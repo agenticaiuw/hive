@@ -5,6 +5,8 @@ dotenv.config()
 export const PORT = Number(process.env.RELAY_PORT || process.env.PORT || 8787)
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''
 export const PAIRING_CODE = process.env.PAIRING_CODE || ''
+export const PENDANT_ACCOUNT_ID =
+  process.env.PENDANT_ACCOUNT_ID || 'single-owner'
 export const BRIDGE_POLL_TIMEOUT_MS = Number(
   process.env.BRIDGE_POLL_TIMEOUT_MS || 25000,
 )

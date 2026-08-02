@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Pendant Browser Bridge</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">AI Pendant</p>
+      <h1>Browser Bridge</h1>
+      <p>
+        Connect this browser profile to the local Mac agent. Commands never pass
+        through a public browser-control server.
+      </p>
+
+      <section class="card">
+        <div class="status-row">
+          <span id="status-dot" class="dot"></span>
+          <div class="status-copy">
+            <strong id="status-title">Checking connection…</strong>
+            <small id="status-detail"></small>
+          </div>
+          <button id="connect-now" type="button">Reconnect</button>
+        </div>
+        <p class="meta">
+          Extension ID: <code id="extension-id">—</code><br />
+          Last connected: <span id="last-connected">Never</span>
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Local agent</h2>
+        <label>
+          Agent URL
+          <input
+            id="agent-url"
+            inputmode="url"
+            autocomplete="off"
+            spellcheck="false"
+            value="http://127.0.0.1:8000"
+          />
+        </label>
+        <p class="help">Only loopback addresses are accepted.</p>
+
+        <label>
+          Agent token
+          <input
+            id="agent-token"
+            type="password"
+            autocomplete="new-password"
+            spellcheck="false"
+          />
+        </label>
+        <p class="help">
+          Stored only in this browser profile—not synced to Chrome, Safari, or
+          another device. Use the same value as <code>AGENT_TOKEN</code>.
+        </p>
+
+        <label>
+          Device name
+          <input
+            id="device-name"
+            autocomplete="off"
+            placeholder="Chrome on Evan’s Mac"
+            maxlength="80"
+          />
+        </label>
+
+        <label>
+          Default tab target
+          <select id="target-mode">
+            <option value="last-focused">Active tab in the last-used window</option>
+            <option value="current-active">Active tab in the current window</option>
+            <option value="new-tab">New tab for navigation commands</option>
+          </select>
+        </label>
+
+        <div class="button-row">
+          <button id="save" class="primary" type="button">Save locally</button>
+          <button id="test" type="button">Test connection</button>
+          <button id="clear" class="danger" type="button">Clear token</button>
+        </div>
+        <p id="form-status" class="notice" role="status"></p>
+      </section>
+
+      <section class="card">
+        <h2>Website access</h2>
+        <div class="permission-row">
+          <div class="status-copy">
+            <strong id="permission-title">Checking access…</strong>
+            <small>
+              Required to click, type, and read pages. Browser settings,
+              extension pages, and local files stay protected.
+            </small>
+          </div>
+          <button id="permission-toggle" type="button">Grant access</button>
+        </div>
+        <p class="privacy">
+          Website access is an explicit browser permission. The extension only
+          acts when the authenticated local agent queues a command. Revoke access
+          here or disable the extension at any time.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

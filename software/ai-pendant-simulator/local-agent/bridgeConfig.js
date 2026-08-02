@@ -5,6 +5,8 @@ dotenv.config()
 export const RELAY_URL = process.env.RELAY_URL || 'http://localhost:8787'
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''
 export const PAIRING_CODE = process.env.PAIRING_CODE || ''
+export const PENDANT_ACCOUNT_ID =
+  process.env.PENDANT_ACCOUNT_ID || 'single-owner'
 export const BRIDGE_DEVICE_ID =
   process.env.BRIDGE_DEVICE_ID || 'home-macbook-bridge'
 export const LOCAL_AGENT_URL =

@@ -6,6 +6,9 @@ export function createJobId() {
 
 export function createAudioCapture({
   audioBase64,
+  audioRef = null,
+  audioStorage = null,
+  audioStorageWarning = null,
   audioBytes,
   format,
   language,
@@ -20,6 +23,9 @@ export function createAudioCapture({
     type: 'audio_capture',
     status,
     audioBase64,
+    audioRef,
+    audioStorage,
+    ...(audioStorageWarning ? { audioStorageWarning } : {}),
     audioBytes,
     format,
     language: language ?? null,

@@ -323,7 +323,7 @@ export async function orchestrateExecute({
   const { executeActions } = await import('./executor.js')
   const { appendLog } = await import('./logger.js')
   const { updateContextGraphFromExecution } = await import('./contextGraph.js')
-  const { throwIfAborted, JobCancelledError } = await import('./jobControl.js')
+  const { throwIfAborted } = await import('./jobControl.js')
 
   const trace = startThinkingTrace({
     command,

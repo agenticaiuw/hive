@@ -5,6 +5,7 @@ import {
   loadCloudSettings,
   saveCloudSettings,
 } from './cloudClient'
+import { isNativeCredentialStorage } from './nativeSecureStorage'
 import {
   prefersCloudSpeechToText,
   startCloudVoiceCapture,
@@ -119,7 +120,10 @@ function App() {
         mode === 'remote' ? cloudSettings.relayApiKey : agentToken
 
       if (mode === 'remote') {
-        setSessions(loadLocalSessions())
+        const productState = await cloudClient.getProductState()
+        setSessions(
+          (productState?.sessions ?? []).filter((session) => !session.deletedAt),
+        )
         return
       }
 
@@ -136,7 +140,7 @@ function App() {
     } catch {
       setSessions(loadLocalSessions())
     }
-  }, [agentToken, cloudSettings.relayApiKey, cloudSettings.relayUrl, macAgentUrl, mode])
+  }, [agentToken, cloudClient, cloudSettings.relayApiKey, cloudSettings.relayUrl, macAgentUrl, mode])
 
   const fetchContextGraph = useCallback(async () => {
     const response = await fetch(`${macAgentUrl}/context-graph`, {
@@ -1188,15 +1192,16 @@ function App() {
                 }))
               }
             />
-            <label htmlFor="relay-api-key">Relay API Key</label>
+            <label htmlFor="relay-pairing-code">One-time pairing code</label>
             <input
-              id="relay-api-key"
+              id="relay-pairing-code"
               type="password"
-              value={cloudSettings.relayApiKey}
+              autoComplete="one-time-code"
+              value={cloudSettings.pairingCode}
               onChange={(event) =>
                 setCloudSettings((current) => ({
                   ...current,
-                  relayApiKey: event.target.value,
+                  pairingCode: event.target.value,
                 }))
               }
             />
@@ -1225,6 +1230,29 @@ function App() {
                   rememberDashboardSession({ sessionId })
                 }}
                 onNewSession={async () => {
+                  if (mode === 'remote') {
+                    const sessionId = crypto.randomUUID()
+                    try {
+                      const productState =
+                        await cloudClient.createProductSession({
+                          sessionId,
+                          title: 'New session',
+                        })
+                      setActiveSessionId(sessionId)
+                      rememberDashboardSession({ sessionId })
+                      setSessions(
+                        (productState?.sessions ?? []).filter(
+                          (session) => !session.deletedAt,
+                        ),
+                      )
+                    } catch (error) {
+                      setMessage(
+                        error.message || 'Shared session could not be created.',
+                      )
+                    }
+                    return
+                  }
+
                   if (mode === 'mac') {
                     const response = await fetch(`${macAgentUrl}/sessions`, {
                       method: 'POST',
@@ -1815,7 +1843,12 @@ function isLocalHost() {
 }
 
 function getDefaultConnectionMode() {
-  // Hosted UI talks to the home Mac through the cloud relay.
+  // Capacitor serves bundled assets from localhost, but a phone does not host
+  // the Mac agent. Native clients always start through the cloud relay.
+  if (isNativeCredentialStorage()) {
+    return 'remote'
+  }
+
   return isLocalHost() ? 'mac' : 'remote'
 }
 

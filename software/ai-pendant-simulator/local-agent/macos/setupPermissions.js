@@ -2,8 +2,9 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import {
   ensurePermissions,
   formatPermissionHelp,
@@ -12,19 +13,51 @@ import {
 } from './permissions.js'
 
 const execFileAsync = promisify(execFile)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = repoRootFromHere()
 const APP_NAME = 'AI Pendant Agent.app'
 const APP_PATH = path.join(os.homedir(), 'Applications', APP_NAME)
+const APP_SUPPORT_PATH = path.join(
+  os.homedir(),
+  'Library',
+  'Application Support',
+  'AIPendant',
+)
+const AGENT_ROOT_CONFIG = path.join(APP_SUPPORT_PATH, 'agent-root')
 const LAUNCH_AGENT_LABEL = 'com.aipendant.agent'
 const LAUNCH_BRIDGE_LABEL = 'com.aipendant.bridge'
 const AUTOSTART = process.argv.includes('--autostart')
+const INSIDE_APP = process.argv.includes('--inside-app')
+const INSTALL_ONLY = process.argv.includes('--install-only')
 
 async function main() {
   console.log('\nAI Pendant — one-time Mac permission setup\n')
   console.log(`Repo: ${REPO_ROOT}`)
 
-  await installAgentApp()
-  await installLaunchAgentPlists()
+  if (!INSIDE_APP) {
+    await installAgentApp()
+    await installLaunchAgentPlists()
+
+    if (INSTALL_ONLY) {
+      console.log(`\nAgent app installed and verified at:\n  ${APP_PATH}\n`)
+      return
+    }
+
+    const launcher = path.join(APP_PATH, 'Contents', 'MacOS', 'AIPendantAgent')
+    const result = spawnSync(
+      launcher,
+      ['setup', ...(AUTOSTART ? ['--autostart'] : [])],
+      {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          __CFBundleIdentifier: 'com.aipendant.agent',
+        },
+      },
+    )
+    process.exitCode = result.status ?? 1
+    return
+  }
 
   console.log('\nRequesting macOS permission prompts for ALL apps now...')
   console.log('Click Allow on each dialog. Do not skip — this is the only time.\n')
@@ -91,6 +124,7 @@ async function main() {
 
 async function installAgentApp() {
   fs.mkdirSync(path.join(os.homedir(), 'Applications'), { recursive: true })
+  fs.mkdirSync(APP_SUPPORT_PATH, { recursive: true })
 
   const contents = path.join(APP_PATH, 'Contents')
   const macos = path.join(contents, 'MacOS')
@@ -99,24 +133,50 @@ async function installAgentApp() {
   fs.mkdirSync(resources, { recursive: true })
 
   const launcher = path.join(macos, 'AIPendantAgent')
-  const nodePath = process.execPath
-  const script = `#!/bin/bash
-set -euo pipefail
-cd ${shellQuote(REPO_ROOT)}
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-MODE="\${1:-agent}"
-if [[ "$MODE" == "bridge" ]]; then
-  exec ${shellQuote(nodePath)} local-agent/runBridge.js
-fi
-exec ${shellQuote(nodePath)} local-agent/server.js
-`
+  const embeddedNode = path.join(resources, 'node')
+  const launcherSource = path.join(__dirname, 'agentLauncher.c')
 
-  fs.writeFileSync(launcher, script, { mode: 0o755 })
+  fs.writeFileSync(AGENT_ROOT_CONFIG, `${REPO_ROOT}\n`, 'utf8')
+  fs.copyFileSync(process.execPath, embeddedNode)
+  fs.chmodSync(embeddedNode, 0o755)
+  await execFileAsync('xcrun', [
+    'clang',
+    '-Os',
+    '-Wall',
+    '-Wextra',
+    launcherSource,
+    '-framework',
+    'ApplicationServices',
+    '-framework',
+    'CoreGraphics',
+    '-o',
+    launcher,
+  ])
   fs.writeFileSync(
     path.join(contents, 'Info.plist'),
     buildInfoPlist(),
     'utf8',
   )
+  const signingIdentity = await resolveSigningIdentity()
+  await signCode(embeddedNode, `${LAUNCH_AGENT_LABEL}.runtime`, signingIdentity)
+  await signCode(launcher, LAUNCH_AGENT_LABEL, signingIdentity)
+  const teamIdentifier = await readTeamIdentifier(launcher)
+  const stableAppRequirement =
+    signingIdentity !== '-' && teamIdentifier
+      ? `=designated => anchor apple generic and identifier "${LAUNCH_AGENT_LABEL}" and certificate leaf[subject.OU] = "${teamIdentifier}"`
+      : null
+  await signCode(
+    APP_PATH,
+    LAUNCH_AGENT_LABEL,
+    signingIdentity,
+    stableAppRequirement,
+  )
+  await execFileAsync('codesign', [
+    '--verify',
+    '--deep',
+    '--strict',
+    APP_PATH,
+  ])
 
   // Refresh Launch Services registration for the app bundle.
   try {
@@ -131,6 +191,65 @@ exec ${shellQuote(nodePath)} local-agent/server.js
       // ignore
     }
   }
+}
+
+async function resolveSigningIdentity() {
+  try {
+    const { stdout } = await execFileAsync('security', [
+      'find-identity',
+      '-v',
+      '-p',
+      'codesigning',
+    ])
+    const preferred =
+      stdout.match(/"((?:Apple Development|Developer ID Application):[^"]+)"/) ||
+      stdout.match(/"([^"]+)"/)
+    if (preferred?.[1]) {
+      console.log(`Signing stable agent identity with: ${preferred[1]}`)
+      return preferred[1]
+    }
+  } catch {
+    // Fall back to an explicit, stable ad-hoc designated requirement.
+  }
+  console.warn(
+    'No code-signing certificate found; using an ad-hoc signature. ' +
+      'Install an Apple Development certificate to keep TCC grants across app rebuilds.',
+  )
+  return '-'
+}
+
+async function readTeamIdentifier(target) {
+  try {
+    const { stderr } = await execFileAsync('codesign', [
+      '--display',
+      '--verbose=4',
+      target,
+    ])
+    return stderr.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim() || null
+  } catch {
+    return null
+  }
+}
+
+async function signCode(target, identifier, identity, requirement = null) {
+  const args = [
+    '--force',
+    '--timestamp=none',
+    '--sign',
+    identity,
+    '--identifier',
+    identifier,
+  ]
+  if (requirement) {
+    args.push('--requirements', requirement)
+  } else if (identity === '-') {
+    args.push(
+      '--requirements',
+      `=designated => identifier "${identifier}"`,
+    )
+  }
+  args.push(target)
+  await execFileAsync('codesign', args)
 }
 
 async function installLaunchAgentPlists() {
@@ -225,9 +344,9 @@ function buildInfoPlist() {
   <key>CFBundleIdentifier</key>
   <string>com.aipendant.agent</string>
   <key>CFBundleVersion</key>
-  <string>1.0.0</string>
+  <string>1.1.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>1.1.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
@@ -240,6 +359,8 @@ function buildInfoPlist() {
   <string>AI Pendant creates and updates reminders you ask for.</string>
   <key>NSCalendarsUsageDescription</key>
   <string>AI Pendant can create calendar events when you ask.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>AI Pendant needs screen access to understand and interact with visible apps when you ask.</string>
   <key>NSAppleScriptEnabled</key>
   <true/>
   <key>NSHighResolutionCapable</key>
@@ -247,10 +368,6 @@ function buildInfoPlist() {
 </dict>
 </plist>
 `
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\"'\"'")}'`
 }
 
 function escapeXml(value) {

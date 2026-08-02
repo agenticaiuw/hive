@@ -3,13 +3,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 const graphPath = path.join(process.cwd(), 'local-agent', 'memory', 'context_graph.json')
-
-const initialGraph = {
-  version: 1,
-  updatedAt: null,
-  entities: [],
-  relations: [],
-}
+const MEMORY_TOMBSTONE_LIMIT = 10_000
+const LOCAL_MEMORY_DEVICE_ID =
+  process.env.PENDANT_DEVICE_ID ||
+  process.env.BRIDGE_DEVICE_ID ||
+  'local-mac-agent'
 
 export function contextGraphLocation() {
   ensureGraph()
@@ -20,16 +18,28 @@ export function readContextGraph() {
   ensureGraph()
 
   try {
-    return JSON.parse(fs.readFileSync(graphPath, 'utf8'))
+    return normalizeGraph(JSON.parse(fs.readFileSync(graphPath, 'utf8')))
   } catch {
-    return { ...initialGraph }
+    return emptyGraph()
   }
 }
 
 export function resetContextGraph() {
+  const current = readContextGraph()
+  const now = new Date().toISOString()
   const graph = {
-    ...initialGraph,
-    updatedAt: new Date().toISOString(),
+    ...emptyGraph(),
+    updatedAt: now,
+    tombstones: {
+      entities: mergeTombstones(
+        current.tombstones.entities,
+        current.entities.map((entity) => toTombstone(entity, now)),
+      ),
+      relations: mergeTombstones(
+        current.tombstones.relations,
+        current.relations.map((relation) => toTombstone(relation, now)),
+      ),
+    },
   }
 
   writeGraph(graph)
@@ -39,10 +49,14 @@ export function resetContextGraph() {
 export function loadDemoContextGraph() {
   const now = new Date().toISOString()
   const graph = {
-    version: 1,
+    version: 2,
     updatedAt: now,
     entities: [],
     relations: [],
+    tombstones: {
+      entities: [],
+      relations: [],
+    },
   }
   const context = createGraphWriter(graph, now)
 
@@ -349,6 +363,7 @@ export function upsertContextEntity({ id, type, name, attributes = {} }) {
     entity.name = entityName
     entity.attributes = nextAttributes
     entity.updatedAt = now
+    entity.sourceDeviceId = LOCAL_MEMORY_DEVICE_ID
   } else {
     entity = {
       id: crypto.randomUUID(),
@@ -357,6 +372,7 @@ export function upsertContextEntity({ id, type, name, attributes = {} }) {
       attributes: nextAttributes,
       createdAt: now,
       updatedAt: now,
+      sourceDeviceId: LOCAL_MEMORY_DEVICE_ID,
     }
     graph.entities.push(entity)
   }
@@ -368,7 +384,11 @@ export function upsertContextEntity({ id, type, name, attributes = {} }) {
 
 export function deleteContextEntity(entityId) {
   const graph = readContextGraph()
+  const deletedEntity = graph.entities.find((entity) => entity.id === entityId)
   const before = graph.entities.length
+  const deletedRelations = graph.relations.filter(
+    (relation) => relation.from === entityId || relation.to === entityId,
+  )
   graph.entities = graph.entities.filter((entity) => entity.id !== entityId)
   graph.relations = graph.relations.filter(
     (relation) => relation.from !== entityId && relation.to !== entityId,
@@ -379,6 +399,13 @@ export function deleteContextEntity(entityId) {
   }
 
   graph.updatedAt = new Date().toISOString()
+  graph.tombstones.entities = mergeTombstones(graph.tombstones.entities, [
+    toTombstone(deletedEntity, graph.updatedAt),
+  ])
+  graph.tombstones.relations = mergeTombstones(
+    graph.tombstones.relations,
+    deletedRelations.map((relation) => toTombstone(relation, graph.updatedAt)),
+  )
   writeGraph(graph)
   return graph
 }
@@ -395,6 +422,9 @@ export function addContextRelation({ from, type, to, attributes = {} }) {
 
 export function deleteContextRelation(relationId) {
   const graph = readContextGraph()
+  const deletedRelation = graph.relations.find(
+    (relation) => relation.id === relationId,
+  )
   const before = graph.relations.length
   graph.relations = graph.relations.filter((relation) => relation.id !== relationId)
 
@@ -403,6 +433,43 @@ export function deleteContextRelation(relationId) {
   }
 
   graph.updatedAt = new Date().toISOString()
+  graph.tombstones.relations = mergeTombstones(graph.tombstones.relations, [
+    toTombstone(deletedRelation, graph.updatedAt),
+  ])
+  writeGraph(graph)
+  return graph
+}
+
+export function exportMemoryRecords() {
+  const graph = readContextGraph()
+  return {
+    entities: [...graph.entities, ...graph.tombstones.entities],
+    relations: [...graph.relations, ...graph.tombstones.relations],
+  }
+}
+
+export function restoreMemoryRecords({ entities = [], relations = [] } = {}) {
+  const normalizedEntities = Array.isArray(entities) ? entities : []
+  const normalizedRelations = Array.isArray(relations) ? relations : []
+  const graph = {
+    version: 2,
+    updatedAt:
+      [...normalizedEntities, ...normalizedRelations]
+        .map((record) => record.updatedAt || record.deletedAt || record.createdAt)
+        .filter(Boolean)
+        .sort()
+        .at(-1) || new Date().toISOString(),
+    entities: normalizedEntities.filter((entity) => !entity.deletedAt),
+    relations: normalizedRelations.filter((relation) => !relation.deletedAt),
+    tombstones: {
+      entities: normalizedEntities
+        .filter((entity) => entity.deletedAt)
+        .slice(-MEMORY_TOMBSTONE_LIMIT),
+      relations: normalizedRelations
+        .filter((relation) => relation.deletedAt)
+        .slice(-MEMORY_TOMBSTONE_LIMIT),
+    },
+  }
   writeGraph(graph)
   return graph
 }
@@ -457,6 +524,7 @@ function createGraphWriter(graph, now) {
         attributes,
         createdAt: now,
         updatedAt: now,
+        sourceDeviceId: LOCAL_MEMORY_DEVICE_ID,
       }
       graph.entities.push(entity)
       return entity
@@ -471,6 +539,7 @@ function createGraphWriter(graph, now) {
       if (existing) {
         existing.attributes = { ...existing.attributes, ...attributes }
         existing.updatedAt = now
+        existing.sourceDeviceId = LOCAL_MEMORY_DEVICE_ID
         return existing
       }
 
@@ -493,6 +562,8 @@ function createGraphWriter(graph, now) {
         to,
         attributes,
         createdAt: now,
+        updatedAt: now,
+        sourceDeviceId: LOCAL_MEMORY_DEVICE_ID,
       })
     },
   }
@@ -506,12 +577,87 @@ function ensureGraph() {
   }
 
   if (!fs.existsSync(graphPath)) {
-    resetContextGraph()
+    writeGraph({
+      ...emptyGraph(),
+      updatedAt: new Date().toISOString(),
+    })
   }
 }
 
 function writeGraph(graph) {
-  fs.writeFileSync(graphPath, JSON.stringify(graph, null, 2))
+  const normalized = normalizeGraph(graph)
+  const serialized = `${JSON.stringify(normalized, null, 2)}\n`
+  const temporaryPath = `${graphPath}.${process.pid}.${crypto.randomUUID()}.tmp`
+  let descriptor
+  try {
+    descriptor = fs.openSync(temporaryPath, 'wx', 0o600)
+    fs.writeFileSync(descriptor, serialized, 'utf8')
+    fs.fsyncSync(descriptor)
+    fs.closeSync(descriptor)
+    descriptor = undefined
+    fs.renameSync(temporaryPath, graphPath)
+    fs.chmodSync(graphPath, 0o600)
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+    try {
+      fs.unlinkSync(temporaryPath)
+    } catch {
+      // A successful rename removes the temporary path.
+    }
+  }
+}
+
+function normalizeGraph(graph) {
+  const tombstones = graph?.tombstones || {}
+  return {
+    version: 2,
+    updatedAt: graph?.updatedAt || null,
+    entities: Array.isArray(graph?.entities) ? graph.entities : [],
+    relations: Array.isArray(graph?.relations) ? graph.relations : [],
+    tombstones: {
+      entities: Array.isArray(tombstones.entities)
+        ? tombstones.entities.slice(-MEMORY_TOMBSTONE_LIMIT)
+        : [],
+      relations: Array.isArray(tombstones.relations)
+        ? tombstones.relations.slice(-MEMORY_TOMBSTONE_LIMIT)
+        : [],
+    },
+  }
+}
+
+function emptyGraph() {
+  return {
+    version: 2,
+    updatedAt: null,
+    entities: [],
+    relations: [],
+    tombstones: {
+      entities: [],
+      relations: [],
+    },
+  }
+}
+
+function toTombstone(record, deletedAt) {
+  return {
+    ...record,
+    deletedAt,
+    updatedAt: deletedAt,
+    sourceDeviceId: LOCAL_MEMORY_DEVICE_ID,
+  }
+}
+
+function mergeTombstones(existing, incoming) {
+  const byId = new Map(
+    [...existing, ...incoming]
+      .filter(Boolean)
+      .map((record) => [record.id, record]),
+  )
+  return [...byId.values()]
+    .sort((left, right) =>
+      String(left.deletedAt).localeCompare(String(right.deletedAt)),
+    )
+    .slice(-MEMORY_TOMBSTONE_LIMIT)
 }
 
 function latestEntity(graph, type) {

@@ -4,6 +4,7 @@ import {
   HEARTBEAT_INTERVAL_MS,
   LOCAL_AGENT_URL,
   PAIRING_CODE,
+  PENDANT_ACCOUNT_ID,
   RELAY_API_KEY,
   RELAY_URL,
   WORK_POLL_INTERVAL_MS,
@@ -12,6 +13,7 @@ import {
   spokenTextForResult,
   synthesizePendantSpeech,
 } from './pendantSpeech.js'
+import { synchronizeProductState } from './productSyncClient.js'
 
 const relayHeaders = {
   'Content-Type': 'application/json',
@@ -19,6 +21,7 @@ const relayHeaders = {
 }
 
 let running = false
+let productSyncPromise = null
 
 export async function startBridge() {
   if (!RELAY_API_KEY) {
@@ -36,7 +39,9 @@ export async function startBridge() {
   running = true
   console.log(`[bridge] Connecting to relay at ${RELAY_URL}`)
   await registerBridge()
+  await syncProductState()
   startHeartbeat()
+  await syncAgentSnapshot()
   await workLoop()
 }
 
@@ -91,6 +96,8 @@ function startHeartbeat() {
         headers: relayHeaders,
         body: JSON.stringify({ deviceId: BRIDGE_DEVICE_ID }),
       })
+      await syncProductState()
+      await syncAgentSnapshot()
     } catch (error) {
       console.warn(`[bridge] Heartbeat failed: ${error.message}`)
     }
@@ -356,6 +363,49 @@ async function handleWork(work) {
       ok: false,
       error: error.message,
     })
+  } finally {
+    await syncProductState()
+    await syncAgentSnapshot()
+  }
+}
+
+async function syncProductState() {
+  if (productSyncPromise) {
+    return productSyncPromise
+  }
+
+  productSyncPromise = synchronizeProductState({
+    relayUrl: RELAY_URL,
+    authorization: `Bearer ${RELAY_API_KEY}`,
+    accountId: PENDANT_ACCOUNT_ID,
+    sourceDeviceId: BRIDGE_DEVICE_ID,
+  }).catch((error) => {
+    console.warn(`[bridge] Canonical product sync failed: ${error.message}`)
+    return null
+  }).finally(() => {
+    productSyncPromise = null
+  })
+
+  return productSyncPromise
+}
+
+async function syncAgentSnapshot() {
+  try {
+    const snapshot = await callLocalAgent('/ops/snapshot', { method: 'GET' })
+    const response = await fetch(`${RELAY_URL}/v1/state/agent-snapshot`, {
+      method: 'PUT',
+      headers: relayHeaders,
+      body: JSON.stringify({
+        data: snapshot,
+        updatedBy: BRIDGE_DEVICE_ID,
+      }),
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(payload.error || `relay returned ${response.status}`)
+    }
+  } catch (error) {
+    console.warn(`[bridge] Persistent state sync failed: ${error.message}`)
   }
 }
 

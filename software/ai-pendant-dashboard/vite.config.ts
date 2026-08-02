@@ -14,6 +14,7 @@ const { d1, r2 } = hostingConfig;
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
+  name: "ai-pendant-dashboard",
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
   vars: {
@@ -24,7 +25,7 @@ const localBindingConfig = {
       ? [
           {
             binding: "RELAY",
-            service: "ai-pendant-relay",
+            service: "ai-pendant-mission-control",
             remote: true,
           },
         ]

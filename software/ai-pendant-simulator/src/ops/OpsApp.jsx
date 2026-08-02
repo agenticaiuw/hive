@@ -201,10 +201,13 @@ export function OpsApp() {
   }
 
   useEffect(() => {
-    refreshAll()
+    const initial = window.setTimeout(refreshAll, 0)
     const intervalMs = client.useRelayProxy ? 10_000 : 4_000
     const timer = setInterval(refreshAll, intervalMs)
-    return () => clearInterval(timer)
+    return () => {
+      window.clearTimeout(initial)
+      clearInterval(timer)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client])
 
@@ -292,7 +295,11 @@ export function OpsApp() {
   }, [client])
 
   useEffect(() => {
-    setRenameDraft(activeSession?.title ?? '')
+    const timer = window.setTimeout(
+      () => setRenameDraft(activeSession?.title ?? ''),
+      0,
+    )
+    return () => window.clearTimeout(timer)
   }, [activeSession?.sessionId, activeSession?.title])
 
   function handleSaveSettings(event) {
@@ -1288,7 +1295,11 @@ function MemoryView({
     )
 
   useEffect(() => {
-    setProjectSummary(workingProject?.summary || '')
+    const timer = window.setTimeout(
+      () => setProjectSummary(workingProject?.summary || ''),
+      0,
+    )
+    return () => window.clearTimeout(timer)
   }, [workingProject?.id, workingProject?.summary])
 
   return (
@@ -1534,7 +1545,6 @@ function friendlySummary(text = '') {
       const parts = dataLine.split(/\s+/)
       // filesystem size used avail capacity mount
       if (parts.length >= 5) {
-        const used = parts[2]
         const avail = parts[3]
         const capacity = parts[4]
         return `Storage: ${capacity} used · ${avail} free (of ${parts[1]})`

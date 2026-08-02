@@ -861,7 +861,12 @@ app.post('/browser/heartbeat', (request, response) => {
     registerBrowserHeartbeat({
       extensionId: String(request.body?.extensionId ?? 'home-chrome'),
       tabId: request.body?.tabId ?? null,
+      windowId: request.body?.windowId ?? null,
+      tabUrl: request.body?.tabUrl ?? '',
       userAgent: request.body?.userAgent ?? '',
+      deviceName: request.body?.deviceName ?? '',
+      browserName: request.body?.browserName ?? '',
+      extensionVersion: request.body?.extensionVersion ?? '',
     }),
   )
 })
@@ -879,11 +884,15 @@ app.get('/browser/poll', (request, response) => {
 })
 
 app.post('/browser/result/:commandId', (request, response) => {
-  const result = completeBrowserCommand(request.params.commandId, {
-    ok: Boolean(request.body?.ok),
-    result: request.body?.result ?? null,
-    error: String(request.body?.error ?? ''),
-  })
+  const result = completeBrowserCommand(
+    request.params.commandId,
+    {
+      ok: Boolean(request.body?.ok),
+      result: request.body?.result ?? null,
+      error: String(request.body?.error ?? ''),
+    },
+    request.body?.extensionId ?? null,
+  )
 
   if (!result) {
     response.status(404).json({ ok: false, error: 'Browser command not found.' })

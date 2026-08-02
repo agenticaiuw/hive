@@ -1056,9 +1056,34 @@ static int receive_close_delimited_pcm(struct http_body_reader *reader,
 	}
 }
 
+static char ascii_lower(char value)
+{
+	return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value;
+}
+
+static const char *header_find_ci(const char *header, const char *needle)
+{
+	size_t needle_length = strlen(needle);
+
+	for (const char *candidate = header; *candidate != '\0'; ++candidate) {
+		size_t index = 0U;
+
+		while (index < needle_length &&
+		       candidate[index] != '\0' &&
+		       ascii_lower(candidate[index]) ==
+			       ascii_lower(needle[index])) {
+			++index;
+		}
+		if (index == needle_length) {
+			return candidate;
+		}
+	}
+	return NULL;
+}
+
 static size_t header_decimal_value(const char *header, const char *name)
 {
-	const char *value = strstr(header, name);
+	const char *value = header_find_ci(header, name);
 
 	return value == NULL ? 0U : (size_t)strtoul(value + strlen(name), NULL, 10);
 }
@@ -1110,11 +1135,11 @@ static int receive_agent_job_speech(int fd, const char *pcm_path)
 		return -EREMOTE;
 	}
 	bool is_opus =
-		strstr(header, "Content-Type: audio/ogg") != NULL ||
-		strstr(header, "X-Audio-Format: ogg-opus") != NULL;
+		header_find_ci(header, "Content-Type: audio/ogg") != NULL ||
+		header_find_ci(header, "X-Audio-Format: ogg-opus") != NULL;
 	bool is_pcm =
-		strstr(header, "Content-Type: audio/pcm") != NULL ||
-		strstr(header, "X-Audio-Format: s16le") != NULL;
+		header_find_ci(header, "Content-Type: audio/pcm") != NULL ||
+		header_find_ci(header, "X-Audio-Format: s16le") != NULL;
 
 	if (!is_opus && !is_pcm) {
 		return -EBADMSG;
@@ -1124,7 +1149,8 @@ static int receive_agent_job_speech(int fd, const char *pcm_path)
 		: PENDANT_CLOUD_AUDIO_PCM_S16LE;
 
 	size_t content_length = header_decimal_value(header, "Content-Length:");
-	bool chunked = strstr(header, "Transfer-Encoding: chunked") != NULL;
+	bool chunked =
+		header_find_ci(header, "Transfer-Encoding: chunked") != NULL;
 	size_t sample_rate =
 		header_decimal_value(header, "X-Audio-Sample-Rate:");
 	if (sample_rate != 0U) {

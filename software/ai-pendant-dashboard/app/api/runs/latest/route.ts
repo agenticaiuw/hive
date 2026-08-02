@@ -3,6 +3,17 @@ export const dynamic = "force-dynamic";
 const DEFAULT_RELAY_URL =
   "https://ai-pendant-mission-control.your-subdomain.workers.dev";
 
+function safeTimestamp(value: unknown) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function safeIdentifier(value: unknown, maxLength: number) {
+  return String(value ?? "")
+    .replace(/[^a-zA-Z0-9_.:-]/g, "")
+    .slice(0, maxLength);
+}
+
 export async function GET() {
   type RelayBinding = {
     fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
@@ -55,11 +66,28 @@ export async function GET() {
       );
     }
 
-    return Response.json(payload, {
-      headers: {
-        "Cache-Control": "no-store, max-age=0",
+    const latest =
+      payload.latest && typeof payload.latest === "object"
+        ? payload.latest
+        : null;
+    return Response.json(
+      {
+        ok: Boolean(payload.ok),
+        latest: latest
+          ? {
+              pipelineId: safeIdentifier(latest.pipelineId, 160),
+              status: safeIdentifier(latest.status, 80),
+              updatedAt: safeTimestamp(latest.updatedAt),
+            }
+          : null,
+        observedAt: safeTimestamp(payload.observedAt),
       },
-    });
+      {
+        headers: {
+          "Cache-Control": "no-store, max-age=0",
+        },
+      },
+    );
   } catch (error) {
     return Response.json(
       {

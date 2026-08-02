@@ -274,6 +274,10 @@ export async function openPrivacySettings() {
 }
 
 export function detectHostApp() {
+  if (process.execPath.includes(`${path.sep}AI Pendant Agent.app${path.sep}`)) {
+    return 'AI Pendant Agent'
+  }
+
   const termProgram = process.env.TERM_PROGRAM || ''
   if (/warp/i.test(termProgram)) return 'Warp'
   if (/iTerm/i.test(termProgram)) return 'iTerm'
@@ -293,6 +297,9 @@ export function detectHostApp() {
 }
 
 function hostFingerprint(hostApp = detectHostApp()) {
+  if (hostApp === 'AI Pendant Agent') {
+    return 'com.aipendant.agent|~/Applications/AI Pendant Agent.app'
+  }
   return `${hostApp}|${process.execPath}|${process.env.__CFBundleIdentifier || ''}`
 }
 
@@ -309,7 +316,7 @@ async function checkAccessibility() {
       trusted,
       detail: trusted
         ? 'Accessibility is granted'
-        : `Enable Accessibility for ${detectHostApp()} (and AI Pendant Agent if installed)`,
+        : `Enable Accessibility for ${detectHostApp()}`,
     }
   } catch (error) {
     return {
@@ -575,13 +582,13 @@ export function formatPermissionHelp(report) {
     : 'none'
   return [
     'Do this ONCE so later commands never ask again:',
-    `1) Accessibility → enable ${host} AND "AI Pendant Agent"`,
-    `2) Screen Recording → enable ${host} AND "AI Pendant Agent"`,
+    `1) Accessibility → enable ${host}`,
+    `2) Screen Recording → enable ${host}`,
     '3) Automation → turn ON every app listed (Reminders, Calendar, Mail, Notes, System Events, Finder, browsers…)',
     '4) Reminders + Calendars privacy panes → allow if shown',
     '5) Re-run: npm run agent:setup',
     `Required still missing: ${missing}`,
-    'After that, prefer: npm run agent:autostart (stable TCC identity). Do not switch between Terminal / Cursor / Warp for the agent process.',
+    'After that, use npm run agent:autostart. The embedded app identity remains stable across terminals, folders, and Node upgrades.',
   ].join('\n')
 }
 

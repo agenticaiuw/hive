@@ -36,7 +36,24 @@ npm install
 Start the Mac local agent:
 
 ```bash
-npm run agent
+npm run agent:setup
+```
+
+This installs `~/Applications/AI Pendant Agent.app` with an embedded Node
+runtime and signs it with the first available Apple code-signing identity. The
+app is the permanent macOS privacy identity, so changing terminals, repository
+folders, or NVM versions does not create a new permission target. Approve
+Accessibility, Screen Recording, and the requested Automation targets for
+**AI Pendant Agent**, then enable the login service:
+
+```bash
+npm run agent:autostart
+```
+
+Follow the local service logs from any directory with:
+
+```bash
+npm --prefix /path/to/agentic-gadget/software/ai-pendant-simulator run agent:logs
 ```
 
 The local agent requires a shared token. Create `.env` from `.env.example`:
@@ -160,7 +177,9 @@ When `FULL_CONTROL_MODE=true` and `LLM_API_KEY` is set, the LLM can plan any com
 
 Shopping, Google Docs, and browser-based tasks use a combination of `open_url`, `type_text`, and `press_keys`.
 
-macOS will ask for **Accessibility** permission for keyboard automation and **Automation** permission for Mail/AppleScript on first use.
+macOS will ask for **Accessibility**, **Screen Recording**, and **Automation**
+permissions for the signed **AI Pendant Agent** app during
+`npm run agent:setup`.
 
 ## Supported Safe Actions (Legacy Demo Mode)
 
@@ -224,7 +243,8 @@ Set `FULL_CONTROL_MODE=false` to restore whitelist-only demo mode:
 ## Current Limitations
 
 - Full control requires `LLM_API_KEY` for open-ended natural language commands.
-- Keyboard automation needs macOS Accessibility permission for the terminal/node process.
+- Keyboard automation needs macOS Accessibility permission for the signed
+  `AI Pendant Agent.app`.
 - Mail sending uses Mail.app, not Gmail API.
 - Browser shopping automation depends on visible UI automation (no headless browser yet).
 - Voice input depends on browser Web Speech API support.
@@ -244,17 +264,27 @@ Set `FULL_CONTROL_MODE=false` to restore whitelist-only demo mode:
 
 ## Browser Session Reuse (No OAuth Plugins)
 
-Install the Chrome extension from `browser-extension/` on your home Mac:
+Build the shared browser-extension package, then load the Chrome bundle:
 
-```text
-chrome://extensions → Load unpacked → browser-extension/
+```bash
+node browser-extension/package.mjs
 ```
 
-Set Agent URL + Agent Token in extension options. The agent can then plan:
+```text
+chrome://extensions → Load unpacked → browser-extension/build/chrome
+```
+
+Set the loopback Agent URL + Agent Token in extension options. The token is
+kept in local extension storage, never browser sync. The agent can then plan:
 
 - `browser_navigate` / `browser_click` / `browser_type` / `browser_read_page`
 
 These run inside Chrome with your existing logged-in cookies.
+
+For Safari, open
+`safari-browser-extension/AI Pendant Browser Bridge/AI Pendant Browser Bridge.xcodeproj`
+in Xcode. The wrapper shares the same extension source and includes macOS and
+iOS schemes.
 
 ## Built-in Programs (No LLM)
 
@@ -277,7 +307,8 @@ Remote cloud relay is now implemented. See [docs/REMOTE_SETUP.md](docs/REMOTE_SE
 
 Architecture:
 
-- **Remote Cloud mode** (default): mobile/nRF → Cloudflare Worker + D1 → home Mac bridge → local agent
+- **Remote Cloud mode** (default): mobile/nRF → Cloudflare Worker + D1
+  metadata (+ private R2 audio when enabled) → home Mac bridge → local agent
 - **Local Mac mode**: same Wi-Fi direct connection (original behavior)
 - **LLM planner**: enable with `LLM_API_KEY` in `.env` (falls back to rules without it)
 
@@ -314,6 +345,15 @@ npx wrangler secret put PAIRING_CODE
 npm run relay:cloudflare:deploy
 ```
 
+Diagnostic recordings are backward compatible with D1-only deployments. For
+durable binary storage, create the private `ai-pendant-audio` R2 bucket, then
+uncomment the `AUDIO_BUCKET` binding in `wrangler.jsonc` before deployment.
+New recordings will store only private R2 object metadata in D1; existing D1
+Base64 recordings remain readable. Audio-capture metadata is retained across
+the normal 24-hour queue cleanup. The relay accepts diagnostic objects up to
+8 MiB with R2 enabled and keeps the legacy D1 fallback capped at 1 MiB to stay
+below D1's row limit. No bucket is exposed publicly.
+
 Then set `RELAY_URL` and `VITE_RELAY_URL` to the emitted `workers.dev`
 URL. Workers AI provides transcription; the home Mac generates the pendant
 reply locally and compresses it as 16 kb/s Ogg Opus for the LTE return path.
@@ -348,11 +388,12 @@ local-agent/
 
 cloud-relay/
   server.js       Shared relay API (local Node or Cloudflare Worker)
+  audioStorage.js Private R2 audio with legacy D1 Base64 fallback
   store/          In-memory local store and Cloudflare D1 store
 
 cloudflare-worker/
   worker.js       Workers entrypoint for the shared Express relay
   schema.sql      Persistent D1 queue/device schema
 
-wrangler.jsonc    Worker, D1, and Workers AI bindings
+wrangler.jsonc    Worker, D1, optional R2, and Workers AI bindings
 ```

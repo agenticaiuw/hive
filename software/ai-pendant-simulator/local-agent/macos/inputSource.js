@@ -41,7 +41,10 @@ export async function selectInputSource(query) {
     return selected
   } catch (error) {
     const detail = String(error.stderr || error.message || '').trim()
-    throw new Error(detail || `Could not switch input source to “${wanted}”.`)
+    throw new Error(
+      detail || `Could not switch input source to “${wanted}”.`,
+      { cause: error },
+    )
   }
 }
 

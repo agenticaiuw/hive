@@ -26,22 +26,22 @@ export async function createReminder({
     listName,
   })
 
-  let stdout = ''
-  let stderr = ''
+  let result
   try {
-    ;({ stdout, stderr } = await execFileAsync('osascript', ['-e', script], {
+    result = await execFileAsync('osascript', ['-e', script], {
       timeout: 20_000,
-    }))
+    })
   } catch (error) {
     const detail = String(error?.stderr || error?.message || error)
     if (/not allowed|authorization|permission|user canceled|(-1743)/i.test(detail)) {
       throw new Error(
         'macOS blocked Reminders automation. Run once: npm run agent:setup and Allow Reminders under Automation for this host.',
+        { cause: error },
       )
     }
     throw error
   }
-  const output = String(stdout || stderr || '').trim()
+  const output = String(result?.stdout || result?.stderr || '').trim()
 
   if (!output || /error/i.test(output)) {
     throw new Error(output || 'Failed to create reminder.')

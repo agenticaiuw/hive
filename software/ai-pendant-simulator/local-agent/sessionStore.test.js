@@ -1,0 +1,148 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+
+import {
+  LOCAL_SESSION_SCHEMA_VERSION,
+  mergeSessionState,
+  readSessionDocument,
+  restoreSessionState,
+  writeSessionDocumentAtomic,
+} from './sessionStore.js'
+
+function withTemporaryStore(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pendant-session-test-'))
+  const filePath = path.join(directory, 'sessions.json')
+  t.after(() => fs.rmSync(directory, { force: true, recursive: true }))
+  return filePath
+}
+
+test('migrates the legacy array and rewrites it as an atomic versioned document', (t) => {
+  const filePath = withTemporaryStore(t)
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify([
+      {
+        sessionId: 'legacy-1',
+        title: 'Legacy',
+        createdAt: '2026-08-02T10:00:00.000Z',
+        updatedAt: '2026-08-02T10:00:00.000Z',
+        turns: [],
+      },
+    ]),
+  )
+  const migrated = readSessionDocument({ filePath })
+  assert.equal(migrated.schemaVersion, LOCAL_SESSION_SCHEMA_VERSION)
+  assert.equal(migrated.sessions[0].sessionId, 'legacy-1')
+
+  writeSessionDocumentAtomic(migrated, { filePath })
+  const stored = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  assert.equal(stored.schemaVersion, LOCAL_SESSION_SCHEMA_VERSION)
+  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600)
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(filePath)).filter((name) => name.endsWith('.tmp')),
+    [],
+  )
+})
+
+test('restore replaces local state while merge preserves disjoint device turns', (t) => {
+  const filePath = withTemporaryStore(t)
+  const remote = {
+    accountId: 'single-owner',
+    sourceDeviceId: 'ios',
+    generatedAt: '2026-08-02T12:00:00.000Z',
+    sessions: [
+      {
+        sessionId: 'session-1',
+        title: 'Phone',
+        createdAt: '2026-08-02T11:00:00.000Z',
+        updatedAt: '2026-08-02T12:00:00.000Z',
+        sourceDeviceId: 'ios',
+        turns: [
+          {
+            id: 'turn-ios',
+            role: 'user',
+            content: 'from phone',
+            createdAt: '2026-08-02T11:01:00.000Z',
+            updatedAt: '2026-08-02T11:01:00.000Z',
+            sourceDeviceId: 'ios',
+          },
+        ],
+      },
+    ],
+    memory: {},
+  }
+  restoreSessionState(remote, { filePath })
+
+  const mac = {
+    ...remote,
+    sourceDeviceId: 'mac',
+    generatedAt: '2026-08-02T12:01:00.000Z',
+    sessions: [
+      {
+        ...remote.sessions[0],
+        title: 'Mac',
+        updatedAt: '2026-08-02T12:01:00.000Z',
+        sourceDeviceId: 'mac',
+        turns: [
+          {
+            id: 'turn-mac',
+            role: 'assistant',
+            content: 'from mac',
+            createdAt: '2026-08-02T11:02:00.000Z',
+            updatedAt: '2026-08-02T11:02:00.000Z',
+            sourceDeviceId: 'mac',
+          },
+        ],
+      },
+    ],
+  }
+  const result = mergeSessionState(mac, { filePath })
+  assert.equal(result.sessions[0].title, 'Mac')
+  assert.deepEqual(
+    result.sessions[0].turns.map((turn) => turn.id),
+    ['turn-ios', 'turn-mac'],
+  )
+})
+
+test('cloud tombstones survive a stale local merge', (t) => {
+  const filePath = withTemporaryStore(t)
+  const deleted = {
+    accountId: 'single-owner',
+    sourceDeviceId: 'ios',
+    generatedAt: '2026-08-02T13:00:00.000Z',
+    sessions: [
+      {
+        sessionId: 'session-deleted',
+        title: 'Deleted',
+        createdAt: '2026-08-02T11:00:00.000Z',
+        updatedAt: '2026-08-02T13:00:00.000Z',
+        deletedAt: '2026-08-02T13:00:00.000Z',
+        sourceDeviceId: 'ios',
+        turns: [],
+      },
+    ],
+    memory: {},
+  }
+  restoreSessionState(deleted, { filePath })
+  const merged = mergeSessionState(
+    {
+      ...deleted,
+      sourceDeviceId: 'mac',
+      generatedAt: '2026-08-02T12:00:00.000Z',
+      sessions: [
+        {
+          ...deleted.sessions[0],
+          updatedAt: '2026-08-02T12:00:00.000Z',
+          deletedAt: null,
+          sourceDeviceId: 'mac',
+        },
+      ],
+    },
+    { filePath },
+  )
+  assert.equal(merged.sessions.length, 0)
+  assert.equal(merged.state.sessions[0].deletedAt, '2026-08-02T13:00:00.000Z')
+})

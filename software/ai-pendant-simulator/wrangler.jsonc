@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ai-pendant-relay",
+  "name": "ai-pendant-mission-control",
   "workers_dev": true,
   "main": "cloudflare-worker/worker.js",
   "compatibility_date": "2026-07-31",
@@ -10,8 +10,15 @@
   "vars": {
     "RELAY_PORT": "8787",
     "BRIDGE_POLL_TIMEOUT_MS": "25000",
-    "JOB_TTL_MS": "86400000"
+    "JOB_TTL_MS": "86400000",
+    "AUDIO_BUCKET_PREFIX": "audio-captures"
   },
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_BUCKET",
+      "bucket_name": "ai-pendant-audio"
+    }
+  ],
   "ai": {
     "binding": "AI"
   },

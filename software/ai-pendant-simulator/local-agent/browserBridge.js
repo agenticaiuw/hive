@@ -1,16 +1,33 @@
 const pendingCommands = new Map()
 const results = new Map()
 const HEARTBEATS = new Map()
-const ONLINE_WINDOW_MS = 45_000
+const ONLINE_WINDOW_MS = 70_000
+const COMMAND_LEASE_MS = 45_000
+const MAX_COMPLETED_RESULTS = 200
 
-export function registerBrowserHeartbeat({ extensionId, tabId, userAgent }) {
+export function registerBrowserHeartbeat({
+  extensionId,
+  tabId,
+  windowId,
+  tabUrl,
+  userAgent,
+  deviceName,
+  browserName,
+  extensionVersion,
+}) {
   const now = new Date().toISOString()
   HEARTBEATS.set(extensionId, {
     extensionId,
     tabId: tabId ?? null,
+    windowId: windowId ?? null,
+    tabUrl: tabUrl ?? '',
     userAgent: userAgent ?? '',
+    deviceName: deviceName ?? '',
+    browserName: browserName ?? '',
+    extensionVersion: extensionVersion ?? '',
     lastSeenAt: now,
   })
+  pruneOfflineHeartbeats()
 
   return {
     ok: true,
@@ -46,6 +63,8 @@ export function enqueueBrowserCommand(action) {
 }
 
 export function pollBrowserCommand(extensionId) {
+  reclaimExpiredCommands()
+
   if (!isExtensionOnline(extensionId)) {
     registerBrowserHeartbeat({ extensionId })
   }
@@ -55,6 +74,7 @@ export function pollBrowserCommand(extensionId) {
       command.status = 'processing'
       command.claimedAt = new Date().toISOString()
       command.claimedBy = extensionId
+      command.attempts = (command.attempts ?? 0) + 1
       return command
     }
   }
@@ -62,10 +82,18 @@ export function pollBrowserCommand(extensionId) {
   return null
 }
 
-export function completeBrowserCommand(commandId, payload) {
+export function completeBrowserCommand(commandId, payload, extensionId = null) {
   const command = pendingCommands.get(commandId)
 
   if (!command) {
+    return null
+  }
+
+  if (
+    extensionId &&
+    command.claimedBy &&
+    command.claimedBy !== extensionId
+  ) {
     return null
   }
 
@@ -79,6 +107,7 @@ export function completeBrowserCommand(commandId, payload) {
 
   results.set(commandId, result)
   pendingCommands.delete(commandId)
+  pruneCompletedResults()
   return result
 }
 
@@ -86,7 +115,7 @@ export function getBrowserCommandResult(commandId) {
   return results.get(commandId) ?? pendingCommands.get(commandId) ?? null
 }
 
-export async function waitForBrowserResult(commandId, timeoutMs = 20_000) {
+export async function waitForBrowserResult(commandId, timeoutMs = 45_000) {
   const deadline = Date.now() + timeoutMs
 
   while (Date.now() < deadline) {
@@ -105,6 +134,39 @@ export async function waitForBrowserResult(commandId, timeoutMs = 20_000) {
 function isExtensionOnline(extensionId) {
   const heartbeat = HEARTBEATS.get(extensionId)
   return heartbeat ? isOnline(heartbeat.lastSeenAt) : false
+}
+
+function reclaimExpiredCommands() {
+  const now = Date.now()
+
+  for (const command of pendingCommands.values()) {
+    if (
+      command.status === 'processing' &&
+      (!command.claimedAt ||
+        now - new Date(command.claimedAt).getTime() >= COMMAND_LEASE_MS)
+    ) {
+      command.status = 'queued'
+      command.claimedAt = null
+      command.claimedBy = null
+    }
+  }
+}
+
+function pruneCompletedResults() {
+  while (results.size > MAX_COMPLETED_RESULTS) {
+    const oldestCommandId = results.keys().next().value
+    results.delete(oldestCommandId)
+  }
+}
+
+function pruneOfflineHeartbeats() {
+  const staleBefore = Date.now() - ONLINE_WINDOW_MS * 4
+
+  for (const [extensionId, heartbeat] of HEARTBEATS) {
+    if (new Date(heartbeat.lastSeenAt).getTime() < staleBefore) {
+      HEARTBEATS.delete(extensionId)
+    }
+  }
 }
 
 function isOnline(lastSeenAt) {

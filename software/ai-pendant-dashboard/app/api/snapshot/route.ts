@@ -1,52 +1,234 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- The relay payload is untrusted and allowlisted into a public shape below. */
+
 export const dynamic = "force-dynamic";
 
 const DEFAULT_RELAY_URL =
   "https://ai-pendant-mission-control.your-subdomain.workers.dev";
 
-function publicSnapshot(snapshot: Record<string, any>, cloud: Record<string, any>) {
+function sanitizeText(value: unknown, maxLength = 500) {
+  return String(value ?? "")
+    .replace(
+      /(?:\/Users\/[^/\s]+|\/Volumes\/[^/\s]+|\/private\/(?:var|tmp)|\/var\/folders|\/tmp)(?:\/[^\n\r"'`]*)?/gi,
+      "[local path]",
+    )
+    .replace(/[A-Za-z]:\\Users\\[^\\\s]+(?:\\[^\n\r"'`]*)?/g, "[local path]")
+    .slice(0, maxLength);
+}
+
+function safeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.slice(0, 32).map((item) => sanitizeText(item, 80))
+    : [];
+}
+
+function safeTimestamp(value: unknown) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function publicProduct(value: unknown) {
+  const state =
+    value && typeof value === "object" ? (value as Record<string, any>) : {};
+  const sessions = Array.isArray(state.sessions)
+    ? state.sessions
+        .filter((session: Record<string, any>) => !session.deletedAt)
+        .slice(0, 40)
+        .map((session: Record<string, any>) => ({
+          sessionId: sanitizeText(session.sessionId, 160),
+          title: sanitizeText(session.title, 240),
+          createdAt: safeTimestamp(session.createdAt),
+          updatedAt: safeTimestamp(session.updatedAt),
+          turns: Array.isArray(session.turns)
+            ? session.turns
+                .filter((turn: Record<string, any>) => !turn.deletedAt)
+                .slice(-20)
+                .map((turn: Record<string, any>) => ({
+                  id: sanitizeText(turn.id, 160),
+                  role: sanitizeText(turn.role, 40),
+                  content: sanitizeText(turn.content, 600),
+                  createdAt: safeTimestamp(turn.createdAt),
+                }))
+            : [],
+        }))
+    : [];
+  const memory = state.memory && typeof state.memory === "object"
+    ? state.memory
+    : {};
+  const entities = Array.isArray(memory.entities)
+    ? memory.entities
+        .filter((entity: Record<string, any>) => !entity.deletedAt)
+        .slice(0, 80)
+        .map((entity: Record<string, any>) => ({
+          id: sanitizeText(entity.id, 160),
+          type: sanitizeText(entity.type, 80),
+          name: sanitizeText(entity.name, 240),
+          updatedAt: safeTimestamp(entity.updatedAt),
+        }))
+    : [];
+
+  return {
+    schemaVersion: sanitizeText(state.schemaVersion, 80) || null,
+    revision: Number(state.revision || 0),
+    sessions,
+    memory: { entities },
+  };
+}
+
+function publicSnapshot(
+  snapshot: Record<string, any>,
+  cloud: Record<string, any>,
+  product: unknown,
+) {
   const pipeline = Array.isArray(snapshot.pipeline)
     ? snapshot.pipeline.slice(0, 12).map((run: Record<string, any>) => ({
-        pipelineId: run.pipelineId,
-        command: run.command,
-        status: run.status,
-        createdAt: run.createdAt,
-        updatedAt: run.updatedAt,
+        pipelineId: sanitizeText(run.pipelineId, 160),
+        command: sanitizeText(run.command, 300),
+        status: sanitizeText(run.status, 80),
+        createdAt: safeTimestamp(run.createdAt),
+        updatedAt: safeTimestamp(run.updatedAt),
         events: Array.isArray(run.events)
           ? run.events.map((event: Record<string, any>) => ({
-              eventId: event.eventId,
-              stage: event.stage,
-              status: event.status,
-              label: event.label,
-              detail: event.detail,
-              text: event.text,
-              at: event.at,
+              eventId: sanitizeText(event.eventId, 160),
+              stage: sanitizeText(event.stage, 80),
+              status: sanitizeText(event.status, 80),
+              label: sanitizeText(event.label, 160),
+              detail: sanitizeText(event.detail, 500),
+              text: sanitizeText(event.text, 500),
+              at: safeTimestamp(event.at),
               meta: event.meta?.inputTelemetry
-                ? { inputTelemetry: event.meta.inputTelemetry }
+                ? {
+                    inputTelemetry: {
+                      audioBytes: Number(
+                        event.meta.inputTelemetry.audioBytes || 0,
+                      ),
+                      durationMs: Number(
+                        event.meta.inputTelemetry.durationMs || 0,
+                      ),
+                      sampleRate: Number(
+                        event.meta.inputTelemetry.sampleRate || 0,
+                      ),
+                      format:
+                        sanitizeText(
+                          event.meta.inputTelemetry.format,
+                          40,
+                        ) || null,
+                      storage:
+                        sanitizeText(
+                          event.meta.inputTelemetry.storage,
+                          80,
+                        ) || null,
+                      inputGainDb:
+                        event.meta.inputTelemetry.inputGainDb == null
+                          ? null
+                          : Number(event.meta.inputTelemetry.inputGainDb),
+                    },
+                  }
                 : null,
             }))
           : [],
       }))
     : [];
   const logs = Array.isArray(snapshot.logs)
-    ? snapshot.logs.slice(0, 5).map((entry: Record<string, any>) => ({
-        id: entry.id,
-        command: entry.command,
-        status: entry.status,
-        createdAt: entry.createdAt,
+    ? snapshot.logs.slice(0, 12).map((entry: Record<string, any>) => ({
+        id: sanitizeText(entry.id, 160),
+        command: sanitizeText(entry.command, 300),
+        status: sanitizeText(entry.status, 80),
+        createdAt: safeTimestamp(entry.createdAt),
+        summary: sanitizeText(entry.summary, 500),
+        error: sanitizeText(entry.error, 300),
       }))
     : [];
+  const sourceAgent = snapshot.status?.agent ?? {};
+  const sourcePermissions = sourceAgent.permissions ?? {};
+  const sourceBrowser =
+    sourceAgent.browserExtension ?? snapshot.status?.browser ?? {};
+  const automation =
+    sourcePermissions.automation &&
+    typeof sourcePermissions.automation === "object"
+      ? Object.fromEntries(
+          Object.entries(sourcePermissions.automation)
+            .slice(0, 32)
+            .map(([name, result]) => [
+              sanitizeText(name, 80),
+              {
+                granted: Boolean(
+                  result &&
+                    typeof result === "object" &&
+                    (result as Record<string, unknown>).granted,
+                ),
+              },
+            ]),
+        )
+      : {};
 
   return {
     ok: Boolean(snapshot.ok),
     status: {
       agent: {
-        ok: Boolean(snapshot.status?.agent?.ok),
-        version: snapshot.status?.agent?.version ?? null,
+        ok: Boolean(sourceAgent.ok),
+        version: sanitizeText(sourceAgent.version, 80) || null,
+        hostApp: sanitizeText(sourcePermissions.hostApp, 80) || null,
+        fullControlMode: Boolean(sourceAgent.fullControlMode),
+        llmPlannerEnabled: Boolean(sourceAgent.llmPlannerEnabled),
+        permissions: {
+          ready: Boolean(sourcePermissions.ready),
+          accessibility: {
+            trusted: Boolean(sourcePermissions.accessibility?.trusted),
+          },
+          screenRecording: {
+            granted: Boolean(sourcePermissions.screenRecording?.granted),
+          },
+          automation,
+          reminders: {
+            granted: Boolean(sourcePermissions.reminders?.granted),
+          },
+          requiredMissing: safeStringList(sourcePermissions.requiredMissing),
+          optionalMissing: safeStringList(sourcePermissions.optionalMissing),
+        },
+        browserExtension: {
+          online: Boolean(sourceBrowser.online),
+          pendingCommands: Number(sourceBrowser.pendingCommands || 0),
+          connectedDevices: Array.isArray(sourceBrowser.devices)
+            ? sourceBrowser.devices.filter(
+                (device: Record<string, unknown>) => device.online,
+              ).length
+            : 0,
+          lastSeenAt: Array.isArray(sourceBrowser.devices)
+            ? sourceBrowser.devices
+                .map((device: Record<string, unknown>) =>
+                  String(device.lastSeenAt || ""),
+                )
+                .filter(Boolean)
+                .sort()
+                .at(-1)
+              ? safeTimestamp(
+                  sourceBrowser.devices
+                    .map((device: Record<string, unknown>) =>
+                      String(device.lastSeenAt || ""),
+                    )
+                    .filter(Boolean)
+                    .sort()
+                    .at(-1),
+                )
+              : null
+            : null,
+        },
       },
     },
     pipeline,
     logs,
-    cloud,
+    activity: logs,
+    product: publicProduct(product),
+    cloud: {
+      ok: Boolean(cloud.ok),
+      store: sanitizeText(cloud.store, 40) || null,
+      speechToTextConfigured: Boolean(cloud.speechToTextConfigured),
+      macBridgeOnline: Boolean(cloud.macBridgeOnline),
+      models: {
+        speechToText: sanitizeText(cloud.models?.speechToText, 120) || null,
+        textToSpeech: sanitizeText(cloud.models?.textToSpeech, 120) || null,
+      },
+    },
   };
 }
 
@@ -83,42 +265,54 @@ export async function GET() {
   }
 
   try {
-    const [healthResponse, snapshotResponse] = await Promise.all([
+    const [healthResponse, stateResponse, productResponse] = await Promise.all([
       relayFetch("/health", { cache: "no-store" }),
-      relayFetch("/v1/ops/proxy", {
-        method: "POST",
+      relayFetch("/v1/state/agent-snapshot", {
         headers: {
-          "Content-Type": "application/json",
           Authorization: `Bearer ${relayApiKey}`,
         },
-        body: JSON.stringify({
-          method: "GET",
-          path: "/ops/snapshot",
-          body: null,
-          deviceId: "deployed-ops-dashboard",
-        }),
+        cache: "no-store",
+      }),
+      relayFetch("/v1/product/state/single-owner", {
+        headers: {
+          Authorization: `Bearer ${relayApiKey}`,
+        },
         cache: "no-store",
       }),
     ]);
 
     const health = await healthResponse.json().catch(() => ({}));
-    const snapshot = await snapshotResponse.json().catch(() => ({}));
+    const statePayload = await stateResponse.json().catch(() => ({}));
+    const productPayload = await productResponse.json().catch(() => ({}));
 
-    if (!snapshotResponse.ok) {
+    if (!stateResponse.ok) {
       return Response.json(
         {
           ok: false,
           error:
-            snapshot.error ||
-            `Cloud relay snapshot failed (${snapshotResponse.status}).`,
+            statePayload.error ||
+            `Cloud state refresh failed (${stateResponse.status}).`,
           cloud: health,
         },
-        { status: snapshotResponse.status },
+        { status: stateResponse.status },
       );
     }
 
+    const snapshot = statePayload.state?.data ?? {};
     return Response.json(
-      publicSnapshot(snapshot, health),
+      {
+        ...publicSnapshot(
+          snapshot,
+          health,
+          productResponse.ok ? productPayload.state : null,
+        ),
+        state: {
+          revision: statePayload.state?.revision ?? null,
+          updatedAt: safeTimestamp(statePayload.state?.updatedAt),
+          updatedBy:
+            sanitizeText(statePayload.state?.updatedBy, 120) || null,
+        },
+      },
       {
         headers: {
           "Cache-Control": "no-store, max-age=0",

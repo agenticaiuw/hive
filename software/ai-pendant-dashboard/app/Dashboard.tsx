@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @typescript-eslint/no-explicit-any -- Relay records are schemaless at this display boundary. */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type JsonRecord = Record<string, any>;
@@ -223,6 +225,27 @@ export default function Dashboard() {
   const latestMacAction = Array.isArray(snapshot?.logs)
     ? snapshot.logs[0]
     : null;
+  const permissions = agent.permissions ?? {};
+  const browserExtension = agent.browserExtension ?? {};
+  const automationEntries = Object.entries(
+    permissions.automation ?? {},
+  ) as [string, JsonRecord][];
+  const grantedAutomation = automationEntries.filter(
+    ([, result]) => result.granted,
+  ).length;
+  const requiredMissing = Array.isArray(permissions.requiredMissing)
+    ? permissions.requiredMissing
+    : [];
+  const activity = Array.isArray(snapshot?.activity)
+    ? snapshot.activity.slice(0, 6)
+    : [];
+  const sharedProduct = snapshot?.product ?? {};
+  const sharedSessions = Array.isArray(sharedProduct.sessions)
+    ? sharedProduct.sessions
+    : [];
+  const memoryEntities = Array.isArray(sharedProduct.memory?.entities)
+    ? sharedProduct.memory.entities
+    : [];
 
   return (
     <main className="dashboard-shell">
@@ -242,9 +265,18 @@ export default function Dashboard() {
             online={!latestBad}
             warning={Boolean(latestBad)}
           />
+          <StatusPill
+            label="Browser"
+            online={Boolean(browserExtension.online)}
+          />
           <button className="refresh-button" onClick={refresh} disabled={refreshing}>
             {refreshing ? "Updating…" : "Refresh"}
           </button>
+          <form action="/api/auth/logout" method="post">
+            <button className="logout-button" type="submit">
+              Sign out
+            </button>
+          </form>
         </div>
       </header>
 
@@ -324,6 +356,186 @@ export default function Dashboard() {
             />
           </dl>
         </aside>
+      </section>
+
+      <section className="agent-overview" aria-label="Mac agent status">
+        <article className="agent-card">
+          <div className="section-heading">
+            <div>
+              <p className="kicker">Mac agent</p>
+              <h3>Device permissions</h3>
+            </div>
+            <span className={`pulse ${permissions.ready ? "online" : ""}`} />
+          </div>
+          <dl className="system-list">
+            <SystemRow
+              label="Accessibility"
+              value={permissions.accessibility?.trusted ? "Allowed" : "Missing"}
+            />
+            <SystemRow
+              label="Screen recording"
+              value={permissions.screenRecording?.granted ? "Allowed" : "Missing"}
+            />
+            <SystemRow
+              label="Automation"
+              value={
+                automationEntries.length
+                  ? `${grantedAutomation}/${automationEntries.length} allowed`
+                  : "Not checked"
+              }
+            />
+            <SystemRow
+              label="Host identity"
+              value={agent.hostApp || "Unavailable"}
+            />
+          </dl>
+          {requiredMissing.length ? (
+            <p className="agent-warning">
+              Still needed: {requiredMissing.join(", ")}
+            </p>
+          ) : permissions.ready ? (
+            <p className="agent-ready">All required Mac permissions are ready.</p>
+          ) : null}
+        </article>
+
+        <article className="agent-card">
+          <div className="section-heading">
+            <div>
+              <p className="kicker">Browser bridge</p>
+              <h3>
+                {browserExtension.online
+                  ? "Extension connected"
+                  : "Waiting for extension"}
+              </h3>
+            </div>
+            <span
+              className={`pulse ${browserExtension.online ? "online" : ""}`}
+            />
+          </div>
+          <dl className="system-list">
+            <SystemRow
+              label="Status"
+              value={browserExtension.online ? "Online" : "Offline"}
+            />
+            <SystemRow
+              label="Connected browsers"
+              value={String(browserExtension.connectedDevices ?? 0)}
+            />
+            <SystemRow
+              label="Pending commands"
+              value={String(browserExtension.pendingCommands ?? 0)}
+            />
+            <SystemRow
+              label="Last heartbeat"
+              value={clock(browserExtension.lastSeenAt)}
+            />
+          </dl>
+        </article>
+
+        <article className="agent-card activity-card">
+          <div className="section-heading">
+            <div>
+              <p className="kicker">Local activity</p>
+              <h3>Recent Mac agent logs</h3>
+            </div>
+            <span className="activity-count">{activity.length}</span>
+          </div>
+          {activity.length ? (
+            <ol className="activity-list">
+              {activity.map((entry: JsonRecord) => (
+                <li key={entry.id}>
+                  <span
+                    className={`activity-dot ${
+                      entry.status === "failed" ? "failed" : ""
+                    }`}
+                  />
+                  <div>
+                    <strong>{entry.command || entry.summary || "Agent activity"}</strong>
+                    <small>
+                      {entry.status || "complete"} · {clock(entry.createdAt)}
+                    </small>
+                    {entry.error ? <p>{entry.error}</p> : null}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="agent-empty">
+              No synced Mac activity yet. New actions will appear here.
+            </p>
+          )}
+        </article>
+      </section>
+
+      <section className="shared-data" aria-label="Shared cloud data">
+        <div className="shared-data-heading">
+          <div>
+            <p className="kicker">Shared cloud data</p>
+            <h2>One history across Mac, web, and iPhone</h2>
+          </div>
+          <span className="revision-badge">
+            D1 revision {sharedProduct.revision ?? 0}
+          </span>
+        </div>
+        <div className="shared-data-grid">
+          <article className="shared-data-card">
+            <div className="section-heading">
+              <div>
+                <p className="kicker">Chats</p>
+                <h3>{sharedSessions.length} synchronized sessions</h3>
+              </div>
+            </div>
+            {sharedSessions.length ? (
+              <ol className="shared-record-list">
+                {sharedSessions.slice(0, 6).map((session: JsonRecord) => (
+                  <li key={session.sessionId}>
+                    <div>
+                      <strong>{session.title || "Untitled session"}</strong>
+                      <small>
+                        {session.turns?.length ?? 0} recent turns ·{" "}
+                        {clock(session.updatedAt)}
+                      </small>
+                    </div>
+                    <span>{session.sessionId?.slice(0, 8)}</span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="agent-empty">
+                No synchronized sessions yet. New conversations will persist
+                here after the Mac bridge publishes them.
+              </p>
+            )}
+          </article>
+
+          <article className="shared-data-card">
+            <div className="section-heading">
+              <div>
+                <p className="kicker">Memory</p>
+                <h3>{memoryEntities.length} synchronized entities</h3>
+              </div>
+            </div>
+            {memoryEntities.length ? (
+              <ol className="shared-record-list">
+                {memoryEntities.slice(0, 6).map((entity: JsonRecord) => (
+                  <li key={entity.id}>
+                    <div>
+                      <strong>{entity.name || "Untitled memory"}</strong>
+                      <small>
+                        {entity.type || "Memory"} · {clock(entity.updatedAt)}
+                      </small>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="agent-empty">
+                Memory is empty. Facts captured by the local agent will appear
+                here and remain available on every signed-in device.
+              </p>
+            )}
+          </article>
+        </div>
       </section>
 
       <section className="workspace">

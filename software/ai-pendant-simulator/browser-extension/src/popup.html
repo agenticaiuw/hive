@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Pendant Browser Bridge</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <p class="eyebrow">AI Pendant</p>
+      <h2>Browser Bridge</h2>
+      <div class="card">
+        <div class="status-row">
+          <span id="status-dot" class="dot"></span>
+          <div class="status-copy">
+            <strong id="status-title">Checking…</strong>
+            <small id="status-detail"></small>
+          </div>
+        </div>
+        <div class="button-row">
+          <button id="connect-now" class="primary" type="button">Connect now</button>
+          <button id="open-settings" type="button">Settings</button>
+        </div>
+      </div>
+      <p class="help">Commands come only from the authenticated agent on this Mac.</p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

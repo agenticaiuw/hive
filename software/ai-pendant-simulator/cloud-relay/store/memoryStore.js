@@ -1,14 +1,24 @@
 import { JOB_TTL_MS } from '../config.js'
+import {
+  mergeProductSync as mergeProductSyncDocuments,
+  normalizeProductSync,
+} from '../../shared/productSync.js'
 
 const jobs = new Map()
 const devices = new Map()
+const deviceCredentials = new Map()
+const states = new Map()
+const productStates = new Map()
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 
 function pruneExpiredJobs() {
   const cutoff = Date.now() - JOB_TTL_MS
 
   for (const [jobId, job] of jobs.entries()) {
-    if (new Date(job.updatedAt).getTime() < cutoff) {
+    if (
+      job.type !== 'audio_capture' &&
+      new Date(job.updatedAt).getTime() < cutoff
+    ) {
       jobs.delete(jobId)
     }
   }
@@ -34,6 +44,98 @@ export function createMemoryStore() {
       return [...devices.values()].sort((left, right) =>
         right.updatedAt.localeCompare(left.updatedAt),
       )
+    },
+
+    async saveDeviceCredential(credential) {
+      const record = {
+        ...credential,
+        scopes: [...(credential.scopes || [])],
+        updatedAt: credential.updatedAt || new Date().toISOString(),
+      }
+      deviceCredentials.set(record.tokenId, record)
+      return { ...record, scopes: [...record.scopes] }
+    },
+
+    async getDeviceCredential(tokenId) {
+      const record = deviceCredentials.get(tokenId)
+      return record ? { ...record, scopes: [...record.scopes] } : null
+    },
+
+    async touchDeviceCredential(tokenId, lastUsedAt = new Date().toISOString()) {
+      const current = deviceCredentials.get(tokenId)
+      if (!current) {
+        return null
+      }
+
+      const next = {
+        ...current,
+        lastUsedAt,
+        updatedAt: lastUsedAt,
+      }
+      deviceCredentials.set(tokenId, next)
+      return { ...next, scopes: [...next.scopes] }
+    },
+
+    async revokeDeviceCredential(tokenId, revokedAt = new Date().toISOString()) {
+      const current = deviceCredentials.get(tokenId)
+      if (!current) {
+        return null
+      }
+
+      const next = {
+        ...current,
+        revokedAt,
+        updatedAt: revokedAt,
+      }
+      deviceCredentials.set(tokenId, next)
+      return { ...next, scopes: [...next.scopes] }
+    },
+
+    async saveState(stateKey, data, { updatedBy = 'unknown' } = {}) {
+      const current = states.get(stateKey)
+      const record = {
+        stateKey,
+        revision: Number(current?.revision || 0) + 1,
+        updatedAt: new Date().toISOString(),
+        updatedBy,
+        data,
+      }
+      states.set(stateKey, record)
+      return record
+    },
+
+    async getState(stateKey) {
+      return states.get(stateKey) ?? null
+    },
+
+    async mergeProductState(input) {
+      const incoming = normalizeProductSync(input)
+      const current = productStates.get(incoming.accountId)
+      const merged = current
+        ? mergeProductSyncDocuments(current, incoming)
+        : incoming
+      const stored = normalizeProductSync({
+        ...merged,
+        revision: Number(current?.revision || 0) + 1,
+        generatedAt: new Date().toISOString(),
+      })
+      productStates.set(incoming.accountId, stored)
+      return normalizeProductSync(stored)
+    },
+
+    async getProductState(accountId) {
+      const current = productStates.get(accountId)
+      if (current) {
+        return normalizeProductSync(current)
+      }
+      return normalizeProductSync({
+        accountId,
+        sourceDeviceId: 'cloud-memory',
+        revision: 0,
+        generatedAt: new Date().toISOString(),
+        sessions: [],
+        memory: {},
+      })
     },
 
     async createJob(job) {

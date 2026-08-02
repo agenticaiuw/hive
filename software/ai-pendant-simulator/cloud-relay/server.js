@@ -5,6 +5,7 @@ import {
   BRIDGE_POLL_TIMEOUT_MS,
   LLM_API_KEY,
   PAIRING_CODE,
+  PENDANT_ACCOUNT_ID,
   PORT,
   RELAY_API_KEY,
   STT_MODEL,
@@ -23,6 +24,20 @@ import { getStore } from './store/index.js'
 import { transcribeAudio } from './transcribe.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
+import {
+  deleteAudioCaptureObject,
+  loadAudioCapture,
+  persistAudioCapture,
+} from './audioStorage.js'
+import {
+  authenticateRelayRequest,
+  createDeviceCredential,
+  principalHasScopes,
+  principalOwnsDevice,
+  publicCredential,
+  SUPPORTED_DEVICE_TYPES,
+  verifyPairingCode,
+} from './deviceAuth.js'
 
 const app = express()
 const pendantAudioParser = express.raw({
@@ -33,6 +48,7 @@ const PENDANT_PCM_SAMPLE_RATE = 24000
 const PENDANT_PCM_CHANNELS = 1
 const PENDANT_PCM_BITS = 16
 const DIAGNOSTIC_AUDIO_MAX_BYTES = 1024 * 1024
+const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' }))
@@ -57,6 +73,8 @@ app.get('/health', async (_request, response) => {
     capabilities: {
       pendantPipelineTelemetry: true,
       pendantSpeech: true,
+      persistentAgentState: true,
+      durableAudio: Boolean(cloudflareBindings?.AUDIO_BUCKET),
     },
     models: {
       speechToText: cloudflareBindings?.AI
@@ -68,23 +86,97 @@ app.get('/health', async (_request, response) => {
   })
 })
 
-app.use((request, response, next) => {
-  if (!RELAY_API_KEY) {
-    response.status(503).json({
+app.post('/v1/devices/pair', async (request, response) => {
+  const deviceId = String(request.body?.deviceId ?? '').trim()
+  const deviceType = String(request.body?.deviceType ?? '').trim()
+  const name = String(request.body?.name ?? '').trim()
+  const pairingCode = String(request.body?.pairingCode ?? '').trim()
+
+  if (!deviceId || !SUPPORTED_DEVICE_TYPES.includes(deviceType)) {
+    response.status(400).json({
       ok: false,
-      error:
-        'Blocked for safety: RELAY_API_KEY is not configured on the cloud relay.',
+      error: `deviceId and deviceType (${SUPPORTED_DEVICE_TYPES.join('|')}) are required.`,
     })
     return
   }
 
-  const authorization = request.get('authorization') ?? ''
-  const token = authorization.replace(/^Bearer\s+/i, '')
-
-  if (token !== RELAY_API_KEY) {
-    response.status(401).json({
+  if (!PAIRING_CODE) {
+    response.status(503).json({
       ok: false,
-      error: 'Blocked for safety: invalid or missing relay API key.',
+      error:
+        'Blocked for safety: device pairing is not configured on the cloud relay.',
+    })
+    return
+  }
+
+  if (!verifyPairingCode(pairingCode, PAIRING_CODE)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: invalid pairing code.',
+    })
+    return
+  }
+
+  const now = new Date().toISOString()
+  let issued
+  try {
+    issued = createDeviceCredential({
+      deviceId,
+      deviceType,
+      now,
+    })
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message || 'Device pairing request is invalid.',
+    })
+    return
+  }
+
+  const store = await getStore()
+  const device = await store.saveDevice({
+    deviceId,
+    deviceType,
+    name: name || deviceId,
+    registeredAt: now,
+    lastSeenAt: now,
+    updatedAt: now,
+  })
+  await store.saveDeviceCredential(issued.record)
+
+  response.status(201).json({
+    ok: true,
+    device,
+    credential: {
+      ...publicCredential(issued.record),
+      token: issued.token,
+    },
+  })
+})
+
+app.use(async (request, response, next) => {
+  const auth = await authenticateRelayRequest({
+    authorization: request.get('authorization') ?? '',
+    adminApiKey: RELAY_API_KEY,
+    credentialStore: await getStore(),
+  })
+  if (!auth.ok) {
+    response.status(auth.status || 401).json({
+      ok: false,
+      error: auth.error,
+    })
+    return
+  }
+
+  request.relayPrincipal = auth.principal
+  const requiredScopes = requiredScopesForRequest(request)
+  if (
+    !requiredScopes ||
+    !principalHasScopes(request.relayPrincipal, ...requiredScopes)
+  ) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: this device is not allowed to use that route.',
     })
     return
   }
@@ -141,6 +233,13 @@ app.post('/v1/devices/heartbeat', async (request, response) => {
     })
     return
   }
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a device may only heartbeat itself.',
+    })
+    return
+  }
 
   const store = await getStore()
   const existing = await store.getDevice(deviceId)
@@ -181,12 +280,138 @@ app.get('/v1/devices/status', async (_request, response) => {
   })
 })
 
+app.get('/v1/product/state/:accountId', async (request, response) => {
+  const accountId = String(request.params.accountId || '').trim()
+  if (accountId !== PENDANT_ACCOUNT_ID) {
+    response.status(404).json({
+      ok: false,
+      error: 'Product state was not found for this account.',
+    })
+    return
+  }
+
+  try {
+    const state = await (await getStore()).getProductState(accountId)
+    if (!state) {
+      response.status(404).json({
+        ok: false,
+        error: 'Product state has not been synchronized yet.',
+      })
+      return
+    }
+    response.set('Cache-Control', 'private, no-store')
+    response.json({ ok: true, state })
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message || 'Product state could not be read.',
+    })
+  }
+})
+
+app.put('/v1/product/state', async (request, response) => {
+  const input = request.body?.state
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    response.status(400).json({
+      ok: false,
+      error: 'A product state object is required.',
+    })
+    return
+  }
+  if (String(input.accountId || '').trim() !== PENDANT_ACCOUNT_ID) {
+    response.status(403).json({
+      ok: false,
+      error: 'Product state belongs to a different account.',
+    })
+    return
+  }
+
+  try {
+    const sourceDeviceId =
+      request.relayPrincipal?.kind === 'device'
+        ? request.relayPrincipal.deviceId
+        : input.sourceDeviceId
+    const state = await (await getStore()).mergeProductState({
+      ...input,
+      sourceDeviceId,
+    })
+    response.set('Cache-Control', 'private, no-store')
+    response.status(200).json({ ok: true, state })
+  } catch (error) {
+    response.status(error instanceof RangeError ? 413 : 400).json({
+      ok: false,
+      error: error.message || 'Product state could not be synchronized.',
+    })
+  }
+})
+
+app.get('/v1/state/:stateKey', async (request, response) => {
+  const stateKey = normalizeStateKey(request.params.stateKey)
+  if (!stateKey) {
+    response.status(400).json({
+      ok: false,
+      error: 'State key must use lowercase letters, numbers, and hyphens.',
+    })
+    return
+  }
+
+  const store = await getStore()
+  const state = await store.getState(stateKey)
+  if (!state) {
+    response.status(404).json({
+      ok: false,
+      error: 'Persistent state has not been published yet.',
+    })
+    return
+  }
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({ ok: true, state })
+})
+
+app.put('/v1/state/:stateKey', async (request, response) => {
+  const stateKey = normalizeStateKey(request.params.stateKey)
+  const data = request.body?.data
+  const updatedBy =
+    request.relayPrincipal?.kind === 'device'
+      ? request.relayPrincipal.deviceId
+      : 'admin'
+
+  if (!stateKey) {
+    response.status(400).json({
+      ok: false,
+      error: 'State key must use lowercase letters, numbers, and hyphens.',
+    })
+    return
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    response.status(400).json({
+      ok: false,
+      error: 'Persistent state data must be a JSON object.',
+    })
+    return
+  }
+
+  const store = await getStore()
+  const state = await store.saveState(stateKey, data, {
+    updatedBy: updatedBy || 'unknown',
+  })
+  response.status(201).json({ ok: true, state })
+})
+
 app.post('/v1/pendant/announce', async (request, response) => {
   // Creates a visible pending job the moment the pendant stops recording,
   // seconds before the audio upload itself completes.
   const deviceId =
     String(request.body?.deviceId || 'nrf9160-pendant').trim() ||
     'nrf9160-pendant'
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a device may only announce its own audio.',
+    })
+    return
+  }
   const store = await getStore()
   const job = createPlanJob({
     command: '',
@@ -212,6 +437,19 @@ app.post('/v1/transcribe', async (request, response) => {
   let store = null
 
   try {
+    const requestDeviceId = String(request.body?.deviceId || '').trim()
+    if (
+      request.relayPrincipal?.kind === 'device' &&
+      (!requestDeviceId ||
+        !principalOwnsDevice(request.relayPrincipal, requestDeviceId))
+    ) {
+      response.status(403).json({
+        ok: false,
+        error:
+          'Blocked for safety: deviceId must identify the authenticated device.',
+      })
+      return
+    }
     const audioBase64 = String(request.body?.audioBase64 || '')
       .replace(/^data:[^;]+;base64,/, '')
       .trim()
@@ -269,7 +507,13 @@ app.post('/v1/transcribe', async (request, response) => {
         await store.createJob(transcriptionJob)
       }
 
-      if (audioBytes <= DIAGNOSTIC_AUDIO_MAX_BYTES) {
+      const r2AudioEnabled = Boolean(
+        getCloudflareBindings()?.AUDIO_BUCKET?.put,
+      )
+      const diagnosticAudioLimit = r2AudioEnabled
+        ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
+        : DIAGNOSTIC_AUDIO_MAX_BYTES
+      if (audioBytes <= diagnosticAudioLimit) {
         capture = createAudioCapture({
           audioBase64,
           audioBytes,
@@ -279,11 +523,44 @@ app.post('/v1/transcribe', async (request, response) => {
           transcriptionModel: null,
           status: 'received',
         })
+        const persistedAudio = await persistAudioCapture({
+          captureId: capture.jobId,
+          audioBase64,
+          audioBytes,
+          format: capture.format,
+          createdAt: capture.createdAt,
+          allowD1Fallback: audioBytes <= DIAGNOSTIC_AUDIO_MAX_BYTES,
+        })
+        if (persistedAudio.audioStorageWarning) {
+          console.warn(`[relay] ${persistedAudio.audioStorageWarning}`)
+        }
+        if (persistedAudio.audioStorage === 'unavailable') {
+          capture = null
+        } else {
+          capture = {
+            ...capture,
+            ...persistedAudio,
+          }
+        }
         /*
          * Persist the raw recording before starting speech-to-text. The Mac
          * capture watcher can now download it while Whisper is still running.
          */
-        await store.createJob(capture)
+        if (capture) {
+          try {
+            await store.createJob(capture)
+          } catch (error) {
+            await deleteAudioCaptureObject(capture).catch((cleanupError) => {
+              console.warn(
+                `[relay] Could not remove orphaned audio object: ${
+                  cleanupError?.message || cleanupError
+                }`,
+              )
+            })
+            capture = null
+            throw error
+          }
+        }
       }
     }
 
@@ -385,6 +662,14 @@ app.post(
       const deviceId =
         String(request.get('x-device-id') || 'nrf9160-pendant').trim() ||
         'nrf9160-pendant'
+      if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+        response.status(403).json({
+          ok: false,
+          error:
+            'Blocked for safety: a device may only upload its own commands.',
+        })
+        return
+      }
       const sessionId =
         String(request.get('x-session-id') || '').trim() || null
       const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
@@ -513,6 +798,16 @@ app.get('/v1/pendant/jobs/:jobId/speech', async (request, response) => {
       })
       return
     }
+    if (
+      request.relayPrincipal?.kind === 'device' &&
+      job.createdBy !== request.relayPrincipal.deviceId
+    ) {
+      response.status(403).json({
+        ok: false,
+        error: 'Blocked for safety: this job belongs to another device.',
+      })
+      return
+    }
 
     if (job.status === 'failed' || job.status === 'cancelled') {
       response.status(502).json({
@@ -583,6 +878,13 @@ app.post('/v1/mac/plan', async (request, response) => {
     typeof request.body.inputTelemetry === 'object'
       ? request.body.inputTelemetry
       : null
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a device may only create its own jobs.',
+    })
+    return
+  }
 
   if (!command) {
     response.status(400).json({
@@ -653,6 +955,13 @@ app.post('/v1/mac/execute', async (request, response) => {
   const actions = Array.isArray(request.body?.actions)
     ? request.body.actions
     : []
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a device may only execute its own jobs.',
+    })
+    return
+  }
 
   if (!actions.length) {
     response.status(400).json({
@@ -698,6 +1007,16 @@ app.get('/v1/mac/jobs/:jobId', async (request, response) => {
     response.status(404).json({
       ok: false,
       error: 'Job not found.',
+    })
+    return
+  }
+  if (
+    request.relayPrincipal?.kind === 'device' &&
+    job.createdBy !== request.relayPrincipal.deviceId
+  ) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: this job belongs to another device.',
     })
     return
   }
@@ -770,6 +1089,7 @@ app.get('/v1/ops/audio-captures', async (request, response) => {
       language: capture.language,
       cloudTranscript: capture.transcript,
       cloudModel: capture.transcriptionModel,
+      storage: capture.audioStorage || 'd1-base64',
       status: capture.status,
       createdAt: capture.createdAt,
     })),
@@ -780,7 +1100,7 @@ app.get('/v1/ops/audio-captures/:captureId/audio', async (request, response) => 
   const store = await getStore()
   const capture = await store.getJob(request.params.captureId)
 
-  if (!capture || capture.type !== 'audio_capture' || !capture.audioBase64) {
+  if (!capture || capture.type !== 'audio_capture') {
     response.status(404).json({
       ok: false,
       error: 'Audio capture not found.',
@@ -788,22 +1108,22 @@ app.get('/v1/ops/audio-captures/:captureId/audio', async (request, response) => 
     return
   }
 
-  const audio = Buffer.from(capture.audioBase64, 'base64')
-  response.set('Cache-Control', 'no-store')
-  response.set(
-    'Content-Type',
-    ['ogg', 'opus', 'ogg-opus'].includes(
-      String(capture.format || '').toLowerCase(),
-    )
-      ? 'audio/ogg'
-      : String(capture.format || '').toLowerCase() === 'wav'
-        ? 'audio/wav'
-        : 'application/octet-stream',
-  )
-  response.set('Content-Length', String(audio.length))
+  const storedAudio = await loadAudioCapture(capture)
+  if (!storedAudio) {
+    response.status(404).json({
+      ok: false,
+      error: 'Audio capture data was not found.',
+    })
+    return
+  }
+
+  response.set('Cache-Control', 'private, no-store')
+  response.set('Content-Type', storedAudio.contentType)
+  response.set('Content-Length', String(storedAudio.audio.length))
+  response.set('X-Audio-Storage', storedAudio.source)
   response.set('X-Cloud-Transcript', encodeURIComponent(capture.transcript || ''))
   response.set('X-Cloud-Model', capture.transcriptionModel || '')
-  response.send(audio)
+  response.send(storedAudio.audio)
 })
 
 app.post('/v1/pendant/jobs/:jobId/events', async (request, response) => {
@@ -985,6 +1305,13 @@ app.get('/v1/bridge/work', async (request, response) => {
     })
     return
   }
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a bridge may only claim its own work.',
+    })
+    return
+  }
 
   const store = await getStore()
   const deadline = Date.now() + BRIDGE_POLL_TIMEOUT_MS
@@ -1040,6 +1367,16 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
     response.status(404).json({
       ok: false,
       error: 'Job not found.',
+    })
+    return
+  }
+  if (
+    request.relayPrincipal?.kind === 'device' &&
+    job.claimedBy !== request.relayPrincipal.deviceId
+  ) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: this work was claimed by another bridge.',
     })
     return
   }
@@ -1225,6 +1562,81 @@ function isDeviceOnline(device) {
 
   const lastSeen = new Date(device.lastSeenAt).getTime()
   return Date.now() - lastSeen < 90_000
+}
+
+function normalizeStateKey(value) {
+  const stateKey = String(value || '').trim().toLowerCase()
+  return /^[a-z0-9][a-z0-9-]{0,63}$/.test(stateKey) ? stateKey : ''
+}
+
+function requiredScopesForRequest(request) {
+  const method = request.method.toUpperCase()
+  const path = request.path
+
+  if (method === 'POST' && path === '/v1/devices/register') return ['admin']
+  if (method === 'POST' && path === '/v1/devices/heartbeat') {
+    return ['device:heartbeat:self']
+  }
+  if (method === 'GET' && path === '/v1/devices/status') {
+    return ['device:status:read']
+  }
+  if (
+    method === 'GET' &&
+    /^\/v1\/product\/state\/[^/]+$/.test(path)
+  ) {
+    return ['product:read']
+  }
+  if (method === 'PUT' && path === '/v1/product/state') {
+    return ['product:write']
+  }
+  if (method === 'GET' && path.startsWith('/v1/state/')) {
+    return ['state:read']
+  }
+  if (method === 'PUT' && path.startsWith('/v1/state/')) {
+    return ['state:write']
+  }
+  if (method === 'POST' && path === '/v1/pendant/announce') {
+    return ['pendant:announce']
+  }
+  if (method === 'POST' && path === '/v1/transcribe') {
+    return ['speech:transcribe']
+  }
+  if (method === 'POST' && path === '/v1/pendant/command') {
+    return ['pendant:audio:upload']
+  }
+  if (method === 'POST' && path === '/v1/speak') {
+    return ['speech:synthesize']
+  }
+  if (
+    (method === 'POST' && path === '/v1/pendant/speak') ||
+    (method === 'GET' &&
+      /^\/v1\/pendant\/jobs\/[^/]+\/speech$/.test(path))
+  ) {
+    return ['pendant:speech:read']
+  }
+  if (method === 'POST' && path === '/v1/mac/plan') return ['mac:plan']
+  if (method === 'POST' && path === '/v1/mac/execute') return ['mac:execute']
+  if (method === 'GET' && /^\/v1\/mac\/jobs\/[^/]+$/.test(path)) {
+    return ['mac:jobs:read']
+  }
+  if (path.startsWith('/v1/ops/')) return ['admin']
+  if (
+    method === 'POST' &&
+    /^\/v1\/pendant\/jobs\/[^/]+\/events$/.test(path)
+  ) {
+    return ['pendant:event:write']
+  }
+  if (method === 'GET' && path === '/v1/bridge/work') {
+    return ['bridge:work:claim']
+  }
+  if (
+    method === 'POST' &&
+    /^\/v1\/bridge\/work\/[^/]+\/result$/.test(path)
+  ) {
+    return ['bridge:work:complete']
+  }
+
+  return null
 }
 
 function sleep(ms) {

@@ -9,7 +9,8 @@ import { planCommand as planWithRules } from './planner.js'
 const LLM_API_KEY = process.env.LLM_API_KEY || ''
 const LLM_API_BASE_URL =
   process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1'
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini'
+const LLM_MODEL =
+  process.env.LLM_MODEL || 'deepseek/deepseek-v4-flash'
 const LLM_MAX_TOKENS = Math.min(
   Math.max(Number(process.env.LLM_MAX_TOKENS || 1024), 128),
   4096,

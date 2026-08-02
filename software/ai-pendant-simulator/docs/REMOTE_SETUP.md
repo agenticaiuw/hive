@@ -25,9 +25,10 @@ required.
 
 The checked-in Wrangler configuration deploys:
 
-- Worker: `ai-pendant-relay`
+- Worker: `ai-pendant-mission-control`
 - D1 database: `ai-pendant-relay-db`
-- Worker URL: `https://ai-pendant-relay.your-subdomain.workers.dev`
+- Worker URL:
+  `https://ai-pendant-mission-control.your-subdomain.workers.dev`
 - Speech model: `@cf/openai/whisper-large-v3-turbo`
 
 The relay API key and pairing code are Cloudflare Worker secrets and are not
@@ -39,15 +40,18 @@ Copy `.env.example` to `.env` and set:
 
 ```dotenv
 RELAY_API_KEY=replace-with-a-random-relay-api-key
-VITE_RELAY_API_KEY=replace-with-the-same-relay-api-key
 PAIRING_CODE=replace-with-a-random-pairing-code
-VITE_PAIRING_CODE=replace-with-the-same-pairing-code
 
 RELAY_URL=https://your-worker.your-subdomain.workers.dev
 VITE_RELAY_URL=https://your-worker.your-subdomain.workers.dev
 BRIDGE_DEVICE_ID=home-macbook-bridge
 LOCAL_AGENT_URL=http://127.0.0.1:8000
 ```
+
+`RELAY_API_KEY` and `PAIRING_CODE` are server/agent secrets. Never prefix
+either with `VITE_`: Vite variables are embedded in the browser and iOS web
+bundles. The mobile app exchanges the one-time pairing code for a scoped device
+credential, which iOS stores in Keychain.
 
 The local agent still uses `LLM_API_KEY` for planning. Cloudflare Workers AI
 handles pendant microphone transcription, while macOS speech creates the reply
