@@ -21,9 +21,6 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
-const PRIMARY_APP_URL =
-  "https://ai-pendant-mission-control.your-subdomain.workers.dev";
-
 function relayRequest(request: Request, env: Env): Promise<Response> {
   const requestUrl = new URL(request.url);
   const relayUrl = String(
@@ -53,13 +50,6 @@ const worker = {
       }
     ).__PENDANT_RUNTIME_ENV__ = env;
     const url = new URL(request.url);
-
-    if (url.hostname.endsWith(".chatgpt.site")) {
-      return Response.redirect(
-        `${PRIMARY_APP_URL}${url.pathname}${url.search}`,
-        308,
-      );
-    }
 
     if (url.pathname === "/health" || url.pathname.startsWith("/v1/")) {
       return relayRequest(request, env);

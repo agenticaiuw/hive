@@ -13,6 +13,10 @@ The browser never receives the relay API key. The server-side dashboard route
 reads `RELAY_URL` and `RELAY_API_KEY` from hosted runtime settings, then proxies
 snapshot requests through the authenticated Cloudflare relay.
 
+Open the deployed `*.chatgpt.site` URL to use Mission Control. The
+`*.workers.dev` relay URL is the protected machine API, so opening it directly
+in a browser is expected to return an authentication error.
+
 ## Local development
 
 ```bash
