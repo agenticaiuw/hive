@@ -1,0 +1,90 @@
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <samples/cellular/nrf91_crypto_partitions.dtsi>
+#include <samples/cellular/nrf91_sram_crypto_partitions.dtsi>
+
+&pinctrl {
+	/*
+	 * Agent-response audio to the ESP32 Bluetooth bridge:
+	 *   LRC  -> A3 / P0.17 -> ESP32 GPIO33
+	 *   BCLK -> A4 / P0.18 -> ESP32 GPIO27
+	 *   DATA -> A5 / P0.19 -> ESP32 GPIO14
+	 *
+	 * Unlike the former A0/A1 pins, P0.17/P0.18/P0.19 are routed directly
+	 * to the Arduino header and are not shared with the DK's VCOM2 path.
+	 */
+	/*
+	 * The Adafruit SPH0645LM4H I2S microphone shares this bus:
+	 *   DOUT -> dedicated GPIO header / P0.20 (I2S SDIN)
+	 *
+	 * During recording the nRF9160 runs I2S in slave mode: the SPH0645
+	 * requires exactly 64 BCLK per stereo frame, which this I2S
+	 * peripheral cannot generate as master (24-bit max word = 48 BCLK).
+	 * PWM1/PWM2 generate BCLK on P0.16 (A2) and LRCLK on P0.14 (A0);
+	 * two breadboard jumpers feed them back into P0.18 and P0.17.
+	 * During playback the peripheral is master and drives the same pins.
+	 */
+	i2s0_default_agent_audio: i2s0_default_agent_audio {
+		group1 {
+			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
+				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>,
+				<NRF_PSEL(I2S_SDIN, 0, 20)>;
+		};
+	};
+
+	i2s0_sleep_agent_audio: i2s0_sleep_agent_audio {
+		group1 {
+			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
+				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>,
+				<NRF_PSEL(I2S_SDIN, 0, 20)>;
+			low-power-enable;
+		};
+	};
+};
+
+/*
+ * One I2S peripheral serves both audio directions, never at the same time:
+ * slave RX from the SPH0645 microphone while recording, master TX to the
+ * ESP32 Bluetooth bridge while playing the agent reply.
+ */
+&i2s0 {
+	status = "okay";
+	pinctrl-0 = <&i2s0_default_agent_audio>;
+	pinctrl-1 = <&i2s0_sleep_agent_audio>;
+	pinctrl-names = "default", "sleep";
+	clock-source = "PCLK32M";
+};
+
+/* Keep the unused Arduino UART inactive. */
+&uart1 {
+	status = "disabled";
+};
+
+/* The Arduino SCL/SDA pins are not used by this prototype. */
+&i2c2 {
+	status = "disabled";
+};
+
+/*
+ * Adafruit microSD breakout #254 on the Arduino SPI header:
+ *   CLK -> D13 / P0.13, DO -> D12 / P0.12, DI -> D11 / P0.11,
+ *   CS -> D10 / P0.10.
+ */
+&arduino_spi {
+	status = "okay";
+
+	sd_slot: sdhc@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = <0>;
+		/* Conservative speed for loose breadboard wiring. */
+		spi-max-frequency = <2000000>;
+		status = "okay";
+
+		sdmmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};

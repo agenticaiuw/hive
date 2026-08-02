@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 1 — Prototyping Shopping List</title>
+<style>
+  :root{--bg:#14161b;--card:#1c1f27;--line:#2c303b;--ink:#e8e8ea;--mut:#9aa0ac;--acc:#8a86ff;
+        --buy:#f0a13a;--buybg:#3a2c14;--dev:#7ee0b8;--devbg:#123027;--opt:#c7ccd6;}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink);
+       margin:0;padding:32px 20px 70px;line-height:1.55}
+  .wrap{max-width:860px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 4px;color:var(--acc)}
+  .sub{color:var(--mut);font-size:14px;margin:0 0 6px}
+  .note{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 15px;font-size:13.5px;color:#c7ccd6;margin:16px 0 22px}
+  .note b{color:var(--ink)}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:26px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 16px;margin-bottom:10px;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;align-items:center}
+  .l{flex:1;min-width:240px}
+  .name{font-weight:600;font-size:15px}
+  .desc{color:var(--mut);font-size:13px;margin-top:2px}
+  .r{display:flex;align-items:center;gap:12px}
+  .price{font-variant-numeric:tabular-nums;color:#cfd3db;font-size:14px;min-width:52px;text-align:right}
+  a.btn{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;
+        padding:8px 15px;border-radius:8px;color:var(--buy);background:var(--buybg);border:1px solid #6a4c1e;white-space:nowrap}
+  a.btn:hover{filter:brightness(1.15)}
+  a.btn.sm{padding:6px 11px;font-size:12px}
+  .dev a.btn{color:var(--dev);background:var(--devbg);border-color:#1f5843}
+  .tot{display:flex;justify-content:space-between;align-items:center;background:#20242e;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-top:16px;font-size:16px}
+  .tot b{color:var(--acc)}
+  .foot{color:var(--mut);font-size:12.5px;margin-top:26px;border-top:1px solid var(--line);padding-top:14px}
+  .opt{opacity:.85}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Phase 1 — Prototyping shopping list</h1>
+  <p class="sub">Breadboard-friendly parts to prove the system before the custom PCB. You already have the breadboard, jumpers, and LEDs, so those are off the list. All links go straight to the product page.</p>
+  <div class="note">These are <b>breakout boards</b> (chip + its application circuit + header holes) so you can wire everything on a <b>breadboard with jumper wires</b> — the only soldering is attaching the header strips (easy through-hole). The <b>dev board already includes</b> USB, a LiPo charger, an accelerometer, u.FL antenna jacks, a button, and the eSIM. Prices are rough USD — verify at checkout. Breakouts may use a <b>sibling chip</b> (fine for proving the system; the exact parts go on the PCB later).</div>
+
+  <h2>The brain (dev board)</h2>
+  <div class="card dev">
+    <div class="l"><div class="name">Actinius Icarus IoT Board v2</div><div class="desc">nRF9160 + USB + charger + accelerometer + u.FL antenna + eSIM. Choose "with pin headers."</div></div>
+    <div class="r"><span class="price">~$120</span><a class="btn" href="https://www.actinius.com/icarus" target="_blank" rel="noopener">Actinius</a></div>
+  </div>
+  <div class="card dev opt">
+    <div class="l"><div class="name">Alternative: Nordic nRF9160-DK</div><div class="desc">Bigger/pricier, but has an on-board debugger for single-stepping code.</div></div>
+    <div class="r"><span class="price">~$160</span><a class="btn" href="https://www.nordicsemi.com/Products/Development-hardware/nRF9160-DK" target="_blank" rel="noopener">Nordic</a></div>
+  </div>
+
+  <h2>Audio</h2>
+  <div class="card">
+    <div class="l"><div class="name">I²S amplifier — MAX98357A</div><div class="desc">Same chip as your BOM; drives the speaker. Has a screw terminal for the speaker wires.</div></div>
+    <div class="r"><span class="price">$5.95</span><a class="btn" href="https://www.adafruit.com/product/3006" target="_blank" rel="noopener">#3006</a></div>
+  </div>
+  <div class="card">
+    <div class="l"><div class="name">Mini oval 8 Ω speaker — 1 W</div><div class="desc">In stock (replaces the sold-out #1890). Snip off the PicoBlade connector, strip the two wires, and screw them into the amp's terminal. Start low — the amp can overdrive it.</div></div>
+    <div class="r"><span class="price">$1.95</span><a class="btn" href="https://www.adafruit.com/product/3923" target="_blank" rel="noopener">#3923</a></div>
+  </div>
+  <div class="card">
+    <div class="l"><div class="name">PDM MEMS microphone</div><div class="desc">Runs at 3.3 V → no level shifter needed for the prototype.</div></div>
+    <div class="r"><span class="price">$4.95</span><a class="btn" href="https://www.adafruit.com/product/3492" target="_blank" rel="noopener">#3492</a></div>
+  </div>
+
+  <h2>Wireless audio (AirPods) + test rig</h2>
+  <div class="card">
+    <div class="l"><div class="name">ESP32 dev board (original, Classic BT)</div><div class="desc">Prototypes AirPods audio out (A2DP) and doubles as the WiFi test rig. Must be the <b>original ESP32 (WROOM)</b> — not S2/S3/C3, which lack Classic Bluetooth. The final board uses a Microchip BM83 module instead.</div></div>
+    <div class="r"><span class="price">$19.95</span><a class="btn" href="https://www.adafruit.com/product/3405" target="_blank" rel="noopener">#3405</a></div>
+  </div>
+
+  <h2>Haptics &amp; notification</h2>
+  <div class="card">
+    <div class="l"><div class="name">Haptic driver — DRV2605L</div><div class="desc">Same chip as your BOM; I²C control of the motor.</div></div>
+    <div class="r"><span class="price">$7.95</span><a class="btn" href="https://www.adafruit.com/product/2305" target="_blank" rel="noopener">#2305</a></div>
+  </div>
+  <div class="card">
+    <div class="l"><div class="name">Vibration motor disc</div><div class="desc">The buzz — two wires to the driver's output.</div></div>
+    <div class="r"><span class="price">$1.95</span><a class="btn" href="https://www.adafruit.com/product/1201" target="_blank" rel="noopener">#1201</a></div>
+  </div>
+  <div class="card opt">
+    <div class="l"><div class="name">Notification LED</div><div class="desc">You already have these — wire a plain LED (any color) through a 330 Ω resistor to one GPIO. No purchase needed.</div></div>
+    <div class="r"><span class="price">have it</span></div>
+  </div>
+
+  <h2>Power</h2>
+  <div class="card">
+    <div class="l"><div class="name">LiPo battery ~500 mAh</div><div class="desc">Plugs into the dev board's JST + charger.</div></div>
+    <div class="r"><span class="price">$7.95</span><a class="btn" href="https://www.adafruit.com/product/1578" target="_blank" rel="noopener">#1578</a></div>
+  </div>
+
+  <h2>Storage</h2>
+  <div class="card">
+    <div class="l"><div class="name">microSD breakout + card</div><div class="desc">Gigabytes of offline storage for recordings, audiobooks, and memos. Grab any 32 GB microSD card (~$8) to go with it. Final board can move to a soldered chip for lower power.</div></div>
+    <div class="r"><span class="price">$7.50</span><a class="btn" href="https://www.adafruit.com/product/254" target="_blank" rel="noopener">#254</a></div>
+  </div>
+
+  <h2>Optional</h2>
+  <div class="card opt">
+    <div class="l"><div class="name">6-axis IMU — LSM6DSOX</div><div class="desc">Only if you want a gyro; the dev board already has an accelerometer for steps.</div></div>
+    <div class="r"><span class="price">$11.95</span><a class="btn" href="https://www.adafruit.com/product/4438" target="_blank" rel="noopener">#4438</a></div>
+  </div>
+
+  <div class="tot"><span>Rough total (core, incl. ESP32 + storage, without optional IMU)</span><b>≈ $186</b></div>
+
+  <p class="foot">Already have on hand (not on the list): breadboard, jumper wires, LEDs + resistors. Once this breadboard build works end-to-end, you order the <b>custom PCB + the exact bare-SMD parts</b> from the main BOM — that's when the level shifter, 1.8 V regulator, USB-C connector, and antenna go on your own board. SparkFun / Pimoroni / Pololu carry equivalents if anything's out of stock.</p>
+</div>
+</body>
+</html>

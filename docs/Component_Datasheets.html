@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Wearable — Component Datasheets & Files</title>
+<style>
+  :root{--accent:#534AB7;--ink:#1f1f1f;--muted:#6a6a6a;--line:#e6e4f2;--bg:#faf9fe;--card:#fff;
+        --pdf:#0f6e56;--pdfbg:#e1f5ee;--page:#185fa5;--pagebg:#e6f1fb;--buy:#854f0b;--buybg:#faeeda;--cad:#993c1d;--cadbg:#f5e4dd;}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:var(--ink);
+       background:var(--bg);margin:0;padding:32px 20px 60px;line-height:1.5}
+  .wrap{max-width:880px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 4px;color:var(--accent)}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 4px}
+  .note{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px;color:#444;margin:16px 0 24px}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:28px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+  .top{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px}
+  .name{font-weight:600;font-size:15px}
+  .mpn{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--accent);background:#f1eff9;padding:1px 7px;border-radius:5px}
+  .role{color:var(--muted);font-size:13px;margin:2px 0 10px}
+  .links{display:flex;flex-wrap:wrap;gap:8px}
+  a.btn{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:500;
+        padding:6px 12px;border-radius:7px;border:1px solid transparent}
+  .pdf{color:var(--pdf);background:var(--pdfbg)}
+  .page{color:var(--page);background:var(--pagebg)}
+  .buy{color:var(--buy);background:var(--buybg)}
+  .cad{color:var(--cad);background:var(--cadbg)}
+  a.btn:hover{filter:brightness(.96)}
+  .foot{color:var(--muted);font-size:12px;margin-top:28px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Component datasheets &amp; files</h1>
+  <p class="sub">Agentic Voice Wearable — official sources for every recommended part.</p>
+  <div class="note">Click any button to open the official source in a new tab. <b>PDF</b> = direct datasheet download · <b>Product</b> = manufacturer page (has datasheet + app notes) · <b>DigiKey</b> = buy + specs + datasheet link · <b>CAD</b> = footprints/symbols for KiCad. A few makers (Microchip, Nordic, TDK) don't expose a stable direct‑PDF URL, so those point to the product/DigiKey page where the datasheet lives.</div>
+
+  <h2>The brain</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">Actinius Icarus SoM</span><span class="mpn">Icarus SoM (nRF9160)</span></div>
+    <div class="role">Cellular module — LTE‑M/NB‑IoT + Cortex‑M33, on‑board eSIM, u.FL. The core of the device.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://docs.actinius.com/icarus-som/datasheet/" target="_blank" rel="noopener">Datasheet (web)</a>
+      <a class="btn cad" href="https://docs.actinius.com/icarus-som/board-files/" target="_blank" rel="noopener">Board files</a>
+      <a class="btn cad" href="https://www.snapeda.com/parts/Icarus%20SOM/Actinius/view-part/" target="_blank" rel="noopener">CAD (SnapEDA)</a>
+      <a class="btn buy" href="https://www.actinius.com/icarus-som" target="_blank" rel="noopener">Buy (Actinius)</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Nordic nRF9160</span><span class="mpn">nRF9160‑SICA</span></div>
+    <div class="role">The SoC inside the Icarus SoM (CPU + LTE modem). Pinout &amp; peripherals reference.</div>
+    <div class="links">
+      <a class="btn page" href="https://www.nordicsemi.com/Products/nRF9160" target="_blank" rel="noopener">Product + datasheet</a>
+      <a class="btn page" href="https://docs.nordicsemi.com/bundle/ps_nrf9160/page/keyfeatures.html" target="_blank" rel="noopener">Spec (online)</a>
+    </div>
+  </div>
+
+  <h2>Audio</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">TDK InvenSense T5837 — PDM mic</span><span class="mpn">MMICT5837-00-012</span></div>
+    <div class="role">Digital MEMS microphone (PDM). Voice capture.</div>
+    <div class="links">
+      <a class="btn page" href="https://invensense.tdk.com/products/t5837/" target="_blank" rel="noopener">Product page</a>
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/tdk-invensense/MMICT5837-00-012/16903859" target="_blank" rel="noopener">DigiKey + datasheet</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Analog Devices MAX98357A — I²S amp</span><span class="mpn">MAX98357AETE+T</span></div>
+    <div class="role">Class‑D speaker amplifier, takes I²S directly. Voice output.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://www.analog.com/media/en/technical-documentation/data-sheets/MAX98357A-MAX98357B.pdf" target="_blank" rel="noopener">Datasheet PDF</a>
+      <a class="btn page" href="https://www.analog.com/en/products/max98357a.html" target="_blank" rel="noopener">Product page</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">PUI Audio micro speaker</span><span class="mpn">AS01808MR-R</span></div>
+    <div class="role">Small 8Ω speaker for the top face.</div>
+    <div class="links">
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/pui-audio-inc/AS01808MR-R/1745511" target="_blank" rel="noopener">DigiKey + datasheet</a>
+    </div>
+  </div>
+
+  <h2>Haptics &amp; notification</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">TI DRV2605L — haptic driver</span><span class="mpn">DRV2605LDGSR</span></div>
+    <div class="role">I²C haptic driver with effect library. Drives the buzz motor.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://www.ti.com/lit/ds/symlink/drv2605l.pdf" target="_blank" rel="noopener">Datasheet PDF</a>
+      <a class="btn page" href="https://www.ti.com/product/DRV2605L" target="_blank" rel="noopener">Product page</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Vybronics LRA (vibration motor)</span><span class="mpn">VLV101040A</span></div>
+    <div class="role">Linear resonant actuator — the crisp buzz.</div>
+    <div class="links">
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/vybronics-inc/VLV101040A/12323590" target="_blank" rel="noopener">DigiKey + datasheet</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Addressable RGB LED</span><span class="mpn">SK6812 / NeoPixel</span></div>
+    <div class="role">Notification light (1‑wire). Adafruit NeoPixel = easy 3‑pad wiring.</div>
+    <div class="links">
+      <a class="btn page" href="https://www.adafruit.com/product/1655" target="_blank" rel="noopener">Adafruit (NeoPixel)</a>
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/adafruit-industries-llc/1655/5154679" target="_blank" rel="noopener">DigiKey</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Omron tactile button</span><span class="mpn">B3F-1000</span></div>
+    <div class="role">The single user control (push‑to‑talk).</div>
+    <div class="links">
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/omron-electronics-inc-emc-div/B3F-1000/33150" target="_blank" rel="noopener">DigiKey + datasheet</a>
+    </div>
+  </div>
+
+  <h2>Power &amp; charging</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">LiPo battery 500 mAh</span><span class="mpn">Adafruit 1578</span></div>
+    <div class="role">Single‑cell battery (JST‑PH, protected).</div>
+    <div class="links">
+      <a class="btn page" href="https://www.adafruit.com/product/1578" target="_blank" rel="noopener">Product + specs</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Microchip MCP73831 — charger</span><span class="mpn">MCP73831T-2ACI/OT</span></div>
+    <div class="role">Simple Li‑ion charger (one resistor sets current).</div>
+    <div class="links">
+      <a class="btn page" href="https://www.microchip.com/en-us/product/MCP73831" target="_blank" rel="noopener">Product + datasheet</a>
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/microchip-technology/MCP73831T-2ACI-OT/964301" target="_blank" rel="noopener">DigiKey</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">TI BQ24074 — charger (power‑path)</span><span class="mpn">BQ24074RGTR</span></div>
+    <div class="role">Alternative charger that runs the device from USB with a flat/missing battery.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://www.ti.com/lit/ds/symlink/bq24074.pdf" target="_blank" rel="noopener">Datasheet PDF</a>
+      <a class="btn page" href="https://www.ti.com/product/BQ24074" target="_blank" rel="noopener">Product page</a>
+    </div>
+  </div>
+
+  <h2>Connectors &amp; antenna</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">GCT USB‑C connector</span><span class="mpn">USB4085-GF-A</span></div>
+    <div class="role">Through‑hole USB‑C (easiest to hand‑solder). Charging port.</div>
+    <div class="links">
+      <a class="btn page" href="https://gct.co/connector/usb4085" target="_blank" rel="noopener">Product + datasheet</a>
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/gct/USB4085-GF-A/9859662" target="_blank" rel="noopener">DigiKey</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Molex flexible LTE antenna</span><span class="mpn">2091420180</span></div>
+    <div class="role">u.FL flexible LTE‑M antenna (no tuning needed).</div>
+    <div class="links">
+      <a class="btn page" href="https://www.molex.com/en-us/products/part-detail/2091420180" target="_blank" rel="noopener">Product + datasheet</a>
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/molex/2091420180/10057542" target="_blank" rel="noopener">DigiKey</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">Hirose u.FL receptacle</span><span class="mpn">U.FL-R-SMT-1(10)</span></div>
+    <div class="role">On‑board u.FL jack (if you add one beyond the SoM's).</div>
+    <div class="links">
+      <a class="btn buy" href="https://www.digikey.com/en/products/detail/hirose-electric-co-ltd/U-FL-R-SMT-1-10/2391570" target="_blank" rel="noopener">DigiKey + datasheet</a>
+    </div>
+  </div>
+
+  <h2>Sensors (optional / on‑board)</h2>
+
+  <div class="card">
+    <div class="top"><span class="name">ST LSM6DSO — 6‑axis IMU</span><span class="mpn">LSM6DSOTR</span></div>
+    <div class="role">Optional accelerometer + gyro for richer motion/sleep tracking.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://www.st.com/resource/en/datasheet/lsm6dso.pdf" target="_blank" rel="noopener">Datasheet PDF</a>
+      <a class="btn page" href="https://www.st.com/en/mems-and-sensors/lsm6dso.html" target="_blank" rel="noopener">Product page</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><span class="name">ST LIS2DH12 — accelerometer</span><span class="mpn">LIS2DH12</span></div>
+    <div class="role">Already built into the Icarus SoM (good for basic step counting) — datasheet for reference.</div>
+    <div class="links">
+      <a class="btn pdf" href="https://www.st.com/resource/en/datasheet/lis2dh12.pdf" target="_blank" rel="noopener">Datasheet PDF</a>
+    </div>
+  </div>
+
+  <p class="foot">Tip: the most useful files for your PCB work are the Icarus <b>Board files</b> + <b>SnapEDA</b> (footprints/symbols), the <b>nRF9160</b> spec (pinout), and the direct PDFs for the MAX98357A, DRV2605L, BQ24074, and LSM6DSO. Links verified June 2026 — if a product page moves, search the part number on DigiKey.</p>
+</div>
+</body>
+</html>

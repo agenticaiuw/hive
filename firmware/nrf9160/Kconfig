@@ -1,0 +1,17 @@
+mainmenu "nRF9160 agentic pendant"
+
+config PENDANT_RELAY_API_KEY
+	string "AI Pendant cloud relay API key"
+	default ""
+	help
+	  Bearer token used by the deployed AI Pendant cloud relay. Keep this
+	  value out of source control and inject it at build time.
+
+config PENDANT_BOOT_AGENT_JOB_ID
+	string "Existing relay job to download at boot for diagnostics"
+	default ""
+	help
+	  When non-empty, download the Mac-generated pendantSpeech payload from
+	  this relay job after LTE initialization. Leave empty in production.
+
+source "Kconfig.zephyr"

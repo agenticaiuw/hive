@@ -1,0 +1,20 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.ui
+      - --build-arg
+      - VITE_RELAY_URL=${_VITE_RELAY_URL}
+      - --build-arg
+      - VITE_RELAY_API_KEY=${_VITE_RELAY_API_KEY}
+      - --build-arg
+      - VITE_PAIRING_CODE=${_VITE_PAIRING_CODE}
+      - --build-arg
+      - VITE_FULL_CONTROL_MODE=true
+      - -t
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+timeout: 1200s

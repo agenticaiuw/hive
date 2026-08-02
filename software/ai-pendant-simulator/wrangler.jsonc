@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ai-pendant-relay",
+  "workers_dev": true,
+  "main": "cloudflare-worker/worker.js",
+  "compatibility_date": "2026-07-31",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "RELAY_PORT": "8787",
+    "BRIDGE_POLL_TIMEOUT_MS": "25000",
+    "JOB_TTL_MS": "86400000"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-pendant-relay-db",
+      "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,709 @@
+{
+  "modules": {
+    "": {
+      "cells": {
+        "BT1": {
+          "attributes": {
+            "value": "LiPo_3V7"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "LiPo_3V7_1_"
+        },
+        "C1": {
+          "attributes": {
+            "value": "4.7uF"
+          },
+          "connections": {
+            "1": [
+              23
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C10": {
+          "attributes": {
+            "value": "0.1uF"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C2": {
+          "attributes": {
+            "value": "4.7uF"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C3": {
+          "attributes": {
+            "value": "100uF"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C4": {
+          "attributes": {
+            "value": "10uF"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C5": {
+          "attributes": {
+            "value": "1uF"
+          },
+          "connections": {
+            "1": [
+              10
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C6": {
+          "attributes": {
+            "value": "1uF"
+          },
+          "connections": {
+            "1": [
+              15
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C7": {
+          "attributes": {
+            "value": "0.1uF"
+          },
+          "connections": {
+            "1": [
+              15
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C8": {
+          "attributes": {
+            "value": "1uF"
+          },
+          "connections": {
+            "1": [
+              22
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "C9": {
+          "attributes": {
+            "value": "1uF"
+          },
+          "connections": {
+            "1": [
+              10
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "C_1_"
+        },
+        "D1": {
+          "attributes": {
+            "value": "SK6812"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              17
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input"
+          },
+          "type": "SK6812_1_"
+        },
+        "J1": {
+          "attributes": {
+            "value": "USB4085_USB_C"
+          },
+          "connections": {
+            "1": [
+              23
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              9
+            ],
+            "4": [
+              18
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input",
+            "6": "input"
+          },
+          "type": "USB4085_USB_C_1_"
+        },
+        "LS1": {
+          "attributes": {
+            "value": "Speaker_8ohm"
+          },
+          "connections": {
+            "1": [
+              6
+            ],
+            "2": [
+              8
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "Speaker_8ohm_1_"
+        },
+        "M1": {
+          "attributes": {
+            "value": "LRA_VLV101040A"
+          },
+          "connections": {
+            "1": [
+              7
+            ],
+            "2": [
+              5
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "LRA_VLV101040A_1_"
+        },
+        "MK1": {
+          "attributes": {
+            "value": "T5837_PDM_mic"
+          },
+          "connections": {
+            "1": [
+              15
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              21
+            ],
+            "4": [
+              25
+            ],
+            "5": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input"
+          },
+          "type": "T5837_PDM_mic_1_"
+        },
+        "R1": {
+          "attributes": {
+            "value": "5.1k"
+          },
+          "connections": {
+            "1": [
+              9
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "R_1_"
+        },
+        "R2": {
+          "attributes": {
+            "value": "5.1k"
+          },
+          "connections": {
+            "1": [
+              18
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "R_1_"
+        },
+        "R3": {
+          "attributes": {
+            "value": "2k"
+          },
+          "connections": {
+            "1": [
+              14
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "R_1_"
+        },
+        "R4": {
+          "attributes": {
+            "value": "4.7k"
+          },
+          "connections": {
+            "1": [
+              11
+            ],
+            "2": [
+              10
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "R_1_"
+        },
+        "R5": {
+          "attributes": {
+            "value": "4.7k"
+          },
+          "connections": {
+            "1": [
+              4
+            ],
+            "2": [
+              10
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "R_1_"
+        },
+        "SW1": {
+          "attributes": {
+            "value": "Button_B3F"
+          },
+          "connections": {
+            "1": [
+              12
+            ],
+            "2": [
+              20
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input"
+          },
+          "type": "Button_B3F_1_"
+        },
+        "U1": {
+          "attributes": {
+            "value": "Icarus_SoM_nRF9160"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "10": [
+              4
+            ],
+            "11": [
+              16
+            ],
+            "12": [
+              12
+            ],
+            "13": [
+              17
+            ],
+            "14": [
+              24
+            ],
+            "2": [
+              10
+            ],
+            "3": [
+              20
+            ],
+            "4": [
+              26
+            ],
+            "5": [
+              3
+            ],
+            "6": [
+              1
+            ],
+            "7": [
+              13
+            ],
+            "8": [
+              19
+            ],
+            "9": [
+              11
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "10": "input",
+            "11": "input",
+            "12": "input",
+            "13": "input",
+            "14": "input",
+            "15": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input",
+            "6": "input",
+            "7": "input",
+            "8": "input",
+            "9": "input"
+          },
+          "type": "Icarus_SoM_nRF9160_1_"
+        },
+        "U2": {
+          "attributes": {
+            "value": "MCP73831"
+          },
+          "connections": {
+            "1": [
+              24
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              2
+            ],
+            "4": [
+              23
+            ],
+            "5": [
+              14
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input"
+          },
+          "type": "MCP73831_1_"
+        },
+        "U3": {
+          "attributes": {
+            "value": "AP2112_3V3"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              2
+            ],
+            "5": [
+              10
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input"
+          },
+          "type": "AP2112_3V3_1_"
+        },
+        "U4": {
+          "attributes": {
+            "value": "XC6206_1V8"
+          },
+          "connections": {
+            "1": [
+              10
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              15
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input"
+          },
+          "type": "XC6206_1V8_1_"
+        },
+        "U5": {
+          "attributes": {
+            "value": "MAX98357A"
+          },
+          "connections": {
+            "1": [
+              2
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              26
+            ],
+            "4": [
+              3
+            ],
+            "5": [
+              1
+            ],
+            "7": [
+              2
+            ],
+            "8": [
+              6
+            ],
+            "9": [
+              8
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input",
+            "6": "input",
+            "7": "input",
+            "8": "input",
+            "9": "input"
+          },
+          "type": "MAX98357A_1_"
+        },
+        "U6": {
+          "attributes": {
+            "value": "TXB0102"
+          },
+          "connections": {
+            "1": [
+              15
+            ],
+            "2": [
+              10
+            ],
+            "3": [
+              20
+            ],
+            "4": [
+              10
+            ],
+            "5": [
+              21
+            ],
+            "6": [
+              25
+            ],
+            "7": [
+              13
+            ],
+            "8": [
+              19
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input",
+            "6": "input",
+            "7": "input",
+            "8": "input"
+          },
+          "type": "TXB0102_1_"
+        },
+        "U7": {
+          "attributes": {
+            "value": "DRV2605L"
+          },
+          "connections": {
+            "1": [
+              10
+            ],
+            "2": [
+              20
+            ],
+            "3": [
+              22
+            ],
+            "4": [
+              16
+            ],
+            "5": [
+              20
+            ],
+            "6": [
+              4
+            ],
+            "7": [
+              11
+            ],
+            "8": [
+              7
+            ],
+            "9": [
+              5
+            ]
+          },
+          "port_directions": {
+            "1": "input",
+            "2": "input",
+            "3": "input",
+            "4": "input",
+            "5": "input",
+            "6": "input",
+            "7": "input",
+            "8": "input",
+            "9": "input"
+          },
+          "type": "DRV2605L_1_"
+        }
+      },
+      "ports": {}
+    }
+  }
+}

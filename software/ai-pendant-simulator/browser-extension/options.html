@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AI Pendant Browser Bridge</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 520px;
+        margin: 24px auto;
+        padding: 0 16px;
+      }
+
+      label {
+        display: block;
+        margin-top: 12px;
+        font-weight: 600;
+      }
+
+      input {
+        width: 100%;
+        margin-top: 6px;
+        padding: 8px;
+      }
+
+      button {
+        margin-top: 16px;
+        padding: 10px 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>AI Pendant Browser Bridge</h1>
+    <p>Keep this extension running on your home Mac Chrome so AI Pendant can reuse logged-in sites.</p>
+    <label>
+      Agent URL
+      <input id="agent-url" value="http://127.0.0.1:8000" />
+    </label>
+    <label>
+      Agent Token
+      <input id="agent-token" type="password" />
+    </label>
+    <button id="save">Save</button>
+    <p id="status"></p>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

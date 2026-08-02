@@ -1,0 +1,10 @@
+{
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/dashboard", "destination": "/dashboard.html" },
+    { "source": "/dashboard/", "destination": "/dashboard.html" },
+    { "source": "/((?!dashboard(?:\\.html)?|assets/).*)", "destination": "/index.html" }
+  ]
+}

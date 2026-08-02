@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Breadboard Wiring Guide — nRF9160 DK</title>
+<style>
+:root{--bg:#14161b;--card:#1c1f27;--line:#2c303b;--ink:#e8e8ea;--mut:#9aa0ac;--acc:#8a86ff;
+--warn:#f0a13a;--warnbg:#3a2c14;--ok:#7ee0b8;--okbg:#123027;--code:#161920;}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink);
+margin:0;padding:32px 20px 70px;line-height:1.55}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:26px;margin:0 0 4px;color:var(--acc)}
+.sub{color:var(--mut);font-size:14px;margin:0 0 20px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:34px 0 12px;
+border-bottom:1px solid var(--line);padding-bottom:6px}
+h3{font-size:15px;margin:22px 0 8px;color:var(--ink)}
+.note{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 15px;
+font-size:13.5px;color:#c7ccd6;margin:14px 0}
+.note b{color:var(--ink)}
+.warn{background:var(--warnbg);border-color:#6a4c1e;color:#f3d5ab}
+.ok{background:var(--okbg);border-color:#1f5843;color:#bdf0dc}
+table{width:100%;border-collapse:collapse;margin:10px 0 4px;font-size:13.5px}
+th{text-align:left;color:var(--mut);font-weight:600;font-size:11.5px;text-transform:uppercase;
+letter-spacing:.04em;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:8px 10px;border-bottom:1px solid #23262f;vertical-align:top}
+tr:last-child td{border-bottom:none}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+background:var(--code);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#cfd3db}
+pre{background:var(--code);border:1px solid var(--line);border-radius:9px;padding:14px 16px;
+overflow-x:auto;font-size:12.5px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfd3db}
+pre .c{color:#6f7684}
+pre .k{color:#8a86ff}
+.pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;
+background:#262a34;color:var(--mut);border:1px solid var(--line);margin-left:6px;vertical-align:middle}
+.pill.free{background:var(--okbg);color:var(--ok);border-color:#1f5843}
+.pill.used{background:#2e2320;color:#e0a07f;border-color:#5a3a2c}
+ol.steps{padding-left:20px}
+ol.steps li{margin-bottom:10px}
+.foot{color:var(--mut);font-size:12.5px;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
+a{color:#8fb4ff}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Breadboard wiring guide</h1>
+<p class="sub">nRF9160 DK + Adafruit breakouts &middot; Phase 1 bring-up &middot; no custom PCB</p>
+
+<div class="note warn">
+<b>Before you plug anything in:</b> find the <b>VDD selector switch</b> on the DK (marked <code>1.8V / 3V</code>)
+and make sure it's on <b>3V</b>. At 1.8&nbsp;V the haptic driver and the microSD breakout won't work, and the
+amp's logic thresholds get marginal. Also confirm the header's <code>5V</code> pin actually reads ~5&nbsp;V with a
+multimeter before you hang the amp off it.
+</div>
+
+<h2>What's already taken on the DK</h2>
+
+<p>The Arduino headers look like 20 free pins. They aren't. This is what's already wired to something:</p>
+
+<table>
+<tr><th>nRF9160 pin</th><th>Header</th><th>Used by</th><th></th></tr>
+<tr><td><code>P0.00 / P0.01</code></td><td>D0 / D1</td><td>Arduino UART (<code>uart1</code>) — we disable it</td><td><span class="pill free">freeable</span></td></tr>
+<tr><td><code>P0.02–P0.05</code></td><td>D2–D5</td><td>LED1–LED4</td><td><span class="pill used">taken</span></td></tr>
+<tr><td><code>P0.06–P0.09</code></td><td>D6–D9</td><td>Button1, Button2, Switch1, Switch2</td><td><span class="pill used">taken</span></td></tr>
+<tr><td><code>P0.10</code></td><td>D10</td><td>SPI chip-select</td><td><span class="pill">SD card</span></td></tr>
+<tr><td><code>P0.11–P0.13</code></td><td>D11–D13</td><td>SPI MOSI / MISO / SCK</td><td><span class="pill">SD card</span></td></tr>
+<tr><td><code>P0.14 / P0.15</code></td><td>A0 / A1</td><td>Arduino UART RTS/CTS — freed with <code>uart1</code></td><td><span class="pill free">freeable</span></td></tr>
+<tr><td><code>P0.16</code></td><td>A2</td><td>nothing</td><td><span class="pill free">free</span></td></tr>
+<tr><td><code>P0.17–P0.19</code></td><td>A3–A5</td><td>also routed to the on-board nRF52840</td><td><span class="pill used">avoid</span></td></tr>
+<tr><td><code>P0.26–P0.29</code></td><td>—</td><td><b>Console UART (VCOM0)</b> — your only debug output</td><td><span class="pill used">never touch</span></td></tr>
+<tr><td><code>P0.30 / P0.31</code></td><td>SDA / SCL</td><td>I²C bus (<code>i2c2</code>)</td><td><span class="pill">haptic + IMU</span></td></tr>
+</table>
+
+<div class="note">
+Disabling <code>uart1</code> is what makes this fit. It's the "Arduino serial" port, which you have no use for —
+your console is <code>uart0</code> on completely different pins and stays untouched.
+</div>
+
+<h2>The wiring</h2>
+
+<h3>1. MAX98357A amplifier <span class="pill">I²S out</span></h3>
+<table>
+<tr><th>Amp pin</th><th>Goes to</th><th>nRF9160</th><th>Note</th></tr>
+<tr><td><code>VIN</code></td><td><code>5V</code> on the power header</td><td>—</td><td>3V works but is quieter</td></tr>
+<tr><td><code>GND</code></td><td><code>GND</code></td><td>—</td><td></td></tr>
+<tr><td><code>BCLK</code></td><td><b>A0</b></td><td><code>P0.14</code></td><td>bit clock</td></tr>
+<tr><td><code>LRC</code></td><td><b>A1</b></td><td><code>P0.15</code></td><td>word select</td></tr>
+<tr><td><code>DIN</code></td><td><b>A2</b></td><td><code>P0.16</code></td><td>data</td></tr>
+<tr><td><code>GAIN</code></td><td>leave floating</td><td>—</td><td>= 9&nbsp;dB</td></tr>
+<tr><td><code>SD</code></td><td>leave floating</td><td>—</td><td>= enabled, (L+R)/2 mono</td></tr>
+<tr><td>terminal block</td><td>speaker + / −</td><td>—</td><td>snip the JST off the speaker, strip, screw in</td></tr>
+</table>
+<div class="note">The amp's logic inputs are fine at 3&nbsp;V even when <code>VIN</code> is 5&nbsp;V. Start the volume low —
+1&nbsp;W into that little oval speaker will distort well before max.</div>
+
+<h3>2. PDM MEMS microphone <span class="pill">PDM in</span></h3>
+<table>
+<tr><th>Mic pin</th><th>Goes to</th><th>nRF9160</th><th>Note</th></tr>
+<tr><td><code>3V</code></td><td><code>VDD</code></td><td>—</td><td>mic is 1.8–3.3&nbsp;V, so <b>not</b> 5&nbsp;V</td></tr>
+<tr><td><code>GND</code></td><td><code>GND</code></td><td>—</td><td></td></tr>
+<tr><td><code>SEL</code></td><td><code>GND</code></td><td>—</td><td>selects left channel</td></tr>
+<tr><td><code>CLK</code></td><td><b>D0</b></td><td><code>P0.00</code></td><td></td></tr>
+<tr><td><code>DAT</code></td><td><b>D1</b></td><td><code>P0.01</code></td><td></td></tr>
+</table>
+
+<h3>3. DRV2605L haptic driver <span class="pill">I²C</span></h3>
+<table>
+<tr><th>Driver pin</th><th>Goes to</th><th>nRF9160</th><th>Note</th></tr>
+<tr><td><code>VIN</code></td><td><code>VDD</code></td><td>—</td><td>3–5&nbsp;V tolerant</td></tr>
+<tr><td><code>GND</code></td><td><code>GND</code></td><td>—</td><td></td></tr>
+<tr><td><code>SDA</code></td><td><b>SDA</b></td><td><code>P0.30</code></td><td>address <code>0x5A</code></td></tr>
+<tr><td><code>SCL</code></td><td><b>SCL</b></td><td><code>P0.31</code></td><td></td></tr>
+<tr><td>motor pads</td><td>vibration motor wires</td><td>—</td><td><b>solder</b> — no terminal block here</td></tr>
+</table>
+<div class="note ok">This one you can wire with a STEMMA QT → male-header cable and skip soldering the I²C side entirely.
+Only the two motor wires need the iron.</div>
+
+<h3>4. LSM6DSOX IMU <span class="pill">I²C, optional</span></h3>
+<p style="font-size:13.5px;color:#c7ccd6;margin:6px 0 0">
+Same bus as the haptic driver — <code>VIN</code>→VDD, <code>GND</code>→GND, <code>SDA</code>→SDA, <code>SCL</code>→SCL.
+Different I²C address (<code>0x6A</code>), so they coexist fine. Fully solderless via STEMMA QT.
+Skip it until everything else works; the DK already has an accelerometer.
+</p>
+
+<h3>5. microSD breakout <span class="pill">SPI</span></h3>
+<table>
+<tr><th>SD pin</th><th>Goes to</th><th>nRF9160</th><th>Note</th></tr>
+<tr><td><code>5V</code></td><td><code>5V</code></td><td>—</td><td>board has its own 3.3&nbsp;V regulator + level shifter</td></tr>
+<tr><td><code>GND</code></td><td><code>GND</code></td><td>—</td><td></td></tr>
+<tr><td><code>CLK</code></td><td><b>D13</b></td><td><code>P0.13</code></td><td>SCK</td></tr>
+<tr><td><code>DO</code></td><td><b>D12</b></td><td><code>P0.12</code></td><td>MISO</td></tr>
+<tr><td><code>DI</code></td><td><b>D11</b></td><td><code>P0.11</code></td><td>MOSI</td></tr>
+<tr><td><code>CS</code></td><td><b>D10</b></td><td><code>P0.10</code></td><td>chip select</td></tr>
+</table>
+
+<h3>6. Notification LED</h3>
+<p style="font-size:13.5px;color:#c7ccd6;margin:6px 0 0">
+Don't wire one. The DK has four, and they're already in devicetree as <code>led0</code>–<code>led3</code>.
+Save the GPIO.</p>
+
+<h3>7. ESP32 Feather</h3>
+<p style="font-size:13.5px;color:#c7ccd6;margin:6px 0 0">
+Keep this off the breadboard for now. It's a <b>separate test rig</b> for the AirPods/A2DP experiment and
+for WiFi-based server testing — it isn't part of the nRF9160 signal chain. Wiring it in now just adds
+variables. Bring it up on its own once the DK peripherals work.</p>
+
+<h2>Devicetree overlay</h2>
+
+<p>Create <code>boards/nrf9160dk_nrf9160.overlay</code> in your app folder:</p>
+
+<pre><span class="c">/* Free P0.00, P0.01, P0.14, P0.15 — we don't use the Arduino UART */</span>
+&amp;uart1 {
+	status = "disabled";
+};
+
+&amp;pinctrl {
+	i2s0_default_alt: i2s0_default_alt {
+		group1 {
+			psels = &lt;NRF_PSEL(I2S_SCK_M, 0, 14)&gt;,   <span class="c">/* BCLK -&gt; amp BCLK */</span>
+				&lt;NRF_PSEL(I2S_LRCK_M, 0, 15)&gt;,  <span class="c">/* LRC  -&gt; amp LRC  */</span>
+				&lt;NRF_PSEL(I2S_SDOUT, 0, 16)&gt;;   <span class="c">/* DIN  -&gt; amp DIN  */</span>
+		};
+	};
+
+	pdm0_default_alt: pdm0_default_alt {
+		group1 {
+			psels = &lt;NRF_PSEL(PDM_CLK, 0, 0)&gt;,      <span class="c">/* -&gt; mic CLK */</span>
+				&lt;NRF_PSEL(PDM_DIN, 0, 1)&gt;;      <span class="c">/* -&gt; mic DAT */</span>
+		};
+	};
+};
+
+&amp;i2s0 {
+	status = "okay";
+	pinctrl-0 = &lt;&amp;i2s0_default_alt&gt;;
+	pinctrl-names = "default";
+	clock-source = "PCLK32M_HFXO";
+};
+
+&amp;pdm0 {
+	status = "okay";
+	pinctrl-0 = &lt;&amp;pdm0_default_alt&gt;;
+	pinctrl-names = "default";
+	clock-source = "PCLK32M_HFXO";
+};
+
+<span class="c">/* microSD on the Arduino SPI header */</span>
+&amp;arduino_spi {
+	status = "okay";
+	cs-gpios = &lt;&amp;arduino_header 16 GPIO_ACTIVE_LOW&gt;;  <span class="c">/* 16 = D10 */</span>
+
+	sdhc0: sdhc@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = &lt;0&gt;;
+		status = "okay";
+		spi-max-frequency = &lt;8000000&gt;;
+
+		mmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
+</pre>
+
+<p>And in <code>prj.conf</code>, enable only what you're testing at the time:</p>
+
+<pre><span class="c"># speaker (I2S)</span>
+CONFIG_I2S=y
+
+<span class="c"># microphone (PDM, via Zephyr's DMIC API)</span>
+CONFIG_AUDIO=y
+CONFIG_AUDIO_DMIC=y
+
+<span class="c"># haptic + IMU</span>
+CONFIG_I2C=y
+
+<span class="c"># microSD</span>
+CONFIG_SPI=y
+CONFIG_DISK_ACCESS=y
+CONFIG_DISK_DRIVER_SDMMC=y
+CONFIG_FILE_SYSTEM=y
+CONFIG_FAT_FILESYSTEM_ELM=y
+
+<span class="c"># useful throughout</span>
+CONFIG_LOG=y
+CONFIG_HEAP_MEM_POOL_SIZE=8192
+</pre>
+
+<h2>Bring-up order</h2>
+
+<p>Wire and prove <b>one</b> at a time. Do not build the whole breadboard and then flash — if three things
+are wrong at once you'll never find any of them.</p>
+
+<ol class="steps">
+<li><b>Haptic driver first.</b> Four wires, no soldering. Run an I²C scan and confirm <code>0x5A</code> shows up.
+This proves your I²C, your overlay workflow, and your wiring habits with the lowest possible stakes.</li>
+<li><b>Speaker.</b> Solder the amp header, wire I²S, play a 440&nbsp;Hz sine from a buffer. Hearing a tone is the
+single most motivating milestone in this whole phase.</li>
+<li><b>Microphone.</b> Capture a second of PDM audio, dump the samples over serial, plot them in Python.
+Confirms the mic works <i>before</i> you try to stream it anywhere.</li>
+<li><b>Loopback.</b> Mic → buffer → speaker, on-device. No network, no server. If this works you have a
+working audio path end to end.</li>
+<li><b>microSD.</b> Mount FAT, write a file, read it back.</li>
+<li><b>Then</b> the network layer.</li>
+</ol>
+
+<h2>Gotchas</h2>
+
+<div class="note warn">
+<b>Secure vs non-secure build target.</b> You're building for <code>nrf9160dk/nrf9160</code>, which is fine for all
+of the above. But the LTE modem library <i>requires</i> the non-secure target <code>nrf9160dk/nrf9160/ns</code>
+(it needs TF-M). When you switch, do a <b>pristine build</b> — peripherals get reassigned to the non-secure
+domain and a stale build directory will produce confusing errors.
+</div>
+
+<div class="note">
+<b>Common grounds.</b> Every breakout's GND must connect back to the DK's GND. On a breadboard this means
+running a ground rail, not one wire per board daisy-chained. Floating grounds on I²S produce noise that
+looks exactly like a firmware bug.
+</div>
+
+<div class="note">
+<b>I²C pull-ups.</b> Both Adafruit boards have them on-board. With two devices you'll have two sets in
+parallel — still fine. Add a third I²C device and you may need to cut one set.
+</div>
+
+<div class="note">
+<b>If the mic reads silence,</b> check <code>SEL</code> is actually grounded before you touch the code.
+Floating <code>SEL</code> is the number one cause.
+</div>
+
+<p class="foot">
+Pin assignments verified against the Zephyr board definition for <code>nrf9160dk</code>
+(<code>nrf9160dk_nrf9160_common.dtsi</code> and its pinctrl file), not from memory.
+Component pinouts and soldering requirements taken from the Adafruit product pages for
+3006, 3492, 2305, 4438 and 254.
+</p>
+
+</div>
+</body>
+</html>

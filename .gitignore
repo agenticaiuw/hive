@@ -1,0 +1,50 @@
+.DS_Store
+
+# Secrets and local runtime state
+.env
+.env.*
+!.env.example
+secrets.conf
+*.log
+
+# Local captures, generated analysis, and private purchase records
+diagnostics/audio-captures/
+hardware/purchases/
+hardware/kicad/KiCad-backups/
+output/
+tmp/
+software/ai-pendant-simulator/local-agent/memory/*.json
+
+# KiCad local UI state and automatic backups
+*.kicad_prl
+*.lck
+*-backups/
+*-bak
+
+# JavaScript
+node_modules/
+dist/
+dist-ssr/
+.next/
+.vinext/
+.wrangler/
+.vercel/
+coverage/
+
+# Zephyr / Nordic
+build/
+build-*/
+!software/airpods-control/build/
+!software/airpods-control/build/sites-vite-plugin.ts
+
+# PlatformIO / Python
+.pio/
+.venv/
+__pycache__/
+*.pyc
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~

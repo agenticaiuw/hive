@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "AI Pendant Browser Bridge",
+  "version": "1.0.0",
+  "description": "Reuses logged-in Chrome sessions for home Mac tasks requested by AI Pendant.",
+  "permissions": ["storage", "tabs", "scripting", "activeTab"],
+  "host_permissions": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "AI Pendant Browser Bridge"
+  },
+  "options_page": "options.html"
+}

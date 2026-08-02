@@ -1,0 +1,13 @@
+/*
+ * The nRF9160 DK's nRF52840 board controller routes these nRF9160 pins to
+ * VCOM2 by default:
+ *
+ *   P0.00 / P0.01 - PDM microphone data and clock
+ *   P0.14 / P0.15 - I2S LRCK and BCLK
+ *
+ * Disable that analog-switch path so the external audio bus owns the pins.
+ * This overlay is built into the board-controller image, not the nRF9160 app.
+ */
+&vcom2_pins_routing {
+	status = "disabled";
+};
