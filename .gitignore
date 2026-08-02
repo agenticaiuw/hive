@@ -36,6 +36,8 @@ build/
 build-*/
 !software/airpods-control/build/
 !software/airpods-control/build/sites-vite-plugin.ts
+!software/ai-pendant-dashboard/build/
+!software/ai-pendant-dashboard/build/sites-vite-plugin.ts
 
 # PlatformIO / Python
 .pio/
