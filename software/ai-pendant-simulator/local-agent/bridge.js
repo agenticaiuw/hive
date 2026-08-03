@@ -52,50 +52,6 @@ export function stopBridge() {
   running = false
 }
 
-/**
- * "Open Outlook" / "open Google Chrome." → open_app without an LLM.
- * Keeps simple Mac control under the sub-3s budget once the transcript exists.
- */
-export function matchInstantOpenCommand(command) {
-  const text = String(command || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const match = text.match(
-    /^(?:please\s+)?(?:can you\s+)?open(?:\s+up)?\s+(.+?)\s*\.?$/i,
-  )
-  if (!match) return null
-  let appName = match[1]
-    .replace(/^(the|my|an?)\s+/i, '')
-    .replace(/[.!?]+$/g, '')
-    .trim()
-  if (!appName || appName.length > 80) return null
-  // Avoid "open the file on my desktop" style false positives.
-  if (/\b(file|folder|document|website|url|http)\b/i.test(appName)) {
-    return null
-  }
-  // Common spoken aliases.
-  const aliases = {
-    outlook: 'Microsoft Outlook',
-    'microsoft outlook': 'Microsoft Outlook',
-    chrome: 'Google Chrome',
-    'google chrome': 'Google Chrome',
-    safari: 'Safari',
-    finder: 'Finder',
-    slack: 'Slack',
-    messages: 'Messages',
-    mail: 'Mail',
-    notes: 'Notes',
-    calendar: 'Calendar',
-    terminal: 'Terminal',
-    'vs code': 'Visual Studio Code',
-    vscode: 'Visual Studio Code',
-    code: 'Visual Studio Code',
-  }
-  const key = appName.toLowerCase()
-  if (aliases[key]) appName = aliases[key]
-  return { appName }
-}
-
 async function registerBridge() {
   // A previously paired bridge can resume with its relay credential alone.
   // This avoids requiring the one-time pairing code again after a local
@@ -234,10 +190,6 @@ export async function handleWork(work) {
         (hintActions.length > 0 ||
           hint?.status === 'instant' ||
           String(hint?.response || '').trim())
-      const instantOpen = !useAudioNativePlan
-        ? matchInstantOpenCommand(work.command)
-        : null
-
       let plan
       if (useAudioNativePlan) {
         await reportPipelineEvent(work, {
@@ -257,27 +209,6 @@ export async function handleWork(work) {
           actions: hintActions,
           requiresConfirmation: hintActions.length > 0,
           planner: 'audio-native',
-          fullControl: true,
-        }
-      } else if (instantOpen) {
-        await reportPipelineEvent(work, {
-          stage: 'agent',
-          status: 'active',
-          label: 'Instant open_app plan (no LLM)',
-          detail: `Matched simple open request → ${instantOpen.appName}`,
-        })
-        plan = {
-          status: 'ready',
-          command: work.command,
-          actions: [
-            {
-              type: 'open_app',
-              label: `Open ${instantOpen.appName}`,
-              params: { appName: instantOpen.appName },
-            },
-          ],
-          requiresConfirmation: false,
-          planner: 'instant-open',
           fullControl: true,
         }
       } else {
@@ -302,11 +233,7 @@ export async function handleWork(work) {
         status: 'done',
         label: 'Agent response ready',
         detail: `Completed in ${Date.now() - agentStartedAt} ms${
-          useAudioNativePlan
-            ? ' (audio-native, no local LLM)'
-            : instantOpen
-              ? ' (instant-open, no LLM)'
-              : ''
+          useAudioNativePlan ? ' (audio-native, no local LLM)' : ''
         }.`,
         text: spokenTextForResult(plan),
         meta: {
@@ -315,7 +242,6 @@ export async function handleWork(work) {
           thinkingTraceId: plan.thinking?.traceId ?? null,
           planner: plan.planner ?? null,
           audioNative: Boolean(useAudioNativePlan),
-          instantOpen: Boolean(instantOpen),
           resultStatus: plan.status ?? null,
           responseCharacters: spokenTextForResult(plan).length,
         },
@@ -414,11 +340,26 @@ export async function handleWork(work) {
       }
 
       const speechStartedAt = Date.now()
+      // Trivial single open_app success: skip a long spoken sentence; still send
+      // a one-word cached "Done." so the pendant has something to play.
+      const trivialOpen =
+        plan.executed &&
+        Array.isArray(plan.actions) &&
+        plan.actions.length === 1 &&
+        plan.actions[0]?.type === 'open_app'
+      if (trivialOpen) {
+        plan.response = 'Done.'
+      }
+
       void reportPipelineEvent(work, {
         stage: 'tts',
         status: 'active',
-        label: 'Rendering response speech',
-        detail: 'macOS speech is generating 24 kHz mono PCM for the pendant.',
+        label: trivialOpen
+          ? 'Rendering short confirmation speech'
+          : 'Rendering response speech',
+        detail: trivialOpen
+          ? 'Simple open_app success — using cached one-word reply.'
+          : 'macOS speech is generating 24 kHz mono PCM for the pendant.',
         text: spokenTextForResult(plan),
       })
       // TTS after execute; cached phrases are near-instant.

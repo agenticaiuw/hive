@@ -1411,6 +1411,10 @@ int main(void)
 		/* Ready: button 1 starts a new recording. */
 		audio_cycle_phase = 0U;
 		gpio_pin_set_dt(&led, 0);
+		/* Keep a TLS session warm between presses so the next cycle
+		 * does not pay a full LTE handshake if the idle window is short.
+		 */
+		pendant_cloud_prewarm_start();
 		wait_for_button_press();
 
 		/* Recording: blinking LED; button 1 stops recording. */
@@ -1441,6 +1445,12 @@ int main(void)
 		struct pendant_opus_stats encode_stats = { 0 };
 		int64_t lat_press_started = k_uptime_get();
 
+		/*
+		 * Overlap final Ogg close with TLS readiness: if the during-
+		 * record prewarm finished, upload uses it; if not, kick one
+		 * more attempt while stream_end flushes the last page.
+		 */
+		pendant_cloud_prewarm_start();
 		if (pendant_opus_stream_active()) {
 			error = pendant_opus_stream_end(&encode_stats);
 			printk("LAT encode_ms=%lld (live) pcm_in=%u ogg_out=%u "
@@ -1484,8 +1494,12 @@ int main(void)
 			       pendant_cloud_last_http_status);
 			audio_cycle_result = error;
 			flash_led(5U, 100, 100);
+			/* Still try to warm a socket for the next attempt. */
+			pendant_cloud_prewarm_start();
 			continue;
 		}
+		/* Next press can reuse a warm TLS session while we wait/play. */
+		pendant_cloud_prewarm_start();
 
 		audio_cycle_phase = 4U;
 		gpio_pin_set_dt(&led, 0);

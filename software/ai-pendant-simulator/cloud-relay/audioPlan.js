@@ -8,14 +8,15 @@ import {
 
 const PLAN_PROMPT = `You are the voice planner for a wearable AI pendant that controls a Mac.
 Listen to the short spoken command and respond with ONLY valid JSON (no markdown):
-{"text":"transcript","status":"ready"|"instant"|"unsupported","response":"short spoken reply","actions":[{"type":"open_app","label":"Open Outlook","params":{"appName":"Microsoft Outlook"}}]}
+{"text":"transcript of what was said","status":"ready"|"instant"|"unsupported","response":"optional short spoken reply","actions":[{"type":"...","label":"...","params":{}}]}
 
-Be fast and decisive. No preamble.
-- text: short transcript (required).
-- "open X" / "open Outlook" / "open Chrome" → status ready, ONE open_app action with a real macOS app name (Outlook→Microsoft Outlook, Chrome→Google Chrome).
-- mute/volume/brightness/time/weather → status instant + actions when needed.
-- Keep 0-2 actions. Empty actions only for pure spoken answers.
-- unsupported only if silence/unintelligible.`
+Rules:
+- text is a faithful short transcript of the audio (required).
+- status "instant" when you can answer immediately (facts, time, short confirmations) with a spoken response and optional light actions.
+- status "ready" when the Mac should run tool actions. Use the action types the Mac agent supports (apps, media, settings, files, UI, etc.) with concrete params.
+- status "unsupported" only if the audio is empty/unintelligible or impossible; put a brief reason in response.
+- Keep actions short (usually 0-3). Use empty actions [] when only a spoken reply is needed.
+- Do not special-case particular apps or phrases; decide from the audio alone.`
 
 /**
  * Normalize container labels from the pendant / browser into formats the
