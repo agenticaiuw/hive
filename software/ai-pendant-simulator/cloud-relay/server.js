@@ -5,6 +5,8 @@ import {
   AUDIO_NATIVE_PLANNER,
   AUDIO_RETENTION_MAX_AGE_MS,
   AUDIO_RETENTION_SWEEP_ENABLED,
+  BRIDGE_CLAIM_MAX_INTERVAL_MS,
+  BRIDGE_CLAIM_MIN_INTERVAL_MS,
   BRIDGE_POLL_TIMEOUT_MS,
   JOB_TTL_MS,
   LLM_API_KEY,
@@ -67,12 +69,15 @@ import {
   SUPPORTED_DEVICE_TYPES,
   verifyPairingCode,
 } from './deviceAuth.js'
+import { bridgeClaimDelay } from './polling.js'
+import {
+  createPendantAudioParser,
+  pendantAudioFormat,
+  preparePendantAudioForStt,
+} from './rawAudio.js'
 
 const app = express()
-const pendantAudioParser = express.raw({
-  type: ['audio/wav', 'audio/x-wav', 'application/octet-stream'],
-  limit: '12mb',
-})
+const pendantAudioParser = createPendantAudioParser()
 const PENDANT_PCM_SAMPLE_RATE = 24000
 const PENDANT_PCM_CHANNELS = 1
 const PENDANT_PCM_BITS = 16
@@ -726,15 +731,16 @@ app.post('/v1/transcribe', async (request, response) => {
 })
 
 /*
- * Embedded pendants can stream a WAV file directly from storage instead of
- * first allocating a Base64 JSON document. The relay performs the Base64
- * conversion required by the upstream speech-to-text API and, by default,
- * queues the resulting transcript for the Mac bridge.
+ * Embedded pendants stream raw audio (preferably live chunked s16le PCM)
+ * without Base64 JSON. The relay wraps PCM as WAV for STT/multimodal APIs
+ * and, by default, queues the transcript for the Mac bridge.
  *
  * Headers:
- *   Content-Type: audio/wav
+ *   Content-Type: audio/pcm | audio/ogg | audio/wav
+ *   Transfer-Encoding: chunked (optional; live capture)
  *   Authorization: Bearer <RELAY_API_KEY>
- *   X-Device-Id, X-Session-Id, X-Language (all optional)
+ *   X-Device-Id, X-Session-Id, X-Language, X-Sample-Rate (optional)
+ *   X-Audio-Format: pcm | ogg | wav
  *
  * Add ?dispatch=0 to transcribe without queueing a Mac command.
  */
@@ -743,11 +749,11 @@ app.post(
   pendantAudioParser,
   async (request, response) => {
     try {
-      const audio = Buffer.isBuffer(request.body)
+      const rawAudio = Buffer.isBuffer(request.body)
         ? request.body
         : Buffer.alloc(0)
 
-      if (!audio.length) {
+      if (!rawAudio.length) {
         response.status(400).json({
           ok: false,
           error: 'Raw audio body is required.',
@@ -755,10 +761,33 @@ app.post(
         return
       }
 
-      const format =
-        String(request.get('x-audio-format') || 'wav')
-          .trim()
-          .toLowerCase() || 'wav'
+      const format = pendantAudioFormat({
+        headerFormat: request.get('x-audio-format'),
+        contentType: request.get('content-type'),
+      })
+      const sampleRateHeader = Number(
+        request.get('x-sample-rate') || PENDANT_PCM_SAMPLE_RATE,
+      )
+      const sampleRate = Number.isFinite(sampleRateHeader)
+        ? sampleRateHeader
+        : PENDANT_PCM_SAMPLE_RATE
+      const channelsHeader = Number(
+        request.get('x-audio-channels') || PENDANT_PCM_CHANNELS,
+      )
+      const bitsHeader = Number(request.get('x-audio-bits') || PENDANT_PCM_BITS)
+      const prepared = preparePendantAudioForStt({
+        audio: rawAudio,
+        format,
+        sampleRate,
+        channels: Number.isFinite(channelsHeader)
+          ? channelsHeader
+          : PENDANT_PCM_CHANNELS,
+        bitsPerSample: Number.isFinite(bitsHeader)
+          ? bitsHeader
+          : PENDANT_PCM_BITS,
+      })
+      const audio = prepared.audio
+      const sttFormat = prepared.format
       const language = String(request.get('x-language') || '').trim() || null
       const deviceId =
         String(request.get('x-device-id') || 'nrf9160-pendant').trim() ||
@@ -774,11 +803,13 @@ app.post(
       const sessionId =
         String(request.get('x-session-id') || '').trim() || null
       const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
+      // History playback stores WAV (including PCM→WAV) for browser play.
+      const captureFormat = prepared.wrapped ? 'wav' : sttFormat
       const audioBase64 = audio.toString('base64')
 
       const transcript = await resolveAudioTranscript({
         audioBase64,
-        format,
+        format: sttFormat,
         language,
       })
       const transcriptionDurationMs = transcript.durationMs
@@ -788,8 +819,8 @@ app.post(
       let macBridgeOnline = false
       const store = await getStore()
 
-      // Persist a diagnostic capture when the raw upload fits the same limits
-      // as /v1/transcribe so ops history can replay pendant audio.
+      // Persist a diagnostic capture when the upload fits history limits.
+      // Prefer WAV (including PCM→WAV) so the dashboard can play it back.
       const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
       const diagnosticAudioLimit = r2AudioEnabled
         ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
@@ -799,7 +830,7 @@ app.post(
           capture = createAudioCapture({
             audioBase64,
             audioBytes: audio.length,
-            format,
+            format: captureFormat,
             language,
             transcript: transcript.text,
             transcriptionModel: transcript.model,
@@ -809,7 +840,7 @@ app.post(
             captureId: capture.jobId,
             audioBase64,
             audioBytes: audio.length,
-            format,
+            format: captureFormat,
             createdAt: capture.createdAt,
             allowD1Fallback: audio.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
           })
@@ -840,21 +871,28 @@ app.post(
         macBridgeOnline = isDeviceOnline(macBridge)
 
         if (macBridgeOnline) {
-          const sampleRateHeader = Number(
-            request.get('x-sample-rate') || PENDANT_PCM_SAMPLE_RATE,
-          )
           const inputTelemetry = {
-            audioBytes: audio.length,
-            format: format === 'ogg' ? 'ogg-opus' : format,
-            sampleRate: Number.isFinite(sampleRateHeader)
-              ? sampleRateHeader
-              : PENDANT_PCM_SAMPLE_RATE,
-            channels: PENDANT_PCM_CHANNELS,
-            bitsPerSample: PENDANT_PCM_BITS,
+            audioBytes: rawAudio.length,
+            format: prepared.wrapped
+              ? 'pcm-s16le'
+              : format === 'ogg'
+                ? 'ogg-opus'
+                : format,
+            sampleRate,
+            channels: Number.isFinite(channelsHeader)
+              ? channelsHeader
+              : PENDANT_PCM_CHANNELS,
+            bitsPerSample: Number.isFinite(bitsHeader)
+              ? bitsHeader
+              : PENDANT_PCM_BITS,
             // voiceRunForJob only surfaces microSD/dashboard origins.
             storage: 'microSD',
             uploadState: 'uploaded',
-            uploadedFormat: format === 'ogg' ? 'ogg' : format,
+            uploadedFormat: prepared.wrapped
+              ? 'pcm'
+              : format === 'ogg'
+                ? 'ogg'
+                : format,
             transcriptionModel: transcript.model,
             transcriptionLanguage: transcript.language,
             transcriptionDurationMs,
@@ -889,7 +927,10 @@ app.post(
         durationMs: transcriptionDurationMs,
         source: transcript.source || 'stt',
         plannerHint: transcript.plannerHint,
-        audioBytes: audio.length,
+        audioBytes: rawAudio.length,
+        sttAudioBytes: audio.length,
+        format: prepared.wrapped ? 'pcm' : sttFormat,
+        sampleRate,
         captureId: capture?.jobId ?? null,
         dispatchRequested: shouldDispatch,
         macBridgeOnline,
@@ -1757,6 +1798,7 @@ app.get('/v1/bridge/work', async (request, response) => {
 
   const store = await getStore()
   const deadline = Date.now() + BRIDGE_POLL_TIMEOUT_MS
+  let emptyClaimCount = 0
 
   while (Date.now() < deadline) {
     const job = await store.claimNextJob(deviceId)
@@ -1793,9 +1835,16 @@ app.get('/v1/bridge/work', async (request, response) => {
       return
     }
 
-    // Every millisecond here lands directly in the voice-command latency the
-    // owner feels, so poll tightly rather than politely.
-    await sleep(50)
+    // A 50 ms loop performed about 500 D1 reads per long-poll request and could
+    // make this one endpoint fail while relay health remained green. Start
+    // responsive, then cap at one inexpensive claim per second.
+    await sleep(
+      bridgeClaimDelay(emptyClaimCount, {
+        minimumMs: BRIDGE_CLAIM_MIN_INTERVAL_MS,
+        maximumMs: BRIDGE_CLAIM_MAX_INTERVAL_MS,
+      }),
+    )
+    emptyClaimCount += 1
   }
 
   response.status(204).end()

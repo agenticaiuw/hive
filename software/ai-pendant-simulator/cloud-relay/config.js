@@ -8,6 +8,12 @@ export const PENDANT_ACCOUNT_ID =
 export const BRIDGE_POLL_TIMEOUT_MS = Number(
   process.env.BRIDGE_POLL_TIMEOUT_MS || 25000,
 )
+export const BRIDGE_CLAIM_MIN_INTERVAL_MS = Number(
+  process.env.BRIDGE_CLAIM_MIN_INTERVAL_MS || 250,
+)
+export const BRIDGE_CLAIM_MAX_INTERVAL_MS = Number(
+  process.env.BRIDGE_CLAIM_MAX_INTERVAL_MS || 1000,
+)
 export const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 1000 * 60 * 60 * 24)
 
 /*
