@@ -149,3 +149,59 @@ test('a shell action from the relay is never executed hands-free', async (t) => 
     ['run_shell'],
   )
 })
+
+test('execution and telemetry follow a session created by planning', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      sessionId: 'session-created-by-plan',
+      planner: 'llm',
+      response: 'Opening Outlook.',
+      actions: [
+        {
+          type: 'open_app',
+          label: 'Open Outlook',
+          params: { appName: 'Microsoft Outlook' },
+        },
+      ],
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [{ ok: true, status: 'success', message: 'Opened Outlook.' }],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-session-continuity',
+    command: 'open Outlook',
+    sessionId: null,
+  })
+
+  const executeCall = stub.calls.find(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.ok(executeCall)
+  assert.equal(
+    JSON.parse(executeCall.body).sessionId,
+    'session-created-by-plan',
+  )
+
+  const planCallIndex = stub.calls.findIndex(
+    (call) => call.toAgent && call.pathname === '/plan',
+  )
+  const laterTelemetry = stub.calls
+    .slice(planCallIndex + 1)
+    .filter(
+      (call) => call.toAgent && call.pathname === '/pipeline/events',
+    )
+    .map((call) => JSON.parse(call.body))
+  assert.ok(laterTelemetry.length > 0)
+  assert.ok(
+    laterTelemetry.every(
+      (event) => event.sessionId === 'session-created-by-plan',
+    ),
+  )
+})

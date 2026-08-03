@@ -26,6 +26,7 @@ import {
   showScreenOverlay,
 } from './screenOverlay.js'
 import * as computerUse from './computerUse.js'
+import { resolveLlmApiBaseUrl } from './llmProvider.js'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -376,109 +377,17 @@ async function openUrl(action) {
 }
 
 async function openApp(action) {
-  const requested = String(action.params?.appName ?? '').trim()
+  // Exact appName from the LLM only — no fuzzy installed-app matching.
+  const appName = String(action.params?.appName ?? '')
+    .trim()
+    .replace(/\.app$/i, '')
 
-  if (!requested) {
+  if (!appName) {
     throw new Error('open_app requires appName.')
   }
 
-  const { getMachineContext, findClosestInstalledApp } = await import(
-    './machineContext.js'
-  )
-  const machine = await getMachineContext()
-  const candidates = [
-    requested.replace(/\.app$/i, ''),
-    findClosestInstalledApp(requested, machine.applications),
-  ].filter(Boolean)
-
-  const uniqueCandidates = [...new Set(candidates)]
-  let lastError = null
-
-  for (const appName of uniqueCandidates) {
-    try {
-      await execFileAsync('open', ['-a', appName])
-      // `open -a` can exit 0 without the app actually becoming frontmost
-      // (wrong name match, launch services no-op, already-crashed app). Verify
-      // the process is alive before telling the owner it opened.
-      const running = await waitForAppProcess(appName, 2500)
-      if (!running) {
-        lastError = new Error(
-          `"${appName}" did not stay open after launch — check that it is installed and can start.`,
-        )
-        continue
-      }
-      if (normalizeLoose(appName) !== normalizeLoose(requested)) {
-        return success(
-          action,
-          `Opened ${appName} on Mac (closest installed match for "${requested}")`,
-        )
-      }
-
-      return success(action, `Opened ${appName} on Mac`)
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  throw new Error(
-    lastError?.message ||
-      `Could not open "${requested}". No close installed match was found.`,
-  )
-}
-
-/**
- * Poll System Events for a process whose name matches the app (case-insensitive,
- * ignoring a trailing ".app"). Returns true once seen, false after the timeout.
- */
-async function waitForAppProcess(appName, timeoutMs = 2500) {
-  const needle = normalizeLoose(appName)
-  if (!needle) return false
-  const deadline = Date.now() + timeoutMs
-  // pgrep -i -f matches the app name case-insensitively against the cmdline.
-  const pgrepPattern = needle.replace(/[^a-z0-9 ._+-]/gi, '')
-
-  while (Date.now() < deadline) {
-    try {
-      const { stdout } = await execFileAsync(
-        'osascript',
-        [
-          '-e',
-          'tell application "System Events" to get name of every process whose background only is false',
-        ],
-        { timeout: 1500 },
-      )
-      const names = String(stdout || '')
-        .split(',')
-        .map((name) => normalizeLoose(name))
-      if (
-        names.some(
-          (name) =>
-            name === needle || name.includes(needle) || needle.includes(name),
-        )
-      ) {
-        return true
-      }
-    } catch {
-      // Fall through to pgrep if System Events is denied.
-      if (pgrepPattern) {
-        try {
-          await execFileAsync('pgrep', ['-if', pgrepPattern], { timeout: 1000 })
-          return true
-        } catch {
-          // not running yet
-        }
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
-  return false
-}
-
-function normalizeLoose(value) {
-  return String(value ?? '')
-    .toLowerCase()
-    .replace(/\.app$/i, '')
-    .trim()
+  await execFileAsync('open', ['-a', appName])
+  return success(action, `Opened ${appName} on Mac`)
 }
 
 async function openPath(action) {
@@ -682,7 +591,7 @@ async function runComputerUseTaskAction(action) {
   // text-only agent, so it is opt-in and never implied by FULL_CONTROL_MODE.
   if (!visionUploadConsented()) {
     throw new Error(
-      `Screenshots would be uploaded to ${new URL(process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1').host} (model ${visionModelName()}). Set PENDANT_VISION_UPLOAD_CONSENT=1 to allow that.`,
+      `Screenshots would be uploaded to ${new URL(resolveLlmApiBaseUrl()).host} (model ${visionModelName()}). Set PENDANT_VISION_UPLOAD_CONSENT=1 to allow that.`,
     )
   }
 

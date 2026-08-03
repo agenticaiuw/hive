@@ -43,13 +43,18 @@ target_include_directories(opus PRIVATE
   ${OPUS_ROOT}/silk
   ${OPUS_ROOT}/silk/fixed
 )
+# Xiph OpusFAQ: on limited embedded, NONTHREADSAFE_PSEUDOSTACK moves SILK
+# temps off the call stack into a fixed buffer (pendant_opus_scratch).
+# GLOBAL_STACK_SIZE must match PENDANT_OPUS_SCRATCH_BYTES in audio_opus.h.
+# Not thread-safe: only main thread may call opus_encode/decode.
 target_compile_definitions(opus PRIVATE
   OPUS_BUILD
   FIXED_POINT=1
   DISABLE_FLOAT_API
   DISABLE_DEBUG_FLOAT
   ENABLE_HARDENING
-  VAR_ARRAYS
+  NONTHREADSAFE_PSEUDOSTACK
+  GLOBAL_STACK_SIZE=28672
 )
 target_compile_options(opus PRIVATE -Os -fstack-usage)
 target_link_libraries(opus PRIVATE zephyr_interface)

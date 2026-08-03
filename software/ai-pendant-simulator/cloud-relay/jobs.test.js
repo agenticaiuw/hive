@@ -17,7 +17,7 @@ test('converts a pendant relay job into a dashboard voice run', () => {
       audioBytes: 148800,
       durationMs: 4650,
       sampleRate: 16000,
-      storage: 'microSD',
+      storage: 'live_lte',
     },
     result: {
       response: 'Outlook is open.',
@@ -116,22 +116,25 @@ test('labels a typed dashboard command instead of faking a transcription', () =>
 })
 
 test('shows a recording immediately while Cloudflare is transcribing it', () => {
-  const run = voiceRunForJob({
-    jobId: 'job_transcribing',
-    type: 'plan',
-    status: 'transcribing',
-    command: '',
-    inputTelemetry: {
-      audioBytes: 112044,
-      storage: 'microSD',
-      format: 'wav',
+  const run = voiceRunForJob(
+    {
+      jobId: 'job_transcribing',
+      type: 'plan',
+      status: 'transcribing',
+      command: '',
+      inputTelemetry: {
+        audioBytes: 112044,
+        storage: 'microSD',
+        format: 'wav',
+      },
+      deviceEvents: [],
+      result: null,
+      error: null,
+      createdAt: '2026-08-01T01:00:00.000Z',
+      updatedAt: '2026-08-01T01:00:00.000Z',
     },
-    deviceEvents: [],
-    result: null,
-    error: null,
-    createdAt: '2026-08-01T01:00:00.000Z',
-    updatedAt: '2026-08-01T01:00:00.000Z',
-  })
+    { now: Date.parse('2026-08-01T01:00:30.000Z') },
+  )
 
   assert.equal(run.status, 'processing')
   assert.equal(run.command, '')

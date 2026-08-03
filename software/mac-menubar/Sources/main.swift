@@ -23,27 +23,56 @@ import AVFoundation
 
 enum AgentEnv {
     static let envPathDefaultsKey = "AgentEnvPath"
+    static let bundleId = "com.aipendant.menubar"
+
+    /// Canonical + legacy secret files. First readable path wins.
+    static var candidateEnvPaths: [String] {
+        let home = NSHomeDirectory()
+        var paths: [String] = []
+        // Explicit override from `defaults write … AgentEnvPath`
+        if let domain = UserDefaults.standard.persistentDomain(forName: bundleId),
+           let override = domain[envPathDefaultsKey] as? String,
+           !override.isEmpty {
+            paths.append(override)
+        }
+        paths.append(contentsOf: [
+            "\(home)/agentic-gadget/.env",
+            "\(home)/agentic-gadget/software/ai-pendant.env",
+            "\(home)/agentic-gadget/software/ai-pendant-simulator/.env",
+        ])
+        // de-dupe, preserve order
+        var seen = Set<String>()
+        return paths.filter { seen.insert($0).inserted }
+    }
 
     static func registerDefaults() {
-        // Single shared secrets file: repo-root .env only.
-        let fallback = (NSString("~/agentic-gadget/.env")).expandingTildeInPath
-        UserDefaults.standard.register(defaults: [envPathDefaultsKey: fallback])
+        let preferred =
+            candidateEnvPaths.first { FileManager.default.isReadableFile(atPath: $0) }
+            ?? "\(NSHomeDirectory())/agentic-gadget/.env"
+        UserDefaults.standard.register(defaults: [envPathDefaultsKey: preferred])
     }
 
+    /// Path shown in error UI — the file we actually expect secrets from.
     static var envPath: String {
-        UserDefaults.standard.string(forKey: envPathDefaultsKey) ?? ""
+        candidateEnvPaths.first { FileManager.default.isReadableFile(atPath: $0) }
+            ?? candidateEnvPaths.first
+            ?? "\(NSHomeDirectory())/agentic-gadget/.env"
     }
 
-    /// Reads AGENT_TOKEN from the configured .env file. Kept in memory only.
+    /// Reads AGENT_TOKEN from any known secrets file. Kept in memory only.
     static func loadToken() -> String? {
-        guard let content = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
-        for rawLine in content.split(separator: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("AGENT_TOKEN=") else { continue }
-            var value = String(line.dropFirst("AGENT_TOKEN=".count))
-                .trimmingCharacters(in: .whitespaces)
-            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
+        for path in candidateEnvPaths {
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                continue
+            }
+            for rawLine in content.split(separator: "\n") {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("AGENT_TOKEN=") else { continue }
+                var value = String(line.dropFirst("AGENT_TOKEN=".count))
+                    .trimmingCharacters(in: .whitespaces)
+                value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                if !value.isEmpty { return value }
+            }
         }
         return nil
     }
@@ -835,7 +864,7 @@ final class FloatingCommandModel: ObservableObject {
             return
         }
         guard let token = tokenProvider(), !token.isEmpty else {
-            status = "Missing AGENT_TOKEN in ai-pendant.env"
+            status = "Missing AGENT_TOKEN in \(AgentEnv.envPath)"
             return
         }
         busy = true

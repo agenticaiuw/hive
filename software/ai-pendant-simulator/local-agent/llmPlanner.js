@@ -4,16 +4,19 @@ import {
   formatMachineContextForPrompt,
   getMachineContext,
 } from './machineContext.js'
-import { planCommand as planWithRules } from './planner.js'
+import {
+  resolveDefaultTextModel,
+  resolveLlmApiBaseUrl,
+  resolveLlmApiKey,
+} from './llmProvider.js'
+import { stripProtocolTerminators } from '../shared/protocolText.js'
 
-const LLM_API_KEY = process.env.LLM_API_KEY || ''
-const LLM_API_BASE_URL =
-  process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1'
+const LLM_API_KEY = resolveLlmApiKey()
+const LLM_API_BASE_URL = resolveLlmApiBaseUrl()
 // Pinned: the bare `deepseek-v4-flash` slug still resolves to the April preview
 // checkpoint, which is far weaker at agentic work (Terminal-Bench 61.8 vs 82.7)
 // and costs more.
-const LLM_MODEL =
-  process.env.LLM_MODEL || 'deepseek/deepseek-v4-flash-0731'
+const LLM_MODEL = resolveDefaultTextModel()
 // DeepSeek is text-only; a request carrying an image 404s. Screenshots go to a
 // vision model that returns normalized 0-999 coordinates, so no provider-side
 // image resize can throw off a click.
@@ -393,9 +396,11 @@ export async function requestLlmMessages({
   })
 
   const payload = await response.json()
+  const providerError = providerErrorMessage(payload)
 
-  if (!response.ok) {
-    const message = payload?.error?.message ?? `LLM API request failed (${response.status}).`
+  if (!response.ok || providerError) {
+    const message =
+      providerError || `LLM API request failed (${response.status}).`
     const error = new Error(`${message} (model ${model})`)
     error.status = response.status
     // Lets the caller drop to a text-only step rather than aborting the task.
@@ -403,7 +408,9 @@ export async function requestLlmMessages({
     throw error
   }
 
-  return payload.choices?.[0]?.message?.content ?? ''
+  return stripProtocolTerminators(
+    payload.choices?.[0]?.message?.content ?? '',
+  )
 }
 
 export function isFullControlPlanner() {
@@ -448,17 +455,17 @@ export async function planCommand(command, options = {}) {
     }
   }
 
-  if (!FULL_CONTROL_MODE || !LLM_ENABLED) {
-    return planWithRules(command)
-  }
-
+  // Never fall back to keyword / string-match tables. Planning is model-only.
   return {
     status: 'unsupported',
     command,
     actions: [],
     requiresConfirmation: true,
-    error:
-      'LLM could not plan this command. Rephrase the request or check LLM_API_KEY.',
+    error: !LLM_ENABLED
+      ? 'LLM planner is not configured (set LLM_API_KEY). No hardcoded command matching.'
+      : !FULL_CONTROL_MODE
+        ? 'Full-control LLM planner is disabled (FULL_CONTROL_MODE=false). No hardcoded command matching.'
+        : 'LLM could not plan this command. Rephrase the request or check LLM_API_KEY.',
     planner: 'llm',
   }
 }
@@ -628,7 +635,7 @@ export function chooseReasoningEffort(
   return 'low'
 }
 
-async function requestLlmPlanContent({
+export async function requestLlmPlanContent({
   headers,
   systemPrompt,
   userContent,
@@ -636,6 +643,7 @@ async function requestLlmPlanContent({
   screenshot = null,
   command = '',
   attempt = 0,
+  fetchImpl = fetch,
 }) {
   const useStream = typeof onProgress === 'function'
   const hasScreenshot = Boolean(screenshot?.dataUrl)
@@ -651,7 +659,7 @@ async function requestLlmPlanContent({
       }
     : { role: 'user', content: userContent }
 
-  const response = await fetch(`${LLM_API_BASE_URL}/chat/completions`, {
+  const response = await fetchImpl(`${LLM_API_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -667,18 +675,36 @@ async function requestLlmPlanContent({
 
   if (!useStream) {
     const payload = await response.json()
-    if (!response.ok) {
+    const providerError = providerErrorMessage(payload)
+    if (!response.ok || providerError) {
       throw new Error(
-        payload.error?.message ?? `LLM API request failed (${response.status}).`,
+        providerError || `LLM API request failed (${response.status}).`,
       )
     }
-    return payload.choices?.[0]?.message?.content ?? ''
+    return stripProtocolTerminators(
+      payload.choices?.[0]?.message?.content ?? '',
+    )
   }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}))
     throw new Error(
-      payload.error?.message ?? `LLM API request failed (${response.status}).`,
+      providerErrorMessage(payload) ||
+        `LLM API request failed (${response.status}).`,
+    )
+  }
+
+  const responseContentType =
+    response.headers?.get?.('content-type')?.toLowerCase() || ''
+  if (
+    responseContentType.includes('application/json') &&
+    !responseContentType.includes('text/event-stream')
+  ) {
+    const payload = await response.json()
+    const providerError = providerErrorMessage(payload)
+    if (providerError) throw new Error(providerError)
+    return stripProtocolTerminators(
+      payload.choices?.[0]?.message?.content ?? '',
     )
   }
 
@@ -686,65 +712,92 @@ async function requestLlmPlanContent({
     throw new Error('LLM stream body missing.')
   }
 
-  const reader = response.body.getReader()
+  return readLlmSseContent(response.body, { onProgress })
+}
+
+export async function readLlmSseContent(body, { onProgress } = {}) {
+  const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
   let lastEmit = 0
   let lastEmittedLen = 0
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  const consumeLine = (rawLine) => {
+    const line = rawLine.trim()
+    if (!line) return
 
-    buffer += decoder.decode(value, { stream: true })
-    const chunks = buffer.split('\n')
-    buffer = chunks.pop() ?? ''
+    const isDataFrame = line.startsWith('data:')
+    const data = isDataFrame ? line.slice(5).trim() : line
+    // Provider transport control stays inside this parser. It is never a
+    // model delta, progress message, session turn, or speech input.
+    if (!data || data === '[DONE]') return
+    if (!isDataFrame && !data.startsWith('{')) return
 
-    for (const rawLine of chunks) {
-      const line = rawLine.trim()
-      if (!line.startsWith('data:')) continue
-      const data = line.slice(5).trim()
-      if (!data || data === '[DONE]') continue
+    let payload
+    try {
+      payload = JSON.parse(data)
+    } catch {
+      return
+    }
 
-      let payload
-      try {
-        payload = JSON.parse(data)
-      } catch {
-        continue
-      }
+    const providerError = providerErrorMessage(payload)
+    if (providerError) throw new Error(providerError)
 
-      const delta =
-        payload.choices?.[0]?.delta?.content ??
-        payload.choices?.[0]?.message?.content ??
-        ''
-      if (!delta) continue
+    const delta =
+      payload.choices?.[0]?.delta?.content ??
+      payload.choices?.[0]?.message?.content ??
+      ''
+    if (!delta) return
 
-      content += delta
-      const now = Date.now()
-      // Emit often enough for the ops dashboard to show real token chunks.
-      if (now - lastEmit >= 70 || content.length - lastEmittedLen >= 24) {
-        lastEmit = now
-        lastEmittedLen = content.length
-        onProgress?.({
-          phase: 'llm_stream',
-          message: 'Model is drafting the plan',
-          partial: content,
-          chars: content.length,
-          delta,
-        })
-      }
+    content += delta
+    const now = Date.now()
+    // Emit often enough for the ops dashboard to show real token chunks.
+    if (now - lastEmit >= 70 || content.length - lastEmittedLen >= 24) {
+      lastEmit = now
+      lastEmittedLen = content.length
+      onProgress?.({
+        phase: 'llm_stream',
+        message: 'Model is drafting the plan',
+        partial: content,
+        chars: content.length,
+        delta,
+      })
     }
   }
 
-  onProgress?.({
-    phase: 'llm_stream',
-    message: 'Model finished drafting',
-    partial: content,
-    chars: content.length,
-  })
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      buffer += decoder.decode()
+      if (buffer) consumeLine(buffer)
+      break
+    }
 
-  return content
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split(/\r?\n/)
+    buffer = chunks.pop() ?? ''
+
+    for (const rawLine of chunks) {
+      consumeLine(rawLine)
+    }
+  }
+
+  return stripProtocolTerminators(content)
+}
+
+function providerErrorMessage(payload) {
+  if (!payload || typeof payload !== 'object') return ''
+  if (typeof payload.error === 'string') return payload.error.trim()
+  if (payload.error && typeof payload.error === 'object') {
+    return String(
+      payload.error.message || payload.error.code || 'LLM provider error.',
+    ).trim()
+  }
+  if (payload.type === 'error') {
+    return String(payload.message || 'LLM provider error.').trim()
+  }
+  return ''
 }
 
 function extractJsonObject(text) {

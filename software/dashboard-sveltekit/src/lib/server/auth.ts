@@ -1,5 +1,5 @@
 /**
- * Pairing-code session auth, ported verbatim from the React dashboard's
+ * Pairing-code session auth for the dashboard
  * hand-written Worker entry (`worker/index.ts`). Every constant, status code,
  * header and comparison here is load-bearing: the deployed dashboard is a
  * public URL that gates itself, and the test-suite asserts the exact bytes.

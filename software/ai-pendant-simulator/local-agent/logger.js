@@ -1,24 +1,14 @@
-import fs from 'node:fs'
 import path from 'node:path'
-import { logPath, workspacePath } from './config.js'
+import { readJsonWithRecovery, writeJsonAtomic } from './atomicJsonStore.js'
+import { logPath } from './config.js'
+
+const ARRAY_STORE = { validate: Array.isArray }
 
 export function readLogs() {
-  if (!fs.existsSync(logPath)) {
-    return []
-  }
-
-  try {
-    return JSON.parse(fs.readFileSync(logPath, 'utf8'))
-  } catch {
-    return []
-  }
+  return readJsonWithRecovery(logPath, { fallback: [], ...ARRAY_STORE })
 }
 
 export function appendLog(entry) {
-  if (!fs.existsSync(workspacePath)) {
-    fs.mkdirSync(workspacePath, { recursive: true })
-  }
-
   const logs = readLogs()
   const nextLogs = [
     {
@@ -29,7 +19,7 @@ export function appendLog(entry) {
     ...logs,
   ].slice(0, 200)
 
-  fs.writeFileSync(logPath, JSON.stringify(nextLogs, null, 2))
+  writeJsonAtomic(logPath, nextLogs, ARRAY_STORE)
   return nextLogs
 }
 

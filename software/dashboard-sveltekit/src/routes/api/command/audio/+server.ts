@@ -5,6 +5,7 @@ import {
   relayClient,
   safeIdentifier,
   sanitizeText,
+  strictIdentifier,
 } from "$lib/server/relay";
 
 export const prerender = false;
@@ -62,6 +63,13 @@ export const POST: RequestHandler = async ({ request, locals }) => {
   const language = /^[a-z]{2}$/i.test(requestedLanguage)
     ? requestedLanguage.toLowerCase()
     : undefined;
+  const sessionId = strictIdentifier(body.sessionId);
+  if (!sessionId) {
+    return Response.json(
+      { ok: false, error: "A valid conversation sessionId is required." },
+      { status: 400 },
+    );
+  }
 
   // `storage: "dashboard"` is what puts this run in the operator feed without
   // pretending it came off the pendant's microSD buffer.
@@ -84,6 +92,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         format,
         ...(language ? { language } : {}),
         deviceId: DASHBOARD_DEVICE_ID,
+        sessionId,
         inputTelemetry,
       }),
     });
@@ -118,6 +127,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         body: JSON.stringify({
           command: text,
           deviceId: DASHBOARD_DEVICE_ID,
+          sessionId,
           // Keeps the run attributed to the dashboard even if the announced
           // transcription job could not be upgraded in place.
           inputTelemetry,

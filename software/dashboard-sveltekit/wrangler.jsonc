@@ -1,7 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Same Worker name as the deployed React dashboard so a human cutover is a
-  // single `wrangler deploy` against the existing script.
+  // Live Mission Control Worker name (public URL host stays the same).
   "name": "ai-pendant-dashboard",
   "main": ".svelte-kit/cloudflare/_worker.js",
   "compatibility_date": "2026-05-01",

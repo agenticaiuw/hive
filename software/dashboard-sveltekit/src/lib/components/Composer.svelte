@@ -4,7 +4,7 @@
    * in the same relay pipeline the pendant uses, so the run simply appears in
    * the hero via the existing freshness polling.
    */
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import {
     blobToBase64,
     mimeToFormat,
@@ -13,6 +13,9 @@
   } from "$lib/pipeline";
 
   type ComposerMode = "idle" | "recording" | "sending";
+
+  const SESSION_STORAGE_KEY = "ai-pendant-dashboard-conversation-id";
+  const SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/;
 
   type ActiveRecording = {
     recorder: MediaRecorder;
@@ -28,6 +31,7 @@
   let text = $state("");
   let hint = $state("");
   let seconds = $state(0);
+  let sessionId = $state("");
 
   // Deliberately a plain binding, not `$state`: the recorder handle is
   // machinery, and mutating it must never schedule a re-render or re-run the
@@ -36,6 +40,29 @@
 
   const recording = $derived(mode === "recording");
   const sending = $derived(mode === "sending");
+
+  onMount(() => {
+    let stored = "";
+    try {
+      stored = localStorage.getItem(SESSION_STORAGE_KEY) || "";
+    } catch {
+      // Private browsing may make localStorage unavailable; the in-memory id
+      // still keeps every command in this mounted dashboard together.
+    }
+    sessionId = SESSION_ID_PATTERN.test(stored) ? stored : crypto.randomUUID();
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    } catch {
+      // See the private-browsing fallback above.
+    }
+  });
+
+  function conversationSessionId() {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      sessionId = crypto.randomUUID();
+    }
+    return sessionId;
+  }
 
   $effect(() => {
     if (mode !== "recording") return;
@@ -129,6 +156,7 @@
           audioBase64,
           format: mimeToFormat(blob.type || pending.mimeType),
           durationMs: Date.now() - pending.startedAt,
+          sessionId: conversationSessionId(),
           language: navigator.language?.toLowerCase().startsWith("ko")
             ? "ko"
             : "en",
@@ -164,7 +192,10 @@
       const response = await fetch("/api/command/text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: command }),
+        body: JSON.stringify({
+          text: command,
+          sessionId: conversationSessionId(),
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {

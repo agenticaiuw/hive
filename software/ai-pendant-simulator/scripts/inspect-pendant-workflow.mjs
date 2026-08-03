@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import 'dotenv/config'
+import '../../load-pendant-env.mjs'
 
 export const STAGES = [
   'recording',

@@ -6,11 +6,16 @@
 #include <stdint.h>
 
 /*
- * Codec arena. During live capture the mic RX slab lives in a *separate*
- * buffer (see main.c) so this workspace can hold the Opus encoder state and
- * encode frames while the user is still speaking.
+ * Codec arena: OpusEncoder state + Ogg page payload only.
+ * SILK scratch lives in a separate NONTHREADSAFE_PSEUDOSTACK buffer so live
+ * encode-during-record does not blow the main thread stack.
+ *
+ * Encoder mono fixed-point is ~22–25 KiB; page payload is ~2 KiB with 5
+ * packets/page. 30 KiB workspace leaves margin.
  */
-#define PENDANT_OPUS_WORKSPACE_BYTES (40U * 1024U)
+#define PENDANT_OPUS_WORKSPACE_BYTES (30U * 1024U)
+/* Must match GLOBAL_STACK_SIZE in CMakeLists.txt (≥ measured ~25.4 KiB peak). */
+#define PENDANT_OPUS_SCRATCH_BYTES (28U * 1024U)
 #define PENDANT_OPUS_SAMPLE_RATE 16000U
 #define PENDANT_OPUS_REPLY_SAMPLE_RATE 24000U
 #define PENDANT_OPUS_BITRATE 16000U

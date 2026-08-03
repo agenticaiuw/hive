@@ -1,6 +1,8 @@
 #ifndef PENDANT_CLOUD_H_
 #define PENDANT_CLOUD_H_
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define PENDANT_CLOUD_REPLY_AUDIO_PATH "/SD:/agent_reply.audio"
@@ -20,53 +22,41 @@ enum pendant_cloud_audio_format {
 int pendant_cloud_init(void);
 
 /*
- * Disable LTE RF while the PDM microphone is active, then reconnect after the
- * recording is safely on microSD. These calls are no-ops before cloud init.
+ * Fully power down modem RF while I2S DMA is active, then reconnect.
+ * Latency-first voice path no longer uses suspend/resume; kept for diagnostics.
  */
 int pendant_cloud_suspend_radio(void);
 int pendant_cloud_resume_radio(void);
 
-/*
- * While the user is still speaking, open a TLS session to the relay on a
- * background thread so button-release only pays for the HTTP body. Safe to
- * call multiple times; cancel() drops a held socket.
- */
-void pendant_cloud_prewarm_start(void);
-void pendant_cloud_prewarm_cancel(void);
-
-/*
- * Optional early dashboard visibility. Prefer the single-shot
- * pendant_cloud_upload_recording path for latency; announce costs a full
- * TLS handshake of its own.
- */
 int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 				     uint32_t sample_rate);
 
 /*
- * Single-shot upload: one TLS session POSTs raw Ogg Opus to
- * /v1/pendant/command?dispatch=1. The relay runs STT (or multimodal audio
- * plan) and queues the Mac agent job. Replaces the old
- * announce + /v1/transcribe + /v1/mac/plan triple handshake.
+ * Live chunked PCM upload only (no microSD upload fallback).
+ * Prewarm while idle so Button 1 never waits on TLS. During capture,
+ * stream_write queues one HTTP chunk and stream_pump advances non-blocking
+ * sends under a time budget so I2S never blocks on LTE.
+ */
+int pendant_cloud_stream_prewarm(uint32_t sample_rate);
+int pendant_cloud_stream_begin(uint32_t sample_rate);
+int pendant_cloud_stream_write(const void *data, size_t length);
+int pendant_cloud_stream_pump(uint32_t budget_ms);
+int pendant_cloud_stream_end(void);
+void pendant_cloud_stream_abort(void);
+bool pendant_cloud_stream_active(void);
+bool pendant_cloud_stream_has_pending(void);
+uint32_t pendant_cloud_stream_bytes_sent(void);
+
+/*
+ * Diagnostic helper only — not used on the live voice critical path.
  */
 int pendant_cloud_upload_recording(const char *audio_path,
 				   uint32_t source_pcm_bytes,
 				   uint32_t sample_rate);
 
-/*
- * Poll the queued Mac job, decode the HTTP response framing, and write the
- * Ogg Opus (or legacy PCM fallback) body into the supplied microSD path.
- */
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path);
-
-/*
- * Best-effort observability hooks for the local pipeline dashboard. These
- * report playback progress through the relay without changing playback
- * success or failure.
- */
 int pendant_cloud_report_playback_started(void);
 int pendant_cloud_report_playback_result(int playback_result);
-
-/* Select an existing completed job for the optional boot-time diagnostic. */
 int pendant_cloud_set_job_id_for_diagnostic(const char *job_id);
 
 extern volatile int pendant_cloud_init_result;

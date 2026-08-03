@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { stripProtocolTerminators } from '../shared/protocolText.js'
 
 export const PENDANT_SPEECH_SAMPLE_RATE = 24000
 export const PENDANT_SPEECH_CHANNELS = 1
@@ -69,7 +70,9 @@ export function spokenTextForResult(result) {
     value.executionError,
     value.error,
   ]
-    .map((candidate) => String(candidate || '').replace(/\s+/g, ' ').trim())
+    .map((candidate) =>
+      stripProtocolTerminators(candidate).replace(/\s+/g, ' ').trim(),
+    )
     .find(Boolean)
 
   if (direct) {

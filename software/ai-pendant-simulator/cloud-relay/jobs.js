@@ -146,11 +146,15 @@ export function publicJob(job) {
 }
 
 // A job earns a spot in the operator feed when the owner started it directly:
-// pendant audio buffered to microSD, or a command sent from a signed-in
-// dashboard browser (spoken or typed).
-const VOICE_RUN_ORIGINS = new Set(['microsd', 'dashboard'])
+// live LTE upload, legacy microSD-buffered label, or dashboard (spoken/typed).
+const VOICE_RUN_ORIGINS = new Set([
+  'live_lte',
+  'microsd',
+  'dashboard',
+  'pendant_upload',
+])
 
-export function voiceRunForJob(job) {
+export function voiceRunForJob(job, { now = Date.now() } = {}) {
   if (!job || job.type !== 'plan') return null
   const telemetry = job.inputTelemetry
   const origin = String(telemetry?.storage || '').toLowerCase()
@@ -163,7 +167,7 @@ export function voiceRunForJob(job) {
   // After this window, treat them as failed so the dashboard returns to idle.
   const STALE_TRANSCRIBE_MS = 90_000
   const updatedMs = new Date(job.updatedAt || job.createdAt || 0).getTime()
-  const ageMs = Number.isFinite(updatedMs) ? Date.now() - updatedMs : 0
+  const ageMs = Number.isFinite(updatedMs) ? Number(now) - updatedMs : 0
   const transcriptionStale =
     job.status === 'transcribing' && ageMs > STALE_TRANSCRIBE_MS
   const transcriptionPending =

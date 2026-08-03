@@ -3,7 +3,8 @@ import {
   NO_STORE_HEADERS,
   missingRelayCredential,
   relayClient,
-  safeIdentifier,
+  sanitizeText,
+  strictIdentifier,
 } from "$lib/server/relay";
 
 export const prerender = false;
@@ -14,7 +15,7 @@ export const GET: RequestHandler = async ({ locals, params, request }) => {
   if (!client) return missingRelayCredential();
   const { relayApiKey, relayFetch } = client;
 
-  const pipelineId = safeIdentifier(params.pipelineId, 160);
+  const pipelineId = strictIdentifier(params.pipelineId);
   if (!pipelineId) {
     return Response.json(
       { ok: false, error: "pipelineId is required." },
@@ -30,7 +31,7 @@ export const GET: RequestHandler = async ({ locals, params, request }) => {
     if (range) headers.Range = range;
 
     const response = await relayFetch(
-      `/v1/ops/history/${pipelineId}/audio`,
+      `/v1/ops/history/${encodeURIComponent(pipelineId)}/audio`,
       { headers, cache: "no-store" },
     );
 
@@ -40,7 +41,7 @@ export const GET: RequestHandler = async ({ locals, params, request }) => {
         {
           ok: false,
           error:
-            payload.error ||
+            sanitizeText(payload.error, 300) ||
             `Recording fetch failed (${response.status}).`,
         },
         { status: response.status, headers: NO_STORE_HEADERS },
@@ -70,7 +71,7 @@ export const GET: RequestHandler = async ({ locals, params, request }) => {
         ok: false,
         error:
           error instanceof Error
-            ? error.message
+            ? sanitizeText(error.message, 300)
             : "Unable to stream the recording.",
       },
       { status: 502, headers: NO_STORE_HEADERS },

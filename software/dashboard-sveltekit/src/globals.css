@@ -1164,6 +1164,12 @@ blockquote {
   cursor: pointer;
 }
 
+.history-main:hover,
+.history-main.selected {
+  border-radius: 10px;
+  background: rgba(112, 167, 255, 0.06);
+}
+
 .history-main strong {
   display: block;
   overflow: hidden;
@@ -1210,6 +1216,96 @@ blockquote {
   background: rgba(112, 167, 255, 0.16);
 }
 
+.history-more {
+  display: block;
+  margin: 12px auto 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 13px;
+  color: #c8d2e0;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.history-more:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.history-detail-state {
+  margin-top: 16px;
+}
+
+.history-detail {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+
+.history-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.history-detail-head h3 {
+  margin: 0;
+  color: #edf3fb;
+  font-size: 1rem;
+}
+
+.history-detail-head > span {
+  border: 1px solid rgba(118, 230, 163, 0.22);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #bff0d0;
+  font: 0.64rem var(--font-geist-mono), monospace;
+}
+
+.history-detail-meta {
+  margin-top: 10px;
+  color: var(--muted);
+  font: 0.66rem var(--font-geist-mono), monospace;
+}
+
+.history-detail-events {
+  display: grid;
+  gap: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-detail-events li {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.history-detail-events strong,
+.history-detail-events small {
+  display: block;
+}
+
+.history-detail-events strong {
+  color: #dce5f0;
+  font-size: 0.76rem;
+}
+
+.history-detail-events small {
+  margin-top: 2px;
+  color: var(--muted);
+  font: 0.62rem var(--font-geist-mono), monospace;
+}
+
+.history-detail-events p {
+  margin-top: 5px;
+  color: #aab5c4;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
 /* ---------- Data panel ---------- */
 
 .rev-badge {
@@ -1250,6 +1346,21 @@ blockquote {
   padding: 9px 0;
 }
 
+.data-list li.active {
+  background: rgba(112, 167, 255, 0.05);
+}
+
+.data-session-button {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
 .data-line {
   display: flex;
   align-items: baseline;
@@ -1278,6 +1389,59 @@ blockquote {
   color: var(--muted);
   font-family: var(--font-geist-mono), monospace;
   font-size: 0.64rem;
+}
+
+.chat-transcript {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.chat-transcript > ol {
+  display: grid;
+  gap: 9px;
+  max-height: 360px;
+  margin: 0;
+  padding: 0 4px 0 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.chat-transcript > ol > li {
+  border: 1px solid rgba(112, 167, 255, 0.16);
+  border-radius: 12px;
+  padding: 9px 11px;
+  background: rgba(112, 167, 255, 0.05);
+}
+
+.chat-transcript > ol > li.assistant {
+  border-color: rgba(118, 230, 163, 0.14);
+  background: rgba(118, 230, 163, 0.04);
+}
+
+.chat-transcript li > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-transcript strong {
+  color: #dce5f0;
+  font-size: 0.68rem;
+}
+
+.chat-transcript time {
+  color: var(--muted);
+  font: 0.6rem var(--font-geist-mono), monospace;
+}
+
+.chat-transcript li > p {
+  margin-top: 5px;
+  color: #c5cfdd;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 /* ---------- Breakpoints ---------- */

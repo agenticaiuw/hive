@@ -1,9 +1,14 @@
-import fs from 'node:fs'
 import path from 'node:path'
+import {
+  ensureJsonStore,
+  readJsonWithRecovery,
+  writeJsonAtomic,
+} from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
 
 const jobsPath = path.join(workspacePath, 'pendant-jobs.json')
 const MAX_JOBS = 120
+const ARRAY_STORE = { validate: Array.isArray }
 
 export function jobsLocation() {
   ensureStore()
@@ -12,12 +17,7 @@ export function jobsLocation() {
 
 export function readJobs() {
   ensureStore()
-
-  try {
-    return JSON.parse(fs.readFileSync(jobsPath, 'utf8'))
-  } catch {
-    return []
-  }
+  return readJsonWithRecovery(jobsPath, { fallback: [], ...ARRAY_STORE })
 }
 
 export function recordJobStart({ type, command, sessionId = null, source = 'local' }) {
@@ -83,16 +83,9 @@ export function clearJobs() {
 }
 
 function ensureStore() {
-  if (!fs.existsSync(workspacePath)) {
-    fs.mkdirSync(workspacePath, { recursive: true })
-  }
-
-  if (!fs.existsSync(jobsPath)) {
-    fs.writeFileSync(jobsPath, '[]')
-  }
+  ensureJsonStore(jobsPath, [], ARRAY_STORE)
 }
 
 function writeJobs(jobs) {
-  ensureStore()
-  fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2))
+  writeJsonAtomic(jobsPath, jobs, ARRAY_STORE)
 }

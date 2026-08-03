@@ -32,8 +32,14 @@
   let historyLoading = $state(false);
   let historyError = $state("");
   let historyRetention = $state<JsonRecord | null>(null);
+  let historyNextCursor = $state("");
+  let historyHasMore = $state(false);
+  let historyDetail = $state<JsonRecord | null>(null);
+  let historyDetailLoading = $state(false);
+  let historyDetailError = $state("");
   let memoryEntitiesFull = $state<JsonRecord[]>([]);
   let memorySessions = $state<JsonRecord[]>([]);
+  let activeSessionId = $state("");
   let playingId = $state("");
 
   // Re-entrancy guards and the freshness key stay plain bindings on purpose:
@@ -112,6 +118,7 @@
   }
 
   async function checkLatest() {
+    if (document.visibilityState !== "visible") return;
     try {
       const response = await fetch("/api/runs/latest", { cache: "no-store" });
       const payload = await response.json();
@@ -131,13 +138,18 @@
     }
   }
 
-  async function refreshHistory(q = historyQuery) {
+  async function refreshHistory(
+    q = historyQuery,
+    cursor = "",
+    append = false,
+  ) {
     if (historyRefreshPending) return;
     historyRefreshPending = true;
     historyLoading = true;
     try {
       const params = new URLSearchParams({ limit: "24" });
       if (q.trim()) params.set("q", q.trim());
+      if (cursor) params.set("cursor", cursor);
       const response = await fetch(`/api/history?${params}`, {
         cache: "no-store",
       });
@@ -145,7 +157,10 @@
       if (!response.ok) {
         throw new Error(payload.error || `History failed (${response.status})`);
       }
-      historyEntries = Array.isArray(payload.entries) ? payload.entries : [];
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      historyEntries = append ? [...historyEntries, ...entries] : entries;
+      historyNextCursor = String(payload.nextCursor || "");
+      historyHasMore = Boolean(payload.hasMore && historyNextCursor);
       historyRetention =
         payload.retention && typeof payload.retention === "object"
           ? payload.retention
@@ -160,6 +175,35 @@
     }
   }
 
+  async function selectHistoryEntry(pipelineId: string) {
+    if (!pipelineId || historyDetailLoading) return;
+    historyDetailLoading = true;
+    historyDetailError = "";
+    try {
+      const response = await fetch(
+        `/api/history/${encodeURIComponent(pipelineId)}`,
+        { cache: "no-store" },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          payload.error || `Run detail failed (${response.status})`,
+        );
+      }
+      historyDetail =
+        payload.run && typeof payload.run === "object" ? payload.run : null;
+      if (!historyDetail) throw new Error("Run detail was empty.");
+    } catch (detailError) {
+      historyDetail = null;
+      historyDetailError =
+        detailError instanceof Error
+          ? detailError.message
+          : "Run detail could not load.";
+    } finally {
+      historyDetailLoading = false;
+    }
+  }
+
   async function refreshMemory() {
     try {
       const response = await fetch("/api/memory", { cache: "no-store" });
@@ -169,6 +213,14 @@
         ? payload.memory.entities
         : [];
       memorySessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      if (
+        !activeSessionId ||
+        !memorySessions.some(
+          (session) => session.sessionId === activeSessionId,
+        )
+      ) {
+        activeSessionId = String(memorySessions[0]?.sessionId || "");
+      }
     } catch {
       // Data tile still shows snapshot memory if this fails.
     }
@@ -193,16 +245,28 @@
 
   onMount(() => {
     const initialSnapshot = window.setTimeout(refresh, 0);
-    const snapshotTimer = window.setInterval(refresh, 5000);
+    const snapshotTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 15_000);
     const initialRuns = window.setTimeout(refreshRuns, 0);
-    const probe = window.setInterval(checkLatest, 500);
-    const runsBackstop = window.setInterval(refreshRuns, 5000);
+    const probe = window.setInterval(checkLatest, 5_000);
+    const runsBackstop = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshRuns();
+    }, 15_000);
+    const handleVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      void checkLatest();
+      void refreshRuns();
+      void refresh();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       window.clearTimeout(initialSnapshot);
       window.clearInterval(snapshotTimer);
       window.clearTimeout(initialRuns);
       window.clearInterval(probe);
       window.clearInterval(runsBackstop);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   });
 
@@ -286,6 +350,16 @@
   const sharedProduct = $derived<any>(snapshot?.product ?? {});
   const sharedSessions = $derived<JsonRecord[]>(
     Array.isArray(sharedProduct.sessions) ? sharedProduct.sessions : [],
+  );
+  const visibleSessions = $derived<JsonRecord[]>(
+    memorySessions.length ? memorySessions : sharedSessions,
+  );
+  const activeSession = $derived<JsonRecord | null>(
+    visibleSessions.find(
+      (session) => session.sessionId === activeSessionId,
+    ) ??
+      visibleSessions[0] ??
+      null,
   );
   const memoryEntities = $derived<JsonRecord[]>(
     Array.isArray(sharedProduct.memory?.entities)
@@ -832,6 +906,8 @@
         class="history-search"
         onsubmit={(event) => {
           event.preventDefault();
+          historyDetail = null;
+          historyDetailError = "";
           void refreshHistory(historyQuery);
         }}
       >
@@ -867,11 +943,14 @@
             <li>
               <div class="history-row">
                 <button
-                  class="history-main"
+                  class="history-main {historyDetail?.pipelineId ===
+                  entry.pipelineId
+                    ? 'selected'
+                    : ''}"
                   onclick={() => {
-                    selectedId = String(entry.pipelineId || "");
-                    detailsOpen = true;
+                    void selectHistoryEntry(String(entry.pipelineId || ""));
                   }}
+                  aria-pressed={historyDetail?.pipelineId === entry.pipelineId}
                 >
                   <strong>{entry.command || "(no transcript)"}</strong>
                   <small
@@ -906,6 +985,54 @@
       {:else if !historyLoading}
         <p class="panel-empty">No history yet — press the pendant or use the mic above.</p>
       {/if}
+      {#if historyHasMore}
+        <button
+          class="history-more"
+          type="button"
+          disabled={historyLoading}
+          onclick={() => {
+            void refreshHistory(historyQuery, historyNextCursor, true);
+          }}
+          >{historyLoading ? "Loading…" : "Load older runs"}</button
+        >
+      {/if}
+      {#if historyDetailLoading}
+        <p class="panel-empty history-detail-state">Loading run detail…</p>
+      {:else if historyDetailError}
+        <p class="history-error history-detail-state">{historyDetailError}</p>
+      {:else if historyDetail}
+        <article class="history-detail" aria-label="Selected run detail">
+          <div class="history-detail-head">
+            <div>
+              <p class="micro-label">Selected run</p>
+              <h3>{historyDetail.command || "(no transcript)"}</h3>
+            </div>
+            <span>{historyDetail.status || "—"}</span>
+          </div>
+          {#if historyDetail.reply}
+            <blockquote>{historyDetail.reply}</blockquote>
+          {/if}
+          <p class="history-detail-meta">
+            {historyDetail.origin || historyDetail.inputMode || "voice"} ·
+            {clock(historyDetail.createdAt)}
+            {#if historyDetail.sessionId}
+              · chat {historyDetail.sessionId.slice(0, 8)}
+            {/if}
+          </p>
+          {#if historyDetail.events?.length}
+            <ol class="history-detail-events">
+              {#each historyDetail.events as event}
+                <li>
+                  <strong>{event.label || event.stage || "Event"}</strong>
+                  <small>{event.status || "—"} · {clock(event.at)}</small>
+                  {#if event.detail}<p>{event.detail}</p>{/if}
+                  {#if event.text}<blockquote>{event.text}</blockquote>{/if}
+                </li>
+              {/each}
+            </ol>
+          {/if}
+        </article>
+      {/if}
     </section>
   {/if}
 
@@ -919,24 +1046,51 @@
       <div class="data-grid">
         <div>
           <p class="micro-label">Chats</p>
-          {#if (memorySessions.length ? memorySessions : sharedSessions).length}
+          {#if visibleSessions.length}
             <ol class="data-list">
-              {#each (memorySessions.length ? memorySessions : sharedSessions).slice(0, 8) as session}
-                <li>
-                  <div class="data-line">
-                    <strong>{session.title || "Untitled session"}</strong>
-                    <span>{session.sessionId?.slice(0, 8)}</span>
-                  </div>
-                  <small
-                    >{session.turnCount ?? session.turns?.length ?? 0} turns · {clock(
-                      session.updatedAt,
-                    )}</small
+              {#each visibleSessions.slice(0, 8) as session}
+                <li class:active={activeSession?.sessionId === session.sessionId}>
+                  <button
+                    type="button"
+                    class="data-session-button"
+                    aria-pressed={activeSession?.sessionId === session.sessionId}
+                    onclick={() => (activeSessionId = String(session.sessionId))}
                   >
+                    <span class="data-line">
+                      <strong>{session.title || "Untitled session"}</strong>
+                      <span>{session.sessionId?.slice(0, 8)}</span>
+                    </span>
+                    <small
+                      >{session.turnCount ?? session.turns?.length ?? 0} turns · {clock(
+                        session.updatedAt,
+                      )}</small
+                    >
+                  </button>
                 </li>
               {/each}
             </ol>
           {:else}
             <p class="panel-empty">None</p>
+          {/if}
+          {#if activeSession}
+            <section class="chat-transcript" aria-label="Selected chat transcript">
+              <p class="micro-label">Transcript</p>
+              {#if activeSession.turns?.length}
+                <ol>
+                  {#each activeSession.turns as turn}
+                    <li class:assistant={turn.role !== "user"}>
+                      <div>
+                        <strong>{turn.role === "user" ? "You" : "Pendant"}</strong>
+                        <time>{clock(turn.createdAt)}</time>
+                      </div>
+                      <p>{turn.content}</p>
+                    </li>
+                  {/each}
+                </ol>
+              {:else}
+                <p class="panel-empty">No messages in this chat.</p>
+              {/if}
+            </section>
           {/if}
         </div>
         <div>

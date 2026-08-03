@@ -5,6 +5,7 @@ import {
   relayClient,
   safeIdentifier,
   sanitizeText,
+  strictIdentifier,
 } from "$lib/server/relay";
 
 export const prerender = false;
@@ -44,6 +45,13 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       { status: 413 },
     );
   }
+  const sessionId = strictIdentifier(body.sessionId);
+  if (!sessionId) {
+    return Response.json(
+      { ok: false, error: "A valid conversation sessionId is required." },
+      { status: 400 },
+    );
+  }
 
   try {
     const planResponse = await relayFetch("/v1/mac/plan", {
@@ -55,6 +63,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       body: JSON.stringify({
         command: text,
         deviceId: DASHBOARD_DEVICE_ID,
+        sessionId,
         inputTelemetry: {
           storage: "dashboard",
           source: DASHBOARD_DEVICE_ID,

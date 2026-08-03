@@ -13,7 +13,9 @@ export const AGENT_TOKEN = process.env.AGENT_TOKEN || ''
 export const HEARTBEAT_INTERVAL_MS = Number(
   process.env.BRIDGE_HEARTBEAT_INTERVAL_MS || 30000,
 )
-// Tighter than 100ms: every wait here is pure button→Outlook lag.
-export const WORK_POLL_INTERVAL_MS = Number(
-  process.env.BRIDGE_WORK_POLL_INTERVAL_MS || 50,
+export const WORK_RETRY_BASE_MS = Number(
+  process.env.BRIDGE_WORK_RETRY_BASE_MS || 250,
+)
+export const WORK_RETRY_MAX_MS = Number(
+  process.env.BRIDGE_WORK_RETRY_MAX_MS || 30000,
 )

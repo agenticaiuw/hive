@@ -13,6 +13,7 @@ import {
 
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 const PRODUCT_BATCH_SIZE = 80
+export const JOB_PRUNE_INTERVAL_MS = 5 * 60 * 1000
 
 function parseRecord(row) {
   if (!row?.data) {
@@ -77,6 +78,18 @@ async function runPreparedBatch(db, statements) {
 }
 
 export function createD1Store(db) {
+  let nextJobPruneAt = 0
+
+  async function pruneJobsWhenDue() {
+    const now = Date.now()
+    if (now < nextJobPruneAt) return false
+
+    // Advance before the await so concurrent creates share the same sweep.
+    nextJobPruneAt = now + JOB_PRUNE_INTERVAL_MS
+    await pruneExpiredJobs(db)
+    return true
+  }
+
   return {
     kind: 'd1',
 
@@ -509,7 +522,7 @@ export function createD1Store(db) {
     },
 
     async createJob(job) {
-      await pruneExpiredJobs(db)
+      await pruneJobsWhenDue()
       await db
         .prepare(
           `INSERT INTO relay_jobs
@@ -704,8 +717,6 @@ export function createD1Store(db) {
     },
 
     async claimNextJob(deviceId) {
-      await pruneExpiredJobs(db)
-
       for (let attempt = 0; attempt < 40; attempt += 1) {
         const row = await db
           .prepare(

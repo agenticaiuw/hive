@@ -147,12 +147,19 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.match(html, /action="\/api\/auth\/logout"/);
 
   // Hero renders the pre-data empty state on the server.
-  assert.match(html, /Waiting for pendant/);
-  assert.match(html, /Press and speak/);
+  assert.match(html, />Ready</);
+  assert.match(html, /Press the pendant or type a command/);
 
-  // Run strip and the five status tiles.
+  // Run strip and the six status tiles.
   assert.match(html, /aria-label="Recent commands"/);
-  for (const tile of ["System", "Mac", "Browser", "Activity", "Data"]) {
+  for (const tile of [
+    "System",
+    "Mac",
+    "Browser",
+    "Activity",
+    "History",
+    "Memory",
+  ]) {
     assert.match(html, new RegExp(`>${tile}</span>`));
   }
 
@@ -178,6 +185,24 @@ test("serves the app-authenticated dashboard from a public Sites host", async ()
   assert.equal(response.headers.get("location"), null);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   assert.match(await response.text(), /Dashboard/);
+});
+
+test("accepts the shared repo-root auth variable names server-side", async () => {
+  const worker = await loadWorker();
+  const runtimeEnv = {
+    ASSETS: env.ASSETS,
+    PAIRING_CODE: "shared-root-pairing-code",
+    SESSION_SECRET: "shared-root-session-secret-with-enough-entropy",
+  };
+  const response = await login(worker, runtimeEnv, {
+    accessKey: runtimeEnv.PAIRING_CODE,
+  });
+
+  assert.equal(response.status, 303);
+  assert.match(
+    response.headers.get("set-cookie") ?? "",
+    /^__Host-pendant_session=/,
+  );
 });
 
 test("rejects a wrong pairing code without creating a session", async () => {
@@ -296,7 +321,7 @@ test("queues a typed dashboard command through the pendant relay pipeline", asyn
   const response = await postJson(
     worker,
     "https://dashboard.example/api/command/text",
-    { text: "  open mail  " },
+    { text: "  open mail  ", sessionId: "session-dashboard-1" },
     { cookie, runtimeEnv },
   );
   assert.equal(response.status, 202);
@@ -310,6 +335,7 @@ test("queues a typed dashboard command through the pendant relay pipeline", asyn
   assert.equal(relayCalls[0].path, "/v1/mac/plan");
   assert.equal(relayCalls[0].authorization, `Bearer ${relayApiKey}`);
   assert.equal(relayCalls[0].body.command, "open mail");
+  assert.equal(relayCalls[0].body.sessionId, "session-dashboard-1");
   // Runs are attributed to the browser that sent them, not to the pendant.
   assert.equal(relayCalls[0].body.deviceId, "dashboard-web");
   assert.deepEqual(relayCalls[0].body.inputTelemetry, {
@@ -349,6 +375,14 @@ test("validates typed commands before spending a relay call", async () => {
     { cookie, runtimeEnv },
   );
   assert.equal(tooLong.status, 413);
+
+  const invalidSession = await postJson(
+    worker,
+    "https://dashboard.example/api/command/text",
+    { text: "open mail", sessionId: "../another/session" },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(invalidSession.status, 400);
   assert.equal(relayCalls, 0);
 });
 
@@ -393,6 +427,7 @@ test("transcribes a browser recording and dispatches the transcript", async () =
       format: "webm",
       durationMs: 2400,
       language: "en",
+      sessionId: "session-dashboard-voice",
     },
     { cookie, runtimeEnv },
   );
@@ -418,9 +453,11 @@ test("transcribes a browser recording and dispatches the transcript", async () =
   assert.equal(relayCalls[0].body.audioBase64, "QUJDRA==");
   assert.equal(relayCalls[0].body.format, "webm");
   assert.equal(relayCalls[0].body.deviceId, "dashboard-web");
+  assert.equal(relayCalls[0].body.sessionId, "session-dashboard-voice");
   // The transcript upgrades the announced job instead of forking a new run.
   assert.equal(relayCalls[1].body.transcriptionJobId, "job-42");
   assert.equal(relayCalls[1].body.deviceId, "dashboard-web");
+  assert.equal(relayCalls[1].body.sessionId, "session-dashboard-voice");
   // Both hops carry the telemetry that keeps the run in the operator feed.
   for (const call of relayCalls) {
     assert.deepEqual(call.body.inputTelemetry, {
@@ -470,6 +507,18 @@ test("rejects malformed or oversized browser recordings", async () => {
     { cookie, runtimeEnv },
   );
   assert.equal(oversized.status, 413);
+
+  const invalidSession = await postJson(
+    worker,
+    "https://dashboard.example/api/command/audio",
+    {
+      audioBase64: "QUJDRA==",
+      format: "webm",
+      sessionId: "../another/session",
+    },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(invalidSession.status, 400);
   assert.equal(relayCalls, 0);
 });
 
@@ -747,6 +796,245 @@ test("publishes only sanitized agent status and keeps relay credentials server-s
       authorization: `Bearer ${relayApiKey}`,
     },
   ]);
+});
+
+test("serves linked chats and explicitly sanitized historical run detail", async () => {
+  const worker = await loadWorker();
+  const relayApiKey = "server-side-relay-secret";
+  const nestedSecret = "nested-history-secret";
+  const localPath = "/Users/example/Projects/Private/run.txt";
+  const completionMarker = "[AGENT_RESPONSE_COMPLETE]";
+  const relayRequests = [];
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: relayApiKey,
+    RELAY: {
+      async fetch(request) {
+        const url = new URL(request.url);
+        relayRequests.push(url.pathname);
+
+        if (url.pathname === "/v1/ops/history") {
+          return Response.json({
+            ok: true,
+            entries: [
+              {
+                pipelineId: "job-history-1",
+                sessionId: "session-dashboard-1",
+                kind: "voice_command",
+                command: "Open the report",
+                origin: "dashboard",
+                inputMode: "typed",
+                source: "cloudflare",
+                status: "completed",
+                jobStatus: "completed",
+                reply: `Report opened\n${completionMarker}`,
+                actionCount: 1,
+                eventCount: 2,
+                audio: { available: false },
+                createdAt: "2026-08-02T20:00:00.000Z",
+                updatedAt: "2026-08-02T20:00:01.000Z",
+              },
+            ],
+            nextCursor: "2026-08-02T20:00:00.000Z|job-history-1",
+            hasMore: true,
+            limit: 24,
+            retention: {
+              runsTtlMs: 86_400_000,
+              runsOldestVisibleAt: "2026-08-01T20:00:00.000Z",
+              runsNote: "Old runs expire.",
+              internalSecret: nestedSecret,
+              audio: {
+                maxAgeMs: 2_592_000_000,
+                maxAgeDays: 30,
+                defaultMaxAgeMs: 2_592_000_000,
+                sweepEnabled: false,
+                expiresBefore: "2026-07-03T20:00:00.000Z",
+                internalSecret: nestedSecret,
+              },
+            },
+            observedAt: "2026-08-02T20:00:02.000Z",
+          });
+        }
+
+        if (url.pathname === "/v1/ops/history/job-history-1") {
+          return Response.json({
+            ok: true,
+            run: {
+              pipelineId: "job-history-1",
+              sessionId: "session-dashboard-1",
+              command: "Open the report",
+              reply: `Report opened\n<|eot_id|>`,
+              status: "completed",
+              origin: "dashboard",
+              inputMode: "typed",
+              audio: {
+                available: false,
+                captureId: null,
+                internalSecret: nestedSecret,
+              },
+              events: [
+                {
+                  eventId: "event-history-1",
+                  stage: "agent",
+                  status: "done",
+                  label: "Opened report",
+                  detail: `Opened ${localPath}`,
+                  text: `Visible event text\n${completionMarker}`,
+                  source: "mac-bridge",
+                  at: "2026-08-02T20:00:01.000Z",
+                  meta: {
+                    authorization: nestedSecret,
+                    inputTelemetry: {
+                      audioBytes: 12,
+                      storage: localPath,
+                      privateToken: nestedSecret,
+                    },
+                  },
+                },
+              ],
+              actions: [
+                {
+                  type: "open_path",
+                  label: "Open report",
+                  params: { path: localPath, apiKey: nestedSecret },
+                },
+              ],
+              execution: {
+                ok: true,
+                status: "success",
+                summary: `Opened ${localPath}`,
+                response: `Report opened\n${completionMarker}`,
+                planner: "llm",
+                thinking: { systemPrompt: nestedSecret },
+                results: [
+                  {
+                    ok: true,
+                    status: "success",
+                    message: `Opened ${localPath}`,
+                    authorization: nestedSecret,
+                  },
+                ],
+                actions: [
+                  {
+                    type: "open_path",
+                    label: "Open report",
+                    params: { path: localPath, token: nestedSecret },
+                  },
+                ],
+                pendantSpeech: { audioBase64: nestedSecret },
+              },
+              createdAt: "2026-08-02T20:00:00.000Z",
+              updatedAt: "2026-08-02T20:00:01.000Z",
+            },
+            retention: { runsTtlMs: 86_400_000, audio: {} },
+            observedAt: "2026-08-02T20:00:02.000Z",
+          });
+        }
+
+        if (url.pathname === "/v1/ops/memory") {
+          return Response.json({
+            ok: true,
+            counts: {
+              entities: 0,
+              relations: 0,
+              sessions: 1,
+              turns: 2,
+              internalSecret: nestedSecret,
+            },
+            memory: { entities: [] },
+            sessions: [
+              {
+                sessionId: "session-dashboard-1",
+                title: "Report chat",
+                turnCount: 2,
+                updatedAt: "2026-08-02T20:00:01.000Z",
+                turns: [
+                  {
+                    role: "user",
+                    content: "Open the report",
+                    createdAt: "2026-08-02T20:00:00.000Z",
+                  },
+                  {
+                    role: "assistant",
+                    content: `Report opened\n${completionMarker}`,
+                    createdAt: "2026-08-02T20:00:01.000Z",
+                  },
+                ],
+              },
+            ],
+            observedAt: "2026-08-02T20:00:02.000Z",
+          });
+        }
+
+        return Response.json({ ok: false, error: "Not found" }, { status: 404 });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const historyResponse = await request(
+    worker,
+    "https://dashboard.example/api/history?limit=24",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(historyResponse.status, 200);
+  const history = await historyResponse.json();
+  assert.equal(history.entries[0].sessionId, "session-dashboard-1");
+  assert.equal(history.entries[0].reply, "Report opened");
+  assert.equal(history.hasMore, true);
+  assert.match(history.nextCursor, /job-history-1$/);
+
+  const memoryResponse = await request(
+    worker,
+    "https://dashboard.example/api/memory",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(memoryResponse.status, 200);
+  const memory = await memoryResponse.json();
+  assert.equal(memory.sessions[0].turns[1].content, "Report opened");
+  assert.deepEqual(memory.counts, {
+    entities: 0,
+    relations: 0,
+    sessions: 1,
+    turns: 2,
+    matchedEntities: 0,
+    matchedRelations: 0,
+    matchedSessions: 0,
+  });
+
+  const detailResponse = await request(
+    worker,
+    "https://dashboard.example/api/history/job-history-1",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json();
+  assert.equal(detail.run.sessionId, "session-dashboard-1");
+  assert.equal(detail.run.reply, "Report opened");
+  assert.match(detail.run.events[0].detail, /\[local path\]/);
+  assert.equal(detail.run.events[0].text, "Visible event text");
+  assert.deepEqual(detail.run.actions, [
+    { type: "open_path", label: "Open report" },
+  ]);
+  assert.equal(detail.run.execution.thinking, undefined);
+  assert.equal(detail.run.execution.pendantSpeech, undefined);
+  assert.deepEqual(detail.run.execution.actions, [
+    { type: "open_path", label: "Open report" },
+  ]);
+
+  const serialized = JSON.stringify({ history, memory, detail });
+  assert.doesNotMatch(serialized, /\/Users\//);
+  assert.doesNotMatch(serialized, new RegExp(nestedSecret));
+  assert.doesNotMatch(serialized, /AGENT_RESPONSE_COMPLETE|eot_id/);
+
+  const relayCount = relayRequests.length;
+  const invalidId = await request(
+    worker,
+    "https://dashboard.example/api/history/bad%24id",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(invalidId.status, 400);
+  assert.equal(relayRequests.length, relayCount);
 });
 
 test("rejects tampered sessions and prevents cross-origin return redirects", async () => {

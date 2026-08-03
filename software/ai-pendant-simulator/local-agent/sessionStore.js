@@ -7,6 +7,10 @@ import {
   PRODUCT_SYNC_LIMITS,
   visibleProductSync,
 } from '../shared/productSync.js'
+import {
+  isProtocolOnlyText,
+  stripProtocolTerminators,
+} from '../shared/protocolText.js'
 
 export const LOCAL_SESSION_SCHEMA_VERSION = 'local-session-store.v2'
 export const SINGLE_OWNER_ACCOUNT_ID =
@@ -71,11 +75,20 @@ export function appendTurn(sessionId, turn) {
     (item) => item.sessionId === sessionId && !item.deletedAt,
   )
   const now = new Date().toISOString()
+  const content = stripProtocolTerminators(turn.content)
+
+  if (isProtocolOnlyText(turn.content)) {
+    return {
+      session: session ? visibleSession(session) : null,
+      turn: null,
+      ignored: true,
+    }
+  }
 
   if (!session) {
     session = {
       sessionId: sessionId || crypto.randomUUID(),
-      title: deriveTitle(turn.content),
+      title: deriveTitle(content),
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
@@ -92,6 +105,7 @@ export function appendTurn(sessionId, turn) {
     deletedAt: null,
     sourceDeviceId: turn.sourceDeviceId || LOCAL_DEVICE_ID,
     ...turn,
+    content,
   }
   nextTurn.id ||= crypto.randomUUID()
   nextTurn.createdAt = normalizeIsoOrNow(nextTurn.createdAt)
@@ -103,7 +117,7 @@ export function appendTurn(sessionId, turn) {
   session.updatedAt = nextTurn.updatedAt
   session.sourceDeviceId = LOCAL_DEVICE_ID
   if (visibleTurns(session.turns).length === 1 && turn.role === 'user') {
-    session.title = deriveTitle(turn.content)
+    session.title = deriveTitle(content)
   }
 
   document.updatedAt = now
@@ -320,12 +334,16 @@ function migrateLegacySession(input, sourceDeviceId) {
     turns: (Array.isArray(input?.turns) ? input.turns : []).map((turn) => {
       const turnCreatedAt =
         normalizeIso(turn?.createdAt) || normalizeIso(turn?.updatedAt) || createdAt
+      const content = stripProtocolTerminators(turn?.content)
+      const protocolOnly = isProtocolOnlyText(turn?.content)
       return {
         ...turn,
         id: turn?.id || turn?.turnId || crypto.randomUUID(),
+        content,
         createdAt: turnCreatedAt,
         updatedAt: normalizeIso(turn?.updatedAt) || turnCreatedAt,
-        deletedAt: normalizeIso(turn?.deletedAt),
+        deletedAt:
+          normalizeIso(turn?.deletedAt) || (protocolOnly ? turnCreatedAt : null),
         sourceDeviceId: turn?.sourceDeviceId || sourceDeviceId,
       }
     }),

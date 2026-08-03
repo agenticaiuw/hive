@@ -17,12 +17,9 @@ function defaults() {
       ? `${window.location.protocol}//${window.location.host}`
       : import.meta.env.VITE_AGENT_URL ||
         (useRelay ? relayUrl : 'http://localhost:8000'),
-    agentToken:
-      import.meta.env.VITE_AGENT_TOKEN ||
-      localStorage.getItem('macAgentToken') ||
-      '',
+    agentToken: localStorage.getItem('macAgentToken') || '',
     useRelayProxy: useRelay,
-    relayApiKey: import.meta.env.VITE_RELAY_API_KEY || '',
+    relayApiKey: '',
   }
 }
 
@@ -82,8 +79,7 @@ export function createOpsClient(settings) {
       ? relayFromEnv || settings.agentUrl
       : settings.agentUrl || ''
   ).replace(/\/$/, '')
-  const relayApiKey =
-    settings.relayApiKey || import.meta.env.VITE_RELAY_API_KEY || ''
+  const relayApiKey = settings.relayApiKey || ''
   const agentToken = settings.agentToken || ''
 
   async function request(path, options = {}) {

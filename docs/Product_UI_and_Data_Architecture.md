@@ -7,7 +7,7 @@ iOS. Device agents are execution peers, not separate products.
 
 - **Dashboard** becomes the shared product shell: home, conversations,
   runs, memory, devices, and settings.
-- **Web** and **Capacitor iOS** consume the same React feature packages and the
+- **Web** and **Capacitor iOS** consume the same product shell and the
   same cloud API contracts.
 - The **Mac agent**, **browser extension**, **iOS agent**, and **pendant** expose
   capabilities, presence, permissions, and diagnostics. They do not each own a
@@ -20,7 +20,7 @@ iOS. Device agents are execution peers, not separate products.
 
 | Surface | Current source | Current authority | Problem |
 | --- | --- | --- | --- |
-| Dashboard | `software/ai-pendant-dashboard` | D1 jobs plus a bounded `agent-snapshot` copied from the Mac | Hardware-focused view; not the full product |
+| Dashboard | `software/dashboard-sveltekit` | D1 jobs plus a bounded `agent-snapshot` copied from the Mac | Hardware-focused view; not the full product |
 | Local Ops dashboard | `software/ai-pendant-simulator/src/ops` | Mac JSON files and local agent APIs | Fullest UI, but tied to one Mac and duplicated remotely through an RPC proxy |
 | Pendant controller / Capacitor | `software/ai-pendant-simulator/src` | Browser localStorage in mock mode, Mac or relay otherwise | Separate shell and session cache; diverges from web |
 | Local Mac agent | `software/ai-pendant-simulator/local-agent` | Device-local permissions, execution, logs, and JSON stores | Product records are still authored and stored primarily on one Mac |

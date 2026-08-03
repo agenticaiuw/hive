@@ -1,11 +1,16 @@
-import fs from 'node:fs'
 import path from 'node:path'
+import {
+  ensureJsonStore,
+  readJsonWithRecovery,
+  writeJsonAtomic,
+} from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
 
 const tracesPath = path.join(workspacePath, 'pendant-thinking.json')
 const MAX_TRACES = 40
 const MAX_CHUNKS_PER_STEP = 120
 const listeners = new Set()
+const ARRAY_STORE = { validate: Array.isArray }
 
 export function tracesLocation() {
   ensureStore()
@@ -14,11 +19,7 @@ export function tracesLocation() {
 
 export function readTraces() {
   ensureStore()
-  try {
-    return JSON.parse(fs.readFileSync(tracesPath, 'utf8'))
-  } catch {
-    return []
-  }
+  return readJsonWithRecovery(tracesPath, { fallback: [], ...ARRAY_STORE })
 }
 
 export function getTrace(traceId) {
@@ -212,17 +213,11 @@ export function finishThinkingTrace(traceId, { status = 'done', summary = '' } =
 }
 
 function ensureStore() {
-  if (!fs.existsSync(workspacePath)) {
-    fs.mkdirSync(workspacePath, { recursive: true })
-  }
-  if (!fs.existsSync(tracesPath)) {
-    fs.writeFileSync(tracesPath, '[]')
-  }
+  ensureJsonStore(tracesPath, [], ARRAY_STORE)
 }
 
 function writeTraces(traces) {
-  ensureStore()
-  fs.writeFileSync(tracesPath, JSON.stringify(traces, null, 2))
+  writeJsonAtomic(tracesPath, traces, ARRAY_STORE)
   for (const listener of listeners) {
     try {
       listener(traces)

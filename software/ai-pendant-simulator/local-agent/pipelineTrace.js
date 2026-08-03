@@ -1,11 +1,16 @@
-import fs from 'node:fs'
 import path from 'node:path'
+import {
+  ensureJsonStore,
+  readJsonWithRecovery,
+  writeJsonAtomic,
+} from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
 
 const pipelinePath = path.join(workspacePath, 'pendant-pipeline.json')
 const MAX_RUNS = 80
 const MAX_EVENTS_PER_RUN = 80
 const listeners = new Set()
+const ARRAY_STORE = { validate: Array.isArray }
 
 export function pipelineLocation() {
   ensureStore()
@@ -14,12 +19,10 @@ export function pipelineLocation() {
 
 export function readPipelineRuns() {
   ensureStore()
-  try {
-    const value = JSON.parse(fs.readFileSync(pipelinePath, 'utf8'))
-    return Array.isArray(value) ? value : []
-  } catch {
-    return []
-  }
+  return readJsonWithRecovery(pipelinePath, {
+    fallback: [],
+    ...ARRAY_STORE,
+  })
 }
 
 export function onPipelineChange(listener) {
@@ -178,17 +181,11 @@ function sanitizeMeta(value, depth = 0) {
 }
 
 function ensureStore() {
-  if (!fs.existsSync(workspacePath)) {
-    fs.mkdirSync(workspacePath, { recursive: true })
-  }
-  if (!fs.existsSync(pipelinePath)) {
-    fs.writeFileSync(pipelinePath, '[]')
-  }
+  ensureJsonStore(pipelinePath, [], ARRAY_STORE)
 }
 
 function writeRuns(runs) {
-  ensureStore()
-  fs.writeFileSync(pipelinePath, JSON.stringify(runs, null, 2))
+  writeJsonAtomic(pipelinePath, runs, ARRAY_STORE)
   for (const listener of listeners) {
     try {
       listener(runs)

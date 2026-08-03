@@ -22,6 +22,9 @@ i2s_chan_handle_t i2sInput = nullptr;
 // speaker does not always answer a fresh Classic Bluetooth inquiry, so the
 // prototype can reconnect to its known address directly.
 esp_bd_addr_t BOSE_SLIII_ADDRESS = {0x08, 0xDF, 0x1F, 0xEA, 0x19, 0x33};
+constexpr const char *BOSE_SLIII_NAME = "Bose SLIII";
+// How often to force-page the known Bose address if the link is down.
+constexpr uint32_t BOSE_RECONNECT_INTERVAL_MS = 8000;
 
 // The relay returns OpenRouter-compatible signed 16-bit mono PCM at 24 kHz.
 constexpr uint32_t INPUT_RATE = 24000;
@@ -697,10 +700,32 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   return matches;
 }
 
+bool isBoseTarget() {
+  String normalized = targetName;
+  normalized.trim();
+  normalized.toLowerCase();
+  return normalized == "bose sliii" || normalized.indexOf("bose") >= 0;
+}
+
+void forceBoseConnect() {
+  if (!a2dpStarted || !isBoseTarget()) {
+    return;
+  }
+  if (a2dp.get_connection_state() == ESP_A2D_CONNECTION_STATE_CONNECTED ||
+      a2dp.get_connection_state() == ESP_A2D_CONNECTION_STATE_CONNECTING) {
+    return;
+  }
+  emitEvent("searching",
+            "Paging Bose SLIII at 08:DF:1F:EA:19:33 (put speaker on, pairing "
+            "mode if first time).");
+  a2dp.connect_to(BOSE_SLIII_ADDRESS);
+}
+
 void startBluetoothSearch(bool scanOnly = false) {
   if (!scanOnly && targetName.isEmpty()) {
-    emitEvent("usb", "No AirPods target has been configured.");
-    return;
+    targetName = BOSE_SLIII_NAME;
+    preferences.putString("target", targetName);
+    emitEvent("usb", "Default Bluetooth target set to Bose SLIII.");
   }
 
   if (a2dpStarted) {
@@ -714,19 +739,27 @@ void startBluetoothSearch(bool scanOnly = false) {
   a2dp.set_data_callback_in_frames(provideA2dpFrames);
   a2dp.set_ssid_callback(targetMatches);
   a2dp.set_on_connection_state_changed(onConnectionState);
-  if (!scanOnly && targetName.equalsIgnoreCase("Bose SLIII")) {
-    a2dp.set_auto_reconnect(BOSE_SLIII_ADDRESS, 5);
+  if (!scanOnly && isBoseTarget()) {
+    // Address-first reconnect: SLIII often ignores inquiry when already bonded
+    // to a phone/Mac. Page the known BD_ADDR directly.
+    a2dp.set_auto_reconnect(BOSE_SLIII_ADDRESS, 12);
   } else {
     a2dp.set_auto_reconnect(!scanOnly, 5);
   }
   /* The SoundLink III uses the legacy fixed PIN documented by Bose. */
   a2dp.set_pin_code("0000", ESP_BT_PIN_TYPE_FIXED);
-  a2dp.set_volume(64);
+  a2dp.set_volume(80);
   a2dp.start();
   a2dpStarted = true;
   emitEvent("searching",
             scanOnly ? "Scanning for nearby Bluetooth audio devices."
-                     : "Scanning for “" + targetName + "”.");
+                     : "Connecting to “" + targetName +
+                           "”. Put Bose in pairing mode if it does not "
+                           "answer (hold Bluetooth button).");
+  if (!scanOnly && isBoseTarget()) {
+    delay(500);
+    forceBoseConnect();
+  }
 }
 
 void removeAllBluetoothBonds() {
@@ -882,17 +915,21 @@ void setup() {
 
   preferences.begin("airpods", false);
   targetName = preferences.getString("target", "");
+  if (targetName.isEmpty()) {
+    targetName = BOSE_SLIII_NAME;
+    preferences.putString("target", targetName);
+  }
 
   configureI2sInput();
   xTaskCreatePinnedToCore(i2sCaptureTask, "i2s-capture", 4096, nullptr, 4,
                          nullptr, 1);
 
   emitEvent("usb",
-            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, A2DP volume=50%, "
-            "nRF forwarding enabled.");
-  if (!targetName.isEmpty()) {
-    startBluetoothSearch(false);
-  }
+            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, A2DP→Bose SLIII, "
+            "nRF I2S forwarding on. Ensure Bose is powered and not stuck "
+            "on another phone.");
+  // Always try to reconnect the speaker on boot.
+  startBluetoothSearch(false);
 }
 
 void loop() {
@@ -992,6 +1029,13 @@ void loop() {
     rawCapturePrinted = false;
   }
 
+  static uint32_t lastBoseReconnectAt = 0;
+  if (a2dpStarted && isBoseTarget() &&
+      millis() - lastBoseReconnectAt >= BOSE_RECONNECT_INTERVAL_MS) {
+    lastBoseReconnectAt = millis();
+    forceBoseConnect();
+  }
+
   if (millis() - lastDiagnosticAt >= 1000) {
     lastDiagnosticAt = millis();
     const uint16_t peak = i2sPeakSinceReport;
@@ -1010,6 +1054,7 @@ void loop() {
         a2dp.get_connection_state() == ESP_A2D_CONNECTION_STATE_CONNECTED
             ? "connected"
             : (a2dpStarted ? "searching" : "usb");
+    document["target"] = targetName;
     document["message"] =
         "I2S frames=" + String(i2sFramesReceived) +
         ", raw peak=" + String(rawPeak) +

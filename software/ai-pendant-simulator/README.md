@@ -56,20 +56,24 @@ Follow the local service logs from any directory with:
 npm --prefix /path/to/agentic-gadget/software/ai-pendant-simulator run agent:logs
 ```
 
-The local agent requires a shared token. Create `.env` from `.env.example`:
+The local agent requires a shared token. Secrets live in the **repo-root**
+`.env` only (see `agentic-gadget/.env.example`). Package-local `.env` files are
+not used.
 
 ```bash
+# from the agentic-gadget repo root
 cp .env.example .env
 ```
 
-Then edit `.env`:
+Then edit that root `.env`:
 
 ```text
 AGENT_TOKEN=some-random-token
-VITE_AGENT_TOKEN=some-random-token
 ```
 
-`VITE_AGENT_TOKEN` is only for local demo convenience. It pre-fills the token in the browser controller. Do not use this pattern for a public deployment.
+Private credentials are never aliased to `VITE_*` variables: Vite embeds those
+values in browser bundles. Enter or pair the local-agent token at runtime. Only
+public configuration such as `VITE_RELAY_URL` may be compiled into the UI.
 
 Start the browser controller:
 

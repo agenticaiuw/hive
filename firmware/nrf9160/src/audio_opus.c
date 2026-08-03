@@ -6,6 +6,7 @@
  */
 
 #include "audio_opus.h"
+#include "audio_opus_math.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -26,7 +27,8 @@
 	(PENDANT_OPUS_REPLY_SAMPLE_RATE * 120U / 1000U)
 #define OPUS_MAX_PACKET_BYTES 1275U
 #define OPUS_ENCODE_PACKET_BYTES 400U
-#define OGG_PACKETS_PER_PAGE 10U
+/* Fewer packets/page → smaller payload in the codec workspace. */
+#define OGG_PACKETS_PER_PAGE 5U
 #define OGG_MAX_PAGE_PAYLOAD \
 	(OGG_PACKETS_PER_PAGE * OPUS_ENCODE_PACKET_BYTES)
 #define OGG_HEADER_BYTES 27U
@@ -37,6 +39,51 @@
 #define OGG_FLAG_EOS 0x04U
 #define OGG_GRANULE_RATE 48000U
 #define OPUS_SERIAL_NUMBER 0x50444e54U
+BUILD_ASSERT(PENDANT_OPUS_SAMPLE_RATE == PENDANT_OPUS_MATH_SAMPLE_RATE);
+
+/*
+ * NONTHREADSAFE_PSEUDOSTACK: libopus ALLOC() temps land here instead of the
+ * call stack. Symbols are defined in celt when that mode is enabled. Pin them
+ * before every encode/decode so opus never mallocs from the tiny system heap.
+ */
+extern char *global_stack;
+extern char *scratch_ptr;
+#define OPUS_SCRATCH_GUARD_BYTES 32U
+#define OPUS_SCRATCH_FILL 0xa5U
+static uint8_t opus_pseudostack[PENDANT_OPUS_SCRATCH_BYTES +
+				OPUS_SCRATCH_GUARD_BYTES] __aligned(8);
+
+static void pendant_opus_prepare_scratch(void)
+{
+	memset(opus_pseudostack, OPUS_SCRATCH_FILL, sizeof(opus_pseudostack));
+	scratch_ptr = (char *)opus_pseudostack;
+	global_stack = (char *)opus_pseudostack;
+}
+
+static int pendant_opus_validate_scratch(const char *operation)
+{
+	size_t touched = 0U;
+	bool guard_ok = true;
+
+	for (size_t index = PENDANT_OPUS_SCRATCH_BYTES; index > 0U; --index) {
+		if (opus_pseudostack[index - 1U] != OPUS_SCRATCH_FILL) {
+			touched = index;
+			break;
+		}
+	}
+	for (size_t index = PENDANT_OPUS_SCRATCH_BYTES;
+	     index < sizeof(opus_pseudostack); ++index) {
+		if (opus_pseudostack[index] != OPUS_SCRATCH_FILL) {
+			guard_ok = false;
+			break;
+		}
+	}
+	printk("Opus scratch %s: touched=%u capacity=%u guard=%s\n",
+	       operation, (unsigned int)touched,
+	       (unsigned int)PENDANT_OPUS_SCRATCH_BYTES,
+	       guard_ok ? "ok" : "CORRUPT");
+	return guard_ok ? 0 : -EOVERFLOW;
+}
 
 struct ogg_writer {
 	struct fs_file_t *file;
@@ -279,6 +326,8 @@ struct pendant_opus_stream {
 	uint32_t phase; /* accumulates PENDANT_OPUS_SAMPLE_RATE per input */
 	uint32_t source_rate;
 	uint32_t source_samples;
+	uint32_t resampled_samples;
+	/* Full coded frames, including padding in the final packet. */
 	uint32_t output_samples;
 	uint16_t pre_skip;
 	struct pendant_opus_stats stats;
@@ -286,13 +335,51 @@ struct pendant_opus_stream {
 
 static struct pendant_opus_stream g_stream;
 
+static int stream_write_page(bool final_page)
+{
+	struct pendant_opus_stream *s = &g_stream;
+	uint64_t granule;
+	int error;
+
+	if (s->page_packets == 0U) {
+		return final_page ? -ENODATA : 0;
+	}
+	granule = final_page
+		? (uint64_t)s->pre_skip +
+			  (uint64_t)s->resampled_samples *
+				  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE)
+		: (uint64_t)s->output_samples *
+			  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE);
+	error = ogg_write_page(&s->ogg, final_page ? OGG_FLAG_EOS : 0U,
+			       granule, s->page_payload, s->packet_lengths,
+			       s->page_packets);
+	if (error == 0) {
+		s->page_packets = 0U;
+		s->page_bytes = 0U;
+	}
+	return error;
+}
+
 static int stream_flush_frame(bool final_packet)
 {
 	struct pendant_opus_stream *s = &g_stream;
 	int packet_bytes;
+	int error;
 
-	if (s->frame_fill == 0U && !final_packet) {
-		return 0;
+	/* Keep a full page pending until the next packet or EOS.  This lets an
+	 * exact page boundary carry EOS without inventing 20 ms of silence.
+	 */
+	if (s->page_packets == OGG_PACKETS_PER_PAGE) {
+		if (final_packet && s->frame_fill == 0U) {
+			return stream_write_page(true);
+		}
+		error = stream_write_page(false);
+		if (error != 0) {
+			return error;
+		}
+	}
+	if (!pendant_opus_final_needs_packet(s->frame_fill)) {
+		return final_packet ? stream_write_page(true) : 0;
 	}
 	if (s->frame_fill < OPUS_ENCODE_FRAME_SAMPLES) {
 		memset(s->frame + s->frame_fill, 0,
@@ -314,24 +401,7 @@ static int stream_flush_frame(bool final_packet)
 	s->stats.packets++;
 	s->output_samples += OPUS_ENCODE_FRAME_SAMPLES;
 
-	bool flush_page =
-		final_packet || s->page_packets == OGG_PACKETS_PER_PAGE;
-	if (!flush_page) {
-		return 0;
-	}
-
-	uint64_t granule = final_packet
-		? (uint64_t)s->pre_skip +
-			  (uint64_t)s->output_samples *
-				  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE)
-		: (uint64_t)s->output_samples *
-			  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE);
-	int error = ogg_write_page(&s->ogg, final_packet ? OGG_FLAG_EOS : 0U,
-				   granule, s->page_payload, s->packet_lengths,
-				   s->page_packets);
-	s->page_packets = 0U;
-	s->page_bytes = 0U;
-	return error;
+	return final_packet ? stream_write_page(true) : 0;
 }
 
 static int stream_emit_output_sample(int16_t sample)
@@ -339,6 +409,7 @@ static int stream_emit_output_sample(int16_t sample)
 	struct pendant_opus_stream *s = &g_stream;
 
 	s->frame[s->frame_fill++] = sample;
+	s->resampled_samples++;
 	if (s->frame_fill < OPUS_ENCODE_FRAME_SAMPLES) {
 		return 0;
 	}
@@ -376,9 +447,14 @@ int pendant_opus_stream_begin(const char *opus_path,
 		return -EINVAL;
 	}
 
+	pendant_opus_prepare_scratch();
+
 	encoder_bytes = opus_encoder_get_size(1);
 	arena_needed = ROUND_UP((size_t)encoder_bytes, 4U) + OGG_MAX_PAGE_PAYLOAD;
 	if (encoder_bytes <= 0 || arena_needed > workspace_bytes) {
+		printk("Opus live begin: workspace too small need=%u have=%u enc=%d\n",
+		       (unsigned int)arena_needed,
+		       (unsigned int)workspace_bytes, encoder_bytes);
 		return -ENOMEM;
 	}
 
@@ -474,13 +550,9 @@ int pendant_opus_stream_feed(const int16_t *samples, size_t sample_count)
 			 * are through the input step. phase/source_rate is the
 			 * remaining fraction toward the next input.
 			 */
-			uint32_t t =
-				(s->phase * 256U) / s->source_rate; /* 0..255 */
-			int32_t blended =
-				((int32_t)s->prev_sample * (int32_t)(256U - t) +
-				 (int32_t)sample * (int32_t)t) /
-				256;
-			error = stream_emit_output_sample((int16_t)blended);
+			int16_t blended = pendant_opus_live_interpolate(
+				s->prev_sample, sample, s->phase);
+			error = stream_emit_output_sample(blended);
 			if (error != 0) {
 				return error;
 			}
@@ -499,12 +571,17 @@ int pendant_opus_stream_end(struct pendant_opus_stats *stats)
 		return -ENOTCONN;
 	}
 
-	/* Flush a partial last frame so EOS has real audio. */
-	if (s->frame_fill > 0U || s->page_packets > 0U ||
-	    s->stats.packets == 0U) {
-		error = stream_flush_frame(true);
-	} else {
-		/* Exact page boundary already: write empty EOS page? force one. */
+	uint32_t target_samples = pendant_opus_resampled_count(
+		s->source_samples, s->source_rate);
+
+	while (error == 0 && s->resampled_samples < target_samples) {
+		error = stream_emit_output_sample(s->prev_sample);
+	}
+	if (error == 0 && s->resampled_samples != target_samples) {
+		error = -EOVERFLOW;
+	}
+	if (error == 0) {
+		/* A pending exact-boundary page gets EOS with no extra packet. */
 		error = stream_flush_frame(true);
 	}
 
@@ -518,7 +595,7 @@ int pendant_opus_stream_end(struct pendant_opus_stats *stats)
 	}
 
 	s->stats.output_bytes = s->ogg.bytes;
-	s->stats.samples = s->output_samples;
+	s->stats.samples = s->resampled_samples;
 	if (stats != NULL) {
 		*stats = s->stats;
 	}
@@ -526,7 +603,12 @@ int pendant_opus_stream_end(struct pendant_opus_stats *stats)
 	printk("Opus live stream end: pcm_in=%u ogg_out=%u packets=%u "
 	       "out_samples=%u err=%d\n",
 	       s->stats.input_bytes, s->stats.output_bytes, s->stats.packets,
-	       s->output_samples, error);
+	       s->resampled_samples, error);
+	int scratch_error = pendant_opus_validate_scratch("live encode");
+
+	if (error == 0) {
+		error = scratch_error;
+	}
 
 	s->active = false;
 	/* Leave encoder memory dirty; caller reuses workspace for decode later. */
@@ -555,6 +637,7 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 	if (workspace == NULL || stats == NULL || source_sample_rate == 0U) {
 		return -EINVAL;
 	}
+	pendant_opus_prepare_scratch();
 	memset(stats, 0, sizeof(*stats));
 	error = fs_stat(pcm_path, &input_entry);
 	if (error != 0 || input_entry.type != FS_DIR_ENTRY_FILE ||
@@ -562,10 +645,8 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 		return error != 0 ? error : -EBADMSG;
 	}
 	uint32_t source_samples = (uint32_t)input_entry.size / sizeof(int16_t);
-	uint32_t output_samples = (uint32_t)(
-		((uint64_t)source_samples * PENDANT_OPUS_SAMPLE_RATE +
-		 source_sample_rate - 1U) /
-		source_sample_rate);
+	uint32_t output_samples = pendant_opus_resampled_count(
+		source_samples, source_sample_rate);
 	uint32_t total_packets =
 		DIV_ROUND_UP(output_samples, OPUS_ENCODE_FRAME_SAMPLES);
 	int encoder_bytes = opus_encoder_get_size(1);
@@ -721,6 +802,11 @@ out:
 			error = close_error;
 		}
 	}
+	int scratch_error = pendant_opus_validate_scratch("offline encode");
+
+	if (error == 0) {
+		error = scratch_error;
+	}
 	return error;
 }
 
@@ -796,6 +882,7 @@ int pendant_opus_decode_file(const char *opus_path, const char *pcm_path,
 	if (workspace == NULL || stats == NULL) {
 		return -EINVAL;
 	}
+	pendant_opus_prepare_scratch();
 	memset(stats, 0, sizeof(*stats));
 	int decoder_bytes = opus_decoder_get_size(1);
 	size_t decoder_offset = ROUND_UP((size_t)decoder_bytes, 4U);
@@ -968,6 +1055,11 @@ out:
 		if (error == 0) {
 			error = close_error;
 		}
+	}
+	int scratch_error = pendant_opus_validate_scratch("decode");
+
+	if (error == 0) {
+		error = scratch_error;
 	}
 	return error;
 }

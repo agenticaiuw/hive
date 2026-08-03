@@ -18,6 +18,7 @@
 #include <ff.h>
 
 #include "audio_opus.h"
+#include "pcm_tx_ring.h"
 #include "pendant_cloud.h"
 
 #define LED_NODE DT_ALIAS(led0)
@@ -57,28 +58,33 @@
 #define MIC_RX_BLOCK_FRAMES 640U
 #define MIC_RX_BLOCK_SIZE (MIC_RX_BLOCK_FRAMES * sizeof(int32_t))
 /*
- * RX slab is a *dedicated* buffer now so the 40 KiB Opus workspace can hold
- * the live encoder while the user is still speaking.  6 blocks ≈ 123 ms of
- * RX slack — enough for SD/Opus stalls without the old 330 ms pile-up.
+ * RX slab is dedicated so the 30 KiB Opus workspace can hold the live encoder
+ * while the user is speaking. Six blocks provide about 123 ms total buffering;
+ * the live-codec budget below reserves two blocks so PCM capture cannot be
+ * killed by an encoder that is slower than real time.
  */
-#define MIC_RX_BLOCK_COUNT 4U
+#define MIC_RX_BLOCK_COUNT 6U
 #define MIC_OUT_BLOCK_FRAMES (MIC_RX_BLOCK_FRAMES / MIC_DECIMATION)
 #define MIC_STAGE_FRAMES 512U
+#define MIC_STAGE_BYTES (MIC_STAGE_FRAMES * sizeof(int16_t))
+/* Reuse Opus workspace as SPSC TX ring during capture (~30 KiB ≈ 1 s PCM). */
+#define PCM_TX_RING_SLOTS \
+	(PENDANT_OPUS_WORKSPACE_BYTES / MIC_STAGE_BYTES)
+/* Max LTE work per capture block so I2S DMA never starves. */
+/* Slightly more LTE work per I2S block to keep the ring drained. */
+#define PCM_TX_PUMP_BUDGET_MS 5U
+#define PCM_TX_DRAIN_BUDGET_MS 12U
 #define MAX_RECORD_SECONDS 30U
 #define MAX_RECORD_SAMPLE_COUNT (SAMPLE_RATE * MAX_RECORD_SECONDS)
 #define AUTORECORD_TEST_SECONDS 5U
 #define AUTORECORD_TEST_SAMPLE_COUNT \
 	(SAMPLE_RATE * AUTORECORD_TEST_SECONDS)
-/* SPH0645 t_powerup is 50 ms maximum once BCLK runs; SD open and I2S
- * setup overlap this budget, so only the remainder is slept.
- */
-#define MIC_POWERUP_BUDGET_MS 60
+/* SPH0645 t_powerup is ≤50 ms once BCLK runs; only remainder is slept. */
+#define MIC_POWERUP_BUDGET_MS 50
 /* Discard the first RX block: slave sync and DMA-start artifacts. */
 #define MIC_STARTUP_SKIP_BLOCKS 1U
-/* Keep the external clocks alive briefly after DROP so the slave-mode
- * peripheral can reach its STOPPED state and release its buffers.
- */
-#define MIC_STOP_SETTLE_MS 25
+/* Keep clocks alive briefly after DROP so I2S can reach STOPPED. */
+#define MIC_STOP_SETTLE_MS 12
 #define MIC_MIN_RECORD_FRAMES SAMPLE_RATE
 /* One-pole DC blocker, y[n] = x[n] - x[n-1] + a*y[n-1], a = 0.995. */
 #define MIC_HPF_COEFF_Q15 32604
@@ -125,10 +131,12 @@
 #define SD_TEST_MAGIC 0x53445631U
 #define SD_TEST_CHECK_XOR 0xA55A39C3U
 
-/* Temporary diagnostic: upload the existing SD recording once after boot. */
-#define PENDANT_BOOT_UPLOAD_EXISTING 1
+/* Boot upload stresses encode+LTE at once; keep off for stable bring-up. */
+#define PENDANT_BOOT_UPLOAD_EXISTING 0
 /* Temporary diagnostic: record five seconds automatically before LTE init. */
 #define PENDANT_BOOT_AUTORECORD_TEST 0
+/* Temporary diagnostic: exercise one complete post-LTE voice cycle. */
+#define PENDANT_BOOT_AUDIO_CYCLE_TEST 0
 /*
  * Stack self-test: encode a synthetic strongly voiced tone at boot.
  *
@@ -169,8 +177,8 @@ static struct fs_mount_t sd_mount = {
 K_SEM_DEFINE(button_press_sem, 0, 1);
 
 /*
- * Mic RX slab is dedicated. Opus workspace is free for live encode-during-
- * capture (and later for reply decode). Re-init the slab every capture.
+ * Mic RX slab is dedicated. audio_workspace is the live PCM TX ring during
+ * capture and the Opus decode workspace for reply playback.
  */
 static struct k_mem_slab mic_rx_slab;
 static uint8_t mic_rx_storage[MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT]
@@ -179,9 +187,98 @@ static uint8_t audio_workspace[PENDANT_OPUS_WORKSPACE_BYTES] __aligned(4);
 BUILD_ASSERT(sizeof(mic_rx_storage) ==
 		     MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT,
 	     "mic RX storage size mismatch");
+BUILD_ASSERT(PCM_TX_RING_SLOTS >= 4U, "TX ring too small for live upload");
 K_MEM_SLAB_DEFINE_STATIC(i2s_slab, I2S_BLOCK_SIZE, I2S_BLOCK_COUNT, 4);
-/* Processed audio staged between microSD writes (~2 KB chunks). */
+/* Processed audio staged between microSD writes (~1 KiB stages). */
 static int16_t mic_stage_samples[MIC_STAGE_FRAMES] __aligned(4);
+static struct pcm_tx_ring live_tx_ring;
+static bool live_stream_failed;
+
+/*
+ * Queue one PCM stage for LTE and drain the ring under a time budget.
+ * Never blocks long enough to starve I2S: -EAGAIN means try next block.
+ * On hard stream failure or ring overflow, abort live TX and keep SD capture.
+ */
+static void live_tx_offer_stage(const int16_t *samples, size_t frame_count)
+{
+	const size_t byte_count = frame_count * sizeof(int16_t);
+	int error;
+
+	if (live_stream_failed || !pendant_cloud_stream_active()) {
+		return;
+	}
+	if (byte_count != MIC_STAGE_BYTES) {
+		/* Final short stage: send directly if ring empty & no pending. */
+		if (!pcm_tx_ring_empty(&live_tx_ring) ||
+		    pendant_cloud_stream_has_pending()) {
+			return;
+		}
+		error = pendant_cloud_stream_write(samples, byte_count);
+		if (error == -EAGAIN) {
+			return;
+		}
+		if (error != 0) {
+			printk("Live TX short write failed: %d\n", error);
+			pendant_cloud_stream_abort();
+			live_stream_failed = true;
+		}
+		return;
+	}
+
+	if (!pcm_tx_ring_push(&live_tx_ring, samples, byte_count)) {
+		printk("Live TX ring full; abort stream (no SD fallback)\n");
+		pendant_cloud_stream_abort();
+		live_stream_failed = true;
+		pcm_tx_ring_reset(&live_tx_ring);
+		return;
+	}
+}
+
+static void live_tx_pump(uint32_t budget_ms)
+{
+	int64_t deadline;
+	int error;
+
+	if (live_stream_failed || !pendant_cloud_stream_active()) {
+		return;
+	}
+
+	deadline = k_uptime_get() + (int64_t)budget_ms;
+	while (k_uptime_get() < deadline) {
+		if (pendant_cloud_stream_has_pending()) {
+			error = pendant_cloud_stream_pump(1U);
+			if (error == -EAGAIN) {
+				return;
+			}
+			if (error != 0) {
+				printk("Live TX pump failed: %d\n", error);
+				pendant_cloud_stream_abort();
+				live_stream_failed = true;
+				pcm_tx_ring_reset(&live_tx_ring);
+				return;
+			}
+			continue;
+		}
+
+		const uint8_t *slot = pcm_tx_ring_peek(&live_tx_ring);
+
+		if (slot == NULL) {
+			return;
+		}
+		error = pendant_cloud_stream_write(slot, MIC_STAGE_BYTES);
+		if (error == -EAGAIN) {
+			return;
+		}
+		if (error != 0) {
+			printk("Live TX write failed: %d\n", error);
+			pendant_cloud_stream_abort();
+			live_stream_failed = true;
+			pcm_tx_ring_reset(&live_tx_ring);
+			return;
+		}
+		(void)pcm_tx_ring_pop(&live_tx_ring);
+	}
+}
 
 /*
  * Main-thread stack high-water reporting.
@@ -264,9 +361,9 @@ static void finish_button_press(void)
 {
 	/* gpio_pin_get_dt() returns the logical active state. */
 	while (gpio_pin_get_dt(&button) > 0) {
-		k_msleep(10);
+		k_msleep(5);
 	}
-	k_msleep(35);
+	k_msleep(15);
 	clear_button_events();
 }
 
@@ -281,8 +378,13 @@ static bool consume_button_event(void)
 
 static void wait_for_button_press(void)
 {
+	/*
+	 * Latency-first: start work on the active edge. Do not wait for the
+	 * physical release — that used to add hundreds of ms before the mic
+	 * even powered up.
+	 */
 	k_sem_take(&button_press_sem, K_FOREVER);
-	finish_button_press();
+	clear_button_events();
 }
 
 static void flash_led(unsigned int count, int on_ms, int off_ms)
@@ -296,12 +398,15 @@ static void flash_led(unsigned int count, int on_ms, int off_ms)
 }
 
 /*
- * Reply ready: hold the LED solid until the playback press.  It stays
- * solid through playback and turns off when the response finishes.
+ * Speech ready for the user — never autoplay.
+ * Solid LED = first speech is buffered and ready. Button 1 starts playback
+ * to the ESP32/Bose path; remaining audio is already on-device (full file
+ * today; progressive stream is the next step on the download path).
  */
 static void wait_for_reply_playback_press(void)
 {
 	gpio_pin_set_dt(&led, 1);
+	printk("Reply ready — solid LED; press button 1 to play (no autoplay)\n");
 	wait_for_button_press();
 }
 
@@ -723,15 +828,15 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		.block_size = MIC_RX_BLOCK_SIZE,
 		.timeout = 1500,
 	};
-	struct fs_file_t file;
 	const size_t effective_sample_limit = sample_limit;
 	size_t sample_index = 0U;
 	size_t stage_frames = 0U;
-	uint32_t sd_flush_count = 0U;
-	int live_write_error = 0;
+	uint32_t stage_flush_count = 0U;
 	size_t next_trace_sample = SAMPLE_RATE;
 	size_t block_index = 0U;
 	uint64_t square_sum = 0U;
+	/* Copy each completed DMA block here and return its slab immediately. */
+	int32_t raw_processing[MIC_RX_BLOCK_FRAMES];
 	uint32_t zero_crossings = 0U;
 	int16_t minimum_sample = INT16_MAX;
 	int16_t maximum_sample = INT16_MIN;
@@ -742,14 +847,25 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	bool hpf_primed = false;
 	int32_t slew_prev = 0;
 	bool slew_primed = false;
-	bool led_started = false;
 	int64_t clocks_started_at;
 	int64_t settle_elapsed;
-	int64_t next_led_toggle = INT64_MAX;
+	int64_t next_led_toggle;
 	int error;
 
-	if (!sd_ready || sample_limit == 0U) {
+	/*
+	 * Latency path: live LTE only. No microSD write during capture and no
+	 * SD-file upload fallback. Prewarm TLS while idle; press = mic + ring.
+	 */
+	recording_on_sd = false;
+	live_stream_failed = false;
+	pcm_tx_ring_init(&live_tx_ring, audio_workspace, MIC_STAGE_BYTES,
+			 PCM_TX_RING_SLOTS);
+	if (sample_limit == 0U) {
 		return -ENODEV;
+	}
+	if (!pendant_cloud_stream_active()) {
+		printk("Live stream not prewarmed — refuse record (no SD fallback)\n");
+		return -ENOTCONN;
 	}
 	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
 				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
@@ -757,48 +873,21 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		return error;
 	}
 
-	/* Start the mic clocks first: SD open and I2S setup below then
-	 * count toward the mic's 50 ms power-up budget.
-	 */
+	/* Button press = record NOW. LED + mic; LTE drains ring between I2S. */
+	gpio_pin_set_dt(&led, 1);
+	next_led_toggle = k_uptime_get() + 250;
 	mic_clocks_start();
 	clocks_started_at = k_uptime_get();
-
-	fs_file_t_init(&file);
-	error = fs_open(&file, SD_RECORDING_PATH,
-			FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
-	if (error != 0) {
-		mic_clocks_stop();
-		sd_mount_result = error;
-		sd_ready = false;
-		recording_on_sd = false;
-		return error;
-	}
-
-	/*
-	 * Live Opus encode while recording. Uses the full audio_workspace so
-	 * button-release does not pay another multi-second encode tax.
-	 */
-	error = pendant_opus_stream_begin(SD_OPUS_PATH, SAMPLE_RATE,
-					  audio_workspace,
-					  sizeof(audio_workspace));
-	if (error != 0) {
-		printk("Opus live stream begin failed: %d (will encode after)\n",
-		       error);
-	}
-
-	/* Open TLS to the relay while the user is still speaking. */
-	pendant_cloud_prewarm_start();
 
 	recorded_samples = 0U;
 	recorded_peak = 0U;
 	recording_absolute_sum = 0U;
-	recording_on_sd = true;
 	recording_stopped_by_button = false;
 
 	error = i2s_configure(i2s, I2S_DIR_RX, &config);
 	if (error != 0) {
 		mic_clocks_stop();
-		(void)fs_close(&file);
+		gpio_pin_set_dt(&led, 0);
 		return error;
 	}
 
@@ -809,20 +898,21 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 #if PENDANT_MIC_ELECTRICAL_PROBE
 	probe_mic_data_driver();
 #endif
-	printk("I2S mic: bclk_hz=%u lrclk_hz=%u pcm_rate_hz=%u mode=slave "
-	       "gain=%ux shift=%u storage=microSD-live\n",
+	printk("I2S mic record: bclk_hz=%u lrclk_hz=%u pcm_rate_hz=%u "
+	       "live_stream=%d ring_slots=%u\n",
 	       16000000U / MIC_BCLK_TOP, 16000000U / MIC_LRCLK_TOP,
-	       SAMPLE_RATE, MIC_GAIN, MIC_SAMPLE_SHIFT);
+	       SAMPLE_RATE, pendant_cloud_stream_active() ? 1 : 0,
+	       (unsigned int)PCM_TX_RING_SLOTS);
 
 	error = i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_START);
 	if (error != 0) {
 		mic_clocks_stop();
-		(void)fs_close(&file);
+		gpio_pin_set_dt(&led, 0);
 		return error;
 	}
 
-	printk("I2S mic live: sample_limit=%u requested=%u\n",
-	       (uint32_t)effective_sample_limit, (uint32_t)sample_limit);
+	printk("I2S mic live: sample_limit=%u\n",
+	       (uint32_t)effective_sample_limit);
 
 	while (sample_index < effective_sample_limit) {
 		void *block;
@@ -835,11 +925,23 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 			k_msleep(MIC_STOP_SETTLE_MS);
 			mic_clocks_stop();
-			(void)fs_close(&file);
 			return error;
 		}
 
-		int32_t *raw = block;
+		if (size > sizeof(raw_processing) ||
+		    (size % sizeof(raw_processing[0])) != 0U) {
+			k_mem_slab_free(&mic_rx_slab, block);
+			printk("I2S mic invalid RX block: bytes=%u capacity=%u\n",
+			       (uint32_t)size, (uint32_t)sizeof(raw_processing));
+			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
+			k_msleep(MIC_STOP_SETTLE_MS);
+			mic_clocks_stop();
+			return -EMSGSIZE;
+		}
+		memcpy(raw_processing, block, size);
+		k_mem_slab_free(&mic_rx_slab, block);
+
+		int32_t *raw = raw_processing;
 		size_t raw_frames = size / sizeof(int32_t);
 
 		if (block_index == 0U) {
@@ -850,27 +952,16 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 				raw_min = MIN(raw_min, raw[index]);
 				raw_max = MAX(raw_max, raw[index]);
 			}
-			printk("I2S mic raw block0: words=%u min=%d max=%d "
-			       "w0=%08x w1=%08x w2=%08x w3=%08x\n",
-			       (uint32_t)raw_frames, raw_min, raw_max,
-			       (unsigned int)raw[0], (unsigned int)raw[1],
-			       (unsigned int)raw[2], (unsigned int)raw[3]);
+			printk("I2S mic raw block0: words=%u min=%d max=%d\n",
+			       (uint32_t)raw_frames, raw_min, raw_max);
 		}
 
 		if (block_index < MIC_STARTUP_SKIP_BLOCKS) {
 			++block_index;
-			k_mem_slab_free(&mic_rx_slab, block);
 			clear_button_events();
 			continue;
 		}
 		++block_index;
-
-		if (!led_started) {
-			/* Light the cue only once audio is being kept. */
-			gpio_pin_set_dt(&led, 1);
-			next_led_toggle = k_uptime_get() + 250;
-			led_started = true;
-		}
 
 		size_t out_frames = raw_frames / MIC_DECIMATION;
 
@@ -907,10 +998,7 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 			int32_t sample = ((first + second) / 2) >> 8;
 
-			/* DC blocker: the SPH0645 sits about 5% off center.
-			 * Warm-start on the first frame so the standing
-			 * offset does not enter as an audible step.
-			 */
+			/* DC blocker: the SPH0645 sits about 5% off center. */
 			if (!hpf_primed) {
 				hpf_prev_in = sample;
 				hpf_primed = true;
@@ -930,25 +1018,12 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 			mic_stage_samples[stage_frames] = (int16_t)amplified;
 			if (++stage_frames == MIC_STAGE_FRAMES) {
-				live_write_error = write_pcm_frames(
-					&file, mic_stage_samples,
-					MIC_STAGE_FRAMES);
-				if (live_write_error == 0 &&
-				    pendant_opus_stream_active()) {
-					live_write_error =
-						pendant_opus_stream_feed(
-							mic_stage_samples,
-							MIC_STAGE_FRAMES);
-					if (live_write_error != 0) {
-						printk("Opus live feed failed: %d\n",
-						       live_write_error);
-						pendant_opus_stream_abort();
-						live_write_error = 0; /* PCM still OK */
-					}
-				}
+				/* Live LTE only — never gate stream on microSD. */
+				live_tx_offer_stage(mic_stage_samples,
+						    MIC_STAGE_FRAMES);
 				stage_frames = 0U;
-				++sd_flush_count;
-				if (live_write_error != 0) {
+				++stage_flush_count;
+				if (live_stream_failed) {
 					break;
 				}
 			}
@@ -974,29 +1049,18 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		}
 
 		recorded_samples = sample_index;
-		k_mem_slab_free(&mic_rx_slab, block);
-		if (live_write_error != 0) {
-			printk("I2S mic live SD write failed: %d\n",
-			       live_write_error);
+		if (live_stream_failed) {
+			printk("I2S mic live LTE stream failed mid-capture\n");
 			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 			k_msleep(MIC_STOP_SETTLE_MS);
 			mic_clocks_stop();
-			(void)fs_close(&file);
-			sd_ready = false;
-			sd_mount_result = live_write_error;
-			return live_write_error;
+			return -EIO;
 		}
-		if (sample_index >= next_trace_sample) {
-			uint32_t rms = integer_square_root(
-				square_sum / sample_index);
 
-			printk("I2S mic live: samples=%u mean=%u peak=%u "
-			       "rms=%u min=%d max=%d zero_crossings=%u\n",
-			       recorded_samples,
-			       (uint32_t)(recording_absolute_sum /
-					  recorded_samples),
-			       recorded_peak, rms, minimum_sample,
-			       maximum_sample, zero_crossings);
+		/* Spend a few free ms pushing PCM over LTE between DMA blocks. */
+		live_tx_pump(PCM_TX_PUMP_BUDGET_MS);
+
+		if (sample_index >= next_trace_sample) {
 			next_trace_sample += SAMPLE_RATE;
 		}
 
@@ -1006,10 +1070,8 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		}
 
 		/*
-		 * Ignore switch bounce or a second edge left over from the start
-		 * press. A valid voice sample needs at least one second anyway.
-		 * The check must not block: waiting for the physical release
-		 * here would starve the RX slab and overrun the driver.
+		 * Ignore bounce / leftover edges from the start press for the
+		 * first second, then a second press stops recording.
 		 */
 		if (sample_index < MIC_MIN_RECORD_FRAMES) {
 			clear_button_events();
@@ -1019,56 +1081,58 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		}
 	}
 
-	/*
-	 * DROP stops reception at once and frees the driver-held RX
-	 * blocks internally, so no drain loop is needed and nothing can
-	 * pend on the 1500 ms read timeout.
-	 */
 	error = i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 	k_msleep(MIC_STOP_SETTLE_MS);
 	mic_clocks_stop();
 	if (recording_stopped_by_button) {
-		/* Debounce now that the stream no longer depends on it. */
 		finish_button_press();
 	}
 
-	int write_error = stage_frames > 0U
-		? write_pcm_frames(&file, mic_stage_samples, stage_frames)
-		: 0;
-	if (write_error == 0 && stage_frames > 0U &&
-	    pendant_opus_stream_active()) {
-		int feed_error =
-			pendant_opus_stream_feed(mic_stage_samples, stage_frames);
-		if (feed_error != 0) {
-			printk("Opus live final feed failed: %d\n", feed_error);
-			pendant_opus_stream_abort();
+	if (stage_frames > 0U) {
+		/* Pad last stream slot so the fixed-size ring accepts it. */
+		while (stage_frames < MIC_STAGE_FRAMES) {
+			mic_stage_samples[stage_frames++] = 0;
 		}
+		live_tx_offer_stage(mic_stage_samples, MIC_STAGE_FRAMES);
 	}
-	int sync_error = write_error == 0 ? fs_sync(&file) : write_error;
-	int close_error = fs_close(&file);
+	/* Drain remaining ring slots after capture (still budgeted). */
+	{
+		int64_t drain_until = k_uptime_get() + 2000;
 
-	if (error == 0) {
-		error = sync_error != 0 ? sync_error : close_error;
-	}
-	if (write_error != 0 || sync_error != 0 || close_error != 0) {
-		printk("I2S mic save failed: write=%d sync=%d close=%d\n",
-		       write_error, sync_error, close_error);
+		while ((!pcm_tx_ring_empty(&live_tx_ring) ||
+			pendant_cloud_stream_has_pending()) &&
+		       pendant_cloud_stream_active() && !live_stream_failed &&
+		       k_uptime_get() < drain_until) {
+			live_tx_pump(PCM_TX_DRAIN_BUDGET_MS);
+		}
+		if ((!pcm_tx_ring_empty(&live_tx_ring) ||
+		     pendant_cloud_stream_has_pending()) ||
+		    live_stream_failed || !pendant_cloud_stream_active()) {
+			printk("Live TX incomplete — no SD fallback\n");
+			pendant_cloud_stream_abort();
+			live_stream_failed = true;
+			pcm_tx_ring_reset(&live_tx_ring);
+			error = -EIO;
+		}
 	}
 
 	uint32_t rms = recorded_samples == 0U
 		? 0U
 		: integer_square_root(square_sum / recorded_samples);
 	printk("I2S mic capture totals: samples=%u mean=%u peak=%u rms=%u "
-	       "min=%d max=%d zero_crossings=%u sd_flushes_live=%u "
-	       "opus_live=%d\n",
+	       "min=%d max=%d zero_crossings=%u stages=%u "
+	       "live_sent=%u ring_push=%u ring_pop=%u ring_ovf=%u "
+	       "stream_failed=%d\n",
 	       recorded_samples,
 	       recorded_samples == 0U
 		       ? 0U
 		       : (uint32_t)(recording_absolute_sum /
 				    recorded_samples),
 	       recorded_peak, rms, minimum_sample, maximum_sample,
-	       zero_crossings, sd_flush_count,
-	       pendant_opus_stream_active() ? 1 : 0);
+	       zero_crossings, stage_flush_count,
+	       pendant_cloud_stream_bytes_sent(), live_tx_ring.pushes,
+	       live_tx_ring.pops, live_tx_ring.overflows,
+	       live_stream_failed ? 1 : 0);
 	return error;
 }
 
@@ -1329,7 +1393,12 @@ int main(void)
 	}
 #endif
 
-	/* Solid LED while the modem registers and establishes the LTE session. */
+	/*
+	 * Solid LED while LTE attaches (up to CONFIG_LTE_NETWORK_TIMEOUT).
+	 * Off after success = ready for Button 1 (recording blinks ~250 ms).
+	 * Rapid 100 ms blink = show_error() after attach failure.
+	 */
+	printk("LTE init begin (LED solid = attaching; live Opus enabled)\n");
 	gpio_pin_set_dt(&led, 1);
 	error = pendant_cloud_init();
 	gpio_pin_set_dt(&led, 0);
@@ -1338,6 +1407,7 @@ int main(void)
 		audio_cycle_result = error;
 		show_error();
 	}
+	printk("LTE OK — ready for button (press = record + live upload)\n");
 
 	if (CONFIG_PENDANT_BOOT_AGENT_JOB_ID[0] != '\0') {
 		printk("BOOT_AGENT_REPLY_TEST_BEGIN job=%s\n",
@@ -1366,31 +1436,19 @@ int main(void)
 	}
 
 #if PENDANT_BOOT_UPLOAD_EXISTING
-	printk("Boot diagnostic: uploading existing SD recording\n");
+	printk("Boot diagnostic: uploading existing SD PCM recording\n");
 	gpio_pin_set_dt(&led, 1);
-	struct pendant_opus_stats boot_encode_stats = { 0 };
 	int64_t lat_cycle_started = k_uptime_get();
+	struct fs_dirent boot_entry;
 
-	error = pendant_opus_encode_file(
-		SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
-		audio_workspace, sizeof(audio_workspace), &boot_encode_stats);
-	int64_t lat_encode_done = k_uptime_get();
-
-	printk("Boot encode result: %d (packets=%u in=%u out=%u)\n", error,
-	       boot_encode_stats.packets, boot_encode_stats.input_bytes,
-	       boot_encode_stats.output_bytes);
-	printk("LAT encode_ms=%lld pcm_in=%u ogg_out=%u packets=%u "
-	       "audio_ms=%u\n",
-	       lat_encode_done - lat_cycle_started,
-	       boot_encode_stats.input_bytes, boot_encode_stats.output_bytes,
-	       boot_encode_stats.packets,
-	       (uint32_t)(boot_encode_stats.input_bytes /
-			  (SAMPLE_RATE * sizeof(int16_t) / 1000U)));
-	report_main_stack_headroom("boot encode");
-	if (error == 0) {
-		/* Single-shot /v1/pendant/command — no separate announce TLS. */
+	error = fs_stat(SD_RECORDING_PATH, &boot_entry);
+	if (error == 0 && boot_entry.type == FS_DIR_ENTRY_FILE &&
+	    boot_entry.size > 0U) {
 		error = pendant_cloud_upload_recording(
-			SD_OPUS_PATH, boot_encode_stats.input_bytes, SAMPLE_RATE);
+			SD_RECORDING_PATH, (uint32_t)boot_entry.size,
+			SAMPLE_RATE);
+	} else if (error == 0) {
+		error = -ENODATA;
 	}
 	printk("LAT cycle_to_dispatch_ms=%lld\n",
 	       k_uptime_get() - lat_cycle_started);
@@ -1407,83 +1465,78 @@ int main(void)
 
 	clear_button_events();
 
+#if PENDANT_BOOT_AUDIO_CYCLE_TEST
+	bool boot_audio_cycle_test_pending = true;
+#endif
+
 	while (true) {
-		/* Ready: button 1 starts a new recording. */
+		/* Ready: prewarm TLS/chunked headers while idle (not on press). */
 		audio_cycle_phase = 0U;
 		gpio_pin_set_dt(&led, 0);
-		/* Keep a TLS session warm between presses so the next cycle
-		 * does not pay a full LTE handshake if the idle window is short.
-		 */
-		pendant_cloud_prewarm_start();
+		if (!pendant_cloud_stream_active()) {
+			int prewarm = pendant_cloud_stream_prewarm(SAMPLE_RATE);
+
+			if (prewarm != 0) {
+				printk("Idle stream prewarm failed: %d "
+				       "(record will refuse — no SD fallback)\n",
+				       prewarm);
+			}
+		}
+#if PENDANT_BOOT_AUDIO_CYCLE_TEST
+		if (boot_audio_cycle_test_pending) {
+			boot_audio_cycle_test_pending = false;
+			k_msleep(1500);
+			k_sem_give(&button_press_sem);
+		}
+#endif
 		wait_for_button_press();
 
-		/* Recording: blinking LED; button 1 stops recording. */
 		/*
-		 * LTE stays attached during recording.  The RF-off isolation
-		 * was a PDM-era noise workaround; it made every cycle pay a
-		 * network reattach (which could hang for minutes) before the
-		 * upload could start.  The I2S capture path buffers deeply
-		 * and the slew limiter absorbs coupled impulses.
+		 * Press = record immediately. Live upload drains a ring with
+		 * non-blocking pumps between I2S blocks (prewarmed TLS).
 		 */
 		audio_cycle_phase = 1U;
-		error = record_microphone(i2s, MAX_RECORD_SAMPLE_COUNT);
+		int64_t lat_press_started = k_uptime_get();
+
+		error = record_microphone(
+			i2s,
+#if PENDANT_BOOT_AUDIO_CYCLE_TEST
+			AUTORECORD_TEST_SAMPLE_COUNT
+#else
+			MAX_RECORD_SAMPLE_COUNT
+#endif
+		);
+		int capture_error = error;
+
 		gpio_pin_set_dt(&led, 0);
 		audio_cycle_phase = 2U;
-		if (error != 0) {
-			printk("Microphone recording failed: %d\n", error);
-			audio_cycle_result = error;
+		if (capture_error != 0) {
+			printk("Microphone recording failed: %d\n", capture_error);
+			pendant_cloud_stream_abort();
+			recording_on_sd = false;
+			audio_cycle_result = capture_error;
 			flash_led(3U, 120, 120);
 			clear_button_events();
 			continue;
 		}
 
 		/*
-		 * Stopped/processing: LED stays off while the captured voice goes
-		 * to the relay and the Mac prepares its spoken response.
+		 * Live chunked POST only. No microSD file upload fallback.
 		 */
 		audio_cycle_phase = 3U;
-		struct pendant_opus_stats encode_stats = { 0 };
-		int64_t lat_press_started = k_uptime_get();
-
-		/*
-		 * Overlap final Ogg close with TLS readiness: if the during-
-		 * record prewarm finished, upload uses it; if not, kick one
-		 * more attempt while stream_end flushes the last page.
-		 */
-		pendant_cloud_prewarm_start();
-		if (pendant_opus_stream_active()) {
-			error = pendant_opus_stream_end(&encode_stats);
-			printk("LAT encode_ms=%lld (live) pcm_in=%u ogg_out=%u "
-			       "packets=%u\n",
+		if (pendant_cloud_stream_active() && !live_stream_failed) {
+			error = pendant_cloud_stream_end();
+			printk("LAT live_stream_end_ms=%lld pcm_bytes=%u\n",
 			       k_uptime_get() - lat_press_started,
-			       encode_stats.input_bytes,
-			       encode_stats.output_bytes, encode_stats.packets);
+			       pendant_cloud_uploaded_pcm_bytes);
 		} else {
-			error = pendant_opus_encode_file(
-				SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
-				audio_workspace, sizeof(audio_workspace),
-				&encode_stats);
-			printk("LAT encode_ms=%lld (fallback file) pcm_in=%u "
-			       "ogg_out=%u packets=%u\n",
-			       k_uptime_get() - lat_press_started,
-			       encode_stats.input_bytes,
-			       encode_stats.output_bytes, encode_stats.packets);
+			if (pendant_cloud_stream_active()) {
+				pendant_cloud_stream_abort();
+			}
+			printk("Live stream dead — refusing SD fallback\n");
+			error = -EIO;
 		}
-		report_main_stack_headroom("encode");
-		if (error != 0) {
-			printk("Opus recording compression failed: %d\n", error);
-			pendant_cloud_prewarm_cancel();
-			audio_cycle_result = error;
-			flash_led(4U, 100, 100);
-			continue;
-		}
-		/*
-		 * One TLS + raw Ogg to /v1/pendant/command (STT + Mac queue).
-		 * Skipping the separate announce/dispatch handshakes saves
-		 * ~10–20 s of pure radio time on a typical cycle.
-		 */
-		error = pendant_cloud_upload_recording(
-			SD_OPUS_PATH, encode_stats.input_bytes, SAMPLE_RATE);
+		report_main_stack_headroom("upload");
 		printk("LAT press_to_upload_done_ms=%lld\n",
 		       k_uptime_get() - lat_press_started);
 		if (error != 0) {
@@ -1494,15 +1547,18 @@ int main(void)
 			       pendant_cloud_last_http_status);
 			audio_cycle_result = error;
 			flash_led(5U, 100, 100);
-			/* Still try to warm a socket for the next attempt. */
-			pendant_cloud_prewarm_start();
 			continue;
 		}
-		/* Next press can reuse a warm TLS session while we wait/play. */
-		pendant_cloud_prewarm_start();
 
 		audio_cycle_phase = 4U;
+		/*
+		 * Waiting for agent speech (LED off during TLS polls).
+		 * When speech is fully on-device: solid LED + button 1 to play.
+		 * Never autoplay.
+		 */
 		gpio_pin_set_dt(&led, 0);
+		printk("Waiting for agent speech (no autoplay; solid LED "
+		       "when ready to press play)\n");
 		error = pendant_cloud_wait_for_agent_reply(
 			PENDANT_CLOUD_REPLY_AUDIO_PATH);
 		if (error == -ECANCELED) {
@@ -1511,6 +1567,7 @@ int main(void)
 			 */
 			printk("Reply wait canceled by button press\n");
 			finish_button_press();
+			gpio_pin_set_dt(&led, 0);
 			continue;
 		}
 		const char *reply_pcm_path = PENDANT_CLOUD_REPLY_AUDIO_PATH;
@@ -1549,6 +1606,9 @@ int main(void)
 		 */
 		audio_cycle_phase = 5U;
 		clear_button_events();
+#if PENDANT_BOOT_AUDIO_CYCLE_TEST
+		k_sem_give(&button_press_sem);
+#endif
 		wait_for_reply_playback_press();
 
 		/* Playing: LED remains solid for the duration of agent speech. */

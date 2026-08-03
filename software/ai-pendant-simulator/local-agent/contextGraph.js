@@ -1,8 +1,17 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const graphPath = path.join(process.cwd(), 'local-agent', 'memory', 'context_graph.json')
+export function resolveContextGraphPath(moduleUrl = import.meta.url) {
+  return path.join(
+    path.dirname(fileURLToPath(moduleUrl)),
+    'memory',
+    'context_graph.json',
+  )
+}
+
+const graphPath = resolveContextGraphPath()
 const MEMORY_TOMBSTONE_LIMIT = 10_000
 const LOCAL_MEMORY_DEVICE_ID =
   process.env.PENDANT_DEVICE_ID ||

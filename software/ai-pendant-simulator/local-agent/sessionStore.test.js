@@ -146,3 +146,38 @@ test('cloud tombstones survive a stale local merge', (t) => {
   assert.equal(merged.sessions.length, 0)
   assert.equal(merged.state.sessions[0].deletedAt, '2026-08-02T13:00:00.000Z')
 })
+
+test('legacy protocol-only turns are tombstoned and never rendered', (t) => {
+  const filePath = withTemporaryStore(t)
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify({
+      schemaVersion: LOCAL_SESSION_SCHEMA_VERSION,
+      updatedAt: '2026-08-02T10:00:00.000Z',
+      sessions: [
+        {
+          sessionId: 'session-control-frame',
+          title: 'Provider frame',
+          createdAt: '2026-08-02T10:00:00.000Z',
+          updatedAt: '2026-08-02T10:00:00.000Z',
+          turns: [
+            {
+              id: 'turn-control-frame',
+              role: 'assistant',
+              content: '[DONE]',
+              createdAt: '2026-08-02T10:00:00.000Z',
+              updatedAt: '2026-08-02T10:00:00.000Z',
+            },
+          ],
+        },
+      ],
+    }),
+  )
+
+  const migrated = readSessionDocument({ filePath })
+  assert.equal(migrated.sessions[0].turns[0].content, '')
+  assert.ok(migrated.sessions[0].turns[0].deletedAt)
+
+  writeSessionDocumentAtomic(migrated, { filePath })
+  assert.doesNotMatch(fs.readFileSync(filePath, 'utf8'), /\[DONE\]/)
+})

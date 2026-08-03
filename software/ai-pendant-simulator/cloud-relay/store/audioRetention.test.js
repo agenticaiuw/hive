@@ -33,7 +33,7 @@ test('memory queue cleanup retains durable audio-capture metadata', async () => 
 })
 
 test('D1 queue cleanup explicitly excludes audio-capture metadata', async () => {
-  let cleanupSql = ''
+  const cleanupSql = []
   const db = {
     prepare(sql) {
       return {
@@ -42,7 +42,7 @@ test('D1 queue cleanup explicitly excludes audio-capture metadata', async () => 
         },
         async run() {
           if (sql.includes('DELETE FROM relay_jobs')) {
-            cleanupSql = sql
+            cleanupSql.push(sql)
           }
           return { meta: { changes: 1 } }
         },
@@ -52,6 +52,8 @@ test('D1 queue cleanup explicitly excludes audio-capture metadata', async () => 
   const store = createD1Store(db)
 
   await store.createJob(expiredJob('job_audio_metadata', 'audio_capture'))
+  await store.createJob(expiredJob('job_audio_metadata_2', 'audio_capture'))
 
-  assert.match(cleanupSql, /type\s*<>\s*'audio_capture'/)
+  assert.equal(cleanupSql.length, 1)
+  assert.match(cleanupSql[0], /type\s*<>\s*'audio_capture'/)
 })

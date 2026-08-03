@@ -8,6 +8,7 @@ relay, and Bluetooth audio bridge.
 - `firmware/nrf9160` — nRF9160 DK firmware (Zephyr/NCS)
 - `firmware/esp32-airpods-bridge` — HUZZAH32 Bluetooth A2DP audio bridge
 - `software/ai-pendant-simulator` — local Mac agent, cloud relay, and simulator
+- `software/dashboard-sveltekit` — Mission Control dashboard (Cloudflare Worker)
 - `software/airpods-control` — local Bluetooth control surface
 - `hardware` — datasheets, electrical design, and KiCad sources
 - `docs` — build guides, BOM, plan, and architecture images
@@ -16,8 +17,8 @@ relay, and Bluetooth audio bridge.
 
 ## Local agent
 
-Keep private credentials in `software/ai-pendant-simulator/.env`. That file is
-ignored by Git.
+Keep private credentials in the repo-root `.env` (see `.env.example`). That file
+is ignored by Git.
 
 ```sh
 cd software/ai-pendant-simulator

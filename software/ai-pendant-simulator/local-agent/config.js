@@ -10,6 +10,8 @@ const homeDirectory = os.homedir()
 export const PORT = Number(process.env.MAC_AGENT_PORT || 8000)
 export const AGENT_TOKEN = process.env.AGENT_TOKEN || ''
 
+// Used only when FULL_CONTROL_MODE=false (legacy safe demo). Full control
+// opens whatever appName the LLM returns — no product keyword table.
 export const allowedUrls = {
   gmail: 'https://mail.google.com',
   calendar: 'https://calendar.google.com',

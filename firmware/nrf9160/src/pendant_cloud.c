@@ -16,46 +16,64 @@
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/tls_credentials.h>
+#include <fcntl.h>
 #include <zephyr/posix/arpa/inet.h>
+#include <zephyr/posix/fcntl.h>
 #include <zephyr/posix/netdb.h>
 #include <zephyr/posix/sys/socket.h>
 #include <zephyr/posix/unistd.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 /* Owned by main.c; lets the reply poll react to Button 1. */
 extern struct k_sem button_press_sem;
 
-/* Periodic attach diagnostics: +CEREG status 3 means the network DENIED
- * registration (reject cause follows in the response), 2 means still
- * searching, and XMONITOR shows whether any cell is visible at all.
+/* Periodic attach diagnostics while lte_lc_connect() blocks (up to
+ * CONFIG_LTE_NETWORK_TIMEOUT). +CEREG: 0 not-reg, 1 home, 2 searching,
+ * 3 denied, 5 roaming. %XSIM: 1 = SIM OK.
  */
 static void lte_attach_probe_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(lte_attach_probe_work, lte_attach_probe_fn);
+static uint32_t lte_attach_probe_count;
+static int64_t lte_attach_started_ms;
+static atomic_t lte_attach_probe_active;
 
 static void lte_attach_probe_fn(struct k_work *work)
 {
 	char at_buf[240];
+	int64_t elapsed_s =
+		(k_uptime_get() - lte_attach_started_ms) / 1000;
 
 	ARG_UNUSED(work);
+	if (!atomic_get(&lte_attach_probe_active)) {
+		return;
+	}
+	++lte_attach_probe_count;
+	printk("LTE attach waiting… t=%llds probe=%u timeout=%us\n",
+	       elapsed_s, lte_attach_probe_count,
+	       (unsigned int)CONFIG_LTE_NETWORK_TIMEOUT);
+
 	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT+CEREG?") == 0) {
 		printk("LTE probe reg: %s", at_buf);
+	}
+	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XSIM?") == 0) {
+		printk("LTE probe SIM (post-CFUN, authoritative): %s", at_buf);
+	}
+	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XICCID") == 0) {
+		printk("LTE probe iccid: %s", at_buf);
+	} else {
+		printk("LTE probe iccid: not ready\n");
+	}
+	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT+CESQ") == 0) {
+		printk("LTE probe signal: %s", at_buf);
 	}
 	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XMONITOR") == 0) {
 		printk("LTE probe cell: %s", at_buf);
 	}
-	/* SIM state: %XSIM: 1 means the SIM initialized fine. */
-	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XSIM?") == 0) {
-		printk("LTE probe sim: %s", at_buf);
+	if (atomic_get(&lte_attach_probe_active)) {
+		k_work_schedule(&lte_attach_probe_work, K_SECONDS(5));
 	}
-	/* Signal: +CESQ last field 255 means no measurable signal (antenna). */
-	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT+CESQ") == 0) {
-		printk("LTE probe signal: %s", at_buf);
-	}
-	if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XICCID") == 0) {
-		printk("LTE probe iccid: %s", at_buf);
-	}
-	k_work_schedule(&lte_attach_probe_work, K_SECONDS(15));
 }
 
 #define RELAY_HOSTNAME \
@@ -69,16 +87,17 @@ static void lte_attach_probe_fn(struct k_work *work)
 
 #define TLS_SECURITY_TAG 193
 #define TLS_VERIFY_REQUIRED 2
-#define HTTP_RESPONSE_SIZE 4096U
+/* Sized for JSON status + short transcript (not multi-MB bodies). */
+#define HTTP_RESPONSE_SIZE 2048U
 #define HTTP_HEADER_SIZE 768U
 #define FILE_READ_SIZE 384U
 #define BASE64_SEND_SIZE 512U
-#define TRANSCRIPT_JSON_SIZE 2048U
+#define TRANSCRIPT_JSON_SIZE 1024U
 #define JOB_ID_SIZE 80U
 #define PLAN_SUFFIX_SIZE 416U
 #define PENDANT_EVENT_BODY_SIZE 512U
 #define HTTP_STREAM_HEADER_SIZE 1536U
-#define HTTP_STREAM_READ_SIZE 4096U
+#define HTTP_STREAM_READ_SIZE 1536U
 #define MAX_PCM_BYTES (8U * 1024U * 1024U)
 #define AGENT_REPLY_POLL_ATTEMPTS 30U
 
@@ -103,13 +122,19 @@ static uint8_t http_stream_buffer[HTTP_STREAM_READ_SIZE];
 static bool cloud_initialized;
 static bool radio_suspended;
 
-/* Pre-opened TLS socket prepared while the user is still speaking. */
-static int prewarm_fd = -1;
-static bool prewarm_running;
-static K_MUTEX_DEFINE(prewarm_mutex);
-static K_THREAD_STACK_DEFINE(prewarm_stack, 4096);
-static struct k_thread prewarm_thread;
-static k_tid_t prewarm_tid;
+/* Live chunked PCM upload session (one TLS socket for the whole utterance). */
+static int stream_fd = -1;
+static bool stream_active;
+static uint32_t stream_sample_rate;
+static uint32_t stream_bytes_sent;
+static int64_t stream_started_ms;
+/* Non-blocking TX: one in-flight HTTP chunk framing + body + CRLF. */
+#define STREAM_PENDING_MAX 1200U
+static uint8_t stream_pending[STREAM_PENDING_MAX];
+static size_t stream_pending_len;
+static size_t stream_pending_off;
+static uint32_t stream_pump_calls;
+static uint32_t stream_eagain_count;
 
 volatile int pendant_cloud_init_result = -EAGAIN;
 volatile int pendant_cloud_transcribe_result = -EAGAIN;
@@ -229,88 +254,7 @@ static int configure_tls_socket(int fd)
 	return 0;
 }
 
-static int open_relay_socket_fresh(void);
-
-static int take_prewarm_fd(void)
-{
-	int fd = -1;
-
-	k_mutex_lock(&prewarm_mutex, K_FOREVER);
-	if (prewarm_fd >= 0) {
-		fd = prewarm_fd;
-		prewarm_fd = -1;
-		printk("LAT tls_prewarm_hit=1\n");
-	}
-	k_mutex_unlock(&prewarm_mutex);
-	return fd;
-}
-
-static void prewarm_thread_entry(void *p1, void *p2, void *p3)
-{
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
-
-	int fd = open_relay_socket_fresh();
-
-	k_mutex_lock(&prewarm_mutex, K_FOREVER);
-	if (prewarm_fd >= 0) {
-		close(prewarm_fd);
-		prewarm_fd = -1;
-	}
-	if (fd >= 0) {
-		prewarm_fd = fd;
-		printk("LAT tls_prewarm_ready=1\n");
-	} else {
-		printk("LAT tls_prewarm_ready=0 err=%d\n", fd);
-	}
-	prewarm_running = false;
-	k_mutex_unlock(&prewarm_mutex);
-}
-
-void pendant_cloud_prewarm_start(void)
-{
-	if (!cloud_initialized) {
-		return;
-	}
-
-	k_mutex_lock(&prewarm_mutex, K_FOREVER);
-	if (prewarm_running || prewarm_fd >= 0) {
-		k_mutex_unlock(&prewarm_mutex);
-		return;
-	}
-	prewarm_running = true;
-	k_mutex_unlock(&prewarm_mutex);
-
-	prewarm_tid = k_thread_create(
-		&prewarm_thread, prewarm_stack,
-		K_THREAD_STACK_SIZEOF(prewarm_stack), prewarm_thread_entry,
-		NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
-	k_thread_name_set(prewarm_tid, "tls_prewarm");
-}
-
-void pendant_cloud_prewarm_cancel(void)
-{
-	k_mutex_lock(&prewarm_mutex, K_FOREVER);
-	if (prewarm_fd >= 0) {
-		close(prewarm_fd);
-		prewarm_fd = -1;
-	}
-	/* Running thread will exit and not publish if we clear the slot. */
-	k_mutex_unlock(&prewarm_mutex);
-}
-
 static int open_relay_socket(void)
-{
-	int warmed = take_prewarm_fd();
-
-	if (warmed >= 0) {
-		return warmed;
-	}
-	return open_relay_socket_fresh();
-}
-
-static int open_relay_socket_fresh(void)
 {
 	struct addrinfo hints = {
 		.ai_family = AF_INET,
@@ -479,13 +423,11 @@ static int send_http_post_header(int fd, const char *path,
 }
 
 /*
- * Single-shot voice command: one TLS session, raw Ogg body, relay does
- * STT + Mac dispatch. Replaces the old announce → /v1/transcribe →
- * /v1/mac/plan triple handshake that cost 15–25 s of pure radio idle.
+ * Chunked raw PCM voice command: one TLS session, HTTP/1.1 Transfer-Encoding
+ * chunked, relay wraps s16le → WAV for STT/multimodal + Mac dispatch.
+ * Content-Length is unknown at open time so capture can stream live.
  */
-static int send_pendant_command_header(int fd, size_t content_length,
-				       uint32_t sample_rate,
-				       uint32_t source_pcm_bytes)
+static int send_pendant_command_chunked_header(int fd, uint32_t sample_rate)
 {
 	char header[HTTP_HEADER_SIZE + 128];
 	int length = snprintf(
@@ -493,21 +435,173 @@ static int send_pendant_command_header(int fd, size_t content_length,
 		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"Authorization: Bearer %s\r\n"
-		"Content-Type: audio/ogg\r\n"
-		"Content-Length: %lu\r\n"
+		"Content-Type: audio/pcm\r\n"
+		"Transfer-Encoding: chunked\r\n"
 		"X-Device-Id: %s\r\n"
-		"X-Audio-Format: ogg\r\n"
+		"X-Audio-Format: pcm\r\n"
 		"X-Sample-Rate: %u\r\n"
-		"X-Pcm-Bytes: %u\r\n"
+		"X-Audio-Channels: 1\r\n"
+		"X-Audio-Bits: 16\r\n"
 		"Connection: close\r\n\r\n",
 		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
-		(unsigned long)content_length, PENDANT_DEVICE_ID,
-		sample_rate, source_pcm_bytes);
+		PENDANT_DEVICE_ID, sample_rate);
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
 		return -EOVERFLOW;
 	}
 	return send_all(fd, header, (size_t)length);
+}
+
+/* Known-length fallback for post-capture file upload of raw PCM. */
+static int send_pendant_command_pcm_header(int fd, size_t content_length,
+					   uint32_t sample_rate)
+{
+	char header[HTTP_HEADER_SIZE + 128];
+	int length = snprintf(
+		header, sizeof(header),
+		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
+		"Host: %s\r\n"
+		"Authorization: Bearer %s\r\n"
+		"Content-Type: audio/pcm\r\n"
+		"Content-Length: %lu\r\n"
+		"X-Device-Id: %s\r\n"
+		"X-Audio-Format: pcm\r\n"
+		"X-Sample-Rate: %u\r\n"
+		"X-Audio-Channels: 1\r\n"
+		"X-Audio-Bits: 16\r\n"
+		"X-Pcm-Bytes: %lu\r\n"
+		"Connection: close\r\n\r\n",
+		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
+		(unsigned long)content_length, PENDANT_DEVICE_ID, sample_rate,
+		(unsigned long)content_length);
+
+	if (length < 0 || (size_t)length >= sizeof(header)) {
+		return -EOVERFLOW;
+	}
+	return send_all(fd, header, (size_t)length);
+}
+
+static int socket_set_nonblock(int fd, bool enable)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (flags < 0) {
+		return -errno;
+	}
+	if (enable) {
+		flags |= O_NONBLOCK;
+	} else {
+		flags &= ~O_NONBLOCK;
+	}
+	if (fcntl(fd, F_SETFL, flags) != 0) {
+		return -errno;
+	}
+	return 0;
+}
+
+/*
+ * Advance non-blocking send of stream_pending. Returns 0 when fully sent,
+ * -EAGAIN if more work remains, or a hard error.
+ */
+static int stream_pending_pump(int64_t deadline_ms)
+{
+	while (stream_pending_off < stream_pending_len) {
+		ssize_t sent;
+
+		if (k_uptime_get() >= deadline_ms) {
+			++stream_eagain_count;
+			return -EAGAIN;
+		}
+		sent = send(stream_fd, stream_pending + stream_pending_off,
+			    stream_pending_len - stream_pending_off, 0);
+		if (sent < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				++stream_eagain_count;
+				return -EAGAIN;
+			}
+			return -errno;
+		}
+		if (sent == 0) {
+			return -ECONNRESET;
+		}
+		stream_pending_off += (size_t)sent;
+	}
+	stream_pending_len = 0U;
+	stream_pending_off = 0U;
+	return 0;
+}
+
+static int stream_queue_http_chunk(const void *data, size_t length)
+{
+	char chunk_header[16];
+	int header_length;
+	size_t total;
+
+	if (length == 0U) {
+		return 0;
+	}
+	if (stream_pending_len != 0U) {
+		return -EBUSY;
+	}
+
+	header_length = snprintf(chunk_header, sizeof(chunk_header), "%x\r\n",
+				 (unsigned int)length);
+	if (header_length < 0 || (size_t)header_length >= sizeof(chunk_header)) {
+		return -EOVERFLOW;
+	}
+	total = (size_t)header_length + length + 2U;
+	if (total > sizeof(stream_pending)) {
+		return -EMSGSIZE;
+	}
+
+	memcpy(stream_pending, chunk_header, (size_t)header_length);
+	memcpy(stream_pending + (size_t)header_length, data, length);
+	stream_pending[(size_t)header_length + length] = '\r';
+	stream_pending[(size_t)header_length + length + 1U] = '\n';
+	stream_pending_len = total;
+	stream_pending_off = 0U;
+	return 0;
+}
+
+static int send_http_chunk_end(int fd)
+{
+	/* Final chunk must go out reliably; briefly restore blocking. */
+	(void)socket_set_nonblock(fd, false);
+	return send_all(fd, "0\r\n\r\n", 5U);
+}
+
+static int copy_transcript_json_string(void);
+static int copy_json_string_value(const char *key, char *output,
+				  size_t output_size);
+
+static int finalize_command_response(void)
+{
+	int error;
+
+	error = copy_transcript_json_string();
+	if (error != 0) {
+		pendant_cloud_transcribe_result = error;
+		return error;
+	}
+
+	/* Prefer nested job.jobId from /v1/pendant/command; fall back to jobId. */
+	if (copy_json_string_value("jobId", mac_job_id, sizeof(mac_job_id)) ==
+	    0) {
+		(void)strncpy(transcription_job_id, mac_job_id,
+			      sizeof(transcription_job_id) - 1U);
+		transcription_job_id[sizeof(transcription_job_id) - 1U] = '\0';
+		pendant_cloud_dispatch_result = 0;
+		printk("Transcript queued for Mac job %s (live PCM stream)\n",
+		       mac_job_id);
+		return 0;
+	}
+
+	pendant_cloud_dispatch_result = -ENOTCONN;
+	printk("PCM upload ok but no Mac job was queued\n");
+	return -ENOTCONN;
 }
 
 static int send_http_get_header(int fd, const char *path)
@@ -606,8 +700,8 @@ static int base64_finish(struct base64_stream *stream)
 }
 
 /*
- * Raw Ogg upload on /v1/pendant/command. One TLS + one HTTP request does
- * STT and Mac dispatch; no Base64 bloat, no second/third handshake.
+ * Fallback: known-length raw s16le PCM file upload on /v1/pendant/command.
+ * Live capture prefers pendant_cloud_stream_* chunked path instead.
  */
 static int post_recording_command(const char *audio_path,
 				  uint32_t source_pcm_bytes,
@@ -632,7 +726,7 @@ static int post_recording_command(const char *audio_path,
 		       (unsigned int)entry.type, (uint32_t)entry.size);
 		return -EINVAL;
 	}
-	printk("Cloud upload found %u Ogg Opus bytes on SD (single-shot)\n",
+	printk("Cloud upload found %u PCM bytes on SD (fallback single-shot)\n",
 	       (uint32_t)entry.size);
 
 	int64_t lat_upload_started = k_uptime_get();
@@ -644,8 +738,8 @@ static int post_recording_command(const char *audio_path,
 	}
 	int64_t lat_upload_socket_done = k_uptime_get();
 
-	error = send_pendant_command_header(fd, (size_t)entry.size,
-					    sample_rate, source_pcm_bytes);
+	error = send_pendant_command_pcm_header(fd, (size_t)entry.size,
+						sample_rate);
 	if (error != 0) {
 		printk("Cloud upload HTTP header failed: %d\n", error);
 		goto out;
@@ -682,10 +776,9 @@ static int post_recording_command(const char *audio_path,
 		goto out;
 	}
 
-	pendant_cloud_uploaded_pcm_bytes = source_pcm_bytes;
-	printk("Uploaded %u Ogg Opus bytes representing %u PCM bytes "
-	       "(raw single-shot)\n",
-	       bytes_read_total, pendant_cloud_uploaded_pcm_bytes);
+	pendant_cloud_uploaded_pcm_bytes = bytes_read_total;
+	printk("Uploaded %u raw PCM bytes (fallback single-shot)\n",
+	       bytes_read_total);
 	int64_t lat_body_sent = k_uptime_get();
 
 	error = receive_http_response(fd);
@@ -1355,39 +1448,94 @@ int pendant_cloud_init(void)
 	printk("Initializing nRF9160 modem\n");
 	error = nrf_modem_lib_init();
 	if (error != 0) {
+		printk("nrf_modem_lib_init failed: %d\n", error);
 		goto out;
 	}
 	error = provision_relay_certificate();
 	if (error != 0) {
+		printk("Relay CA provision failed: %d\n", error);
 		goto out;
 	}
 
-	/* Print SIM identity once, then live registration status with the
-	 * network's reject cause while the blocking attach runs, so a stuck
-	 * attach explains itself over serial.
+	/*
+	 * UICC often only answers after full functionality (CFUN). Pre-attach
+	 * ICCID failure is not fatal; recheck during probes. lte_lc_connect
+	 * blocks up to CONFIG_LTE_NETWORK_TIMEOUT (cereg.c).
 	 */
 	{
 		char at_buf[160];
 
+		(void)nrf_modem_at_printf("AT+CEREG=5");
+		if (nrf_modem_at_cmd(at_buf, sizeof(at_buf),
+				     "AT%%XSIM?") == 0) {
+			printk("SIM before CFUN (non-authoritative; %%XSIM: 0 is "
+			       "expected here): %s", at_buf);
+		}
 		if (nrf_modem_at_cmd(at_buf, sizeof(at_buf),
 				     "AT%%XICCID") == 0) {
-			printk("SIM ICCID: %s", at_buf);
+			printk("SIM ICCID before CFUN (non-authoritative): %s",
+			       at_buf);
 		} else {
-			printk("SIM ICCID read failed (SIM missing?)\n");
+			printk("SIM ICCID not ready pre-attach "
+			       "(will recheck during attach)\n");
 		}
-		(void)nrf_modem_at_printf("AT+CEREG=5");
 	}
-	k_work_schedule(&lte_attach_probe_work, K_SECONDS(15));
 
-	printk("Attaching pendant to LTE network\n");
+	lte_attach_probe_count = 0U;
+	lte_attach_started_ms = k_uptime_get();
+	atomic_set(&lte_attach_probe_active, 1);
+	k_work_schedule(&lte_attach_probe_work, K_SECONDS(3));
+
+	printk("Attaching pendant to LTE network (timeout %us)\n",
+	       (unsigned int)CONFIG_LTE_NETWORK_TIMEOUT);
 	error = lte_lc_connect();
-	(void)k_work_cancel_delayable(&lte_attach_probe_work);
+	atomic_clear(&lte_attach_probe_active);
+	struct k_work_sync probe_sync;
+
+	(void)k_work_cancel_delayable_sync(&lte_attach_probe_work, &probe_sync);
 	if (error != 0) {
+		bool sim_ready = false;
+
+		printk("LTE attach failed: %d (%s).\n", error,
+		       error == -ETIMEDOUT ? "timeout" : "error");
+		{
+			char at_buf[160];
+
+			if (nrf_modem_at_cmd(at_buf, sizeof(at_buf),
+					     "AT%%XSIM?") == 0) {
+				sim_ready = strstr(at_buf, "%XSIM: 1") != NULL;
+				printk("Final SIM (post-CFUN, authoritative): %s",
+				       at_buf);
+			}
+			if (nrf_modem_at_cmd(at_buf, sizeof(at_buf),
+					     "AT+CEREG?") == 0) {
+				printk("Final CEREG: %s", at_buf);
+			}
+		}
+		if (sim_ready) {
+			printk("SIM is initialized; check LTE-M coverage, antenna, "
+			       "APN/plan, and registration status.\n");
+		} else {
+			printk("SIM is not initialized post-CFUN; check the nano-SIM "
+			       "seat, contacts, tray, and power.\n");
+		}
 		goto out;
+	}
+	{
+		char at_buf[160];
+
+		if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XSIM?") == 0) {
+			printk("SIM after attach (post-CFUN, authoritative): %s",
+			       at_buf);
+		}
+		if (nrf_modem_at_cmd(at_buf, sizeof(at_buf), "AT%%XICCID") == 0) {
+			printk("SIM ICCID after attach: %s", at_buf);
+		}
 	}
 
 	cloud_initialized = true;
-	printk("Pendant LTE connection ready\n");
+	printk("Pendant LTE connection ready (attach %lld s)\n",
+	       (k_uptime_get() - lte_attach_started_ms) / 1000);
 
 out:
 	pendant_cloud_init_result = error;
@@ -1402,14 +1550,14 @@ int pendant_cloud_suspend_radio(void)
 		return 0;
 	}
 
-	printk("Suspending LTE RF for quiet microphone capture\n");
-	error = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+	printk("Powering down modem RF for deterministic microphone capture\n");
+	error = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
 	if (error == 0) {
 		radio_suspended = true;
 		/*
 		 * The AT command returns before the modem's final RF/HFXO rail
-		 * transition has fully settled. Starting PDM during that transition
-		 * can starve the nRF9160 PDM DMA about one second later.
+		 * transition has fully settled. Starting I2S during that transition
+		 * can still starve DMA about one second later.
 		 */
 		k_msleep(1500);
 	}
@@ -1425,7 +1573,7 @@ int pendant_cloud_resume_radio(void)
 	}
 
 	printk("Resuming LTE after microphone capture\n");
-	error = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
+	error = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
 	if (error != 0) {
 		return error;
 	}
@@ -1435,11 +1583,262 @@ int pendant_cloud_resume_radio(void)
 	return lte_lc_connect();
 }
 
+static void stream_reset_state(void)
+{
+	stream_fd = -1;
+	stream_active = false;
+	stream_sample_rate = 0U;
+	stream_bytes_sent = 0U;
+	stream_started_ms = 0;
+	stream_pending_len = 0U;
+	stream_pending_off = 0U;
+	stream_pump_calls = 0U;
+	stream_eagain_count = 0U;
+}
+
+bool pendant_cloud_stream_active(void)
+{
+	return stream_active;
+}
+
+bool pendant_cloud_stream_has_pending(void)
+{
+	return stream_pending_len != 0U;
+}
+
+uint32_t pendant_cloud_stream_bytes_sent(void)
+{
+	return stream_bytes_sent;
+}
+
+void pendant_cloud_stream_abort(void)
+{
+	if (stream_fd >= 0) {
+		close(stream_fd);
+	}
+	stream_reset_state();
+}
+
+static int stream_open_chunked(uint32_t sample_rate)
+{
+	int error;
+
+	if (sample_rate == 0U) {
+		return -EINVAL;
+	}
+	if (!cloud_initialized) {
+		error = pendant_cloud_init();
+		if (error != 0) {
+			return error;
+		}
+	}
+	if (radio_suspended) {
+		error = pendant_cloud_resume_radio();
+		if (error != 0) {
+			return error;
+		}
+	}
+
+	stream_started_ms = k_uptime_get();
+	error = open_relay_socket();
+	if (error < 0) {
+		printk("Live PCM stream socket failed: %d\n", error);
+		stream_reset_state();
+		return error;
+	}
+	stream_fd = error;
+
+	/* Headers use blocking send (idle/prewarm only). */
+	error = send_pendant_command_chunked_header(stream_fd, sample_rate);
+	if (error != 0) {
+		printk("Live PCM stream header failed: %d\n", error);
+		close(stream_fd);
+		stream_reset_state();
+		return error;
+	}
+
+	error = socket_set_nonblock(stream_fd, true);
+	if (error != 0) {
+		printk("Live PCM stream nonblock failed: %d\n", error);
+		/* Continue with blocking; pump still time-bounds loops. */
+	}
+
+	stream_active = true;
+	stream_sample_rate = sample_rate;
+	stream_bytes_sent = 0U;
+	stream_pending_len = 0U;
+	stream_pending_off = 0U;
+	printk("Live PCM stream open: sample_rate=%u header_ms=%lld\n",
+	       sample_rate, k_uptime_get() - stream_started_ms);
+	return 0;
+}
+
+static void stream_reset_job_state(void)
+{
+	pendant_cloud_transcribe_result = -EAGAIN;
+	pendant_cloud_dispatch_result = -EAGAIN;
+	pendant_cloud_reply_result = -EAGAIN;
+	pendant_cloud_last_http_status = 0;
+	pendant_cloud_uploaded_pcm_bytes = 0U;
+	pendant_cloud_reply_pcm_bytes = 0U;
+	pendant_cloud_reply_format = PENDANT_CLOUD_AUDIO_UNKNOWN;
+	transcription_job_id[0] = '\0';
+	mac_job_id[0] = '\0';
+	announced_job_id[0] = '\0';
+}
+
+/*
+ * Open TLS + chunked headers while the UI is idle so Button 1 never waits on
+ * the modem handshake. Safe to call repeatedly.
+ */
+int pendant_cloud_stream_prewarm(uint32_t sample_rate)
+{
+	int error;
+
+	if (stream_active) {
+		return 0;
+	}
+	stream_reset_job_state();
+	error = stream_open_chunked(sample_rate);
+	if (error == 0) {
+		printk("Live PCM stream prewarmed (idle)\n");
+	}
+	return error;
+}
+
+int pendant_cloud_stream_begin(uint32_t sample_rate)
+{
+	if (stream_active && stream_sample_rate == sample_rate) {
+		/* Reuse prewarmed session. */
+		return 0;
+	}
+	if (stream_active) {
+		pendant_cloud_stream_abort();
+	}
+	stream_reset_job_state();
+	return stream_open_chunked(sample_rate);
+}
+
+int pendant_cloud_stream_pump(uint32_t budget_ms)
+{
+	int64_t deadline;
+
+	++stream_pump_calls;
+	if (!stream_active || stream_fd < 0) {
+		return -ENOTCONN;
+	}
+	if (stream_pending_len == 0U) {
+		return 0;
+	}
+	deadline = k_uptime_get() + (int64_t)budget_ms;
+	return stream_pending_pump(deadline);
+}
+
+int pendant_cloud_stream_write(const void *data, size_t length)
+{
+	int error;
+
+	if (!stream_active || stream_fd < 0) {
+		return -ENOTCONN;
+	}
+	if (data == NULL || length == 0U) {
+		return 0;
+	}
+	if (stream_bytes_sent + length > MAX_PCM_BYTES) {
+		return -EFBIG;
+	}
+	/* Must finish previous chunk framing before queueing another. */
+	if (stream_pending_len != 0U) {
+		return -EAGAIN;
+	}
+
+	error = stream_queue_http_chunk(data, length);
+	if (error != 0) {
+		return error;
+	}
+	/* Bytes are committed once framed; pump may finish later. */
+	stream_bytes_sent += (uint32_t)length;
+	return 0;
+}
+
+int pendant_cloud_stream_end(void)
+{
+	int error;
+	int64_t body_done_ms;
+	int64_t drain_deadline;
+
+	if (!stream_active || stream_fd < 0) {
+		return -ENOTCONN;
+	}
+
+	/* Drain any in-flight chunk (budget up to 5 s). */
+	drain_deadline = k_uptime_get() + 5000;
+	while (stream_pending_len != 0U) {
+		error = stream_pending_pump(drain_deadline);
+		if (error == -EAGAIN) {
+			if (k_uptime_get() >= drain_deadline) {
+				printk("Live PCM stream drain timeout\n");
+				pendant_cloud_stream_abort();
+				pendant_cloud_transcribe_result = -ETIMEDOUT;
+				return -ETIMEDOUT;
+			}
+			continue;
+		}
+		if (error != 0) {
+			printk("Live PCM stream drain failed: %d\n", error);
+			pendant_cloud_stream_abort();
+			pendant_cloud_transcribe_result = error;
+			return error;
+		}
+	}
+
+	error = send_http_chunk_end(stream_fd);
+	if (error != 0) {
+		printk("Live PCM stream end-chunk failed: %d\n", error);
+		pendant_cloud_stream_abort();
+		pendant_cloud_transcribe_result = error;
+		return error;
+	}
+
+	pendant_cloud_uploaded_pcm_bytes = stream_bytes_sent;
+	body_done_ms = k_uptime_get();
+	printk("Live PCM stream body complete: bytes=%u stream_ms=%lld "
+	       "pumps=%u eagain=%u\n",
+	       stream_bytes_sent, body_done_ms - stream_started_ms,
+	       stream_pump_calls, stream_eagain_count);
+
+	(void)socket_set_nonblock(stream_fd, false);
+	error = receive_http_response(stream_fd);
+	printk("LAT live_stream server_wait_ms=%lld total_ms=%lld "
+	       "body_bytes=%u HTTP=%d\n",
+	       k_uptime_get() - body_done_ms,
+	       k_uptime_get() - stream_started_ms, stream_bytes_sent,
+	       pendant_cloud_last_http_status);
+
+	close(stream_fd);
+	stream_fd = -1;
+	stream_active = false;
+
+	pendant_cloud_transcribe_result = error;
+	if (error != 0) {
+		stream_reset_state();
+		return error;
+	}
+
+	error = finalize_command_response();
+	stream_reset_state();
+	return error;
+}
+
 int pendant_cloud_upload_recording(const char *audio_path,
 				   uint32_t source_pcm_bytes,
 				   uint32_t sample_rate)
 {
 	int error;
+
+	if (stream_active) {
+		pendant_cloud_stream_abort();
+	}
 
 	pendant_cloud_transcribe_result = -EAGAIN;
 	pendant_cloud_dispatch_result = -EAGAIN;
@@ -1460,8 +1859,7 @@ int pendant_cloud_upload_recording(const char *audio_path,
 	}
 
 	/*
-	 * Fast path: one TLS session, raw Ogg, relay STT + Mac queue.
-	 * Response carries transcript text and job.jobId (or top-level jobId).
+	 * Fallback: one TLS session, raw PCM file, relay STT + Mac queue.
 	 */
 	error = post_recording_command(audio_path, source_pcm_bytes,
 				       sample_rate);
@@ -1470,29 +1868,7 @@ int pendant_cloud_upload_recording(const char *audio_path,
 		return error;
 	}
 
-	error = copy_transcript_json_string();
-	if (error != 0) {
-		/* Empty transcript / noise rejection still returns 200 sometimes. */
-		pendant_cloud_transcribe_result = error;
-		return error;
-	}
-
-	/* Prefer nested job.jobId from /v1/pendant/command; fall back to jobId. */
-	if (copy_json_string_value("jobId", mac_job_id, sizeof(mac_job_id)) ==
-	    0) {
-		(void)strncpy(transcription_job_id, mac_job_id,
-			      sizeof(transcription_job_id) - 1U);
-		transcription_job_id[sizeof(transcription_job_id) - 1U] = '\0';
-		pendant_cloud_dispatch_result = 0;
-		printk("Transcript queued for Mac job %s (single-shot)\n",
-		       mac_job_id);
-		return 0;
-	}
-
-	/* No job in response — Mac bridge offline or dispatch=0. */
-	pendant_cloud_dispatch_result = -ENOTCONN;
-	printk("Single-shot upload ok but no Mac job was queued\n");
-	return -ENOTCONN;
+	return finalize_command_response();
 }
 
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path)
@@ -1558,7 +1934,13 @@ int pendant_cloud_wait_for_agent_reply(const char *pcm_path)
 		}
 		printk("Agent reply is not ready; polling again (%u/%u)\n",
 		       attempt, AGENT_REPLY_POLL_ATTEMPTS);
-		k_sleep(K_SECONDS(1));
+		/* ~1 s wait; cancel if the user presses the button. */
+		for (unsigned int slice = 0U; slice < 10U; ++slice) {
+			if (k_sem_take(&button_press_sem, K_MSEC(100)) == 0) {
+				pendant_cloud_reply_result = -ECANCELED;
+				return -ECANCELED;
+			}
+		}
 	}
 
 	pendant_cloud_reply_result = error;

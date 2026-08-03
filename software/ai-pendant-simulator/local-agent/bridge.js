@@ -7,7 +7,8 @@ import {
   PENDANT_ACCOUNT_ID,
   RELAY_API_KEY,
   RELAY_URL,
-  WORK_POLL_INTERVAL_MS,
+  WORK_RETRY_BASE_MS,
+  WORK_RETRY_MAX_MS,
 } from './bridgeConfig.js'
 import {
   spokenConfirmation,
@@ -17,6 +18,10 @@ import {
 import { synchronizeProductState } from './productSyncClient.js'
 import { classifyPlan } from './actionRisk.js'
 import { stripImageBytes } from './redaction.js'
+import {
+  createRateLimitedErrorReporter,
+  createRetryBackoff,
+} from './retryPolicy.js'
 
 const relayHeaders = {
   'Content-Type': 'application/json',
@@ -45,6 +50,13 @@ export async function startBridge() {
   await syncProductState()
   startHeartbeat()
   await syncAgentSnapshot()
+  // Warm trivial success speech so first open_app does not pay cold TTS.
+  try {
+    const { synthesizePendantSpeech } = await import('./pendantSpeech.js')
+    synthesizePendantSpeech({ response: 'Done.', status: 'ready', actions: [] })
+  } catch (error) {
+    console.warn(`[bridge] Speech cache warm failed: ${error.message}`)
+  }
   await workLoop()
 }
 
@@ -111,6 +123,12 @@ function startHeartbeat() {
 }
 
 async function workLoop() {
+  const retryBackoff = createRetryBackoff({
+    baseMs: WORK_RETRY_BASE_MS,
+    maximumMs: WORK_RETRY_MAX_MS,
+  })
+  const reportWorkLoopError = createRateLimitedErrorReporter()
+
   while (running) {
     try {
       const work = await pollForWork()
@@ -118,9 +136,10 @@ async function workLoop() {
       if (work) {
         await handleWork(work)
       }
+      retryBackoff.reset()
     } catch (error) {
-      console.warn(`[bridge] Work loop error: ${error.message}`)
-      await sleep(WORK_POLL_INTERVAL_MS)
+      reportWorkLoopError('[bridge] Work loop error', error)
+      await sleep(retryBackoff.nextDelay())
     }
   }
 }
@@ -162,7 +181,8 @@ export async function handleWork(work) {
     work.type === 'plan' || work.type === 'execute'
 
   if (observablePipeline) {
-    await reportPipelineEvent(work, {
+    // Non-blocking telemetry — do not delay execute for dashboard events.
+    void reportPipelineEvent(work, {
       stage: 'transcription',
       status: 'done',
       label: 'Transcript received from cloud',
@@ -185,14 +205,18 @@ export async function handleWork(work) {
       const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
       // Relay multimodal audio→plan already produced actions — skip a second
       // DeepSeek round trip (saves ~1–5 s on simple commands).
+      // Realtime / audio-native plan from the relay. Skip local LLM unless the
+      // voice agent explicitly delegated multi-step work to the Mac planner.
       const useAudioNativePlan =
-        hint?.planner === 'audio-native' &&
+        (hint?.planner === 'audio-native' ||
+          hint?.planner === 'audio-native-realtime') &&
+        !hint?.requireLocalPlanner &&
         (hintActions.length > 0 ||
           hint?.status === 'instant' ||
           String(hint?.response || '').trim())
       let plan
       if (useAudioNativePlan) {
-        await reportPipelineEvent(work, {
+        void reportPipelineEvent(work, {
           stage: 'agent',
           status: 'active',
           label: 'Using audio-native plan from the relay',
@@ -212,7 +236,7 @@ export async function handleWork(work) {
           fullControl: true,
         }
       } else {
-        await reportPipelineEvent(work, {
+        void reportPipelineEvent(work, {
           stage: 'agent',
           status: 'active',
           label: 'Agent is processing the transcript',
@@ -228,7 +252,16 @@ export async function handleWork(work) {
         })
       }
 
-      await reportPipelineEvent(work, {
+      // Planning may create the session when the relay did not supply one.
+      // Every later turn and telemetry event must follow that canonical id;
+      // otherwise execution creates a second assistant-only conversation.
+      const activeSessionId = plan.sessionId ?? work.sessionId
+      const planWork =
+        activeSessionId === work.sessionId
+          ? work
+          : { ...work, sessionId: activeSessionId }
+
+      void reportPipelineEvent(planWork, {
         stage: 'agent',
         status: 'done',
         label: 'Agent response ready',
@@ -252,7 +285,7 @@ export async function handleWork(work) {
       const verdict = classifyPlan(plan.actions)
       if (verdict.autoRun) {
         const executionStartedAt = Date.now()
-        await reportPipelineEvent(work, {
+        void reportPipelineEvent(planWork, {
           stage: 'agent',
           status: 'active',
           label: 'Running the plan on this Mac',
@@ -264,7 +297,7 @@ export async function handleWork(work) {
             body: {
               command: work.command,
               actions: plan.actions,
-              sessionId: work.sessionId,
+              sessionId: activeSessionId,
               planMeta: { planner: plan.planner ?? null, source: 'pendant' },
               source: 'pendant',
             },
@@ -276,7 +309,7 @@ export async function handleWork(work) {
           // The planner wrote its reply before anything ran, so it can only
           // describe intent. Speak what actually happened instead.
           plan.response = spokenConfirmation(plan, execution)
-          await reportPipelineEvent(work, {
+          await reportPipelineEvent(planWork, {
             stage: 'agent',
             status: plan.executed ? 'done' : 'failed',
             label: plan.executed ? 'Plan executed on this Mac' : 'Execution failed',
@@ -314,7 +347,7 @@ export async function handleWork(work) {
             .replace(/\s+/g, ' ')
             .trim()
             .slice(0, 180)
-          await reportPipelineEvent(work, {
+          await reportPipelineEvent(planWork, {
             stage: 'agent',
             status: 'failed',
             label: 'Execution failed',
@@ -329,7 +362,7 @@ export async function handleWork(work) {
         plan.response =
           spokenTextForResult({ ...plan, awaitingApproval: true }) ||
           'Waiting for your approval on the dashboard.'
-        await reportPipelineEvent(work, {
+        await reportPipelineEvent(planWork, {
           stage: 'agent',
           status: 'waiting',
           label: 'Waiting for your approval',
@@ -351,7 +384,7 @@ export async function handleWork(work) {
         plan.response = 'Done.'
       }
 
-      void reportPipelineEvent(work, {
+      void reportPipelineEvent(planWork, {
         stage: 'tts',
         status: 'active',
         label: trivialOpen
@@ -365,9 +398,9 @@ export async function handleWork(work) {
       // TTS after execute; cached phrases are near-instant.
       const planWithSpeech = synthesizePendantSpeech(plan)
 
-      void reportSynthesizedSpeech(work, planWithSpeech, speechStartedAt)
+      void reportSynthesizedSpeech(planWork, planWithSpeech, speechStartedAt)
 
-      void reportPipelineEvent(work, {
+      void reportPipelineEvent(planWork, {
         stage: 'relay_result',
         status: 'active',
         label: 'Uploading response to cloud relay',
@@ -387,7 +420,7 @@ export async function handleWork(work) {
               ? plan.executionError || plan.response || 'Execution failed.'
               : '',
       })
-      void reportPipelineEvent(work, {
+      void reportPipelineEvent(planWork, {
         stage: 'relay_result',
         status: 'done',
         label: 'Response waiting for the pendant',

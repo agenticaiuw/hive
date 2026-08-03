@@ -17,7 +17,8 @@ npm run agent    # terminal 1
 npm run dev:ops  # terminal 2
 ```
 
-Connect panel uses `AGENT_TOKEN` / `VITE_AGENT_TOKEN` from `.env`.
+Enter the local-agent token in the Connect panel at runtime. The build never
+copies `AGENT_TOKEN` into a `VITE_*` variable or browser bundle.
 
 ## Panels
 

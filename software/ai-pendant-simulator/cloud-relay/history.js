@@ -1,4 +1,5 @@
 import { voiceRunForJob } from './jobs.js'
+import { stripProtocolTerminators } from '../shared/protocolText.js'
 
 /*
  * History is derived from the same `plan` jobs the operator feed already shows,
@@ -85,7 +86,9 @@ export function spokenReplyForJob(job) {
   if (!result) {
     return ''
   }
-  return String(result.response || result.summary || '').slice(0, 2000)
+  return stripProtocolTerminators(
+    result.response || result.summary || '',
+  ).slice(0, 2000)
 }
 
 function audioSummary(capture, link) {

@@ -1,9 +1,17 @@
+/**
+ * Pause between empty claims inside a long-poll.
+ * Not a product "wait for the user" timeout — only a yield so we do not
+ * spin D1 / Worker CPU when the queue is empty. Defaults are near-zero;
+ * set both to 0 only if you accept higher empty-queue read volume.
+ */
 export function bridgeClaimDelay(
   emptyClaimCount,
-  { minimumMs = 250, maximumMs = 1000 } = {},
+  { minimumMs = 0, maximumMs = 25 } = {},
 ) {
-  const minimum = Math.max(50, Number(minimumMs) || 250)
-  const maximum = Math.max(minimum, Number(maximumMs) || 1000)
-  const attempt = Math.max(0, Number(emptyClaimCount) || 0)
-  return Math.min(maximum, Math.round(minimum * 1.6 ** attempt))
+  const minimum = Math.max(0, Number(minimumMs) || 0)
+  const maximum = Math.max(minimum, Number(maximumMs) || 0)
+  if (maximum === 0) return 0
+  // No exponential backoff — empty queue should not climb to multi-second waits.
+  void emptyClaimCount
+  return minimum > 0 ? minimum : maximum
 }

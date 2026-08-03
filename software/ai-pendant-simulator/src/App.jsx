@@ -1861,7 +1861,7 @@ function loadSavedAgentUrl() {
 }
 
 function loadSavedAgentToken() {
-  return localStorage.getItem('macAgentToken') || import.meta.env.VITE_AGENT_TOKEN || ''
+  return localStorage.getItem('macAgentToken') || ''
 }
 
 function authHeaders(token) {

@@ -28,6 +28,7 @@ import {
 } from './jobs.js'
 import { getStore } from './store/index.js'
 import { planFromAudio } from './audioPlan.js'
+import { createStreamingRealtimeSession } from './openaiRealtimeVoice.js'
 import { transcribeAudio } from './transcribe.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
@@ -71,31 +72,108 @@ import {
 } from './deviceAuth.js'
 import { bridgeClaimDelay } from './polling.js'
 import {
-  createPendantAudioParser,
+  isRawPcmFormat,
   pendantAudioFormat,
+  pcmS16leToWavBuffer,
   preparePendantAudioForStt,
 } from './rawAudio.js'
 
 const app = express()
-const pendantAudioParser = createPendantAudioParser()
-const PENDANT_PCM_SAMPLE_RATE = 24000
+// Default if pendant omits X-Sample-Rate (nRF live path sends 15625).
+const PENDANT_PCM_SAMPLE_RATE = 15625
 const PENDANT_PCM_CHANNELS = 1
 const PENDANT_PCM_BITS = 16
 const DIAGNOSTIC_AUDIO_MAX_BYTES = 1024 * 1024
 const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
+
+function plannerHintFromPlan(plan) {
+  if (!plan) return undefined
+  const hasPlanPayload =
+    (Array.isArray(plan.actions) && plan.actions.length > 0) ||
+    Boolean(plan.status) ||
+    Boolean(plan.response) ||
+    Boolean(plan.requireLocalPlanner)
+  if (!hasPlanPayload) return undefined
+  return {
+    status: plan.status,
+    response: plan.response,
+    actions: plan.actions || [],
+    planner: plan.requireLocalPlanner
+      ? 'audio-native-delegate'
+      : 'audio-native',
+    requireLocalPlanner: Boolean(plan.requireLocalPlanner),
+    toolsUsed: plan.toolsUsed,
+    passes: plan.passes,
+    midPressStreamed: Boolean(plan.midPressStreamed),
+  }
+}
+
+async function enqueueMacPlanJob({
+  store,
+  deviceId,
+  sessionId,
+  plan,
+  rawAudioBytes,
+  format,
+  sampleRate,
+  channels,
+  bitsPerSample,
+  transcriptionDurationMs,
+}) {
+  const inputTelemetry = {
+    audioBytes: rawAudioBytes,
+    format: isRawPcmFormat(format) ? 'pcm-s16le' : format,
+    sampleRate,
+    channels,
+    bitsPerSample,
+    storage: 'live_lte',
+    uploadState: 'uploaded',
+    uploadedFormat: isRawPcmFormat(format) ? 'pcm' : format,
+    transcriptionModel: plan.model,
+    transcriptionLanguage: plan.language,
+    transcriptionDurationMs,
+    transcriptionSource: plan.source || 'stt',
+    midPressStreamed: Boolean(plan.midPressStreamed),
+  }
+  const job = createPlanJob({
+    command: plan.text,
+    deviceId,
+    sessionId,
+    inputTelemetry,
+  })
+  const hint = plannerHintFromPlan(plan)
+  if (hint) job.plannerHint = hint
+  await store.createJob(job)
+  return job
+}
 
 /**
  * Prefer multimodal audio→plan when configured; fall back to Whisper STT.
  * Returns a transcript-shaped object plus optional plannerHint for plan jobs.
  */
 async function resolveAudioTranscript({ audioBase64, format, language }) {
-  if (AUDIO_NATIVE_PLANNER && LLM_API_KEY) {
+  // Preferred path: feed audio tokens into Gemini first (transcript + plan).
+  // Falls back to Whisper STT only if Gemini is unavailable or fails.
+  const canPlanNative =
+    AUDIO_NATIVE_PLANNER &&
+    Boolean(
+      process.env.OPENAI_API_KEY ||
+        process.env.OPENAI_KEY ||
+        process.env.LLM_API_KEY ||
+        LLM_API_KEY,
+    )
+  if (canPlanNative) {
     try {
-      const plan = await planFromAudio({ audioBase64, format, language })
+      const plan = await planFromAudio({
+        audioBase64,
+        format,
+        language,
+      })
       const hasPlanPayload =
         (Array.isArray(plan.actions) && plan.actions.length > 0) ||
         Boolean(plan.status) ||
-        Boolean(plan.response)
+        Boolean(plan.response) ||
+        Boolean(plan.requireLocalPlanner)
 
       return {
         text: plan.text,
@@ -103,18 +181,24 @@ async function resolveAudioTranscript({ audioBase64, format, language }) {
         language: plan.language,
         durationMs: plan.durationMs,
         source: plan.source,
+        toolsUsed: plan.toolsUsed,
         plannerHint: hasPlanPayload
           ? {
               status: plan.status,
               response: plan.response,
               actions: plan.actions || [],
-              planner: 'audio-native',
+              planner: plan.requireLocalPlanner
+                ? 'audio-native-delegate'
+                : 'audio-native',
+              requireLocalPlanner: Boolean(plan.requireLocalPlanner),
+              toolsUsed: plan.toolsUsed,
+              passes: plan.passes,
             }
           : undefined,
       }
     } catch (error) {
       console.warn(
-        `[relay] Audio-native planner failed; falling back to STT: ${
+        `[relay] Audio-native OpenAI planner failed; falling back to STT: ${
           error?.message || error
         }`,
       )
@@ -731,29 +815,115 @@ app.post('/v1/transcribe', async (request, response) => {
 })
 
 /*
- * Embedded pendants stream raw audio (preferably live chunked s16le PCM)
- * without Base64 JSON. The relay wraps PCM as WAV for STT/multimodal APIs
- * and, by default, queues the transcript for the Mac bridge.
+ * Mid-press streaming voice command.
+ *
+ * Pendant opens chunked POST during record and pumps PCM while the button is
+ * held. This handler does NOT wait for the full body before talking to
+ * OpenAI: it opens Realtime immediately and appends each PCM chunk as it
+ * arrives, then commits when the body ends.
  *
  * Headers:
  *   Content-Type: audio/pcm | audio/ogg | audio/wav
- *   Transfer-Encoding: chunked (optional; live capture)
+ *   Transfer-Encoding: chunked (live capture)
  *   Authorization: Bearer <RELAY_API_KEY>
- *   X-Device-Id, X-Session-Id, X-Language, X-Sample-Rate (optional)
+ *   X-Device-Id, X-Session-Id, X-Language, X-Sample-Rate
  *   X-Audio-Format: pcm | ogg | wav
  *
- * Add ?dispatch=0 to transcribe without queueing a Mac command.
+ * Add ?dispatch=0 to plan without queueing a Mac command.
  */
-app.post(
-  '/v1/pendant/command',
-  pendantAudioParser,
-  async (request, response) => {
-    try {
-      const rawAudio = Buffer.isBuffer(request.body)
-        ? request.body
-        : Buffer.alloc(0)
+app.post('/v1/pendant/command', async (request, response) => {
+  const format = pendantAudioFormat({
+    headerFormat: request.get('x-audio-format'),
+    contentType: request.get('content-type'),
+  })
+  const sampleRateHeader = Number(
+    request.get('x-sample-rate') || PENDANT_PCM_SAMPLE_RATE,
+  )
+  const sampleRate = Number.isFinite(sampleRateHeader)
+    ? sampleRateHeader
+    : PENDANT_PCM_SAMPLE_RATE
+  const channelsHeader = Number(
+    request.get('x-audio-channels') || PENDANT_PCM_CHANNELS,
+  )
+  const bitsHeader = Number(request.get('x-audio-bits') || PENDANT_PCM_BITS)
+  const channels = Number.isFinite(channelsHeader)
+    ? channelsHeader
+    : PENDANT_PCM_CHANNELS
+  const bitsPerSample = Number.isFinite(bitsHeader)
+    ? bitsHeader
+    : PENDANT_PCM_BITS
+  const language = String(request.get('x-language') || '').trim() || null
+  const deviceId =
+    String(request.get('x-device-id') || 'nrf9160-pendant').trim() ||
+    'nrf9160-pendant'
+  const sessionId = String(request.get('x-session-id') || '').trim() || null
+  const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
 
-      if (!rawAudio.length) {
+  if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: a device may only upload its own commands.',
+    })
+    return
+  }
+
+  const useRealtimeStream =
+    AUDIO_NATIVE_PLANNER &&
+    isRawPcmFormat(format) &&
+    Boolean(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY) &&
+    process.env.OPENAI_VOICE_AGENT !== '0' &&
+    process.env.OPENAI_VOICE_AGENT !== 'false'
+
+  try {
+    const store = await getStore()
+    let job = null
+    let jobEnqueued = false
+    let macBridgeOnline = false
+    const pcmChunks = []
+    let rawByteCount = 0
+    const startedAt = Date.now()
+
+    async function dispatchPlan(plan) {
+      if (!shouldDispatch || jobEnqueued || !plan?.text) return job
+      jobEnqueued = true
+      job = await enqueueMacPlanJob({
+        store,
+        deviceId,
+        sessionId,
+        plan,
+        rawAudioBytes: rawByteCount,
+        format,
+        sampleRate,
+        channels,
+        bitsPerSample,
+        transcriptionDurationMs: plan.durationMs ?? Date.now() - startedAt,
+      })
+      return job
+    }
+
+    let plan
+
+    if (useRealtimeStream) {
+      // --- Mid-press path: Realtime open → append while body streams ---
+      const session = await createStreamingRealtimeSession({
+        inputSampleRate: sampleRate,
+        language,
+        onEarlyPlan: async (earlyPlan) => {
+          // Queue Mac as soon as tools fire (often right after commit).
+          await dispatchPlan(earlyPlan)
+        },
+      })
+
+      for await (const chunk of request) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        if (!buf.length) continue
+        rawByteCount += buf.length
+        pcmChunks.push(buf)
+        session.appendRawPcm(buf)
+      }
+
+      if (rawByteCount === 0) {
+        session.abort(new Error('Raw audio body is required.'))
         response.status(400).json({
           ok: false,
           error: 'Raw audio body is required.',
@@ -761,192 +931,179 @@ app.post(
         return
       }
 
-      const format = pendantAudioFormat({
-        headerFormat: request.get('x-audio-format'),
-        contentType: request.get('content-type'),
-      })
-      const sampleRateHeader = Number(
-        request.get('x-sample-rate') || PENDANT_PCM_SAMPLE_RATE,
-      )
-      const sampleRate = Number.isFinite(sampleRateHeader)
-        ? sampleRateHeader
-        : PENDANT_PCM_SAMPLE_RATE
-      const channelsHeader = Number(
-        request.get('x-audio-channels') || PENDANT_PCM_CHANNELS,
-      )
-      const bitsHeader = Number(request.get('x-audio-bits') || PENDANT_PCM_BITS)
+      plan = await session.finish()
+      await dispatchPlan(plan)
+    } else {
+      // --- Non-PCM / fallback: buffer body then existing planner ---
+      const bodyChunks = []
+      for await (const chunk of request) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        if (buf.length) {
+          bodyChunks.push(buf)
+          rawByteCount += buf.length
+        }
+      }
+      const rawAudio = Buffer.concat(bodyChunks)
+      if (!rawAudio.length) {
+        response.status(400).json({
+          ok: false,
+          error: 'Raw audio body is required.',
+        })
+        return
+      }
+      pcmChunks.push(rawAudio)
+
       const prepared = preparePendantAudioForStt({
         audio: rawAudio,
         format,
         sampleRate,
-        channels: Number.isFinite(channelsHeader)
-          ? channelsHeader
-          : PENDANT_PCM_CHANNELS,
-        bitsPerSample: Number.isFinite(bitsHeader)
-          ? bitsHeader
-          : PENDANT_PCM_BITS,
+        channels,
+        bitsPerSample,
       })
-      const audio = prepared.audio
-      const sttFormat = prepared.format
-      const language = String(request.get('x-language') || '').trim() || null
-      const deviceId =
-        String(request.get('x-device-id') || 'nrf9160-pendant').trim() ||
-        'nrf9160-pendant'
-      if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
-        response.status(403).json({
-          ok: false,
-          error:
-            'Blocked for safety: a device may only upload its own commands.',
-        })
-        return
-      }
-      const sessionId =
-        String(request.get('x-session-id') || '').trim() || null
-      const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
-      // History playback stores WAV (including PCM→WAV) for browser play.
-      const captureFormat = prepared.wrapped ? 'wav' : sttFormat
-      const audioBase64 = audio.toString('base64')
-
       const transcript = await resolveAudioTranscript({
-        audioBase64,
-        format: sttFormat,
+        audioBase64: prepared.audio.toString('base64'),
+        format: prepared.format,
         language,
       })
-      const transcriptionDurationMs = transcript.durationMs
+      plan = {
+        text: transcript.text,
+        model: transcript.model,
+        language: transcript.language,
+        durationMs: transcript.durationMs,
+        source: transcript.source,
+        status: transcript.plannerHint?.status,
+        response: transcript.plannerHint?.response,
+        actions: transcript.plannerHint?.actions || [],
+        requireLocalPlanner: transcript.plannerHint?.requireLocalPlanner,
+        toolsUsed: transcript.toolsUsed,
+        planner: transcript.plannerHint?.planner,
+        midPressStreamed: false,
+      }
+      // Attach full plannerHint fields for enqueue
+      if (transcript.plannerHint) {
+        plan = { ...plan, ...transcript.plannerHint, text: transcript.text }
+      }
+      await dispatchPlan({
+        ...plan,
+        durationMs: plan.durationMs,
+      })
+    }
 
-      let job = null
-      let capture = null
-      let macBridgeOnline = false
-      const store = await getStore()
+    if (!plan?.text) {
+      response.status(400).json({
+        ok: false,
+        error: 'Voice agent returned empty transcript.',
+      })
+      return
+    }
 
-      // Persist a diagnostic capture when the upload fits history limits.
-      // Prefer WAV (including PCM→WAV) so the dashboard can play it back.
-      const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
-      const diagnosticAudioLimit = r2AudioEnabled
-        ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
-        : DIAGNOSTIC_AUDIO_MAX_BYTES
-      if (audio.length > 0 && audio.length <= diagnosticAudioLimit) {
+    try {
+      const devices = await store.listDevices()
+      const macBridge = devices.find((d) => d.deviceType === 'mac_bridge')
+      macBridgeOnline = isDeviceOnline(macBridge)
+    } catch {
+      macBridgeOnline = false
+    }
+
+    const hint = job?.plannerHint || plannerHintFromPlan(plan)
+    response.status(job ? 202 : 200).json({
+      ok: true,
+      text: plan.text,
+      model: plan.model,
+      language: plan.language,
+      durationMs: plan.durationMs ?? Date.now() - startedAt,
+      source: plan.source || 'stt',
+      plannerHint: hint,
+      toolsUsed: plan.toolsUsed,
+      midPressStreamed: Boolean(plan.midPressStreamed),
+      audioBytes: rawByteCount,
+      sttAudioBytes: rawByteCount,
+      format: isRawPcmFormat(format) ? 'pcm' : format,
+      sampleRate,
+      captureId: null,
+      dispatchRequested: shouldDispatch,
+      macBridgeOnline,
+      queued: Boolean(job),
+      job: publicJob(job),
+    })
+
+    // Async diagnostic store (WAV for dashboard).
+    const rawAudio = Buffer.concat(pcmChunks)
+    const wavForHistory = isRawPcmFormat(format)
+      ? pcmS16leToWavBuffer(rawAudio, {
+          sampleRate,
+          channels,
+          bitsPerSample,
+        })
+      : rawAudio
+    const captureFormat = isRawPcmFormat(format) ? 'wav' : format
+    const audioBase64 = wavForHistory.toString('base64')
+    const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
+    const diagnosticAudioLimit = r2AudioEnabled
+      ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
+      : DIAGNOSTIC_AUDIO_MAX_BYTES
+    if (wavForHistory.length > 0 && wavForHistory.length <= diagnosticAudioLimit) {
+      void (async () => {
+        let capture = null
         try {
           capture = createAudioCapture({
             audioBase64,
-            audioBytes: audio.length,
+            audioBytes: wavForHistory.length,
             format: captureFormat,
             language,
-            transcript: transcript.text,
-            transcriptionModel: transcript.model,
+            transcript: plan.text,
+            transcriptionModel: plan.model,
             status: 'completed',
           })
           const persistedAudio = await persistAudioCapture({
             captureId: capture.jobId,
             audioBase64,
-            audioBytes: audio.length,
+            audioBytes: wavForHistory.length,
             format: captureFormat,
             createdAt: capture.createdAt,
-            allowD1Fallback: audio.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
+            allowD1Fallback: wavForHistory.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
           })
-          if (persistedAudio.audioStorage === 'unavailable') {
-            capture = null
-          } else {
-            capture = { ...capture, ...persistedAudio }
-            await store.createJob(capture)
+          if (persistedAudio.audioStorage === 'unavailable') return
+          capture = { ...capture, ...persistedAudio }
+          await store.createJob(capture)
+          if (job?.jobId) {
+            await store.updateJob(capture.jobId, { planJobId: job.jobId })
+            await store.updateJob(job.jobId, {
+              inputTelemetry: {
+                ...(job.inputTelemetry || {}),
+                captureId: capture.jobId,
+              },
+            })
           }
         } catch (error) {
           console.warn(
-            `[relay] Pendant audio capture not stored: ${
+            `[relay] Pendant audio capture not stored (async): ${
               error?.message || error
             }`,
           )
           if (capture) {
             await deleteAudioCaptureObject(capture).catch(() => {})
           }
-          capture = null
         }
-      }
-
-      if (shouldDispatch) {
-        const devices = await store.listDevices()
-        const macBridge = devices.find(
-          (device) => device.deviceType === 'mac_bridge',
-        )
-        macBridgeOnline = isDeviceOnline(macBridge)
-
-        if (macBridgeOnline) {
-          const inputTelemetry = {
-            audioBytes: rawAudio.length,
-            format: prepared.wrapped
-              ? 'pcm-s16le'
-              : format === 'ogg'
-                ? 'ogg-opus'
-                : format,
-            sampleRate,
-            channels: Number.isFinite(channelsHeader)
-              ? channelsHeader
-              : PENDANT_PCM_CHANNELS,
-            bitsPerSample: Number.isFinite(bitsHeader)
-              ? bitsHeader
-              : PENDANT_PCM_BITS,
-            // voiceRunForJob only surfaces microSD/dashboard origins.
-            storage: 'microSD',
-            uploadState: 'uploaded',
-            uploadedFormat: prepared.wrapped
-              ? 'pcm'
-              : format === 'ogg'
-                ? 'ogg'
-                : format,
-            transcriptionModel: transcript.model,
-            transcriptionLanguage: transcript.language,
-            transcriptionDurationMs,
-            transcriptionSource: transcript.source || 'stt',
-            ...(capture ? { captureId: capture.jobId } : {}),
-          }
-          job = createPlanJob({
-            command: transcript.text,
-            deviceId,
-            sessionId,
-            inputTelemetry,
-          })
-          if (transcript.plannerHint) {
-            job.plannerHint = transcript.plannerHint
-          }
-          await store.createJob(job)
-
-          if (capture) {
-            capture =
-              (await store.updateJob(capture.jobId, {
-                planJobId: job.jobId,
-              })) || capture
-          }
-        }
-      }
-
-      response.status(job ? 202 : 200).json({
-        ok: true,
-        text: transcript.text,
-        model: transcript.model,
-        language: transcript.language,
-        durationMs: transcriptionDurationMs,
-        source: transcript.source || 'stt',
-        plannerHint: transcript.plannerHint,
-        audioBytes: rawAudio.length,
-        sttAudioBytes: audio.length,
-        format: prepared.wrapped ? 'pcm' : sttFormat,
-        sampleRate,
-        captureId: capture?.jobId ?? null,
-        dispatchRequested: shouldDispatch,
-        macBridgeOnline,
-        queued: Boolean(job),
-        job: publicJob(job),
-      })
-    } catch (error) {
+      })()
+    }
+  } catch (error) {
+    if (!response.headersSent) {
       response
-        .status(error.message.includes('not configured') ? 503 : 400)
+        .status(error.message?.includes('not configured') ? 503 : 400)
         .json({
           ok: false,
           error: error.message || 'Pendant audio upload failed.',
         })
+    } else {
+      console.warn(
+        `[relay] Pendant command error after response: ${
+          error?.message || error
+        }`,
+      )
     }
-  },
-)
+  }
+})
 
 app.post('/v1/speak', async (request, response) => {
   try {
@@ -1835,15 +1992,15 @@ app.get('/v1/bridge/work', async (request, response) => {
       return
     }
 
-    // A 50 ms loop performed about 500 D1 reads per long-poll request and could
-    // make this one endpoint fail while relay health remained green. Start
-    // responsive, then cap at one inexpensive claim per second.
-    await sleep(
-      bridgeClaimDelay(emptyClaimCount, {
-        minimumMs: BRIDGE_CLAIM_MIN_INTERVAL_MS,
-        maximumMs: BRIDGE_CLAIM_MAX_INTERVAL_MS,
-      }),
-    )
+    // Yield only when the queue is empty. When a job exists, claim returns
+    // immediately (no intentional product delay).
+    const delayMs = bridgeClaimDelay(emptyClaimCount, {
+      minimumMs: BRIDGE_CLAIM_MIN_INTERVAL_MS,
+      maximumMs: BRIDGE_CLAIM_MAX_INTERVAL_MS,
+    })
+    if (delayMs > 0) {
+      await sleep(delayMs)
+    }
     emptyClaimCount += 1
   }
 

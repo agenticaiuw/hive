@@ -31,7 +31,9 @@ export const GET: RequestHandler = async ({ locals, url }) => {
       return Response.json(
         {
           ok: false,
-          error: payload.error || `Memory refresh failed (${response.status}).`,
+          error:
+            sanitizeText(payload.error, 300) ||
+            `Memory refresh failed (${response.status}).`,
         },
         { status: response.status, headers: NO_STORE_HEADERS },
       );
@@ -65,7 +67,18 @@ export const GET: RequestHandler = async ({ locals, url }) => {
     return Response.json(
       {
         ok: Boolean(payload.ok),
-        counts: payload.counts ?? null,
+        counts:
+          payload.counts && typeof payload.counts === "object"
+            ? {
+                entities: Number(payload.counts.entities || 0),
+                relations: Number(payload.counts.relations || 0),
+                sessions: Number(payload.counts.sessions || 0),
+                turns: Number(payload.counts.turns || 0),
+                matchedEntities: Number(payload.counts.matchedEntities || 0),
+                matchedRelations: Number(payload.counts.matchedRelations || 0),
+                matchedSessions: Number(payload.counts.matchedSessions || 0),
+              }
+            : null,
         memory: { entities },
         sessions,
         observedAt: safeTimestamp(payload.observedAt),
@@ -78,7 +91,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
         ok: false,
         error:
           error instanceof Error
-            ? error.message
+            ? sanitizeText(error.message, 300)
             : "Unable to reach memory.",
       },
       { status: 502, headers: NO_STORE_HEADERS },

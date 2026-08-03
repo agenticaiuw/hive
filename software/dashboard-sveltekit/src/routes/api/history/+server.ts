@@ -2,9 +2,11 @@ import type { RequestHandler } from "./$types";
 import {
   NO_STORE_HEADERS,
   missingRelayCredential,
+  publicHistoryRetention,
   relayClient,
   safeTimestamp,
   sanitizeText,
+  strictIdentifier,
 } from "$lib/server/relay";
 
 export const prerender = false;
@@ -19,6 +21,7 @@ function publicHistoryEntry(value: unknown) {
 
   return {
     pipelineId: sanitizeText(entry.pipelineId, 160),
+    sessionId: strictIdentifier(entry.sessionId) || null,
     kind: sanitizeText(entry.kind, 80),
     command: sanitizeText(entry.command, 300),
     origin: sanitizeText(entry.origin, 80),
@@ -76,7 +79,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
         {
           ok: false,
           error:
-            payload.error ||
+            sanitizeText(payload.error, 300) ||
             `History refresh failed (${response.status}).`,
         },
         { status: response.status, headers: NO_STORE_HEADERS },
@@ -93,7 +96,9 @@ export const GET: RequestHandler = async ({ locals, url }) => {
         hasMore: Boolean(payload.hasMore),
         limit: Number(payload.limit || limit),
         query: sanitizeText(payload.query, 120),
-        retention: payload.retention ?? null,
+        retention: payload.retention
+          ? publicHistoryRetention(payload.retention)
+          : null,
         observedAt: safeTimestamp(payload.observedAt),
       },
       { headers: NO_STORE_HEADERS },
@@ -104,7 +109,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
         ok: false,
         error:
           error instanceof Error
-            ? error.message
+            ? sanitizeText(error.message, 300)
             : "Unable to reach the history feed.",
       },
       { status: 502, headers: NO_STORE_HEADERS },

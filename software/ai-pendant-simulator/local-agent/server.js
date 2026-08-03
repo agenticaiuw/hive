@@ -94,6 +94,7 @@ import {
   ensurePermissions,
   formatPermissionHelp,
 } from './macos/permissions.js'
+import { isPublicPath, publicHealthPayload } from './httpPolicy.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -105,19 +106,9 @@ warmMachineContext()
 app.use(cors())
 app.use(express.json({ limit: '2mb' }))
 
-app.get('/health', async (_request, response) => {
-  response.json(await buildHealthPayload())
+app.get('/health', (_request, response) => {
+  response.json(publicHealthPayload())
 })
-
-function isPublicPath(requestPath) {
-  if (requestPath === '/health') return true
-  if (requestPath === '/dashboard' || requestPath.startsWith('/dashboard/')) {
-    return true
-  }
-  if (requestPath.startsWith('/assets/')) return true
-  if (requestPath === '/favicon.svg' || requestPath === '/favicon.ico') return true
-  return false
-}
 
 app.use((request, response, next) => {
   if (isPublicPath(request.path)) {

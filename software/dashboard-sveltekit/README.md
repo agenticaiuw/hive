@@ -1,11 +1,8 @@
 # AI Pendant Dashboard (SvelteKit)
 
-SvelteKit port of `software/ai-pendant-dashboard`, the app-authenticated
-dashboard for the AI Pendant hardware and cloud pipeline. Same UI, same auth,
-same relay contract — Svelte 5 runes instead of React, `@sveltejs/adapter-cloudflare`
-instead of the hand-written Worker entry.
-
-The React app is still the live deployment. Nothing here has been deployed.
+App-authenticated Mission Control dashboard for the AI Pendant hardware and
+cloud pipeline. Svelte 5 + `@sveltejs/adapter-cloudflare`, deployed as the
+`ai-pendant-dashboard` Worker.
 
 It shows:
 
@@ -36,10 +33,12 @@ characters. Authentication fails closed if either value is missing or weak.
 
 ## Runtime environment
 
-Bindings arrive per request through `event.platform.env` and are stashed on
-`event.locals.runtimeEnv`. When there is no platform at all (`node --test`, or a
-plain Node host) the server falls back to the dynamic private env. Either way,
-if there is no `RELAY` service binding the relay helpers use
+Bindings arrive per request through `event.platform.env` and are merged with
+SvelteKit's server-only dynamic private env before being stashed on
+`event.locals.runtimeEnv`. Worker bindings take precedence. Vite reads the one
+repo-root `.env`; the shared `PAIRING_CODE` / `SESSION_SECRET` names are mapped
+server-side to the dashboard auth names, and no credential is copied into a
+`VITE_*` variable. If there is no `RELAY` service binding, the relay helpers use
 `fetch(RELAY_URL + path)`.
 
 ## Local development
@@ -52,8 +51,8 @@ npm run dev
 `vite dev` emulates the Worker bindings through Wrangler against the `local`
 environment in `wrangler.jsonc` — same vars, no service binding, because the
 remote relay Worker cannot be stood up locally. Put the values described in
-`.env.example` in a `.env` (or `.dev.vars`) file; Wrangler loads them into
-`platform.env`.
+the repository's `.env.example` in the single repo-root `.env`; Vite loads them
+only into the server environment and the relay falls back to `RELAY_URL`.
 
 ## Deploy
 

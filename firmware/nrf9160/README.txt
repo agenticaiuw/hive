@@ -3,14 +3,19 @@ Agentic pendant firmware for the nRF9160 DK
 Audio path
 ----------
 
-1. Button 1 starts a microphone recording; LED1 blinks.
-2. Button 1 stops the recording; LED1 turns off.
-3. The nRF9160 resamples 15,625 Hz PCM to 16 kHz and encodes 20 ms frames as
-   fixed-point, restricted-SILK Opus at 16 kb/s in an Ogg container.
-4. It uploads the Ogg recording over LTE for transcription and dispatches the
-   resulting command to the Mac agent.
-5. The Mac synthesizes only the agent's response, encodes it as 24 kHz Ogg
-   Opus, and returns it through the relay. The nRF9160 decodes it to signed
+1. While idle, firmware prewarms TLS + HTTP chunked headers to the relay so
+   Button 1 never waits on a handshake.
+2. Button 1 starts a microphone recording immediately (LED blinks on press;
+   no release wait).
+3. Button 1 stops the recording (after ≥1 s); LED1 turns off.
+4. During capture, raw 15,625 Hz mono s16le PCM is written to microSD and
+   pushed into a RAM ring. Between I2S DMA blocks, a few milliseconds of
+   non-blocking LTE sends drain the ring as HTTP/1.1 chunked body. If the
+   radio falls behind, the stream aborts and a full SD upload runs after stop.
+4. The relay wraps PCM as WAV for STT/multimodal plan and dispatches the
+   command to the Mac agent.
+5. The Mac synthesizes the agent's response, encodes it as 24 kHz Ogg Opus,
+   and returns it through the relay. The nRF9160 decodes it to signed
    16-bit mono PCM on the microSD card.
 6. Repeating pairs of short LED flashes mean the response is ready; they
    continue until the playback press so the indication cannot be missed.
@@ -18,8 +23,12 @@ Audio path
    it plays. The ESP32 is responsible for Bluetooth A2DP output.
 
 Production recordings stop on the second button press, with a 30-second safety
-limit. A successful microSD write is mandatory; the firmware will not upload a
-stale recording if the card fails.
+limit. A successful microSD write is still kept as a local backup; the live
+stream is preferred for latency.
+
+The modem RF stays up during capture so bits can leave the device while the
+user is still speaking. Full-file FAT preallocation and RF suspend/resume
+were removed from the voice path to cut multi-second start delays.
 
 LED diagnostics:
 
@@ -71,7 +80,7 @@ the data net does not float while the mic tri-states the right slot.
 Keep the mic leads short and away from the D10-D13 microSD wires.  Capture
 is 24-bit left-slot at 31,250 Hz, averaged in pairs to a 15,625 Hz mono
 16-bit upload with a DC-blocking filter and 4x (+12 dB) digital gain.
-Audio streams to the microSD card in 4 KB chunks while recording (the SD
+Audio streams to the microSD card in 1 KiB chunks while recording (the SD
 activity LED flickers during capture); recordings can run up to 30 s and
 stop on the second button press after at least one second.
 
@@ -98,73 +107,42 @@ Opus implementation
 -------------------
 
 The firmware vendors Xiph.Org libopus 1.6.1 under third_party/opus and builds
-the fixed-point API only. The codec arena shares the microphone's 40 KiB RX
-slab because capture, encode, and reply decode are sequential (see the caveat
-at the end of the next section - that sharing does NOT make the buffer free
-during encode). The resulting application currently uses about 327 KiB of the
-576 KiB application flash region and 143816 B of 154264 B RAM.
+the fixed-point API only. Encoder/decoder state and Ogg payload use a dedicated
+30 KiB workspace. Temporary SILK/CELT allocations use a separate 28 KiB
+NONTHREADSAFE_PSEUDOSTACK protected by a canary and reported high-water scan.
+The microphone has its own six-block RX slab so a bounded live-codec stall does
+not overwrite or alias capture buffers. The nrf9160/ns build currently uses
+339788 B of 576 KiB application flash and 147192 B of the 154264 B application
+RAM region, leaving 7072 B static RAM headroom.
 
 Main stack sizing (do not shrink without measuring)
 ---------------------------------------------------
 
-CONFIG_MAIN_STACK_SIZE is 32768.  It used to be 24576, and that was wrong: the
-board took a UsageFault ("Stack overflow (context area not valid)") inside
-silk_pitch_analysis_core on the second of the two stage-3 VLA allocations, so
-every recording was captured to microSD and then lost before it could be
-uploaded.
+CONFIG_MAIN_STACK_SIZE is 20480. libopus is compiled with
+NONTHREADSAFE_PSEUDOSTACK, not VAR_ARRAYS, so codec ALLOC() scratch does not
+consume the calling thread's C stack. GLOBAL_STACK_SIZE in CMakeLists.txt must
+exactly match PENDANT_OPUS_SCRATCH_BYTES in src/audio_opus.h.
 
-Two facts drive the number:
+Do not shrink either allocation from a quiet-room measurement. Pitch analysis
+takes its deepest path on voiced input. Every completed live encode, offline
+encode, and reply decode reports codec scratch touched/capacity/guard state;
+main also reports its Zephyr stack high-water mark. CONFIG_INIT_STACKS,
+CONFIG_HW_STACK_PROTECTION, and CONFIG_BUILTIN_STACK_GUARD remain enabled so
+these measurements and faults stay actionable.
 
-  * libopus is compiled with -DVAR_ARRAYS (CMakeLists.txt), so celt/stack_alloc.h
-    maps every ALLOC() to a C99 VLA.  All codec scratch memory therefore lives
-    on the *calling* thread's stack, and pendant_opus_encode_file() is called
-    directly from main() - there is no codec thread and no workqueue involved.
-  * The old 24 KiB figure came from GCC -fstack-usage printing "10752 dynamic"
-    for silk_encode_frame_FIX.  The bare "dynamic" qualifier means the printed
-    number EXCLUDES the VLAs, i.e. it omitted exactly the allocations that
-    overflowed, and it counted none of the nested analysis routines below it.
+The live encoder is optional acceleration, never the source of truth. Its feed
+calls are bounded and timed. If cumulative codec time falls more than two mic
+RX blocks behind represented audio, firmware closes the partial Ogg file and
+continues PCM-only; the normal post-release path then performs offline encoding.
 
-Measured on hardware, main thread, encoding a strongly voiced signal:
+UART diagnostics
+----------------
 
-  peak 25396 B of 32768   ->  7372 B free (29% headroom over peak)
+The current build uses the 115200-baud UART console and has no SEGGER RTT
+control block. Run scripts/auto_capture_diag.sh to resolve the Nordic DK console
+port and append output to diagnostics/pendant-uart.log. Override auto-detection
+with PENDANT_UART_PORT and the log path with PENDANT_UART_LOG.
 
-25396 is 820 B past the old 24576 budget, which is precisely the observed
-failure.  The frames behind it are silk_encode_frame_FIX ~13.4 KiB +
-silk_find_pitch_lags_FIX ~1.0 KiB + silk_pitch_analysis_core ~8.7 KiB, under
-~2.5 KiB of opus_encode / silk_Encode / pendant_opus_encode_file / main.
-
-MEASURE WITH A VOICED SIGNAL OR THE NUMBER LIES.  The two 1920-byte stage-3
-VLAs in silk_pitch_analysis_core sit behind the "a pitch candidate was found"
-branch, so an unvoiced input returns early and never allocates them.  A silent
-room-noise capture peaks at only 23416 B - it would have fit inside the old,
-broken budget and "proved" a stack that in fact crashes on speech.
-src/main.c has PENDANT_BOOT_ENCODE_SELFTEST for this: set it to 1 and the
-firmware writes a 125 Hz sawtooth to the card at boot, encodes it, and prints
-the high-water mark.  It needs no microphone, no button and no network.  Leave
-it at 0; turn it on after any change to CONFIG_MAIN_STACK_SIZE, the libopus
-complexity setting, or OPUS_FRAME_MS.
-
-CONFIG_INIT_STACKS=y is enabled so main() can print its own high-water mark
-after every encode (report_main_stack_headroom() in src/main.c).  It costs no
-RAM - only a boot-time 0xAA fill - and it is the only way to keep this number
-honest.  CONFIG_HW_STACK_PROTECTION/CONFIG_BUILTIN_STACK_GUARD stay on: the
-ARMv8-M PSPLIM guard is what produced the precise diagnosis above.
-
-RAM cost: exactly the 8192 B of stack, and nothing else - CONFIG_INIT_STACKS
-and CONFIG_EXTRA_EXCEPTION_INFO are both free in static RAM.  Static RAM went
-135624 -> 143816 B of the 154264 B region, leaving 10448 B free (was 18640).
-Nothing in this firmware allocates dynamically beyond the 4 KiB
-system heap, so that headroom was previously unused.  The obvious place to look
-for the bytes back is the 40 KiB audio_workspace, and it does not work: during
-encode that buffer is NOT idle, it holds the ~22.9 KiB OpusEncoder plus the
-4 KiB Ogg page payload, so only ~13.5 KiB of it is spare - half of what the
-codec's stack needs.  The genuinely idle memory during encode is the 16 KiB
-I2S playback slab plus the 4 KiB mic staging buffer; reclaiming it would mean
-moving the codec onto its own thread with a stack unioned over both, which buys
-RAM that nothing currently wants at the cost of destabilising two paths that
-work.  Not done deliberately.
-
-The codec arena shares the microphone's 40 KiB RX slab because capture, encode,
-and reply decode are sequential.  Note the limit of that sharing: during encode
-the arena is NOT free, it holds the ~22.9 KiB OpusEncoder plus the 4 KiB Ogg
-page payload, so it cannot also host codec scratch or a codec stack.
+For an acoustic end-to-end diagnostic, set PENDANT_UART_TRIGGER_AUDIO to a WAV
+file. The capture script plays it once when the UART reaches the configurable
+PENDANT_UART_TRIGGER_MARKER (default: "I2S mic preallocated").
