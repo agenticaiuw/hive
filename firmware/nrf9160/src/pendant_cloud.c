@@ -29,6 +29,8 @@
 /* Owned by main.c; lets the reply poll react to Button 1. */
 extern struct k_sem button_press_sem;
 
+volatile bool pendant_cloud_reply_first_batch;
+
 /* Periodic attach diagnostics while lte_lc_connect() blocks (up to
  * CONFIG_LTE_NETWORK_TIMEOUT). +CEREG: 0 not-reg, 1 home, 2 searching,
  * 3 denied, 5 roaming. %XSIM: 1 = SIM OK.
@@ -1093,6 +1095,7 @@ struct pcm_writer {
 	uint8_t output[FILE_READ_SIZE];
 	size_t output_length;
 	size_t written_bytes;
+	bool first_batch_notified;
 };
 
 struct http_body_reader {
@@ -1118,6 +1121,17 @@ static int pcm_writer_flush(struct pcm_writer *writer)
 	}
 	writer->written_bytes += writer->output_length;
 	writer->output_length = 0U;
+
+	/*
+	 * First speech batch on device → solid LED (main hook). Never autoplay.
+	 * User presses button 1 after this to start Bose/I2S playback.
+	 */
+	if (!writer->first_batch_notified &&
+	    writer->written_bytes >= PENDANT_REPLY_FIRST_BATCH_BYTES) {
+		writer->first_batch_notified = true;
+		pendant_cloud_reply_first_batch = true;
+		pendant_notify_reply_first_batch();
+	}
 	return 0;
 }
 
@@ -1425,10 +1439,18 @@ static int receive_agent_job_speech(int fd, const char *pcm_path)
 		return -EBADMSG;
 	}
 
+	/* Tiny replies: still raise LED if body finished under threshold. */
+	if (!writer.first_batch_notified && writer.written_bytes > 0U) {
+		writer.first_batch_notified = true;
+		pendant_cloud_reply_first_batch = true;
+		pendant_notify_reply_first_batch();
+	}
+
 	pendant_cloud_reply_pcm_bytes = (uint32_t)writer.written_bytes;
-	printk("Downloaded %u bytes of Mac agent speech (%s)\n",
+	printk("Downloaded %u bytes of Mac agent speech (%s)%s\n",
 	       pendant_cloud_reply_pcm_bytes,
-	       is_opus ? "Ogg Opus" : "PCM fallback");
+	       is_opus ? "Ogg Opus" : "PCM fallback",
+	       pendant_cloud_reply_first_batch ? " [LED already solid]" : "");
 	return 0;
 }
 
@@ -1879,6 +1901,7 @@ int pendant_cloud_wait_for_agent_reply(const char *pcm_path)
 	pendant_cloud_reply_result = -EAGAIN;
 	pendant_cloud_reply_pcm_bytes = 0U;
 	pendant_cloud_reply_format = PENDANT_CLOUD_AUDIO_UNKNOWN;
+	pendant_cloud_reply_first_batch = false;
 	if (!cloud_initialized || mac_job_id[0] == '\0') {
 		pendant_cloud_reply_result = -ENODATA;
 		return pendant_cloud_reply_result;

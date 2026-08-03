@@ -59,6 +59,15 @@ int pendant_cloud_report_playback_started(void);
 int pendant_cloud_report_playback_result(int playback_result);
 int pendant_cloud_set_job_id_for_diagnostic(const char *job_id);
 
+/*
+ * First speech bytes written to microSD (not autoplay). Main raises solid LED
+ * so the user can press button 1 while the rest of the reply is still arriving.
+ */
+#define PENDANT_REPLY_FIRST_BATCH_BYTES 2048U
+extern volatile bool pendant_cloud_reply_first_batch;
+/* Implemented in main.c — turn LED solid; never start playback here. */
+void pendant_notify_reply_first_batch(void);
+
 extern volatile int pendant_cloud_init_result;
 extern volatile int pendant_cloud_transcribe_result;
 extern volatile int pendant_cloud_dispatch_result;

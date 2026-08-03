@@ -398,15 +398,27 @@ static void flash_led(unsigned int count, int on_ms, int off_ms)
 }
 
 /*
- * Speech ready for the user — never autoplay.
- * Solid LED = first speech is buffered and ready. Button 1 starts playback
- * to the ESP32/Bose path; remaining audio is already on-device (full file
- * today; progressive stream is the next step on the download path).
+ * Solid LED = first speech batch on device (may still be downloading more).
+ * Never autoplay — button 1 starts I2S → ESP32 → Bose.
  */
-static void wait_for_reply_playback_press(void)
+void pendant_notify_reply_first_batch(void)
 {
 	gpio_pin_set_dt(&led, 1);
-	printk("Reply ready — solid LED; press button 1 to play (no autoplay)\n");
+	printk("First speech batch ready — solid LED; press button 1 to play "
+	       "(no autoplay; download may still be finishing)\n");
+}
+
+static void wait_for_reply_playback_press(void)
+{
+	/* LED may already be solid from pendant_notify_reply_first_batch(). */
+	if (!pendant_cloud_reply_first_batch) {
+		gpio_pin_set_dt(&led, 1);
+		printk("Reply complete — solid LED; press button 1 to play "
+		       "(no autoplay)\n");
+	} else {
+		printk("Waiting for play press (LED already solid from first "
+		       "speech batch)\n");
+	}
 	wait_for_button_press();
 }
 
@@ -1552,13 +1564,12 @@ int main(void)
 
 		audio_cycle_phase = 4U;
 		/*
-		 * Waiting for agent speech (LED off during TLS polls).
-		 * When speech is fully on-device: solid LED + button 1 to play.
-		 * Never autoplay.
+		 * Waiting for agent speech: LED off until first batch arrives,
+		 * then solid (pendant_notify_reply_first_batch). Never autoplay.
 		 */
 		gpio_pin_set_dt(&led, 0);
-		printk("Waiting for agent speech (no autoplay; solid LED "
-		       "when ready to press play)\n");
+		printk("Waiting for agent speech (LED solid on first batch; "
+		       "press button 1 to play — no autoplay)\n");
 		error = pendant_cloud_wait_for_agent_reply(
 			PENDANT_CLOUD_REPLY_AUDIO_PATH);
 		if (error == -ECANCELED) {
