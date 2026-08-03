@@ -176,22 +176,25 @@ Without encode streaming + TLS reuse, **&lt; 5 s is not reachable** even with a 
 - [x] **`LLM_AUDIO_MODEL` pilot** (`audioPlan.js`) with Whisper fallback  
 - [x] **Bridge skips local LLM** when `plannerHint` is audio-native  
 - [x] **Canned TTS PCM cache** for short fixed phrases  
-- [ ] Stream Opus encode *during* capture (needs RX slab shrink; next firmware pass)  
+- [x] **Stream Opus encode during capture** (`pendant_opus_stream_*`)  
+- [x] **TLS pre-warm thread** while user is still speaking  
+- [x] **Instant `open X` plan** on Mac (no LLM) for simple app launches  
 - [ ] Dashboard stage timers always show `meta.durationMs`  
 
-### Expected after flash + deploy (warm modem, short command)
+### Expected after flash + deploy (warm modem, “open Outlook”)
 
 | Stage | Before | After (est.) |
 |-------|-------:|-------------:|
-| Encode | ~5 s (cplx 3) | ~2–3 s (cplx 1) |
-| TLS ×3 | ~6–15 s | **~2–3 s ×1** |
-| Whisper | ~11.6 s | **~2–4 s multimodal** (or Whisper fallback) |
-| Mac plan | ~1–5 s | **~0 s** if audio-native actions present |
-| Execute | ~0.2 s | ~0.2 s |
-| TTS | ~1.2 s | **~0 s cache hit** / ~1.2 s miss |
-| **Total** | **~25–34 s** | **~5–10 s** first press; **~3–6 s** warm session + cache |
+| Encode after button | ~5 s | **~0.05–0.2 s** (finalize only; encoded live) |
+| TLS connect | ~2–10 s ×3 | **~0 s** if pre-warm finished; else ~1–2 s once |
+| Upload body | ~0.3 s | ~0.3 s |
+| STT (Whisper/multimodal) | ~11.6 s | **~1.5–3 s** (goal; provider-dependent) |
+| Mac plan | ~1–5 s | **~0 s** (`instant-open` or audio-native) |
+| Execute open_app | ~0.2 s | ~0.2 s |
+| TTS (does not block app open) | ~1.2 s | cache hit ~0; runs after execute |
+| **Button → Outlook open** | **~25–34 s** | **~2–4 s** target when STT is fast |
 
-True **&lt; 3 s** still wants streaming encode during speech (encode hidden under recording).
+**Sub-3 s is realistic** when: live encode works, TLS pre-warm hits, STT ≤ ~2 s, and instant-open skips the LLM. If STT alone is 4 s, the floor is ~4.5 s until a faster STT path ships.
 
 ## Acceptance criteria
 

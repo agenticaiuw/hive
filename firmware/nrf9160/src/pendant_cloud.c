@@ -103,6 +103,14 @@ static uint8_t http_stream_buffer[HTTP_STREAM_READ_SIZE];
 static bool cloud_initialized;
 static bool radio_suspended;
 
+/* Pre-opened TLS socket prepared while the user is still speaking. */
+static int prewarm_fd = -1;
+static bool prewarm_running;
+static K_MUTEX_DEFINE(prewarm_mutex);
+static K_THREAD_STACK_DEFINE(prewarm_stack, 4096);
+static struct k_thread prewarm_thread;
+static k_tid_t prewarm_tid;
+
 volatile int pendant_cloud_init_result = -EAGAIN;
 volatile int pendant_cloud_transcribe_result = -EAGAIN;
 volatile int pendant_cloud_dispatch_result = -EAGAIN;
@@ -221,7 +229,88 @@ static int configure_tls_socket(int fd)
 	return 0;
 }
 
+static int open_relay_socket_fresh(void);
+
+static int take_prewarm_fd(void)
+{
+	int fd = -1;
+
+	k_mutex_lock(&prewarm_mutex, K_FOREVER);
+	if (prewarm_fd >= 0) {
+		fd = prewarm_fd;
+		prewarm_fd = -1;
+		printk("LAT tls_prewarm_hit=1\n");
+	}
+	k_mutex_unlock(&prewarm_mutex);
+	return fd;
+}
+
+static void prewarm_thread_entry(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	int fd = open_relay_socket_fresh();
+
+	k_mutex_lock(&prewarm_mutex, K_FOREVER);
+	if (prewarm_fd >= 0) {
+		close(prewarm_fd);
+		prewarm_fd = -1;
+	}
+	if (fd >= 0) {
+		prewarm_fd = fd;
+		printk("LAT tls_prewarm_ready=1\n");
+	} else {
+		printk("LAT tls_prewarm_ready=0 err=%d\n", fd);
+	}
+	prewarm_running = false;
+	k_mutex_unlock(&prewarm_mutex);
+}
+
+void pendant_cloud_prewarm_start(void)
+{
+	if (!cloud_initialized) {
+		return;
+	}
+
+	k_mutex_lock(&prewarm_mutex, K_FOREVER);
+	if (prewarm_running || prewarm_fd >= 0) {
+		k_mutex_unlock(&prewarm_mutex);
+		return;
+	}
+	prewarm_running = true;
+	k_mutex_unlock(&prewarm_mutex);
+
+	prewarm_tid = k_thread_create(
+		&prewarm_thread, prewarm_stack,
+		K_THREAD_STACK_SIZEOF(prewarm_stack), prewarm_thread_entry,
+		NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
+	k_thread_name_set(prewarm_tid, "tls_prewarm");
+}
+
+void pendant_cloud_prewarm_cancel(void)
+{
+	k_mutex_lock(&prewarm_mutex, K_FOREVER);
+	if (prewarm_fd >= 0) {
+		close(prewarm_fd);
+		prewarm_fd = -1;
+	}
+	/* Running thread will exit and not publish if we clear the slot. */
+	k_mutex_unlock(&prewarm_mutex);
+}
+
 static int open_relay_socket(void)
+{
+	int warmed = take_prewarm_fd();
+
+	if (warmed >= 0) {
+		return warmed;
+	}
+	return open_relay_socket_fresh();
+}
+
+static int open_relay_socket_fresh(void)
 {
 	struct addrinfo hints = {
 		.ai_family = AF_INET,

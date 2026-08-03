@@ -57,14 +57,13 @@
 #define MIC_RX_BLOCK_FRAMES 640U
 #define MIC_RX_BLOCK_SIZE (MIC_RX_BLOCK_FRAMES * sizeof(int32_t))
 /*
- * Audio streams to the microSD card during capture.  The generous RX
- * slab (16 blocks = ~330 ms) rides out FAT write-latency spikes, and
- * processed audio is written in staging-buffer chunks so the card sees
- * few, large writes instead of one per block.
+ * RX slab is a *dedicated* buffer now so the 40 KiB Opus workspace can hold
+ * the live encoder while the user is still speaking.  6 blocks ≈ 123 ms of
+ * RX slack — enough for SD/Opus stalls without the old 330 ms pile-up.
  */
-#define MIC_RX_BLOCK_COUNT 16U
+#define MIC_RX_BLOCK_COUNT 4U
 #define MIC_OUT_BLOCK_FRAMES (MIC_RX_BLOCK_FRAMES / MIC_DECIMATION)
-#define MIC_STAGE_FRAMES 2048U
+#define MIC_STAGE_FRAMES 512U
 #define MAX_RECORD_SECONDS 30U
 #define MAX_RECORD_SAMPLE_COUNT (SAMPLE_RATE * MAX_RECORD_SECONDS)
 #define AUTORECORD_TEST_SECONDS 5U
@@ -108,8 +107,9 @@
 #define I2S_CHANNEL_COUNT 2U
 #define I2S_BLOCK_SIZE \
 	(I2S_BLOCK_FRAMES * I2S_CHANNEL_COUNT * sizeof(int16_t))
-#define I2S_BLOCK_COUNT 16U
-#define I2S_PREFILL_BLOCKS 12U
+/* Cut from 16 to free RAM for live Opus + dedicated mic RX. */
+#define I2S_BLOCK_COUNT 4U
+#define I2S_PREFILL_BLOCKS 3U
 #define I2S_SYNC_PATTERN_BLOCKS 2U
 #define I2S_SYNC_END_FRAMES 16U
 #define I2S_STREAM_SYNC_A 0x2468
@@ -169,17 +169,18 @@ static struct fs_mount_t sd_mount = {
 K_SEM_DEFINE(button_press_sem, 0, 1);
 
 /*
- * The microphone RX slab and Opus arena share one allocation. Recording,
- * encoding, and reply decoding are strictly sequential. Reinitialize the slab
- * before every capture because the codec overwrites its in-buffer free list.
+ * Mic RX slab is dedicated. Opus workspace is free for live encode-during-
+ * capture (and later for reply decode). Re-init the slab every capture.
  */
 static struct k_mem_slab mic_rx_slab;
+static uint8_t mic_rx_storage[MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT]
+	__aligned(4);
 static uint8_t audio_workspace[PENDANT_OPUS_WORKSPACE_BYTES] __aligned(4);
-BUILD_ASSERT(MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT <=
-		     sizeof(audio_workspace),
-	     "Opus arena must also hold the microphone RX slab");
+BUILD_ASSERT(sizeof(mic_rx_storage) ==
+		     MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT,
+	     "mic RX storage size mismatch");
 K_MEM_SLAB_DEFINE_STATIC(i2s_slab, I2S_BLOCK_SIZE, I2S_BLOCK_COUNT, 4);
-/* Processed audio staged here between microSD writes (4 KB chunks). */
+/* Processed audio staged between microSD writes (~2 KB chunks). */
 static int16_t mic_stage_samples[MIC_STAGE_FRAMES] __aligned(4);
 
 /*
@@ -750,7 +751,7 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	if (!sd_ready || sample_limit == 0U) {
 		return -ENODEV;
 	}
-	error = k_mem_slab_init(&mic_rx_slab, audio_workspace,
+	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
 				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
 	if (error != 0) {
 		return error;
@@ -772,6 +773,21 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		recording_on_sd = false;
 		return error;
 	}
+
+	/*
+	 * Live Opus encode while recording. Uses the full audio_workspace so
+	 * button-release does not pay another multi-second encode tax.
+	 */
+	error = pendant_opus_stream_begin(SD_OPUS_PATH, SAMPLE_RATE,
+					  audio_workspace,
+					  sizeof(audio_workspace));
+	if (error != 0) {
+		printk("Opus live stream begin failed: %d (will encode after)\n",
+		       error);
+	}
+
+	/* Open TLS to the relay while the user is still speaking. */
+	pendant_cloud_prewarm_start();
 
 	recorded_samples = 0U;
 	recorded_peak = 0U;
@@ -917,6 +933,19 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 				live_write_error = write_pcm_frames(
 					&file, mic_stage_samples,
 					MIC_STAGE_FRAMES);
+				if (live_write_error == 0 &&
+				    pendant_opus_stream_active()) {
+					live_write_error =
+						pendant_opus_stream_feed(
+							mic_stage_samples,
+							MIC_STAGE_FRAMES);
+					if (live_write_error != 0) {
+						printk("Opus live feed failed: %d\n",
+						       live_write_error);
+						pendant_opus_stream_abort();
+						live_write_error = 0; /* PCM still OK */
+					}
+				}
 				stage_frames = 0U;
 				++sd_flush_count;
 				if (live_write_error != 0) {
@@ -1006,6 +1035,15 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	int write_error = stage_frames > 0U
 		? write_pcm_frames(&file, mic_stage_samples, stage_frames)
 		: 0;
+	if (write_error == 0 && stage_frames > 0U &&
+	    pendant_opus_stream_active()) {
+		int feed_error =
+			pendant_opus_stream_feed(mic_stage_samples, stage_frames);
+		if (feed_error != 0) {
+			printk("Opus live final feed failed: %d\n", feed_error);
+			pendant_opus_stream_abort();
+		}
+	}
 	int sync_error = write_error == 0 ? fs_sync(&file) : write_error;
 	int close_error = fs_close(&file);
 
@@ -1021,14 +1059,16 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		? 0U
 		: integer_square_root(square_sum / recorded_samples);
 	printk("I2S mic capture totals: samples=%u mean=%u peak=%u rms=%u "
-	       "min=%d max=%d zero_crossings=%u sd_flushes_live=%u\n",
+	       "min=%d max=%d zero_crossings=%u sd_flushes_live=%u "
+	       "opus_live=%d\n",
 	       recorded_samples,
 	       recorded_samples == 0U
 		       ? 0U
 		       : (uint32_t)(recording_absolute_sum /
 				    recorded_samples),
 	       recorded_peak, rms, minimum_sample, maximum_sample,
-	       zero_crossings, sd_flush_count);
+	       zero_crossings, sd_flush_count,
+	       pendant_opus_stream_active() ? 1 : 0);
 	return error;
 }
 
@@ -1401,16 +1441,28 @@ int main(void)
 		struct pendant_opus_stats encode_stats = { 0 };
 		int64_t lat_press_started = k_uptime_get();
 
-		error = pendant_opus_encode_file(
-			SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
-			audio_workspace, sizeof(audio_workspace), &encode_stats);
-		printk("LAT encode_ms=%lld pcm_in=%u ogg_out=%u packets=%u\n",
-		       k_uptime_get() - lat_press_started,
-		       encode_stats.input_bytes, encode_stats.output_bytes,
-		       encode_stats.packets);
+		if (pendant_opus_stream_active()) {
+			error = pendant_opus_stream_end(&encode_stats);
+			printk("LAT encode_ms=%lld (live) pcm_in=%u ogg_out=%u "
+			       "packets=%u\n",
+			       k_uptime_get() - lat_press_started,
+			       encode_stats.input_bytes,
+			       encode_stats.output_bytes, encode_stats.packets);
+		} else {
+			error = pendant_opus_encode_file(
+				SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
+				audio_workspace, sizeof(audio_workspace),
+				&encode_stats);
+			printk("LAT encode_ms=%lld (fallback file) pcm_in=%u "
+			       "ogg_out=%u packets=%u\n",
+			       k_uptime_get() - lat_press_started,
+			       encode_stats.input_bytes,
+			       encode_stats.output_bytes, encode_stats.packets);
+		}
 		report_main_stack_headroom("encode");
 		if (error != 0) {
 			printk("Opus recording compression failed: %d\n", error);
+			pendant_cloud_prewarm_cancel();
 			audio_cycle_result = error;
 			flash_led(4U, 100, 100);
 			continue;

@@ -27,6 +27,14 @@ int pendant_cloud_suspend_radio(void);
 int pendant_cloud_resume_radio(void);
 
 /*
+ * While the user is still speaking, open a TLS session to the relay on a
+ * background thread so button-release only pays for the HTTP body. Safe to
+ * call multiple times; cancel() drops a held socket.
+ */
+void pendant_cloud_prewarm_start(void);
+void pendant_cloud_prewarm_cancel(void);
+
+/*
  * Optional early dashboard visibility. Prefer the single-shot
  * pendant_cloud_upload_recording path for latency; announce costs a full
  * TLS handshake of its own.

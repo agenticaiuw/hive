@@ -255,6 +255,287 @@ static int resampler_next(struct pcm_resampler *resampler, int16_t *sample)
 	return 0;
 }
 
+/*
+ * Live encode-while-recording. Mic samples arrive at 15,625 Hz; we resample
+ * on the fly to 16 kHz and push 20 ms Opus frames into Ogg pages so that by
+ * the time the button is released the SD card already holds a complete
+ * latest.opus and the post-press encode tax is gone.
+ */
+struct pendant_opus_stream {
+	OpusEncoder *encoder;
+	uint8_t *page_payload;
+	struct ogg_writer ogg;
+	struct fs_file_t file;
+	bool file_open;
+	bool active;
+	uint16_t packet_lengths[OGG_PACKETS_PER_PAGE];
+	size_t page_packets;
+	size_t page_bytes;
+	int16_t frame[OPUS_ENCODE_FRAME_SAMPLES];
+	size_t frame_fill;
+	/* Resampler: 15625 → 16000 via phase accumulator + linear interp. */
+	int16_t prev_sample;
+	bool has_prev;
+	uint32_t phase; /* accumulates PENDANT_OPUS_SAMPLE_RATE per input */
+	uint32_t source_rate;
+	uint32_t source_samples;
+	uint32_t output_samples;
+	uint16_t pre_skip;
+	struct pendant_opus_stats stats;
+};
+
+static struct pendant_opus_stream g_stream;
+
+static int stream_flush_frame(bool final_packet)
+{
+	struct pendant_opus_stream *s = &g_stream;
+	int packet_bytes;
+
+	if (s->frame_fill == 0U && !final_packet) {
+		return 0;
+	}
+	if (s->frame_fill < OPUS_ENCODE_FRAME_SAMPLES) {
+		memset(s->frame + s->frame_fill, 0,
+		       (OPUS_ENCODE_FRAME_SAMPLES - s->frame_fill) *
+			       sizeof(s->frame[0]));
+	}
+
+	packet_bytes = opus_encode(s->encoder, s->frame,
+				   OPUS_ENCODE_FRAME_SAMPLES,
+				   s->page_payload + s->page_bytes,
+				   OPUS_ENCODE_PACKET_BYTES);
+	s->frame_fill = 0U;
+	if (packet_bytes < 0) {
+		return -EIO;
+	}
+
+	s->packet_lengths[s->page_packets++] = (uint16_t)packet_bytes;
+	s->page_bytes += (size_t)packet_bytes;
+	s->stats.packets++;
+	s->output_samples += OPUS_ENCODE_FRAME_SAMPLES;
+
+	bool flush_page =
+		final_packet || s->page_packets == OGG_PACKETS_PER_PAGE;
+	if (!flush_page) {
+		return 0;
+	}
+
+	uint64_t granule = final_packet
+		? (uint64_t)s->pre_skip +
+			  (uint64_t)s->output_samples *
+				  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE)
+		: (uint64_t)s->output_samples *
+			  (OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE);
+	int error = ogg_write_page(&s->ogg, final_packet ? OGG_FLAG_EOS : 0U,
+				   granule, s->page_payload, s->packet_lengths,
+				   s->page_packets);
+	s->page_packets = 0U;
+	s->page_bytes = 0U;
+	return error;
+}
+
+static int stream_emit_output_sample(int16_t sample)
+{
+	struct pendant_opus_stream *s = &g_stream;
+
+	s->frame[s->frame_fill++] = sample;
+	if (s->frame_fill < OPUS_ENCODE_FRAME_SAMPLES) {
+		return 0;
+	}
+	return stream_flush_frame(false);
+}
+
+bool pendant_opus_stream_active(void)
+{
+	return g_stream.active;
+}
+
+void pendant_opus_stream_abort(void)
+{
+	struct pendant_opus_stream *s = &g_stream;
+
+	if (s->file_open) {
+		(void)fs_close(&s->file);
+		s->file_open = false;
+	}
+	memset(s, 0, sizeof(*s));
+}
+
+int pendant_opus_stream_begin(const char *opus_path,
+			      uint32_t source_sample_rate, void *workspace,
+			      size_t workspace_bytes)
+{
+	struct pendant_opus_stream *s = &g_stream;
+	int encoder_bytes;
+	size_t arena_needed;
+	int error;
+
+	pendant_opus_stream_abort();
+	if (opus_path == NULL || workspace == NULL ||
+	    source_sample_rate == 0U) {
+		return -EINVAL;
+	}
+
+	encoder_bytes = opus_encoder_get_size(1);
+	arena_needed = ROUND_UP((size_t)encoder_bytes, 4U) + OGG_MAX_PAGE_PAYLOAD;
+	if (encoder_bytes <= 0 || arena_needed > workspace_bytes) {
+		return -ENOMEM;
+	}
+
+	s->encoder = workspace;
+	s->page_payload =
+		(uint8_t *)workspace + ROUND_UP((size_t)encoder_bytes, 4U);
+	s->source_rate = source_sample_rate;
+
+	error = opus_encoder_init(s->encoder, PENDANT_OPUS_SAMPLE_RATE, 1,
+				  OPUS_APPLICATION_RESTRICTED_SILK);
+	if (error != OPUS_OK) {
+		return -EINVAL;
+	}
+	if (opus_encoder_ctl(s->encoder,
+			     OPUS_SET_BITRATE(PENDANT_OPUS_BITRATE)) !=
+		    OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(1)) != OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)) !=
+		    OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_VBR(1)) != OPUS_OK) {
+		return -EINVAL;
+	}
+
+	opus_int32 lookahead = 0;
+	if (opus_encoder_ctl(s->encoder, OPUS_GET_LOOKAHEAD(&lookahead)) !=
+	    OPUS_OK) {
+		return -EINVAL;
+	}
+	s->pre_skip = (uint16_t)(lookahead *
+		(OGG_GRANULE_RATE / PENDANT_OPUS_SAMPLE_RATE));
+
+	fs_file_t_init(&s->file);
+	error = fs_open(&s->file, opus_path,
+			FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (error != 0) {
+		return error;
+	}
+	s->file_open = true;
+	s->ogg.file = &s->file;
+	s->ogg.sequence = 0U;
+	s->ogg.bytes = 0U;
+
+	error = ogg_write_headers(&s->ogg, s->pre_skip, source_sample_rate);
+	if (error != 0) {
+		pendant_opus_stream_abort();
+		return error;
+	}
+
+	s->active = true;
+	printk("Opus live stream begin: source_hz=%u workspace=%u\n",
+	       source_sample_rate, (unsigned int)workspace_bytes);
+	return 0;
+}
+
+int pendant_opus_stream_feed(const int16_t *samples, size_t sample_count)
+{
+	struct pendant_opus_stream *s = &g_stream;
+
+	if (!s->active || samples == NULL) {
+		return s->active ? -EINVAL : -ENOTCONN;
+	}
+
+	for (size_t i = 0U; i < sample_count; ++i) {
+		int16_t sample = samples[i];
+		int error;
+
+		s->source_samples++;
+		s->stats.input_bytes += sizeof(int16_t);
+
+		if (!s->has_prev) {
+			s->prev_sample = sample;
+			s->has_prev = true;
+			/*
+			 * Seed: emit one sample so silence at the start still
+			 * produces a valid stream when the utterance is short.
+			 */
+			error = stream_emit_output_sample(sample);
+			if (error != 0) {
+				return error;
+			}
+			continue;
+		}
+
+		/*
+		 * For each input at Si, produce So/Si outputs on average:
+		 * phase += So; while phase >= Si emit one and phase -= Si.
+		 */
+		s->phase += PENDANT_OPUS_SAMPLE_RATE;
+		while (s->phase >= s->source_rate) {
+			s->phase -= s->source_rate;
+			/*
+			 * Linear blend from prev→current based on how far we
+			 * are through the input step. phase/source_rate is the
+			 * remaining fraction toward the next input.
+			 */
+			uint32_t t =
+				(s->phase * 256U) / s->source_rate; /* 0..255 */
+			int32_t blended =
+				((int32_t)s->prev_sample * (int32_t)(256U - t) +
+				 (int32_t)sample * (int32_t)t) /
+				256;
+			error = stream_emit_output_sample((int16_t)blended);
+			if (error != 0) {
+				return error;
+			}
+		}
+		s->prev_sample = sample;
+	}
+	return 0;
+}
+
+int pendant_opus_stream_end(struct pendant_opus_stats *stats)
+{
+	struct pendant_opus_stream *s = &g_stream;
+	int error = 0;
+
+	if (!s->active) {
+		return -ENOTCONN;
+	}
+
+	/* Flush a partial last frame so EOS has real audio. */
+	if (s->frame_fill > 0U || s->page_packets > 0U ||
+	    s->stats.packets == 0U) {
+		error = stream_flush_frame(true);
+	} else {
+		/* Exact page boundary already: write empty EOS page? force one. */
+		error = stream_flush_frame(true);
+	}
+
+	if (error == 0) {
+		error = fs_sync(&s->file);
+	}
+	int close_error = fs_close(&s->file);
+	s->file_open = false;
+	if (error == 0) {
+		error = close_error;
+	}
+
+	s->stats.output_bytes = s->ogg.bytes;
+	s->stats.samples = s->output_samples;
+	if (stats != NULL) {
+		*stats = s->stats;
+	}
+
+	printk("Opus live stream end: pcm_in=%u ogg_out=%u packets=%u "
+	       "out_samples=%u err=%d\n",
+	       s->stats.input_bytes, s->stats.output_bytes, s->stats.packets,
+	       s->output_samples, error);
+
+	s->active = false;
+	/* Leave encoder memory dirty; caller reuses workspace for decode later. */
+	if (error != 0) {
+		pendant_opus_stream_abort();
+	}
+	return error;
+}
+
 int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 			     uint32_t source_sample_rate, void *workspace,
 			     size_t workspace_bytes,
