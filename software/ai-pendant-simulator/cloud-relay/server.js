@@ -84,6 +84,17 @@ const PENDANT_PCM_BITS = 16
 const DIAGNOSTIC_AUDIO_MAX_BYTES = 1024 * 1024
 const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
 
+/**
+ * Build the complete Mac-side plan payload from a Realtime voice plan.
+ * Mac must execute plannerHint.actions (or speak plannerHint.response), never
+ * treat job.command (history label / transcript) as the plan.
+ *
+ * E2E probe (local):
+ *   # With relay + bridge + agent running, press the pendant (or POST PCM to
+ *   # /v1/pendant/command). Expect: relay log actionCount>0, bridge log
+ *   # "Audio-native execute-only" and no local /plan when actions present.
+ *   # Battery: Realtime emits run_shell pmset -g batt → bridge auto-executes.
+ */
 function plannerHintFromPlan(plan) {
   if (!plan) return undefined
   // Realtime / audio-native plans always attach a complete hint so the Mac
@@ -147,6 +158,7 @@ async function enqueueMacPlanJob({
     midPressStreamed: Boolean(plan.midPressStreamed),
   }
   // command is a short history label only; plannerHint carries the real plan.
+  // Never put transcript-as-plan into job.actions — Mac uses plannerHint.
   const job = createPlanJob({
     command: String(plan.text || '').trim() || 'voice command',
     deviceId,
@@ -155,6 +167,14 @@ async function enqueueMacPlanJob({
   })
   const hint = plannerHintFromPlan(plan)
   if (hint) job.plannerHint = hint
+  if (plan.toolsUsed) job.toolsUsed = plan.toolsUsed
+  const actionCount = Array.isArray(hint?.actions) ? hint.actions.length : 0
+  console.log(
+    `[relay] Enqueued Mac plan job ${job.jobId} actionCount=${actionCount}` +
+      ` requireLocalPlanner=${Boolean(hint?.requireLocalPlanner)}` +
+      ` planner=${hint?.planner || 'none'}` +
+      (plan.toolsUsed?.length ? ` toolsUsed=${plan.toolsUsed.join(',')}` : ''),
+  )
   await store.createJob(job)
   return job
 }

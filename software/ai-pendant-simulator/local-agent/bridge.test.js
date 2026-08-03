@@ -106,7 +106,7 @@ test('a screenshot job never uploads the frame to the cloud relay', async (t) =>
   })
 })
 
-test('a shell action from the relay is never executed hands-free', async (t) => {
+test('a dangerous shell action from the relay is never executed hands-free', async (t) => {
   const stub = installFetchStub({
     '/plan': {
       status: 'ok',
@@ -148,6 +148,54 @@ test('a shell action from the relay is never executed hands-free', async (t) => 
     posted.result.awaitingApproval.map((entry) => entry.type),
     ['run_shell'],
   )
+})
+
+test('audio-native battery status shell auto-executes without local LLM', async (t) => {
+  const stub = installFetchStub({
+    '/plan': () => {
+      throw new Error('local /plan must not run for audio-native battery')
+    },
+    '/execute': {
+      ok: true,
+      results: [
+        {
+          ok: true,
+          status: 'success',
+          message: "Now drawing from 'AC Power'\n100%; charged",
+        },
+      ],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-battery-native',
+    command: 'battery level',
+    sessionId: 'session-batt',
+    plannerHint: {
+      planner: 'audio-native',
+      status: 'ready',
+      response: 'Checking battery.',
+      actions: [
+        {
+          type: 'run_shell',
+          label: 'Battery',
+          params: { command: 'pmset -g batt' },
+        },
+      ],
+      requireLocalPlanner: false,
+    },
+  })
+
+  const executed = stub.calls.some(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.equal(executed, true, 'safe status shell should auto-execute')
+  const planned = stub.calls.some(
+    (call) => call.toAgent && call.pathname === '/plan',
+  )
+  assert.equal(planned, false, 'must not call local /plan')
 })
 
 test('audio-native plannerHint with actions skips local /plan', async (t) => {
@@ -253,9 +301,15 @@ test('empty audio-native hint falls back to local /plan (battery-style)', async 
         },
       ],
     },
-    '/execute': () => {
-      // shell is not auto-run hands-free
-      throw new Error('should not auto-execute shell')
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [
+        {
+          ok: true,
+          message: 'Now drawing from \'Battery Power\'\n -InternalBattery-0 82%',
+        },
+      ],
     },
   })
   t.after(() => stub.restore())
@@ -278,9 +332,66 @@ test('empty audio-native hint falls back to local /plan (battery-style)', async 
     (call) => call.toAgent && call.pathname === '/plan',
   )
   assert.equal(planCalls.length, 1, 'empty Realtime plan must use local LLM')
+  // Status run_shell (pmset) is on the hands-free allowlist.
+  const executeCall = stub.calls.find(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.ok(executeCall, 'status shell (pmset) must auto-execute hands-free')
+  assert.equal(
+    JSON.parse(executeCall.body).actions[0].params.command,
+    'pmset -g batt',
+  )
 })
 
-test('requireLocalPlanner forces local /plan even with actions', async (t) => {
+test('audio-native status run_shell (pmset) skips /plan and auto-executes', async (t) => {
+  const stub = installFetchStub({
+    '/plan': () => {
+      throw new Error('local /plan must not run when Realtime already has actions')
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [{ ok: true, message: '82% charged' }],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-audio-native-pmset',
+    command: 'battery',
+    sessionId: 'session-pmset',
+    plannerHint: {
+      planner: 'audio-native',
+      status: 'ready',
+      response: 'Checking battery.',
+      actions: [
+        {
+          type: 'run_shell',
+          label: 'Battery',
+          params: { command: 'pmset -g batt' },
+        },
+      ],
+      requireLocalPlanner: false,
+    },
+  })
+
+  assert.equal(
+    stub.calls.filter((call) => call.toAgent && call.pathname === '/plan')
+      .length,
+    0,
+  )
+  const executeCall = stub.calls.find(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.ok(executeCall, 'must execute Realtime pmset without local LLM')
+  assert.equal(
+    JSON.parse(executeCall.body).actions[0].params.command,
+    'pmset -g batt',
+  )
+})
+
+test('empty actions + requireLocalPlanner calls /plan', async (t) => {
   const stub = installFetchStub({
     '/plan': {
       status: 'ready',

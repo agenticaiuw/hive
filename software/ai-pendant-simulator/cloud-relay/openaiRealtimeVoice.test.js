@@ -8,12 +8,15 @@ const {
   REALTIME_TOOLS,
   buildPlanResult,
   historyLabelFromState,
+  mapGetMacStatusToActions,
+  looksLikeDeviceStateAnswer,
 } = await import('./openaiRealtimeVoice.js')
 
-test('REALTIME_TOOLS expose search + Mac + browser tools', () => {
+test('REALTIME_TOOLS expose status + control + search + browser + delegate', () => {
   const names = REALTIME_TOOLS.map((t) => t.name).sort()
   assert.deepEqual(names, [
     'browser_run_actions',
+    'get_mac_status',
     'mac_delegate',
     'mac_run_actions',
     'web_search',
@@ -25,7 +28,10 @@ test('Realtime action tools require actions/goal, not transcript', () => {
   assert.deepEqual(byName.mac_run_actions.parameters.required, ['actions'])
   assert.deepEqual(byName.browser_run_actions.parameters.required, ['actions'])
   assert.deepEqual(byName.mac_delegate.parameters.required, ['goal'])
+  // get_mac_status has no required params (fields optional)
+  assert.deepEqual(byName.get_mac_status.parameters.required || [], [])
   for (const name of [
+    'get_mac_status',
     'mac_run_actions',
     'browser_run_actions',
     'mac_delegate',
@@ -45,9 +51,63 @@ test('Realtime action tools require actions/goal, not transcript', () => {
     )
   }
   assert.ok(
-    /battery|system|shell/i.test(byName.mac_run_actions.description),
-    'mac_run_actions should mention system/shell queries',
+    /PROACTIVE/i.test(byName.get_mac_status.description),
+    'get_mac_status should be marked PROACTIVE',
   )
+  assert.ok(
+    /PROACTIVE/i.test(byName.mac_run_actions.description),
+    'mac_run_actions should be marked PROACTIVE',
+  )
+  assert.ok(
+    /Do NOT use when/i.test(byName.get_mac_status.description),
+    'get_mac_status should include Do NOT use when',
+  )
+  assert.ok(
+    /battery|wifi|volume|focused/i.test(byName.get_mac_status.description),
+    'get_mac_status should mention device status fields',
+  )
+})
+
+test('get_mac_status fields enum covers battery wifi volume focused_app all', () => {
+  const byName = Object.fromEntries(REALTIME_TOOLS.map((t) => [t.name, t]))
+  const fields = byName.get_mac_status.parameters.properties.fields
+  assert.equal(fields.type, 'array')
+  assert.deepEqual(fields.items.enum.sort(), [
+    'all',
+    'battery',
+    'focused_app',
+    'volume',
+    'wifi',
+  ])
+})
+
+test('mapGetMacStatusToActions expands battery to pmset run_shell', () => {
+  const actions = mapGetMacStatusToActions(['battery'])
+  assert.equal(actions.length, 1)
+  assert.equal(actions[0].type, 'run_shell')
+  assert.equal(actions[0].label, 'Battery')
+  assert.equal(actions[0].params.command, 'pmset -g batt')
+})
+
+test('mapGetMacStatusToActions expands all / empty to full snapshot', () => {
+  const all = mapGetMacStatusToActions(['all'])
+  const empty = mapGetMacStatusToActions([])
+  assert.equal(all.length, 4)
+  assert.equal(empty.length, 4)
+  const types = all.map((a) => a.type)
+  assert.ok(types.includes('run_shell'))
+  assert.ok(types.includes('get_volume'))
+  assert.ok(all.some((a) => a.label === 'Battery'))
+  assert.ok(all.some((a) => a.label === 'Wi‑Fi' || a.label === 'Wi-Fi'))
+  assert.ok(all.some((a) => a.label === 'Volume'))
+  assert.ok(all.some((a) => a.label === 'Focused app'))
+})
+
+test('mapGetMacStatusToActions supports multi-field subset', () => {
+  const actions = mapGetMacStatusToActions(['wifi', 'volume'])
+  assert.equal(actions.length, 2)
+  assert.equal(actions[0].label, 'Wi‑Fi')
+  assert.equal(actions[1].type, 'get_volume')
 })
 
 test('buildPlanResult is always audio-native with actions+response product', () => {
@@ -62,7 +122,7 @@ test('buildPlanResult is always audio-native with actions+response product', () 
           params: { command: 'pmset -g batt' },
         },
       ],
-      toolsUsed: ['mac_run_actions'],
+      toolsUsed: ['get_mac_status'],
       delegate: false,
       status: 'ready',
       midPressStreamed: true,
@@ -78,7 +138,9 @@ test('buildPlanResult is always audio-native with actions+response product', () 
   assert.equal(plan.actions.length, 1)
   assert.equal(plan.actions[0].type, 'run_shell')
   assert.equal(plan.requireLocalPlanner, false)
+  assert.equal(plan.needsLocalFallback, false)
   assert.equal(plan.midPressStreamed, true)
+  assert.deepEqual(plan.toolsUsed, ['get_mac_status'])
   // History label can come from action label when transcript is empty.
   assert.equal(plan.text, 'Check battery')
 })
@@ -101,6 +163,55 @@ test('buildPlanResult works without transcript (optional history only)', () => {
   assert.ok(plan.actions.length === 1)
   assert.ok(plan.text) // non-empty history label
   assert.notEqual(plan.text, '')
+  assert.equal(plan.needsLocalFallback, false)
+})
+
+test('buildPlanResult pure chitchat is instant with empty actions', () => {
+  const plan = buildPlanResult(
+    {
+      transcript: '',
+      response: 'Hello! How can I help?',
+      actions: [],
+      toolsUsed: [],
+      delegate: false,
+      status: 'instant',
+      textParts: ['Hello! How can I help?'],
+    },
+    Date.now(),
+    'en',
+  )
+  assert.equal(plan.planner, 'audio-native')
+  assert.equal(plan.status, 'instant')
+  assert.equal(plan.actions.length, 0)
+  assert.equal(plan.needsLocalFallback, false)
+  assert.equal(plan.requireLocalPlanner, false)
+  assert.equal(plan.response, 'Hello! How can I help?')
+})
+
+test('buildPlanResult delegate variant when mac_delegate with no actions', () => {
+  const plan = buildPlanResult(
+    {
+      transcript: '',
+      response: 'Working on that on your Mac.',
+      actions: [],
+      toolsUsed: ['mac_delegate'],
+      delegate: true,
+      status: 'ready',
+      textParts: [],
+    },
+    Date.now(),
+    null,
+  )
+  assert.equal(plan.planner, 'audio-native-delegate')
+  assert.equal(plan.requireLocalPlanner, true)
+  assert.equal(plan.needsLocalFallback, false)
+  assert.deepEqual(plan.toolsUsed, ['mac_delegate'])
+})
+
+test('looksLikeDeviceStateAnswer flags battery-like pure text', () => {
+  assert.equal(looksLikeDeviceStateAnswer('Your battery is at 80 percent.'), true)
+  assert.equal(looksLikeDeviceStateAnswer('WiFi is connected.'), true)
+  assert.equal(looksLikeDeviceStateAnswer('Hello there.'), false)
 })
 
 test('historyLabelFromState prefers transcript then action then spoken', () => {

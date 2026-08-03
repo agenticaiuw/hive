@@ -30,13 +30,19 @@ test('static instructions stay high-level (no open_app lectures, no product name
   assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('Outlook'))
   // Product frame: useful while away, not an app launcher.
   assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /away from the keyboard/i)
-  // Audio-native: tools from speech; transcript not the product.
-  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /Plan directly from the speech/i)
-  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /transcript is optional history/i)
-  // Mac state Q&A must use mac_run_actions (battery etc.).
+  // Audio-native / Realtime-first: tools from speech; transcript not the product.
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /Plan from speech/i)
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /optional history/i)
+  // Mac state Q&A must use tools (get_mac_status / mac_run_actions; battery etc.).
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /get_mac_status/)
   assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /mac_run_actions/)
   assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /battery/i)
-  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /run_shell/)
+  // Tool-primary: never guess device readings; ACT via tools.
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /Never guess numbers|Never invent/i)
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /ACT through tools|ACT via tools|tools first/i)
+  // Static block cacheable: no timestamps in static prefix.
+  assert.ok(!/\d{4}-\d{2}-\d{2}/.test(VOICE_AGENT_STATIC_INSTRUCTIONS))
+  assert.ok(!/as_of:/i.test(VOICE_AGENT_STATIC_INSTRUCTIONS))
 })
 
 test('formatFleetSnapshot is environment facts, not tool coaching', () => {

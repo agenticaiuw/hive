@@ -6,9 +6,11 @@
  * PCM while the pendant is still uploading, commit only when the body ends.
  * That is the latency win vs buffering the full clip then planning.
  *
- * Product: plan from AUDIO via tools (actions + spoken_reply). Transcript is
- * optional history/debug only — never required, never the critical hot path.
- * Tools: web_search, mac_run_actions, browser_run_actions, mac_delegate.
+ * Product: Realtime is the ONLY planner for voice. Plan from AUDIO via tools
+ * (actions + spoken_reply). Transcript is optional history/debug only —
+ * never required, never the critical hot path. Mac only executes.
+ * Tools: get_mac_status, mac_run_actions, browser_run_actions, web_search,
+ * mac_delegate.
  * Docs: https://developers.openai.com/api/docs/guides/realtime-websocket
  */
 
@@ -84,32 +86,47 @@ const ACTION_ITEM_SCHEMA = {
 }
 
 /**
- * Tool definitions = agent-computer interface.
- * System prompt stays high-level; schemas carry parameter contracts
- * (Anthropic: prompt-engineer tools, not brittle instruction lists).
+ * Tool definitions = agent-computer interface (tight ~5 tools).
+ * System prompt stays high-level; schemas carry Use when / Do NOT use when.
+ * PROACTIVE tools fire immediately for status and reversible control.
  */
 export const REALTIME_TOOLS = [
   {
     type: 'function',
-    name: 'web_search',
+    name: 'get_mac_status',
     description:
-      'Look up current information on the public web (news, weather, sports, facts, anything that needs live data). Prefer this over guessing about changing facts.',
+      'PROACTIVE. Read live Mac device state: battery, wifi, volume, focused app, or all. Use when the owner asks about battery/charge, wifi/network, volume/mute, or what app is frontmost. Call immediately — no confirmation. Do NOT use when: controlling the Mac (open app, set volume, type, reminders — use mac_run_actions), browser work (browser_run_actions), public web facts (web_search), or multi-step ambiguous tasks (mac_delegate). Never invent readings; always call this tool instead of guessing numbers.',
     parameters: {
       type: 'object',
       properties: {
-        query: {
+        fields: {
+          type: 'array',
+          description:
+            'Optional status fields to fetch. Omit or use ["all"] for a full snapshot.',
+          items: {
+            type: 'string',
+            enum: ['battery', 'wifi', 'volume', 'focused_app', 'all'],
+          },
+        },
+        spoken_reply: {
           type: 'string',
-          description: 'Search query derived from the user speech.',
+          description:
+            'Short pendant confirmation (e.g. "Checking battery."). One sentence.',
+        },
+        transcript: {
+          type: 'string',
+          description:
+            'Optional history label only. Omit if unsure — never block on this.',
         },
       },
-      required: ['query'],
+      required: [],
     },
   },
   {
     type: 'function',
     name: 'mac_run_actions',
     description:
-      'Execute 1–3 concrete actions on the Mac surface when it is online: reminders, files, URLs, UI/input, shell/system queries (battery, disk, processes, network), clipboard, and similar hands-free work. Prefer real outcomes over merely launching UI. Required product for any live Mac state question — do not answer those from spoken text alone. Use only when the Mac surface is online.',
+      'PROACTIVE for reversible control. Execute 1–3 concrete Mac actions when the Mac surface is online: open_app, open_url, open_path, create_reminder, type_text, get_volume, set_volume, run_shell (allowlisted system intents), run_applescript, and similar. Prefer high-level types over raw shell when a typed action exists. Use when: owner wants to change or run something on the Mac that is not a pure status read. Do NOT use when: only reading battery/wifi/volume/focused app (get_mac_status), browser page work (browser_run_actions), public facts (web_search), or long multi-step ambiguous workflows (mac_delegate). Confirmation first only for destructive actions. Never claim success without this tool (or get_mac_status) actually queuing work.',
     parameters: {
       type: 'object',
       properties: {
@@ -137,7 +154,7 @@ export const REALTIME_TOOLS = [
     type: 'function',
     name: 'browser_run_actions',
     description:
-      'Execute 1–3 actions through the browser extension when online: list_tabs, snapshot (interactive refs), navigate, click/type by ref, wait_for, read_page, select, scroll. Prefer over Mac desktop control for web/logged-in site work.',
+      'PROACTIVE when browser work is needed. Execute 1–3 actions through the browser extension when online: browser_list_tabs, browser_snapshot, browser_navigate, browser_click/type by ref, browser_wait_for, browser_read_page, browser_select, scroll. Use when: web/logged-in site work, reading or interacting with a page. Do NOT use when: Mac desktop/system control (mac_run_actions / get_mac_status), public web facts without a page (web_search), or multi-step Mac workflows (mac_delegate). Prefer over Mac desktop control for in-browser tasks.',
     parameters: {
       type: 'object',
       properties: {
@@ -163,9 +180,25 @@ export const REALTIME_TOOLS = [
   },
   {
     type: 'function',
+    name: 'web_search',
+    description:
+      'PROACTIVE for live public facts. Look up current information on the public web (news, weather, sports, prices, anything that needs live data). Use when: answer needs up-to-date public information. Do NOT use when: Mac device state (get_mac_status), controlling Mac/browser (mac_run_actions / browser_run_actions), or pure knowledge you already know without live data.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query derived from the user speech.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    type: 'function',
     name: 'mac_delegate',
     description:
-      'Hand a multi-step or ambiguous computer task to the local Mac agent, which has full machine context and can plan longer workflows. Use when a short action list is not enough.',
+      'ONLY for multi-step or ambiguous computer tasks that cannot fit a short action list. Hands the goal to the local Mac agent (sets requireLocalPlanner). Use when: complex multi-app workflows, unclear steps, long-running computer use. Do NOT use when: a single get_mac_status or 1–3 mac_run_actions / browser_run_actions would suffice. Prefer concrete tools first.',
     parameters: {
       type: 'object',
       properties: {
@@ -188,6 +221,74 @@ export const REALTIME_TOOLS = [
     },
   },
 ]
+
+/** Status field → Mac executor action(s). get_mac_status expands into these. */
+const MAC_STATUS_FIELD_ACTIONS = {
+  battery: {
+    type: 'run_shell',
+    label: 'Battery',
+    params: { command: 'pmset -g batt' },
+  },
+  wifi: {
+    type: 'run_shell',
+    label: 'Wi‑Fi',
+    params: {
+      command:
+        'scutil --nwi; echo "---"; networksetup -getairportnetwork en0 2>/dev/null || true',
+    },
+  },
+  volume: {
+    type: 'get_volume',
+    label: 'Volume',
+    params: {},
+  },
+  focused_app: {
+    type: 'run_shell',
+    label: 'Focused app',
+    params: {
+      command:
+        'osascript -e \'tell application "System Events" to get name of first application process whose frontmost is true\'',
+    },
+  },
+}
+
+/**
+ * Expand get_mac_status fields into mac_run_actions-compatible executor actions.
+ * @param {string[]|undefined|null} fields
+ * @returns {{ type: string, label?: string, params: object }[]}
+ */
+export function mapGetMacStatusToActions(fields) {
+  const raw = Array.isArray(fields) ? fields : []
+  const normalized = raw
+    .map((f) => String(f || '').trim().toLowerCase())
+    .filter(Boolean)
+  const wantAll =
+    normalized.length === 0 ||
+    normalized.includes('all') ||
+    normalized.includes('*')
+
+  const keys = wantAll
+    ? ['battery', 'wifi', 'volume', 'focused_app']
+    : [...new Set(normalized.filter((k) => MAC_STATUS_FIELD_ACTIONS[k]))]
+
+  if (!keys.length) {
+    return [
+      MAC_STATUS_FIELD_ACTIONS.battery,
+      MAC_STATUS_FIELD_ACTIONS.wifi,
+      MAC_STATUS_FIELD_ACTIONS.volume,
+      MAC_STATUS_FIELD_ACTIONS.focused_app,
+    ]
+  }
+  return keys.map((k) => ({ ...MAC_STATUS_FIELD_ACTIONS[k] }))
+}
+
+/** Heuristic: pure text that looks like a device-state answer without tools. */
+const DEVICE_STATE_ANSWER_RE =
+  /\b(battery|percent|%|wifi|wi-?fi|volume|muted?|frontmost|focused app|charging|plugged in)\b/i
+
+export function looksLikeDeviceStateAnswer(text) {
+  return DEVICE_STATE_ANSWER_RE.test(String(text || ''))
+}
 
 /**
  * Extract s16le PCM from a WAV buffer (or return raw if already PCM).
@@ -596,10 +697,12 @@ export function historyLabelFromState(state) {
 
 /**
  * Always emit a complete audio-native plan payload for the Mac bridge.
- * Transcript/text is only a history label; actions + response are the product.
+ * Realtime is the only planner (or delegate variant). Transcript/text is only
+ * a history label; actions + response are the product. Mac only executes.
  */
 export function buildPlanResult(state, startedAt, language) {
   const actions = Array.isArray(state.actions) ? state.actions : []
+  const toolsUsed = Array.isArray(state.toolsUsed) ? state.toolsUsed : []
   const spoken =
     String(state.response || '').trim() ||
     (actions.length
@@ -611,7 +714,9 @@ export function buildPlanResult(state, startedAt, language) {
   else if (spoken) status = 'instant'
   else status = status || 'instant'
 
+  // Never empty a usable plan that already has tool-produced actions.
   const requireLocalPlanner = Boolean(state.delegate && !actions.length)
+  const needsLocalFallback = false
 
   return {
     // History label only — Mac must use plannerHint, not re-plan from this.
@@ -623,10 +728,12 @@ export function buildPlanResult(state, startedAt, language) {
     actions,
     durationMs: Date.now() - startedAt,
     source: 'audio-native-realtime',
-    toolsUsed: state.toolsUsed || [],
+    toolsUsed,
     passes: 1,
+    // Always audio-native (or delegate variant). Never a text/local primary planner.
     planner: requireLocalPlanner ? 'audio-native-delegate' : 'audio-native',
     requireLocalPlanner,
+    needsLocalFallback,
     midPressStreamed: Boolean(state.midPressStreamed),
   }
 }
@@ -722,6 +829,21 @@ export async function createStreamingRealtimeSession({
     socket.send(JSON.stringify(event))
   }
 
+  async function emitMacPlanAndFinish(planSurface = 'mac') {
+    const plan = buildPlanResult(state, startedAt, language)
+    if (typeof onEarlyPlan === 'function') {
+      try {
+        await onEarlyPlan(plan)
+      } catch (error) {
+        console.warn(
+          `[realtime] onEarlyPlan failed: ${error?.message || error}`,
+        )
+      }
+    }
+    finishOk()
+    return plan
+  }
+
   async function handleFunctionCall(name, callId, argsJson) {
     let args = {}
     try {
@@ -745,6 +867,34 @@ export async function createStreamingRealtimeSession({
         type: 'response.create',
         response: { output_modalities: ['text'] },
       })
+      return
+    }
+
+    // PROACTIVE status reads → same plan path as mac_run_actions (Mac executes).
+    if (name === 'get_mac_status') {
+      const optionalTranscript = String(args.transcript || '').trim()
+      if (optionalTranscript) state.transcript = optionalTranscript
+      state.response =
+        String(args.spoken_reply || args.response || '').trim() || 'Checking.'
+      const actions = normalizeActions(mapGetMacStatusToActions(args.fields))
+      state.actions = actions
+      state.status = actions.length ? 'ready' : 'instant'
+      send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify({
+            ok: true,
+            queued: true,
+            surface: 'mac',
+            tool: 'get_mac_status',
+            actionCount: state.actions.length,
+            fields: Array.isArray(args.fields) ? args.fields : ['all'],
+          }),
+        },
+      })
+      await emitMacPlanAndFinish('mac')
       return
     }
 
@@ -780,17 +930,9 @@ export async function createStreamingRealtimeSession({
           }),
         },
       })
-      const plan = buildPlanResult(state, startedAt, language)
-      if (typeof onEarlyPlan === 'function') {
-        try {
-          await onEarlyPlan(plan)
-        } catch (error) {
-          console.warn(
-            `[realtime] onEarlyPlan failed: ${error?.message || error}`,
-          )
-        }
-      }
-      finishOk()
+      await emitMacPlanAndFinish(
+        name === 'browser_run_actions' ? 'browser' : 'mac',
+      )
       return
     }
 
@@ -811,17 +953,7 @@ export async function createStreamingRealtimeSession({
           output: JSON.stringify({ ok: true, delegated: true }),
         },
       })
-      const plan = buildPlanResult(state, startedAt, language)
-      if (typeof onEarlyPlan === 'function') {
-        try {
-          await onEarlyPlan(plan)
-        } catch (error) {
-          console.warn(
-            `[realtime] onEarlyPlan failed: ${error?.message || error}`,
-          )
-        }
-      }
-      finishOk()
+      await emitMacPlanAndFinish('mac')
       return
     }
 
@@ -895,10 +1027,28 @@ export async function createStreamingRealtimeSession({
         (item) => item?.type === 'function_call',
       )
       if (!hasFunctionCall && status === 'completed') {
-        // Pure text Q&A: spoken reply only. Do NOT promote response → transcript;
-        // history label is derived later; plan product is response + empty actions.
+        // Pure text: chitchat / knowledge only. Empty actions; needsLocalFallback false.
+        // Do NOT promote response → transcript; history label is derived later.
         if (!state.response) {
           state.response = String(state.textParts.join('')).trim() || undefined
+        }
+        // If model answered device/Mac state without mac tools, log corrective note
+        // (mid-session re-prompt is hard; instructions are the primary fix).
+        const macTools = new Set([
+          'get_mac_status',
+          'mac_run_actions',
+          'mac_delegate',
+        ])
+        const usedMacTool = (state.toolsUsed || []).some((t) => macTools.has(t))
+        if (
+          !usedMacTool &&
+          !state.actions.length &&
+          looksLikeDeviceStateAnswer(state.response)
+        ) {
+          console.warn(
+            '[realtime] device-state-like text reply without mac tools; strengthen instructions / tool_choice. response=',
+            String(state.response || '').slice(0, 160),
+          )
         }
         state.status =
           state.actions.length || state.delegate ? 'ready' : 'instant'

@@ -182,6 +182,7 @@ export async function handleWork(work) {
 
   if (observablePipeline) {
     // Telemetry only — not a product STT stage. Realtime already planned.
+    // Stage labels: "Realtime plan" / command label — never "transcription" as product.
     const hint = work.plannerHint
     const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
     const hasPlanPayload =
@@ -198,7 +199,7 @@ export async function handleWork(work) {
         ? 'Realtime plan received from cloud'
         : 'Command label received from cloud',
       detail: hasPlanPayload
-        ? 'Audio-native Realtime plan (tools/reply) — not a separate STT step.'
+        ? `Realtime plan — ${hintActions.length} action(s); not a separate STT step.`
         : 'Job label for history; local planning may still be needed.',
       text: work.command,
       source: 'cloud-relay',
@@ -207,6 +208,8 @@ export async function handleWork(work) {
         workType: work.type,
         inputTelemetry: work.inputTelemetry ?? null,
         planner: hint?.planner ?? null,
+        actionCount: hintActions.length,
+        requireLocalPlanner: Boolean(hint?.requireLocalPlanner),
       },
     })
   }
@@ -217,11 +220,11 @@ export async function handleWork(work) {
       const hint = work.plannerHint
       const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
       const spokenResponse = String(hint?.response || '').trim()
-      // Realtime hot path: if the cloud already produced tools and/or a spoken
-      // reply, execute it. Do NOT require a second Mac text LLM.
-      // Empty status alone is not usable (Realtime defaults status to
-      // "instant" even for battery-style transcripts with no tools — those
-      // still need local LLM as last resort when requireLocalPlanner or empty).
+      // Execute-only hot path (no second Mac text LLM):
+      // 1) actions.length > 0 && !requireLocalPlanner → use Realtime actions
+      // 2) status instant + spoken response + no actions → instant reply
+      // Local LLM only when: requireLocalPlanner, typed dashboard (no hint),
+      // or empty-tool chitchat that still needs planning.
       const hasUsableNativePayload =
         hintActions.length > 0 || spokenResponse.length > 0
       const useAudioNativePlan =
@@ -230,11 +233,20 @@ export async function handleWork(work) {
         hasUsableNativePayload
       let plan
       if (useAudioNativePlan) {
+        console.log(
+          `[bridge] Audio-native execute-only job ${work.jobId} actionCount=${hintActions.length}`,
+        )
         void reportPipelineEvent(work, {
           stage: 'agent',
           status: 'active',
-          label: 'Using audio-native plan from the relay',
-          detail: 'Skipping local LLM — Realtime already decided actions/reply.',
+          label:
+            hintActions.length > 0
+              ? 'Realtime plan — executing actions'
+              : 'Realtime plan — spoken reply only',
+          detail:
+            hintActions.length > 0
+              ? `Skipping local LLM — executing ${hintActions.length} Realtime action(s).`
+              : 'Skipping local LLM — Realtime already provided the spoken reply.',
         })
         plan = {
           status:
@@ -245,12 +257,14 @@ export async function handleWork(work) {
           command: work.command,
           response: spokenResponse || undefined,
           actions: hintActions,
-          requiresConfirmation: hintActions.length > 0,
+          // Hands-free pendant: classifyPlan decides auto-run vs approval.
+          requiresConfirmation: false,
           planner:
             hint.planner === 'audio-native-realtime'
               ? 'audio-native-realtime'
               : 'audio-native',
           fullControl: true,
+          toolsUsed: hint.toolsUsed,
         }
       } else {
         void reportPipelineEvent(work, {
@@ -262,10 +276,15 @@ export async function handleWork(work) {
           detail:
             'Local OpenAI planner — fallback only, not the Realtime hot path.',
         })
+        // Prefer explicit goal from the hint when Realtime delegated planning;
+        // job.command is only a history label (may be empty / generic).
+        const planCommand =
+          (hint?.requireLocalPlanner && String(hint?.goal || '').trim()) ||
+          work.command
         plan = await callLocalAgent('/plan', {
           method: 'POST',
           body: {
-            command: work.command,
+            command: planCommand,
             sessionId: work.sessionId,
             source: 'pendant',
             plannerHint: hint ?? null,
@@ -285,7 +304,9 @@ export async function handleWork(work) {
       void reportPipelineEvent(planWork, {
         stage: 'agent',
         status: 'done',
-        label: 'Agent response ready',
+        label: useAudioNativePlan
+          ? 'Realtime plan ready'
+          : 'Agent response ready',
         detail: `Completed in ${Date.now() - agentStartedAt} ms${
           useAudioNativePlan ? ' (audio-native, no local LLM)' : ''
         }.`,
@@ -296,20 +317,21 @@ export async function handleWork(work) {
           thinkingTraceId: plan.thinking?.traceId ?? null,
           planner: plan.planner ?? null,
           audioNative: Boolean(useAudioNativePlan),
+          actionCount: Array.isArray(plan.actions) ? plan.actions.length : 0,
           resultStatus: plan.status ?? null,
           responseCharacters: spokenTextForResult(plan).length,
         },
       })
 
-      // A pendant command has no confirm button, so the plan is useless unless
-      // the safe part of it actually runs.
+      // Pendant has no confirm UI: auto-run allowlisted / status actions.
+      // Status run_shell (pmset, open -a, …) is hands-free via actionRisk.
       const verdict = classifyPlan(plan.actions)
       if (verdict.autoRun) {
         const executionStartedAt = Date.now()
         void reportPipelineEvent(planWork, {
           stage: 'agent',
           status: 'active',
-          label: 'Running the plan on this Mac',
+          label: 'Executing actions',
           detail: `Executing ${plan.actions.length} action(s) hands-free.`,
         })
         try {
@@ -333,7 +355,9 @@ export async function handleWork(work) {
           await reportPipelineEvent(planWork, {
             stage: 'agent',
             status: plan.executed ? 'done' : 'failed',
-            label: plan.executed ? 'Plan executed on this Mac' : 'Execution failed',
+            label: plan.executed
+              ? 'Executing actions — done'
+              : 'Executing actions — failed',
             detail: `Finished in ${Date.now() - executionStartedAt} ms.`,
             text: spokenTextForResult(plan),
             meta: { results: execution?.results ?? null },
@@ -371,7 +395,7 @@ export async function handleWork(work) {
           await reportPipelineEvent(planWork, {
             stage: 'agent',
             status: 'failed',
-            label: 'Execution failed',
+            label: 'Executing actions — failed',
             detail: executionError.message,
             text: plan.response,
           })

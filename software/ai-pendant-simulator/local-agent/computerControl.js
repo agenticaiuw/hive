@@ -58,6 +58,62 @@ export async function executeComputerAction(action) {
   switch (action.type) {
     case 'run_shell':
       return runShell(action)
+    case 'get_battery':
+      return runShell({
+        ...action,
+        type: 'run_shell',
+        params: { command: 'pmset -g batt' },
+      })
+    case 'get_mac_status': {
+      const fields = Array.isArray(action.params?.fields)
+        ? action.params.fields.map((f) => String(f).toLowerCase())
+        : ['all']
+      const wantAll = fields.includes('all') || fields.length === 0
+      const parts = []
+      if (wantAll || fields.includes('battery')) {
+        parts.push(
+          await runShell({
+            type: 'run_shell',
+            label: 'battery',
+            params: { command: 'pmset -g batt' },
+          }),
+        )
+      }
+      if (wantAll || fields.includes('wifi') || fields.includes('network')) {
+        parts.push(
+          await runShell({
+            type: 'run_shell',
+            label: 'network',
+            params: { command: 'scutil --nwi' },
+          }),
+        )
+      }
+      if (wantAll || fields.includes('volume')) {
+        parts.push(
+          await runShell({
+            type: 'run_shell',
+            label: 'volume',
+            params: {
+              command:
+                "osascript -e 'output volume of (get volume settings)'",
+            },
+          }),
+        )
+      }
+      const ok = parts.every((p) => p.ok !== false)
+      const message = parts
+        .map((p) => p.message || p.stdout || '')
+        .filter(Boolean)
+        .join('\n')
+      return {
+        action,
+        ok,
+        status: ok ? 'success' : 'failed',
+        message: message || 'Status collected.',
+        stdout: message,
+        results: parts,
+      }
+    }
     case 'run_applescript':
       return runAppleScript(action)
     case 'open_url':
