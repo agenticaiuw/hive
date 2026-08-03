@@ -25,8 +25,8 @@ enum AgentEnv {
     static let envPathDefaultsKey = "AgentEnvPath"
 
     static func registerDefaults() {
-        // Single shared secrets file for the whole stack.
-        let fallback = (NSString("~/agentic-gadget/software/ai-pendant.env")).expandingTildeInPath
+        // Single shared secrets file: repo-root .env only.
+        let fallback = (NSString("~/agentic-gadget/.env")).expandingTildeInPath
         UserDefaults.standard.register(defaults: [envPathDefaultsKey: fallback])
     }
 

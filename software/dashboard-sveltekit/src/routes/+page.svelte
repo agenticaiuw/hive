@@ -12,6 +12,7 @@
     displayCommand,
     duration,
     hasUsefulTranscript,
+    isIdleRun,
     isTranscribing,
     stageState,
     stagesFor,
@@ -211,9 +212,29 @@
   const runs = $derived<JsonRecord[]>(
     liveRuns.length ? liveRuns : snapshotRuns,
   );
-  const selected = $derived<any>(
-    runs.find((run) => run.pipelineId === selectedId) ?? runs[0] ?? null,
-  );
+  // Prefer an active/recent real run over a stuck empty "transcribing" job.
+  const preferredRun = $derived.by(() => {
+    const list = runs;
+    if (!list.length) return null;
+    if (selectedId) {
+      const hit = list.find((run) => run.pipelineId === selectedId);
+      if (hit && !isIdleRun(hit)) return hit;
+    }
+    const live = list.find(
+      (run) =>
+        isTranscribing(run) ||
+        (run.status === "processing" && hasUsefulTranscript(run.command)),
+    );
+    if (live) return live;
+    const done = list.find(
+      (run) =>
+        hasUsefulTranscript(run.command) ||
+        run.status === "completed" ||
+        run.status === "failed",
+    );
+    return done ?? null;
+  });
+  const selected = $derived<any>(preferredRun);
   const cloud = $derived<any>(snapshot?.cloud ?? {});
   const agent = $derived<any>(snapshot?.status?.agent ?? {});
   const telemetry = $derived<any>(
@@ -222,17 +243,27 @@
     )?.meta?.inputTelemetry ?? null,
   );
   const selectedTranscribing = $derived(isTranscribing(selected));
+  const selectedIdle = $derived(!selected || isIdleRun(selected));
   const badTranscript = $derived(
     Boolean(
-      selected && !selectedTranscribing && !hasUsefulTranscript(selected.command),
+      selected &&
+        !selectedIdle &&
+        !selectedTranscribing &&
+        !hasUsefulTranscript(selected.command) &&
+        selected.status === "failed",
     ),
   );
-  const newestRun = $derived<any>(runs[0] ?? null);
+  const newestRun = $derived<any>(
+    runs.find((run) => hasUsefulTranscript(run.command) || isTranscribing(run)) ??
+      runs[0] ??
+      null,
+  );
   const latestBad = $derived(
     Boolean(
       newestRun &&
         !isTranscribing(newestRun) &&
-        !hasUsefulTranscript(newestRun.command),
+        !hasUsefulTranscript(newestRun.command) &&
+        newestRun.status === "failed",
     ),
   );
   const latestMacAction = $derived<any>(
@@ -272,8 +303,8 @@
   const newestFailedLog = $derived(activity[0]?.status === "failed");
 
   const heroChip = $derived<{ tone: string; word: string } | null>(
-    !selected
-      ? null
+    selectedIdle
+      ? { tone: "ok", word: "Idle" }
       : badTranscript
         ? { tone: "warn", word: "No speech" }
         : selectedTranscribing ||
@@ -440,7 +471,7 @@
   {/if}
 
   <article class="hero {badTranscript ? 'has-alert' : ''}">
-    {#if selected}
+    {#if selected && !selectedIdle}
       <div class="hero-top">
         <span class="micro-chip"
           >{selected.pipelineId === newestRun?.pipelineId
@@ -561,8 +592,16 @@
       {/if}
     {:else}
       <div class="hero-empty">
-        <h2 class="hero-command">Waiting for pendant</h2>
-        <p class="hero-hint">Press and speak</p>
+        <div class="hero-top">
+          <span class="micro-chip">Idle</span>
+          {#if heroChip}
+            <span class="status-chip {heroChip.tone}"
+              ><i aria-hidden="true"></i>{heroChip.word}</span
+            >
+          {/if}
+        </div>
+        <h2 class="hero-command">Ready</h2>
+        <p class="hero-hint">Press the pendant or type a command</p>
       </div>
     {/if}
     <Composer onQueued={handleCommandQueued} />

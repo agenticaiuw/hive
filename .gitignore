@@ -1,11 +1,9 @@
 .DS_Store
 
-# Secrets and local runtime state
+# Secrets and local runtime state — only root .env is used
 .env
 .env.*
 !.env.example
-software/ai-pendant.env
-!software/ai-pendant.env.example
 secrets.conf
 *.log
 

@@ -1,47 +1,35 @@
-# One env file + floating command HUD
+# Root `.env` + floating command HUD
 
-## Secrets: `software/ai-pendant.env`
+## One env file: repo root only
 
-All packages load this single file (via `software/load-pendant-env.js` or a symlink named `.env`).
+```
+agentic-gadget/.env          ← the only secrets file
+agentic-gadget/.env.example  ← template (committed)
+```
+
+There are **no** `software/*/.env` files. Packages load root via:
+
+```js
+import '../../load-pendant-env.mjs'  // resolves to <repo>/.env
+```
 
 ### Required keys (6)
 
 | Key | Purpose |
 |-----|---------|
-| `PAIRING_CODE` | Mission Control login **and** device pairing |
-| `RELAY_API_KEY` | Bridge / dashboard / worker auth |
-| `AGENT_TOKEN` | Local Mac agent Bearer token |
-| `OPENROUTER_API_KEY` | LLM + multimodal (also accepted as `LLM_API_KEY`) |
-| `RELAY_URL` | Cloudflare relay base URL |
-| `SESSION_SECRET` | Dashboard cookie signing |
+| `PAIRING_CODE` | Mission Control login + device pairing |
+| `RELAY_API_KEY` | Bridge / dashboard / worker |
+| `AGENT_TOKEN` | Local Mac agent |
+| `OPENROUTER_API_KEY` | LLM (+ multimodal) |
+| `RELAY_URL` | Cloudflare relay |
+| `SESSION_SECRET` | Dashboard cookies |
 
-Everything else (models, ports, retention, computer-use flags) has **code defaults** — only set them to override.
+Aliases applied in `load-pendant-env.mjs`: `LLM_API_KEY`, `DASHBOARD_ACCESS_KEY`, `DASHBOARD_SESSION_SECRET`, `VITE_*`.
 
-### Aliases applied automatically
+## Floating HUD
 
-- `OPENROUTER_API_KEY` ↔ `LLM_API_KEY`
-- `PAIRING_CODE` → `DASHBOARD_ACCESS_KEY` (login code)
-- `SESSION_SECRET` → `DASHBOARD_SESSION_SECRET`
-- `RELAY_URL` → `VITE_RELAY_URL`
+Menu bar AI Pendant → **Floating Command…** — always-on-top text + mic over other apps.
 
-### Cloudflare
+## Dashboard idle
 
-`wrangler secret put` for the worker should still set `RELAY_API_KEY`, `PAIRING_CODE`, and `LLM_API_KEY` / `OPENROUTER_API_KEY` to match this file.
-
-## Floating command HUD
-
-In **AI Pendant** (menu bar app):
-
-1. Menu bar icon → **Floating Command…** (or rebuild/install the app)
-2. Always-on-top panel with **mic + text field + send**
-3. Stays over other apps (`NSPanel` floating, all Spaces)
-4. Sends to local agent `POST /plan` then auto-`/execute` when actions are returned
-
-Rebuild:
-
-```bash
-cd software/mac-menubar && bash build.sh
-# then copy build/AI\ Pendant.app to /Applications
-```
-
-Mic needs **Speech Recognition** + **Microphone** permission for the app.
+Stuck `status=transcribing` jobs older than 90s are treated as failed. The hero shows **Ready / Idle** when nothing useful is active.

@@ -50,6 +50,10 @@ function hasUsefulTranscript(value: unknown) {
 }
 
 function isTranscribing(run: JsonRecord | null) {
+  if (!run) return false;
+  const updated = Date.parse(String(run.updatedAt || run.createdAt || ""));
+  const ageMs = Number.isFinite(updated) ? Date.now() - updated : 0;
+  if (ageMs > 90_000) return false;
   return Boolean(
     run?.events?.some(
       (event: JsonRecord) =>
@@ -57,6 +61,13 @@ function isTranscribing(run: JsonRecord | null) {
         ["active", "waiting"].includes(event.status),
     ),
   );
+}
+
+function isIdleRun(run: JsonRecord | null) {
+  if (!run) return true;
+  if (isTranscribing(run)) return false;
+  if (!hasUsefulTranscript(run.command) && !isTranscribing(run)) return true;
+  return false;
 }
 
 function bytes(value: unknown) {
@@ -112,7 +123,8 @@ function stageState(run: JsonRecord | null, stageId: string) {
   return "done";
 }
 
-function displayCommand(run: JsonRecord) {
+function displayCommand(run: JsonRecord | null) {
+  if (!run || isIdleRun(run)) return "Ready";
   if (isTranscribing(run)) return "Transcribing…";
   if (!hasUsefulTranscript(run.command)) return "No speech detected";
   return run.command;
@@ -287,10 +299,28 @@ export default function Dashboard() {
 
   const snapshotRuns = Array.isArray(snapshot?.pipeline) ? snapshot.pipeline : [];
   const runs = liveRuns.length ? liveRuns : snapshotRuns;
-  const selected =
-    runs.find((run: JsonRecord) => run.pipelineId === selectedId) ??
-    runs[0] ??
-    null;
+  const preferredRun = (() => {
+    if (!runs.length) return null;
+    if (selectedId) {
+      const hit = runs.find((run: JsonRecord) => run.pipelineId === selectedId);
+      if (hit && !isIdleRun(hit)) return hit;
+    }
+    const live = runs.find(
+      (run: JsonRecord) =>
+        isTranscribing(run) ||
+        (run.status === "processing" && hasUsefulTranscript(run.command)),
+    );
+    if (live) return live;
+    return (
+      runs.find(
+        (run: JsonRecord) =>
+          hasUsefulTranscript(run.command) ||
+          run.status === "completed" ||
+          run.status === "failed",
+      ) ?? null
+    );
+  })();
+  const selected = preferredRun;
   const cloud = snapshot?.cloud ?? {};
   const agent = snapshot?.status?.agent ?? {};
   const telemetry = useMemo(() => {
@@ -300,13 +330,27 @@ export default function Dashboard() {
     return event?.meta?.inputTelemetry ?? null;
   }, [selected]);
   const selectedTranscribing = isTranscribing(selected);
+  const selectedIdle = !selected || isIdleRun(selected);
   const badTranscript = Boolean(
-    selected && !selectedTranscribing && !hasUsefulTranscript(selected.command),
+    selected &&
+      !selectedIdle &&
+      !selectedTranscribing &&
+      !hasUsefulTranscript(selected.command) &&
+      selected.status === "failed",
   );
-  const newestRun = runs[0] ?? null;
+  const newestRun =
+    runs.find(
+      (run: JsonRecord) =>
+        hasUsefulTranscript(run.command) || isTranscribing(run),
+    ) ??
+    runs[0] ??
+    null;
   const newestTranscribing = isTranscribing(newestRun);
   const latestBad = Boolean(
-    newestRun && !newestTranscribing && !hasUsefulTranscript(newestRun.command),
+    newestRun &&
+      !newestTranscribing &&
+      !hasUsefulTranscript(newestRun.command) &&
+      newestRun.status === "failed",
   );
   const latestMacAction = Array.isArray(snapshot?.logs)
     ? snapshot.logs[0]
@@ -365,15 +409,15 @@ export default function Dashboard() {
     cloudUp && bridgeUp ? "ok" : cloudUp || bridgeUp ? "warn" : "off";
   const newestFailedLog = activity[0]?.status === "failed";
 
-  const heroChip = !selected
-    ? null
+  const heroChip = selectedIdle
+    ? { tone: "ok", word: "Idle" }
     : badTranscript
       ? { tone: "warn", word: "No speech" }
       : selectedTranscribing ||
-          selected.status === "processing" ||
-          selected.status === "active"
+          selected?.status === "processing" ||
+          selected?.status === "active"
         ? { tone: "run", word: "Running" }
-        : selected.status === "failed"
+        : selected?.status === "failed"
           ? { tone: "warn", word: "Failed" }
           : { tone: "ok", word: "Done" };
 
@@ -493,7 +537,7 @@ export default function Dashboard() {
       ) : null}
 
       <article className={`hero ${badTranscript ? "has-alert" : ""}`}>
-        {selected ? (
+        {selected && !selectedIdle ? (
           <>
             <div className="hero-top">
               <span className="micro-chip">
@@ -647,8 +691,17 @@ export default function Dashboard() {
           </>
         ) : (
           <div className="hero-empty">
-            <h2 className="hero-command">Waiting for pendant</h2>
-            <p className="hero-hint">Press and speak</p>
+            <div className="hero-top">
+              <span className="micro-chip">Idle</span>
+              {heroChip ? (
+                <span className={`status-chip ${heroChip.tone}`}>
+                  <i aria-hidden="true" />
+                  {heroChip.word}
+                </span>
+              ) : null}
+            </div>
+            <h2 className="hero-command">Ready</h2>
+            <p className="hero-hint">Press the pendant or type a command</p>
           </div>
         )}
         <Composer onQueued={handleCommandQueued} />

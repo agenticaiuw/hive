@@ -159,7 +159,15 @@ export function voiceRunForJob(job) {
 
   const events = []
   const hasTranscript = /[\p{L}\p{N}]/u.test(String(job.command || ''))
-  const transcriptionPending = job.status === 'transcribing'
+  // Boot diagnostics / failed uploads can leave status=transcribing forever.
+  // After this window, treat them as failed so the dashboard returns to idle.
+  const STALE_TRANSCRIBE_MS = 90_000
+  const updatedMs = new Date(job.updatedAt || job.createdAt || 0).getTime()
+  const ageMs = Number.isFinite(updatedMs) ? Date.now() - updatedMs : 0
+  const transcriptionStale =
+    job.status === 'transcribing' && ageMs > STALE_TRANSCRIBE_MS
+  const transcriptionPending =
+    job.status === 'transcribing' && !transcriptionStale
   events.push(
     typed
       ? {
@@ -186,13 +194,17 @@ export function voiceRunForJob(job) {
             ? 'Recording received; transcription running'
             : hasTranscript
               ? 'Transcript received from cloud'
-              : 'Speech was not recognized',
+              : transcriptionStale
+                ? 'Transcription timed out'
+                : 'Speech was not recognized',
           detail: transcriptionPending
             ? 'Cloudflare received the pendant recording and is transcribing it now.'
             : hasTranscript
               ? 'Speech-to-text completed before this job reached the Mac bridge.'
-              : job.error ||
-                'Audio arrived, but speech-to-text did not return words.',
+              : transcriptionStale
+                ? 'This run sat in transcribing with no transcript — usually a failed or partial upload. Safe to ignore; start a new recording.'
+                : job.error ||
+                  'Audio arrived, but speech-to-text did not return words.',
           text: String(job.command || ''),
           source: 'cloudflare',
           meta: { inputTelemetry: telemetry },
@@ -359,11 +371,16 @@ export function voiceRunForJob(job) {
         event.status === 'done' &&
         /executed|Plan executed/i.test(String(event.label || '')),
     )
-  const status = ['failed', 'cancelled'].includes(job.status)
-    ? 'failed'
-    : playbackDone || dashboardDone || macDoneForUi
-      ? 'completed'
-      : 'processing'
+  const status =
+    ['failed', 'cancelled'].includes(job.status) || transcriptionStale
+      ? 'failed'
+      : playbackDone || dashboardDone || macDoneForUi
+        ? 'completed'
+        : transcriptionPending
+          ? 'processing'
+          : hasTranscript || result
+            ? 'processing'
+            : 'failed'
 
   return {
     pipelineId: job.jobId,

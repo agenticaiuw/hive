@@ -37,7 +37,13 @@ export function hasUsefulTranscript(value: unknown) {
   return /[\p{L}\p{N}]/u.test(String(value || ""));
 }
 
+/** True only while STT is actually in progress on a fresh run (not a stale stuck job). */
 export function isTranscribing(run: JsonRecord | null) {
+  if (!run) return false;
+  const updated = Date.parse(String(run.updatedAt || run.createdAt || ""));
+  const ageMs = Number.isFinite(updated) ? Date.now() - updated : 0;
+  // Stuck boot/partial uploads used to sit on "Transcribing…" forever.
+  if (ageMs > 90_000) return false;
   return Boolean(
     run?.events?.some(
       (event: JsonRecord) =>
@@ -45,6 +51,18 @@ export function isTranscribing(run: JsonRecord | null) {
         ["active", "waiting"].includes(event.status),
     ),
   );
+}
+
+/** No active work — hero should show idle, not a stuck stage name. */
+export function isIdleRun(run: JsonRecord | null) {
+  if (!run) return true;
+  if (isTranscribing(run)) return false;
+  const status = String(run.status || "");
+  if (status === "completed" || status === "failed") return false;
+  // Empty command + not actively transcribing = nothing useful to show as "current".
+  if (!hasUsefulTranscript(run.command) && status !== "processing") return true;
+  if (!hasUsefulTranscript(run.command) && !isTranscribing(run)) return true;
+  return false;
 }
 
 export function bytes(value: unknown) {
@@ -97,7 +115,8 @@ export function stageState(run: JsonRecord | null, stageId: string) {
   return "done";
 }
 
-export function displayCommand(run: JsonRecord) {
+export function displayCommand(run: JsonRecord | null) {
+  if (!run || isIdleRun(run)) return "Ready";
   if (isTranscribing(run)) return "Transcribing…";
   if (!hasUsefulTranscript(run.command)) return "No speech detected";
   return run.command;
