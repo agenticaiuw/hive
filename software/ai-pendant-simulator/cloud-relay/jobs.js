@@ -133,6 +133,8 @@ export function publicJob(job) {
     method: job.method ?? null,
     path: job.path ?? null,
     inputTelemetry: job.inputTelemetry ?? null,
+    // Hint from multimodal audio→plan (relay pilot); bridge may skip re-planning.
+    plannerHint: job.plannerHint ?? null,
     deviceEvents: Array.isArray(job.deviceEvents)
       ? job.deviceEvents.slice(-32)
       : [],

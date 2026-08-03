@@ -199,16 +199,22 @@ static int configure_tls_socket(int fd)
 		return -errno;
 	}
 
-#if defined(TLS_SESSION_CACHE) && defined(TLS_SESSION_CACHE_ENABLED)
-	/* Session resumption keeps the small announce POST that follows a
-	 * recording under a second by skipping the full TLS handshake.
-	 * Best effort: some modem firmware revisions reject the option.
+#if defined(TLS_SESSION_CACHE)
+	/*
+	 * Session resumption is the difference between a ~0.5 s second
+	 * connect and a full ~2–10 s handshake on LTE-M. The previous guard
+	 * required TLS_SESSION_CACHE_ENABLED to also be *defined*, but that
+	 * symbol is a value (1), not a feature flag — so the option never
+	 * applied. Always request caching when the socket API supports it.
 	 */
 	{
 		int session_cache = TLS_SESSION_CACHE_ENABLED;
 
-		(void)setsockopt(fd, SOL_TLS, TLS_SESSION_CACHE,
-				 &session_cache, sizeof(session_cache));
+		if (setsockopt(fd, SOL_TLS, TLS_SESSION_CACHE,
+			       &session_cache, sizeof(session_cache)) != 0) {
+			printk("TLS session cache not accepted (errno=%d)\n",
+			       errno);
+		}
 	}
 #endif
 
@@ -383,6 +389,38 @@ static int send_http_post_header(int fd, const char *path,
 	return send_all(fd, header, (size_t)length);
 }
 
+/*
+ * Single-shot voice command: one TLS session, raw Ogg body, relay does
+ * STT + Mac dispatch. Replaces the old announce → /v1/transcribe →
+ * /v1/mac/plan triple handshake that cost 15–25 s of pure radio idle.
+ */
+static int send_pendant_command_header(int fd, size_t content_length,
+				       uint32_t sample_rate,
+				       uint32_t source_pcm_bytes)
+{
+	char header[HTTP_HEADER_SIZE + 128];
+	int length = snprintf(
+		header, sizeof(header),
+		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
+		"Host: %s\r\n"
+		"Authorization: Bearer %s\r\n"
+		"Content-Type: audio/ogg\r\n"
+		"Content-Length: %lu\r\n"
+		"X-Device-Id: %s\r\n"
+		"X-Audio-Format: ogg\r\n"
+		"X-Sample-Rate: %u\r\n"
+		"X-Pcm-Bytes: %u\r\n"
+		"Connection: close\r\n\r\n",
+		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
+		(unsigned long)content_length, PENDANT_DEVICE_ID,
+		sample_rate, source_pcm_bytes);
+
+	if (length < 0 || (size_t)length >= sizeof(header)) {
+		return -EOVERFLOW;
+	}
+	return send_all(fd, header, (size_t)length);
+}
+
 static int send_http_get_header(int fd, const char *path)
 {
 	char header[HTTP_HEADER_SIZE];
@@ -478,14 +516,17 @@ static int base64_finish(struct base64_stream *stream)
 	return error == 0 ? base64_flush(stream) : error;
 }
 
-static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
+/*
+ * Raw Ogg upload on /v1/pendant/command. One TLS + one HTTP request does
+ * STT and Mac dispatch; no Base64 bloat, no second/third handshake.
+ */
+static int post_recording_command(const char *audio_path,
+				  uint32_t source_pcm_bytes,
+				  uint32_t sample_rate)
 {
 	struct fs_dirent entry;
 	struct fs_file_t file;
 	uint8_t file_bytes[FILE_READ_SIZE];
-	struct base64_stream encoder = { 0 };
-	size_t base64_bytes;
-	size_t body_bytes;
 	uint32_t bytes_read_total = 0U;
 	int fd = -1;
 	int error;
@@ -502,34 +543,8 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 		       (unsigned int)entry.type, (uint32_t)entry.size);
 		return -EINVAL;
 	}
-	printk("Cloud upload found %u Ogg Opus bytes on SD\n",
+	printk("Cloud upload found %u Ogg Opus bytes on SD (single-shot)\n",
 	       (uint32_t)entry.size);
-
-	/* When a pre-upload announce succeeded, reference its job so the
-	 * relay attaches this audio to the already-visible entry instead
-	 * of creating a second one.
-	 */
-	char dynamic_prefix[JOB_ID_SIZE + 32];
-	int prefix_length;
-
-	if (announced_job_id[0] != '\0') {
-		prefix_length = snprintf(
-			dynamic_prefix, sizeof(dynamic_prefix),
-			"{\"jobId\":\"%s\",\"audioBase64\":\"",
-			announced_job_id);
-	} else {
-		prefix_length = snprintf(dynamic_prefix,
-					 sizeof(dynamic_prefix), "%s",
-					 transcription_prefix);
-	}
-	if (prefix_length < 0 ||
-	    (size_t)prefix_length >= sizeof(dynamic_prefix)) {
-		return -EOVERFLOW;
-	}
-
-	base64_bytes = ((entry.size + 2U) / 3U) * 4U;
-	body_bytes = (size_t)prefix_length + base64_bytes +
-		     sizeof(transcription_suffix) - 1U;
 
 	int64_t lat_upload_started = k_uptime_get();
 
@@ -540,19 +555,13 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 	}
 	int64_t lat_upload_socket_done = k_uptime_get();
 
-	error = send_http_post_header(fd, TRANSCRIBE_PATH,
-				      "application/json", body_bytes);
+	error = send_pendant_command_header(fd, (size_t)entry.size,
+					    sample_rate, source_pcm_bytes);
 	if (error != 0) {
 		printk("Cloud upload HTTP header failed: %d\n", error);
 		goto out;
 	}
-	error = send_all(fd, dynamic_prefix, (size_t)prefix_length);
-	if (error != 0) {
-		printk("Cloud upload JSON prefix failed: %d\n", error);
-		goto out;
-	}
 
-	encoder.fd = fd;
 	fs_file_t_init(&file);
 	error = fs_open(&file, audio_path, FS_O_READ);
 	if (error != 0) {
@@ -569,7 +578,7 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 		if (count == 0) {
 			break;
 		}
-		error = base64_feed(&encoder, file_bytes, (size_t)count);
+		error = send_all(fd, file_bytes, (size_t)count);
 		if (error != 0) {
 			break;
 		}
@@ -584,18 +593,9 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 		goto out;
 	}
 
-	error = base64_finish(&encoder);
-	if (error != 0) {
-		goto out;
-	}
-	error = send_all(fd, transcription_suffix,
-			 sizeof(transcription_suffix) - 1U);
-	if (error != 0) {
-		goto out;
-	}
-
 	pendant_cloud_uploaded_pcm_bytes = source_pcm_bytes;
-	printk("Uploaded %u Ogg Opus bytes representing %u PCM bytes\n",
+	printk("Uploaded %u Ogg Opus bytes representing %u PCM bytes "
+	       "(raw single-shot)\n",
 	       bytes_read_total, pendant_cloud_uploaded_pcm_bytes);
 	int64_t lat_body_sent = k_uptime_get();
 
@@ -606,7 +606,7 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 	       lat_body_sent - lat_upload_socket_done,
 	       k_uptime_get() - lat_body_sent,
 	       k_uptime_get() - lat_upload_started,
-	       (uint32_t)body_bytes);
+	       (uint32_t)entry.size);
 
 out:
 	close(fd);
@@ -1361,6 +1361,7 @@ int pendant_cloud_upload_recording(const char *audio_path,
 	pendant_cloud_reply_format = PENDANT_CLOUD_AUDIO_UNKNOWN;
 	transcription_job_id[0] = '\0';
 	mac_job_id[0] = '\0';
+	announced_job_id[0] = '\0';
 
 	if (!cloud_initialized) {
 		error = pendant_cloud_init();
@@ -1369,7 +1370,12 @@ int pendant_cloud_upload_recording(const char *audio_path,
 		}
 	}
 
-	error = post_recording(audio_path, source_pcm_bytes);
+	/*
+	 * Fast path: one TLS session, raw Ogg, relay STT + Mac queue.
+	 * Response carries transcript text and job.jobId (or top-level jobId).
+	 */
+	error = post_recording_command(audio_path, source_pcm_bytes,
+				       sample_rate);
 	pendant_cloud_transcribe_result = error;
 	if (error != 0) {
 		return error;
@@ -1377,29 +1383,27 @@ int pendant_cloud_upload_recording(const char *audio_path,
 
 	error = copy_transcript_json_string();
 	if (error != 0) {
-		pendant_cloud_transcribe_result = error;
-		return error;
-	}
-	error = copy_json_string_value(
-		"jobId", transcription_job_id,
-		sizeof(transcription_job_id));
-	if (error != 0) {
+		/* Empty transcript / noise rejection still returns 200 sometimes. */
 		pendant_cloud_transcribe_result = error;
 		return error;
 	}
 
-	error = dispatch_transcript_to_mac(sample_rate);
-	pendant_cloud_dispatch_result = error;
-	if (error == 0) {
-		error = copy_json_string_value(
-			"jobId", mac_job_id, sizeof(mac_job_id));
-		if (error != 0) {
-			pendant_cloud_dispatch_result = error;
-			return error;
-		}
-		printk("Transcript queued for Mac job %s\n", mac_job_id);
+	/* Prefer nested job.jobId from /v1/pendant/command; fall back to jobId. */
+	if (copy_json_string_value("jobId", mac_job_id, sizeof(mac_job_id)) ==
+	    0) {
+		(void)strncpy(transcription_job_id, mac_job_id,
+			      sizeof(transcription_job_id) - 1U);
+		transcription_job_id[sizeof(transcription_job_id) - 1U] = '\0';
+		pendant_cloud_dispatch_result = 0;
+		printk("Transcript queued for Mac job %s (single-shot)\n",
+		       mac_job_id);
+		return 0;
 	}
-	return error;
+
+	/* No job in response — Mac bridge offline or dispatch=0. */
+	pendant_cloud_dispatch_result = -ENOTCONN;
+	printk("Single-shot upload ok but no Mac job was queued\n");
+	return -ENOTCONN;
 }
 
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path)

@@ -303,9 +303,15 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 	if (error != OPUS_OK) {
 		return -EINVAL;
 	}
+	/*
+	 * Complexity 1 is dramatically cheaper on the nRF9160 than 3 and is
+	 * still fine for short command speech. Measured encode CPU at
+	 * complexity 3 was ~3.6 s for 2.8 s of audio — the main post-button
+	 * tax after we collapsed the cloud handshakes.
+	 */
 	if (opus_encoder_ctl(encoder, OPUS_SET_BITRATE(PENDANT_OPUS_BITRATE)) !=
 		    OPUS_OK ||
-	    opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(3)) != OPUS_OK ||
+	    opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(1)) != OPUS_OK ||
 	    opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)) !=
 		    OPUS_OK ||
 	    opus_encoder_ctl(encoder, OPUS_SET_VBR(1)) != OPUS_OK) {

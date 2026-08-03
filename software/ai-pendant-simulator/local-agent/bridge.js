@@ -181,32 +181,68 @@ export async function handleWork(work) {
   try {
     if (work.type === 'plan') {
       const agentStartedAt = Date.now()
-      await reportPipelineEvent(work, {
-        stage: 'agent',
-        status: 'active',
-        label: 'Agent is processing the transcript',
-        detail: 'Streaming the request through the local Mac agent and LLM.',
-      })
-      const plan = await callLocalAgent('/plan', {
-        method: 'POST',
-        body: {
+      const hint = work.plannerHint
+      const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
+      // Relay multimodal audio→plan already produced actions — skip a second
+      // DeepSeek round trip (saves ~1–5 s on simple commands).
+      const useAudioNativePlan =
+        hint?.planner === 'audio-native' &&
+        (hintActions.length > 0 ||
+          hint?.status === 'instant' ||
+          String(hint?.response || '').trim())
+
+      let plan
+      if (useAudioNativePlan) {
+        await reportPipelineEvent(work, {
+          stage: 'agent',
+          status: 'active',
+          label: 'Using audio-native plan from the relay',
+          detail: 'Skipping local LLM — multimodal planner already decided.',
+        })
+        plan = {
+          status:
+            hint.status === 'instant' ||
+            (!hintActions.length && String(hint.response || '').trim())
+              ? 'instant'
+              : 'ready',
           command: work.command,
-          sessionId: work.sessionId,
-          source: 'pendant',
-        },
-      })
+          response: String(hint.response || '').trim() || undefined,
+          actions: hintActions,
+          requiresConfirmation: hintActions.length > 0,
+          planner: 'audio-native',
+          fullControl: true,
+        }
+      } else {
+        await reportPipelineEvent(work, {
+          stage: 'agent',
+          status: 'active',
+          label: 'Agent is processing the transcript',
+          detail: 'Streaming the request through the local Mac agent and LLM.',
+        })
+        plan = await callLocalAgent('/plan', {
+          method: 'POST',
+          body: {
+            command: work.command,
+            sessionId: work.sessionId,
+            source: 'pendant',
+          },
+        })
+      }
 
       await reportPipelineEvent(work, {
         stage: 'agent',
         status: 'done',
         label: 'Agent response ready',
-        detail: `Completed in ${Date.now() - agentStartedAt} ms.`,
+        detail: `Completed in ${Date.now() - agentStartedAt} ms${
+          useAudioNativePlan ? ' (audio-native, no local LLM)' : ''
+        }.`,
         text: spokenTextForResult(plan),
         meta: {
           durationMs: Date.now() - agentStartedAt,
           localJobId: plan.jobId ?? null,
           thinkingTraceId: plan.thinking?.traceId ?? null,
           planner: plan.planner ?? null,
+          audioNative: Boolean(useAudioNativePlan),
           resultStatus: plan.status ?? null,
           responseCharacters: spokenTextForResult(plan).length,
         },

@@ -40,6 +40,15 @@ export const LLM_API_BASE_URL =
   process.env.LLM_API_BASE_URL || 'https://openrouter.ai/api/v1'
 export const STT_MODEL =
   process.env.STT_MODEL || 'openai/whisper-large-v3'
+// Multimodal chat model that accepts input_audio (OpenRouter / OpenAI-compatible).
+// Used by the audio-native planner pilot to go audio → transcript+plan in one hop.
+export const LLM_AUDIO_MODEL =
+  process.env.LLM_AUDIO_MODEL || 'google/gemini-3.6-flash'
+// When true (default), /v1/transcribe and /v1/pendant/command try planFromAudio
+// first and fall back to Whisper STT on failure. Set to 0 or false to disable.
+export const AUDIO_NATIVE_PLANNER =
+  process.env.AUDIO_NATIVE_PLANNER !== '0' &&
+  process.env.AUDIO_NATIVE_PLANNER !== 'false'
 // OpenRouter requires a live speech model slug (generic openai/gpt-4o-mini-tts
 // no longer resolves). Prefer Grok voice for Korean + English mp3 replies.
 export const TTS_MODEL =

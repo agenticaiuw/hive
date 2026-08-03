@@ -12,6 +12,48 @@ export const PENDANT_SPEECH_OPUS_BITRATE = 16000
 const MAX_SPOKEN_CHARACTERS = 180
 const SPEECH_RATE_WORDS_PER_MINUTE = 210
 const FADE_OUT_SAMPLES = Math.round(PENDANT_SPEECH_SAMPLE_RATE * 0.1)
+const CACHEABLE_SHORT_TEXT_MAX = 48
+const CACHEABLE_SHORT_TEXT_PATTERN = /^[A-Za-z0-9 .,!?'"-]+$/
+const ALWAYS_CACHE_PHRASES = new Set([
+  'Done.',
+  'Waiting for your approval on the dashboard.',
+  "That didn't finish on the Mac.",
+])
+
+/** @type {Map<string, { pcm: Buffer, opus: Buffer, truncated: boolean }>} */
+const pendantSpeechCache = new Map()
+
+export function clearPendantSpeechCache() {
+  pendantSpeechCache.clear()
+}
+
+export function pendantSpeechCacheSize() {
+  return pendantSpeechCache.size
+}
+
+function shouldCacheSpokenText(text) {
+  if (ALWAYS_CACHE_PHRASES.has(text)) return true
+  return (
+    text.length > 0 &&
+    text.length <= CACHEABLE_SHORT_TEXT_MAX &&
+    CACHEABLE_SHORT_TEXT_PATTERN.test(text)
+  )
+}
+
+function pendantSpeechPayload(pcm, opus, truncated) {
+  return {
+    format: 's16le',
+    sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
+    channels: PENDANT_SPEECH_CHANNELS,
+    bitsPerSample: PENDANT_SPEECH_BITS,
+    pcmBytes: pcm.length,
+    truncated: Boolean(truncated),
+    audioBase64: pcm.toString('base64'),
+    compressedFormat: 'ogg-opus',
+    compressedBytes: opus.length,
+    compressedAudioBase64: opus.toString('base64'),
+  }
+}
 
 /**
  * What the pendant should say for a result. Always returns non-empty text —
@@ -134,6 +176,19 @@ export function synthesizePendantSpeech(result) {
       ? { ...result, response: text }
       : result
 
+  const cached = pendantSpeechCache.get(text)
+  if (cached) {
+    const pcm = Buffer.from(cached.pcm)
+    const opus = cached.opus
+      ? Buffer.from(cached.opus)
+      : encodePendantSpeechOpus(pcm)
+    return {
+      ...resultWithText,
+      response: String(resultWithText?.response || text),
+      pendantSpeech: pendantSpeechPayload(pcm, opus, cached.truncated),
+    }
+  }
+
   const temporaryDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'ai-pendant-speech-'),
   )
@@ -180,21 +235,18 @@ export function synthesizePendantSpeech(result) {
     }
     const opus = encodePendantSpeechOpus(pcm)
 
+    if (shouldCacheSpokenText(text)) {
+      pendantSpeechCache.set(text, {
+        pcm: Buffer.from(pcm),
+        opus: Buffer.from(opus),
+        truncated: wasTruncated,
+      })
+    }
+
     return {
       ...resultWithText,
       response: String(resultWithText?.response || text),
-      pendantSpeech: {
-        format: 's16le',
-        sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
-        channels: PENDANT_SPEECH_CHANNELS,
-        bitsPerSample: PENDANT_SPEECH_BITS,
-        pcmBytes: pcm.length,
-        truncated: wasTruncated,
-        audioBase64: pcm.toString('base64'),
-        compressedFormat: 'ogg-opus',
-        compressedBytes: opus.length,
-        compressedAudioBase64: opus.toString('base64'),
-      },
+      pendantSpeech: pendantSpeechPayload(pcm, opus, wasTruncated),
     }
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true })

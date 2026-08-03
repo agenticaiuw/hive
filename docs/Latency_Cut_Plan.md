@@ -170,11 +170,28 @@ Without encode streaming + TLS reuse, **&lt; 5 s is not reachable** even with a 
 - [x] Cut poll idle (~1.5 s)  
 - [x] Conditional memory for one-shots  
 - [x] Always-speak + verify `open_app`  
-- [ ] Stream Opus encode during record  
-- [ ] TLS session reuse / combined pendant endpoint  
-- [ ] `LLM_AUDIO_MODEL` pilot + fallback  
-- [ ] Canned PCM for fixed replies  
-- [ ] Dashboard stage timers always show `meta.durationMs`
+- [x] **Single-shot `/v1/pendant/command`** (firmware drops announce + separate dispatch TLS)  
+- [x] **TLS session cache** actually enabled (was never applied due to a bad `#if`)  
+- [x] **Opus complexity 1** (cheaper encode on nRF9160)  
+- [x] **`LLM_AUDIO_MODEL` pilot** (`audioPlan.js`) with Whisper fallback  
+- [x] **Bridge skips local LLM** when `plannerHint` is audio-native  
+- [x] **Canned TTS PCM cache** for short fixed phrases  
+- [ ] Stream Opus encode *during* capture (needs RX slab shrink; next firmware pass)  
+- [ ] Dashboard stage timers always show `meta.durationMs`  
+
+### Expected after flash + deploy (warm modem, short command)
+
+| Stage | Before | After (est.) |
+|-------|-------:|-------------:|
+| Encode | ~5 s (cplx 3) | ~2–3 s (cplx 1) |
+| TLS ×3 | ~6–15 s | **~2–3 s ×1** |
+| Whisper | ~11.6 s | **~2–4 s multimodal** (or Whisper fallback) |
+| Mac plan | ~1–5 s | **~0 s** if audio-native actions present |
+| Execute | ~0.2 s | ~0.2 s |
+| TTS | ~1.2 s | **~0 s cache hit** / ~1.2 s miss |
+| **Total** | **~25–34 s** | **~5–10 s** first press; **~3–6 s** warm session + cache |
+
+True **&lt; 3 s** still wants streaming encode during speech (encode hidden under recording).
 
 ## Acceptance criteria
 

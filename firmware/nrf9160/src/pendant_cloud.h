@@ -27,17 +27,18 @@ int pendant_cloud_suspend_radio(void);
 int pendant_cloud_resume_radio(void);
 
 /*
- * Announce a finished recording to the relay before the audio upload so
- * the dashboard shows the pending task within about a second of the stop
- * press. Best effort; the upload attaches to the announced job when this
- * succeeded and creates its own job otherwise.
+ * Optional early dashboard visibility. Prefer the single-shot
+ * pendant_cloud_upload_recording path for latency; announce costs a full
+ * TLS handshake of its own.
  */
 int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 				     uint32_t sample_rate);
 
 /*
- * Stream an Ogg Opus recording from microSD to the cloud relay. On successful
- * transcription, the transcript is queued for the Mac agent.
+ * Single-shot upload: one TLS session POSTs raw Ogg Opus to
+ * /v1/pendant/command?dispatch=1. The relay runs STT (or multimodal audio
+ * plan) and queues the Mac agent job. Replaces the old
+ * announce + /v1/transcribe + /v1/mac/plan triple handshake.
  */
 int pendant_cloud_upload_recording(const char *audio_path,
 				   uint32_t source_pcm_bytes,

@@ -1348,13 +1348,7 @@ int main(void)
 			  (SAMPLE_RATE * sizeof(int16_t) / 1000U)));
 	report_main_stack_headroom("boot encode");
 	if (error == 0) {
-		/* Mirror the button path exactly: announce, then upload. */
-		int boot_announce_error = pendant_cloud_announce_recording(
-			boot_encode_stats.input_bytes, SAMPLE_RATE);
-		if (boot_announce_error != 0) {
-			printk("Boot announce failed: %d\n",
-			       boot_announce_error);
-		}
+		/* Single-shot /v1/pendant/command — no separate announce TLS. */
 		error = pendant_cloud_upload_recording(
 			SD_OPUS_PATH, boot_encode_stats.input_bytes, SAMPLE_RATE);
 	}
@@ -1421,20 +1415,15 @@ int main(void)
 			flash_led(4U, 100, 100);
 			continue;
 		}
-		/* Make the new task visible on the dashboard right away;
-		 * the audio itself follows in the next request.
+		/*
+		 * One TLS + raw Ogg to /v1/pendant/command (STT + Mac queue).
+		 * Skipping the separate announce/dispatch handshakes saves
+		 * ~10–20 s of pure radio time on a typical cycle.
 		 */
-		int announce_error = pendant_cloud_announce_recording(
-			recorded_samples * (uint32_t)sizeof(int16_t),
-			SAMPLE_RATE);
-		printk("LAT press_to_announce_done_ms=%lld\n",
-		       k_uptime_get() - lat_press_started);
-		if (announce_error != 0) {
-			printk("Recording announce failed: %d\n",
-			       announce_error);
-		}
 		error = pendant_cloud_upload_recording(
 			SD_OPUS_PATH, encode_stats.input_bytes, SAMPLE_RATE);
+		printk("LAT press_to_upload_done_ms=%lld\n",
+		       k_uptime_get() - lat_press_started);
 		if (error != 0) {
 			printk("Internet voice cycle failed: %d "
 			       "(transcribe=%d dispatch=%d HTTP=%d)\n",

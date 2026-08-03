@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import express from 'express'
 import cors from 'cors'
 import {
+  AUDIO_NATIVE_PLANNER,
   AUDIO_RETENTION_MAX_AGE_MS,
   AUDIO_RETENTION_SWEEP_ENABLED,
   BRIDGE_POLL_TIMEOUT_MS,
@@ -24,6 +25,7 @@ import {
   voiceRunForJob,
 } from './jobs.js'
 import { getStore } from './store/index.js'
+import { planFromAudio } from './audioPlan.js'
 import { transcribeAudio } from './transcribe.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
@@ -76,6 +78,54 @@ const PENDANT_PCM_CHANNELS = 1
 const PENDANT_PCM_BITS = 16
 const DIAGNOSTIC_AUDIO_MAX_BYTES = 1024 * 1024
 const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
+
+/**
+ * Prefer multimodal audio→plan when configured; fall back to Whisper STT.
+ * Returns a transcript-shaped object plus optional plannerHint for plan jobs.
+ */
+async function resolveAudioTranscript({ audioBase64, format, language }) {
+  if (AUDIO_NATIVE_PLANNER && LLM_API_KEY) {
+    try {
+      const plan = await planFromAudio({ audioBase64, format, language })
+      const hasPlanPayload =
+        (Array.isArray(plan.actions) && plan.actions.length > 0) ||
+        Boolean(plan.status) ||
+        Boolean(plan.response)
+
+      return {
+        text: plan.text,
+        model: plan.model,
+        language: plan.language,
+        durationMs: plan.durationMs,
+        source: plan.source,
+        plannerHint: hasPlanPayload
+          ? {
+              status: plan.status,
+              response: plan.response,
+              actions: plan.actions || [],
+              planner: 'audio-native',
+            }
+          : undefined,
+      }
+    } catch (error) {
+      console.warn(
+        `[relay] Audio-native planner failed; falling back to STT: ${
+          error?.message || error
+        }`,
+      )
+    }
+  }
+
+  const startedAt = Date.now()
+  const result = await transcribeAudio({ audioBase64, format, language })
+  return {
+    text: result.text,
+    model: result.model,
+    language: result.language,
+    durationMs: Date.now() - startedAt,
+    source: 'stt',
+  }
+}
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' }))
@@ -606,16 +656,15 @@ app.post('/v1/transcribe', async (request, response) => {
       }
     }
 
-    const transcriptionStartedAt = Date.now()
-    const result = await transcribeAudio({
+    const result = await resolveAudioTranscript({
       audioBase64,
       format: request.body?.format,
       language: request.body?.language,
     })
-    const transcriptionDurationMs = Date.now() - transcriptionStartedAt
+    const transcriptionDurationMs = result.durationMs
 
     if (transcriptionJob) {
-      transcriptionJob = await store.updateJob(transcriptionJob.jobId, {
+      const jobPatch = {
         command: result.text,
         status: 'transcribed',
         inputTelemetry: {
@@ -623,8 +672,13 @@ app.post('/v1/transcribe', async (request, response) => {
           transcriptionModel: result.model,
           transcriptionLanguage: result.language,
           transcriptionDurationMs,
+          transcriptionSource: result.source || 'stt',
         },
-      })
+      }
+      if (result.plannerHint) {
+        jobPatch.plannerHint = result.plannerHint
+      }
+      transcriptionJob = await store.updateJob(transcriptionJob.jobId, jobPatch)
     }
 
     if (capture) {
@@ -638,7 +692,12 @@ app.post('/v1/transcribe', async (request, response) => {
 
     response.json({
       ok: true,
-      ...result,
+      text: result.text,
+      model: result.model,
+      language: result.language,
+      durationMs: transcriptionDurationMs,
+      source: result.source || 'stt',
+      plannerHint: result.plannerHint,
       captureId: capture?.jobId ?? null,
       jobId: transcriptionJob?.jobId ?? null,
     })
@@ -715,20 +774,65 @@ app.post(
       const sessionId =
         String(request.get('x-session-id') || '').trim() || null
       const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
+      const audioBase64 = audio.toString('base64')
 
-      const transcriptionStartedAt = Date.now()
-      const transcript = await transcribeAudio({
-        audioBase64: audio.toString('base64'),
+      const transcript = await resolveAudioTranscript({
+        audioBase64,
         format,
         language,
       })
-      const transcriptionDurationMs = Date.now() - transcriptionStartedAt
+      const transcriptionDurationMs = transcript.durationMs
 
       let job = null
+      let capture = null
       let macBridgeOnline = false
+      const store = await getStore()
+
+      // Persist a diagnostic capture when the raw upload fits the same limits
+      // as /v1/transcribe so ops history can replay pendant audio.
+      const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
+      const diagnosticAudioLimit = r2AudioEnabled
+        ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
+        : DIAGNOSTIC_AUDIO_MAX_BYTES
+      if (audio.length > 0 && audio.length <= diagnosticAudioLimit) {
+        try {
+          capture = createAudioCapture({
+            audioBase64,
+            audioBytes: audio.length,
+            format,
+            language,
+            transcript: transcript.text,
+            transcriptionModel: transcript.model,
+            status: 'completed',
+          })
+          const persistedAudio = await persistAudioCapture({
+            captureId: capture.jobId,
+            audioBase64,
+            audioBytes: audio.length,
+            format,
+            createdAt: capture.createdAt,
+            allowD1Fallback: audio.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
+          })
+          if (persistedAudio.audioStorage === 'unavailable') {
+            capture = null
+          } else {
+            capture = { ...capture, ...persistedAudio }
+            await store.createJob(capture)
+          }
+        } catch (error) {
+          console.warn(
+            `[relay] Pendant audio capture not stored: ${
+              error?.message || error
+            }`,
+          )
+          if (capture) {
+            await deleteAudioCaptureObject(capture).catch(() => {})
+          }
+          capture = null
+        }
+      }
 
       if (shouldDispatch) {
-        const store = await getStore()
         const devices = await store.listDevices()
         const macBridge = devices.find(
           (device) => device.deviceType === 'mac_bridge',
@@ -736,29 +840,57 @@ app.post(
         macBridgeOnline = isDeviceOnline(macBridge)
 
         if (macBridgeOnline) {
+          const sampleRateHeader = Number(
+            request.get('x-sample-rate') || PENDANT_PCM_SAMPLE_RATE,
+          )
+          const inputTelemetry = {
+            audioBytes: audio.length,
+            format: format === 'ogg' ? 'ogg-opus' : format,
+            sampleRate: Number.isFinite(sampleRateHeader)
+              ? sampleRateHeader
+              : PENDANT_PCM_SAMPLE_RATE,
+            channels: PENDANT_PCM_CHANNELS,
+            bitsPerSample: PENDANT_PCM_BITS,
+            // voiceRunForJob only surfaces microSD/dashboard origins.
+            storage: 'microSD',
+            uploadState: 'uploaded',
+            uploadedFormat: format === 'ogg' ? 'ogg' : format,
+            transcriptionModel: transcript.model,
+            transcriptionLanguage: transcript.language,
+            transcriptionDurationMs,
+            transcriptionSource: transcript.source || 'stt',
+            ...(capture ? { captureId: capture.jobId } : {}),
+          }
           job = createPlanJob({
             command: transcript.text,
             deviceId,
             sessionId,
-            inputTelemetry: {
-              audioBytes: audio.length,
-              format,
-              sampleRate: PENDANT_PCM_SAMPLE_RATE,
-              channels: PENDANT_PCM_CHANNELS,
-              bitsPerSample: PENDANT_PCM_BITS,
-              transcriptionModel: transcript.model,
-              transcriptionLanguage: transcript.language,
-              transcriptionDurationMs,
-            },
+            inputTelemetry,
           })
+          if (transcript.plannerHint) {
+            job.plannerHint = transcript.plannerHint
+          }
           await store.createJob(job)
+
+          if (capture) {
+            capture =
+              (await store.updateJob(capture.jobId, {
+                planJobId: job.jobId,
+              })) || capture
+          }
         }
       }
 
       response.status(job ? 202 : 200).json({
         ok: true,
-        ...transcript,
+        text: transcript.text,
+        model: transcript.model,
+        language: transcript.language,
+        durationMs: transcriptionDurationMs,
+        source: transcript.source || 'stt',
+        plannerHint: transcript.plannerHint,
         audioBytes: audio.length,
+        captureId: capture?.jobId ?? null,
         dispatchRequested: shouldDispatch,
         macBridgeOnline,
         queued: Boolean(job),
@@ -1651,6 +1783,8 @@ app.get('/v1/bridge/work', async (request, response) => {
           actions: job.actions,
           sessionId: job.sessionId ?? null,
           inputTelemetry: job.inputTelemetry ?? null,
+          // Multimodal audio→plan on the relay; bridge may skip a second LLM.
+          plannerHint: job.plannerHint ?? null,
           method: job.method ?? null,
           path: job.path ?? null,
           body: job.body ?? null,

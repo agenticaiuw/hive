@@ -6,8 +6,10 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   PENDANT_SPEECH_SAMPLE_RATE,
+  clearPendantSpeechCache,
   encodePendantSpeechOpus,
   extractWavePcm,
+  pendantSpeechCacheSize,
   spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
@@ -140,4 +142,26 @@ test('encodes 24 kHz PCM into an Ogg Opus stream', () => {
   const opus = encodePendantSpeechOpus(pcm)
   assert.equal(opus.toString('ascii', 0, 4), 'OggS')
   assert.ok(opus.length < pcm.length / 4)
+})
+
+test('caches canned short phrases and clears on demand', () => {
+  clearPendantSpeechCache()
+  assert.equal(pendantSpeechCacheSize(), 0)
+
+  const first = synthesizePendantSpeech({ response: 'Done.' })
+  assert.ok(first.pendantSpeech.pcmBytes > 100)
+  assert.ok(pendantSpeechCacheSize() >= 1)
+
+  const second = synthesizePendantSpeech({ response: 'Done.' })
+  assert.ok(second.pendantSpeech.pcmBytes > 100)
+  assert.equal(second.pendantSpeech.pcmBytes, first.pendantSpeech.pcmBytes)
+  assert.equal(
+    second.pendantSpeech.audioBase64,
+    first.pendantSpeech.audioBase64,
+  )
+  // Second call should reuse cache rather than grow it.
+  assert.equal(pendantSpeechCacheSize(), 1)
+
+  clearPendantSpeechCache()
+  assert.equal(pendantSpeechCacheSize(), 0)
 })
