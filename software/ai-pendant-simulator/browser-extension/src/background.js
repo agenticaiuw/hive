@@ -108,13 +108,24 @@ async function responseError(response) {
 
 async function currentTabSummary() {
   const [tab] = await api.tabs.query({ active: true, lastFocusedWindow: true })
+  const all = await api.tabs.query({}).catch(() => [])
+  const scriptable = all.filter((t) => isScriptableUrl(t?.url))
   return tab
     ? {
         tabId: tab.id ?? null,
         windowId: tab.windowId ?? null,
+        // Origin only — no path/query (fleet metadata, not page content).
         tabUrl: isScriptableUrl(tab.url) ? new URL(tab.url).origin : '',
+        tabTitle: String(tab.title || '').slice(0, 80),
+        tabCount: scriptable.length,
       }
-    : { tabId: null, windowId: null, tabUrl: '' }
+    : {
+        tabId: null,
+        windowId: null,
+        tabUrl: '',
+        tabTitle: '',
+        tabCount: scriptable.length,
+      }
 }
 
 async function heartbeat(config) {
@@ -281,8 +292,20 @@ async function executeCommand(command, config) {
     return navigate(params, config)
   }
 
+  if (type === 'list_tabs') {
+    return listTabs(params)
+  }
+
   const tab = await selectTargetTab(params, config.targetMode)
   await assertPageAccess(tab)
+
+  if (type === 'capture') {
+    return captureTab(tab)
+  }
+
+  if (type === 'wait_for') {
+    return waitForInTab(tab, params)
+  }
 
   const injection = await api.scripting.executeScript({
     target: { tabId: tab.id, frameIds: [0] },
@@ -295,11 +318,121 @@ async function executeCommand(command, config) {
     throw new Error('The browser returned no result from the active page.')
   }
 
+  if (firstResult.error) {
+    throw new Error(firstResult.error.message || String(firstResult.error))
+  }
+
   return {
     ...firstResult.result,
     tabId: tab.id,
     windowId: tab.windowId,
     url: tab.url ?? '',
+    title: tab.title ?? firstResult.result?.title ?? '',
+  }
+}
+
+async function waitForInTab(tab, params) {
+  const timeoutMs = Math.max(
+    100,
+    Math.min(Number(params.timeoutMs) || 10_000, 30_000),
+  )
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const injection = await api.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [0] },
+      func: checkWaitCondition,
+      args: [params],
+    })
+    const ok = injection?.[0]?.result === true
+    if (ok) {
+      return {
+        message: 'wait_for satisfied',
+        waitedMs: Date.now() - started,
+        tabId: tab.id,
+        windowId: tab.windowId,
+        url: tab.url ?? '',
+      }
+    }
+    await delay(150)
+  }
+  throw new Error(`wait_for timed out after ${timeoutMs}ms`)
+}
+
+/** Injected: returns true if wait condition holds. */
+function checkWaitCondition(params) {
+  const selector = String(params.selector || '').trim()
+  const textNeedle = String(params.textContains || params.text || '')
+    .trim()
+    .toLowerCase()
+  if (selector) {
+    try {
+      const el = document.querySelector(selector)
+      if (el) {
+        const style = window.getComputedStyle(el)
+        const rect = el.getBoundingClientRect()
+        if (
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          rect.width > 0 &&
+          rect.height > 0
+        ) {
+          return true
+        }
+      }
+    } catch {
+      throw new Error(`Invalid CSS selector: ${selector}`)
+    }
+  }
+  if (textNeedle) {
+    const bodyText = (document.body?.innerText || '').toLowerCase()
+    if (bodyText.includes(textNeedle)) return true
+  }
+  return false
+}
+
+async function listTabs(params = {}) {
+  const max = Math.max(1, Math.min(Number(params.limit) || 30, 80))
+  const tabs = await api.tabs.query({})
+  const rows = tabs
+    .filter((tab) => isScriptableUrl(tab?.url))
+    .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+    .slice(0, max)
+    .map((tab) => ({
+      tabId: tab.id,
+      windowId: tab.windowId,
+      active: Boolean(tab.active),
+      title: String(tab.title || '').slice(0, 120),
+      // Full URL for agent targeting; fleet heartbeat still uses origin only.
+      url: tab.url || '',
+      origin: isScriptableUrl(tab.url) ? new URL(tab.url).origin : '',
+    }))
+
+  return {
+    message: `${rows.length} open web tab(s)`,
+    tabs: rows,
+    tabCount: rows.length,
+  }
+}
+
+async function captureTab(tab) {
+  const windowId = tab.windowId
+  // Capture the tab's window; may capture active tab in that window.
+  if (tab.active === false) {
+    await api.tabs.update(tab.id, { active: true })
+    await delay(150)
+  }
+  const dataUrl = await api.tabs.captureVisibleTab(windowId, {
+    format: 'png',
+  })
+  return {
+    message: 'Captured visible tab',
+    tabId: tab.id,
+    windowId,
+    url: tab.url ?? '',
+    title: tab.title ?? '',
+    mimeType: 'image/png',
+    // Data URL can be large; Mac agent should not forward to cloud by default.
+    imageDataUrl: dataUrl,
   }
 }
 
@@ -410,27 +543,191 @@ function waitForTabLoad(tabId, timeoutMs) {
   })
 }
 
+/**
+ * Injected into the page (isolated world). Keep pure-page; no chrome.* APIs.
+ */
 function runInPage(type, params) {
-  const findElement = () => {
+  const ATTR = 'data-pendant-ref'
+  const MAX_ELEMENTS = 80
+
+  const cssPath = (el) => {
+    if (!(el instanceof Element)) return ''
+    if (el.id) {
+      const id = CSS.escape(el.id)
+      if (document.querySelectorAll(`#${id}`).length === 1) return `#${id}`
+    }
+    const parts = []
+    let node = el
+    while (node && node.nodeType === 1 && parts.length < 6) {
+      let part = node.nodeName.toLowerCase()
+      if (node.id) {
+        parts.unshift(`#${CSS.escape(node.id)}`)
+        break
+      }
+      const parent = node.parentElement
+      if (parent) {
+        const siblings = [...parent.children].filter(
+          (c) => c.nodeName === node.nodeName,
+        )
+        if (siblings.length > 1) {
+          const index = siblings.indexOf(node) + 1
+          part += `:nth-of-type(${index})`
+        }
+      }
+      parts.unshift(part)
+      node = parent
+    }
+    return parts.join(' > ')
+  }
+
+  const resolveElement = () => {
+    if (params.ref) {
+      const ref = String(params.ref).trim()
+      const byAttr = document.querySelector(`[${ATTR}="${ref.replace(/"/g, '')}"]`)
+      if (byAttr) return byAttr
+      throw new Error(
+        `Snapshot ref not found: ${ref}. Call snapshot again and use a fresh ref.`,
+      )
+    }
+    const selector = String(params.selector ?? '')
     let element
     try {
-      element = document.querySelector(params.selector)
+      element = document.querySelector(selector)
     } catch {
-      throw new Error(`Invalid CSS selector: ${params.selector}`)
+      throw new Error(`Invalid CSS selector: ${selector}`)
     }
-    if (!element) throw new Error(`Element not found: ${params.selector}`)
+    if (!element) throw new Error(`Element not found: ${selector}`)
     return element
   }
 
+  const isVisible = (el) => {
+    if (!(el instanceof Element)) return false
+    const style = window.getComputedStyle(el)
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      Number(style.opacity) === 0
+    ) {
+      return false
+    }
+    const rect = el.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0
+  }
+
+  const accessibleName = (el) => {
+    const aria = el.getAttribute('aria-label')
+    if (aria) return aria.trim().slice(0, 120)
+    const labelledBy = el.getAttribute('aria-labelledby')
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.innerText)
+        .filter(Boolean)
+        .join(' ')
+        .trim()
+      if (text) return text.slice(0, 120)
+    }
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      const lab = el.labels?.[0]?.innerText
+      if (lab) return lab.trim().slice(0, 120)
+      if (el.placeholder) return el.placeholder.trim().slice(0, 120)
+      if (el.name) return el.name.slice(0, 120)
+    }
+    if (el instanceof HTMLSelectElement && el.name) return el.name.slice(0, 120)
+    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
+    return text.slice(0, 120)
+  }
+
+  const roleOf = (el) => {
+    const explicit = el.getAttribute('role')
+    if (explicit) return explicit
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'a' && el.hasAttribute('href')) return 'link'
+    if (tag === 'button') return 'button'
+    if (tag === 'select') return 'combobox'
+    if (tag === 'textarea') return 'textbox'
+    if (tag === 'input') {
+      const t = (el.type || 'text').toLowerCase()
+      if (t === 'checkbox') return 'checkbox'
+      if (t === 'radio') return 'radio'
+      if (t === 'submit' || t === 'button') return 'button'
+      return 'textbox'
+    }
+    if (el.isContentEditable) return 'textbox'
+    return tag
+  }
+
+  if (type === 'snapshot') {
+    const max = Math.max(
+      1,
+      Math.min(Number(params.maxElements) || MAX_ELEMENTS, MAX_ELEMENTS),
+    )
+    document.querySelectorAll(`[${ATTR}]`).forEach((el) => el.removeAttribute(ATTR))
+
+    const selector =
+      'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="menuitem"], [contenteditable="true"]'
+    const candidates = [...document.querySelectorAll(selector)].filter(
+      (el) => isVisible(el) && !el.closest('[aria-hidden="true"]'),
+    )
+
+    const elements = []
+    for (const el of candidates) {
+      if (elements.length >= max) break
+      if (
+        el instanceof HTMLInputElement &&
+        (el.type === 'hidden' || el.type === 'password') &&
+        params.includeSensitive !== true
+      ) {
+        if (el.type === 'hidden') continue
+        // password: include as role only, no value
+      }
+      const ref = `e${elements.length}`
+      el.setAttribute(ATTR, ref)
+      const rect = el.getBoundingClientRect()
+      elements.push({
+        ref,
+        role: roleOf(el),
+        name: accessibleName(el),
+        tag: el.tagName.toLowerCase(),
+        selector: cssPath(el),
+        disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+        checked:
+          el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
+            ? Boolean(el.checked)
+            : el.getAttribute('aria-checked') === 'true'
+              ? true
+              : undefined,
+        href: el instanceof HTMLAnchorElement ? el.href?.slice(0, 300) : undefined,
+        inputType:
+          el instanceof HTMLInputElement ? (el.type || 'text').toLowerCase() : undefined,
+        bounds: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        },
+      })
+    }
+
+    return {
+      message: `Snapshot: ${elements.length} interactive element(s)`,
+      title: document.title,
+      url: location.href,
+      elementCount: elements.length,
+      elements,
+    }
+  }
+
   if (type === 'click') {
-    const element = findElement()
+    const element = resolveElement()
     element.scrollIntoView({ block: 'center', inline: 'center' })
     element.click()
-    return { message: `Clicked ${params.selector}` }
+    const label = params.ref || params.selector
+    return { message: `Clicked ${label}` }
   }
 
   if (type === 'type') {
-    const element = findElement()
+    const element = resolveElement()
     if (
       element instanceof HTMLInputElement &&
       element.type === 'password' &&
@@ -462,11 +759,13 @@ function runInPage(type, params) {
       throw new Error('The selected element is not editable.')
     }
 
-    element.dispatchEvent(new InputEvent('input', {
-      bubbles: true,
-      inputType: 'insertText',
-      data: text,
-    }))
+    element.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: text,
+      }),
+    )
     element.dispatchEvent(new Event('change', { bubbles: true }))
 
     if (params.submit) {
@@ -483,23 +782,125 @@ function runInPage(type, params) {
       }
     }
 
-    return { message: `Typed into ${params.selector}` }
+    return { message: `Typed into ${params.ref || params.selector}` }
+  }
+
+  if (type === 'select') {
+    const element = resolveElement()
+    if (!(element instanceof HTMLSelectElement)) {
+      throw new Error('select requires a <select> element.')
+    }
+    const value = String(params.value ?? '')
+    const label = String(params.label ?? '')
+    let matched = false
+    for (const opt of element.options) {
+      if (
+        (value && opt.value === value) ||
+        (label && opt.textContent.trim() === label) ||
+        (label && opt.textContent.trim().includes(label))
+      ) {
+        element.value = opt.value
+        matched = true
+        break
+      }
+    }
+    if (!matched) throw new Error('No matching option for select.')
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+    element.dispatchEvent(new Event('change', { bubbles: true }))
+    return { message: `Selected option on ${params.ref || params.selector}` }
+  }
+
+  if (type === 'scroll') {
+    if (params.selector || params.ref) {
+      const element = resolveElement()
+      element.scrollIntoView({
+        block: params.block || 'center',
+        inline: 'nearest',
+        behavior: 'instant',
+      })
+      return { message: `Scrolled to ${params.ref || params.selector}` }
+    }
+    const dy = Number(params.dy) || 0
+    const dx = Number(params.dx) || 0
+    window.scrollBy(dx, dy)
+    return { message: `Scrolled by (${dx}, ${dy})` }
+  }
+
+  if (type === 'press_key') {
+    const key = String(params.key || '')
+    const target =
+      params.selector || params.ref ? resolveElement() : document.activeElement || document.body
+    target.dispatchEvent(
+      new KeyboardEvent('keydown', { key, code: key, bubbles: true }),
+    )
+    target.dispatchEvent(
+      new KeyboardEvent('keyup', { key, code: key, bubbles: true }),
+    )
+    return { message: `Pressed ${key}` }
   }
 
   if (type === 'read_page') {
-    const maximum = Math.max(1, Math.min(Number(params.maxChars) || 12_000, 50_000))
-    const element = params.selector ? findElement() : document.documentElement
-    const content =
-      params.mode === 'html'
-        ? element.outerHTML
-        : params.selector
-          ? element.innerText || element.textContent || ''
-          : document.body?.innerText || ''
+    const maximum = Math.max(
+      1,
+      Math.min(Number(params.maxChars) || 12_000, 50_000),
+    )
+    const mode = String(params.mode || 'text')
+
+    if (params.selector || params.ref) {
+      const element = resolveElement()
+      const content =
+        mode === 'html'
+          ? element.outerHTML
+          : element.innerText || element.textContent || ''
+      return {
+        message: 'Read selected content',
+        content: String(content ?? '').slice(0, maximum),
+        title: document.title,
+        mode,
+      }
+    }
+
+    let content = ''
+    if (mode === 'html') {
+      content = document.documentElement?.outerHTML || ''
+    } else if (mode === 'forms') {
+      content = [...document.querySelectorAll('form')]
+        .map((form, i) => {
+          const fields = [...form.querySelectorAll('input,select,textarea')]
+            .map((el) => {
+              const name = el.name || el.id || el.getAttribute('aria-label') || el.type
+              const kind = el.tagName.toLowerCase()
+              return `  - ${kind}${el.type ? `[${el.type}]` : ''} name=${name}`
+            })
+            .join('\n')
+          return `form#${i}\n${fields}`
+        })
+        .join('\n\n')
+    } else if (mode === 'landmarks') {
+      content = [
+        ...document.querySelectorAll(
+          'main, nav, header, footer, [role="main"], [role="navigation"], h1, h2',
+        ),
+      ]
+        .map((el) => {
+          const tag = el.tagName.toLowerCase()
+          const name = (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+          return `${tag}: ${name}`
+        })
+        .join('\n')
+    } else if (mode === 'main_text') {
+      const main =
+        document.querySelector('main, [role="main"], article') || document.body
+      content = main?.innerText || ''
+    } else {
+      content = document.body?.innerText || ''
+    }
 
     return {
-      message: params.selector ? 'Read selected content' : 'Read page content',
+      message: `Read page (${mode})`,
       content: String(content ?? '').slice(0, maximum),
       title: document.title,
+      mode,
     }
   }
 

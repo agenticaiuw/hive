@@ -1,3 +1,4 @@
+import './loadEnv.js'
 import { startBridge } from './bridge.js'
 
 startBridge().catch((error) => {

@@ -44,6 +44,18 @@ const AUTO_SAFE_ACTIONS = new Set([
   'copy_to_clipboard',
   'set_clipboard',
   'play_youtube',
+  // Browser extension (hands-free when extension is online).
+  'browser_navigate',
+  'browser_click',
+  'browser_type',
+  'browser_read_page',
+  'browser_snapshot',
+  'browser_wait_for',
+  'browser_scroll',
+  'browser_select',
+  'browser_list_tabs',
+  'browser_capture',
+  'browser_press_key',
 ])
 
 // Held back from the hands-free path. Unknown action types are refused too —

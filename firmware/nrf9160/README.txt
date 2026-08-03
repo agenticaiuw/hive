@@ -135,6 +135,26 @@ calls are bounded and timed. If cumulative codec time falls more than two mic
 RX blocks behind represented audio, firmware closes the partial Ogg file and
 continues PCM-only; the normal post-release path then performs offline encoding.
 
+Build and flash
+---------------
+
+NCS v3.4.0 is installed at /opt/nordic/ncs (toolchain hash ccc010f809). west
+and nrfutil are not on the default PATH until you source the env script:
+
+  source scripts/env.sh
+  scripts/flash.sh --check          # tools + J-Link SN 960036581, no program
+  scripts/flash.sh                  # west flash --runner nrfutil --dev-id 960036581
+
+Build example (from /opt/nordic/ncs/v3.4.0 after sourcing env.sh):
+
+  west build -b nrf9160dk/nrf9160/ns \
+    -d $PWD/build-cloud $PWD \
+    -- -DEXTRA_CONF_FILE=$PWD/secrets.conf
+
+Sysbuild output image: build-cloud/nrf9160/zephyr/tfm_merged.hex
+Alternate runner: scripts/flash.sh --runner jlink
+nrfjprog is not required (and is not installed); nrfutil + JLinkExe are.
+
 UART diagnostics
 ----------------
 

@@ -2,10 +2,34 @@ export const DEFAULT_AGENT_URL = 'http://127.0.0.1:8000'
 export const DEFAULT_TARGET_MODE = 'last-focused'
 export const MAX_SELECTOR_LENGTH = 2_000
 export const MAX_TEXT_LENGTH = 50_000
+export const MAX_SNAPSHOT_ELEMENTS = 80
+export const MAX_READ_CHARS = 50_000
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost'])
 const TARGET_MODES = new Set(['last-focused', 'current-active', 'new-tab'])
-const COMMAND_TYPES = new Set(['navigate', 'click', 'type', 'read_page'])
+
+/** Commands the extension can execute. Keep in sync with background.js. */
+export const COMMAND_TYPES = new Set([
+  'navigate',
+  'click',
+  'type',
+  'read_page',
+  'snapshot',
+  'wait_for',
+  'scroll',
+  'select',
+  'list_tabs',
+  'capture',
+  'press_key',
+])
+
+const READ_MODES = new Set([
+  'text',
+  'main_text',
+  'html',
+  'forms',
+  'landmarks',
+])
 
 export function normalizeAgentUrl(value) {
   const candidate = String(value ?? '').trim() || DEFAULT_AGENT_URL
@@ -89,15 +113,44 @@ export function validateCommand(command) {
     validateNavigationUrl(params.url)
   }
 
-  if (type === 'click' || type === 'type') {
-    const selector = String(params.selector ?? '')
-    if (!selector || selector.length > MAX_SELECTOR_LENGTH) {
+  if (type === 'click' || type === 'type' || type === 'select' || type === 'scroll') {
+    const hasSelector = String(params.selector ?? '').trim()
+    const hasRef = String(params.ref ?? '').trim()
+    if (!hasSelector && !hasRef) {
+      throw new Error('A CSS selector or snapshot ref is required.')
+    }
+    if (hasSelector && hasSelector.length > MAX_SELECTOR_LENGTH) {
       throw new Error('A valid, reasonably sized CSS selector is required.')
     }
   }
 
   if (type === 'type' && String(params.text ?? '').length > MAX_TEXT_LENGTH) {
     throw new Error(`Typed text is limited to ${MAX_TEXT_LENGTH} characters.`)
+  }
+
+  if (type === 'select' && String(params.value ?? params.label ?? '').trim() === '') {
+    throw new Error('select requires value or label.')
+  }
+
+  if (type === 'wait_for') {
+    const hasSelector = String(params.selector ?? '').trim()
+    const hasText = String(params.textContains ?? params.text ?? '').trim()
+    if (!hasSelector && !hasText) {
+      throw new Error('wait_for requires selector or textContains.')
+    }
+  }
+
+  if (type === 'read_page' && params.mode != null) {
+    const mode = String(params.mode).trim()
+    if (mode && !READ_MODES.has(mode)) {
+      throw new Error(
+        `read_page mode must be one of: ${[...READ_MODES].join(', ')}.`,
+      )
+    }
+  }
+
+  if (type === 'press_key' && !String(params.key ?? '').trim()) {
+    throw new Error('press_key requires key.')
   }
 
   if (
@@ -134,6 +187,18 @@ export function pickTargetTab(tabs, params = {}, targetMode = DEFAULT_TARGET_MOD
     )
   }
 
+  const titleNeedle = String(params.titleContains ?? '').trim().toLowerCase()
+  if (titleNeedle) {
+    return (
+      candidates
+        .filter((tab) =>
+          String(tab.title ?? '').toLowerCase().includes(titleNeedle),
+        )
+        .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0] ??
+      null
+    )
+  }
+
   if (Number.isInteger(params.windowId)) {
     return (
       candidates.find(
@@ -160,6 +225,22 @@ export function isScriptableUrl(value) {
   } catch {
     return false
   }
+}
+
+/** Heartbeat-safe origin: no path/query/token leakage. */
+export function safeTabOrigin(url) {
+  try {
+    if (!isScriptableUrl(url)) return ''
+    return new URL(url).origin
+  } catch {
+    return ''
+  }
+}
+
+export function truncateTitle(title, max = 80) {
+  const text = String(title ?? '').replace(/\s+/g, ' ').trim()
+  if (text.length <= max) return text
+  return `${text.slice(0, max - 1)}…`
 }
 
 export function retryDelay(attempt, baseMs = 750, maximumMs = 15_000) {

@@ -463,8 +463,7 @@ export function buildObservationTurn(observation, step) {
     return { role: 'user', content: text }
   }
 
-  // OpenAI-compatible content parts, text first — that ordering is what
-  // OpenRouter parses most reliably.
+  // OpenAI vision content parts: text first, then image.
   return {
     role: 'user',
     content: [

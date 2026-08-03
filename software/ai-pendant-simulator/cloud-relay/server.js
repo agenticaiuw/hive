@@ -2,7 +2,6 @@ import crypto from 'node:crypto'
 import express from 'express'
 import cors from 'cors'
 import {
-  AUDIO_NATIVE_PLANNER,
   AUDIO_RETENTION_MAX_AGE_MS,
   AUDIO_RETENTION_SWEEP_ENABLED,
   BRIDGE_CLAIM_MAX_INTERVAL_MS,
@@ -14,7 +13,6 @@ import {
   PENDANT_ACCOUNT_ID,
   PORT,
   RELAY_API_KEY,
-  STT_MODEL,
   TTS_MODEL,
   TTS_VOICE,
 } from './config.js'
@@ -29,7 +27,7 @@ import {
 import { getStore } from './store/index.js'
 import { planFromAudio } from './audioPlan.js'
 import { createStreamingRealtimeSession } from './openaiRealtimeVoice.js'
-import { transcribeAudio } from './transcribe.js'
+import { loadFleetFromStore } from './fleetContext.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
 import {
@@ -88,22 +86,35 @@ const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
 
 function plannerHintFromPlan(plan) {
   if (!plan) return undefined
+  // Realtime / audio-native plans always attach a complete hint so the Mac
+  // never treats the job as "transcript-only → re-plan with text LLM".
+  const isAudioNative =
+    plan.planner === 'audio-native' ||
+    plan.planner === 'audio-native-delegate' ||
+    plan.planner === 'audio-native-realtime' ||
+    plan.source === 'audio-native-realtime' ||
+    plan.source === 'audio-native'
+  const actions = Array.isArray(plan.actions) ? plan.actions : []
+  const requireLocalPlanner = Boolean(plan.requireLocalPlanner)
   const hasPlanPayload =
-    (Array.isArray(plan.actions) && plan.actions.length > 0) ||
+    isAudioNative ||
+    actions.length > 0 ||
     Boolean(plan.status) ||
     Boolean(plan.response) ||
-    Boolean(plan.requireLocalPlanner)
+    requireLocalPlanner
   if (!hasPlanPayload) return undefined
   return {
-    status: plan.status,
+    status:
+      plan.status ||
+      (requireLocalPlanner || actions.length ? 'ready' : 'instant'),
     response: plan.response,
-    actions: plan.actions || [],
-    planner: plan.requireLocalPlanner
-      ? 'audio-native-delegate'
-      : 'audio-native',
-    requireLocalPlanner: Boolean(plan.requireLocalPlanner),
+    actions,
+    planner:
+      plan.planner ||
+      (requireLocalPlanner ? 'audio-native-delegate' : 'audio-native'),
+    requireLocalPlanner,
     toolsUsed: plan.toolsUsed,
-    passes: plan.passes,
+    passes: plan.passes ?? 1,
     midPressStreamed: Boolean(plan.midPressStreamed),
   }
 }
@@ -135,8 +146,9 @@ async function enqueueMacPlanJob({
     transcriptionSource: plan.source || 'stt',
     midPressStreamed: Boolean(plan.midPressStreamed),
   }
+  // command is a short history label only; plannerHint carries the real plan.
   const job = createPlanJob({
-    command: plan.text,
+    command: String(plan.text || '').trim() || 'voice command',
     deviceId,
     sessionId,
     inputTelemetry,
@@ -148,71 +160,32 @@ async function enqueueMacPlanJob({
 }
 
 /**
- * Prefer multimodal audio→plan when configured; fall back to Whisper STT.
- * Returns a transcript-shaped object plus optional plannerHint for plan jobs.
+ * Voice audio → Realtime plan only (no Whisper / gpt-audio fallbacks).
  */
-async function resolveAudioTranscript({ audioBase64, format, language }) {
-  // Preferred path: feed audio tokens into Gemini first (transcript + plan).
-  // Falls back to Whisper STT only if Gemini is unavailable or fails.
-  const canPlanNative =
-    AUDIO_NATIVE_PLANNER &&
-    Boolean(
-      process.env.OPENAI_API_KEY ||
-        process.env.OPENAI_KEY ||
-        process.env.LLM_API_KEY ||
-        LLM_API_KEY,
-    )
-  if (canPlanNative) {
-    try {
-      const plan = await planFromAudio({
-        audioBase64,
-        format,
-        language,
-      })
-      const hasPlanPayload =
-        (Array.isArray(plan.actions) && plan.actions.length > 0) ||
-        Boolean(plan.status) ||
-        Boolean(plan.response) ||
-        Boolean(plan.requireLocalPlanner)
+async function resolveAudioTranscript({
+  audioBase64,
+  audioBuffer,
+  format,
+  sampleRate,
+  language,
+}) {
+  const plan = await planFromAudio({
+    audioBase64,
+    audioBuffer,
+    format,
+    sampleRate,
+    language,
+  })
 
-      return {
-        text: plan.text,
-        model: plan.model,
-        language: plan.language,
-        durationMs: plan.durationMs,
-        source: plan.source,
-        toolsUsed: plan.toolsUsed,
-        plannerHint: hasPlanPayload
-          ? {
-              status: plan.status,
-              response: plan.response,
-              actions: plan.actions || [],
-              planner: plan.requireLocalPlanner
-                ? 'audio-native-delegate'
-                : 'audio-native',
-              requireLocalPlanner: Boolean(plan.requireLocalPlanner),
-              toolsUsed: plan.toolsUsed,
-              passes: plan.passes,
-            }
-          : undefined,
-      }
-    } catch (error) {
-      console.warn(
-        `[relay] Audio-native OpenAI planner failed; falling back to STT: ${
-          error?.message || error
-        }`,
-      )
-    }
-  }
-
-  const startedAt = Date.now()
-  const result = await transcribeAudio({ audioBase64, format, language })
   return {
-    text: result.text,
-    model: result.model,
-    language: result.language,
-    durationMs: Date.now() - startedAt,
-    source: 'stt',
+    text: plan.text,
+    model: plan.model,
+    language: plan.language,
+    durationMs: plan.durationMs,
+    source: plan.source,
+    toolsUsed: plan.toolsUsed,
+    // Always complete so Mac uses actions/response, never re-plans from text.
+    plannerHint: plannerHintFromPlan(plan),
   }
 }
 
@@ -232,7 +205,9 @@ app.get('/health', async (_request, response) => {
     platform: cloudflareBindings ? 'cloudflare-workers' : 'node',
     store: store.kind,
     relayApiKeyConfigured: Boolean(RELAY_API_KEY),
-    speechToTextConfigured: Boolean(cloudflareBindings?.AI || LLM_API_KEY),
+    speechToTextConfigured: Boolean(
+      process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || LLM_API_KEY,
+    ),
     pairingRequired: Boolean(PAIRING_CODE),
     macBridgeOnline: isDeviceOnline(macBridge),
     macBridgeLastSeen: macBridge?.lastSeenAt ?? null,
@@ -243,9 +218,7 @@ app.get('/health', async (_request, response) => {
       durableAudio: Boolean(cloudflareBindings?.AUDIO_BUCKET),
     },
     models: {
-      speechToText: cloudflareBindings?.AI
-        ? '@cf/openai/whisper-large-v3-turbo'
-        : STT_MODEL,
+      voiceAgent: process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1',
       textToSpeech: 'macOS say (24 kHz PCM)',
       relayTextToSpeechFallback: `${TTS_MODEL} · ${TTS_VOICE}`,
     },
@@ -712,8 +685,8 @@ app.post('/v1/transcribe', async (request, response) => {
           }
         }
         /*
-         * Persist the raw recording before starting speech-to-text. The Mac
-         * capture watcher can now download it while Whisper is still running.
+         * Persist the raw recording before / alongside Realtime planning so the
+         * Mac capture watcher can download it without waiting on the plan.
          */
         if (capture) {
           try {
@@ -867,12 +840,13 @@ app.post('/v1/pendant/command', async (request, response) => {
     return
   }
 
-  const useRealtimeStream =
-    AUDIO_NATIVE_PLANNER &&
-    isRawPcmFormat(format) &&
-    Boolean(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY) &&
-    process.env.OPENAI_VOICE_AGENT !== '0' &&
-    process.env.OPENAI_VOICE_AGENT !== 'false'
+  if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
+    response.status(503).json({
+      ok: false,
+      error: 'Voice agent requires OPENAI_API_KEY on the Worker.',
+    })
+    return
+  }
 
   try {
     const store = await getStore()
@@ -884,7 +858,13 @@ app.post('/v1/pendant/command', async (request, response) => {
     const startedAt = Date.now()
 
     async function dispatchPlan(plan) {
-      if (!shouldDispatch || jobEnqueued || !plan?.text) return job
+      if (!shouldDispatch || jobEnqueued || !plan) return job
+      const hasWork =
+        Boolean(String(plan.text || '').trim()) ||
+        (Array.isArray(plan.actions) && plan.actions.length > 0) ||
+        Boolean(String(plan.response || '').trim()) ||
+        Boolean(plan.requireLocalPlanner)
+      if (!hasWork) return job
       jobEnqueued = true
       job = await enqueueMacPlanJob({
         store,
@@ -903,13 +883,15 @@ app.post('/v1/pendant/command', async (request, response) => {
 
     let plan
 
-    if (useRealtimeStream) {
-      // --- Mid-press path: Realtime open → append while body streams ---
+    // Realtime only: mid-press stream when PCM, else buffer then Realtime batch.
+    const fleet = await loadFleetFromStore(store).catch(() => null)
+
+    if (isRawPcmFormat(format)) {
       const session = await createStreamingRealtimeSession({
         inputSampleRate: sampleRate,
         language,
+        fleet,
         onEarlyPlan: async (earlyPlan) => {
-          // Queue Mac as soon as tools fire (often right after commit).
           await dispatchPlan(earlyPlan)
         },
       })
@@ -934,7 +916,6 @@ app.post('/v1/pendant/command', async (request, response) => {
       plan = await session.finish()
       await dispatchPlan(plan)
     } else {
-      // --- Non-PCM / fallback: buffer body then existing planner ---
       const bodyChunks = []
       for await (const chunk of request) {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
@@ -953,46 +934,25 @@ app.post('/v1/pendant/command', async (request, response) => {
       }
       pcmChunks.push(rawAudio)
 
-      const prepared = preparePendantAudioForStt({
-        audio: rawAudio,
+      plan = await planFromAudio({
+        audioBuffer: rawAudio,
         format,
         sampleRate,
-        channels,
-        bitsPerSample,
-      })
-      const transcript = await resolveAudioTranscript({
-        audioBase64: prepared.audio.toString('base64'),
-        format: prepared.format,
         language,
+        fleet,
       })
-      plan = {
-        text: transcript.text,
-        model: transcript.model,
-        language: transcript.language,
-        durationMs: transcript.durationMs,
-        source: transcript.source,
-        status: transcript.plannerHint?.status,
-        response: transcript.plannerHint?.response,
-        actions: transcript.plannerHint?.actions || [],
-        requireLocalPlanner: transcript.plannerHint?.requireLocalPlanner,
-        toolsUsed: transcript.toolsUsed,
-        planner: transcript.plannerHint?.planner,
-        midPressStreamed: false,
-      }
-      // Attach full plannerHint fields for enqueue
-      if (transcript.plannerHint) {
-        plan = { ...plan, ...transcript.plannerHint, text: transcript.text }
-      }
-      await dispatchPlan({
-        ...plan,
-        durationMs: plan.durationMs,
-      })
+      await dispatchPlan(plan)
     }
 
-    if (!plan?.text) {
+    const planHasContent =
+      Boolean(String(plan?.text || '').trim()) ||
+      (Array.isArray(plan?.actions) && plan.actions.length > 0) ||
+      Boolean(String(plan?.response || '').trim()) ||
+      Boolean(plan?.requireLocalPlanner)
+    if (!plan || !planHasContent) {
       response.status(400).json({
         ok: false,
-        error: 'Voice agent returned empty transcript.',
+        error: 'Voice agent returned an empty plan.',
       })
       return
     }

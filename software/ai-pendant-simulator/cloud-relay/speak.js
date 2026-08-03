@@ -1,8 +1,6 @@
 import {
   LLM_API_BASE_URL,
   LLM_API_KEY,
-  OPENROUTER_APP_TITLE,
-  OPENROUTER_HTTP_REFERER,
   TTS_MODEL,
   TTS_VOICE,
 } from './config.js'
@@ -15,7 +13,7 @@ export async function synthesizeSpeech({
 } = {}) {
   if (!LLM_API_KEY) {
     throw new Error(
-      'Text-to-speech is not configured on the relay (missing LLM_API_KEY).',
+      'Text-to-speech is not configured on the relay (missing OPENAI_API_KEY).',
     )
   }
 
@@ -32,11 +30,6 @@ export async function synthesizeSpeech({
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${LLM_API_KEY}`,
-  }
-
-  if (LLM_API_BASE_URL.includes('openrouter.ai')) {
-    headers['HTTP-Referer'] = OPENROUTER_HTTP_REFERER
-    headers['X-Title'] = OPENROUTER_APP_TITLE
   }
 
   const response = await fetch(`${LLM_API_BASE_URL}/audio/speech`, {

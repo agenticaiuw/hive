@@ -181,19 +181,32 @@ export async function handleWork(work) {
     work.type === 'plan' || work.type === 'execute'
 
   if (observablePipeline) {
-    // Non-blocking telemetry — do not delay execute for dashboard events.
+    // Telemetry only — not a product STT stage. Realtime already planned.
+    const hint = work.plannerHint
+    const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
+    const hasPlanPayload =
+      Boolean(hint) &&
+      (hintActions.length > 0 ||
+        String(hint?.response || '').trim().length > 0 ||
+        hint?.planner === 'audio-native' ||
+        hint?.planner === 'audio-native-realtime' ||
+        hint?.planner === 'audio-native-delegate')
     void reportPipelineEvent(work, {
-      stage: 'transcription',
-      status: 'done',
-      label: 'Transcript received from cloud',
-      detail:
-        'Speech-to-text completed before this job reached the Mac bridge.',
+      stage: hasPlanPayload ? 'agent' : 'command',
+      status: hasPlanPayload ? 'active' : 'done',
+      label: hasPlanPayload
+        ? 'Realtime plan received from cloud'
+        : 'Command label received from cloud',
+      detail: hasPlanPayload
+        ? 'Audio-native Realtime plan (tools/reply) — not a separate STT step.'
+        : 'Job label for history; local planning may still be needed.',
       text: work.command,
       source: 'cloud-relay',
       meta: {
         relayJobId: work.jobId,
         workType: work.type,
         inputTelemetry: work.inputTelemetry ?? null,
+        planner: hint?.planner ?? null,
       },
     })
   }
@@ -203,44 +216,51 @@ export async function handleWork(work) {
       const agentStartedAt = Date.now()
       const hint = work.plannerHint
       const hintActions = Array.isArray(hint?.actions) ? hint.actions : []
-      // Relay multimodal audio→plan already produced actions — skip a second
-      // DeepSeek round trip (saves ~1–5 s on simple commands).
-      // Realtime / audio-native plan from the relay. Skip local LLM unless the
-      // voice agent explicitly delegated multi-step work to the Mac planner.
+      const spokenResponse = String(hint?.response || '').trim()
+      // Realtime hot path: if the cloud already produced tools and/or a spoken
+      // reply, execute it. Do NOT require a second Mac text LLM.
+      // Empty status alone is not usable (Realtime defaults status to
+      // "instant" even for battery-style transcripts with no tools — those
+      // still need local LLM as last resort when requireLocalPlanner or empty).
+      const hasUsableNativePayload =
+        hintActions.length > 0 || spokenResponse.length > 0
       const useAudioNativePlan =
-        (hint?.planner === 'audio-native' ||
-          hint?.planner === 'audio-native-realtime') &&
+        Boolean(hint) &&
         !hint?.requireLocalPlanner &&
-        (hintActions.length > 0 ||
-          hint?.status === 'instant' ||
-          String(hint?.response || '').trim())
+        hasUsableNativePayload
       let plan
       if (useAudioNativePlan) {
         void reportPipelineEvent(work, {
           stage: 'agent',
           status: 'active',
           label: 'Using audio-native plan from the relay',
-          detail: 'Skipping local LLM — multimodal planner already decided.',
+          detail: 'Skipping local LLM — Realtime already decided actions/reply.',
         })
         plan = {
           status:
             hint.status === 'instant' ||
-            (!hintActions.length && String(hint.response || '').trim())
+            (!hintActions.length && spokenResponse)
               ? 'instant'
               : 'ready',
           command: work.command,
-          response: String(hint.response || '').trim() || undefined,
+          response: spokenResponse || undefined,
           actions: hintActions,
           requiresConfirmation: hintActions.length > 0,
-          planner: 'audio-native',
+          planner:
+            hint.planner === 'audio-native-realtime'
+              ? 'audio-native-realtime'
+              : 'audio-native',
           fullControl: true,
         }
       } else {
         void reportPipelineEvent(work, {
           stage: 'agent',
           status: 'active',
-          label: 'Agent is processing the transcript',
-          detail: 'Streaming the request through the local Mac agent and LLM.',
+          label: hint?.requireLocalPlanner
+            ? 'Realtime delegated multi-step plan to Mac LLM'
+            : 'Mac LLM planning (no usable Realtime actions)',
+          detail:
+            'Local OpenAI planner — fallback only, not the Realtime hot path.',
         })
         plan = await callLocalAgent('/plan', {
           method: 'POST',
@@ -248,6 +268,7 @@ export async function handleWork(work) {
             command: work.command,
             sessionId: work.sessionId,
             source: 'pendant',
+            plannerHint: hint ?? null,
           },
         })
       }
@@ -591,8 +612,46 @@ async function syncAgentSnapshot() {
     if (!response.ok) {
       throw new Error(payload.error || `relay returned ${response.status}`)
     }
+    // Compact fleet snapshot for Realtime voice agent (apps, browser, memory).
+    await syncFleetContext(snapshot)
   } catch (error) {
     console.warn(`[bridge] Persistent state sync failed: ${error.message}`)
+  }
+}
+
+/**
+ * Push a cache-friendly fleet world-model to the relay for Realtime instructions.
+ * Built from live Mac discovery — no hard-coded app or command lists.
+ */
+async function syncFleetContext(snapshot) {
+  try {
+    const { buildFleetPayloadFromLocal } = await import(
+      '../cloud-relay/fleetContext.js'
+    )
+    const status = snapshot?.status || snapshot || {}
+    const fleet = buildFleetPayloadFromLocal({
+      machine: status.machine || null,
+      browser: status.browser || null,
+      permissions: status.agent?.permissions || status.permissions || null,
+      memory: status.memory || snapshot?.context?.memory || null,
+      workingProject:
+        status.workingProject || snapshot?.context?.workingProject || null,
+      speaker: process.env.PENDANT_SPEAKER_NAME || null,
+    })
+    const response = await fetch(`${RELAY_URL}/v1/state/fleet`, {
+      method: 'PUT',
+      headers: relayHeaders,
+      body: JSON.stringify({
+        data: fleet,
+        updatedBy: BRIDGE_DEVICE_ID,
+      }),
+    })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new Error(payload.error || `relay returned ${response.status}`)
+    }
+  } catch (error) {
+    console.warn(`[bridge] Fleet context sync failed: ${error.message}`)
   }
 }
 

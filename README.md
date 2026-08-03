@@ -29,11 +29,20 @@ npm run agent
 
 ## nRF9160 firmware
 
-Build from `firmware/nrf9160` using the installed Nordic toolchain. Build
-directories are intentionally not stored in this repository. Private Kconfig
-values belong in the ignored `firmware/nrf9160/secrets.conf` file and must be
-included with `-DEXTRA_CONF_FILE=secrets.conf` when creating a fresh build.
+Build from `firmware/nrf9160` using the installed Nordic toolchain (NCS under
+`/opt/nordic/ncs`). Build directories are intentionally not stored in this
+repository. Private Kconfig values belong in the ignored
+`firmware/nrf9160/secrets.conf` file and must be included with
+`-DEXTRA_CONF_FILE=secrets.conf` when creating a fresh build.
 
+```sh
+source firmware/nrf9160/scripts/env.sh          # puts west/nrfutil on PATH
+firmware/nrf9160/scripts/flash.sh --check       # verify probe + tools
+# build (see docs/How_This_System_Runs.md), then:
+firmware/nrf9160/scripts/flash.sh               # nrfutil → J-Link 960036581
+```
+
+ESP32 bridge: `firmware/esp32-airpods-bridge/flash.sh` (PlatformIO in `.venv`).
 ## Original working trees
 
 The previous folders under `/Users/you/Claude/Projects` are retained as

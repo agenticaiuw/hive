@@ -124,12 +124,36 @@ static uint8_t http_stream_buffer[HTTP_STREAM_READ_SIZE];
 static bool cloud_initialized;
 static bool radio_suspended;
 
+/*
+ * DNS on nRF9160 can return -11 / errno=115 (EINPROGRESS/EAGAIN) after RF
+ * churn or when the modem's resolver is wedged. Cache the last working IPv4
+ * and keep Cloudflare anycast bootstraps for this worker hostname so a voice
+ * cycle still reaches the relay when getaddrinfo fails.
+ *
+ * When DNS has failed recently, prefer cache/bootstrap before another slow
+ * getaddrinfo cycle so live prewarm and SD fallback still open a TLS socket.
+ */
+static struct in_addr relay_cached_ip;
+static bool relay_cached_valid;
+static bool relay_dns_unreliable;
+static const char *const relay_bootstrap_ips[] = {
+	"104.21.85.125",
+	"172.67.205.183",
+};
+
 /* Live chunked PCM upload session (one TLS socket for the whole utterance). */
 static int stream_fd = -1;
 static bool stream_active;
 static uint32_t stream_sample_rate;
 static uint32_t stream_bytes_sent;
 static int64_t stream_started_ms;
+/*
+ * Half-open chunked POST (headers sent, body pending) dies after idle:
+ * dual-capture saw Live TX pump failed: -104 (ECONNRESET) ~79s after
+ * prewarm with live_sent=0. Refresh idle sockets and re-validate at press.
+ */
+#define STREAM_MAX_IDLE_MS 20000
+#define STREAM_STALE_AT_START_MS 12000
 /* Non-blocking TX: one in-flight HTTP chunk framing + body + CRLF. */
 #define STREAM_PENDING_MAX 1200U
 static uint8_t stream_pending[STREAM_PENDING_MAX];
@@ -137,6 +161,8 @@ static size_t stream_pending_len;
 static size_t stream_pending_off;
 static uint32_t stream_pump_calls;
 static uint32_t stream_eagain_count;
+/* Fully sent HTTP body chunks (not merely queued). */
+static uint32_t stream_chunks_completed;
 
 volatile int pendant_cloud_init_result = -EAGAIN;
 volatile int pendant_cloud_transcribe_result = -EAGAIN;
@@ -256,6 +282,153 @@ static int configure_tls_socket(int fd)
 	return 0;
 }
 
+static void relay_cache_store(const struct sockaddr *addr)
+{
+	if (addr == NULL || addr->sa_family != AF_INET) {
+		return;
+	}
+	relay_cached_ip = ((const struct sockaddr_in *)addr)->sin_addr;
+	relay_cached_valid = true;
+}
+
+/* Seed cache from bootstrap anycast so the first call is never DNS-only. */
+static void relay_cache_seed_bootstrap(void)
+{
+	struct in_addr ip;
+
+	if (relay_cached_valid) {
+		return;
+	}
+	if (inet_pton(AF_INET, relay_bootstrap_ips[0], &ip) == 1) {
+		relay_cached_ip = ip;
+		relay_cached_valid = true;
+		printk("Relay DNS cache seeded with bootstrap %s\n",
+		       relay_bootstrap_ips[0]);
+	}
+}
+
+static int ensure_lte_data_ready(void)
+{
+	enum lte_lc_nw_reg_status status = LTE_LC_NW_REG_UNKNOWN;
+	int error;
+
+	if (radio_suspended) {
+		error = pendant_cloud_resume_radio();
+		if (error != 0) {
+			printk("LTE resume before socket failed: %d\n", error);
+			return error;
+		}
+	}
+
+	error = lte_lc_nw_reg_status_get(&status);
+	if (error != 0) {
+		printk("LTE reg status query failed: %d (continuing)\n", error);
+		return 0;
+	}
+	if (status == LTE_LC_NW_REG_REGISTERED_HOME ||
+	    status == LTE_LC_NW_REG_REGISTERED_ROAMING) {
+		return 0;
+	}
+
+	printk("LTE not registered (status=%d); reconnecting for relay DNS\n",
+	       (int)status);
+	error = lte_lc_connect();
+	if (error != 0) {
+		printk("LTE reconnect failed: %d\n", error);
+	}
+	return error;
+}
+
+/*
+ * Try one IPv4 candidate with TLS, then plain TCP diagnostic on failure.
+ * On success stores the address in the DNS cache and returns the fd (>=0).
+ */
+static int try_relay_ipv4(const struct in_addr *ip, unsigned int attempt,
+			  unsigned int candidate_number,
+			  const char *source, int64_t lat_socket_started,
+			  int *last_error)
+{
+	struct sockaddr_in sa;
+	char address[INET_ADDRSTRLEN] = "?";
+	int fd;
+	int error;
+	int64_t lat_tls_started;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sin_family = AF_INET;
+	sa.sin_port = htons(443);
+	sa.sin_addr = *ip;
+	(void)inet_ntop(AF_INET, ip, address, sizeof(address));
+	printk("Relay DNS candidate %u.%u (%s): %s\n", attempt,
+	       candidate_number, source, address);
+
+	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TLS_1_2);
+	if (fd < 0) {
+		*last_error = -errno;
+		printk("Relay socket attempt %u.%u failed: %d errno=%d\n",
+		       attempt, candidate_number, *last_error, errno);
+		return *last_error;
+	}
+
+	lat_tls_started = k_uptime_get();
+	error = configure_tls_socket(fd);
+	if (error == 0 &&
+	    connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
+		printk("Relay TLS connected on attempt %u.%u (%s %s)\n",
+		       attempt, candidate_number, source, address);
+		printk("LAT tls_connect_ms=%lld socket_total_ms=%lld\n",
+		       k_uptime_get() - lat_tls_started,
+		       k_uptime_get() - lat_socket_started);
+		relay_cache_store((struct sockaddr *)&sa);
+		/* A working connect via bootstrap does not prove DNS is healthy. */
+		if (strcmp(source, "dns") == 0) {
+			relay_dns_unreliable = false;
+		}
+		return fd;
+	}
+
+	*last_error = error != 0 ? error : -errno;
+	printk("Relay TLS attempt %u.%u failed: %d (errno=%d source=%s)\n",
+	       attempt, candidate_number, *last_error, errno, source);
+	close(fd);
+
+	/* Distinguish routing failure from TLS/credential failure. */
+	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (fd >= 0) {
+		error = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+		printk("Relay plain TCP diagnostic %u.%u: %s (errno=%d)\n",
+		       attempt, candidate_number,
+		       error == 0 ? "connected" : "failed", errno);
+		close(fd);
+	}
+	return *last_error;
+}
+
+static int try_relay_bootstrap_list(unsigned int attempt_tag,
+				    int64_t lat_socket_started,
+				    int *last_error,
+				    bool skip_cached_ip)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(relay_bootstrap_ips); ++i) {
+		struct in_addr ip;
+		int error;
+
+		if (inet_pton(AF_INET, relay_bootstrap_ips[i], &ip) != 1) {
+			continue;
+		}
+		if (skip_cached_ip && relay_cached_valid &&
+		    memcmp(&ip, &relay_cached_ip, sizeof(ip)) == 0) {
+			continue;
+		}
+		error = try_relay_ipv4(&ip, attempt_tag, i + 1U, "bootstrap",
+				       lat_socket_started, last_error);
+		if (error >= 0) {
+			return error;
+		}
+	}
+	return *last_error < 0 ? *last_error : -EHOSTUNREACH;
+}
+
 static int open_relay_socket(void)
 {
 	struct addrinfo hints = {
@@ -263,89 +436,82 @@ static int open_relay_socket(void)
 		.ai_socktype = SOCK_STREAM,
 	};
 	int last_error = -EHOSTUNREACH;
+	int ready;
+	int64_t lat_socket_started = k_uptime_get();
+	const unsigned int dns_attempts = relay_dns_unreliable ? 1U : 3U;
 
 	/*
-	 * Cloud Run publishes several IPv4 addresses. A cellular route can
-	 * occasionally refuse one address while the others remain reachable,
-	 * so try every answer and refresh DNS before failing the voice cycle.
+	 * Workers / CF publish several IPv4 addresses. Cellular routes can
+	 * refuse one address while others work, and nRF DNS can wedge with
+	 * -11/errno=115 — so try resolve, then cache, then bootstrap IPs.
+	 * Prefer cache/bootstrap early: dual-capture logs show getaddrinfo
+	 * failing immediately while Cloudflare anycast still answers TLS.
 	 */
-	int64_t lat_socket_started = k_uptime_get();
+	relay_cache_seed_bootstrap();
+	ready = ensure_lte_data_ready();
+	if (ready != 0) {
+		printk("LTE not ready before relay socket: %d\n", ready);
+		/* Still attempt DNS/cache; reconnect may have partially worked. */
+	}
 
-	for (unsigned int attempt = 1U; attempt <= 3U; ++attempt) {
+	/* Fast path when modem DNS is known-bad: cache then bootstrap. */
+	if (relay_dns_unreliable) {
+		int error;
+
+		printk("Relay DNS marked unreliable — trying cache/bootstrap first\n");
+		if (relay_cached_valid) {
+			error = try_relay_ipv4(&relay_cached_ip, 0U, 90U,
+					       "cache", lat_socket_started,
+					       &last_error);
+			if (error >= 0) {
+				return error;
+			}
+		}
+		error = try_relay_bootstrap_list(0U, lat_socket_started,
+						&last_error, true);
+		if (error >= 0) {
+			return error;
+		}
+	}
+
+	for (unsigned int attempt = 1U; attempt <= dns_attempts; ++attempt) {
 		struct addrinfo *result = NULL;
 		int64_t lat_dns_started = k_uptime_get();
 		int error = getaddrinfo(RELAY_HOSTNAME, RELAY_PORT,
 					&hints, &result);
 		int64_t lat_dns_ms = k_uptime_get() - lat_dns_started;
+		bool dns_ok = (error == 0 && result != NULL);
 
-		printk("LAT dns_ms=%lld attempt=%u error=%d\n",
-		       lat_dns_ms, attempt, error);
+		printk("LAT dns_ms=%lld attempt=%u error=%d errno=%d\n",
+		       lat_dns_ms, attempt, error, errno);
 
-		if (error != 0 || result == NULL) {
-			printk("Relay DNS attempt %u failed: %d errno=%d\n",
+		if (!dns_ok) {
+			printk("Relay DNS attempt %u failed: %d errno=%d "
+			       "(EAGAIN/EINPROGRESS often = wedged modem DNS)\n",
 			       attempt, error, errno);
 			last_error = error != 0 ? -EHOSTUNREACH : -ENOENT;
+			relay_dns_unreliable = true;
 		} else {
 			unsigned int candidate_number = 0U;
 
 			for (struct addrinfo *candidate = result;
 			     candidate != NULL; candidate = candidate->ai_next) {
-				char address[INET_ADDRSTRLEN] = "?";
-				int fd;
+				struct in_addr ip;
 
-				++candidate_number;
-				(void)inet_ntop(
-					AF_INET,
-					&((struct sockaddr_in *)
-						  candidate->ai_addr)->sin_addr,
-					address, sizeof(address));
-				printk("Relay DNS candidate %u.%u: %s\n",
-				       attempt, candidate_number, address);
-				fd = socket(candidate->ai_family, SOCK_STREAM,
-					    IPPROTO_TLS_1_2);
-				if (fd < 0) {
-					last_error = -errno;
-					printk("Relay socket attempt %u.%u failed: %d\n",
-					       attempt, candidate_number, last_error);
+				if (candidate->ai_family != AF_INET ||
+				    candidate->ai_addr == NULL) {
 					continue;
 				}
-
-				int64_t lat_tls_started = k_uptime_get();
-
-				error = configure_tls_socket(fd);
-				if (error == 0 &&
-				    connect(fd, candidate->ai_addr,
-					    candidate->ai_addrlen) == 0) {
-					printk("Relay TLS connected on attempt %u.%u\n",
-					       attempt, candidate_number);
-					printk("LAT tls_connect_ms=%lld socket_total_ms=%lld\n",
-					       k_uptime_get() - lat_tls_started,
-					       k_uptime_get() - lat_socket_started);
+				++candidate_number;
+				ip = ((struct sockaddr_in *)candidate->ai_addr)
+					     ->sin_addr;
+				error = try_relay_ipv4(&ip, attempt,
+						       candidate_number, "dns",
+						       lat_socket_started,
+						       &last_error);
+				if (error >= 0) {
 					freeaddrinfo(result);
-					return fd;
-				}
-
-				last_error = error != 0 ? error : -errno;
-				printk("Relay TLS attempt %u.%u failed: %d "
-				       "(errno=%d)\n",
-				       attempt, candidate_number, last_error, errno);
-				close(fd);
-
-				/*
-				 * Distinguish a carrier/IP routing failure from a
-				 * TLS handshake or credential failure.
-				 */
-				fd = socket(candidate->ai_family, SOCK_STREAM,
-					    IPPROTO_TCP);
-				if (fd >= 0) {
-					error = connect(fd, candidate->ai_addr,
-							candidate->ai_addrlen);
-					printk("Relay plain TCP diagnostic %u.%u: "
-					       "%s (errno=%d)\n",
-					       attempt, candidate_number,
-					       error == 0 ? "connected" :
-					       "failed", errno);
-					close(fd);
+					return error;
 				}
 			}
 		}
@@ -353,11 +519,59 @@ static int open_relay_socket(void)
 		if (result != NULL) {
 			freeaddrinfo(result);
 		}
-		if (attempt < 3U) {
-			k_sleep(K_SECONDS(2));
+
+		/* After a DNS miss, try cache immediately (seeded bootstrap). */
+		if (relay_cached_valid) {
+			error = try_relay_ipv4(&relay_cached_ip, attempt, 90U,
+					       "cache", lat_socket_started,
+					       &last_error);
+			if (error >= 0) {
+				return error;
+			}
+		}
+
+		/* First miss: bootstrap before multi-second DNS retries. */
+		if (attempt == 1U || !dns_ok) {
+			error = try_relay_bootstrap_list(attempt,
+							lat_socket_started,
+							&last_error, true);
+			if (error >= 0) {
+				return error;
+			}
+		}
+
+		/* Once: hard reattach only if cache+bootstrap also failed. */
+		if (attempt == 1U && dns_attempts > 1U) {
+			printk("Relay DNS/bootstrap failed; forcing LTE reattach\n");
+			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_OFFLINE);
+			k_msleep(500);
+			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+			error = lte_lc_connect();
+			radio_suspended = false;
+			if (error != 0) {
+				printk("LTE reattach failed: %d\n", error);
+			}
+		}
+
+		if (attempt < dns_attempts) {
+			k_sleep(K_MSEC(750));
 		}
 	}
 
+	/* Final pass over every bootstrap IP (including the cached one). */
+	{
+		int error = try_relay_bootstrap_list(9U, lat_socket_started,
+						    &last_error, false);
+
+		if (error >= 0) {
+			return error;
+		}
+	}
+
+	printk("Relay socket open failed: last_error=%d dns_unreliable=%d "
+	       "cache_valid=%d\n",
+	       last_error, relay_dns_unreliable ? 1 : 0,
+	       relay_cached_valid ? 1 : 0);
 	return last_error;
 }
 
@@ -533,6 +747,7 @@ static int stream_pending_pump(int64_t deadline_ms)
 	}
 	stream_pending_len = 0U;
 	stream_pending_off = 0U;
+	++stream_chunks_completed;
 	return 0;
 }
 
@@ -733,12 +948,24 @@ static int post_recording_command(const char *audio_path,
 
 	int64_t lat_upload_started = k_uptime_get();
 
+	/*
+	 * open_relay_socket already retries DNS/cache/bootstrap. One extra
+	 * outer attempt recovers from a transient TLS handshake glitch.
+	 */
 	fd = open_relay_socket();
+	if (fd < 0) {
+		printk("Cloud upload relay socket open failed (%d); retrying once\n",
+		       fd);
+		k_msleep(1000);
+		fd = open_relay_socket();
+	}
 	if (fd < 0) {
 		printk("Cloud upload could not open relay socket: %d\n", fd);
 		return fd;
 	}
 	int64_t lat_upload_socket_done = k_uptime_get();
+	printk("Cloud upload relay socket open after %lld ms (fd=%d)\n",
+	       lat_upload_socket_done - lat_upload_started, fd);
 
 	error = send_pendant_command_pcm_header(fd, (size_t)entry.size,
 						sample_rate);
@@ -1616,6 +1843,43 @@ static void stream_reset_state(void)
 	stream_pending_off = 0U;
 	stream_pump_calls = 0U;
 	stream_eagain_count = 0U;
+	stream_chunks_completed = 0U;
+}
+
+/*
+ * True when the prewarmed fd still looks usable. Peer close/RST shows up as
+ * POLLHUP/POLLERR. Any POLLIN on a half-open chunked POST (headers sent, body
+ * not finished) means FIN/RST/unexpected response — do not reuse.
+ */
+static bool stream_socket_ok(void)
+{
+	struct zsock_pollfd pfd;
+	int n;
+
+	if (stream_fd < 0) {
+		return false;
+	}
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = stream_fd;
+	pfd.events = ZSOCK_POLLIN;
+	n = zsock_poll(&pfd, 1, 0);
+	if (n < 0) {
+		return false;
+	}
+	if ((pfd.revents & (ZSOCK_POLLIN | ZSOCK_POLLERR | ZSOCK_POLLHUP |
+			    ZSOCK_POLLNVAL)) != 0) {
+		return false;
+	}
+	return true;
+}
+
+static bool stream_is_conn_death(int error)
+{
+	return error == -ECONNRESET || error == -EPIPE || error == -ENOTCONN ||
+	       error == -ECONNABORTED || error == -ENETRESET ||
+	       error == -EHOSTUNREACH || error == -ENETUNREACH ||
+	       error == -ETIMEDOUT;
 }
 
 bool pendant_cloud_stream_active(void)
@@ -1664,6 +1928,12 @@ static int stream_open_chunked(uint32_t sample_rate)
 	stream_started_ms = k_uptime_get();
 	error = open_relay_socket();
 	if (error < 0) {
+		printk("Live PCM stream socket failed (%d); retrying once\n",
+		       error);
+		k_msleep(500);
+		error = open_relay_socket();
+	}
+	if (error < 0) {
 		printk("Live PCM stream socket failed: %d\n", error);
 		stream_reset_state();
 		return error;
@@ -1690,11 +1960,17 @@ static int stream_open_chunked(uint32_t sample_rate)
 	stream_bytes_sent = 0U;
 	stream_pending_len = 0U;
 	stream_pending_off = 0U;
+	stream_chunks_completed = 0U;
+	/* stream_started_ms set above at open start — age for stale checks. */
 	printk("Live PCM stream open: sample_rate=%u header_ms=%lld\n",
 	       sample_rate, k_uptime_get() - stream_started_ms);
 	return 0;
 }
 
+/*
+ * Drop a dead/stale half-open session and open a fresh TLS+chunked stream.
+ * Clears any in-flight pending frame (caller must tolerate losing that stage).
+ */
 static void stream_reset_job_state(void)
 {
 	pendant_cloud_transcribe_result = -EAGAIN;
@@ -1709,41 +1985,96 @@ static void stream_reset_job_state(void)
 	announced_job_id[0] = '\0';
 }
 
+static int stream_reopen_fresh(uint32_t sample_rate, const char *reason)
+{
+	printk("Live PCM stream reopen (%s)\n",
+	       reason != NULL ? reason : "refresh");
+	if (stream_fd >= 0) {
+		close(stream_fd);
+	}
+	stream_reset_state();
+	stream_reset_job_state();
+	return stream_open_chunked(sample_rate);
+}
+
 /*
  * Open TLS + chunked headers while the UI is idle so Button 1 never waits on
- * the modem handshake. Safe to call repeatedly.
+ * the modem handshake. Safe to call repeatedly. Refreshes aged/dead sockets so
+ * a long wait between prewarm and press does not leave a RST-pending fd.
  */
 int pendant_cloud_stream_prewarm(uint32_t sample_rate)
 {
 	int error;
 
-	if (stream_active) {
-		return 0;
+	if (stream_active && stream_sample_rate == sample_rate) {
+		int64_t age_ms = k_uptime_get() - stream_started_ms;
+		bool ok = stream_socket_ok();
+
+		if (age_ms < STREAM_MAX_IDLE_MS && ok) {
+			return 0;
+		}
+		printk("Live PCM idle refresh (age_ms=%lld socket_ok=%d)\n",
+		       age_ms, ok ? 1 : 0);
+		error = stream_reopen_fresh(sample_rate, "idle_refresh");
+	} else {
+		if (stream_active) {
+			pendant_cloud_stream_abort();
+		}
+		stream_reset_job_state();
+		error = stream_open_chunked(sample_rate);
 	}
-	stream_reset_job_state();
-	error = stream_open_chunked(sample_rate);
 	if (error == 0) {
 		printk("Live PCM stream prewarmed (idle)\n");
 	}
 	return error;
 }
 
+/*
+ * Call at button press before I2S starts. Reopens if the idle prewarm is
+ * stale or the modem socket already shows POLLHUP/RST.
+ */
+int pendant_cloud_stream_ensure(uint32_t sample_rate)
+{
+	int error;
+
+	if (stream_active && stream_sample_rate == sample_rate) {
+		int64_t age_ms = k_uptime_get() - stream_started_ms;
+		bool ok = stream_socket_ok();
+
+		if (age_ms < STREAM_STALE_AT_START_MS && ok) {
+			stream_reset_job_state();
+			printk("Live PCM stream ready at press (age_ms=%lld)\n",
+			       age_ms);
+			return 0;
+		}
+		printk("Live PCM stream not ready at press "
+		       "(age_ms=%lld socket_ok=%d); reopening\n",
+		       age_ms, ok ? 1 : 0);
+		error = stream_reopen_fresh(sample_rate, "press_ensure");
+	} else {
+		if (stream_active) {
+			pendant_cloud_stream_abort();
+		}
+		stream_reset_job_state();
+		error = stream_open_chunked(sample_rate);
+	}
+	if (error == 0) {
+		printk("Live PCM stream ensured at press\n");
+	} else {
+		printk("Live PCM stream ensure failed: %d\n", error);
+	}
+	return error;
+}
+
 int pendant_cloud_stream_begin(uint32_t sample_rate)
 {
-	if (stream_active && stream_sample_rate == sample_rate) {
-		/* Reuse prewarmed session. */
-		return 0;
-	}
-	if (stream_active) {
-		pendant_cloud_stream_abort();
-	}
-	stream_reset_job_state();
-	return stream_open_chunked(sample_rate);
+	return pendant_cloud_stream_ensure(sample_rate);
 }
 
 int pendant_cloud_stream_pump(uint32_t budget_ms)
 {
 	int64_t deadline;
+	int error;
 
 	++stream_pump_calls;
 	if (!stream_active || stream_fd < 0) {
@@ -1753,7 +2084,19 @@ int pendant_cloud_stream_pump(uint32_t budget_ms)
 		return 0;
 	}
 	deadline = k_uptime_get() + (int64_t)budget_ms;
-	return stream_pending_pump(deadline);
+	error = stream_pending_pump(deadline);
+	/*
+	 * Do not TLS-reopen here: I2S only has ~123 ms of RX slab headroom and
+	 * a modem handshake can take hundreds of ms to seconds. Stale sockets
+	 * are handled by idle prewarm refresh + ensure-at-press.
+	 */
+	if (error != 0 && error != -EAGAIN && stream_is_conn_death(error)) {
+		printk("Live PCM pump conn death: %d chunks_done=%u "
+		       "pending_off=%u (SD backup if armed)\n",
+		       error, stream_chunks_completed,
+		       (unsigned int)stream_pending_off);
+	}
+	return error;
 }
 
 int pendant_cloud_stream_write(const void *data, size_t length)

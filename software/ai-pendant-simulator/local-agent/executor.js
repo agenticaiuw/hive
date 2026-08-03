@@ -47,9 +47,18 @@ async function executeSafeAction(action) {
   }
 
   if (action.type === 'open_app') {
-    assertAllowedApp(action.params.appName)
-    await execFileAsync('open', ['-a', action.params.appName])
-    return success(action, `Opened ${action.params.appName}`)
+    const appName = String(
+      action.params?.appName ||
+        action.params?.name ||
+        action.params?.app ||
+        '',
+    )
+      .trim()
+      .replace(/\.app$/i, '')
+    if (!appName) throw new Error('open_app requires appName.')
+    assertAllowedApp(appName)
+    await execFileAsync('open', ['-a', appName])
+    return success(action, `Opened ${appName}`)
   }
 
   if (action.type === 'open_folder') {

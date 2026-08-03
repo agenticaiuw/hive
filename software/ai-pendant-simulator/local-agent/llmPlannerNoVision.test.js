@@ -1,7 +1,7 @@
 // Same trick as llmPlannerVision.test.js: node --test gives each file its own
 // process, so this one configures a deployment with NO vision model.
 process.env.LLM_API_KEY = 'test-key'
-process.env.LLM_API_BASE_URL = 'https://openrouter.ai/api/v1'
+process.env.LLM_API_BASE_URL = 'https://api.openai.com/v1'
 process.env.LLM_VISION_MODEL = 'off'
 
 import assert from 'node:assert/strict'

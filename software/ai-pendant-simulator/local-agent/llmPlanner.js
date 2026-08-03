@@ -1,29 +1,44 @@
+import './loadEnv.js'
 import os from 'node:os'
 import { FULL_CONTROL_MODE } from './config.js'
 import {
   formatMachineContextForPrompt,
   getMachineContext,
 } from './machineContext.js'
-import {
-  resolveDefaultTextModel,
-  resolveLlmApiBaseUrl,
-  resolveLlmApiKey,
-} from './llmProvider.js'
 import { stripProtocolTerminators } from '../shared/protocolText.js'
 
-const LLM_API_KEY = resolveLlmApiKey()
-const LLM_API_BASE_URL = resolveLlmApiBaseUrl()
-// Pinned: the bare `deepseek-v4-flash` slug still resolves to the April preview
-// checkpoint, which is far weaker at agentic work (Terminal-Bench 61.8 vs 82.7)
-// and costs more.
-const LLM_MODEL = resolveDefaultTextModel()
-// DeepSeek is text-only; a request carrying an image 404s. Screenshots go to a
-// vision model that returns normalized 0-999 coordinates, so no provider-side
-// image resize can throw off a click.
+// Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
+// Cloudflare uses Realtime separately — this process never opens Realtime.
+function resolveOpenAiApiKey() {
+  const openai = String(process.env.OPENAI_API_KEY || '').trim()
+  const llm = String(process.env.LLM_API_KEY || '').trim()
+  // Never send OpenRouter keys to api.openai.com.
+  if (openai && !openai.startsWith('sk-or-')) return openai
+  if (llm && !llm.startsWith('sk-or-')) return llm
+  if (openai.startsWith('sk-or-') || llm.startsWith('sk-or-')) {
+    console.error(
+      '[planner] Ignoring OpenRouter sk-or-v1 key — set OPENAI_API_KEY (sk-proj-…)',
+    )
+  }
+  return ''
+}
+const LLM_API_KEY = resolveOpenAiApiKey()
+const LLM_API_BASE_URL = String(
+  process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1',
+)
+  .trim()
+  .replace(/\/$/, '')
+const LLM_MODEL = String(process.env.LLM_MODEL || 'gpt-5.6-luna').trim()
+// Vision for computer-use screenshots (OpenAI multimodal).
 const LLM_VISION_MODEL =
-  process.env.LLM_VISION_MODEL || 'google/gemini-3.6-flash'
-// 'auto' picks per request; 'low'/'medium'/'high' pin it; 'off' omits the field.
-const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT || 'auto'
+  process.env.LLM_VISION_MODEL || 'gpt-4.1-mini'
+// gpt-5.6-luna (and most OpenAI chat/completions models) reject unknown
+// `reasoning`. Never send that field to api.openai.com.
+const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT || 'off'
+const LLM_SEND_REASONING =
+  !LLM_API_BASE_URL.includes('api.openai.com') &&
+  (process.env.LLM_SEND_REASONING === '1' ||
+    Boolean(String(process.env.LLM_API_BASE_URL || '').trim()))
 const LLM_MAX_TOKENS = Math.min(
   Math.max(Number(process.env.LLM_MAX_TOKENS || 1024), 128),
   4096,
@@ -294,21 +309,92 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Read the current Mac typing/keyboard language.',
     params: {},
   },
+  browser_list_tabs: {
+    description:
+      'List open web tabs (title, url, tabId) in the user browser profile. Prefer before guessing which tab is active.',
+    params: { limit: 'optional number' },
+  },
+  browser_snapshot: {
+    description:
+      'Structured interactive-element snapshot of a tab (refs, roles, names, selectors). Prefer this over desktop screenshots for web work. Then click/type using ref or selector.',
+    params: {
+      tabId: 'optional',
+      urlContains: 'optional',
+      maxElements: 'optional number',
+    },
+  },
   browser_navigate: {
-    description: 'Open a URL in the home Mac Chrome extension using existing logged-in browser cookies.',
-    params: { url: 'string' },
+    description:
+      'Open a URL in the user browser via the extension (real cookies/session). Prefer over open_url when the extension is online.',
+    params: { url: 'string', newTab: 'optional boolean', tabId: 'optional' },
   },
   browser_click: {
-    description: 'Click an element in the active browser tab.',
-    params: { selector: 'CSS selector' },
+    description:
+      'Click an element in a browser tab. Prefer ref from browser_snapshot; selector also works.',
+    params: {
+      ref: 'optional snapshot ref e.g. e3',
+      selector: 'optional CSS selector',
+      tabId: 'optional',
+    },
   },
   browser_type: {
-    description: 'Type into an input in the active browser tab.',
-    params: { selector: 'CSS selector', text: 'string', submit: 'optional boolean' },
+    description: 'Type into an input in a browser tab (ref or selector).',
+    params: {
+      ref: 'optional',
+      selector: 'optional',
+      text: 'string',
+      submit: 'optional boolean',
+      tabId: 'optional',
+    },
+  },
+  browser_select: {
+    description: 'Choose an option in a <select> (ref or selector).',
+    params: {
+      ref: 'optional',
+      selector: 'optional',
+      value: 'optional',
+      label: 'optional',
+      tabId: 'optional',
+    },
   },
   browser_read_page: {
-    description: 'Read visible text or HTML from the active browser tab.',
-    params: { mode: 'text|html', selector: 'optional CSS selector' },
+    description:
+      'Read page content. Modes: text, main_text, forms, landmarks, html. Prefer main_text or forms over html.',
+    params: {
+      mode: 'text|main_text|forms|landmarks|html',
+      selector: 'optional',
+      ref: 'optional',
+      maxChars: 'optional',
+      tabId: 'optional',
+    },
+  },
+  browser_wait_for: {
+    description: 'Wait until a selector is visible or text appears on the page.',
+    params: {
+      selector: 'optional',
+      textContains: 'optional',
+      timeoutMs: 'optional',
+      tabId: 'optional',
+    },
+  },
+  browser_scroll: {
+    description: 'Scroll to an element (ref/selector) or by dy/dx pixels.',
+    params: {
+      ref: 'optional',
+      selector: 'optional',
+      dy: 'optional',
+      dx: 'optional',
+      tabId: 'optional',
+    },
+  },
+  browser_press_key: {
+    description: 'Dispatch a key (e.g. Enter, Escape) on the focused element or a target.',
+    params: { key: 'string', ref: 'optional', selector: 'optional', tabId: 'optional' },
+  },
+  browser_capture: {
+    description:
+      'PNG of the visible browser tab only. Use only when structured snapshot is insufficient (canvas/charts). Do not send to cloud by default.',
+    params: { tabId: 'optional', urlContains: 'optional' },
   },
 }
 
@@ -339,19 +425,10 @@ export function isVisionConfigured() {
 }
 
 export function llmRequestHeaders() {
-  const headers = {
+  return {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${LLM_API_KEY}`,
   }
-
-  if (LLM_API_BASE_URL.includes('openrouter.ai')) {
-    headers['HTTP-Referer'] =
-      process.env.OPENROUTER_HTTP_REFERER ||
-      'https://github.com/geunwoo-dev/ai-pendant-simulator'
-    headers['X-Title'] = process.env.OPENROUTER_APP_TITLE || 'AI Pendant Simulator'
-  }
-
-  return headers
 }
 
 /**
@@ -362,9 +439,8 @@ export function llmRequestHeaders() {
  *  - it takes a full `messages` array, so assistant turns accumulate;
  *  - `content` may be an OpenAI content-part array carrying `image_url` with a
  *    base64 data URL;
- *  - `response_format: json_object` is applied ONLY when there is no image.
- *    Several vision-capable models on OpenRouter reject json_object alongside
- *    image parts, and the failure surfaces as an opaque provider 400.
+ *  - `response_format: json_object` is applied ONLY when there is no image
+ *    (some multimodal endpoints reject json_object with image parts).
  */
 export async function requestLlmMessages({
   messages,
@@ -388,8 +464,8 @@ export async function requestLlmMessages({
     headers: llmRequestHeaders(),
     body: JSON.stringify({
       model,
-      temperature: 0.1,
-      max_tokens: maxTokens,
+      // gpt-5.x only allows default temperature (omit field).
+      max_completion_tokens: maxTokens,
       ...(hasImages ? {} : { response_format: { type: 'json_object' } }),
       messages,
     }),
@@ -507,18 +583,20 @@ ${machinePrompt}
 
 Planning rules:
 - Choose dedicated action types yourself. Never invent keyword parsers.
-- Weather / rain / forecast → get_weather (never play_youtube, never open YouTube).
+- Weather / rain / forecast → get_weather.
 - Time / date / clock → get_time.
 - Translation → translate_text.
-- Music / play a song or video → play_youtube (or open_app Spotify when appropriate).
-- Open apps with open_app using the installed-app list for THIS device.
-- Brightness → set_brightness. Volume/mute → set_volume / set_mute. Reminders → create_reminder.
-- Screen darken/cover → show_screen_overlay.
+- Reminders → create_reminder. Brightness/volume → set_brightness / set_volume / set_mute.
+- Web / browser / "this page" / site / tab / form on the web:
+  1) Prefer browser_* tools (extension uses the real logged-in profile).
+  2) Start with browser_list_tabs or browser_snapshot, then click/type by ref or selector.
+  3) Use browser_wait_for after navigations or SPA updates.
+  4) Prefer browser_read_page (main_text/forms) over dumping html.
+  5) Only use browser_capture or desktop computer_use_task when the page is canvas/visual-only or the extension is offline.
+- Native Mac apps (Finder, Settings, non-browser UI): ui_menu / ui_find / ui_click; computer_use_task for multi-step unpredictable UI.
 - Prefer dedicated types over long shell/AppleScript.
-- Driving an app's interface: prefer ui_menu, then ui_find + ui_click. Fall back to screenshot + mouse_click only when the accessibility tree does not expose the control.
-- When the task needs several dependent UI steps whose outcome you cannot predict (fill this form, find that setting, work through this dialog), emit a SINGLE computer_use_task with a clear goal instead of guessing a fixed click sequence.
 - Keep plans short (usually 1-3 steps). Use absolute paths under ${home} when possible.
-- Destructive actions are allowed when the user explicitly asks.
+- Destructive actions only when the user explicitly asks.
 - If truly impossible, return status "unsupported" with a short reason.`
     : `You are the planning layer for a safe Mac local agent.
 Return ONLY valid JSON with status, actions, optional response, and optional error.
@@ -529,17 +607,7 @@ Never invent shell commands or paths outside the whitelist.`
     .filter(Boolean)
     .join('\n\n')
 
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${LLM_API_KEY}`,
-  }
-
-  // OpenRouter recommends these attribution headers.
-  if (LLM_API_BASE_URL.includes('openrouter.ai')) {
-    headers['HTTP-Referer'] =
-      process.env.OPENROUTER_HTTP_REFERER || 'https://github.com/geunwoo-dev/ai-pendant-simulator'
-    headers['X-Title'] = process.env.OPENROUTER_APP_TITLE || 'AI Pendant Simulator'
-  }
+  const headers = llmRequestHeaders()
 
   onProgress?.({
     phase: 'llm_start',
@@ -625,14 +693,15 @@ export function chooseReasoningEffort(
   command,
   { attempt = 0, hasScreenshot = false } = {},
 ) {
+  if (LLM_REASONING_EFFORT === 'off' || !LLM_REASONING_EFFORT) return 'off'
   if (LLM_REASONING_EFFORT !== 'auto') return LLM_REASONING_EFFORT
+  // Auto only when explicitly enabled — still keep simple voice commands cheap.
   if (attempt > 0) return 'high'
   const text = String(command || '')
   if (DELIBERATION_HINTS.test(text)) return 'high'
   if (text.length > 160) return 'high'
-  // Reading a screen is perception, not deliberation.
   if (hasScreenshot) return 'low'
-  return 'low'
+  return 'off'
 }
 
 export async function requestLlmPlanContent({
@@ -648,7 +717,7 @@ export async function requestLlmPlanContent({
   const useStream = typeof onProgress === 'function'
   const hasScreenshot = Boolean(screenshot?.dataUrl)
   const effort = chooseReasoningEffort(command, { attempt, hasScreenshot })
-  // OpenRouter parses multipart content best with the text first.
+  // OpenAI (and OpenAI-compatible gateways) parse multipart content best with text first.
   const userMessage = hasScreenshot
     ? {
         role: 'user',
@@ -664,11 +733,13 @@ export async function requestLlmPlanContent({
     headers,
     body: JSON.stringify({
       model: hasScreenshot ? LLM_VISION_MODEL : LLM_MODEL,
-      temperature: 0.1,
-      max_tokens: LLM_MAX_TOKENS,
+      // gpt-5.x: max_completion_tokens only; no temperature override; no reasoning.
+      max_completion_tokens: LLM_MAX_TOKENS,
       stream: useStream,
       response_format: { type: 'json_object' },
-      ...(effort === 'off' ? {} : { reasoning: { effort } }),
+      ...(LLM_SEND_REASONING && effort !== 'off'
+        ? { reasoning: { effort } }
+        : {}),
       messages: [{ role: 'system', content: systemPrompt }, userMessage],
     }),
   })

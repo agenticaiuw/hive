@@ -24,24 +24,47 @@ You asked what “flash the firmware,” “deploy the relay,” “TTS,” “b
 
 **How (this Mac, this project):**
 
-```bash
-cd /opt/nordic/ncs/v3.4.0
-export PATH=/opt/nordic/ncs/toolchains/ccc010f809/bin:/opt/nordic/ncs/toolchains/ccc010f809/usr/bin:$PATH \
-  ZEPHYR_BASE=/opt/nordic/ncs/v3.4.0/zephyr ZEPHYR_TOOLCHAIN_VARIANT=zephyr \
-  ZEPHYR_SDK_INSTALL_DIR=/opt/nordic/ncs/toolchains/ccc010f809/opt/zephyr-sdk
+Tools live under `/opt/nordic/ncs` (NCS v3.4.0 + toolchain `ccc010f809`) but are **not** on the default shell PATH. Either use the helpers, or export the env once per shell.
 
-# Build
+```bash
+# One-liner env (preferred)
+source ~/agentic-gadget/firmware/nrf9160/scripts/env.sh
+# Or: eval "$(pendant-ncs-env)"   # ~/.local/bin wrappers for west/nrfutil
+
+# Probe + tools only (no program)
+~/agentic-gadget/firmware/nrf9160/scripts/flash.sh --check
+
+# Build (from NCS workspace)
+cd /opt/nordic/ncs/v3.4.0
 west build -b nrf9160dk/nrf9160/ns \
   -d ~/agentic-gadget/firmware/nrf9160/build-cloud \
   ~/agentic-gadget/firmware/nrf9160 \
   -- -DEXTRA_CONF_FILE=~/agentic-gadget/firmware/nrf9160/secrets.conf
 
-# Flash (USB cable to the DK, J-Link serial 960036581)
-west flash -d ~/agentic-gadget/firmware/nrf9160/build-cloud --runner jlink --dev-id 960036581
+# Flash — default runner is nrfutil; jlink also works
+# USB cable to the DK, onboard J-Link serial 960036581 (PCA10090)
+~/agentic-gadget/firmware/nrf9160/scripts/flash.sh
+# equivalent:
+# west flash -d ~/agentic-gadget/firmware/nrf9160/build-cloud --runner nrfutil --dev-id 960036581
+# west flash -d ~/agentic-gadget/firmware/nrf9160/build-cloud --runner jlink  --dev-id 960036581
 ```
+
+Image flashed is the TF-M merged hex:
+`firmware/nrf9160/build-cloud/nrf9160/zephyr/tfm_merged.hex`.
+
+UART console after flash: `/dev/cu.usbmodem0009600365811` (interface ending in `1`), 115200 baud.
 
 USB must be plugged in. After flash, the board reboots with the new behavior (live Opus encode, single-shot upload, etc.).
 
+**ESP32 (HUZZAH32 AirPods bridge, optional):**
+
+```bash
+~/agentic-gadget/firmware/esp32-airpods-bridge/flash.sh --check
+~/agentic-gadget/firmware/esp32-airpods-bridge/flash.sh
+# or: cd firmware/esp32-airpods-bridge && .venv/bin/pio run --target upload
+```
+
+CP2104 port observed as `/dev/cu.usbserial-0287A9CA`.
 ---
 
 ## 2. Deploy the cloud relay worker

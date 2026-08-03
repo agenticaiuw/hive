@@ -1,3 +1,4 @@
+import './loadEnv.js'
 import express from 'express'
 import cors from 'cors'
 import fs from 'node:fs'
@@ -867,6 +868,8 @@ app.post('/browser/heartbeat', (request, response) => {
       tabId: request.body?.tabId ?? null,
       windowId: request.body?.windowId ?? null,
       tabUrl: request.body?.tabUrl ?? '',
+      tabTitle: request.body?.tabTitle ?? '',
+      tabCount: request.body?.tabCount ?? null,
       userAgent: request.body?.userAgent ?? '',
       deviceName: request.body?.deviceName ?? '',
       browserName: request.body?.browserName ?? '',
@@ -1047,6 +1050,8 @@ async function buildOpsStatus() {
           home: machine.home,
           platform: machine.platform,
           appCount: machine.applications?.length ?? 0,
+          // Full list for the Realtime fleet harness (capped in fleetContext).
+          applications: machine.applications ?? [],
           topApps: (machine.applications ?? []).slice(0, 12),
         }
       : null,

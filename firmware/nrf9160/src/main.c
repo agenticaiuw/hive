@@ -226,7 +226,7 @@ static void live_tx_offer_stage(const int16_t *samples, size_t frame_count)
 	}
 
 	if (!pcm_tx_ring_push(&live_tx_ring, samples, byte_count)) {
-		printk("Live TX ring full; abort stream (no SD fallback)\n");
+		printk("Live TX ring full; abort stream (SD backup continues)\n");
 		pendant_cloud_stream_abort();
 		live_stream_failed = true;
 		pcm_tx_ring_reset(&live_tx_ring);
@@ -247,6 +247,9 @@ static void live_tx_pump(uint32_t budget_ms)
 	while (k_uptime_get() < deadline) {
 		if (pendant_cloud_stream_has_pending()) {
 			error = pendant_cloud_stream_pump(1U);
+			if (error == -EAGAIN) {
+				return;
+			}
 			if (error == -EAGAIN) {
 				return;
 			}
@@ -382,8 +385,13 @@ static void wait_for_button_press(void)
 	 * Latency-first: start work on the active edge. Do not wait for the
 	 * physical release — that used to add hundreds of ms before the mic
 	 * even powered up.
+	 *
+	 * While idle, wake every ~10 s to refresh the half-open live stream so
+	 * a long wait does not leave a RST-pending TLS socket for the press.
 	 */
-	k_sem_take(&button_press_sem, K_FOREVER);
+	while (k_sem_take(&button_press_sem, K_SECONDS(10)) != 0) {
+		(void)pendant_cloud_stream_prewarm(SAMPLE_RATE);
+	}
 	clear_button_events();
 }
 
@@ -865,9 +873,14 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	int error;
 
 	/*
-	 * Latency path: live LTE only. No microSD write during capture and no
-	 * SD-file upload fallback. Prewarm TLS while idle; press = mic + ring.
+	 * Latency path: live LTE when prewarmed + microSD backup always.
+	 * Prewarm TLS while idle; press = mic + ring (+ SD for fallback).
 	 */
+	struct fs_file_t sd_file;
+	bool sd_open = false;
+	bool live_fail_logged = false;
+	int live_write_error = 0;
+
 	recording_on_sd = false;
 	live_stream_failed = false;
 	pcm_tx_ring_init(&live_tx_ring, audio_workspace, MIC_STAGE_BYTES,
@@ -875,9 +888,10 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	if (sample_limit == 0U) {
 		return -ENODEV;
 	}
-	if (!pendant_cloud_stream_active()) {
-		printk("Live stream not prewarmed — refuse record (no SD fallback)\n");
-		return -ENOTCONN;
+	/* Re-validate/reopen idle prewarm before I2S (stale sockets → -104). */
+	if (pendant_cloud_stream_ensure(SAMPLE_RATE) != 0) {
+		printk("Live stream ensure failed — recording to microSD "
+		       "(fallback single-shot after stop)\n");
 	}
 	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
 				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
@@ -891,6 +905,30 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	mic_clocks_start();
 	clocks_started_at = k_uptime_get();
 
+	fs_file_t_init(&sd_file);
+	if (sd_ready) {
+		error = fs_open(&sd_file, SD_RECORDING_PATH,
+				FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+		if (error == 0) {
+			sd_open = true;
+			recording_on_sd = true;
+		} else {
+			printk("microSD open failed (%d); live-only if stream up\n",
+			       error);
+			if (!pendant_cloud_stream_active()) {
+				mic_clocks_stop();
+				gpio_pin_set_dt(&led, 0);
+				return error;
+			}
+			error = 0;
+		}
+	} else if (!pendant_cloud_stream_active()) {
+		mic_clocks_stop();
+		gpio_pin_set_dt(&led, 0);
+		printk("No live stream and no microSD — cannot record\n");
+		return -ENOTCONN;
+	}
+
 	recorded_samples = 0U;
 	recorded_peak = 0U;
 	recording_absolute_sum = 0U;
@@ -899,6 +937,10 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	error = i2s_configure(i2s, I2S_DIR_RX, &config);
 	if (error != 0) {
 		mic_clocks_stop();
+		if (sd_open) {
+			(void)fs_close(&sd_file);
+			recording_on_sd = false;
+		}
 		gpio_pin_set_dt(&led, 0);
 		return error;
 	}
@@ -911,14 +953,18 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	probe_mic_data_driver();
 #endif
 	printk("I2S mic record: bclk_hz=%u lrclk_hz=%u pcm_rate_hz=%u "
-	       "live_stream=%d ring_slots=%u\n",
+	       "live_stream=%d ring_slots=%u sd=%d\n",
 	       16000000U / MIC_BCLK_TOP, 16000000U / MIC_LRCLK_TOP,
 	       SAMPLE_RATE, pendant_cloud_stream_active() ? 1 : 0,
-	       (unsigned int)PCM_TX_RING_SLOTS);
+	       (unsigned int)PCM_TX_RING_SLOTS, sd_open ? 1 : 0);
 
 	error = i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_START);
 	if (error != 0) {
 		mic_clocks_stop();
+		if (sd_open) {
+			(void)fs_close(&sd_file);
+			recording_on_sd = false;
+		}
 		gpio_pin_set_dt(&led, 0);
 		return error;
 	}
@@ -937,6 +983,10 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 			k_msleep(MIC_STOP_SETTLE_MS);
 			mic_clocks_stop();
+			if (sd_open) {
+				(void)fs_close(&sd_file);
+				recording_on_sd = false;
+			}
 			return error;
 		}
 
@@ -948,6 +998,10 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 			k_msleep(MIC_STOP_SETTLE_MS);
 			mic_clocks_stop();
+			if (sd_open) {
+				(void)fs_close(&sd_file);
+				recording_on_sd = false;
+			}
 			return -EMSGSIZE;
 		}
 		memcpy(raw_processing, block, size);
@@ -1030,12 +1084,26 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 			mic_stage_samples[stage_frames] = (int16_t)amplified;
 			if (++stage_frames == MIC_STAGE_FRAMES) {
-				/* Live LTE only — never gate stream on microSD. */
+				/* SD backup + live LTE; neither gates the other. */
+				if (sd_open) {
+					live_write_error = write_pcm_frames(
+						&sd_file, mic_stage_samples,
+						MIC_STAGE_FRAMES);
+					if (live_write_error != 0) {
+						printk("microSD stage write failed: %d\n",
+						       live_write_error);
+						(void)fs_close(&sd_file);
+						sd_open = false;
+						recording_on_sd = false;
+						live_write_error = 0;
+					}
+				}
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
 				stage_frames = 0U;
 				++stage_flush_count;
-				if (live_stream_failed) {
+				/* Live mid-fail is OK if SD still capturing. */
+				if (live_stream_failed && !sd_open) {
 					break;
 				}
 			}
@@ -1061,16 +1129,27 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		}
 
 		recorded_samples = sample_index;
-		if (live_stream_failed) {
-			printk("I2S mic live LTE stream failed mid-capture\n");
+		if (live_stream_failed && !sd_open) {
+			printk("I2S mic live LTE stream failed mid-capture "
+			       "(no SD backup)\n");
 			(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
 			k_msleep(MIC_STOP_SETTLE_MS);
 			mic_clocks_stop();
+			if (sd_open) {
+				(void)fs_close(&sd_file);
+				recording_on_sd = false;
+			}
 			return -EIO;
+		}
+		if (live_stream_failed && sd_open && !live_fail_logged) {
+			printk("Live LTE failed mid-capture; continuing on microSD\n");
+			live_fail_logged = true;
 		}
 
 		/* Spend a few free ms pushing PCM over LTE between DMA blocks. */
-		live_tx_pump(PCM_TX_PUMP_BUDGET_MS);
+		if (!live_stream_failed) {
+			live_tx_pump(PCM_TX_PUMP_BUDGET_MS);
+		}
 
 		if (sample_index >= next_trace_sample) {
 			next_trace_sample += SAMPLE_RATE;
@@ -1101,14 +1180,35 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	}
 
 	if (stage_frames > 0U) {
+		if (sd_open) {
+			live_write_error = write_pcm_frames(
+				&sd_file, mic_stage_samples, stage_frames);
+			if (live_write_error != 0) {
+				printk("microSD final stage write failed: %d\n",
+				       live_write_error);
+			}
+		}
 		/* Pad last stream slot so the fixed-size ring accepts it. */
 		while (stage_frames < MIC_STAGE_FRAMES) {
 			mic_stage_samples[stage_frames++] = 0;
 		}
 		live_tx_offer_stage(mic_stage_samples, MIC_STAGE_FRAMES);
 	}
+
+	if (sd_open) {
+		int sync_error = fs_sync(&sd_file);
+		int close_error = fs_close(&sd_file);
+
+		sd_open = false;
+		if (sync_error != 0 || close_error != 0) {
+			printk("microSD close failed: sync=%d close=%d\n",
+			       sync_error, close_error);
+			recording_on_sd = false;
+		}
+	}
+
 	/* Drain remaining ring slots after capture (still budgeted). */
-	{
+	if (pendant_cloud_stream_active() && !live_stream_failed) {
 		int64_t drain_until = k_uptime_get() + 2000;
 
 		while ((!pcm_tx_ring_empty(&live_tx_ring) ||
@@ -1120,19 +1220,21 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		if ((!pcm_tx_ring_empty(&live_tx_ring) ||
 		     pendant_cloud_stream_has_pending()) ||
 		    live_stream_failed || !pendant_cloud_stream_active()) {
-			printk("Live TX incomplete — no SD fallback\n");
+			printk("Live TX incomplete — will use SD fallback if present\n");
 			pendant_cloud_stream_abort();
 			live_stream_failed = true;
 			pcm_tx_ring_reset(&live_tx_ring);
-			error = -EIO;
 		}
 	}
+
+	/* Capture itself succeeded if we have samples (live and/or SD). */
+	error = (recorded_samples > 0U) ? 0 : (error != 0 ? error : -ENODATA);
 
 	uint32_t rms = recorded_samples == 0U
 		? 0U
 		: integer_square_root(square_sum / recorded_samples);
 	printk("I2S mic capture totals: samples=%u mean=%u peak=%u rms=%u "
-	       "min=%d max=%d zero_crossings=%u stages=%u "
+	       "min=%d max=%d zero_crossings=%u sd_flushes=%u "
 	       "live_sent=%u ring_push=%u ring_pop=%u ring_ovf=%u "
 	       "stream_failed=%d\n",
 	       recorded_samples,
@@ -1482,15 +1584,19 @@ int main(void)
 #endif
 
 	while (true) {
-		/* Ready: prewarm TLS/chunked headers while idle (not on press). */
+		/*
+		 * Ready: keep TLS + chunked headers warm. Always call prewarm
+		 * so aged/dead half-open sockets refresh before the next press
+		 * (avoids Live TX pump failed: -104 after long idle).
+		 */
 		audio_cycle_phase = 0U;
 		gpio_pin_set_dt(&led, 0);
-		if (!pendant_cloud_stream_active()) {
+		{
 			int prewarm = pendant_cloud_stream_prewarm(SAMPLE_RATE);
 
 			if (prewarm != 0) {
 				printk("Idle stream prewarm failed: %d "
-				       "(record will refuse — no SD fallback)\n",
+				       "(will SD-upload after stop)\n",
 				       prewarm);
 			}
 		}
@@ -1533,20 +1639,46 @@ int main(void)
 		}
 
 		/*
-		 * Live chunked POST only. No microSD file upload fallback.
+		 * Prefer live chunked POST; fall back to microSD single-shot
+		 * when prewarm failed, live TX aborted, or stream_end fails.
 		 */
 		audio_cycle_phase = 3U;
-		if (pendant_cloud_stream_active() && !live_stream_failed) {
-			error = pendant_cloud_stream_end();
-			printk("LAT live_stream_end_ms=%lld pcm_bytes=%u\n",
-			       k_uptime_get() - lat_press_started,
-			       pendant_cloud_uploaded_pcm_bytes);
-		} else {
-			if (pendant_cloud_stream_active()) {
+		{
+			uint32_t pcm_bytes =
+				recorded_samples * (uint32_t)sizeof(int16_t);
+			bool live_ok = pendant_cloud_stream_active() &&
+				       !live_stream_failed &&
+				       pendant_cloud_stream_bytes_sent() > 0U;
+
+			error = -EIO;
+			if (live_ok) {
+				error = pendant_cloud_stream_end();
+				printk("LAT live_stream_end_ms=%lld pcm_bytes=%u "
+				       "result=%d\n",
+				       k_uptime_get() - lat_press_started,
+				       pendant_cloud_uploaded_pcm_bytes, error);
+			} else if (pendant_cloud_stream_active()) {
 				pendant_cloud_stream_abort();
 			}
-			printk("Live stream dead — refusing SD fallback\n");
-			error = -EIO;
+
+			if (error != 0 && recording_on_sd && pcm_bytes > 0U) {
+				printk("Fallback SD PCM upload (%u bytes) "
+				       "(live_result=%d live_sent=%u)\n",
+				       pcm_bytes, error,
+				       pendant_cloud_stream_bytes_sent());
+				error = pendant_cloud_upload_recording(
+					SD_RECORDING_PATH, pcm_bytes,
+					SAMPLE_RATE);
+				printk("LAT fallback_upload_ms=%lld "
+				       "pcm_bytes=%u result=%d\n",
+				       k_uptime_get() - lat_press_started,
+				       pendant_cloud_uploaded_pcm_bytes, error);
+			} else if (error != 0) {
+				printk("Live stream dead and no SD backup "
+				       "(pcm_bytes=%u recording_on_sd=%d)\n",
+				       pcm_bytes, recording_on_sd ? 1 : 0);
+				error = -EIO;
+			}
 		}
 		report_main_stack_headroom("upload");
 		printk("LAT press_to_upload_done_ms=%lld\n",

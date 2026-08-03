@@ -1,5 +1,5 @@
 process.env.LLM_API_KEY = 'test-key'
-process.env.LLM_API_BASE_URL = 'https://openrouter.ai/api/v1'
+process.env.LLM_API_BASE_URL = 'https://api.openai.com/v1'
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -72,6 +72,30 @@ test('HTTP-200 JSON error body rejects a requested stream', async () => {
           ),
       }),
     /provider returned an error/,
+  )
+})
+
+test('OpenAI plan requests never include the reasoning parameter', async () => {
+  let body = null
+  await requestLlmPlanContent({
+    headers: {},
+    systemPrompt: 'system',
+    userContent: 'user',
+    fetchImpl: async (_url, options) => {
+      body = JSON.parse(options.body)
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"status":"instant","actions":[]}' } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    },
+  })
+  assert.ok(body)
+  assert.equal(
+    Object.hasOwn(body, 'reasoning'),
+    false,
+    'reasoning must not be sent to api.openai.com',
   )
 })
 

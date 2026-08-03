@@ -47,9 +47,31 @@ test('commands are validated before touching a tab', () => {
     }),
     { type: 'click', params: { selector: '#save', tabId: 4 } },
   )
+  assert.deepEqual(
+    validateCommand({
+      action: { type: 'click', params: { ref: 'e3' } },
+    }),
+    { type: 'click', params: { ref: 'e3' } },
+  )
+  assert.deepEqual(
+    validateCommand({
+      action: { type: 'snapshot', params: { maxElements: 40 } },
+    }),
+    { type: 'snapshot', params: { maxElements: 40 } },
+  )
+  assert.deepEqual(
+    validateCommand({
+      action: { type: 'wait_for', params: { textContains: 'Done' } },
+    }),
+    { type: 'wait_for', params: { textContains: 'Done' } },
+  )
+  assert.deepEqual(
+    validateCommand({ action: { type: 'list_tabs', params: {} } }),
+    { type: 'list_tabs', params: {} },
+  )
   assert.throws(
     () => validateCommand({ action: { type: 'type', params: {} } }),
-    /CSS selector/,
+    /selector or snapshot ref/,
   )
   assert.throws(
     () => validateCommand({ action: { type: 'delete_history', params: {} } }),

@@ -150,6 +150,179 @@ test('a shell action from the relay is never executed hands-free', async (t) => 
   )
 })
 
+test('audio-native plannerHint with actions skips local /plan', async (t) => {
+  const stub = installFetchStub({
+    '/plan': () => {
+      throw new Error('local /plan must not run for audio-native plans with actions')
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [{ ok: true, status: 'success', message: 'Opened Outlook.' }],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-audio-native-actions',
+    command: 'open Outlook',
+    sessionId: 'session-an-1',
+    plannerHint: {
+      planner: 'audio-native',
+      status: 'ready',
+      response: 'Opening Outlook.',
+      actions: [
+        {
+          type: 'open_app',
+          label: 'Open Outlook',
+          params: { appName: 'Microsoft Outlook' },
+        },
+      ],
+      requireLocalPlanner: false,
+    },
+  })
+
+  const planCalls = stub.calls.filter(
+    (call) => call.toAgent && call.pathname === '/plan',
+  )
+  assert.equal(planCalls.length, 0, 'must not call local /plan')
+
+  const executeCall = stub.calls.find(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.ok(executeCall, 'must execute audio-native actions')
+  assert.equal(
+    JSON.parse(executeCall.body).actions[0].params.appName,
+    'Microsoft Outlook',
+  )
+})
+
+test('audio-native spoken reply with empty actions skips local /plan', async (t) => {
+  const stub = installFetchStub({
+    '/plan': () => {
+      throw new Error('local /plan must not run for spoken-only audio-native plans')
+    },
+    '/execute': () => {
+      throw new Error('/execute must not run when there are no actions')
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-audio-native-spoken',
+    command: 'what time is it',
+    sessionId: 'session-an-2',
+    plannerHint: {
+      planner: 'audio-native-realtime',
+      status: 'instant',
+      response: 'It is three o’clock.',
+      actions: [],
+      requireLocalPlanner: false,
+    },
+  })
+
+  assert.equal(
+    stub.calls.filter((call) => call.toAgent && call.pathname === '/plan')
+      .length,
+    0,
+  )
+  const completion = stub.calls.find(
+    (call) =>
+      call.toRelay && call.pathname.endsWith('/job-audio-native-spoken/result'),
+  )
+  assert.ok(completion)
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.ok, true)
+  assert.equal(posted.result.planner, 'audio-native-realtime')
+  assert.match(posted.result.response || '', /three/i)
+})
+
+test('empty audio-native hint falls back to local /plan (battery-style)', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      response: 'Checking battery.',
+      actions: [
+        {
+          type: 'run_shell',
+          label: 'Battery',
+          params: { command: 'pmset -g batt' },
+        },
+      ],
+    },
+    '/execute': () => {
+      // shell is not auto-run hands-free
+      throw new Error('should not auto-execute shell')
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-battery-fallback',
+    command: 'how much battery do I have',
+    sessionId: 'session-batt',
+    plannerHint: {
+      planner: 'audio-native',
+      status: 'instant',
+      response: '',
+      actions: [],
+      requireLocalPlanner: false,
+    },
+  })
+
+  const planCalls = stub.calls.filter(
+    (call) => call.toAgent && call.pathname === '/plan',
+  )
+  assert.equal(planCalls.length, 1, 'empty Realtime plan must use local LLM')
+})
+
+test('requireLocalPlanner forces local /plan even with actions', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      response: 'Delegated plan.',
+      actions: [
+        {
+          type: 'open_app',
+          label: 'Open Notes',
+          params: { appName: 'Notes' },
+        },
+      ],
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [{ ok: true, message: 'Opened Notes.' }],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-delegate-local',
+    command: 'do a multi step thing',
+    sessionId: 'session-del',
+    plannerHint: {
+      planner: 'audio-native-delegate',
+      status: 'ready',
+      response: 'I will plan that on the Mac.',
+      actions: [],
+      requireLocalPlanner: true,
+    },
+  })
+
+  assert.equal(
+    stub.calls.filter((call) => call.toAgent && call.pathname === '/plan')
+      .length,
+    1,
+  )
+})
+
 test('execution and telemetry follow a session created by planning', async (t) => {
   const stub = installFetchStub({
     '/plan': {

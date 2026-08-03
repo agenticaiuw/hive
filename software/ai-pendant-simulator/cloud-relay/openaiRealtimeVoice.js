@@ -6,11 +6,17 @@
  * PCM while the pendant is still uploading, commit only when the body ends.
  * That is the latency win vs buffering the full clip then planning.
  *
- * Tools: web_search, mac_run_actions, mac_delegate; plain text for Q&A.
+ * Product: plan from AUDIO via tools (actions + spoken_reply). Transcript is
+ * optional history/debug only — never required, never the critical hot path.
+ * Tools: web_search, mac_run_actions, browser_run_actions, mac_delegate.
  * Docs: https://developers.openai.com/api/docs/guides/realtime-websocket
  */
 
 import { OPENAI_API_BASE_URL } from './config.js'
+import {
+  composeRealtimeInstructions,
+  normalizeFleetSnapshot,
+} from './fleetContext.js'
 
 export const REALTIME_PCM_RATE = 24000
 const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
@@ -39,26 +45,55 @@ function realtimeWsUrl() {
   return `${wsBase}/realtime?model=${encodeURIComponent(realtimeModel())}`
 }
 
-const VOICE_AGENT_INSTRUCTIONS = `You are the voice agent for a wearable AI pendant that controls a Mac and answers questions.
+/**
+ * Action item schema — contracts live here (not in the system prompt).
+ * Stable across sessions for prompt-cache friendliness.
+ */
+const ACTION_ITEM_SCHEMA = {
+  type: 'object',
+  properties: {
+    type: {
+      type: 'string',
+      description:
+        'Executor action type. Examples: run_shell, run_applescript, create_reminder, open_app, open_url, open_path, type_text, get_volume, set_volume, browser_snapshot, browser_list_tabs, browser_navigate, browser_click, browser_type, browser_wait_for, browser_read_page, browser_select.',
+    },
+    label: {
+      type: 'string',
+      description: 'Short human-readable label for logs / UI.',
+    },
+    params: {
+      type: 'object',
+      description:
+        'Parameters for the action type. Use only fields that type needs (e.g. command for run_shell, title/due for create_reminder, url for open_url or browser_navigate, selector/text for browser_click/type, appName for open_app matching the Mac software inventory exactly).',
+      properties: {
+        appName: { type: 'string' },
+        url: { type: 'string' },
+        path: { type: 'string' },
+        title: { type: 'string' },
+        due: { type: 'string' },
+        selector: { type: 'string' },
+        text: { type: 'string' },
+        query: { type: 'string' },
+        command: { type: 'string' },
+        script: { type: 'string' },
+        cwd: { type: 'string' },
+      },
+    },
+  },
+  required: ['type', 'params'],
+}
 
-The user is speaking a short command or question (audio may still be arriving). Decide from the audio alone (no keyword tables on the client).
-
-Use tools when needed:
-- web_search: current facts, news, weather, sports, "look up X", anything needing the live web.
-- mac_run_actions: simple, concrete Mac control you can express as 1–3 actions (open_app with params.appName, open_url with params.url, etc.). Never invent params.name — use appName.
-- mac_delegate: multi-step or ambiguous Mac work the local Mac agent should plan (research+file, multi-app workflows, "set up my morning", etc.).
-
-When the user only wants a spoken answer (definitions, translations, math, short facts you know confidently), do NOT call a tool — reply with a short plain-language answer (1–3 sentences).
-
-After tools return results, give a brief final user-facing reply when helpful.
-Prefer the correct tool over guessing. Do not claim you opened apps or searched if you did not call the tool.`
-
+/**
+ * Tool definitions = agent-computer interface.
+ * System prompt stays high-level; schemas carry parameter contracts
+ * (Anthropic: prompt-engineer tools, not brittle instruction lists).
+ */
 export const REALTIME_TOOLS = [
   {
     type: 'function',
     name: 'web_search',
     description:
-      'Search the public web for up-to-date information (news, weather, facts, lookups).',
+      'Look up current information on the public web (news, weather, sports, facts, anything that needs live data). Prefer this over guessing about changing facts.',
     parameters: {
       type: 'object',
       properties: {
@@ -74,60 +109,82 @@ export const REALTIME_TOOLS = [
     type: 'function',
     name: 'mac_run_actions',
     description:
-      'Run a small set of concrete Mac control actions (open apps/URLs, simple control).',
+      'Execute 1–3 concrete actions on the Mac surface when it is online: reminders, files, URLs, UI/input, shell/system queries (battery, disk, processes, network), clipboard, and similar hands-free work. Prefer real outcomes over merely launching UI. Required product for any live Mac state question — do not answer those from spoken text alone. Use only when the Mac surface is online.',
     parameters: {
       type: 'object',
       properties: {
-        transcript: {
-          type: 'string',
-          description: 'Faithful short transcript of what the user said.',
+        actions: {
+          type: 'array',
+          description:
+            '1–3 concrete actions for the Mac executor (primary product of this tool).',
+          items: ACTION_ITEM_SCHEMA,
         },
         spoken_reply: {
           type: 'string',
-          description: 'Optional short confirmation the pendant can speak.',
+          description:
+            'Short confirmation for the pendant speaker (preferred user-facing reply).',
         },
-        actions: {
-          type: 'array',
-          description: 'Usually 1–3 Mac tool actions.',
-          items: {
-            type: 'object',
-            properties: {
-              type: {
-                type: 'string',
-                description: 'Action type, e.g. open_app, open_url.',
-              },
-              label: { type: 'string' },
-              params: {
-                type: 'object',
-                description:
-                  'Action params. open_app requires appName; open_url requires url.',
-              },
-            },
-            required: ['type'],
-          },
+        transcript: {
+          type: 'string',
+          description:
+            'Optional short transcript for history/debug only. Omit if unsure — never block on this; plan from audio via actions.',
         },
       },
-      required: ['transcript', 'actions'],
+      required: ['actions'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'browser_run_actions',
+    description:
+      'Execute 1–3 actions through the browser extension when online: list_tabs, snapshot (interactive refs), navigate, click/type by ref, wait_for, read_page, select, scroll. Prefer over Mac desktop control for web/logged-in site work.',
+    parameters: {
+      type: 'object',
+      properties: {
+        actions: {
+          type: 'array',
+          description:
+            '1–3 browser-extension actions (primary product of this tool).',
+          items: ACTION_ITEM_SCHEMA,
+        },
+        spoken_reply: {
+          type: 'string',
+          description:
+            'Short confirmation for the pendant speaker (preferred user-facing reply).',
+        },
+        transcript: {
+          type: 'string',
+          description:
+            'Optional short transcript for history/debug only. Omit if unsure — never block on this.',
+        },
+      },
+      required: ['actions'],
     },
   },
   {
     type: 'function',
     name: 'mac_delegate',
     description:
-      'Hand a complex multi-step Mac task to the local Mac agent for full planning.',
+      'Hand a multi-step or ambiguous computer task to the local Mac agent, which has full machine context and can plan longer workflows. Use when a short action list is not enough.',
     parameters: {
       type: 'object',
       properties: {
-        transcript: {
-          type: 'string',
-          description: 'Faithful transcript of the request.',
-        },
         goal: {
           type: 'string',
-          description: 'Clear goal statement for the Mac agent.',
+          description: 'Clear goal for the Mac agent to accomplish.',
+        },
+        spoken_reply: {
+          type: 'string',
+          description:
+            'Optional short confirmation for the pendant speaker while the Mac works.',
+        },
+        transcript: {
+          type: 'string',
+          description:
+            'Optional short transcript for history/debug only. Omit if unsure.',
         },
       },
-      required: ['transcript', 'goal'],
+      required: ['goal'],
     },
   },
 ]
@@ -347,7 +404,123 @@ async function runWebSearch(query) {
   }
 }
 
-function openRealtimeSocket(url, apiKey) {
+/**
+ * Normalize CF / browser WebSocket to the EventEmitter-ish surface used by
+ * this module (`on`/`once`/`send`/`close`/`readyState`/`OPEN`).
+ */
+function wrapBrowserWebSocket(ws) {
+  const OPEN = typeof ws.OPEN === 'number' ? ws.OPEN : 1
+  return {
+    OPEN,
+    get readyState() {
+      return ws.readyState
+    },
+    send(data) {
+      ws.send(data)
+    },
+    close(code, reason) {
+      try {
+        ws.close(code, reason)
+      } catch {
+        /* ignore */
+      }
+    },
+    terminate() {
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
+      }
+    },
+    on(event, handler) {
+      if (event === 'message') {
+        ws.addEventListener('message', (ev) => {
+          handler(ev?.data)
+        })
+        return
+      }
+      if (event === 'error') {
+        ws.addEventListener('error', (ev) => {
+          handler(ev?.error || ev || new Error('WebSocket error'))
+        })
+        return
+      }
+      if (event === 'close') {
+        ws.addEventListener('close', () => handler())
+        return
+      }
+      if (event === 'open') {
+        ws.addEventListener('open', () => handler())
+      }
+    },
+    once(event, handler) {
+      const wrap = (...args) => {
+        ws.removeEventListener?.(event, wrap)
+        handler(...args)
+      }
+      if (event === 'message') {
+        const listener = (ev) => {
+          ws.removeEventListener('message', listener)
+          handler(ev?.data)
+        }
+        ws.addEventListener('message', listener)
+        return
+      }
+      if (event === 'error') {
+        const listener = (ev) => {
+          ws.removeEventListener('error', listener)
+          handler(ev?.error || ev || new Error('WebSocket error'))
+        }
+        ws.addEventListener('error', listener)
+        return
+      }
+      if (event === 'close') {
+        const listener = () => {
+          ws.removeEventListener('close', listener)
+          handler()
+        }
+        ws.addEventListener('close', listener)
+        return
+      }
+      if (event === 'open') {
+        const listener = () => {
+          ws.removeEventListener('open', listener)
+          handler()
+        }
+        ws.addEventListener('open', listener)
+      }
+    },
+  }
+}
+
+/**
+ * Cloudflare Workers outbound WebSocket with custom Authorization header.
+ * Uses fetch + Upgrade (standard WebSocket() cannot set auth headers).
+ * https://developers.cloudflare.com/workers/examples/websockets/
+ */
+async function openViaCloudflareFetchUpgrade(wsUrl, apiKey) {
+  const httpUrl = String(wsUrl).replace(/^ws/i, 'http')
+  const response = await fetch(httpUrl, {
+    headers: {
+      Upgrade: 'websocket',
+      Authorization: `Bearer ${apiKey}`,
+    },
+  })
+  const webSocket = response.webSocket
+  if (!webSocket) {
+    const body = await response.text().catch(() => '')
+    throw new Error(
+      `Realtime WebSocket upgrade failed (HTTP ${response.status})${
+        body ? `: ${body.slice(0, 200)}` : ''
+      }`,
+    )
+  }
+  // Required before using a server-side accepted socket in Workers.
+  webSocket.accept()
+  return wrapBrowserWebSocket(webSocket)
+}
+
+function openViaNodeWs(url, apiKey) {
   return import('ws').then(
     ({ default: WS }) =>
       new Promise((resolve, reject) => {
@@ -374,34 +547,86 @@ function openRealtimeSocket(url, apiKey) {
   )
 }
 
-function buildPlanResult(state, startedAt, language) {
-  const text =
-    String(state.transcript || '').trim() ||
-    String(state.response || '').trim() ||
-    'voice command'
+/**
+ * Open a Realtime WebSocket on Node (`ws`) or Cloudflare Workers (fetch upgrade).
+ * The `ws` package refuses to load in the Workers "browser-like" runtime:
+ * "ws does not work in the browser".
+ */
+async function openRealtimeSocket(url, apiKey) {
+  // WebSocketPair is a Workers-only global — prefer the CF client path.
+  const onCloudflareWorker = typeof WebSocketPair !== 'undefined'
+  if (onCloudflareWorker) {
+    return openViaCloudflareFetchUpgrade(url, apiKey)
+  }
+
+  try {
+    return await openViaNodeWs(url, apiKey)
+  } catch (error) {
+    const message = String(error?.message || error)
+    // Bundlers sometimes resolve the browser stub of `ws` even outside CF.
+    if (
+      message.includes('does not work in the browser') ||
+      message.includes('WebSocket object')
+    ) {
+      return openViaCloudflareFetchUpgrade(url, apiKey)
+    }
+    throw error
+  }
+}
+
+/**
+ * Short history/debug label for job.command — never the plan itself.
+ * Prefer optional transcript, else action label, else spoken reply, else generic.
+ */
+export function historyLabelFromState(state) {
+  const transcript = String(state?.transcript || '').trim()
+  if (transcript) return transcript
+  const actions = Array.isArray(state?.actions) ? state.actions : []
+  if (actions.length) {
+    const first = actions[0]
+    const label = String(first?.label || first?.type || '').trim()
+    if (label) return label
+  }
+  const spoken = String(state?.response || '').trim()
+  if (spoken) return spoken.slice(0, 120)
+  const textParts = String(state?.textParts?.join?.('') || '').trim()
+  if (textParts) return textParts.slice(0, 120)
+  return 'voice command'
+}
+
+/**
+ * Always emit a complete audio-native plan payload for the Mac bridge.
+ * Transcript/text is only a history label; actions + response are the product.
+ */
+export function buildPlanResult(state, startedAt, language) {
+  const actions = Array.isArray(state.actions) ? state.actions : []
   const spoken =
     String(state.response || '').trim() ||
-    (state.actions.length
+    (actions.length
       ? undefined
-      : String(state.textParts.join('')).trim() || undefined)
+      : String(state.textParts?.join?.('') || '').trim() || undefined)
 
   let status = state.status
-  if (state.delegate || state.actions.length) status = 'ready'
+  if (state.delegate || actions.length) status = 'ready'
   else if (spoken) status = 'instant'
+  else status = status || 'instant'
+
+  const requireLocalPlanner = Boolean(state.delegate && !actions.length)
 
   return {
-    text,
+    // History label only — Mac must use plannerHint, not re-plan from this.
+    text: historyLabelFromState({ ...state, actions, response: spoken }),
     model: realtimeModel(),
     language: language || null,
     status,
     response: spoken,
-    actions: state.actions,
+    actions,
     durationMs: Date.now() - startedAt,
     source: 'audio-native-realtime',
-    toolsUsed: state.toolsUsed,
+    toolsUsed: state.toolsUsed || [],
     passes: 1,
-    planner: 'audio-native',
-    requireLocalPlanner: Boolean(state.delegate && !state.actions.length),
+    planner: requireLocalPlanner ? 'audio-native-delegate' : 'audio-native',
+    requireLocalPlanner,
     midPressStreamed: Boolean(state.midPressStreamed),
   }
 }
@@ -412,11 +637,13 @@ function buildPlanResult(state, startedAt, language) {
  * @param {object} opts
  * @param {number} [opts.inputSampleRate=15625]
  * @param {string|null} [opts.language]
+ * @param {object|null} [opts.fleet] - live fleet snapshot (Mac apps, browser, iOS, …)
  * @param {(plan: object) => void|Promise<void>} [opts.onEarlyPlan] - fire when Mac tools resolve
  */
 export async function createStreamingRealtimeSession({
   inputSampleRate = 15625,
   language = null,
+  fleet = null,
   onEarlyPlan = null,
 } = {}) {
   const apiKey = openaiApiKey()
@@ -425,7 +652,10 @@ export async function createStreamingRealtimeSession({
   }
 
   const startedAt = Date.now()
-  const languageHint = language ? ` Spoken language hint: ${language}.` : ''
+  const sessionInstructions = composeRealtimeInstructions({
+    language,
+    fleet: fleet ? normalizeFleetSnapshot(fleet) : null,
+  })
   const resampler = new StreamingPcmResampler(inputSampleRate, REALTIME_PCM_RATE)
   const socket = await openRealtimeSocket(realtimeWsUrl(), apiKey)
 
@@ -518,13 +748,24 @@ export async function createStreamingRealtimeSession({
       return
     }
 
-    if (name === 'mac_run_actions') {
-      state.transcript =
-        String(args.transcript || state.transcript || '').trim() ||
-        state.transcript
+    if (name === 'mac_run_actions' || name === 'browser_run_actions') {
+      // Transcript is optional history only — actions + spoken_reply are the plan.
+      const optionalTranscript = String(args.transcript || '').trim()
+      if (optionalTranscript) state.transcript = optionalTranscript
       state.response =
         String(args.spoken_reply || args.response || '').trim() || undefined
-      state.actions = normalizeActions(args.actions)
+      let actions = normalizeActions(args.actions)
+      // Browser tool: ensure action types are browser_* when the model omits prefix.
+      if (name === 'browser_run_actions') {
+        actions = actions.map((action) => {
+          const type = String(action.type || '')
+          if (type && !type.startsWith('browser_') && type !== 'open_url') {
+            return { ...action, type: `browser_${type}` }
+          }
+          return action
+        })
+      }
+      state.actions = actions
       state.status = state.actions.length ? 'ready' : 'instant'
       send({
         type: 'conversation.item.create',
@@ -534,6 +775,7 @@ export async function createStreamingRealtimeSession({
           output: JSON.stringify({
             ok: true,
             queued: true,
+            surface: name === 'browser_run_actions' ? 'browser' : 'mac',
             actionCount: state.actions.length,
           }),
         },
@@ -553,11 +795,11 @@ export async function createStreamingRealtimeSession({
     }
 
     if (name === 'mac_delegate') {
-      state.transcript =
-        String(args.transcript || state.transcript || '').trim() ||
-        state.transcript
+      const optionalTranscript = String(args.transcript || '').trim()
+      if (optionalTranscript) state.transcript = optionalTranscript
       state.response =
-        String(args.goal || '').trim() || 'Working on that on your Mac.'
+        String(args.spoken_reply || args.goal || '').trim() ||
+        'Working on that on your Mac.'
       state.actions = []
       state.delegate = true
       state.status = 'ready'
@@ -653,11 +895,10 @@ export async function createStreamingRealtimeSession({
         (item) => item?.type === 'function_call',
       )
       if (!hasFunctionCall && status === 'completed') {
+        // Pure text Q&A: spoken reply only. Do NOT promote response → transcript;
+        // history label is derived later; plan product is response + empty actions.
         if (!state.response) {
           state.response = String(state.textParts.join('')).trim() || undefined
-        }
-        if (!state.transcript && state.response) {
-          state.transcript = state.response.slice(0, 120)
         }
         state.status =
           state.actions.length || state.delegate ? 'ready' : 'instant'
@@ -678,11 +919,13 @@ export async function createStreamingRealtimeSession({
     }
   })
 
+  // Static policy + tools first, then fleet snapshot inside instructions
+  // (composeRealtimeInstructions puts static text first for prefix caching).
   send({
     type: 'session.update',
     session: {
       type: 'realtime',
-      instructions: `${VOICE_AGENT_INSTRUCTIONS}${languageHint}`,
+      instructions: sessionInstructions,
       output_modalities: ['text'],
       tools: REALTIME_TOOLS,
       tool_choice: 'auto',
@@ -765,6 +1008,7 @@ export async function planUtteranceWithRealtime({
   format = 'wav',
   sampleRate = 16000,
   language = null,
+  fleet = null,
   onEarlyPlan = null,
 } = {}) {
   const { pcm: rawPcm, sampleRate: wavRate } = extractPcmFromWavOrPcm(
@@ -779,6 +1023,7 @@ export async function planUtteranceWithRealtime({
   const session = await createStreamingRealtimeSession({
     inputSampleRate: sourceRate,
     language,
+    fleet,
     onEarlyPlan,
   })
   // Append in chunks so the path matches mid-press streaming.

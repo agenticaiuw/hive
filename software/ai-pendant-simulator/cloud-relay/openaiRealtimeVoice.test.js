@@ -6,11 +6,123 @@ const {
   resamplePcmS16le,
   StreamingPcmResampler,
   REALTIME_TOOLS,
+  buildPlanResult,
+  historyLabelFromState,
 } = await import('./openaiRealtimeVoice.js')
 
-test('REALTIME_TOOLS expose search + Mac tools', () => {
+test('REALTIME_TOOLS expose search + Mac + browser tools', () => {
   const names = REALTIME_TOOLS.map((t) => t.name).sort()
-  assert.deepEqual(names, ['mac_delegate', 'mac_run_actions', 'web_search'])
+  assert.deepEqual(names, [
+    'browser_run_actions',
+    'mac_delegate',
+    'mac_run_actions',
+    'web_search',
+  ])
+})
+
+test('Realtime action tools require actions/goal, not transcript', () => {
+  const byName = Object.fromEntries(REALTIME_TOOLS.map((t) => [t.name, t]))
+  assert.deepEqual(byName.mac_run_actions.parameters.required, ['actions'])
+  assert.deepEqual(byName.browser_run_actions.parameters.required, ['actions'])
+  assert.deepEqual(byName.mac_delegate.parameters.required, ['goal'])
+  for (const name of [
+    'mac_run_actions',
+    'browser_run_actions',
+    'mac_delegate',
+  ]) {
+    const required = byName[name].parameters.required || []
+    assert.ok(
+      !required.includes('transcript'),
+      `${name} must not require transcript`,
+    )
+    assert.ok(
+      byName[name].parameters.properties.transcript,
+      `${name} keeps optional transcript for history`,
+    )
+    assert.ok(
+      byName[name].parameters.properties.spoken_reply || name === 'mac_delegate',
+      `${name} prefers spoken_reply`,
+    )
+  }
+  assert.ok(
+    /battery|system|shell/i.test(byName.mac_run_actions.description),
+    'mac_run_actions should mention system/shell queries',
+  )
+})
+
+test('buildPlanResult is always audio-native with actions+response product', () => {
+  const plan = buildPlanResult(
+    {
+      transcript: '',
+      response: 'Checking battery.',
+      actions: [
+        {
+          type: 'run_shell',
+          label: 'Check battery',
+          params: { command: 'pmset -g batt' },
+        },
+      ],
+      toolsUsed: ['mac_run_actions'],
+      delegate: false,
+      status: 'ready',
+      midPressStreamed: true,
+      textParts: [],
+    },
+    Date.now() - 50,
+    'en',
+  )
+  assert.equal(plan.planner, 'audio-native')
+  assert.equal(plan.source, 'audio-native-realtime')
+  assert.equal(plan.status, 'ready')
+  assert.equal(plan.response, 'Checking battery.')
+  assert.equal(plan.actions.length, 1)
+  assert.equal(plan.actions[0].type, 'run_shell')
+  assert.equal(plan.requireLocalPlanner, false)
+  assert.equal(plan.midPressStreamed, true)
+  // History label can come from action label when transcript is empty.
+  assert.equal(plan.text, 'Check battery')
+})
+
+test('buildPlanResult works without transcript (optional history only)', () => {
+  const plan = buildPlanResult(
+    {
+      transcript: '',
+      response: undefined,
+      actions: [{ type: 'create_reminder', params: { title: 'Call mom' } }],
+      toolsUsed: ['mac_run_actions'],
+      delegate: false,
+      status: 'ready',
+      textParts: [],
+    },
+    Date.now(),
+    null,
+  )
+  assert.equal(plan.planner, 'audio-native')
+  assert.ok(plan.actions.length === 1)
+  assert.ok(plan.text) // non-empty history label
+  assert.notEqual(plan.text, '')
+})
+
+test('historyLabelFromState prefers transcript then action then spoken', () => {
+  assert.equal(
+    historyLabelFromState({ transcript: 'open mail', actions: [] }),
+    'open mail',
+  )
+  assert.equal(
+    historyLabelFromState({
+      transcript: '',
+      actions: [{ type: 'run_shell', label: 'Battery' }],
+    }),
+    'Battery',
+  )
+  assert.equal(
+    historyLabelFromState({
+      transcript: '',
+      actions: [],
+      response: 'Hello there friend',
+    }),
+    'Hello there friend',
+  )
 })
 
 test('extractPcmFromWavOrPcm strips RIFF header', () => {

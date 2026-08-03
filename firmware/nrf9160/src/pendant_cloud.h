@@ -32,12 +32,18 @@ int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 				     uint32_t sample_rate);
 
 /*
- * Live chunked PCM upload only (no microSD upload fallback).
- * Prewarm while idle so Button 1 never waits on TLS. During capture,
- * stream_write queues one HTTP chunk and stream_pump advances non-blocking
- * sends under a time budget so I2S never blocks on LTE.
+ * Live chunked PCM upload (preferred path). Prewarm while idle so Button 1
+ * never waits on TLS. During capture, stream_write queues one HTTP chunk and
+ * stream_pump advances non-blocking sends under a time budget so I2S never
+ * blocks on LTE. If live TX fails, main falls back to upload_recording().
+ *
+ * Idle half-open chunked sockets go stale (CF/NAT/modem → ECONNRESET/-104).
+ * prewarm refreshes aged sockets; ensure re-validates at press; pump recovers
+ * once on first-body connection death so mid-press live bytes still flow.
  */
 int pendant_cloud_stream_prewarm(uint32_t sample_rate);
+/* Re-validate/reopen prewarmed stream at button press (before I2S starts). */
+int pendant_cloud_stream_ensure(uint32_t sample_rate);
 int pendant_cloud_stream_begin(uint32_t sample_rate);
 int pendant_cloud_stream_write(const void *data, size_t length);
 int pendant_cloud_stream_pump(uint32_t budget_ms);
@@ -48,7 +54,8 @@ bool pendant_cloud_stream_has_pending(void);
 uint32_t pendant_cloud_stream_bytes_sent(void);
 
 /*
- * Diagnostic helper only — not used on the live voice critical path.
+ * Single-shot raw PCM file upload (SD fallback when live TX is unavailable).
+ * open_relay_socket() retries DNS, uses a cached IP, then Cloudflare bootstrap.
  */
 int pendant_cloud_upload_recording(const char *audio_path,
 				   uint32_t source_pcm_bytes,

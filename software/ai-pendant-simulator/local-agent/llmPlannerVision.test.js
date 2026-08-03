@@ -2,7 +2,7 @@
 // environment here (before the dynamic import below) deterministically
 // configures the planner module regardless of the developer's .env.
 process.env.LLM_API_KEY = 'test-key'
-process.env.LLM_API_BASE_URL = 'https://openrouter.ai/api/v1'
+process.env.LLM_API_BASE_URL = 'https://api.openai.com/v1'
 process.env.LLM_MODEL = 'deepseek/deepseek-v4-flash-0731'
 process.env.LLM_VISION_MODEL = 'google/gemini-3.6-flash'
 
@@ -43,7 +43,7 @@ test('an image request is routed to the configured vision model, not the text mo
   await requestLlmMessages({ messages: [IMAGE_TURN], hasImages: true, fetchImpl })
 
   assert.equal(calls[0].body.model, 'google/gemini-3.6-flash')
-  assert.equal(calls[0].url, 'https://openrouter.ai/api/v1/chat/completions')
+  assert.equal(calls[0].url, 'https://api.openai.com/v1/chat/completions')
 })
 
 test('a text-only request still uses the cheaper text model', async () => {
@@ -81,15 +81,6 @@ test('json_object is omitted when images are present and applied when they are n
   assert.deepEqual(calls[1].body.response_format, { type: 'json_object' })
 })
 
-test('OpenRouter attribution headers are sent for openrouter base URLs', async () => {
-  const { calls, fetchImpl } = recordingFetch()
-
-  await requestLlmMessages({ messages: [IMAGE_TURN], hasImages: true, fetchImpl })
-
-  assert.ok(calls[0].headers['HTTP-Referer'])
-  assert.ok(calls[0].headers['X-Title'])
-  assert.match(calls[0].headers.Authorization, /^Bearer /)
-})
 
 test('a provider rejecting the image is reported as such so the caller can degrade', async () => {
   const fetchImpl = async () => ({

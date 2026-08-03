@@ -1,0 +1,111 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  VOICE_AGENT_STATIC_INSTRUCTIONS,
+  composeRealtimeInstructions,
+  formatFleetSnapshotForPrompt,
+  fleetFromAgentSnapshot,
+  normalizeFleetSnapshot,
+  buildFleetPayloadFromLocal,
+} from './fleetContext.js'
+
+test('static instructions stay high-level (no open_app lectures, no product names)', () => {
+  const text = composeRealtimeInstructions({
+    fleet: {
+      mac: {
+        online: true,
+        hostname: 'evans-macbook',
+        applications: ['Microsoft Outlook', 'Safari'],
+      },
+    },
+  })
+  assert.ok(text.startsWith(VOICE_AGENT_STATIC_INSTRUCTIONS.slice(0, 40)))
+  // Live inventory may appear in the environment block:
+  assert.ok(text.includes('Microsoft Outlook'))
+  // Static policy must not coach open_app or hardcode products:
+  assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('open_app'))
+  assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('appName'))
+  assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('Microsoft Outlook'))
+  assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('Safari'))
+  assert.ok(!VOICE_AGENT_STATIC_INSTRUCTIONS.includes('Outlook'))
+  // Product frame: useful while away, not an app launcher.
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /away from the keyboard/i)
+  // Audio-native: tools from speech; transcript not the product.
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /Plan directly from the speech/i)
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /transcript is optional history/i)
+  // Mac state Q&A must use mac_run_actions (battery etc.).
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /mac_run_actions/)
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /battery/i)
+  assert.match(VOICE_AGENT_STATIC_INSTRUCTIONS, /run_shell/)
+})
+
+test('formatFleetSnapshot is environment facts, not tool coaching', () => {
+  const block = formatFleetSnapshotForPrompt({
+    updatedAt: '2026-08-03T00:00:00.000Z',
+    mac: {
+      online: true,
+      hostname: 'home',
+      platform: 'darwin',
+      applications: ['Microsoft Outlook', 'Finder'],
+    },
+    browser: { online: false, devices: [] },
+  })
+  assert.match(block, /Microsoft Outlook/)
+  assert.match(block, /browser_extension: offline/)
+  assert.match(block, /Mac software inventory/)
+  assert.ok(!block.includes('open_app'))
+  assert.ok(!block.includes('appName'))
+})
+
+test('normalizeFleetSnapshot trims and caps applications', () => {
+  const apps = Array.from({ length: 300 }, (_, i) => `App${i}`)
+  const fleet = normalizeFleetSnapshot({
+    mac: { online: true, applications: apps },
+  })
+  assert.equal(fleet.mac.applications.length, 220)
+  assert.equal(fleet.mac.applications[0], 'App0')
+})
+
+test('fleetFromAgentSnapshot maps ops snapshot shape', () => {
+  const fleet = fleetFromAgentSnapshot({
+    status: {
+      machine: {
+        hostname: 'mac.local',
+        platform: 'darwin',
+        applications: ['Safari', 'Microsoft Outlook'],
+      },
+      browser: {
+        online: true,
+        devices: [
+          {
+            online: true,
+            browserName: 'Safari',
+            tabUrl: 'https://example.com',
+            deviceName: 'Evan Mac',
+          },
+        ],
+      },
+      memory: { latestPerson: { name: 'Nico' } },
+    },
+  })
+  assert.equal(fleet.mac.hostname, 'mac.local')
+  assert.ok(fleet.mac.applications.includes('Microsoft Outlook'))
+  assert.equal(fleet.browser.online, true)
+  assert.equal(fleet.memory.latestPerson, 'Nico')
+})
+
+test('buildFleetPayloadFromLocal produces put-ready object', () => {
+  const payload = buildFleetPayloadFromLocal({
+    machine: {
+      hostname: 'x',
+      platform: 'darwin',
+      home: '/Users/x',
+      applications: ['Safari'],
+    },
+    browser: { online: false, devices: [] },
+    permissions: { ready: true, hostApp: 'AI Pendant Agent' },
+  })
+  assert.equal(payload.version, 1)
+  assert.equal(payload.mac.applications[0], 'Safari')
+  assert.equal(payload.mac.permissionsReady, true)
+})

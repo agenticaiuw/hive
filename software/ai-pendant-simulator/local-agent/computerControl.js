@@ -26,7 +26,6 @@ import {
   showScreenOverlay,
 } from './screenOverlay.js'
 import * as computerUse from './computerUse.js'
-import { resolveLlmApiBaseUrl } from './llmProvider.js'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -175,6 +174,20 @@ export async function executeComputerAction(action) {
       return runBrowserAction(action, 'type')
     case 'browser_read_page':
       return runBrowserAction(action, 'read_page')
+    case 'browser_snapshot':
+      return runBrowserAction(action, 'snapshot')
+    case 'browser_wait_for':
+      return runBrowserAction(action, 'wait_for')
+    case 'browser_scroll':
+      return runBrowserAction(action, 'scroll')
+    case 'browser_select':
+      return runBrowserAction(action, 'select')
+    case 'browser_list_tabs':
+      return runBrowserAction(action, 'list_tabs')
+    case 'browser_capture':
+      return runBrowserAction(action, 'capture')
+    case 'browser_press_key':
+      return runBrowserAction(action, 'press_key')
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
   }
@@ -377,8 +390,15 @@ async function openUrl(action) {
 }
 
 async function openApp(action) {
-  // Exact appName from the LLM only — no fuzzy installed-app matching.
-  const appName = String(action.params?.appName ?? '')
+  // Schema seatbelt only: models sometimes emit name/app instead of appName.
+  // Exact string from the planner — no hard-coded alias table.
+  const appName = String(
+    action.params?.appName ??
+      action.params?.name ??
+      action.params?.app ??
+      action.params?.application ??
+      '',
+  )
     .trim()
     .replace(/\.app$/i, '')
 
@@ -591,7 +611,7 @@ async function runComputerUseTaskAction(action) {
   // text-only agent, so it is opt-in and never implied by FULL_CONTROL_MODE.
   if (!visionUploadConsented()) {
     throw new Error(
-      `Screenshots would be uploaded to ${new URL(resolveLlmApiBaseUrl()).host} (model ${visionModelName()}). Set PENDANT_VISION_UPLOAD_CONSENT=1 to allow that.`,
+      `Screenshots would be uploaded to api.openai.com (model ${visionModelName()}). Set PENDANT_VISION_UPLOAD_CONSENT=1 to allow that.`,
     )
   }
 

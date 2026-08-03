@@ -17,8 +17,14 @@ V3 source in [`src/`](./src).
   explicitly set `allowSensitiveInput: true`.
 - Each command result goes back to the same authenticated loopback agent.
 
-The extension can read, click, and type on sites after website access is
-granted. Install it only in a browser profile you want AI Pendant to control.
+The extension is a **sensor/actuator** for the Mac agent (no LLM in the
+extension). After website access is granted it can:
+
+- **snapshot** interactive elements with stable refs (prefer over desktop screenshots)
+- **list_tabs**, **navigate**, **click** / **type** by ref or CSS selector
+- **wait_for**, **scroll**, **select**, **press_key**, **read_page**, **capture** (tab PNG)
+
+Install it only in a browser profile you want AI Pendant to control.
 
 ## Chrome setup
 
