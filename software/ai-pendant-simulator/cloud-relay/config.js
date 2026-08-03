@@ -1,6 +1,4 @@
-import dotenv from 'dotenv'
-
-dotenv.config()
+import '../../load-pendant-env.mjs'
 
 export const PORT = Number(process.env.RELAY_PORT || process.env.PORT || 8787)
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''

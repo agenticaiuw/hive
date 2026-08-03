@@ -1,9 +1,7 @@
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import dotenv from 'dotenv'
-
-dotenv.config()
+import '../../load-pendant-env.mjs'
 
 const localAgentDirectory = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(localAgentDirectory, '..')

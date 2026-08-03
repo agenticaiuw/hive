@@ -1,6 +1,4 @@
-import dotenv from 'dotenv'
-
-dotenv.config()
+import '../../load-pendant-env.mjs'
 
 export const RELAY_URL = process.env.RELAY_URL || 'http://localhost:8787'
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''

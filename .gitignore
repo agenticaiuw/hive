@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+software/ai-pendant.env
+!software/ai-pendant.env.example
 secrets.conf
 *.log
 

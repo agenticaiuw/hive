@@ -16,6 +16,8 @@ import WebKit
 import SwiftUI
 import Combine
 import ServiceManagement
+import Speech
+import AVFoundation
 
 // MARK: - Agent token (never compiled in, never logged, never displayed)
 
@@ -23,7 +25,8 @@ enum AgentEnv {
     static let envPathDefaultsKey = "AgentEnvPath"
 
     static func registerDefaults() {
-        let fallback = (NSString("~/agentic-gadget/software/ai-pendant-simulator/.env")).expandingTildeInPath
+        // Single shared secrets file for the whole stack.
+        let fallback = (NSString("~/agentic-gadget/software/ai-pendant.env")).expandingTildeInPath
         UserDefaults.standard.register(defaults: [envPathDefaultsKey: fallback])
     }
 
@@ -804,6 +807,228 @@ enum MainTab: String {
     }
 }
 
+// MARK: - Floating always-on-top command HUD
+
+final class FloatingCommandModel: ObservableObject {
+    @Published var text = ""
+    @Published var status = "Type a command · ⌘K from menu bar"
+    @Published var busy = false
+    @Published var listening = false
+
+    private let tokenProvider: () -> String?
+    private let agentBaseURL: URL
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
+
+    init(tokenProvider: @escaping () -> String?, agentBaseURL: URL) {
+        self.tokenProvider = tokenProvider
+        self.agentBaseURL = agentBaseURL
+        self.speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
+    }
+
+    func send() {
+        let command = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            status = "Enter a command first"
+            return
+        }
+        guard let token = tokenProvider(), !token.isEmpty else {
+            status = "Missing AGENT_TOKEN in ai-pendant.env"
+            return
+        }
+        busy = true
+        status = "Sending…"
+        var request = URLRequest(url: agentBaseURL.appendingPathComponent("plan"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "command": command,
+            "source": "floating-hud",
+            "autoExecute": true,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.busy = false
+                if let error {
+                    self?.status = error.localizedDescription
+                    return
+                }
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard let data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    self?.status = "Bad response (\(code))"
+                    return
+                }
+                // Fire-and-forget auto-execute for safe open_app plans when present.
+                if let actions = json["actions"] as? [[String: Any]], !actions.isEmpty {
+                    self?.execute(actions: actions, command: command, token: token)
+                    let label = (actions.first?["label"] as? String) ?? "Running…"
+                    self?.status = label
+                    self?.text = ""
+                    return
+                }
+                let reply = (json["response"] as? String)
+                    ?? (json["error"] as? String)
+                    ?? "ok"
+                self?.status = reply
+                if json["error"] == nil { self?.text = "" }
+            }
+        }.resume()
+    }
+
+    private func execute(actions: [[String: Any]], command: String, token: String) {
+        var request = URLRequest(url: agentBaseURL.appendingPathComponent("execute"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "command": command,
+            "actions": actions,
+            "source": "floating-hud",
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            DispatchQueue.main.async {
+                if let data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let response = json["response"] as? String, !response.isEmpty {
+                    self?.status = response
+                } else {
+                    self?.status = "Done"
+                }
+            }
+        }.resume()
+    }
+
+    func toggleListen() {
+        if listening {
+            stopListen()
+            return
+        }
+        SFSpeechRecognizer.requestAuthorization { [weak self] auth in
+            DispatchQueue.main.async {
+                guard auth == .authorized else {
+                    self?.status = "Mic permission denied — enable Speech Recognition"
+                    return
+                }
+                self?.startListen()
+            }
+        }
+    }
+
+    private func startListen() {
+        guard let speechRecognizer, speechRecognizer.isAvailable else {
+            status = "Speech recognition unavailable"
+            return
+        }
+        stopListen()
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        recognitionRequest = request
+
+        let input = audioEngine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        input.removeTap(onBus: 0)
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            request.append(buffer)
+        }
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            status = "Mic failed: \(error.localizedDescription)"
+            return
+        }
+        listening = true
+        status = "Listening… click mic to stop"
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
+            DispatchQueue.main.async {
+                if let result {
+                    self?.text = result.bestTranscription.formattedString
+                    if result.isFinal {
+                        self?.stopListen()
+                        self?.send()
+                    }
+                }
+                if error != nil {
+                    self?.stopListen()
+                }
+            }
+        }
+    }
+
+    private func stopListen() {
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionRequest = nil
+        recognitionTask = nil
+        listening = false
+    }
+}
+
+struct FloatingCommandView: View {
+    @StateObject private var model: FloatingCommandModel
+
+    init(tokenProvider: @escaping () -> String?, agentBaseURL: URL) {
+        _model = StateObject(wrappedValue: FloatingCommandModel(
+            tokenProvider: tokenProvider,
+            agentBaseURL: agentBaseURL
+        ))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    model.toggleListen()
+                } label: {
+                    Image(systemName: model.listening ? "mic.fill" : "mic")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(model.listening ? Color.green : Color.white.opacity(0.85))
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help(model.listening ? "Stop listening" : "Speak a command")
+
+                TextField("Command…", text: $model.text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                    .onSubmit { model.send() }
+
+                Button {
+                    model.send()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(model.busy ? Color.white.opacity(0.3) : Color(red: 0.46, green: 0.90, blue: 0.64))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.busy)
+            }
+            Text(model.status)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.white.opacity(0.45))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 // MARK: - App delegate (menu bar + window shell)
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
@@ -812,6 +1037,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let statusHeaderItem = NSMenuItem(title: "Agent…", action: nil, keyEquivalent: "")
     private let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
     private var mainWindow: NSWindow?
+    /// Always-on-top compact HUD: text + send while using other apps.
+    private var floatPanel: NSPanel?
     private let model = AgentModel()
     private var cancellables = Set<AnyCancellable>()
 
@@ -1005,6 +1232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusMenu.autoenablesItems = true
 
         statusMenu.addItem(makeItem("Open AI Pendant", #selector(showMainWindow)))
+        statusMenu.addItem(makeItem("Floating Command…", #selector(showFloatPanel), key: "k"))
         statusMenu.addItem(.separator())
 
         statusHeaderItem.isEnabled = false
@@ -1104,6 +1332,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func openDashboard() {
         NSWorkspace.shared.open(dashboardURL)
+    }
+
+    /// Compact always-on-top panel: type a command while in any other app.
+    @objc func showFloatPanel() {
+        if floatPanel == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 88),
+                styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false)
+            panel.title = "Command"
+            panel.titleVisibility = .hidden
+            panel.titlebarAppearsTransparent = true
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+            panel.isMovableByWindowBackground = true
+            panel.hidesOnDeactivate = false
+            panel.becomesKeyOnlyIfNeeded = false
+            panel.isReleasedWhenClosed = false
+            panel.backgroundColor = NSColor(red: 0.06, green: 0.07, blue: 0.10, alpha: 0.94)
+            panel.appearance = NSAppearance(named: .darkAqua)
+            panel.setFrameAutosaveName("AIPendantFloatPanel")
+
+            let host = NSHostingView(rootView: FloatingCommandView(
+                tokenProvider: { AgentEnv.loadToken() },
+                agentBaseURL: URL(string: "http://127.0.0.1:8000")!
+            ))
+            host.frame = NSRect(x: 0, y: 0, width: 440, height: 88)
+            panel.contentView = host
+            if panel.frame.origin == .zero {
+                if let screen = NSScreen.main {
+                    let f = screen.visibleFrame
+                    panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.minY + 80))
+                }
+            }
+            floatPanel = panel
+        }
+        floatPanel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func restartAgent() {
