@@ -11,8 +11,18 @@ import {
   registerBrowserHeartbeat,
 } from './browserBridge.js'
 import { orchestrateExecute, orchestratePlan } from './orchestrator.js'
+import { purgeAllCaptures, stripImageBytes } from './screenCapture.js'
 import { appendLog, logLocation, readLogs } from './logger.js'
-import { isFullControlPlanner, isLlmPlannerEnabled } from './llmPlanner.js'
+import {
+  isFullControlPlanner,
+  isLlmPlannerEnabled,
+  isVisionConfigured,
+} from './llmPlanner.js'
+import {
+  computerUseEnabled,
+  MAX_STEPS_CEILING,
+  visionUploadConsented,
+} from './computerUseLoop.js'
 import {
   addContextRelation,
   contextGraphLocation,
@@ -244,7 +254,10 @@ app.post('/execute', async (request, response) => {
 
     recordJobFinish(tracked.jobId, {
       status: payload.ok ? 'completed' : 'failed',
-      result: payload,
+      // pendant-jobs.json is durable and is rendered in the ops dashboard, so
+      // the image bytes are stripped before it is written. The HTTP response
+      // still carries them for the immediate caller.
+      result: stripImageBytes(payload),
       error: payload.ok ? null : payload.error || payload.status,
       thinking: payload.thinking ?? null,
     })
@@ -913,6 +926,8 @@ if (fs.existsSync(distDir)) {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Pendant Mac Local Agent listening on http://localhost:${PORT}`)
+  // Any screenshots left behind by a crashed run die with the old process.
+  purgeAllCaptures()
   startBridge().catch((error) => {
     console.error(`[bridge] Fatal error: ${error.message}`)
   })
@@ -973,6 +988,12 @@ async function buildHealthPayload() {
     fullControlMode: FULL_CONTROL_MODE,
     llmPlannerEnabled: isLlmPlannerEnabled(),
     fullControlPlanner: isFullControlPlanner(),
+    computerUse: {
+      loopEnabled: computerUseEnabled(),
+      visionModelConfigured: isVisionConfigured(),
+      visionUploadConsented: visionUploadConsented(),
+      maxSteps: MAX_STEPS_CEILING,
+    },
     browserExtension: getBrowserStatus(),
     permissions,
     logPath: logLocation(),

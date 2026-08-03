@@ -1,5 +1,10 @@
 {
   "appId": "com.aipendant.app",
   "appName": "AI Pendant",
-  "webDir": "dist"
+  "webDir": "dist",
+  "server": {
+    "url": "https://ai-pendant-dashboard.your-subdomain.workers.dev",
+    "allowNavigation": ["ai-pendant-dashboard.your-subdomain.workers.dev"],
+    "errorPath": "offline.html"
+  }
 }

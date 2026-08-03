@@ -2,7 +2,10 @@ import crypto from 'node:crypto'
 import express from 'express'
 import cors from 'cors'
 import {
+  AUDIO_RETENTION_MAX_AGE_MS,
+  AUDIO_RETENTION_SWEEP_ENABLED,
   BRIDGE_POLL_TIMEOUT_MS,
+  JOB_TTL_MS,
   LLM_API_KEY,
   PAIRING_CODE,
   PENDANT_ACCOUNT_ID,
@@ -29,6 +32,30 @@ import {
   loadAudioCapture,
   persistAudioCapture,
 } from './audioStorage.js'
+import {
+  audioCaptureExpiresAt,
+  audioRetentionPolicy,
+  deleteStoredAudio,
+  hasStoredAudio,
+  normalizeMaxAgeMs,
+  selectExpiredAudioCaptures,
+  sweepExpiredAudio,
+} from './audioRetention.js'
+import {
+  buildHistoryPage,
+  decodeHistoryCursor,
+  HISTORY_MAX_SCAN,
+  HISTORY_OVERSCAN,
+  linkAudioCaptures,
+  normalizeHistoryLimit,
+  normalizeHistoryQuery,
+  runDetailForJob,
+} from './history.js'
+import { parseByteRange, RANGE_UNSATISFIABLE } from './httpRange.js'
+import {
+  PRODUCT_SYNC_LIMITS,
+  visibleProductSync,
+} from '../shared/productSync.js'
 import {
   authenticateRelayRequest,
   createDeviceCredential,
@@ -521,6 +548,9 @@ app.post('/v1/transcribe', async (request, response) => {
           language: request.body?.language || null,
           transcript: null,
           transcriptionModel: null,
+          // Cross-reference the run from the start: without it a history page
+          // can only guess which recording belongs to which transcript.
+          planJobId: transcriptionJob?.jobId ?? null,
           status: 'received',
         })
         const persistedAudio = await persistAudioCapture({
@@ -559,6 +589,18 @@ app.post('/v1/transcribe', async (request, response) => {
             })
             capture = null
             throw error
+          }
+
+          // Mirror the link onto the plan job so run detail can offer
+          // "play this recording" without timestamp guesswork.
+          if (transcriptionJob) {
+            transcriptionJob =
+              (await store.updateJob(transcriptionJob.jobId, {
+                inputTelemetry: {
+                  ...(transcriptionJob.inputTelemetry || {}),
+                  captureId: capture.jobId,
+                },
+              })) || transcriptionJob
           }
         }
       }
@@ -1053,11 +1095,9 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
 app.get('/v1/ops/voice-runs/latest', async (_request, response) => {
   const store = await getStore()
   const jobs = await store.listJobs({ type: 'plan', limit: 8 })
-  const job = jobs.find(
-    (candidate) =>
-      String(candidate?.inputTelemetry?.storage || '').toLowerCase() ===
-      'microsd',
-  )
+  // Same membership rule as /v1/ops/voice-runs so the fast probe and the full
+  // list can never disagree about which run is newest.
+  const job = jobs.find((candidate) => Boolean(voiceRunForJob(candidate)))
   response.set('Cache-Control', 'no-store, max-age=0')
   response.json({
     ok: true,
@@ -1082,17 +1122,10 @@ app.get('/v1/ops/audio-captures', async (request, response) => {
   response.set('Cache-Control', 'no-store')
   response.json({
     ok: true,
-    captures: captures.map((capture) => ({
-      captureId: capture.jobId,
-      audioBytes: capture.audioBytes,
-      format: capture.format,
-      language: capture.language,
-      cloudTranscript: capture.transcript,
-      cloudModel: capture.transcriptionModel,
-      storage: capture.audioStorage || 'd1-base64',
-      status: capture.status,
-      createdAt: capture.createdAt,
-    })),
+    // Additive since the last shape: `planJobId` links a recording back to its
+    // run, and `audioDeletedAt` marks one that retention has already removed.
+    captures: captures.map(audioCaptureSummary),
+    retention: audioRetentionPolicy(),
   })
 })
 
@@ -1108,22 +1141,299 @@ app.get('/v1/ops/audio-captures/:captureId/audio', async (request, response) => 
     return
   }
 
-  const storedAudio = await loadAudioCapture(capture)
-  if (!storedAudio) {
+  await streamCaptureAudio(request, response, { store, capture })
+})
+
+app.delete('/v1/ops/audio-captures/:captureId/audio', async (request, response) => {
+  const store = await getStore()
+  const capture = await store.getJob(request.params.captureId)
+
+  if (!capture || capture.type !== 'audio_capture') {
     response.status(404).json({
       ok: false,
-      error: 'Audio capture data was not found.',
+      error: 'Audio capture not found.',
     })
     return
   }
 
+  await deleteCaptureAudio(request, response, { store, capture })
+})
+
+/*
+ * Durable history.
+ *
+ * `plan` rows are pruned after JOB_TTL_MS (24h by default), so this list is a
+ * recent-activity view rather than an archive. The `retention` block on every
+ * response says so explicitly, because a history page that quietly forgets
+ * yesterday is worse than one that admits its horizon.
+ */
+app.get('/v1/ops/history', async (request, response) => {
+  const store = await getStore()
+  const limit = normalizeHistoryLimit(request.query?.limit)
+  const query = normalizeHistoryQuery(request.query?.q ?? request.query?.query)
+  const cursor = decodeHistoryCursor(request.query?.cursor ?? request.query?.before)
+  const origin = String(request.query?.origin || '')
+    .trim()
+    .toLowerCase()
+
+  // voiceRunForJob() drops plan jobs the owner did not start, so read several
+  // pages' worth of rows and let the filter thin them out.
+  const scanLimit = Math.min(limit * HISTORY_OVERSCAN + 10, HISTORY_MAX_SCAN)
+  const jobs = await store.listJobs({
+    type: 'plan',
+    limit: scanLimit,
+    before: cursor,
+    search: query || null,
+  })
+
+  const page = buildHistoryPage({
+    jobs,
+    captures: await capturesNear(store, jobs),
+    limit,
+    query,
+    scanLimit,
+  })
+  const entries = origin
+    ? page.entries.filter((entry) => entry.origin === origin)
+    : page.entries
+
   response.set('Cache-Control', 'private, no-store')
-  response.set('Content-Type', storedAudio.contentType)
-  response.set('Content-Length', String(storedAudio.audio.length))
-  response.set('X-Audio-Storage', storedAudio.source)
-  response.set('X-Cloud-Transcript', encodeURIComponent(capture.transcript || ''))
-  response.set('X-Cloud-Model', capture.transcriptionModel || '')
-  response.send(storedAudio.audio)
+  response.json({
+    ok: true,
+    entries,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
+    limit,
+    query,
+    retention: historyRetention(),
+    observedAt: new Date().toISOString(),
+  })
+})
+
+app.get('/v1/ops/history/:pipelineId', async (request, response) => {
+  const detail = await loadRunDetail(request, response)
+  if (!detail) return
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    run: detail.run,
+    retention: historyRetention(),
+    observedAt: new Date().toISOString(),
+  })
+})
+
+app.get('/v1/ops/history/:pipelineId/audio', async (request, response) => {
+  const detail = await loadRunDetail(request, response)
+  if (!detail) return
+
+  if (!detail.capture) {
+    response.status(404).json({
+      ok: false,
+      error: 'No recording is stored for this run.',
+    })
+    return
+  }
+
+  await streamCaptureAudio(request, response, {
+    store: detail.store,
+    capture: detail.capture,
+  })
+})
+
+app.delete('/v1/ops/history/:pipelineId/audio', async (request, response) => {
+  const detail = await loadRunDetail(request, response)
+  if (!detail) return
+
+  if (!detail.capture) {
+    response.status(404).json({
+      ok: false,
+      error: 'No recording is stored for this run.',
+    })
+    return
+  }
+
+  await deleteCaptureAudio(request, response, {
+    store: detail.store,
+    capture: detail.capture,
+  })
+})
+
+// Same detail payload under the operator-feed name, so a dashboard that
+// already speaks voice-runs can deep-link without learning a second shape.
+app.get('/v1/ops/voice-runs/:pipelineId', async (request, response) => {
+  if (request.params.pipelineId === 'latest') {
+    response.status(404).json({ ok: false, error: 'Run not found.' })
+    return
+  }
+
+  const detail = await loadRunDetail(request, response)
+  if (!detail) return
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    run: detail.run,
+    observedAt: new Date().toISOString(),
+  })
+})
+
+/*
+ * What the agent remembers: the canonical product_memory_* tables plus the
+ * sessions and turns behind them. Unlike /v1/ops/proxy this keeps working
+ * while the Mac bridge is offline, because D1 is the system of record.
+ */
+app.get('/v1/ops/memory', async (request, response) => {
+  const store = await getStore()
+  const includeTurns = String(request.query?.includeTurns ?? 'true') !== 'false'
+  const entityLimit = clampNumber(request.query?.entityLimit, 200, 1, 5000)
+  const relationLimit = clampNumber(request.query?.relationLimit, 200, 1, 10000)
+  const sessionLimit = clampNumber(request.query?.sessionLimit, 25, 1, 100)
+  const turnLimit = clampNumber(request.query?.turnLimit, 40, 1, 200)
+  const query = normalizeHistoryQuery(request.query?.q ?? request.query?.query)
+  const needle = query.toLowerCase()
+
+  let state
+  try {
+    state = await store.getProductState(PENDANT_ACCOUNT_ID)
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message || 'Memory could not be read.',
+    })
+    return
+  }
+
+  const visible = visibleProductSync(state)
+  const matchesEntity = (entity) =>
+    !needle ||
+    `${entity.name || ''} ${entity.type || ''} ${JSON.stringify(
+      entity.attributes || {},
+    )}`
+      .toLowerCase()
+      .includes(needle)
+  const entities = visible.memory.entities.filter(matchesEntity)
+  const entityIds = new Set(entities.map((entity) => entity.id))
+  const relations = visible.memory.relations.filter(
+    (relation) =>
+      !needle || entityIds.has(relation.from) || entityIds.has(relation.to),
+  )
+
+  const sessions = visible.sessions
+    .filter(
+      (session) =>
+        !needle ||
+        String(session.title || '').toLowerCase().includes(needle) ||
+        session.turns.some((turn) =>
+          String(turn.content || '').toLowerCase().includes(needle),
+        ),
+    )
+    .sort((left, right) =>
+      String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')),
+    )
+    .slice(0, sessionLimit)
+    .map((session) => ({
+      sessionId: session.sessionId,
+      title: session.title,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      sourceDeviceId: session.sourceDeviceId,
+      turnCount: session.turns.length,
+      // Newest turns are the useful ones, but a transcript reads forwards.
+      turns: includeTurns ? session.turns.slice(-turnLimit) : [],
+    }))
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    accountId: visible.accountId,
+    revision: visible.revision,
+    generatedAt: visible.generatedAt,
+    query,
+    counts: {
+      entities: visible.memory.entities.length,
+      relations: visible.memory.relations.length,
+      sessions: visible.sessions.length,
+      turns: visible.sessions.reduce(
+        (total, session) => total + session.turns.length,
+        0,
+      ),
+      matchedEntities: entities.length,
+      matchedRelations: relations.length,
+      matchedSessions: sessions.length,
+    },
+    memory: {
+      entities: entities.slice(0, entityLimit),
+      relations: relations.slice(0, relationLimit),
+    },
+    sessions,
+    limits: PRODUCT_SYNC_LIMITS,
+    observedAt: new Date().toISOString(),
+  })
+})
+
+app.get('/v1/ops/audio-retention', async (request, response) => {
+  const store = await getStore()
+  const maxAgeMs = normalizeMaxAgeMs(
+    request.query?.maxAgeMs ?? AUDIO_RETENTION_MAX_AGE_MS,
+  )
+  const now = Date.now()
+  const captures = await store.listJobs({ type: 'audio_capture', limit: 100 })
+  const expired = selectExpiredAudioCaptures(captures, { now, maxAgeMs })
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    policy: audioRetentionPolicy({ maxAgeMs, now }),
+    scanned: captures.length,
+    storedRecordings: captures.filter(hasStoredAudio).length,
+    expiredCount: expired.length,
+    expired: expired.map((capture) => ({
+      captureId: capture.jobId,
+      createdAt: capture.createdAt,
+      expiresAt: audioCaptureExpiresAt(capture, { maxAgeMs }),
+      audioBytes: capture.audioBytes ?? null,
+      storage: capture.audioStorage || 'd1-base64',
+    })),
+    observedAt: new Date().toISOString(),
+  })
+})
+
+/*
+ * The sweep is inert unless BOTH the operator asks for it (dryRun:false) and
+ * the deployment opts in (AUDIO_RETENTION_SWEEP_ENABLED=true). Anything else
+ * returns the list of recordings it would have removed.
+ */
+app.post('/v1/ops/audio-retention/sweep', async (request, response) => {
+  const store = await getStore()
+  const maxAgeMs = normalizeMaxAgeMs(
+    request.body?.maxAgeMs ?? AUDIO_RETENTION_MAX_AGE_MS,
+  )
+  const requestedDryRun = request.body?.dryRun !== false
+  const mode = request.body?.mode === 'record' ? 'record' : 'audio'
+  const dryRun = requestedDryRun || !AUDIO_RETENTION_SWEEP_ENABLED
+
+  const report = await sweepExpiredAudio(store, {
+    maxAgeMs,
+    limit: clampNumber(request.body?.limit, 50, 1, 100),
+    mode,
+    dryRun,
+  })
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    ...report,
+    requestedDryRun,
+    blockedBySafetyFlag: !requestedDryRun && !AUDIO_RETENTION_SWEEP_ENABLED,
+    ...(!requestedDryRun && !AUDIO_RETENTION_SWEEP_ENABLED
+      ? {
+          note:
+            'Set AUDIO_RETENTION_SWEEP_ENABLED=true on the relay before a sweep may delete recordings.',
+        }
+      : {}),
+    observedAt: new Date().toISOString(),
+  })
 })
 
 app.post('/v1/pendant/jobs/:jobId/events', async (request, response) => {
@@ -1349,7 +1659,9 @@ app.get('/v1/bridge/work', async (request, response) => {
       return
     }
 
-    await sleep(800)
+    // Every millisecond here lands directly in the voice-command latency the
+    // owner feels, so poll tightly rather than politely.
+    await sleep(120)
   }
 
   response.status(204).end()
@@ -1567,6 +1879,178 @@ function isDeviceOnline(device) {
 function normalizeStateKey(value) {
   const stateKey = String(value || '').trim().toLowerCase()
   return /^[a-z0-9][a-z0-9-]{0,63}$/.test(stateKey) ? stateKey : ''
+}
+
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+  return Math.min(Math.max(Math.floor(parsed), min), max)
+}
+
+function historyRetention() {
+  return {
+    // Every /v1/ops/history response repeats this so the dashboard can tell
+    // the owner why last week's runs are missing.
+    runsTtlMs: JOB_TTL_MS,
+    runsOldestVisibleAt: new Date(Date.now() - JOB_TTL_MS).toISOString(),
+    runsNote:
+      'Relay run records are pruned after JOB_TTL_MS. Recordings, transcripts, and product turns outlive them.',
+    audio: audioRetentionPolicy(),
+  }
+}
+
+/**
+ * Recordings are written moments before or after their plan job, so a window
+ * around the page is enough to resolve every link on it.
+ */
+async function capturesNear(store, jobs, { window = 5 * 60_000, limit = 100 } = {}) {
+  if (!jobs.length) {
+    return []
+  }
+
+  const newest = jobs.reduce((latest, job) => {
+    const time = new Date(job?.createdAt || 0).getTime()
+    return Number.isFinite(time) && time > latest ? time : latest
+  }, 0)
+  if (!newest) {
+    return []
+  }
+
+  return store.listJobs({
+    type: 'audio_capture',
+    limit,
+    before: { createdAt: new Date(newest + window).toISOString() },
+  })
+}
+
+async function resolveRunCapture(store, job) {
+  const declared = String(job?.inputTelemetry?.captureId || '').trim()
+  if (declared) {
+    const capture = await store.getJob(declared)
+    if (capture?.type === 'audio_capture') {
+      return { capture, link: 'telemetry' }
+    }
+  }
+
+  const captures = await capturesNear(store, [job], { limit: 60 })
+  return linkAudioCaptures([job], captures).get(job.jobId) || { capture: null, link: null }
+}
+
+/**
+ * A device token can never reach /v1/ops/* today (those routes demand the
+ * admin scope), but ownership is asserted here as well so that widening the
+ * scope table later cannot silently hand one device another device's audio.
+ */
+function principalCanReadJob(principal, job) {
+  return (
+    principal?.kind !== 'device' || principalOwnsDevice(principal, job?.createdBy)
+  )
+}
+
+/**
+ * Shared front half of every run-scoped route: resolve the run, enforce
+ * ownership, and attach its recording. Responds and returns null on failure.
+ */
+async function loadRunDetail(request, response) {
+  const store = await getStore()
+  const job = await store.getJob(String(request.params.pipelineId || '').trim())
+
+  if (!job || job.type !== 'plan') {
+    response.status(404).json({
+      ok: false,
+      error: 'Run not found. Relay run records expire after JOB_TTL_MS.',
+    })
+    return null
+  }
+  if (!principalCanReadJob(request.relayPrincipal, job)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: this run belongs to another device.',
+    })
+    return null
+  }
+
+  const { capture, link } = await resolveRunCapture(store, job)
+  const run = runDetailForJob(job, { capture, link })
+  if (!run) {
+    response.status(404).json({
+      ok: false,
+      error: 'That job is not an owner-initiated run.',
+    })
+    return null
+  }
+
+  return { store, job, capture, link, run }
+}
+
+/**
+ * Stream a private recording. Range support is byte-slicing over an already
+ * buffered object rather than a ranged R2 read, which is enough for <audio>
+ * scrubbing on captures measured in kilobytes.
+ */
+async function streamCaptureAudio(request, response, { capture }) {
+  const storedAudio = await loadAudioCapture(capture)
+  if (!storedAudio) {
+    response.set('Cache-Control', 'private, no-store')
+    response.status(404).json({
+      ok: false,
+      error:
+        capture.audioStorage === 'deleted'
+          ? 'This recording was deleted.'
+          : 'Audio capture data was not found.',
+    })
+    return
+  }
+
+  const total = storedAudio.audio.length
+  response.set('Cache-Control', 'private, no-store')
+  response.set('Content-Type', storedAudio.contentType)
+  response.set('Accept-Ranges', 'bytes')
+  response.set('X-Audio-Storage', storedAudio.source)
+  response.set('X-Cloud-Transcript', encodeURIComponent(capture.transcript || ''))
+  response.set('X-Cloud-Model', capture.transcriptionModel || '')
+
+  const range = parseByteRange(request.get('range'), total)
+  if (range === RANGE_UNSATISFIABLE) {
+    response.set('Content-Range', `bytes */${total}`)
+    response.status(416).end()
+    return
+  }
+
+  if (range) {
+    const slice = storedAudio.audio.subarray(range.start, range.end + 1)
+    response.set('Content-Range', `bytes ${range.start}-${range.end}/${total}`)
+    response.set('Content-Length', String(slice.length))
+    response.status(206).send(slice)
+    return
+  }
+
+  response.set('Content-Length', String(total))
+  response.send(storedAudio.audio)
+}
+
+async function deleteCaptureAudio(request, response, { store, capture }) {
+  const mode = request.query?.mode === 'record' ? 'record' : 'audio'
+
+  try {
+    const report = await deleteStoredAudio(store, capture, {
+      mode,
+      reason: 'operator',
+    })
+    response.set('Cache-Control', 'private, no-store')
+    response.json({
+      ok: true,
+      deleted: report,
+      policy: audioRetentionPolicy(),
+    })
+  } catch (error) {
+    response.status(500).json({
+      ok: false,
+      error: error?.message || 'The recording could not be deleted.',
+    })
+  }
 }
 
 function requiredScopesForRequest(request) {

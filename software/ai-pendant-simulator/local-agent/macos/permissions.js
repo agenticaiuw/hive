@@ -133,11 +133,36 @@ const GRANT_CACHE_PATH = path.join(
   'permissions-grant.json',
 )
 
+// If Accessibility is granted to the wrong bundle, synthesized events are
+// silently swallowed with no error at all — the most confusing failure mode on
+// macOS. This probe posts a zero-delta mouse move to the cursor's own location
+// (a genuine no-op) to prove the event tap actually accepts our events.
+async function checkInputPosting() {
+  try {
+    const { probeInput } = await import('../uiControl.js')
+    const probe = await probeInput()
+    return {
+      granted: Boolean(probe.axTrusted),
+      secureInput: Boolean(probe.secureInput),
+      displays: probe.displays?.length ?? 0,
+      detail: probe.axTrusted
+        ? 'Synthesized mouse and keyboard events post successfully.'
+        : 'Accessibility is not granted to this process — mouse and keyboard actions will be ignored.',
+    }
+  } catch (error) {
+    return {
+      granted: false,
+      detail: `Input helper unavailable: ${error.message}`,
+    }
+  }
+}
+
 export async function getPermissionReport({ deep = false } = {}) {
-  const [accessibility, screenRecording, automation] = await Promise.all([
+  const [accessibility, screenRecording, automation, inputPosting] = await Promise.all([
     checkAccessibility(),
     checkScreenRecording(),
     deep ? probeAllAutomationTargets() : probeAutomationSummary(),
+    checkInputPosting(),
   ])
 
   const requiredMissing = AUTOMATION_TARGETS.filter(
@@ -161,6 +186,7 @@ export async function getPermissionReport({ deep = false } = {}) {
     hostFingerprint: hostFingerprint(hostApp),
     accessibility,
     screenRecording,
+    inputPosting,
     automation,
     reminders: automation.Reminders || { granted: false, detail: 'not probed' },
     requiredMissing,

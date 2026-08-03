@@ -9,8 +9,18 @@ import { planCommand as planWithRules } from './planner.js'
 const LLM_API_KEY = process.env.LLM_API_KEY || ''
 const LLM_API_BASE_URL =
   process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1'
+// Pinned: the bare `deepseek-v4-flash` slug still resolves to the April preview
+// checkpoint, which is far weaker at agentic work (Terminal-Bench 61.8 vs 82.7)
+// and costs more.
 const LLM_MODEL =
-  process.env.LLM_MODEL || 'deepseek/deepseek-v4-flash'
+  process.env.LLM_MODEL || 'deepseek/deepseek-v4-flash-0731'
+// DeepSeek is text-only; a request carrying an image 404s. Screenshots go to a
+// vision model that returns normalized 0-999 coordinates, so no provider-side
+// image resize can throw off a click.
+const LLM_VISION_MODEL =
+  process.env.LLM_VISION_MODEL || 'google/gemini-3.6-flash'
+// 'auto' picks per request; 'low'/'medium'/'high' pin it; 'off' omits the field.
+const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT || 'auto'
 const LLM_MAX_TOKENS = Math.min(
   Math.max(Number(process.env.LLM_MAX_TOKENS || 1024), 128),
   4096,
@@ -63,12 +73,17 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     params: { from: 'absolute path', to: 'absolute path' },
   },
   type_text: {
-    description: 'Type text into the frontmost application.',
-    params: { text: 'string' },
+    description:
+      'Type text into the frontmost application. Layout independent and unicode safe (emoji, CJK, newlines).',
+    params: { text: 'string', perCharDelayMs: 'optional pacing in ms' },
   },
   press_keys: {
-    description: 'Press keyboard shortcuts in the frontmost app.',
-    params: { keys: 'string like cmd+c, cmd+shift+p, enter' },
+    description:
+      'Press a keyboard shortcut in the frontmost app. Supports cmd/ctrl/alt/shift/fn plus arrows, function keys, page up/down, home/end and forward delete.',
+    params: {
+      keys: 'string like cmd+c, cmd+shift+p, enter, pageup, ctrl+alt+left, f5',
+      repeat: 'optional number of repeats',
+    },
   },
   set_brightness: {
     description:
@@ -123,8 +138,107 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     },
   },
   screenshot: {
-    description: 'Capture the screen to a PNG file.',
-    params: { path: 'optional absolute path', interactive: 'optional boolean' },
+    description:
+      'Capture the screen. Returns a downscaled image plus the display size in points, the image size in pixels, and the points-per-image-pixel ratio needed to turn image coordinates back into clickable screen coordinates.',
+    params: {
+      scope: 'optional display|window|region',
+      display: 'optional 1-based display number',
+      region: 'optional {x, y, w, h} in screen points',
+      maxWidth: 'optional downscale width, default 1456',
+      path: 'optional absolute path to also save a durable copy',
+    },
+  },
+  zoom: {
+    description:
+      'Capture one region of the screen at native resolution to read small text without paying for a full frame.',
+    params: { region: '{x, y, w, h} in screen points', maxWidth: 'optional, default 1024' },
+  },
+  // --- Accessibility tier: prefer these over pixel clicking. They resolve a
+  // control by NAME, so they are layout independent, cost no image tokens, and
+  // record what was actually clicked.
+  ui_snapshot: {
+    description:
+      'List the actionable accessibility elements of an app, with on-screen frames in points. Try this before any screenshot.',
+    params: { app: 'optional app name, default frontmost', maxElements: 'optional number' },
+  },
+  ui_find: {
+    description: 'Find one named control in an app without acting on it.',
+    params: { app: 'optional', title: 'exact title', titleContains: 'substring', nth: 'optional index' },
+  },
+  ui_click: {
+    description:
+      'Press a named control via the accessibility API, falling back to a click at its centre. Preferred over mouse_click.',
+    params: { app: 'optional', ref: 'ref from ui_snapshot', title: 'or exact title', titleContains: 'or substring' },
+  },
+  ui_menu: {
+    description:
+      'Choose an app menu item by path, e.g. ["File","Export As","PDF…"]. Never click menus by coordinate.',
+    params: { app: 'app name', path: 'array of menu titles' },
+  },
+  ui_wait_for: {
+    description: 'Poll until a named control appears. Use instead of sleeping.',
+    params: { app: 'optional', title: 'or titleContains', timeoutMs: 'optional, default 5000' },
+  },
+  ui_hit_test: {
+    description: 'Report which named control is under a screen point.',
+    params: { x: 'number in points', y: 'number in points' },
+  },
+  // --- Pixel tier: only when the accessibility tree does not expose the control.
+  mouse_move: {
+    description: 'Move the pointer to a screen point (points, top-left origin).',
+    params: { x: 'number', y: 'number' },
+  },
+  mouse_click: {
+    description: 'Click at a screen point.',
+    params: {
+      x: 'number',
+      y: 'number',
+      button: 'optional left|right|middle',
+      clicks: 'optional 1-3',
+      modifiers: 'optional array like ["cmd","shift"]',
+    },
+  },
+  mouse_double_click: {
+    description: 'Double-click at a screen point.',
+    params: { x: 'number', y: 'number' },
+  },
+  mouse_right_click: {
+    description: 'Right-click at a screen point to open a context menu.',
+    params: { x: 'number', y: 'number' },
+  },
+  mouse_drag: {
+    description: 'Press, drag along an interpolated path, and release.',
+    params: { fromX: 'number', fromY: 'number', toX: 'number', toY: 'number', button: 'optional', steps: 'optional' },
+  },
+  mouse_down: {
+    description: 'Press and hold a mouse button at a point.',
+    params: { x: 'number', y: 'number', button: 'optional' },
+  },
+  mouse_up: {
+    description: 'Release a held mouse button at a point.',
+    params: { x: 'number', y: 'number', button: 'optional' },
+  },
+  scroll: {
+    description: 'Scroll the view under the pointer. Positive dy scrolls up.',
+    params: { x: 'optional number', y: 'optional number', dx: 'optional number', dy: 'optional number' },
+  },
+  cursor_position: {
+    description: 'Report where the pointer currently is.',
+    params: {},
+  },
+  list_displays: {
+    description: 'List displays with their point origins, sizes and backing scale factors.',
+    params: {},
+  },
+  computer_use_task: {
+    description:
+      'Hand a goal to the bounded perceive-act loop: the agent looks at the screen, acts, looks again, and repeats until done or until its step/time budget runs out. Use this when the task needs several dependent UI steps whose outcome cannot be predicted in advance. Shell, file and mail actions are NOT available inside the loop.',
+    params: {
+      goal: 'what to accomplish, in one sentence',
+      app: 'optional app to focus on',
+      maxSteps: 'optional, default 25',
+      budgetMs: 'optional wall-clock budget',
+    },
   },
   get_clipboard: {
     description: 'Read the current clipboard text.',
@@ -207,6 +321,89 @@ const SAFE_ACTION_SCHEMA = {
 
 export function isLlmPlannerEnabled() {
   return LLM_ENABLED
+}
+
+export function visionModelName() {
+  return LLM_VISION_MODEL
+}
+
+// The text model is text-only: a request carrying an image part 404s or, worse,
+// silently drops it and the agent confidently guesses. So vision is gated on an
+// explicitly configured multimodal model, and callers degrade to text-only
+// planning when it is absent rather than pretending to see.
+export function isVisionConfigured() {
+  return LLM_ENABLED && Boolean(LLM_VISION_MODEL) && LLM_VISION_MODEL !== 'off'
+}
+
+export function llmRequestHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${LLM_API_KEY}`,
+  }
+
+  if (LLM_API_BASE_URL.includes('openrouter.ai')) {
+    headers['HTTP-Referer'] =
+      process.env.OPENROUTER_HTTP_REFERER ||
+      'https://github.com/geunwoo-dev/ai-pendant-simulator'
+    headers['X-Title'] = process.env.OPENROUTER_APP_TITLE || 'AI Pendant Simulator'
+  }
+
+  return headers
+}
+
+/**
+ * Multi-turn, optionally multimodal chat request.
+ *
+ * This is the transport the perceive-act loop runs on. It differs from the
+ * single-shot planner path in three ways that matter:
+ *  - it takes a full `messages` array, so assistant turns accumulate;
+ *  - `content` may be an OpenAI content-part array carrying `image_url` with a
+ *    base64 data URL;
+ *  - `response_format: json_object` is applied ONLY when there is no image.
+ *    Several vision-capable models on OpenRouter reject json_object alongside
+ *    image parts, and the failure surfaces as an opaque provider 400.
+ */
+export async function requestLlmMessages({
+  messages,
+  hasImages = false,
+  maxTokens = LLM_MAX_TOKENS,
+  fetchImpl = fetch,
+} = {}) {
+  if (!LLM_ENABLED) {
+    throw new Error('LLM is not configured (set LLM_API_KEY).')
+  }
+
+  if (hasImages && !isVisionConfigured()) {
+    throw new Error(
+      'No vision model is configured. Set LLM_VISION_MODEL to a multimodal model on your LLM_API_BASE_URL, or run the task without screenshots.',
+    )
+  }
+
+  const model = hasImages ? LLM_VISION_MODEL : LLM_MODEL
+  const response = await fetchImpl(`${LLM_API_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: llmRequestHeaders(),
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      max_tokens: maxTokens,
+      ...(hasImages ? {} : { response_format: { type: 'json_object' } }),
+      messages,
+    }),
+  })
+
+  const payload = await response.json()
+
+  if (!response.ok) {
+    const message = payload?.error?.message ?? `LLM API request failed (${response.status}).`
+    const error = new Error(`${message} (model ${model})`)
+    error.status = response.status
+    // Lets the caller drop to a text-only step rather than aborting the task.
+    error.rejectedImages = hasImages
+    throw error
+  }
+
+  return payload.choices?.[0]?.message?.content ?? ''
 }
 
 export function isFullControlPlanner() {
@@ -311,6 +508,8 @@ Planning rules:
 - Brightness → set_brightness. Volume/mute → set_volume / set_mute. Reminders → create_reminder.
 - Screen darken/cover → show_screen_overlay.
 - Prefer dedicated types over long shell/AppleScript.
+- Driving an app's interface: prefer ui_menu, then ui_find + ui_click. Fall back to screenshot + mouse_click only when the accessibility tree does not expose the control.
+- When the task needs several dependent UI steps whose outcome you cannot predict (fill this form, find that setting, work through this dialog), emit a SINGLE computer_use_task with a clear goal instead of guessing a fixed click sequence.
 - Keep plans short (usually 1-3 steps). Use absolute paths under ${home} when possible.
 - Destructive actions are allowed when the user explicitly asks.
 - If truly impossible, return status "unsupported" with a short reason.`
@@ -345,6 +544,7 @@ Never invent shell commands or paths outside the whitelist.`
     systemPrompt,
     userContent,
     onProgress,
+    command,
   })
 
   if (!content) {
@@ -408,27 +608,60 @@ Never invent shell commands or paths outside the whitelist.`
   }
 }
 
+// Deliberating costs seconds of voice latency, so spend it only where it pays:
+// a retry (the fast pass already failed) or a command whose wording implies
+// several dependent steps, comparison, or open-ended searching.
+const DELIBERATION_HINTS =
+  /\b(then|after that|figure out|research|compare|summari[sz]e|debug|troubleshoot|refactor|migrat|organi[sz]e|clean up|plan|decide|why|how come|instead of|each of|all of my|every)\b/i
+
+export function chooseReasoningEffort(
+  command,
+  { attempt = 0, hasScreenshot = false } = {},
+) {
+  if (LLM_REASONING_EFFORT !== 'auto') return LLM_REASONING_EFFORT
+  if (attempt > 0) return 'high'
+  const text = String(command || '')
+  if (DELIBERATION_HINTS.test(text)) return 'high'
+  if (text.length > 160) return 'high'
+  // Reading a screen is perception, not deliberation.
+  if (hasScreenshot) return 'low'
+  return 'low'
+}
+
 async function requestLlmPlanContent({
   headers,
   systemPrompt,
   userContent,
   onProgress,
+  screenshot = null,
+  command = '',
+  attempt = 0,
 }) {
   const useStream = typeof onProgress === 'function'
+  const hasScreenshot = Boolean(screenshot?.dataUrl)
+  const effort = chooseReasoningEffort(command, { attempt, hasScreenshot })
+  // OpenRouter parses multipart content best with the text first.
+  const userMessage = hasScreenshot
+    ? {
+        role: 'user',
+        content: [
+          { type: 'text', text: userContent },
+          { type: 'image_url', image_url: { url: screenshot.dataUrl } },
+        ],
+      }
+    : { role: 'user', content: userContent }
 
   const response = await fetch(`${LLM_API_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      model: LLM_MODEL,
+      model: hasScreenshot ? LLM_VISION_MODEL : LLM_MODEL,
       temperature: 0.1,
       max_tokens: LLM_MAX_TOKENS,
       stream: useStream,
       response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
+      ...(effort === 'off' ? {} : { reasoning: { effort } }),
+      messages: [{ role: 'system', content: systemPrompt }, userMessage],
     }),
   })
 
@@ -533,6 +766,26 @@ function extractJsonObject(text) {
   }
 }
 
+// Dispatchable types that are deliberately not advertised to the model, kept
+// here so a plan replayed from history is not dropped.
+const DISPATCH_ALIASES = new Set([
+  'set_clipboard',
+  'open_folder',
+  'open_path',
+  'set_keyboard_language',
+  'mouse_scroll',
+  'show_screen_overlay',
+])
+
+export function isKnownActionType(type) {
+  const name = String(type ?? '')
+  return (
+    Object.hasOwn(FULL_CONTROL_ACTION_SCHEMA, name) ||
+    Object.hasOwn(SAFE_ACTION_SCHEMA, name) ||
+    DISPATCH_ALIASES.has(name)
+  )
+}
+
 function sanitizeActions(actions) {
   // Light per-action cleanup only — never rewrite the whole plan from command text.
   return actions
@@ -589,6 +842,14 @@ function sanitizeActions(actions) {
         } catch {
           return action
         }
+      }
+
+      // A hallucinated type used to pass straight through, get shown to the
+      // user for confirmation, and only fail at execution with "Unsupported
+      // action type". Drop it here instead.
+      if (!isKnownActionType(action.type)) {
+        console.warn(`[planner] dropping unknown action type: ${String(action.type)}`)
+        return null
       }
 
       return {

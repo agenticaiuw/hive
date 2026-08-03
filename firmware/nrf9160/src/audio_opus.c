@@ -14,6 +14,7 @@
 
 #include <opus.h>
 #include <zephyr/fs/fs.h>
+#include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
@@ -343,10 +344,15 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 	size_t page_packets = 0U;
 	size_t page_bytes = 0U;
 	uint32_t produced_samples = 0U;
+	int64_t lat_read_us = 0;
+	int64_t lat_encode_us = 0;
+	int64_t lat_ogg_us = 0;
+
 	for (uint32_t packet = 0U; packet < total_packets; ++packet) {
 		size_t valid_samples = MIN(
 			(uint32_t)OPUS_ENCODE_FRAME_SAMPLES,
 			output_samples - produced_samples);
+		uint32_t lat_mark = k_cycle_get_32();
 
 		for (size_t index = 0U; index < valid_samples; ++index) {
 			error = resampler_next(&resampler, &frame[index]);
@@ -354,13 +360,16 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 				goto out;
 			}
 		}
+		lat_read_us += k_cyc_to_us_near32(k_cycle_get_32() - lat_mark);
 		memset(frame + valid_samples, 0,
 		       (OPUS_ENCODE_FRAME_SAMPLES - valid_samples) *
 			       sizeof(frame[0]));
 
+		lat_mark = k_cycle_get_32();
 		int packet_bytes = opus_encode(
 			encoder, frame, OPUS_ENCODE_FRAME_SAMPLES,
 			page_payload + page_bytes, OPUS_ENCODE_PACKET_BYTES);
+		lat_encode_us += k_cyc_to_us_near32(k_cycle_get_32() - lat_mark);
 
 		if (packet_bytes < 0) {
 			error = -EIO;
@@ -383,10 +392,13 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 					  (OGG_GRANULE_RATE /
 					   PENDANT_OPUS_SAMPLE_RATE);
 
+			lat_mark = k_cycle_get_32();
 			error = ogg_write_page(
 				&ogg, final_packet ? OGG_FLAG_EOS : 0U,
 				granule, page_payload, packet_lengths,
 				page_packets);
+			lat_ogg_us +=
+				k_cyc_to_us_near32(k_cycle_get_32() - lat_mark);
 			if (error != 0) {
 				goto out;
 			}
@@ -394,6 +406,8 @@ int pendant_opus_encode_file(const char *pcm_path, const char *opus_path,
 			page_bytes = 0U;
 		}
 	}
+	printk("LAT encode_split read_ms=%lld opus_ms=%lld oggwrite_ms=%lld\n",
+	       lat_read_us / 1000, lat_encode_us / 1000, lat_ogg_us / 1000);
 	error = fs_sync(&output);
 	if (error == 0) {
 		stats->input_bytes = (uint32_t)input_entry.size;

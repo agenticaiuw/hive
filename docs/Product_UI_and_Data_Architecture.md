@@ -5,7 +5,7 @@
 The AI Pendant should have one account-scoped product experience across web and
 iOS. Device agents are execution peers, not separate products.
 
-- **Mission Control** becomes the shared product shell: home, conversations,
+- **Dashboard** becomes the shared product shell: home, conversations,
   runs, memory, devices, and settings.
 - **Web** and **Capacitor iOS** consume the same React feature packages and the
   same cloud API contracts.
@@ -20,7 +20,7 @@ iOS. Device agents are execution peers, not separate products.
 
 | Surface | Current source | Current authority | Problem |
 | --- | --- | --- | --- |
-| Mission Control | `software/ai-pendant-dashboard` | D1 jobs plus a bounded `agent-snapshot` copied from the Mac | Hardware-focused view; not the full product |
+| Dashboard | `software/ai-pendant-dashboard` | D1 jobs plus a bounded `agent-snapshot` copied from the Mac | Hardware-focused view; not the full product |
 | Local Ops dashboard | `software/ai-pendant-simulator/src/ops` | Mac JSON files and local agent APIs | Fullest UI, but tied to one Mac and duplicated remotely through an RPC proxy |
 | Pendant controller / Capacitor | `software/ai-pendant-simulator/src` | Browser localStorage in mock mode, Mac or relay otherwise | Separate shell and session cache; diverges from web |
 | Local Mac agent | `software/ai-pendant-simulator/local-agent` | Device-local permissions, execution, logs, and JSON stores | Product records are still authored and stored primarily on one Mac |
@@ -175,7 +175,7 @@ modules directly. Capacitor calls the same account API using its native session.
 
 The existing Vite local Ops page should first become a compatibility consumer
 of those shared view models. Once feature parity is reached, `/dashboard` on the
-Mac can show a small diagnostics-only page or open Mission Control with the
+Mac can show a small diagnostics-only page or open the Dashboard with the
 paired `deviceId`.
 
 ## Capability and permission reports
@@ -215,7 +215,7 @@ Accessibility, or "browser available" while no extension is connected.
    memory, device, capability, and media endpoints. Keep `/v1/ops/proxy` only
    for device-local diagnostics/actions that cannot be cloud records.
 7. **Extract the shared React product UI.** Move feature components and view
-   models from Mission Control and Ops into one client package. Render it in the
+   models from the Dashboard and Ops into one client package. Render it in the
    deployed web shell and Capacitor. Move hardware telemetry into a Runs detail
    view and Mac status into Devices.
 8. **Add offline synchronization.** Queue iOS/web mutations locally, replay with

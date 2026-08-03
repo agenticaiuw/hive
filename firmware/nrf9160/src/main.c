@@ -119,14 +119,35 @@
 #define SD_MOUNT_POINT "/SD:"
 #define SD_RECORDING_PATH SD_MOUNT_POINT "/latest.pcm"
 #define SD_OPUS_PATH SD_MOUNT_POINT "/latest.opus"
+#define SD_SELFTEST_PCM_PATH SD_MOUNT_POINT "/selftest.pcm"
+#define SD_SELFTEST_OPUS_PATH SD_MOUNT_POINT "/selftest.opus"
 #define SD_TEST_PATH SD_MOUNT_POINT "/power_test.bin"
 #define SD_TEST_MAGIC 0x53445631U
 #define SD_TEST_CHECK_XOR 0xA55A39C3U
 
 /* Temporary diagnostic: upload the existing SD recording once after boot. */
-#define PENDANT_BOOT_UPLOAD_EXISTING 0
+#define PENDANT_BOOT_UPLOAD_EXISTING 1
 /* Temporary diagnostic: record five seconds automatically before LTE init. */
 #define PENDANT_BOOT_AUTORECORD_TEST 0
+/*
+ * Stack self-test: encode a synthetic strongly voiced tone at boot.
+ *
+ * The deepest libopus stack path is silk_pitch_analysis_core's stage-3
+ * contour search, and its two 1920-byte VLAs sit behind the "a pitch
+ * candidate was found" branch - a silent or noise-only recording returns
+ * early and never touches them, so it cannot validate the stack budget.
+ * A 125 Hz sawtooth is unambiguously voiced and forces that branch, which
+ * makes the high-water number printed afterwards meaningful.  Needs no
+ * microphone, no button and no network.  Leave at 0; set to 1 to re-measure
+ * after touching CONFIG_MAIN_STACK_SIZE, the opus complexity setting, or
+ * OPUS_FRAME_MS.
+ *
+ * Last measured on hardware: peak=25396 of 32768 bytes, 7372 free.
+ */
+#define PENDANT_BOOT_ENCODE_SELFTEST 0
+#define SELFTEST_PITCH_PERIOD_SAMPLES 125U
+#define SELFTEST_AMPLITUDE 9000
+#define SELFTEST_SECONDS 3U
 /* Temporary diagnostic: emit the saved raw PCM as delimited hex on USB. */
 #define PENDANT_BOOT_DUMP_PCM_HEX 0
 /* Temporary diagnostic: prove whether the microphone actively drives DOUT. */
@@ -160,6 +181,36 @@ BUILD_ASSERT(MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT <=
 K_MEM_SLAB_DEFINE_STATIC(i2s_slab, I2S_BLOCK_SIZE, I2S_BLOCK_COUNT, 4);
 /* Processed audio staged here between microSD writes (4 KB chunks). */
 static int16_t mic_stage_samples[MIC_STAGE_FRAMES] __aligned(4);
+
+/*
+ * Main-thread stack high-water reporting.
+ *
+ * libopus is compiled with -DVAR_ARRAYS, so every codec scratch buffer is a
+ * VLA on this thread's stack; the deepest one (silk_pitch_analysis_core)
+ * previously ran the 24 KiB main stack off its PSPLIM guard mid-encode.  There
+ * is no way to size the stack honestly without a real high-water number, so
+ * report one after each encode.  CONFIG_INIT_STACKS fills the stack with 0xAA
+ * at boot and costs no RAM; k_thread_stack_space_get() then counts the bytes
+ * still untouched.
+ */
+static void report_main_stack_headroom(const char *phase)
+{
+#ifdef CONFIG_INIT_STACKS
+	size_t unused = 0U;
+	int error = k_thread_stack_space_get(k_current_get(), &unused);
+
+	if (error != 0) {
+		printk("Main stack usage (%s): unavailable (%d)\n", phase,
+		       error);
+		return;
+	}
+	printk("Main stack usage (%s): peak=%u free=%u size=%u\n", phase,
+	       (unsigned int)(CONFIG_MAIN_STACK_SIZE - unused),
+	       (unsigned int)unused, (unsigned int)CONFIG_MAIN_STACK_SIZE);
+#else
+	ARG_UNUSED(phase);
+#endif
+}
 
 /* PWM duty words: bit 15 clear means the output is low first, so BCLK
  * rises mid-period (tick 4 of 8) while LRCLK edges (tick 0 mod 256) sit
@@ -422,6 +473,71 @@ static int write_pcm_frames(struct fs_file_t *file,
 
 	return 0;
 }
+
+#if PENDANT_BOOT_ENCODE_SELFTEST
+/*
+ * Write SELFTEST_SECONDS of a 125 Hz bipolar sawtooth to the card, then run
+ * the real encoder over it.  The sawtooth is periodic and harmonically rich,
+ * so SILK classifies every frame as voiced and takes both the stage-3 pitch
+ * contour search and the delayed-decision quantizer - the two deepest stack
+ * consumers in the codec.  Staging reuses mic_stage_samples, which is idle
+ * outside capture, so this costs no RAM.
+ */
+static int encode_stack_selftest(void)
+{
+	struct fs_file_t file;
+	struct pendant_opus_stats stats = { 0 };
+	const uint32_t total_samples = SAMPLE_RATE * SELFTEST_SECONDS;
+	uint32_t written_samples = 0U;
+	int error;
+
+	fs_file_t_init(&file);
+	error = fs_open(&file, SD_SELFTEST_PCM_PATH,
+			FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (error != 0) {
+		printk("Selftest PCM open failed: %d\n", error);
+		return error;
+	}
+
+	while (written_samples < total_samples) {
+		size_t chunk = MIN((size_t)(total_samples - written_samples),
+				   (size_t)MIC_STAGE_FRAMES);
+
+		for (size_t index = 0U; index < chunk; ++index) {
+			uint32_t phase = (written_samples + (uint32_t)index) %
+					 SELFTEST_PITCH_PERIOD_SAMPLES;
+			int32_t value =
+				SELFTEST_AMPLITUDE -
+				(int32_t)((2 * SELFTEST_AMPLITUDE * phase) /
+					  SELFTEST_PITCH_PERIOD_SAMPLES);
+
+			mic_stage_samples[index] = (int16_t)value;
+		}
+		error = write_pcm_frames(&file, mic_stage_samples, chunk);
+		if (error != 0) {
+			printk("Selftest PCM write failed: %d\n", error);
+			(void)fs_close(&file);
+			return error;
+		}
+		written_samples += (uint32_t)chunk;
+	}
+	error = fs_close(&file);
+	if (error != 0) {
+		printk("Selftest PCM close failed: %d\n", error);
+		return error;
+	}
+
+	printk("ENCODE_SELFTEST_BEGIN samples=%u pitch_hz=%u\n",
+	       total_samples, SAMPLE_RATE / SELFTEST_PITCH_PERIOD_SAMPLES);
+	error = pendant_opus_encode_file(
+		SD_SELFTEST_PCM_PATH, SD_SELFTEST_OPUS_PATH, SAMPLE_RATE,
+		audio_workspace, sizeof(audio_workspace), &stats);
+	printk("ENCODE_SELFTEST_END result=%d packets=%u in=%u out=%u\n",
+	       error, stats.packets, stats.input_bytes, stats.output_bytes);
+	report_main_stack_headroom("voiced selftest encode");
+	return error;
+}
+#endif /* PENDANT_BOOT_ENCODE_SELFTEST */
 
 /*
  * Configure one PWM instance as a free-running square wave: a single
@@ -1159,9 +1275,17 @@ int main(void)
 	gpio_pin_set_dt(&led, 0);
 	printk("BOOT_MIC_AUTOTEST_END result=%d samples=%u\n",
 	       error, recorded_samples);
+	report_main_stack_headroom("capture");
 	if (error != 0) {
 		audio_cycle_result = error;
 		show_error();
+	}
+#endif
+
+#if PENDANT_BOOT_ENCODE_SELFTEST
+	/* Runs before LTE so a network problem cannot mask a codec fault. */
+	if (encode_stack_selftest() != 0) {
+		printk("Encode stack selftest failed\n");
 	}
 #endif
 
@@ -1204,14 +1328,38 @@ int main(void)
 #if PENDANT_BOOT_UPLOAD_EXISTING
 	printk("Boot diagnostic: uploading existing SD recording\n");
 	gpio_pin_set_dt(&led, 1);
-	struct pendant_opus_stats boot_encode_stats;
+	struct pendant_opus_stats boot_encode_stats = { 0 };
+	int64_t lat_cycle_started = k_uptime_get();
+
 	error = pendant_opus_encode_file(
 		SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
 		audio_workspace, sizeof(audio_workspace), &boot_encode_stats);
+	int64_t lat_encode_done = k_uptime_get();
+
+	printk("Boot encode result: %d (packets=%u in=%u out=%u)\n", error,
+	       boot_encode_stats.packets, boot_encode_stats.input_bytes,
+	       boot_encode_stats.output_bytes);
+	printk("LAT encode_ms=%lld pcm_in=%u ogg_out=%u packets=%u "
+	       "audio_ms=%u\n",
+	       lat_encode_done - lat_cycle_started,
+	       boot_encode_stats.input_bytes, boot_encode_stats.output_bytes,
+	       boot_encode_stats.packets,
+	       (uint32_t)(boot_encode_stats.input_bytes /
+			  (SAMPLE_RATE * sizeof(int16_t) / 1000U)));
+	report_main_stack_headroom("boot encode");
 	if (error == 0) {
+		/* Mirror the button path exactly: announce, then upload. */
+		int boot_announce_error = pendant_cloud_announce_recording(
+			boot_encode_stats.input_bytes, SAMPLE_RATE);
+		if (boot_announce_error != 0) {
+			printk("Boot announce failed: %d\n",
+			       boot_announce_error);
+		}
 		error = pendant_cloud_upload_recording(
 			SD_OPUS_PATH, boot_encode_stats.input_bytes, SAMPLE_RATE);
 	}
+	printk("LAT cycle_to_dispatch_ms=%lld\n",
+	       k_uptime_get() - lat_cycle_started);
 	gpio_pin_set_dt(&led, 0);
 	printk("Boot upload result: %d (transcribe=%d dispatch=%d HTTP=%d "
 	       "PCM bytes=%u)\n",
@@ -1219,6 +1367,7 @@ int main(void)
 	       pendant_cloud_dispatch_result,
 	       pendant_cloud_last_http_status,
 	       pendant_cloud_uploaded_pcm_bytes);
+	report_main_stack_headroom("boot upload");
 	audio_cycle_result = error;
 #endif
 
@@ -1255,11 +1404,17 @@ int main(void)
 		 * to the relay and the Mac prepares its spoken response.
 		 */
 		audio_cycle_phase = 3U;
-		struct pendant_opus_stats encode_stats;
+		struct pendant_opus_stats encode_stats = { 0 };
+		int64_t lat_press_started = k_uptime_get();
 
 		error = pendant_opus_encode_file(
 			SD_RECORDING_PATH, SD_OPUS_PATH, SAMPLE_RATE,
 			audio_workspace, sizeof(audio_workspace), &encode_stats);
+		printk("LAT encode_ms=%lld pcm_in=%u ogg_out=%u packets=%u\n",
+		       k_uptime_get() - lat_press_started,
+		       encode_stats.input_bytes, encode_stats.output_bytes,
+		       encode_stats.packets);
+		report_main_stack_headroom("encode");
 		if (error != 0) {
 			printk("Opus recording compression failed: %d\n", error);
 			audio_cycle_result = error;
@@ -1272,6 +1427,8 @@ int main(void)
 		int announce_error = pendant_cloud_announce_recording(
 			recorded_samples * (uint32_t)sizeof(int16_t),
 			SAMPLE_RATE);
+		printk("LAT press_to_announce_done_ms=%lld\n",
+		       k_uptime_get() - lat_press_started);
 		if (announce_error != 0) {
 			printk("Recording announce failed: %d\n",
 			       announce_error);

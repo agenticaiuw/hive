@@ -9,22 +9,47 @@ import {
 } from './projectMemory.js'
 import { getRecentTurns } from './sessionStore.js'
 
-export function buildConversationContext({ command, sessionId }) {
-  const recentTurns = sessionId ? getRecentTurns(sessionId, 10) : []
-  const graphContext = getLatestContext()
-  const activeProject = getActiveProject()
-  const longTerm = retrieveLongTermMemory({
-    command,
-    projectId: activeProject?.id ?? null,
-    limit: 8,
-  })
+/**
+ * Commands that only need "what is installed / where is home" from the machine
+ * prompt, not prior chat or long-term memory. Shipping the full memory block
+ * on every "open Outlook" request costs tokens and hundreds of ms for no gain.
+ */
+const MEMORY_HINT =
+  /\b(that|this|it|those|same|again|continue|him|her|them|remember|my|previous|last|earlier|before|also|too)\b|그거|방금|아까|이거|저거|같은|이어서|계속|그분|그 사람|그 이메일/i
 
-  const resolvedCommand = resolveFollowUpReferences(
-    command,
-    recentTurns,
-    graphContext,
-    activeProject,
-  )
+export function commandNeedsMemory(command) {
+  const text = String(command || '').trim()
+  if (!text) return false
+  // Very short one-shot control ("open Outlook", "mute") almost never needs
+  // prior turns; pronouns / continuation language do.
+  if (MEMORY_HINT.test(text)) return true
+  if (text.length > 120) return true
+  return false
+}
+
+export function buildConversationContext({ command, sessionId }) {
+  const needsMemory = commandNeedsMemory(command)
+  const recentTurns = sessionId
+    ? getRecentTurns(sessionId, needsMemory ? 10 : 2)
+    : []
+  const graphContext = getLatestContext()
+  const activeProject = needsMemory ? getActiveProject() : null
+  const longTerm = needsMemory
+    ? retrieveLongTermMemory({
+        command,
+        projectId: activeProject?.id ?? null,
+        limit: 8,
+      })
+    : []
+
+  const resolvedCommand = needsMemory
+    ? resolveFollowUpReferences(
+        command,
+        recentTurns,
+        graphContext,
+        activeProject,
+      )
+    : command
 
   const shortTerm = buildShortTermSnapshot(recentTurns)
 
@@ -41,19 +66,28 @@ export function buildConversationContext({ command, sessionId }) {
     shortTerm,
     workingProject: activeProject,
     longTerm,
-    memory: {
-      latestEmailDraft: graphContext.latestEmailDraft ?? null,
-      latestPerson: graphContext.latestPerson ?? null,
-      latestFile: graphContext.latestFile ?? null,
-      latestTask: graphContext.latestTask ?? null,
-    },
+    memory: needsMemory
+      ? {
+          latestEmailDraft: graphContext.latestEmailDraft ?? null,
+          latestPerson: graphContext.latestPerson ?? null,
+          latestFile: graphContext.latestFile ?? null,
+          latestTask: graphContext.latestTask ?? null,
+        }
+      : {
+          latestEmailDraft: null,
+          latestPerson: null,
+          latestFile: null,
+          latestTask: null,
+        },
+    memoryIncluded: needsMemory,
     promptBlock: formatPromptBlock({
       command,
       resolvedCommand,
-      recentTurns,
-      shortTerm,
+      recentTurns: needsMemory ? recentTurns : recentTurns.slice(-1),
+      shortTerm: needsMemory ? shortTerm : { lastUserCommand: null },
       activeProject,
       longTerm,
+      compact: !needsMemory,
     }),
   }
 }
@@ -135,7 +169,18 @@ function formatPromptBlock({
   shortTerm,
   activeProject,
   longTerm,
+  compact = false,
 }) {
+  if (compact) {
+    // One-shot commands: only the request. Machine context still rides in the
+    // system prompt via the planner; memory is what we skip here.
+    const lines = [`Current user request: ${command}`]
+    if (resolvedCommand !== command) {
+      lines.push(`Resolved request: ${resolvedCommand}`)
+    }
+    return lines.join('\n')
+  }
+
   const lines = [
     '## Short-term session context',
     shortTerm?.lastUserCommand

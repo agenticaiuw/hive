@@ -99,8 +99,72 @@ Opus implementation
 
 The firmware vendors Xiph.Org libopus 1.6.1 under third_party/opus and builds
 the fixed-point API only. The codec arena shares the microphone's 40 KiB RX
-slab because capture, encode, and reply decode are sequential. The resulting
-application currently uses about 318 KiB of the 576 KiB application flash
-region and 136 KiB of 154 KiB RAM. The 24 KiB main stack is intentional: the
-compiler reports a 10.8 KiB dynamic frame inside the SILK encoder before its
-callers and nested analysis routines are counted.
+slab because capture, encode, and reply decode are sequential (see the caveat
+at the end of the next section - that sharing does NOT make the buffer free
+during encode). The resulting application currently uses about 327 KiB of the
+576 KiB application flash region and 143816 B of 154264 B RAM.
+
+Main stack sizing (do not shrink without measuring)
+---------------------------------------------------
+
+CONFIG_MAIN_STACK_SIZE is 32768.  It used to be 24576, and that was wrong: the
+board took a UsageFault ("Stack overflow (context area not valid)") inside
+silk_pitch_analysis_core on the second of the two stage-3 VLA allocations, so
+every recording was captured to microSD and then lost before it could be
+uploaded.
+
+Two facts drive the number:
+
+  * libopus is compiled with -DVAR_ARRAYS (CMakeLists.txt), so celt/stack_alloc.h
+    maps every ALLOC() to a C99 VLA.  All codec scratch memory therefore lives
+    on the *calling* thread's stack, and pendant_opus_encode_file() is called
+    directly from main() - there is no codec thread and no workqueue involved.
+  * The old 24 KiB figure came from GCC -fstack-usage printing "10752 dynamic"
+    for silk_encode_frame_FIX.  The bare "dynamic" qualifier means the printed
+    number EXCLUDES the VLAs, i.e. it omitted exactly the allocations that
+    overflowed, and it counted none of the nested analysis routines below it.
+
+Measured on hardware, main thread, encoding a strongly voiced signal:
+
+  peak 25396 B of 32768   ->  7372 B free (29% headroom over peak)
+
+25396 is 820 B past the old 24576 budget, which is precisely the observed
+failure.  The frames behind it are silk_encode_frame_FIX ~13.4 KiB +
+silk_find_pitch_lags_FIX ~1.0 KiB + silk_pitch_analysis_core ~8.7 KiB, under
+~2.5 KiB of opus_encode / silk_Encode / pendant_opus_encode_file / main.
+
+MEASURE WITH A VOICED SIGNAL OR THE NUMBER LIES.  The two 1920-byte stage-3
+VLAs in silk_pitch_analysis_core sit behind the "a pitch candidate was found"
+branch, so an unvoiced input returns early and never allocates them.  A silent
+room-noise capture peaks at only 23416 B - it would have fit inside the old,
+broken budget and "proved" a stack that in fact crashes on speech.
+src/main.c has PENDANT_BOOT_ENCODE_SELFTEST for this: set it to 1 and the
+firmware writes a 125 Hz sawtooth to the card at boot, encodes it, and prints
+the high-water mark.  It needs no microphone, no button and no network.  Leave
+it at 0; turn it on after any change to CONFIG_MAIN_STACK_SIZE, the libopus
+complexity setting, or OPUS_FRAME_MS.
+
+CONFIG_INIT_STACKS=y is enabled so main() can print its own high-water mark
+after every encode (report_main_stack_headroom() in src/main.c).  It costs no
+RAM - only a boot-time 0xAA fill - and it is the only way to keep this number
+honest.  CONFIG_HW_STACK_PROTECTION/CONFIG_BUILTIN_STACK_GUARD stay on: the
+ARMv8-M PSPLIM guard is what produced the precise diagnosis above.
+
+RAM cost: exactly the 8192 B of stack, and nothing else - CONFIG_INIT_STACKS
+and CONFIG_EXTRA_EXCEPTION_INFO are both free in static RAM.  Static RAM went
+135624 -> 143816 B of the 154264 B region, leaving 10448 B free (was 18640).
+Nothing in this firmware allocates dynamically beyond the 4 KiB
+system heap, so that headroom was previously unused.  The obvious place to look
+for the bytes back is the 40 KiB audio_workspace, and it does not work: during
+encode that buffer is NOT idle, it holds the ~22.9 KiB OpusEncoder plus the
+4 KiB Ogg page payload, so only ~13.5 KiB of it is spare - half of what the
+codec's stack needs.  The genuinely idle memory during encode is the 16 KiB
+I2S playback slab plus the 4 KiB mic staging buffer; reclaiming it would mean
+moving the codec onto its own thread with a stack unioned over both, which buys
+RAM that nothing currently wants at the cost of destabilising two paths that
+work.  Not done deliberately.
+
+The codec arena shares the microphone's 40 KiB RX slab because capture, encode,
+and reply decode are sequential.  Note the limit of that sharing: during encode
+the arena is NOT free, it holds the ~22.9 KiB OpusEncoder plus the 4 KiB Ogg
+page payload, so it cannot also host codec scratch or a codec stack.

@@ -10,10 +10,13 @@ import {
   WORK_POLL_INTERVAL_MS,
 } from './bridgeConfig.js'
 import {
+  spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
 } from './pendantSpeech.js'
 import { synchronizeProductState } from './productSyncClient.js'
+import { classifyPlan } from './actionRisk.js'
+import { stripImageBytes } from './redaction.js'
 
 const relayHeaders = {
   'Content-Type': 'application/json',
@@ -151,7 +154,9 @@ async function pollForWork() {
   return payload.work ?? null
 }
 
-async function handleWork(work) {
+// Exported for the regression test that drives a full screenshot job and
+// asserts nothing pixel-shaped reaches the relay.
+export async function handleWork(work) {
   console.log(`[bridge] Processing ${work.type} job ${work.jobId}`)
   const observablePipeline =
     work.type === 'plan' || work.type === 'execute'
@@ -206,6 +211,77 @@ async function handleWork(work) {
           responseCharacters: spokenTextForResult(plan).length,
         },
       })
+
+      // A pendant command has no confirm button, so the plan is useless unless
+      // the safe part of it actually runs.
+      const verdict = classifyPlan(plan.actions)
+      if (verdict.autoRun) {
+        const executionStartedAt = Date.now()
+        await reportPipelineEvent(work, {
+          stage: 'agent',
+          status: 'active',
+          label: 'Running the plan on this Mac',
+          detail: `Executing ${plan.actions.length} action(s) hands-free.`,
+        })
+        try {
+          const execution = await callLocalAgent('/execute', {
+            method: 'POST',
+            body: {
+              command: work.command,
+              actions: plan.actions,
+              sessionId: work.sessionId,
+              planMeta: { planner: plan.planner ?? null, source: 'pendant' },
+              source: 'pendant',
+            },
+          })
+          // Already free of image bytes — callLocalAgent strips them — which
+          // matters because this object is spread into the relay job result.
+          plan.execution = execution
+          plan.executed = execution?.ok !== false
+          // The planner wrote its reply before anything ran, so it can only
+          // describe intent. Speak what actually happened instead.
+          plan.response = spokenConfirmation(plan, execution)
+          await reportPipelineEvent(work, {
+            stage: 'agent',
+            status: plan.executed ? 'done' : 'failed',
+            label: plan.executed ? 'Plan executed on this Mac' : 'Execution failed',
+            detail: `Finished in ${Date.now() - executionStartedAt} ms.`,
+            text: spokenTextForResult(plan),
+            meta: { results: execution?.results ?? null },
+          })
+        } catch (executionError) {
+          plan.executed = false
+          plan.executionError = executionError.message
+          // Always tell the owner what failed — an optimistic planner response
+          // ("Opening Outlook") must not be the last thing the pendant says.
+          plan.response = `That didn't work: ${executionError.message}`
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180)
+          await reportPipelineEvent(work, {
+            stage: 'agent',
+            status: 'failed',
+            label: 'Execution failed',
+            detail: executionError.message,
+            text: plan.response,
+          })
+        }
+      } else if (Array.isArray(plan.actions) && plan.actions.length) {
+        plan.executed = false
+        // Array of blocked actions (not a boolean) — dashboard and tests read it.
+        plan.awaitingApproval = verdict.blocked
+        plan.response =
+          spokenTextForResult({ ...plan, awaitingApproval: true }) ||
+          'Waiting for your approval on the dashboard.'
+        await reportPipelineEvent(work, {
+          stage: 'agent',
+          status: 'waiting',
+          label: 'Waiting for your approval',
+          detail: verdict.reason,
+          text: plan.response,
+          meta: { blocked: verdict.blocked },
+        })
+      }
 
       const speechStartedAt = Date.now()
       await reportPipelineEvent(work, {
@@ -505,7 +581,12 @@ async function completeWork(jobId, { ok, result, error }) {
   const response = await fetch(`${RELAY_URL}/v1/bridge/work/${jobId}/result`, {
     method: 'POST',
     headers: relayHeaders,
-    body: JSON.stringify({ ok, result, error }),
+    // The relay stores this body verbatim in D1 and hands it back to every API
+    // consumer, so this is the last place to catch image bytes before they
+    // leave the owner's machine for good. `callLocalAgent` already stripped
+    // them; this is the belt to that suspenders, and it covers every work type
+    // including agent_proxy, whose result shape is whatever path was proxied.
+    body: JSON.stringify({ ok, result: stripImageBytes(result), error }),
   })
   const raw = await response.text()
   let payload
@@ -558,7 +639,12 @@ async function callLocalAgent(path, { method = 'POST', body } = {}) {
     throw new Error(payload.error ?? `Local agent ${method} ${path} failed.`)
   }
 
-  return payload
+  // The agent's HTTP response carries screenshot bytes for its in-process
+  // callers (the ops dashboard, the computer-use loop). The bridge is not one
+  // of them: it is the cloud-facing process, and everything it holds ends up in
+  // a relay job result, a pipeline event or a state snapshot. Drop the pixels
+  // on the way in, so no later code path has any to forward.
+  return stripImageBytes(payload)
 }
 
 function sleep(ms) {

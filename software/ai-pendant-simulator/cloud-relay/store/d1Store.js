@@ -4,6 +4,12 @@ import {
   PRODUCT_SYNC_SCHEMA_VERSION,
   recordVersionKey,
 } from '../../shared/productSync.js'
+import {
+  likePatternForSearch,
+  normalizeJobCursor,
+  normalizeJobListLimit,
+  normalizeJobSearch,
+} from './jobQuery.js'
 
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 const PRODUCT_BATCH_SIZE = 80
@@ -530,26 +536,89 @@ export function createD1Store(db) {
       return parseRecord(row)
     },
 
-    async listJobs({ type = null, limit = 40 } = {}) {
-      const safeLimit = Math.min(Math.max(Number(limit) || 40, 1), 100)
-      const query = type
-        ? db
-            .prepare(
-              `SELECT data FROM relay_jobs
+    async listJobs({ type = null, limit = 40, before = null, search = null } = {}) {
+      const safeLimit = normalizeJobListLimit(limit)
+      const cursor = normalizeJobCursor(before)
+      const needle = normalizeJobSearch(search)
+
+      // Keep the legacy statements byte-identical when no cursor or search is
+      // supplied: every existing caller keeps its exact query plan, and the
+      // json_extract() path is only reached by the new history routes.
+      if (!cursor && !needle) {
+        const query = type
+          ? db
+              .prepare(
+                `SELECT data FROM relay_jobs
                WHERE type = ?1
                ORDER BY created_at DESC
                LIMIT ?2`,
-            )
-            .bind(type, safeLimit)
-        : db
-            .prepare(
-              `SELECT data FROM relay_jobs
+              )
+              .bind(type, safeLimit)
+          : db
+              .prepare(
+                `SELECT data FROM relay_jobs
                ORDER BY created_at DESC
                LIMIT ?1`,
-            )
-            .bind(safeLimit)
-      const { results = [] } = await query.all()
+              )
+              .bind(safeLimit)
+        const { results = [] } = await query.all()
+        return results.map(parseRecord).filter(Boolean)
+      }
+
+      const conditions = []
+      const bindings = []
+      const next = () => `?${bindings.length + 1}`
+
+      if (type) {
+        conditions.push(`type = ${next()}`)
+        bindings.push(type)
+      }
+      if (cursor) {
+        const createdAtParam = next()
+        bindings.push(cursor.createdAt)
+        const cursorCreatedAtParam = next()
+        bindings.push(cursor.createdAt)
+        const jobIdParam = next()
+        bindings.push(cursor.jobId)
+        conditions.push(
+          `(created_at < ${createdAtParam} OR (created_at = ${cursorCreatedAtParam} AND job_id < ${jobIdParam}))`,
+        )
+      }
+      if (needle) {
+        const pattern = likePatternForSearch(needle)
+        const commandParam = next()
+        bindings.push(pattern)
+        const transcriptParam = next()
+        bindings.push(pattern)
+        const responseParam = next()
+        bindings.push(pattern)
+        conditions.push(
+          `(lower(COALESCE(json_extract(data, '$.command'), '')) LIKE ${commandParam} ESCAPE '\\'
+            OR lower(COALESCE(json_extract(data, '$.transcript'), '')) LIKE ${transcriptParam} ESCAPE '\\'
+            OR lower(COALESCE(json_extract(data, '$.result.response'), '')) LIKE ${responseParam} ESCAPE '\\')`,
+        )
+      }
+
+      const limitParam = next()
+      bindings.push(safeLimit)
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_jobs
+           WHERE ${conditions.join(' AND ')}
+           ORDER BY created_at DESC, job_id DESC
+           LIMIT ${limitParam}`,
+        )
+        .bind(...bindings)
+        .all()
       return results.map(parseRecord).filter(Boolean)
+    },
+
+    async deleteJob(jobId) {
+      const result = await db
+        .prepare('DELETE FROM relay_jobs WHERE job_id = ?1')
+        .bind(jobId)
+        .run()
+      return Number(result?.meta?.changes || 0) > 0
     },
 
     async updateJob(jobId, patch) {

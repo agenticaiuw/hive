@@ -63,7 +63,7 @@ const worker = {
     if (!publicAsset && !(await hasValidSession(request, env))) {
       if (url.pathname.startsWith("/api/")) {
         return Response.json(
-          { ok: false, error: "Sign in to Mission Control." },
+          { ok: false, error: "Sign in to the dashboard." },
           { status: 401 },
         );
       }
@@ -96,7 +96,7 @@ export default worker;
 async function login(request: Request, env: Env): Promise<Response> {
   if (!hasSecureAuthConfiguration(env)) {
     return Response.json(
-      { ok: false, error: "Mission Control authentication is not configured." },
+      { ok: false, error: "Dashboard authentication is not configured." },
       {
         status: 503,
         headers: { "Cache-Control": "no-store" },
@@ -242,7 +242,7 @@ function safeReturnTo(value: unknown): string {
     return "/";
   }
 
-  const base = new URL("https://mission-control.invalid/");
+  const base = new URL("https://dashboard.invalid/");
   const destination = new URL(raw, base);
   if (destination.origin !== base.origin) {
     return "/";

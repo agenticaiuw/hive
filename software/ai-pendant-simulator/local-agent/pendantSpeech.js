@@ -13,6 +13,10 @@ const MAX_SPOKEN_CHARACTERS = 180
 const SPEECH_RATE_WORDS_PER_MINUTE = 210
 const FADE_OUT_SAMPLES = Math.round(PENDANT_SPEECH_SAMPLE_RATE * 0.1)
 
+/**
+ * What the pendant should say for a result. Always returns non-empty text —
+ * a silent success is indistinguishable from a hang on a voice-first device.
+ */
 export function spokenTextForResult(result) {
   const value = result && typeof result === 'object' ? result : {}
   const direct = [
@@ -20,12 +24,25 @@ export function spokenTextForResult(result) {
     value.summary,
     value.message,
     typeof value.result === 'string' ? value.result : '',
+    value.executionError,
+    value.error,
   ]
     .map((candidate) => String(candidate || '').replace(/\s+/g, ' ').trim())
     .find(Boolean)
 
   if (direct) {
     return direct.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
+  if (
+    value.awaitingApproval === true ||
+    (Array.isArray(value.awaitingApproval) && value.awaitingApproval.length)
+  ) {
+    return 'Waiting for your approval on the dashboard.'
+  }
+
+  if (value.executed === false && !value.awaitingApproval) {
+    return "That didn't finish on the Mac."
   }
 
   const labels = Array.isArray(value.actions)
@@ -39,7 +56,7 @@ export function spokenTextForResult(result) {
     : []
 
   if (!labels.length) {
-    return ''
+    return 'Done.'
   }
 
   const prefix = value.actions.some((action) => action?.requiresConfirmation)
@@ -109,10 +126,13 @@ export function extractWavePcm(wave) {
 }
 
 export function synthesizePendantSpeech(result) {
-  const text = spokenTextForResult(result)
-  if (!text) {
-    return result
-  }
+  // spokenTextForResult always returns text; keep a belt-and-braces fallback
+  // so a future regression cannot ship silent results to the pendant.
+  const text = spokenTextForResult(result) || 'Done.'
+  const resultWithText =
+    result && typeof result === 'object' && !String(result.response || '').trim()
+      ? { ...result, response: text }
+      : result
 
   const temporaryDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'ai-pendant-speech-'),
@@ -161,7 +181,8 @@ export function synthesizePendantSpeech(result) {
     const opus = encodePendantSpeechOpus(pcm)
 
     return {
-      ...result,
+      ...resultWithText,
+      response: String(resultWithText?.response || text),
       pendantSpeech: {
         format: 's16le',
         sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
@@ -253,4 +274,42 @@ function applyFadeOut(pcm) {
     const scaled = Math.round((sample * (fadeSamples - index - 1)) / fadeSamples)
     pcm.writeInt16LE(scaled, offset)
   }
+}
+
+// After actions run, the pendant should say what happened, not what was
+// planned — and it must always say something, even for a silent action.
+export function spokenConfirmation(plan, execution) {
+  const results = Array.isArray(execution?.results) ? execution.results : []
+  const failures = results.filter((entry) => entry?.ok === false)
+  const spoken = []
+
+  for (const entry of results) {
+    const message = String(entry?.message || '').replace(/\s+/g, ' ').trim()
+    if (message && entry?.ok !== false) spoken.push(message)
+  }
+
+  if (failures.length) {
+    const reason = String(
+      failures[0]?.reason || failures[0]?.message || 'it did not complete',
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+    return `That didn't work: ${reason}`.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
+  const planned = String(plan?.response || '').replace(/\s+/g, ' ').trim()
+  if (spoken.length) {
+    return spoken.join('. ').slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+  if (planned) return planned.slice(0, MAX_SPOKEN_CHARACTERS)
+
+  const labels = Array.isArray(plan?.actions)
+    ? plan.actions
+        .map((action) => String(action?.label || action?.type || '').trim())
+        .filter(Boolean)
+    : []
+  if (labels.length) {
+    return `Done: ${labels.join(', ')}`.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+  return 'Done.'
 }

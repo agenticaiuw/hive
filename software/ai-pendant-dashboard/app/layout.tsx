@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const title = "AI Pendant Mission Control";
+const title = "AI Pendant Dashboard";
 const description =
   "Live Cloudflare, Mac bridge, microphone, and voice pipeline diagnostics for the AI Pendant.";
 

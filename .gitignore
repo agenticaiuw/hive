@@ -27,17 +27,21 @@ dist/
 dist-ssr/
 .next/
 .vinext/
+.svelte-kit/
 .wrangler/
 .vercel/
 coverage/
+*.tsbuildinfo
+
+# Rust
+target/
+**/target/
 
 # Zephyr / Nordic
 build/
 build-*/
 !software/airpods-control/build/
 !software/airpods-control/build/sites-vite-plugin.ts
-!software/ai-pendant-dashboard/build/
-!software/ai-pendant-dashboard/build/sites-vite-plugin.ts
 
 # PlatformIO / Python
 .pio/

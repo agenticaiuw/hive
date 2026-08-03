@@ -1,4 +1,4 @@
-# AI Pendant Mission Control
+# AI Pendant Dashboard
 
 App-authenticated dashboard for the AI Pendant hardware and cloud pipeline.
 
@@ -16,12 +16,12 @@ The browser never receives the relay API key. The server-side dashboard route
 reads `RELAY_URL` and `RELAY_API_KEY` from hosted runtime settings, then proxies
 snapshot requests through the authenticated Cloudflare relay.
 
-Mission Control deploys to the `ai-pendant-dashboard` Cloudflare Worker
+The dashboard deploys to the `ai-pendant-dashboard` Cloudflare Worker
 (`npm run deploy:cloudflare`). The `ai-pendant-mission-control.*.workers.dev`
 relay URL is the protected machine API, so opening it directly in a browser is
 expected to return an authentication error.
 
-The dashboard URL can be public because Mission Control enforces its
+The dashboard URL can be public because the dashboard enforces its
 own pairing-key session before serving the dashboard or any API route. Set
 `DASHBOARD_ACCESS_KEY` to a random value of at least 16 characters and
 `DASHBOARD_SESSION_SECRET` to an independent random value of at least 32

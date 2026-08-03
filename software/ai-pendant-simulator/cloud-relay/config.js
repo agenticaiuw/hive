@@ -12,6 +12,28 @@ export const BRIDGE_POLL_TIMEOUT_MS = Number(
 )
 export const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 1000 * 60 * 60 * 24)
 
+/*
+ * Voice recordings are the owner's private audio, so they outlive the 24h
+ * relay job queue and are never touched by pruneExpiredJobs(). This is the one
+ * knob that decides how long they stay: 30 days by default. A blank or
+ * non-positive value falls back to the default on purpose — an accidental
+ * `AUDIO_RETENTION_MAX_AGE_MS=0` must never mean "erase everything".
+ */
+export const AUDIO_RETENTION_DEFAULT_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30
+export const AUDIO_RETENTION_MAX_AGE_MS =
+  Number(process.env.AUDIO_RETENTION_MAX_AGE_MS) > 0
+    ? Number(process.env.AUDIO_RETENTION_MAX_AGE_MS)
+    : AUDIO_RETENTION_DEFAULT_MAX_AGE_MS
+/*
+ * Retention sweeps are opt-in. With this unset the sweep endpoint reports what
+ * it *would* remove and deletes nothing, so enabling retention is a deliberate
+ * two-step act (set the flag, then post dryRun:false).
+ */
+export const AUDIO_RETENTION_SWEEP_ENABLED =
+  String(process.env.AUDIO_RETENTION_SWEEP_ENABLED || '')
+    .trim()
+    .toLowerCase() === 'true'
+
 // Used for mobile voice on cellular (browser Web Speech often fails off Wi‑Fi).
 export const LLM_API_KEY = process.env.LLM_API_KEY || ''
 export const LLM_API_BASE_URL =

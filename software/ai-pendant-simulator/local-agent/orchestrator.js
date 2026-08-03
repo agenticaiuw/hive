@@ -324,6 +324,7 @@ export async function orchestrateExecute({
   const { appendLog } = await import('./logger.js')
   const { updateContextGraphFromExecution } = await import('./contextGraph.js')
   const { throwIfAborted } = await import('./jobControl.js')
+  const { stripImageBytes } = await import('./screenCapture.js')
 
   const trace = startThinkingTrace({
     command,
@@ -388,11 +389,21 @@ export async function orchestrateExecute({
       status: 'active',
     })
 
-    const logs = appendLog({ command, actions, results, status })
+    // Screenshot bytes must never reach anything durable: the activity log, the
+    // context graph and the job store all persist to disk, and the context
+    // graph is what the cloud relay syncs. Strip once, here, at the choke point
+    // every sink flows through.
+    const persistableResults = stripImageBytes(results)
+    const logs = appendLog({
+      command,
+      actions,
+      results: persistableResults,
+      status,
+    })
     const contextGraph = updateContextGraphFromExecution({
       command,
       actions,
-      results,
+      results: persistableResults,
     })
 
     let workingProject = null
@@ -403,7 +414,7 @@ export async function orchestrateExecute({
       workingProject = refreshWorkingMemoryFromExecution({
         command,
         actions,
-        results,
+        results: persistableResults,
       })
     }
 

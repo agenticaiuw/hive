@@ -25,6 +25,7 @@ import {
   inferOverlayRegion,
   showScreenOverlay,
 } from './screenOverlay.js'
+import * as computerUse from './computerUse.js'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -85,7 +86,48 @@ export async function executeComputerAction(action) {
     case 'send_email':
       return sendEmail(action)
     case 'screenshot':
-      return takeScreenshot(action)
+      return computerUse.takeScreenshot(action)
+    case 'zoom':
+      return computerUse.zoomRegion(action)
+    // Accessibility tier — preferred over the pixel tier below.
+    case 'ui_snapshot':
+      return computerUse.uiSnapshot(action)
+    case 'ui_find':
+      return computerUse.uiFind(action)
+    case 'ui_click':
+      return computerUse.uiClick(action)
+    case 'ui_menu':
+      return computerUse.uiMenu(action)
+    case 'ui_wait_for':
+      return computerUse.uiWaitFor(action)
+    case 'ui_hit_test':
+      return computerUse.uiHitTest(action)
+    // Pixel tier.
+    case 'mouse_move':
+      return computerUse.mouseMove(action)
+    case 'mouse_click':
+      return computerUse.mouseClick(action)
+    case 'mouse_double_click':
+      return computerUse.mouseClick(action, { defaultClicks: 2 })
+    case 'mouse_right_click':
+      return computerUse.mouseClick(action, { defaultButton: 'right' })
+    case 'mouse_down':
+      return computerUse.mouseButton(action, 'down')
+    case 'mouse_up':
+      return computerUse.mouseButton(action, 'up')
+    case 'mouse_drag':
+      return computerUse.mouseDrag(action)
+    case 'scroll':
+    case 'mouse_scroll':
+      return computerUse.mouseScroll(action)
+    case 'cursor_position':
+      return computerUse.readCursorPosition(action)
+    case 'list_displays':
+      return computerUse.readDisplays(action)
+    case 'check_input_permissions':
+      return computerUse.readInputPermissions(action)
+    case 'computer_use_task':
+      return runComputerUseTaskAction(action)
     case 'get_clipboard':
       return getClipboard(action)
     case 'copy_to_clipboard':
@@ -355,14 +397,24 @@ async function openApp(action) {
   for (const appName of uniqueCandidates) {
     try {
       await execFileAsync('open', ['-a', appName])
+      // `open -a` can exit 0 without the app actually becoming frontmost
+      // (wrong name match, launch services no-op, already-crashed app). Verify
+      // the process is alive before telling the owner it opened.
+      const running = await waitForAppProcess(appName, 2500)
+      if (!running) {
+        lastError = new Error(
+          `"${appName}" did not stay open after launch — check that it is installed and can start.`,
+        )
+        continue
+      }
       if (normalizeLoose(appName) !== normalizeLoose(requested)) {
         return success(
           action,
-          `Opened ${appName} (closest installed match for "${requested}")`,
+          `Opened ${appName} on Mac (closest installed match for "${requested}")`,
         )
       }
 
-      return success(action, `Opened ${appName}`)
+      return success(action, `Opened ${appName} on Mac`)
     } catch (error) {
       lastError = error
     }
@@ -372,6 +424,54 @@ async function openApp(action) {
     lastError?.message ||
       `Could not open "${requested}". No close installed match was found.`,
   )
+}
+
+/**
+ * Poll System Events for a process whose name matches the app (case-insensitive,
+ * ignoring a trailing ".app"). Returns true once seen, false after the timeout.
+ */
+async function waitForAppProcess(appName, timeoutMs = 2500) {
+  const needle = normalizeLoose(appName)
+  if (!needle) return false
+  const deadline = Date.now() + timeoutMs
+  // pgrep -i -f matches the app name case-insensitively against the cmdline.
+  const pgrepPattern = needle.replace(/[^a-z0-9 ._+-]/gi, '')
+
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execFileAsync(
+        'osascript',
+        [
+          '-e',
+          'tell application "System Events" to get name of every process whose background only is false',
+        ],
+        { timeout: 1500 },
+      )
+      const names = String(stdout || '')
+        .split(',')
+        .map((name) => normalizeLoose(name))
+      if (
+        names.some(
+          (name) =>
+            name === needle || name.includes(needle) || needle.includes(name),
+        )
+      ) {
+        return true
+      }
+    } catch {
+      // Fall through to pgrep if System Events is denied.
+      if (pgrepPattern) {
+        try {
+          await execFileAsync('pgrep', ['-if', pgrepPattern], { timeout: 1000 })
+          return true
+        } catch {
+          // not running yet
+        }
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return false
 }
 
 function normalizeLoose(value) {
@@ -459,10 +559,39 @@ async function movePath(action) {
 
 async function typeText(action) {
   const text = String(action.params?.text ?? '')
-  const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  const script = `tell application "System Events" to keystroke "${escaped}"`
-  await execFileAsync('osascript', ['-e', script])
-  return success(action, `Typed ${text.length} characters into the frontmost app`)
+
+  if (!text) {
+    throw new Error('type_text requires a non-empty text value.')
+  }
+
+  try {
+    await computerUse.typeTextViaHelper(text, {
+      perCharDelayMs: action.params?.perCharDelayMs,
+    })
+    return success(action, `Typed ${text.length} characters into the frontmost app`, {
+      characters: text.length,
+      method: 'cgevent',
+    })
+  } catch (error) {
+    // The secure-input interlock is a refusal, not a transport failure — never
+    // retry it through AppleScript.
+    if (error.code === 'SECURE_INPUT') {
+      throw error
+    }
+
+    // Degrade rather than break on a machine where the helper cannot build.
+    // AppleScript `keystroke` mangles newlines and unicode, hence the caveat.
+    const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    await execFileAsync('osascript', [
+      '-e',
+      `tell application "System Events" to keystroke "${escaped}"`,
+    ])
+    return success(
+      action,
+      `Typed ${text.length} characters into the frontmost app (AppleScript fallback; unicode and newlines may be unreliable)`,
+      { characters: text.length, method: 'applescript', fallbackReason: error.message },
+    )
+  }
 }
 
 async function pressKeys(action) {
@@ -472,9 +601,24 @@ async function pressKeys(action) {
     throw new Error('press_keys requires a keys value like cmd+c or enter.')
   }
 
-  const script = buildKeyScript(keys)
-  await execFileAsync('osascript', ['-e', script])
-  return success(action, `Pressed ${keys}`)
+  try {
+    await computerUse.pressKeysViaHelper(keys, { repeat: action.params?.repeat })
+    return success(action, `Pressed ${keys}`, { keys, method: 'cgevent' })
+  } catch (error) {
+    if (error.code === 'SECURE_INPUT') {
+      throw error
+    }
+
+    // buildKeyScript only knows cmd/ctrl/alt/shift and seven special keys, so
+    // this fallback is genuinely narrower — it throws on arrows and F-keys.
+    const script = buildKeyScript(keys)
+    await execFileAsync('osascript', ['-e', script])
+    return success(action, `Pressed ${keys}`, {
+      keys,
+      method: 'applescript',
+      fallbackReason: error.message,
+    })
+  }
 }
 
 async function sendEmail(action) {
@@ -510,21 +654,52 @@ end tell`
   )
 }
 
-async function takeScreenshot(action) {
-  const targetPath = resolveUserPath(
-    action.params?.path ??
-      path.join(workspacePath, `screenshot-${Date.now()}.png`),
+// Entry point for the bounded perceive-act loop. This is the one action the
+// user confirms; the loop itself runs entirely server-side, so screenshot bytes
+// never cross the agent's own HTTP surface or its 2mb JSON body limit.
+async function runComputerUseTaskAction(action) {
+  const { runComputerUseTask, computerUseEnabled, visionUploadConsented } = await import(
+    './computerUseLoop.js'
   )
-  fs.mkdirSync(path.dirname(targetPath), { recursive: true })
-  const args = ['-x', targetPath]
+  const { isVisionConfigured, requestLlmMessages, visionModelName } = await import(
+    './llmPlanner.js'
+  )
 
-  if (action.params?.interactive) {
-    await execFileAsync('screencapture', ['-i', targetPath])
-  } else {
-    await execFileAsync('screencapture', args)
+  if (!computerUseEnabled()) {
+    throw new Error(
+      'The computer-use loop is disabled. Set PENDANT_COMPUTER_USE_ENABLED=1 to allow the agent to drive the screen.',
+    )
   }
 
-  return success(action, `Saved screenshot to ${targetPath}`, { path: targetPath })
+  if (!isVisionConfigured()) {
+    throw new Error(
+      'No vision model is configured. Set LLM_VISION_MODEL to a multimodal model on your LLM_API_BASE_URL.',
+    )
+  }
+
+  // Screenshots of the desktop are uploaded to a third-party inference
+  // provider. That is a materially different privacy posture from the
+  // text-only agent, so it is opt-in and never implied by FULL_CONTROL_MODE.
+  if (!visionUploadConsented()) {
+    throw new Error(
+      `Screenshots would be uploaded to ${new URL(process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1').host} (model ${visionModelName()}). Set PENDANT_VISION_UPLOAD_CONSENT=1 to allow that.`,
+    )
+  }
+
+  const { executeActions } = await import('./executor.js')
+  const result = await runComputerUseTask(action.params ?? {}, {
+    requestMessages: ({ messages, hasImages }) =>
+      requestLlmMessages({ messages, hasImages }),
+    execute: executeActions,
+  })
+
+  return {
+    action,
+    ok: result.ok,
+    status: result.ok ? 'success' : result.status,
+    message: result.message,
+    ...result,
+  }
 }
 
 async function getClipboard(action) {

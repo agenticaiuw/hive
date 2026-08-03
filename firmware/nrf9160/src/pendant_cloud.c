@@ -228,10 +228,17 @@ static int open_relay_socket(void)
 	 * occasionally refuse one address while the others remain reachable,
 	 * so try every answer and refresh DNS before failing the voice cycle.
 	 */
+	int64_t lat_socket_started = k_uptime_get();
+
 	for (unsigned int attempt = 1U; attempt <= 3U; ++attempt) {
 		struct addrinfo *result = NULL;
+		int64_t lat_dns_started = k_uptime_get();
 		int error = getaddrinfo(RELAY_HOSTNAME, RELAY_PORT,
 					&hints, &result);
+		int64_t lat_dns_ms = k_uptime_get() - lat_dns_started;
+
+		printk("LAT dns_ms=%lld attempt=%u error=%d\n",
+		       lat_dns_ms, attempt, error);
 
 		if (error != 0 || result == NULL) {
 			printk("Relay DNS attempt %u failed: %d errno=%d\n",
@@ -262,12 +269,17 @@ static int open_relay_socket(void)
 					continue;
 				}
 
+				int64_t lat_tls_started = k_uptime_get();
+
 				error = configure_tls_socket(fd);
 				if (error == 0 &&
 				    connect(fd, candidate->ai_addr,
 					    candidate->ai_addrlen) == 0) {
 					printk("Relay TLS connected on attempt %u.%u\n",
 					       attempt, candidate_number);
+					printk("LAT tls_connect_ms=%lld socket_total_ms=%lld\n",
+					       k_uptime_get() - lat_tls_started,
+					       k_uptime_get() - lat_socket_started);
 					freeaddrinfo(result);
 					return fd;
 				}
@@ -519,11 +531,14 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 	body_bytes = (size_t)prefix_length + base64_bytes +
 		     sizeof(transcription_suffix) - 1U;
 
+	int64_t lat_upload_started = k_uptime_get();
+
 	fd = open_relay_socket();
 	if (fd < 0) {
 		printk("Cloud upload could not open relay socket: %d\n", fd);
 		return fd;
 	}
+	int64_t lat_upload_socket_done = k_uptime_get();
 
 	error = send_http_post_header(fd, TRANSCRIBE_PATH,
 				      "application/json", body_bytes);
@@ -582,7 +597,16 @@ static int post_recording(const char *audio_path, uint32_t source_pcm_bytes)
 	pendant_cloud_uploaded_pcm_bytes = source_pcm_bytes;
 	printk("Uploaded %u Ogg Opus bytes representing %u PCM bytes\n",
 	       bytes_read_total, pendant_cloud_uploaded_pcm_bytes);
+	int64_t lat_body_sent = k_uptime_get();
+
 	error = receive_http_response(fd);
+	printk("LAT upload socket_ms=%lld body_send_ms=%lld "
+	       "server_wait_ms=%lld total_ms=%lld body_bytes=%u\n",
+	       lat_upload_socket_done - lat_upload_started,
+	       lat_body_sent - lat_upload_socket_done,
+	       k_uptime_get() - lat_body_sent,
+	       k_uptime_get() - lat_upload_started,
+	       (uint32_t)body_bytes);
 
 out:
 	close(fd);
@@ -731,10 +755,13 @@ static int dispatch_transcript_to_mac(uint32_t sample_rate)
 	body_length = sizeof(plan_prefix) - 1U +
 		      transcript_length + (size_t)suffix_length;
 
+	int64_t lat_dispatch_started = k_uptime_get();
+
 	fd = open_relay_socket();
 	if (fd < 0) {
 		return fd;
 	}
+	int64_t lat_dispatch_socket_done = k_uptime_get();
 
 	error = send_http_post_header(fd, MAC_PLAN_PATH,
 				      "application/json", body_length);
@@ -750,6 +777,10 @@ static int dispatch_transcript_to_mac(uint32_t sample_rate)
 	if (error == 0) {
 		error = receive_http_response(fd);
 	}
+	printk("LAT dispatch socket_ms=%lld rest_ms=%lld total_ms=%lld\n",
+	       lat_dispatch_socket_done - lat_dispatch_started,
+	       k_uptime_get() - lat_dispatch_socket_done,
+	       k_uptime_get() - lat_dispatch_started);
 
 	close(fd);
 	return error;
@@ -841,10 +872,14 @@ int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 		return -EOVERFLOW;
 	}
 
+	int64_t lat_announce_started = k_uptime_get();
+
 	fd = open_relay_socket();
 	if (fd < 0) {
 		return fd;
 	}
+	int64_t lat_announce_socket_done = k_uptime_get();
+
 	error = send_http_post_header(
 		fd, "/v1/pendant/announce", "application/json",
 		(size_t)body_length);
@@ -864,6 +899,10 @@ int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 	}
 	printk("Recording announced: result=%d job=%s\n",
 	       error, announced_job_id[0] != '\0' ? announced_job_id : "-");
+	printk("LAT announce socket_ms=%lld rest_ms=%lld total_ms=%lld\n",
+	       lat_announce_socket_done - lat_announce_started,
+	       k_uptime_get() - lat_announce_socket_done,
+	       k_uptime_get() - lat_announce_started);
 	return error;
 }
 

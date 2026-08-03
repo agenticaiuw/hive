@@ -14,6 +14,7 @@ export function createAudioCapture({
   language,
   transcript,
   transcriptionModel,
+  planJobId = null,
   status = 'completed',
 }) {
   const now = new Date().toISOString()
@@ -22,6 +23,7 @@ export function createAudioCapture({
     jobId: createJobId(),
     type: 'audio_capture',
     status,
+    planJobId,
     audioBase64,
     audioRef,
     audioStorage,
@@ -141,33 +143,60 @@ export function publicJob(job) {
   }
 }
 
+// A job earns a spot in the operator feed when the owner started it directly:
+// pendant audio buffered to microSD, or a command sent from a signed-in
+// dashboard browser (spoken or typed).
+const VOICE_RUN_ORIGINS = new Set(['microsd', 'dashboard'])
+
 export function voiceRunForJob(job) {
   if (!job || job.type !== 'plan') return null
   const telemetry = job.inputTelemetry
-  if (String(telemetry?.storage || '').toLowerCase() !== 'microsd') return null
+  const origin = String(telemetry?.storage || '').toLowerCase()
+  if (!VOICE_RUN_ORIGINS.has(origin)) return null
+  const typed = String(telemetry?.inputMode || '') === 'typed'
 
   const events = []
   const hasTranscript = /[\p{L}\p{N}]/u.test(String(job.command || ''))
   const transcriptionPending = job.status === 'transcribing'
-  events.push({
-    eventId: `cloud-${job.jobId}-transcription`,
-    stage: 'transcription',
-    status: transcriptionPending ? 'active' : hasTranscript ? 'done' : 'failed',
-    label: transcriptionPending
-      ? 'Recording received; transcription running'
-      : hasTranscript
-        ? 'Transcript received from cloud'
-        : 'Speech was not recognized',
-    detail: transcriptionPending
-      ? 'Cloudflare received the pendant recording and is transcribing it now.'
-      : hasTranscript
-        ? 'Speech-to-text completed before this job reached the Mac bridge.'
-        : job.error || 'Audio arrived, but speech-to-text did not return words.',
-    text: String(job.command || ''),
-    source: 'cloudflare',
-    meta: { inputTelemetry: telemetry },
-    at: job.createdAt,
-  })
+  events.push(
+    typed
+      ? {
+          eventId: `cloud-${job.jobId}-transcription`,
+          stage: 'transcription',
+          status: 'done',
+          label: 'Typed in the dashboard',
+          detail:
+            'Command typed on a signed-in device, so there was no audio to transcribe.',
+          text: String(job.command || ''),
+          source: 'dashboard',
+          meta: { inputTelemetry: telemetry },
+          at: job.createdAt,
+        }
+      : {
+          eventId: `cloud-${job.jobId}-transcription`,
+          stage: 'transcription',
+          status: transcriptionPending
+            ? 'active'
+            : hasTranscript
+              ? 'done'
+              : 'failed',
+          label: transcriptionPending
+            ? 'Recording received; transcription running'
+            : hasTranscript
+              ? 'Transcript received from cloud'
+              : 'Speech was not recognized',
+          detail: transcriptionPending
+            ? 'Cloudflare received the pendant recording and is transcribing it now.'
+            : hasTranscript
+              ? 'Speech-to-text completed before this job reached the Mac bridge.'
+              : job.error ||
+                'Audio arrived, but speech-to-text did not return words.',
+          text: String(job.command || ''),
+          source: 'cloudflare',
+          meta: { inputTelemetry: telemetry },
+          at: job.createdAt,
+        },
+  )
 
   const result = job.result && typeof job.result === 'object' ? job.result : null
   if (result) {
@@ -284,9 +313,14 @@ export function voiceRunForJob(job) {
   const playbackDone = events.some(
     (event) => event.stage === 'device_playback' && event.status === 'done',
   )
+  // Browser-originated runs never reach the pendant, so their finish line is
+  // the Mac's answer rather than I2S playback.
+  const dashboardDone =
+    origin === 'dashboard' &&
+    events.some((event) => event.stage === 'agent' && event.status === 'done')
   const status = ['failed', 'cancelled'].includes(job.status)
     ? 'failed'
-    : playbackDone
+    : playbackDone || dashboardDone
       ? 'completed'
       : 'processing'
 
@@ -295,6 +329,7 @@ export function voiceRunForJob(job) {
     kind: 'voice_command',
     command: String(job.command || ''),
     source: 'cloudflare',
+    origin,
     status,
     events,
     createdAt: job.createdAt,

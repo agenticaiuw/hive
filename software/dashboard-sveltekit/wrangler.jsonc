@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Same Worker name as the deployed React dashboard so a human cutover is a
+  // single `wrangler deploy` against the existing script.
+  "name": "ai-pendant-dashboard",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".svelte-kit/cloudflare"
+  },
+  "vars": {
+    "RELAY_URL": "https://ai-pendant-mission-control.your-subdomain.workers.dev"
+  },
+  // `ai-pendant-mission-control` is the live relay Worker's real name.
+  "services": [
+    {
+      "binding": "RELAY",
+      "service": "ai-pendant-mission-control",
+      "remote": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  // Escape hatch for machines without access to the remote relay Worker:
+  // `wrangler dev --env local` inherits everything except the service binding,
+  // so the server falls back to `fetch(RELAY_URL + path)`. Plain `npm run dev`
+  // (vite) needs no bindings at all and uses the same fallback.
+  // RELAY_API_KEY / DASHBOARD_ACCESS_KEY / DASHBOARD_SESSION_SECRET are
+  // secrets: `wrangler secret put <NAME>`. Never put them in this file.
+  "env": {
+    "local": {
+      "vars": {
+        "RELAY_URL": "https://ai-pendant-mission-control.your-subdomain.workers.dev"
+      }
+    }
+  }
+}

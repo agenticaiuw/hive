@@ -256,6 +256,55 @@ Set `FULL_CONTROL_MODE=false` to restore whitelist-only demo mode:
 - Pendant UI also has a lighter **Dashboard** panel for session turns
 - Sessions are stored on the home Mac at `AI-Pendant-Workspace/pendant-sessions.json`
 
+## Relay History, Playback & Memory APIs
+
+Every route below lives on the Cloudflare relay, sits behind the normal auth
+middleware, and requires the admin `RELAY_API_KEY` (the `/v1/ops/` prefix maps
+to the `admin` scope, so a per-device token can never reach them). The
+dashboard must keep proxying them server-side; a recording URL must never carry
+the key.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/ops/history?limit=&cursor=&q=&origin=` | Newest-first page of runs: transcript, origin (`microsd` / `dashboard`), status, spoken reply, timestamps, and whether a recording exists. |
+| `GET /v1/ops/history/:pipelineId` | One run: full event timeline, planned actions, execution results, and the spoken reply. Also served as `GET /v1/ops/voice-runs/:pipelineId`. |
+| `GET /v1/ops/history/:pipelineId/audio` | Streams that run's recording (R2, falling back to the inline D1 copy) with `Accept-Ranges: bytes` and `Cache-Control: private, no-store`. |
+| `DELETE /v1/ops/history/:pipelineId/audio` | Deletes one recording. |
+| `GET /v1/ops/memory?q=&sessionLimit=&turnLimit=` | Canonical `product_memory_entities` / `product_memory_relations` plus sessions and turns. Reads D1 directly, so it keeps working while the Mac bridge is offline. |
+| `GET /v1/ops/audio-retention` | Reports the retention policy and how many recordings are already past it. Read-only. |
+| `POST /v1/ops/audio-retention/sweep` | Expires old recordings in bulk. Dry-run by default. |
+
+Pagination is keyset based: `cursor` is the opaque `<createdAt>|<jobId>` value
+returned as `nextCursor`, so two runs sharing a millisecond cannot hide each
+other across a page boundary. `q` searches the transcript and the spoken reply.
+
+Every history response carries a `retention` block, because relay run records
+are pruned after `JOB_TTL_MS` (24 hours by default). Recordings, their
+transcripts, and `product_turns` outlive that window; the run timeline does
+not.
+
+### Audio retention policy
+
+Voice recordings are the owner's private audio and are deliberately exempt from
+the 24-hour queue cleanup, so they need their own policy:
+
+- `AUDIO_RETENTION_MAX_AGE_MS` — how long a recording is kept. Default 30 days.
+  A blank, zero, or negative value falls back to the default; an accidental
+  `0` must never mean "erase everything".
+- `AUDIO_RETENTION_SWEEP_ENABLED` — must be `true` before a sweep may delete
+  anything. Unset by default.
+
+Delete paths:
+
+1. **One run, on demand:** `DELETE /v1/ops/history/:pipelineId/audio` (or
+   `DELETE /v1/ops/audio-captures/:captureId/audio`). Removes the R2 object and
+   clears any inline Base64 copy, but keeps the capture row so the transcript
+   and history stay intact. Add `?mode=record` to drop the row as well.
+2. **Everything expired:** `POST /v1/ops/audio-retention/sweep`. Deletes only
+   when the request passes `{"dryRun": false}` **and** the deployment sets
+   `AUDIO_RETENTION_SWEEP_ENABLED=true`. Any other combination returns the list
+   of recordings it would have removed and touches nothing.
+
 ## Context Engineering
 
 - Recent turns (last 6–10) are injected into the LLM planner prompt

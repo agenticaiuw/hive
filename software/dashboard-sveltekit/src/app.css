@@ -1,0 +1,17 @@
+/*
+ * Entry stylesheet.
+ *
+ * `globals.css` is the redesigned dashboard stylesheet lifted verbatim from the
+ * React app (including its `@import "tailwindcss";` first line). It references
+ * `--font-geist-sans` / `--font-geist-mono` in a dozen places; Next supplied
+ * those through `next/font/google`, so here they are self-hosted through
+ * Fontsource and bound to the same two custom properties.
+ */
+@import "./globals.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+:root {
+  --font-geist-sans: "Geist Variable";
+  --font-geist-mono: "Geist Mono Variable";
+}

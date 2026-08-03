@@ -11,7 +11,11 @@
     "RELAY_PORT": "8787",
     "BRIDGE_POLL_TIMEOUT_MS": "25000",
     "JOB_TTL_MS": "86400000",
-    "AUDIO_BUCKET_PREFIX": "audio-captures"
+    "AUDIO_BUCKET_PREFIX": "audio-captures",
+    // Private voice recordings survive the 24h queue cleanup, so they carry
+    // their own window: 30 days. Sweeps stay off until deliberately enabled.
+    "AUDIO_RETENTION_MAX_AGE_MS": "2592000000",
+    "AUDIO_RETENTION_SWEEP_ENABLED": "false"
   },
   "r2_buckets": [
     {

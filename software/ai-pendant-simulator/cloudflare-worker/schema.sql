@@ -43,6 +43,12 @@ CREATE INDEX IF NOT EXISTS relay_jobs_queue
 CREATE INDEX IF NOT EXISTS relay_jobs_updated_at
   ON relay_jobs(updated_at ASC);
 
+-- Keyset pagination for /v1/ops/history and the audio retention sweep:
+-- newest-first within a type, tie-broken by job_id so a shared millisecond
+-- cannot hide a run across a page boundary.
+CREATE INDEX IF NOT EXISTS relay_jobs_type_history
+  ON relay_jobs(type, created_at DESC, job_id DESC);
+
 CREATE TABLE IF NOT EXISTS relay_state (
   state_key TEXT PRIMARY KEY,
   revision INTEGER NOT NULL DEFAULT 1,

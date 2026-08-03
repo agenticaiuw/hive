@@ -1,0 +1,43 @@
+{
+  // Side-by-side test deployment of the Rust/WASM relay.
+  //
+  // The worker NAME differs from the live JS worker on purpose
+  // ("ai-pendant-mission-control") so this can be deployed and exercised
+  // without touching the hostname the nRF9160 firmware has compiled in.
+  //
+  // Every binding below is byte-identical to the live worker's config so the
+  // Rust port reads and writes exactly the same D1 database and R2 bucket.
+  "name": "ai-pendant-relay-rust",
+  "workers_dev": true,
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-07-31",
+  // nodejs_compat is intentionally dropped: the Rust worker has no Node shim.
+  "build": {
+    "command": "cargo install -q worker-build --version 0.8.5 && worker-build --release"
+  },
+  "vars": {
+    "RELAY_PORT": "8787",
+    "BRIDGE_POLL_TIMEOUT_MS": "25000",
+    "JOB_TTL_MS": "86400000",
+    "AUDIO_BUCKET_PREFIX": "audio-captures"
+  },
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_BUCKET",
+      "bucket_name": "ai-pendant-audio"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-pendant-relay-db",
+      "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

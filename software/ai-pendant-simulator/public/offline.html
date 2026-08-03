@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AI Pendant — Offline</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #111318;
+        --muted: #5b6172;
+        --accent: #2f6feb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d0f14;
+          --fg: #f2f4f8;
+          --muted: #9aa3b8;
+          --accent: #6f9bff;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        text-align: center;
+      }
+      main {
+        max-width: 22rem;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.35rem;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+      }
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0.85rem 2rem;
+        font: inherit;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+      }
+      button:active {
+        opacity: 0.7;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Can't reach the dashboard</h1>
+      <p>AI Pendant needs a network connection to load your dashboard. Check your connection and try again.</p>
+      <button type="button" id="retry">Try again</button>
+    </main>
+    <script>
+      var DASHBOARD_URL = 'https://ai-pendant-dashboard.your-subdomain.workers.dev/'
+      document.getElementById('retry').addEventListener('click', function () {
+        window.location.replace(DASHBOARD_URL)
+      })
+      window.addEventListener('online', function () {
+        window.location.replace(DASHBOARD_URL)
+      })
+    </script>
+  </body>
+</html>

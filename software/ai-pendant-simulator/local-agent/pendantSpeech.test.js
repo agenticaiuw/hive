@@ -8,6 +8,7 @@ import {
   PENDANT_SPEECH_SAMPLE_RATE,
   encodePendantSpeechOpus,
   extractWavePcm,
+  spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
 } from './pendantSpeech.js'
@@ -34,6 +35,42 @@ test('falls back to a confirmation description for action plans', () => {
       ],
     }),
     'Ready for confirmation: Open Finder.',
+  )
+})
+
+test('never returns empty spoken text', () => {
+  assert.equal(spokenTextForResult({}), 'Done.')
+  assert.equal(spokenTextForResult(null), 'Done.')
+  assert.equal(
+    spokenTextForResult({ awaitingApproval: true }),
+    'Waiting for your approval on the dashboard.',
+  )
+  assert.equal(
+    spokenTextForResult({ executed: false, executionError: 'Outlook missing' }),
+    'Outlook missing',
+  )
+})
+
+test('spokenConfirmation always describes what happened', () => {
+  assert.equal(
+    spokenConfirmation(
+      { response: 'Opening Outlook', actions: [{ label: 'Open Outlook' }] },
+      {
+        results: [{ ok: true, message: 'Opened Microsoft Outlook on Mac' }],
+      },
+    ),
+    'Opened Microsoft Outlook on Mac',
+  )
+  assert.match(
+    spokenConfirmation(
+      { actions: [{ label: 'Open Outlook' }] },
+      { results: [{ ok: false, message: 'not installed' }] },
+    ),
+    /That didn't work/,
+  )
+  assert.equal(
+    spokenConfirmation({ actions: [{ label: 'Open Outlook' }] }, { results: [] }),
+    'Done: Open Outlook',
   )
 })
 

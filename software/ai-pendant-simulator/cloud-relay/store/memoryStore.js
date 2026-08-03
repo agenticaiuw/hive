@@ -3,6 +3,13 @@ import {
   mergeProductSync as mergeProductSyncDocuments,
   normalizeProductSync,
 } from '../../shared/productSync.js'
+import {
+  compareJobsNewestFirst,
+  jobIsBeforeCursor,
+  jobMatchesSearch,
+  normalizeJobCursor,
+  normalizeJobListLimit,
+} from './jobQuery.js'
 
 const jobs = new Map()
 const devices = new Map()
@@ -148,15 +155,20 @@ export function createMemoryStore() {
       return jobs.get(jobId) ?? null
     },
 
-    async listJobs({ type = null, limit = 40 } = {}) {
+    async listJobs({ type = null, limit = 40, before = null, search = null } = {}) {
       pruneExpiredJobs()
-      const safeLimit = Math.min(Math.max(Number(limit) || 40, 1), 100)
+      const safeLimit = normalizeJobListLimit(limit)
+      const cursor = normalizeJobCursor(before)
       return [...jobs.values()]
         .filter((job) => !type || job.type === type)
-        .sort((left, right) =>
-          String(right.createdAt).localeCompare(String(left.createdAt)),
-        )
+        .filter((job) => jobIsBeforeCursor(job, cursor))
+        .filter((job) => jobMatchesSearch(job, search))
+        .sort(compareJobsNewestFirst)
         .slice(0, safeLimit)
+    },
+
+    async deleteJob(jobId) {
+      return jobs.delete(jobId)
     },
 
     async updateJob(jobId, patch) {

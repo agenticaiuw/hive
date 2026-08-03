@@ -21,11 +21,8 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           P
         </div>
         <p className="kicker">AI Pendant</p>
-        <h1 id="login-title">Open Mission Control</h1>
-        <p className="login-copy">
-          Enter your pendant pairing code. This signs this browser into your
-          private device network without using a ChatGPT account.
-        </p>
+        <h1 id="login-title">Dashboard</h1>
+        <p className="login-copy">Enter your pairing code.</p>
 
         {params.error ? (
           <p className="login-error" role="alert">
@@ -47,8 +44,8 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           <button type="submit">Continue</button>
         </form>
         <p className="login-note">
-          The code is sent only to Mission Control over HTTPS. It is never put
-          in the page URL or included in the dashboard bundle.
+          Your code is sent only to the dashboard over HTTPS and never appears
+          in the page URL.
         </p>
       </section>
     </main>

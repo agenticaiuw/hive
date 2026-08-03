@@ -56,11 +56,63 @@ test('converts a pendant relay job into a dashboard voice run', () => {
   assert.equal(run.events[1].meta.actions[0].label, 'Open Outlook')
 })
 
-test('ignores plan jobs that did not originate from pendant microSD audio', () => {
+test('ignores plan jobs the owner did not start from a pendant or the dashboard', () => {
   assert.equal(
     voiceRunForJob({ jobId: 'job_mobile', type: 'plan', inputTelemetry: null }),
     null,
   )
+})
+
+test('shows a voice command recorded in a signed-in dashboard browser', () => {
+  const run = voiceRunForJob({
+    jobId: 'job_dashboard_voice',
+    type: 'plan',
+    status: 'queued',
+    command: 'open Outlook',
+    inputTelemetry: {
+      storage: 'dashboard',
+      source: 'dashboard-web',
+      inputMode: 'voice',
+      durationMs: 2400,
+    },
+    deviceEvents: [],
+    result: null,
+    error: null,
+    createdAt: '2026-08-02T01:00:00.000Z',
+    updatedAt: '2026-08-02T01:00:00.000Z',
+  })
+
+  assert.equal(run.pipelineId, 'job_dashboard_voice')
+  assert.equal(run.command, 'open Outlook')
+  assert.equal(run.events[0].stage, 'transcription')
+  assert.equal(run.events[0].status, 'done')
+  assert.equal(run.events[0].source, 'cloudflare')
+  assert.equal(run.events[0].meta.inputTelemetry.source, 'dashboard-web')
+})
+
+test('labels a typed dashboard command instead of faking a transcription', () => {
+  const run = voiceRunForJob({
+    jobId: 'job_dashboard_typed',
+    type: 'plan',
+    status: 'queued',
+    command: 'open Outlook',
+    inputTelemetry: {
+      storage: 'dashboard',
+      source: 'dashboard-web',
+      inputMode: 'typed',
+    },
+    deviceEvents: [],
+    result: null,
+    error: null,
+    createdAt: '2026-08-02T01:00:00.000Z',
+    updatedAt: '2026-08-02T01:00:00.000Z',
+  })
+
+  assert.equal(run.events[0].stage, 'transcription')
+  assert.equal(run.events[0].status, 'done')
+  assert.equal(run.events[0].source, 'dashboard')
+  assert.match(run.events[0].label, /Typed in the dashboard/)
+  assert.match(run.events[0].detail, /no audio to transcribe/i)
 })
 
 test('shows a recording immediately while Cloudflare is transcribing it', () => {

@@ -16,5 +16,5 @@ export const HEARTBEAT_INTERVAL_MS = Number(
   process.env.BRIDGE_HEARTBEAT_INTERVAL_MS || 30000,
 )
 export const WORK_POLL_INTERVAL_MS = Number(
-  process.env.BRIDGE_WORK_POLL_INTERVAL_MS || 1000,
+  process.env.BRIDGE_WORK_POLL_INTERVAL_MS || 100,
 )
