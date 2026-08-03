@@ -201,6 +201,13 @@ export function voiceRunForJob(job) {
   )
 
   const result = job.result && typeof job.result === 'object' ? job.result : null
+  const macActionDone = Boolean(
+    result &&
+      (result.executed === true ||
+        result.phase === 'executed' ||
+        result.execution?.ok === true ||
+        (result.execution && result.executed !== false)),
+  )
   if (result) {
     const actionText = Array.isArray(result.actions)
       ? result.actions
@@ -226,16 +233,24 @@ export function voiceRunForJob(job) {
       eventId: `cloud-${job.jobId}-agent`,
       stage: 'agent',
       status: 'done',
-      label: actionText ? 'Mac action selected' : 'Agent response ready',
-      detail: actionText
-        ? 'The Mac agent produced this action plan from the transcript.'
-        : 'The Mac agent completed this request.',
+      label: macActionDone
+        ? 'Plan executed on this Mac'
+        : actionText
+          ? 'Mac action selected'
+          : 'Agent response ready',
+      detail: macActionDone
+        ? 'The Mac already ran the action; speech may still be rendering.'
+        : actionText
+          ? 'The Mac agent produced this action plan from the transcript.'
+          : 'The Mac agent completed this request.',
       text: agentText,
       source: 'mac-bridge',
       meta: {
         planner: result.planner || null,
         thinkingTraceId: result.thinking?.traceId || null,
         actions: Array.isArray(result.actions) ? result.actions : [],
+        executed: macActionDone,
+        phase: result.phase || null,
       },
       at: result.thinking?.updatedAt || job.updatedAt,
     })
@@ -259,18 +274,32 @@ export function voiceRunForJob(job) {
         },
         at: job.updatedAt,
       })
+    } else if (macActionDone && job.status === 'processing') {
+      events.push({
+        eventId: `cloud-${job.jobId}-tts-pending`,
+        stage: 'tts',
+        status: 'active',
+        label: 'Rendering response speech',
+        detail: 'Action already ran; generating the spoken confirmation.',
+        text: agentText,
+        source: 'mac-bridge',
+        meta: null,
+        at: job.updatedAt,
+      })
     }
 
-    events.push({
-      eventId: `cloud-${job.jobId}-relay`,
-      stage: 'relay_result',
-      status: 'done',
-      label: 'Agent result stored in Cloudflare',
-      detail: 'The response is ready for the pendant to download.',
-      source: 'cloudflare',
-      meta: null,
-      at: job.updatedAt,
-    })
+    if (['plan_ready', 'completed'].includes(job.status) && speech) {
+      events.push({
+        eventId: `cloud-${job.jobId}-relay`,
+        stage: 'relay_result',
+        status: 'done',
+        label: 'Agent result stored in Cloudflare',
+        detail: 'The response is ready for the pendant to download.',
+        source: 'cloudflare',
+        meta: null,
+        at: job.updatedAt,
+      })
+    }
   } else if (
     !transcriptionPending &&
     !['failed', 'cancelled', 'completed'].includes(job.status)
@@ -320,9 +349,19 @@ export function voiceRunForJob(job) {
   const dashboardDone =
     origin === 'dashboard' &&
     events.some((event) => event.stage === 'agent' && event.status === 'done')
+  // Pendant runs: show Done as soon as the Mac has executed (Outlook is open),
+  // even if TTS / pendant playback is still in flight.
+  const macDoneForUi =
+    macActionDone ||
+    events.some(
+      (event) =>
+        event.stage === 'agent' &&
+        event.status === 'done' &&
+        /executed|Plan executed/i.test(String(event.label || '')),
+    )
   const status = ['failed', 'cancelled'].includes(job.status)
     ? 'failed'
-    : playbackDone || dashboardDone
+    : playbackDone || dashboardDone || macDoneForUi
       ? 'completed'
       : 'processing'
 

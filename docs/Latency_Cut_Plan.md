@@ -179,7 +179,21 @@ Without encode streaming + TLS reuse, **&lt; 5 s is not reachable** even with a 
 - [x] **Stream Opus encode during capture** (`pendant_opus_stream_*`)  
 - [x] **TLS pre-warm thread** while user is still speaking  
 - [x] **Instant `open X` plan** on Mac (no LLM) for simple app launches  
+- [x] **Dashboard Done as soon as Mac executes** (partial result before TTS)  
+- [x] Bridge work poll **50 ms** (was 100–120)  
+- [x] Tighter multimodal prompt for open-app commands  
 - [ ] Dashboard stage timers always show `meta.durationMs`  
+
+### More cuts still available (not all free)
+
+| Idea | Saves | Tradeoff |
+|------|------:|----------|
+| Faster STT provider / region | 0.5–2 s | Cost / quality |
+| Skip TTS on ultra-simple opens (LED only) | ~0–1 s heard, not open time | Less feedback |
+| HTTP/2 or connection reuse cloud-side | 0.2–1 s | Infra |
+| On-device keyword “open …” (no cloud STT) | huge for that phrase | Limited vocab, training |
+| Keep LTE TCP warm between presses | 0.5–2 s | Power |
+| Stream upload while finishing last Ogg page | 0.1–0.3 s | Complexity |  
 
 ### Expected after flash + deploy (warm modem, “open Outlook”)
 

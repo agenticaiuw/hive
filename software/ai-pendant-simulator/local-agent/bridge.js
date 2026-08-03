@@ -358,6 +358,27 @@ export async function handleWork(work) {
             text: spokenTextForResult(plan),
             meta: { results: execution?.results ?? null },
           })
+          // Dashboard: show Done the moment Outlook (etc.) is open — do not
+          // wait for TTS. partial keeps the job open so speech can attach next.
+          // Await so the final completeWork cannot race ahead of this patch.
+          if (plan.executed) {
+            try {
+              await completeWork(work.jobId, {
+                ok: true,
+                partial: true,
+                result: {
+                  ...plan,
+                  executed: true,
+                  phase: 'executed',
+                  pendantSpeech: undefined,
+                },
+              })
+            } catch (err) {
+              console.warn(
+                `[bridge] Early execute report failed for ${work.jobId}: ${err.message}`,
+              )
+            }
+          }
         } catch (executionError) {
           plan.executed = false
           plan.executionError = executionError.message
@@ -393,32 +414,39 @@ export async function handleWork(work) {
       }
 
       const speechStartedAt = Date.now()
-      await reportPipelineEvent(work, {
+      void reportPipelineEvent(work, {
         stage: 'tts',
         status: 'active',
         label: 'Rendering response speech',
         detail: 'macOS speech is generating 24 kHz mono PCM for the pendant.',
         text: spokenTextForResult(plan),
       })
+      // TTS after execute; cached phrases are near-instant.
       const planWithSpeech = synthesizePendantSpeech(plan)
 
-      await reportSynthesizedSpeech(work, planWithSpeech, speechStartedAt)
+      void reportSynthesizedSpeech(work, planWithSpeech, speechStartedAt)
 
-      await reportPipelineEvent(work, {
+      void reportPipelineEvent(work, {
         stage: 'relay_result',
         status: 'active',
         label: 'Uploading response to cloud relay',
         detail: 'Sending the answer and PCM payload back for the nRF9160.',
       })
       await completeWork(work.jobId, {
-        ok: plan.status !== 'unsupported',
-        result: planWithSpeech,
+        ok: plan.status !== 'unsupported' && plan.executed !== false,
+        result: {
+          ...planWithSpeech,
+          executed: plan.executed !== false,
+          phase: 'complete',
+        },
         error:
           plan.status === 'unsupported'
             ? plan.error ?? 'Planning failed on local agent.'
-            : '',
+            : plan.executed === false
+              ? plan.executionError || plan.response || 'Execution failed.'
+              : '',
       })
-      await reportPipelineEvent(work, {
+      void reportPipelineEvent(work, {
         stage: 'relay_result',
         status: 'done',
         label: 'Response waiting for the pendant',
@@ -686,7 +714,7 @@ function formatBytes(value) {
   return `${(bytes / 1024).toFixed(1)} KiB`
 }
 
-async function completeWork(jobId, { ok, result, error }) {
+async function completeWork(jobId, { ok, result, error, partial = false }) {
   const response = await fetch(`${RELAY_URL}/v1/bridge/work/${jobId}/result`, {
     method: 'POST',
     headers: relayHeaders,
@@ -695,7 +723,12 @@ async function completeWork(jobId, { ok, result, error }) {
     // leave the owner's machine for good. `callLocalAgent` already stripped
     // them; this is the belt to that suspenders, and it covers every work type
     // including agent_proxy, whose result shape is whatever path was proxied.
-    body: JSON.stringify({ ok, result: stripImageBytes(result), error }),
+    body: JSON.stringify({
+      ok,
+      result: stripImageBytes(result),
+      error,
+      partial: Boolean(partial),
+    }),
   })
   const raw = await response.text()
   let payload
@@ -711,7 +744,9 @@ async function completeWork(jobId, { ok, result, error }) {
     throw new Error(payload.error ?? 'Failed to report bridge work result.')
   }
 
-  console.log(`[bridge] Completed job ${jobId} (${payload.job?.status})`)
+  console.log(
+    `[bridge] ${partial ? 'Progress' : 'Completed'} job ${jobId} (${payload.job?.status})`,
+  )
 }
 
 async function callLocalAgent(path, { method = 'POST', body } = {}) {

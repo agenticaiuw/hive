@@ -1795,7 +1795,7 @@ app.get('/v1/bridge/work', async (request, response) => {
 
     // Every millisecond here lands directly in the voice-command latency the
     // owner feels, so poll tightly rather than politely.
-    await sleep(120)
+    await sleep(50)
   }
 
   response.status(204).end()
@@ -1806,6 +1806,9 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
   const ok = Boolean(request.body?.ok)
   const result = request.body?.result ?? null
   const error = String(request.body?.error ?? '').trim()
+  // Partial = Mac already ran the action; TTS/speech may still be rendering.
+  // Keeps status=processing so a final completeWork can attach pendantSpeech.
+  const partial = Boolean(request.body?.partial)
   const store = await getStore()
   const job = await store.getJob(jobId)
 
@@ -1827,7 +1830,15 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
     return
   }
 
-  if (job.status !== 'processing') {
+  // Final success may arrive after a partial progress report (still processing).
+  // Failures and partials must still be on a live processing job.
+  const allowFinalAfterPartial =
+    !partial &&
+    ok &&
+    job.status === 'processing' &&
+    job.result &&
+    typeof job.result === 'object'
+  if (job.status !== 'processing' && !allowFinalAfterPartial) {
     response.status(409).json({
       ok: false,
       error: `Job is not processing (current status: ${job.status}).`,
@@ -1845,6 +1856,34 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
     response.json({
       ok: true,
       job: publicJob(failed),
+    })
+    return
+  }
+
+  if (partial) {
+    const mergedResult =
+      result && typeof result === 'object'
+        ? {
+            ...(job.result && typeof job.result === 'object' ? job.result : {}),
+            ...result,
+            // Explicit so the dashboard can flip to "Done" before TTS finishes.
+            executed: result.executed !== false,
+            phase: result.phase || 'executed',
+          }
+        : job.result
+    const updated = await store.updateJob(jobId, {
+      status: 'processing',
+      result: mergedResult,
+      error: null,
+      actions:
+        job.type === 'plan'
+          ? mergedResult?.actions ?? job.actions ?? []
+          : job.actions,
+    })
+    response.json({
+      ok: true,
+      partial: true,
+      job: publicJob(updated),
     })
     return
   }

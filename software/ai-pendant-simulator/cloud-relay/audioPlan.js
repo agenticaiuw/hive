@@ -8,15 +8,14 @@ import {
 
 const PLAN_PROMPT = `You are the voice planner for a wearable AI pendant that controls a Mac.
 Listen to the short spoken command and respond with ONLY valid JSON (no markdown):
-{"text":"transcript of what was said","status":"ready"|"instant"|"unsupported","response":"optional spoken reply","actions":[{"type":"...","label":"...","params":{}}]}
+{"text":"transcript","status":"ready"|"instant"|"unsupported","response":"short spoken reply","actions":[{"type":"open_app","label":"Open Outlook","params":{"appName":"Microsoft Outlook"}}]}
 
-Rules:
-- text is a faithful short transcript of the audio (required).
-- status "instant" when you can answer immediately (time, weather phrasing, mute/unmute, volume, brightness) with a short spoken response and optional actions.
-- status "ready" when the user wants the Mac agent to run actions (open app, play music, reminders, shell-like tasks). Prefer concrete action types: open_app, set_mute, set_volume, set_brightness, play_youtube, create_reminder, get_time, get_weather, translate_text.
-- status "unsupported" only if the audio is empty/unintelligible or impossible; put a brief reason in response.
-- Keep actions short (usually 0-2). Use empty actions [] when only a spoken reply is needed.
-- Prefer app names as spoken (Outlook, Finder, Safari, Chrome, Mail, Calendar, Notes, Messages, Music, System Settings).`
+Be fast and decisive. No preamble.
+- text: short transcript (required).
+- "open X" / "open Outlook" / "open Chrome" → status ready, ONE open_app action with a real macOS app name (Outlook→Microsoft Outlook, Chrome→Google Chrome).
+- mute/volume/brightness/time/weather → status instant + actions when needed.
+- Keep 0-2 actions. Empty actions only for pure spoken answers.
+- unsupported only if silence/unintelligible.`
 
 /**
  * Normalize container labels from the pendant / browser into formats the
