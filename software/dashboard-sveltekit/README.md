@@ -61,7 +61,7 @@ npm run deploy:cloudflare
 ```
 
 Deploys the `ai-pendant-dashboard` Worker with the `RELAY` service binding to
-`ai-pendant-mission-control`. The three secrets are never in `wrangler.jsonc`:
+`ai-pendant-relay`. The three secrets are never in `wrangler.jsonc`:
 
 ```bash
 wrangler secret put RELAY_API_KEY

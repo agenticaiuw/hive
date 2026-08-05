@@ -36,6 +36,7 @@ function publicHistoryEntry(value: unknown) {
     durationMs: entry.durationMs == null ? null : Number(entry.durationMs),
     audio: {
       available: Boolean(audio.available),
+      replyAvailable: Boolean(audio.replyAvailable),
       captureId: sanitizeText(audio.captureId, 160) || null,
       link: sanitizeText(audio.link, 40) || null,
       storage: sanitizeText(audio.storage, 40) || null,

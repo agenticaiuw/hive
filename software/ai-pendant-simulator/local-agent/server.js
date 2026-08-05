@@ -1,4 +1,15 @@
 import './loadEnv.js'
+
+/*
+ * Timestamp every log line. The launchd log files have no other time source,
+ * which made the 2026-08-05 latency stalls unattributable after the fact.
+ */
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console)
+  console[level] = (...parts) =>
+    original(new Date().toISOString(), ...parts)
+}
+
 import express from 'express'
 import cors from 'cors'
 import fs from 'node:fs'
@@ -751,9 +762,17 @@ app.delete('/context-graph/relations/:relationId', (request, response) => {
 })
 
 app.get('/machine-context', async (_request, response) => {
-  response.json({
-    machine: await getMachineContext(),
-  })
+  try {
+    response.json({
+      machine: await getMachineContext(),
+    })
+  } catch (error) {
+    response.json({
+      machine: null,
+      error: `${error?.message || error}`,
+      stack: String(error?.stack || '').split('\n').slice(0, 4),
+    })
+  }
 })
 
 app.post('/machine-context/refresh', async (_request, response) => {
@@ -922,9 +941,15 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Pendant Mac Local Agent listening on http://localhost:${PORT}`)
   // Any screenshots left behind by a crashed run die with the old process.
   purgeAllCaptures()
-  startBridge().catch((error) => {
-    console.error(`[bridge] Fatal error: ${error.message}`)
-  })
+  // Keep retrying: an agent booted during a relay outage must still end up
+  // with a live work loop once the relay recovers.
+  const launchBridge = () => {
+    startBridge().catch((error) => {
+      console.error(`[bridge] Fatal error: ${error.message} — retrying in 5s`)
+      setTimeout(launchBridge, 5000)
+    })
+  }
+  launchBridge()
   if (fs.existsSync(path.join(distDir, 'dashboard.html'))) {
     console.log(`Mac Ops dashboard: http://localhost:${PORT}/dashboard`)
   }
@@ -1053,6 +1078,10 @@ async function buildOpsStatus() {
           // Full list for the Realtime fleet harness (capped in fleetContext).
           applications: machine.applications ?? [],
           topApps: (machine.applications ?? []).slice(0, 12),
+          // Discovered automation environment (macOS version, Shortcuts,
+          // installed CLIs) so the planner never guesses at missing tools.
+          automation: machine.automation ?? null,
+          timezone: machine.timezone ?? null,
         }
       : null,
     memory: {

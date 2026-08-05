@@ -17,6 +17,7 @@ import {
   TTS_VOICE,
 } from './config.js'
 import {
+  voiceRunForCapture,
   createAudioCapture,
   createAgentProxyJob,
   createExecuteJob,
@@ -26,10 +27,20 @@ import {
 } from './jobs.js'
 import { getStore } from './store/index.js'
 import { planFromAudio } from './audioPlan.js'
-import { createStreamingRealtimeSession } from './openaiRealtimeVoice.js'
+import {
+  createStreamingRealtimeSession,
+  G711_SAMPLE_RATE,
+  REALTIME_PCM_RATE,
+} from './openaiRealtimeVoice.js'
 import { loadFleetFromStore } from './fleetContext.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
+import {
+  createOpusReplyEncoder,
+  createOpusUploadDecoder,
+  isOpusFramesFormat,
+  OPUS_WIRE_SAMPLE_RATE,
+} from './opusTranscode.js'
 import {
   deleteAudioCaptureObject,
   loadAudioCapture,
@@ -71,9 +82,11 @@ import {
 import { bridgeClaimDelay } from './polling.js'
 import {
   isRawPcmFormat,
+  isG711UlawFormat,
   pendantAudioFormat,
   pcmS16leToWavBuffer,
   preparePendantAudioForStt,
+  ulawToPcmS16le,
 } from './rawAudio.js'
 
 const app = express()
@@ -824,6 +837,61 @@ app.post('/v1/transcribe', async (request, response) => {
  *
  * Add ?dispatch=0 to plan without queueing a Mac command.
  */
+/*
+ * Run async work that must SURVIVE the response ending. In Cloudflare
+ * Workers, promises left dangling after the response completes are killed —
+ * which silently dropped the dashboard capture for every conversational run
+ * (the audio stream ends the response first). ctx.waitUntil keeps them alive;
+ * plain Node (tests, local agent) just runs the promise.
+ */
+let cloudflareWaitUntil = null
+void import('cloudflare:workers')
+  .then((mod) => {
+    cloudflareWaitUntil = mod.waitUntil || null
+  })
+  .catch(() => {})
+
+function keepAliveAfterResponse(work) {
+  const promise = Promise.resolve()
+    .then(work)
+    .catch((error) => {
+      console.warn(
+        `[relay] post-response task failed: ${error?.message || error}`,
+      )
+    })
+
+  if (typeof cloudflareWaitUntil === 'function') {
+    try {
+      cloudflareWaitUntil(promise)
+    } catch {
+      /* outside a request context — the promise still runs */
+    }
+  }
+  return promise
+}
+
+/*
+ * Compact a Mac execution result for a Realtime function_call_output: keep
+ * the fields the model needs to speak an answer, cap the per-action outputs
+ * so a chatty command can't blow up the conversation context.
+ */
+function trimMacResultForModel(result) {
+  const actionResults = Array.isArray(result.results)
+    ? result.results.slice(0, 6).map((entry) => {
+        const text = JSON.stringify(entry) || ''
+        return text.length > 400 ? `${text.slice(0, 400)}…` : entry
+      })
+    : undefined
+
+  return {
+    executed: Boolean(result.executed),
+    response: String(result.response || '').slice(0, 400) || undefined,
+    executionError:
+      String(result.executionError || '').slice(0, 400) || undefined,
+    results: actionResults,
+  }
+}
+
 app.post('/v1/pendant/command', async (request, response) => {
   const format = pendantAudioFormat({
     headerFormat: request.get('x-audio-format'),
@@ -901,31 +969,334 @@ app.post('/v1/pendant/command', async (request, response) => {
       return job
     }
 
+    // Async diagnostic store (WAV for dashboard). Fire-and-forget; called on
+    // every response path, including the inline audio-stream exits which
+    // would otherwise leave no trace of the run in history.
+    function storeDiagnosticCapture(planForCapture) {
+      const rawAudio = Buffer.concat(pcmChunks)
+      const isUlawCapture = isG711UlawFormat(format)
+      const isOpusCapture = isOpusFramesFormat(format)
+      const wavForHistory = isUlawCapture
+        ? pcmS16leToWavBuffer(ulawToPcmS16le(rawAudio), {
+            sampleRate: G711_SAMPLE_RATE,
+            channels: 1,
+            bitsPerSample: 16,
+          })
+        : isOpusCapture
+          ? pcmS16leToWavBuffer(rawAudio, {
+              sampleRate: OPUS_WIRE_SAMPLE_RATE,
+              channels: 1,
+              bitsPerSample: 16,
+            })
+          : isRawPcmFormat(format)
+            ? pcmS16leToWavBuffer(rawAudio, {
+                sampleRate,
+                channels,
+                bitsPerSample,
+              })
+            : rawAudio
+      const captureFormat =
+        isUlawCapture || isOpusCapture || isRawPcmFormat(format)
+          ? 'wav'
+          : format
+      const audioBase64 = wavForHistory.toString('base64')
+      const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
+      const diagnosticAudioLimit = r2AudioEnabled
+        ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
+        : DIAGNOSTIC_AUDIO_MAX_BYTES
+      if (
+        wavForHistory.length === 0 ||
+        wavForHistory.length > diagnosticAudioLimit
+      ) {
+        return
+      }
+      return keepAliveAfterResponse(async () => {
+        let capture = null
+        try {
+          capture = createAudioCapture({
+            audioBase64,
+            audioBytes: wavForHistory.length,
+            format: captureFormat,
+            language,
+            transcript: planForCapture?.text,
+            transcriptionModel: planForCapture?.model,
+            status: 'completed',
+          })
+          const persistedAudio = await persistAudioCapture({
+            captureId: capture.jobId,
+            audioBase64,
+            audioBytes: wavForHistory.length,
+            format: captureFormat,
+            createdAt: capture.createdAt,
+            allowD1Fallback: wavForHistory.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
+          })
+          if (persistedAudio.audioStorage === 'unavailable') return
+          capture = { ...capture, ...persistedAudio }
+          await store.createJob(capture)
+
+          // The agent's own voice, WAV-wrapped, as a linked reply capture so
+          // the dashboard can play BOTH sides of the exchange.
+          const replyRaw = Buffer.concat(replyAudioChunks)
+          if (replyRaw.length > 0) {
+            const replyWav = replyIsUlaw
+              ? pcmS16leToWavBuffer(ulawToPcmS16le(replyRaw), {
+                  sampleRate: G711_SAMPLE_RATE,
+                  channels: 1,
+                  bitsPerSample: 16,
+                })
+              : pcmS16leToWavBuffer(replyRaw, {
+                  sampleRate: REALTIME_PCM_RATE,
+                  channels: 1,
+                  bitsPerSample: 16,
+                })
+            const replyTranscript =
+              String(planForCapture?.response || '').trim() || null
+
+            if (replyWav.length <= diagnosticAudioLimit) {
+              let replyCapture = createAudioCapture({
+                audioBase64: replyWav.toString('base64'),
+                audioBytes: replyWav.length,
+                format: 'wav',
+                language,
+                transcript: replyTranscript,
+                transcriptionModel: 'gpt-realtime-2.1',
+                status: 'completed',
+              })
+              replyCapture = { ...replyCapture, role: 'reply' }
+              const persistedReply = await persistAudioCapture({
+                captureId: replyCapture.jobId,
+                audioBase64: replyCapture.audioBase64,
+                audioBytes: replyWav.length,
+                format: 'wav',
+                createdAt: replyCapture.createdAt,
+                allowD1Fallback:
+                  replyWav.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
+              })
+              if (persistedReply.audioStorage !== 'unavailable') {
+                replyCapture = { ...replyCapture, ...persistedReply }
+                await store.createJob(replyCapture)
+                await store.updateJob(capture.jobId, {
+                  replyCaptureId: replyCapture.jobId,
+                  replyTranscript,
+                })
+              }
+            } else if (replyTranscript) {
+              await store.updateJob(capture.jobId, { replyTranscript })
+            }
+          }
+          if (job?.jobId) {
+            await store.updateJob(capture.jobId, { planJobId: job.jobId })
+            await store.updateJob(job.jobId, {
+              inputTelemetry: {
+                ...(job.inputTelemetry || {}),
+                captureId: capture.jobId,
+              },
+            })
+          }
+        } catch (error) {
+          console.warn(
+            `[relay] Pendant audio capture not stored (async): ${
+              error?.message || error
+            }`,
+          )
+          if (capture) {
+            await deleteAudioCaptureObject(capture).catch(() => {})
+          }
+        }
+      })
+    }
+
     let plan
 
     // Realtime only: mid-press stream when PCM, else buffer then Realtime batch.
-    const fleet = await loadFleetFromStore(store).catch(() => null)
+    // Promise, not value: the D1 fleet read overlaps the OpenAI WS handshake
+    // (createStreamingRealtimeSession awaits it after the socket is open).
+    const fleetPromise = loadFleetFromStore(store).catch(() => null)
 
-    if (isRawPcmFormat(format)) {
-      const session = await createStreamingRealtimeSession({
-        inputSampleRate: sampleRate,
-        language,
-        fleet,
-        onEarlyPlan: async (earlyPlan) => {
-          await dispatchPlan(earlyPlan)
-        },
-      })
+    /*
+     * Conversational reply path (firmware opt-in via X-Reply-Stream):
+     * the model speaks and its audio deltas go straight down this same
+     * connection as a chunked audio response — no Mac TTS, no reply polling.
+     * Header value picks the reply codec: 'pcmu' = G.711 μ-law 8 kHz
+     * (64 kbps — fits real-world LTE-M downlink), 'pcm' = 24 kHz s16le
+     * (broadband only). Without the header the classic JSON response is
+     * unchanged.
+     */
+    const replyStreamCodec = String(request.headers['x-reply-stream'] || '')
+      .trim()
+      .toLowerCase()
+    const wantsReplyStream =
+      replyStreamCodec === 'pcm' ||
+      replyStreamCodec === 'pcmu' ||
+      replyStreamCodec === 'opus'
+    const replyIsUlaw = replyStreamCodec === 'pcmu'
+    // Opus reply: model speaks 24 kHz PCM; we transcode to ~14 kbps 60 ms
+    // length-prefixed packets the pendant can actually receive in realtime.
+    const replyIsOpus = replyStreamCodec === 'opus'
+    const replyOpusEncoder = replyIsOpus ? await createOpusReplyEncoder() : null
+    let replyStreamStarted = false
+    // Keep a copy of the agent's spoken reply for dashboard playback.
+    const replyAudioChunks = []
+    let replyAudioBytes = 0
+    const REPLY_AUDIO_MAX_BYTES = 1_500_000
+    const streamReplyDelta = (pcm) => {
+      if (!pcm?.length || response.writableEnded) return
+      if (!replyIsOpus && replyAudioBytes < REPLY_AUDIO_MAX_BYTES) {
+        // COPY: response.write() transfers (detaches) the buffer's memory in
+        // the Workers stream bridge, leaving pushed references empty.
+        replyAudioChunks.push(Buffer.from(pcm))
+        replyAudioBytes += pcm.length
+      }
+      if (!replyStreamStarted) {
+        replyStreamStarted = true
+        response.status(200).set({
+          'Content-Type': replyIsOpus
+            ? 'audio/opus'
+            : replyIsUlaw
+              ? 'audio/pcmu'
+              : 'audio/pcm',
+          'Cache-Control': 'no-store',
+          'X-Audio-Format': replyIsOpus
+            ? 'opus-frames'
+            : replyIsUlaw
+              ? 'pcmu'
+              : 's16le',
+          // The firmware clocks its I2S output from this header: opus wire
+          // rate is 16 kHz, μ-law is fixed 8 kHz, PCM deltas are 24 kHz —
+          // never the 15,625 mic rate.
+          'X-Audio-Sample-Rate': String(
+            replyIsOpus
+              ? OPUS_WIRE_SAMPLE_RATE
+              : replyIsUlaw
+                ? G711_SAMPLE_RATE
+                : REALTIME_PCM_RATE,
+          ),
+          'X-Audio-Channels': '1',
+          'X-Audio-Bits': replyIsOpus ? '0' : replyIsUlaw ? '8' : '16',
+          ...(job?.jobId ? { 'X-Job-Id': job.jobId } : {}),
+        })
+        response.flushHeaders?.()
+      }
+      response.write(pcm)
+    }
+    // Opus replies: capture the model's 24 kHz PCM for the dashboard, then
+    // stream the transcoded packets. Other codecs pass deltas straight through.
+    const onReplyDelta = replyIsOpus
+      ? (pcm) => {
+          if (!pcm?.length) return
+          if (replyAudioBytes < REPLY_AUDIO_MAX_BYTES) {
+            replyAudioChunks.push(Buffer.from(pcm))
+            replyAudioBytes += pcm.length
+          }
+          const packets = replyOpusEncoder.push(pcm)
 
-      for await (const chunk of request) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        if (!buf.length) continue
-        rawByteCount += buf.length
-        pcmChunks.push(buf)
-        session.appendRawPcm(buf)
+          if (packets.length) streamReplyDelta(packets)
+        }
+      : streamReplyDelta
+    const flushReplyEncoder = () => {
+      if (!replyIsOpus || response.writableEnded) return
+      try {
+        const tail = replyOpusEncoder.end()
+
+        if (tail.length) streamReplyDelta(tail)
+      } catch (error) {
+        console.warn(`[relay] opus flush failed: ${error?.message || error}`)
+      }
+    }
+
+    const ulawUpload = isG711UlawFormat(format)
+    const opusUpload = isOpusFramesFormat(format)
+    const opusUploadDecoder = opusUpload
+      ? await createOpusUploadDecoder()
+      : null
+
+    if (isRawPcmFormat(format) || ulawUpload || opusUpload) {
+      /*
+       * Create the Realtime session on the FIRST body byte, not at headers:
+       * the firmware prewarms this request (headers sent, body idle) and
+       * rotates stale sockets every ~15s, so a header-time session would
+       * open and leak an OpenAI WS per idle refresh, all day.
+       *
+       * NEVER await the session inside the read loop: blocking the read
+       * backpressures TCP into the modem and overflows the pendant's tiny
+       * PCM ring (~1s of audio) mid-utterance. The WS handshake runs
+       * concurrently; chunks buffer locally and catch up when it opens.
+       */
+      let session = null
+      let sessionPromise = null
+      const chunksAwaitingSession = []
+
+      try {
+        for await (const chunk of request) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          if (!buf.length) continue
+          if (!sessionPromise) {
+            sessionPromise = createStreamingRealtimeSession({
+              inputSampleRate: opusUpload ? OPUS_WIRE_SAMPLE_RATE : sampleRate,
+              language,
+              fleet: fleetPromise,
+              audioOut: wantsReplyStream,
+              onAudioDelta: wantsReplyStream ? onReplyDelta : null,
+              inputFormat: ulawUpload ? 'pcmu' : 'pcm',
+              outputFormat: replyIsUlaw ? 'pcmu' : 'pcm',
+              deviceTime:
+                String(request.get('x-device-time') || '').trim() || null,
+              onEarlyPlan: async (earlyPlan) => {
+                return await dispatchPlan(earlyPlan)
+              },
+              // Status tools hold the turn on this so the spoken reply can
+              // contain the Mac's actual data (Mac claims in ~250 ms and
+              // posts an early phase:'executed' result).
+              waitForMacResult: async (jobId) => {
+                const deadline = Date.now() + 9000
+
+                while (Date.now() < deadline) {
+                  const current = await store.getJob(jobId).catch(() => null)
+                  const result = current?.result
+
+                  if (
+                    result &&
+                    (result.phase === 'executed' ||
+                      result.executed === true ||
+                      result.executionError ||
+                      current.status === 'completed')
+                  ) {
+                    return trimMacResultForModel(result)
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, 300))
+                }
+                return null
+              },
+            }).then((opened) => {
+              session = opened
+              for (const pending of chunksAwaitingSession) {
+                session.appendRawPcm(pending)
+              }
+              chunksAwaitingSession.length = 0
+              return opened
+            })
+            // Failures surface at the await below; don't crash the process.
+            sessionPromise.catch(() => {})
+          }
+          rawByteCount += buf.length
+          const feed = opusUpload ? opusUploadDecoder.push(buf) : buf
+
+          if (!feed.length) continue
+          pcmChunks.push(feed)
+          if (session) {
+            session.appendRawPcm(feed)
+          } else {
+            chunksAwaitingSession.push(feed)
+          }
+        }
+      } catch (error) {
+        // Client (pendant) aborted mid-upload — free the OpenAI WS now
+        // instead of leaking it until its own timeout.
+        void sessionPromise?.then((opened) => opened.abort(error)).catch(() => {})
+        throw error
       }
 
-      if (rawByteCount === 0) {
-        session.abort(new Error('Raw audio body is required.'))
+      if (rawByteCount === 0 || !sessionPromise) {
         response.status(400).json({
           ok: false,
           error: 'Raw audio body is required.',
@@ -933,8 +1304,34 @@ app.post('/v1/pendant/command', async (request, response) => {
         return
       }
 
-      plan = await session.finish()
-      await dispatchPlan(plan)
+      try {
+        session = await sessionPromise
+        plan = await session.finish()
+      } catch (error) {
+        if (replyStreamStarted) {
+          // Mid-speech failure: end the audio stream cleanly; the pendant
+          // treats a short stream as a finished (if clipped) reply.
+          console.warn(
+            `[relay] Realtime session failed mid-reply-stream: ${error?.message || error}`,
+          )
+          flushReplyEncoder()
+          await storeDiagnosticCapture(null)
+          response.end()
+          return
+        }
+        throw error
+      }
+      // When the spoken reply already streamed inline, a plan whose only
+      // content is that speech needs no Mac job — nothing would consume it.
+      // Tool-call plans were already dispatched early (dispatchPlan is
+      // idempotent via jobEnqueued).
+      if (
+        !replyStreamStarted ||
+        (Array.isArray(plan?.actions) && plan.actions.length > 0) ||
+        plan?.requireLocalPlanner
+      ) {
+        await dispatchPlan(plan)
+      }
     } else {
       const bodyChunks = []
       for await (const chunk of request) {
@@ -959,9 +1356,18 @@ app.post('/v1/pendant/command', async (request, response) => {
         format,
         sampleRate,
         language,
-        fleet,
+        fleet: await fleetPromise,
       })
       await dispatchPlan(plan)
+    }
+
+    if (replyStreamStarted) {
+      // The spoken reply already went down this connection; the job (if any)
+      // was dispatched from the tool-call handler. Close the audio stream.
+      flushReplyEncoder()
+      await storeDiagnosticCapture(plan)
+      response.end()
+      return
     }
 
     const planHasContent =
@@ -1007,66 +1413,7 @@ app.post('/v1/pendant/command', async (request, response) => {
       job: publicJob(job),
     })
 
-    // Async diagnostic store (WAV for dashboard).
-    const rawAudio = Buffer.concat(pcmChunks)
-    const wavForHistory = isRawPcmFormat(format)
-      ? pcmS16leToWavBuffer(rawAudio, {
-          sampleRate,
-          channels,
-          bitsPerSample,
-        })
-      : rawAudio
-    const captureFormat = isRawPcmFormat(format) ? 'wav' : format
-    const audioBase64 = wavForHistory.toString('base64')
-    const r2AudioEnabled = Boolean(getCloudflareBindings()?.AUDIO_BUCKET?.put)
-    const diagnosticAudioLimit = r2AudioEnabled
-      ? DIAGNOSTIC_AUDIO_R2_MAX_BYTES
-      : DIAGNOSTIC_AUDIO_MAX_BYTES
-    if (wavForHistory.length > 0 && wavForHistory.length <= diagnosticAudioLimit) {
-      void (async () => {
-        let capture = null
-        try {
-          capture = createAudioCapture({
-            audioBase64,
-            audioBytes: wavForHistory.length,
-            format: captureFormat,
-            language,
-            transcript: plan.text,
-            transcriptionModel: plan.model,
-            status: 'completed',
-          })
-          const persistedAudio = await persistAudioCapture({
-            captureId: capture.jobId,
-            audioBase64,
-            audioBytes: wavForHistory.length,
-            format: captureFormat,
-            createdAt: capture.createdAt,
-            allowD1Fallback: wavForHistory.length <= DIAGNOSTIC_AUDIO_MAX_BYTES,
-          })
-          if (persistedAudio.audioStorage === 'unavailable') return
-          capture = { ...capture, ...persistedAudio }
-          await store.createJob(capture)
-          if (job?.jobId) {
-            await store.updateJob(capture.jobId, { planJobId: job.jobId })
-            await store.updateJob(job.jobId, {
-              inputTelemetry: {
-                ...(job.inputTelemetry || {}),
-                captureId: capture.jobId,
-              },
-            })
-          }
-        } catch (error) {
-          console.warn(
-            `[relay] Pendant audio capture not stored (async): ${
-              error?.message || error
-            }`,
-          )
-          if (capture) {
-            await deleteAudioCaptureObject(capture).catch(() => {})
-          }
-        }
-      })()
-    }
+    storeDiagnosticCapture(plan)
   } catch (error) {
     if (!response.headersSent) {
       response
@@ -1175,6 +1522,22 @@ app.get('/v1/pendant/jobs/:jobId/speech', async (request, response) => {
         response.set('X-Pendant-Job-Status', job.status)
         sendPendantAudio(response, pendantSpeech)
         return
+      }
+
+      /*
+       * Partial execute report: the Mac ran the actions and its speech is
+       * still rendering (result.phase === 'executed', pendantSpeech absent).
+       * Keep the long-poll parked for it — synthesizing the same text with
+       * cloud TTS here would race the Mac render, and a synthesis failure
+       * reads as fatal to the pendant (it abandons the reply entirely).
+       */
+      if (
+        job.status === 'plan_ready' &&
+        job.result?.phase === 'executed' &&
+        Date.now() < deadline
+      ) {
+        await sleep(350)
+        continue
       }
 
       const text = spokenTextForJob(job)
@@ -1385,10 +1748,19 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
     Math.max(Number(request.query?.limit || 12), 1),
     40,
   )
-  const jobs = await store.listJobs({ type: 'plan', limit: 80 })
-  const runs = jobs
-    .map(voiceRunForJob)
+  const [jobs, captures] = await Promise.all([
+    store.listJobs({ type: 'plan', limit: 80 }),
+    store.listJobs({ type: 'audio_capture', limit: 40 }),
+  ])
+  const runs = [
+    ...jobs.map(voiceRunForJob),
+    ...captures.map(voiceRunForCapture),
+  ]
     .filter(Boolean)
+    .sort(
+      (left, right) =>
+        new Date(right.createdAt || 0) - new Date(left.createdAt || 0),
+    )
     .slice(0, requestedLimit)
 
   response.set('Cache-Control', 'no-store, max-age=0')
@@ -1404,10 +1776,22 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
 // just when something changed.
 app.get('/v1/ops/voice-runs/latest', async (_request, response) => {
   const store = await getStore()
-  const jobs = await store.listJobs({ type: 'plan', limit: 8 })
+  const [jobs, captures] = await Promise.all([
+    store.listJobs({ type: 'plan', limit: 8 }),
+    store.listJobs({ type: 'audio_capture', limit: 8 }),
+  ])
   // Same membership rule as /v1/ops/voice-runs so the fast probe and the full
   // list can never disagree about which run is newest.
-  const job = jobs.find((candidate) => Boolean(voiceRunForJob(candidate)))
+  const job = [...jobs, ...captures]
+    .sort(
+      (left, right) =>
+        new Date(right.createdAt || 0) - new Date(left.createdAt || 0),
+    )
+    .find(
+      (candidate) =>
+        Boolean(voiceRunForJob(candidate)) ||
+        Boolean(voiceRunForCapture(candidate)),
+    )
   response.set('Cache-Control', 'no-store, max-age=0')
   response.json({
     ok: true,
@@ -1537,7 +1921,20 @@ app.get('/v1/ops/history/:pipelineId/audio', async (request, response) => {
   const detail = await loadRunDetail(request, response)
   if (!detail) return
 
-  if (!detail.capture) {
+  let capture = detail.capture
+  // ?voice=reply streams the AGENT's stored voice instead of the owner's.
+  if (String(request.query?.voice || '') === 'reply') {
+    const replyCaptureId = detail.capture?.replyCaptureId || null
+    capture = replyCaptureId ? await detail.store.getJob(replyCaptureId) : null
+    if (!capture || capture.type !== 'audio_capture') {
+      response.status(404).json({
+        ok: false,
+        error: 'No agent reply audio is stored for this run.',
+      })
+      return
+    }
+  }
+  if (!capture) {
     response.status(404).json({
       ok: false,
       error: 'No recording is stored for this run.',
@@ -1547,7 +1944,7 @@ app.get('/v1/ops/history/:pipelineId/audio', async (request, response) => {
 
   await streamCaptureAudio(request, response, {
     store: detail.store,
-    capture: detail.capture,
+    capture,
   })
 })
 
@@ -1958,6 +2355,8 @@ app.get('/v1/bridge/work', async (request, response) => {
         work: {
           jobId: job.jobId,
           type: job.type,
+          // Lets the bridge log queue-to-claim age per job.
+          createdAt: job.createdAt ?? null,
           command: job.command,
           actions: job.actions,
           sessionId: job.sessionId ?? null,
@@ -2315,6 +2714,17 @@ function principalCanReadJob(principal, job) {
 async function loadRunDetail(request, response) {
   const store = await getStore()
   const job = await store.getJob(String(request.params.pipelineId || '').trim())
+
+  // Conversational presses: the audio_capture IS the run (no plan job).
+  if (job && job.type === 'audio_capture' && job.role !== 'reply') {
+    const run = voiceRunForCapture(job)
+
+    if (!run) {
+      response.status(404).json({ ok: false, error: 'Run not found.' })
+      return null
+    }
+    return { store, job, capture: job, link: 'self', run }
+  }
 
   if (!job || job.type !== 'plan') {
     response.status(404).json({

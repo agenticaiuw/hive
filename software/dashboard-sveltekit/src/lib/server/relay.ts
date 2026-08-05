@@ -8,7 +8,7 @@
 import type { RuntimeEnv } from "./env";
 
 const DEFAULT_RELAY_URL =
-  "https://ai-pendant-mission-control.your-subdomain.workers.dev";
+  "https://ai-pendant-relay.your-subdomain.workers.dev";
 
 export type RelayFetch = (path: string, init?: RequestInit) => Promise<Response>;
 

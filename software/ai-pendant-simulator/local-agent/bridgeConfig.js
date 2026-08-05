@@ -16,6 +16,18 @@ export const HEARTBEAT_INTERVAL_MS = Number(
 export const WORK_RETRY_BASE_MS = Number(
   process.env.BRIDGE_WORK_RETRY_BASE_MS || 250,
 )
+/*
+ * Poll-failure backoff cap. Keep this small: while the bridge sleeps here, no
+ * poll is outstanding, so a freshly queued voice job waits the full remaining
+ * sleep before pickup. The old 30s cap turned relay flaps into 16-30s
+ * button-to-execution stalls.
+ */
 export const WORK_RETRY_MAX_MS = Number(
-  process.env.BRIDGE_WORK_RETRY_MAX_MS || 30000,
+  process.env.BRIDGE_WORK_RETRY_MAX_MS || 3000,
+)
+/* Client-side cap on one poll request; server holds ≤5s, then margin. A
+ * stale keep-alive socket after a Worker redeploy hangs without erroring —
+ * this abort is the only bound on that stall, so keep it tight. */
+export const WORK_POLL_ABORT_MS = Number(
+  process.env.BRIDGE_WORK_POLL_ABORT_MS || 8000,
 )

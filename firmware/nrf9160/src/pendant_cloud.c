@@ -79,7 +79,7 @@ static void lte_attach_probe_fn(struct k_work *work)
 }
 
 #define RELAY_HOSTNAME \
-	"ai-pendant-mission-control.your-subdomain.workers.dev"
+	"ai-pendant-relay.your-subdomain.workers.dev"
 #define RELAY_PORT "443"
 #define TRANSCRIBE_PATH "/v1/transcribe"
 #define MAC_PLAN_PATH "/v1/mac/plan"
@@ -152,8 +152,15 @@ static int64_t stream_started_ms;
  * dual-capture saw Live TX pump failed: -104 (ECONNRESET) ~79s after
  * prewarm with live_sent=0. Refresh idle sockets and re-validate at press.
  */
-#define STREAM_MAX_IDLE_MS 20000
-#define STREAM_STALE_AT_START_MS 12000
+/*
+ * Cloudflare kills the half-open chunked POST after ~20s idle, so refresh at
+ * 10s — before death, not after — to shrink the dead-socket window a press
+ * can land in. The press-time threshold sits above the refresh cadence so a
+ * healthy just-refreshed socket (age ≤ ~13s with reopen time) is never torn
+ * down at the exact moment the user starts speaking.
+ */
+#define STREAM_MAX_IDLE_MS 12000
+#define STREAM_STALE_AT_START_MS 15000
 /* Non-blocking TX: one in-flight HTTP chunk framing + body + CRLF. */
 #define STREAM_PENDING_MAX 1200U
 static uint8_t stream_pending[STREAM_PENDING_MAX];
@@ -639,28 +646,77 @@ static int send_http_post_header(int fd, const char *path,
 }
 
 /*
+ * Network (NITZ) clock from the LTE tower: "yy/MM/dd,hh:mm:ss±zz" with zz in
+ * quarter-hours. Rides up as X-Device-Time so the cloud agent knows the
+ * owner's local time even with every other device offline. Empty when the
+ * carrier has not delivered time yet (relay validates before trusting).
+ */
+static void copy_device_time(char *out, size_t out_size)
+{
+	char cclk[64];
+	const char *open_quote;
+	const char *close_quote;
+	size_t copy_length;
+
+	out[0] = '\0';
+	if (nrf_modem_at_cmd(cclk, sizeof(cclk), "AT+CCLK?") != 0) {
+		return;
+	}
+	open_quote = strchr(cclk, '"');
+	if (open_quote == NULL) {
+		return;
+	}
+	close_quote = strchr(open_quote + 1, '"');
+	if (close_quote == NULL) {
+		return;
+	}
+	copy_length = (size_t)(close_quote - open_quote - 1);
+	if (copy_length == 0U || copy_length >= out_size) {
+		return;
+	}
+	memcpy(out, open_quote + 1, copy_length);
+	out[copy_length] = '\0';
+}
+
+/*
  * Chunked raw PCM voice command: one TLS session, HTTP/1.1 Transfer-Encoding
  * chunked, relay wraps s16le → WAV for STT/multimodal + Mac dispatch.
  * Content-Length is unknown at open time so capture can stream live.
  */
 static int send_pendant_command_chunked_header(int fd, uint32_t sample_rate)
 {
-	char header[HTTP_HEADER_SIZE + 128];
+	char header[HTTP_HEADER_SIZE + 192];
+	char device_time[32];
+	char device_time_line[64];
+
+	copy_device_time(device_time, sizeof(device_time));
+	if (device_time[0] != '\0') {
+		(void)snprintf(device_time_line, sizeof(device_time_line),
+			       "X-Device-Time: %s\r\n", device_time);
+	} else {
+		device_time_line[0] = '\0';
+	}
 	int length = snprintf(
 		header, sizeof(header),
 		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"Authorization: Bearer %s\r\n"
-		"Content-Type: audio/pcm\r\n"
+		/* Opus at ~16 kbps: measured real-world LTE-M here sustains
+		 * only 24-55 kbps each way, which starves even 64 kbps u-law.
+		 * Wire format: 2-byte BE length-prefixed raw Opus packets. */
+		"Content-Type: audio/opus\r\n"
 		"Transfer-Encoding: chunked\r\n"
 		"X-Device-Id: %s\r\n"
-		"X-Audio-Format: pcm\r\n"
+		"X-Audio-Format: opus-frames\r\n"
 		"X-Sample-Rate: %u\r\n"
 		"X-Audio-Channels: 1\r\n"
-		"X-Audio-Bits: 16\r\n"
+		"%s"
+		/* Conversational reply: the relay transcodes the model's voice
+		 * to length-prefixed Opus packets down this same connection. */
+		"X-Reply-Stream: opus\r\n"
 		"Connection: close\r\n\r\n",
 		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
-		PENDANT_DEVICE_ID, sample_rate);
+		PENDANT_DEVICE_ID, sample_rate, device_time_line);
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
 		return -EOVERFLOW;
@@ -2126,6 +2182,298 @@ int pendant_cloud_stream_write(const void *data, size_t length)
 	return 0;
 }
 
+/*
+ * Inline (conversational) reply: after the terminal upload chunk the relay
+ * answers with the model's spoken PCM on this same connection. State below
+ * lets main pull the dechunked body at playback pace.
+ */
+static bool reply_inline_active;
+static bool reply_inline_chunked;
+static bool reply_inline_eof;
+static size_t reply_inline_fixed_remaining;
+static unsigned long reply_chunk_remaining;
+static struct http_body_reader reply_reader;
+/* Chunk-size-line accumulator persists across -EAGAIN (non-blocking play). */
+static char reply_sizeline[24];
+static size_t reply_sizeline_length;
+
+static void header_copy_value(const char *header, const char *name,
+			      char *out, size_t out_size)
+{
+	out[0] = '\0';
+	const char *at = header_find_ci(header, name);
+
+	if (at == NULL) {
+		return;
+	}
+	at += strlen(name);
+	while (*at == ' ') {
+		++at;
+	}
+	size_t index = 0U;
+	while (at[index] != '\0' && at[index] != '\r' && at[index] != '\n' &&
+	       index + 1U < out_size) {
+		out[index] = at[index];
+		++index;
+	}
+	out[index] = '\0';
+}
+
+/*
+ * Read the response status line + headers from the live stream socket.
+ * Returns PENDANT_CLOUD_REPLY_INLINE when an audio/pcm body follows (socket
+ * stays open for pendant_cloud_reply_read), 0 for a classic JSON response
+ * (rest of the body is accumulated into http_response as before), <0 error.
+ */
+static int receive_stream_response_start(int fd)
+{
+	size_t offset = 0U;
+	char *body = NULL;
+
+	while (offset < sizeof(http_response) - 1U) {
+		ssize_t received = recv(fd, http_response + offset,
+					sizeof(http_response) - 1U - offset, 0);
+
+		if (received < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -errno;
+		}
+		if (received == 0) {
+			break;
+		}
+		offset += (size_t)received;
+		http_response[offset] = '\0';
+		body = strstr(http_response, "\r\n\r\n");
+		if (body != NULL) {
+			break;
+		}
+	}
+	http_response[offset] = '\0';
+
+	const char *status = strchr(http_response, ' ');
+
+	if (status == NULL) {
+		return -EBADMSG;
+	}
+	pendant_cloud_last_http_status = atoi(status + 1);
+
+	const bool inline_audio =
+		body != NULL && pendant_cloud_last_http_status >= 200 &&
+		pendant_cloud_last_http_status < 300 &&
+		(header_find_ci(http_response, "Content-Type: audio/pcm") !=
+			 NULL ||
+		 header_find_ci(http_response, "Content-Type: audio/opus") !=
+			 NULL);
+
+	if (inline_audio) {
+		const bool ulaw_reply =
+			header_find_ci(http_response,
+				       "Content-Type: audio/pcmu") != NULL;
+		const bool opus_reply =
+			header_find_ci(http_response,
+				       "Content-Type: audio/opus") != NULL;
+		size_t rate = header_decimal_value(http_response,
+						   "X-Audio-Sample-Rate:");
+
+		pendant_cloud_reply_format =
+			opus_reply ? PENDANT_CLOUD_AUDIO_OPUS_FRAMES
+			: ulaw_reply ? PENDANT_CLOUD_AUDIO_G711_ULAW
+				     : PENDANT_CLOUD_AUDIO_PCM_S16LE;
+		if (opus_reply) {
+			/* Wire packets carry 16 kHz speech; the on-device
+			 * decoder outputs 24 kHz regardless of this header. */
+			pendant_cloud_reply_sample_rate = 24000U;
+		} else if (rate != 0U) {
+			pendant_cloud_reply_sample_rate = (uint32_t)rate;
+		} else if (ulaw_reply) {
+			/* G.711 is defined at 8 kHz. */
+			pendant_cloud_reply_sample_rate = 8000U;
+		}
+		header_copy_value(http_response, "X-Job-Id:", mac_job_id,
+				  sizeof(mac_job_id));
+		reply_inline_chunked =
+			header_find_ci(http_response,
+				       "Transfer-Encoding: chunked") != NULL;
+		reply_inline_fixed_remaining = header_decimal_value(
+			http_response, "Content-Length:");
+		body += 4;
+		reply_reader = (struct http_body_reader){
+			.fd = fd,
+			.initial = (const uint8_t *)body,
+			.initial_length =
+				offset - (size_t)(body - http_response),
+		};
+		reply_chunk_remaining = 0U;
+		reply_sizeline_length = 0U;
+		reply_inline_eof = false;
+		reply_inline_active = true;
+		printk("Inline reply stream: rate=%u chunked=%u job=%s\n",
+		       pendant_cloud_reply_sample_rate,
+		       reply_inline_chunked ? 1U : 0U,
+		       mac_job_id[0] != '\0' ? mac_job_id : "(pending)");
+		return PENDANT_CLOUD_REPLY_INLINE;
+	}
+
+	/* Classic JSON: read the remainder until close, as before. */
+	while (offset < sizeof(http_response) - 1U) {
+		ssize_t received = recv(fd, http_response + offset,
+					sizeof(http_response) - 1U - offset, 0);
+
+		if (received < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -errno;
+		}
+		if (received == 0) {
+			break;
+		}
+		offset += (size_t)received;
+	}
+	http_response[offset] = '\0';
+	printk("Relay HTTP status: %d, response bytes: %u\n",
+	       pendant_cloud_last_http_status, (uint32_t)offset);
+	if (pendant_cloud_last_http_status < 200 ||
+	    pendant_cloud_last_http_status >= 300) {
+		const char *error_body = strstr(http_response, "\r\n\r\n");
+
+		printk("Relay error: %s\n",
+		       error_body == NULL ? "(no body)" : error_body + 4);
+		return -EREMOTE;
+	}
+	return 0;
+}
+
+int pendant_cloud_reply_read(void *buffer, size_t length)
+{
+	uint8_t *out = buffer;
+	size_t filled = 0U;
+
+	if (!reply_inline_active) {
+		return -ENOTCONN;
+	}
+	if (reply_inline_eof) {
+		return 0;
+	}
+
+	while (filled < length) {
+		uint8_t value;
+		int status;
+
+		if (reply_inline_chunked) {
+			if (reply_chunk_remaining == 0U) {
+				/* Chunk-size line (plus closing CRLF of the
+				 * previous chunk when one was consumed). */
+				bool line_done = false;
+
+				while (!line_done) {
+					status = http_body_next(&reply_reader,
+								&value);
+					if (status == -EAGAIN) {
+						return filled > 0U
+							       ? (int)filled
+							       : -EAGAIN;
+					}
+					if (status <= 0) {
+						reply_inline_eof = true;
+						return filled > 0U
+							       ? (int)filled
+							       : status;
+					}
+					if (value == '\n') {
+						line_done =
+							reply_sizeline_length >
+							0U;
+						continue;
+					}
+					if (value == '\r') {
+						continue;
+					}
+					if (reply_sizeline_length + 1U >=
+					    sizeof(reply_sizeline)) {
+						reply_inline_eof = true;
+						return -EOVERFLOW;
+					}
+					reply_sizeline[reply_sizeline_length++] =
+						(char)value;
+				}
+				reply_sizeline[reply_sizeline_length] = '\0';
+
+				char *end = NULL;
+				reply_chunk_remaining =
+					strtoul(reply_sizeline, &end, 16);
+				const bool bad_size = end == reply_sizeline;
+
+				reply_sizeline_length = 0U;
+				if (bad_size) {
+					reply_inline_eof = true;
+					return -EBADMSG;
+				}
+				if (reply_chunk_remaining == 0U) {
+					reply_inline_eof = true;
+					return (int)filled;
+				}
+			}
+			status = http_body_next(&reply_reader, &value);
+			if (status == -EAGAIN) {
+				return filled > 0U ? (int)filled : -EAGAIN;
+			}
+			if (status <= 0) {
+				reply_inline_eof = true;
+				return filled > 0U ? (int)filled : status;
+			}
+			--reply_chunk_remaining;
+			out[filled++] = value;
+		} else {
+			if (reply_inline_fixed_remaining == 0U) {
+				/* Close-delimited body: read until EOF. */
+			}
+			status = http_body_next(&reply_reader, &value);
+			if (status == -EAGAIN) {
+				return filled > 0U ? (int)filled : -EAGAIN;
+			}
+			if (status <= 0) {
+				reply_inline_eof = true;
+				/* status==0 is clean EOF; a socket error with
+				 * nothing buffered must NOT read as an empty
+				 * reply played "successfully". */
+				return filled > 0U ? (int)filled : status;
+			}
+			out[filled++] = value;
+			if (reply_inline_fixed_remaining > 0U &&
+			    --reply_inline_fixed_remaining == 0U) {
+				reply_inline_eof = true;
+				return (int)filled;
+			}
+		}
+	}
+	return (int)filled;
+}
+
+/* Playback drains the reply without blocking so the jitter ring, not the
+ * 85 ms I2S queue, absorbs LTE burst gaps. */
+int pendant_cloud_reply_set_nonblocking(bool enable)
+{
+	if (stream_fd < 0) {
+		return -ENOTCONN;
+	}
+	return socket_set_nonblock(stream_fd, enable);
+}
+
+void pendant_cloud_reply_stream_close(void)
+{
+	reply_inline_active = false;
+	reply_inline_eof = true;
+	if (stream_fd >= 0) {
+		close(stream_fd);
+		stream_fd = -1;
+	}
+	stream_active = false;
+	stream_reset_state();
+}
+
 int pendant_cloud_stream_end(void)
 {
 	int error;
@@ -2173,12 +2521,44 @@ int pendant_cloud_stream_end(void)
 	       stream_pump_calls, stream_eagain_count);
 
 	(void)socket_set_nonblock(stream_fd, false);
-	error = receive_http_response(stream_fd);
+	{
+		/* Header wait bounds SERVER THINK TIME (model turn + tool run
+		 * + first speech byte), not link liveness — a web_search chain
+		 * alone can pass 15s. Body reads tighten to 15s below once
+		 * audio is actually streaming. */
+		struct timeval receive_timeout = {
+			.tv_sec = 30,
+			.tv_usec = 0,
+		};
+		(void)setsockopt(stream_fd, SOL_SOCKET, SO_RCVTIMEO,
+				 &receive_timeout, sizeof(receive_timeout));
+	}
+	error = receive_stream_response_start(stream_fd);
 	printk("LAT live_stream server_wait_ms=%lld total_ms=%lld "
 	       "body_bytes=%u HTTP=%d\n",
 	       k_uptime_get() - body_done_ms,
 	       k_uptime_get() - stream_started_ms, stream_bytes_sent,
 	       pendant_cloud_last_http_status);
+
+	if (error == PENDANT_CLOUD_REPLY_INLINE) {
+		/*
+		 * The model's spoken reply is arriving on this socket; main
+		 * pulls it via pendant_cloud_reply_read and closes with
+		 * pendant_cloud_reply_stream_close. The Mac job (if any) was
+		 * dispatched server-side from the tool call. Deltas flow
+		 * continuously once speech starts, so a mid-body recv may
+		 * use a tighter bound than the header wait above.
+		 */
+		struct timeval body_timeout = {
+			.tv_sec = 15,
+			.tv_usec = 0,
+		};
+		(void)setsockopt(stream_fd, SOL_SOCKET, SO_RCVTIMEO,
+				 &body_timeout, sizeof(body_timeout));
+		pendant_cloud_transcribe_result = 0;
+		pendant_cloud_dispatch_result = 0;
+		return PENDANT_CLOUD_REPLY_INLINE;
+	}
 
 	close(stream_fd);
 	stream_fd = -1;

@@ -13,6 +13,8 @@
 
 export const FLEET_STATE_KEY = 'fleet'
 export const MAX_APPLICATIONS_IN_PROMPT = 220
+export const MAX_SHORTCUTS_IN_PROMPT = 40
+export const MAX_CLI_TOOLS_IN_PROMPT = 180
 export const MAX_BROWSER_DEVICES = 6
 export const MAX_MEMORY_LINE = 160
 
@@ -36,6 +38,7 @@ export const VOICE_AGENT_STATIC_INSTRUCTIONS = `You are the wearable pendant voi
 - Device/Mac state ALWAYS uses tools — battery, wifi, volume, focused app, disk, processes, network, what is open, system settings. Prefer get_mac_status. Never guess numbers or invent readings in spoken text alone.
 - Anything that queries or changes the Mac = tool first (get_mac_status, mac_run_actions, browser_run_actions). Chitchat and pure knowledge Q&A = speak only, no tools.
 - Live public facts = web_search. Multi-step or ambiguous computer work = mac_delegate only when a short action list is not enough.
+- You are self-sufficient for general knowledge, conversation, math, and date/time (owner_local_time is in context). NEVER involve the Mac for questions that are not about the Mac or its apps/files.
 - Never claim success unless a tool call actually queued or completed the work.
 - If a needed surface is offline, say so briefly and offer what you can do without it.
 - Follow tool schemas exactly; do not invent parameter names.
@@ -48,6 +51,74 @@ export const VOICE_AGENT_STATIC_INSTRUCTIONS = `You are the wearable pendant voi
 Tools produce the plan (actions). Spoken reply is user-facing confirmation only. History labels are secondary.`
 
 /**
+ * Parse the pendant's X-Device-Time header (3GPP +CCLK "yy/MM/dd,hh:mm:ss±zz",
+ * zz = quarter-hours offset from UTC). Whether the time field is UTC or local
+ * varies by modem/carrier, so both readings are checked against the server's
+ * own clock and the agreeing one wins. Returns { utcMs, offsetMinutes } or
+ * null when absent/implausible (e.g. NITZ never delivered).
+ */
+export function parseDeviceTime(cclk, nowMs = Date.now()) {
+  const match =
+    /^(\d{2})\/(\d{2})\/(\d{2}),(\d{2}):(\d{2}):(\d{2})([+-]\d{1,2})$/.exec(
+      String(cclk || '').trim(),
+    )
+  if (!match) return null
+
+  const year = 2000 + Number(match[1])
+  if (year < 2024 || year > 2099) return null
+  const offsetMinutes = Number(match[7]) * 15
+  const fieldMs = Date.UTC(
+    year,
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6]),
+  )
+
+  const TOLERANCE_MS = 5 * 60_000
+  const candidates = [
+    fieldMs, // time field already UTC
+    fieldMs - offsetMinutes * 60_000, // time field was local
+  ]
+  for (const utcMs of candidates) {
+    if (Math.abs(utcMs - nowMs) <= TOLERANCE_MS) {
+      return { utcMs, offsetMinutes }
+    }
+  }
+  return null
+}
+
+export function formatDeviceTime({ utcMs, offsetMinutes }) {
+  const local = new Date(utcMs + offsetMinutes * 60_000)
+  const dayNames = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ]
+  const hours24 = local.getUTCHours()
+  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12
+  const meridiem = hours24 < 12 ? 'AM' : 'PM'
+  const minutes = String(local.getUTCMinutes()).padStart(2, '0')
+  const sign = offsetMinutes >= 0 ? '+' : '-'
+  const absOffset = Math.abs(offsetMinutes)
+  const offsetLabel = `UTC${sign}${Math.floor(absOffset / 60)}${
+    absOffset % 60 ? `:${String(absOffset % 60).padStart(2, '0')}` : ''
+  }`
+
+  return `${dayNames[local.getUTCDay()]} ${local.getUTCFullYear()}-${String(
+    local.getUTCMonth() + 1,
+  ).padStart(2, '0')}-${String(local.getUTCDate()).padStart(
+    2,
+    '0',
+  )} ${hours12}:${minutes} ${meridiem} (${offsetLabel}, from the pendant's LTE network)`
+}
+
+/**
  * Build the full Realtime session instructions string.
  * Static block is always first so prefix caching can hit across sessions.
  */
@@ -55,10 +126,11 @@ export function composeRealtimeInstructions({
   language = null,
   fleet = null,
   cloud = null,
+  deviceTime = null,
 } = {}) {
   const parts = [VOICE_AGENT_STATIC_INSTRUCTIONS]
 
-  const fleetBlock = formatFleetSnapshotForPrompt(fleet, { cloud })
+  const fleetBlock = formatFleetSnapshotForPrompt(fleet, { cloud, deviceTime })
   if (fleetBlock) {
     parts.push('')
     parts.push(fleetBlock)
@@ -93,12 +165,38 @@ export function normalizeFleetSnapshot(raw) {
   const memory =
     data.memory && typeof data.memory === 'object' ? data.memory : {}
 
+  // Sort BEFORE capping: on a Mac with more than MAX_APPLICATIONS_IN_PROMPT
+  // discovered apps, discovery-order slicing would change WHICH apps survive
+  // the cap between heartbeats, churning the prompt's cacheable prefix.
   const applications = Array.isArray(mac.applications)
     ? mac.applications
         .map((name) => String(name || '').trim())
         .filter((name) => name && !name.startsWith('.'))
+        .sort()
         .slice(0, MAX_APPLICATIONS_IN_PROMPT)
     : []
+
+  const automationRaw =
+    mac.automation && typeof mac.automation === 'object' ? mac.automation : {}
+  // Sorted before capping for the same prompt-cache stability as apps.
+  const automation = {
+    macosVersion: String(automationRaw.macosVersion || '').trim() || null,
+    arch: String(automationRaw.arch || '').trim() || null,
+    shortcuts: Array.isArray(automationRaw.shortcuts)
+      ? automationRaw.shortcuts
+          .map((name) => String(name || '').trim())
+          .filter(Boolean)
+          .sort()
+          .slice(0, MAX_SHORTCUTS_IN_PROMPT)
+      : [],
+    cliTools: Array.isArray(automationRaw.cliTools)
+      ? automationRaw.cliTools
+          .map((name) => String(name || '').trim())
+          .filter(Boolean)
+          .sort()
+          .slice(0, MAX_CLI_TOOLS_IN_PROMPT)
+      : [],
+  }
 
   const browserDevices = Array.isArray(browser.devices)
     ? browser.devices
@@ -131,6 +229,8 @@ export function normalizeFleetSnapshot(raw) {
       hostApp: String(mac.hostApp || '').trim() || null,
       applications,
       appCount: applications.length || Number(mac.appCount) || 0,
+      automation,
+      timezone: String(mac.timezone || '').trim() || null,
     },
     browser: {
       online: Boolean(browser.online) || browserDevices.some((d) => d.online),
@@ -222,6 +322,8 @@ export function fleetFromAgentSnapshot(agentSnapshot, { devices = [] } = {}) {
       hostApp: permissions.hostApp || null,
       applications,
       appCount: machine.appCount || applications.length,
+      automation: machine.automation || null,
+      timezone: machine.timezone || null,
     },
     browser: {
       online: Boolean(browser.online),
@@ -256,7 +358,10 @@ export function fleetFromAgentSnapshot(agentSnapshot, { devices = [] } = {}) {
  * Compact live environment block (after static policy).
  * Facts only — no per-action coaching. Names/resources come from runtime discovery.
  */
-export function formatFleetSnapshotForPrompt(fleetInput, { cloud = null } = {}) {
+export function formatFleetSnapshotForPrompt(
+  fleetInput,
+  { cloud = null, deviceTime = null } = {},
+) {
   const fleet = normalizeFleetSnapshot(fleetInput || {})
   if (cloud && typeof cloud === 'object') {
     fleet.cloud = {
@@ -268,10 +373,16 @@ export function formatFleetSnapshotForPrompt(fleetInput, { cloud = null } = {}) 
     }
   }
 
+  /*
+   * Ordering is prompt-cache load-bearing: OpenAI caches the longest
+   * byte-identical prefix (min 1024 tokens). Stable facts (surfaces, cloud,
+   * sorted app inventory) come first so the cacheable prefix extends well past
+   * the minimum; anything that churns between presses (active tab, memory,
+   * as_of) sits at the very end. Do not add timestamps above the inventory.
+   */
   const lines = ['## Live environment']
-  lines.push(`as_of: ${fleet.updatedAt || 'unknown'}`)
 
-  // Surfaces
+  // Surfaces (stable identity only — live tab state comes later)
   lines.push('### Surfaces')
   if (fleet.mac.online) {
     lines.push(
@@ -283,24 +394,13 @@ export function formatFleetSnapshotForPrompt(fleetInput, { cloud = null } = {}) 
   } else {
     lines.push('- mac: offline')
   }
-
-  if (fleet.browser.online && fleet.browser.devices.length) {
-    lines.push('- browser_extension: online')
-    for (const device of fleet.browser.devices) {
-      if (!device.online) continue
-      const bits = [
-        device.browserName || 'browser',
-        device.deviceName,
-        device.tabUrl && `active_origin=${device.tabUrl}`,
-        device.tabTitle && `title=${device.tabTitle}`,
-        device.tabCount != null && `tabs=${device.tabCount}`,
-      ].filter(Boolean)
-      lines.push(`  - ${bits.join(' · ')}`)
-    }
-  } else {
-    lines.push('- browser_extension: offline')
-  }
-
+  lines.push(
+    `- browser_extension: ${
+      fleet.browser.online && fleet.browser.devices.length
+        ? 'online'
+        : 'offline'
+    }`,
+  )
   lines.push(
     fleet.ios.online
       ? `- ios: online${fleet.ios.name ? ` · ${fleet.ios.name}` : ''}`
@@ -323,13 +423,67 @@ export function formatFleetSnapshotForPrompt(fleetInput, { cloud = null } = {}) 
   )
   lines.push(`- connected_integrations: ${integrations}`)
 
-  // Mac resource inventory (for grounding — not a command menu)
+  // Mac resource inventory (for grounding — not a command menu). Sorted so
+  // discovery-order churn cannot invalidate the cached prefix.
   if (fleet.mac.online && fleet.mac.applications.length) {
     lines.push('### Mac software inventory')
     lines.push(
       `(${fleet.mac.applications.length} apps discovered on this machine; use exact names when a tool needs one)`,
     )
-    lines.push(fleet.mac.applications.join(', '))
+    lines.push([...fleet.mac.applications].sort().join(', '))
+  }
+
+  const automation = fleet.mac.automation
+  if (fleet.mac.online && automation) {
+    lines.push('### Mac automation environment (discovered, not assumed)')
+    lines.push(
+      `- macOS ${automation.macosVersion || 'unknown'} on ${
+        automation.arch || 'unknown'
+      }. AppleScript, System Events UI scripting, and media key codes are available (accessibility ${
+        fleet.mac.permissionsReady ? 'granted' : 'NOT granted'
+      }).`,
+    )
+    lines.push(
+      automation.shortcuts.length
+        ? `- Shortcuts runnable via \`shortcuts run "<name>"\`: ${automation.shortcuts.join(', ')}`
+        : '- No Shortcuts are defined on this Mac.',
+    )
+    if (automation.cliTools.length === 0) {
+      lines.push(
+        '- No non-default CLI tools are installed — never shell out to a third-party tool; use AppleScript/System Events/Shortcuts instead.',
+      )
+    } else if (automation.cliTools.length < MAX_CLI_TOOLS_IN_PROMPT) {
+      lines.push(
+        `- Non-default CLI tools installed (complete list): ${automation.cliTools.join(', ')}`,
+      )
+      lines.push(
+        '- A CLI tool absent from that list is NOT installed — never shell out to one on a guess; use AppleScript/System Events/Shortcuts instead.',
+      )
+    } else {
+      // Capped: an alphabetical prefix must not masquerade as the whole truth.
+      lines.push(
+        `- Non-default CLI tools (first ${automation.cliTools.length} alphabetically; more may exist): ${automation.cliTools.join(', ')}`,
+      )
+      lines.push(
+        '- Before shelling out to any tool NOT shown above, verify it exists in the same action (e.g. `command -v <tool> && <tool> …`) with an AppleScript/System Events fallback.',
+      )
+    }
+  }
+
+  // ---- Volatile tail (changes between presses; kept below the cache line) ----
+  if (fleet.browser.online && fleet.browser.devices.length) {
+    lines.push('### Browser now')
+    for (const device of fleet.browser.devices) {
+      if (!device.online) continue
+      const bits = [
+        device.browserName || 'browser',
+        device.deviceName,
+        device.tabUrl && `active_origin=${device.tabUrl}`,
+        device.tabTitle && `title=${device.tabTitle}`,
+        device.tabCount != null && `tabs=${device.tabCount}`,
+      ].filter(Boolean)
+      lines.push(`- ${bits.join(' · ')}`)
+    }
   }
 
   // Light memory
@@ -343,6 +497,36 @@ export function formatFleetSnapshotForPrompt(fleetInput, { cloud = null } = {}) 
     lines.push('### Recent context')
     lines.push(memBits.join(' · '))
   }
+
+  // The model has no clock: give it the owner's local wall time (volatile
+  // tail — below the cache line) so time/date questions are answered
+  // directly, never routed to a Mac tool.
+  const timezone = fleet.mac.timezone || 'UTC'
+  let localNow
+  try {
+    localNow = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    }).format(new Date())
+  } catch {
+    localNow = new Date().toISOString()
+  }
+  lines.push('### Now')
+  // Pendant NITZ time (from the LTE tower) beats the Mac-reported timezone:
+  // it stays correct with the Mac asleep, offline, or in another city.
+  const parsedDeviceTime = deviceTime ? parseDeviceTime(deviceTime) : null
+  if (parsedDeviceTime) {
+    lines.push(`- owner_local_time: ${formatDeviceTime(parsedDeviceTime)}`)
+  } else {
+    lines.push(`- owner_local_time: ${localNow} (${timezone})`)
+  }
+  lines.push(`as_of: ${fleet.updatedAt || 'unknown'}`)
 
   return lines.join('\n')
 }
@@ -381,6 +565,8 @@ export function buildFleetPayloadFromLocal({
             ? permissions.requiredMissing.length === 0
             : true),
       ),
+      automation: machine?.automation || null,
+      timezone: machine?.timezone || null,
       hostApp: permissions?.hostApp || null,
       applications,
       appCount: applications.length,

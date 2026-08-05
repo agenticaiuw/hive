@@ -216,9 +216,15 @@ export function createMemoryStore() {
       const nowIso = new Date().toISOString()
 
       for (let attempt = 0; attempt < 40; attempt += 1) {
+        // Same priority rule as d1Store: voice jobs preempt agent_proxy work.
         const queued = [...jobs.values()]
           .filter((job) => job.status === 'queued')
-          .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+          .sort(
+            (a, b) =>
+              (a.type === 'agent_proxy' ? 1 : 0) -
+                (b.type === 'agent_proxy' ? 1 : 0) ||
+              String(a.createdAt).localeCompare(String(b.createdAt)),
+          )
 
         const job = queued[0]
         if (!job) return null

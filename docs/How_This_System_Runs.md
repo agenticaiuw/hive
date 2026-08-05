@@ -69,7 +69,7 @@ CP2104 port observed as `/dev/cu.usbserial-0287A9CA`.
 
 ## 2. Deploy the cloud relay worker
 
-**What it is:** The **relay** is a small always-on program in Cloudflare’s cloud (`ai-pendant-mission-control…workers.dev`). It:
+**What it is:** The **relay** is a small always-on program in Cloudflare’s cloud (`ai-pendant-relay…workers.dev`). It:
 
 - Receives audio from the board  
 - Turns speech into text (and optionally a plan)  

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DEFAULT_RELAY_URL =
-  'https://ai-pendant-mission-control.your-subdomain.workers.dev'
+  'https://ai-pendant-relay.your-subdomain.workers.dev'
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_OUTPUT_DIRECTORY = path.resolve(
   SCRIPT_DIRECTORY,

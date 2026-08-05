@@ -331,6 +331,12 @@ struct pendant_opus_stream {
 	uint32_t output_samples;
 	uint16_t pre_skip;
 	struct pendant_opus_stats stats;
+	/*
+	 * Live LTE mode: when set, encoded packets go to this sink as raw
+	 * Opus packets (caller adds wire framing) and the Ogg/file machinery
+	 * is bypassed entirely.
+	 */
+	int (*packet_sink)(const uint8_t *packet, size_t packet_bytes);
 };
 
 static struct pendant_opus_stream g_stream;
@@ -365,6 +371,33 @@ static int stream_flush_frame(bool final_packet)
 	struct pendant_opus_stream *s = &g_stream;
 	int packet_bytes;
 	int error;
+
+	if (s->packet_sink != NULL) {
+		if (s->frame_fill == 0U ||
+		    !pendant_opus_final_needs_packet(s->frame_fill)) {
+			return 0;
+		}
+		if (s->frame_fill < OPUS_ENCODE_FRAME_SAMPLES) {
+			if (!final_packet) {
+				return 0;
+			}
+			memset(s->frame + s->frame_fill, 0,
+			       (OPUS_ENCODE_FRAME_SAMPLES - s->frame_fill) *
+				       sizeof(s->frame[0]));
+		}
+		packet_bytes = opus_encode(s->encoder, s->frame,
+					   OPUS_ENCODE_FRAME_SAMPLES,
+					   s->page_payload,
+					   OPUS_ENCODE_PACKET_BYTES);
+		s->frame_fill = 0U;
+		if (packet_bytes < 0) {
+			return -EIO;
+		}
+		s->stats.packets++;
+		s->stats.output_bytes += (uint32_t)packet_bytes;
+		s->output_samples += OPUS_ENCODE_FRAME_SAMPLES;
+		return s->packet_sink(s->page_payload, (size_t)packet_bytes);
+	}
 
 	/* Keep a full page pending until the next packet or EOS.  This lets an
 	 * exact page boundary carry EOS without inventing 20 ms of silence.
@@ -509,6 +542,112 @@ int pendant_opus_stream_begin(const char *opus_path,
 	return 0;
 }
 
+/*
+ * Live LTE variant of stream_begin: no file, no Ogg — encoded packets go to
+ * `sink` as they are produced. Workspace holds only the encoder state plus
+ * one packet's staging (OPUS_ENCODE_PACKET_BYTES).
+ */
+int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
+				      void *workspace, size_t workspace_bytes,
+				      int (*sink)(const uint8_t *packet,
+						  size_t packet_bytes))
+{
+	struct pendant_opus_stream *s = &g_stream;
+	int encoder_bytes;
+	size_t arena_needed;
+	int error;
+
+	pendant_opus_stream_abort();
+	if (workspace == NULL || source_sample_rate == 0U || sink == NULL) {
+		return -EINVAL;
+	}
+
+	pendant_opus_prepare_scratch();
+
+	encoder_bytes = opus_encoder_get_size(1);
+	arena_needed =
+		ROUND_UP((size_t)encoder_bytes, 4U) + OPUS_ENCODE_PACKET_BYTES;
+	if (encoder_bytes <= 0 || arena_needed > workspace_bytes) {
+		printk("Opus live begin(pkt): workspace too small need=%u have=%u\n",
+		       (unsigned int)arena_needed,
+		       (unsigned int)workspace_bytes);
+		return -ENOMEM;
+	}
+
+	s->encoder = workspace;
+	s->page_payload =
+		(uint8_t *)workspace + ROUND_UP((size_t)encoder_bytes, 4U);
+	s->source_rate = source_sample_rate;
+
+	error = opus_encoder_init(s->encoder, PENDANT_OPUS_SAMPLE_RATE, 1,
+				  OPUS_APPLICATION_RESTRICTED_SILK);
+	if (error != OPUS_OK) {
+		return -EINVAL;
+	}
+	if (opus_encoder_ctl(s->encoder,
+			     OPUS_SET_BITRATE(PENDANT_OPUS_BITRATE)) !=
+		    OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(1)) != OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)) !=
+		    OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_DTX(1)) != OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_VBR(1)) != OPUS_OK) {
+		return -EINVAL;
+	}
+
+	s->packet_sink = sink;
+	s->active = true;
+	printk("Opus live stream begin (packet sink): source_hz=%u\n",
+	       source_sample_rate);
+	return 0;
+}
+
+/*
+ * Streaming reply decoder: raw Opus packets in, 24 kHz mono PCM out (the
+ * decoder resamples internally — no separate upsampling stage).
+ */
+static OpusDecoder *g_reply_decoder;
+
+int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes)
+{
+	int decoder_bytes = opus_decoder_get_size(1);
+	int error;
+
+	g_reply_decoder = NULL;
+	if (workspace == NULL || decoder_bytes <= 0 ||
+	    (size_t)decoder_bytes > workspace_bytes) {
+		return -ENOMEM;
+	}
+	pendant_opus_prepare_scratch();
+	error = opus_decoder_init((OpusDecoder *)workspace,
+				  PENDANT_OPUS_REPLY_SAMPLE_RATE, 1);
+	if (error != OPUS_OK) {
+		return -EINVAL;
+	}
+	g_reply_decoder = (OpusDecoder *)workspace;
+	return decoder_bytes;
+}
+
+int pendant_opus_reply_decode_packet(const uint8_t *packet,
+				     size_t packet_bytes, int16_t *pcm_out,
+				     size_t max_samples)
+{
+	int decoded;
+
+	if (g_reply_decoder == NULL || packet == NULL || pcm_out == NULL) {
+		return -ENOTCONN;
+	}
+	pendant_opus_prepare_scratch();
+	decoded = opus_decode(g_reply_decoder, packet, (opus_int32)packet_bytes,
+			      pcm_out, (int)max_samples, 0);
+	return decoded < 0 ? -EIO : decoded;
+}
+
+void pendant_opus_reply_decoder_end(void)
+{
+	g_reply_decoder = NULL;
+}
+
 int pendant_opus_stream_feed(const int16_t *samples, size_t sample_count)
 {
 	struct pendant_opus_stream *s = &g_stream;
@@ -583,6 +722,15 @@ int pendant_opus_stream_end(struct pendant_opus_stats *stats)
 	if (error == 0) {
 		/* A pending exact-boundary page gets EOS with no extra packet. */
 		error = stream_flush_frame(true);
+	}
+
+	if (s->packet_sink != NULL) {
+		/* Live LTE mode: no file to sync, nothing else to finalize. */
+		if (stats != NULL) {
+			*stats = s->stats;
+		}
+		memset(s, 0, sizeof(*s));
+		return error;
 	}
 
 	if (error == 0) {

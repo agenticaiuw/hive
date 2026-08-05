@@ -9,6 +9,7 @@ import {
   RELAY_URL,
   WORK_RETRY_BASE_MS,
   WORK_RETRY_MAX_MS,
+  WORK_POLL_ABORT_MS,
 } from './bridgeConfig.js'
 import {
   spokenConfirmation,
@@ -145,10 +146,13 @@ async function workLoop() {
 }
 
 async function pollForWork() {
+  // The abort signal bounds a stalled long-poll; without it a wedged socket
+  // holds the work loop hostage for undici's multi-minute default timeout.
   const response = await fetch(
     `${RELAY_URL}/v1/bridge/work?deviceId=${encodeURIComponent(BRIDGE_DEVICE_ID)}`,
     {
       headers: relayHeaders,
+      signal: AbortSignal.timeout(WORK_POLL_ABORT_MS),
     },
   )
 
@@ -176,7 +180,13 @@ async function pollForWork() {
 // Exported for the regression test that drives a full screenshot job and
 // asserts nothing pixel-shaped reaches the relay.
 export async function handleWork(work) {
-  console.log(`[bridge] Processing ${work.type} job ${work.jobId}`)
+  const queueAgeMs = work.createdAt
+    ? Date.now() - new Date(work.createdAt).getTime()
+    : null
+  console.log(
+    `[bridge] Processing ${work.type} job ${work.jobId}` +
+      (queueAgeMs === null ? '' : ` (claimed +${queueAgeMs}ms after creation)`),
+  )
   const observablePipeline =
     work.type === 'plan' || work.type === 'execute'
 
@@ -418,26 +428,11 @@ export async function handleWork(work) {
       }
 
       const speechStartedAt = Date.now()
-      // Trivial single open_app success: skip a long spoken sentence; still send
-      // a one-word cached "Done." so the pendant has something to play.
-      const trivialOpen =
-        plan.executed &&
-        Array.isArray(plan.actions) &&
-        plan.actions.length === 1 &&
-        plan.actions[0]?.type === 'open_app'
-      if (trivialOpen) {
-        plan.response = 'Done.'
-      }
-
       void reportPipelineEvent(planWork, {
         stage: 'tts',
         status: 'active',
-        label: trivialOpen
-          ? 'Rendering short confirmation speech'
-          : 'Rendering response speech',
-        detail: trivialOpen
-          ? 'Simple open_app success — using cached one-word reply.'
-          : 'macOS speech is generating 24 kHz mono PCM for the pendant.',
+        label: 'Rendering response speech',
+        detail: 'macOS speech is generating 24 kHz mono PCM for the pendant.',
         text: spokenTextForResult(plan),
       })
       // TTS after execute; cached phrases are near-instant.

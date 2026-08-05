@@ -7,7 +7,7 @@ import { parse } from 'dotenv'
 const projectRoot = resolve(import.meta.dirname, '..')
 const productionRelayUrl =
   process.env.IOS_RELAY_URL ||
-  'https://ai-pendant-mission-control.your-subdomain.workers.dev'
+  'https://ai-pendant-relay.your-subdomain.workers.dev'
 
 const build = spawnSync(
   process.execPath,

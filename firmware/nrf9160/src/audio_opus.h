@@ -13,7 +13,12 @@
  * Encoder mono fixed-point is ~22–25 KiB; page payload is ~2 KiB with 5
  * packets/page. 30 KiB workspace leaves margin.
  */
-#define PENDANT_OPUS_WORKSPACE_BYTES (30U * 1024U)
+/* Shared audio RAM, time-multiplexed: capture TX ring while recording,
+ * reply jitter buffer while playing, Opus scratch only in the SD-fallback
+ * encode. One 30 KiB block, three jobs, never concurrently. */
+#define PENDANT_AUDIO_WORKSPACE_BYTES (30U * 1024U)
+/* Back-compat alias for the opus encoder's own references. */
+#define PENDANT_OPUS_WORKSPACE_BYTES PENDANT_AUDIO_WORKSPACE_BYTES
 /* Must match GLOBAL_STACK_SIZE in CMakeLists.txt (≥ measured ~25.4 KiB peak). */
 #define PENDANT_OPUS_SCRATCH_BYTES (28U * 1024U)
 #define PENDANT_OPUS_SAMPLE_RATE 16000U
@@ -52,5 +57,24 @@ bool pendant_opus_stream_active(void);
 int pendant_opus_decode_file(const char *opus_path, const char *pcm_path,
 			     void *workspace, size_t workspace_bytes,
 			     struct pendant_opus_stats *stats);
+
+/*
+ * Live LTE paths. Uplink: stream_begin_packets + stream_feed deliver raw
+ * Opus packets to `sink` mid-recording (no file, no Ogg). Downlink: the
+ * reply decoder turns wire packets into 24 kHz mono PCM (Opus resamples
+ * internally). Both share the NONTHREADSAFE_PSEUDOSTACK scratch, so never
+ * run one while the other is active.
+ */
+int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
+				      void *workspace, size_t workspace_bytes,
+				      int (*sink)(const uint8_t *packet,
+						  size_t packet_bytes));
+int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes);
+int pendant_opus_reply_decode_packet(const uint8_t *packet,
+				     size_t packet_bytes, int16_t *pcm_out,
+				     size_t max_samples);
+void pendant_opus_reply_decoder_end(void);
+/* 60 ms wire packets: 960 samples at 16 kHz in, 1440 samples at 24 kHz out. */
+#define PENDANT_OPUS_REPLY_FRAME_SAMPLES 1440U
 
 #endif /* AUDIO_OPUS_H_ */

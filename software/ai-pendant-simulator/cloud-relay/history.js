@@ -1,4 +1,4 @@
-import { voiceRunForJob } from './jobs.js'
+import { voiceRunForCapture, voiceRunForJob } from './jobs.js'
 import { stripProtocolTerminators } from '../shared/protocolText.js'
 
 /*
@@ -109,6 +109,8 @@ function audioSummary(capture, link) {
   return {
     available: storage === 'r2' || storage === 'd1-base64',
     captureId: capture.jobId,
+    replyAvailable: Boolean(capture.replyCaptureId),
+    replyCaptureId: capture.replyCaptureId || null,
     link,
     storage,
     format: capture.format ?? null,
@@ -160,6 +162,7 @@ export function linkAudioCaptures(jobs = [], captures = []) {
     let bestDistance = Number.POSITIVE_INFINITY
     for (const capture of capturesById.values()) {
       if (claimed.has(capture.jobId)) continue
+      if (capture.role === 'reply') continue
       if (String(capture.transcript || '').trim() !== transcript) continue
       const distance = Math.abs(new Date(capture.createdAt || 0).getTime() - jobTime)
       if (!Number.isFinite(distance) || distance > HEURISTIC_MATCH_WINDOW_MS) continue
@@ -213,6 +216,37 @@ export function historyEntryForJob(job, { capture = null, link = null } = {}) {
  * for the next page. `scanned` is the raw row count so the caller can tell a
  * short page (nothing left) from a page thinned out by filtering.
  */
+/*
+ * Conversational presses leave no plan job — the capture IS the run. Shape it
+ * like any other history entry so both voices and transcripts surface.
+ */
+export function historyEntryForCapture(capture) {
+  const run = voiceRunForCapture(capture)
+  if (!run) {
+    return null
+  }
+
+  return {
+    pipelineId: run.pipelineId,
+    kind: run.kind,
+    command: run.command,
+    origin: run.origin,
+    inputMode: 'voice',
+    source: run.source,
+    sessionId: null,
+    status: run.status,
+    jobStatus: 'completed',
+    reply: capture.replyTranscript || null,
+    actionCount: 0,
+    eventCount: run.events.length,
+    error: null,
+    durationMs: null,
+    audio: audioSummary(capture, 'self'),
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  }
+}
+
 export function buildHistoryPage({
   jobs = [],
   captures = [],
@@ -224,6 +258,24 @@ export function buildHistoryPage({
   const matching = jobs.filter((job) => matchesHistoryQuery(job, query))
   const links = linkAudioCaptures(matching, captures)
 
+  const claimedCaptures = new Set(
+    [...links.values()].map((linked) => linked?.capture?.jobId).filter(Boolean),
+  )
+  const captureEntries = captures
+    .filter(
+      (capture) =>
+        capture &&
+        !claimedCaptures.has(capture.jobId) &&
+        !capture.planJobId &&
+        capture.role !== 'reply' &&
+        matchesHistoryQuery(
+          { command: capture.transcript, transcript: capture.transcript },
+          query,
+        ),
+    )
+    .map((capture) => historyEntryForCapture(capture))
+    .filter(Boolean)
+
   const all = matching
     .map((job) => {
       const linked = links.get(job.jobId)
@@ -233,6 +285,11 @@ export function buildHistoryPage({
       })
     })
     .filter(Boolean)
+    .concat(captureEntries)
+    .sort(
+      (left, right) =>
+        new Date(right.createdAt || 0) - new Date(left.createdAt || 0),
+    )
 
   const entries = all.slice(0, safeLimit)
   const scanned = jobs.length

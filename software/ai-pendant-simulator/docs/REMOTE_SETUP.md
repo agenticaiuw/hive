@@ -25,10 +25,10 @@ required.
 
 The checked-in Wrangler configuration deploys:
 
-- Worker: `ai-pendant-mission-control`
+- Worker: `ai-pendant-relay`
 - D1 database: `ai-pendant-relay-db`
 - Worker URL:
-  `https://ai-pendant-mission-control.your-subdomain.workers.dev`
+  `https://ai-pendant-relay.your-subdomain.workers.dev`
 - Speech model: `@cf/openai/whisper-large-v3-turbo`
 
 The relay API key and pairing code are Cloudflare Worker secrets and are not

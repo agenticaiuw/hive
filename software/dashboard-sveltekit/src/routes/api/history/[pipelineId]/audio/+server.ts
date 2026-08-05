@@ -10,7 +10,7 @@ import {
 export const prerender = false;
 
 /** Stream the stored recording for one run. Auth stays server-side. */
-export const GET: RequestHandler = async ({ locals, params, request }) => {
+export const GET: RequestHandler = async ({ locals, params, request, url }) => {
   const client = relayClient(locals.runtimeEnv);
   if (!client) return missingRelayCredential();
   const { relayApiKey, relayFetch } = client;
@@ -30,8 +30,9 @@ export const GET: RequestHandler = async ({ locals, params, request }) => {
     const range = request.headers.get("range");
     if (range) headers.Range = range;
 
+    const voice = url.searchParams.get("voice") === "reply" ? "?voice=reply" : "";
     const response = await relayFetch(
-      `/v1/ops/history/${encodeURIComponent(pipelineId)}/audio`,
+      `/v1/ops/history/${encodeURIComponent(pipelineId)}/audio${voice}`,
       { headers, cache: "no-store" },
     );
 

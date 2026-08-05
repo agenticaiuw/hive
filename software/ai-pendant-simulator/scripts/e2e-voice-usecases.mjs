@@ -47,7 +47,7 @@ const AGENT = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:8000'
 const TOKEN = process.env.AGENT_TOKEN || ''
 const RELAY =
   process.env.RELAY_URL ||
-  'https://ai-pendant-mission-control.your-subdomain.workers.dev'
+  'https://ai-pendant-relay.your-subdomain.workers.dev'
 const RELAY_KEY = process.env.RELAY_API_KEY || ''
 
 function log(msg) {

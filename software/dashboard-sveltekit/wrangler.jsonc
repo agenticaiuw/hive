@@ -10,13 +10,13 @@
     "directory": ".svelte-kit/cloudflare"
   },
   "vars": {
-    "RELAY_URL": "https://ai-pendant-mission-control.your-subdomain.workers.dev"
+    "RELAY_URL": "https://ai-pendant-relay.your-subdomain.workers.dev"
   },
-  // `ai-pendant-mission-control` is the live relay Worker's real name.
+  // `ai-pendant-relay` is the live relay Worker's real name.
   "services": [
     {
       "binding": "RELAY",
-      "service": "ai-pendant-mission-control",
+      "service": "ai-pendant-relay",
       "remote": true
     }
   ],
@@ -32,7 +32,7 @@
   "env": {
     "local": {
       "vars": {
-        "RELAY_URL": "https://ai-pendant-mission-control.your-subdomain.workers.dev"
+        "RELAY_URL": "https://ai-pendant-relay.your-subdomain.workers.dev"
       }
     }
   }

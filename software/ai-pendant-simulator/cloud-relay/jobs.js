@@ -155,6 +155,61 @@ const VOICE_RUN_ORIGINS = new Set([
   'pendant_upload',
 ])
 
+/*
+ * Conversational-only presses (the model answered by voice; no Mac job) leave
+ * only an audio_capture behind. Surface those as first-class runs so chat
+ * questions don't vanish from the dashboard.
+ */
+export function voiceRunForCapture(capture) {
+  if (!capture || capture.type !== 'audio_capture') return null
+  if (capture.planJobId) return null // its plan job already owns the run
+  if (capture.role === 'reply') return null // agent-voice sidecar, not a run
+  const transcript = String(capture.transcript || '').trim()
+
+  return {
+    pipelineId: capture.jobId,
+    kind: 'voice_command',
+    command: transcript,
+    source: 'cloudflare',
+    origin: 'live_lte',
+    status: 'completed',
+    events: [
+      {
+        eventId: `cloud-${capture.jobId}-transcription`,
+        stage: 'transcription',
+        status: transcript ? 'done' : 'failed',
+        label: transcript
+          ? 'Transcript received from cloud'
+          : 'Speech was not recognized',
+        detail: 'Speech-to-text ran inside the Realtime session.',
+        text: transcript,
+        source: 'cloudflare',
+        meta: { audioBytes: capture.audioBytes, format: capture.format },
+        at: capture.createdAt,
+      },
+      {
+        eventId: `cloud-${capture.jobId}-agent`,
+        stage: 'agent',
+        status: 'done',
+        label: 'Answered by voice (no Mac action)',
+        detail:
+          'The cloud agent spoke its reply down the pendant stream; the Mac was not involved.',
+        text: '',
+        source: 'cloudflare',
+        meta: null,
+        at: capture.updatedAt || capture.createdAt,
+      },
+    ],
+    createdAt: capture.createdAt,
+    updatedAt: capture.updatedAt || capture.createdAt,
+    audio: {
+      captureId: capture.jobId,
+      replyCaptureId: capture.replyCaptureId || null,
+      replyTranscript: capture.replyTranscript || null,
+    },
+  }
+}
+
 export function voiceRunForJob(job, { now = Date.now() } = {}) {
   if (!job || job.type !== 'plan') return null
   const telemetry = job.inputTelemetry
@@ -397,5 +452,10 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
     events,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
+    audio: {
+      captureId: telemetry?.captureId || null,
+      replyCaptureId: null,
+      replyTranscript: String(result?.response || '').trim() || null,
+    },
   }
 }

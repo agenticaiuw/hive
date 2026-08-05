@@ -9,7 +9,7 @@ const config = {
     // up by `wrangler.jsonc` (`main` + `assets.directory`).
     adapter: adapter({
       // `vite dev` emulates the Worker bindings through Wrangler. It cannot
-      // stand up the remote `ai-pendant-mission-control` service, and a
+      // stand up the remote `ai-pendant-relay` service, and a
       // half-emulated binding is worse than none, so dev runs against the
       // `local` environment (same vars, no services) and the server falls back
       // to `fetch(RELAY_URL + path)`. Deploys still use the top-level config.

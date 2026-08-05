@@ -1,6 +1,8 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ai-pendant-mission-control",
+  "name": "ai-pendant-relay",
+  // opusscript asm.js probes __dirname in its Node branch; Workers ESM has none.
+  "define": { "__dirname": "'/opusscript'" },
   "workers_dev": true,
   "main": "cloudflare-worker/worker.js",
   "compatibility_date": "2026-07-31",
@@ -9,7 +11,16 @@
   ],
   "vars": {
     "RELAY_PORT": "8787",
-    "BRIDGE_POLL_TIMEOUT_MS": "25000",
+    // 20s window × 500ms claim spacing ≈ 40 D1 subrequests per empty poll —
+    // safely under Cloudflare's per-request subrequest cap. The previous
+    // 25s × 25ms spacing (~1000 subrequests) tripped the cap and made
+    // Cloudflare kill the poll with an HTML 503, which drove the Mac bridge
+    // into its 30s error backoff (the 16-25s job-pickup stalls).
+    // Short holds bound the blast radius of a silently-stalled poll (stale
+    // keep-alive socket, event-loop stall) to one 5s window instead of 20-30s.
+    // 5s × 250ms spacing ≈ 20 D1 claims per empty poll — far under limits.
+    "BRIDGE_POLL_TIMEOUT_MS": "5000",
+    "BRIDGE_CLAIM_MIN_INTERVAL_MS": "250",
     "JOB_TTL_MS": "86400000",
     "AUDIO_BUCKET_PREFIX": "audio-captures",
     // Private voice recordings survive the 24h queue cleanup, so they carry

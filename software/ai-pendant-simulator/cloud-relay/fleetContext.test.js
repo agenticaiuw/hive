@@ -3,10 +3,12 @@ import test from 'node:test'
 import {
   VOICE_AGENT_STATIC_INSTRUCTIONS,
   composeRealtimeInstructions,
+  formatDeviceTime,
   formatFleetSnapshotForPrompt,
   fleetFromAgentSnapshot,
   normalizeFleetSnapshot,
   buildFleetPayloadFromLocal,
+  parseDeviceTime,
 } from './fleetContext.js'
 
 test('static instructions stay high-level (no open_app lectures, no product names)', () => {
@@ -114,4 +116,24 @@ test('buildFleetPayloadFromLocal produces put-ready object', () => {
   assert.equal(payload.version, 1)
   assert.equal(payload.mac.applications[0], 'Safari')
   assert.equal(payload.mac.permissionsReady, true)
+})
+
+test('parseDeviceTime self-verifies UTC vs local field against server clock', () => {
+  const nowMs = Date.UTC(2026, 7, 5, 16, 10, 0)
+  // Field is UTC (nRF91 style): matches now directly; offset -16 qh = -4 h.
+  const utcStyle = parseDeviceTime('26/08/05,16:10:12-16', nowMs)
+  assert.ok(utcStyle)
+  assert.equal(utcStyle.offsetMinutes, -240)
+  // Field is local (12:10 at UTC-4): candidate B matches.
+  const localStyle = parseDeviceTime('26/08/05,12:10:12-16', nowMs)
+  assert.ok(localStyle)
+  assert.ok(Math.abs(localStyle.utcMs - nowMs) < 60_000)
+  // Neither reading plausible → rejected.
+  assert.equal(parseDeviceTime('26/08/05,03:00:00-16', nowMs), null)
+  // NITZ never delivered (modem epoch default) → rejected.
+  assert.equal(parseDeviceTime('80/01/06,00:11:52+00', nowMs), null)
+  assert.equal(parseDeviceTime('garbage', nowMs), null)
+  const formatted = formatDeviceTime(utcStyle)
+  assert.ok(formatted.includes('12:10 PM'))
+  assert.ok(formatted.includes('UTC-4'))
 })

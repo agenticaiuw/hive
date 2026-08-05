@@ -1,6 +1,10 @@
+import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 let cachedContext = null
 let cachedAt = 0
@@ -27,10 +31,65 @@ export async function getMachineContext() {
     home: os.homedir(),
     hostname: os.hostname(),
     platform: process.platform,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     applications,
+    automation: await discoverAutomation(),
   }
   cachedAt = now
   return cachedContext
+}
+
+/*
+ * Runtime discovery of what system control actually exists on THIS Mac —
+ * macOS version, chip, the user's Shortcuts, and every non-default CLI in
+ * the Homebrew/local bin dirs. The planner uses this to stop guessing at
+ * tools that are not installed (e.g. a `brightness` CLI that isn't there).
+ */
+async function discoverAutomation() {
+  const [macosVersion, shortcuts] = await Promise.all([
+    execFileAsync('sw_vers', ['-productVersion'], { timeout: 3000 })
+      .then((r) => r.stdout.trim() || null)
+      .catch(() => null),
+    execFileAsync('shortcuts', ['list'], { timeout: 5000 })
+      .then((r) =>
+        r.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean),
+      )
+      .catch(() => []),
+  ])
+
+  return {
+    macosVersion,
+    arch: process.arch,
+    shortcuts,
+    cliTools: listExecutableNames(['/opt/homebrew/bin', '/usr/local/bin']),
+  }
+}
+
+function listExecutableNames(roots) {
+  const names = new Set()
+
+  for (const root of roots) {
+    let entries
+
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        !entry.name.startsWith('.')
+      ) {
+        names.add(entry.name)
+      }
+    }
+  }
+
+  return [...names].sort((left, right) => left.localeCompare(right))
 }
 
 export function formatMachineContextForPrompt(context) {
@@ -39,12 +98,17 @@ export function formatMachineContextForPrompt(context) {
   }
 
   const apps = context.applications.join(', ')
+  const automation = context.automation || {}
+  const shortcuts = (automation.shortcuts || []).join(', ') || '(none)'
+  const cliTools = (automation.cliTools || []).join(', ') || '(none)'
 
   return `Live machine context for THIS device (discovered at runtime — do not assume another computer's software):
 - Home: ${context.home}
 - Host: ${context.hostname}
-- Platform: ${context.platform}
+- Platform: ${context.platform} (macOS ${automation.macosVersion || 'unknown'}, ${automation.arch || 'unknown'})
 - Installed applications: ${apps}
+- Shortcuts runnable via \`shortcuts run "<name>"\`: ${shortcuts}
+- Non-default CLI tools installed (complete list — a tool absent here is NOT installed; never shell out on a guess): ${cliTools}
 
 Universal judgment rules:
 - Complete the user's intent using what is actually installed above.

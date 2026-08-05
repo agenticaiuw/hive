@@ -718,11 +718,14 @@ export function createD1Store(db) {
 
     async claimNextJob(deviceId) {
       for (let attempt = 0; attempt < 40; attempt += 1) {
+        // Voice jobs preempt dashboard proxy work: a queued agent_proxy job
+        // must never delay a pendant press behind its serial execution.
         const row = await db
           .prepare(
             `SELECT job_id, data FROM relay_jobs
              WHERE status = 'queued'
-             ORDER BY created_at ASC
+             ORDER BY CASE WHEN type = 'agent_proxy' THEN 1 ELSE 0 END ASC,
+                      created_at ASC
              LIMIT 1`,
           )
           .first()

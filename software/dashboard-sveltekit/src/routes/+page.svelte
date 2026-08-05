@@ -226,15 +226,19 @@
     }
   }
 
-  function playRecording(pipelineId: string) {
+  function playRecording(pipelineId: string, voice: "owner" | "reply" = "owner") {
     if (!pipelineId) return;
-    playingId = pipelineId;
-    const audio = new Audio(`/api/history/${encodeURIComponent(pipelineId)}/audio`);
+    const playKey = voice === "reply" ? `${pipelineId}:reply` : pipelineId;
+    playingId = playKey;
+    const query = voice === "reply" ? "?voice=reply" : "";
+    const audio = new Audio(
+      `/api/history/${encodeURIComponent(pipelineId)}/audio${query}`,
+    );
     audio.addEventListener("ended", () => {
-      if (playingId === pipelineId) playingId = "";
+      if (playingId === playKey) playingId = "";
     });
     audio.addEventListener("error", () => {
-      if (playingId === pipelineId) playingId = "";
+      if (playingId === playKey) playingId = "";
       historyError = "Could not play this recording.";
     });
     void audio.play().catch(() => {
@@ -970,12 +974,26 @@
                     class="history-audio"
                     onclick={() => playRecording(String(entry.pipelineId))}
                     aria-label={playingId === entry.pipelineId
-                      ? "Playing recording"
-                      : "Play recording"}
+                      ? "Playing your recording"
+                      : "Play your recording"}
                     title={entry.audio.audioBytes
-                      ? bytes(entry.audio.audioBytes)
-                      : "Play recording"}
+                      ? `Your voice · ${bytes(entry.audio.audioBytes)}`
+                      : "Play your recording"}
                     >{playingId === entry.pipelineId ? "♪" : "▶"}</button
+                  >
+                {/if}
+                {#if entry.audio?.replyAvailable}
+                  <button
+                    class="history-audio history-audio-reply"
+                    onclick={() =>
+                      playRecording(String(entry.pipelineId), "reply")}
+                    aria-label={playingId === `${entry.pipelineId}:reply`
+                      ? "Playing agent reply"
+                      : "Play agent reply"}
+                    title="Agent's spoken reply"
+                    >{playingId === `${entry.pipelineId}:reply`
+                      ? "♪"
+                      : "🗣"}</button
                   >
                 {/if}
               </div>

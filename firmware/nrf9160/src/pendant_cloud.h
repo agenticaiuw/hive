@@ -13,6 +13,10 @@ enum pendant_cloud_audio_format {
 	PENDANT_CLOUD_AUDIO_UNKNOWN = 0,
 	PENDANT_CLOUD_AUDIO_PCM_S16LE,
 	PENDANT_CLOUD_AUDIO_OGG_OPUS,
+	/* G.711 μ-law 8 kHz mono — 64 kbps fits real-world LTE-M both ways. */
+	PENDANT_CLOUD_AUDIO_G711_ULAW,
+	/* Length-prefixed raw Opus packets, ~16 kbps — the daytime-proof path. */
+	PENDANT_CLOUD_AUDIO_OPUS_FRAMES,
 };
 
 /*
@@ -48,6 +52,18 @@ int pendant_cloud_stream_begin(uint32_t sample_rate);
 int pendant_cloud_stream_write(const void *data, size_t length);
 int pendant_cloud_stream_pump(uint32_t budget_ms);
 int pendant_cloud_stream_end(void);
+/*
+ * pendant_cloud_stream_end returns this (positive) when the relay is
+ * streaming the model's spoken reply back on the upload socket. Pull it with
+ * pendant_cloud_reply_read (returns bytes read, 0 at end, <0 error) and then
+ * call pendant_cloud_reply_stream_close.
+ */
+#define PENDANT_CLOUD_REPLY_INLINE 1
+int pendant_cloud_reply_read(void *buffer, size_t length);
+/* Non-blocking mode: reply_read returns -EAGAIN instead of waiting, so the
+ * caller's jitter buffer (not the tiny I2S queue) rides out LTE bursts. */
+int pendant_cloud_reply_set_nonblocking(bool enable);
+void pendant_cloud_reply_stream_close(void);
 void pendant_cloud_stream_abort(void);
 bool pendant_cloud_stream_active(void);
 bool pendant_cloud_stream_has_pending(void);

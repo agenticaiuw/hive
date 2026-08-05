@@ -4,11 +4,43 @@ import express from 'express'
 
 import {
   createPendantAudioParser,
+  isG711UlawFormat,
   isRawPcmFormat,
+  linearToUlaw,
   pendantAudioFormat,
   pcmS16leToWavBuffer,
   preparePendantAudioForStt,
+  ulawToPcmS16le,
 } from './rawAudio.js'
+
+test('G.711 μ-law format detection and codec round-trip', () => {
+  assert.equal(isG711UlawFormat('pcmu'), true)
+  assert.equal(isG711UlawFormat('G711U'), true)
+  assert.equal(isG711UlawFormat('g711_ulaw'), true)
+  assert.equal(isG711UlawFormat('pcm'), false)
+  assert.equal(isG711UlawFormat('ogg'), false)
+  assert.equal(isRawPcmFormat('pcmu'), false)
+
+  // Silence encodes to 0xff and decodes back to 0.
+  assert.equal(linearToUlaw(0), 0xff)
+  assert.equal(ulawToPcmS16le(Buffer.from([0xff])).readInt16LE(0), 0)
+
+  // Round-trip error stays within one quantization step across the range.
+  for (const sample of [-32000, -12345, -500, -1, 0, 1, 500, 12345, 32000]) {
+    const decoded = ulawToPcmS16le(
+      Buffer.from([linearToUlaw(sample)]),
+    ).readInt16LE(0)
+    const step = Math.max(16, Math.abs(sample) / 16)
+    assert.ok(
+      Math.abs(decoded - sample) <= step,
+      `sample ${sample} decoded to ${decoded}`,
+    )
+  }
+
+  // Buffer decode doubles length.
+  const encoded = Buffer.from([0xff, 0x7f, 0x00, 0x80])
+  assert.equal(ulawToPcmS16le(encoded).length, 8)
+})
 
 async function withRawAudioServer(run) {
   const app = express()

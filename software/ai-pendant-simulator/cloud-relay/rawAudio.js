@@ -7,6 +7,8 @@ export const PENDANT_AUDIO_CONTENT_TYPES = Object.freeze([
   'audio/opus',
   'audio/pcm',
   'audio/l16',
+  'audio/pcmu',
+  'audio/basic',
   'application/octet-stream',
 ])
 
@@ -47,6 +49,57 @@ export function isRawPcmFormat(format) {
     value === 'raw' ||
     value === 'l16'
   )
+}
+
+/* G.711 μ-law: fixed 8 kHz, 8 bits/sample — the pendant's LTE-M-friendly
+ * codec (64 kbps vs raw PCM's 250+). Realtime consumes it natively. */
+export function isG711UlawFormat(format) {
+  const value = String(format || '')
+    .trim()
+    .toLowerCase()
+  return (
+    value === 'pcmu' ||
+    value === 'g711u' ||
+    value === 'g711_ulaw' ||
+    value === 'ulaw' ||
+    value === 'audio/pcmu'
+  )
+}
+
+const ULAW_DECODE_TABLE = (() => {
+  const table = new Int16Array(256)
+  for (let code = 0; code < 256; code++) {
+    const u = ~code & 0xff
+    let t = (((u & 0x0f) << 3) + 0x84) << ((u >> 4) & 0x07)
+    table[code] = (u & 0x80 ? 0x84 - t : t - 0x84) | 0
+  }
+  return table
+})()
+
+/** Decode G.711 μ-law bytes to s16le PCM (same sample count, 2x bytes). */
+export function ulawToPcmS16le(ulawBuffer) {
+  const out = Buffer.alloc(ulawBuffer.length * 2)
+  for (let i = 0; i < ulawBuffer.length; i++) {
+    out.writeInt16LE(ULAW_DECODE_TABLE[ulawBuffer[i]], i * 2)
+  }
+  return out
+}
+
+/** Encode one s16 sample to a μ-law byte (CCITT G.711 reference). */
+export function linearToUlaw(sample) {
+  const BIAS = 0x84
+  const CLIP = 32635
+  let s = sample | 0
+  const sign = s < 0 ? 0x80 : 0
+  if (s < 0) s = -s
+  if (s > CLIP) s = CLIP
+  s += BIAS
+  let exponent = 7
+  for (let mask = 0x4000; (s & mask) === 0 && exponent > 0; exponent--) {
+    mask >>= 1
+  }
+  const mantissa = (s >> (exponent + 3)) & 0x0f
+  return ~(sign | (exponent << 4) | mantissa) & 0xff
 }
 
 /**

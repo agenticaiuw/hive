@@ -21,6 +21,11 @@ import {
 } from './fleetContext.js'
 
 export const REALTIME_PCM_RATE = 24000
+/* G.711 μ-law (audio/pcmu) is fixed at 8 kHz, 8 bits — 64 kbps. The pendant
+ * uses it both ways because real-world LTE-M sustains ~100 kbps, far below
+ * raw PCM's 250-384 kbps. Realtime en/decodes μ-law natively; the relay
+ * never touches the samples. */
+export const G711_SAMPLE_RATE = 8000
 const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
 const SESSION_TIMEOUT_MS = 60_000
 
@@ -465,44 +470,71 @@ function normalizeActions(raw) {
     .filter((a) => a.type)
 }
 
-async function runWebSearch(query) {
+/*
+ * Real web search via OpenAI's Responses API built-in tool (same API key the
+ * Worker already holds). The old DuckDuckGo Instant Answer endpoint returned
+ * an empty answer for almost everything (weather, news, time abroad), which
+ * left the model with nothing to say after its "let me check…" filler.
+ */
+export async function runWebSearch(query) {
   const q = String(query || '').trim()
   if (!q) return { ok: false, error: 'empty query' }
+  const apiKey = openaiApiKey()
+  if (!apiKey) return { ok: false, query: q, error: 'no API key' }
 
-  try {
-    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`
-    const response = await fetch(url, {
-      headers: { Accept: 'application/json' },
-    })
-    const payload = await response.json().catch(() => ({}))
-    const abstract = String(payload.AbstractText || '').trim()
-    const answer = String(payload.Answer || '').trim()
-    const heading = String(payload.Heading || '').trim()
-    const related = Array.isArray(payload.RelatedTopics)
-      ? payload.RelatedTopics.map((t) => String(t?.Text || '').trim())
-          .filter(Boolean)
-          .slice(0, 5)
-      : []
-    const summary =
-      abstract ||
-      answer ||
-      (related.length ? related.join(' · ') : '') ||
-      'No concise instant answer found. Try rephrasing.'
-    return {
-      ok: true,
-      query: q,
-      heading: heading || undefined,
-      summary,
-      related,
-      source: 'duckduckgo-instant',
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      query: q,
-      error: error?.message || 'web search failed',
+  // Tool type was renamed across API generations; try current name first.
+  for (const toolType of ['web_search', 'web_search_preview']) {
+    try {
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: AbortSignal.timeout(15_000),
+        body: JSON.stringify({
+          model: process.env.OPENAI_SEARCH_MODEL || 'gpt-4o-mini',
+          input: `Search the web and answer concisely in 2-3 spoken-style sentences: ${q}`,
+          tools: [{ type: toolType }],
+        }),
+      })
+      const payload = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        const message = payload?.error?.message || `HTTP ${response.status}`
+        // Unknown tool type → try the other name; anything else is real.
+        if (response.status === 400 && /tool/i.test(message)) continue
+        return { ok: false, query: q, error: message }
+      }
+      const text =
+        String(payload.output_text || '').trim() ||
+        (Array.isArray(payload.output)
+          ? payload.output
+              .flatMap((item) =>
+                Array.isArray(item?.content) ? item.content : [],
+              )
+              .map((part) => String(part?.text || '').trim())
+              .filter(Boolean)
+              .join(' ')
+          : '')
+      if (text) {
+        return {
+          ok: true,
+          query: q,
+          summary: text.slice(0, 1200),
+          source: 'openai-web-search',
+        }
+      }
+      return { ok: false, query: q, error: 'search returned no text' }
+    } catch (error) {
+      return {
+        ok: false,
+        query: q,
+        error: error?.message || 'web search failed',
+      }
     }
   }
+  return { ok: false, query: q, error: 'web search tool unavailable' }
 }
 
 /**
@@ -752,6 +784,31 @@ export async function createStreamingRealtimeSession({
   language = null,
   fleet = null,
   onEarlyPlan = null,
+  /*
+   * Conversational reply path: when audioOut is set the model itself speaks
+   * (output_modalities ['audio']) and every PCM delta is handed to
+   * onAudioDelta as a 24 kHz s16le mono Buffer the moment it arrives, so the
+   * caller can pipe it straight down to the pendant. Tool calls still fire.
+   */
+  audioOut = false,
+  onAudioDelta = null,
+  /*
+   * 'pcm'  — s16le at inputSampleRate, resampled here to 24 kHz.
+   * 'pcmu' — G.711 μ-law 8 kHz bytes passed through untouched (the model
+   *          decodes μ-law itself). Output mirrors: 'pcmu' makes the model
+   *          emit μ-law deltas so the pendant gets 64 kbps, not 384.
+   */
+  inputFormat = 'pcm',
+  outputFormat = 'pcm',
+  /*
+   * Status-type tools (get_mac_status) block on this: it resolves with the
+   * Mac's executed result so the model can SPEAK the actual answer down the
+   * live stream instead of a "fetching…" filler that never gets followed up.
+   * Resolves null on timeout; the model then says results are on the way.
+   */
+  waitForMacResult = null,
+  /* Raw X-Device-Time header (+CCLK) — the pendant's LTE network clock. */
+  deviceTime = null,
 } = {}) {
   const apiKey = openaiApiKey()
   if (!apiKey) {
@@ -759,11 +816,10 @@ export async function createStreamingRealtimeSession({
   }
 
   const startedAt = Date.now()
-  const sessionInstructions = composeRealtimeInstructions({
-    language,
-    fleet: fleet ? normalizeFleetSnapshot(fleet) : null,
-  })
-  const resampler = new StreamingPcmResampler(inputSampleRate, REALTIME_PCM_RATE)
+  const passthroughInput = inputFormat === 'pcmu'
+  const resampler = passthroughInput
+    ? null
+    : new StreamingPcmResampler(inputSampleRate, REALTIME_PCM_RATE)
   const socket = await openRealtimeSocket(realtimeWsUrl(), apiKey)
 
   const state = {
@@ -829,16 +885,47 @@ export async function createStreamingRealtimeSession({
     socket.send(JSON.stringify(event))
   }
 
-  async function emitMacPlanAndFinish(planSurface = 'mac') {
+  /*
+   * Ask the model to SPEAK (the reply streams to the pendant's open socket);
+   * the response.done handler finishes the session when speech completes.
+   * response.create while another response is still active is an API error
+   * that would kill the session mid-stream — defer to its response.done.
+   */
+  function requestSpokenReply() {
+    if (state.responseActive) {
+      state.pendingSpokenReply = true
+    } else {
+      state.spokenReplyRequested = true
+      send({
+        type: 'response.create',
+        response: { output_modalities: ['audio'] },
+      })
+    }
+  }
+
+  /* Dispatch the current plan to the Mac early; returns the queued job. */
+  async function emitMacPlan() {
     const plan = buildPlanResult(state, startedAt, language)
+    let job = null
+
     if (typeof onEarlyPlan === 'function') {
       try {
-        await onEarlyPlan(plan)
+        job = await onEarlyPlan(plan)
       } catch (error) {
         console.warn(
           `[realtime] onEarlyPlan failed: ${error?.message || error}`,
         )
       }
+    }
+    return { plan, job }
+  }
+
+  async function emitMacPlanAndFinish(planSurface = 'mac') {
+    const { plan } = await emitMacPlan()
+
+    if (audioOut && !state.finished) {
+      requestSpokenReply()
+      return plan
     }
     finishOk()
     return plan
@@ -865,12 +952,14 @@ export async function createStreamingRealtimeSession({
       })
       send({
         type: 'response.create',
-        response: { output_modalities: ['text'] },
+        response: { output_modalities: audioOut ? ['audio'] : ['text'] },
       })
       return
     }
 
-    // PROACTIVE status reads → same plan path as mac_run_actions (Mac executes).
+    // PROACTIVE status reads: dispatch to the Mac, then (audio mode) HOLD the
+    // turn until the real result lands so the model speaks the actual answer
+    // — never a "fetching…" filler followed by silence.
     if (name === 'get_mac_status') {
       const optionalTranscript = String(args.transcript || '').trim()
       if (optionalTranscript) state.transcript = optionalTranscript
@@ -879,22 +968,45 @@ export async function createStreamingRealtimeSession({
       const actions = normalizeActions(mapGetMacStatusToActions(args.fields))
       state.actions = actions
       state.status = actions.length ? 'ready' : 'instant'
+
+      const { job } = await emitMacPlan()
+
+      let output = {
+        ok: true,
+        queued: true,
+        surface: 'mac',
+        tool: 'get_mac_status',
+        actionCount: state.actions.length,
+        fields: Array.isArray(args.fields) ? args.fields : ['all'],
+      }
+      if (audioOut && job?.jobId && typeof waitForMacResult === 'function') {
+        const result = await waitForMacResult(job.jobId).catch(() => null)
+        output = result
+          ? {
+              ok: true,
+              executed: true,
+              surface: 'mac',
+              tool: 'get_mac_status',
+              result,
+            }
+          : {
+              ...output,
+              note: 'Mac has not returned data yet; tell the owner the result is on its way.',
+            }
+      }
       send({
         type: 'conversation.item.create',
         item: {
           type: 'function_call_output',
           call_id: callId,
-          output: JSON.stringify({
-            ok: true,
-            queued: true,
-            surface: 'mac',
-            tool: 'get_mac_status',
-            actionCount: state.actions.length,
-            fields: Array.isArray(args.fields) ? args.fields : ['all'],
-          }),
+          output: JSON.stringify(output),
         },
       })
-      await emitMacPlanAndFinish('mac')
+      if (audioOut && !state.finished) {
+        requestSpokenReply()
+        return
+      }
+      finishOk()
       return
     }
 
@@ -967,7 +1079,7 @@ export async function createStreamingRealtimeSession({
     })
     send({
       type: 'response.create',
-      response: { output_modalities: ['text'] },
+      response: { output_modalities: audioOut ? ['audio'] : ['text'] },
     })
   }
 
@@ -988,6 +1100,10 @@ export async function createStreamingRealtimeSession({
       return
     }
 
+    if (event.type === 'response.created') {
+      state.responseActive = true
+    }
+
     if (event.type === 'conversation.item.input_audio_transcription.completed') {
       const t = String(event.transcript || '').trim()
       if (t) state.transcript = t
@@ -999,6 +1115,29 @@ export async function createStreamingRealtimeSession({
     ) {
       const delta = event.delta || event.text || ''
       if (delta) state.textParts.push(delta)
+    }
+
+    if (event.type === 'response.output_audio.delta') {
+      if (typeof onAudioDelta === 'function' && event.delta) {
+        try {
+          onAudioDelta(Buffer.from(event.delta, 'base64'))
+        } catch (error) {
+          console.warn(
+            `[realtime] onAudioDelta failed: ${error?.message || error}`,
+          )
+        }
+      }
+    }
+
+    // Audio mode delivers the reply text as a transcript stream; capture it
+    // so job history and the Mac result keep their text fields.
+    if (event.type === 'response.output_audio_transcript.delta') {
+      const delta = event.delta || ''
+      if (delta) state.textParts.push(delta)
+    }
+    if (event.type === 'response.output_audio_transcript.done') {
+      const text = String(event.transcript || state.textParts.join('')).trim()
+      if (text) state.response = text
     }
 
     if (
@@ -1021,11 +1160,23 @@ export async function createStreamingRealtimeSession({
     }
 
     if (event.type === 'response.done') {
+      state.responseActive = false
       const status = event.response?.status
       const output = event.response?.output || []
       const hasFunctionCall = output.some(
         (item) => item?.type === 'function_call',
       )
+      if (state.pendingSpokenReply) {
+        // The tool-call response just finished; now request the deferred
+        // spoken confirmation (see emitMacPlanAndFinish).
+        state.pendingSpokenReply = false
+        state.spokenReplyRequested = true
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['audio'] },
+        })
+        return
+      }
       if (!hasFunctionCall && status === 'completed') {
         // Pure text: chitchat / knowledge only. Empty actions; needsLocalFallback false.
         // Do NOT promote response → transcript; history label is derived later.
@@ -1053,6 +1204,18 @@ export async function createStreamingRealtimeSession({
         state.status =
           state.actions.length || state.delegate ? 'ready' : 'instant'
         finishOk()
+      } else if (
+        !hasFunctionCall &&
+        state.spokenReplyRequested &&
+        status &&
+        status !== 'in_progress'
+      ) {
+        // Speech follow-up after a Mac tool call ended without completing
+        // (cancelled/failed). The plan already went out via onEarlyPlan —
+        // finish with it instead of hanging until the session timeout.
+        state.status =
+          state.actions.length || state.delegate ? 'ready' : 'instant'
+        finishOk()
       }
     }
   })
@@ -1069,6 +1232,16 @@ export async function createStreamingRealtimeSession({
     }
   })
 
+  // `fleet` may be a promise: the caller's D1 fleet read overlaps the WS
+  // handshake. Awaited here — after every socket handler above is attached —
+  // so no early server event can land in an unhandled gap.
+  const resolvedFleet = await fleet
+  const sessionInstructions = composeRealtimeInstructions({
+    language,
+    fleet: resolvedFleet ? normalizeFleetSnapshot(resolvedFleet) : null,
+    deviceTime,
+  })
+
   // Static policy + tools first, then fleet snapshot inside instructions
   // (composeRealtimeInstructions puts static text first for prefix caching).
   send({
@@ -1076,33 +1249,46 @@ export async function createStreamingRealtimeSession({
     session: {
       type: 'realtime',
       instructions: sessionInstructions,
-      output_modalities: ['text'],
+      output_modalities: audioOut ? ['audio'] : ['text'],
       tools: REALTIME_TOOLS,
       tool_choice: 'auto',
       audio: {
         input: {
-          format: { type: 'audio/pcm', rate: REALTIME_PCM_RATE },
+          format: passthroughInput
+            ? { type: 'audio/pcmu' }
+            : { type: 'audio/pcm', rate: REALTIME_PCM_RATE },
           transcription: { model: 'gpt-4o-mini-transcribe' },
           turn_detection: null,
         },
+        ...(audioOut
+          ? {
+              output: {
+                format:
+                  outputFormat === 'pcmu'
+                    ? { type: 'audio/pcmu' }
+                    : { type: 'audio/pcm', rate: REALTIME_PCM_RATE },
+                voice: process.env.OPENAI_REALTIME_VOICE || 'marin',
+              },
+            }
+          : {}),
       },
     },
   })
 
   return {
-    /** Append raw source-rate s16le PCM from the pendant (mid-press). */
+    /** Append pendant audio (mid-press): s16le PCM, or μ-law passthrough. */
     appendRawPcm(chunk) {
       if (state.finished || state.committed) return
       if (!chunk?.length) return
       state.bytesIn += chunk.length
-      const pcm24 = resampler.push(chunk)
-      if (!pcm24.length) return
-      state.bytesToModel += pcm24.length
+      const toModel = passthroughInput ? chunk : resampler.push(chunk)
+      if (!toModel.length) return
+      state.bytesToModel += toModel.length
       state.midPressStreamed = true
-      // Send in ~200 ms frames at 24 kHz.
-      const frame = 9600
-      for (let i = 0; i < pcm24.length; i += frame) {
-        const slice = pcm24.subarray(i, i + frame)
+      // ~200 ms frames: 9600 B at 24 kHz s16le, 1600 B at 8 kHz μ-law.
+      const frame = passthroughInput ? 1600 : 9600
+      for (let i = 0; i < toModel.length; i += frame) {
+        const slice = toModel.subarray(i, i + frame)
         send({
           type: 'input_audio_buffer.append',
           audio: slice.toString('base64'),
@@ -1115,7 +1301,7 @@ export async function createStreamingRealtimeSession({
       if (state.finished) return resultPromise
       if (!state.committed) {
         state.committed = true
-        const tail = resampler.flush()
+        const tail = resampler ? resampler.flush() : Buffer.alloc(0)
         if (tail.length) {
           state.bytesToModel += tail.length
           send({
@@ -1130,7 +1316,7 @@ export async function createStreamingRealtimeSession({
         send({ type: 'input_audio_buffer.commit' })
         send({
           type: 'response.create',
-          response: { output_modalities: ['text'] },
+          response: { output_modalities: audioOut ? ['audio'] : ['text'] },
         })
       }
       return resultPromise
