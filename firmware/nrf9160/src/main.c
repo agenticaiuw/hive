@@ -2544,7 +2544,19 @@ static int convo_queue_preamble(const struct device *i2s)
 			if (block_index == 0U) {
 				value = (frame & 1U) ? I2S_STREAM_SYNC_B
 						     : I2S_STREAM_SYNC_A;
-			} else if (frame < I2S_SYNC_END_FRAMES) {
+			} else if (block_index == 1U &&
+				   frame < I2S_SYNC_END_FRAMES) {
+				/*
+				 * End marker belongs to block 1 ONLY. Without
+				 * the block test every priming block repeated
+				 * it, and the receiver skips markers only
+				 * until it locks — so blocks 2..5 arrived as
+				 * audio: four bursts of 0x6C6C (27756, ~85%
+				 * of full scale) at 20 ms intervals, i.e. a
+				 * burst of loud clicks at the start of every
+				 * single conversation. Captured off the wire
+				 * at indices 1257-1304 of a press.
+				 */
 				value = I2S_STREAM_SYNC_END;
 			}
 			words[frame] = value << 8;

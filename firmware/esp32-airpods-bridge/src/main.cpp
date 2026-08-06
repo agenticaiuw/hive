@@ -83,9 +83,41 @@ volatile uint32_t testToneFramesRemaining = 0;
 volatile uint32_t testTonePhase = 0;
 volatile bool i2sForwardingEnabled = true;
 volatile bool rawCaptureReady = false;
+volatile bool rawCaptureAwaitAudio = false;
+volatile bool dumpInProgress = false;
 volatile bool clockCaptureRequested = false;
 volatile size_t rawCaptureFrames = 0;
 int32_t rawCapture[RAW_CAPTURE_FRAMES * 2];
+
+/*
+ * Diagnostic capture of the nRF's audio exactly as this chip receives it
+ * (post sync-lock, 31250 Hz, before any resampling here). Tapping the ring
+ * input rather than the A2DP callback splits the chain cleanly in two and
+ * works with no headphones connected. Half a second is plenty to see
+ * the waveform and its spectrum, and DRAM here is tight next to the
+ * Bluetooth stack.
+ */
+constexpr size_t CAPTURE_FRAMES = 22050; // 0.5 s at 44.1 kHz
+int16_t captureBuffer[CAPTURE_FRAMES];
+volatile uint32_t captureCount = 0;
+// 0 idle, 1 armed (waiting for audio), 2 recording, 3 full/ready to dump
+volatile uint8_t captureState = 0;
+
+inline void captureSample(int16_t sample) {
+  const uint8_t state = captureState;
+  if (state == 1) {
+    captureCount = 0;
+    captureState = 2;
+  } else if (state != 2) {
+    return;
+  }
+  if (captureCount < CAPTURE_FRAMES) {
+    captureBuffer[captureCount++] = sample;
+    if (captureCount >= CAPTURE_FRAMES) {
+      captureState = 3;
+    }
+  }
+}
 
 int16_t ringBuffer[RING_FRAMES];
 size_t ringRead = 0;
@@ -125,6 +157,9 @@ void emitStatus() {
 }
 
 void pushSample(int16_t sample) {
+  // Diagnostic tap first: this is the nRF's audio exactly as received, and
+  // it must be observable whether or not headphones are connected.
+  captureSample(sample);
   /*
    * With no A2DP sink nothing drains the ring, so buffering here would
    * only bank stale audio: observed as a permanently full ring and
@@ -372,7 +407,16 @@ void i2sCaptureTask(void *) {
     i2sFramesReceived += frames;
 
     for (size_t frame = 0; frame < frames; ++frame) {
-      if (rawCaptureFrames < RAW_CAPTURE_FRAMES) {
+      if (rawCaptureAwaitAudio) {
+        // Wait for a LOUD sample: quiet words are ambiguous between slot
+        // alignments (256<<8 and 1<<16 are the same 32-bit value), so only
+        // a large magnitude can prove which one is real.
+        const int32_t probe = extractSlotSample(input[frame * 2]);
+        if (probe > 8000 || probe < -8000) {
+          rawCaptureAwaitAudio = false;
+        }
+      }
+      if (!rawCaptureAwaitAudio && rawCaptureFrames < RAW_CAPTURE_FRAMES) {
         rawCapture[rawCaptureFrames * 2] = input[frame * 2];
         rawCapture[rawCaptureFrames * 2 + 1] = input[frame * 2 + 1];
         ++rawCaptureFrames;
@@ -819,6 +863,20 @@ void handleSerialCommand(const String &line) {
                   : "usb",
               i2sForwardingEnabled ? "nRF I2S forwarding enabled."
                                    : "nRF I2S forwarding muted.");
+  } else if (command == "capture") {
+    captureCount = 0;
+    captureState = 1;
+    // Also re-arm the raw 32-bit word capture so it lands on real audio
+    // rather than on the silence right after a resync. The bit pattern is
+    // what proves or disproves slot alignment.
+    rawCaptureFrames = 0;
+    rawCaptureReady = false;
+    rawCaptureAwaitAudio = true;
+    emitEvent(a2dp.get_connection_state() ==
+                      ESP_A2D_CONNECTION_STATE_CONNECTED
+                  ? "connected"
+                  : "usb",
+              "Armed A2DP capture; recording starts at the next audio.");
   } else if (command == "dump") {
     int16_t samples[64] = {};
     size_t sampleCount = 0;
@@ -997,6 +1055,50 @@ void loop() {
     }
   }
 
+  if (captureState == 3) {
+    captureState = 0;
+    dumpInProgress = true;
+    uint32_t lineSeq = 0;
+    static const char *b64 =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(captureBuffer);
+    const size_t total = captureCount * sizeof(int16_t);
+    Serial.print("{\"type\":\"a2dp_capture_begin\",\"rate\":");
+    Serial.print(INPUT_RATE);
+    Serial.print(",\"samples\":");
+    Serial.print(captureCount);
+    Serial.println("}");
+    String line;
+    line.reserve(260);
+    for (size_t i = 0; i < total; i += 3) {
+      const uint32_t a = bytes[i];
+      const uint32_t b = (i + 1 < total) ? bytes[i + 1] : 0;
+      const uint32_t c = (i + 2 < total) ? bytes[i + 2] : 0;
+      const uint32_t triple = (a << 16) | (b << 8) | c;
+      line += b64[(triple >> 18) & 0x3F];
+      line += b64[(triple >> 12) & 0x3F];
+      line += (i + 1 < total) ? b64[(triple >> 6) & 0x3F] : '=';
+      line += (i + 2 < total) ? b64[triple & 0x3F] : '=';
+      if (line.length() >= 240) {
+        Serial.print("A2DPCAP ");
+        Serial.print(lineSeq++);
+        Serial.print(' ');
+        Serial.println(line);
+        line = "";
+      }
+    }
+    if (line.length() > 0) {
+      Serial.print("A2DPCAP ");
+      Serial.print(lineSeq++);
+      Serial.print(' ');
+      Serial.println(line);
+    }
+    Serial.print("{\"type\":\"a2dp_capture_end\",\"lines\":");
+    Serial.print(lineSeq);
+    Serial.println("}");
+    dumpInProgress = false;
+  }
+
   if (clockCaptureRequested) {
     clockCaptureRequested = false;
     emitClockTiming();
@@ -1067,7 +1169,7 @@ void loop() {
     forceKnownConnect();
   }
 
-  if (millis() - lastDiagnosticAt >= 1000) {
+  if (!dumpInProgress && millis() - lastDiagnosticAt >= 1000) {
     lastDiagnosticAt = millis();
     const uint16_t peak = i2sPeakSinceReport;
     const uint16_t rawPeak = i2sRawPeakSinceReport;
