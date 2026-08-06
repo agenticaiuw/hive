@@ -77,6 +77,16 @@ int pendant_cloud_upload_recording(const char *audio_path,
 				   uint32_t source_pcm_bytes,
 				   uint32_t sample_rate);
 
+/*
+ * Shared plumbing for the WebSocket transport (pendant_ws.c): a connected
+ * TLS socket to the relay (DNS cache + Cloudflare bootstrap retries), the
+ * relay hostname/key for the upgrade request, and the modem clock.
+ */
+int pendant_cloud_open_socket(void);
+const char *pendant_cloud_hostname(void);
+const char *pendant_cloud_api_key(void);
+void pendant_cloud_copy_device_time(char *out, size_t out_size);
+
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path);
 int pendant_cloud_report_playback_started(void);
 int pendant_cloud_report_playback_result(int playback_result);

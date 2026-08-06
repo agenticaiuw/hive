@@ -15,8 +15,9 @@
  */
 /* Shared audio RAM, time-multiplexed: capture TX ring while recording,
  * reply jitter buffer while playing, Opus scratch only in the SD-fallback
- * encode. One 30 KiB block, three jobs, never concurrently. */
-#define PENDANT_AUDIO_WORKSPACE_BYTES (30U * 1024U)
+ * encode (~27 KiB worst case). One 28 KiB block, never concurrently —
+ * trimmed from 30 to fund the always-on duplex decoder arena. */
+#define PENDANT_AUDIO_WORKSPACE_BYTES (28U * 1024U)
 /* Back-compat alias for the opus encoder's own references. */
 #define PENDANT_OPUS_WORKSPACE_BYTES PENDANT_AUDIO_WORKSPACE_BYTES
 /* Must match GLOBAL_STACK_SIZE in CMakeLists.txt (≥ measured ~25.4 KiB peak). */
@@ -70,6 +71,11 @@ int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
 				      int (*sink)(const uint8_t *packet,
 						  size_t packet_bytes));
 int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes);
+/* Conversation path: decode at the 16 kHz wire rate (fewer samples, and the
+ * TX fill owns the exact-ratio resample to the I2S frame rate). */
+int pendant_opus_reply_decoder_begin_rate(void *workspace,
+					  size_t workspace_bytes,
+					  uint32_t sample_rate);
 int pendant_opus_reply_decode_packet(const uint8_t *packet,
 				     size_t packet_bytes, int16_t *pcm_out,
 				     size_t max_samples);

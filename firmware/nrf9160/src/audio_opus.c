@@ -603,12 +603,17 @@ int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
 }
 
 /*
- * Streaming reply decoder: raw Opus packets in, 24 kHz mono PCM out (the
- * decoder resamples internally — no separate upsampling stage).
+ * Streaming reply decoder: raw Opus packets in, mono PCM out at the caller's
+ * rate (the decoder resamples internally — no separate upsampling stage).
+ * The HTTP reply path decodes at 24 kHz; the full-duplex conversation path
+ * decodes at the 16 kHz wire rate and resamples to the I2S frame rate in
+ * the TX fill.
  */
 static OpusDecoder *g_reply_decoder;
 
-int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes)
+int pendant_opus_reply_decoder_begin_rate(void *workspace,
+					  size_t workspace_bytes,
+					  uint32_t sample_rate)
 {
 	int decoder_bytes = opus_decoder_get_size(1);
 	int error;
@@ -620,12 +625,18 @@ int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes)
 	}
 	pendant_opus_prepare_scratch();
 	error = opus_decoder_init((OpusDecoder *)workspace,
-				  PENDANT_OPUS_REPLY_SAMPLE_RATE, 1);
+				  (opus_int32)sample_rate, 1);
 	if (error != OPUS_OK) {
 		return -EINVAL;
 	}
 	g_reply_decoder = (OpusDecoder *)workspace;
 	return decoder_bytes;
+}
+
+int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes)
+{
+	return pendant_opus_reply_decoder_begin_rate(
+		workspace, workspace_bytes, PENDANT_OPUS_REPLY_SAMPLE_RATE);
 }
 
 int pendant_opus_reply_decode_packet(const uint8_t *packet,

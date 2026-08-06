@@ -5,6 +5,11 @@
   "define": { "__dirname": "'/opusscript'" },
   "workers_dev": true,
   "main": "cloudflare-worker/worker.js",
+  // NOTE: on Workers Paid, set "limits": { "cpu_ms": 300000 } here — a
+  // full-duplex conversation holds one WS invocation for minutes of wasm
+  // transcode. The Free plan rejects the limits key entirely (deploy error
+  // 100328); today's transcode load runs under Free's enforcement, but if
+  // long conversations die with CPU errors, upgrading is the fix.
   "compatibility_date": "2026-07-31",
   "compatibility_flags": [
     "nodejs_compat"

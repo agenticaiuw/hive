@@ -63,6 +63,7 @@ target_sources(app PRIVATE
   src/main.c
   src/audio_opus.c
   src/pendant_cloud.c
+  src/pendant_ws.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

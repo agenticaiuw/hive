@@ -28,6 +28,9 @@ export const REALTIME_PCM_RATE = 24000
 export const G711_SAMPLE_RATE = 8000
 const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
 const SESSION_TIMEOUT_MS = 60_000
+/* Full-duplex conversations end on button stop or relay inactivity logic;
+ * five minutes is the absolute runaway ceiling, not a UX parameter. */
+const CONVERSATION_MAX_MS = 300_000
 
 function openaiApiKey() {
   return String(
@@ -809,6 +812,19 @@ export async function createStreamingRealtimeSession({
   waitForMacResult = null,
   /* Raw X-Device-Time header (+CCLK) — the pendant's LTE network clock. */
   deviceTime = null,
+  /*
+   * Full-duplex conversation mode (WebSocket transport): the session outlives
+   * any single response — turns keep flowing until the caller invokes end()
+   * (button stop / socket close / inactivity). finish()'s HTTP body-end
+   * semantics never apply; barge-in interrupts the model mid-speech.
+   */
+  conversation = false,
+  /* Conversation mode: fired once per completed spoken turn with
+   * { transcript, response } so the caller can record the exchange. */
+  onTurn = null,
+  /* Conversation mode: user started speaking (semantic VAD). The caller
+   * decides whether device-side playback needs flushing (barge-in). */
+  onUserSpeech = null,
 } = {}) {
   const apiKey = openaiApiKey()
   if (!apiKey) {
@@ -835,6 +851,14 @@ export async function createStreamingRealtimeSession({
     committed: false,
     bodyEnded: false,
     completedResponses: 0,
+    /*
+     * Turn accounting: semantic VAD commits utterances on its own; every
+     * commit (with create_response) owes the pendant one completed spoken
+     * response. finish() must never close the session while
+     * completedResponses < vadCommits — that is exactly the "reply cut off
+     * after the first sentence" bug.
+     */
+    vadCommits: 0,
     midPressStreamed: false,
     bytesIn: 0,
     bytesToModel: 0,
@@ -845,12 +869,17 @@ export async function createStreamingRealtimeSession({
     settle = { resolve, reject }
   })
 
-  const timeout = setTimeout(() => {
-    if (state.finished) return
-    state.finished = true
-    cleanup()
-    settle.reject(new Error('Realtime voice agent timed out.'))
-  }, SESSION_TIMEOUT_MS)
+  // Conversation sessions are ended by the caller (button stop / WS close /
+  // inactivity); the timer is only a runaway backstop.
+  const timeout = setTimeout(
+    () => {
+      if (state.finished) return
+      state.finished = true
+      cleanup()
+      settle.reject(new Error('Realtime voice agent timed out.'))
+    },
+    conversation ? CONVERSATION_MAX_MS : SESSION_TIMEOUT_MS,
+  )
 
   function cleanup() {
     clearTimeout(timeout)
@@ -952,10 +981,16 @@ export async function createStreamingRealtimeSession({
           output: JSON.stringify(output),
         },
       })
-      send({
-        type: 'response.create',
-        response: { output_modalities: audioOut ? ['audio'] : ['text'] },
-      })
+      // Semantic VAD may have started another response while the search ran;
+      // a raw response.create then is an API error that kills the session.
+      if (audioOut) {
+        requestSpokenReply()
+      } else {
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['text'] },
+        })
+      }
       return
     }
 
@@ -1079,10 +1114,14 @@ export async function createStreamingRealtimeSession({
         output: JSON.stringify({ ok: false, error: `Unknown tool: ${name}` }),
       },
     })
-    send({
-      type: 'response.create',
-      response: { output_modalities: audioOut ? ['audio'] : ['text'] },
-    })
+    if (audioOut) {
+      requestSpokenReply()
+    } else {
+      send({
+        type: 'response.create',
+        response: { output_modalities: ['text'] },
+      })
+    }
   }
 
   socket.on('message', (raw) => {
@@ -1106,12 +1145,46 @@ export async function createStreamingRealtimeSession({
     }
 
     if (event.type === 'error') {
-      finishErr(
-        new Error(
-          event.error?.message || event.message || 'Realtime API error',
-        ),
-      )
+      // Commit-shaped complaints are recoverable bookkeeping, not session
+      // failures: semantic VAD may have already consumed the buffer when a
+      // defensive commit lands. Killing the socket here cuts the model off
+      // mid-sentence on the pendant.
+      const code = event.error?.code || ''
+      const message =
+        event.error?.message || event.message || 'Realtime API error'
+      if (
+        code === 'input_audio_buffer_commit_empty' ||
+        /buffer too small/i.test(message)
+      ) {
+        console.warn(`[realtime] non-fatal API error: ${message}`)
+        if (
+          state.bodyEnded &&
+          state.completedResponses > 0 &&
+          !state.responseActive &&
+          !state.pendingSpokenReply
+        ) {
+          state.status =
+            state.actions.length || state.delegate ? 'ready' : 'instant'
+          finishOk()
+        }
+        return
+      }
+      finishErr(new Error(message))
       return
+    }
+
+    if (event.type === 'input_audio_buffer.committed') {
+      state.vadCommits += 1
+    }
+
+    if (event.type === 'input_audio_buffer.speech_started') {
+      if (typeof onUserSpeech === 'function') {
+        try {
+          onUserSpeech()
+        } catch {
+          /* caller's problem, not the session's */
+        }
+      }
     }
 
     if (event.type === 'response.created') {
@@ -1193,9 +1266,41 @@ export async function createStreamingRealtimeSession({
       }
       if (!hasFunctionCall && status === 'completed') {
         state.completedResponses += 1
+        if (conversation) {
+          // Full-duplex: the turn is done, the session is not. Hand the
+          // exchange to the caller and reset for the next utterance. The
+          // input transcript is cleared with it — otherwise a turn whose
+          // transcription arrives late replays the PREVIOUS user line.
+          const turnResponse =
+            String(state.response || state.textParts.join('')).trim() ||
+            undefined
+          const turnTranscript = state.transcript || undefined
+          state.transcript = ''
+          state.response = undefined
+          state.textParts = []
+          if (typeof onTurn === 'function') {
+            try {
+              onTurn({ transcript: turnTranscript, response: turnResponse })
+            } catch {
+              /* recording the turn must never break the conversation */
+            }
+          }
+          return
+        }
         if (audioOut && !state.bodyEnded) {
           // Owner is still recording: reply audio is already queued down the
           // response stream; keep the session open for the next utterance.
+          if (!state.response) {
+            state.response =
+              String(state.textParts.join('')).trim() || undefined
+          }
+          state.textParts = []
+          return
+        }
+        if (audioOut && state.completedResponses < state.vadCommits) {
+          // Body ended but an earlier VAD-committed utterance still owes a
+          // reply (its response is queued behind this one). Keep the session
+          // and the audio stream open until every turn is answered.
           if (!state.response) {
             state.response =
               String(state.textParts.join('')).trim() || undefined
@@ -1229,6 +1334,14 @@ export async function createStreamingRealtimeSession({
         state.status =
           state.actions.length || state.delegate ? 'ready' : 'instant'
         finishOk()
+      } else if (conversation) {
+        // Cancelled/failed/incomplete turns (barge-in truncation included)
+        // never end a live conversation — reset fully so the aborted
+        // response's partial text cannot leak into the next turn record.
+        if (!hasFunctionCall && status && status !== 'in_progress') {
+          state.textParts = []
+          state.response = undefined
+        }
       } else if (
         !hasFunctionCall &&
         state.spokenReplyRequested &&
@@ -1238,6 +1351,20 @@ export async function createStreamingRealtimeSession({
         // Speech follow-up after a Mac tool call ended without completing
         // (cancelled/failed). The plan already went out via onEarlyPlan —
         // finish with it instead of hanging until the session timeout.
+        state.status =
+          state.actions.length || state.delegate ? 'ready' : 'instant'
+        finishOk()
+      } else if (
+        !hasFunctionCall &&
+        state.bodyEnded &&
+        status &&
+        status !== 'in_progress' &&
+        state.completedResponses > 0 &&
+        !state.pendingSpokenReply
+      ) {
+        // A queued turn died (cancelled/failed) after body end. Its reply is
+        // never coming; ship what the earlier turns produced instead of
+        // hanging the pendant until the session timeout.
         state.status =
           state.actions.length || state.delegate ? 'ready' : 'instant'
         finishOk()
@@ -1289,11 +1416,18 @@ export async function createStreamingRealtimeSession({
            * replies queue downstream and play the moment upload ends).
            * Text mode keeps manual commit semantics.
            */
+          /*
+           * Conversation (full duplex): the model may be interrupted by the
+           * owner's voice — barge-in truncates its speech, like a real
+           * conversation. HTTP mode keeps interrupt off: the pendant plays
+           * replies after upload, so "interruptions" would only be the
+           * model hearing trailing mic audio, not real barge-in.
+           */
           turn_detection: audioOut
             ? {
                 type: 'semantic_vad',
                 create_response: true,
-                interrupt_response: false,
+                interrupt_response: conversation,
               }
             : null,
         },
@@ -1352,10 +1486,18 @@ export async function createStreamingRealtimeSession({
         }
         state.bodyEnded = true
         if (audioOut) {
-          // Semantic VAD already committed/responded per utterance. Only
-          // force a turn when the recording ended with none detected, and
-          // finish immediately when the last reply completed earlier.
+          /*
+           * Semantic VAD owns the turns. At body end there are three cases:
+           * 1. VAD never committed anything (short press, released before
+           *    the pause was detected) — force a manual commit + response.
+           * 2. Turns are outstanding (a commit without its completed reply,
+           *    an active response, a deferred spoken follow-up) — WAIT.
+           *    The response.done handler finishes when the ledger balances.
+           *    Ending here is the "first sentence only" cutoff.
+           * 3. Every committed turn is answered — finish now.
+           */
           if (
+            state.vadCommits === 0 &&
             state.completedResponses === 0 &&
             !state.responseActive &&
             !state.pendingSpokenReply &&
@@ -1367,7 +1509,23 @@ export async function createStreamingRealtimeSession({
               response: { output_modalities: ['audio'] },
             })
           } else if (
+            state.completedResponses === 0 &&
+            !state.responseActive &&
+            !state.pendingSpokenReply &&
+            !state.spokenReplyRequested
+          ) {
+            // VAD committed a turn but its auto-response never appeared
+            // (create raced the body end, or got cancelled before
+            // response.created). Nothing is in flight, so requesting the
+            // response ourselves is safe — waiting here would hang until
+            // the 60 s session timeout (review finding).
+            send({
+              type: 'response.create',
+              response: { output_modalities: ['audio'] },
+            })
+          } else if (
             state.completedResponses > 0 &&
+            state.completedResponses >= state.vadCommits &&
             !state.responseActive &&
             !state.pendingSpokenReply
           ) {
@@ -1384,6 +1542,41 @@ export async function createStreamingRealtimeSession({
         }
       }
       return resultPromise
+    },
+
+    /**
+     * Conversation mode: end the session deliberately (button stop, device
+     * socket closed, inactivity). Resolves the summary plan from whatever
+     * the conversation accumulated; never forces a commit.
+     */
+    end() {
+      if (state.finished) return resultPromise
+      state.bodyEnded = true
+      state.status =
+        state.actions.length || state.delegate ? 'ready' : 'instant'
+      if (!state.response && state.textParts.length) {
+        state.response = String(state.textParts.join('')).trim() || undefined
+      }
+      finishOk()
+      return resultPromise
+    },
+
+    /** Live session state for callers that manage their own lifecycle. */
+    get active() {
+      return !state.finished
+    },
+
+    /**
+     * Settles when the session is over — resolves with the plan on a clean
+     * end, rejects if the Realtime leg died. Conversation callers watch this
+     * to tear down the device leg instead of streaming into a dead session.
+     */
+    get done() {
+      return resultPromise
+    },
+
+    get responseInFlight() {
+      return Boolean(state.responseActive || state.pendingSpokenReply)
     },
 
     abort(error) {

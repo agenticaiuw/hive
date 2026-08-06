@@ -108,7 +108,7 @@ const DIAGNOSTIC_AUDIO_R2_MAX_BYTES = 8 * 1024 * 1024
  *   # "Audio-native execute-only" and no local /plan when actions present.
  *   # Battery: Realtime emits run_shell pmset -g batt → bridge auto-executes.
  */
-function plannerHintFromPlan(plan) {
+export function plannerHintFromPlan(plan) {
   if (!plan) return undefined
   // Realtime / audio-native plans always attach a complete hint so the Mac
   // never treats the job as "transcript-only → re-plan with text LLM".
@@ -143,7 +143,7 @@ function plannerHintFromPlan(plan) {
   }
 }
 
-async function enqueueMacPlanJob({
+export async function enqueueMacPlanJob({
   store,
   deviceId,
   sessionId,
@@ -875,7 +875,7 @@ function keepAliveAfterResponse(work) {
  * the fields the model needs to speak an answer, cap the per-action outputs
  * so a chatty command can't blow up the conversation context.
  */
-function trimMacResultForModel(result) {
+export function trimMacResultForModel(result) {
   const actionResults = Array.isArray(result.results)
     ? result.results.slice(0, 6).map((entry) => {
         const text = JSON.stringify(entry) || ''
@@ -1887,9 +1887,23 @@ app.get('/v1/ops/history', async (request, response) => {
     search: query || null,
   })
 
+  // First page: anchor the capture window at NOW, not at the newest plan
+  // job — a conversation that dispatched no Mac jobs stores a capture newer
+  // than every job, which the job-anchored window silently excluded.
+  // Cursored pages keep the job anchor so older pages don't re-serve the
+  // newest captures.
+  const captureAnchor = cursor
+    ? await capturesNear(store, jobs)
+    : await capturesNear(
+        store,
+        jobs.length
+          ? [...jobs, { createdAt: new Date().toISOString() }]
+          : [{ createdAt: new Date().toISOString() }],
+      )
+
   const page = buildHistoryPage({
     jobs,
-    captures: await capturesNear(store, jobs),
+    captures: captureAnchor,
     limit,
     query,
     scanLimit,

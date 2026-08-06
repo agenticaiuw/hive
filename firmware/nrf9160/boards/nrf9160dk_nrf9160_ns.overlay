@@ -1,6 +1,66 @@
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 #include <samples/cellular/nrf91_crypto_partitions.dtsi>
-#include <samples/cellular/nrf91_sram_crypto_partitions.dtsi>
+
+/*
+ * SRAM partitions — same node structure as Nordic's
+ * nrf91_sram_crypto_partitions.dtsi but sized for THIS build: that dtsi
+ * reserves 88 kB of secure RAM for the full TF-M crypto profile, while
+ * this firmware runs TFM_PROFILE_TYPE_MINIMAL (32 kB). The 56 kB
+ * difference funds the full-duplex audio buffers (concurrent Opus
+ * encoder + decoder + jitter ring).
+ *
+ *   0x2000_0000  Secure RAM (TF-M minimal)       (   32 kB)
+ *   0x2000_8000  Non-secure RAM area             (  224 kB)
+ *     0x2000_8000  Modem shared area             ( 17768 B)
+ *       0x2000_8000  control                     (  1256 B)
+ *       0x2000_84e8  app -> cell                 (  8320 B)
+ *       0x2000_a568  cell -> app                 (    8 kB)
+ *     0x2000_c568  Application RAM               (211608 B)
+ */
+/delete-node/ &sram0_s;
+/delete-node/ &sram0_ns;
+
+&sram0 {
+	sram0_s: sram@0 {
+		reg = <0x0 0x8000>;
+	};
+
+	sram0_ns: sram@8000 {
+		reg = <0x8000 0x38000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x8000 0x38000>;
+
+		/* Must be in first 128 kB of RAM. */
+		sram0_ns_modem: sram0_ns@0 {
+			/* Modem (shared) memory */
+			reg = <0x0 0x4568>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x0 0x4568>;
+
+			cpuapp_cpucell_ipc_shm_ctrl: sram0_ns_modem@0 {
+				/* Modem IPC control */
+				reg = <0x0 0x4e8>;
+			};
+
+			cpuapp_cpucell_ipc_shm_heap: sram0_ns_modem@4e8 {
+				/* Modem IPC transmit */
+				reg = <0x4e8 0x2080>;
+			};
+
+			cpucell_cpuapp_ipc_shm_heap: sram0_ns_modem@2568 {
+				/* Modem IPC receive */
+				reg = <0x2568 0x2000>;
+			};
+		};
+
+		sram0_ns_app: sram0_ns@4568 {
+			/* Non-Secure application memory */
+			reg = <0x4568 0x33a98>;
+		};
+	};
+};
 
 &pinctrl {
 	/*

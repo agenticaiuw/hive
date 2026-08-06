@@ -678,6 +678,27 @@ static void copy_device_time(char *out, size_t out_size)
 	out[copy_length] = '\0';
 }
 
+/* WebSocket transport plumbing — see pendant_cloud.h. */
+int pendant_cloud_open_socket(void)
+{
+	return open_relay_socket();
+}
+
+const char *pendant_cloud_hostname(void)
+{
+	return RELAY_HOSTNAME;
+}
+
+const char *pendant_cloud_api_key(void)
+{
+	return CONFIG_PENDANT_RELAY_API_KEY;
+}
+
+void pendant_cloud_copy_device_time(char *out, size_t out_size)
+{
+	copy_device_time(out, out_size);
+}
+
 /*
  * Chunked raw PCM voice command: one TLS session, HTTP/1.1 Transfer-Encoding
  * chunked, relay wraps s16le → WAV for STT/multimodal + Mac dispatch.

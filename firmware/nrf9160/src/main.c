@@ -19,6 +19,7 @@
 
 #include "audio_opus.h"
 #include "pendant_cloud.h"
+#include "pendant_ws.h"
 
 #define LED_NODE DT_ALIAS(led0)
 #define BUTTON_NODE DT_ALIAS(sw0)
@@ -57,10 +58,11 @@
 #define MIC_RX_BLOCK_FRAMES 640U
 #define MIC_RX_BLOCK_SIZE (MIC_RX_BLOCK_FRAMES * sizeof(int32_t))
 /*
- * RX slab is dedicated so the 30 KiB Opus workspace can hold the live encoder
- * while the user is speaking. Six blocks provide about 123 ms total buffering;
- * the live-codec budget below reserves two blocks so PCM capture cannot be
- * killed by an encoder that is slower than real time.
+ * RX slab is dedicated so the Opus workspace can hold the live encoder
+ * while the user is speaking. Six blocks ≈ 123 ms of elastic: an i2s_nrfx
+ * RX overrun ERRORS the whole transfer (it does not drop-and-continue), so
+ * this must ride out SD-journal stalls on the legacy path and codec spikes
+ * on the duplex path.
  */
 #define MIC_RX_BLOCK_COUNT 6U
 #define MIC_OUT_BLOCK_FRAMES (MIC_RX_BLOCK_FRAMES / MIC_DECIMATION)
@@ -183,6 +185,99 @@
 /* Temporary diagnostic: prove whether the microphone actively drives DOUT. */
 #define PENDANT_MIC_ELECTRICAL_PROBE 0
 
+/*
+ * ---- Full-duplex conversation (WebSocket transport) ----
+ *
+ * One I2S config drives BOTH directions (i2s_nrfx memcmps them): the mic's
+ * proven 24-bit/mono/slave/31250 setup, clocks from the PWM loopback. RX is
+ * byte-identical to record_microphone's capture; TX rides the same clocks
+ * out SDOUT to the ESP32, which reads the top 16 bits of each 24-bit left
+ * word (TX word = sample << 8) at 31250 frames/s.
+ *
+ * Downlink Opus decodes at the 16 kHz wire rate; the TX fill upsamples
+ * 16000 → 31250 with exact 64/125 phase math. TX must NEVER starve: an
+ * nrfx TX underrun errors the whole duplex transfer, RX included, so the
+ * fill emits silence whenever the jitter ring is below its gate.
+ */
+#define CONVO_MAX_SECONDS 300U
+#define CONVO_TX_BLOCK_FRAMES MIC_RX_BLOCK_FRAMES
+#define CONVO_TX_SLAB_BLOCKS 3U
+#define CONVO_TX_PRIME_BLOCKS 2U
+/* 16 kHz s16 jitter ring: 512 ms of agent speech. Barge-in flushes it, so
+ * depth buys LTE-jitter absorption, not conversational latency. */
+#define DL_JITTER_BYTES 16384U
+#define DL_JITTER_SAMPLES (DL_JITTER_BYTES / sizeof(int16_t))
+/* Start/resume playback only with this much banked (128 ms). */
+#define DL_PREBUFFER_SAMPLES 2048U
+/*
+ * Worst case one downlink WS frame decodes to: the relay caps frames at 4
+ * packets AND 500 B, each packet ≤ 60 ms (960 samples). The receive gate
+ * needs at least this much ring space free, and it MUST sit at or above
+ * DL_PREBUFFER_SAMPLES or the prebuffer can never fill (review finding:
+ * gate 1024 < prebuffer 2048 deadlocked the ring permanently).
+ */
+#define DL_WORST_FRAME_SAMPLES 3840U
+BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
+		     DL_PREBUFFER_SAMPLES + 960U,
+	     "receive gate must clear the prebuffer with a packet to spare");
+/* Largest downlink WS frame the relay may send (packet-aligned, ≤500 B). */
+#define WS_RX_BUF_BYTES 640U
+/* ~120 ms of Opus per uplink frame: batching overhead vs VAD latency. */
+#define WS_TX_BATCH_BYTES 240U
+/* Exact 16000/31250 ratio for the TX upsampler. */
+#define TX_RESAMPLE_NUM 64U
+#define TX_RESAMPLE_DEN 125U
+/* Idle keepalive: under Cloudflare's 100 s WS idle kill. */
+#define WS_IDLE_PING_SECONDS 25U
+
+/* Decoder state arena (18,404 B measured + margin) — concurrent with the
+ * encoder in audio_workspace, so it cannot time-share that block. */
+static uint8_t opus_dec_arena[18432] __aligned(4);
+static int16_t dl_jitter[DL_JITTER_SAMPLES];
+static size_t dl_jitter_head;
+static size_t dl_jitter_tail;
+static size_t dl_jitter_count;
+static int16_t dl_decode_buf[960]; /* one 60 ms wire packet at 16 kHz */
+
+/*
+ * ---- WS I/O thread ----
+ *
+ * The audio loop must queue a TX block every ~20 ms or i2s_nrfx errors the
+ * whole duplex transfer — but modem sends can stall for hundreds of ms on
+ * LTE. So sockets live on their own thread: the audio loop only touches
+ * the uplink byte ring (SPSC: main produces, ws thread consumes), the
+ * downlink frame pipe (ws thread produces, main consumes), and two atomic
+ * control flags. Codec work stays on main (shared pseudostack).
+ */
+#define WS_IO_STACK_BYTES 2560
+#define WS_IO_PRIORITY 5
+#define DL_PIPE_BYTES 4096
+static K_THREAD_STACK_DEFINE(ws_io_stack, WS_IO_STACK_BYTES);
+static struct k_thread ws_io_thread_data;
+static K_MUTEX_DEFINE(ws_lock); /* serializes pendant_ws_* across threads */
+K_PIPE_DEFINE(dl_pipe, DL_PIPE_BYTES, 4);
+/*
+ * Pipe occupancy, tracked by hand: the new k_pipe API has no free-space
+ * query, and a partial write would tear the [len][frame] record framing.
+ * Single writer (ws thread) checks this before writing both parts; single
+ * reader (main) credits it back after consuming a whole record.
+ */
+static atomic_t dl_pipe_used;
+static atomic_t convo_active;    /* audio loop live: pump/recv at full rate */
+static atomic_t convo_flush_req; /* relay said flush (barge-in) */
+static atomic_t convo_end_req;   /* relay said end / transport died */
+static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];    /* ws thread only */
+static uint8_t dl_frame_buf[WS_RX_BUF_BYTES]; /* main thread only */
+/*
+ * One TX slab serves both worlds: duplex conversation blocks (2,560 B used
+ * fully) and the legacy reply path's 1,024 B blocks (partial fill of the
+ * same chunks). Four blocks preserve the legacy prefill(3)+1 pattern.
+ */
+K_MEM_SLAB_DEFINE_STATIC(convo_tx_slab,
+			 CONVO_TX_BLOCK_FRAMES * sizeof(int32_t),
+			 I2S_BLOCK_COUNT, 4);
+#define i2s_slab convo_tx_slab
+
 static const struct gpio_dt_spec led =
 	GPIO_DT_SPEC_GET(LED_NODE, gpios);
 static const struct gpio_dt_spec button =
@@ -209,7 +304,7 @@ static uint8_t audio_workspace[PENDANT_AUDIO_WORKSPACE_BYTES] __aligned(4);
 BUILD_ASSERT(sizeof(mic_rx_storage) ==
 		     MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT,
 	     "mic RX storage size mismatch");
-K_MEM_SLAB_DEFINE_STATIC(i2s_slab, I2S_BLOCK_SIZE, I2S_BLOCK_COUNT, 4);
+/* Legacy i2s_slab folded into convo_tx_slab (defined above). */
 /* Processed audio staged between microSD writes (~1 KiB stages). */
 static int16_t mic_stage_samples[MIC_STAGE_FRAMES] __aligned(4);
 static bool live_stream_failed;
@@ -230,10 +325,15 @@ static int16_t ulaw_to_linear(uint8_t code)
 	return (int16_t)((u & 0x80U) ? (0x84 - t) : (t - 0x84));
 }
 
-/* Wire-framed Opus packet FIFO in the workspace tail (SPSC, byte ring). */
-static size_t live_fifo_head;
-static size_t live_fifo_tail;
-static size_t live_fifo_count;
+/*
+ * Wire-framed Opus packet FIFO in the workspace tail. True SPSC ring: the
+ * producer (main: encoder sink) owns head, the consumer (legacy pump on
+ * main, or the WS I/O thread in a conversation) owns tail; fill level is
+ * derived, never a shared counter. Aligned word stores are atomic on this
+ * core, so volatile indices are the whole synchronization story.
+ */
+static volatile size_t live_fifo_head;
+static volatile size_t live_fifo_tail;
 static bool live_tx_flush;
 
 static inline uint8_t *live_fifo_storage(void)
@@ -241,23 +341,32 @@ static inline uint8_t *live_fifo_storage(void)
 	return audio_workspace + OPUS_TX_ARENA_BYTES;
 }
 
+static inline size_t live_fifo_fill(void)
+{
+	return (live_fifo_head - live_fifo_tail + OPUS_TX_FIFO_BYTES) %
+	       OPUS_TX_FIFO_BYTES;
+}
+
 static void live_fifo_reset(void)
 {
 	live_fifo_head = 0U;
 	live_fifo_tail = 0U;
-	live_fifo_count = 0U;
 	live_tx_flush = false;
 }
 
 static void live_fifo_put(const uint8_t *data, size_t length)
 {
 	uint8_t *storage = live_fifo_storage();
+	size_t head = live_fifo_head;
 
 	for (size_t i = 0U; i < length; ++i) {
-		storage[live_fifo_head] = data[i];
-		live_fifo_head = (live_fifo_head + 1U) % OPUS_TX_FIFO_BYTES;
+		storage[head] = data[i];
+		head = (head + 1U) % OPUS_TX_FIFO_BYTES;
 	}
-	live_fifo_count += length;
+	/* Data lands before the head moves; the consumer never sees bytes
+	 * that are not fully written. */
+	compiler_barrier();
+	live_fifo_head = head;
 }
 
 /* Encoder → FIFO. Saturation clips the utterance (never fails the cycle). */
@@ -269,7 +378,8 @@ static int live_opus_packet_sink(const uint8_t *packet, size_t packet_bytes)
 	if (live_tx_saturated) {
 		return 0;
 	}
-	if (2U + packet_bytes > OPUS_TX_FIFO_BYTES - live_fifo_count) {
+	/* One byte of the ring stays unused so full != empty. */
+	if (2U + packet_bytes > OPUS_TX_FIFO_BYTES - 1U - live_fifo_fill()) {
 		printk("Live TX FIFO saturated; ending utterance with what "
 		       "the link carried\n");
 		live_tx_saturated = true;
@@ -284,19 +394,29 @@ static int live_opus_packet_sink(const uint8_t *packet, size_t packet_bytes)
  * Feed one PCM stage into the live Opus encoder (packets land in the FIFO
  * via the sink). Encoding a 20 ms frame at complexity 1 fits the gap between
  * I2S DMA blocks; the FIFO absorbs LTE stalls.
+ *
+ * Transport gate differs by mode: the legacy path requires the chunked-HTTP
+ * stream to be open (pendant_cloud_stream_active), the conversation path
+ * requires only a live WebSocket — gating on the HTTP stream there made
+ * every conversation mute (review finding).
  */
 static void live_tx_offer_stage(const int16_t *samples, size_t frame_count)
 {
+	bool transport_up = atomic_get(&convo_active)
+				    ? pendant_ws_connected()
+				    : pendant_cloud_stream_active();
 	int error;
 
-	if (live_stream_failed || live_tx_saturated ||
-	    !pendant_cloud_stream_active() || !pendant_opus_stream_active()) {
+	if (live_stream_failed || live_tx_saturated || !transport_up ||
+	    !pendant_opus_stream_active()) {
 		return;
 	}
 	error = pendant_opus_stream_feed(samples, frame_count);
 	if (error != 0) {
 		printk("Live Opus feed failed: %d\n", error);
-		pendant_cloud_stream_abort();
+		if (!atomic_get(&convo_active)) {
+			pendant_cloud_stream_abort();
+		}
 		live_stream_failed = true;
 	}
 }
@@ -327,8 +447,10 @@ static void live_tx_pump(uint32_t budget_ms)
 			continue;
 		}
 
-		if (live_fifo_count == 0U ||
-		    (!live_tx_flush && live_fifo_count < LIVE_TX_BATCH_BYTES)) {
+		size_t fill = live_fifo_fill();
+
+		if (fill == 0U ||
+		    (!live_tx_flush && fill < LIVE_TX_BATCH_BYTES)) {
 			return;
 		}
 
@@ -336,7 +458,7 @@ static void live_tx_pump(uint32_t budget_ms)
 		 * FIFO bytes can be consumed as soon as the queue accepts. */
 		uint8_t staging[LIVE_TX_WRITE_MAX];
 		uint8_t *storage = live_fifo_storage();
-		size_t batch = MIN(live_fifo_count, sizeof(staging));
+		size_t batch = MIN(fill, sizeof(staging));
 
 		for (size_t i = 0U; i < batch; ++i) {
 			staging[i] = storage[(live_fifo_tail + i) %
@@ -354,7 +476,6 @@ static void live_tx_pump(uint32_t budget_ms)
 			return;
 		}
 		live_fifo_tail = (live_fifo_tail + batch) % OPUS_TX_FIFO_BYTES;
-		live_fifo_count -= batch;
 	}
 }
 
@@ -1366,7 +1487,7 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		int64_t drain_until = k_uptime_get() + 6000;
 
 		live_tx_flush = true;
-		while ((live_fifo_count > 0U ||
+		while ((live_fifo_fill() > 0U ||
 			pendant_cloud_stream_has_pending()) &&
 		       pendant_cloud_stream_active() && !live_stream_failed &&
 		       k_uptime_get() < drain_until) {
@@ -1384,12 +1505,12 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			pendant_cloud_stream_abort();
 			live_stream_failed = true;
 			live_fifo_reset();
-		} else if (live_fifo_count > 0U) {
+		} else if (live_fifo_fill() > 0U) {
 			/* Socket healthy but slow: clip the utterance tail and
 			 * let the model answer on what arrived. */
 			printk("Live TX drain timeout; clipping %u undelivered "
 			       "bytes\n",
-			       (uint32_t)live_fifo_count);
+			       (uint32_t)live_fifo_fill());
 			live_fifo_reset();
 		}
 	}
@@ -1412,7 +1533,7 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	       recorded_peak, rms, minimum_sample, maximum_sample,
 	       zero_crossings, stage_flush_count,
 	       pendant_cloud_stream_bytes_sent(),
-	       (uint32_t)live_fifo_count, live_tx_saturated ? 1 : 0,
+	       (uint32_t)live_fifo_fill(), live_tx_saturated ? 1 : 0,
 	       live_stream_failed ? 1 : 0);
 	return error;
 }
@@ -2046,6 +2167,629 @@ static void show_error(void)
 	}
 }
 
+/* ---- Full-duplex conversation ---- */
+
+static void dl_jitter_reset(void)
+{
+	dl_jitter_head = 0U;
+	dl_jitter_tail = 0U;
+	dl_jitter_count = 0U;
+}
+
+static void dl_jitter_put(const int16_t *samples, size_t count)
+{
+	size_t free_samples = DL_JITTER_SAMPLES - dl_jitter_count;
+
+	/* The receive gate makes overflow unreachable in normal operation;
+	 * a misbehaving relay (dense DTX frames) must clip, not corrupt. */
+	if (count > free_samples) {
+		count = free_samples;
+	}
+	for (size_t i = 0U; i < count; ++i) {
+		dl_jitter[dl_jitter_head] = samples[i];
+		dl_jitter_head = (dl_jitter_head + 1U) % DL_JITTER_SAMPLES;
+	}
+	dl_jitter_count += count;
+}
+
+/*
+ * Fill one TX block (640 words at 31250) from the 16 kHz jitter ring with
+ * exact 64/125 phase-accumulator interpolation. `*playing` implements the
+ * prebuffer/rebuffer gate; silence flows whenever it is off so the duplex
+ * transfer never underruns. Interp state persists across blocks.
+ */
+static uint32_t tx_phase;      /* 0..TX_RESAMPLE_DEN-1 */
+static int16_t tx_prev_sample; /* last 16 kHz sample consumed */
+static int16_t tx_next_sample;
+static bool tx_have_next;
+
+static void tx_resample_reset(void)
+{
+	tx_phase = 0U;
+	tx_prev_sample = 0;
+	tx_next_sample = 0;
+	tx_have_next = false;
+}
+
+static void convo_fill_tx_block(int32_t *words, bool *playing)
+{
+	for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES; ++frame) {
+		if (!*playing && dl_jitter_count >= DL_PREBUFFER_SAMPLES) {
+			*playing = true;
+		}
+		if (*playing && !tx_have_next && dl_jitter_count > 0U) {
+			tx_next_sample = dl_jitter[dl_jitter_tail];
+			dl_jitter_tail =
+				(dl_jitter_tail + 1U) % DL_JITTER_SAMPLES;
+			--dl_jitter_count;
+			tx_have_next = true;
+		}
+		if (!*playing || !tx_have_next) {
+			/* Starved: pause output and re-arm the prebuffer. */
+			if (*playing && dl_jitter_count == 0U) {
+				*playing = false;
+			}
+			words[frame] = 0;
+			continue;
+		}
+
+		int32_t span = (int32_t)tx_next_sample - tx_prev_sample;
+		int32_t value = tx_prev_sample +
+				(span * (int32_t)tx_phase) /
+					(int32_t)TX_RESAMPLE_DEN;
+
+		words[frame] = value << 8;
+		tx_phase += TX_RESAMPLE_NUM;
+		if (tx_phase >= TX_RESAMPLE_DEN) {
+			tx_phase -= TX_RESAMPLE_DEN;
+			tx_prev_sample = tx_next_sample;
+			tx_have_next = false;
+			if (dl_jitter_count > 0U) {
+				tx_next_sample = dl_jitter[dl_jitter_tail];
+				dl_jitter_tail = (dl_jitter_tail + 1U) %
+						 DL_JITTER_SAMPLES;
+				--dl_jitter_count;
+				tx_have_next = true;
+			}
+		}
+	}
+}
+
+/* Queue one filled TX block; returns 0 or the i2s_write error. */
+static int convo_queue_tx_block(const struct device *i2s, bool *playing)
+{
+	void *block;
+	int error;
+
+	error = k_mem_slab_alloc(&convo_tx_slab, &block, K_MSEC(200));
+	if (error != 0) {
+		return error;
+	}
+	convo_fill_tx_block((int32_t *)block, playing);
+	error = i2s_write(i2s, block,
+			  CONVO_TX_BLOCK_FRAMES * sizeof(int32_t));
+	if (error != 0) {
+		k_mem_slab_free(&convo_tx_slab, block);
+	}
+	return error;
+}
+
+/*
+ * The ESP32 hunts a sync preamble after every BCLK restart: ≥8 alternating
+ * 0x2468/0x5A5A words then 0x6C6C, all in the top 16 bits of left-slot
+ * words. Block 0 is pure alternation (20.5 ms — outlives the ESP32's
+ * discarded first DMA block), block 1 opens with the end marker.
+ */
+static int convo_queue_preamble(const struct device *i2s)
+{
+	for (unsigned int block_index = 0U;
+	     block_index < CONVO_TX_PRIME_BLOCKS; ++block_index) {
+		void *block;
+		int32_t *words;
+		int error;
+
+		error = k_mem_slab_alloc(&convo_tx_slab, &block, K_MSEC(100));
+		if (error != 0) {
+			return error;
+		}
+		words = (int32_t *)block;
+		for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES;
+		     ++frame) {
+			int32_t value = 0;
+
+			if (block_index == 0U) {
+				value = (frame & 1U) ? I2S_STREAM_SYNC_B
+						     : I2S_STREAM_SYNC_A;
+			} else if (frame < I2S_SYNC_END_FRAMES) {
+				value = I2S_STREAM_SYNC_END;
+			}
+			words[frame] = value << 8;
+		}
+		error = i2s_write(i2s, block,
+				  CONVO_TX_BLOCK_FRAMES * sizeof(int32_t));
+		if (error != 0) {
+			k_mem_slab_free(&convo_tx_slab, block);
+			return error;
+		}
+	}
+	return 0;
+}
+
+/*
+ * WS I/O thread body. All socket work lives here so a stalled modem send
+ * can never starve the audio loop's 20 ms TX deadline.
+ *
+ * Uplink: consume the SPSC wire FIFO, batch, send (blocking is fine on
+ * this thread — SO_SNDTIMEO bounds it). Downlink: receive one message at a
+ * time; binary frames go into dl_pipe as [2-byte BE frame length][bytes]
+ * only when the pipe has room (backpressure = stop receiving, TCP holds
+ * the rest); control frames become atomic flags. While no conversation is
+ * active the thread just keeps the idle socket alive with pings.
+ */
+static void ws_io_pump_uplink(void)
+{
+	uint8_t staging[WS_TX_BATCH_BYTES];
+	uint8_t *storage = live_fifo_storage();
+	size_t fill;
+
+	while ((fill = live_fifo_fill()) >= WS_TX_BATCH_BYTES ||
+	       (live_tx_flush && fill > 0U)) {
+		size_t tail = live_fifo_tail;
+		size_t batch = MIN(fill, sizeof(staging));
+
+		for (size_t i = 0U; i < batch; ++i) {
+			staging[i] =
+				storage[(tail + i) % OPUS_TX_FIFO_BYTES];
+		}
+		if (pendant_ws_send_binary(staging, batch) != 0) {
+			atomic_set(&convo_end_req, 1);
+			return;
+		}
+		live_fifo_tail = (tail + batch) % OPUS_TX_FIFO_BYTES;
+	}
+}
+
+static void ws_io_drain_downlink(void)
+{
+	for (unsigned int budget = 0U; budget < 4U; ++budget) {
+		bool is_text = false;
+		int received;
+		uint8_t frame_header[2];
+
+		/* Backpressure: no pipe room for a max frame → stop reading
+		 * the socket; TCP flow control parks the rest at the relay. */
+		if (DL_PIPE_BYTES - (size_t)atomic_get(&dl_pipe_used) <
+		    sizeof(frame_header) + sizeof(ws_rx_buf)) {
+			return;
+		}
+		received = pendant_ws_recv(ws_rx_buf, sizeof(ws_rx_buf),
+					   &is_text);
+		if (received == 0) {
+			return;
+		}
+		if (received < 0) {
+			atomic_set(&convo_end_req, 1);
+			return;
+		}
+		if (is_text) {
+			ws_rx_buf[MIN((size_t)received,
+				      sizeof(ws_rx_buf) - 1U)] = '\0';
+			if (strstr((const char *)ws_rx_buf, "\"flush\"") !=
+			    NULL) {
+				atomic_set(&convo_flush_req, 1);
+			} else if (strstr((const char *)ws_rx_buf,
+					  "\"end\"") != NULL) {
+				atomic_set(&convo_end_req, 1);
+			}
+			continue;
+		}
+		frame_header[0] = (uint8_t)((size_t)received >> 8);
+		frame_header[1] = (uint8_t)((size_t)received & 0xFFU);
+		/* Space was checked above and this is the only writer, so
+		 * both writes land in full. */
+		(void)k_pipe_write(&dl_pipe, frame_header,
+				   sizeof(frame_header), K_NO_WAIT);
+		(void)k_pipe_write(&dl_pipe, ws_rx_buf, (size_t)received,
+				   K_NO_WAIT);
+		atomic_add(&dl_pipe_used,
+			   (atomic_val_t)(sizeof(frame_header) +
+					  (size_t)received));
+	}
+}
+
+static void ws_io_thread_fn(void *a, void *b, void *c)
+{
+	int64_t next_idle_ping = 0;
+
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (;;) {
+		if (atomic_get(&convo_active)) {
+			k_mutex_lock(&ws_lock, K_FOREVER);
+			if (pendant_ws_connected()) {
+				ws_io_pump_uplink();
+				ws_io_drain_downlink();
+			} else {
+				atomic_set(&convo_end_req, 1);
+			}
+			k_mutex_unlock(&ws_lock);
+			k_msleep(5);
+			continue;
+		}
+		if (pendant_ws_connected() &&
+		    k_uptime_get() >= next_idle_ping) {
+			k_mutex_lock(&ws_lock, K_FOREVER);
+			(void)pendant_ws_ping();
+			/* Swallow pongs/strays so they never lead a
+			 * conversation's downlink. */
+			for (int drained = 1; drained > 0;) {
+				bool is_text = false;
+
+				drained = pendant_ws_recv(ws_rx_buf,
+							  sizeof(ws_rx_buf),
+							  &is_text);
+			}
+			k_mutex_unlock(&ws_lock);
+			next_idle_ping =
+				k_uptime_get() + WS_IDLE_PING_SECONDS * 1000;
+		}
+		k_msleep(200);
+	}
+}
+
+/*
+ * Main-loop side of the downlink: pull whole frames from dl_pipe, decode
+ * each packet into the jitter ring. Called between I2S blocks; bounded by
+ * ring space, not time (a 60 ms decode is ~2-4 ms here).
+ */
+static void convo_decode_downlink(void)
+{
+	for (;;) {
+		uint8_t frame_header[2];
+		size_t frame_bytes;
+		size_t got = 0U;
+
+		if (DL_JITTER_SAMPLES - dl_jitter_count <
+		    DL_WORST_FRAME_SAMPLES) {
+			return;
+		}
+		if (k_pipe_read(&dl_pipe, frame_header, sizeof(frame_header),
+				K_NO_WAIT) < (int)sizeof(frame_header)) {
+			return;
+		}
+		frame_bytes = ((size_t)frame_header[0] << 8) | frame_header[1];
+		if (frame_bytes > sizeof(dl_frame_buf)) {
+			printk("Downlink pipe record oversized\n");
+			atomic_set(&convo_end_req, 1);
+			return;
+		}
+		while (got < frame_bytes) {
+			int r = k_pipe_read(&dl_pipe, dl_frame_buf + got,
+					    frame_bytes - got, K_MSEC(20));
+
+			if (r <= 0) {
+				printk("Downlink pipe torn frame\n");
+				atomic_set(&convo_end_req, 1);
+				return;
+			}
+			got += (size_t)r;
+		}
+		atomic_sub(&dl_pipe_used,
+			   (atomic_val_t)(sizeof(frame_header) + frame_bytes));
+
+		size_t offset = 0U;
+
+		while (offset + 2U <= frame_bytes) {
+			size_t packet_bytes =
+				((size_t)dl_frame_buf[offset] << 8) |
+				dl_frame_buf[offset + 1U];
+
+			offset += 2U;
+			if (packet_bytes == 0U ||
+			    offset + packet_bytes > frame_bytes) {
+				printk("Downlink framing broken (len=%u)\n",
+				       (unsigned int)packet_bytes);
+				atomic_set(&convo_end_req, 1);
+				return;
+			}
+			int decoded = pendant_opus_reply_decode_packet(
+				dl_frame_buf + offset, packet_bytes,
+				dl_decode_buf, ARRAY_SIZE(dl_decode_buf));
+
+			if (decoded > 0) {
+				dl_jitter_put(dl_decode_buf,
+					      (size_t)decoded);
+			}
+			offset += packet_bytes;
+		}
+	}
+}
+
+/*
+ * One press-to-press conversation: mic streams up, agent speech streams
+ * down and PLAYS WHILE RECORDING — the model decides when to talk. Ends on
+ * the second button press, relay 'end' (30 s of mutual silence), transport
+ * death, or the runaway cap.
+ */
+static int run_conversation(const struct device *i2s)
+{
+	struct i2s_config config = {
+		.word_size = 24U,
+		.channels = 1U,
+		.format = I2S_FMT_DATA_FORMAT_I2S,
+		.options = I2S_OPT_BIT_CLK_TARGET | I2S_OPT_FRAME_CLK_TARGET,
+		.frame_clk_freq = MIC_FRAME_RATE,
+		.mem_slab = &mic_rx_slab,
+		.block_size = MIC_RX_BLOCK_SIZE,
+		.timeout = 1500,
+	};
+	struct i2s_config tx_config;
+	int32_t raw_processing[MIC_RX_BLOCK_FRAMES];
+	char device_time[32];
+	char start_message[96];
+	int64_t started_at;
+	int64_t next_led_toggle;
+	size_t stage_frames = 0U;
+	size_t block_index = 0U;
+	int32_t hpf_prev_in = 0;
+	int32_t hpf_prev_out = 0;
+	bool hpf_primed = false;
+	int32_t slew_prev = 0;
+	bool slew_primed = false;
+	bool playing = false;
+	bool i2s_running = false;
+	bool stop_sent = false;
+	int result = 0;
+	int error;
+
+	live_stream_failed = false;
+	live_tx_saturated = false;
+	live_fifo_reset();
+	dl_jitter_reset();
+	tx_resample_reset();
+	k_pipe_reset(&dl_pipe);
+	atomic_set(&dl_pipe_used, 0);
+	atomic_set(&convo_flush_req, 0);
+	atomic_set(&convo_end_req, 0);
+
+	k_mutex_lock(&ws_lock, K_FOREVER);
+	error = pendant_ws_connect();
+	if (error == 0) {
+		pendant_cloud_copy_device_time(device_time,
+					       sizeof(device_time));
+		snprintf(start_message, sizeof(start_message),
+			 "{\"type\":\"start\",\"deviceTime\":\"%s\"}",
+			 device_time);
+		error = pendant_ws_send_text(start_message);
+	}
+	k_mutex_unlock(&ws_lock);
+	if (error != 0) {
+		return error;
+	}
+
+	error = pendant_opus_stream_begin_packets(SAMPLE_RATE,
+						  audio_workspace,
+						  OPUS_TX_ARENA_BYTES,
+						  live_opus_packet_sink);
+	if (error != 0) {
+		printk("Conversation encoder init failed: %d\n", error);
+		return error;
+	}
+	error = pendant_opus_reply_decoder_begin_rate(
+		opus_dec_arena, sizeof(opus_dec_arena),
+		PENDANT_OPUS_SAMPLE_RATE);
+	if (error < 0) {
+		printk("Conversation decoder init failed: %d\n", error);
+		pendant_opus_stream_abort();
+		return error;
+	}
+
+	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
+				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
+	if (error != 0) {
+		goto teardown;
+	}
+
+	gpio_pin_set_dt(&led, 1);
+	next_led_toggle = k_uptime_get() + 250;
+	mic_clocks_start();
+
+	error = i2s_configure(i2s, I2S_DIR_RX, &config);
+	if (error != 0) {
+		goto teardown_clocks;
+	}
+	tx_config = config;
+	tx_config.mem_slab = &convo_tx_slab;
+	error = i2s_configure(i2s, I2S_DIR_TX, &tx_config);
+	if (error != 0) {
+		goto teardown_clocks;
+	}
+
+	/* START in BOTH mode needs TX blocks queued first. */
+	error = convo_queue_preamble(i2s);
+	if (error != 0) {
+		goto teardown_clocks;
+	}
+
+	k_msleep(MIC_POWERUP_BUDGET_MS);
+	printk("Conversation: duplex I2S bclk_hz=%u lrclk_hz=%u "
+	       "(mic %u Hz up, agent 16 kHz down)\n",
+	       16000000U / MIC_BCLK_TOP, 16000000U / MIC_LRCLK_TOP,
+	       SAMPLE_RATE);
+	error = i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_START);
+	if (error != 0) {
+		goto teardown_clocks;
+	}
+	i2s_running = true;
+	started_at = k_uptime_get();
+	clear_button_events();
+	atomic_set(&convo_active, 1);
+
+	while (true) {
+		void *block;
+		size_t size;
+
+		/* Clock-locked pacing: one RX block in, one TX block out. */
+		error = i2s_read(i2s, &block, &size);
+		if (error != 0) {
+			printk("Conversation I2S read failed: %d\n", error);
+			result = error;
+			break;
+		}
+		if (size > sizeof(raw_processing) ||
+		    (size % sizeof(int32_t)) != 0U) {
+			k_mem_slab_free(&mic_rx_slab, block);
+			result = -EMSGSIZE;
+			break;
+		}
+		memcpy(raw_processing, block, size);
+		k_mem_slab_free(&mic_rx_slab, block);
+
+		error = convo_queue_tx_block(i2s, &playing);
+		if (error != 0) {
+			printk("Conversation TX write failed: %d\n", error);
+			result = error;
+			break;
+		}
+
+		if (block_index < MIC_STARTUP_SKIP_BLOCKS) {
+			++block_index;
+			clear_button_events();
+			continue;
+		}
+		++block_index;
+
+		/* Mic DSP — the twin of record_microphone's inner loop
+		 * (slew limit → decimate-average → DC blocker → gain). */
+		int32_t *raw = raw_processing;
+		size_t out_frames = (size / sizeof(int32_t)) / MIC_DECIMATION;
+
+		for (size_t frame = 0U; frame < out_frames; ++frame) {
+			int32_t first = raw[frame * MIC_DECIMATION] >>
+					MIC_SAMPLE_SHIFT;
+			int32_t second = raw[frame * MIC_DECIMATION + 1U] >>
+					 MIC_SAMPLE_SHIFT;
+
+			if (!slew_primed) {
+				slew_prev = first;
+				slew_primed = true;
+			}
+			int32_t delta = first - slew_prev;
+
+			delta = CLAMP(delta, -MIC_SLEW_LIMIT, MIC_SLEW_LIMIT);
+			slew_prev += delta;
+			first = slew_prev;
+			delta = second - slew_prev;
+			delta = CLAMP(delta, -MIC_SLEW_LIMIT, MIC_SLEW_LIMIT);
+			slew_prev += delta;
+			second = slew_prev;
+
+			int32_t sample = ((first + second) / 2) >> 8;
+
+			if (!hpf_primed) {
+				hpf_prev_in = sample;
+				hpf_primed = true;
+			}
+			int32_t filtered =
+				sample - hpf_prev_in +
+				(int32_t)(((int64_t)MIC_HPF_COEFF_Q15 *
+					   hpf_prev_out) >>
+					  15);
+			hpf_prev_in = sample;
+			hpf_prev_out = filtered;
+
+			int32_t amplified = filtered * MIC_GAIN;
+
+			amplified = CLAMP(amplified, INT16_MIN, INT16_MAX);
+			mic_stage_samples[stage_frames] = (int16_t)amplified;
+			if (++stage_frames == MIC_STAGE_FRAMES) {
+				live_tx_offer_stage(mic_stage_samples,
+						    MIC_STAGE_FRAMES);
+				stage_frames = 0U;
+			}
+		}
+		if (live_stream_failed) {
+			result = -EIO;
+			break;
+		}
+
+		/* The WS thread moves bytes; this loop only decodes. */
+		convo_decode_downlink();
+
+		if (atomic_cas(&convo_flush_req, 1, 0)) {
+			/* Barge-in: the owner is talking over the agent. */
+			dl_jitter_reset();
+			tx_resample_reset();
+			playing = false;
+		}
+		if (atomic_get(&convo_end_req)) {
+			/* Relay 'end' (mutual silence) or transport close —
+			 * a normal conversation ending, not a failure. */
+			printk("Conversation ended by relay/transport\n");
+			error = 0;
+			break;
+		}
+
+		/* Solid LED while the agent is audible, blink otherwise. */
+		if (playing) {
+			gpio_pin_set_dt(&led, 1);
+			next_led_toggle = k_uptime_get() + 250;
+		} else if (k_uptime_get() >= next_led_toggle) {
+			gpio_pin_toggle_dt(&led);
+			next_led_toggle = k_uptime_get() + 250;
+		}
+
+		if (k_uptime_get() - started_at >
+		    (int64_t)CONVO_MAX_SECONDS * 1000) {
+			printk("Conversation hit the %u s cap\n",
+			       CONVO_MAX_SECONDS);
+			break;
+		}
+		/* Bounce/release edges from the starting press for the first
+		 * second; after that a press ends the conversation. */
+		if (k_uptime_get() - started_at < 1000) {
+			clear_button_events();
+		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
+			printk("Conversation ended by button\n");
+			break;
+		}
+	}
+
+teardown_clocks:
+	if (i2s_running) {
+		/*
+		 * DROP, never DRAIN: as a clock-slave, draining needs the PWM
+		 * clocks to keep running until every queued TX block plays
+		 * out — a 12 ms settle is not enough, and killing the clocks
+		 * mid-STOPPING wedges i2s_nrfx (configure then fails -EINVAL
+		 * until reboot; review finding). DROP forces READY
+		 * synchronously and frees the queued blocks; the ≤41 ms of
+		 * tail audio it discards is silence or flushed speech.
+		 */
+		(void)i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_DROP);
+		k_msleep(MIC_STOP_SETTLE_MS);
+	}
+	mic_clocks_stop();
+	gpio_pin_set_dt(&led, 0);
+teardown:
+	atomic_set(&convo_active, 0);
+	k_mutex_lock(&ws_lock, K_FOREVER);
+	if (pendant_ws_connected() && !stop_sent) {
+		(void)pendant_ws_send_text("{\"type\":\"stop\"}");
+		stop_sent = true;
+	}
+	k_mutex_unlock(&ws_lock);
+	pendant_opus_stream_abort();
+	pendant_opus_reply_decoder_end();
+	clear_button_events();
+	if (result == 0 && error != 0) {
+		result = error;
+	}
+	return result;
+}
+
 int main(void)
 {
 	const struct device *const i2s = DEVICE_DT_GET(I2S_NODE);
@@ -2145,6 +2889,13 @@ int main(void)
 	}
 	printk("LTE OK — ready for button (press = record + live upload)\n");
 
+	/* Socket I/O lives on its own thread from here on: audio deadlines
+	 * on main can never be blocked by a stalled modem send. */
+	k_thread_create(&ws_io_thread_data, ws_io_stack,
+			K_THREAD_STACK_SIZEOF(ws_io_stack), ws_io_thread_fn,
+			NULL, NULL, NULL, WS_IO_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&ws_io_thread_data, "ws_io");
+
 	if (CONFIG_PENDANT_BOOT_AGENT_JOB_ID[0] != '\0') {
 		printk("BOOT_AGENT_REPLY_TEST_BEGIN job=%s\n",
 		       CONFIG_PENDANT_BOOT_AGENT_JOB_ID);
@@ -2207,19 +2958,22 @@ int main(void)
 
 	while (true) {
 		/*
-		 * Ready: keep TLS + chunked headers warm. Always call prewarm
-		 * so aged/dead half-open sockets refresh before the next press
-		 * (avoids Live TX pump failed: -104 after long idle).
+		 * Ready: hold ONE WebSocket open (pings keep Cloudflare's
+		 * 100 s idle killer away) instead of rebuilding TLS every
+		 * 15 s like the chunked-HTTP prewarm had to.
 		 */
 		audio_cycle_phase = 0U;
 		gpio_pin_set_dt(&led, 0);
-		{
-			int prewarm = pendant_cloud_stream_prewarm(PENDANT_OPUS_SAMPLE_RATE);
+		if (!pendant_ws_connected()) {
+			int ws_error;
 
-			if (prewarm != 0) {
-				printk("Idle stream prewarm failed: %d "
-				       "(will SD-upload after stop)\n",
-				       prewarm);
+			k_mutex_lock(&ws_lock, K_FOREVER);
+			ws_error = pendant_ws_connect();
+			k_mutex_unlock(&ws_lock);
+			if (ws_error != 0) {
+				printk("Idle WS connect failed: %d "
+				       "(legacy HTTP path on next press)\n",
+				       ws_error);
 			}
 		}
 #if PENDANT_BOOT_AUDIO_CYCLE_TEST
@@ -2229,14 +2983,55 @@ int main(void)
 			k_sem_give(&button_press_sem);
 		}
 #endif
-		wait_for_button_press();
+		/* Wait for a press. The WS I/O thread keeps the idle socket
+		 * alive (pings + stray drains); main only reconnects. */
+		while (k_sem_take(&button_press_sem,
+				  K_SECONDS(WS_IDLE_PING_SECONDS)) != 0) {
+			if (!pendant_ws_connected()) {
+				int ws_error;
+
+				k_mutex_lock(&ws_lock, K_FOREVER);
+				ws_error = pendant_ws_connect();
+				k_mutex_unlock(&ws_lock);
+				if (ws_error != 0) {
+					printk("Idle WS reconnect failed: %d\n",
+					       ws_error);
+				}
+			}
+		}
+		/* Latency-first: act on the active edge, never the release. */
+		clear_button_events();
 
 		/*
-		 * Press = record immediately. Live upload drains a ring with
-		 * non-blocking pumps between I2S blocks (prewarmed TLS).
+		 * Press = converse. Full-duplex WebSocket when the socket is
+		 * up; the proven record-then-reply HTTP cycle when it is not
+		 * (that path still journals to microSD when LTE is down).
 		 */
 		audio_cycle_phase = 1U;
 		int64_t lat_press_started = k_uptime_get();
+
+		bool ws_ready = pendant_ws_connected();
+
+		if (!ws_ready) {
+			k_mutex_lock(&ws_lock, K_FOREVER);
+			ws_ready = pendant_ws_connect() == 0;
+			k_mutex_unlock(&ws_lock);
+		}
+		if (ws_ready) {
+			error = run_conversation(i2s);
+			gpio_pin_set_dt(&led, 0);
+			printk("LAT conversation_ms=%lld result=%d\n",
+			       k_uptime_get() - lat_press_started, error);
+			report_main_stack_headroom("conversation");
+			if (error != 0) {
+				audio_cycle_result = error;
+				flash_led(4U, 100, 100);
+			} else {
+				audio_cycle_result = 0;
+			}
+			clear_button_events();
+			continue;
+		}
 
 		error = record_microphone(
 			i2s,
@@ -2306,26 +3101,19 @@ int main(void)
 		printk("LAT press_to_upload_done_ms=%lld\n",
 		       k_uptime_get() - lat_press_started);
 		if (error == PENDANT_CLOUD_REPLY_INLINE) {
-			/* Conversational path: the model's voice is already
-			 * arriving on the upload socket — play it now. */
+			/*
+			 * Legacy fallback cannot voice replies anymore: the
+			 * ESP32 bridge now speaks the duplex wire format
+			 * (32-bit slots @31250) and the old 16-bit/24 kHz
+			 * player would be noise. The command still executed
+			 * and both transcripts + audio are in the dashboard;
+			 * voice replies need the WebSocket link.
+			 */
 			audio_cycle_phase = 6U;
-			gpio_pin_set_dt(&led, 1);
-			printk("Conversational reply: autoplaying inline "
-			       "stream\n");
-			int play_error = play_inline_reply(i2s);
-
 			pendant_cloud_reply_stream_close();
-			gpio_pin_set_dt(&led, 0);
-			printk("LAT inline_reply_done_ms=%lld result=%d\n",
-			       k_uptime_get() - lat_press_started, play_error);
-			/* The solid LED used to mean press-to-play; a press
-			 * queued during autoplay must not start a recording. */
+			printk("Reply ready server-side; voice playback "
+			       "requires the duplex link (WS was down)\n");
 			clear_button_events();
-			if (play_error != 0) {
-				audio_cycle_result = play_error;
-				flash_led(6U, 100, 100);
-				continue;
-			}
 			goto reply_done;
 		}
 		if (error != 0) {
@@ -2339,90 +3127,12 @@ int main(void)
 			continue;
 		}
 
+		/* Same story as the inline branch: the fallback delivered the
+		 * command; the spoken reply lives in the dashboard until the
+		 * duplex link is back. */
 		audio_cycle_phase = 4U;
-		/*
-		 * Waiting for agent speech: LED off until first batch arrives,
-		 * then solid (pendant_notify_reply_first_batch). Never autoplay.
-		 */
-		gpio_pin_set_dt(&led, 0);
-		printk("Waiting for agent speech (LED solid on first batch; "
-		       "press button 1 to play as soon as it is solid)\n");
-		error = pendant_cloud_wait_for_agent_reply(
-			PENDANT_CLOUD_REPLY_AUDIO_PATH);
-		if (error == -ECANCELED) {
-			/* Button pressed while polling: skip this reply and
-			 * go straight back to Ready for a new recording.
-			 */
-			printk("Reply wait canceled by button press\n");
-			finish_button_press();
-			gpio_pin_set_dt(&led, 0);
-			continue;
-		}
-		const char *reply_pcm_path = PENDANT_CLOUD_REPLY_AUDIO_PATH;
-		if (pendant_cloud_reply_format ==
-		    PENDANT_CLOUD_AUDIO_OGG_OPUS) {
-			struct pendant_opus_stats decode_stats;
-
-			error = pendant_opus_decode_file(
-				PENDANT_CLOUD_REPLY_AUDIO_PATH,
-				PENDANT_CLOUD_REPLY_PCM_PATH,
-				audio_workspace, sizeof(audio_workspace),
-				&decode_stats);
-			if (error != 0) {
-				printk("Opus reply decode failed: %d\n", error);
-				audio_cycle_result = error;
-				flash_led(8U, 100, 100);
-				continue;
-			}
-			pendant_cloud_reply_pcm_bytes =
-				decode_stats.output_bytes;
-			pendant_cloud_reply_sample_rate =
-				PENDANT_OPUS_REPLY_SAMPLE_RATE;
-			reply_pcm_path = PENDANT_CLOUD_REPLY_PCM_PATH;
-		}
-		if (error != 0) {
-			printk("Agent reply download failed: %d (HTTP=%d)\n",
-			       error, pendant_cloud_last_http_status);
-			audio_cycle_result = error;
-			flash_led(7U, 100, 100);
-			continue;
-		}
-
-		/*
-		 * Repeating pairs of short flashes mean the agent response is ready.
-		 * A deliberate third button press starts Bluetooth playback.
-		 */
-		audio_cycle_phase = 5U;
-		clear_button_events();
-#if PENDANT_BOOT_AUDIO_CYCLE_TEST
-		k_sem_give(&button_press_sem);
-#endif
-		wait_for_reply_playback_press();
-
-		/* Playing: LED remains solid for the duration of agent speech. */
-		audio_cycle_phase = 6U;
-		gpio_pin_set_dt(&led, 1);
-		int telemetry_error =
-			pendant_cloud_report_playback_started();
-
-		if (telemetry_error != 0) {
-			printk("Playback-start telemetry failed: %d\n",
-			       telemetry_error);
-		}
-		error = play_agent_reply(i2s, reply_pcm_path);
-		telemetry_error =
-			pendant_cloud_report_playback_result(error);
-		if (telemetry_error != 0) {
-			printk("Playback-result telemetry failed: %d\n",
-			       telemetry_error);
-		}
-		gpio_pin_set_dt(&led, 0);
-		if (error != 0) {
-			printk("Agent reply I2S playback failed: %d\n", error);
-			audio_cycle_result = error;
-			flash_led(9U, 100, 100);
-			continue;
-		}
+		printk("Command delivered via fallback; voice reply "
+		       "requires the duplex link (WS was down)\n");
 
 reply_done:
 		audio_cycle_phase = 7U;

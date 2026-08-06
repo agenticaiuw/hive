@@ -12,18 +12,38 @@ const SYNC_B = 0x5a5a
 const SYNC_END = 0x6c6c
 const BLOCK_FRAMES = 256
 const SYNC_MATCHES_REQUIRED = 8
+// The last eight cycles of each 32-cycle slot are undefined line state, and
+// the right slot is entirely unspecified. The decoder must ignore both.
+const SLOT_TAIL_JUNK = 0xa5
+const RIGHT_SLOT_JUNK = 0x13572468 | 0
 
 function signed16(value) {
   const word = value & 0xffff
   return word >= 0x8000 ? word - 0x10000 : word
 }
 
-function oneBitLate(value) {
-  return signed16((value & 0xffff) >>> 1)
+function int32(value) {
+  return value | 0
 }
 
-function repairOneBitLate(value) {
-  return signed16((value & 0xffff) << 1)
+// The nRF sends a 24-bit Philips word MSB-aligned in the 32-cycle slot: the
+// mono sample in the top 16 bits, a zero low byte, then the undefined tail.
+function leftSlotWord(sample) {
+  return int32(((sample & 0xffff) << 16) | SLOT_TAIL_JUNK)
+}
+
+function oneBitLate(word) {
+  // A one-bit-early latch captures one junk bit first, pushing the true
+  // word one bit lower in the 32-bit slot.
+  return int32((1 << 31) | (word >>> 1))
+}
+
+function extractSample(word) {
+  return signed16(word >>> 16)
+}
+
+function extractShiftedSample(word) {
+  return signed16(int32(word << 1) >>> 16)
 }
 
 function makeNrfFrames(samples) {
@@ -33,17 +53,17 @@ function makeNrfFrames(samples) {
     for (let frame = 0; frame < BLOCK_FRAMES; frame += 1) {
       const absoluteFrame = block * BLOCK_FRAMES + frame
       const sample = absoluteFrame & 1 ? SYNC_B : SYNC_A
-      frames.push([sample, sample])
+      frames.push([leftSlotWord(sample), RIGHT_SLOT_JUNK])
     }
   }
 
   for (let frame = 0; frame < BLOCK_FRAMES; frame += 1) {
     const sample = frame < 16 ? SYNC_END : 0
-    frames.push([sample, sample])
+    frames.push([leftSlotWord(sample), RIGHT_SLOT_JUNK])
   }
 
   for (const sample of samples) {
-    frames.push([sample, sample])
+    frames.push([leftSlotWord(sample), RIGHT_SLOT_JUNK])
   }
 
   return frames
@@ -62,18 +82,11 @@ function decodeEspFrames(inputFrames) {
   let normalMatches = 0
   let shiftedMatches = 0
 
-  for (const [left, right] of frames) {
-    const shiftedLeft = repairOneBitLate(left)
-    const shiftedRight = repairOneBitLate(right)
+  for (const [leftWord] of frames) {
+    const normal = extractSample(leftWord)
+    const shifted = extractShiftedSample(leftWord)
 
     if (waitingForSync) {
-      const normal =
-        left === SYNC_A || left === SYNC_B ? left : right
-      const shifted =
-        shiftedLeft === SYNC_A || shiftedLeft === SYNC_B
-          ? shiftedLeft
-          : shiftedRight
-
       if (!syncLocked) {
         if (normal === SYNC_A || normal === SYNC_B) {
           const alternates =
@@ -107,9 +120,8 @@ function decodeEspFrames(inputFrames) {
         continue
       }
 
-      const alignedLeft = repairShift ? shiftedLeft : left
-      const alignedRight = repairShift ? shiftedRight : right
-      if (alignedLeft === SYNC_END || alignedRight === SYNC_END) {
+      const aligned = repairShift ? shifted : normal
+      if (aligned === SYNC_END) {
         syncEndSeen = true
         continue
       }
@@ -117,7 +129,7 @@ function decodeEspFrames(inputFrames) {
       waitingForSync = false
     }
 
-    output.push(repairShift ? shiftedLeft : left)
+    output.push(repairShift ? shifted : normal)
   }
 
   return { output, repairShift, syncLocked }
@@ -127,8 +139,9 @@ test('firmware pins and rates match the nRF reply-audio contract', () => {
   assert.match(firmware, /I2S_LRC_PIN = GPIO_NUM_33/)
   assert.match(firmware, /I2S_BCLK_PIN = GPIO_NUM_27/)
   assert.match(firmware, /I2S_DATA_PIN = GPIO_NUM_14/)
-  assert.match(firmware, /INPUT_RATE = 24000/)
+  assert.match(firmware, /INPUT_RATE = 31250/)
   assert.match(firmware, /OUTPUT_RATE = 44100/)
+  assert.match(firmware, /I2S_DATA_BIT_WIDTH_32BIT/)
 })
 
 test('firmware explicitly selects and reports the maximum ESP32 CPU clock', () => {

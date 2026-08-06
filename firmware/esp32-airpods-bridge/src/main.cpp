@@ -26,21 +26,26 @@ constexpr const char *BOSE_SLIII_NAME = "Bose SLIII";
 // How often to force-page the known Bose address if the link is down.
 constexpr uint32_t BOSE_RECONNECT_INTERVAL_MS = 8000;
 
-// The relay returns OpenRouter-compatible signed 16-bit mono PCM at 24 kHz.
-constexpr uint32_t INPUT_RATE = 24000;
+// The nRF9160 duplex I2S TX shares the mic clock: LRCK 31250 Hz and BCLK
+// 2 MHz, so each stereo frame is 64 BCLK with 32-cycle slots. The nRF sends
+// 24-bit Philips words whose top 16 bits carry the mono signed PCM reply;
+// only the LEFT slot is specified, and the right slot is ignored.
+constexpr uint32_t INPUT_RATE = 31250;
 constexpr uint32_t OUTPUT_RATE = 44100;
 constexpr size_t INPUT_BLOCK_FRAMES = 256;
+// About 524 ms of jitter headroom at the 31250 Hz wire rate.
 constexpr size_t RING_FRAMES = 16384;
+// About 65 ms of lead-in before the resampler starts.
 constexpr size_t RESAMPLER_PREFILL_FRAMES = 2048;
 constexpr size_t RESAMPLER_LOW_WATER_FRAMES = 1024;
 constexpr size_t RESAMPLER_HIGH_WATER_FRAMES = 4096;
+// 32/31250 is about a 0.1% pull toward the buffer midpoint.
 constexpr uint32_t RESAMPLER_RATE_CORRECTION = 32;
 constexpr size_t RAW_CAPTURE_FRAMES = 64;
 constexpr int16_t STREAM_SYNC_A = 0x2468;
 constexpr int16_t STREAM_SYNC_B = 0x5A5A;
 constexpr int16_t STREAM_SYNC_END = 0x6C6C;
 constexpr uint8_t STREAM_SYNC_MATCHES_REQUIRED = 8;
-constexpr int32_t I2S_MAX_PLAUSIBLE_SAMPLE_STEP = 8192;
 
 BluetoothA2DPSource a2dp;
 Preferences preferences;
@@ -56,9 +61,7 @@ volatile uint32_t i2sReadErrors = 0;
 volatile uint16_t i2sPeakSinceReport = 0;
 volatile uint16_t i2sRawPeakSinceReport = 0;
 volatile uint32_t i2sReceiverResyncs = 0;
-volatile uint32_t i2sStereoMismatches = 0;
 volatile uint32_t i2sSyncLocks = 0;
-volatile uint32_t i2sOutliersSuppressed = 0;
 volatile uint32_t a2dpFramesRequested = 0;
 volatile uint32_t a2dpNonzeroFrames = 0;
 volatile uint32_t ringOverruns = 0;
@@ -70,7 +73,7 @@ volatile bool i2sForwardingEnabled = true;
 volatile bool rawCaptureReady = false;
 volatile bool clockCaptureRequested = false;
 volatile size_t rawCaptureFrames = 0;
-int16_t rawCapture[RAW_CAPTURE_FRAMES * 2];
+int32_t rawCapture[RAW_CAPTURE_FRAMES * 2];
 
 int16_t ringBuffer[RING_FRAMES];
 size_t ringRead = 0;
@@ -273,10 +276,23 @@ void emitClockTiming() {
   Serial.println("}");
 }
 
+/*
+ * The nRF's 24 data bits land MSB-aligned in the captured 32-cycle slot, so
+ * the mono PCM sample is the top 16 bits of the received 32-bit word. The
+ * one-bit-early-latch repair shifts the whole 32-bit word left once before
+ * extracting; the bit it discards lives in the undefined slot tail.
+ */
+inline int16_t extractSlotSample(int32_t word) {
+  return static_cast<int16_t>(static_cast<uint32_t>(word) >> 16);
+}
+
+inline int16_t extractShiftedSlotSample(int32_t word) {
+  return static_cast<int16_t>((static_cast<uint32_t>(word) << 1) >> 16);
+}
+
 void i2sCaptureTask(void *) {
-  int16_t input[INPUT_BLOCK_FRAMES * 2];
+  int32_t input[INPUT_BLOCK_FRAMES * 2];
   uint32_t lastBlockAt = 0;
-  int16_t previousOutputSample = 0;
   bool waitingForSync = true;
   bool syncLocked = false;
   bool repairOneBitShift = false;
@@ -317,7 +333,6 @@ void i2sCaptureTask(void *) {
       rawCaptureFrames = 0;
       rawCaptureReady = false;
       clockCaptureRequested = true;
-      previousOutputSample = 0;
       waitingForSync = true;
       syncLocked = false;
       repairOneBitShift = false;
@@ -331,7 +346,7 @@ void i2sCaptureTask(void *) {
     }
     lastBlockAt = receivedAt;
 
-    const size_t frames = bytesRead / (2 * sizeof(int16_t));
+    const size_t frames = bytesRead / (2 * sizeof(int32_t));
     i2sFramesReceived += frames;
 
     for (size_t frame = 0; frame < frames; ++frame) {
@@ -344,54 +359,43 @@ void i2sCaptureTask(void *) {
         }
       }
 
-      const int16_t leftSample = input[frame * 2];
-      const int16_t rightSample = input[frame * 2 + 1];
+      const int32_t leftWord = input[frame * 2];
+      const int16_t normalSample = extractSlotSample(leftWord);
+      const int16_t shiftedSample = extractShiftedSlotSample(leftWord);
 
       /*
-       * Every nRF stream begins with an alternating pre-shared sync word.
-       * Search both the hardware-delivered words and a one-bit-left repair.
-       * This turns the otherwise unframed I2S restart into an explicit
-       * handshake and tells us which alignment to use for the whole stream.
+       * Every nRF stream begins with an alternating pre-shared sync word in
+       * the left slot. Search both the hardware-delivered alignment and a
+       * one-bit-left repair of the 32-bit slot word. This turns the
+       * otherwise unframed I2S restart into an explicit handshake and tells
+       * us which alignment to use for the whole stream.
        */
       if (waitingForSync) {
-        const int16_t normalCandidate =
-            (leftSample == STREAM_SYNC_A || leftSample == STREAM_SYNC_B)
-                ? leftSample
-                : rightSample;
-        const int16_t shiftedLeft = static_cast<int16_t>(
-            static_cast<uint16_t>(leftSample) << 1);
-        const int16_t shiftedRight = static_cast<int16_t>(
-            static_cast<uint16_t>(rightSample) << 1);
-        const int16_t shiftedCandidate =
-            (shiftedLeft == STREAM_SYNC_A || shiftedLeft == STREAM_SYNC_B)
-                ? shiftedLeft
-                : shiftedRight;
-
         if (!syncLocked) {
-          if (normalCandidate == STREAM_SYNC_A ||
-              normalCandidate == STREAM_SYNC_B) {
+          if (normalSample == STREAM_SYNC_A ||
+              normalSample == STREAM_SYNC_B) {
             const bool alternates =
-                (normalCandidate == STREAM_SYNC_A &&
+                (normalSample == STREAM_SYNC_A &&
                  previousNormalSync == STREAM_SYNC_B) ||
-                (normalCandidate == STREAM_SYNC_B &&
+                (normalSample == STREAM_SYNC_B &&
                  previousNormalSync == STREAM_SYNC_A);
             normalSyncMatches = alternates ? normalSyncMatches + 1U : 1U;
-            previousNormalSync = normalCandidate;
+            previousNormalSync = normalSample;
           } else {
             normalSyncMatches = 0;
             previousNormalSync = 0;
           }
 
-          if (shiftedCandidate == STREAM_SYNC_A ||
-              shiftedCandidate == STREAM_SYNC_B) {
+          if (shiftedSample == STREAM_SYNC_A ||
+              shiftedSample == STREAM_SYNC_B) {
             const bool alternates =
-                (shiftedCandidate == STREAM_SYNC_A &&
+                (shiftedSample == STREAM_SYNC_A &&
                  previousShiftedSync == STREAM_SYNC_B) ||
-                (shiftedCandidate == STREAM_SYNC_B &&
+                (shiftedSample == STREAM_SYNC_B &&
                  previousShiftedSync == STREAM_SYNC_A);
             shiftedSyncMatches =
                 alternates ? shiftedSyncMatches + 1U : 1U;
-            previousShiftedSync = shiftedCandidate;
+            previousShiftedSync = shiftedSample;
           } else {
             shiftedSyncMatches = 0;
             previousShiftedSync = 0;
@@ -407,12 +411,9 @@ void i2sCaptureTask(void *) {
           continue;
         }
 
-        const int16_t alignedLeft =
-            repairOneBitShift ? shiftedLeft : leftSample;
-        const int16_t alignedRight =
-            repairOneBitShift ? shiftedRight : rightSample;
-        if (alignedLeft == STREAM_SYNC_END ||
-            alignedRight == STREAM_SYNC_END) {
+        const int16_t alignedSample =
+            repairOneBitShift ? shiftedSample : normalSample;
+        if (alignedSample == STREAM_SYNC_END) {
           syncEndSeen = true;
           continue;
         }
@@ -421,65 +422,16 @@ void i2sCaptureTask(void *) {
         }
 
         waitingForSync = false;
-        previousOutputSample = 0;
         clearAudioBuffer();
       }
 
-      int16_t alignedLeft = leftSample;
-      int16_t alignedRight = rightSample;
-      if (repairOneBitShift) {
-        alignedLeft = static_cast<int16_t>(
-            static_cast<uint16_t>(leftSample) << 1);
-        alignedRight = static_cast<int16_t>(
-            static_cast<uint16_t>(rightSample) << 1);
-      }
+      const int16_t sample =
+          repairOneBitShift ? shiftedSample : normalSample;
 
-      /*
-       * The nRF intentionally sends the mono sample in both stereo slots.
-       * Treat those copies as a two-word repetition code. If only one copy
-       * is damaged, select the one that continues smoothly from the prior
-       * PCM sample instead of forwarding the full-scale corrupt value.
-       */
-      int16_t sample = alignedLeft;
-      if (alignedLeft != alignedRight) {
-        ++i2sStereoMismatches;
-        int32_t leftDelta =
-            static_cast<int32_t>(alignedLeft) - previousOutputSample;
-        int32_t rightDelta =
-            static_cast<int32_t>(alignedRight) - previousOutputSample;
-        if (leftDelta < 0) {
-          leftDelta = -leftDelta;
-        }
-        if (rightDelta < 0) {
-          rightDelta = -rightDelta;
-        }
-        if (rightDelta < leftDelta) {
-          sample = alignedRight;
-        }
-
-        /*
-         * Only suppress a large step when the duplicated words disagree.
-         * Matching copies are strong evidence that the transition is real
-         * audio; spoken consonants can legitimately exceed this threshold.
-         */
-        const int32_t selectedDelta =
-            rightDelta < leftDelta ? rightDelta : leftDelta;
-        if (selectedDelta > I2S_MAX_PLAUSIBLE_SAMPLE_STEP) {
-          sample = previousOutputSample;
-          ++i2sOutliersSuppressed;
-        }
+      int32_t rawMagnitude = normalSample;
+      if (rawMagnitude < 0) {
+        rawMagnitude = -rawMagnitude;
       }
-      previousOutputSample = sample;
-
-      int32_t leftMagnitude = leftSample;
-      int32_t rightMagnitude = rightSample;
-      if (leftMagnitude < 0) {
-        leftMagnitude = -leftMagnitude;
-      }
-      if (rightMagnitude < 0) {
-        rightMagnitude = -rightMagnitude;
-      }
-      const int32_t rawMagnitude = max(leftMagnitude, rightMagnitude);
       if (rawMagnitude > i2sRawPeakSinceReport) {
         i2sRawPeakSinceReport = static_cast<uint16_t>(rawMagnitude);
       }
@@ -525,7 +477,7 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
     return frameCount;
   }
 
-  // The nRF stream is 24 kHz. A2DP requests 44.1 kHz stereo PCM, so use a
+  // The nRF stream is 31250 Hz. A2DP requests 44.1 kHz stereo PCM, so use a
   // fixed-ratio linear interpolator without blocking the Bluetooth task.
   static int16_t current = 0;
   static int16_t next = 0;
@@ -552,7 +504,7 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
     /*
      * The nRF and Bluetooth clocks are independent. Starting as soon as two
      * samples arrive makes every scheduling hiccup an audible underrun.
-     * Accumulate about 85 ms first so the resampler has a real jitter buffer.
+     * Accumulate about 65 ms first so the resampler has a real jitter buffer.
      */
     if (buffered < RESAMPLER_PREFILL_FRAMES) {
       memset(frames, 0, frameCount * sizeof(Frame));
@@ -569,7 +521,7 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
 
   /*
    * Correct the tiny long-term clock mismatch without dropping whole
-   * samples. The adjustment is only 0.2%, so it is inaudible but keeps the
+   * samples. The adjustment is only 0.1%, so it is inaudible but keeps the
    * buffer away from its empty/full limits.
    */
   uint32_t phaseStep = INPUT_RATE;
@@ -868,8 +820,12 @@ void configureI2sInput() {
 
   i2s_std_config_t standard = {
       .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(INPUT_RATE),
+      /*
+       * 32-bit slots capture the nRF's full 32-cycle slot; its 24 data bits
+       * land MSB-aligned and the mono sample occupies the top 16 bits.
+       */
       .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-          I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+          I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
       .gpio_cfg =
           {
               .mclk = I2S_GPIO_UNUSED,
@@ -890,6 +846,13 @@ void configureI2sInput() {
                   },
           },
   };
+
+  /*
+   * The slave RX module clock must stay at least eight times the external
+   * BCLK. The nRF clocks BCLK at 2 MHz, so the default 256x multiple
+   * (8 MHz at 31250 Hz) is too slow; 512x yields exactly 16 MHz.
+   */
+  standard.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_512;
 
   ESP_ERROR_CHECK(i2s_new_channel(&channel, nullptr, &i2sInput));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2sInput, &standard));
@@ -921,7 +884,8 @@ void setup() {
   }
 
   configureI2sInput();
-  xTaskCreatePinnedToCore(i2sCaptureTask, "i2s-capture", 4096, nullptr, 4,
+  // 32-bit slot capture doubles the on-stack DMA block to 2 KiB.
+  xTaskCreatePinnedToCore(i2sCaptureTask, "i2s-capture", 6144, nullptr, 4,
                          nullptr, 1);
 
   emitEvent("usb",
@@ -984,9 +948,8 @@ void loop() {
     uint64_t shiftedAbsoluteSum = 0;
 
     for (size_t frame = 0; frame < RAW_CAPTURE_FRAMES; ++frame) {
-      const int16_t raw = rawCapture[frame * 2];
-      const int16_t shifted =
-          static_cast<int16_t>(static_cast<uint16_t>(raw) << 1);
+      const int16_t raw = extractSlotSample(rawCapture[frame * 2]);
+      const int16_t shifted = extractShiftedSlotSample(rawCapture[frame * 2]);
       int32_t rawAbsolute = raw;
       int32_t shiftedAbsolute = shifted;
       if (rawAbsolute < 0) {
@@ -1060,9 +1023,7 @@ void loop() {
         ", raw peak=" + String(rawPeak) +
         ", output peak=" + String(peak) +
         ", receiver resyncs=" + String(i2sReceiverResyncs) +
-        ", stereo mismatches=" + String(i2sStereoMismatches) +
         ", sync locks=" + String(i2sSyncLocks) +
-        ", outliers suppressed=" + String(i2sOutliersSuppressed) +
         ", buffered=" + String(buffered) +
         "; A2DP frames=" + String(a2dpFramesRequested) +
         ", nonzero=" + String(a2dpNonzeroFrames) +
@@ -1074,9 +1035,7 @@ void loop() {
     document["i2s_raw_peak"] = rawPeak;
     document["i2s_peak"] = peak;
     document["i2s_receiver_resyncs"] = i2sReceiverResyncs;
-    document["i2s_stereo_mismatches"] = i2sStereoMismatches;
     document["i2s_sync_locks"] = i2sSyncLocks;
-    document["i2s_outliers_suppressed"] = i2sOutliersSuppressed;
     document["buffered_frames"] = buffered;
     document["a2dp_frames"] = a2dpFramesRequested;
     document["a2dp_nonzero_frames"] = a2dpNonzeroFrames;
