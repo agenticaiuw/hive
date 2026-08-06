@@ -343,6 +343,7 @@ static uint32_t convo_decoded_packets;
 static uint32_t convo_max_loop_ms;
 static uint32_t convo_uplink_drops;
 static uint32_t convo_mic_drops;
+static uint32_t convo_tx_peak;
 /*
  * One TX slab serves both worlds: duplex conversation blocks (2,560 B used
  * fully) and the legacy reply path's 1,024 B blocks (partial fill of the
@@ -2350,6 +2351,14 @@ static void convo_fill_tx_block(int32_t *words, bool *playing)
 				(span * (int32_t)tx_phase) /
 					(int32_t)TX_RESAMPLE_DEN;
 
+		/* Ground truth for "is the chip actually sending audio?" —
+		 * compared against the ESP32's own raw-word peak to tell a
+		 * silent transmitter from a mis-decoded receiver. */
+		uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+
+		if (magnitude > convo_tx_peak) {
+			convo_tx_peak = magnitude;
+		}
 		words[frame] = value << 8;
 		tx_phase += TX_RESAMPLE_NUM;
 		if (tx_phase >= TX_RESAMPLE_DEN) {
@@ -2724,6 +2733,7 @@ static int run_conversation(const struct device *i2s)
 	convo_max_loop_ms = 0U;
 	convo_uplink_drops = 0U;
 	convo_mic_drops = 0U;
+	convo_tx_peak = 0U;
 
 	k_mutex_lock(&ws_lock, K_FOREVER);
 	error = pendant_ws_connect();
@@ -2965,11 +2975,11 @@ static int run_conversation(const struct device *i2s)
 
 	printk("Conversation stats: rx_blocks=%u tx_blocks=%u tx_starved=%u "
 	       "decoded_packets=%u max_loop_ms=%u fifo_left=%u "
-	       "uplink_drops=%u mic_drops=%u\n",
+	       "uplink_drops=%u mic_drops=%u tx_peak=%u\n",
 	       convo_rx_blocks, convo_tx_blocks, convo_tx_starved,
 	       convo_decoded_packets, convo_max_loop_ms,
 	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
-	       convo_mic_drops);
+	       convo_mic_drops, convo_tx_peak);
 
 teardown_clocks:
 	if (i2s_running) {

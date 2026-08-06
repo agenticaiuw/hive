@@ -113,6 +113,16 @@ void emitStatus() {
 }
 
 void pushSample(int16_t sample) {
+  /*
+   * With no A2DP sink nothing drains the ring, so buffering here would
+   * only bank stale audio: observed as a permanently full ring and
+   * hundreds of thousands of overruns while the headphones were away.
+   * The damage is audible — on reconnect the listener hears half a second
+   * of a PREVIOUS conversation before the live stream. Drop instead.
+   */
+  if (a2dp.get_connection_state() != ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    return;
+  }
   portENTER_CRITICAL(&ringMux);
   if (ringCount == RING_FRAMES) {
     ringRead = (ringRead + 1) % RING_FRAMES;
