@@ -15,9 +15,10 @@
  */
 /* Shared audio RAM, time-multiplexed: capture TX ring while recording,
  * reply jitter buffer while playing, Opus scratch only in the SD-fallback
- * encode (~27 KiB worst case). One 28 KiB block, never concurrently —
- * trimmed from 30 to fund the always-on duplex decoder arena. */
-#define PENDANT_AUDIO_WORKSPACE_BYTES (28U * 1024U)
+ * encode. One 24 KiB block, never concurrently: 17 KiB encoder arena plus
+ * a 7 KiB uplink FIFO (~3.5 s of Opus, ample now that the WS thread drains
+ * it continuously). Trimmed from 28 to fund the 24 kHz downlink ring. */
+#define PENDANT_AUDIO_WORKSPACE_BYTES (24U * 1024U)
 /* Back-compat alias for the opus encoder's own references. */
 #define PENDANT_OPUS_WORKSPACE_BYTES PENDANT_AUDIO_WORKSPACE_BYTES
 /* Must match GLOBAL_STACK_SIZE in CMakeLists.txt (≥ measured ~25.4 KiB peak). */

@@ -25,8 +25,40 @@ test('24k→16k resampler keeps 2/3 ratio across chunk boundaries', () => {
   for (let off = 0; off < pcm.length; off += 146) {
     out += resampler.push(pcm.subarray(off, off + 146)).length
   }
-  // 2400 input samples → 1600 output samples (± one group at the tail).
-  assert.ok(Math.abs(out / 2 - 1600) <= 2, `got ${out / 2} samples`)
+  // 2400 input → 1600 output, less the anti-aliasing filter's one-time
+  // priming delay (half its taps). Real filtering costs latency; the ratio
+  // itself is verified in steady state below.
+  const first = out / 2
+
+  assert.ok(first > 1570 && first <= 1600, `got ${first} samples`)
+
+  let second = 0
+
+  for (let off = 0; off < pcm.length; off += 146) {
+    second += resampler.push(pcm.subarray(off, off + 146)).length
+  }
+  // Steady state: no further priming, so exactly 2/3 (± one group).
+  assert.ok(Math.abs(second / 2 - 1600) <= 2, `got ${second / 2} samples`)
+})
+
+test('24k→16k resampler rejects content above the 8 kHz Nyquist', () => {
+  const resampler = createPcm24kTo16k()
+  const rate = 24000
+  const pcm = Buffer.alloc(rate * 2)
+
+  for (let i = 0; i < rate; i++) {
+    pcm.writeInt16LE(Math.round(12000 * Math.sin((2 * Math.PI * 9000 * i) / rate)), i * 2)
+  }
+  const out = resampler.push(pcm)
+  // A 9 kHz tone would fold onto 7 kHz without a real filter (it did: only
+  // 3.2 dB of rejection, audible as metallic speech). Filtered, almost
+  // nothing survives — assert on residual energy.
+  let peak = 0
+
+  for (let i = 0; i < out.length / 2; i++) {
+    peak = Math.max(peak, Math.abs(out.readInt16LE(i * 2)))
+  }
+  assert.ok(peak < 12000 * 0.05, `alias residue peak ${peak} of 12000`)
 })
 
 test('reply encoder → upload decoder round trip preserves duration', async () => {

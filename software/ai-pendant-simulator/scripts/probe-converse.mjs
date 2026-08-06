@@ -31,11 +31,12 @@ const speech = fs.readFileSync(WAV).subarray(44)
 const silence = Buffer.alloc(TAIL_SILENCE_SECONDS * RATE * 2)
 const pcm = Buffer.concat([speech, silence])
 
+const REPLY_RATE = 16000 // agent voice: wideband Opus, anti-alias filtered
 const encoder = new OpusScript(RATE, 1, OpusScript.Application.VOIP, {
   wasm: false,
 })
 encoder.setBitrate(14000)
-const decoder = new OpusScript(RATE, 1, OpusScript.Application.VOIP, {
+const decoder = new OpusScript(REPLY_RATE, 1, OpusScript.Application.VOIP, {
   wasm: false,
 })
 
@@ -72,7 +73,7 @@ ws.on('open', async () => {
     await new Promise((r) => setTimeout(r, 60))
 
     // Barge-in: once ~2 s of agent audio has arrived, talk over it.
-    if (!bargedIn && replySamples > 2 * RATE) {
+    if (!bargedIn && replySamples > 2 * REPLY_RATE) {
       bargedIn = true
       stamp('BARGE-IN: speaking over the agent (expect flush)')
       for (let g = 0; g < Math.floor(speech.length / 2 / FRAME); g++) {
@@ -98,7 +99,7 @@ ws.on('message', (data, isBinary) => {
     if (text.includes('"end"')) {
       setTimeout(() => {
         stamp(
-          `TOTAL agent speech: ${(replySamples / RATE).toFixed(2)}s over ${frames} frames (${replyBytes} wire B, max frame ${maxFrame} B)` +
+          `TOTAL agent speech: ${(replySamples / REPLY_RATE).toFixed(2)}s over ${frames} frames (${replyBytes} wire B, max frame ${maxFrame} B)` +
             (firstAudioAt
               ? `; first audio at +${((firstAudioAt - t0) / 1000).toFixed(2)}s (mid-recording=${firstAudioAt - t0 < 22000})`
               : ''),

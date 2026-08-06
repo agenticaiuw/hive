@@ -95,7 +95,8 @@ const encoder = new OpusScript(WIRE_RATE, 1, OpusScript.Application.VOIP, {
   wasm: false,
 })
 encoder.setBitrate(14000)
-const decoder = new OpusScript(WIRE_RATE, 1, OpusScript.Application.VOIP, {
+const REPLY_RATE = 16000 // agent voice: wideband Opus, anti-alias filtered
+const decoder = new OpusScript(REPLY_RATE, 1, OpusScript.Application.VOIP, {
   wasm: false,
 })
 
@@ -147,7 +148,7 @@ relay.on('message', (data, isBinary) => {
   // Queue for the persona's own real-time input clock (see below).
   personaInQueue = Buffer.concat([
     personaInQueue,
-    resample(pcm16k, WIRE_RATE, MODEL_RATE),
+    pcm16k,
   ])
 })
 relay.on('error', (e) => stamp(`relay WS error: ${e.message}`))
@@ -336,13 +337,13 @@ function finish(reason) {
     const ownerWav = path.join(OUT_DIR, 'owner.wav')
     const agentWav = path.join(OUT_DIR, 'agent.wav')
     writeWav(ownerWav, Buffer.concat(personaPcm), MODEL_RATE)
-    writeWav(agentWav, Buffer.concat(agentPcm), WIRE_RATE)
+    writeWav(agentWav, Buffer.concat(agentPcm), REPLY_RATE)
     fs.writeFileSync(
       path.join(OUT_DIR, 'transcript.txt'),
       transcript.join('\n') + '\n',
     )
     const ownerSec = Buffer.concat(personaPcm).length / 2 / MODEL_RATE
-    const agentSec = Buffer.concat(agentPcm).length / 2 / WIRE_RATE
+    const agentSec = Buffer.concat(agentPcm).length / 2 / REPLY_RATE
     stamp(
       `saved: ${ownerWav} (${ownerSec.toFixed(1)}s owner), ${agentWav} (${agentSec.toFixed(1)}s agent), transcript.txt`,
     )

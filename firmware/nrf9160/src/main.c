@@ -234,23 +234,30 @@
 /* Fill the runway before START so the first seconds have slack too. */
 #define CONVO_TX_PRIME_BLOCKS 6U
 /*
- * Opus decode is the heaviest main-thread job (~3-6 ms per 60 ms packet).
- * Steady state needs one packet per ~3 blocks, so 2 per iteration is 6x
- * headroom for catch-up while bounding worst-case loop time.
+ * Decode budget per RX block. RX blocks arrive at 31250/640 = 48.8 Hz, so
+ * a cap of N sets a hard ceiling of 48.8*N decoded packets per second. At
+ * 60 ms reply frames the stream needs 16.7/s, so 2 leaves ~6x headroom to
+ * catch up after a burst. This ceiling is easy to set below the required
+ * rate by accident: at 20 ms frames the stream needs 50/s, which a cap of
+ * 1 could never meet, and playback starved continuously.
  */
-#define CONVO_MAX_DECODES_PER_BLOCK 1U
-/* 16 kHz s16 jitter ring: 512 ms of agent speech. Barge-in flushes it, so
+#define CONVO_MAX_DECODES_PER_BLOCK 2U
+/* 16 kHz s16 jitter ring: 768 ms of agent speech. Barge-in flushes it, so
  * depth buys LTE-jitter absorption, not conversational latency. */
-#define DL_JITTER_BYTES 16384U
+#define DL_JITTER_BYTES 24576U
 #define DL_JITTER_SAMPLES (DL_JITTER_BYTES / sizeof(int16_t))
-/* Start/resume playback only with this much banked (128 ms). */
-#define DL_PREBUFFER_SAMPLES 2048U
+/*
+ * Start/resume playback only with this much banked (300 ms at 16 kHz).
+ * Every starve pauses output and re-arms, which is audible as chopping —
+ * hardware runs showed 8 of them in 22 s at the old 128 ms gate.
+ */
+#define DL_PREBUFFER_SAMPLES 4800U
 /*
  * Worst case one downlink WS frame decodes to: the relay caps frames at 4
- * packets AND 500 B, each packet ≤ 60 ms (960 samples). The receive gate
- * needs at least this much ring space free, and it MUST sit at or above
- * DL_PREBUFFER_SAMPLES or the prebuffer can never fill (review finding:
- * gate 1024 < prebuffer 2048 deadlocked the ring permanently).
+ * packets AND 500 B, each packet 60 ms (960 samples at 16 kHz). The
+ * receive gate needs at least this much ring space free, and the ring must
+ * clear DL_PREBUFFER_SAMPLES afterwards or the prebuffer could never fill.
+ * 4 packets x 60 ms x 16 kHz = 3840 samples.
  */
 #define DL_WORST_FRAME_SAMPLES 3840U
 BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
@@ -260,7 +267,7 @@ BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
 #define WS_RX_BUF_BYTES 640U
 /* ~120 ms of Opus per uplink frame: batching overhead vs VAD latency. */
 #define WS_TX_BATCH_BYTES 240U
-/* Exact 16000/31250 ratio for the TX upsampler. */
+/* Exact 16000/31250 ratio for the TX upsampler (64/125). */
 #define TX_RESAMPLE_NUM 64U
 #define TX_RESAMPLE_DEN 125U
 /* Idle keepalive: under Cloudflare's 100 s WS idle kill. */
@@ -330,6 +337,14 @@ struct dl_frame {
 #define DL_FRAME_SLOTS 6U
 K_MSGQ_DEFINE(dl_frames, sizeof(struct dl_frame), DL_FRAME_SLOTS, 4);
 static atomic_t convo_active;    /* audio loop live: pump/recv at full rate */
+/*
+ * The relay's {started} for THIS conversation. The WebSocket outlives
+ * individual conversations, so the previous one's trailing {end} (and any
+ * late reply audio) can still be in flight when the next one begins —
+ * which killed a fresh conversation 80 ms in. Nothing from the downlink
+ * counts until {started} arrives.
+ */
+static atomic_t convo_started;
 static atomic_t convo_flush_req; /* relay said flush (barge-in) */
 static atomic_t convo_end_req;   /* relay said end / transport died */
 static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];  /* ws thread only */
@@ -2574,13 +2589,24 @@ static void ws_io_drain_downlink(void)
 		if (is_text) {
 			ws_rx_buf[MIN((size_t)received,
 				      sizeof(ws_rx_buf) - 1U)] = '\0';
-			if (strstr((const char *)ws_rx_buf, "\"flush\"") !=
-			    NULL) {
-				atomic_set(&convo_flush_req, 1);
+			if (strstr((const char *)ws_rx_buf,
+				   "\"started\"") != NULL) {
+				atomic_set(&convo_started, 1);
+			} else if (strstr((const char *)ws_rx_buf,
+					  "\"flush\"") != NULL) {
+				if (atomic_get(&convo_started)) {
+					atomic_set(&convo_flush_req, 1);
+				}
 			} else if (strstr((const char *)ws_rx_buf,
 					  "\"end\"") != NULL) {
-				atomic_set(&convo_end_req, 1);
+				if (atomic_get(&convo_started)) {
+					atomic_set(&convo_end_req, 1);
+				}
 			}
+			continue;
+		}
+		/* Reply audio from the previous conversation: discard. */
+		if (!atomic_get(&convo_started)) {
 			continue;
 		}
 		dl_tx_frame.length = (uint16_t)received;
@@ -2610,12 +2636,16 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 			k_msleep(5);
 			continue;
 		}
-		if (pendant_ws_connected() &&
-		    k_uptime_get() >= next_idle_ping) {
+		if (pendant_ws_connected()) {
 			k_mutex_lock(&ws_lock, K_FOREVER);
-			(void)pendant_ws_ping();
-			/* Swallow pongs/strays so they never lead a
-			 * conversation's downlink. */
+			if (k_uptime_get() >= next_idle_ping) {
+				(void)pendant_ws_ping();
+				next_idle_ping = k_uptime_get() +
+						 WS_IDLE_PING_SECONDS * 1000;
+			}
+			/* Swallow pongs and the previous conversation's
+			 * trailing frames every tick, not just at ping
+			 * time, so none of it leads the next conversation. */
 			for (int drained = 1; drained > 0;) {
 				bool is_text = false;
 
@@ -2624,8 +2654,6 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 							  &is_text);
 			}
 			k_mutex_unlock(&ws_lock);
-			next_idle_ping =
-				k_uptime_get() + WS_IDLE_PING_SECONDS * 1000;
 		}
 		k_msleep(200);
 	}
@@ -2726,6 +2754,7 @@ static int run_conversation(const struct device *i2s)
 	k_msgq_purge(&dl_frames);
 	atomic_set(&convo_flush_req, 0);
 	atomic_set(&convo_end_req, 0);
+	atomic_set(&convo_started, 0);
 	convo_tx_blocks = 0U;
 	convo_tx_starved = 0U;
 	convo_rx_blocks = 0U;

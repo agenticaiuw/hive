@@ -2,10 +2,10 @@
  * Opus transcode for the pendant's constrained LTE-M link.
  *
  * Wire format (both directions): raw Opus packets, each preceded by a 2-byte
- * big-endian length, inside the HTTP chunked body. Downlink packets are
- * 60 ms SILK-wideband at ~14 kbps VBR — the research-backed sweet spot where
- * TLS+TCP overhead amortizes to ~9 kbps and speech quality beats G.711 at a
- * fifth of the bits. FEC stays off (TCP never drops packets).
+ * big-endian length. Uplink (mic) is 60 ms wideband at ~14 kbps. Downlink
+ * (the agent's voice) is 60 ms wideband at ~20 kbps, anti-alias filtered
+ * down from the model's 24 kHz. FEC stays off (both directions ride TCP,
+ * which never drops packets).
  *
  * The codec is OUR OWN libopus.wasm, compiled from the same vendored Opus
  * tree the firmware uses, with plain C exports and zero runtime codegen —
@@ -19,6 +19,25 @@ export const OPUS_WIRE_SAMPLE_RATE = 16000
 export const OPUS_FRAME_SAMPLES = 960 // 60 ms at 16 kHz
 export const OPUS_TARGET_BITRATE = 14000
 export const OPUS_COMPLEXITY = 6
+
+/*
+ * Downlink (the agent's voice): 16 kHz wideband Opus.
+ *
+ * The distortion was never the rate — it was the DOWNSAMPLER. 24 k -> 16 k
+ * used a 2-tap average, which is not an anti-aliasing filter: a 9 kHz tone
+ * survived with 3.2 dB of rejection and folded onto 7 kHz, so every
+ * sibilant mirrored itself into the voice band. That is fixed below with a
+ * real polyphase FIR (45 dB rejection, measured).
+ *
+ * 24 kHz superwideband end-to-end was tried and rejected on evidence: the
+ * nRF9160's 64 MHz M33 cannot decode SWB alongside the uplink encoder
+ * (loop time 177 ms, 17% of mic blocks dropped, playback starving). 16 kHz
+ * wideband is what this chip can actually sustain, now clean, at a higher
+ * bitrate than before.
+ */
+export const OPUS_REPLY_SAMPLE_RATE = 16000
+export const OPUS_REPLY_FRAME_SAMPLES = 960 // 60 ms at 16 kHz
+export const OPUS_REPLY_BITRATE = 20000
 export const OPUS_MAX_PACKET_BYTES = 2000 // RFC 6716 caps one frame at 1275
 
 const WASI_STUBS = {
@@ -60,29 +79,89 @@ async function createCodecInstance() {
 }
 
 /*
- * Streaming 24 kHz → 16 kHz linear resampler (3:2). Adequate for speech; the
- * model's 24 kHz output has little energy near the new Nyquist.
+ * Streaming 24 kHz → 16 kHz downsampler with a real anti-aliasing filter.
+ *
+ * Decimating to 16 kHz means everything above 8 kHz MUST be removed first,
+ * or it folds back into the voice band. Speech sibilance ("s", "sh", "t")
+ * is loud at 8-12 kHz, so the old 2-tap average turned every one of them
+ * into metallic noise on top of the words.
+ *
+ * Output sample n sits at input position n * 1.5, so positions alternate
+ * integer / half-integer — exactly two polyphase branches, precomputed
+ * once. Windowed-sinc, cutoff 7.2 kHz, Hamming, 32 taps per branch.
  */
+const AA_TAPS = 32
+const AA_CUTOFF_NORM = 7200 / 24000 // cutoff / input rate
+
+function buildPolyphaseBranches() {
+  const branches = []
+
+  for (let phase = 0; phase < 2; phase++) {
+    const shift = phase * 0.5
+    const taps = new Float64Array(AA_TAPS)
+    let sum = 0
+
+    for (let i = 0; i < AA_TAPS; i++) {
+      const x = i - (AA_TAPS / 2 - 1) - shift
+      const arg = 2 * AA_CUTOFF_NORM * x
+      const sinc =
+        Math.abs(arg) < 1e-9 ? 1 : Math.sin(Math.PI * arg) / (Math.PI * arg)
+      const window =
+        0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (AA_TAPS - 1))
+      taps[i] = 2 * AA_CUTOFF_NORM * sinc * window
+      sum += taps[i]
+    }
+    // Unity DC gain keeps loudness identical to the model's output.
+    for (let i = 0; i < AA_TAPS; i++) taps[i] /= sum
+    branches.push(taps)
+  }
+  return branches
+}
+
+const AA_BRANCHES = buildPolyphaseBranches()
+
 export function createPcm24kTo16k() {
-  let tail = Buffer.alloc(0)
+  // History carries the filter across chunk boundaries; without it every
+  // push() would click at its seam.
+  const history = new Float64Array(AA_TAPS)
+  let historyLen = 0
+  let inputIndex = 0 // absolute input sample counter
+  let outputIndex = 0 // absolute output sample counter
 
   return {
     push(pcm24) {
-      const merged = tail.length ? Buffer.concat([tail, pcm24]) : pcm24
-      const inSamples = Math.floor(merged.length / 2)
-      const groups = Math.floor(inSamples / 3)
-      const out = Buffer.alloc(groups * 2 * 2)
+      const inSamples = Math.floor(pcm24.length / 2)
+      const out = []
 
-      for (let g = 0; g < groups; g++) {
-        const s0 = merged.readInt16LE(g * 6)
-        const s1 = merged.readInt16LE(g * 6 + 2)
-        const s2 = merged.readInt16LE(g * 6 + 4)
+      for (let i = 0; i < inSamples; i++) {
+        // Shift the newest sample into the delay line.
+        for (let t = 0; t < AA_TAPS - 1; t++) history[t] = history[t + 1]
+        history[AA_TAPS - 1] = pcm24.readInt16LE(i * 2)
+        if (historyLen < AA_TAPS) historyLen++
+        inputIndex++
 
-        out.writeInt16LE(s0, g * 4)
-        out.writeInt16LE(Math.round((s1 + s2) / 2), g * 4 + 2)
+        // Emit every output whose position is now covered by the window.
+        for (;;) {
+          const position = outputIndex * 1.5
+          const center = inputIndex - AA_TAPS / 2
+
+          if (position >= center + 1 || historyLen < AA_TAPS) break
+
+          const phase = outputIndex % 2 === 0 ? 0 : 1
+          const taps = AA_BRANCHES[phase]
+          let acc = 0
+
+          for (let t = 0; t < AA_TAPS; t++) acc += taps[t] * history[t]
+          const clamped = Math.max(-32768, Math.min(32767, Math.round(acc)))
+
+          out.push(clamped)
+          outputIndex++
+        }
       }
-      tail = Buffer.from(merged.subarray(groups * 6))
-      return out
+      const buf = Buffer.alloc(out.length * 2)
+
+      for (let i = 0; i < out.length; i++) buf.writeInt16LE(out[i], i * 2)
+      return buf
     },
   }
 }
@@ -93,11 +172,11 @@ export function createPcm24kTo16k() {
  * flushes the final partial frame zero-padded.
  */
 export async function createOpusReplyEncoder({
-  bitrate = OPUS_TARGET_BITRATE,
+  bitrate = OPUS_REPLY_BITRATE,
 } = {}) {
   const codec = await createCodecInstance()
   const initError = codec.exports.ow_enc_init(
-    OPUS_WIRE_SAMPLE_RATE,
+    OPUS_REPLY_SAMPLE_RATE,
     bitrate,
     OPUS_COMPLEXITY,
   )
@@ -109,10 +188,10 @@ export async function createOpusReplyEncoder({
   let pending = Buffer.alloc(0)
 
   function encodeFrame(frame) {
-    for (let i = 0; i < OPUS_FRAME_SAMPLES; i++) {
+    for (let i = 0; i < OPUS_REPLY_FRAME_SAMPLES; i++) {
       codec.pcm[i] = i * 2 + 1 < frame.length ? frame.readInt16LE(i * 2) : 0
     }
-    const bytes = codec.exports.ow_encode(OPUS_FRAME_SAMPLES)
+    const bytes = codec.exports.ow_encode(OPUS_REPLY_FRAME_SAMPLES)
 
     if (bytes < 0) {
       throw new Error(`opus encode failed: ${bytes}`)
@@ -125,7 +204,7 @@ export async function createOpusReplyEncoder({
   }
 
   function encodeReady(final) {
-    const frameBytes = OPUS_FRAME_SAMPLES * 2
+    const frameBytes = OPUS_REPLY_FRAME_SAMPLES * 2
     const packets = []
 
     while (pending.length >= frameBytes) {
@@ -140,6 +219,7 @@ export async function createOpusReplyEncoder({
   }
 
   return {
+    /* Model 24 kHz PCM in, anti-alias filtered down to the 16 kHz wire. */
     push(pcm24) {
       const pcm16k = resampler.push(pcm24)
 
@@ -161,9 +241,15 @@ export async function createOpusReplyEncoder({
  * Upload path: length-prefixed Opus packets in → 16 kHz s16le PCM out.
  * Tolerates arbitrary chunk boundaries (prefix parsing is stateful).
  */
-export async function createOpusUploadDecoder() {
+/*
+ * Uplink decoder (mic audio, 16 kHz). Pass OPUS_REPLY_SAMPLE_RATE to decode
+ * the downlink instead — test harnesses need to hear what the pendant hears.
+ */
+export async function createOpusUploadDecoder(
+  sampleRate = OPUS_WIRE_SAMPLE_RATE,
+) {
   const codec = await createCodecInstance()
-  const initError = codec.exports.ow_dec_init(OPUS_WIRE_SAMPLE_RATE)
+  const initError = codec.exports.ow_dec_init(sampleRate)
 
   if (initError !== 0) {
     throw new Error(`opus decoder init failed: ${initError}`)

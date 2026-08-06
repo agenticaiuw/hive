@@ -39,6 +39,7 @@ import {
   createOpusReplyEncoder,
   createOpusUploadDecoder,
   isOpusFramesFormat,
+  OPUS_REPLY_SAMPLE_RATE,
   OPUS_WIRE_SAMPLE_RATE,
 } from './opusTranscode.js'
 import {
@@ -1165,12 +1166,13 @@ app.post('/v1/pendant/command', async (request, response) => {
             : replyIsUlaw
               ? 'pcmu'
               : 's16le',
-          // The firmware clocks its I2S output from this header: opus wire
-          // rate is 16 kHz, μ-law is fixed 8 kHz, PCM deltas are 24 kHz —
-          // never the 15,625 mic rate.
+          // The firmware clocks its I2S output from this header: opus
+          // replies are 24 kHz (the model's own rate, never resampled),
+          // μ-law is fixed 8 kHz, PCM deltas are 24 kHz — never the
+          // 15,625 mic rate.
           'X-Audio-Sample-Rate': String(
             replyIsOpus
-              ? OPUS_WIRE_SAMPLE_RATE
+              ? OPUS_REPLY_SAMPLE_RATE
               : replyIsUlaw
                 ? G711_SAMPLE_RATE
                 : REALTIME_PCM_RATE,
