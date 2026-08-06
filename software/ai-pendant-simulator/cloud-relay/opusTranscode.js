@@ -3,8 +3,8 @@
  *
  * Wire format (both directions): raw Opus packets, each preceded by a 2-byte
  * big-endian length. Uplink (mic) is 60 ms wideband at ~14 kbps. Downlink
- * (the agent's voice) is 60 ms wideband at ~20 kbps, anti-alias filtered
- * down from the model's 24 kHz. FEC stays off (both directions ride TCP,
+ * (the agent's voice) is 60 ms superwideband at 24 kHz / ~24 kbps, straight
+ * from the model with no resampling. FEC stays off (both directions ride TCP,
  * which never drops packets).
  *
  * The codec is OUR OWN libopus.wasm, compiled from the same vendored Opus
@@ -21,23 +21,21 @@ export const OPUS_TARGET_BITRATE = 14000
 export const OPUS_COMPLEXITY = 6
 
 /*
- * Downlink (the agent's voice): 16 kHz wideband Opus.
+ * Downlink (the agent's voice): 24 kHz superwideband Opus, the model's own
+ * rate, never resampled. No downsampler means nothing to alias — the
+ * earlier 2-tap decimator folded 9 kHz sibilance onto 7 kHz with 3.2 dB of
+ * rejection, which was the metallic distortion.
  *
- * The distortion was never the rate — it was the DOWNSAMPLER. 24 k -> 16 k
- * used a 2-tap average, which is not an anti-aliasing filter: a 9 kHz tone
- * survived with 3.2 dB of rejection and folded onto 7 kHz, so every
- * sibilant mirrored itself into the voice band. That is fixed below with a
- * real polyphase FIR (45 dB rejection, measured).
- *
- * 24 kHz superwideband end-to-end was tried and rejected on evidence: the
- * nRF9160's 64 MHz M33 cannot decode SWB alongside the uplink encoder
- * (loop time 177 ms, 17% of mic blocks dropped, playback starving). 16 kHz
- * wideband is what this chip can actually sustain, now clean, at a higher
- * bitrate than before.
+ * This first failed on hardware and the rate got the blame; the real cause
+ * was pairing it with 20 ms frames, i.e. 50 decodes/s against a chip that
+ * can only start ~48.8/s. At 60 ms frames it is 16.7/s. Measured on device
+ * with libopus finally built -O3: decode 8.8 ms per 60 ms packet at 16 kHz
+ * (~15% CPU), against ~50% for the uplink encoder — leaving room for the
+ * ~1.5x that superwideband costs.
  */
-export const OPUS_REPLY_SAMPLE_RATE = 16000
-export const OPUS_REPLY_FRAME_SAMPLES = 960 // 60 ms at 16 kHz
-export const OPUS_REPLY_BITRATE = 20000
+export const OPUS_REPLY_SAMPLE_RATE = 24000
+export const OPUS_REPLY_FRAME_SAMPLES = 1440 // 60 ms at 24 kHz
+export const OPUS_REPLY_BITRATE = 24000
 export const OPUS_MAX_PACKET_BYTES = 2000 // RFC 6716 caps one frame at 1275
 
 const WASI_STUBS = {
@@ -73,7 +71,7 @@ async function createCodecInstance() {
 
   return {
     exports: instance.exports,
-    pcm: new Int16Array(memory.buffer, ow_pcm_buf(), 1920),
+    pcm: new Int16Array(memory.buffer, ow_pcm_buf(), 1920), // 1440 used
     pkt: new Uint8Array(memory.buffer, ow_pkt_buf(), 1400),
   }
 }
@@ -184,7 +182,6 @@ export async function createOpusReplyEncoder({
   if (initError !== 0) {
     throw new Error(`opus encoder init failed: ${initError}`)
   }
-  const resampler = createPcm24kTo16k()
   let pending = Buffer.alloc(0)
 
   function encodeFrame(frame) {
@@ -219,12 +216,10 @@ export async function createOpusReplyEncoder({
   }
 
   return {
-    /* Model 24 kHz PCM in, anti-alias filtered down to the 16 kHz wire. */
+    /* The model's own 24 kHz PCM is the wire format. No resampling. */
     push(pcm24) {
-      const pcm16k = resampler.push(pcm24)
-
-      if (pcm16k.length) {
-        pending = pending.length ? Buffer.concat([pending, pcm16k]) : pcm16k
+      if (pcm24.length) {
+        pending = pending.length ? Buffer.concat([pending, pcm24]) : pcm24
       }
       return encodeReady(false)
     },

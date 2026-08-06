@@ -59,7 +59,7 @@ const CAPTURE_MAX_BYTES = 7_500_000
  * smuggle dozens of 60 ms packets past the firmware's ring budget, which
  * assumes ≤ MAX_DOWNLINK_FRAME_PACKETS × 960 samples per frame.
  */
-const MAX_DOWNLINK_FRAME_PACKETS = 4
+const MAX_DOWNLINK_FRAME_PACKETS = 2
 function splitWireFrames(wire, maxBytes = MAX_DOWNLINK_FRAME_BYTES) {
   const frames = []
   let start = 0

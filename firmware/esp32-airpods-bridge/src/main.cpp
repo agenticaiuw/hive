@@ -23,8 +23,8 @@ i2s_chan_handle_t i2sInput = nullptr;
 // prototype can reconnect to its known address directly.
 esp_bd_addr_t BOSE_SLIII_ADDRESS = {0x08, 0xDF, 0x1F, 0xEA, 0x19, 0x33};
 constexpr const char *BOSE_SLIII_NAME = "Bose SLIII";
-// How often to force-page the known Bose address if the link is down.
-constexpr uint32_t BOSE_RECONNECT_INTERVAL_MS = 8000;
+// How often to re-page the known address while the link is down.
+constexpr uint32_t RECONNECT_INTERVAL_MS = 8000;
 
 // The nRF9160 duplex I2S TX shares the mic clock: LRCK 31250 Hz and BCLK
 // 2 MHz, so each stereo frame is 64 BCLK with 32-cycle slots. The nRF sends
@@ -53,6 +53,18 @@ String targetName;
 bool a2dpStarted = false;
 bool discoveryOnly = false;
 volatile bool targetSelectionPending = false;
+/*
+ * The BD_ADDR of the last device we actually connected to, persisted.
+ *
+ * Discovery by NAME only finds a device that is currently discoverable, and
+ * headphones are discoverable only in pairing mode — AirPods sitting in your
+ * ears or in the case never answer an inquiry, so a name scan searches
+ * forever. Paging a known address works on any bonded device that is simply
+ * powered on. This is why the hardcoded Bose path always reconnected and
+ * everything else did not.
+ */
+esp_bd_addr_t knownAddress = {0, 0, 0, 0, 0, 0};
+bool haveKnownAddress = false;
 volatile esp_a2d_connection_state_t pendingConnectionState =
     ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile bool connectionStateChanged = false;
@@ -669,18 +681,38 @@ bool isBoseTarget() {
   return normalized == "bose sliii" || normalized.indexOf("bose") >= 0;
 }
 
-void forceBoseConnect() {
-  if (!a2dpStarted || !isBoseTarget()) {
+/*
+ * Page a known address directly. Works for a bonded device that is powered
+ * on but not discoverable — the case a name scan can never handle.
+ */
+void forceKnownConnect() {
+  if (!a2dpStarted) {
     return;
   }
   if (a2dp.get_connection_state() == ESP_A2D_CONNECTION_STATE_CONNECTED ||
       a2dp.get_connection_state() == ESP_A2D_CONNECTION_STATE_CONNECTING) {
     return;
   }
-  emitEvent("searching",
-            "Paging Bose SLIII at 08:DF:1F:EA:19:33 (put speaker on, pairing "
-            "mode if first time).");
-  a2dp.connect_to(BOSE_SLIII_ADDRESS);
+
+  esp_bd_addr_t *target = nullptr;
+  if (haveKnownAddress) {
+    target = &knownAddress;
+  } else if (isBoseTarget()) {
+    target = &BOSE_SLIII_ADDRESS; // known-good address before first connect
+  }
+  if (target == nullptr) {
+    return;
+  }
+
+  char addressText[18];
+  const uint8_t *a = *target;
+  snprintf(addressText, sizeof(addressText), "%02x:%02x:%02x:%02x:%02x:%02x",
+           a[0], a[1], a[2], a[3], a[4], a[5]);
+  emitEvent("searching", "Paging " + targetName + " at " +
+                             String(addressText) +
+                             " (device must be on and not connected "
+                             "elsewhere).");
+  a2dp.connect_to(*target);
 }
 
 void startBluetoothSearch(bool scanOnly = false) {
@@ -701,9 +733,10 @@ void startBluetoothSearch(bool scanOnly = false) {
   a2dp.set_data_callback_in_frames(provideA2dpFrames);
   a2dp.set_ssid_callback(targetMatches);
   a2dp.set_on_connection_state_changed(onConnectionState);
-  if (!scanOnly && isBoseTarget()) {
-    // Address-first reconnect: SLIII often ignores inquiry when already bonded
-    // to a phone/Mac. Page the known BD_ADDR directly.
+  if (!scanOnly && haveKnownAddress) {
+    // Address-first reconnect for whatever we last connected to.
+    a2dp.set_auto_reconnect(knownAddress, 12);
+  } else if (!scanOnly && isBoseTarget()) {
     a2dp.set_auto_reconnect(BOSE_SLIII_ADDRESS, 12);
   } else {
     a2dp.set_auto_reconnect(!scanOnly, 5);
@@ -718,9 +751,9 @@ void startBluetoothSearch(bool scanOnly = false) {
                      : "Connecting to “" + targetName +
                            "”. Put Bose in pairing mode if it does not "
                            "answer (hold Bluetooth button).");
-  if (!scanOnly && isBoseTarget()) {
+  if (!scanOnly && (haveKnownAddress || isBoseTarget())) {
     delay(500);
-    forceBoseConnect();
+    forceKnownConnect();
   }
 }
 
@@ -762,6 +795,11 @@ void handleSerialCommand(const String &line) {
     if (targetName.isEmpty()) {
       emitEvent("usb", "The Bluetooth target name cannot be empty.");
       return;
+    }
+    if (!targetName.equalsIgnoreCase(preferences.getString("target", ""))) {
+      // Switching devices: the remembered address belongs to the old one.
+      haveKnownAddress = false;
+      preferences.remove("addr");
     }
     preferences.putString("target", targetName);
     startBluetoothSearch(false);
@@ -813,6 +851,8 @@ void handleSerialCommand(const String &line) {
     }
     removeAllBluetoothBonds();
     preferences.remove("target");
+    preferences.remove("addr");
+    haveKnownAddress = false;
     targetName = "";
     discoveryOnly = false;
     clearAudioBuffer();
@@ -887,6 +927,9 @@ void setup() {
       maximumCpuClockSelected ? "true" : "false");
 
   preferences.begin("airpods", false);
+  haveKnownAddress =
+      preferences.getBytes("addr", knownAddress, ESP_BD_ADDR_LEN) ==
+      ESP_BD_ADDR_LEN;
   targetName = preferences.getString("target", "");
   if (targetName.isEmpty()) {
     targetName = BOSE_SLIII_NAME;
@@ -926,10 +969,19 @@ void loop() {
   if (connectionStateChanged) {
     connectionStateChanged = false;
     switch (pendingConnectionState) {
-    case ESP_A2D_CONNECTION_STATE_CONNECTED:
+    case ESP_A2D_CONNECTION_STATE_CONNECTED: {
+      // Remember who answered, so the next reconnect can page instead of
+      // scan. Only a real connection proves the address is reachable.
+      esp_bd_addr_t *peer = a2dp.get_last_peer_address();
+      if (peer != nullptr) {
+        memcpy(knownAddress, *peer, ESP_BD_ADDR_LEN);
+        haveKnownAddress = true;
+        preferences.putBytes("addr", knownAddress, ESP_BD_ADDR_LEN);
+      }
       emitEvent("connected",
                 "Bluetooth speaker connected. A2DP is streaming at 50%.");
       break;
+    }
     case ESP_A2D_CONNECTION_STATE_CONNECTING:
       emitEvent("searching",
                 "Bluetooth target found; opening the A2DP link.");
@@ -1002,11 +1054,17 @@ void loop() {
     rawCapturePrinted = false;
   }
 
-  static uint32_t lastBoseReconnectAt = 0;
-  if (a2dpStarted && isBoseTarget() &&
-      millis() - lastBoseReconnectAt >= BOSE_RECONNECT_INTERVAL_MS) {
-    lastBoseReconnectAt = millis();
-    forceBoseConnect();
+  /*
+   * Keep paging the known address while the link is down. Headphones come
+   * back on their own schedule — out of the case, released by a phone — and
+   * they will never page US, so retrying is the only way the link returns
+   * without a human issuing a command.
+   */
+  static uint32_t lastReconnectAttemptAt = 0;
+  if (a2dpStarted && (haveKnownAddress || isBoseTarget()) &&
+      millis() - lastReconnectAttemptAt >= RECONNECT_INTERVAL_MS) {
+    lastReconnectAttemptAt = millis();
+    forceKnownConnect();
   }
 
   if (millis() - lastDiagnosticAt >= 1000) {

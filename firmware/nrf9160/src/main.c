@@ -242,33 +242,33 @@
  * 1 could never meet, and playback starved continuously.
  */
 #define CONVO_MAX_DECODES_PER_BLOCK 2U
-/* 16 kHz s16 jitter ring: 768 ms of agent speech. Barge-in flushes it, so
+/* 24 kHz s16 jitter ring: 512 ms of agent speech. Barge-in flushes it, so
  * depth buys LTE-jitter absorption, not conversational latency. */
 #define DL_JITTER_BYTES 24576U
 #define DL_JITTER_SAMPLES (DL_JITTER_BYTES / sizeof(int16_t))
 /*
- * Start/resume playback only with this much banked (300 ms at 16 kHz).
+ * Start/resume playback only with this much banked (200 ms at 24 kHz).
  * Every starve pauses output and re-arms, which is audible as chopping —
  * hardware runs showed 8 of them in 22 s at the old 128 ms gate.
  */
 #define DL_PREBUFFER_SAMPLES 4800U
 /*
  * Worst case one downlink WS frame decodes to: the relay caps frames at 4
- * packets AND 500 B, each packet 60 ms (960 samples at 16 kHz). The
+ * packets AND 500 B, each packet 60 ms (1440 samples at 24 kHz). The
  * receive gate needs at least this much ring space free, and the ring must
  * clear DL_PREBUFFER_SAMPLES afterwards or the prebuffer could never fill.
- * 4 packets x 60 ms x 16 kHz = 3840 samples.
+ * 2 packets x 60 ms x 24 kHz = 2880 samples.
  */
-#define DL_WORST_FRAME_SAMPLES 3840U
+#define DL_WORST_FRAME_SAMPLES 2880U
 BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
-		     DL_PREBUFFER_SAMPLES + 960U,
+		     DL_PREBUFFER_SAMPLES + 1440U,
 	     "receive gate must clear the prebuffer with a packet to spare");
 /* Largest downlink WS frame the relay may send (packet-aligned, ≤500 B). */
 #define WS_RX_BUF_BYTES 640U
 /* ~120 ms of Opus per uplink frame: batching overhead vs VAD latency. */
 #define WS_TX_BATCH_BYTES 240U
-/* Exact 16000/31250 ratio for the TX upsampler (64/125). */
-#define TX_RESAMPLE_NUM 64U
+/* Exact 24000/31250 ratio for the TX upsampler (96/125). */
+#define TX_RESAMPLE_NUM 96U
 #define TX_RESAMPLE_DEN 125U
 /* Idle keepalive: under Cloudflare's 100 s WS idle kill. */
 #define WS_IDLE_PING_SECONDS 25U
@@ -284,7 +284,7 @@ static uint8_t opus_dec_arena[18432] __aligned(4);
 static int16_t dl_jitter[DL_JITTER_SAMPLES];
 static volatile size_t dl_jitter_head;
 static volatile size_t dl_jitter_tail;
-static int16_t dl_decode_buf[960]; /* one 60 ms wire packet at 16 kHz */
+static int16_t dl_decode_buf[1440]; /* one 60 ms wire packet at 24 kHz */
 
 /*
  * ---- Audio thread ----
@@ -359,6 +359,23 @@ static uint32_t convo_max_loop_ms;
 static uint32_t convo_uplink_drops;
 static uint32_t convo_mic_drops;
 static uint32_t convo_tx_peak;
+/*
+ * Codec cost, measured not guessed. The 32.768 kHz cycle counter gives
+ * 30.5 us resolution — plenty for multi-millisecond codec calls, and it
+ * settles whether a given sample rate actually fits the CPU budget.
+ */
+static uint32_t convo_decode_cycles;
+static uint32_t convo_decode_calls;
+static uint32_t convo_decode_max_cycles;
+static uint32_t convo_encode_cycles;
+static uint32_t convo_encode_calls;
+static uint32_t convo_encode_max_cycles;
+
+static inline uint32_t cycles_to_us(uint32_t cycles)
+{
+	return (uint32_t)(((uint64_t)cycles * 1000000U) /
+			  sys_clock_hw_cycles_per_sec());
+}
 /*
  * One TX slab serves both worlds: duplex conversation blocks (2,560 B used
  * fully) and the legacy reply path's 1,024 B blocks (partial fill of the
@@ -512,7 +529,17 @@ static void live_tx_offer_stage(const int16_t *samples, size_t frame_count)
 	    !pendant_opus_stream_active()) {
 		return;
 	}
+	uint32_t encode_started = k_cycle_get_32();
+
 	error = pendant_opus_stream_feed(samples, frame_count);
+
+	uint32_t encode_elapsed = k_cycle_get_32() - encode_started;
+
+	convo_encode_cycles += encode_elapsed;
+	++convo_encode_calls;
+	if (encode_elapsed > convo_encode_max_cycles) {
+		convo_encode_max_cycles = encode_elapsed;
+	}
 	if (error != 0) {
 		printk("Live Opus feed failed: %d\n", error);
 		if (!atomic_get(&convo_active)) {
@@ -2694,9 +2721,18 @@ static void convo_decode_downlink(void)
 				atomic_set(&convo_end_req, 1);
 				return;
 			}
+			uint32_t decode_started = k_cycle_get_32();
 			int decoded = pendant_opus_reply_decode_packet(
 				dl_rx_frame.data + offset, packet_bytes,
 				dl_decode_buf, ARRAY_SIZE(dl_decode_buf));
+			uint32_t decode_elapsed =
+				k_cycle_get_32() - decode_started;
+
+			convo_decode_cycles += decode_elapsed;
+			++convo_decode_calls;
+			if (decode_elapsed > convo_decode_max_cycles) {
+				convo_decode_max_cycles = decode_elapsed;
+			}
 
 			if (decoded > 0) {
 				dl_jitter_put(dl_decode_buf,
@@ -2763,6 +2799,12 @@ static int run_conversation(const struct device *i2s)
 	convo_uplink_drops = 0U;
 	convo_mic_drops = 0U;
 	convo_tx_peak = 0U;
+	convo_decode_cycles = 0U;
+	convo_decode_calls = 0U;
+	convo_decode_max_cycles = 0U;
+	convo_encode_cycles = 0U;
+	convo_encode_calls = 0U;
+	convo_encode_max_cycles = 0U;
 
 	k_mutex_lock(&ws_lock, K_FOREVER);
 	error = pendant_ws_connect();
@@ -2789,7 +2831,7 @@ static int run_conversation(const struct device *i2s)
 	}
 	error = pendant_opus_reply_decoder_begin_rate(
 		opus_dec_arena, sizeof(opus_dec_arena),
-		PENDANT_OPUS_SAMPLE_RATE);
+		PENDANT_OPUS_REPLY_SAMPLE_RATE);
 	if (error < 0) {
 		printk("Conversation decoder init failed: %d\n", error);
 		pendant_opus_stream_abort();
@@ -2835,7 +2877,7 @@ static int run_conversation(const struct device *i2s)
 
 	k_msleep(MIC_POWERUP_BUDGET_MS);
 	printk("Conversation: duplex I2S bclk_hz=%u lrclk_hz=%u "
-	       "(mic %u Hz up, agent 16 kHz down)\n",
+	       "(mic %u Hz up, agent 24 kHz down)\n",
 	       16000000U / MIC_BCLK_TOP, 16000000U / MIC_LRCLK_TOP,
 	       SAMPLE_RATE);
 	error = i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_START);
@@ -3009,6 +3051,16 @@ static int run_conversation(const struct device *i2s)
 	       convo_decoded_packets, convo_max_loop_ms,
 	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
 	       convo_mic_drops, convo_tx_peak);
+	printk("Codec cost: decode avg=%u us max=%u us n=%u | "
+	       "encode avg=%u us max=%u us n=%u\n",
+	       convo_decode_calls
+		       ? cycles_to_us(convo_decode_cycles / convo_decode_calls)
+		       : 0U,
+	       cycles_to_us(convo_decode_max_cycles), convo_decode_calls,
+	       convo_encode_calls
+		       ? cycles_to_us(convo_encode_cycles / convo_encode_calls)
+		       : 0U,
+	       cycles_to_us(convo_encode_max_cycles), convo_encode_calls);
 
 teardown_clocks:
 	if (i2s_running) {

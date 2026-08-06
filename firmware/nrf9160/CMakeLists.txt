@@ -56,7 +56,40 @@ target_compile_definitions(opus PRIVATE
   NONTHREADSAFE_PSEUDOSTACK
   GLOBAL_STACK_SIZE=28672
 )
-target_compile_options(opus PRIVATE -Os -fstack-usage)
+#
+# Opus is the CPU budget on this device: the downlink decode and the uplink
+# encode run concurrently on one 64 MHz core, and the achievable audio
+# sample rate follows directly from how fast they are.
+#
+# -O3 rather than Zephyr's default -Os: this is DSP code in tight loops, and
+# size is not the binding constraint (flash is ~54% used).
+#
+# The Cortex-M33 implements the ARM DSP extension, so libopus's ARMv5E
+# integer paths (SMULWB/SMLABB and friends in celt/arm/fixed_armv5e.h and
+# silk/arm/SigProc_FIX_armv5e.h) apply. They are header-only inline asm — no
+# NEON, no .s files, nothing that needs runtime CPU detection.
+#
+#
+# -O3 must be applied as a SOURCE property, not a target option: Zephyr's
+# zephyr_interface appends its own -Os after any target-level flags, and the
+# last -O wins. Verified via compile_commands.json — the target-level form
+# produced "-O3 -Os" and silently kept building for size.
+#
+target_compile_options(opus PRIVATE -fstack-usage)
+set_source_files_properties(
+  ${opus_silk_sources}
+  ${opus_silk_fixed_sources}
+  ${opus_celt_sources}
+  ${opus_sources}
+  ${opus_float_sources}
+  TARGET_DIRECTORY opus
+  PROPERTIES COMPILE_OPTIONS "-O3"
+)
+target_compile_definitions(opus PRIVATE
+  OPUS_ARM_ASM
+  OPUS_ARM_INLINE_ASM
+  OPUS_ARM_INLINE_EDSP
+)
 target_link_libraries(opus PRIVATE zephyr_interface)
 
 target_sources(app PRIVATE

@@ -504,7 +504,14 @@ int pendant_opus_stream_begin(const char *opus_path,
 	if (opus_encoder_ctl(s->encoder,
 			     OPUS_SET_BITRATE(PENDANT_OPUS_BITRATE)) !=
 		    OPUS_OK ||
-	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(1)) != OPUS_OK ||
+	    /*
+	     * Complexity 0, not 1: the uplink encoder costs ~50% of this
+	     * 64 MHz core, and the 24 kHz downlink decode needs ~42% more.
+	     * Spending the budget here is the wrong trade — this audio only
+	     * has to be UNDERSTOOD by speech-to-text, while the decoded
+	     * audio is what the owner actually hears.
+	     */
+	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(0)) != OPUS_OK ||
 	    opus_encoder_ctl(s->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)) !=
 		    OPUS_OK ||
 	    opus_encoder_ctl(s->encoder, OPUS_SET_VBR(1)) != OPUS_OK) {
@@ -587,7 +594,7 @@ int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
 	if (opus_encoder_ctl(s->encoder,
 			     OPUS_SET_BITRATE(PENDANT_OPUS_BITRATE)) !=
 		    OPUS_OK ||
-	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(1)) != OPUS_OK ||
+	    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(0)) != OPUS_OK ||
 	    opus_encoder_ctl(s->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)) !=
 		    OPUS_OK ||
 	    opus_encoder_ctl(s->encoder, OPUS_SET_DTX(1)) != OPUS_OK ||
