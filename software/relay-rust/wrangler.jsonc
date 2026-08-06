@@ -2,7 +2,7 @@
   // Side-by-side test deployment of the Rust/WASM relay.
   //
   // The worker NAME differs from the live JS worker on purpose
-  // ("ai-pendant-mission-control") so this can be deployed and exercised
+  // ("ai-pendant-relay") so this can be deployed and exercised
   // without touching the hostname the nRF9160 firmware has compiled in.
   //
   // Every binding below is byte-identical to the live worker's config so the

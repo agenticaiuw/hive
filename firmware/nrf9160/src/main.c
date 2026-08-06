@@ -1031,12 +1031,13 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	recording_absolute_sum = 0U;
 	recording_stopped_by_button = false;
 
-	/* Adaptive end-of-utterance detector state (see SILENCE_STOP_MS). */
+	/* Stage level tracking (diagnostics only — recording stops ONLY on a
+	 * second button press or the 30 s cap; the cloud's semantic VAD owns
+	 * end-of-utterance detection now). */
 	uint32_t stage_abs_sum = 0U;
 	uint32_t noise_floor_mean = UINT32_MAX;
 	uint32_t voiced_stage_count = 0U;
 	uint32_t silent_stage_count = 0U;
-	bool recording_stopped_by_silence = false;
 
 	error = i2s_configure(i2s, I2S_DIR_RX, &config);
 	if (error != 0) {
@@ -1218,32 +1219,23 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 				stage_abs_sum = 0U;
 				noise_floor_mean = MIN(noise_floor_mean,
 						       MAX(stage_mean, 8U));
+				/* Calibrated on a real press (capture
+				 * job_bff5bd08): speech runs only ~2-5x the
+				 * amplified noise floor, so demand 1.5x plus
+				 * an absolute margin, not the 4x that scored
+				 * a clean transcribed sentence as silence. */
 				if (stage_mean >
-				    MAX(noise_floor_mean * 4U, 200U)) {
+				    noise_floor_mean +
+					    MAX(noise_floor_mean / 2U, 120U)) {
 					++voiced_stage_count;
 					silent_stage_count = 0U;
 				} else if (stage_mean <
-					   MAX(noise_floor_mean * 2U, 100U)) {
+					   noise_floor_mean +
+						   MAX(noise_floor_mean / 4U,
+						       60U)) {
 					++silent_stage_count;
 				}
-				if (sample_index >= MIC_MIN_RECORD_FRAMES) {
-					if (voiced_stage_count >=
-						    VOICED_STAGES_REQUIRED &&
-					    silent_stage_count >=
-						    SILENCE_STOP_STAGES) {
-						recording_stopped_by_silence =
-							true;
-					} else if (voiced_stage_count == 0U &&
-						   sample_index >=
-							   SAMPLE_RATE *
-								   NO_SPEECH_STOP_SECONDS) {
-						/* Accidental press: no speech. */
-						recording_stopped_by_silence =
-							true;
-					}
-				}
-				if (recording_stopped_by_silence ||
-				    live_tx_saturated) {
+				if (live_tx_saturated) {
 					break;
 				}
 				/* Live mid-fail is OK if SD still capturing. */
@@ -1304,14 +1296,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			next_led_toggle = k_uptime_get() + 250;
 		}
 
-		if (recording_stopped_by_silence) {
-			printk("End of utterance: %s (voiced_stages=%u)\n",
-			       voiced_stage_count > 0U
-				       ? "silence after speech"
-				       : "no speech detected",
-			       voiced_stage_count);
-			break;
-		}
 		if (live_tx_saturated) {
 			printk("Utterance clipped: uplink fell ~4 s behind\n");
 			break;

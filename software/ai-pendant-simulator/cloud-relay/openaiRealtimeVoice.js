@@ -833,6 +833,8 @@ export async function createStreamingRealtimeSession({
     closed: false,
     finished: false,
     committed: false,
+    bodyEnded: false,
+    completedResponses: 0,
     midPressStreamed: false,
     bytesIn: 0,
     bytesToModel: 0,
@@ -1091,6 +1093,18 @@ export async function createStreamingRealtimeSession({
       return
     }
 
+    // OPENAI_RT_DEBUG=1 traces the raw event sequence — the only way to see
+    // why semantic VAD did or didn't act on a given press.
+    if (process.env.OPENAI_RT_DEBUG) {
+      const brief =
+        event.type === 'error'
+          ? event.error?.message || event.message
+          : event.type === 'response.done'
+            ? event.response?.status
+            : ''
+      console.log(`[rt-event] ${event.type}${brief ? ` :: ${brief}` : ''}`)
+    }
+
     if (event.type === 'error') {
       finishErr(
         new Error(
@@ -1178,6 +1192,17 @@ export async function createStreamingRealtimeSession({
         return
       }
       if (!hasFunctionCall && status === 'completed') {
+        state.completedResponses += 1
+        if (audioOut && !state.bodyEnded) {
+          // Owner is still recording: reply audio is already queued down the
+          // response stream; keep the session open for the next utterance.
+          if (!state.response) {
+            state.response =
+              String(state.textParts.join('')).trim() || undefined
+          }
+          state.textParts = []
+          return
+        }
         // Pure text: chitchat / knowledge only. Empty actions; needsLocalFallback false.
         // Do NOT promote response → transcript; history label is derived later.
         if (!state.response) {
@@ -1258,7 +1283,19 @@ export async function createStreamingRealtimeSession({
             ? { type: 'audio/pcmu' }
             : { type: 'audio/pcm', rate: REALTIME_PCM_RATE },
           transcription: { model: 'gpt-4o-mini-transcribe' },
-          turn_detection: null,
+          /*
+           * Audio mode: the model detects end-of-utterance itself and
+           * responds mid-recording (the pendant records until button-stop;
+           * replies queue downstream and play the moment upload ends).
+           * Text mode keeps manual commit semantics.
+           */
+          turn_detection: audioOut
+            ? {
+                type: 'semantic_vad',
+                create_response: true,
+                interrupt_response: false,
+              }
+            : null,
         },
         ...(audioOut
           ? {
@@ -1313,11 +1350,38 @@ export async function createStreamingRealtimeSession({
           finishErr(new Error('No audio received for Realtime session.'))
           return resultPromise
         }
-        send({ type: 'input_audio_buffer.commit' })
-        send({
-          type: 'response.create',
-          response: { output_modalities: audioOut ? ['audio'] : ['text'] },
-        })
+        state.bodyEnded = true
+        if (audioOut) {
+          // Semantic VAD already committed/responded per utterance. Only
+          // force a turn when the recording ended with none detected, and
+          // finish immediately when the last reply completed earlier.
+          if (
+            state.completedResponses === 0 &&
+            !state.responseActive &&
+            !state.pendingSpokenReply &&
+            !state.spokenReplyRequested
+          ) {
+            send({ type: 'input_audio_buffer.commit' })
+            send({
+              type: 'response.create',
+              response: { output_modalities: ['audio'] },
+            })
+          } else if (
+            state.completedResponses > 0 &&
+            !state.responseActive &&
+            !state.pendingSpokenReply
+          ) {
+            state.status =
+              state.actions.length || state.delegate ? 'ready' : 'instant'
+            finishOk()
+          }
+        } else {
+          send({ type: 'input_audio_buffer.commit' })
+          send({
+            type: 'response.create',
+            response: { output_modalities: ['text'] },
+          })
+        }
       }
       return resultPromise
     },

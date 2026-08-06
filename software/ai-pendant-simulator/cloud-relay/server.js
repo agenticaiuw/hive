@@ -939,21 +939,25 @@ app.post('/v1/pendant/command', async (request, response) => {
   try {
     const store = await getStore()
     let job = null
-    let jobEnqueued = false
+    let jobEnqueuedCount = 0
     let macBridgeOnline = false
     const pcmChunks = []
     let rawByteCount = 0
     const startedAt = Date.now()
 
-    async function dispatchPlan(plan) {
-      if (!shouldDispatch || jobEnqueued || !plan) return job
+    async function dispatchPlan(plan, { allowRepeat = false } = {}) {
+      // Semantic-VAD recordings can carry SEVERAL commands; each tool call
+      // dispatches its own job (allowRepeat). Everything else keeps the
+      // one-job-per-request rule.
+      if (!shouldDispatch || !plan) return job
+      if (jobEnqueuedCount > 0 && !allowRepeat) return job
       const hasWork =
         Boolean(String(plan.text || '').trim()) ||
         (Array.isArray(plan.actions) && plan.actions.length > 0) ||
         Boolean(String(plan.response || '').trim()) ||
         Boolean(plan.requireLocalPlanner)
       if (!hasWork) return job
-      jobEnqueued = true
+      jobEnqueuedCount += 1
       job = await enqueueMacPlanJob({
         store,
         deviceId,
@@ -1242,7 +1246,9 @@ app.post('/v1/pendant/command', async (request, response) => {
               deviceTime:
                 String(request.get('x-device-time') || '').trim() || null,
               onEarlyPlan: async (earlyPlan) => {
-                return await dispatchPlan(earlyPlan)
+                return await dispatchPlan(earlyPlan, {
+                  allowRepeat: wantsReplyStream,
+                })
               },
               // Status tools hold the turn on this so the spoken reply can
               // contain the Mac's actual data (Mac claims in ~250 ms and
@@ -1326,9 +1332,10 @@ app.post('/v1/pendant/command', async (request, response) => {
       // Tool-call plans were already dispatched early (dispatchPlan is
       // idempotent via jobEnqueued).
       if (
-        !replyStreamStarted ||
-        (Array.isArray(plan?.actions) && plan.actions.length > 0) ||
-        plan?.requireLocalPlanner
+        jobEnqueuedCount === 0 &&
+        (!replyStreamStarted ||
+          (Array.isArray(plan?.actions) && plan.actions.length > 0) ||
+          plan?.requireLocalPlanner)
       ) {
         await dispatchPlan(plan)
       }
