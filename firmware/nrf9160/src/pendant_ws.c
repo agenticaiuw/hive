@@ -13,10 +13,15 @@
 /*
  * Bounds EVERY send on the socket, including the CLOSE frame that
  * websocket_disconnect emits — without it a dead socket blocks the caller
- * forever (review finding). All WS calls run on the ws_io thread (or under
- * ws_lock), so a bounded block is acceptable there.
+ * forever. All WS calls run on the ws_io thread, never the audio loop, so
+ * a long block costs nothing.
+ *
+ * It must be LONG: a Cat-M1 uplink routinely stalls for seconds (RRC
+ * re-establishment, scheduling on a deprioritized roaming SIM). 1.5 s
+ * killed live conversations after ~5 s on hardware (-ETIMEDOUT/-116), and
+ * a timeout mid-frame would corrupt the WebSocket stream anyway.
  */
-#define WS_SEND_TIMEOUT_MS 1500
+#define WS_SEND_TIMEOUT_MS 10000
 /* A started (fragmented) message must complete within this window. */
 #define WS_MESSAGE_DEADLINE_MS 2000
 #define WS_URL "/v1/pendant/converse"

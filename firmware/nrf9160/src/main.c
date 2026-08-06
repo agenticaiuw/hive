@@ -59,12 +59,18 @@
 #define MIC_RX_BLOCK_SIZE (MIC_RX_BLOCK_FRAMES * sizeof(int32_t))
 /*
  * RX slab is dedicated so the Opus workspace can hold the live encoder
- * while the user is speaking. Six blocks ≈ 123 ms of elastic: an i2s_nrfx
- * RX overrun ERRORS the whole transfer (it does not drop-and-continue), so
- * this must ride out SD-journal stalls on the legacy path and codec spikes
- * on the duplex path.
+ * while the user is speaking. An i2s_nrfx RX overrun ERRORS the whole
+ * transfer (it does not drop-and-continue), so this must ride out codec
+ * spikes on the duplex path.
+ *
+ * Size it ABOVE the driver's queue depth, not equal to it: the driver
+ * holds CONFIG_I2S_NRFX_RX_BLOCK_COUNT (6) blocks in its queue PLUS 2
+ * latched in hardware, and this loop holds 1 while copying. A 6-block
+ * slab therefore died at a 4-block backlog ("Failed to allocate next RX
+ * buffer: -12") on a 76 ms loop spike. 10 blocks = a full 6-block (123 ms)
+ * backlog with buffers to spare.
  */
-#define MIC_RX_BLOCK_COUNT 6U
+#define MIC_RX_BLOCK_COUNT 10U
 #define MIC_OUT_BLOCK_FRAMES (MIC_RX_BLOCK_FRAMES / MIC_DECIMATION)
 #define MIC_STAGE_FRAMES 512U
 #define MIC_STAGE_BYTES (MIC_STAGE_FRAMES * sizeof(int16_t))
@@ -184,6 +190,15 @@
 #define PENDANT_BOOT_DUMP_PCM_HEX 0
 /* Temporary diagnostic: prove whether the microphone actively drives DOUT. */
 #define PENDANT_MIC_ELECTRICAL_PROBE 0
+/*
+ * Hardware self-test: start a duplex conversation automatically N seconds
+ * after boot and end it after PENDANT_BOOT_CONVERSATION_SECONDS. Set to 1
+ * to validate the whole duplex path (I2S both directions, live Opus encode
+ * + decode, WebSocket, relay, ESP32) from the serial log alone — no button
+ * press required. Leave at 0 for normal use.
+ */
+#define PENDANT_BOOT_CONVERSATION_TEST 0
+#define PENDANT_BOOT_CONVERSATION_SECONDS 30U
 
 /*
  * ---- Full-duplex conversation (WebSocket transport) ----
@@ -201,8 +216,29 @@
  */
 #define CONVO_MAX_SECONDS 300U
 #define CONVO_TX_BLOCK_FRAMES MIC_RX_BLOCK_FRAMES
-#define CONVO_TX_SLAB_BLOCKS 3U
-#define CONVO_TX_PRIME_BLOCKS 2U
+/*
+ * TX runway. i2s_nrfx latches 2 buffers in hardware and holds the rest in
+ * tx_queue (CONFIG_I2S_NRFX_TX_BLOCK_COUNT). It asks for the next TX buffer
+ * in the SAME ISR that completes an RX block, and if that buffer is still
+ * missing one block later it declares "Next buffers not supplied on time"
+ * and kills the WHOLE duplex transfer, RX included (i2s_nrfx.c:194-203).
+ *
+ * A 1:1 write-per-read loop therefore runs with ZERO slack and dies on the
+ * first 20 ms hiccup — that is exactly what killed conversations on
+ * hardware after 1-3.5 s. Instead the loop keeps this queue topped up, so
+ * the transfer survives a stall as long as the runway below.
+ * 8 queued + 2 latched = 10 blocks = 205 ms, matching the RX slab's depth.
+ */
+#define CONVO_TX_QUEUE_BLOCKS 8U
+#define CONVO_TX_SLAB_BLOCKS (CONVO_TX_QUEUE_BLOCKS + 2U)
+/* Fill the runway before START so the first seconds have slack too. */
+#define CONVO_TX_PRIME_BLOCKS 6U
+/*
+ * Opus decode is the heaviest main-thread job (~3-6 ms per 60 ms packet).
+ * Steady state needs one packet per ~3 blocks, so 2 per iteration is 6x
+ * headroom for catch-up while bounding worst-case loop time.
+ */
+#define CONVO_MAX_DECODES_PER_BLOCK 1U
 /* 16 kHz s16 jitter ring: 512 ms of agent speech. Barge-in flushes it, so
  * depth buys LTE-jitter absorption, not conversational latency. */
 #define DL_JITTER_BYTES 16384U
@@ -233,11 +269,39 @@ BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
 /* Decoder state arena (18,404 B measured + margin) — concurrent with the
  * encoder in audio_workspace, so it cannot time-share that block. */
 static uint8_t opus_dec_arena[18432] __aligned(4);
+/*
+ * Downlink jitter ring — SPSC across threads: main decodes into it (owns
+ * head), the audio thread drains it into I2S (owns tail). Fill is derived
+ * from the two indices, never a shared counter.
+ */
 static int16_t dl_jitter[DL_JITTER_SAMPLES];
-static size_t dl_jitter_head;
-static size_t dl_jitter_tail;
-static size_t dl_jitter_count;
+static volatile size_t dl_jitter_head;
+static volatile size_t dl_jitter_tail;
 static int16_t dl_decode_buf[960]; /* one 60 ms wire packet at 16 kHz */
+
+/*
+ * ---- Audio thread ----
+ *
+ * i2s_nrfx kills the ENTIRE duplex transfer if the app misses a buffer
+ * deadline by one block (20.48 ms) — "No room in RX queue" / "Failed to
+ * allocate next RX buffer". Opus encode+decode on the same thread spiked
+ * to 91 ms, so no buffer depth could ever make that safe.
+ *
+ * This thread therefore does ONLY pointer shuffling: read an RX block,
+ * hand the pointer to main, keep the TX runway full. It never touches a
+ * codec, so its loop is microseconds. It runs at a cooperative priority so
+ * it always wins over main, and it blocks on i2s_read every iteration
+ * (never starving the system). When main falls behind, mic blocks are
+ * dropped — audio degrades, the transfer survives.
+ */
+#define AUDIO_THREAD_STACK_BYTES 1536
+#define AUDIO_THREAD_PRIORITY -2
+#define MIC_RAW_QUEUE_SLOTS 6U
+static K_THREAD_STACK_DEFINE(audio_thread_stack, AUDIO_THREAD_STACK_BYTES);
+static struct k_thread audio_thread_data;
+K_MSGQ_DEFINE(mic_raw_q, sizeof(void *), MIC_RAW_QUEUE_SLOTS, sizeof(void *));
+static const struct device *audio_i2s_dev;
+static atomic_t audio_thread_error;
 
 /*
  * ---- WS I/O thread ----
@@ -251,23 +315,34 @@ static int16_t dl_decode_buf[960]; /* one 60 ms wire packet at 16 kHz */
  */
 #define WS_IO_STACK_BYTES 2560
 #define WS_IO_PRIORITY 5
-#define DL_PIPE_BYTES 4096
 static K_THREAD_STACK_DEFINE(ws_io_stack, WS_IO_STACK_BYTES);
 static struct k_thread ws_io_thread_data;
 static K_MUTEX_DEFINE(ws_lock); /* serializes pendant_ws_* across threads */
-K_PIPE_DEFINE(dl_pipe, DL_PIPE_BYTES, 4);
 /*
- * Pipe occupancy, tracked by hand: the new k_pipe API has no free-space
- * query, and a partial write would tear the [len][frame] record framing.
- * Single writer (ws thread) checks this before writing both parts; single
- * reader (main) credits it back after consuming a whole record.
+ * Downlink frames cross threads as whole messages, never a byte stream: a
+ * message queue makes every get atomic, so a torn or mis-framed record is
+ * structurally impossible and no free-space bookkeeping is needed.
  */
-static atomic_t dl_pipe_used;
+struct dl_frame {
+	uint16_t length;
+	uint8_t data[WS_RX_BUF_BYTES];
+};
+#define DL_FRAME_SLOTS 6U
+K_MSGQ_DEFINE(dl_frames, sizeof(struct dl_frame), DL_FRAME_SLOTS, 4);
 static atomic_t convo_active;    /* audio loop live: pump/recv at full rate */
 static atomic_t convo_flush_req; /* relay said flush (barge-in) */
 static atomic_t convo_end_req;   /* relay said end / transport died */
-static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];    /* ws thread only */
-static uint8_t dl_frame_buf[WS_RX_BUF_BYTES]; /* main thread only */
+static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];  /* ws thread only */
+static struct dl_frame dl_tx_frame;         /* ws thread only */
+static struct dl_frame dl_rx_frame;         /* main thread only */
+/* Duplex diagnostics — printed at every conversation end. */
+static uint32_t convo_tx_blocks;
+static uint32_t convo_tx_starved;
+static uint32_t convo_rx_blocks;
+static uint32_t convo_decoded_packets;
+static uint32_t convo_max_loop_ms;
+static uint32_t convo_uplink_drops;
+static uint32_t convo_mic_drops;
 /*
  * One TX slab serves both worlds: duplex conversation blocks (2,560 B used
  * fully) and the legacy reply path's 1,024 B blocks (partial fill of the
@@ -275,7 +350,7 @@ static uint8_t dl_frame_buf[WS_RX_BUF_BYTES]; /* main thread only */
  */
 K_MEM_SLAB_DEFINE_STATIC(convo_tx_slab,
 			 CONVO_TX_BLOCK_FRAMES * sizeof(int32_t),
-			 I2S_BLOCK_COUNT, 4);
+			 CONVO_TX_SLAB_BLOCKS, 4);
 #define i2s_slab convo_tx_slab
 
 static const struct gpio_dt_spec led =
@@ -380,6 +455,16 @@ static int live_opus_packet_sink(const uint8_t *packet, size_t packet_bytes)
 	}
 	/* One byte of the ring stays unused so full != empty. */
 	if (2U + packet_bytes > OPUS_TX_FIFO_BYTES - 1U - live_fifo_fill()) {
+		if (atomic_get(&convo_active)) {
+			/*
+			 * A conversation outlives a radio stall: drop this
+			 * packet (Opus is loss-tolerant and the frame stays
+			 * length-prefixed) and keep talking, instead of
+			 * latching saturation and ending the call.
+			 */
+			++convo_uplink_drops;
+			return 0;
+		}
 		printk("Live TX FIFO saturated; ending utterance with what "
 		       "the link carried\n");
 		live_tx_saturated = true;
@@ -548,6 +633,24 @@ static void button_pressed(const struct device *port,
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 	k_sem_give(&button_press_sem);
+}
+
+/*
+ * Debug press hook: a debugger (J-Link) can write 1 here to simulate a
+ * button press without touching the hardware —
+ *   JLinkExe -device nRF9160_xxAA -if SWD -speed 4000 -autoconnect 1
+ *   w4 <&pendant_remote_press> 1
+ * Polled wherever the firmware waits on the button.
+ */
+volatile uint32_t pendant_remote_press;
+
+static bool take_remote_press(void)
+{
+	if (pendant_remote_press == 0U) {
+		return false;
+	}
+	pendant_remote_press = 0U;
+	return true;
 }
 
 static void clear_button_events(void)
@@ -2169,27 +2272,36 @@ static void show_error(void)
 
 /* ---- Full-duplex conversation ---- */
 
+static inline size_t dl_jitter_fill(void)
+{
+	return (dl_jitter_head - dl_jitter_tail + DL_JITTER_SAMPLES) %
+	       DL_JITTER_SAMPLES;
+}
+
 static void dl_jitter_reset(void)
 {
 	dl_jitter_head = 0U;
 	dl_jitter_tail = 0U;
-	dl_jitter_count = 0U;
 }
 
 static void dl_jitter_put(const int16_t *samples, size_t count)
 {
-	size_t free_samples = DL_JITTER_SAMPLES - dl_jitter_count;
+	/* One slot stays unused so full != empty. The receive gate makes
+	 * overflow unreachable in normal operation; a misbehaving relay
+	 * (dense DTX frames) must clip, not corrupt. */
+	size_t free_samples = DL_JITTER_SAMPLES - 1U - dl_jitter_fill();
+	size_t head = dl_jitter_head;
 
-	/* The receive gate makes overflow unreachable in normal operation;
-	 * a misbehaving relay (dense DTX frames) must clip, not corrupt. */
 	if (count > free_samples) {
 		count = free_samples;
 	}
 	for (size_t i = 0U; i < count; ++i) {
-		dl_jitter[dl_jitter_head] = samples[i];
-		dl_jitter_head = (dl_jitter_head + 1U) % DL_JITTER_SAMPLES;
+		dl_jitter[head] = samples[i];
+		head = (head + 1U) % DL_JITTER_SAMPLES;
 	}
-	dl_jitter_count += count;
+	/* Samples land before the consumer can see them. */
+	compiler_barrier();
+	dl_jitter_head = head;
 }
 
 /*
@@ -2214,20 +2326,20 @@ static void tx_resample_reset(void)
 static void convo_fill_tx_block(int32_t *words, bool *playing)
 {
 	for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES; ++frame) {
-		if (!*playing && dl_jitter_count >= DL_PREBUFFER_SAMPLES) {
+		if (!*playing && dl_jitter_fill() >= DL_PREBUFFER_SAMPLES) {
 			*playing = true;
 		}
-		if (*playing && !tx_have_next && dl_jitter_count > 0U) {
+		if (*playing && !tx_have_next && dl_jitter_fill() > 0U) {
 			tx_next_sample = dl_jitter[dl_jitter_tail];
 			dl_jitter_tail =
 				(dl_jitter_tail + 1U) % DL_JITTER_SAMPLES;
-			--dl_jitter_count;
 			tx_have_next = true;
 		}
 		if (!*playing || !tx_have_next) {
 			/* Starved: pause output and re-arm the prebuffer. */
-			if (*playing && dl_jitter_count == 0U) {
+			if (*playing && dl_jitter_fill() == 0U) {
 				*playing = false;
+				++convo_tx_starved;
 			}
 			words[frame] = 0;
 			continue;
@@ -2244,34 +2356,114 @@ static void convo_fill_tx_block(int32_t *words, bool *playing)
 			tx_phase -= TX_RESAMPLE_DEN;
 			tx_prev_sample = tx_next_sample;
 			tx_have_next = false;
-			if (dl_jitter_count > 0U) {
+			if (dl_jitter_fill() > 0U) {
 				tx_next_sample = dl_jitter[dl_jitter_tail];
 				dl_jitter_tail = (dl_jitter_tail + 1U) %
 						 DL_JITTER_SAMPLES;
-				--dl_jitter_count;
 				tx_have_next = true;
 			}
 		}
 	}
 }
 
-/* Queue one filled TX block; returns 0 or the i2s_write error. */
-static int convo_queue_tx_block(const struct device *i2s, bool *playing)
-{
-	void *block;
-	int error;
+/*
+ * Keep the TX runway as full as the slab allows. Called once per RX block,
+ * but deliberately NOT 1:1 — it writes as many blocks as the driver will
+ * accept right now, so the queue stays deep and a late iteration cannot
+ * starve the transfer. K_NO_WAIT everywhere: when the driver is saturated
+ * (the healthy steady state) there is simply nothing to do.
+ */
+static int convo_top_up_tx(const struct device *i2s, bool *playing);
 
-	error = k_mem_slab_alloc(&convo_tx_slab, &block, K_MSEC(200));
-	if (error != 0) {
-		return error;
+/*
+ * Audio thread: the ONLY code with an I2S deadline. Reads each RX block and
+ * hands the pointer to main (no copy), keeps the TX runway full, and
+ * services barge-in flushes. No codec, no socket, no allocation beyond the
+ * slabs — so it cannot miss the driver's one-block deadline no matter how
+ * long an Opus frame takes on main.
+ */
+static void audio_thread_fn(void *a, void *b, void *c)
+{
+	bool playing = false;
+
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (;;) {
+		void *block;
+		size_t size;
+		int error;
+
+		if (!atomic_get(&convo_active)) {
+			playing = false;
+			k_msleep(20);
+			continue;
+		}
+
+		error = i2s_read(audio_i2s_dev, &block, &size);
+		if (error != 0) {
+			if (atomic_get(&convo_active)) {
+				printk("Audio thread I2S read failed: %d\n",
+				       error);
+				atomic_set(&audio_thread_error, error);
+				atomic_set(&convo_end_req, 1);
+				atomic_set(&convo_active, 0);
+			}
+			continue;
+		}
+		++convo_rx_blocks;
+
+		/* Barge-in: the consumer owns the tail, so dropping the
+		 * backlog here is race-free against main's decode. */
+		if (atomic_cas(&convo_flush_req, 1, 0)) {
+			dl_jitter_tail = dl_jitter_head;
+			tx_resample_reset();
+			playing = false;
+		}
+
+		error = convo_top_up_tx(audio_i2s_dev, &playing);
+		if (error != 0) {
+			printk("Audio thread TX write failed: %d\n", error);
+			atomic_set(&audio_thread_error, error);
+			atomic_set(&convo_end_req, 1);
+			atomic_set(&convo_active, 0);
+		}
+
+		if (k_msgq_put(&mic_raw_q, &block, K_NO_WAIT) != 0) {
+			/* Main is behind (long encode): drop this mic block
+			 * rather than let the RX queue overflow and take the
+			 * whole duplex transfer down with it. */
+			k_mem_slab_free(&mic_rx_slab, block);
+			++convo_mic_drops;
+		}
 	}
-	convo_fill_tx_block((int32_t *)block, playing);
-	error = i2s_write(i2s, block,
-			  CONVO_TX_BLOCK_FRAMES * sizeof(int32_t));
-	if (error != 0) {
-		k_mem_slab_free(&convo_tx_slab, block);
+}
+
+static int convo_top_up_tx(const struct device *i2s, bool *playing)
+{
+	for (;;) {
+		void *block;
+		int error;
+
+		if (k_mem_slab_alloc(&convo_tx_slab, &block, K_NO_WAIT) != 0) {
+			/* Every block is with the driver: runway is full. */
+			return 0;
+		}
+		convo_fill_tx_block((int32_t *)block, playing);
+		error = i2s_write(i2s, block,
+				  CONVO_TX_BLOCK_FRAMES * sizeof(int32_t));
+		if (error != 0) {
+			k_mem_slab_free(&convo_tx_slab, block);
+			if (error == -EAGAIN || error == -ENOMSG) {
+				/* tx_queue full — runway is full, not an
+				 * error (i2s_write's own timeout path). */
+				return 0;
+			}
+			return error;
+		}
+		++convo_tx_blocks;
 	}
-	return error;
 }
 
 /*
@@ -2292,6 +2484,7 @@ static int convo_queue_preamble(const struct device *i2s)
 		if (error != 0) {
 			return error;
 		}
+		++convo_tx_blocks;
 		words = (int32_t *)block;
 		for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES;
 		     ++frame) {
@@ -2354,12 +2547,10 @@ static void ws_io_drain_downlink(void)
 	for (unsigned int budget = 0U; budget < 4U; ++budget) {
 		bool is_text = false;
 		int received;
-		uint8_t frame_header[2];
 
-		/* Backpressure: no pipe room for a max frame → stop reading
-		 * the socket; TCP flow control parks the rest at the relay. */
-		if (DL_PIPE_BYTES - (size_t)atomic_get(&dl_pipe_used) <
-		    sizeof(frame_header) + sizeof(ws_rx_buf)) {
+		/* Backpressure: no free slot → stop reading the socket and
+		 * let TCP flow control park the rest at the relay. */
+		if (k_msgq_num_free_get(&dl_frames) == 0U) {
 			return;
 		}
 		received = pendant_ws_recv(ws_rx_buf, sizeof(ws_rx_buf),
@@ -2383,17 +2574,9 @@ static void ws_io_drain_downlink(void)
 			}
 			continue;
 		}
-		frame_header[0] = (uint8_t)((size_t)received >> 8);
-		frame_header[1] = (uint8_t)((size_t)received & 0xFFU);
-		/* Space was checked above and this is the only writer, so
-		 * both writes land in full. */
-		(void)k_pipe_write(&dl_pipe, frame_header,
-				   sizeof(frame_header), K_NO_WAIT);
-		(void)k_pipe_write(&dl_pipe, ws_rx_buf, (size_t)received,
-				   K_NO_WAIT);
-		atomic_add(&dl_pipe_used,
-			   (atomic_val_t)(sizeof(frame_header) +
-					  (size_t)received));
+		dl_tx_frame.length = (uint16_t)received;
+		memcpy(dl_tx_frame.data, ws_rx_buf, (size_t)received);
+		(void)k_msgq_put(&dl_frames, &dl_tx_frame, K_NO_WAIT);
 	}
 }
 
@@ -2446,45 +2629,25 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
  */
 static void convo_decode_downlink(void)
 {
-	for (;;) {
-		uint8_t frame_header[2];
-		size_t frame_bytes;
-		size_t got = 0U;
+	unsigned int decodes = 0U;
 
-		if (DL_JITTER_SAMPLES - dl_jitter_count <
+	while (decodes < CONVO_MAX_DECODES_PER_BLOCK) {
+		size_t frame_bytes;
+		size_t offset = 0U;
+
+		if (DL_JITTER_SAMPLES - 1U - dl_jitter_fill() <
 		    DL_WORST_FRAME_SAMPLES) {
 			return;
 		}
-		if (k_pipe_read(&dl_pipe, frame_header, sizeof(frame_header),
-				K_NO_WAIT) < (int)sizeof(frame_header)) {
+		if (k_msgq_get(&dl_frames, &dl_rx_frame, K_NO_WAIT) != 0) {
 			return;
 		}
-		frame_bytes = ((size_t)frame_header[0] << 8) | frame_header[1];
-		if (frame_bytes > sizeof(dl_frame_buf)) {
-			printk("Downlink pipe record oversized\n");
-			atomic_set(&convo_end_req, 1);
-			return;
-		}
-		while (got < frame_bytes) {
-			int r = k_pipe_read(&dl_pipe, dl_frame_buf + got,
-					    frame_bytes - got, K_MSEC(20));
-
-			if (r <= 0) {
-				printk("Downlink pipe torn frame\n");
-				atomic_set(&convo_end_req, 1);
-				return;
-			}
-			got += (size_t)r;
-		}
-		atomic_sub(&dl_pipe_used,
-			   (atomic_val_t)(sizeof(frame_header) + frame_bytes));
-
-		size_t offset = 0U;
+		frame_bytes = dl_rx_frame.length;
 
 		while (offset + 2U <= frame_bytes) {
 			size_t packet_bytes =
-				((size_t)dl_frame_buf[offset] << 8) |
-				dl_frame_buf[offset + 1U];
+				((size_t)dl_rx_frame.data[offset] << 8) |
+				dl_rx_frame.data[offset + 1U];
 
 			offset += 2U;
 			if (packet_bytes == 0U ||
@@ -2495,14 +2658,16 @@ static void convo_decode_downlink(void)
 				return;
 			}
 			int decoded = pendant_opus_reply_decode_packet(
-				dl_frame_buf + offset, packet_bytes,
+				dl_rx_frame.data + offset, packet_bytes,
 				dl_decode_buf, ARRAY_SIZE(dl_decode_buf));
 
 			if (decoded > 0) {
 				dl_jitter_put(dl_decode_buf,
 					      (size_t)decoded);
+				++convo_decoded_packets;
 			}
 			offset += packet_bytes;
+			++decodes;
 		}
 	}
 }
@@ -2549,10 +2714,16 @@ static int run_conversation(const struct device *i2s)
 	live_fifo_reset();
 	dl_jitter_reset();
 	tx_resample_reset();
-	k_pipe_reset(&dl_pipe);
-	atomic_set(&dl_pipe_used, 0);
+	k_msgq_purge(&dl_frames);
 	atomic_set(&convo_flush_req, 0);
 	atomic_set(&convo_end_req, 0);
+	convo_tx_blocks = 0U;
+	convo_tx_starved = 0U;
+	convo_rx_blocks = 0U;
+	convo_decoded_packets = 0U;
+	convo_max_loop_ms = 0U;
+	convo_uplink_drops = 0U;
+	convo_mic_drops = 0U;
 
 	k_mutex_lock(&ws_lock, K_FOREVER);
 	error = pendant_ws_connect();
@@ -2602,6 +2773,16 @@ static int run_conversation(const struct device *i2s)
 	}
 	tx_config = config;
 	tx_config.mem_slab = &convo_tx_slab;
+	/*
+	 * TX writes must NEVER block. i2s_write waits up to cfg.timeout for
+	 * a free tx_queue slot, which paces the loop to exactly one RX block
+	 * per block period — leaving no way to drain an RX backlog after a
+	 * stall, so the backlog grows until the RX queue overflows and the
+	 * driver errors the transfer (observed as -EIO at ~15 s). With 0 the
+	 * top-up simply stops when the runway is full and the loop is free
+	 * to catch up. RX keeps its own timeout for i2s_read.
+	 */
+	tx_config.timeout = 0;
 	error = i2s_configure(i2s, I2S_DIR_TX, &tx_config);
 	if (error != 0) {
 		goto teardown_clocks;
@@ -2625,34 +2806,34 @@ static int run_conversation(const struct device *i2s)
 	i2s_running = true;
 	started_at = k_uptime_get();
 	clear_button_events();
+	k_msgq_purge(&mic_raw_q);
+	atomic_set(&audio_thread_error, 0);
+	/* Hand the I2S deadlines to the audio thread from here on. */
+	audio_i2s_dev = i2s;
 	atomic_set(&convo_active, 1);
 
 	while (true) {
 		void *block;
-		size_t size;
+		int64_t loop_started;
 
-		/* Clock-locked pacing: one RX block in, one TX block out. */
-		error = i2s_read(i2s, &block, &size);
-		if (error != 0) {
-			printk("Conversation I2S read failed: %d\n", error);
-			result = error;
-			break;
+		/*
+		 * Codec-side loop. The audio thread owns every I2S deadline;
+		 * this one may take as long as an Opus frame needs without
+		 * endangering the transfer. A missed block here costs mic
+		 * audio (counted as mic_drops), never the conversation.
+		 */
+		if (k_msgq_get(&mic_raw_q, &block, K_MSEC(200)) != 0) {
+			if (atomic_get(&convo_end_req) ||
+			    !atomic_get(&convo_active)) {
+				break;
+			}
+			continue;
 		}
-		if (size > sizeof(raw_processing) ||
-		    (size % sizeof(int32_t)) != 0U) {
-			k_mem_slab_free(&mic_rx_slab, block);
-			result = -EMSGSIZE;
-			break;
-		}
-		memcpy(raw_processing, block, size);
+		loop_started = k_uptime_get();
+		memcpy(raw_processing, block, MIC_RX_BLOCK_SIZE);
 		k_mem_slab_free(&mic_rx_slab, block);
 
-		error = convo_queue_tx_block(i2s, &playing);
-		if (error != 0) {
-			printk("Conversation TX write failed: %d\n", error);
-			result = error;
-			break;
-		}
+		size_t size = MIC_RX_BLOCK_SIZE;
 
 		if (block_index < MIC_STARTUP_SKIP_BLOCKS) {
 			++block_index;
@@ -2715,15 +2896,10 @@ static int run_conversation(const struct device *i2s)
 			break;
 		}
 
-		/* The WS thread moves bytes; this loop only decodes. */
+		/* The WS thread moves bytes; this loop only decodes. The
+		 * audio thread owns playback state and barge-in flushes. */
 		convo_decode_downlink();
 
-		if (atomic_cas(&convo_flush_req, 1, 0)) {
-			/* Barge-in: the owner is talking over the agent. */
-			dl_jitter_reset();
-			tx_resample_reset();
-			playing = false;
-		}
 		if (atomic_get(&convo_end_req)) {
 			/* Relay 'end' (mutual silence) or transport close —
 			 * a normal conversation ending, not a failure. */
@@ -2732,8 +2908,8 @@ static int run_conversation(const struct device *i2s)
 			break;
 		}
 
-		/* Solid LED while the agent is audible, blink otherwise. */
-		if (playing) {
+		/* Solid LED while agent audio is buffered, blink otherwise. */
+		if (dl_jitter_fill() > 0U) {
 			gpio_pin_set_dt(&led, 1);
 			next_led_toggle = k_uptime_get() + 250;
 		} else if (k_uptime_get() >= next_led_toggle) {
@@ -2747,15 +2923,53 @@ static int run_conversation(const struct device *i2s)
 			       CONVO_MAX_SECONDS);
 			break;
 		}
+#if PENDANT_BOOT_CONVERSATION_TEST
+		if (k_uptime_get() - started_at >
+		    (int64_t)PENDANT_BOOT_CONVERSATION_SECONDS * 1000) {
+			printk("Self-test conversation window elapsed\n");
+			break;
+		}
+#endif
 		/* Bounce/release edges from the starting press for the first
 		 * second; after that a press ends the conversation. */
 		if (k_uptime_get() - started_at < 1000) {
 			clear_button_events();
-		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
+		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
+			   take_remote_press()) {
 			printk("Conversation ended by button\n");
 			break;
 		}
+
+		/* Loop time is the whole ballgame: exceed the TX runway and
+		 * the driver kills the duplex transfer. Track the worst. */
+		uint32_t loop_ms = (uint32_t)(k_uptime_get() - loop_started);
+
+		if (loop_ms > convo_max_loop_ms) {
+			convo_max_loop_ms = loop_ms;
+		}
 	}
+
+	/* Stop the audio thread before touching I2S or the slabs. */
+	atomic_set(&convo_active, 0);
+	k_msleep(30);
+	if (result == 0 && atomic_get(&audio_thread_error) != 0) {
+		result = (int)atomic_get(&audio_thread_error);
+	}
+	{
+		void *stale;
+
+		while (k_msgq_get(&mic_raw_q, &stale, K_NO_WAIT) == 0) {
+			k_mem_slab_free(&mic_rx_slab, stale);
+		}
+	}
+
+	printk("Conversation stats: rx_blocks=%u tx_blocks=%u tx_starved=%u "
+	       "decoded_packets=%u max_loop_ms=%u fifo_left=%u "
+	       "uplink_drops=%u mic_drops=%u\n",
+	       convo_rx_blocks, convo_tx_blocks, convo_tx_starved,
+	       convo_decoded_packets, convo_max_loop_ms,
+	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
+	       convo_mic_drops);
 
 teardown_clocks:
 	if (i2s_running) {
@@ -2896,6 +3110,15 @@ int main(void)
 			NULL, NULL, NULL, WS_IO_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&ws_io_thread_data, "ws_io");
 
+	/* And the I2S deadlines live on a cooperative thread that does
+	 * nothing but move buffers — codecs can never delay it. */
+	audio_i2s_dev = i2s;
+	k_thread_create(&audio_thread_data, audio_thread_stack,
+			K_THREAD_STACK_SIZEOF(audio_thread_stack),
+			audio_thread_fn, NULL, NULL, NULL,
+			AUDIO_THREAD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&audio_thread_data, "audio");
+
 	if (CONFIG_PENDANT_BOOT_AGENT_JOB_ID[0] != '\0') {
 		printk("BOOT_AGENT_REPLY_TEST_BEGIN job=%s\n",
 		       CONFIG_PENDANT_BOOT_AGENT_JOB_ID);
@@ -2955,6 +3178,9 @@ int main(void)
 #if PENDANT_BOOT_AUDIO_CYCLE_TEST
 	bool boot_audio_cycle_test_pending = true;
 #endif
+#if PENDANT_BOOT_CONVERSATION_TEST
+	bool boot_conversation_test_pending = true;
+#endif
 
 	while (true) {
 		/*
@@ -2983,10 +3209,21 @@ int main(void)
 			k_sem_give(&button_press_sem);
 		}
 #endif
+#if PENDANT_BOOT_CONVERSATION_TEST
+		if (boot_conversation_test_pending) {
+			boot_conversation_test_pending = false;
+			printk("SELFTEST_CONVERSATION_BEGIN window=%u s\n",
+			       PENDANT_BOOT_CONVERSATION_SECONDS);
+			k_msleep(1500);
+			k_sem_give(&button_press_sem);
+		}
+#endif
 		/* Wait for a press. The WS I/O thread keeps the idle socket
 		 * alive (pings + stray drains); main only reconnects. */
-		while (k_sem_take(&button_press_sem,
-				  K_SECONDS(WS_IDLE_PING_SECONDS)) != 0) {
+		while (k_sem_take(&button_press_sem, K_MSEC(200)) != 0) {
+			if (take_remote_press()) {
+				break;
+			}
 			if (!pendant_ws_connected()) {
 				int ws_error;
 

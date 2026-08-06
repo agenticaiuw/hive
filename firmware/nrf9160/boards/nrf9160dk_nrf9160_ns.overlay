@@ -114,6 +114,14 @@
 	pinctrl-1 = <&i2s0_sleep_agent_audio>;
 	pinctrl-names = "default", "sleep";
 	clock-source = "PCLK32M";
+	/*
+	 * Priority 0, above NRF_DEFAULT_IRQ_PRIORITY (1). The modem's IPC
+	 * IRQ and RTC1 also sit at 1, so at the default the I2S ISR could
+	 * never preempt modem processing — and missing the I2S buffer
+	 * deadline by one block period kills the whole duplex transfer.
+	 * Not a zero-latency IRQ: the handler uses kernel objects.
+	 */
+	interrupts = <40 0>;
 };
 
 /* Keep the unused Arduino UART inactive. */
