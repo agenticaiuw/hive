@@ -165,17 +165,38 @@ any single member and must not reset.** Ants do not remember the trail; the
 trail remembers — though only a decision, never a fact, which is why the store
 had to be built rather than borrowed. See `collective-architecture.md`.
 
-## What the agents converged on, which nobody told them
+## What the agents proposed, and what that is not evidence of
 
 Everything above is top-down: my reading of CMS data, wiretap statute and two
 dead ends. The agents were given none of it. They were given an environment and
 asked what the owner should be able to have.
 
-**417 capability proposals across 9 agents.** The corpus is genuinely diverse —
-only 11 pairs anywhere near duplication, and the densest single idea has 8
-echoes — so what follows is convergence, not one agent repeating itself.
+**516 capability proposals across 9 agents.** I read two shapes in them and
+called it convergence. Then I measured it, and the measurement says no:
 
-Two shapes account for most of it.
+| grouping threshold | clusters | spanning ≥2 agents | proposals in cross-agent clusters |
+|---|---|---|---|
+| 0.40 | 510 | **0** | 0% |
+| 0.30 | 496 | **0** | 0% |
+| 0.22 | 379 | 23 | 17% |
+| 0.15 | 145 | 36 | 63% |
+
+**At any threshold that means "the same idea", not one cluster spans two
+agents.** Cross-agent overlap appears only at 0.22 and below, which is loose
+enough to be measuring shared vocabulary rather than shared ideas.
+
+What the corpus actually contains is *self*-repetition inside each agent —
+relay-realtime proposed "keep working after I stop talking" ten separate times —
+and divergence between agents. That is what a device-shaped partition predicts:
+each agent proposes about its own surface. It is also, per Wegner, the
+differentiation you want; it is simply not agreement.
+
+One honest qualification in the other direction: lexical similarity is a weak
+proxy for semantic agreement, and two agents could express one idea in
+non-overlapping words. So this refutes *measured* convergence, not the
+possibility of it. The two shapes below are **my** reading of the corpus, and
+they should be weighted as one reader's synthesis rather than as nine
+independent witnesses.
 
 **1. Work that continues after the owner leaves.** The single most-restated ask
 is *"keep working after I stop talking, then tell me what happened when it's
@@ -196,5 +217,11 @@ it must survive the owner's attention leaving — shape 1. And it is conducted
 through authenticated sessions where a wrong click is not retractable, so
 nothing irreversible can happen without a look — shape 2.
 
-The bottom-up and top-down arguments landing on the same two properties is the
-strongest evidence either of them has. Neither knew about the other.
+**Do not read that agreement as independent confirmation.** I wrote both the
+top-down argument and this reading of the corpus, so the two are not independent
+observers, and the clustering above found no measurable agreement between the
+agents themselves. What this section is worth: the shapes are a hypothesis with
+516 proposals' worth of illustration, which is more than nothing and much less
+than nine witnesses. The test that would actually settle it is whether an agent
+that has never seen this document proposes shape 2 unprompted when working on a
+surface where nothing irreversible is possible — and that has not been run.
