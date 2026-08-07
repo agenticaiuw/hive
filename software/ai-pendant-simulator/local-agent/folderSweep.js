@@ -268,7 +268,10 @@ function classifyFile(file, { now, staleDays, installerStaleDays, duplicateSet, 
   if (TEMPORARY_EXTENSIONS.has(file.extension) || TEMPORARY_NAMES.test(file.name)) {
     classes.push('temporary')
     reasons.push(`${file.extension || 'lock file'} is what an interrupted download leaves behind`)
-  } else if (file.bytes === 0) {
+  } else if (file.bytes === 0 && ageDays >= 1) {
+    /* A zero-byte file that is a day old is debris. One that is a minute old
+     * may be a file some other program is in the middle of writing, and the
+     * owner is using this machine right now. */
     classes.push('temporary')
     reasons.push('empty file — nothing ever finished writing to it')
   }
@@ -509,7 +512,8 @@ export function formatSweep(plan) {
   const lines = [
     `${plan.directory}`,
     `${plan.items.length} loose file${plan.items.length === 1 ? '' : 's'}. ` +
-      `${acting.length} would change, ${plan.counts.keep} stay put. Nothing has moved — plan ${plan.id}.`,
+      `${acting.length} would change, ${plan.counts.flag} reported without touching, ` +
+      `${plan.counts.keep} left alone. Nothing has moved — plan ${plan.id}.`,
   ]
 
   for (const kind of ['delete', 'archive', 'file']) {

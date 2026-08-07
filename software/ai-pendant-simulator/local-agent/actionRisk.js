@@ -74,6 +74,18 @@ const AUTO_SAFE_ACTIONS = new Set([
   // preview the owner has already been shown. The gate is the shape of the API,
   // not a prompt.
   'tidy_downloads_apply',
+  // Looking costs nothing and changes nothing: a folder survey, a plan preview,
+  // and a page read with citations are all pure description.
+  'sweep_folder_preview',
+  'preview_plan',
+  'browser_inspect',
+  // Same shape as tidy_downloads_apply: these replay a stored, already-shown
+  // plan by id and cannot invent one. Nothing is being withheld from the owner
+  // here — they can still call move_path, delete_path or browser_click directly
+  // and have them run immediately, exactly as before.
+  'sweep_folder_apply',
+  'sweep_folder_undo',
+  'browser_inspect_act',
 ])
 
 const CONFIRM_REASONS = new Map([

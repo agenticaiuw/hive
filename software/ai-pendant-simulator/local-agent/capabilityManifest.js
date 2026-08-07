@@ -108,6 +108,15 @@ const GROUP_NOTES = {
     what: 'Multi-source research runs and their rendered answers.',
     module: 'local-agent/research.js',
   },
+  mail: {
+    what:
+      'Inbox triage: four buckets, drafted replies, reviewable on disk. Composes and stores only — never sends.',
+    module: 'local-agent/mailTriage.js',
+  },
+  'meeting-followup': {
+    what: 'Post-meeting workspace: notes opened, draft summary, related unread mail.',
+    module: 'local-agent/meetingFollowup.js',
+  },
   watches: {
     what: 'Standing page watches and the reports they have raised.',
     module: 'local-agent/pageWatch.js',
@@ -123,6 +132,16 @@ const GROUP_NOTES = {
   routing: {
     what: 'Which planner tier handled which request, and what it cost.',
     module: 'local-agent/routingStats.js',
+  },
+  journal: {
+    what:
+      'Execution journal, derived on read: what ran, in what order, what it touched, which tier planned it, whether it can be undone. Observes only.',
+    module: 'local-agent/executionJournal.js',
+  },
+  observe: {
+    what:
+      'Host state a journal entry happened in: foreground app, running apps, whether synthesized input reaches the screen, browser sessions, path roots.',
+    module: 'local-agent/executionJournal.js',
   },
   dashboard: {
     what: 'Ops dashboard HTML. Issues a loopback session cookie.',

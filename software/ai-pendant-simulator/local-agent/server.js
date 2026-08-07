@@ -136,6 +136,11 @@ import {
 import { describeUndoability, undoJobResults } from './undo.js'
 import { receiptsForJob, undoVaultLocation } from './actionReceipts.js'
 import {
+  buildExecutionJournal,
+  journalEntry,
+  observeHost,
+} from './executionJournal.js'
+import {
   getMachineContext,
   refreshMachineContext,
   warmMachineContext,
@@ -182,6 +187,24 @@ import {
   undoTidy,
 } from './downloadsTidy.js'
 import {
+  applySweep,
+  formatSweep,
+  listSweeps,
+  planSweep,
+  surveyFolder,
+  sweepPlansLocation,
+  undoSweep,
+} from './folderSweep.js'
+import { foreseePlan, formatPlanPreview } from './planPreview.js'
+import {
+  actOnInspection,
+  formatInspection,
+  getInspection,
+  inspectPage,
+  inspectionsLocation,
+  listInspections,
+} from './browserInspect.js'
+import {
   endFocusSession,
   focusStatus,
   resumeFocusSessions,
@@ -189,6 +212,13 @@ import {
 } from './focusSession.js'
 import { buildDayPlan, formatBriefing } from './dayPlan.js'
 import { prepareForNextMeeting } from './meetingPrep.js'
+import { prepareMeetingFollowup } from './meetingFollowup.js'
+import {
+  listTriageRuns,
+  mailTriageLocation,
+  readTriageRun,
+  triageInbox,
+} from './mailTriage.js'
 import { triageNotifications } from './notificationTriage.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -343,7 +373,21 @@ app.post('/plan', async (request, response) => {
       result: plan,
       thinking: plan.thinking ?? null,
     })
-    response.json({ ...plan, jobId: tracked.jobId })
+    /*
+     * "Make every Mac plan two-phase by default: first return a concise preview
+     * with affected apps/files/URLs."
+     *
+     * Attached, not enforced. The plan is unchanged and /execute will still run
+     * it as-is without ever reading this field; `preview` is the affected
+     * apps/files/URLs and the undo story, computed from the same receipt logic
+     * that will describe the run afterwards, so the owner can see it before
+     * they say go. It carries `bulk: true` when the plan is the sort worth
+     * pausing on — advice for whatever is rendering it, never a condition.
+     */
+    const preview = Array.isArray(plan.actions) && plan.actions.length
+      ? foreseePlan(plan.actions, { title: command })
+      : null
+    response.json({ ...plan, preview, jobId: tracked.jobId })
   } catch (error) {
     const cancelled =
       error?.name === 'JobCancelledError' ||
@@ -1119,6 +1163,100 @@ app.get('/routing', (_request, response) => {
   response.json({ ok: true, routing: readRoutingStats() })
 })
 
+/*
+ * The execution journal: what ran, in what order, what it touched, how long it
+ * took, which tier planned it, and whether it can still be taken back.
+ *
+ * Every fact here already existed — in the job store, in the receipts, in
+ * undo.js, in routingStats — and was never joined, so answering "what did the
+ * agent do to my Mac, and can I take it back" meant reading four endpoints and
+ * matching them by eye. Derived on read, like /capabilities: nothing in the
+ * execution path writes to a journal, so there is no journal to fall behind.
+ *
+ * GET only, and inert by construction. It reports on work that has already
+ * happened; it cannot block, refuse, or delay anything.
+ *
+ *   /journal?limit=25&type=execute&status=failed&idempotencyKey=act_...
+ */
+app.get('/journal', (request, response) => {
+  const limit = Number.parseInt(String(request.query.limit ?? ''), 10)
+
+  response.json(
+    buildExecutionJournal({
+      jobs: readJobs(),
+      routing: readRoutingStats(),
+      limit: Number.isFinite(limit) && limit > 0 ? limit : 25,
+      type: String(request.query.type ?? '').trim() || null,
+      status: String(request.query.status ?? '').trim() || null,
+      idempotencyKey: String(request.query.idempotencyKey ?? '').trim() || null,
+      storePath: jobsLocation(),
+    }),
+  )
+})
+
+/* One job, every step, nothing trimmed for a list view. */
+app.get('/journal/:jobId', (request, response) => {
+  const jobs = readJobs()
+  const job = jobs.find((item) => item.jobId === String(request.params.jobId || ''))
+  if (!job) {
+    response.status(404).json({ ok: false, error: 'Job not found.' })
+    return
+  }
+
+  response.json({
+    ok: true,
+    readOnly: true,
+    entry: journalEntry(job, { jobs, routing: readRoutingStats() }),
+  })
+})
+
+/*
+ * The host as the agent currently sees it: foreground app, running apps,
+ * whether synthesized input actually reaches the screen, open browser sessions,
+ * and the configured path roots.
+ *
+ * This is the context a journal entry happened in. A ui_click receipt says
+ * "success" whenever the executor was told success — including when
+ * Accessibility is granted to the wrong bundle and the event went nowhere, and
+ * including when the frontmost app was not the one the plan assumed. Neither is
+ * visible in the journal alone.
+ *
+ * `permissions` is read with the same quiet call /capabilities uses, so reading
+ * this never raises a macOS permission dialog. That report answers "is the TCC
+ * checkbox on", which is not the same question as "do synthesized events
+ * actually post" — only posting one answers that. `?probeInput=1` posts one: a
+ * zero-delta mouse move at the cursor's own location, a genuine no-op. It is
+ * opt-in because a pollable GET should not spawn a helper binary every call.
+ */
+app.get('/observe', async (request, response) => {
+  let permissions
+  try {
+    const result = await ensurePermissions({
+      prompt: false,
+      openSettings: false,
+      preflightAutomation: false,
+      force: false,
+    })
+    permissions = result.after
+  } catch (error) {
+    permissions = { error: error.message }
+  }
+
+  const wantsProbe = ['1', 'true', 'yes'].includes(
+    String(request.query.probeInput ?? '').toLowerCase(),
+  )
+
+  response.json(
+    await observeHost({
+      permissions,
+      browserSessions: listBrowserSessions(),
+      inputProbe: wantsProbe
+        ? async () => (await import('./uiControl.js')).probeInput()
+        : null,
+    }),
+  )
+})
+
 app.get('/browser/status', (_request, response) => {
   response.json(getBrowserStatus())
 })
@@ -1434,6 +1572,133 @@ app.post('/tidy/:planId/undo', (request, response) => {
   }
 })
 
+/*
+ * Two-phase, for the small class of operations where the owner asked for it:
+ * bulk file moves, deletes, and the browser's inspect-before-act.
+ *
+ * Read this before adding to it. These routes are ADDITIVE. Nothing on this
+ * server started requiring a preview today. POST /execute still runs every
+ * action type the moment it arrives — move_path, delete_path, run_shell,
+ * browser_click, all of it, with no token, no approval, no expiry. The preview
+ * routes exist because the owner asked to be able to look at a bulk sweep
+ * before it happens, and the apply routes take an id because "apply what you
+ * showed me" only means something if the thing applied is the thing shown.
+ *
+ * If you are here to add a check that stops /execute until a preview has been
+ * read: that is the confirmation broker, and it has been rejected three times.
+ */
+
+/* Just look: what is in this folder and what kind of thing is each file. */
+app.get('/sweep/survey', (request, response) => {
+  try {
+    response.json({
+      ok: true,
+      survey: surveyFolder({
+        directory: request.query.directory || undefined,
+        staleDays: Number(request.query.staleDays) || undefined,
+      }),
+    })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/* What a sweep would do. Writes a plan; moves nothing. */
+app.post('/sweep/preview', (request, response) => {
+  try {
+    const plan = planSweep(request.body || {})
+    response.json({ ok: true, plan, preview: formatSweep(plan) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/sweep', (_request, response) => {
+  response.json({ ok: true, plans: listSweeps({}), storePath: sweepPlansLocation() })
+})
+
+app.get('/sweep/:planId', (request, response) => {
+  const plan = listSweeps({ limit: 50 }).find((item) => item.id === request.params.planId)
+  if (!plan) {
+    response.status(404).json({ ok: false, error: 'No such sweep plan.' })
+    return
+  }
+  response.json({ ok: true, plan })
+})
+
+/*
+ * Do exactly what the preview said. `only` names item ids for the owner who
+ * read the list and wants three of the twelve — a selection, not a permission.
+ */
+app.post('/sweep/:planId/apply', async (request, response) => {
+  try {
+    response.json(
+      await applySweep(request.params.planId, { only: request.body?.only ?? null }),
+    )
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.post('/sweep/:planId/undo', async (request, response) => {
+  try {
+    response.json(await undoSweep(request.params.planId, { runId: request.body?.runId ?? null }))
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/*
+ * A preview of any action list at all, for the caller that wants the affected
+ * apps/files/URLs before it commits. Pure description — POST /preview never
+ * runs anything, and never records anything /execute consults.
+ */
+app.post('/preview', (request, response) => {
+  const actions = Array.isArray(request.body?.actions) ? request.body.actions : []
+  const preview = foreseePlan(actions, { title: request.body?.command || '' })
+  response.json({ ok: true, preview, text: formatPlanPreview(preview) })
+})
+
+/* Browser phase one: read the page, cite what it says, propose one next step. */
+app.post('/browser/inspect', async (request, response) => {
+  try {
+    const inspection = await inspectPage(request.body || {})
+    response.json({ ok: true, inspection, text: formatInspection(inspection) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/browser/inspections', (_request, response) => {
+  response.json({
+    ok: true,
+    inspections: listInspections({}),
+    storePath: inspectionsLocation(),
+  })
+})
+
+app.get('/browser/inspections/:inspectionId', (request, response) => {
+  const inspection = getInspection(request.params.inspectionId)
+  if (!inspection) {
+    response.status(404).json({ ok: false, error: 'No such inspection.' })
+    return
+  }
+  response.json({ ok: true, inspection, text: formatInspection(inspection) })
+})
+
+/* Browser phase two: run the proposed step, on the element it described. */
+app.post('/browser/inspections/:inspectionId/act', async (request, response) => {
+  try {
+    response.json(
+      await actOnInspection(request.params.inspectionId, {
+        text: request.body?.text ?? null,
+      }),
+    )
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
 app.post('/focus', async (request, response) => {
   try {
     response.json({ ok: true, session: await startFocusSession(request.body || {}) })
@@ -1473,6 +1738,69 @@ app.get('/meeting-prep', async (request, response) => {
       await prepareForNextMeeting({
         withinHours: Number(request.query.withinHours) || 24,
         collect: request.query.collect !== 'false',
+      }),
+    )
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+/*
+ * Mail triage is a POST because it is work, not a lookup: it reads the mailbox,
+ * calls a model for the drafts and writes a folder. The GETs are for reading
+ * back a run the owner has already had composed — the review list is a durable
+ * artefact, not a response body that scrolls away.
+ *
+ * Nothing on this surface can send. See mailTriage.js: the sinks are asserted
+ * against briefing.js's non-transmitting list and the AppleScript is refused if
+ * it contains Mail's `send` verb.
+ */
+app.post('/mail/triage', async (request, response) => {
+  try {
+    const body = request.body || {}
+    response.json({
+      ok: true,
+      ...(await triageInbox({
+        sinceHours: Number(body.sinceHours) || undefined,
+        limit: Number(body.limit) || undefined,
+        maxDrafts: body.maxDrafts === undefined ? undefined : Number(body.maxDrafts),
+        /* Someone already in the owner's graph is someone whose mail is more
+         * likely to be a conversation than a broadcast. */
+        knownPeople: readContextGraph()
+          .entities.filter((entity) => entity.type === 'Person')
+          .map((entity) => entity.name),
+      })),
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/mail/triage', (request, response) => {
+  response.json({
+    ok: true,
+    runs: listTriageRuns({ limit: Number(request.query.limit) || 10 }),
+    ...mailTriageLocation(),
+  })
+})
+
+app.get('/mail/triage/:runId', (request, response) => {
+  const run = readTriageRun(request.params.runId)
+  if (!run) {
+    response.status(404).json({ ok: false, error: 'No such triage run.' })
+    return
+  }
+  response.json({ ok: true, run })
+})
+
+/* The other end of a meeting from /meeting-prep. See meetingFollowup.js. */
+app.post('/meeting-followup', async (request, response) => {
+  try {
+    const body = request.body || {}
+    response.json(
+      await prepareMeetingFollowup({
+        lookbackHours: Number(body.lookbackHours) || undefined,
+        open: body.open !== false,
       }),
     )
   } catch (error) {

@@ -380,6 +380,18 @@ export function formatBytes(bytes) {
   return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
 
+/*
+ * "Every Friday" with a scheduler that only knows "daily".
+ *
+ * routines.js has two schedule shapes and neither can express a day of the
+ * week, so the weekly sweep is a daily routine plus this. The gate lives with
+ * the work rather than with the clock, which also keeps it true when the sweep
+ * is run by hand.
+ */
+export function isWeeklySweepDay(when = new Date(), { day = 5 } = {}) {
+  return new Date(when).getDay() === day
+}
+
 export function tidyPlansLocation() {
   return storePath()
 }

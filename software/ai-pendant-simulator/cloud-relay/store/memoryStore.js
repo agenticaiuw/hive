@@ -16,6 +16,10 @@ const devices = new Map()
 const deviceCredentials = new Map()
 const states = new Map()
 const productStates = new Map()
+const routines = new Map()
+const routineRuns = new Map()
+const routineLeases = new Map()
+const announcements = new Map()
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 
 function pruneExpiredJobs() {
@@ -254,6 +258,84 @@ export function createMemoryStore() {
       }
 
       return null
+    },
+
+    /* ---- scheduled routines / announcements -----------------------------
+     * Same contract as d1Store so `npm run relay` locally exercises the real
+     * scheduler rather than a stub that only works in production.
+     * -------------------------------------------------------------------- */
+
+    async saveRoutine(routine) {
+      const record = { ...routine, updatedAt: new Date().toISOString() }
+      routines.set(record.routineId, record)
+      routineLeases.delete(record.routineId)
+      return record
+    },
+
+    async getRoutine(routineId) {
+      return routines.get(routineId) ?? null
+    },
+
+    async listRoutines({ limit = 50 } = {}) {
+      return [...routines.values()]
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200))
+    },
+
+    async deleteRoutine(routineId) {
+      routineLeases.delete(routineId)
+      return routines.delete(routineId)
+    },
+
+    async claimDueRoutines({ now = Date.now(), limit = 8, leaseMs = 300_000 } = {}) {
+      const due = [...routines.values()]
+        .filter(
+          (routine) =>
+            routine.enabled &&
+            Number.isFinite(routine.nextRunAt) &&
+            routine.nextRunAt <= now &&
+            (routineLeases.get(routine.routineId) ?? 0) <= now,
+        )
+        .sort((a, b) => a.nextRunAt - b.nextRunAt)
+        .slice(0, Math.min(Math.max(Number(limit) || 8, 1), 25))
+      for (const routine of due) {
+        routineLeases.set(routine.routineId, now + leaseMs)
+      }
+      return due.map((routine) => ({ ...routine }))
+    },
+
+    async recordRoutineRun(run) {
+      routineRuns.set(run.runId, { ...run })
+      return run
+    },
+
+    async listRoutineRuns({ routineId = null, status = null, limit = 25 } = {}) {
+      return [...routineRuns.values()]
+        .filter((run) => !routineId || run.routineId === routineId)
+        .filter((run) => !status || run.status === status)
+        .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
+        .slice(0, Math.min(Math.max(Number(limit) || 25, 1), 100))
+    },
+
+    async createAnnouncement(announcement) {
+      announcements.set(announcement.announcementId, { ...announcement })
+      return announcement
+    },
+
+    async listAnnouncements({ deviceId = null, state = null, limit = 20 } = {}) {
+      return [...announcements.values()]
+        .filter((entry) => !deviceId || entry.deviceId === deviceId)
+        .filter((entry) => !state || entry.state === state)
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+        .slice(0, Math.min(Math.max(Number(limit) || 20, 1), 100))
+    },
+
+    async updateAnnouncement(announcementId, patch) {
+      const current = announcements.get(announcementId)
+      if (!current) return null
+      const next = { ...current, ...patch }
+      announcements.set(announcementId, next)
+      return next
     },
   }
 }

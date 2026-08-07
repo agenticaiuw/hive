@@ -1333,6 +1333,19 @@ Some of what that implies, to think WITH rather than to answer:
 
 Be ambitious in proportion to that. A proposal that merely tidies what already exists is a wasted round.
 
+THE HARDWARE IS A PROTOTYPE, NOT THE PRODUCT. get_hardware_spec describes a Nordic development kit on a desk — one button, one LED, that exact chip, that exact RAM. None of it is fixed. It is what was available to build a first version, and the shipped product could be anything.
+
+So do not design around 211 kB of RAM or a single button unless the constraint is genuinely load-bearing for the idea. Say what the device should BE, then say what it would take. That includes:
+- A different SoC entirely, if the job needs more compute, more memory, a neural accelerator, better radio, or lower idle draw.
+- Battery: how long must it last on a charge for someone to actually wear it daily, and what does that buy or cost you? How does it charge?
+- Storage: how much, and what is worth keeping on the device rather than in the cloud.
+- Sensors and I/O: microphones and how many, speaker or bone conduction, haptics, IMU for motion and gesture, GPS, temperature, heart rate, a camera — and what each one would let you DO that you cannot do now. I2C and SPI are unused today.
+- Controls: how does a person actually operate something worn on their body without looking at it? A second button, a rotating bezel or scroll wheel to set a duration, a long-press, a squeeze, a tap gesture, voice alone.
+- Feedback: one LED is almost nothing. What should the owner be able to perceive without taking it off — colour, a small display, a vibration pattern, a tone?
+- Physical design: it is a PENDANT, worn visibly, so it is jewellery as much as electronics. Size, weight, what it is made of — 3D-printed polymer, machined aluminium, ceramic, something someone would actually wear. How it attaches, how it survives sweat and rain, whether the electronics are serviceable.
+
+Propose the device you would want to wear every day, and be specific about which capability each hardware choice unlocks. "Add an IMU" is weak; "an IMU lets the pendant know it was tapped twice through a coat, so the owner can capture a thought without speaking" is a proposal. Cost and manufacturability are real, so say when something is expensive — but do not pre-emptively design down to the dev kit.
+
 Design what you should be able to DO for them. Use get_hardware_spec before proposing anything that touches the physical devices, so your proposals are grounded in the real chip, its real memory, and its real I/O rather than in what a device like this usually has.
 
 Think broadly and concretely. Some shapes worth considering, not a list to work through:
@@ -1419,6 +1432,14 @@ async function executeTool(call, { state, transcript, asked }) {
      */
     result = {
       ...spec,
+      /*
+       * Without this an agent reads the dev kit as the product and designs
+       * down to it — one button, 211 kB, that exact SoC. It is a prototype on
+       * a desk; the shipped device is unbuilt and its hardware is a live
+       * question, not a constraint.
+       */
+      status:
+        'PROTOTYPE. This is a Nordic development kit, not the product. Every choice here — the SoC, the RAM, the single button, the single LED, the enclosure — is provisional and can change. Design the device the owner should wear, then say what it would take to build it.',
       you_are_here:
         AGENT_ID === 'relay-realtime'
           ? 'You run on a Cloudflare Worker. The pendant and ESP32 below are REMOTE devices you talk to over the network; you are not running on them.'

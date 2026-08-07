@@ -336,6 +336,23 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       kind: 'one of: morning, workday, wrapup, mail, schedule',
     },
   },
+  triage_inbox: {
+    description:
+      "Classify the owner's unread mail into urgent / reply soon / reference / noise, draft replies for the first two categories, and leave a reviewable list plus the draft files on the Mac. Use for 'triage my inbox', 'turn my unread mail into a priority list', 'classify my unread mail', 'draft replies for the top three'. It NEVER sends: the drafts are files the owner sends themselves. Do not add a send_email action alongside it.",
+    params: {
+      sinceHours: 'optional lookback in hours, default 72',
+      maxDrafts:
+        'optional cap on drafted replies; pass 3 when the owner said "the top three"',
+    },
+  },
+  meeting_followup: {
+    description:
+      "After a meeting ends: open the meeting notes, write a DRAFT summary file with the attendees and the action items quoted out of those notes, and list the unread mail that belongs to that meeting. Use for 'after my meeting', 'meeting follow-up', 'write up that meeting'. For work BEFORE a meeting starts use prepare_for_meeting instead. It never sends the summary to anyone.",
+    params: {
+      lookbackHours: 'optional, how far back to look for the meeting, default 6',
+      open: 'optional false to write the workspace without bringing files forward',
+    },
+  },
   run_project: {
     description: 'Start a long-running command in a project folder.',
     params: { path: 'absolute path', command: 'optional shell command' },

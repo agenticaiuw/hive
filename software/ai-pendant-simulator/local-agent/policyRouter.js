@@ -2,6 +2,8 @@ import fs from 'node:fs'
 
 import { matchBriefingCommand } from './briefing.js'
 import { classifyIntent } from './intentRouter.js'
+import { matchMailTriageCommand } from './mailTriage.js'
+import { matchMeetingFollowupCommand } from './meetingFollowup.js'
 import { findClosestInstalledApp, getMachineContext } from './machineContext.js'
 import { resolveUserPath } from './security.js'
 
@@ -276,6 +278,26 @@ const DETERMINISTIC_MATCHERS = [
     test: (text) => matchBriefingCommand(text),
     build: (kind) =>
       action('compose_briefing', `Compose the ${kind} brief`, { kind }),
+  },
+  {
+    /*
+     * "Triage my inbox" is a standing phrase with one meaning, and the module
+     * behind it cannot send — so there is no slot here a wrong guess could land
+     * in either. The matcher carries the draft cap out of the phrasing because
+     * "the top three" is the owner naming a number, not a synonym.
+     */
+    intent: 'triage_inbox',
+    readOnly: false,
+    test: (text) => matchMailTriageCommand(text),
+    build: (options) =>
+      action('triage_inbox', 'Triage the inbox and draft replies', options),
+  },
+  {
+    intent: 'meeting_followup',
+    readOnly: false,
+    test: (text) => matchMeetingFollowupCommand(text),
+    build: (options) =>
+      action('meeting_followup', 'Open the meeting follow-up workspace', options),
   },
   {
     intent: 'open_app',

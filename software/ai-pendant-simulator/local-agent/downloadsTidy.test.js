@@ -10,6 +10,7 @@ import {
   formatPreview,
   getPlan,
   groupFor,
+  isWeeklySweepDay,
   planTidy,
   undoTidy,
 } from './downloadsTidy.js'
@@ -169,4 +170,10 @@ test('byte sizes read like sizes', () => {
   assert.equal(formatBytes(0), '0 B')
   assert.equal(formatBytes(2048), '2.0 KB')
   assert.equal(formatBytes(5 * 1024 * 1024), '5.0 MB')
+})
+
+test('the weekly sweep only runs on Friday, because the scheduler cannot say so', () => {
+  assert.equal(isWeeklySweepDay(new Date('2026-08-07T17:00:00')), true, '2026-08-07 is a Friday')
+  assert.equal(isWeeklySweepDay(new Date('2026-08-10T17:00:00')), false, 'Monday')
+  assert.equal(isWeeklySweepDay(new Date('2026-08-08T17:00:00')), false, 'Saturday')
 })

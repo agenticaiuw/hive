@@ -2171,6 +2171,172 @@ app.post('/v1/ops/audio-retention/sweep', async (request, response) => {
   })
 })
 
+/* ---- scheduled routines --------------------------------------------------
+ * The relay owns the clock now (cloud-relay/routines.js explains why). These
+ * routes are how a routine gets declared, inspected, and — because Cloudflare
+ * offers no way to fire a deployed Cron Trigger by hand — kicked manually.
+ * -------------------------------------------------------------------------- */
+
+app.get('/v1/routines', async (_request, response) => {
+  const store = await getStore()
+  const [routines, runs, scheduler] = await Promise.all([
+    store.listRoutines({ limit: 100 }),
+    store.listRoutineRuns({ limit: 25 }),
+    store.getState(SCHEDULER_STATE_KEY),
+  ])
+
+  response.json({
+    ok: true,
+    routines,
+    recentRuns: runs,
+    /* Proof the Cron Trigger is alive. Without this the only way to notice a
+     * dead schedule is to miss a briefing. */
+    scheduler: scheduler?.data ?? null,
+    schedulerUpdatedAt: scheduler?.updatedAt ?? null,
+    observedAt: new Date().toISOString(),
+  })
+})
+
+app.post('/v1/routines', async (request, response) => {
+  const store = await getStore()
+  try {
+    const routine = createRoutine({
+      name: request.body?.name,
+      command: request.body?.command,
+      schedule: request.body?.schedule,
+      venue: request.body?.venue,
+      sources: request.body?.sources,
+      deviceId: request.body?.deviceId,
+      announce: request.body?.announce !== false,
+      enabled: request.body?.enabled !== false,
+    })
+    await store.saveRoutine(routine)
+    response.status(201).json({ ok: true, routine })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: String(error?.message || error) })
+  }
+})
+
+app.patch('/v1/routines/:routineId', async (request, response) => {
+  const store = await getStore()
+  const current = await store.getRoutine(String(request.params.routineId || ''))
+  if (!current) {
+    response.status(404).json({ ok: false, error: 'Routine not found.' })
+    return
+  }
+  try {
+    const routine = await store.saveRoutine(
+      updateRoutineRecord(current, request.body ?? {}),
+    )
+    response.json({ ok: true, routine })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: String(error?.message || error) })
+  }
+})
+
+app.delete('/v1/routines/:routineId', async (request, response) => {
+  const store = await getStore()
+  const removed = await store.deleteRoutine(String(request.params.routineId || ''))
+  response.status(removed ? 200 : 404).json({ ok: removed })
+})
+
+/*
+ * Run one now, without waiting for its schedule. Sets nextRunAt to the past
+ * and ticks: the routine then travels the exact code path the cron uses, so
+ * "run now" can never succeed where the real schedule would fail.
+ */
+app.post('/v1/routines/:routineId/run', async (request, response) => {
+  const store = await getStore()
+  const routineId = String(request.params.routineId || '')
+  const current = await store.getRoutine(routineId)
+  if (!current) {
+    response.status(404).json({ ok: false, error: 'Routine not found.' })
+    return
+  }
+  await store.saveRoutine({
+    ...current,
+    enabled: true,
+    nextRunAt: Date.now() - 1,
+    dueSince: Date.now() - 1,
+  })
+  const { runScheduledTick } = await import('./scheduler.js')
+  const result = await runScheduledTick({ trigger: 'manual', limit: 1 })
+  response.json({
+    ok: true,
+    run: result.runs.find((run) => run.routineId === routineId) ?? null,
+    tick: result,
+  })
+})
+
+/*
+ * Cloudflare has no "fire this cron now" button or wrangler command, so this
+ * is how a deployed schedule gets exercised on demand — same function the
+ * scheduled() handler calls, only the trigger label differs.
+ */
+app.post('/v1/routines/tick', async (_request, response) => {
+  const { runScheduledTick } = await import('./scheduler.js')
+  response.json({ ok: true, ...(await runScheduledTick({ trigger: 'manual' })) })
+})
+
+/* ---- outbound announcements --------------------------------------------- */
+
+app.get('/v1/announcements', async (request, response) => {
+  const store = await getStore()
+  const announcements = await store.listAnnouncements({
+    deviceId: String(request.query.deviceId || '').trim() || null,
+    state: String(request.query.state || '').trim() || null,
+    limit: clampNumber(request.query.limit, 20, 1, 100),
+  })
+  response.json({
+    ok: true,
+    announcements,
+    pending: selectDeliverable(announcements, { limit: 5 }),
+    observedAt: new Date().toISOString(),
+  })
+})
+
+/*
+ * Anything can queue something for the owner's ear — a Mac routine that
+ * finished after the lid closed, a long research job, the dashboard. This is
+ * the only write path into the outbound queue that is not the scheduler.
+ */
+app.post('/v1/announcements', async (request, response) => {
+  const store = await getStore()
+  try {
+    const announcement = createAnnouncement({
+      deviceId: request.body?.deviceId,
+      title: request.body?.title,
+      speech: request.body?.speech ?? request.body?.text,
+      priority: request.body?.priority,
+      ...(Number(request.body?.ttlMs) > 0
+        ? { ttlMs: Number(request.body.ttlMs) }
+        : {}),
+    })
+    await store.createAnnouncement(announcement)
+    response.status(201).json({ ok: true, announcement })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: String(error?.message || error) })
+  }
+})
+
+app.post('/v1/announcements/:announcementId/ack', async (request, response) => {
+  const store = await getStore()
+  const state = request.body?.state === 'dismissed' ? 'dismissed' : 'delivered'
+  const announcement = await store.updateAnnouncement(
+    String(request.params.announcementId || ''),
+    {
+      state,
+      deliveredAt: new Date().toISOString(),
+      deliveryPath: String(request.body?.deliveryPath || 'manual').slice(0, 40),
+    },
+  )
+  if (!announcement) {
+    response.status(404).json({ ok: false, error: 'Announcement not found.' })
+    return
+  }
+  response.json({ ok: true, announcement })
+})
+
 app.post('/v1/pendant/jobs/:jobId/events', async (request, response) => {
   const jobId = String(request.params.jobId || '').trim()
   const stage = String(request.body?.stage || '').trim().toLowerCase()
@@ -2901,6 +3067,16 @@ function requiredScopesForRequest(request) {
     return ['mac:jobs:read']
   }
   if (path.startsWith('/v1/ops/')) return ['admin']
+  /*
+   * Scheduling is owner-level configuration: a routine can ask the Mac to do
+   * anything a spoken command can, so declaring one is not something a paired
+   * pendant should be able to do on its own. The owner's RELAY_API_KEY is an
+   * admin principal and holds every scope, so this gates nothing the owner
+   * does — it only keeps a stolen device token out of the schedule.
+   */
+  if (path.startsWith('/v1/routines') || path.startsWith('/v1/announcements')) {
+    return ['admin']
+  }
   if (
     method === 'POST' &&
     /^\/v1\/pendant\/jobs\/[^/]+\/events$/.test(path)

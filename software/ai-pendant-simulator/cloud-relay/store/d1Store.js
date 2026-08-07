@@ -1,3 +1,5 @@
+import crypto from 'node:crypto'
+
 import { JOB_TTL_MS } from '../config.js'
 import {
   normalizeProductSync,
@@ -780,6 +782,221 @@ export function createD1Store(db) {
       }
 
       return null
+    },
+
+    /* ---- scheduled routines (cloud-relay/routines.js) ------------------ *
+     * Deliberately NOT relay_jobs rows. That table is a 24 h work queue
+     * swept by JOB_TTL_MS and drained by claimNextJob(), so a routine parked
+     * there would be handed to the Mac bridge as work and then deleted a day
+     * later. A routine is durable configuration, not a job.
+     * ------------------------------------------------------------------- */
+
+    async saveRoutine(routine) {
+      const record = { ...routine, updatedAt: new Date().toISOString() }
+      await db
+        .prepare(
+          `INSERT INTO relay_routines
+             (routine_id, enabled, next_run_at, lease_owner, lease_until,
+              created_at, updated_at, data)
+           VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6)
+           ON CONFLICT(routine_id) DO UPDATE SET
+             enabled = excluded.enabled,
+             next_run_at = excluded.next_run_at,
+             lease_owner = NULL,
+             lease_until = NULL,
+             updated_at = excluded.updated_at,
+             data = excluded.data`,
+        )
+        .bind(
+          record.routineId,
+          record.enabled ? 1 : 0,
+          Number.isFinite(record.nextRunAt) ? record.nextRunAt : null,
+          record.createdAt,
+          record.updatedAt,
+          JSON.stringify(record),
+        )
+        .run()
+      return record
+    },
+
+    async getRoutine(routineId) {
+      const row = await db
+        .prepare('SELECT data FROM relay_routines WHERE routine_id = ?1')
+        .bind(routineId)
+        .first()
+      return parseRecord(row)
+    },
+
+    async listRoutines({ limit = 50 } = {}) {
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_routines
+           ORDER BY created_at DESC LIMIT ?1`,
+        )
+        .bind(Math.min(Math.max(Number(limit) || 50, 1), 200))
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    async deleteRoutine(routineId) {
+      const result = await db
+        .prepare('DELETE FROM relay_routines WHERE routine_id = ?1')
+        .bind(routineId)
+        .run()
+      return Number(result.meta?.changes || 0) > 0
+    },
+
+    /*
+     * Lease-then-read, not read-then-lease: the UPDATE is the claim, and it
+     * stamps a token unique to this tick. Two overlapping ticks (a cron and
+     * a manual POST /v1/routines/tick, say) cannot both take the same
+     * routine, because the second UPDATE's WHERE clause no longer matches.
+     */
+    async claimDueRoutines({ now = Date.now(), limit = 8, leaseMs = 300_000 } = {}) {
+      const leaseOwner = `tick_${crypto.randomUUID()}`
+      const leaseUntil = now + leaseMs
+      await db
+        .prepare(
+          `UPDATE relay_routines
+              SET lease_owner = ?1, lease_until = ?2
+            WHERE routine_id IN (
+              SELECT routine_id FROM relay_routines
+               WHERE enabled = 1
+                 AND next_run_at IS NOT NULL
+                 AND next_run_at <= ?3
+                 AND (lease_until IS NULL OR lease_until <= ?3)
+               ORDER BY next_run_at ASC
+               LIMIT ?4
+            )`,
+        )
+        .bind(
+          leaseOwner,
+          leaseUntil,
+          now,
+          Math.min(Math.max(Number(limit) || 8, 1), 25),
+        )
+        .run()
+
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_routines
+            WHERE lease_owner = ?1 ORDER BY next_run_at ASC`,
+        )
+        .bind(leaseOwner)
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    async recordRoutineRun(run) {
+      await db
+        .prepare(
+          `INSERT INTO relay_routine_runs
+             (run_id, routine_id, status, started_at, data)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(run_id) DO UPDATE SET
+             status = excluded.status,
+             data = excluded.data`,
+        )
+        .bind(
+          run.runId,
+          run.routineId,
+          run.status,
+          run.startedAt,
+          JSON.stringify(run),
+        )
+        .run()
+      return run
+    },
+
+    async listRoutineRuns({ routineId = null, status = null, limit = 25 } = {}) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 100)
+      const clauses = []
+      const bindings = []
+      if (routineId) {
+        bindings.push(routineId)
+        clauses.push(`routine_id = ?${bindings.length}`)
+      }
+      if (status) {
+        bindings.push(status)
+        clauses.push(`status = ?${bindings.length}`)
+      }
+      bindings.push(safeLimit)
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_routine_runs ${where}
+            ORDER BY started_at DESC LIMIT ?${bindings.length}`,
+        )
+        .bind(...bindings)
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    /* ---- outbound announcements (cloud-relay/announce.js) -------------- */
+
+    async createAnnouncement(announcement) {
+      await db
+        .prepare(
+          `INSERT INTO relay_announcements
+             (announcement_id, device_id, state, created_at, expires_at, data)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        )
+        .bind(
+          announcement.announcementId,
+          announcement.deviceId,
+          announcement.state,
+          announcement.createdAt,
+          announcement.expiresAt,
+          JSON.stringify(announcement),
+        )
+        .run()
+      return announcement
+    },
+
+    async listAnnouncements({ deviceId = null, state = null, limit = 20 } = {}) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100)
+      const clauses = []
+      const bindings = []
+      if (deviceId) {
+        bindings.push(deviceId)
+        clauses.push(`device_id = ?${bindings.length}`)
+      }
+      if (state) {
+        bindings.push(state)
+        clauses.push(`state = ?${bindings.length}`)
+      }
+      bindings.push(safeLimit)
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_announcements ${where}
+            ORDER BY created_at ASC LIMIT ?${bindings.length}`,
+        )
+        .bind(...bindings)
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    async updateAnnouncement(announcementId, patch) {
+      const current = parseRecord(
+        await db
+          .prepare(
+            'SELECT data FROM relay_announcements WHERE announcement_id = ?1',
+          )
+          .bind(announcementId)
+          .first(),
+      )
+      if (!current) return null
+      const next = { ...current, ...patch }
+      await db
+        .prepare(
+          `UPDATE relay_announcements
+              SET state = ?2, data = ?3
+            WHERE announcement_id = ?1`,
+        )
+        .bind(announcementId, next.state, JSON.stringify(next))
+        .run()
+      return next
     },
   }
 }

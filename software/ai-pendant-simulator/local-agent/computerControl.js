@@ -262,6 +262,14 @@ export async function executeComputerAction(action) {
       return tidyPreviewAction(action)
     case 'tidy_downloads_apply':
       return tidyApplyAction(action)
+    case 'sweep_folder_preview':
+      return sweepPreviewAction(action)
+    case 'sweep_folder_apply':
+      return sweepApplyAction(action)
+    case 'sweep_folder_undo':
+      return sweepUndoAction(action)
+    case 'preview_plan':
+      return previewPlanAction(action)
     case 'start_focus_session':
       return startFocusAction(action)
     case 'end_focus_session':
@@ -270,6 +278,10 @@ export async function executeComputerAction(action) {
       return dayPlanAction(action)
     case 'prepare_for_meeting':
       return meetingPrepAction(action)
+    case 'meeting_followup':
+      return meetingFollowupAction(action)
+    case 'triage_inbox':
+      return mailTriageAction(action)
     case 'triage_notifications':
       return triageAction(action)
     case 'compose_briefing':
@@ -309,6 +321,10 @@ export async function executeComputerAction(action) {
       return listBrowserTabSessions(action)
     case 'browser_close_session':
       return closeBrowserTabSession(action)
+    case 'browser_inspect':
+      return browserInspectAction(action)
+    case 'browser_inspect_act':
+      return browserInspectActAction(action)
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
   }
@@ -377,6 +393,75 @@ async function tidyApplyAction(action) {
   return success(action, result.spoken, result)
 }
 
+/*
+ * Preview / apply / inspect: the two-phase family.
+ *
+ * The preview actions are ordinary actions. They run the moment they are asked,
+ * they return a description, and they change nothing. The apply actions are
+ * also ordinary actions — they take a plan id because that is how "do what you
+ * showed me" is expressed, not because anything is being withheld. Every other
+ * action type in this file still executes immediately and none of them gained a
+ * precondition today.
+ */
+async function sweepPreviewAction(action) {
+  const { formatSweep, planSweep } = await import('./folderSweep.js')
+  const plan = planSweep({
+    directory: action.params?.directory || action.params?.path || undefined,
+    staleDays: Number(action.params?.staleDays) || undefined,
+    installerStaleDays: Number(action.params?.installerStaleDays) || undefined,
+  })
+  /* The preview IS the result: nothing has moved and nothing is pending. */
+  return success(action, formatSweep(plan), { plan })
+}
+
+async function sweepApplyAction(action) {
+  const { applySweep } = await import('./folderSweep.js')
+  const planId = String(action.params?.planId || action.params?.id || '')
+  if (!planId) throw new Error('sweep_folder_apply needs the planId from a preview.')
+  const only = action.params?.only ?? action.params?.items ?? null
+  const result = await applySweep(planId, { only })
+  return success(action, result.spoken, result)
+}
+
+async function sweepUndoAction(action) {
+  const { undoSweep } = await import('./folderSweep.js')
+  const planId = String(action.params?.planId || action.params?.id || '')
+  if (!planId) throw new Error('sweep_folder_undo needs the planId of an applied sweep.')
+  const result = await undoSweep(planId, { runId: action.params?.runId || null })
+  return success(action, result.summary, result)
+}
+
+async function previewPlanAction(action) {
+  const { foreseePlan, formatPlanPreview } = await import('./planPreview.js')
+  const actions = Array.isArray(action.params?.actions) ? action.params.actions : []
+  const preview = foreseePlan(actions, { title: action.params?.title || action.label || '' })
+  return success(action, formatPlanPreview(preview), { preview })
+}
+
+async function browserInspectAction(action) {
+  const { formatInspection, inspectPage } = await import('./browserInspect.js')
+  const inspection = await inspectPage({
+    url: action.params?.url,
+    goal: action.params?.goal || action.params?.question || action.label || '',
+    look: action.params?.look ?? [],
+    maxChars: Number(action.params?.maxChars) || undefined,
+    reload: action.params?.reload !== false,
+  })
+  return success(action, formatInspection(inspection), { inspection })
+}
+
+async function browserInspectActAction(action) {
+  const { actOnInspection } = await import('./browserInspect.js')
+  const inspectionId = String(action.params?.inspectionId || action.params?.id || '')
+  if (!inspectionId) {
+    throw new Error('browser_inspect_act needs the inspectionId from an inspect.')
+  }
+  const result = await actOnInspection(inspectionId, {
+    text: action.params?.text ?? null,
+  })
+  return success(action, result.spoken, result)
+}
+
 async function startFocusAction(action) {
   const { startFocusSession } = await import('./focusSession.js')
   const session = await startFocusSession({
@@ -406,6 +491,43 @@ async function meetingPrepAction(action) {
     withinHours: Number(action.params?.withinHours) || 24,
   })
   return success(action, result.spoken, result)
+}
+
+async function meetingFollowupAction(action) {
+  const { prepareMeetingFollowup } = await import('./meetingFollowup.js')
+  const result = await prepareMeetingFollowup({
+    lookbackHours: Number(action.params?.lookbackHours) || undefined,
+    open: action.params?.open !== false,
+  })
+  return success(action, result.spoken, result)
+}
+
+/*
+ * The full run is deliberately not returned to the caller. Every action result
+ * is written to pendant-jobs.json, and a triage run carries the sender, subject
+ * and drafted reply for every unread message — the review list belongs in the
+ * owner's folder, not in a job log that other surfaces read.
+ */
+async function mailTriageAction(action) {
+  const { triageInbox } = await import('./mailTriage.js')
+  const result = await triageInbox({
+    sinceHours: Number(action.params?.sinceHours) || undefined,
+    maxDrafts:
+      action.params?.maxDrafts === undefined
+        ? undefined
+        : Number(action.params.maxDrafts),
+  })
+  return success(action, result.spoken, {
+    triage: {
+      id: result.id,
+      scanned: result.scanned,
+      counts: result.counts,
+      drafts: result.drafts.length,
+      reviewPath: result.reviewPath,
+      folder: result.folder,
+      sent: result.sent,
+    },
+  })
 }
 
 async function triageAction(action) {

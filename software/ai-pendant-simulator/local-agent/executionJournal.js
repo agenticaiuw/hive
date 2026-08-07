@@ -278,14 +278,22 @@ export function repeatedActions(entries) {
 
   return [...byKey.entries()]
     .filter(([, runs]) => runs.length > 1)
-    .map(([idempotencyKey, runs]) => ({
-      idempotencyKey,
-      type: findType(entries, idempotencyKey),
-      runs: runs.length,
-      firstAt: runs[runs.length - 1]?.at ?? null,
-      lastAt: runs[0]?.at ?? null,
-      jobIds: [...new Set(runs.map((run) => run.jobId))],
-    }))
+    .map(([idempotencyKey, runs]) => {
+      const jobIds = [...new Set(runs.map((run) => run.jobId))]
+      return {
+        idempotencyKey,
+        type: findType(entries, idempotencyKey),
+        runs: runs.length,
+        failed: runs.filter((run) => !run.ok).length,
+        firstAt: runs[runs.length - 1]?.at ?? null,
+        lastAt: runs[0]?.at ?? null,
+        jobs: jobIds.length,
+        /* Bounded: a browser_list_tabs that ran fifty times would otherwise
+         * put fifty uuids in a summary row. Ask /journal?idempotencyKey=… for
+         * the full set. */
+        recentJobIds: jobIds.slice(0, 5),
+      }
+    })
     .sort((a, b) => b.runs - a.runs)
 }
 
@@ -457,11 +465,22 @@ async function readRunningApps(execFileImpl) {
   }
 }
 
+const SILENT_SWALLOW =
+  'ui_click, ui_menu, type_text and press_keys report success while doing nothing — receipts for those steps cannot be trusted.'
+
 /**
  * Accessibility as the journal needs it: not "is the checkbox on" but "would a
  * ui_* or type_text step in the next job actually reach the screen".
+ *
+ * The two are genuinely different answers. `accessibility.trusted` is a TCC
+ * lookup; whether synthesized events post is only knowable by posting one. The
+ * quiet permission report /capabilities uses does not post a test event and
+ * carries no `inputPosting` at all, so "absent" must read as NOT PROBED. This
+ * function reported it as "does not post" on its first live run — a confident,
+ * wrong claim about the host, on the endpoint whose whole job is not making
+ * those.
  */
-export function projectAccessibility(permissions) {
+export function projectAccessibility(permissions, { inputPosting = null } = {}) {
   if (!permissions || permissions.error) {
     return {
       probed: false,
@@ -470,27 +489,35 @@ export function projectAccessibility(permissions) {
   }
 
   const accessibility = permissions.accessibility ?? {}
-  const posting = permissions.inputPosting ?? {}
   const screen = permissions.screenRecording ?? {}
+  const posting = inputPosting ?? permissions.inputPosting ?? null
+  const trusted = Boolean(accessibility.trusted)
 
   return {
     probed: true,
-    trusted: Boolean(accessibility.trusted),
+    trusted,
     detail: accessibility.detail ?? null,
     hostApp: permissions.hostApp ?? null,
-    /* The failure this exists to make visible: events post silently into
-     * nothing when Accessibility is granted to a different bundle. */
-    eventsPost: Boolean(posting.granted),
-    secureInputActive: Boolean(posting.secureInput),
+    /* The failure this exists to make visible: when Accessibility is granted to
+     * a different bundle than the one running, events post into nothing and
+     * every step still reports success. */
+    eventsPost: posting ? Boolean(posting.granted) : null,
+    eventsPostDetail: posting
+      ? (posting.detail ?? null)
+      : 'Not probed. The quiet permission report does not post a test event; add ?probeInput=1 to post one (a zero-delta mouse move at the cursor, a genuine no-op).',
+    secureInputActive: posting ? Boolean(posting.secureInput) : null,
     screenRecording: Boolean(screen.granted),
     automationMissing: Array.isArray(permissions.requiredMissing)
       ? permissions.requiredMissing
       : [],
-    uiActionsWillReachTheScreen: Boolean(accessibility.trusted && posting.granted),
-    consequence:
-      accessibility.trusted && posting.granted
+    uiActionsWillReachTheScreen: posting ? Boolean(trusted && posting.granted) : null,
+    consequence: !posting
+      ? `Unverified: TCC says Accessibility is granted to ${
+          permissions.hostApp ?? 'this process'
+        }, but nothing here posted an event to confirm it. If it is granted to the wrong bundle, ${SILENT_SWALLOW}`
+      : trusted && posting.granted
         ? null
-        : 'ui_click, ui_menu, type_text and press_keys report success while doing nothing — receipts for those steps cannot be trusted until this is granted.',
+        : `${SILENT_SWALLOW} Grant Accessibility to ${permissions.hostApp ?? 'this process'}.`,
   }
 }
 
@@ -517,6 +544,30 @@ function describeRoots(roots) {
 }
 
 /**
+ * Opt-in only: the probe posts a real (zero-delta, no-op) event, and a GET that
+ * anyone can poll should not spawn a helper binary on every call.
+ *
+ * A probe that throws is not "unknown" — the helper is how events get posted at
+ * all, so a failure to run it is a failure to post. macos/permissions.js
+ * reaches the same conclusion the same way.
+ */
+async function runInputProbe(inputProbe) {
+  if (typeof inputProbe !== 'function') return null
+  try {
+    const probe = await inputProbe()
+    return {
+      granted: Boolean(probe?.axTrusted),
+      secureInput: Boolean(probe?.secureInput),
+      detail: probe?.axTrusted
+        ? 'A synthesized event posted successfully.'
+        : 'Synthesized events are not accepted — Accessibility is granted to a different bundle than the one running.',
+    }
+  } catch (error) {
+    return { granted: false, detail: `Input helper unavailable: ${error?.message ?? error}` }
+  }
+}
+
+/**
  * The host as the agent currently sees it. `permissions` and `browserSessions`
  * are injected by the caller, which already holds both — the same contract
  * buildCapabilityManifest uses, so that reading this never triggers a fresh
@@ -527,10 +578,12 @@ export async function observeHost({
   browserSessions = [],
   roots = allowedFolders,
   execFileImpl = execFileAsync,
+  inputProbe = null,
 } = {}) {
-  const [foreground, running] = await Promise.all([
+  const [foreground, running, inputPosting] = await Promise.all([
     readForegroundApp(execFileImpl),
     readRunningApps(execFileImpl),
+    runInputProbe(inputProbe),
   ])
 
   const sessions = Array.isArray(browserSessions) ? browserSessions : []
@@ -554,7 +607,7 @@ export async function observeHost({
       error: running.error ?? null,
       apps: running.apps,
     },
-    accessibility: projectAccessibility(permissions),
+    accessibility: projectAccessibility(permissions, { inputPosting }),
     browser: {
       sessions: sessions.length,
       tabs: sessions.map((session) => ({

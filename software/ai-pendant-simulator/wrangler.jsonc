@@ -59,6 +59,29 @@
       "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
     }
   ],
+  // The relay's clock (cloud-relay/scheduler.js). Routines used to fire only
+  // from the Mac's 30 s setInterval, which meant they fired only while the
+  // Mac was awake — and the pendant is worn precisely when it is not.
+  //
+  // Every minute is Cloudflare's finest granularity, and it is the right one:
+  // a "7:00 am" promise must not be able to land at 7:04. Cost is 1,440
+  // invocations a day against the Free plan's 100,000 requests, and one of
+  // the 5 Cron Triggers a Free account may have across all Workers.
+  //
+  // Durable Object alarms were the alternative and were rejected: the docs
+  // give alarms no precision guarantee, so they buy no accuracy over this,
+  // while adding a second storage backend beside D1. See the header of
+  // cloud-relay/routines.js for where a DO does become necessary.
+  //
+  // HARD LIMIT that shapes scheduler.js: a cron invocation on Workers Free
+  // gets 10 ms of CPU (awaiting I/O is free, wall clock is 15 minutes). The
+  // tick is therefore all awaits — no audio, no bulk JSON, nothing heavy
+  // imported at module scope.
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
   "observability": {
     "enabled": true
   }
