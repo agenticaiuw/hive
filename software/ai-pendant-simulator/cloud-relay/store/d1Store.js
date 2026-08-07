@@ -1093,7 +1093,11 @@ export function createD1Store(db) {
      * log. See shared/fleetMemory.js.
      * -------------------------------------------------------------------- */
 
-    async appendMemoryEvents(events) {
+    /* `now` threaded for the same reason as in memoryStore: the post-append
+     * prune ran on the wall clock while events carried the caller's, so an
+     * event stamped more than one TTL behind real time was deleted by the call
+     * that wrote it, and the append still reported success. */
+    async appendMemoryEvents(events, { now = Date.now() } = {}) {
       const list = Array.isArray(events) ? events : []
       if (!list.length) return { removed: 0, kept: 0, reasons: {} }
 
@@ -1119,7 +1123,7 @@ export function createD1Store(db) {
       )
 
       await runPreparedBatch(db, statements)
-      return pruneMemoryEventLog(db, {})
+      return pruneMemoryEventLog(db, { now })
     },
 
     async listMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
