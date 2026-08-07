@@ -238,8 +238,23 @@ for (; cycle < CYCLES; cycle += 1) {
        * see, which both loses the work and suppresses the retry.
        */
       failed += 1
-      consecutiveFailures += 1
       process.stdout.write(`    ${result.tail.trim().split('\n').slice(-2).join(' / ')}\n`)
+
+      /*
+       * Lock contention is not a broken harness. The orchestrator holds an
+       * agent's lock for a whole round, and so does anything else that writes
+       * its state — granting a request, denying one, moving a phase. When those
+       * overlap the lock refuses, correctly, and nothing is lost: the agent
+       * stays eligible and runs next cycle.
+       *
+       * Counting it toward the failure limit would let three well-timed grants
+       * stop a run that is working perfectly. Seen for real: answering a
+       * pending request took faculty-perception's lock in the same second the
+       * shell tried to spawn its round.
+       */
+      if (/is already running/.test(result.tail)) continue
+
+      consecutiveFailures += 1
       continue
     }
 
