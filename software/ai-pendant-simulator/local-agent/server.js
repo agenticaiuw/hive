@@ -235,7 +235,7 @@ import {
   startFocusSession,
 } from './focusSession.js'
 import { buildDayPlan, formatBriefing } from './dayPlan.js'
-import { prepareForNextMeeting } from './meetingPrep.js'
+import { prepareForNextMeeting, registerMeetingPrepRoutes } from './meetingPrep.js'
 import { prepareMeetingFollowup } from './meetingFollowup.js'
 import {
   listTriageRuns,
@@ -1384,6 +1384,11 @@ registerPageWatchRoutes(app)
  * only — nothing here executes, so a wrong route costs a re-plan, not an
  * action on a real page. */
 registerGoalRouterRoutes(app)
+
+/* Named-meeting prep, and the overnight pass that has it ready before the
+ * owner asks. Writes no `told` fingerprints, so it never spends one of the
+ * morning brief's three spoken slots. */
+registerMeetingPrepRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
