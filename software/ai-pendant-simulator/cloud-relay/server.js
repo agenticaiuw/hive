@@ -41,7 +41,10 @@ import {
   G711_SAMPLE_RATE,
   REALTIME_PCM_RATE,
 } from './openaiRealtimeVoice.js'
-import { loadFleetFromStore } from './fleetContext.js'
+import { loadFleetFromStore,
+  fleetMemoryScopesFor,
+  registerFleetMemoryRoutes,
+} from './fleetContext.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
 import {
@@ -2315,6 +2318,13 @@ app.post('/v1/ops/audio-retention/sweep', async (request, response) => {
  * across every routine, which cannot answer "what happened to the thing I
  * asked for" once more than a couple of routines exist.
  */
+/*
+ * The write end of the cross-surface memory path. Measured before this landed:
+ * `rememberFact` existed only under local-agent/, so of the four bodies only
+ * the Mac could record anything the others would ever see.
+ */
+registerFleetMemoryRoutes(app, { getStore })
+
 registerSchedulerRoutes(app)
 
 app.get('/v1/routines', async (_request, response) => {
@@ -3160,6 +3170,11 @@ async function deleteCaptureAudio(request, response, { store, capture }) {
 function requiredScopesForRequest(request) {
   const method = request.method.toUpperCase()
   const path = request.path
+
+  /* Declared next to their handlers in fleetContext.js, so adding a memory
+   * route cannot quietly ship an unscoped write path for the owner's facts. */
+  const memoryScopes = fleetMemoryScopesFor(method, path)
+  if (memoryScopes) return memoryScopes
 
   if (method === 'POST' && path === '/v1/devices/register') return ['admin']
   if (method === 'POST' && path === '/v1/devices/heartbeat') {

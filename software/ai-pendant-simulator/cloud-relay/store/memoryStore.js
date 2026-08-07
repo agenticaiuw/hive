@@ -1,5 +1,10 @@
 import { JOB_TTL_MS } from '../config.js'
 import {
+  MAX_LOG_BYTES,
+  pruneFleetMemoryEvents,
+  takeWithinByteBudget,
+} from '../../shared/fleetMemory.js'
+import {
   mergeProductSync as mergeProductSyncDocuments,
   normalizeProductSync,
 } from '../../shared/productSync.js'
@@ -21,6 +26,7 @@ const routineRuns = new Map()
 const routineLeases = new Map()
 const announcements = new Map()
 const contexts = new Map()
+const memoryEvents = new Map()
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 
 function pruneExpiredJobs() {
@@ -360,7 +366,60 @@ export function createMemoryStore() {
     async deleteContext(handleId) {
       return contexts.delete(handleId)
     },
+
+    /* ---- cross-surface memory -------------------------------------------
+     * Same contract as d1Store so `npm run relay` locally exercises the real
+     * fold and the real byte budget rather than a stub that only works in
+     * production. The eviction ORDER matters as much as the totals here, and
+     * it is the thing a stub would get wrong: see fleetMemory.js.
+     * -------------------------------------------------------------------- */
+
+    async appendMemoryEvents(events) {
+      for (const event of Array.isArray(events) ? events : []) {
+        // Appends are immutable, and a device on a flaky LTE link retries. A
+        // re-sent batch must be a no-op, not a second copy of the same fact.
+        if (!memoryEvents.has(event.eventId)) {
+          memoryEvents.set(event.eventId, { ...event })
+        }
+      }
+      return sweepMemoryEvents()
+    },
+
+    async listMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
+      sweepMemoryEvents(now, maxBytes)
+      // Bounded again on the way out. The sweep already fits the log to the
+      // budget, so this only binds when a caller asks for less than the store
+      // holds — which is what a small surface with a small prompt should do.
+      return takeWithinByteBudget([...memoryEvents.values()], maxBytes).map(
+        (record) => ({ ...record }),
+      )
+    },
+
+    async pruneMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
+      return sweepMemoryEvents(now, maxBytes)
+    },
   }
+}
+
+/*
+ * One sweep for expiry, supersession and the byte ceiling, run on write and on
+ * read. Read-side too, for the same reason contexts are checked on read: it is
+ * what makes "expired" mean the same thing whether or not a write has happened
+ * since, and this store is the one that runs for days in local development
+ * without a single append.
+ */
+function sweepMemoryEvents(now = Date.now(), maxBytes = MAX_LOG_BYTES) {
+  const { kept, stats } = pruneFleetMemoryEvents([...memoryEvents.values()], {
+    now,
+    maxBytes,
+  })
+
+  if (stats.removed) {
+    memoryEvents.clear()
+    for (const record of kept) memoryEvents.set(record.eventId, record)
+  }
+
+  return stats
 }
 
 /*
