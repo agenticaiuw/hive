@@ -76,7 +76,11 @@ test('a contradiction outranks a merely new fact', () => {
   const { run, assessed } = schedule(dir, ['newfact-agent', 'contradicted-agent'], { cycle: 2, slots: 2 })
   assert.equal(run[0].agent, 'contradicted-agent')
   assert.match(assessed.find((row) => row.agent === 'contradicted-agent').reason, /1 contradicted/)
-  assert.match(assessed.find((row) => row.agent === 'newfact-agent').reason, /^1 new$/)
+
+  /* And the gap is not merely ordering: something the agent believed being
+   * false is worth a round on its own, where one unseen key is not. */
+  assert.equal(assessed.find((row) => row.agent === 'newfact-agent').eligible, false)
+  assert.equal(run.length, 1)
 })
 
 test('unread mail is a reason to run on its own', () => {
@@ -150,7 +154,10 @@ test('an expired entry stops counting as something to catch up on', () => {
    * negative, which is not expiry), and would record the agent as having
    * already seen a fact that did not exist yet. */
   markRan(dir, 'late', { cycle: 1, now })
-  deposit(dir, { tool: 'probe_http', args: { method: 'GET', path: '/gone' }, result: { status: 404 }, agent: 'a', round: 1, now })
+  /* Three, because one unseen key is deliberately not worth a round. */
+  for (const path of ['/gone', '/also-gone', '/missing']) {
+    deposit(dir, { tool: 'probe_http', args: { method: 'GET', path }, result: { status: 404 }, agent: 'a', round: 1, now })
+  }
 
   assert.equal(assess(dir, 'late', { cycle: 2, now }).eligible, true)
 
@@ -208,8 +215,14 @@ test('a brand new key is never discounted for volatility it has not shown', () =
   const dir = tempDir()
   markRan(dir, 'mac-planner', { cycle: 1 })
   /* One observation says nothing about whether a key moves, so it must not be
-   * treated as noise on no evidence. */
-  deposit(dir, { tool: 'discover', args: { category: 'brand-new' }, result: { items: [1] }, agent: 'x', round: 1 })
+   * treated as noise on no evidence. Three keys, since a single unseen one is
+   * deliberately below what a round is worth — the point here is that they
+   * count at full value rather than being discounted as churn. */
+  for (const category of ['brand-new', 'also-new', 'third-new']) {
+    deposit(dir, { tool: 'discover', args: { category }, result: { items: [1] }, agent: 'x', round: 1 })
+  }
 
-  assert.equal(assess(dir, 'mac-planner', { cycle: 2 }).eligible, true)
+  const verdict = assess(dir, 'mac-planner', { cycle: 2 })
+  assert.equal(verdict.eligible, true)
+  assert.equal(verdict.score, 3, 'undiscounted: three new keys at full weight')
 })
