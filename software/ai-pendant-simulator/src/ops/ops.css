@@ -662,6 +662,156 @@ button {
   border-top: 1px solid var(--line);
 }
 
+.home-jobs-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-top: 30px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* Jobs */
+.job-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--mute);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.job-chip.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.job-rail-group + .job-rail-group {
+  margin-top: 14px;
+}
+
+.job-rail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 0 0 4px;
+  padding: 0 8px;
+  color: var(--mute);
+  font-size: 0.7rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.job-rail-head span {
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.rail-empty {
+  margin: 0;
+  padding: 6px 8px 2px;
+  color: var(--mute);
+  font-size: 0.8rem;
+}
+
+.job-source {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(24, 32, 40, 0.07);
+  color: var(--ink);
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.job-source.src-pendant {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.job-source.src-recon,
+.job-source.src-harness-task {
+  background: rgba(196, 146, 58, 0.16);
+  color: #8f631d;
+}
+
+/* Commands are often a bare URL — one long unbreakable token. */
+.job-detail .flow-head h2 {
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+
+.job-detail.is-live {
+  outline: 1px solid rgba(196, 146, 58, 0.35);
+  outline-offset: 8px;
+}
+
+.job-detail .pipeline-meta {
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-detail .pipeline-event .pipeline-meta {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.job-touches {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.job-touches ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.job-evidence-head {
+  margin: 24px 0 2px;
+}
+
+.pipeline-event.is-pending .pipeline-event-index {
+  border-style: dashed;
+}
+
+.job-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
 .meta-value {
   margin: 8px 0 0;
   color: var(--ink);
@@ -988,8 +1138,10 @@ button {
     padding-bottom: 12px;
   }
 
-  .chat-head {
+  .chat-head,
+  .home-jobs-strip {
     flex-direction: column;
+    align-items: flex-start;
   }
 
   .pipeline-stage-map,

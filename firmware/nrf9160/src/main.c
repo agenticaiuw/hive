@@ -20,6 +20,7 @@
 #include "audio_opus.h"
 #include "pendant_cloud.h"
 #include "pendant_ws.h"
+#include "tx_resample_taps.h"
 
 #define LED_NODE DT_ALIAS(led0)
 #define BUTTON_NODE DT_ALIAS(sw0)
@@ -267,6 +268,46 @@ BUILD_ASSERT(DL_JITTER_SAMPLES - DL_WORST_FRAME_SAMPLES >=
 #define WS_RX_BUF_BYTES 640U
 /* ~120 ms of Opus per uplink frame: batching overhead vs VAD latency. */
 #define WS_TX_BATCH_BYTES 240U
+/*
+ * ---- Adaptive duplex uplink ----
+ *
+ * LTE-M Cat-M1 is half-duplex. While the agent's reply streams down, the modem
+ * cannot transmit, so the uplink FIFO fills at the encoder's rate and drains at
+ * roughly zero. A live 42 s conversation ended with fifo_left=7146 — the 7 KiB
+ * ring 100% full — uplink_drops=388, and "WS send failed: -116" nine seconds
+ * later. The user's follow-up question was encoded straight into a full ring
+ * and discarded by live_opus_packet_sink, so the agent never answered it while
+ * the LED went right on blinking.
+ *
+ * Two levers, engaged only while downlink audio is playing:
+ *
+ *   DUCK - halve the uplink Opus target bitrate. The mic stream stays
+ *          continuous, so server-side barge-in still sees the user, but the
+ *          ring fills half as fast: the runway grows from ~3.5 s to ~7 s,
+ *          which covers a typical agent utterance.
+ *   HOLD - past the high-water mark, stop feeding the encoder at all. The
+ *          packet would have been discarded by the sink anyway, so the splice
+ *          in the uplink stream is identical and the measured ~15 ms encode is
+ *          saved. What it actually buys is the reserve *below* the mark: when
+ *          the agent stops talking the ring still has room for the user's next
+ *          words, instead of the zero headroom the failing call ended with.
+ *
+ * Pausing capture outright was the other option in the proposal and is wrong
+ * here: barge-in is server-side, so a muted uplink makes the agent
+ * uninterruptible. Ducking degrades that path instead of removing it.
+ */
+#define CONVO_UPLINK_DUCK_BPS (PENDANT_OPUS_BITRATE / 2U)
+/*
+ * Downlink frames arrive in bursts and the jitter ring briefly empties between
+ * them; without a hangover the duck would chatter the encoder every block.
+ */
+#define CONVO_DL_ACTIVE_HANGOVER_MS 300
+/* Hold above 60% of the ring, release below 40%: the top ~2.8 KiB (≈1.4 s at
+ * full rate) stays reserved for speech that arrives after the agent stops. */
+#define CONVO_UPLINK_HOLD_BYTES ((OPUS_TX_FIFO_BYTES * 3U) / 5U)
+#define CONVO_UPLINK_RESUME_BYTES ((OPUS_TX_FIFO_BYTES * 2U) / 5U)
+BUILD_ASSERT(CONVO_UPLINK_RESUME_BYTES < CONVO_UPLINK_HOLD_BYTES,
+	     "uplink hold needs hysteresis or it toggles every block");
 /* Exact 24000/31250 ratio for the TX upsampler (96/125). */
 #define TX_RESAMPLE_NUM 96U
 #define TX_RESAMPLE_DEN 125U
@@ -352,13 +393,33 @@ static struct dl_frame dl_tx_frame;         /* ws thread only */
 static struct dl_frame dl_rx_frame;         /* main thread only */
 /* Duplex diagnostics — printed at every conversation end. */
 static uint32_t convo_tx_blocks;
+/*
+ * Underrun EVENTS, not silent samples. The runway running dry is normal at the
+ * tail of every agent utterance, so counting per sample just measures how long
+ * the agent stayed quiet. Only the dry/not-dry transition says the decoder
+ * failed to keep up.
+ */
 static uint32_t convo_tx_starved;
+static bool convo_tx_dry;
 static uint32_t convo_rx_blocks;
 static uint32_t convo_decoded_packets;
 static uint32_t convo_max_loop_ms;
 static uint32_t convo_uplink_drops;
 static uint32_t convo_mic_drops;
 static uint32_t convo_tx_peak;
+/*
+ * Adaptive duplex uplink state. Main thread only: the conversation loop is the
+ * sole writer and live_tx_offer_stage (same thread) the sole reader, so no
+ * atomics are needed. convo_uplink_held / convo_uplink_duck_ms are the effect
+ * counters — read them against uplink_drops to see whether the duck actually
+ * kept the ring off its ceiling.
+ */
+static bool convo_uplink_ducked;
+static bool convo_uplink_holding;
+static int64_t convo_dl_active_until;
+static int64_t convo_adapt_last_ms;
+static uint32_t convo_uplink_duck_ms;
+static uint32_t convo_uplink_held;
 /*
  * Codec cost, measured not guessed. The 32.768 kHz cycle counter gives
  * 30.5 us resolution — plenty for multi-millisecond codec calls, and it
@@ -527,6 +588,17 @@ static void live_tx_offer_stage(const int16_t *samples, size_t frame_count)
 
 	if (live_stream_failed || live_tx_saturated || !transport_up ||
 	    !pendant_opus_stream_active()) {
+		return;
+	}
+	/*
+	 * Adaptive duplex HOLD: the ring is past its high-water mark while the
+	 * agent is still talking, so this stage cannot reach the relay. Encoding
+	 * it would only hand the sink a packet to discard — same gap in the
+	 * stream, ~15 ms of CPU wasted, and the reserve below the mark spent on
+	 * audio nobody will hear.
+	 */
+	if (convo_uplink_holding) {
+		++convo_uplink_held;
 		return;
 	}
 	uint32_t encode_started = k_cycle_get_32();
@@ -2348,70 +2420,160 @@ static void dl_jitter_put(const int16_t *samples, size_t count)
 }
 
 /*
- * Fill one TX block (640 words at 31250) from the 16 kHz jitter ring with
- * exact 64/125 phase-accumulator interpolation. `*playing` implements the
- * prebuffer/rebuffer gate; silence flows whenever it is off so the duplex
- * transfer never underruns. Interp state persists across blocks.
+ * Adaptive duplex uplink, evaluated once per mic block from the conversation
+ * loop. See the CONVO_UPLINK_* block above for why: the radio cannot carry the
+ * uplink while agent audio is coming down, so trying to push a full-rate mic
+ * stream through it only fills the FIFO until the user's next question falls
+ * off the end.
+ *
+ * "Playing" is the same signal the LED uses (agent audio buffered), plus a
+ * hangover so the gaps between downlink frames do not retune the encoder every
+ * block.
  */
-static uint32_t tx_phase;      /* 0..TX_RESAMPLE_DEN-1 */
-static int16_t tx_prev_sample; /* last 16 kHz sample consumed */
-static int16_t tx_next_sample;
-static bool tx_have_next;
+static void convo_update_uplink_adapt(void)
+{
+	int64_t now = k_uptime_get();
+	size_t fill = live_fifo_fill();
+	bool dl_playing;
+
+	/* Bill the interval that just closed to the state it actually ran in,
+	 * before that state is allowed to change. */
+	if (convo_adapt_last_ms != 0 && convo_uplink_ducked) {
+		convo_uplink_duck_ms += (uint32_t)(now - convo_adapt_last_ms);
+	}
+	convo_adapt_last_ms = now;
+
+	if (dl_jitter_fill() > 0U) {
+		convo_dl_active_until = now + CONVO_DL_ACTIVE_HANGOVER_MS;
+	}
+	dl_playing = now < convo_dl_active_until;
+
+	if (dl_playing != convo_uplink_ducked) {
+		/* Only latch the new state if the encoder took it, so a failed
+		 * ctl cannot leave the uplink ducked for the whole call. */
+		if (pendant_opus_stream_set_bitrate(
+			    dl_playing ? CONVO_UPLINK_DUCK_BPS
+				       : PENDANT_OPUS_BITRATE) == 0) {
+			convo_uplink_ducked = dl_playing;
+		}
+	}
+
+	/* Hysteresis, and an unconditional release the moment playback ends —
+	 * whatever the user says next is the whole point of the reserve. */
+	if (!dl_playing || fill <= CONVO_UPLINK_RESUME_BYTES) {
+		convo_uplink_holding = false;
+	} else if (fill >= CONVO_UPLINK_HOLD_BYTES) {
+		convo_uplink_holding = true;
+	}
+}
+
+/*
+ * ---- 24000 -> 31250 anti-imaging interpolator ----
+ *
+ * 24000/31250 reduces to 96/125 and gcd(96,125) == 1, so the phase
+ * accumulator visits every one of the 125 residues: the 125-phase table in
+ * tx_resample_taps.h is EXACT, and unlike the ESP32's 625/882 stage there is
+ * nothing to blend between neighbouring phases.
+ *
+ * The straight-line interpolator this replaces had a sinc^2 kernel whose
+ * SECOND image (24000 + f) folds around the 31250 output rate to |7250 - f|.
+ * Measured on the bench: every tone from 5 to 10 kHz left a companion at
+ * -21 to -31 dBc down in the low midrange -- so every "s", "sh" and "f" in
+ * the agent's voice rang a buzz at a few percent of full scale, at a
+ * frequency that moves DOWN as the voice moves up. Inharmonic, frequency
+ * inverted, and squarely where the ear is most sensitive. That is the
+ * distortion, and it is now -58 to -77 dBc.
+ *
+ * Cutoff is 10.5 kHz, not the 12 kHz the decoder can carry: at 125/96 an
+ * 11.9 kHz component images to 12.1 kHz and no filter separates them.
+ *
+ * The table is const in flash. The app is built soft-float (CONFIG_FPU is
+ * not set), so generating it at boot would drag in softfloat sinf/cosf and
+ * spend RAM the audio path does not have.
+ */
+static int16_t tx_fir_hist[2U * TX_FIR_TAPS]; /* written twice so the tap
+					       * window is always contiguous:
+					       * no shift in the hot loop */
+static size_t tx_fir_pos;
+static uint32_t tx_fir_zero_run = TX_FIR_TAPS;
+static uint32_t tx_phase; /* 0..TX_RESAMPLE_DEN-1 */
 
 static void tx_resample_reset(void)
 {
 	tx_phase = 0U;
-	tx_prev_sample = 0;
-	tx_next_sample = 0;
-	tx_have_next = false;
+	tx_fir_pos = 0U;
+	tx_fir_zero_run = TX_FIR_TAPS;
+	memset(tx_fir_hist, 0, sizeof(tx_fir_hist));
 }
 
+static inline void tx_fir_push(int16_t sample)
+{
+	tx_fir_pos = (tx_fir_pos == 0U) ? (TX_FIR_TAPS - 1U)
+					: (tx_fir_pos - 1U);
+	tx_fir_hist[tx_fir_pos] = sample;
+	tx_fir_hist[tx_fir_pos + TX_FIR_TAPS] = sample;
+	if (sample == 0) {
+		if (tx_fir_zero_run < TX_FIR_TAPS) {
+			++tx_fir_zero_run;
+		}
+	} else {
+		tx_fir_zero_run = 0U;
+	}
+}
+
+/*
+ * Fill one TX block (640 words at 31250) from the 24 kHz jitter ring.
+ * `*playing` implements the prebuffer/rebuffer gate; silence flows whenever
+ * it is off so the duplex transfer never underruns. Filter state persists
+ * across blocks.
+ */
 static void convo_fill_tx_block(int32_t *words, bool *playing)
 {
 	for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES; ++frame) {
+		int32_t value = 0;
+
 		if (!*playing && dl_jitter_fill() >= DL_PREBUFFER_SAMPLES) {
 			*playing = true;
 		}
-		if (*playing && !tx_have_next && dl_jitter_fill() > 0U) {
-			tx_next_sample = dl_jitter[dl_jitter_tail];
-			dl_jitter_tail =
-				(dl_jitter_tail + 1U) % DL_JITTER_SAMPLES;
-			tx_have_next = true;
-		}
-		if (!*playing || !tx_have_next) {
-			/* Starved: pause output and re-arm the prebuffer. */
-			if (*playing && dl_jitter_fill() == 0U) {
-				*playing = false;
-				++convo_tx_starved;
+		/* A fully zeroed history convolves to exactly zero at every
+		 * phase, so silence costs nothing. */
+		if (tx_fir_zero_run < TX_FIR_TAPS) {
+			const int16_t *row =
+				&tx_fir_coeff[tx_phase * TX_FIR_TAPS];
+			const int16_t *window = &tx_fir_hist[tx_fir_pos];
+			int32_t acc = 0;
+			uint32_t magnitude;
+
+			for (size_t tap = 0U; tap < TX_FIR_TAPS; ++tap) {
+				acc += (int32_t)row[tap] *
+				       (int32_t)window[tap];
 			}
-			words[frame] = 0;
-			continue;
-		}
+			value = (acc + (1 << (TX_FIR_Q - 1))) >> TX_FIR_Q;
+			/* Sum|h| peaks at 1.651, so a transient can ring past
+			 * full scale even though the decoder never does. */
+			value = CLAMP(value, INT16_MIN, INT16_MAX);
 
-		int32_t span = (int32_t)tx_next_sample - tx_prev_sample;
-		int32_t value = tx_prev_sample +
-				(span * (int32_t)tx_phase) /
-					(int32_t)TX_RESAMPLE_DEN;
-
-		/* Ground truth for "is the chip actually sending audio?" —
-		 * compared against the ESP32's own raw-word peak to tell a
-		 * silent transmitter from a mis-decoded receiver. */
-		uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
-
-		if (magnitude > convo_tx_peak) {
-			convo_tx_peak = magnitude;
+			magnitude = (uint32_t)(value < 0 ? -value : value);
+			if (magnitude > convo_tx_peak) {
+				convo_tx_peak = magnitude;
+			}
 		}
 		words[frame] = value << 8;
+
 		tx_phase += TX_RESAMPLE_NUM;
 		if (tx_phase >= TX_RESAMPLE_DEN) {
 			tx_phase -= TX_RESAMPLE_DEN;
-			tx_prev_sample = tx_next_sample;
-			tx_have_next = false;
-			if (dl_jitter_fill() > 0U) {
-				tx_next_sample = dl_jitter[dl_jitter_tail];
+			if (*playing && dl_jitter_fill() > 0U) {
+				tx_fir_push(dl_jitter[dl_jitter_tail]);
 				dl_jitter_tail = (dl_jitter_tail + 1U) %
 						 DL_JITTER_SAMPLES;
-				tx_have_next = true;
+				convo_tx_dry = false;
+			} else {
+				tx_fir_push(0);
+				if (*playing && !convo_tx_dry) {
+					convo_tx_dry = true;
+					++convo_tx_starved;
+				}
 			}
 		}
 	}
@@ -2805,12 +2967,19 @@ static int run_conversation(const struct device *i2s)
 	atomic_set(&convo_started, 0);
 	convo_tx_blocks = 0U;
 	convo_tx_starved = 0U;
+	convo_tx_dry = false;
 	convo_rx_blocks = 0U;
 	convo_decoded_packets = 0U;
 	convo_max_loop_ms = 0U;
 	convo_uplink_drops = 0U;
 	convo_mic_drops = 0U;
 	convo_tx_peak = 0U;
+	convo_uplink_ducked = false;
+	convo_uplink_holding = false;
+	convo_dl_active_until = 0;
+	convo_adapt_last_ms = 0;
+	convo_uplink_duck_ms = 0U;
+	convo_uplink_held = 0U;
 	convo_decode_cycles = 0U;
 	convo_decode_calls = 0U;
 	convo_decode_max_cycles = 0U;
@@ -2935,6 +3104,9 @@ static int run_conversation(const struct device *i2s)
 		}
 		++block_index;
 
+		/* Decide duck/hold for THIS block before any of it is encoded. */
+		convo_update_uplink_adapt();
+
 		/* Mic DSP — the twin of record_microphone's inner loop
 		 * (slew limit → decimate-average → DC blocker → gain). */
 		int32_t *raw = raw_processing;
@@ -3044,6 +3216,8 @@ static int run_conversation(const struct device *i2s)
 
 	/* Stop the audio thread before touching I2S or the slabs. */
 	atomic_set(&convo_active, 0);
+	/* Never leave the legacy record path gated by a conversation's hold. */
+	convo_uplink_holding = false;
 	k_msleep(30);
 	if (result == 0 && atomic_get(&audio_thread_error) != 0) {
 		result = (int)atomic_get(&audio_thread_error);
@@ -3058,11 +3232,13 @@ static int run_conversation(const struct device *i2s)
 
 	printk("Conversation stats: rx_blocks=%u tx_blocks=%u tx_starved=%u "
 	       "decoded_packets=%u max_loop_ms=%u fifo_left=%u "
-	       "uplink_drops=%u mic_drops=%u tx_peak=%u\n",
+	       "uplink_drops=%u mic_drops=%u tx_peak=%u "
+	       "duck_ms=%u uplink_held=%u\n",
 	       convo_rx_blocks, convo_tx_blocks, convo_tx_starved,
 	       convo_decoded_packets, convo_max_loop_ms,
 	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
-	       convo_mic_drops, convo_tx_peak);
+	       convo_mic_drops, convo_tx_peak, convo_uplink_duck_ms,
+	       convo_uplink_held);
 	printk("Codec cost: decode avg=%u us max=%u us n=%u | "
 	       "encode avg=%u us max=%u us n=%u\n",
 	       convo_decode_calls

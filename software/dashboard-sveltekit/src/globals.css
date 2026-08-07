@@ -658,6 +658,73 @@ p {
   opacity: 0.55;
 }
 
+/* ---------- Hero playback: your voice and the agent's ---------- */
+
+.hero-audio {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.hero-track {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hero-track-label {
+  flex: 0 0 46px;
+  color: var(--muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hero-player {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 460px;
+  height: 36px;
+}
+
+/*
+ * The stock control bar is near-white and glares against this panel. Both
+ * engines expose the shadow part, and the filter is the documented fallback
+ * for the ones that do not.
+ */
+.hero-player::-webkit-media-controls-panel {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@supports not selector(::-webkit-media-controls-panel) {
+  .hero-player {
+    filter: invert(0.92) hue-rotate(180deg);
+  }
+}
+
+.hero-reply-transcript {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 560px) {
+  .hero-track {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .hero-player {
+    max-width: none;
+  }
+}
+
 .details-toggle {
   display: inline-flex;
   align-items: center;

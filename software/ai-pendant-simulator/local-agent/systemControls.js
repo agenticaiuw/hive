@@ -90,16 +90,19 @@ export async function setOutputVolume(level) {
 }
 
 export async function getOutputVolume() {
+  // osascript prints only the LAST -e expression, so the previous two-flag form
+  // silently returned just the mute flag: every volume readback parsed "false"
+  // as a number and reported NaN%. One statement, one printed line, both values.
   const { stdout } = await execFileAsync('osascript', [
     '-e',
-    'output volume of (get volume settings)',
+    'set s to (get volume settings)',
     '-e',
-    'output muted of (get volume settings)',
+    '(output volume of s as text) & "\t" & (output muted of s as text)',
   ])
-  const [volumeLine, mutedLine] = stdout.trim().split('\n')
+  const [volumeField, mutedField] = stdout.trim().split('\t')
   return {
-    percent: Number(volumeLine),
-    muted: String(mutedLine).trim() === 'true',
+    percent: Number(volumeField),
+    muted: String(mutedField).trim() === 'true',
   }
 }
 

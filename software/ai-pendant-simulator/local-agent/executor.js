@@ -4,11 +4,13 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { FULL_CONTROL_MODE, allowedApps, allowedUrls, projectPaths, workspacePath } from './config.js'
 import { executeComputerAction } from './computerControl.js'
+import { buildActionReceipt, observeBeforeAction } from './actionReceipts.js'
 import {
   assertAllowedPath,
   ensureAllowedFolder,
   safeNotePath,
 } from './security.js'
+import { openArgs } from './focusPolicy.js'
 
 const execFileAsync = promisify(execFile)
 const runningProjects = new Map()
@@ -17,14 +19,19 @@ export async function executeActions(actions) {
   const results = []
 
   for (const action of actions) {
+    // Observation only: this records what the action is about to touch and
+    // snapshots anything it would clobber. It never inspects the verdict and
+    // never skips a step — the owner asked for a record, not a gate.
+    const startedAt = new Date().toISOString()
+    const before = observeBeforeAction(action)
+    let result
+
     try {
-      if (FULL_CONTROL_MODE) {
-        results.push(await executeComputerAction(action))
-      } else {
-        results.push(await executeSafeAction(action))
-      }
+      result = FULL_CONTROL_MODE
+        ? await executeComputerAction(action)
+        : await executeSafeAction(action)
     } catch (error) {
-      results.push({
+      result = {
         action,
         ok: false,
         status: isBlockedError(error) ? 'blocked' : 'failed',
@@ -32,8 +39,13 @@ export async function executeActions(actions) {
           ? `Blocked for safety: ${error.message}`
           : `Failed: ${error.message}`,
         reason: error.message,
-      })
+      }
     }
+
+    results.push({
+      ...result,
+      receipt: buildActionReceipt({ action, result, before, startedAt }),
+    })
   }
 
   return results
@@ -42,7 +54,7 @@ export async function executeActions(actions) {
 async function executeSafeAction(action) {
   if (action.type === 'open_url') {
     assertAllowedUrl(action.params.url)
-    await execFileAsync('open', [action.params.url])
+    await execFileAsync('open', await openArgs([action.params.url]))
     return success(action, `Opened ${action.params.url}`)
   }
 
@@ -57,13 +69,13 @@ async function executeSafeAction(action) {
       .replace(/\.app$/i, '')
     if (!appName) throw new Error('open_app requires appName.')
     assertAllowedApp(appName)
-    await execFileAsync('open', ['-a', appName])
+    await execFileAsync('open', await openArgs(['-a', appName]))
     return success(action, `Opened ${appName}`)
   }
 
   if (action.type === 'open_folder') {
     const folderPath = assertAllowedPath(action.params.path)
-    await execFileAsync('open', [folderPath])
+    await execFileAsync('open', await openArgs([folderPath]))
     return success(action, `Opened folder ${folderPath}`)
   }
 
@@ -73,7 +85,7 @@ async function executeSafeAction(action) {
       safeNotePath(workspacePath, action.params.filename),
     )
     fs.writeFileSync(notePath, action.params.content, { flag: 'wx' })
-    await execFileAsync('open', [notePath])
+    await execFileAsync('open', await openArgs([notePath]))
     return success(action, `Created note ${notePath}`)
   }
 

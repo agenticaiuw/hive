@@ -54,6 +54,9 @@ const AUTO_SAFE_ACTIONS = new Set([
   'browser_list_tabs',
   'browser_capture',
   'browser_press_key',
+  'browser_open_session',
+  'browser_list_sessions',
+  'browser_close_session',
 ])
 
 const CONFIRM_REASONS = new Map([

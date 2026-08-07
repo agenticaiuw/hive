@@ -165,6 +165,16 @@ export function voiceRunForCapture(capture) {
   if (capture.planJobId) return null // its plan job already owns the run
   if (capture.role === 'reply') return null // agent-voice sidecar, not a run
   const transcript = String(capture.transcript || '').trim()
+  /*
+   * Whether the agent actually said anything back. This used to be assumed:
+   * the agent event was hardcoded to 'done' with the label "Answered by
+   * voice", so a run where the model produced NOTHING was recorded as a
+   * success and looked healthy on every dashboard. The pendant's own
+   * decoded_packets=0 was the only place the truth appeared. A reply exists
+   * only if audio was captured for it or it left a transcript.
+   */
+  const replyTranscript = String(capture.replyTranscript || '').trim()
+  const answered = Boolean(capture.replyCaptureId) || Boolean(replyTranscript)
 
   return {
     pipelineId: capture.jobId,
@@ -172,7 +182,10 @@ export function voiceRunForCapture(capture) {
     command: transcript,
     source: 'cloudflare',
     origin: 'live_lte',
-    status: 'completed',
+    status: answered ? 'completed' : 'failed',
+    error: answered
+      ? null
+      : 'The pendant uploaded audio but the agent produced no reply.',
     events: [
       {
         eventId: `cloud-${capture.jobId}-transcription`,
@@ -190,11 +203,14 @@ export function voiceRunForCapture(capture) {
       {
         eventId: `cloud-${capture.jobId}-agent`,
         stage: 'agent',
-        status: 'done',
-        label: 'Answered by voice (no Mac action)',
-        detail:
-          'The cloud agent spoke its reply down the pendant stream; the Mac was not involved.',
-        text: '',
+        status: answered ? 'done' : 'failed',
+        label: answered
+          ? 'Answered by voice (no Mac action)'
+          : 'The agent produced no reply',
+        detail: answered
+          ? 'The cloud agent spoke its reply down the pendant stream; the Mac was not involved.'
+          : 'Speech reached the relay and was stored, but no reply audio or text came back. The pendant played silence.',
+        text: replyTranscript,
         source: 'cloudflare',
         meta: null,
         at: capture.updatedAt || capture.createdAt,

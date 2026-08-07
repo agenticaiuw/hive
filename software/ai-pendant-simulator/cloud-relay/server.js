@@ -57,6 +57,9 @@ import {
   sweepExpiredAudio,
 } from './audioRetention.js'
 import {
+  // GET /v1/ops/audio-captures used this without importing it, so every call
+  // threw ReferenceError and Express turned it into a bare HTML 500.
+  audioCaptureSummary,
   buildHistoryPage,
   decodeHistoryCursor,
   HISTORY_MAX_SCAN,
@@ -1023,7 +1026,9 @@ app.post('/v1/pendant/command', async (request, response) => {
             audioBytes: wavForHistory.length,
             format: captureFormat,
             language,
-            transcript: planForCapture?.text,
+            // ASR text only, never plan.text — that is a history label whose
+            // fallback is the literal filler 'voice command'.
+            transcript: planForCapture?.transcript,
             transcriptionModel: planForCapture?.model,
             status: 'completed',
           })

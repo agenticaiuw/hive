@@ -347,9 +347,16 @@ export async function handlePendantConverse(request, context) {
       `[converse] storing capture: user=${state.userPcmBytes}B reply=${state.replyPcmBytes}B turns=${state.turns.length}`,
     )
     const store = state.store
+    /*
+     * ASR text only. `plan.text` used to be the fallback here, but that field
+     * is a history LABEL whose last resort is the literal string
+     * 'voice command' — so every conversation the model never answered was
+     * filed with a transcript the owner never spoke, and looked healthy.
+     * No words recognised now means no transcript.
+     */
     const transcript =
       state.turns.map((t) => t.transcript).filter(Boolean).join('\n') ||
-      plan?.text ||
+      plan?.transcript ||
       undefined
     const replyTranscript =
       state.turns.map((t) => t.response).filter(Boolean).join('\n') ||

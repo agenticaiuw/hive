@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import Composer from "$lib/components/Composer.svelte";
+  import JobsPanel from "$lib/components/JobsPanel.svelte";
   import Metric from "$lib/components/Metric.svelte";
   import SystemRow from "$lib/components/SystemRow.svelte";
   import Tile from "$lib/components/Tile.svelte";
@@ -26,7 +27,10 @@
   let refreshing = $state(false);
   let detailsOpen = $state(false);
   let toggledEvents = $state<Set<string>>(new Set());
-  let openTile = $state("");
+  // Jobs answers "what is running and what did it just do", which is the
+  // question this page exists for, so it is the one panel open on arrival.
+  let openTile = $state("jobs");
+  let jobsPanel = $state<{ refresh: () => Promise<void> } | null>(null);
   let historyEntries = $state<JsonRecord[]>([]);
   let historyQuery = $state("");
   let historyLoading = $state(false);
@@ -396,6 +400,24 @@
 
   const stages = $derived(stagesFor(selected));
 
+  /*
+   * Audio sources for the hero card. A run carries audio.captureId for the
+   * owner's voice and audio.replyCaptureId for the agent's; either can be
+   * absent (a typed command has no recording, and a run whose reply was text
+   * only has no reply audio). Both stream through the same server route,
+   * which keeps the relay key off the client.
+   */
+  const heroOwnAudio = $derived(
+    selected?.audio?.captureId && selected?.pipelineId
+      ? `/api/history/${encodeURIComponent(String(selected.pipelineId))}/audio`
+      : "",
+  );
+  const heroReplyAudio = $derived(
+    selected?.audio?.replyCaptureId && selected?.pipelineId
+      ? `/api/history/${encodeURIComponent(String(selected.pipelineId))}/audio?voice=reply`
+      : "",
+  );
+
   const metaSegments = $derived.by(() => {
     const segments: { title: string; text: string }[] = [];
     if (!selected) return segments;
@@ -591,6 +613,45 @@
 
       {#if metaSegments.length}
         <p class="meta-line">{#each metaSegments as segment, index}{#if index}<span class="sep" aria-hidden="true">{" · "}</span>{/if}<span title={segment.title}>{segment.text}</span>{/each}</p>
+      {/if}
+
+      <!--
+        Both voices, playable in place. The relay's audio route forwards Range
+        headers, so a native <audio> element gets a real scrubber and duration
+        rather than the fire-and-forget playback the history rows use.
+      -->
+      {#if heroOwnAudio || heroReplyAudio}
+        <div class="hero-audio">
+          {#if heroOwnAudio}
+            <div class="hero-track">
+              <span class="hero-track-label">You</span>
+              <audio
+                class="hero-player"
+                controls
+                preload="metadata"
+                src={heroOwnAudio}
+                aria-label="Your recording"
+              ></audio>
+            </div>
+          {/if}
+          {#if heroReplyAudio}
+            <div class="hero-track">
+              <span class="hero-track-label">Agent</span>
+              <audio
+                class="hero-player"
+                controls
+                preload="metadata"
+                src={heroReplyAudio}
+                aria-label="The agent's spoken reply"
+              ></audio>
+            </div>
+          {/if}
+          {#if selected?.audio?.replyTranscript}
+            <p class="hero-reply-transcript">
+              “{selected.audio.replyTranscript}”
+            </p>
+          {/if}
+        </div>
       {/if}
 
       <button

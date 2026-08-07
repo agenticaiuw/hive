@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createOpsClient,
   loadOpsSettings,
@@ -7,13 +7,16 @@ import {
 
 const TABS = [
   { id: 'home', label: 'Home' },
+  { id: 'jobs', label: 'Jobs' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'thinking', label: 'Thinking' },
   { id: 'chats', label: 'Chats' },
   { id: 'memory', label: 'Memory' },
-  { id: 'work', label: 'Work' },
   { id: 'history', label: 'History' },
 ]
+
+/* The Work tab became Jobs; keep bookmarks and saved state pointing somewhere. */
+const TAB_ALIASES = { work: 'jobs' }
 
 const MEMORY_TYPES = [
   { value: 'Person', label: 'Person' },
@@ -26,24 +29,22 @@ const MEMORY_TYPES = [
 
 const TAB_STORAGE_KEY = 'opsDashboardTab'
 
-function isValidTab(id) {
-  return TABS.some((tab) => tab.id === id)
+function resolveTab(id) {
+  const wanted = TAB_ALIASES[id] ?? id
+  return TABS.some((tab) => tab.id === wanted) ? wanted : null
 }
 
 function loadInitialTab() {
   try {
     const hash = window.location.hash.replace(/^#/, '').trim()
-    if (isValidTab(hash)) {
-      return hash
-    }
-    const saved = localStorage.getItem(TAB_STORAGE_KEY)
-    if (isValidTab(saved)) {
-      return saved
-    }
+    return (
+      resolveTab(hash) ??
+      resolveTab(localStorage.getItem(TAB_STORAGE_KEY)) ??
+      'home'
+    )
   } catch {
-    // ignore
+    return 'home'
   }
-  return 'home'
 }
 
 function persistTab(id) {
@@ -66,10 +67,12 @@ export function OpsApp() {
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [context, setContext] = useState(null)
   const [jobs, setJobs] = useState([])
+  const [routines, setRoutines] = useState([])
   const [pipelineRuns, setPipelineRuns] = useState([])
   const [traces, setTraces] = useState([])
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
+  const [loaded, setLoaded] = useState(false)
   const [entityDraft, setEntityDraft] = useState({
     type: 'Person',
     name: '',
@@ -78,6 +81,8 @@ export function OpsApp() {
   const [renameDraft, setRenameDraft] = useState('')
   const [selectedTraceId, setSelectedTraceId] = useState(null)
   const [selectedPipelineId, setSelectedPipelineId] = useState(null)
+  const [selectedWorkId, setSelectedWorkId] = useState(null)
+  const [jobSourceFilter, setJobSourceFilter] = useState('all')
 
   const client = useMemo(() => createOpsClient(settings), [settings])
   const activeSession =
@@ -86,9 +91,10 @@ export function OpsApp() {
     null
 
   function selectTab(nextTab) {
-    if (!isValidTab(nextTab)) return
-    setTab(nextTab)
-    persistTab(nextTab)
+    const resolved = resolveTab(nextTab)
+    if (!resolved) return
+    setTab(resolved)
+    persistTab(resolved)
   }
 
   useEffect(() => {
@@ -97,11 +103,11 @@ export function OpsApp() {
 
   useEffect(() => {
     const onHashChange = () => {
-      const hash = window.location.hash.replace(/^#/, '').trim()
-      if (isValidTab(hash)) {
-        setTab(hash)
+      const resolved = resolveTab(window.location.hash.replace(/^#/, '').trim())
+      if (resolved) {
+        setTab(resolved)
         try {
-          localStorage.setItem(TAB_STORAGE_KEY, hash)
+          localStorage.setItem(TAB_STORAGE_KEY, resolved)
         } catch {
           // ignore
         }
@@ -152,6 +158,22 @@ export function OpsApp() {
         return
       }
 
+      /*
+       * Settled, not all: one slow or failing route used to throw away every
+       * other route's data, which is why Home reported "This Mac ·
+       * Unavailable" while /machine-context was answering perfectly well.
+       * Each panel now keeps whatever actually arrived.
+       */
+      const results = await Promise.allSettled([
+        client.getStatus(),
+        client.getSessions(),
+        client.getContext(),
+        client.getJobs(),
+        client.getPipeline(),
+        client.getThinking(),
+        client.getLogs(),
+        client.getRoutines(),
+      ])
       const [
         nextStatus,
         sessionsPayload,
@@ -160,34 +182,33 @@ export function OpsApp() {
         pipelinePayload,
         thinkingPayload,
         logsPayload,
-      ] = await Promise.all([
-        client.getStatus(),
-        client.getSessions(),
-        client.getContext(),
-        client.getJobs(),
-        client.getPipeline(),
-        client.getThinking(),
-        client.getLogs(),
-      ])
-      setStatus(nextStatus)
-      setSessions(sessionsPayload.sessions ?? [])
-      setContext(contextPayload)
-      setJobs(jobsPayload.jobs ?? [])
-      setPipelineRuns(pipelinePayload.runs ?? [])
-      setTraces(thinkingPayload.traces ?? [])
-      setLogs(logsPayload.logs ?? [])
-      if (!activeSessionId && sessionsPayload.sessions?.[0]) {
+        routinesPayload,
+      ] = results.map((entry) =>
+        entry.status === 'fulfilled' ? entry.value : null,
+      )
+
+      if (nextStatus) setStatus(nextStatus)
+      if (sessionsPayload) setSessions(sessionsPayload.sessions ?? [])
+      if (contextPayload) setContext(contextPayload)
+      if (jobsPayload) setJobs(jobsPayload.jobs ?? [])
+      if (pipelinePayload) setPipelineRuns(pipelinePayload.runs ?? [])
+      if (thinkingPayload) setTraces(thinkingPayload.traces ?? [])
+      if (logsPayload) setLogs(logsPayload.logs ?? [])
+      if (routinesPayload) setRoutines(routinesPayload.routines ?? [])
+      setLoaded(true)
+
+      if (!activeSessionId && sessionsPayload?.sessions?.[0]) {
         setActiveSessionId(sessionsPayload.sessions[0].sessionId)
       }
       if (
-        thinkingPayload.traces?.[0] &&
+        thinkingPayload?.traces?.[0] &&
         (!selectedTraceId ||
           !thinkingPayload.traces.some((trace) => trace.traceId === selectedTraceId))
       ) {
         setSelectedTraceId(thinkingPayload.traces[0].traceId)
       }
       if (
-        pipelinePayload.runs?.[0] &&
+        pipelinePayload?.runs?.[0] &&
         (!selectedPipelineId ||
           !pipelinePayload.runs.some(
             (run) => run.pipelineId === selectedPipelineId,
@@ -195,10 +216,37 @@ export function OpsApp() {
       ) {
         setSelectedPipelineId(pipelinePayload.runs[0].pipelineId)
       }
+
+      const failure = results.find((entry) => entry.status === 'rejected')
+      setError(failure ? friendlyError(failure.reason?.message) : '')
     } catch (err) {
       setError(friendlyError(err.message))
     }
   }
+
+  /*
+   * The job list has no stream of its own, so the thinking and pipeline
+   * streams stand in for one: every step an agent takes pushes an event, and
+   * that is exactly when the Jobs view is stale. Coalesced so a burst of token
+   * chunks costs one refetch, not fifty.
+   */
+  const workTimer = useRef(null)
+  const refreshWork = useCallback(() => {
+    if (workTimer.current) return
+    workTimer.current = window.setTimeout(() => {
+      workTimer.current = null
+      Promise.allSettled([client.getJobs(), client.getRoutines()]).then(
+        ([jobsPayload, routinesPayload]) => {
+          if (jobsPayload.status === 'fulfilled') {
+            setJobs(jobsPayload.value.jobs ?? [])
+          }
+          if (routinesPayload.status === 'fulfilled') {
+            setRoutines(routinesPayload.value.routines ?? [])
+          }
+        },
+      )
+    }, 900)
+  }, [client])
 
   useEffect(() => {
     const initial = window.setTimeout(refreshAll, 0)
@@ -222,6 +270,7 @@ export function OpsApp() {
         onMessage: (payload) => {
           const nextTraces = payload.traces ?? []
           setTraces(nextTraces)
+          refreshWork()
           const latest = nextTraces[0]
           if (latest?.status === 'thinking') {
             setTab((current) => {
@@ -266,6 +315,7 @@ export function OpsApp() {
         onMessage: (payload) => {
           const nextRuns = payload.runs ?? []
           setPipelineRuns(nextRuns)
+          refreshWork()
           const latest = nextRuns[0]
           if (
             latest &&
@@ -381,6 +431,10 @@ export function OpsApp() {
               latestTrace={latestTrace}
               memory={status?.memory ?? {}}
               machine={status?.machine}
+              loaded={loaded}
+              runningJobs={jobs.filter((job) => isRunningStatus(job.status)).length}
+              nextRoutine={nextRoutineDue(routines)}
+              onOpenJobs={() => selectTab('jobs')}
               workingProject={status?.workingProject || context?.workingProject}
               onOpenThinking={() => selectTab('thinking')}
               onCancelThinking={
@@ -510,69 +564,49 @@ export function OpsApp() {
             />
           ) : null}
 
-          {tab === 'work' ? (
-            <section className="stack">
-              <div className="section-label row-between">
-                <span>Work</span>
-                <button
-                  type="button"
-                  className="text-btn"
-                  onClick={async () => {
-                    try {
-                      const payload = await client.undoLastJob()
-                      setError('')
-                      await refreshAll()
-                      window.alert(payload.undo?.summary || 'Undone.')
-                    } catch (err) {
-                      setError(friendlyError(err.message))
-                    }
-                  }}
-                >
-                  Undo last
-                </button>
-              </div>
-              <ListView
-                empty="No requests yet."
-                items={jobs.map((job) => ({
-                  id: job.jobId,
-                  title: job.command || 'Request',
-                  meta: `${statusLabel(job.status)}${job.undoneAt ? ' · Undone' : ''} · ${formatWhen(job.updatedAt || job.createdAt)}`,
-                  body: job.result?.response || job.result?.summary || job.error || '',
-                  tone: job.undoneAt ? 'busy' : simpleStatus(job.status),
-                  actions: [
-                    job.status === 'processing' || job.cancellable
-                      ? {
-                          label: 'Cancel',
-                          onClick: async () => {
-                            try {
-                              await client.cancelJob(job.jobId)
-                              setError('')
-                              refreshAll()
-                            } catch (err) {
-                              setError(friendlyError(err.message))
-                            }
-                          },
-                        }
-                      : null,
-                    job.undo?.canUndo
-                      ? {
-                          label: 'Undo',
-                          onClick: async () => {
-                            try {
-                              const payload = await client.undoJob(job.jobId)
-                              setError('')
-                              await refreshAll()
-                              window.alert(payload.undo?.summary || 'Undone.')
-                            } catch (err) {
-                              setError(friendlyError(err.message))
-                            }
-                          },
-                        }
-                      : null,
-                  ].filter(Boolean),
-                }))}
-              />
-            </section>
+          {tab === 'jobs' ? (
+            <JobsView
+              jobs={jobs}
+              routines={routines}
+              traces={traces}
+              loaded={loaded}
+              selectedId={selectedWorkId}
+              onSelect={setSelectedWorkId}
+              sourceFilter={jobSourceFilter}
+              onSourceFilter={setJobSourceFilter}
+              onOpenThinking={(traceId) => {
+                if (traceId) setSelectedTraceId(traceId)
+                selectTab('thinking')
+              }}
+              onCancel={async (jobId) => {
+                try {
+                  await client.cancelJob(jobId)
+                  setError('')
+                  refreshAll()
+                } catch (err) {
+                  setError(friendlyError(err.message))
+                }
+              }}
+              onUndo={async (jobId) => {
+                try {
+                  const payload = await client.undoJob(jobId)
+                  setError('')
+                  await refreshAll()
+                  window.alert(payload.undo?.summary || 'Undone.')
+                } catch (err) {
+                  setError(friendlyError(err.message))
+                }
+              }}
+              onRunRoutine={async (routineId) => {
+                try {
+                  await client.runRoutine(routineId)
+                  setError('')
+                  refreshAll()
+                } catch (err) {
+                  setError(friendlyError(err.message))
+                }
+              }}
+            />
           ) : null}
 
           {tab === 'history' ? (
@@ -653,6 +687,10 @@ function HomeView({
   latestTrace,
   memory,
   machine,
+  loaded,
+  runningJobs,
+  nextRoutine,
+  onOpenJobs,
   workingProject,
   onOpenThinking,
   onCancelThinking,
@@ -682,6 +720,23 @@ function HomeView({
         </p>
       )}
 
+      <div className="home-jobs-strip">
+        <div>
+          <p className="meta-label">Work right now</p>
+          <p className="meta-value">
+            {runningJobs
+              ? `${runningJobs} job${runningJobs === 1 ? '' : 's'} running`
+              : 'Nothing running'}
+            {nextRoutine
+              ? ` · next scheduled ${formatWhen(nextRoutine.nextRunAt)}`
+              : ''}
+          </p>
+        </div>
+        <button type="button" className="text-btn" onClick={onOpenJobs}>
+          Open Jobs
+        </button>
+      </div>
+
       <div className="meta-strip">
         <div>
           <p className="meta-label">Remembering</p>
@@ -706,11 +761,576 @@ function HomeView({
           <p className="meta-value">
             {machine
               ? `${shortHost(machine.hostname)} · ${machine.appCount} apps`
-              : 'Unavailable'}
+              : loaded
+                ? 'Unavailable'
+                : 'Checking…'}
           </p>
         </div>
       </div>
     </section>
+  )
+}
+
+/*
+ * Who asked for this work. The owner's own pendant commands, work the agent
+ * started on its own, and work a schedule fired are indistinguishable in the
+ * job list without this — and telling them apart is the whole point of the
+ * view.
+ */
+const JOB_SOURCES = {
+  pendant: { label: 'Pendant', hint: 'You asked for this from the pendant' },
+  routine: { label: 'Routine', hint: 'Fired on a schedule, not by you' },
+  recon: { label: 'Recon', hint: 'The agent started this on its own' },
+  'harness-task': { label: 'Harness', hint: 'Automated harness run' },
+  'mac-planner': { label: 'Planner', hint: 'Planned on this Mac' },
+  measure: { label: 'Measure', hint: 'Benchmark / measurement run' },
+  probe: { label: 'Probe', hint: 'Health probe' },
+  local: { label: 'Local', hint: 'Sent from this dashboard or local API' },
+  'user-test': { label: 'Manual', hint: 'Hand-run test from the owner' },
+  test: { label: 'Test', hint: 'Automated test run' },
+}
+
+const RUNNING_STATUSES = ['processing', 'queued', 'active', 'thinking', 'running']
+
+/* Values that should never be read off a shared screen. */
+const SENSITIVE_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cookie|credential|bearer|private[-_]?key/i
+
+function isRunningStatus(status) {
+  return RUNNING_STATUSES.includes(String(status))
+}
+
+function sourceMeta(source) {
+  const key = String(source || 'unknown')
+  return (
+    JOB_SOURCES[key] || {
+      label: key === 'unknown' ? 'Unknown' : humanizeKey(key),
+      hint: 'Origin not recorded',
+    }
+  )
+}
+
+function nextRoutineDue(routines = []) {
+  return (
+    routines
+      .filter((routine) => routine.enabled && routine.nextRunAt)
+      .sort((a, b) => a.nextRunAt - b.nextRunAt)[0] || null
+  )
+}
+
+function describeSchedule(schedule) {
+  if (schedule?.kind === 'daily') return `Every day at ${schedule.at || '08:00'}`
+  if (schedule?.kind === 'interval') {
+    return `Every ${formatDuration(Number(schedule.everyMs) || 0)}`
+  }
+  return 'No schedule'
+}
+
+function redactInline(text) {
+  return String(text).replace(
+    /\b(bearer|token|secret|password|api[-_]?key)([=:"'\s]+)(\S{6,})/gi,
+    (_match, label, separator) => `${label}${separator}•••••••`,
+  )
+}
+
+/** Params stay visible; only the values that are credentials get hidden. */
+function redactParams(params) {
+  if (!params || typeof params !== 'object') return []
+  return Object.entries(params).map(([key, value]) => {
+    if (SENSITIVE_KEY.test(key)) return [key, '••••••• hidden']
+    if (value == null) return [key, '—']
+    if (typeof value === 'object') {
+      return [key, redactInline(JSON.stringify(value))]
+    }
+    return [key, redactInline(value)]
+  })
+}
+
+/* What the run actually reached for, read back off the recorded actions. */
+function summarizeTouches(entries) {
+  const apps = new Set()
+  const urls = new Set()
+  let shell = 0
+  let browser = 0
+
+  for (const entry of entries) {
+    const action = entry.action || entry || {}
+    const params = action.params || {}
+    if (params.appName) apps.add(params.appName)
+    if (params.url) urls.add(String(params.url))
+    if (action.type === 'run_shell' || action.type === 'run_applescript') shell += 1
+    if (String(action.type || '').startsWith('browser_')) browser += 1
+  }
+
+  return [
+    apps.size ? `Apps · ${[...apps].join(', ')}` : null,
+    urls.size ? `Web · ${[...urls].slice(0, 3).join(', ')}` : null,
+    shell ? `Shell/AppleScript · ${shell}` : null,
+    browser ? `Browser control · ${browser}` : null,
+  ].filter(Boolean)
+}
+
+function JobsView({
+  jobs,
+  routines,
+  traces,
+  loaded,
+  selectedId,
+  onSelect,
+  sourceFilter,
+  onSourceFilter,
+  onOpenThinking,
+  onCancel,
+  onUndo,
+  onRunRoutine,
+}) {
+  const sources = useMemo(() => {
+    const counts = new Map()
+    for (const job of jobs) {
+      const key = String(job.source || 'unknown')
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [jobs])
+
+  const byRecency = (a, b) =>
+    Date.parse(b.updatedAt || b.createdAt || 0) -
+    Date.parse(a.updatedAt || a.createdAt || 0)
+
+  const visible =
+    sourceFilter === 'all'
+      ? jobs
+      : jobs.filter((job) => String(job.source || 'unknown') === sourceFilter)
+  const running = visible.filter((job) => isRunningStatus(job.status)).sort(byRecency)
+  const finished = visible
+    .filter((job) => !isRunningStatus(job.status))
+    .sort(byRecency)
+  /* A source filter filters everything, or the group counts stop adding up. */
+  const scheduled =
+    sourceFilter === 'all' || sourceFilter === 'routine'
+      ? [...routines].sort(
+          (a, b) => (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity),
+        )
+      : []
+
+  const selectedJob =
+    visible.find((job) => `job:${job.jobId}` === selectedId) ?? null
+  const selectedRoutine =
+    routines.find((routine) => `routine:${routine.id}` === selectedId) ?? null
+  const fallbackJob = running[0] ?? finished[0] ?? null
+  const job = selectedJob ?? (selectedRoutine ? null : fallbackJob)
+  const routine = selectedRoutine
+
+  const traceIdFor = (target) =>
+    target?.result?.thinking?.traceId ??
+    traces.find(
+      (trace) =>
+        trace.command === target?.command && trace.source === target?.source,
+    )?.traceId ??
+    null
+
+  return (
+    <section className="split-view">
+      <aside className="split-rail">
+        <div className="job-filters" role="group" aria-label="Filter by source">
+          <button
+            type="button"
+            className={sourceFilter === 'all' ? 'job-chip is-on' : 'job-chip'}
+            onClick={() => onSourceFilter('all')}
+          >
+            All · {jobs.length}
+          </button>
+          {sources.map(([key, count]) => (
+            <button
+              key={key}
+              type="button"
+              className={sourceFilter === key ? 'job-chip is-on' : 'job-chip'}
+              onClick={() => onSourceFilter(key)}
+              title={sourceMeta(key).hint}
+            >
+              {sourceMeta(key).label} · {count}
+            </button>
+          ))}
+        </div>
+
+        <div className="rail-scroll">
+          <JobRailGroup label="Running" count={running.length}>
+            {running.map((item) => (
+              <JobRailItem
+                key={item.jobId}
+                job={item}
+                active={item.jobId === job?.jobId}
+                onSelect={() => onSelect(`job:${item.jobId}`)}
+              />
+            ))}
+            {running.length ? null : (
+              <p className="rail-empty">Nothing running.</p>
+            )}
+          </JobRailGroup>
+
+          <JobRailGroup label="Scheduled" count={scheduled.length}>
+            {scheduled.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={
+                  item.id === routine?.id ? 'rail-item is-on' : 'rail-item'
+                }
+                onClick={() => onSelect(`routine:${item.id}`)}
+              >
+                <strong>{truncate(item.name || item.command, 40)}</strong>
+                <span>
+                  <em className="job-source">Routine</em>
+                  {item.enabled && item.nextRunAt
+                    ? ` · next ${formatWhen(item.nextRunAt)}`
+                    : ' · paused'}
+                </span>
+              </button>
+            ))}
+            {scheduled.length ? null : (
+              <p className="rail-empty">No routines scheduled.</p>
+            )}
+          </JobRailGroup>
+
+          <JobRailGroup label="Finished" count={finished.length}>
+            {finished.slice(0, 60).map((item) => (
+              <JobRailItem
+                key={item.jobId}
+                job={item}
+                active={item.jobId === job?.jobId}
+                onSelect={() => onSelect(`job:${item.jobId}`)}
+              />
+            ))}
+            {finished.length ? null : (
+              <p className="rail-empty">
+                {loaded ? 'No finished jobs yet.' : 'Loading…'}
+              </p>
+            )}
+          </JobRailGroup>
+        </div>
+      </aside>
+
+      <div className="split-main">
+        {routine ? (
+          <RoutineDetail routine={routine} onRun={onRunRoutine} />
+        ) : job ? (
+          <JobDetail
+            job={job}
+            traceId={traceIdFor(job)}
+            onOpenThinking={onOpenThinking}
+            onCancel={onCancel}
+            onUndo={onUndo}
+          />
+        ) : (
+          <div className="pipeline-empty">
+            <p className="eyebrow">Jobs</p>
+            <h2>Nothing to show yet</h2>
+            <p className="quiet-lead">
+              Every request — yours, scheduled, or agent-initiated — lands here
+              with the actions it ran and what each one returned.
+            </p>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function JobRailGroup({ label, count, children }) {
+  return (
+    <div className="job-rail-group">
+      <p className="job-rail-head">
+        {label} <span>{count}</span>
+      </p>
+      {children}
+    </div>
+  )
+}
+
+function JobRailItem({ job, active, onSelect }) {
+  return (
+    <button
+      type="button"
+      className={active ? 'rail-item is-on' : 'rail-item'}
+      onClick={onSelect}
+    >
+      <strong>{truncate(job.command || 'Job', 40)}</strong>
+      <span>
+        <em className={`job-source src-${String(job.source || 'unknown')}`}>
+          {sourceMeta(job.source).label}
+        </em>{' '}
+        · {statusLabel(job.status)} · {formatWhen(job.updatedAt || job.createdAt)}
+      </span>
+    </button>
+  )
+}
+
+function JobDetail({ job, traceId, onOpenThinking, onCancel, onUndo }) {
+  const result = job.result && typeof job.result === 'object' ? job.result : null
+  const ran = Array.isArray(result?.results) ? result.results : []
+  const planned = Array.isArray(result?.actions) ? result.actions : []
+  const source = sourceMeta(job.source)
+  const live = isRunningStatus(job.status)
+  const summary = result?.response || result?.summary || job.error || ''
+  const duration = elapsedBetween(job.createdAt, job.updatedAt)
+  const succeeded = ran.filter((entry) => entry.ok !== false).length
+  const touches = summarizeTouches(ran.length ? ran : planned)
+
+  return (
+    <article className={`job-detail ${live ? 'is-live' : ''}`}>
+      <header className="flow-head">
+        <p className="eyebrow">
+          {job.type === 'plan' ? 'Plan' : 'Execution'} · {source.label}
+        </p>
+        <h2>{job.command || 'Job'}</h2>
+        <p className={`pill is-${simpleStatus(job.status)}`}>
+          {statusLabel(job.status)}
+          {duration ? ` · ${formatDuration(duration)}` : ''}
+          {live ? ' · updating live' : ''}
+        </p>
+      </header>
+
+      <dl className="pipeline-meta">
+        <div>
+          <dt>Asked by</dt>
+          <dd>
+            {source.label} — {source.hint}
+          </dd>
+        </div>
+        <div>
+          <dt>Started</dt>
+          <dd>{formatWhen(job.createdAt) || '—'}</dd>
+        </div>
+        <div>
+          <dt>Last update</dt>
+          <dd>{formatWhen(job.updatedAt) || '—'}</dd>
+        </div>
+        <div>
+          <dt>Actions</dt>
+          <dd>
+            {ran.length
+              ? `${succeeded}/${ran.length} succeeded`
+              : planned.length
+                ? `${planned.length} planned`
+                : live
+                  ? 'Starting…'
+                  : 'None recorded'}
+          </dd>
+        </div>
+      </dl>
+
+      {touches.length ? (
+        <div className="job-touches">
+          <p className="meta-label">Touched</p>
+          <ul>
+            {touches.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {summary ? (
+        <div className="pipeline-text">
+          <p className="meta-label">{job.error ? 'Error' : 'Result'}</p>
+          <ReadableText text={summary} />
+        </div>
+      ) : null}
+
+      {ran.length ? (
+        <>
+          <p className="section-label job-evidence-head">Evidence</p>
+          <ol className="pipeline-events">
+            {ran.map((entry, index) => (
+              <JobAction
+                key={`${entry.action?.type || 'action'}-${index}`}
+                entry={entry}
+                index={index}
+              />
+            ))}
+          </ol>
+        </>
+      ) : null}
+
+      {!ran.length && planned.length ? (
+        <>
+          <p className="section-label job-evidence-head">Planned steps</p>
+          <ol className="pipeline-events">
+            {planned.map((action, index) => (
+              <JobAction
+                key={`${action.type || 'action'}-${index}`}
+                entry={{ action }}
+                index={index}
+              />
+            ))}
+          </ol>
+        </>
+      ) : null}
+
+      <div className="job-tools">
+        {job.cancellable || live ? (
+          <button
+            type="button"
+            className="text-btn"
+            onClick={() => onCancel(job.jobId)}
+          >
+            Cancel
+          </button>
+        ) : null}
+        {job.undo?.canUndo ? (
+          <button
+            type="button"
+            className="text-btn"
+            onClick={() => onUndo(job.jobId)}
+          >
+            Undo
+          </button>
+        ) : null}
+        {traceId ? (
+          <button
+            type="button"
+            className="text-btn"
+            onClick={() => onOpenThinking(traceId)}
+          >
+            Open thinking
+          </button>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
+function JobAction({ entry, index }) {
+  const [open, setOpen] = useState(false)
+  const action = entry.action || {}
+  const params = redactParams(action.params)
+  const failed = entry.ok === false || entry.status === 'failed'
+  const state = entry.ok === undefined ? 'pending' : failed ? 'failed' : 'done'
+  const output = [
+    entry.stdout ? ['stdout', entry.stdout] : null,
+    entry.stderr ? ['stderr', entry.stderr] : null,
+  ].filter(Boolean)
+
+  return (
+    <li className={`pipeline-event is-${state}`}>
+      <span className="pipeline-event-index">{index + 1}</span>
+      <div className="pipeline-event-body">
+        <div className="pipeline-event-head">
+          <div>
+            <p className="meta-label">
+              {String(action.type || 'action').replaceAll('_', ' ')}
+            </p>
+            <strong>{action.label || action.type || 'Action'}</strong>
+          </div>
+          <p className={`pill is-${failed ? 'bad' : state === 'done' ? 'ok' : 'busy'}`}>
+            {entry.ok === undefined
+              ? 'Planned'
+              : failed
+                ? 'Failed'
+                : 'Done'}
+          </p>
+        </div>
+
+        {params.length ? (
+          <dl className="pipeline-meta">
+            {params.map(([key, value]) => (
+              <div key={key}>
+                <dt>{humanizeKey(key)}</dt>
+                <dd>{truncate(String(value), 300)}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+
+        {entry.message ? <ReadableText text={String(entry.message)} /> : null}
+
+        {output.length ? (
+          <div className="stream-draft">
+            <div className="stream-draft-head">
+              <p className="meta-label">
+                Output · {output.map(([name]) => name).join(' + ')}
+              </p>
+              <button
+                type="button"
+                className="linkish"
+                onClick={() => setOpen((value) => !value)}
+              >
+                {open ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {open
+              ? output.map(([name, text]) => (
+                  <pre key={name} className="stream-draft-body">
+                    {redactInline(text)}
+                  </pre>
+                ))
+              : null}
+          </div>
+        ) : null}
+      </div>
+    </li>
+  )
+}
+
+function RoutineDetail({ routine, onRun }) {
+  return (
+    <article className="job-detail">
+      <header className="flow-head">
+        <p className="eyebrow">Scheduled routine</p>
+        <h2>{routine.name || routine.command}</h2>
+        <p className={`pill is-${routine.enabled ? 'ok' : 'busy'}`}>
+          {routine.enabled ? describeSchedule(routine.schedule) : 'Paused'}
+        </p>
+      </header>
+
+      <dl className="pipeline-meta">
+        <div>
+          <dt>Runs</dt>
+          <dd>{routine.command}</dd>
+        </div>
+        <div>
+          <dt>Next run</dt>
+          <dd>
+            {routine.enabled && routine.nextRunAt
+              ? formatWhen(routine.nextRunAt)
+              : 'Not scheduled'}
+          </dd>
+        </div>
+        <div>
+          <dt>Last run</dt>
+          <dd>
+            {routine.lastRunAt
+              ? `${formatWhen(routine.lastRunAt)} · ${statusLabel(routine.lastStatus)}`
+              : 'Never'}
+          </dd>
+        </div>
+        <div>
+          <dt>Times run</dt>
+          <dd>{routine.runCount ?? 0}</dd>
+        </div>
+      </dl>
+
+      {routine.lastError ? (
+        <div className="pipeline-text">
+          <p className="meta-label">Last error</p>
+          <ReadableText text={String(routine.lastError)} />
+        </div>
+      ) : null}
+
+      <p className="pipeline-note">
+        Routines run whether or not this dashboard is open. Each run shows up in
+        the job list above with its own evidence.
+      </p>
+
+      <div className="job-tools">
+        <button
+          type="button"
+          className="text-btn"
+          onClick={() => onRun(routine.id)}
+        >
+          Run now
+        </button>
+      </div>
+    </article>
   )
 }
 

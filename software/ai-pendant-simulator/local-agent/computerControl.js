@@ -2,10 +2,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { exec, execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import {
-  enqueueBrowserCommand,
-  waitForBrowserResult,
-} from './browserBridge.js'
+  forgetBrowserSession,
+  listBrowserSessions,
+  openBrowserSession,
+  resolveSessionRef,
+  runBrowserSessionAction,
+} from './browserSessions.js'
 import { workspacePath } from './config.js'
 import { resolveUserPath } from './security.js'
 import {
@@ -26,6 +30,15 @@ import {
   showScreenOverlay,
 } from './screenOverlay.js'
 import * as computerUse from './computerUse.js'
+import {
+  briefingHeadline,
+  deliverBriefing,
+  getBriefing,
+  listBriefings,
+  markBriefingPlayed,
+  pendantSpeechForBriefing,
+  playBriefingOnMac,
+} from './audioBrief.js'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -53,6 +66,23 @@ export async function executeComputerAction(action) {
         color: 'black',
       },
     })
+  }
+
+  /*
+   * The planner can only emit action types llmPlanner.js knows about, and it
+   * reaches research through `run_shell scripts/research-brief.mjs …` (see the
+   * research block in machineContext.js). Running that as a real subprocess
+   * would work right up to the point that matters: a subprocess can only hand
+   * back stdout, and a briefing's deliverable is a megabyte of rendered audio
+   * that has to ride on the result object for the pendant to play it. So the
+   * CLI's own arguments are honoured in-process instead. The script still runs
+   * standalone from a terminal — this only short-circuits the agent's copy.
+   */
+  const researchCall = researchCliCall(action)
+  if (researchCall) {
+    return researchCall.play
+      ? playBriefing({ ...action, params: researchCall.params })
+      : researchBrief({ ...action, params: researchCall.params })
   }
 
   switch (action.type) {
@@ -191,6 +221,13 @@ export async function executeComputerAction(action) {
       return setClipboard(action)
     case 'create_note':
       return createNote(action)
+    case 'research_brief':
+    case 'research_topic':
+      return researchBrief(action)
+    case 'play_briefing':
+      return playBriefing(action)
+    case 'list_briefings':
+      return listBriefingsAction(action)
     case 'run_project':
       return runProject(action)
     case 'search_file':
@@ -244,6 +281,12 @@ export async function executeComputerAction(action) {
       return runBrowserAction(action, 'capture')
     case 'browser_press_key':
       return runBrowserAction(action, 'press_key')
+    case 'browser_open_session':
+      return openBrowserTabSession(action)
+    case 'browser_list_sessions':
+      return listBrowserTabSessions(action)
+    case 'browser_close_session':
+      return closeBrowserTabSession(action)
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
   }
@@ -707,6 +750,131 @@ async function createNote(action) {
   return success(action, `Created note ${notePath}`, { path: notePath })
 }
 
+/*
+ * Research → audio brief.
+ *
+ * Deliberately slow and deliberately cheap: it runs the production web search
+ * and the cheap text tier, never Realtime, because by construction nobody is
+ * waiting on the other end. The result carries the rendered speech so the
+ * pendant can play the actual briefing instead of a sentence about it.
+ */
+async function researchBrief(action) {
+  const { researchTopic } = await import('./research.js')
+  const params = action.params ?? {}
+  const topic = String(params.topic ?? params.query ?? params.subject ?? '').trim()
+  if (!topic) throw new Error('research_brief requires a topic.')
+
+  const research = await researchTopic({
+    topic,
+    mode: String(params.mode ?? 'brief'),
+    match: String(params.match ?? ''),
+    maxSources: Number(params.maxSources) || undefined,
+  })
+  const { briefing, notePath } = deliverBriefing({
+    research,
+    openNote: params.openNote === true,
+  })
+
+  if (params.playOnMac === true) playBriefingOnMac(briefing)
+
+  /*
+   * `deliver: "now"` attaches the whole briefing to this result, so a pendant
+   * that asked and waited hears it immediately. The default is "later": the
+   * spoken confirmation says it is ready, and the audio waits in the store
+   * until "play my briefing" comes back for it. That is the whole point of
+   * work nobody is waiting on — the owner picks the moment, not the agent.
+   */
+  const deliverNow = params.deliver === 'now' || params.attachAudio === true
+  return success(action, briefingHeadline(briefing), {
+    briefingId: briefing.id,
+    notePath,
+    audioPath: briefing.wavPath,
+    opusPath: briefing.opusPath,
+    seconds: briefing.seconds,
+    sourcesRead: briefing.sourcesRead,
+    sourcesSeen: briefing.sourcesSeen,
+    sources: briefing.sources,
+    headline: briefing.headline,
+    ...(deliverNow ? { pendantSpeech: pendantSpeechForBriefing(briefing) } : {}),
+  })
+}
+
+async function playBriefing(action) {
+  const params = action.params ?? {}
+  const briefing = getBriefing(String(params.id ?? params.briefingId ?? 'latest'))
+  if (!briefing) {
+    throw new Error('There are no briefings waiting.')
+  }
+
+  if (params.onMac === true) playBriefingOnMac(briefing)
+  const pendantSpeech = pendantSpeechForBriefing(briefing)
+  markBriefingPlayed(briefing.id)
+
+  return success(action, briefing.spoken || briefingHeadline(briefing), {
+    briefingId: briefing.id,
+    notePath: briefing.notePath,
+    audioPath: briefing.wavPath,
+    seconds: briefing.seconds,
+    sources: briefing.sources,
+    ...(pendantSpeech ? { pendantSpeech } : {}),
+  })
+}
+
+async function listBriefingsAction(action) {
+  const briefings = listBriefings({
+    limit: Number(action.params?.limit) || 20,
+  }).map(({ spoken, sources, ...rest }) => ({
+    ...rest,
+    sourceCount: sources?.length ?? 0,
+  }))
+  const pending = briefings.filter((briefing) => !briefing.played).length
+  return success(
+    action,
+    briefings.length
+      ? `${briefings.length} briefing${briefings.length === 1 ? '' : 's'} saved, ${pending} not played yet.`
+      : 'No briefings yet.',
+    { briefings },
+  )
+}
+
+/*
+ * Recognise the research CLI inside a run_shell command and read its flags.
+ * Matching on the script name (not on the owner's words) keeps this a routing
+ * detail: anything else the planner shells out to is still a plain shell run.
+ */
+export function researchCliCall(action) {
+  if (action?.type !== 'run_shell' && action?.type !== 'run_project') return null
+  const command = String(action.params?.command ?? '')
+  if (!/research-brief\.mjs/.test(command)) return null
+
+  const value = (name) => {
+    const match = command.match(
+      new RegExp(`--${name}[= ]+(?:"([^"]*)"|'([^']*)'|([^\\s]+))`),
+    )
+    return match ? (match[1] ?? match[2] ?? match[3] ?? '').trim() : ''
+  }
+
+  if (/--play\b/.test(command)) {
+    return { play: true, params: { id: value('play') || 'latest' } }
+  }
+
+  const topic = value('topic')
+  if (!topic) return null
+  return {
+    play: false,
+    params: {
+      topic,
+      mode: value('mode') || 'brief',
+      match: value('match'),
+      maxSources: Number(value('max-sources')) || undefined,
+      openNote: /--open\b/.test(command),
+      playOnMac: /--play-on-mac\b/.test(command),
+      deliver: /--now\b/.test(command) ? 'now' : 'later',
+    },
+  }
+}
+
+
 async function runProject(action) {
   const projectPath = resolveUserPath(action.params?.path)
 
@@ -728,20 +896,51 @@ async function runProject(action) {
 }
 
 async function runBrowserAction(action, type) {
-  const command = enqueueBrowserCommand({
+  const result = await runBrowserSessionAction({
     type,
     params: action.params ?? {},
     label: action.label ?? type,
   })
-  const result = await waitForBrowserResult(command.commandId)
 
-  if (result.status === 'failed') {
-    throw new Error(result.error ?? 'Browser extension action failed.')
-  }
+  /* Say when a tab had to be opened: otherwise a planner reading the trace
+   * cannot tell a page it navigated to from one it merely found. */
+  const recovered = result.session?.recovery?.length
+    ? ` (opened a tab first: ${result.session.recovery.join(' → ')})`
+    : ''
 
-  return success(action, result.result?.message ?? 'Browser action completed.', {
-    browser: result.result,
-  })
+  return success(
+    action,
+    `${result.message ?? 'Browser action completed.'}${recovered}`,
+    { browser: result },
+  )
+}
+
+async function openBrowserTabSession(action) {
+  const result = await openBrowserSession(action.params ?? {})
+  return success(action, result.message, { browser: result })
+}
+
+async function listBrowserTabSessions(action) {
+  const sessions = listBrowserSessions()
+  return success(
+    action,
+    sessions.length
+      ? `${sessions.length} browser session(s): ${sessions.map((s) => `${s.id}→tab ${s.tabId}`).join(', ')}`
+      : 'No browser sessions yet.',
+    { browser: { sessions } },
+  )
+}
+
+async function closeBrowserTabSession(action) {
+  const { id } = resolveSessionRef(action.params ?? {})
+  const forgotten = forgetBrowserSession(id)
+  return success(
+    action,
+    forgotten
+      ? `Released browser session "${id}".`
+      : `No browser session named "${id}".`,
+    { browser: { sessionId: id, released: forgotten } },
+  )
 }
 
 async function searchFile(action) {
@@ -1017,3 +1216,34 @@ function success(action, message, extra = {}) {
     ...extra,
   }
 }
+
+/*
+ * The dispatch table above, as data, for GET /capabilities.
+ *
+ * Read out of the switch rather than typed a second time. A hand-kept copy of
+ * a 70-entry list is a list that is wrong: `compose_briefing` was added to the
+ * dispatcher while this very export was first being written. Whatever the
+ * switch can dispatch is what the manifest advertises, always.
+ *
+ * The floor check is the seatbelt — if a refactor ever changes the dispatcher's
+ * shape this fails loudly at startup instead of quietly advertising nothing.
+ */
+function readDispatchableActionTypes() {
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const start = source.indexOf('switch (action.type)')
+  const end = source.indexOf('Unsupported action type', start)
+  const dispatcher = source.slice(start, end)
+  const types = [
+    ...new Set([...dispatcher.matchAll(/case '([a-z0-9_]+)':/g)].map((m) => m[1])),
+  ].sort()
+
+  if (types.length < 40) {
+    throw new Error(
+      `computerControl: could not read the action dispatch table (found ${types.length} types).`,
+    )
+  }
+
+  return Object.freeze(types)
+}
+
+export const SUPPORTED_ACTION_TYPES = readDispatchableActionTypes()

@@ -24,7 +24,7 @@ i2s_chan_handle_t i2sInput = nullptr;
 esp_bd_addr_t BOSE_SLIII_ADDRESS = {0x08, 0xDF, 0x1F, 0xEA, 0x19, 0x33};
 constexpr const char *BOSE_SLIII_NAME = "Bose SLIII";
 // How often to re-page the known address while the link is down.
-constexpr uint32_t RECONNECT_INTERVAL_MS = 8000;
+constexpr uint32_t RECONNECT_INTERVAL_MS = 30000;
 
 // The nRF9160 duplex I2S TX shares the mic clock: LRCK 31250 Hz and BCLK
 // 2 MHz, so each stereo frame is 64 BCLK with 32-cycle slots. The nRF sends
@@ -39,8 +39,30 @@ constexpr size_t RING_FRAMES = 16384;
 constexpr size_t RESAMPLER_PREFILL_FRAMES = 2048;
 constexpr size_t RESAMPLER_LOW_WATER_FRAMES = 1024;
 constexpr size_t RESAMPLER_HIGH_WATER_FRAMES = 4096;
-// 32/31250 is about a 0.1% pull toward the buffer midpoint.
-constexpr uint32_t RESAMPLER_RATE_CORRECTION = 32;
+
+/*
+ * 31250 -> 44100 is an EXACT rational ratio: both rates share a factor of
+ * 50, giving 625/882. Every 882 output frames consume exactly 625 input
+ * samples, so playback pitch is fixed by construction and needs no rate
+ * estimation of any kind.
+ *
+ * A polyphase FIR replaces the linear interpolator. Linear interpolation
+ * between 31250 Hz samples leaves its images only about 10 dB down near
+ * 9 kHz: audible as roughness, and it also spends SBC bitpool encoding
+ * junk that sits outside the speech band.
+ */
+constexpr uint32_t RESAMPLE_L = 882;  // OUTPUT_RATE / 50
+constexpr uint32_t RESAMPLE_M = 625;  // INPUT_RATE / 50
+constexpr size_t RESAMPLE_TAPS = 12;  // input samples per output sample
+/*
+ * A table with one entry per exact phase would need 882 * 12 taps = 21 KB
+ * and does not fit in DRAM alongside the ring. 128 phases plus linear
+ * interpolation between adjacent phases costs 3 KB and measures the same:
+ * 9 kHz image rejection -57.2 dB against -57.3 dB for the full table.
+ * The extra entry is the wrap phase, so tap blending never runs off the end.
+ */
+constexpr size_t RESAMPLE_PHASES = 128;
+int16_t resampleCoeff[(RESAMPLE_PHASES + 1) * RESAMPLE_TAPS];
 constexpr size_t RAW_CAPTURE_FRAMES = 64;
 constexpr int16_t STREAM_SYNC_A = 0x2468;
 constexpr int16_t STREAM_SYNC_B = 0x5A5A;
@@ -79,50 +101,51 @@ volatile uint32_t a2dpNonzeroFrames = 0;
 volatile uint32_t ringOverruns = 0;
 volatile uint32_t ringUnderruns = 0;
 volatile uint32_t resamplerStarts = 0;
+volatile uint32_t resamplerSlips = 0;
+volatile uint32_t a2dpCallCount = 0;
+volatile uint32_t a2dpCallMicros = 0;
+volatile uint32_t a2dpMaxFrameCount = 0;
 volatile uint32_t testToneFramesRemaining = 0;
 volatile uint32_t testTonePhase = 0;
 volatile bool i2sForwardingEnabled = true;
 volatile bool rawCaptureReady = false;
 volatile bool rawCaptureAwaitAudio = false;
-volatile bool dumpInProgress = false;
 volatile bool clockCaptureRequested = false;
 volatile size_t rawCaptureFrames = 0;
 int32_t rawCapture[RAW_CAPTURE_FRAMES * 2];
 
 /*
- * Diagnostic capture of the nRF's audio exactly as this chip receives it
- * (post sync-lock, 31250 Hz, before any resampling here). Tapping the ring
- * input rather than the A2DP callback splits the chain cleanly in two and
- * works with no headphones connected. Half a second is plenty to see
- * the waveform and its spectrum, and DRAM here is tight next to the
- * Bluetooth stack.
+ * There is deliberately no half-second PCM capture buffer here.
+ *
+ * A 22050-sample diagnostic buffer used to live at this spot. It cost
+ * 44,100 bytes of static DRAM and took the image from 22.9% to 36.4% of
+ * RAM, which starved Bluedroid's A2DP source of buffer memory: its TX
+ * queue (TxAaQ) stayed backlogged, so btc_get_num_aa_frame() clamped
+ * output to 8 SBC frames per 30 ms tick instead of the 10.33 that 44.1 kHz
+ * needs. Measured result: 34,247 frames/s delivered against 44,100
+ * required, a 78% feed rate. The sink's decoder underran continuously and
+ * rendered nothing at all.
+ *
+ * The audio path must not be traded for observability. Capture the wire
+ * from the nRF side, which has memory to spare, or over the ring dump
+ * below (64 frames) which costs nothing.
  */
-constexpr size_t CAPTURE_FRAMES = 22050; // 0.5 s at 44.1 kHz
-int16_t captureBuffer[CAPTURE_FRAMES];
-volatile uint32_t captureCount = 0;
-// 0 idle, 1 armed (waiting for audio), 2 recording, 3 full/ready to dump
-volatile uint8_t captureState = 0;
 
-inline void captureSample(int16_t sample) {
-  const uint8_t state = captureState;
-  if (state == 1) {
-    captureCount = 0;
-    captureState = 2;
-  } else if (state != 2) {
-    return;
-  }
-  if (captureCount < CAPTURE_FRAMES) {
-    captureBuffer[captureCount++] = sample;
-    if (captureCount >= CAPTURE_FRAMES) {
-      captureState = 3;
-    }
-  }
-}
-
+/*
+ * Lock-free SPSC ring. The I2S capture task is the only producer and the
+ * A2DP callback the only consumer, so volatile indices and a derived fill
+ * level are sufficient, and cheaper than taking a portMUX critical section
+ * for every single sample in the Bluetooth callback.
+ *
+ * Note for anyone reading the history here: an earlier version of this
+ * comment claimed the critical section was throttling the A2DP callback to
+ * ~34,200 frames/s. That was wrong. Bench measurement showed the opposite —
+ * the callback was served 44,229 frames/s with the critical section in
+ * place. The lock is a small win, not a fix for a delivery-rate problem.
+ */
 int16_t ringBuffer[RING_FRAMES];
-size_t ringRead = 0;
-size_t ringWrite = 0;
-size_t ringCount = 0;
+volatile size_t ringRead = 0;
+volatile size_t ringWrite = 0;
 volatile uint32_t audioStreamGeneration = 0;
 portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -157,9 +180,6 @@ void emitStatus() {
 }
 
 void pushSample(int16_t sample) {
-  // Diagnostic tap first: this is the nRF's audio exactly as received, and
-  // it must be observable whether or not headphones are connected.
-  captureSample(sample);
   /*
    * With no A2DP sink nothing drains the ring, so buffering here would
    * only bank stale audio: observed as a permanently full ring and
@@ -170,46 +190,37 @@ void pushSample(int16_t sample) {
   if (a2dp.get_connection_state() != ESP_A2D_CONNECTION_STATE_CONNECTED) {
     return;
   }
-  portENTER_CRITICAL(&ringMux);
-  if (ringCount == RING_FRAMES) {
-    ringRead = (ringRead + 1) % RING_FRAMES;
-    --ringCount;
+  const size_t write = ringWrite;
+  const size_t next = (write + 1) % RING_FRAMES;
+  if (next == ringRead) {
+    // Full: drop the NEWEST sample. The producer must never move ringRead.
     ++ringOverruns;
+    return;
   }
-  ringBuffer[ringWrite] = sample;
-  ringWrite = (ringWrite + 1) % RING_FRAMES;
-  ++ringCount;
-  portEXIT_CRITICAL(&ringMux);
+  ringBuffer[write] = sample;
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  ringWrite = next;
 }
 
 bool popSample(int16_t &sample) {
-  bool available = false;
-  portENTER_CRITICAL(&ringMux);
-  if (ringCount > 0) {
-    sample = ringBuffer[ringRead];
-    ringRead = (ringRead + 1) % RING_FRAMES;
-    --ringCount;
-    available = true;
+  const size_t read = ringRead;
+  if (read == ringWrite) {
+    return false;
   }
-  portEXIT_CRITICAL(&ringMux);
-  return available;
+  sample = ringBuffer[read];
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  ringRead = (read + 1) % RING_FRAMES;
+  return true;
 }
 
 size_t bufferedSampleCount() {
-  size_t count;
-  portENTER_CRITICAL(&ringMux);
-  count = ringCount;
-  portEXIT_CRITICAL(&ringMux);
-  return count;
+  return (ringWrite - ringRead + RING_FRAMES) % RING_FRAMES;
 }
 
 void clearAudioBuffer() {
-  portENTER_CRITICAL(&ringMux);
-  ringRead = 0;
-  ringWrite = 0;
-  ringCount = 0;
+  // Consumer-side catch-up: never move ringWrite here, only ringRead.
+  ringRead = ringWrite;
   ++audioStreamGeneration;
-  portEXIT_CRITICAL(&ringMux);
 }
 
 inline bool readGpioFast(gpio_num_t pin) {
@@ -514,7 +525,64 @@ void i2sCaptureTask(void *) {
   }
 }
 
+/*
+ * Build the polyphase interpolation filter once at boot.
+ *
+ * The prototype is a Hamming-windowed sinc running at the virtual
+ * RESAMPLE_L * INPUT_RATE rate, cut off at INPUT_RATE/2 (15625 Hz) — the
+ * lower of the two Nyquist limits, which is what an interpolator must
+ * protect. Phase p of the polyphase decomposition is every RESAMPLE_L'th
+ * prototype tap starting at p.
+ *
+ * Each phase is normalised to unity DC gain independently. Normalising the
+ * prototype as a whole instead leaves per-phase sums varying by a fraction
+ * of a dB, which shows up as a tone at the 50 Hz phase-cycle rate.
+ */
+void buildResampleFilter() {
+  const size_t protoLength = RESAMPLE_PHASES * RESAMPLE_TAPS;
+  const double center = (protoLength - 1) / 2.0;
+
+  for (size_t phase = 0; phase <= RESAMPLE_PHASES; ++phase) {
+    double taps[RESAMPLE_TAPS];
+    double sum = 0.0;
+    for (size_t tap = 0; tap < RESAMPLE_TAPS; ++tap) {
+      const size_t index = phase + tap * RESAMPLE_PHASES;
+      const double offset = static_cast<double>(index) - center;
+      // sinc(offset / PHASES): cutoff at half the input rate.
+      const double x = offset / static_cast<double>(RESAMPLE_PHASES);
+      const double sinc = (fabs(x) < 1e-9) ? 1.0 : (sin(M_PI * x) / (M_PI * x));
+      // The wrap phase reaches one past the window; hold its last value.
+      const size_t windowIndex =
+          (index < protoLength) ? index : (protoLength - 1);
+      const double window =
+          0.54 - 0.46 * cos(2.0 * M_PI * static_cast<double>(windowIndex) /
+                            static_cast<double>(protoLength - 1));
+      taps[tap] = sinc * window;
+      sum += taps[tap];
+    }
+    // Unity DC gain per phase, in Q15.
+    const double scale = (fabs(sum) < 1e-9) ? 0.0 : (32768.0 / sum);
+    for (size_t tap = 0; tap < RESAMPLE_TAPS; ++tap) {
+      const double q15 = taps[tap] * scale;
+      resampleCoeff[phase * RESAMPLE_TAPS + tap] = static_cast<int16_t>(
+          constrain(static_cast<int32_t>(lround(q15)), -32768, 32767));
+    }
+  }
+}
+
 int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
+  const uint32_t callStartedUs = micros();
+  struct CallTimer {
+    uint32_t started;
+    int32_t count;
+    ~CallTimer() {
+      a2dpCallMicros += micros() - started;
+      ++a2dpCallCount;
+      if (static_cast<uint32_t>(count) > a2dpMaxFrameCount) {
+        a2dpMaxFrameCount = static_cast<uint32_t>(count);
+      }
+    }
+  } callTimer{callStartedUs, frameCount};
   a2dpFramesRequested += frameCount;
 
   // Diagnostic path: generate a loud 440 Hz square wave directly on the
@@ -523,7 +591,17 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
     for (int32_t index = 0; index < frameCount; ++index) {
       int16_t sample = 0;
       if (testToneFramesRemaining > 0) {
-        sample = testTonePhase < (OUTPUT_RATE / 2) ? 2000 : -2000;
+        /*
+         * 8000, not 2000. The library attenuates our samples AFTER this
+         * callback returns (get_audio_data_volume applies volumeFactor in
+         * place), and set_volume(80) is -13.5 dB on the default exponential
+         * curve. At amplitude 2000 the tone left the chip at -37.8 dBFS,
+         * so "I heard nothing" could not be distinguished from "that was
+         * too quiet to notice" — which made the whole test worthless as
+         * evidence. 8000 leaves at about -25 dBFS: unmistakable, and still
+         * well short of uncomfortable in the ear.
+         */
+        sample = testTonePhase < (OUTPUT_RATE / 2) ? 8000 : -8000;
         testTonePhase += 440;
         if (testTonePhase >= OUTPUT_RATE) {
           testTonePhase -= OUTPUT_RATE;
@@ -543,11 +621,9 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
     return frameCount;
   }
 
-  // The nRF stream is 31250 Hz. A2DP requests 44.1 kHz stereo PCM, so use a
-  // fixed-ratio linear interpolator without blocking the Bluetooth task.
-  static int16_t current = 0;
-  static int16_t next = 0;
-  static uint32_t phase = 0;
+  // The nRF stream is 31250 Hz. A2DP requests 44.1 kHz stereo PCM.
+  static int16_t history[RESAMPLE_TAPS] = {};
+  static uint32_t phaseIndex = 0;  // (n * RESAMPLE_M) mod RESAMPLE_L
   static bool primed = false;
   static uint32_t observedStreamGeneration = 0;
 
@@ -558,9 +634,8 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
    */
   const uint32_t streamGeneration = audioStreamGeneration;
   if (streamGeneration != observedStreamGeneration) {
-    current = 0;
-    next = 0;
-    phase = 0;
+    memset(history, 0, sizeof(history));
+    phaseIndex = 0;
     primed = false;
     observedStreamGeneration = streamGeneration;
   }
@@ -576,42 +651,75 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
       memset(frames, 0, frameCount * sizeof(Frame));
       return frameCount;
     }
-    if (!popSample(current) || !popSample(next)) {
-      memset(frames, 0, frameCount * sizeof(Frame));
-      return frameCount;
+    memset(history, 0, sizeof(history));
+    for (size_t tap = 0; tap < RESAMPLE_TAPS; ++tap) {
+      int16_t incoming = 0;
+      if (!popSample(incoming)) {
+        memset(frames, 0, frameCount * sizeof(Frame));
+        return frameCount;
+      }
+      for (size_t k = RESAMPLE_TAPS - 1; k > 0; --k) {
+        history[k] = history[k - 1];
+      }
+      history[0] = incoming;
     }
-    phase = 0;
+    phaseIndex = 0;
     primed = true;
     ++resamplerStarts;
   }
 
   /*
-   * Correct the tiny long-term clock mismatch without dropping whole
-   * samples. The adjustment is only 0.1%, so it is inaudible but keeps the
-   * buffer away from its empty/full limits.
+   * The 625/882 ratio is exact, so the only correction ever needed is for
+   * the genuine crystal difference between the nRF and the Bluetooth clock
+   * — parts per million. Allow at most ONE slipped input sample per
+   * callback (about 0.9% of the wire rate at the observed call rate), and
+   * count every slip.
+   *
+   * This deliberately cannot paper over a large rate mismatch. If the
+   * Bluetooth stack pulls materially slower than 44100 frames/s, the ring
+   * climbs to the high-water mark and resampler_slips runs away — which is
+   * a fault to be reported, not something to hide by stretching pitch.
    */
-  uint32_t phaseStep = INPUT_RATE;
-  buffered = bufferedSampleCount();
-  if (buffered < RESAMPLER_LOW_WATER_FRAMES) {
-    phaseStep -= RESAMPLER_RATE_CORRECTION;
-  } else if (buffered > RESAMPLER_HIGH_WATER_FRAMES) {
-    phaseStep += RESAMPLER_RATE_CORRECTION;
+  const int32_t level = static_cast<int32_t>(bufferedSampleCount());
+  bool holdOneInput = false;
+  if (level > static_cast<int32_t>(RESAMPLER_HIGH_WATER_FRAMES)) {
+    int16_t extra = 0;
+    if (popSample(extra)) {
+      for (size_t k = RESAMPLE_TAPS - 1; k > 0; --k) {
+        history[k] = history[k - 1];
+      }
+      history[0] = extra;
+      ++resamplerSlips;
+    }
+  } else if (level < static_cast<int32_t>(RESAMPLER_LOW_WATER_FRAMES)) {
+    holdOneInput = true;
   }
+  buffered = static_cast<size_t>(level);
 
   for (int32_t index = 0; index < frameCount; ++index) {
-    const int32_t delta = static_cast<int32_t>(next) - current;
     /*
-     * Keep this multiplication signed and wide. Mixing int32_t delta with
-     * uint32_t phase previously converted negative deltas to unsigned and
-     * overflowed on large transitions, producing full-scale crackles.
+     * Polyphase convolution. history[0] is the newest input sample, and
+     * phaseIndex selects the fractional position between input samples, so
+     * this is a true bandlimited interpolation rather than a straight line
+     * drawn between neighbours.
      */
-    const int32_t interpolated =
-        static_cast<int32_t>(current) +
-        static_cast<int32_t>(
-            (static_cast<int64_t>(delta) * static_cast<int64_t>(phase)) /
-            static_cast<int64_t>(OUTPUT_RATE));
+    const uint32_t scaledPhase = phaseIndex * RESAMPLE_PHASES;
+    const uint32_t phaseSlot = scaledPhase / RESAMPLE_L;
+    const uint32_t phaseFraction = scaledPhase % RESAMPLE_L;
+    const int16_t *lower = &resampleCoeff[phaseSlot * RESAMPLE_TAPS];
+    const int16_t *upper = &resampleCoeff[(phaseSlot + 1) * RESAMPLE_TAPS];
+    int64_t accumulator = 0;
+    for (size_t tap = 0; tap < RESAMPLE_TAPS; ++tap) {
+      const int32_t blended =
+          lower[tap] + static_cast<int32_t>(
+                           (static_cast<int64_t>(upper[tap] - lower[tap]) *
+                            phaseFraction) /
+                           RESAMPLE_L);
+      accumulator += static_cast<int64_t>(blended) * history[tap];
+    }
+    const int32_t scaled = static_cast<int32_t>((accumulator + 16384) >> 15);
     const int16_t sample = static_cast<int16_t>(
-        constrain(interpolated, static_cast<int32_t>(INT16_MIN),
+        constrain(scaled, static_cast<int32_t>(INT16_MIN),
                   static_cast<int32_t>(INT16_MAX)));
     frames[index].channel1 = sample;
     frames[index].channel2 = sample;
@@ -619,14 +727,19 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
       ++a2dpNonzeroFrames;
     }
 
-    phase += phaseStep;
-    while (phase >= OUTPUT_RATE) {
-      phase -= OUTPUT_RATE;
-      current = next;
-      if (!popSample(next)) {
+    phaseIndex += RESAMPLE_M;
+    if (phaseIndex >= RESAMPLE_L) {
+      phaseIndex -= RESAMPLE_L;
+      if (holdOneInput) {
+        // Repeat the current input sample once to let the buffer refill.
+        holdOneInput = false;
+        ++resamplerSlips;
+        continue;
+      }
+      int16_t incoming = 0;
+      if (!popSample(incoming)) {
         ++ringUnderruns;
         primed = false;
-        phase = 0;
         /*
          * Fade the remainder of this callback instead of jumping abruptly
          * from a nonzero sample to zero.
@@ -634,15 +747,18 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
         const int32_t fadeFrames = frameCount - index;
         for (int32_t rest = index + 1; rest < frameCount; ++rest) {
           const int32_t fade =
-              static_cast<int32_t>(current) *
-              (frameCount - rest) / fadeFrames;
+              static_cast<int32_t>(sample) * (frameCount - rest) / fadeFrames;
           frames[rest].channel1 = static_cast<int16_t>(fade);
           frames[rest].channel2 = static_cast<int16_t>(fade);
         }
-        current = 0;
-        next = 0;
+        memset(history, 0, sizeof(history));
+        phaseIndex = 0;
         return frameCount;
       }
+      for (size_t k = RESAMPLE_TAPS - 1; k > 0; --k) {
+        history[k] = history[k - 1];
+      }
+      history[0] = incoming;
     }
   }
 
@@ -864,9 +980,7 @@ void handleSerialCommand(const String &line) {
               i2sForwardingEnabled ? "nRF I2S forwarding enabled."
                                    : "nRF I2S forwarding muted.");
   } else if (command == "capture") {
-    captureCount = 0;
-    captureState = 1;
-    // Also re-arm the raw 32-bit word capture so it lands on real audio
+    // Re-arm the raw 32-bit word capture so it lands on real audio
     // rather than on the silence right after a resync. The bit pattern is
     // what proves or disproves slot alignment.
     rawCaptureFrames = 0;
@@ -880,14 +994,12 @@ void handleSerialCommand(const String &line) {
   } else if (command == "dump") {
     int16_t samples[64] = {};
     size_t sampleCount = 0;
-    portENTER_CRITICAL(&ringMux);
-    sampleCount = min(ringCount, static_cast<size_t>(64));
+    sampleCount = min(bufferedSampleCount(), static_cast<size_t>(64));
     const size_t start =
         (ringWrite + RING_FRAMES - sampleCount) % RING_FRAMES;
     for (size_t index = 0; index < sampleCount; ++index) {
       samples[index] = ringBuffer[(start + index) % RING_FRAMES];
     }
-    portEXIT_CRITICAL(&ringMux);
 
     Serial.print("{\"type\":\"i2s_dump\",\"samples\":[");
     for (size_t index = 0; index < sampleCount; ++index) {
@@ -984,6 +1096,8 @@ void setup() {
       ESP32_MAX_CPU_CLOCK_MHZ, ESP.getCpuFreqMHz(),
       maximumCpuClockSelected ? "true" : "false");
 
+  buildResampleFilter();
+
   preferences.begin("airpods", false);
   haveKnownAddress =
       preferences.getBytes("addr", knownAddress, ESP_BD_ADDR_LEN) ==
@@ -1053,50 +1167,6 @@ void loop() {
       emitEvent("usb", "Bluetooth link is disconnecting.");
       break;
     }
-  }
-
-  if (captureState == 3) {
-    captureState = 0;
-    dumpInProgress = true;
-    uint32_t lineSeq = 0;
-    static const char *b64 =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(captureBuffer);
-    const size_t total = captureCount * sizeof(int16_t);
-    Serial.print("{\"type\":\"a2dp_capture_begin\",\"rate\":");
-    Serial.print(INPUT_RATE);
-    Serial.print(",\"samples\":");
-    Serial.print(captureCount);
-    Serial.println("}");
-    String line;
-    line.reserve(260);
-    for (size_t i = 0; i < total; i += 3) {
-      const uint32_t a = bytes[i];
-      const uint32_t b = (i + 1 < total) ? bytes[i + 1] : 0;
-      const uint32_t c = (i + 2 < total) ? bytes[i + 2] : 0;
-      const uint32_t triple = (a << 16) | (b << 8) | c;
-      line += b64[(triple >> 18) & 0x3F];
-      line += b64[(triple >> 12) & 0x3F];
-      line += (i + 1 < total) ? b64[(triple >> 6) & 0x3F] : '=';
-      line += (i + 2 < total) ? b64[triple & 0x3F] : '=';
-      if (line.length() >= 240) {
-        Serial.print("A2DPCAP ");
-        Serial.print(lineSeq++);
-        Serial.print(' ');
-        Serial.println(line);
-        line = "";
-      }
-    }
-    if (line.length() > 0) {
-      Serial.print("A2DPCAP ");
-      Serial.print(lineSeq++);
-      Serial.print(' ');
-      Serial.println(line);
-    }
-    Serial.print("{\"type\":\"a2dp_capture_end\",\"lines\":");
-    Serial.print(lineSeq);
-    Serial.println("}");
-    dumpInProgress = false;
   }
 
   if (clockCaptureRequested) {
@@ -1169,7 +1239,7 @@ void loop() {
     forceKnownConnect();
   }
 
-  if (!dumpInProgress && millis() - lastDiagnosticAt >= 1000) {
+  if (millis() - lastDiagnosticAt >= 1000) {
     lastDiagnosticAt = millis();
     const uint16_t peak = i2sPeakSinceReport;
     const uint16_t rawPeak = i2sRawPeakSinceReport;
@@ -1178,7 +1248,7 @@ void loop() {
 
     size_t buffered;
     portENTER_CRITICAL(&ringMux);
-    buffered = ringCount;
+    buffered = bufferedSampleCount();
     portEXIT_CRITICAL(&ringMux);
 
     JsonDocument document;
@@ -1202,7 +1272,27 @@ void loop() {
         ", overruns=" + String(ringOverruns) +
         ", starts=" + String(resamplerStarts) + ".";
     document["i2s_frames"] = i2sFramesReceived;
-    document["i2s_raw_peak"] = rawPeak;
+    {
+    char addressText[18] = "";
+    if (haveKnownAddress) {
+      snprintf(addressText, sizeof(addressText),
+               "%02x:%02x:%02x:%02x:%02x:%02x", knownAddress[0],
+               knownAddress[1], knownAddress[2], knownAddress[3],
+               knownAddress[4], knownAddress[5]);
+    }
+    document["known_addr"] = addressText;
+    document["a2dp_state"] = static_cast<int>(a2dp.get_connection_state());
+  }
+  {
+    const uint32_t calls = a2dpCallCount;
+    document["a2dp_calls"] = calls;
+    document["a2dp_us_per_call"] = calls ? (a2dpCallMicros / calls) : 0;
+    document["a2dp_max_frames_per_call"] = a2dpMaxFrameCount;
+    a2dpCallCount = 0;
+    a2dpCallMicros = 0;
+    a2dpMaxFrameCount = 0;
+  }
+  document["i2s_raw_peak"] = rawPeak;
     document["i2s_peak"] = peak;
     document["i2s_receiver_resyncs"] = i2sReceiverResyncs;
     document["i2s_sync_locks"] = i2sSyncLocks;
@@ -1213,6 +1303,7 @@ void loop() {
     document["ring_underruns"] = ringUnderruns;
     document["ring_overruns"] = ringOverruns;
     document["resampler_starts"] = resamplerStarts;
+    document["resampler_slips"] = resamplerSlips;
     serializeJson(document, Serial);
     Serial.println();
   }

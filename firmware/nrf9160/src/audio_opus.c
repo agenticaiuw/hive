@@ -610,6 +610,29 @@ int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
 }
 
 /*
+ * Retarget the live encoder mid-stream. Opus applies a new bitrate from the
+ * next frame with no reset and no discontinuity, which is what makes the
+ * adaptive-duplex duck in main.c possible: the caller lowers the target while
+ * the half-duplex modem is busy with downlink audio and restores it after.
+ * Touches one field of the encoder state — no scratch, no allocation — so it
+ * is safe between feeds without disturbing the NONTHREADSAFE_PSEUDOSTACK.
+ */
+int pendant_opus_stream_set_bitrate(uint32_t bits_per_second)
+{
+	struct pendant_opus_stream *s = &g_stream;
+
+	if (!s->active || s->encoder == NULL) {
+		return -ENOTCONN;
+	}
+	if (opus_encoder_ctl(s->encoder,
+			     OPUS_SET_BITRATE((opus_int32)bits_per_second)) !=
+	    OPUS_OK) {
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
  * Streaming reply decoder: raw Opus packets in, mono PCM out at the caller's
  * rate (the decoder resamples internally — no separate upsampling stage).
  * The HTTP reply path decodes at 24 kHz; the full-duplex conversation path

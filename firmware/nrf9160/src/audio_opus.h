@@ -71,6 +71,13 @@ int pendant_opus_stream_begin_packets(uint32_t source_sample_rate,
 				      void *workspace, size_t workspace_bytes,
 				      int (*sink)(const uint8_t *packet,
 						  size_t packet_bytes));
+/*
+ * Retarget the live encoder's bitrate mid-stream (takes effect on the next
+ * frame, no reset). Used by the adaptive-duplex uplink: half-duplex LTE-M
+ * cannot carry the uplink while agent audio streams down, so the conversation
+ * loop ducks the target for the duration and restores it afterwards.
+ */
+int pendant_opus_stream_set_bitrate(uint32_t bits_per_second);
 int pendant_opus_reply_decoder_begin(void *workspace, size_t workspace_bytes);
 /* Conversation path: decode at the 16 kHz wire rate (fewer samples, and the
  * TX fill owns the exact-ratio resample to the I2S frame rate). */

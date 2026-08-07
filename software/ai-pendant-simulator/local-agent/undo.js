@@ -1,6 +1,8 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { describeReversibility } from './actionReceipts.js'
 import {
   setDisplayBrightness,
   setOutputMuted,
@@ -68,46 +70,55 @@ export function describeUndoability(job) {
     return {
       canUndo: false,
       reason: 'No reversible steps in this job',
+      // The owner asking "why not?" used to get nothing back. Receipts know.
+      irreversible: irreversibleSteps(results),
     }
   }
   return {
     canUndo: true,
     reason: `${reversible.length} reversible step${reversible.length === 1 ? '' : 's'}`,
     count: reversible.length,
+    steps: reversible.map((item) => ({
+      type: item?.action?.type ?? 'unknown',
+      actionId: item?.receipt?.actionId ?? null,
+      by: describeReversibility(item).mechanism,
+    })),
+    irreversible: irreversibleSteps(results),
   }
 }
 
+function irreversibleSteps(results) {
+  return results
+    .filter((item) => item?.ok && !canUndoResult(item))
+    .map((item) => ({
+      type: item?.action?.type ?? 'unknown',
+      actionId: item?.receipt?.actionId ?? null,
+      reason: describeReversibility(item).reason,
+    }))
+}
+
+/*
+ * Reversibility lives in actionReceipts.js so the receipt the owner reads and
+ * the decision undo makes cannot disagree. Jobs recorded before receipts
+ * existed carry no receipt; describeReversibility falls back to the raw result
+ * fields for those, which is why old history stays undoable.
+ */
 function canUndoResult(item) {
-  const type = item?.action?.type
-  switch (type) {
-    case 'set_brightness':
-      return Number.isFinite(Number(item.before))
-    case 'set_volume':
-      return Number.isFinite(Number(item.before?.percent ?? item.before))
-    case 'set_mute':
-      return typeof item.before?.muted === 'boolean' || typeof item.before === 'boolean'
-    case 'show_screen_overlay':
-      return Boolean(item.pid)
-    case 'write_file':
-    case 'create_note':
-      return Boolean(item.path || item.action?.params?.path)
-    case 'copy_path':
-      return Boolean(item.action?.params?.to)
-    case 'move_path':
-      return Boolean(item.action?.params?.from && item.action?.params?.to)
-    case 'open_app':
-    case 'open_url':
-    case 'open_path':
-    case 'open_folder':
-      return true
-    default:
-      return false
-  }
+  return describeReversibility(item).reversible
 }
 
 async function undoOneResult(item) {
   const type = item?.action?.type
   if (!canUndoResult(item)) return null
+
+  // A snapshot beats every heuristic below: the executor copied the file aside
+  // before touching it, so put the exact bytes back. copy_path/move_path are
+  // excluded because their primary undo has to run first — the snapshot is
+  // only their clobbered destination, and it is restored after the move back.
+  if (type === 'write_file' || type === 'create_note' || type === 'delete_path') {
+    const restored = restoreFromSnapshot(item)
+    if (restored) return restored
+  }
 
   switch (type) {
     case 'set_brightness': {
@@ -153,6 +164,12 @@ async function undoOneResult(item) {
     }
     case 'write_file':
     case 'create_note': {
+      // Only ever delete a file this job CREATED. Deleting a file the job
+      // merely overwrote destroys content the agent never wrote — that was the
+      // old behaviour, and it read as a successful undo.
+      if (item.receipt && item.receipt.preexisting?.existed) {
+        return null
+      }
       const filePath = item.path || item.action?.params?.path
       if (filePath && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath)
@@ -168,10 +185,14 @@ async function undoOneResult(item) {
       if (to && fs.existsSync(to)) {
         fs.rmSync(to, { recursive: true, force: true })
       }
+      const replaced = restoreFromSnapshot(item)
       return {
         type,
-        message: `Removed copied path ${to}`,
+        message: replaced
+          ? `Removed copied path ${to} and restored what it replaced`
+          : `Removed copied path ${to}`,
         path: to,
+        restoredSnapshot: replaced?.snapshot ?? null,
       }
     }
     case 'move_path': {
@@ -180,11 +201,15 @@ async function undoOneResult(item) {
       if (to && from && fs.existsSync(to) && !fs.existsSync(from)) {
         fs.renameSync(to, from)
       }
+      const replaced = restoreFromSnapshot(item)
       return {
         type,
-        message: `Moved ${to} back to ${from}`,
+        message: replaced
+          ? `Moved ${to} back to ${from} and restored what it replaced`
+          : `Moved ${to} back to ${from}`,
         from,
         to,
+        restoredSnapshot: replaced?.snapshot ?? null,
       }
     }
     case 'open_app':
@@ -207,5 +232,25 @@ async function undoOneResult(item) {
     }
     default:
       return null
+  }
+}
+
+/**
+ * Put back the bytes the executor copied aside before it overwrote or deleted
+ * a file. This is what makes delete_path — previously permanent — undoable.
+ */
+function restoreFromSnapshot(item) {
+  const snapshot = item?.receipt?.snapshot
+  if (!snapshot?.at || !snapshot?.of) return null
+  if (!fs.existsSync(snapshot.at)) return null
+
+  fs.mkdirSync(path.dirname(snapshot.of), { recursive: true })
+  fs.copyFileSync(snapshot.at, snapshot.of)
+
+  return {
+    type: item?.action?.type,
+    message: `Restored ${snapshot.of} from its pre-action snapshot`,
+    path: snapshot.of,
+    snapshot: snapshot.at,
   }
 }

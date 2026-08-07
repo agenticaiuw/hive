@@ -32,6 +32,16 @@ const LLM_MODEL = String(process.env.LLM_MODEL || 'gpt-5.6-luna').trim()
 // Vision for computer-use screenshots (OpenAI multimodal).
 const LLM_VISION_MODEL =
   process.env.LLM_VISION_MODEL || 'gpt-4.1-mini'
+/*
+ * The cheap tier. Same API, smaller model, and — the part that actually moves
+ * the bill — a system prompt built from a trimmed action schema and an
+ * apps-only machine block instead of the full 26,000-character brief. Point it
+ * anywhere with LLM_BACKGROUND_MODEL; the default is the multimodal small model
+ * this repo already talks to, so the cheap tier needs no new credentials.
+ */
+const LLM_BACKGROUND_MODEL = String(
+  process.env.LLM_BACKGROUND_MODEL || 'gpt-4.1-mini',
+).trim()
 // gpt-5.6-luna (and most OpenAI chat/completions models) reject unknown
 // `reasoning`. Never send that field to api.openai.com.
 const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT || 'off'
@@ -124,6 +134,24 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   set_mute: {
     description: 'Mute or unmute Mac output volume.',
     params: { muted: 'boolean' },
+  },
+  /*
+   * The executor and the pendant's hands-free allowlist have supported these
+   * since status tools existed, but the schema never mentioned them — so the
+   * planner answered "what's my battery" with run_shell pmset instead. Naming
+   * them here is what makes the structured tool reachable, and it lets an
+   * escalated request produce the same action the deterministic tier would.
+   */
+  get_mac_status: {
+    description:
+      'Read Mac status through structured tools instead of shell. Prefer this for battery, wifi/network or volume questions.',
+    params: {
+      fields: 'optional array of battery | wifi | volume | all (default all)',
+    },
+  },
+  get_battery: {
+    description: 'Read battery charge and whether the Mac is on power.',
+    params: {},
   },
   create_reminder: {
     description:
@@ -270,6 +298,13 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Create a note file and open it.',
     params: { filename: 'string', content: 'string', directory: 'optional path' },
   },
+  compose_briefing: {
+    description:
+      "Read the owner's calendar, unread mail, recent files or notes and leave a short spoken brief plus a note on the Mac. Use for any 'brief me' / 'prepare my workday' / 'what did I miss in email' / 'read my schedule' / 'summarize today's notes into next actions' request. It composes and stores only — it never sends anything.",
+    params: {
+      kind: 'one of: morning, workday, wrapup, mail, schedule',
+    },
+  },
   run_project: {
     description: 'Start a long-running command in a project folder.',
     params: { path: 'absolute path', command: 'optional shell command' },
@@ -326,7 +361,12 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   browser_navigate: {
     description:
       'Open a URL in the user browser via the extension (real cookies/session). Prefer over open_url when the extension is online.',
-    params: { url: 'string', newTab: 'optional boolean', tabId: 'optional' },
+    params: {
+      url: 'string',
+      newTab: 'optional boolean',
+      tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
+    },
   },
   browser_click: {
     description:
@@ -335,6 +375,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       ref: 'optional snapshot ref e.g. e3',
       selector: 'optional CSS selector',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_type: {
@@ -345,6 +386,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       text: 'string',
       submit: 'optional boolean',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_select: {
@@ -355,6 +397,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       value: 'optional',
       label: 'optional',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_read_page: {
@@ -366,6 +409,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       ref: 'optional',
       maxChars: 'optional',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_wait_for: {
@@ -375,6 +419,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       textContains: 'optional',
       timeoutMs: 'optional',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_scroll: {
@@ -385,16 +430,46 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       dy: 'optional',
       dx: 'optional',
       tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
     },
   },
   browser_press_key: {
     description: 'Dispatch a key (e.g. Enter, Escape) on the focused element or a target.',
-    params: { key: 'string', ref: 'optional', selector: 'optional', tabId: 'optional' },
+    params: {
+      key: 'string',
+      ref: 'optional',
+      selector: 'optional',
+      tabId: 'optional',
+      session: 'optional session name to stay on the same tab',
+    },
   },
   browser_capture: {
     description:
       'PNG of the visible browser tab only. Use only when structured snapshot is insufficient (canvas/charts). Do not send to cloud by default.',
-    params: { tabId: 'optional', urlContains: 'optional' },
+    params: {
+      tabId: 'optional',
+      urlContains: 'optional',
+      session: 'optional session name to stay on the same tab',
+    },
+  },
+  browser_open_session: {
+    description:
+      'Claim a browser tab under a name you choose, opening one if nothing is open. Pass that same session on every later browser_* action to keep acting on the same page.',
+    params: {
+      session: 'name you pick, e.g. checkout',
+      url: 'optional URL to open',
+      urlContains: 'optional substring of an already-open tab to adopt',
+      tabId: 'optional, unreliable in Safari — prefer urlContains',
+    },
+  },
+  browser_list_sessions: {
+    description: 'List named browser sessions and the tab each one points at.',
+    params: {},
+  },
+  browser_close_session: {
+    description:
+      'Forget a named browser session. The tab stays open; only the name is released.',
+    params: { session: 'session name' },
   },
 }
 
@@ -406,6 +481,70 @@ const SAFE_ACTION_SCHEMA = {
   copy_to_clipboard: { description: 'Copy text to clipboard.', params: { text: 'string' } },
   run_project: { description: 'Run npm dev in a whitelisted project.', params: { path: 'string' } },
   search_file: { description: 'Search whitelisted folders.', params: { root: 'string', query: 'string' } },
+}
+
+/*
+ * What the small tier is allowed to plan with.
+ *
+ * Derived from the full schema rather than duplicated, so an action can never
+ * drift out of sync with its description. The cut is: direct, single-step,
+ * well-understood actions stay; the browser_*, ui_*, mouse_* families and the
+ * open-ended escape hatches (run_shell, run_applescript, computer_use_task,
+ * send_email) go. Those are exactly the ones that need judgement — and they are
+ * also most of the prompt, because their descriptions are the longest.
+ *
+ * A request that turns out to need something from the excluded set does not
+ * lose the capability: the orchestrator escalates it to the full planner.
+ */
+const BACKGROUND_ACTION_TYPES = [
+  'open_app',
+  'open_url',
+  'open_path',
+  'open_folder',
+  'list_directory',
+  'read_file',
+  'write_file',
+  'create_note',
+  'copy_to_clipboard',
+  'get_clipboard',
+  'create_reminder',
+  'set_volume',
+  'get_volume',
+  'set_mute',
+  'set_brightness',
+  'get_brightness',
+  'get_mac_status',
+  'get_battery',
+  'get_weather',
+  'get_time',
+  'translate_text',
+  'play_youtube',
+  'screenshot',
+  'search_file',
+]
+
+export function backgroundModelName() {
+  return LLM_BACKGROUND_MODEL
+}
+
+export function plannerModelName() {
+  return LLM_MODEL
+}
+
+/**
+ * The action schema a tier plans against. `background` gets the subset above;
+ * everything else gets the same schema it always got.
+ */
+export function actionSchemaForTier(tier = 'planner') {
+  const full = FULL_CONTROL_MODE ? FULL_CONTROL_ACTION_SCHEMA : SAFE_ACTION_SCHEMA
+
+  if (tier !== 'background') return full
+
+  const subset = {}
+  for (const type of BACKGROUND_ACTION_TYPES) {
+    if (full[type]) subset[type] = full[type]
+  }
+  return subset
 }
 
 export function isLlmPlannerEnabled() {
@@ -494,13 +633,16 @@ export function isFullControlPlanner() {
 }
 
 export async function planCommand(command, options = {}) {
-  const { context = null, onProgress = null } = options
+  // `tier` picks the model and how much prompt it is given. Default is the
+  // behaviour every existing caller already had.
+  const { context = null, onProgress = null, tier = 'planner' } = options
 
   if (FULL_CONTROL_MODE && LLM_ENABLED) {
     try {
       const llmPlan = await planWithLlm(command, {
         context,
         onProgress,
+        tier,
       })
 
       if (llmPlan.status === 'instant') {
@@ -548,16 +690,49 @@ export async function planCommand(command, options = {}) {
 
 async function planWithLlm(
   command,
-  { context = null, onProgress = null } = {},
+  { context = null, onProgress = null, tier = 'planner' } = {},
 ) {
+  const background = tier === 'background'
   const home = os.homedir()
   const machine = await getMachineContext()
-  const machinePrompt = formatMachineContextForPrompt(machine)
-  const actionSchema = FULL_CONTROL_MODE
-    ? FULL_CONTROL_ACTION_SCHEMA
-    : SAFE_ACTION_SCHEMA
+  const machinePrompt = formatMachineContextForPrompt(machine, {
+    compact: background,
+  })
+  const actionSchema = actionSchemaForTier(tier)
+  const model = background ? LLM_BACKGROUND_MODEL : LLM_MODEL
+  const maxTokens = background
+    ? Math.min(LLM_MAX_TOKENS, 768)
+    : LLM_MAX_TOKENS
 
-  const systemPrompt = FULL_CONTROL_MODE
+  /*
+   * The small tier gets a short brief, not a shortened version of the long one.
+   * Its job is narrow — one obvious action, or admit it cannot — and every rule
+   * about browsers, native UI trees and shell is not just wasted tokens there
+   * but an invitation to attempt something outside its schema.
+   */
+  const systemPrompt = background
+    ? `You are the fast planning layer for a Mac agent. The request is expected to be simple and single-step.
+
+Return ONLY valid JSON:
+{
+  "status": "ready" | "instant" | "unsupported",
+  "response": "optional short spoken answer when status is instant",
+  "actions": [ { "type": "...", "label": "human readable step", "params": { ... } } ],
+  "error": "only when unsupported"
+}
+
+Available action types (this is the complete list you may use):
+${JSON.stringify(actionSchema, null, 2)}
+
+${machinePrompt}
+
+Rules:
+- Prefer exactly one action. Two is the maximum.
+- Weather → get_weather. Time/date → get_time. Translation → translate_text.
+- Battery / wifi / system status → get_mac_status.
+- If the request needs the web, a browser, native UI clicking, a shell command, email, or more than two steps, return status "unsupported" with error "needs full planner". Do not improvise around a missing action type.
+- Use absolute paths under ${home}.`
+    : FULL_CONTROL_MODE
     ? `You are the planning layer for a Mac computer-control agent with FULL access to the user's machine.
 Decide the intent yourself. Do not rely on keyword short-circuits from the client.
 
@@ -587,12 +762,14 @@ Planning rules:
 - Time / date / clock → get_time.
 - Translation → translate_text.
 - Reminders → create_reminder. Brightness/volume → set_brightness / set_volume / set_mute.
+- Brief me / prepare my workday / what did I miss in email / read my schedule / summarize today's notes into next actions → compose_briefing (one action, nothing else). It reads the sources and writes the note itself; do not add create_note or run_applescript alongside it. It never sends, which is what the owner asked for.
 - Web / browser / "this page" / site / tab / form on the web:
   1) Prefer browser_* tools (extension uses the real logged-in profile).
-  2) Start with browser_list_tabs or browser_snapshot, then click/type by ref or selector.
-  3) Use browser_wait_for after navigations or SPA updates.
-  4) Prefer browser_read_page (main_text/forms) over dumping html.
-  5) Only use browser_capture or desktop computer_use_task when the page is canvas/visual-only or the extension is offline.
+  2) For anything past a single step, name a session: browser_open_session with session:"work", then pass session:"work" on every later browser_* action so they all hit the same tab.
+  3) Start with browser_list_tabs or browser_snapshot, then click/type by ref or selector.
+  4) Use browser_wait_for after navigations or SPA updates.
+  5) Prefer browser_read_page (main_text/forms) over dumping html.
+  6) Only use browser_capture or desktop computer_use_task when the page is canvas/visual-only or the extension is offline.
 - Native Mac apps (Finder, Settings, non-browser UI): ui_menu / ui_find / ui_click; computer_use_task for multi-step unpredictable UI.
 - Prefer dedicated types over long shell/AppleScript.
 - Keep plans short (usually 1-3 steps). Use absolute paths under ${home} when possible.
@@ -611,7 +788,7 @@ Never invent shell commands or paths outside the whitelist.`
 
   onProgress?.({
     phase: 'llm_start',
-    message: `Asking ${LLM_MODEL} for a plan`,
+    message: `Asking ${model} for a plan`,
   })
 
   const content = await requestLlmPlanContent({
@@ -620,6 +797,8 @@ Never invent shell commands or paths outside the whitelist.`
     userContent,
     onProgress,
     command,
+    model,
+    maxTokens,
   })
 
   if (!content) {
@@ -631,6 +810,19 @@ Never invent shell commands or paths outside the whitelist.`
     message: 'Parsing the plan',
     partial: content,
   })
+
+  /*
+   * What this call cost. The streaming completions API returns no usage block,
+   * so the character counts are the ground truth and the token numbers derived
+   * from them are labelled estimates wherever they surface. Every return below
+   * carries it: a plan the owner cannot price is a plan they cannot route.
+   */
+  const usage = {
+    tier,
+    model,
+    promptChars: systemPrompt.length + userContent.length,
+    completionChars: content.length,
+  }
 
   const parsed = JSON.parse(extractJsonObject(content))
   const actions = sanitizeActions(
@@ -646,6 +838,7 @@ Never invent shell commands or paths outside the whitelist.`
       requiresConfirmation: true,
       error: parsed.error ?? 'LLM could not produce an action plan.',
       planner: 'llm',
+      usage,
     }
   }
 
@@ -666,6 +859,7 @@ Never invent shell commands or paths outside the whitelist.`
       requiresConfirmation: false,
       planner: 'llm',
       fullControl: FULL_CONTROL_MODE,
+      usage,
     }
   }
 
@@ -680,6 +874,7 @@ Never invent shell commands or paths outside the whitelist.`
       : 'Actions are prepared first. Nothing is executed on the Mac until you confirm.',
     planner: 'llm',
     fullControl: FULL_CONTROL_MODE,
+    usage,
   }
 }
 
@@ -713,6 +908,10 @@ export async function requestLlmPlanContent({
   command = '',
   attempt = 0,
   fetchImpl = fetch,
+  // Tier overrides. Omitted means the planner tier, i.e. what every caller
+  // before the policy router got.
+  model = null,
+  maxTokens = null,
 }) {
   const useStream = typeof onProgress === 'function'
   const hasScreenshot = Boolean(screenshot?.dataUrl)
@@ -732,9 +931,9 @@ export async function requestLlmPlanContent({
     method: 'POST',
     headers,
     body: JSON.stringify({
-      model: hasScreenshot ? LLM_VISION_MODEL : LLM_MODEL,
+      model: hasScreenshot ? LLM_VISION_MODEL : model || LLM_MODEL,
       // gpt-5.x: max_completion_tokens only; no temperature override; no reasoning.
-      max_completion_tokens: LLM_MAX_TOKENS,
+      max_completion_tokens: maxTokens || LLM_MAX_TOKENS,
       stream: useStream,
       response_format: { type: 'json_object' },
       ...(LLM_SEND_REASONING && effort !== 'off'

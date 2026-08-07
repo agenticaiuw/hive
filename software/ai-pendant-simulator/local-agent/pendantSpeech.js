@@ -41,7 +41,13 @@ function shouldCacheSpokenText(text) {
   )
 }
 
-function pendantSpeechPayload(pcm, opus, truncated) {
+/*
+ * The wire contract with cloud-relay's pendantSpeechForJob(), which drops any
+ * payload whose format/rate/channels/bits are not exactly this. Exported so
+ * long-form briefings (audioBrief.js) build it from the same place rather than
+ * from a copy that can drift out of step with the relay.
+ */
+export function pendantSpeechPayload(pcm, opus, truncated) {
   return {
     format: 's16le',
     sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
@@ -170,10 +176,54 @@ export function extractWavePcm(wave) {
   return pcm
 }
 
+/*
+ * Some results arrive with their audio already rendered — a research briefing
+ * is a minute of speech produced hours before anyone asks for it. Re-rendering
+ * here would replace it with `say` reading the 180-character summary of
+ * itself, which is exactly the artifact the owner did NOT ask for.
+ *
+ * Only a payload that already satisfies the relay's format check is trusted;
+ * anything else falls through to a normal render rather than being forwarded
+ * and silently dropped downstream.
+ */
+export function prerenderedPendantSpeech(result) {
+  const candidates = [
+    result?.pendantSpeech,
+    ...(Array.isArray(result?.results)
+      ? result.results.map((entry) => entry?.pendantSpeech)
+      : []),
+  ]
+
+  for (const speech of candidates) {
+    if (
+      speech &&
+      typeof speech === 'object' &&
+      String(speech.format || '').toLowerCase() === 's16le' &&
+      Number(speech.sampleRate) === PENDANT_SPEECH_SAMPLE_RATE &&
+      Number(speech.channels) === PENDANT_SPEECH_CHANNELS &&
+      Number(speech.bitsPerSample) === PENDANT_SPEECH_BITS &&
+      String(speech.audioBase64 || '').length > 0
+    ) {
+      return speech
+    }
+  }
+  return null
+}
+
 export function synthesizePendantSpeech(result) {
   // spokenTextForResult always returns text; keep a belt-and-braces fallback
   // so a future regression cannot ship silent results to the pendant.
   const text = spokenTextForResult(result) || 'Done.'
+
+  const prerendered = prerenderedPendantSpeech(result)
+  if (prerendered) {
+    return {
+      ...result,
+      response: String(result?.response || text),
+      pendantSpeech: prerendered,
+    }
+  }
+
   const resultWithText =
     result && typeof result === 'object' && !String(result.response || '').trim()
       ? { ...result, response: text }

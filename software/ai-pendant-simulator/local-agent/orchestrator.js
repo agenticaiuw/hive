@@ -1,6 +1,14 @@
 import { buildConversationContext } from './conversationContext.js'
 import { planCommand } from './llmPlanner.js'
 import {
+  TIER_BACKGROUND,
+  TIER_DETERMINISTIC,
+  TIER_PLANNER,
+  classifyTier,
+  matchDeterministic,
+} from './policyRouter.js'
+import { recordRouting } from './routingStats.js'
+import {
   createSession,
   appendTurn,
 } from './sessionStore.js'
@@ -16,6 +24,10 @@ const INSTANT_INFO_TYPES = new Set([
   'get_time',
   'translate_text',
 ])
+
+/* Escape hatch: PENDANT_FAST_PATH=off sends every request back through the
+ * planner, which is the only way to A/B the router without a code change. */
+const FAST_PATH_ENABLED = process.env.PENDANT_FAST_PATH !== 'off'
 
 export async function orchestratePlan({
   command,
@@ -36,6 +48,11 @@ export async function orchestratePlan({
     source,
     kind: 'plan',
   })
+
+  // Wall clock for the whole routing decision, not just the model call — the
+  // fast path's win is that it never reaches the model, so timing only the
+  // model would report zero.
+  const routeStartedAt = Date.now()
 
   try {
     throwIfAborted(signal)
@@ -83,20 +100,85 @@ export async function orchestratePlan({
       source: 'user',
     })
 
+    /*
+     * Pick the cheapest path that reaches the same result. This never refuses
+     * anything: a deterministic hit is a claim that no planner could do better,
+     * and every other tier is just a starting point that can escalate.
+     */
+    const deterministic = FAST_PATH_ENABLED
+      ? await matchDeterministic(workingCommand).catch(() => null)
+      : null
+    const route = classifyTier(workingCommand, { source, deterministic })
+
     addThinkingStep(trace.traceId, {
       id: 'route',
-      label: 'Routing via LLM',
-      detail: 'No keyword short-circuit — the model chooses tools and answers',
+      label: `Routed to the ${route.tier} tier`,
+      detail: route.reason,
       status: 'done',
+      meta: { tier: route.tier, intent: deterministic?.intent ?? null },
       chunks: [
         {
-          id: 'route_llm',
+          id: 'route_tier',
           phase: 'route',
-          text: 'Sending request to LLM planner (string intent parsing disabled)',
+          text:
+            route.tier === TIER_DETERMINISTIC
+              ? `${deterministic.intent} → ${deterministic.actions
+                  .map((action) => action.type)
+                  .join(', ')} (no model call)`
+              : `${route.tier} tier: ${route.reason}`,
           at: new Date().toISOString(),
         },
       ],
     })
+
+    if (deterministic) {
+      const fast = await runDeterministicPlan(deterministic, {
+        traceId: trace.traceId,
+        command: workingCommand,
+      })
+
+      if (fast) {
+        appendTurn(activeSessionId, {
+          role: 'assistant',
+          content: fast.response,
+          source: 'deterministic',
+          result: fast.response,
+        })
+
+        const finished = finishThinkingTrace(trace.traceId, {
+          status: 'done',
+          summary: fast.response,
+        })
+
+        return stampRouting(
+          { ...fast, context, sessionId: activeSessionId, thinking: finished },
+          {
+            command: workingCommand,
+            tier: TIER_DETERMINISTIC,
+            reason: route.reason,
+            intent: deterministic.intent,
+            latencyMs: Date.now() - routeStartedAt,
+            usage: [],
+            ok: true,
+          },
+        )
+      }
+
+      /*
+       * The one action we were certain about did not work — a missing app, a
+       * permission, a display that is asleep. Certainty was wrong, so hand the
+       * request to the model rather than reporting a dead end. Costs a wasted
+       * fast path in exchange for never being less capable than before.
+       */
+      addThinkingStep(trace.traceId, {
+        id: 'route',
+        label: 'Fast path failed — escalating to the planner',
+        detail: `${deterministic.intent} did not succeed; asking the model instead`,
+        status: 'done',
+      })
+    }
+
+    const plannedTier = deterministic ? TIER_PLANNER : route.tier
 
     appendThinkingChunk(trace.traceId, {
       stepId: 'plan',
@@ -113,78 +195,119 @@ export async function orchestratePlan({
     let seenLabels = new Set()
     let seenTypes = new Set()
 
-    let plan = await planCommand(workingCommand, {
-      context,
-      onProgress: (progress) => {
-        const elapsedSec = Math.max(
-          1,
-          Math.round((Date.now() - startedAt) / 1000),
-        )
-        const partial = String(progress?.partial || '')
-        const phase = progress?.phase || 'llm_stream'
-        const delta = partial.slice(lastPartial.length)
-        lastPartial = partial
+    const onPlannerProgress = (progress) => {
+      const elapsedSec = Math.max(
+        1,
+        Math.round((Date.now() - startedAt) / 1000),
+      )
+      const partial = String(progress?.partial || '')
+      const phase = progress?.phase || 'llm_stream'
+      const delta = partial.slice(lastPartial.length)
+      lastPartial = partial
 
-        const discoveries = extractPlanDiscoveries(partial)
-        for (const type of discoveries.types) {
-          if (!seenTypes.has(type)) {
-            seenTypes.add(type)
-            appendThinkingChunk(trace.traceId, {
-              stepId: 'plan',
-              label: 'Streaming planner draft',
-              phase: 'discover_type',
-              text: `action type → ${type}`,
-              status: 'active',
-              streamText: partial,
-              detail: `${progress?.message || 'Drafting'} · ${elapsedSec}s · ${partial.length} chars`,
-            })
-          }
-        }
-        for (const label of discoveries.labels) {
-          if (!seenLabels.has(label)) {
-            seenLabels.add(label)
-            appendThinkingChunk(trace.traceId, {
-              stepId: 'plan',
-              label: 'Streaming planner draft',
-              phase: 'discover_label',
-              text: `step → ${label}`,
-              status: 'active',
-              streamText: partial,
-              detail: `${progress?.message || 'Drafting'} · ${elapsedSec}s · ${partial.length} chars`,
-            })
-          }
-        }
-
-        if (delta || phase !== 'llm_stream') {
+      const discoveries = extractPlanDiscoveries(partial)
+      for (const type of discoveries.types) {
+        if (!seenTypes.has(type)) {
+          seenTypes.add(type)
           appendThinkingChunk(trace.traceId, {
             stepId: 'plan',
             label: 'Streaming planner draft',
-            phase,
-            text:
-              phase === 'llm_stream'
-                ? delta || `(+${progress?.chars || partial.length} chars)`
-                : progress?.message || phase,
+            phase: 'discover_type',
+            text: `action type → ${type}`,
             status: 'active',
             streamText: partial,
-            detail: [
-              progress?.message || 'Model is drafting',
-              `${elapsedSec}s`,
-              `${partial.length} chars`,
-              discoveries.labels.length
-                ? `steps: ${discoveries.labels.slice(0, 5).join(' → ')}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join(' · '),
-            meta: {
-              chars: partial.length,
-              labels: discoveries.labels,
-              types: discoveries.types,
-              elapsedSec,
-            },
+            detail: `${progress?.message || 'Drafting'} · ${elapsedSec}s · ${partial.length} chars`,
           })
         }
-      },
+      }
+      for (const label of discoveries.labels) {
+        if (!seenLabels.has(label)) {
+          seenLabels.add(label)
+          appendThinkingChunk(trace.traceId, {
+            stepId: 'plan',
+            label: 'Streaming planner draft',
+            phase: 'discover_label',
+            text: `step → ${label}`,
+            status: 'active',
+            streamText: partial,
+            detail: `${progress?.message || 'Drafting'} · ${elapsedSec}s · ${partial.length} chars`,
+          })
+        }
+      }
+
+      if (delta || phase !== 'llm_stream') {
+        appendThinkingChunk(trace.traceId, {
+          stepId: 'plan',
+          label: 'Streaming planner draft',
+          phase,
+          text:
+            phase === 'llm_stream'
+              ? delta || `(+${progress?.chars || partial.length} chars)`
+              : progress?.message || phase,
+          status: 'active',
+          streamText: partial,
+          detail: [
+            progress?.message || 'Model is drafting',
+            `${elapsedSec}s`,
+            `${partial.length} chars`,
+            discoveries.labels.length
+              ? `steps: ${discoveries.labels.slice(0, 5).join(' → ')}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          meta: {
+            chars: partial.length,
+            labels: discoveries.labels,
+            types: discoveries.types,
+            elapsedSec,
+          },
+        })
+      }
+    }
+
+    let plan = await planCommand(workingCommand, {
+      context,
+      tier: plannedTier,
+      onProgress: onPlannerProgress,
+    })
+
+    const usage = plan.usage ? [plan.usage] : []
+    let effectiveTier = plannedTier
+    let escalatedFrom = deterministic ? TIER_DETERMINISTIC : null
+
+    /*
+     * The cheap tier plans against a trimmed schema and is told to say so when
+     * a request needs more. Taking it at its word — instead of shipping a plan
+     * it hedged on — is what makes the small tier safe to try first: the owner
+     * pays two cheap-ish calls in the miss case and never loses a capability.
+     */
+    if (plannedTier === TIER_BACKGROUND && needsEscalation(plan)) {
+      addThinkingStep(trace.traceId, {
+        id: 'escalate',
+        label: 'Escalating to the full planner',
+        detail: plan.error || 'The small tier did not produce a usable plan',
+        status: 'done',
+      })
+      escalatedFrom = TIER_BACKGROUND
+      effectiveTier = TIER_PLANNER
+      lastPartial = ''
+      plan = await planCommand(workingCommand, {
+        context,
+        tier: TIER_PLANNER,
+        onProgress: onPlannerProgress,
+      })
+      if (plan.usage) usage.push(plan.usage)
+    }
+
+    const routing = () => ({
+      command: workingCommand,
+      tier: effectiveTier,
+      reason: route.reason,
+      intent: deterministic?.intent ?? null,
+      latencyMs: Date.now() - routeStartedAt,
+      escalatedFrom,
+      usage,
     })
 
     if (plan.status === 'unsupported') {
@@ -198,12 +321,15 @@ export async function orchestratePlan({
         status: 'failed',
         summary: plan.error || 'Unsupported request',
       })
-      return {
-        ...plan,
-        context,
-        sessionId: activeSessionId,
-        thinking: finished,
-      }
+      return stampRouting(
+        {
+          ...plan,
+          context,
+          sessionId: activeSessionId,
+          thinking: finished,
+        },
+        { ...routing(), ok: false },
+      )
     }
 
     // Info-only tools: run immediately, skip confirm.
@@ -243,12 +369,15 @@ export async function orchestratePlan({
         summary: plan.response || plan.summary || 'Done',
       })
 
-      return {
-        ...plan,
-        context,
-        sessionId: activeSessionId,
-        thinking: finished,
-      }
+      return stampRouting(
+        {
+          ...plan,
+          context,
+          sessionId: activeSessionId,
+          thinking: finished,
+        },
+        routing(),
+      )
     }
 
     addThinkingStep(trace.traceId, {
@@ -291,12 +420,15 @@ export async function orchestratePlan({
       summary: plan.summary ?? 'Plan ready',
     })
 
-    return {
-      ...plan,
-      context,
-      sessionId: activeSessionId,
-      thinking: finished,
-    }
+    return stampRouting(
+      {
+        ...plan,
+        context,
+        sessionId: activeSessionId,
+        thinking: finished,
+      },
+      routing(),
+    )
   } catch (error) {
     addThinkingStep(trace.traceId, {
       id: 'error',
@@ -455,6 +587,93 @@ export async function orchestrateExecute({
       summary: error.message,
     })
     throw error
+  }
+}
+
+/**
+ * Attach the routing receipt to the plan and add it to the running totals.
+ *
+ * The receipt rides on the plan itself rather than living only in the stats
+ * endpoint because the owner asked to SEE which tier answered — and the place
+ * they see a plan is the plan.
+ */
+function stampRouting(plan, meta) {
+  const entry = recordRouting(meta)
+  return {
+    ...plan,
+    routing: {
+      tier: entry.tier,
+      reason: entry.reason,
+      intent: entry.intent,
+      latencyMs: entry.latencyMs,
+      escalatedFrom: entry.escalatedFrom,
+      llmCalls: entry.llmCalls,
+      estimatedPromptTokens: entry.promptTokens,
+      estimatedCompletionTokens: entry.completionTokens,
+      estimatedCostUsd: entry.costUsd,
+      models: entry.calls.map((call) => call.model),
+    },
+  }
+}
+
+/* The small tier is told to bail out rather than improvise past its schema, so
+ * "unsupported" and "nothing at all" both mean: this one needs the big model. */
+function needsEscalation(plan) {
+  if (!plan) return true
+  if (plan.status === 'unsupported') return true
+  return !plan.actions?.length && !plan.response
+}
+
+/**
+ * Run the one action the router was sure about. Returns null when it did not
+ * work, which is the caller's signal to fall back to the model.
+ *
+ * Executing here rather than handing actions back mirrors what /plan already
+ * does for get_weather / get_time / translate_text: when there is nothing to
+ * decide, a round trip to ask permission to do the obvious thing is latency the
+ * owner pays for nothing. Callers see the familiar instant shape (empty
+ * `actions`, filled `response`), so none of them execute it a second time.
+ */
+async function runDeterministicPlan(deterministic, { traceId, command }) {
+  const { executeActions } = await import('./executor.js')
+  const { stripImageBytes } = await import('./screenCapture.js')
+
+  addThinkingStep(traceId, {
+    id: 'act',
+    label: 'Running it directly',
+    detail: deterministic.actions.map((action) => action.label).join(', '),
+    status: 'active',
+  })
+
+  const results = await executeActions(deterministic.actions)
+  const ok = results.every((result) => result.ok)
+  const response = results
+    .map((result) => result.message || result.error || '')
+    .filter(Boolean)
+    .join('\n')
+
+  addThinkingStep(traceId, {
+    id: 'act',
+    label: ok ? 'Done — no model was needed' : 'Direct run failed',
+    detail: response,
+    status: 'done',
+  })
+
+  if (!ok) return null
+
+  return {
+    status: 'instant',
+    mode: 'deterministic',
+    command,
+    requiresConfirmation: false,
+    summary: response,
+    response,
+    actions: [],
+    // Image bytes never reach here in practice, but /plan writes its result to
+    // the durable job store, so strip at the boundary like orchestrateExecute.
+    sideResults: stripImageBytes(results),
+    planner: 'deterministic',
+    fullControl: true,
   }
 }
 

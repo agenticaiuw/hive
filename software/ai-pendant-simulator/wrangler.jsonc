@@ -42,6 +42,16 @@
   "ai": {
     "binding": "AI"
   },
+  // Cloudflare Browser Run — the relay's own headless browser, so public web
+  // pages can be read while the Mac is asleep (cloud-relay/serverBrowser.js).
+  // The binding, unlike the REST API, needs no token inside the Worker;
+  // .quickAction() wants compatibility_date >= 2026-03-24, satisfied above.
+  // Free plan reality: 10 browser-minutes a day and one Quick Action every
+  // 10s (Paid: unmetered, 10/s). serverBrowser.js reports the 429 wait rather
+  // than stalling a voice turn on it.
+  "browser": {
+    "binding": "BROWSER"
+  },
   "d1_databases": [
     {
       "binding": "DB",

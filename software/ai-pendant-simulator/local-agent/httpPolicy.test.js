@@ -8,6 +8,9 @@ test('public local health contains no operational or filesystem details', () => 
     ok: true,
     service: 'AI Pendant Mac Local Agent',
     version: '0.5.0',
+    // A route name is not an operational detail; it is how a caller finds the
+    // manifest instead of probing for it.
+    capabilities: '/capabilities',
   })
   assert.equal(publicHealthPayload().permissions, undefined)
   assert.equal(publicHealthPayload().browserExtension, undefined)

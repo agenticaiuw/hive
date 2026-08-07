@@ -2,9 +2,34 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
+
+/*
+ * "Research this and tell me later" is a first-class capability with no action
+ * type of its own, because it is not one action — it is a search, a handful of
+ * page fetches, a cheap-tier synthesis and two rendered artifacts, and it takes
+ * a minute. It reaches the executor through run_shell on its own CLI, and the
+ * agent recognises that command and runs it in-process (computerControl.js).
+ *
+ * It lives in the machine block rather than in the action schema because that
+ * is what it is: a tool that exists on THIS machine, described next to the
+ * other tools that exist on this machine.
+ */
+const RESEARCH_CLI = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../scripts/research-brief.mjs',
+)
+
+const RESEARCH_BRIEF_PROMPT = `Research briefs (work the owner is NOT waiting for — "look into X and tell me later", "compare the options and leave me an audio recommendation", "summarize this page and read it to me later"):
+- Emit ONE run_shell action: node ${RESEARCH_CLI} --topic "<the topic, in the owner's words>" --mode <brief|compare|page>
+  - mode "compare" when they are weighing options or asking what to get. It recommends and never buys — do not add any purchase or checkout step.
+  - mode "page" when the subject is a page or tab they already have open; add --match "<a word from the page or site>".
+  - Add --now only if the owner is clearly waiting to hear it right now. Default (omitted) leaves it for later.
+- It searches the public web, reads the sources, writes a cited note under ~/AI-Pendant-Workspace/Briefings and renders the audio. Do not plan those steps yourself and never pair it with browser_* or open_url actions.
+- To play one back ("read me my briefing", "what did you find out"): node ${RESEARCH_CLI} --play latest`
 
 let cachedContext = null
 let cachedAt = 0
@@ -92,12 +117,24 @@ function listExecutableNames(roots) {
   return [...names].sort((left, right) => left.localeCompare(right))
 }
 
-export function formatMachineContextForPrompt(context) {
+export function formatMachineContextForPrompt(context, { compact = false } = {}) {
   if (!context) {
     return ''
   }
 
   const apps = context.applications.join(', ')
+
+  /*
+   * The full block is ~10,000 characters and 7,000 of them are the CLI
+   * inventory — worth every token when the planner might shell out, dead weight
+   * when the cheap tier is choosing between open_app and set_volume. Apps stay
+   * because "open X" is only correct if X is really installed.
+   */
+  if (compact) {
+    return `This device: ${context.platform}, home ${context.home}, timezone ${context.timezone}.
+Installed applications: ${apps}
+Use only applications from that list. If the exact app is missing, pick the closest one that is listed.`
+  }
   const automation = context.automation || {}
   const shortcuts = (automation.shortcuts || []).join(', ') || '(none)'
   const cliTools = (automation.cliTools || []).join(', ') || '(none)'
@@ -109,6 +146,8 @@ export function formatMachineContextForPrompt(context) {
 - Installed applications: ${apps}
 - Shortcuts runnable via \`shortcuts run "<name>"\`: ${shortcuts}
 - Non-default CLI tools installed (complete list — a tool absent here is NOT installed; never shell out on a guess): ${cliTools}
+
+${RESEARCH_BRIEF_PROMPT}
 
 Universal judgment rules:
 - Complete the user's intent using what is actually installed above.

@@ -82,7 +82,35 @@ export function createOpsClient(settings) {
   const relayApiKey = settings.relayApiKey || ''
   const agentToken = settings.agentToken || ''
 
-  async function request(path, options = {}) {
+  /*
+   * The agent hands the dashboard a loopback-only session cookie when it serves
+   * /dashboard, and that cookie is per-process: restart the agent and every
+   * already-open tab starts 401ing on every route until someone reloads by
+   * hand. The page looks alive but goes blank and stale, which is exactly the
+   * failure this dashboard exists to make visible. Re-priming the cookie is a
+   * plain GET of the page we are already on, so do it automatically.
+   */
+  let sessionRepair = null
+  function repairSession() {
+    if (useRelayProxy) return Promise.resolve(false)
+    if (!sessionRepair) {
+      sessionRepair = fetch(`${baseUrl}/dashboard`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      })
+        .then((response) => response.ok)
+        .catch(() => false)
+      // One repair per burst: eight parallel refresh calls must not fire eight.
+      sessionRepair.finally(() => {
+        window.setTimeout(() => {
+          sessionRepair = null
+        }, 1000)
+      })
+    }
+    return sessionRepair
+  }
+
+  async function request(path, options = {}, retried = false) {
     const method = String(options.method || 'GET').toUpperCase()
     let body = undefined
     if (options.body != null) {
@@ -106,12 +134,19 @@ export function createOpsClient(settings) {
         })
       : await fetch(`${baseUrl}${path}`, {
           ...options,
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${agentToken}`,
             ...(options.headers || {}),
           },
         })
+
+    if (response.status === 401 && !retried && !useRelayProxy) {
+      if (await repairSession()) {
+        return request(path, options, true)
+      }
+    }
 
     const contentType = response.headers.get('content-type') || ''
     if (response.status === 204) {
@@ -227,141 +262,98 @@ export function createOpsClient(settings) {
       }
       return response.blob()
     },
-    openPipelineStream: ({ onMessage, onError, signal } = {}) => {
-      // Relay cannot stream SSE — callers should rely on snapshot polling.
-      if (useRelayProxy) {
-        return {
-          close: () => {},
-          done: Promise.resolve(),
-        }
-      }
-
-      const controller = signal ? null : new AbortController()
-      const activeSignal = signal || controller.signal
-
-      const run = (async () => {
-        const response = await fetch(`${baseUrl}/pipeline/stream`, {
-          headers: {
-            Authorization: `Bearer ${agentToken}`,
-            Accept: 'text/event-stream',
-          },
-          signal: activeSignal,
-        })
-
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}))
-          throw new Error(payload.error || `Pipeline stream failed (${response.status})`)
-        }
-
-        const reader = response.body?.getReader()
-        if (!reader) {
-          throw new Error('Pipeline stream is unavailable in this browser.')
-        }
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() ?? ''
-
-          for (const part of parts) {
-            const lines = part.split('\n')
-            const dataLine = lines.find((line) => line.startsWith('data:'))
-            if (!dataLine) continue
-            try {
-              onMessage?.(JSON.parse(dataLine.slice(5).trim()))
-            } catch {
-              // Ignore malformed or partial SSE messages.
-            }
-          }
-        }
-      })()
-
-      run.catch((error) => {
-        if (error.name !== 'AbortError') {
-          onError?.(error)
-        }
-      })
-
-      return {
-        close: () => controller?.abort(),
-        done: run,
-      }
-    },
+    openPipelineStream: (handlers) => openStream('/pipeline/stream', handlers),
     getThinking: () => request('/thinking'),
     getLatestThinking: () => request('/thinking/latest'),
-    openThinkingStream: ({ onMessage, onError, signal } = {}) => {
-      // Relay cannot stream SSE — callers should rely on polling.
-      if (useRelayProxy) {
-        return {
-          close: () => {},
-          done: Promise.resolve(),
-        }
-      }
-
-      const controller = signal ? null : new AbortController()
-      const activeSignal = signal || controller.signal
-
-      const run = (async () => {
-        const response = await fetch(`${baseUrl}/thinking/stream`, {
-          headers: {
-            Authorization: `Bearer ${agentToken}`,
-            Accept: 'text/event-stream',
-          },
-          signal: activeSignal,
-        })
-
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}))
-          throw new Error(payload.error || `Thinking stream failed (${response.status})`)
-        }
-
-        const reader = response.body?.getReader()
-        if (!reader) {
-          throw new Error('Thinking stream is unavailable in this browser.')
-        }
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() ?? ''
-
-          for (const part of parts) {
-            const lines = part.split('\n')
-            const dataLine = lines.find((line) => line.startsWith('data:'))
-            if (!dataLine) continue
-            try {
-              const payload = JSON.parse(dataLine.slice(5).trim())
-              onMessage?.(payload)
-            } catch {
-              // ignore malformed chunks
-            }
-          }
-        }
-      })()
-
-      run.catch((error) => {
-        if (error.name !== 'AbortError') {
-          onError?.(error)
-        }
-      })
-
-      return {
-        close: () => controller?.abort(),
-        done: run,
-      }
-    },
+    openThinkingStream: (handlers) => openStream('/thinking/stream', handlers),
     getLogs: () => request('/logs'),
+    getRoutines: () => request('/routines'),
+    runRoutine: (routineId) =>
+      request(`/routines/${encodeURIComponent(routineId)}/run`, {
+        method: 'POST',
+      }),
     refreshMachine: () =>
       request('/machine-context/refresh', { method: 'POST' }),
+  }
+
+  /*
+   * One SSE reader for every stream the agent exposes. The per-stream copies
+   * this replaced drifted apart in their error text and neither recovered from
+   * an expired session cookie, so a restarted agent silently froze the live
+   * view while the page still looked connected.
+   */
+  function openStream(path, { onMessage, onError, signal } = {}) {
+    // Relay cannot stream SSE — callers fall back to snapshot polling.
+    if (useRelayProxy) {
+      return { close: () => {}, done: Promise.resolve() }
+    }
+
+    const controller = signal ? null : new AbortController()
+    const activeSignal = signal || controller.signal
+
+    const connect = async (retried = false) => {
+      const response = await fetch(`${baseUrl}${path}`, {
+        credentials: 'same-origin',
+        headers: {
+          Authorization: `Bearer ${agentToken}`,
+          Accept: 'text/event-stream',
+        },
+        signal: activeSignal,
+      })
+
+      if (response.status === 401 && !retried && (await repairSession())) {
+        return connect(true)
+      }
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(
+          payload.error || `Stream ${path} failed (${response.status})`,
+        )
+      }
+      return response
+    }
+
+    const run = (async () => {
+      const response = await connect()
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error(`Stream ${path} is unavailable in this browser.`)
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+
+        for (const part of parts) {
+          const dataLine = part
+            .split('\n')
+            .find((line) => line.startsWith('data:'))
+          if (!dataLine) continue
+          try {
+            onMessage?.(JSON.parse(dataLine.slice(5).trim()))
+          } catch {
+            // Ignore malformed or partial SSE messages.
+          }
+        }
+      }
+    })()
+
+    run.catch((error) => {
+      if (error.name !== 'AbortError') {
+        onError?.(error)
+      }
+    })
+
+    return {
+      close: () => controller?.abort(),
+      done: run,
+    }
   }
 }

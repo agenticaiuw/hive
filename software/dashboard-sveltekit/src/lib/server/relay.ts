@@ -59,6 +59,93 @@ export function sanitizeText(value: unknown, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+/* Values that should never be read off a screen, whoever is looking. */
+const SENSITIVE_KEY =
+  /token|secret|password|passwd|api[-_]?key|authorization|cookie|credential|bearer|private[-_]?key/i;
+
+function redactInline(value: string) {
+  return value.replace(
+    /\b(bearer|token|secret|password|api[-_]?key)([=:"'\s]+)(\S{6,})/gi,
+    (_match, label, separator) => `${label}${separator}•••••••`,
+  );
+}
+
+/**
+ * The evidence-grade counterpart to `sanitizeText`.
+ *
+ * `sanitizeText` rewrites `/Users/...` to `[local path]`, which is right for
+ * spoken transcripts but destroys the one thing job evidence exists to show:
+ * the actual command that ran. This keeps paths and output intact and hides
+ * only credentials. Objects come back as objects so callers can render a
+ * parameter table rather than a JSON blob.
+ */
+export function redactSecrets(value: unknown, maxLength = 500): any {
+  if (value == null) return "";
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, 40)
+        .map(([key, item]) => [
+          key.slice(0, 80),
+          SENSITIVE_KEY.test(key)
+            ? "••••••• hidden"
+            : redactSecrets(
+                item !== null && typeof item === "object"
+                  ? JSON.stringify(item)
+                  : item,
+                maxLength,
+              ),
+        ]),
+    );
+  }
+  return redactInline(String(value)).slice(0, maxLength);
+}
+
+/**
+ * Ask the Mac agent a question through the relay's ops proxy.
+ *
+ * The relay parks the request as a job and waits for the Mac bridge to claim
+ * it, so this is a real round trip to the laptop and fails whenever the laptop
+ * is asleep. Callers get the failure as a sentence to show the owner, never a
+ * thrown error — an offline Mac is a normal state for a remote dashboard, not
+ * a fault.
+ */
+export async function opsProxy(
+  client: RelayClient,
+  path: string,
+  { method = "GET", body = null }: { method?: string; body?: unknown } = {},
+): Promise<{ ok: true; payload: any } | { ok: false; error: string }> {
+  try {
+    const response = await client.relayFetch("/v1/ops/proxy", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${client.relayApiKey}`,
+      },
+      body: JSON.stringify({ method, path, body, deviceId: "ops-dashboard" }),
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        ok: false,
+        error:
+          sanitizeText(payload.error, 300) ||
+          `The Mac agent did not answer (${response.status}).`,
+      };
+    }
+    return { ok: true, payload };
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Error
+          ? sanitizeText(error.message, 300)
+          : "Could not reach the Mac agent through the relay.",
+    };
+  }
+}
+
 export function safeIdentifier(value: unknown, maxLength: number) {
   return String(value ?? "")
     .replace(/[^a-zA-Z0-9_.:-]/g, "")

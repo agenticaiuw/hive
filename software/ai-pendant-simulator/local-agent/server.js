@@ -22,7 +22,51 @@ import {
   pollBrowserCommand,
   registerBrowserHeartbeat,
 } from './browserBridge.js'
+import {
+  browserSessionsLocation,
+  forgetBrowserSession,
+  listBrowserSessions,
+  openBrowserSession,
+} from './browserSessions.js'
+import {
+  BRIEFING_KINDS,
+  matchBriefingCommand,
+  readLatestBriefing,
+  runBriefing,
+} from './briefing.js'
+import { fillForm, formFillLocation, getFill, listFills } from './formFill.js'
 import { orchestrateExecute, orchestratePlan } from './orchestrator.js'
+import {
+  acknowledgeReports,
+  checkWatch,
+  createWatch,
+  deleteWatch,
+  getWatch,
+  listWatches,
+  pageWatchLocation,
+  pendingReports,
+  startPageWatchScheduler,
+  updateWatch,
+} from './pageWatch.js'
+import {
+  createRoutine,
+  deleteRoutine,
+  listRoutines,
+  runRoutine,
+  startRoutineScheduler,
+  updateRoutine,
+} from './routines.js'
+import { researchTopic } from './research.js'
+import {
+  briefingsLocation,
+  deliverBriefing,
+  getBriefing,
+  listBriefings,
+  markBriefingPlayed,
+  pendantSpeechForBriefing,
+  playBriefingOnMac,
+} from './audioBrief.js'
+import { readRoutingStats } from './routingStats.js'
 import { purgeAllCaptures, stripImageBytes } from './screenCapture.js'
 import { appendLog, logLocation, readLogs } from './logger.js'
 import {
@@ -56,6 +100,17 @@ import {
   updateActiveProject,
 } from './projectMemory.js'
 import {
+  forgetFact,
+  listFacts,
+  memoryLocation,
+  pruneFacts,
+  rememberBrowserFindings,
+  rememberFact,
+  syncFactsFromContextGraph,
+  touchFacts,
+} from './memoryService.js'
+import { projectContext } from './contextProjection.js'
+import {
   clearSessionTurns,
   createSession,
   deleteSession,
@@ -79,6 +134,7 @@ import {
   registerActiveJob,
 } from './jobControl.js'
 import { describeUndoability, undoJobResults } from './undo.js'
+import { receiptsForJob, undoVaultLocation } from './actionReceipts.js'
 import {
   getMachineContext,
   refreshMachineContext,
@@ -107,6 +163,14 @@ import {
   formatPermissionHelp,
 } from './macos/permissions.js'
 import { isPublicPath, publicHealthPayload } from './httpPolicy.js'
+import {
+  buildCapabilityManifest,
+  isKnownRoutePath,
+} from './capabilityManifest.js'
+import {
+  hasDashboardSession,
+  issueDashboardSession,
+} from './dashboardSession.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -128,6 +192,24 @@ app.use((request, response, next) => {
     return
   }
 
+  /*
+   * Answer "no such route" before "wrong token".
+   *
+   * This middleware sits in front of routing, so every typo used to come back
+   * 401 — indistinguishable from a real route with a bad token. Callers read
+   * that as "it exists but I am not allowed", and reconnaissance rounds were
+   * spent chasing endpoints that were never here. A missing or wrong token on
+   * a route that DOES exist is still 401; nothing about auth is relaxed.
+   */
+  if (!isKnownRoutePath(app, request.path, { staticDir: distDir })) {
+    response.status(404).json({
+      ok: false,
+      error: `No such route on this agent: ${request.method} ${request.path}`,
+      hint: 'GET /capabilities lists every route this process has.',
+    })
+    return
+  }
+
   if (!AGENT_TOKEN) {
     response.status(503).json({
       ok: false,
@@ -135,6 +217,13 @@ app.use((request, response, next) => {
       error:
         'Blocked for safety: AGENT_TOKEN is not configured on the Mac local agent.',
     })
+    return
+  }
+
+  // The dashboard runs in a browser and cannot hold a bearer token; a
+  // loopback-only session cookie stands in for one.
+  if (hasDashboardSession(request)) {
+    next()
     return
   }
 
@@ -151,6 +240,34 @@ app.use((request, response, next) => {
   }
 
   next()
+})
+
+/*
+ * The one place that answers "what can this agent do, and where does it live".
+ * Derived from the running router and the executor's dispatch table — see
+ * capabilityManifest.js for why none of it is written by hand.
+ */
+app.get('/capabilities', async (_request, response) => {
+  let permissions
+  try {
+    const result = await ensurePermissions({
+      prompt: false,
+      openSettings: false,
+      preflightAutomation: false,
+      force: false,
+    })
+    permissions = result.after
+  } catch (error) {
+    permissions = { error: error.message }
+  }
+
+  response.json(
+    buildCapabilityManifest(app, {
+      permissions,
+      staticDir: distDir,
+      relayUrl: RELAY_URL || null,
+    }),
+  )
 })
 
 app.post('/plan', async (request, response) => {
@@ -359,15 +476,93 @@ app.get('/logs', (_request, response) => {
   })
 })
 
-app.get('/jobs', (_request, response) => {
-  const jobs = readJobs().map((job) => ({
+/*
+ * A stored job's `result` carries the whole contextGraph and the log ring —
+ * once per job. With 120 jobs that made this route 27 MB, of which 29 MB
+ * measured: contextGraph 49%, logs 47%, and everything the dashboard actually
+ * renders 2.4%. The Jobs view polls every 4 s, so the agent was serialising
+ * ~7 MB/s to display 700 kB. Only these five result fields are ever read;
+ * GET /jobs/:jobId still returns the record untouched.
+ */
+function projectJobForList(job) {
+  const result = job.result
+  return {
     ...job,
+    result: result
+      ? {
+          results: result.results,
+          actions: result.actions,
+          response: result.response,
+          summary: result.summary,
+          /* The view follows this id to /thinking/:traceId; the trace itself
+           * is far too big to ride along on every poll. */
+          thinking: result.thinking?.traceId
+            ? { traceId: result.thinking.traceId }
+            : undefined,
+        }
+      : result,
     undo: describeUndoability(job),
+    receipts: receiptsForJob(job),
     cancellable: job.status === 'processing',
-  }))
+  }
+}
+
+app.get('/jobs', (request, response) => {
+  const all = readJobs()
+  const limit = Number.parseInt(String(request.query.limit ?? ''), 10)
+  /* Newest first when limiting, so ?limit=20 means the 20 most recent rather
+   * than the 20 oldest, which is never what a caller wants. */
+  const slice =
+    Number.isFinite(limit) && limit > 0 ? all.slice(-limit).reverse() : all
+
   response.json({
-    jobs,
+    jobs: slice.map(projectJobForList),
+    total: all.length,
     path: jobsLocation(),
+  })
+})
+
+/* The untrimmed record, for when something needs what the list drops. */
+app.get('/jobs/:jobId', (request, response) => {
+  const job = getJob(String(request.params.jobId || ''))
+  if (!job) {
+    response.status(404).json({ ok: false, error: 'Job not found.' })
+    return
+  }
+  response.json({
+    ok: true,
+    job: {
+      ...job,
+      undo: describeUndoability(job),
+      receipts: receiptsForJob(job),
+      cancellable: job.status === 'processing',
+    },
+  })
+})
+
+/* What a single job actually touched, and what of it can still be taken back. */
+app.get('/jobs/:jobId/receipts', (request, response) => {
+  const job = getJob(String(request.params.jobId || ''))
+  if (!job) {
+    response.status(404).json({ ok: false, error: 'Job not found.' })
+    return
+  }
+
+  const receipts = receiptsForJob(job)
+  response.json({
+    ok: true,
+    jobId: job.jobId,
+    command: job.command,
+    status: job.status,
+    undoneAt: job.undoneAt ?? null,
+    undo: describeUndoability(job),
+    counts: {
+      total: receipts.length,
+      wrote: receipts.filter((receipt) => receipt.effect === 'write').length,
+      reversible: receipts.filter((receipt) => receipt.reversible).length,
+    },
+    receipts,
+    snapshotVault: undoVaultLocation(),
   })
 })
 
@@ -831,6 +1026,10 @@ app.get('/ops/snapshot', async (_request, response) => {
         undoneAt: job.undoneAt || null,
         cancellable: job.status === 'processing',
         undo: describeUndoability(job),
+        // The snapshot is what the dashboard and the relay actually render, so
+        // receipts have to travel with it or "see what it touched" stops at the
+        // Mac's own /jobs.
+        receipts: receiptsForJob(job),
         result: job.result
           ? {
               summary: job.result.summary,
@@ -849,6 +1048,7 @@ app.get('/ops/snapshot', async (_request, response) => {
                     pid: item.pid,
                     path: item.path,
                     region: item.region,
+                    receipt: item.receipt ?? null,
                   }))
                 : [],
             }
@@ -863,6 +1063,7 @@ app.get('/ops/snapshot', async (_request, response) => {
         llm: undefined,
       })),
     pipeline: readPipelineRuns().slice(0, 40),
+    routing: readRoutingStats(),
     logs: readLogs()
       .slice(0, 50)
       .map((entry) => ({
@@ -874,6 +1075,15 @@ app.get('/ops/snapshot', async (_request, response) => {
         summary: entry.summary || entry.result?.summary || entry.result?.response,
       })),
   })
+})
+
+/*
+ * Which tier answered, and what it cost. Every /plan response already carries
+ * its own `routing` receipt; this is the rollup across the process, including
+ * the measured planner baseline the cheap tiers are compared against.
+ */
+app.get('/routing', (_request, response) => {
+  response.json({ ok: true, routing: readRoutingStats() })
 })
 
 app.get('/browser/status', (_request, response) => {
@@ -928,11 +1138,377 @@ app.post('/browser/result/:commandId', (request, response) => {
   response.json({ ok: true, result })
 })
 
+/* Which tab each named browser session points at. See browserSessions.js. */
+app.get('/browser/sessions', (_request, response) => {
+  response.json({
+    ok: true,
+    sessions: listBrowserSessions(),
+    storePath: browserSessionsLocation(),
+  })
+})
+
+app.post('/browser/sessions', async (request, response) => {
+  try {
+    response.json({ ok: true, ...(await openBrowserSession(request.body || {})) })
+  } catch (error) {
+    response.status(error?.code === 'browser_offline' ? 503 : 409).json({
+      ok: false,
+      code: error?.code ?? 'browser_error',
+      recoverable: Boolean(error?.recoverable),
+      error: error.message,
+    })
+  }
+})
+
+app.delete('/browser/sessions/:id', (request, response) => {
+  response.json({
+    ok: true,
+    released: forgetBrowserSession(request.params.id),
+  })
+})
+
+/*
+ * Briefings: read the day, say it, write it down, send nothing. See briefing.js.
+ * Reachable directly here and as a compose_briefing action, so "prepare my
+ * workday" behaves the same spoken, scheduled, or curled.
+ */
+app.post('/briefing', async (request, response) => {
+  try {
+    const kind =
+      String(request.body?.kind || '').trim() ||
+      matchBriefingCommand(request.body?.command || '') ||
+      'morning'
+    response.json(
+      await runBriefing({ kind, sinks: request.body?.sinks || null }),
+    )
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/briefing/kinds', (_request, response) => {
+  response.json({ ok: true, kinds: BRIEFING_KINDS })
+})
+
+app.get('/briefing/latest', (_request, response) => {
+  const briefing = readLatestBriefing()
+  if (!briefing) {
+    response.status(404).json({ ok: false, error: 'No briefing has been composed yet.' })
+    return
+  }
+  response.json({ ok: true, briefing })
+})
+
+/*
+ * Research → audio brief. See research.js / audioBrief.js.
+ *
+ * Distinct from /briefing above: that one reads the owner's own day off this
+ * Mac, this one goes out to the public web (or their open tabs), checks what
+ * it finds, and leaves a cited note plus audio to play later. Both are here so
+ * the capability behaves the same spoken, scheduled, or curled.
+ */
+app.post('/research', async (request, response) => {
+  const topic = String(request.body?.topic || '').trim()
+  if (!topic) {
+    response.status(400).json({ ok: false, error: 'A topic is required.' })
+    return
+  }
+  try {
+    const research = await researchTopic({
+      topic,
+      mode: String(request.body?.mode || 'brief'),
+      match: String(request.body?.match || ''),
+      maxSources: Number(request.body?.maxSources) || undefined,
+    })
+    const { briefing, notePath, audio } = deliverBriefing({
+      research,
+      openNote: request.body?.openNote === true,
+    })
+    if (request.body?.playOnMac === true) playBriefingOnMac(briefing)
+    /* Audio bytes are never in this body — they are megabytes, and the files
+     * on disk are the artifact. /research/briefings/:id/speech serves them. */
+    response.json({
+      ok: true,
+      briefingId: briefing.id,
+      topic: briefing.topic,
+      mode: briefing.mode,
+      headline: briefing.headline,
+      spoken: briefing.spoken,
+      notePath,
+      audioPath: audio.wavPath,
+      opusPath: audio.opusPath,
+      seconds: audio.seconds,
+      sourcesRead: research.sourcesRead,
+      sourcesSeen: research.sourcesSeen,
+      sources: briefing.sources,
+      queries: research.queries,
+      durationMs: research.durationMs,
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/research/briefings', (request, response) => {
+  response.json({
+    ok: true,
+    location: briefingsLocation(),
+    briefings: listBriefings({ limit: Number(request.query?.limit) || 20 }).map(
+      ({ spoken, ...rest }) => rest,
+    ),
+  })
+})
+
+app.get('/research/briefings/:id', (request, response) => {
+  const briefing = getBriefing(request.params.id)
+  if (!briefing) {
+    response.status(404).json({ ok: false, error: 'No such briefing.' })
+    return
+  }
+  response.json({ ok: true, briefing })
+})
+
+/* The pendant-format payload, exactly as cloud-relay expects to forward it. */
+app.post('/research/briefings/:id/speech', (request, response) => {
+  const briefing = getBriefing(request.params.id)
+  if (!briefing) {
+    response.status(404).json({ ok: false, error: 'No such briefing.' })
+    return
+  }
+  try {
+    if (request.body?.onMac === true) playBriefingOnMac(briefing)
+    const pendantSpeech = pendantSpeechForBriefing(briefing)
+    markBriefingPlayed(briefing.id)
+    response.json({
+      ok: true,
+      briefingId: briefing.id,
+      response: briefing.spoken,
+      pendantSpeech,
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+/* Routines: work the owner is not waiting for. See routines.js. */
+app.get('/routines', (_request, response) => {
+  response.json({ ok: true, routines: listRoutines() })
+})
+
+app.post('/routines', (request, response) => {
+  try {
+    response.json({ ok: true, routine: createRoutine(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.patch('/routines/:routineId', (request, response) => {
+  try {
+    const routine = updateRoutine(request.params.routineId, request.body || {})
+    if (!routine) {
+      response.status(404).json({ ok: false, error: 'No such routine.' })
+      return
+    }
+    response.json({ ok: true, routine })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.delete('/routines/:routineId', (request, response) => {
+  response.json({ ok: deleteRoutine(request.params.routineId) })
+})
+
+app.post('/routines/:routineId/run', async (request, response) => {
+  try {
+    response.json({
+      ok: true,
+      result: await runRoutine(request.params.routineId, { force: true }),
+    })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/*
+ * Page watches: "tell me when the status, price, or availability changes" —
+ * and stay quiet otherwise. See pageWatch.js.
+ */
+app.get('/watches', (_request, response) => {
+  response.json({
+    ok: true,
+    watches: listWatches(),
+    storePath: pageWatchLocation(),
+  })
+})
+
+app.post('/watches', (request, response) => {
+  try {
+    response.json({ ok: true, watch: createWatch(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/* Before /watches/:watchId, or "reports" is read as a watch id. */
+app.get('/watches/reports', (_request, response) => {
+  const reports = pendingReports()
+  response.json({
+    ok: true,
+    reports,
+    summary: reports.length
+      ? reports.map((report) => report.summary).join(' ')
+      : 'Nothing you are watching has changed.',
+  })
+})
+
+app.get('/watches/:watchId', (request, response) => {
+  const watch = getWatch(request.params.watchId)
+  if (!watch) {
+    response.status(404).json({ ok: false, error: 'No such watch.' })
+    return
+  }
+  response.json({ ok: true, watch })
+})
+
+app.patch('/watches/:watchId', (request, response) => {
+  try {
+    const watch = updateWatch(request.params.watchId, request.body || {})
+    if (!watch) {
+      response.status(404).json({ ok: false, error: 'No such watch.' })
+      return
+    }
+    response.json({ ok: true, watch })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.delete('/watches/:watchId', (request, response) => {
+  response.json({ ok: deleteWatch(request.params.watchId) })
+})
+
+app.post('/watches/:watchId/check', async (request, response) => {
+  try {
+    response.json({ ok: true, ...(await checkWatch(request.params.watchId)) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.post('/watches/:watchId/ack', (request, response) => {
+  response.json({
+    ok: true,
+    acknowledged: acknowledgeReports(request.params.watchId),
+  })
+})
+
+/*
+ * Form fills: populate the page, then stop one click short and hand back the
+ * envelope. Nothing here submits. See formFill.js.
+ */
+app.post('/forms/fill', async (request, response) => {
+  try {
+    response.json({ ok: true, fill: await fillForm(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/forms/fills', (_request, response) => {
+  response.json({
+    ok: true,
+    fills: listFills(),
+    storePath: formFillLocation(),
+  })
+})
+
+app.get('/forms/fills/:fillId', (request, response) => {
+  const fill = getFill(request.params.fillId)
+  if (!fill) {
+    response.status(404).json({ ok: false, error: 'No such form fill.' })
+    return
+  }
+  response.json({ ok: true, fill })
+})
+
+/*
+ * Scoped memory: facts with provenance, and the projection that decides which
+ * of them are worth a prompt. See memoryService.js / contextProjection.js.
+ */
+app.get('/memory/facts', (request, response) => {
+  response.json({
+    ok: true,
+    facts: listFacts({
+      kind: request.query.kind || null,
+      surface: request.query.surface || null,
+      includeExpired: request.query.includeExpired === 'true',
+    }),
+    storePath: memoryLocation(),
+  })
+})
+
+app.post('/memory/facts', (request, response) => {
+  try {
+    response.json({ ok: true, fact: rememberFact(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.delete('/memory/facts/:idOrKey', (request, response) => {
+  const forgotten = forgetFact(request.params.idOrKey)
+  if (!forgotten) {
+    response.status(404).json({ ok: false, error: 'No such fact.' })
+    return
+  }
+  response.json({ ok: true, forgotten })
+})
+
+/* Browser jobs report normalized claims here, never page text. */
+app.post('/memory/browser-findings', (request, response) => {
+  try {
+    response.json({
+      ok: true,
+      facts: rememberBrowserFindings(request.body || {}),
+    })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.post('/memory/prune', (request, response) => {
+  response.json({ ok: true, ...pruneFacts(request.body || {}) })
+})
+
+app.post('/memory/sync-graph', (request, response) => {
+  response.json({ ok: true, imported: syncFactsFromContextGraph().length })
+})
+
+/*
+ * The prompt-facing front door: a surface asks what it needs to know for one
+ * task and gets back text, not the store. Reading marks the facts used, which
+ * is what lets pruning tell a load-bearing fact from one nobody has read.
+ */
+app.get('/memory/projection', (request, response) => {
+  const projected = projectContext({
+    surface: String(request.query.surface || 'voice'),
+    task: String(request.query.task || ''),
+    budgetTokens: Number(request.query.budgetTokens) || undefined,
+    revealSensitive: request.query.revealSensitive === 'true',
+    includeWeb: request.query.includeWeb === 'true',
+  })
+  touchFacts(projected.factIds)
+  response.json({ ok: true, ...projected })
+})
+
 if (fs.existsSync(distDir)) {
   app.use('/assets', express.static(path.join(distDir, 'assets')))
   app.use(express.static(distDir, { index: false }))
 
-  app.get(['/dashboard', '/dashboard/'], (_request, response) => {
+  app.get(['/dashboard', '/dashboard/'], (request, response) => {
+    issueDashboardSession(request, response)
     response.sendFile(path.join(distDir, 'dashboard.html'))
   })
 }
@@ -941,6 +1517,11 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Pendant Mac Local Agent listening on http://localhost:${PORT}`)
   // Any screenshots left behind by a crashed run die with the old process.
   purgeAllCaptures()
+  // Routines only fire while this process is up; start the loop with it.
+  startRoutineScheduler()
+  // Same deal for page watches: nothing is polled while the Mac is asleep, and
+  // the first poll after a restart re-establishes the baseline from the page.
+  startPageWatchScheduler()
   // Keep retrying: an agent booted during a relay outage must still end up
   // with a live work loop once the relay recovers.
   const launchBridge = () => {
