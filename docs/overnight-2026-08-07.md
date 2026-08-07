@@ -37,11 +37,16 @@ eighteen times whose every piece ships. Twenty-one requests for tools the agents
 had been given. Two agents requesting access their own probe already carries.
 Every one answerable from information already in front of them.
 
-**3. Nobody checked whether the pendant exists.** It does not — the relay's
-device table holds only the Mac bridge and a mobile device last seen 2026-07-31.
-No nRF9160 has ever registered. A large share of the proposals describe what a
-worn device should do, and the `/pipeline` telemetry they cite is recorded
-history that reads exactly like live data unless you look.
+**3. Nobody checked whether the pendant had registered.** It had not — the
+relay's device table holds only the Mac bridge and a mobile device last seen
+2026-07-31, and no agent probed `/v1/devices/status` across 128 rounds.
+
+*Corrected after the owner pushed back:* both chips ARE physically connected on
+USB serial (nRF9160 DK on `/dev/cu.usbmodem00096003658*`, ESP32 on
+`/dev/cu.usbserial-0287A9CA`). So the finding is a relay-registration gap, not
+absent hardware — and I stated it as the latter, which would have written off the
+entire worn-device line of work. The pendant capabilities are testable over
+serial today.
 
 ## What needs you
 
