@@ -453,6 +453,43 @@ maturities; a condition inferred from which shell had which variable set. Each
 produced a confident, wrong conclusion. Rounds now record their own condition,
 and `harness-stats.mjs` refuses to pool arms that are not comparable.
 
+### The channel nobody read
+
+The harness has always had a way for an agent to say something is wrong:
+`request_context`, `request_tool`, `request_permission`, each carrying a `why`
+and a `how_it_changes_my_behavior`. The orchestrator grants or denies.
+
+**141 requests accumulated. Not one was ever answered.** Every measurement in
+this document was taken from the agents' *output*, while the channel they used
+to report *defects* went unread. What was in it:
+
+- **21 requests for `propose_capability` and `propose_change`.** Not a
+  misunderstanding: those agents were stranded in the recon phase, where the
+  propose tools are genuinely absent from the list, and the phase only ever
+  advanced when a human typed the command. They diagnosed it correctly and said
+  so twenty-one times. Their zero then entered the three-arm comparison as a
+  result about partitioning a mind by faculty.
+- **relay-realtime, three times, rounds 32, 67 and 72:** `discover('granted')`
+  lists tools that `describe(name)` reports as non-existent. It named both tools
+  each time and stated what it would do differently either way. It was right —
+  `describeThing` checked granted context and never granted tools.
+- **Six different agents asking for macOS Accessibility and Screen Recording.**
+
+That last one is worth sitting with. Measured across 835 proposals, cross-agent
+convergence is **zero** — not one cluster spans two agents at any threshold
+meaning "the same idea". But six agents independently converged on the same
+*blocker*.
+
+**The convergence was in the requests, not the proposals, and the measurement
+was pointed at the wrong output.** A collective that can speak and is not heard
+produces exactly the signature this one showed: repetition that reads as poverty
+of imagination and is actually an unanswered question asked louder.
+
+The requests are now being answered — the TCC ones denied with the measured
+reason they cannot be granted from inside the harness, the propose-tool ones
+closed as a fixed defect, relay-realtime's answered with what it could not have
+discovered. That the backlog existed at all is the finding.
+
 ## Empirical baseline for this class of system
 
 MAST (arXiv 2503.13657), 1600+ annotated traces across 7 frameworks, κ=0.88:
