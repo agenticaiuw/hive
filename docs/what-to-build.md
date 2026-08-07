@@ -162,4 +162,39 @@ is what makes a collective one mind rather than an org chart.
 
 Both halves are the same bet: **the collective's knowledge must live outside
 any single member and must not reset.** Ants do not remember the trail; the
-trail remembers.
+trail remembers — though only a decision, never a fact, which is why the store
+had to be built rather than borrowed. See `collective-architecture.md`.
+
+## What the agents converged on, which nobody told them
+
+Everything above is top-down: my reading of CMS data, wiretap statute and two
+dead ends. The agents were given none of it. They were given an environment and
+asked what the owner should be able to have.
+
+**417 capability proposals across 9 agents.** The corpus is genuinely diverse —
+only 11 pairs anywhere near duplication, and the densest single idea has 8
+echoes — so what follows is convergence, not one agent repeating itself.
+
+Two shapes account for most of it.
+
+**1. Work that continues after the owner leaves.** The single most-restated ask
+is *"keep working after I stop talking, then tell me what happened when it's
+done"*. Then: check my authenticated portal every weekday morning and tell me
+only what needs attention; watch this logged-in page and tell me only when the
+condition changes; clean up my Downloads every Friday; triage my inbox. The
+owner starts something and walks away.
+
+**2. Show me exactly what will happen before it happens.** Nearly every
+proposal that touches an irreversible action carries this clause unprompted —
+*fill in the form and stop before the final submit, showing exactly what will be
+sent*; *draft the replies and show me a reviewable list without sending
+anything*; *show me a review list before anything is deleted*.
+
+That is the same product this document argued for from the other direction. An
+appeal runs for weeks against a counterparty who loses nothing by being slow, so
+it must survive the owner's attention leaving — shape 1. And it is conducted
+through authenticated sessions where a wrong click is not retractable, so
+nothing irreversible can happen without a look — shape 2.
+
+The bottom-up and top-down arguments landing on the same two properties is the
+strongest evidence either of them has. Neither knew about the other.
