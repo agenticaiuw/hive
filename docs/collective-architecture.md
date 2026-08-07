@@ -580,13 +580,38 @@ the timezone contradiction, turned from a blocked request into a capability by
 two agents who decided the right behaviour is to surface the conflict rather
 than wait for an answer.
 
-**A hypothesis, marked as one:** the dedup gate may have caused this rather than
-volume alone. Lowering it to 0.30 blocks self-repetition, which forces an agent
-off its worn groove and onto ground it has not covered — and new ground is where
-independent agents can collide. Convergence at 0.45 was invisible partly because
-agents were free to keep restating, and a corpus of restatements has nothing to
-converge *on*. Untested; distinguishing it from "more proposals means more
-chances to overlap" needs a run at each threshold with matched corpus sizes.
+**A hypothesis, then a test of it.** The dedup gate may have caused this rather
+than volume alone: lowering it to 0.30 blocks self-repetition, which forces an
+agent off its worn groove and onto ground it has not covered — and new ground is
+where independent agents can collide. Convergence at 0.45 was invisible partly
+because agents were free to keep restating, and a corpus of restatements has
+nothing to converge *on*.
+
+Testable retrospectively, since every proposal can be dated from its round file
+and the gate moved at a known time. Matched sample sizes, taken immediately
+either side of the change:
+
+| 722 proposals | cross-agent clusters |
+|---|---|
+| immediately **before** the gate moved to 0.30 | **0** |
+| immediately **after** | **3** |
+
+At equal corpus size, convergence appears only after the gate. That is
+consistent with the hypothesis and against "more proposals, more chances to
+overlap", which would have produced clusters in both samples.
+
+Three caveats, none of which the result survives cleanly. **n is 0 against 3** —
+suggestive, not significant. **Other things changed in the same window**:
+`built_from` became required, the holdings section was added, and the
+orchestrator began answering requests for the first time. `built_from` at least
+does not enter the clustered text, which is `user_asks` plus `why_useful`, so it
+cannot inflate similarity directly — but it can change what agents choose to
+propose. And **the before-sample spans a much longer period** than the after,
+because the proposal rate rose.
+
+So: the gate is the best-supported explanation available, and the experiment
+that would settle it is two runs from a common checkpoint differing only in the
+threshold.
 
 **The methodological point stands regardless:** every number in this document is
 a snapshot, and the ones above were taken at 835 proposals. They were right then.
