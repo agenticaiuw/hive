@@ -29,6 +29,11 @@ export const DEVICE_SCOPES = Object.freeze({
     'state:write',
     'pendant:event:write',
     'speech:synthesize',
+    /* Pull a migrated reasoning thread by handle, and store one for the next
+     * body. Read is the one the bridge actually uses today; write is here so a
+     * Mac→Mac or Mac→relay hop does not need a re-pair to exist. */
+    'context:read',
+    'context:write',
   ]),
   nrf_pendant: Object.freeze([
     'device:heartbeat:self',

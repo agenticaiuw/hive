@@ -222,3 +222,18 @@ CREATE TABLE IF NOT EXISTS relay_announcements (
 CREATE INDEX IF NOT EXISTS relay_announcements_pending
   ON relay_announcements(device_id, state, created_at ASC);
 
+-- Reasoning threads handed from one body to another (contextHandoff.js).
+-- See context-handoff-migration.sql for why this is neither a job nor state.
+CREATE TABLE IF NOT EXISTS relay_contexts (
+  handle_id TEXT PRIMARY KEY,
+  secret_hash TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS relay_contexts_expiry
+  ON relay_contexts(expires_at);
+

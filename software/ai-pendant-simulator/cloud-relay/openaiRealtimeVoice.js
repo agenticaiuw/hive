@@ -21,6 +21,7 @@ import {
 } from './fleetContext.js'
 import { READ_WEB_PAGE_TOOL, runReadWebPage } from './serverBrowser.js'
 import { SPOKEN_MAX_CHARS } from './jobRecall.js'
+import { contextItemsFromRealtimeState } from '../shared/contextHandoff.js'
 
 export const REALTIME_PCM_RATE = 24000
 /* G.711 μ-law (audio/pcmu) is fixed at 8 kHz, 8 bits — 64 kbps. The pendant
@@ -932,6 +933,16 @@ export function buildPlanResult(state, startedAt, language) {
     requireLocalPlanner,
     needsLocalFallback,
     midPressStreamed: Boolean(state.midPressStreamed),
+    /*
+     * The reasoning thread behind this plan, for cross-body migration. Not
+     * part of what the Mac executes — it is what the Mac gets to inherit
+     * instead of starting from a bare action list. The relay stores it and
+     * hands over a handle; nothing here travels on the job itself.
+     */
+    contextItems: contextItemsFromRealtimeState(state, {
+      response: spoken,
+      actions,
+    }),
   }
 }
 
@@ -1016,6 +1027,10 @@ export async function createStreamingRealtimeSession({
     status: 'instant',
     response: undefined,
     toolsUsed: [],
+    /* Ordered call/result pairs — the derivation the Mac would otherwise
+     * repeat. toolsUsed keeps only the names and stays as it was because the
+     * dashboards read it. */
+    toolTrace: [],
     delegate: false,
     closed: false,
     finished: false,
@@ -1083,6 +1098,22 @@ export async function createStreamingRealtimeSession({
   }
 
   function send(event) {
+    /*
+     * Every tool result the session produces goes out through here, so this is
+     * the one place that can record them all — including tools added later.
+     * The trace is what the Mac inherits (contextHandoff.js): a search that
+     * came back empty or a page that hit a sign-in wall is a thing already
+     * ruled out, and re-running it on the other side is the waste this whole
+     * handoff exists to remove.
+     */
+    if (event?.item?.type === 'function_call_output') {
+      state.toolTrace.push({
+        kind: 'tool_result',
+        callId: event.item.call_id,
+        text: String(event.item.output ?? ''),
+        at: new Date().toISOString(),
+      })
+    }
     if (state.closed || socket.readyState !== socket.OPEN) return
     socket.send(JSON.stringify(event))
   }
@@ -1141,6 +1172,15 @@ export async function createStreamingRealtimeSession({
       args = {}
     }
     state.toolsUsed.push(name)
+    // The call and its result are recorded separately and linked by call_id;
+    // the result arrives through send() and may be several awaits away.
+    state.toolTrace.push({
+      kind: 'tool_call',
+      name,
+      callId,
+      text: String(argsJson || '{}'),
+      at: new Date().toISOString(),
+    })
 
     if (name === 'web_search') {
       const output = await runWebSearch(args.query)

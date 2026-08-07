@@ -9,6 +9,7 @@ import {
   BRIDGE_POLL_TIMEOUT_MS,
   JOB_TTL_MS,
   LLM_API_KEY,
+  OPENAI_REALTIME_MODEL,
   PAIRING_CODE,
   PENDANT_ACCOUNT_ID,
   PORT,
@@ -26,6 +27,13 @@ import {
   voiceRunForJob,
 } from './jobs.js'
 import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
+import {
+  contextItemsFromRealtimeState,
+  packContext,
+  parseContextHandle,
+  publicContext,
+  verifyContextHandle,
+} from '../shared/contextHandoff.js'
 import { getStore } from './store/index.js'
 import { planFromAudio } from './audioPlan.js'
 import {
@@ -185,6 +193,7 @@ export async function enqueueMacPlanJob({
     deviceId,
     sessionId,
     inputTelemetry,
+    contextHandle: await storePlanContext({ store, plan, sessionId }),
   })
   const hint = plannerHintFromPlan(plan)
   if (hint) job.plannerHint = hint
@@ -198,6 +207,38 @@ export async function enqueueMacPlanJob({
   )
   await store.createJob(job)
   return job
+}
+
+/**
+ * Store the thread behind a voice plan and return the handle to put on the job.
+ *
+ * This is the boundary the context used to die at: the relay distilled a
+ * conversation into an action list, posted the list, and threw the reasoning
+ * away — every crossing, every time. Storing it is best-effort by design. A
+ * failure here must cost the owner nothing but the optimisation, so it logs
+ * and returns null and the Mac starts cold exactly as it always did.
+ */
+async function storePlanContext({ store, plan, sessionId }) {
+  const items = Array.isArray(plan?.contextItems) ? plan.contextItems : []
+  if (!items.length) return null
+
+  try {
+    const { handle, record } = packContext({
+      items,
+      origin: 'cloud-relay/realtime',
+      model: plan.model || OPENAI_REALTIME_MODEL,
+      sessionId,
+    })
+    await store.saveContext(record)
+    console.log(
+      `[relay] Stored handoff context ${record.handleId} ` +
+        `items=${record.items.length} bytes=${record.bytes} shed=${record.shed.length}`,
+    )
+    return handle
+  } catch (error) {
+    console.warn(`[relay] Context handoff store failed: ${error.message}`)
+    return null
+  }
 }
 
 /**
@@ -577,6 +618,77 @@ app.put('/v1/state/:stateKey', async (request, response) => {
     updatedBy: updatedBy || 'unknown',
   })
   response.status(201).json({ ok: true, state })
+})
+
+/*
+ * Store a finished reasoning thread; get back a handle small enough to ride on
+ * a job. See shared/contextHandoff.js for the format and the budget.
+ */
+app.post('/v1/context', async (request, response) => {
+  const items = Array.isArray(request.body?.items) ? request.body.items : null
+  const origin = String(request.body?.origin ?? '').trim()
+
+  if (!items || !origin) {
+    response.status(400).json({
+      ok: false,
+      error: 'items (array) and origin (string) are required.',
+    })
+    return
+  }
+
+  const store = await getStore()
+  const { handle, record } = packContext({
+    items,
+    origin,
+    model: request.body?.model ?? null,
+    sessionId: request.body?.sessionId ?? null,
+    jobId: request.body?.jobId ?? null,
+  })
+  await store.saveContext(record)
+
+  response.set('Cache-Control', 'private, no-store')
+  response.status(201).json({
+    ok: true,
+    handle,
+    expiresAt: record.expiresAt,
+    bytes: record.bytes,
+    itemCount: record.items.length,
+    shed: record.shed,
+    redaction: record.redaction,
+  })
+})
+
+/*
+ * Resume by handle. POST rather than GET-with-path-parameter: the handle is a
+ * capability for the owner's own words, and a URL path is the one place that
+ * reliably ends up in an access log.
+ *
+ * A miss is 200 with resumed:false, never an error status. The receiving body
+ * must fall back to a cold start, and a 404 here invites a caller to treat a
+ * missing optimisation as a failed job.
+ */
+app.post('/v1/context/resume', async (request, response) => {
+  const handle = String(request.body?.handle ?? '').trim()
+  const parsed = parseContextHandle(handle)
+
+  response.set('Cache-Control', 'private, no-store')
+
+  if (!parsed) {
+    response.json({ ok: true, resumed: false, reason: 'malformed_handle' })
+    return
+  }
+
+  const store = await getStore()
+  const record = await store.getContext(parsed.handleId)
+
+  if (!record || !verifyContextHandle(handle, record)) {
+    // One reason for "no such handle", "wrong secret" and "expired": a caller
+    // that can tell them apart can probe the store for live handle ids.
+    response.json({ ok: true, resumed: false, reason: 'missing_or_expired' })
+    return
+  }
+
+  response.json({ ok: true, resumed: true, context: publicContext(record) })
 })
 
 app.post('/v1/pendant/announce', async (request, response) => {
@@ -2569,6 +2681,9 @@ app.get('/v1/bridge/work', async (request, response) => {
           actions: job.actions,
           sessionId: job.sessionId ?? null,
           inputTelemetry: job.inputTelemetry ?? null,
+          // Handle, not context: the bridge pulls the thread only if it is
+          // going to plan locally, so a hot-path job never pays for it.
+          contextHandle: job.contextHandle ?? null,
           // Multimodal audio→plan on the relay; bridge may skip a second LLM.
           plannerHint: job.plannerHint ?? null,
           method: job.method ?? null,
@@ -3052,6 +3167,10 @@ function requiredScopesForRequest(request) {
   }
   if (method === 'GET' && path.startsWith('/v1/state/')) {
     return ['state:read']
+  }
+  if (method === 'POST' && path === '/v1/context') return ['context:write']
+  if (method === 'POST' && path === '/v1/context/resume') {
+    return ['context:read']
   }
   if (method === 'PUT' && path.startsWith('/v1/state/')) {
     return ['state:write']

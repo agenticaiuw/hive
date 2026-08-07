@@ -298,6 +298,13 @@ export async function handleWork(work) {
             sessionId: work.sessionId,
             source: 'pendant',
             plannerHint: hint ?? null,
+            /*
+             * Only this branch gets the handle. The audio-native path above
+             * never calls a model, so a context it would not read is pure
+             * latency; this branch is the one that was starting from a bare
+             * action list and rediscovering what the relay already knew.
+             */
+            contextHandle: work.contextHandle ?? null,
           },
         })
       }

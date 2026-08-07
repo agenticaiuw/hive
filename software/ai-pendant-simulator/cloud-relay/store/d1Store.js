@@ -1004,5 +1004,66 @@ export function createD1Store(db) {
         .run()
       return next
     },
+
+    /* ---- migrated contexts ----------------------------------------------
+     * Same contract as memoryStore. Kept out of relay_state on purpose: that
+     * table is a bounded last-known telemetry cache with no expiry, and a
+     * context is the owner's actual words with a deadline on them.
+     * -------------------------------------------------------------------- */
+
+    async saveContext(record) {
+      await pruneExpiredContexts(db)
+      await db
+        .prepare(
+          `INSERT INTO relay_contexts
+             (handle_id, secret_hash, origin, created_at, expires_at, bytes, data)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(handle_id) DO UPDATE SET
+             secret_hash = excluded.secret_hash,
+             origin = excluded.origin,
+             expires_at = excluded.expires_at,
+             bytes = excluded.bytes,
+             data = excluded.data`,
+        )
+        .bind(
+          record.handleId,
+          record.secretHash,
+          record.origin,
+          record.createdAt,
+          record.expiresAt,
+          Number(record.bytes || 0),
+          JSON.stringify(record),
+        )
+        .run()
+      return record
+    },
+
+    async getContext(handleId) {
+      // Filtered here as well as swept, so an unswept expired row can never be
+      // resumed just because the sweep has not come round yet.
+      const row = await db
+        .prepare(
+          `SELECT data FROM relay_contexts
+            WHERE handle_id = ?1 AND expires_at > ?2`,
+        )
+        .bind(handleId, new Date().toISOString())
+        .first()
+      return parseRecord(row)
+    },
+
+    async deleteContext(handleId) {
+      const result = await db
+        .prepare('DELETE FROM relay_contexts WHERE handle_id = ?1')
+        .bind(handleId)
+        .run()
+      return Boolean(result?.meta?.changes)
+    },
   }
+}
+
+async function pruneExpiredContexts(db) {
+  await db
+    .prepare('DELETE FROM relay_contexts WHERE expires_at <= ?1')
+    .bind(new Date().toISOString())
+    .run()
 }

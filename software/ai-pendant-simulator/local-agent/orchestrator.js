@@ -1,4 +1,5 @@
 import { buildConversationContext } from './conversationContext.js'
+import { describeResume, resumeContext } from './contextResume.js'
 import { planCommand } from './llmPlanner.js'
 import {
   TIER_BACKGROUND,
@@ -34,6 +35,13 @@ export async function orchestratePlan({
   sessionId,
   source = 'local',
   signal = null,
+  /*
+   * Handle to a reasoning thread another body already built (the relay's voice
+   * session, usually). Optional in the strongest sense: it is spent on a best
+   * effort and a miss is a cold start, which is what every plan did before it
+   * existed.
+   */
+  contextHandle = null,
 }) {
   const { throwIfAborted } = await import('./jobControl.js')
   let activeSessionId = sessionId
@@ -180,6 +188,32 @@ export async function orchestratePlan({
 
     const plannedTier = deterministic ? TIER_PLANNER : route.tier
 
+    /*
+     * Spent here rather than at the top of the function on purpose: the
+     * deterministic fast path above never reaches a model, so a context it
+     * would not read is latency the owner pays for nothing.
+     */
+    const resumed = contextHandle
+      ? await resumeContext(contextHandle).catch(() => null)
+      : null
+
+    if (contextHandle) {
+      addThinkingStep(trace.traceId, {
+        id: 'inherit',
+        label: resumed?.resumed
+          ? 'Continued a thread from another body'
+          : 'Started cold',
+        detail: describeResume(resumed),
+        status: 'done',
+        meta: {
+          resumed: Boolean(resumed?.resumed),
+          origin: resumed?.origin ?? null,
+          originModel: resumed?.originModel ?? null,
+          notes: resumed?.notes ?? [],
+        },
+      })
+    }
+
     appendThinkingChunk(trace.traceId, {
       stepId: 'plan',
       label: 'Streaming planner draft',
@@ -270,6 +304,7 @@ export async function orchestratePlan({
       context,
       tier: plannedTier,
       onProgress: onPlannerProgress,
+      resumed,
     })
 
     const usage = plan.usage ? [plan.usage] : []
@@ -296,6 +331,7 @@ export async function orchestratePlan({
         context,
         tier: TIER_PLANNER,
         onProgress: onPlannerProgress,
+        resumed,
       })
       if (plan.usage) usage.push(plan.usage)
     }
