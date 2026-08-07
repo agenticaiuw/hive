@@ -1917,6 +1917,8 @@ async function runRound() {
     if (finished) break
   }
 
+  await proposalPhase(state, tools, instructions, input, transcript, asked)
+
   for (const m of inboxFor(AGENT_ID, state)) state.readMessages.push(m.id)
   state.rounds.push({ round: state.round, transcript })
   saveState(state)
@@ -1939,14 +1941,101 @@ async function runRound() {
     [asked.length, 'new request'],
   ]
 
+  /*
+   * An agent in recon has no propose_* tools at all, so it reports "0
+   * capabilities, 0 changes" no matter how well it did. Two agents sat there
+   * for 16 and 20 rounds respectively and their zeros were read as evidence
+   * about architecture. The phase belongs next to the number it explains.
+   */
   process.stdout.write(
-    `\nRound ${state.round} done. ` +
+    `\nRound ${state.round} done [${state.phase}${
+      state.phase === 'recon' ? ' — cannot propose in this phase' : ''
+    }]. ` +
       counts
         .map(([n, one, many]) => `${n} ${n === 1 ? one : (many ?? `${one}s`)}`)
         .join(', ') +
       `.\n` +
       `Review:  node scripts/derive-harness.mjs review\n`,
   )
+}
+
+/* Discovery is unbounded and proposing is not, so when both draw on one step
+ * budget discovery wins every time. Measured: the unified agent spent 60 steps
+ * on lookups and probes and finished 11 consecutive rounds having proposed
+ * nothing, while agents on a 6-step budget proposed immediately because they
+ * had no room to do anything else. More budget made it strictly worse. */
+const PROPOSAL_STEPS = 8
+
+/**
+ * Run the proposal phase on the context the discovery phase built.
+ *
+ * The whole `input` array carries over — every tool result, every observation,
+ * the model's own reasoning items. Nothing is summarised and nothing is
+ * re-derived, which is the point: a phase that had to rediscover the system
+ * would just be another discovery phase.
+ *
+ * The discovery tools are withheld here. Not as a punishment — as the thing
+ * that makes the phase exist. Left available they get used, because looking is
+ * always locally cheaper than committing to a claim.
+ */
+async function proposalPhase(state, tools, instructions, input, transcript, asked) {
+  const discoveryNames = new Set(DISCOVERY_TOOLS.map((tool) => tool.name))
+  const proposalTools = tools.filter((tool) => !discoveryNames.has(tool.name))
+
+  input.push({
+    role: 'user',
+    content:
+      'Stop looking. You cannot discover anything further this round; those tools are gone. ' +
+      'What you have already found is what you have to work with. ' +
+      'Name what the owner should be able to have that they cannot have today, and what would have to change for them to have it. ' +
+      'Do not restate anything already in the backlog, and do not trim an idea to fit what is currently wired up.\n\n' +
+      /* Prose is invisible to everything downstream: the ledger, the review
+       * command and the round counters all read the tool calls. An earlier
+       * version of this phase produced a detailed, genuinely good proposal as
+       * a paragraph, and the round recorded it as nothing. */
+      'Record it by CALLING propose_capability or propose_change. Writing it as text does not record it — anything not passed to a tool is discarded when this round ends.',
+  })
+
+  process.stdout.write(`  [phase] proposing on the context already gathered\n`)
+
+  for (let step = 0; step < PROPOSAL_STEPS; step += 1) {
+    const payload = await callModel(input, proposalTools, instructions)
+    const output = payload.output || []
+    input.push(...output)
+
+    const text = output
+      .filter((item) => item.type === 'message')
+      .flatMap((item) =>
+        (item.content || [])
+          .filter((c) => c.type === 'output_text')
+          .map((c) => c.text),
+      )
+      .join('\n')
+      .trim()
+    if (text) {
+      transcript.push({ type: 'say', text })
+      process.stdout.write(`\n[agent] ${text}\n`)
+    }
+
+    const calls = output.filter((item) => item.type === 'function_call')
+    if (!calls.length) break
+
+    let finished = false
+    for (const call of calls) {
+      const { result, finish } = await executeTool(call, {
+        state,
+        transcript,
+        asked,
+      })
+      if (finish) finished = true
+      input.push({
+        type: 'function_call_output',
+        call_id: call.call_id,
+        output: JSON.stringify(result).slice(0, 8000),
+      })
+    }
+    if (finished) break
+  }
 }
 
 function writeRoundReport(state, transcript, asked) {
