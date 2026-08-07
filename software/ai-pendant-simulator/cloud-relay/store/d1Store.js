@@ -2,6 +2,10 @@ import crypto from 'node:crypto'
 
 import { JOB_TTL_MS } from '../config.js'
 import {
+  MAX_LOG_BYTES,
+  MEMORY_EVENT_TYPES,
+} from '../../shared/fleetMemory.js'
+import {
   limitSessionWindow,
   normalizeProductSync,
   PRODUCT_SYNC_SCHEMA_VERSION,
@@ -55,6 +59,28 @@ function parseCredential(row) {
     updatedAt: row.updated_at,
   }
 }
+
+/*
+ * The order every fleet-memory read and eviction uses, as SQL.
+ *
+ * Built from MEMORY_EVENT_TYPES rather than typed out, because this ladder has
+ * to be the same ladder compareMemoryEventsByValue() applies in JS. Two stores
+ * that evict in different orders only diverge once a log is full, which is the
+ * worst possible time to find out. fleetMemory.test.js runs both against the
+ * same rows and asserts they keep the same set.
+ *
+ * Not newest-first: a preference is written once and is then permanently the
+ * oldest row and permanently the most valuable one.
+ */
+const MEMORY_VALUE_ORDER = `CASE type ${MEMORY_EVENT_TYPES.map(
+  (type, index) => `WHEN '${type}' THEN ${index}`,
+).join(' ')} ELSE ${MEMORY_EVENT_TYPES.length} END ASC, at DESC, event_id DESC`
+
+/* A running SUM() over that order: the byte budget, expressed as a query. */
+const MEMORY_RUNNING_BYTES = `SUM(bytes) OVER (
+         ORDER BY ${MEMORY_VALUE_ORDER}
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       )`
 
 async function pruneExpiredJobs(db) {
   const cutoff = new Date(Date.now() - JOB_TTL_MS).toISOString()
@@ -1058,6 +1084,76 @@ export function createD1Store(db) {
         .run()
       return Boolean(result?.meta?.changes)
     },
+
+    /* ---- cross-surface memory -------------------------------------------
+     * Same contract as memoryStore. Kept out of relay_state because that table
+     * is one row per key overwritten in place — which is exactly what the
+     * bodies cannot do, since they are never awake at the same time. An append
+     * needs no read of the current value; that is the whole reason this is a
+     * log. See shared/fleetMemory.js.
+     * -------------------------------------------------------------------- */
+
+    async appendMemoryEvents(events) {
+      const list = Array.isArray(events) ? events : []
+      if (!list.length) return { removed: 0, kept: 0, reasons: {} }
+
+      const statements = list.map((event) =>
+        db
+          .prepare(
+            `INSERT INTO relay_memory_events
+               (event_id, type, fact_key, node, surfaces, at, expires_at, bytes, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(event_id) DO NOTHING`,
+          )
+          .bind(
+            event.eventId,
+            event.type,
+            event.key,
+            event.node,
+            JSON.stringify(event.surfaces || []),
+            event.at,
+            event.expiresAt ?? null,
+            Number(event.bytes || 0),
+            JSON.stringify(event),
+          ),
+      )
+
+      await runPreparedBatch(db, statements)
+      return pruneMemoryEventLog(db, {})
+    },
+
+    async listMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
+      /*
+       * Expiry is filtered here as well as swept, so an unswept row can never
+       * reach a prompt just because no append has happened lately.
+       *
+       * Supersession is NOT filtered here, deliberately: the reader folds the
+       * log anyway (a fold is how "current value" is defined), and a
+       * superseded row that survives between sweeps costs bytes, not
+       * correctness. Surfaces are not filtered here either — the log is capped
+       * at MAX_LOG_BYTES, so scoping it in SQL would buy a second, drifting
+       * copy of the surface rule for no measurable read.
+       */
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM (
+             SELECT event_id, type, at, data,
+                    ${MEMORY_RUNNING_BYTES} AS running
+               FROM relay_memory_events
+              WHERE expires_at IS NULL OR expires_at > ?1
+           )
+            WHERE running <= ?2
+            ORDER BY ${MEMORY_VALUE_ORDER}`,
+        )
+        .bind(new Date(now).toISOString(), Math.max(0, Number(maxBytes) || 0))
+        .all()
+
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    async pruneMemoryEvents(options = {}) {
+      return pruneMemoryEventLog(db, options)
+    },
   }
 }
 
@@ -1066,4 +1162,68 @@ async function pruneExpiredContexts(db) {
     .prepare('DELETE FROM relay_contexts WHERE expires_at <= ?1')
     .bind(new Date().toISOString())
     .run()
+}
+
+/**
+ * Compact the memory log: superseded writes, then expirations, then the tail
+ * that does not fit the byte ceiling.
+ *
+ * The order of the first two is load-bearing and is the reverse of what reads
+ * naturally. A retraction inherits its type's TTL, so it can expire while the
+ * value it cancelled is still live. Delete expired rows first and that
+ * retraction disappears before it has suppressed anything, and the retracted
+ * fact comes back — silently, and confidently wrong. Supersession first means
+ * the tombstone has already deleted its target by the time it expires itself.
+ * foldMemoryEvents() gets the same guarantee by folding before it filters.
+ */
+async function pruneMemoryEventLog(
+  db,
+  { now = Date.now(), maxBytes = MAX_LOG_BYTES } = {},
+) {
+  const superseded = await db
+    .prepare(
+      `DELETE FROM relay_memory_events
+        WHERE EXISTS (
+          SELECT 1 FROM relay_memory_events AS newer
+           WHERE newer.type = relay_memory_events.type
+             AND newer.fact_key = relay_memory_events.fact_key
+             AND (newer.at > relay_memory_events.at
+                  OR (newer.at = relay_memory_events.at
+                      AND newer.event_id > relay_memory_events.event_id)))`,
+    )
+    .run()
+
+  const expired = await db
+    .prepare(
+      `DELETE FROM relay_memory_events
+        WHERE expires_at IS NOT NULL AND expires_at <= ?1`,
+    )
+    .bind(new Date(now).toISOString())
+    .run()
+
+  // A running sum can only cut a prefix of the value order, which is why the
+  // JS pruner stops at the first row that does not fit instead of packing.
+  const overflow = await db
+    .prepare(
+      `DELETE FROM relay_memory_events WHERE event_id IN (
+         SELECT event_id FROM (
+           SELECT event_id, ${MEMORY_RUNNING_BYTES} AS running
+             FROM relay_memory_events
+         )
+          WHERE running > ?1
+       )`,
+    )
+    .bind(Math.max(0, Number(maxBytes) || 0))
+    .run()
+
+  const reasons = {
+    superseded: Number(superseded?.meta?.changes || 0),
+    expired: Number(expired?.meta?.changes || 0),
+    overflow: Number(overflow?.meta?.changes || 0),
+  }
+
+  return {
+    removed: reasons.superseded + reasons.expired + reasons.overflow,
+    reasons,
+  }
 }

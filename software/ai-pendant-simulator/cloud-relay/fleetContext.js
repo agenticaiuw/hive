@@ -9,7 +9,19 @@
  *
  * OpenAI Realtime prompt caching: put unchanging text first; device state after.
  * Cached text input on gpt-realtime-2.1 is billed far below uncached rates.
+ *
+ * The memory section is no longer written here. It is a projection of the
+ * cross-surface event log (shared/fleetMemory.js), scoped to the surface that
+ * is asking and to what was actually asked. This file's job is to place that
+ * block correctly in the prompt and to bound it; deciding what belongs in it is
+ * not a relay concern, and when it was, only one body could contribute to it.
  */
+import {
+  appendFleetMemory,
+  DEFAULT_PROJECTION_BYTES,
+  projectFleetMemory,
+  readFleetMemoryProjection,
+} from '../shared/fleetMemory.js'
 
 export const FLEET_STATE_KEY = 'fleet'
 export const MAX_APPLICATIONS_IN_PROMPT = 220
@@ -266,10 +278,11 @@ export function normalizeFleetSnapshot(raw) {
     },
     memory: {
       /*
-       * Preferred: a ready-made prompt block from the Mac's context projection
-       * (typed facts, task-scoped, already budgeted). The relay does not know
-       * which facts exist or what they cost, so it does not try to summarize —
-       * it passes through what the Mac decided was worth saying, bounded.
+       * A ready-made prompt block. Two things produce one: the cross-surface
+       * projection assembled in loadFleetFromStore(), and — until the bridge
+       * appends events instead — the Mac's own single-node projection arriving
+       * through fleet state. The relay does not know which facts exist or what
+       * they cost, so it does not summarize; it bounds and places.
        */
       text: clipText(memory.text, MAX_MEMORY_TEXT_CHARS),
       /*
@@ -501,10 +514,11 @@ export function formatFleetSnapshotForPrompt(
    * Projected memory sits ABOVE the volatile tail, unlike the `### Recent
    * context` line it replaces. That line was correctly treated as volatile —
    * it was rebuilt from whatever entity the graph touched last, so a single
-   * file open changed it. The projection is ordered stable-first by
-   * contextProjection.js (preferences and permissions, sorted), so its head is
-   * byte-identical between turns and only earns its place in the cacheable
-   * prefix if it is emitted before the active tab and the clock.
+   * file open changed it. A projection is ordered stable-first by whichever
+   * body built it (fleetMemory.js and contextProjection.js apply the same rule:
+   * preferences first, sorted by key), so its head is byte-identical between
+   * turns and only earns its place in the cacheable prefix if it is emitted
+   * before the active tab and the clock.
    *
    * Headings are demoted one level: the projection is a standalone document
    * with `##` headings, and pasting those in mid-section would orphan the
@@ -693,9 +707,39 @@ function isRecent(iso, windowMs = 120_000) {
 /**
  * Load fleet for a Realtime session from the relay store.
  * Prefers dedicated fleet state; falls back to agent-snapshot.
+ *
+ * `surface` and `task` are what turn this from a snapshot read into a
+ * projection read. Existing callers pass neither and still get the cross-surface
+ * memory they never had; a caller that knows what was said should pass it,
+ * because relevance is the only thing that makes a memory block cheap and the
+ * relay is the one body that has the words.
  */
-export async function loadFleetFromStore(store) {
+export async function loadFleetFromStore(store, options = {}) {
   if (!store) return null
+
+  const fleet = await loadFleetSnapshot(store)
+  // Memory alone is not a fleet. Synthesizing a snapshot around it would report
+  // "mac: offline" from an absence of telemetry rather than from telemetry,
+  // which is a different and worse claim.
+  if (!fleet) return null
+
+  const projection = await projectFleetMemoryFromStore(store, {
+    ...options,
+    // Whatever the Mac pushed is merged INTO the projection under one budget,
+    // not emitted beside it. Two memory blocks in one prompt pay twice for one
+    // idea; this branch disappears when the bridge appends events instead.
+    inheritedText: fleet.memory.text,
+  })
+
+  if (projection?.text) {
+    fleet.memory = { ...fleet.memory, text: projection.text }
+    fleet.memoryProjection = projection.stats
+  }
+
+  return fleet
+}
+
+async function loadFleetSnapshot(store) {
   try {
     const fleetState = await store.getState?.(FLEET_STATE_KEY)
     if (fleetState?.data && typeof fleetState.data === 'object') {
@@ -717,4 +761,122 @@ export async function loadFleetFromStore(store) {
   }
 
   return null
+}
+
+/**
+ * Read the memory log and project it for one surface.
+ *
+ * Best-effort by design, like every other read in this file: a store with no
+ * memory tables, or a store that throws, costs the voice agent the projection
+ * and nothing else. Losing memory quality is survivable; losing the fleet
+ * snapshot because a memory read failed is not.
+ */
+export async function projectFleetMemoryFromStore(
+  store,
+  {
+    surface = 'voice',
+    task = '',
+    now = Date.now(),
+    // The relay already lets a projection this large into a prompt
+    // (MAX_MEMORY_TEXT_CHARS), so asking for it is not asking for anything new.
+    // It is a ceiling, not a target: the projection spends only what it has.
+    budgetBytes = MAX_MEMORY_TEXT_CHARS,
+    inheritedText = null,
+  } = {},
+) {
+  if (typeof store?.listMemoryEvents !== 'function') {
+    return inheritedText ? { text: inheritedText, eventIds: [], stats: null } : null
+  }
+
+  try {
+    const events = await store.listMemoryEvents({ now })
+    const projection = projectFleetMemory({
+      events,
+      surface,
+      task,
+      now,
+      budgetBytes,
+      inheritedText,
+    })
+    return projection.text ? projection : null
+  } catch {
+    return inheritedText ? { text: inheritedText, eventIds: [], stats: null } : null
+  }
+}
+
+/* ---- routes ------------------------------------------------------------- */
+
+/*
+ * Scopes for the two memory routes, in the shape server.js's
+ * requiredScopesForRequest() answers in. Declared next to the handlers rather
+ * than only in that table so adding a route cannot quietly ship an unscoped
+ * write path for the owner's own facts.
+ */
+export const FLEET_MEMORY_SCOPES = Object.freeze({
+  'POST /v1/memory/events': ['memory:write'],
+  'GET /v1/memory/projection': ['memory:read'],
+})
+
+export function fleetMemoryScopesFor(method, path) {
+  return FLEET_MEMORY_SCOPES[`${String(method).toUpperCase()} ${path}`] ?? null
+}
+
+/**
+ * Register the cross-surface memory endpoints on an Express app.
+ *
+ * A registration function rather than routes written into server.js: this is
+ * the write end of the same store→prompt path the rest of this module owns, and
+ * keeping the two together is what stops the projection and the thing that
+ * feeds it from drifting apart. The handlers hold no logic — the request shapes
+ * and every budget live in shared/fleetMemory.js, so a body that has the store
+ * in-process gets identical behaviour with no HTTP at all.
+ */
+export function registerFleetMemoryRoutes(app, { getStore }) {
+  if (!app || typeof getStore !== 'function') {
+    throw new TypeError('registerFleetMemoryRoutes needs an app and getStore().')
+  }
+
+  const send = async (response, operation) => {
+    // The owner's facts, and a projection is shaped per request: never cached
+    // by anything between here and the asking body.
+    response.set('Cache-Control', 'private, no-store')
+    try {
+      const { status, body } = await operation()
+      response.status(status).json(body)
+    } catch (error) {
+      /*
+       * The migration is applied separately from the deploy, so "the code is
+       * live and the table is not" is a real state this route can be in. Left
+       * to Express it is a 500 with a SQL string in it; named here it tells the
+       * operator the one thing that fixes it.
+       */
+      const missingTable = /no such table|relay_memory_events/i.test(
+        error?.message || '',
+      )
+      response.status(missingTable ? 503 : 500).json({
+        ok: false,
+        error: missingTable
+          ? 'Fleet memory is not available: cloudflare-worker/fleet-memory-migration.sql has not been applied.'
+          : error?.message || 'Fleet memory could not be reached.',
+      })
+    }
+  }
+
+  app.post('/v1/memory/events', async (request, response) => {
+    await send(response, async () =>
+      appendFleetMemory(await getStore(), request.body ?? {}),
+    )
+  })
+
+  app.get('/v1/memory/projection', async (request, response) => {
+    await send(response, async () =>
+      readFleetMemoryProjection(await getStore(), {
+        surface: request.query?.surface,
+        task: request.query?.task,
+        budgetBytes: request.query?.budgetBytes ?? DEFAULT_PROJECTION_BYTES,
+      }),
+    )
+  })
+
+  return Object.keys(FLEET_MEMORY_SCOPES)
 }
