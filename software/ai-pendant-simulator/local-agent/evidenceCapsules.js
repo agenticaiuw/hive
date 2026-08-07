@@ -758,11 +758,12 @@ export const EVIDENCE_SOURCES = [
  * check is the failure mode this whole feature exists to fix.
  */
 export const UNCAPSULED_PATHS = [
-  'cloud-relay/serverBrowser.js read_web_page — runs on the relay, never reaches this process, so it mints nothing.',
+  'cloud-relay/serverBrowser.js readPublicPage, when the relay itself is the caller — cloud-relay/openaiRealtimeVoice.js (the read_web_page voice tool) and cloud-relay/scheduler.js. Those run in the relay process, where this store does not exist. The third caller, local-agent/originFanOut.js, runs here and does mint.',
   'browser_click / browser_type / browser_select / browser_press_key — writes, not readings. Their results carry no page content to capsule.',
   'browser_capture — the screenshot bytes are never stored; the capsule records that a capture of this page happened, with an empty body.',
   'Mac actions link evidence only when the caller tags them (action.params.capsuleIds). An untagged write_file whose content came from a page shows as unlinked in the journal rather than being silently attributed.',
   'screenCapture.js and computerUse vision — screen pixels are a separate provenance problem and are not capsuled here.',
+  'A capsule is not a permission boundary. Synthesis is not forced to read through one: a caller that already holds the extension result can still use the raw string, and nothing here refuses it. What is enforced is that the reading was recorded and that every receipt says whether it was linked.',
 ]
 
 /**

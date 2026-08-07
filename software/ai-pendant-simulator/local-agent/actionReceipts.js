@@ -388,7 +388,15 @@ export function buildActionReceipt({
  * guessed provenance is worse than none.
  */
 function describeEvidence(action, result) {
-  const fromResult = linkedCapsuleIds(result)
+  /*
+   * The executor echoes the whole action back inside its result, so walking the
+   * result as-is finds the caller's own `capsuleIds` again and reports a
+   * declaration as if the extension had supplied it. Measured live: a tagged
+   * copy_to_clipboard came back `result+declared` with nothing on the browser
+   * side at all. Dropping the echo is what keeps `source` worth reading.
+   */
+  const { action: _echoed, ...observed } = result ?? {}
+  const fromResult = linkedCapsuleIds(observed)
   const declared = linkedCapsuleIds({
     capsuleIds: action?.capsuleIds,
     params: { capsuleIds: action?.params?.capsuleIds },

@@ -490,12 +490,16 @@ test('a receipt links back to the capsule the reading produced', (t) => {
 test('a Mac action links evidence only when its caller tagged it', (t) => {
   store(t)
 
+  const action = {
+    type: 'write_file',
+    params: { path: '~/Downloads/order.md', capsuleIds: ['evd_abcdef123456'] },
+  }
   const tagged = buildActionReceipt({
-    action: {
-      type: 'write_file',
-      params: { path: '~/Downloads/order.md', capsuleIds: ['evd_abcdef123456'] },
-    },
-    result: { ok: true, path: '/Users/x/Downloads/order.md' },
+    action,
+    /* The executor echoes the action back inside the result. A declaration
+     * bouncing off that echo must not be reported as an independent fact from
+     * the browser — measured live before this was fixed. */
+    result: { action, ok: true, path: '/Users/x/Downloads/order.md' },
     startedAt: new Date(0).toISOString(),
   })
   assert.deepEqual(tagged.evidence.capsuleIds, ['evd_abcdef123456'])
