@@ -40,17 +40,31 @@ function save(store) {
 }
 
 /*
- * Two shapes, because they answer different questions: "every morning at 7"
+ * Three shapes, because they answer different questions: "every morning at 7"
  * is a wall-clock promise the owner can rely on, "every 30 minutes" is a
- * polling loop. Anything more expressive than this is a cron parser nobody
- * asked for yet.
+ * polling loop, and "every weekday morning" is the first one with days it must
+ * skip. Anything more expressive than this is a cron parser nobody asked for
+ * yet.
+ *
+ * `weekly` exists because the alternative was worse. Eleven rounds asked for
+ * "every weekday morning", and with only `daily` available the choice was to
+ * store it as daily and fire on Saturday — a routine that breaks its promise
+ * twice a week, silently, forever. cloud-relay/routineSchedule.js already had
+ * { kind: 'weekly', days }, so this is the local store catching up to a shape
+ * the relay could already express, not a new idea.
+ *
+ * Days are 0-6 from Date#getDay, Sunday first, matching the relay's spelling so
+ * a routine means the same thing on either side.
  */
+const DAY_MS = 86_400_000
+
 export function nextRunAt(schedule, from = Date.now()) {
   if (schedule?.kind === 'interval') {
     const every = Math.max(60_000, Number(schedule.everyMs) || 0)
     return from + every
   }
-  if (schedule?.kind === 'daily') {
+
+  if (schedule?.kind === 'daily' || schedule?.kind === 'weekly') {
     const [hour, minute] = String(schedule.at || '08:00')
       .split(':')
       .map((n) => Number(n) || 0)
@@ -58,11 +72,47 @@ export function nextRunAt(schedule, from = Date.now()) {
     next.setSeconds(0, 0)
     next.setHours(hour, minute)
     /* Already gone today: the owner means tomorrow, not immediately. */
-    if (next.getTime() <= from) next.setDate(next.getDate() + 1)
-    return next.getTime()
+    if (next.getTime() <= from) next.setTime(next.getTime() + DAY_MS)
+
+    if (schedule.kind === 'daily') return next.getTime()
+
+    /* Coerce deliberately rather than with Number(), which maps null, false
+     * and '' all to 0 — so a caller passing a null day would silently get a
+     * routine that fires on Sunday. A day nobody named must be dropped, not
+     * guessed. */
+    const days = [
+      ...new Set(
+        (Array.isArray(schedule.days) ? schedule.days : [])
+          .map((raw) => {
+            if (typeof raw === 'number') return raw
+            if (typeof raw === 'string' && raw.trim()) return Number(raw)
+            return NaN
+          })
+          .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6),
+      ),
+    ]
+    /* A weekly schedule naming no valid day can never fire. Returning null says
+     * so, where defaulting to daily would quietly hand back the Saturday bug
+     * this shape exists to prevent. */
+    if (!days.length) return null
+
+    /* At most seven steps: one of the seven days is in the set. Stepping by a
+     * whole day rather than adding a computed offset keeps this correct across
+     * the DST boundary, where a day is 23 or 25 hours and the wall-clock time
+     * is what the owner was promised. */
+    for (let i = 0; i < 7; i += 1) {
+      if (days.includes(next.getDay())) return next.getTime()
+      next.setDate(next.getDate() + 1)
+      next.setHours(hour, minute, 0, 0)
+    }
+    return null
   }
+
   return null
 }
+
+/** Monday to Friday, for the phrasing that asked for this. */
+export const WEEKDAYS = Object.freeze([1, 2, 3, 4, 5])
 
 export function listRoutines() {
   return load().routines

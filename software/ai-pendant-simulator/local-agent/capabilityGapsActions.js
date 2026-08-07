@@ -379,14 +379,28 @@ const MIN_ROUTINE_INTERVAL_MS = 60_000
 /*
  * Schedule shapes local-agent/routines.js can actually keep.
  *
- * nextRunAt() there understands `interval` and `daily`. Not `weekly`, not a
- * weekday set, not a timezone. cloud-relay/routineSchedule.js understands all
- * three, which is the right long-term home for a 7am promise anyway since the
- * relay is the half that does not sleep — but the Mac-local store is what this
- * action writes to, and a weekday routine written there as `daily` fires on
- * Saturday morning about a work portal nobody is looking at.
+ * It now understands `weekly` with a day set, so plain "every weekday" is no
+ * longer refused — that refusal existed because storing it as `daily` fires on
+ * Saturday morning about a work portal nobody is looking at, and the honest
+ * move was to decline rather than quietly downgrade. The store caught up
+ * instead, matching the { kind: 'weekly', days } shape cloud-relay's
+ * routineSchedule.js already used, so a routine means the same thing on both
+ * sides.
+ *
+ * Still refused, because still true: named single days and "every other" are a
+ * recurrence rule this store does not keep, and choosing one out of a spoken
+ * sentence is the judgement policyRouter's own header says the deterministic
+ * table must not attempt. A wrong guess here installs a repeating mistake.
  */
-const WEEKDAY_WORDS = /\b(?:weekday|weekdays|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekly|every\s+other)\b/i
+const WEEKDAY_WORDS =
+  /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|every\s+other)\b/i
+const WEEKDAY_ONLY = /\b(?:weekdays?|working\s+days?|business\s+days?)\b/i
+
+/* Monday-Friday in Date#getDay numbering, Sunday 0. Spelled out here rather
+ * than imported because routines.js loads lazily inside the dispatch, and this
+ * file's matchers must stay free of module-scope imports — the whole reason
+ * being that policyRouter runs them on every spoken command. */
+const WEEKDAYS = Object.freeze([1, 2, 3, 4, 5])
 
 function reject(action, message) {
   return {
@@ -540,19 +554,39 @@ export async function runCapabilityGapAction(action, overrides = {}) {
      * than one that was never created, because the owner believes it is right.
      */
     const scheduleText = `${params.at || ''} ${params.schedule?.kind || ''} ${command}`
-    if (WEEKDAY_WORDS.test(scheduleText) || Array.isArray(params.days)) {
+    if (WEEKDAY_WORDS.test(scheduleText)) {
       return reject(
         action,
-        'I can schedule this every day or on an interval, but not on a weekday-only schedule — the Mac routine store has no weekday setting, so it would also fire at the weekend. Ask for it every day, or set it up on the relay, which does understand weekdays.',
+        'I can schedule this every day, every weekday, or on an interval — but not on named days or an "every other" rhythm. The Mac routine store keeps no such recurrence rule, and guessing one out of a sentence installs a repeating mistake. Say every day or every weekday, or set it up on the relay.',
       )
     }
 
+    /* Monday-to-Friday is now storable, so it is honoured rather than refused.
+     * An explicit days array wins over the phrasing: a caller that names the
+     * set has already decided, and re-deriving it from prose could disagree. */
+    const weekdayOnly = WEEKDAY_ONLY.test(scheduleText)
+    const days = Array.isArray(params.days)
+      ? params.days
+      : weekdayOnly
+        ? WEEKDAYS
+        : null
+
     const everyMs = Number(params.everyMs)
     const schedule = params.at
-      ? { kind: 'daily', at: String(params.at) }
+      ? days
+        ? { kind: 'weekly', at: String(params.at), days }
+        : { kind: 'daily', at: String(params.at) }
       : Number.isFinite(everyMs) && everyMs > 0
         ? { kind: 'interval', everyMs: Math.max(MIN_ROUTINE_INTERVAL_MS, everyMs) }
         : null
+    /* A day set with no time is a rhythm with no hour — refuse rather than
+     * inventing 08:00 for a promise the owner will hold us to. */
+    if (days && !params.at) {
+      return reject(
+        action,
+        'A weekday schedule needs a time of day — say when, for example "every weekday at 7".',
+      )
+    }
     if (!schedule) {
       return reject(
         action,
