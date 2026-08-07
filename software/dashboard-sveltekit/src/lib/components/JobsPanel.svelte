@@ -178,6 +178,8 @@
               ? 'selected'
               : ''}"
             onclick={() => (selectedId = `job:${job.id}`)}
+            aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
+              .label} · ${statusLabel(job.status)}`}
           >
             <strong>{truncate(job.command || "Job", 46)}</strong>
             <small
@@ -201,6 +203,7 @@
               ? 'selected'
               : ''}"
             onclick={() => (selectedId = `routine:${routine.id}`)}
+            aria-label={`${routine.name} · scheduled routine`}
           >
             <strong>{truncate(routine.name, 46)}</strong>
             <small
@@ -226,6 +229,8 @@
               ? 'selected'
               : ''}"
             onclick={() => (selectedId = `job:${job.id}`)}
+            aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
+              .label} · ${statusLabel(job.status)}`}
           >
             <strong>{truncate(job.command || "Job", 46)}</strong>
             <small

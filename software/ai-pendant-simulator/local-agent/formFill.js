@@ -381,6 +381,23 @@ function isTextLike(element) {
   )
 }
 
+/**
+ * Which option a dropdown lands on, matched the way the extension matches it.
+ *
+ * The owner says "Two"; the browser sends "2". A manifest that echoed back the
+ * words the owner used would be describing a request nobody is about to make.
+ */
+export function resolveOption(control, wanted) {
+  const text = String(wanted ?? '')
+  const options = control?.options ?? []
+  return (
+    options.find((option) => option.value === text) ??
+    options.find((option) => option.text === text) ??
+    options.find((option) => option.text && option.text.includes(text)) ??
+    null
+  )
+}
+
 function truthy(value) {
   if (typeof value === 'boolean') return value
   const text = String(value).trim().toLowerCase()
@@ -606,8 +623,10 @@ export async function fillForm(
       continue
     }
 
-    const entry = { key, element, matchedBy }
+    const entry = { key, element, matchedBy, value: rawValue }
     if (element.tag === 'select') {
+      /* Record the value the option carries, not the words that found it. */
+      entry.value = resolveOption(element.control, rawValue)?.value ?? String(rawValue)
       entry.action = {
         type: 'browser_select',
         label: `set ${element.label || key}`,
@@ -647,7 +666,6 @@ export async function fillForm(
       warnings.push(`"${key}" maps to a ${element.role || element.tag} that cannot be typed into.`)
       continue
     }
-    entry.value = rawValue
     planned.push(entry)
   }
 

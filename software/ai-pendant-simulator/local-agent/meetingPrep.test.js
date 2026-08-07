@@ -5,7 +5,9 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  discriminatingTerms,
   extractFromText,
+  looksLikeMeeting,
   matchMail,
   meetingTerms,
   prepareForNextMeeting,
@@ -204,4 +206,96 @@ test('collecting copies the documents rather than moving them', async (t) => {
     fs.existsSync(path.join(directory, 'pendant-firmware-decisions.md')),
     'the original must survive: something else is probably using it',
   )
+})
+
+test('a solo five-minute alarm on the calendar is not a meeting', () => {
+  const alarm = {
+    title: 'stand up',
+    start: '2026-08-07T09:00:00',
+    end: '2026-08-07T09:05:00',
+    attendees: [],
+    location: null,
+  }
+  const call = {
+    title: 'Summer Interview',
+    start: '2026-08-07T09:00:00',
+    end: '2026-08-07T09:05:00',
+    attendees: ['Mateo'],
+    location: 'https://zoom.us/j/1',
+  }
+  const blocked = {
+    title: 'Deep work',
+    start: '2026-08-07T09:00:00',
+    end: '2026-08-07T10:00:00',
+    attendees: [],
+    location: null,
+  }
+
+  assert.equal(looksLikeMeeting(alarm), false, 'nobody is invited and there is nowhere to be')
+  assert.equal(looksLikeMeeting(call), true)
+  assert.equal(looksLikeMeeting(blocked), true, 'an hour blocked out is a commitment')
+})
+
+test('prep skips the owner’s own alarms and finds the real next meeting', async () => {
+  const result = await prepareForNextMeeting(
+    { now: NOW, roots: [], collect: false },
+    {
+      readEvents: async () => [
+        {
+          uid: 'alarm',
+          title: 'stand up',
+          start: '2026-08-07T09:10:00',
+          end: '2026-08-07T09:15:00',
+          allDay: false,
+          attendees: [],
+          location: null,
+          notes: null,
+        },
+        {
+          uid: 'real',
+          title: 'Summer Interview with Mateo',
+          start: '2026-08-07T20:00:00',
+          end: '2026-08-07T21:00:00',
+          allDay: false,
+          attendees: ['Mateo Neri Morales'],
+          location: 'https://zoom.us/j/1',
+          notes: null,
+        },
+      ],
+      readMail: async () => [],
+    },
+  )
+
+  assert.equal(result.meeting.title, 'Summer Interview with Mateo')
+})
+
+test('the organiser’s own name is dropped when it matches everything they own', () => {
+  const candidates = Array.from({ length: 20 }, (_unused, index) => ({
+    path: `/Users/evan/Documents/hive-owner-file-${index}.md`,
+  }))
+  candidates[0].path = '/Users/evan/Documents/hive-owner-pendant-firmware.md'
+
+  const terms = discriminatingTerms(['evan', 'liu', 'pendant', 'firmware'], candidates)
+  assert.deepEqual(terms, ['pendant', 'firmware'], 'a term in every file names nothing')
+})
+
+test('a small corpus keeps its terms — frequency needs something to measure', () => {
+  const candidates = [{ path: '/a/evan-notes.md' }, { path: '/a/evan-other.md' }]
+  assert.deepEqual(discriminatingTerms(['evan', 'notes'], candidates), ['evan', 'notes'])
+})
+
+test('conversational future tense is not a prior action item', () => {
+  const { actions } = extractFromText(
+    [
+      "Oh, um, so basically, we're just… I guess I'm just trying to assemble, like, a core team of people during the summer, and then we'll see how it goes from there.",
+      "I'll rerun the latency probe tonight.",
+      'Action item: Mateo to send the BOM by Friday.',
+    ].join('\n'),
+    'transcript.txt',
+  )
+
+  assert.equal(actions.length, 2)
+  assert.ok(!actions.some((item) => item.text.includes('core team of people')), 'that is someone talking')
+  assert.ok(actions.some((item) => item.text === "I'll rerun the latency probe tonight."))
+  assert.ok(actions.some((item) => item.text.includes('Mateo to send the BOM')))
 })

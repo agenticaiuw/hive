@@ -45,8 +45,21 @@ const MAX_FILE_AGE_MS = 180 * 24 * 60 * 60 * 1000
 const DECISION_MARKERS =
   /\b(we (?:decided|agreed|settled on)|decision:|decided to|agreed to|going with|the call is|open question|still (?:undecided|open)|tbd|to be decided)\b/i
 
+/*
+ * Explicit markers only. "I'll" and "we'll" anywhere in a sentence looked like
+ * a commitment and turned out to be how people talk: run against a real meeting
+ * transcript it returned "I'm not planning to collect any fees, but I'll apply
+ * for grants" as a prior action item. A transcript is mostly future tense, so
+ * the tense is not the signal — the label is.
+ */
 const ACTION_MARKERS =
-  /\b(action item|next step|follow[- ]up|i(?:'| a)?ll |we(?:'| wi)?ll |todo|to-do|assigned to|owner:|due (?:by|on)|by (?:monday|tuesday|wednesday|thursday|friday|next week))\b/i
+  /\b(action item|next step|follow[- ]up|todo|to-do|assigned to|owner:|due (?:by|on)|by (?:monday|tuesday|wednesday|thursday|friday|next week))\b/i
+
+/* A commitment stated as a whole short sentence, not buried mid-paragraph:
+ * "I'll rerun the probe", "Mateo will send the BOM". The subject has to be the
+ * first thing in the sentence, which is what a written commitment looks like
+ * and what a transcript of someone thinking out loud does not. */
+const LEADING_COMMITMENT = /^(?:i|we|[a-z]+)\s?['’]?(?:ll|will)\s+\w+/i
 
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'that', 'this', 'meeting', 'call', 'sync',
@@ -76,6 +89,7 @@ export async function prepareForNextMeeting(
 
   const meeting = (events || [])
     .filter((event) => !event.allDay)
+    .filter(looksLikeMeeting)
     .sort((left, right) => Date.parse(left.start) - Date.parse(right.start))[0]
 
   if (!meeting) {
@@ -86,8 +100,8 @@ export async function prepareForNextMeeting(
     }
   }
 
-  const terms = meetingTerms(meeting)
   const candidates = scanDocuments(roots, { now })
+  const terms = discriminatingTerms(meetingTerms(meeting), candidates)
   const documents = rankDocuments(candidates, terms).slice(0, Math.max(1, maxDocuments))
 
   const extracted = documents.map((document) => ({
@@ -144,6 +158,23 @@ export async function prepareForNextMeeting(
     brief,
     spoken: speakableSummary({ meeting, decisions, actions, documents: extracted, now }),
   }
+}
+
+/*
+ * A calendar is not a list of meetings. It also holds the owner's own alarms —
+ * "stand up", "take meds", a 5-minute recurring nudge with nobody else in it —
+ * and preparing a briefing folder for one of those is the wrong answer to
+ * "prepare me for my next meeting", delivered confidently.
+ *
+ * The three signals that separate the two are all on the event: somebody else
+ * is invited, there is somewhere to be, or it is long enough that a person
+ * blocked time out for it.
+ */
+export function looksLikeMeeting(event, { minMinutes = 15 } = {}) {
+  if ((event.attendees || []).length > 0) return true
+  if (String(event.location || '').trim()) return true
+  const minutes = (Date.parse(event.end) - Date.parse(event.start)) / 60_000
+  return Number.isFinite(minutes) && minutes >= minMinutes
 }
 
 /** Words from the invite that a filename or a document could plausibly share. */
@@ -215,6 +246,33 @@ export function scanDocuments(roots, { now = new Date(), maxFiles = MAX_SCAN_FIL
 }
 
 /**
+ * Drop the meeting words that match everything the owner owns.
+ *
+ * The invite names the organiser, and the organiser is usually the owner — so
+ * "evan" and "liu" were scoring every file on the machine and dragging in an
+ * unrelated PDF because it had the owner's own name in the path. A term that
+ * appears in most candidates carries no information about which document is
+ * the right one, whoever it names.
+ *
+ * Kept only when there is a corpus worth measuring against; below that the
+ * frequency is noise and the owner is better served by the raw terms.
+ */
+export function discriminatingTerms(terms, candidates, { maxShare = 0.4, minCandidates = 8 } = {}) {
+  if (candidates.length < minCandidates) return terms
+
+  const discriminating = terms.filter((term) => {
+    const hits = candidates.filter((candidate) =>
+      candidate.path.toLowerCase().includes(term),
+    ).length
+    return hits / candidates.length <= maxShare
+  })
+
+  /* Never return nothing: an over-eager filter that empties the list would find
+   * no documents at all, which is worse than finding slightly wrong ones. */
+  return discriminating.length ? discriminating : terms
+}
+
+/**
  * Filename match dominates; the containing folder is corroboration, not proof.
  *
  * Scoring the whole path equally is how "grocery-list.md" ends up in the prep
@@ -269,7 +327,11 @@ export function extractFromText(text, sourceName = '') {
       continue
     }
     /* An unchecked markdown box is an action item that says so structurally. */
-    if (ACTION_MARKERS.test(sentence) || /^\[ \]/.test(sentence)) {
+    if (
+      ACTION_MARKERS.test(sentence) ||
+      /^\[ \]/.test(sentence) ||
+      (LEADING_COMMITMENT.test(sentence) && sentence.length <= 140)
+    ) {
       actions.push({ text: sentence, source: sourceName })
     }
   }

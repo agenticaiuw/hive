@@ -9,6 +9,7 @@ import {
   parseAttributes,
   parseFormHtml,
   renderPreview,
+  resolveOption,
 } from './formFill.js'
 
 /* The real markup of the public Selenium test form, trimmed to the controls
@@ -99,6 +100,14 @@ test('a select is found by the words printed next to it', () => {
   assert.match(hit.matchedBy, /label/)
   /* And the manifest calls it that too, rather than repeating the wire name. */
   assert.equal(hit.element.label, 'Dropdown (select)')
+})
+
+test('a dropdown reports the value it sends, not the words that chose it', () => {
+  const { controls } = parseFormHtml(FORM_HTML, PAGE_URL)
+  const select = controls.find((control) => control.name === 'my-select')
+  assert.equal(resolveOption(select, 'Two').value, '2')
+  assert.equal(resolveOption(select, '1').value, '1')
+  assert.equal(resolveOption(select, 'no such option'), null)
 })
 
 test('an option with no value attribute submits its own text', () => {
