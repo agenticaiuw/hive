@@ -32,9 +32,11 @@ import '../../load-pendant-env.mjs'
 import {
   deposit as depositToCommons,
   directory as commonsDirectory,
+  fold as commonsFold,
   recall as recallFromCommons,
 } from './commons.mjs'
 import { findDuplicate } from './novelty.mjs'
+import { checkReachability, knownPrimitives } from './reachability.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '../../..')
@@ -1552,6 +1554,22 @@ const CAPABILITY_TOOLS = [
             items: { type: 'string' },
             description: 'What does not exist yet that this needs',
           },
+          /*
+           * Asked for BEFORE `missing`, in the same call, because the corpus
+           * says the agents are not short of facts — they are short of
+           * composition. The single most-restated request here was proposed
+           * eighteen times, and every piece of it already shipped: the /jobs
+           * queue, /jobs/:jobId/receipts, and /v1/pendant/announce, the last of
+           * which is on the requesting agent's own surface. An inventory does
+           * not show a path through itself, so this makes naming the path a
+           * condition of proposing rather than a thing to remember.
+           */
+          built_from: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Exact routes or tools from the established list in your prompt that this would be built out of. Look before you answer — most of what gets proposed here already exists in pieces. If you cannot name any, say so explicitly rather than leaving it empty.',
+          },
         },
         required: [
           'user_asks',
@@ -1561,6 +1579,7 @@ const CAPABILITY_TOOLS = [
           'latency_budget',
           'cost_estimate',
           'security_concerns',
+          'built_from',
           'missing',
         ],
         additionalProperties: false,
@@ -1805,6 +1824,7 @@ async function executeTool(call, { state, transcript, asked }) {
       describe: (item) => [item.user_asks, item.why_useful].filter(Boolean).join(' '),
       announce: () => process.stdout.write(`  IDEA "${args.user_asks}"\n`),
       note: 'Noted. Keep going — propose others, including ones that need capabilities that do not exist yet.',
+      extra: reachabilityNote(args),
     })
   } else if (name === 'propose_change') {
     result = recordIfNovel(state, args, {
@@ -1974,7 +1994,7 @@ function advanceOutOfRecon(state) {
  * because the duplicates are mostly across agents — which is the same
  * rediscovery problem the commons exists for, wearing different clothes.
  */
-function recordIfNovel(state, args, { kind, into, describe, announce, note }) {
+function recordIfNovel(state, args, { kind, into, describe, announce, note, extra }) {
   const priorEntries = [...(state.proposals || []), ...(state.changes || []), ...ledgerEntries()]
   const collision = findDuplicate(args, priorEntries, describe)
 
@@ -1999,6 +2019,7 @@ function recordIfNovel(state, args, { kind, into, describe, announce, note }) {
   return {
     recorded: true,
     note,
+    ...(extra || {}),
     ...(collision
       ? {
           closeTo: describe(collision.entry).slice(0, 200),
@@ -2007,6 +2028,46 @@ function recordIfNovel(state, args, { kind, into, describe, announce, note }) {
             'Recorded, but it is close to the above. If it is the same idea, the backlog now has it twice.',
         }
       : {}),
+  }
+}
+
+/*
+ * Tell an agent how much of what it just proposed already exists.
+ *
+ * Not a gate. "All of these exist" is sometimes exactly right — the connective
+ * tissue between three shipped endpoints is real work — and sometimes it means
+ * a shipped feature has been re-requested for the eighteenth time. An agent
+ * that can see the difference can make it; a gate that guessed would suppress
+ * the first case in order to catch the second.
+ */
+function reachabilityNote(args) {
+  if (!COMMONS_ON) return null
+
+  try {
+    const entries = [...commonsFold(OUT_DIR, { forAgent: AGENT_ID }).values()]
+    const known = knownPrimitives(entries, (entry) =>
+      recallFromCommons(OUT_DIR, entry.key, { forAgent: AGENT_ID })?.content,
+    )
+    const check = checkReachability(args.built_from, known)
+
+    if (check.verdict === 'unnamed') {
+      return {
+        builtFrom:
+          'You named nothing this would be built from. Most of what gets proposed here already exists in pieces — the established list in your prompt is where to look.',
+      }
+    }
+    if (check.verdict === 'assembled') {
+      process.stdout.write(`  BUILT-FROM ${check.found.length}/${check.claimed} already exist\n`)
+      return {
+        builtFrom: `All ${check.claimed} pieces you named already exist: ${check.found.slice(0, 6).join(', ')}. So this is connective work rather than a new capability — say what is missing BETWEEN them, or whether it is already reachable today and nobody has wired it up.`,
+      }
+    }
+    return {
+      builtFrom: `${check.found.length} of ${check.claimed} pieces you named are already known to this system. The rest are not in what anyone here has observed yet: ${check.unseen.slice(0, 6).join(', ')}. That is not proof they do not exist — no agent has inventoried every surface — so check before treating them as the gap.`,
+    }
+  } catch (error) {
+    /* A reachability check that fails is a missing hint, not a failed round. */
+    return { builtFrom: `Could not check what this is built from: ${error.message}` }
   }
 }
 
