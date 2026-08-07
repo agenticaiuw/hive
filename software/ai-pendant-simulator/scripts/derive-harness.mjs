@@ -1310,6 +1310,31 @@ async function describeThing(name, state) {
   const granted = state.granted.context.find((c) => c.topic === wanted)
   if (granted) return { name: wanted, text: granted.text }
 
+  /*
+   * Granted TOOLS were missing from here while being listed by
+   * discover('granted'), so a tool could be shown to an agent as something it
+   * had and then reported as not existing when it asked what the thing was.
+   *
+   * relay-realtime found this and said so three times — rounds 32, 67 and 72 —
+   * naming both tools each time and explaining exactly what it would do
+   * differently depending on the answer. It was right on every count, and the
+   * requests sat unread for forty rounds. The agents are better at reporting
+   * defects than this harness has been at hearing them.
+   */
+  const grantedTool = state.granted.tools.find((tool) => tool.name === wanted)
+  if (grantedTool) {
+    return {
+      name: grantedTool.name,
+      grantedInRound: grantedTool.round ?? null,
+      why: grantedTool.why ?? null,
+      parameters: grantedTool.parameters ?? null,
+      /* Said plainly, because the honest answer to "does this work?" is that a
+       * granted schema is a promise the orchestrator has not kept yet. */
+      status:
+        'Granted as a schema. Calling it returns a note saying it has no implementation yet — describe what you would do with it rather than assuming it acts.',
+    }
+  }
+
   return { error: `Nothing named "${wanted}". Use discover(category) to see valid names.` }
 }
 
