@@ -41,9 +41,40 @@ function loadLedger() {
   }
 }
 
+/*
+ * Support is recomputed from the agent states on every run, never incremented.
+ *
+ * It used to be a running `+= 1` over a re-read of every state file. State
+ * files are cumulative, so each run re-counted every proposal ever made and
+ * bumped it again: after twenty runs the oldest entries read "20x" and anything
+ * created later read "1x". The number was a function of the entry's age and of
+ * how often this script happened to be invoked. It measured neither demand nor
+ * agreement, and everything downstream ranked the backlog by it.
+ *
+ * Counting distinct (agent, round) contributions from scratch is idempotent by
+ * construction — there is no accumulator left to double.
+ */
+function tallySupport() {
+  const support = new Map() // id -> Map(agent -> Set(round))
+  const credit = (id, agent, round) => {
+    if (!support.has(id)) support.set(id, new Map())
+    const byAgent = support.get(id)
+    if (!byAgent.has(agent)) byAgent.set(agent, new Set())
+    byAgent.get(agent).add(round ?? 0)
+  }
+  return { support, credit }
+}
+
 function collect() {
   const ledger = loadLedger()
-  const byId = new Map(ledger.entries.map((e) => [e.id, e]))
+  /* Status and note are owner-owned and must survive; the counts are derived
+   * and get rebuilt, so keep only what cannot be recomputed. */
+  const kept = new Map(
+    ledger.entries.map((e) => [e.id, { status: e.status, note: e.note || '' }]),
+  )
+  const previous = new Map(ledger.entries.map((e) => [e.id, e]))
+  const byId = new Map()
+  const { support, credit } = tallySupport()
 
   for (const file of fs
     .readdirSync(OUT_DIR)
@@ -51,72 +82,98 @@ function collect() {
     const agent = file.replace('state-', '').replace('.json', '')
     const state = JSON.parse(fs.readFileSync(path.join(OUT_DIR, file), 'utf8'))
 
-    for (const change of state.changes || []) {
-      const id = idFor('chg', change.layer, change.change)
-      const existing = byId.get(id)
-      if (existing) {
-        /* Independent re-proposal is signal: two agents wanting the same thing
-         * is stronger evidence than one wanting it twice. */
-        if (!existing.proposedBy.includes(agent)) existing.proposedBy.push(agent)
-        existing.timesProposed += 1
-        continue
+    const seed = (id, entry, round) => {
+      if (!byId.has(id)) {
+        byId.set(id, {
+          id,
+          ...entry,
+          proposedBy: [],
+          round,
+          ...(kept.get(id) || { status: 'proposed', note: '' }),
+        })
       }
-      byId.set(id, {
-        id,
-        kind: 'change',
-        layer: change.layer,
-        summary: change.change,
-        why: change.why || '',
-        proposedBy: [agent],
-        timesProposed: 1,
-        round: change.round,
-        status: 'proposed',
-        note: '',
-      })
+      credit(id, agent, round)
+    }
+
+    for (const change of state.changes || []) {
+      seed(
+        idFor('chg', change.layer, change.change),
+        {
+          kind: 'change',
+          layer: change.layer,
+          summary: change.change,
+          why: change.why || '',
+        },
+        change.round,
+      )
     }
 
     for (const proposal of state.proposals || []) {
-      const id = idFor('cap', 'capability', proposal.user_asks)
-      const existing = byId.get(id)
-      if (existing) {
-        if (!existing.proposedBy.includes(agent)) existing.proposedBy.push(agent)
-        existing.timesProposed += 1
-        continue
-      }
-      byId.set(id, {
-        id,
-        kind: 'capability',
-        layer: 'capability',
-        summary: proposal.user_asks,
-        why: proposal.why || proposal.how || '',
-        proposedBy: [agent],
-        timesProposed: 1,
-        round: proposal.round,
-        status: 'proposed',
-        note: '',
-      })
+      seed(
+        idFor('cap', 'capability', proposal.user_asks),
+        {
+          kind: 'capability',
+          layer: 'capability',
+          summary: proposal.user_asks,
+          why: proposal.why || proposal.how || '',
+        },
+        proposal.round,
+      )
+    }
+
+    /*
+     * Echoes are proposals the novelty gate blocked because they restated
+     * something already on record. That block is the only moment agreement is
+     * ever visible: an agent reaching an existing idea on its own is precisely
+     * the evidence that the gap is real, and discarding it left every entry
+     * looking like one agent's private opinion. Two agents out of 5,320 entries
+     * ever shared a row, because sharing required byte-identical wording.
+     */
+    for (const echo of state.echoes || []) {
+      if (byId.has(echo.id) || kept.has(echo.id)) credit(echo.id, agent, echo.round)
     }
 
     for (const skill of state.granted?.deviceSkills || []) {
-      const id = idFor('skill', 'firmware', skill.name)
-      if (byId.has(id)) continue
-      byId.set(id, {
-        id,
-        kind: 'device-skill',
-        layer: 'firmware',
-        summary: skill.name,
-        why: skill.what_it_does || '',
-        proposedBy: [agent],
-        timesProposed: 1,
-        round: skill.grantedInRound,
-        status: 'proposed',
-        note: '',
-      })
+      seed(
+        idFor('skill', 'firmware', skill.name),
+        {
+          kind: 'device-skill',
+          layer: 'firmware',
+          summary: skill.name,
+          why: skill.what_it_does || '',
+        },
+        skill.grantedInRound,
+      )
     }
   }
 
+  for (const [id, entry] of byId) {
+    const byAgent = support.get(id) || new Map()
+    entry.proposedBy = [...byAgent.keys()].sort()
+    /* How many agents reached it independently — the consensus signal. */
+    entry.agents = byAgent.size
+    /* How many separate rounds reached it — persistence, which is a weaker but
+     * still real signal that something stayed unaddressed. */
+    entry.timesProposed = [...byAgent.values()].reduce((n, rounds) => n + rounds.size, 0)
+  }
+
+  /*
+   * An entry whose originating proposal is no longer in any state file still
+   * belongs here. State gets compacted and agents get retired; neither is a
+   * reason to forget that something was already built or already rejected.
+   * Rebuilding purely from state would drop those rows and re-propose settled
+   * work, so carry them forward with their support frozen at last sighting.
+   */
+  for (const [id, entry] of previous) {
+    if (byId.has(id)) continue
+    byId.set(id, { ...entry, agents: entry.agents ?? 0, unobserved: true })
+  }
+
   const entries = [...byId.values()].sort(
-    (a, b) => b.timesProposed - a.timesProposed || a.layer.localeCompare(b.layer),
+    (a, b) =>
+      b.agents - a.agents ||
+      b.timesProposed - a.timesProposed ||
+      a.layer.localeCompare(b.layer),
   )
   fs.writeFileSync(LEDGER_JSON, `${JSON.stringify({ entries }, null, 2)}\n`)
   return entries
@@ -132,13 +189,15 @@ function writeMarkdown(entries) {
   const rows = (list) =>
     list.length
       ? [
-          '| id | layer | proposed by | × | change |',
-          '| --- | --- | --- | --- | --- |',
+          '| id | layer | proposed by | agents | rounds | change |',
+          '| --- | --- | --- | --- | --- | --- |',
           ...list.map(
             (e) =>
-              `| \`${e.id}\` | ${e.layer} | ${e.proposedBy.join(', ')} | ${e.timesProposed} | ${String(
-                e.summary,
-              ).replace(/\n/g, ' ').slice(0, 150)} |`,
+              `| \`${e.id}\` | ${e.layer} | ${(e.proposedBy || []).join(', ')} | ${
+                e.agents ?? 0
+              } | ${e.timesProposed} | ${String(e.summary)
+                .replace(/\n/g, ' ')
+                .slice(0, 150)} |`,
           ),
           '',
         ]

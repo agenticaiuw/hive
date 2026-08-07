@@ -1331,7 +1331,7 @@ async function discoverCategory(category, state) {
     const open = all.filter((entry) => entry.status === 'proposed')
     const settled = all.length - open.length
     return {
-      note: `${open.length} still open, ${settled} already settled. describe(id) gives the full entry, including why something was rejected. timesProposed counts how many rounds independently arrived at the same idea — a high number means the gap is real and still unfilled, not that it needs saying again.`,
+      note: `${open.length} still open, ${settled} already settled. describe(id) gives the full entry, including why something was rejected. agents counts how many DIFFERENT agents reached the same idea on their own and timesProposed how many separate rounds did; both are near 1 for almost everything, so treat a high number as worth a look rather than as a mandate, and treat a 1 as unremarkable rather than as a reason to restate it.`,
       items: open.map((entry) => ({
         name: entry.id,
         summary: String(entry.summary || '').slice(0, 200),
@@ -2137,6 +2137,24 @@ function recordIfNovel(state, args, { kind, into, describe, announce, note, extr
     process.stdout.write(
       `  DUP ${kind} ~${collision.score.toFixed(2)} of "${describe(collision.entry).slice(0, 60)}"\n`,
     )
+    /*
+     * A block is the only place agreement is ever observed, so discarding it
+     * threw away the one signal worth having. The gate exists to keep the
+     * backlog from filling with restatements, but "this agent independently
+     * arrived at something already recorded" is exactly what tells you a gap is
+     * real rather than one agent's hobby horse. Suppressing the row and the
+     * evidence together left the ledger unable to distinguish the two.
+     *
+     * Recorded into this agent's own state, never into the ledger directly:
+     * rounds run concurrently and each agent may write only its own file.
+     */
+    if (collision.entry?.id) {
+      ;(state.echoes ||= []).push({
+        id: collision.entry.id,
+        round: state.round,
+        score: Number(collision.score.toFixed(2)),
+      })
+    }
     return {
       recorded: false,
       why: 'This restates something the system already has, so it was not recorded.',
