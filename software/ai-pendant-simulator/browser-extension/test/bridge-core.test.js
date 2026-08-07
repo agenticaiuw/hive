@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  MAX_COMMAND_AGE_MS,
   isScriptableUrl,
   normalizeAgentUrl,
   normalizeConfig,
@@ -96,4 +97,65 @@ test('retry delays back off and remain bounded', () => {
   assert.equal(retryDelay(0), 750)
   assert.equal(retryDelay(2), 3_000)
   assert.equal(retryDelay(99), 15_000)
+})
+
+/*
+ * The receiving side has to defend itself, because the sending side cannot be
+ * fixed without the owner restarting the agent.
+ *
+ * Observed 2026-08-07: a live Mac agent, started before the bridge's expiry fix
+ * landed, holding three commands queued hours earlier. They would have run the
+ * moment this extension next connected — opening tabs in Safari unrelated to
+ * anything the owner was doing. An extension reloads with the browser, so this
+ * is the half that can be fixed today.
+ */
+test('a command queued long ago is refused rather than run', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z')
+  const command = {
+    commandId: 'browser_stale',
+    createdAt: new Date(now - 4 * 60 * 60 * 1000).toISOString(),
+    action: { type: 'navigate', params: { url: 'https://example.com' } },
+  }
+
+  assert.throws(() => validateCommand(command, now), /queued 14400s ago/)
+})
+
+test('a fresh command still runs', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z')
+  const command = {
+    commandId: 'browser_fresh',
+    createdAt: new Date(now - 5_000).toISOString(),
+    action: { type: 'navigate', params: { url: 'https://example.com' } },
+  }
+
+  assert.equal(validateCommand(command, now).type, 'navigate')
+})
+
+test('a command right on the expiry boundary is still honoured', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z')
+  const at = (ms) => ({
+    commandId: 'b',
+    createdAt: new Date(now - ms).toISOString(),
+    action: { type: 'list_tabs', params: {} },
+  })
+
+  assert.equal(validateCommand(at(MAX_COMMAND_AGE_MS), now).type, 'list_tabs')
+  assert.throws(() => validateCommand(at(MAX_COMMAND_AGE_MS + 1), now), /Refused/)
+})
+
+/* Older agents do not stamp createdAt. Refusing everything from one would take
+ * the bridge down entirely, which is worse than the surprise this guards. */
+test('a command without a timestamp is not refused for staleness', () => {
+  const command = { commandId: 'b', action: { type: 'list_tabs', params: {} } }
+  assert.equal(validateCommand(command).type, 'list_tabs')
+})
+
+test('a stale command is refused whatever it asks for, valid or not', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z')
+  const command = {
+    commandId: 'b',
+    createdAt: new Date(now - 10 * 60 * 1000).toISOString(),
+    action: { type: 'not_a_real_command', params: {} },
+  }
+  assert.throws(() => validateCommand(command, now), /Refused/)
 })
