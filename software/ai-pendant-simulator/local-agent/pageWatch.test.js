@@ -176,6 +176,31 @@ test('a later check reports only what changed, with before and after', async () 
   assert.equal(stored.observed.values.status, 'Shipped')
 })
 
+test('a poll claims its slot before it starts, so a slow check is not doubled', async () => {
+  const store = temporaryStore()
+  const watch = createWatch(
+    { name: 'Slow page', url: 'https://example.com/slow', everyMs: 60_000 },
+    store,
+  )
+  const dueBefore = getWatch(watch.id, store).nextRunAt
+
+  let dueDuringTheCheck = null
+  await checkWatch(watch.id, {
+    ...store,
+    address: async () => {
+      /* Mid-check: this is what a second tick would read off the store. */
+      dueDuringTheCheck = getWatch(watch.id, store).nextRunAt
+      return { target: {}, url: 'https://example.com/slow', title: '', disposition: 'reloaded' }
+    },
+    read: async () => ({ values: { page: 'x' }, pageText: 'x', title: '', url: '' }),
+  })
+
+  assert.ok(
+    dueDuringTheCheck > dueBefore,
+    'the next run was pushed out before the work started, not after it finished',
+  )
+})
+
 test('a page that cannot be read is recorded, and the watch keeps its schedule', async () => {
   const store = temporaryStore()
   const watch = createWatch(

@@ -19,6 +19,24 @@ The browser never receives the relay API key. Every `/api/*` route runs on the
 server, reads `RELAY_URL` / `RELAY_API_KEY` from the runtime bindings, and
 proxies through the authenticated Cloudflare relay.
 
+## Two hosts, one build
+
+This app is the only dashboard. It ships to two places from the same source:
+
+| Command | Output | Serves | Backend |
+| --- | --- | --- | --- |
+| `npm run build` | `.svelte-kit/cloudflare` | the `ai-pendant-dashboard` Worker | relay, via this app's `/api/*` server routes |
+| `npm run build:agent` | `build-agent/` | the Mac agent at `http://127.0.0.1:8000/dashboard` | the Mac agent's own routes, direct |
+
+`src/lib/dataSource.ts` is the only file that knows which backend it is on;
+every component above it works in one normalised shape. `build-agent/` is a
+static SPA mounted under `/dashboard`, so its `kit.paths.base` is `/dashboard`
+— which `dataSource` also reads as the backend marker, so the two can never
+disagree.
+
+`build-agent/` is gitignored. Run `npm run build:agent` after pulling, or the
+Mac agent falls back to whatever is in `ai-pendant-simulator/dist`.
+
 ## Authentication
 
 `src/hooks.server.ts` reproduces the Worker gate exactly: an HMAC-signed

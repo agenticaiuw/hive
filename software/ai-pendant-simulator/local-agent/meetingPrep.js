@@ -58,8 +58,12 @@ const ACTION_MARKERS =
 /* A commitment stated as a whole short sentence, not buried mid-paragraph:
  * "I'll rerun the probe", "Mateo will send the BOM". The subject has to be the
  * first thing in the sentence, which is what a written commitment looks like
- * and what a transcript of someone thinking out loud does not. */
-const LEADING_COMMITMENT = /^(?:i|we|[a-z]+)\s?['’]?(?:ll|will)\s+\w+/i
+ * and what a transcript of someone thinking out loud does not.
+ *
+ * The separator is required rather than optional: with it optional the pattern
+ * split single words and read "all the raw components are cheap" as "a" + "ll"
+ * + " the", which is how that sentence ended up in a meeting brief. */
+const LEADING_COMMITMENT = /^(?:i|we|[a-z]+)(?:['’]ll|\s+will)\s+\w+/i
 
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'that', 'this', 'meeting', 'call', 'sync',

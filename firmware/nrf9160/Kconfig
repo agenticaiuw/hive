@@ -7,6 +7,25 @@ config PENDANT_RELAY_API_KEY
 	  Bearer token used by the deployed AI Pendant cloud relay. Keep this
 	  value out of source control and inject it at build time.
 
+config PENDANT_MIC_INJECT
+	bool "Debug: replace captured mic audio with debugger-injected PCM"
+	default n
+	help
+	  Build a debug-only audio injection path. When armed over SWD, every
+	  512-sample mic stage is overwritten with PCM the host streams into a
+	  RAM ring buffer before it reaches the Opus encoder, so an end-to-end
+	  test carries a byte-identical utterance at a known level instead of
+	  whatever the physical microphone happened to hear.
+
+	  This exists because the acoustic test rig (play speech out of a
+	  laptop speaker at the pendant) has two uncontrolled variables -
+	  speaker distance and host output volume - which make level-sensitive
+	  conclusions unfalsifiable. Digital injection removes both.
+
+	  Costs ~4.1 KB of RAM for the ring and its control block, and leaves
+	  the microphone hardware running but ignored. Leave this off in
+	  production: it is a harness feature, not a product feature.
+
 config PENDANT_BOOT_AGENT_JOB_ID
 	string "Existing relay job to download at boot for diagnostics"
 	default ""

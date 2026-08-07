@@ -230,13 +230,10 @@ async function blockDistractions({ distractions, mute }) {
   const hidden = []
   const failures = []
 
-  for (const app of distractions) {
-    try {
-      const wasHidden = await hideApp(app)
-      if (wasHidden) hidden.push(app)
-    } catch (error) {
-      failures.push({ app, reason: String(error?.message || error).slice(0, 160) })
-    }
+  try {
+    hidden.push(...(await setAppsVisible(distractions, false)))
+  } catch (error) {
+    failures.push({ app: 'apps', reason: String(error?.message || error).slice(0, 200) })
   }
 
   let muted = false
@@ -261,13 +258,10 @@ async function restoreDistractions(blocked) {
   const shown = []
   const failures = []
 
-  for (const app of blocked?.hidden ?? []) {
-    try {
-      await showApp(app)
-      shown.push(app)
-    } catch (error) {
-      failures.push({ app, reason: String(error?.message || error).slice(0, 160) })
-    }
+  try {
+    shown.push(...(await setAppsVisible(blocked?.hidden ?? [], true)))
+  } catch (error) {
+    failures.push({ app: 'apps', reason: String(error?.message || error).slice(0, 200) })
   }
 
   /* Only unmute what this session muted. The owner may have been working in
@@ -283,30 +277,48 @@ async function restoreDistractions(blocked) {
   return { shown, failures }
 }
 
-/** Hide only what is already running — launching Slack to hide it is absurd. */
-async function hideApp(appName) {
-  const script = `
-tell application "System Events"
-  if exists (process "${escapeAppleScript(appName)}") then
-    set visible of process "${escapeAppleScript(appName)}" to false
-    return "hidden"
-  end if
-end tell
-return "not running"`
-  const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 10_000 })
-  return String(stdout).trim() === 'hidden'
-}
+/**
+ * Change visibility for a whole list in one script, and report only the apps
+ * that actually changed.
+ *
+ * One osascript, not one per app. A dozen concurrent osascript processes all
+ * talking to System Events fail — every one of them errored out on this Mac
+ * while the identical script run alone succeeded — and running them in series
+ * costs about twenty seconds, which the owner spends waiting to be allowed to
+ * start working. A single repeat loop is both faster and the only version that
+ * works.
+ *
+ * Returning what changed rather than what was asked for is what makes the
+ * restore honest: an app the owner had already hidden themselves is not
+ * something this session gets to un-hide at the end.
+ */
+async function setAppsVisible(apps, visible) {
+  const names = [...new Set(apps.map((app) => String(app || '').trim()).filter(Boolean))]
+  if (!names.length) return []
 
-async function showApp(appName) {
   const script = `
+set changed to {}
 tell application "System Events"
-  if exists (process "${escapeAppleScript(appName)}") then
-    set visible of process "${escapeAppleScript(appName)}" to true
-  end if
+  repeat with candidate in {${names.map((name) => `"${escapeAppleScript(name)}"`).join(', ')}}
+    try
+      -- Only what is already running: launching Slack in order to hide it is absurd.
+      if exists (process candidate) then
+        if visible of process candidate is ${visible ? 'false' : 'true'} then
+          set visible of process candidate to ${visible}
+          set end of changed to (candidate as string)
+        end if
+      end if
+    end try
+  end repeat
 end tell
-return "ok"`
-  await execFileAsync('osascript', ['-e', script], { timeout: 10_000 })
-  return true
+set AppleScript's text item delimiters to linefeed
+return changed as text`
+
+  const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 30_000 })
+  return String(stdout)
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean)
 }
 
 /*

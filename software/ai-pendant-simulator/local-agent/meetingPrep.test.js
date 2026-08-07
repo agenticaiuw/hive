@@ -290,11 +290,16 @@ test('conversational future tense is not a prior action item', () => {
       "Oh, um, so basically, we're just… I guess I'm just trying to assemble, like, a core team of people during the summer, and then we'll see how it goes from there.",
       "I'll rerun the latency probe tonight.",
       'Action item: Mateo to send the BOM by Friday.',
+      'all the raw components are extremely cheap.',
     ].join('\n'),
     'transcript.txt',
   )
 
   assert.equal(actions.length, 2)
+  assert.ok(
+    !actions.some((item) => item.text.startsWith('all the raw')),
+    '"a" + "ll" is not somebody promising something',
+  )
   assert.ok(!actions.some((item) => item.text.includes('core team of people')), 'that is someone talking')
   assert.ok(actions.some((item) => item.text === "I'll rerun the latency probe tonight."))
   assert.ok(actions.some((item) => item.text.includes('Mateo to send the BOM')))

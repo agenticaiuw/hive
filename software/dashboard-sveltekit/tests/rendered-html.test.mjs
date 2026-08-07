@@ -1070,3 +1070,179 @@ test("logout clears the host-only session cookie", async () => {
   );
   assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/);
 });
+
+test("serves the full Mac job list with its evidence through the ops proxy", async () => {
+  const worker = await loadWorker();
+  const relayApiKey = "server-side-relay-secret";
+  const proxied = [];
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: relayApiKey,
+    RELAY: {
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path !== "/v1/ops/proxy") {
+          return Response.json({ ok: false }, { status: 404 });
+        }
+        proxied.push({
+          authorization: request.headers.get("authorization"),
+          body: await request.json(),
+        });
+        // Exactly the shape the Mac agent's GET /jobs returns.
+        return Response.json({
+          jobs: [
+            {
+              jobId: "local_1",
+              type: "execute",
+              status: "completed",
+              command: "probe disk",
+              source: "probe",
+              createdAt: "2026-08-07T05:00:00.000Z",
+              updatedAt: "2026-08-07T05:00:04.000Z",
+              cancellable: false,
+              undo: { canUndo: true },
+              result: {
+                response: "Disk is 41% full.",
+                results: [
+                  {
+                    ok: true,
+                    status: "completed",
+                    action: {
+                      type: "run_shell",
+                      label: "df",
+                      params: {
+                        command: "df -h /Users/example/Projects",
+                        apiKey: "sk-live-should-never-render",
+                      },
+                    },
+                    stdout: "Filesystem  Size  Used\n/dev/disk3s5 926Gi 380Gi",
+                    stderr: "",
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const response = await worker.fetch(
+    new Request("https://dashboard.example/api/jobs", { headers: { cookie } }),
+    runtimeEnv,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+
+  // The Mac is asked first, because agent-initiated work never reaches the relay.
+  assert.deepEqual(proxied[0].body, {
+    method: "GET",
+    path: "/jobs",
+    body: null,
+    deviceId: "ops-dashboard",
+  });
+  assert.equal(proxied[0].authorization, `Bearer ${relayApiKey}`);
+  assert.equal(payload.origin, "mac-agent");
+
+  const [job] = payload.jobs;
+  assert.equal(job.source, "probe");
+  assert.equal(job.undo.canUndo, true);
+
+  // Evidence survives: the command that ran and what it printed are the whole
+  // point of the view, so unlike spoken transcripts they keep their real paths.
+  const [step] = job.result.results;
+  assert.equal(step.action.params.command, "df -h /Users/example/Projects");
+  assert.match(step.stdout, /\/dev\/disk3s5/);
+  // Credentials never do.
+  assert.equal(step.action.params.apiKey, "••••••• hidden");
+  assert.doesNotMatch(JSON.stringify(payload), /sk-live-should-never-render/);
+});
+
+test("falls back to relay history, and says so, when the Mac is asleep", async () => {
+  const worker = await loadWorker();
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: "server-side-relay-secret",
+    RELAY: {
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/ops/proxy") {
+          return Response.json(
+            { ok: false, error: "Mac bridge is offline." },
+            { status: 503 },
+          );
+        }
+        if (path === "/v1/ops/history") {
+          return Response.json({
+            ok: true,
+            entries: [
+              {
+                pipelineId: "pipe_1",
+                command: "what is my battery",
+                origin: "dashboard",
+                status: "completed",
+                jobStatus: "completed",
+                reply: "88 percent.",
+                createdAt: "2026-08-07T05:00:00.000Z",
+                updatedAt: "2026-08-07T05:00:02.000Z",
+              },
+            ],
+          });
+        }
+        return Response.json({ ok: false }, { status: 404 });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const response = await worker.fetch(
+    new Request("https://dashboard.example/api/jobs", { headers: { cookie } }),
+    runtimeEnv,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.origin, "relay-history");
+  assert.equal(payload.jobs[0].pipelineId, "pipe_1");
+  // A short list must never read as a quiet Mac.
+  assert.match(payload.note, /Mac bridge is offline/);
+  assert.match(payload.note, /work the Mac started on its own is not in this list/);
+});
+
+test("reports scheduled routines as unreadable from the cloud rather than absent", async () => {
+  const worker = await loadWorker();
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: "server-side-relay-secret",
+    RELAY: {
+      // `/routines` is not on the relay's ops-proxy allowlist, so this is what
+      // the deployed dashboard really gets back.
+      async fetch() {
+        return Response.json(
+          {
+            ok: false,
+            error:
+              "Blocked for safety: path not allowed for ops proxy (/routines).",
+          },
+          { status: 403 },
+        );
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const response = await worker.fetch(
+    new Request("https://dashboard.example/api/routines", {
+      headers: { cookie },
+    }),
+    runtimeEnv,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.routines, []);
+  assert.match(payload.note, /not readable from the cloud dashboard/);
+  assert.match(payload.note, /They run on the Mac whether or not anything is watching/);
+});

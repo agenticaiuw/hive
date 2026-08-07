@@ -1627,7 +1627,9 @@ blockquote {
 
 .jobs-rail {
   min-width: 0;
-  max-height: 560px;
+  /* Tall enough to be worth scrolling, short enough that the detail beside it
+     stays on screen. */
+  max-height: min(70vh, 720px);
   overflow-y: auto;
   padding-right: 6px;
 }

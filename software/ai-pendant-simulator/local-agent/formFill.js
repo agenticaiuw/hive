@@ -122,8 +122,19 @@ export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
     if (tag === 'label') {
       if (!closing) {
         const text = textAfter(source, match.index + match[0].length)
-        pendingLabel = text
+        const owner = attributes.for
+          ? controls.find((control) => control.id === attributes.for)
+          : null
         if (attributes.for) labelFor.set(attributes.for, text)
+        /* A label that trails its own control must not become the label of the
+         * next one — that is how "Checked checkbox" ended up naming the box
+         * underneath it, since Bootstrap puts the label after the input. */
+        if (owner) {
+          if (!owner.label) owner.label = text
+          pendingLabel = ''
+        } else {
+          pendingLabel = text
+        }
       }
       continue
     }
@@ -444,7 +455,22 @@ export function buildPayload(elements, filledByRef) {
     }
 
     if (element.inputType === 'checkbox' || element.inputType === 'radio') {
-      const checked = filled ? truthy(filled.value) : Boolean(element.checked)
+      /*
+       * The page decides, not the request. Trusting the value we asked for
+       * produced a manifest that listed a ticked box next to a screenshot of
+       * an empty one — a click can be swallowed by a re-render or a restored
+       * form state, and "exactly what will be sent" has to survive that.
+       */
+      const checked = Boolean(element.checked)
+      if (filled && truthy(filled.value) !== checked) {
+        omitted.push({
+          name,
+          label: element.label,
+          reason: checked
+            ? 'asked to be cleared, but the page still shows it ticked'
+            : 'asked to be ticked, but the page still shows it unticked',
+        })
+      }
       if (!checked) continue
       entries.push({
         name,

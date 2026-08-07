@@ -768,6 +768,126 @@ static bool take_remote_press(void)
 	return true;
 }
 
+#ifdef CONFIG_PENDANT_MIC_INJECT
+/*
+ * Debug mic injection (harness builds only; see CONFIG_PENDANT_MIC_INJECT).
+ *
+ * Every end-to-end test used to play speech out of the host's speakers so the
+ * physical I2S mic would hear it.  That rig has two variables nobody was
+ * holding still — the laptop's distance from the pendant and the host output
+ * volume — so any conclusion about capture level was unfalsifiable.  This path
+ * replaces the staged mic PCM with bytes the debugger wrote, which makes an
+ * utterance reproducible to the sample.
+ *
+ * Same shape as pendant_remote_press above: plain volatile globals a J-Link
+ * writes over SWD, no protocol, no driver on the target.  Layout is a true
+ * SPSC ring — the host owns head, this firmware owns tail, fill is derived —
+ * so the two sides never need a lock across the debug port.
+ *
+ *   w4  <&pendant_inject_arm> 1        arm (do this before the press)
+ *   loadfile <pcm.bin>, <&pendant_inject_ring + tail*2>
+ *   w4  <&pendant_inject_head> <n>     publish the samples just written
+ *   w4  <&pendant_inject_eof> 1        no more PCM coming; stop counting
+ *                                      underruns and emit silence
+ *
+ * A power-of-two frame count lets the index difference be a mask instead of a
+ * modulo, and makes the unsigned wrap of (head - tail) exact.
+ */
+#define PENDANT_INJECT_RING_FRAMES 2048U
+#define PENDANT_INJECT_RING_MASK (PENDANT_INJECT_RING_FRAMES - 1U)
+BUILD_ASSERT((PENDANT_INJECT_RING_FRAMES &
+	      (PENDANT_INJECT_RING_FRAMES - 1U)) == 0U,
+	     "inject ring must be a power of two");
+BUILD_ASSERT(PENDANT_INJECT_RING_FRAMES >= 2U * MIC_STAGE_FRAMES,
+	     "inject ring must hold at least two stages of runway");
+
+/*
+ * 2048 frames = 4,096 B = 131.07 ms at SAMPLE_RATE 15625, against a 32.77 ms
+ * stage period: four stages of runway.  Sized against the host's measured
+ * refill round-trip (a J-Link loadfile of a half ring plus the head write),
+ * not a guess — see software/ai-pendant-simulator/scripts/inject-audio.mjs,
+ * which refills whenever the ring is half empty and therefore has ~65 ms to
+ * complete each round trip.  RAM is the binding constraint on this image
+ * (95.79% before this ring), so it does not get to be bigger "just in case";
+ * pendant_inject_underruns is what tells you if it was too small.
+ */
+volatile int16_t pendant_inject_ring[PENDANT_INJECT_RING_FRAMES] __aligned(4);
+/* Host writes: 1 = replace mic audio with the ring. */
+volatile uint32_t pendant_inject_arm;
+/* Host writes: producer index, in frames, free-running mod the ring size. */
+volatile uint32_t pendant_inject_head;
+/* Firmware writes: consumer index. The host reads it to compute free space. */
+volatile uint32_t pendant_inject_tail;
+/* Host writes: the utterance is fully queued; a dry ring is no longer a bug. */
+volatile uint32_t pendant_inject_eof;
+/* Firmware writes: stages that went out short because the host fell behind. */
+volatile uint32_t pendant_inject_underruns;
+/* Firmware writes: frames actually substituted into the uplink. */
+volatile uint32_t pendant_inject_frames;
+
+/*
+ * Overwrite one staged mic block with injected PCM. Returns false when
+ * injection is not armed, in which case the caller's real mic samples stand.
+ */
+static bool pendant_inject_fill_stage(int16_t *samples, size_t frame_count)
+{
+	if (pendant_inject_arm == 0U) {
+		return false;
+	}
+
+	uint32_t tail = pendant_inject_tail;
+	uint32_t fill = (pendant_inject_head - tail) & PENDANT_INJECT_RING_MASK;
+	size_t take = MIN((size_t)fill, frame_count);
+
+	for (size_t i = 0U; i < take; ++i) {
+		samples[i] = pendant_inject_ring[(tail + i) &
+						 PENDANT_INJECT_RING_MASK];
+	}
+	/* Samples are consumed before the tail moves, so the host never
+	 * overwrites a frame this stage is still reading. */
+	compiler_barrier();
+	pendant_inject_tail = (tail + (uint32_t)take) &
+			      PENDANT_INJECT_RING_MASK;
+	pendant_inject_frames += (uint32_t)take;
+
+	if (take < frame_count) {
+		/*
+		 * Pad with digital silence rather than the live mic. Letting
+		 * real audio back in on a starved stage would quietly restore
+		 * the acoustic coupling this whole path exists to remove, and
+		 * the run would look fine while measuring the wrong thing.
+		 */
+		memset(&samples[take], 0,
+		       (frame_count - take) * sizeof(int16_t));
+		if (pendant_inject_eof == 0U) {
+			++pendant_inject_underruns;
+		}
+	}
+	return true;
+}
+
+/*
+ * Injection health rides in the existing "Conversation stats:" line rather
+ * than a line of its own: a starved ring produces silence, silence looks
+ * exactly like a working run that had nothing to say, and the number that
+ * distinguishes them has to be where someone reading the run will see it.
+ */
+#define PENDANT_INJECT_STATS_FMT \
+	" inject_frames=%u inject_underruns=%u"
+#define PENDANT_INJECT_STATS_ARGS \
+	, pendant_inject_frames, pendant_inject_underruns
+#else
+static inline bool pendant_inject_fill_stage(int16_t *samples,
+					     size_t frame_count)
+{
+	ARG_UNUSED(samples);
+	ARG_UNUSED(frame_count);
+	return false;
+}
+#define PENDANT_INJECT_STATS_FMT ""
+#define PENDANT_INJECT_STATS_ARGS
+#endif /* CONFIG_PENDANT_MIC_INJECT */
+
 static void clear_button_events(void)
 {
 	while (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
@@ -2974,6 +3094,13 @@ static int run_conversation(const struct device *i2s)
 	convo_uplink_drops = 0U;
 	convo_mic_drops = 0U;
 	convo_tx_peak = 0U;
+#ifdef CONFIG_PENDANT_MIC_INJECT
+	/* Per-conversation, like every other counter here. Head/tail are
+	 * deliberately untouched: the host prefills the ring before pressing,
+	 * and resetting the indices here would throw that prefill away. */
+	pendant_inject_frames = 0U;
+	pendant_inject_underruns = 0U;
+#endif
 	convo_uplink_ducked = false;
 	convo_uplink_holding = false;
 	convo_dl_active_until = 0;
@@ -3151,6 +3278,11 @@ static int run_conversation(const struct device *i2s)
 			amplified = CLAMP(amplified, INT16_MIN, INT16_MAX);
 			mic_stage_samples[stage_frames] = (int16_t)amplified;
 			if (++stage_frames == MIC_STAGE_FRAMES) {
+				/* Harness builds only, and only while armed:
+				 * swap the mic's stage for injected PCM before
+				 * the encoder ever sees it. */
+				(void)pendant_inject_fill_stage(
+					mic_stage_samples, MIC_STAGE_FRAMES);
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
 				stage_frames = 0U;
@@ -3233,12 +3365,12 @@ static int run_conversation(const struct device *i2s)
 	printk("Conversation stats: rx_blocks=%u tx_blocks=%u tx_starved=%u "
 	       "decoded_packets=%u max_loop_ms=%u fifo_left=%u "
 	       "uplink_drops=%u mic_drops=%u tx_peak=%u "
-	       "duck_ms=%u uplink_held=%u\n",
+	       "duck_ms=%u uplink_held=%u" PENDANT_INJECT_STATS_FMT "\n",
 	       convo_rx_blocks, convo_tx_blocks, convo_tx_starved,
 	       convo_decoded_packets, convo_max_loop_ms,
 	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
 	       convo_mic_drops, convo_tx_peak, convo_uplink_duck_ms,
-	       convo_uplink_held);
+	       convo_uplink_held PENDANT_INJECT_STATS_ARGS);
 	printk("Codec cost: decode avg=%u us max=%u us n=%u | "
 	       "encode avg=%u us max=%u us n=%u\n",
 	       convo_decode_calls

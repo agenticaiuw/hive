@@ -354,6 +354,17 @@ export async function checkWatch(
   if (!watch) throw new Error(`No watch ${id}`)
 
   const startedAt = new Date().toISOString()
+  /*
+   * Claim the slot before doing the work, not after.
+   *
+   * A poll holds the browser for several seconds, and the tick that fired
+   * while it was still running found the same watch still due and started a
+   * second one. Both finished against the same page and the owner was told
+   * about one change twice.
+   */
+  commit(id, filePath, (stored) => {
+    stored.nextRunAt = nextRunAt(stored.schedule, Date.now())
+  })
   const callOptions = {
     command: `watch ${watch.name}`,
     source: 'page-watch',
@@ -454,7 +465,6 @@ export async function checkWatch(
   commit(watch.id, filePath, (stored) => {
     stored.lastCheckedAt = startedAt
     stored.checkCount += 1
-    stored.nextRunAt = nextRunAt(stored.schedule, Date.now())
   })
 
   return outcome
@@ -471,14 +481,20 @@ function commit(id, filePath, mutate) {
 }
 
 let timer = null
+const inFlight = new Set()
 
 /** Poll everything due, one page at a time — they share the owner's browser. */
 export async function tickPageWatches(now = Date.now(), { filePath = STORE_PATH } = {}) {
   const due = load(filePath).watches.filter(
-    (watch) => watch.enabled && watch.nextRunAt && watch.nextRunAt <= now,
+    (watch) =>
+      watch.enabled &&
+      watch.nextRunAt &&
+      watch.nextRunAt <= now &&
+      !inFlight.has(watch.id),
   )
   const results = []
   for (const watch of due) {
+    inFlight.add(watch.id)
     try {
       results.push(await checkWatch(watch.id, { filePath }))
     } catch (error) {
@@ -487,6 +503,8 @@ export async function tickPageWatches(now = Date.now(), { filePath = STORE_PATH 
         watchId: watch.id,
         error: String(error?.message || error),
       })
+    } finally {
+      inFlight.delete(watch.id)
     }
   }
   return results

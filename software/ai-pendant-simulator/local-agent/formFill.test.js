@@ -165,6 +165,31 @@ test('an unticked box is absent from the payload, the way a browser omits it', (
   assert.equal(entries.filter((entry) => entry.name === 'my-check').length, 1)
 })
 
+test('a tick that did not take is reported as not taken', () => {
+  /* The page still shows e7 unticked even though it was asked for. The
+   * manifest must follow the page, or it is describing a request that will not
+   * happen. */
+  const { elements } = linked()
+  const { entries, omitted } = buildPayload(elements, new Map([['e7', { value: true }]]))
+  assert.equal(entries.filter((entry) => entry.name === 'my-check').length, 1)
+  assert.match(
+    omitted.find((entry) => entry.label === 'Default checkbox').reason,
+    /still shows it unticked/,
+  )
+})
+
+test('a trailing label names its own control, not the next one', () => {
+  /* Bootstrap writes <input id=x><label for=x>, so the label is parsed after
+   * the control it belongs to. */
+  const { controls } = parseFormHtml(
+    '<form><input type="checkbox" id="a" name="a"><label for="a">First box</label>' +
+      '<input type="checkbox" id="b" name="b"><label for="b">Second box</label></form>',
+    PAGE_URL,
+  )
+  assert.equal(controls.find((control) => control.id === 'a').label, 'First box')
+  assert.equal(controls.find((control) => control.id === 'b').label, 'Second box')
+})
+
 test('the preview spells out the request the owner is about to make', () => {
   const { form, elements } = linked()
   const { entries } = buildPayload(elements, new Map([['e0', { value: 'Wisconsin & co' }]]))

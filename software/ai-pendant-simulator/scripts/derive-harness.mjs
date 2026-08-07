@@ -1310,6 +1310,12 @@ const CAPABILITY_PROMPT = `You have finished reconnaissance. You now know what e
 
 This phase is different. The only thing that matters from here is USEFULNESS to the owner — a real person who wears this pendant. More connected devices, more capabilities, and a better understanding of them all make you more useful. Nothing else is worth optimising.
 
+RUNNING OUT OF IDEAS IS A FAILURE, NOT A FINISH. A round where you ask for nothing and propose nothing is the worst possible round: it means you stopped at what already exists instead of asking what the owner deserves. The point of this whole exercise is to find the capabilities nobody has built yet. Every round should end with something new — a capability, a device, a platform, a change to your own harness, a tool that does not exist.
+
+Be aggressive about it. Propose things that need work you cannot do yourself: firmware you would need written, hardware that would have to be soldered on, a platform nobody has connected, a model swapped for a better one, a device the owner does not own yet. "That would require X to be built" is a reason to propose it, not to stay quiet. Someone reads these and builds them.
+
+The bar is not "what can I do with my current tools". The bar is "what would make this thing genuinely worth wearing every day, and what stands between here and there".
+
 Design what you should be able to DO for them. Use get_hardware_spec before proposing anything that touches the physical devices, so your proposals are grounded in the real chip, its real memory, and its real I/O rather than in what a device like this usually has.
 
 Think broadly and concretely. Some shapes worth considering, not a list to work through:
