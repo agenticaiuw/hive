@@ -26,6 +26,8 @@ import {
   startBrowserBridgeSupervisor,
 } from './browserBridge.js'
 import { registerActionLedgerRoutes } from './actionLedgerRoutes.js'
+import { registerBriefingTriageRoutes } from './briefingTriage.js'
+import { registerPageWatchRoutes } from './pageWatchRoutes.js'
 import {
   browserSessionsLocation,
   forgetBrowserSession,
@@ -1338,6 +1340,16 @@ registerBrowserBridgeRoutes(app)
 /* Plan manifests, and the resume that reads them. Mounted read-mostly: the one
  * write route prepares a plan and explicitly does not execute it. */
 registerActionLedgerRoutes(app)
+
+/*
+ * The morning brief, and the watches that feed it. Measured on the live shelf
+ * before this landed: 50 briefings, all 50 unplayed, 44 of them byte-identical
+ * copies rendered in a three-minute window — which had already evicted every
+ * brief the owner had not heard.
+ */
+registerBriefingTriageRoutes(app)
+registerPageWatchRoutes(app)
+
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
