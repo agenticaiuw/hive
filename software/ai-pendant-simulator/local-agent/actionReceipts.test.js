@@ -4,6 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+/* Snapshots are written to a .undo vault under config.workspacePath, resolved
+ * once at import with no parameter to override it. Redirect the workspace
+ * before actionReceipts.js is evaluated so the owner's real vault is never
+ * written by a test run. */
+import './testWorkspace.js'
+
 import {
   actionIdFor,
   buildActionReceipt,

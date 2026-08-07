@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+
+/* handleWork() syncs product state, which reaches sessionStore.js and writes
+ * pendant-sessions.json. sessionStore takes a { filePath }, but productSync
+ * Client.js does not thread one through, so redirect the workspace instead of
+ * changing a production signature. */
+import './testWorkspace.js'
+
 import { LOCAL_AGENT_URL, RELAY_URL } from './bridgeConfig.js'
 import { handleWork } from './bridge.js'
 

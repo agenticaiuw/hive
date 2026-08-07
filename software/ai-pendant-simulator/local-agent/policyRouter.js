@@ -6,6 +6,7 @@ import { matchMailTriageCommand } from './mailTriage.js'
 import { matchMeetingFollowupCommand } from './meetingFollowup.js'
 import { findClosestInstalledApp, getMachineContext } from './machineContext.js'
 import { resolveUserPath } from './security.js'
+import { CAPABILITY_GAP_MATCHERS } from './capabilityGapsActions.js'
 
 /*
  * Which brain answers this request.
@@ -80,6 +81,19 @@ const OPEN_QUESTION =
   /^(?:what|which|who|whose|where|when|how|why|do i|does|is there|are there|can you tell me)\b/i
 
 const DETERMINISTIC_MATCHERS = [
+  /*
+   * Order is the whole point of putting these first. briefing.js claims
+   * /\bevery\s+(?:week)?day?\s*morning\b/, so "every weekday morning check my
+   * work portal" resolved deterministically to compose_briefing — the older,
+   * narrower brief that opens no authenticated page, drafts nothing, and has
+   * no review queue. No model was ever consulted, so nothing surfaced the
+   * substitution. Below that entry these matchers never see the sentence.
+   *
+   * They are strictly more specific than briefing.js's: "brief me", "morning
+   * brief", "prepare my workday", "what did I miss in email", "read my
+   * schedule" and "wrapup" still belong to it.
+   */
+  ...CAPABILITY_GAP_MATCHERS,
   {
     intent: 'set_volume',
     readOnly: false,

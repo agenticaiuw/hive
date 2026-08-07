@@ -4,6 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+/* Prepared follow-ups are written under workspace/meeting-followup, a module
+ * constant with no override, and this file reads workspacePath itself — so the
+ * redirect has to land before config.js is evaluated. */
+import './testWorkspace.js'
+
 import { workspacePath } from './config.js'
 import {
   formatSummary,

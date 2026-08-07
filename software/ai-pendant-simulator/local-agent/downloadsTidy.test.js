@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 
 import {
   applyTidy,
@@ -14,6 +14,23 @@ import {
   planTidy,
   undoTidy,
 } from './downloadsTidy.js'
+
+/*
+ * A plan store of this process's own, which is the whole point of the module
+ * resolving storePath() per call rather than at import.
+ *
+ * The default is the owner's real workspace, and saveStore() keeps only the
+ * last 20 plans. Every other writer of that one file — the agent app the owner
+ * has running, computerControl.js tidy actions, scripts/pendant-tidy.mjs, or
+ * simply this test file running again in a parallel `node --test` process —
+ * does a read-modify-write on the whole document, so it can evict the plan a
+ * test previewed a moment ago. apply then fails with "No tidy plan ... Preview
+ * one first." on a plan the test is holding in its hand: green alone, red at
+ * random in the full suite.
+ */
+const storeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'pendant-tidy-store-'))
+process.env.PENDANT_TIDY_STORE_PATH = path.join(storeDirectory, 'plans.json')
+after(() => fs.rmSync(storeDirectory, { force: true, recursive: true }))
 
 function sandbox(t, files = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pendant-tidy-test-'))

@@ -248,6 +248,11 @@ import { registerGoalRouterRoutes } from './goalRouter.js'
 import { registerVoiceNotesRoutes } from './voiceNotes.js'
 import { registerVisionLoopRoutes } from './visionLoopRoutes.js'
 import { registerWorkbenchRoutes } from './workbenchRoutes.js'
+import { registerCapabilityGapsRoutes } from './capabilityGaps.js'
+import { registerHandleThisRoutes } from './handleThisRoutes.js'
+import { registerBrowserJobRoutes } from './browserJobRunner.js'
+import { registerCrossCheckRoutes } from './crossCheck.js'
+import { registerBrowserProvenanceRoutes } from './browserProvenance.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1407,6 +1412,27 @@ registerVisionLoopRoutes(app)
  * belongs to whichever capability owns the work, and the sweeper deletes, so
  * neither is exposed as a route. */
 registerWorkbenchRoutes(app)
+
+/* Reports which of the five wiring splices have landed, so none of it has to
+ * be remembered. This is the audit that found the misrouting. */
+registerCapabilityGapsRoutes(app)
+
+/* "Handle this" — gather across the owner's tabs, reconcile what the lenses
+ * disagree about, draft through formPreview. No approve or send route exists. */
+registerHandleThisRoutes(app)
+
+/* Two browser backends behind one job queue, with the choice learned per
+ * origin rather than read off a site list. */
+registerBrowserJobRoutes(app)
+
+/* Read one page several ways and report where the readings disagree instead of
+ * picking one. Overlaps handle-this deliberately: this answers a question about
+ * a page, that one prepares a draft from several tabs. */
+registerCrossCheckRoutes(app)
+
+/* Where every extracted claim and every filled field came from, so a wrong
+ * briefing can be traced to the page rather than argued about. */
+registerBrowserProvenanceRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
