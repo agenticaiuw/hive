@@ -57,3 +57,4 @@ __pycache__/
 
 # Harness per-agent round locks: process-local, never shared.
 diagnostics/harness-derivation/*.lock
+software/ai-pendant-simulator/local-agent/memory/*.bak
