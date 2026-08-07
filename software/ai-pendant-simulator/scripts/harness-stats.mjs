@@ -74,13 +74,23 @@ for (const row of rows) {
 
 const order = ['control', 'commons', 'unrecorded'].filter((name) => conditions.has(name))
 process.stdout.write(
-  `condition    agents rounds  calls  discovery%  recall/rnd  prop/rnd  find/rnd  msg/rnd  probe/rnd\n`,
+  `condition    agents rounds  calls  discovery%  prop/rnd  find/rnd  probe/rnd  silent  wasted-calls\n`,
 )
 for (const name of order) {
   const group = conditions.get(name)
   const sum = (key) => group.reduce((total, row) => total + row[key], 0)
   const rounds = group.length
   const calls = sum('calls')
+
+  /*
+   * A silent round is one that produced no proposal at all. It is the number
+   * the control shell exists to reduce, and the one worth watching hardest:
+   * it costs a full round's budget and leaves nothing behind, so the calls
+   * spent inside it are the clearest measure of waste this harness has.
+   */
+  const silent = group.filter((row) => row.proposals === 0)
+  const wasted = silent.reduce((total, row) => total + row.calls, 0)
+
   process.stdout.write(
     [
       name.padEnd(12),
@@ -88,11 +98,11 @@ for (const name of order) {
       String(rounds).padStart(6),
       String(calls).padStart(6),
       `${((100 * sum('discovery')) / calls).toFixed(1)}%`.padStart(11),
-      (sum('recall') / rounds).toFixed(2).padStart(11),
       (sum('proposals') / rounds).toFixed(2).padStart(9),
       (sum('findings') / rounds).toFixed(2).padStart(9),
-      (sum('messages') / rounds).toFixed(2).padStart(8),
       (sum('probes') / rounds).toFixed(2).padStart(10),
+      `${silent.length}/${rounds}`.padStart(8),
+      `${wasted} (${((100 * wasted) / calls).toFixed(0)}%)`.padStart(14),
     ].join('') + '\n',
   )
 }
