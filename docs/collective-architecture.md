@@ -363,6 +363,17 @@ publishes `/capabilities` built from its live router, so `discover:routes` puts
 equivalent, so the only relay knowledge in the commons is whatever paths some
 agent happened to guess and probe.
 
+Measured, and it is not a shortfall so much as a hole:
+
+| surface | in the commons | published |
+|---|---|---|
+| Mac agent routes | 103 | ~120 (**86%**) |
+| relay routes | **0** | 41 (**0%**) |
+
+Not one relay path. And the relay is the surface the pendant actually talks to —
+the collective knows the machine the owner is not holding, and nothing about the
+one they are.
+
 Which means **the agent that can least see its own surface is the one that most
 restated a request for something on that surface.** relay-realtime is not
 careless; it is blind in the one direction nobody instrumented.
