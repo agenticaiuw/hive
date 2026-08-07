@@ -246,6 +246,7 @@ import {
 import { triageNotifications } from './notificationTriage.js'
 import { registerGoalRouterRoutes } from './goalRouter.js'
 import { registerVoiceNotesRoutes } from './voiceNotes.js'
+import { registerVisionLoopRoutes } from './visionLoopRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1395,6 +1396,11 @@ registerMeetingPrepRoutes(app)
  * happens next. Lifts the transcript the pipeline already has rather than
  * opening a second path to the mic. */
 registerVoiceNotesRoutes(app)
+
+/* Drive the UI through the accessibility tree, never the screen. Plans and
+ * reports today; blocked on an Accessibility grant for this exact binary, and
+ * says so rather than degrading into pixels. */
+registerVisionLoopRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
