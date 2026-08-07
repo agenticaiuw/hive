@@ -14,6 +14,7 @@
  * and two more the relay needs because it is the side that survives sleep:
  *   {kind:'weekly',   at:'HH:MM', days:['mon',...]}   "every weekday at 5"
  *   {kind:'once',     at:'<ISO>'}                     "tell me in an hour"
+ *   {kind:'once',     inMs:N}                         same, without clock math
  */
 
 export const DEFAULT_TIMEZONE = 'America/Chicago'
@@ -150,11 +151,35 @@ function normalizeDays(value) {
   return days.sort((a, b) => DAY_NAMES.indexOf(a) - DAY_NAMES.indexOf(b))
 }
 
+/*
+ * "Queue this up" and "tell me in an hour" are relative, and the caller is
+ * usually a Worker whose Date is UTC and whose owner is not. Making every
+ * caller do `new Date(Date.now() + 3600e3).toISOString()` puts that arithmetic
+ * in N places; one of them will get it wrong. So a one-shot may be declared as
+ * a delay, and it is resolved to an absolute instant HERE, once, at
+ * normalization time — never stored relative. A stored `inMs` would re-resolve
+ * on every read and the one-shot would never be spent: it would fire, advance,
+ * and immediately be due again an hour later, forever.
+ */
+function resolveOnceInstant(schedule, now) {
+  const explicit = String(schedule.at ?? '').trim()
+  if (explicit) return Date.parse(explicit)
+  const delay = Number(schedule.inMs ?? schedule.delayMs)
+  if (!Number.isFinite(delay)) return NaN
+  /* +1 ms so `inMs: 0` ("as soon as you can") lands strictly in the future:
+   * nextRunAt() treats `from` as exclusive, so an instant equal to now reads
+   * as a spent schedule and createRoutine() rejects it. */
+  return now + Math.max(1, Math.floor(delay))
+}
+
 /**
  * Reject early and say why. A routine with a schedule nobody can compute is
  * worse than no routine: it looks armed on the dashboard and never fires.
+ *
+ * `now` only matters for relative one-shots (see resolveOnceInstant); every
+ * other kind is a pure function of its input.
  */
-export function normalizeSchedule(input) {
+export function normalizeSchedule(input, now = Date.now()) {
   const schedule = input && typeof input === 'object' ? input : {}
   const kind = String(schedule.kind || '').trim().toLowerCase()
   const timezone = isValidTimezone(schedule.timezone)
@@ -211,9 +236,12 @@ export function normalizeSchedule(input) {
   }
 
   if (kind === 'once') {
-    const at = Date.parse(String(schedule.at || ''))
+    const at = resolveOnceInstant(schedule, now)
     if (!Number.isFinite(at)) {
-      return { ok: false, error: 'once schedules need at:"<ISO timestamp>".' }
+      return {
+        ok: false,
+        error: 'once schedules need at:"<ISO timestamp>" or inMs:<delay>.',
+      }
     }
     return {
       ok: true,
@@ -236,7 +264,10 @@ export function normalizeSchedule(input) {
  * tomorrow, not an immediate second run.
  */
 export function nextRunAt(schedule, from = Date.now()) {
-  const normalized = normalizeSchedule(schedule)
+  /* `from`, not Date.now(): a relative one-shot must resolve against the same
+   * instant the caller is asking about, or a test (or a replayed tick) that
+   * passes an artificial clock gets an answer anchored to the wall clock. */
+  const normalized = normalizeSchedule(schedule, from)
   if (!normalized.ok) return null
   const spec = normalized.schedule
   const timezone = spec.timezone

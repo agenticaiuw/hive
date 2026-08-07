@@ -136,3 +136,43 @@ test('schedules describe themselves for receipts', () => {
   assert.equal(describeSchedule({ kind: 'interval', everyMs: 3_600_000 }), 'every 1 hour')
   assert.equal(describeSchedule({ kind: 'interval', everyMs: 1_800_000 }), 'every 30 minutes')
 })
+
+test('"in an hour" is expressible without the caller doing UTC clock math', () => {
+  const now = Date.parse('2026-08-07T12:00:00Z')
+  const normalized = normalizeSchedule({ kind: 'once', inMs: 3_600_000 }, now)
+  assert.equal(normalized.ok, true)
+  assert.equal(normalized.schedule.at, '2026-08-07T13:00:00.000Z')
+  // Resolved once, at normalization time, and stored absolute. A stored inMs
+  // would re-resolve on every read, so the one-shot would fire, advance, and
+  // immediately be an hour out again — a recurring routine by accident.
+  assert.equal(normalized.schedule.inMs, undefined)
+  assert.equal(
+    nextRunAt(normalized.schedule, now + 3_600_000),
+    null,
+    'a one-shot that has fired is spent',
+  )
+})
+
+test('an explicit instant always wins over a delay, and neither drifts', () => {
+  const now = Date.parse('2026-08-07T12:00:00Z')
+  const both = normalizeSchedule(
+    { kind: 'once', at: '2026-08-09T09:00:00Z', inMs: 1_000 },
+    now,
+  )
+  assert.equal(both.schedule.at, '2026-08-09T09:00:00.000Z')
+  // nextRunAt resolves a relative one-shot against `from`, not the wall clock,
+  // so a replayed or artificially-clocked tick gets the answer it asked for.
+  assert.equal(iso(nextRunAt({ kind: 'once', inMs: 60_000 }, now)), '2026-08-07T12:01:00.000Z')
+})
+
+test('"as soon as you can" lands on the next tick rather than reading as spent', () => {
+  const now = Date.parse('2026-08-07T12:00:00Z')
+  // nextRunAt treats `from` as exclusive, so an instant equal to now would be
+  // rejected at creation as a schedule with no next occurrence.
+  const due = nextRunAt(normalizeSchedule({ kind: 'once', inMs: 0 }, now).schedule, now)
+  assert.equal(due, now + 1)
+  assert.match(
+    normalizeSchedule({ kind: 'once' }).error,
+    /at:"<ISO timestamp>" or inMs/,
+  )
+})
