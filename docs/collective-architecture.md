@@ -311,6 +311,32 @@ is usually invisible because it reads as helpfulness.* Separate the fact from
 the framing at the point of generation, or the store will faithfully record the
 framing as part of the fact.
 
+### What the control shell actually bought, stated carefully
+
+Run unslotted so that rounds-per-cycle equals agents-eligible, 9 agents, 8
+cycles: **28 rounds against the 72 an unconditional loop would have run — 61%
+fewer.** Rounds per cycle went 3, 1, 3, 3, 6, 3, 6, 3, the sixes being the
+starvation floor sweeping up agents it had been holding.
+
+**That is 61% fewer rounds. It is not 61% less waste, and the difference
+matters.** Every floor-forced round turned out productive — 1 to 4 capabilities
+apiece. The agents being held were not empty; they were deferred. Proposals
+land at ~3.9 a round in both conditions, so 28 rounds produce proportionally
+fewer proposals than 72 would have.
+
+So the honest claim is that the shell **rate-limits** rather than eliminates: it
+spends the same per-round output on far fewer, better-motivated invocations, and
+guarantees nobody is silenced indefinitely. Whether that is a saving depends
+entirely on whether the skipped proposals were worth having. The dedup evidence
+— 64 same-agent near-duplicate pairs — suggests a meaningful share would have
+been restatement, but that is an inference and not a measurement.
+
+**And "silent rounds" has stopped discriminating.** It reads 0/242 now, because
+the proposal phase always produces something once an agent is out of recon. The
+earlier 3/25 → 0/49 improvement was mostly the recon fix, which let a stranded
+agent record at all — not the commons and not the gate. A metric that cannot go
+up any more is not measuring the thing it was chosen for.
+
 ### Differentiation and detachability pull against each other
 
 Wegner's third finding is that the benefit of a transactive memory system comes
