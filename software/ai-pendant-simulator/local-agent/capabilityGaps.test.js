@@ -325,13 +325,14 @@ test('watch_page builds anchor fields, not selectors, and is idempotent by url',
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('a weekday schedule is refused by name rather than stored as daily', async () => {
+test('a weekday schedule is stored as weekly, not flattened to daily', async () => {
   /*
-   * The eleven-vote ask says "every WEEKDAY morning" and
-   * local-agent/routines.js nextRunAt() understands only daily and interval.
-   * A weekday routine written there as daily fires on Saturday morning about a
-   * work portal nobody is looking at — and the owner believes it is right,
-   * which is worse than it never having been created.
+   * The eleven-vote ask says "every WEEKDAY morning". This used to be refused,
+   * because routines.js knew only daily and interval and a weekday routine
+   * written there as daily fires on Saturday morning about a work portal
+   * nobody is looking at — with the owner believing it is right, which is worse
+   * than it never having been created. The store learned `weekly` instead, so
+   * the honest answer is now yes rather than a well-explained no.
    */
   const created = []
   const deps = {
@@ -349,16 +350,45 @@ test('a weekday schedule is refused by name rather than stored as daily', async 
     },
     deps,
   )
-  assert.equal(weekday.ok, false)
-  assert.equal(weekday.status, 'blocked')
-  assert.match(weekday.message, /weekend/i)
-  assert.equal(created.length, 0, 'a refused schedule must not be written anyway')
+  assert.equal(weekday.ok, true)
+  assert.deepEqual(weekday.routine.schedule, {
+    kind: 'weekly',
+    at: '07:00',
+    days: [1, 2, 3, 4, 5],
+  })
+  assert.equal(created.length, 1)
 
-  const withDays = await runCapabilityGapAction(
-    { type: 'schedule_routine', params: { command: 'check my accounts', days: ['mon'] } },
+  /* A day set with no hour is a rhythm with no time. Inventing 08:00 for a
+   * promise the owner will hold us to is the same class of error. */
+  const noTime = await runCapabilityGapAction(
+    { type: 'schedule_routine', params: { command: 'check my accounts every weekday' } },
     deps,
   )
-  assert.equal(withDays.ok, false)
+  assert.equal(noTime.ok, false)
+  assert.equal(created.length, 1, 'a refused schedule must not be written anyway')
+})
+
+test('named days and "every other" are still refused, because the store keeps no such rule', async () => {
+  const created = []
+  const deps = {
+    addRoutine: (input) => {
+      created.push(input)
+      return { id: 'rtn_1', ...input }
+    },
+    routines: () => [],
+  }
+
+  for (const command of [
+    'check my accounts every Tuesday',
+    'check my accounts every other morning',
+  ]) {
+    const result = await runCapabilityGapAction(
+      { type: 'schedule_routine', params: { command, at: '07:00' } },
+      deps,
+    )
+    assert.equal(result.ok, false, command)
+    assert.equal(result.status, 'blocked')
+  }
   assert.equal(created.length, 0)
 })
 
