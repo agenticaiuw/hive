@@ -132,6 +132,18 @@ frameworks replaced with polling.
 sender and expensive to the receiver — precisely the incentive that produces
 both spam and silent nodes.
 
+*Confirmed here, 2026-08-07.* Across 647 bulletin messages the spread between
+agents is 11×: faculty-action sent 126, faculty-judgement 121, mac-planner 103
+— against relay-realtime's 11 and mac-vision's 15. Under the control shell a
+message makes its recipient eligible, so each one spends a peer's whole round
+while costing the sender nothing.
+
+It is **not** currently the bottleneck — only 5 messages were unread at the
+point of measurement, because recipients keep up. So the incentive is confirmed
+and the harm is not yet realised, and building a sender charge now would be
+fixing a problem this system does not have. Recorded so that if the unread
+backlog ever grows, the cause is already known and the 11× is the evidence.
+
 ## Exit is the variable
 
 Across the fiction, what separates a collective experienced as a *gift* from one
