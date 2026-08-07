@@ -37,6 +37,12 @@ import {
 } from './commons.mjs'
 import { findDuplicate } from './novelty.mjs'
 import { checkReachability, knownPrimitives } from './reachability.mjs'
+import {
+  createCapabilityRegistry,
+  listCapabilities,
+  normalizeCapabilityName,
+  registerFromCapabilityManifest,
+} from '../shared/capabilityRegistry.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '../../..')
@@ -666,6 +672,13 @@ function seedMessage(state) {
     : `Round ${state.round}. The orchestrator has acted on your previous requests — the grants are in your system prompt and any new tools are available. Continue discovering, and tell me what you still need.`
 }
 
+/*
+ * Filled by grantedToolLiveness() before the prompt is built, and deliberately
+ * NOT stored on `state` — it is a measurement of the world right now, and
+ * persisting it would let a stale verdict outlive the server that produced it.
+ */
+let GRANTED_LIVENESS = null
+
 function buildSystemPrompt(state) {
   const parts = [
     state.phase === 'task'
@@ -755,10 +768,38 @@ function buildSystemPrompt(state) {
     `- probe_http reaches ${RELAY_URL} and sends this agent's bearer token. Authenticated routes are open to you; "bearer-protected" in a description does not mean closed.`,
   )
   if (state.granted.tools.length) {
-    holdings.push(
-      `- Tools granted to you: ${state.granted.tools.map((tool) => tool.name).join(', ')}. ` +
-        'These are SCHEMAS, not implementations — calling one returns a note saying so. describe(name) will show you the grant.',
-    )
+    /*
+     * This line used to say every granted tool was a schema, full stop. That is
+     * now false for some of them, and an agent that cannot tell a live tool from
+     * a dead one is worse off than one told they are all dead: it will either
+     * plan around a capability it actually has, or plan on top of one it does
+     * not. The split is computed against the running system before the round
+     * starts, so it is a measurement rather than a claim.
+     */
+    const named = state.granted.tools.map((tool) => tool.name).join(', ')
+    const liveness = GRANTED_LIVENESS
+    if (!liveness || liveness.unavailable) {
+      holdings.push(
+        `- Tools granted to you: ${named}. ` +
+          'Nothing published a capability manifest this round, so none of them could be resolved to a real endpoint — treat them all as SCHEMAS. describe(name) will show you the grant.',
+      )
+    } else {
+      const listOf = (entries) =>
+        entries.map((entry) => `${entry.name} (${entry.reaches.join(', ')})`).join('; ')
+      holdings.push(
+        `- Tools granted to you: ${named}.` +
+          (liveness.live.length
+            ? ` LIVE — resolved against the running system's own capability manifest and really called, read-only: ${listOf(liveness.live)}.`
+            : '') +
+          (liveness.described.length
+            ? ` RESOLVED BUT NOT PERFORMED — these do map onto something real, but it has side effects, so calling one returns a description of what it would have done and calls nothing: ${listOf(liveness.described)}.`
+            : '') +
+          (liveness.dead.length
+            ? ` UNRESOLVED — nothing in the live inventory matches these, so calling one returns that verdict plus the nearest real capabilities: ${liveness.dead.join(', ')}. Renaming will not change this; a different SCHEMA might, and an enum of concrete operations resolves where a free-form string cannot.`
+            : '') +
+          ' An enum tool resolves per value, so one branch can be live while another is not. describe(name) shows the grant and what it resolves to.',
+      )
+    }
   }
   if (state.pending.length) {
     const oldest = state.pending.reduce(
@@ -1005,7 +1046,7 @@ const META_TOOLS = [
     function: {
       name: 'request_tool',
       description:
-        'Ask for a capability you do not have. Give a schema precise enough to implement from. Granting one gives you a SCHEMA, not an implementation — calling it returns a note saying so — so a request is a proposal about what should exist, not a way to obtain it this round.',
+        'Ask for a capability you do not have. Give a schema precise enough to implement from. A granted tool is resolved against the running system\'s own capability manifest when you call it: if your schema matches something real and read-only it really runs, if it matches something with side effects you get a description of what it would have called, and if it matches nothing you get that verdict plus the nearest real capabilities. Naming the operations you want as an ENUM is what makes that resolution possible — a free-form string resolves to nothing. A request is still a proposal about what should exist, not a way to get unblocked this round.',
       parameters: {
         type: 'object',
         properties: {
@@ -1417,15 +1458,27 @@ async function describeThing(name, state) {
    */
   const grantedTool = state.granted.tools.find((tool) => tool.name === wanted)
   if (grantedTool) {
+    /* "Does this work?" is now answerable rather than a flat no: the same
+     * resolver the call itself would go through is run here, so the agent can
+     * see what its tool maps onto before spending a call on it. */
+    const resolution = await resolveGrantedCall(grantedTool, {})
     return {
       name: grantedTool.name,
-      grantedInRound: grantedTool.round ?? null,
+      grantedInRound: grantedTool.round ?? grantedTool.grantedInRound ?? null,
       why: grantedTool.why ?? null,
-      parameters: grantedTool.parameters ?? null,
-      /* Said plainly, because the honest answer to "does this work?" is that a
-       * granted schema is a promise the orchestrator has not kept yet. */
-      status:
-        'Granted as a schema. Calling it returns a note saying it has no implementation yet — describe what you would do with it rather than assuming it acts.',
+      parameters: grantedTool.parameters ?? grantedTool.input_schema ?? null,
+      status: GRANTED_IMPLS[grantedTool.name]
+        ? 'Implemented directly by the harness.'
+        : resolution.status === 'resolved'
+          ? `Resolves to ${resolution.label} (confidence ${resolution.confidence.score}, ${resolution.confidence.band}). ` +
+            (isReadOnlyCapability(resolution.capability)
+              ? 'That is a read, so calling this tool really calls it.'
+              : 'That has side effects, so calling this tool describes it instead of performing it.')
+          : `Granted as a schema and not resolvable to anything real (${resolution.status}). ` +
+            'Calling it returns that verdict and the nearest real capabilities, not an action.',
+      ...(resolution.nearest ? { nearestRealCapabilities: resolution.nearest } : {}),
+      note:
+        'If this tool takes an enum, each value resolves separately — one branch can be live while another is not.',
     }
   }
 
@@ -1505,6 +1558,665 @@ async function macFetch(pathname, init) {
     body = text.slice(0, 4000)
   }
   return { ok: response.ok, status: response.status, body }
+}
+
+/* ======================================================================
+ * From a granted NAME to a thing that actually runs.
+ *
+ * THE DEFECT THIS EXISTS FOR. Every granted tool returned the same note —
+ * "granted a schema, no implementation yet" — and there was no path from that
+ * state to any other. The agents worked it out and tried to escape by renaming:
+ * browser-extension asked five times across rounds 1-9 (browser_enqueue_command,
+ * _implemented, browser_command_enqueue, _impl, _implemented again) and
+ * mac-terminal three times (mac_readonly_diagnostics, mac_read_diagnostics,
+ * _impl). They were not confused about what they wanted. They were asking for
+ * the IMPLEMENTATION as a separate object, because from inside the loop that is
+ * the only move available.
+ *
+ * WHY THERE IS NO TABLE HERE. The obvious fix — a switch on tool name mapping
+ * browser_enqueue_command to /browser/commands — is wrong twice over. It is
+ * wrong the moment an agent asks for tool 18, and it is wrong right now,
+ * because the agents' names are not the system's names and never will be:
+ * these tools were invented in prose by a model that had never read the router.
+ *
+ * WHAT IS USED INSTEAD. The system already describes itself. GET /capabilities
+ * on the Mac agent derives ~120 routes off the live Express router and 95
+ * executor action types off the dispatch table (local-agent/capabilityManifest.js),
+ * and shared/capabilityRegistry.js already knows how to turn any spelling of a
+ * name into a record. So a granted tool is resolved the way a caller's guess is
+ * resolved: score it against the running system's own inventory, take the match
+ * only if it is defensible, and refuse otherwise. Nothing here names a feature.
+ *
+ * WHAT THE GRANT PROVIDES AS EVIDENCE. Only what the agent wrote at request
+ * time and what it passed at call time:
+ *   - the enum value it SELECTED for this call. An agent calling
+ *     mac_readonly_inspect{operation:'running_apps'} has said what it wants far
+ *     more precisely than the tool's own name does, and a tool with an
+ *     operation enum is several capabilities behind one name — resolving the
+ *     TOOL to one endpoint would be wrong by construction, so the CALL is what
+ *     gets resolved.
+ *   - the tool name, at a third of the weight. 'mac', 'readonly' and 'impl' are
+ *     the agent's framing, not the system's vocabulary, and weighting them
+ *     equally is how browser_enqueue_command lands on /browser/status.
+ *   - property names, schema prose and `why`, at a tenth. Enough to break a
+ *     tie, never enough to make a match on their own — `why` is actively
+ *     adversarial evidence, since it usually names the thing the agent ALREADY
+ *     has and found insufficient.
+ * ====================================================================== */
+
+/*
+ * Calibrated against the 17 grants that already exist, then left alone.
+ * Every number is reported in the tool result beside the match it produced, so
+ * a bad weight shows up as a bad-looking answer rather than as silence.
+ */
+const RESOLVE_WEIGHTS = { intent: 0.5, arguments: 0.3, identity: 0.2 }
+const RESOLVE_MIN_SCORE = Number(process.env.HARNESS_RESOLVE_MIN || 0.45)
+const RESOLVE_MIN_MARGIN = Number(process.env.HARNESS_RESOLVE_MARGIN || 0.1)
+/*
+ * Bytes, not items. GET /jobs is 686 KB on this machine right now and
+ * GET /context-graph is 626 KB; a cap of "50 entries" would have let either of
+ * them through and taken the round's whole context with it.
+ */
+const RESOLVE_MAX_BYTES = Number(process.env.HARNESS_RESOLVE_MAX_BYTES || 24_000)
+/* A tool-name token is a third of a selected enum value, and everything the
+ * agent merely wrote in prose is a tenth. See the header. */
+const NAME_EVIDENCE_WEIGHT = 0.35
+const PROSE_EVIDENCE_WEIGHT = 0.1
+
+function capabilityTokens(text, keepParams = false) {
+  return normalizeCapabilityName(text, { keepParams }).split(' ').filter(Boolean)
+}
+
+/*
+ * A capability's two token sets.
+ *
+ * `identity` is what the thing IS — its path nouns, or the action type. Used to
+ * ask the reverse question: does the grant account for this capability, or did
+ * it just happen to share a word with a long description?
+ * `described` is everything the surface says about it, group note and
+ * implementing module included. That prose is the only reason GET /observe is
+ * findable at all: its path says "observe" and its note says "foreground app,
+ * running apps, ... browser sessions, path roots", which is four of the six
+ * operations mac_readonly_inspect asked for.
+ */
+function capabilityFacets(record) {
+  const identity =
+    record.kind === 'http'
+      ? capabilityTokens(String(record.invoke?.path ?? ''))
+      : capabilityTokens(
+          String(record.invoke?.action ?? record.invoke?.tool ?? record.name ?? ''),
+          true,
+        )
+  return {
+    record,
+    identity: [...new Set(identity)],
+    described: new Set([
+      ...identity,
+      ...capabilityTokens(record.what ?? ''),
+      ...capabilityTokens(record.module ?? ''),
+    ]),
+  }
+}
+
+/*
+ * The self-description, fetched once per process.
+ *
+ * Two candidate publishers are tried: the base this agent's own probe already
+ * points at, and the Mac agent the harness already holds a token for. Both are
+ * surfaces the harness is ALREADY configured against — no new address is
+ * invented. The relay publishes no inventory (it answers 401 on every path
+ * because its auth runs before routing, so a probe cannot even distinguish
+ * absent from forbidden), and rather than guess a path for it, it is left
+ * unpublished and every resolution says so.
+ */
+const CAPABILITY_CORPUS = { loaded: false, corpus: null, error: null }
+
+async function capabilityCorpus() {
+  if (CAPABILITY_CORPUS.loaded) return CAPABILITY_CORPUS
+  CAPABILITY_CORPUS.loaded = true
+
+  const seen = new Set()
+  const tried = []
+  for (const source of [
+    { baseUrl: RELAY_URL, token: RELAY_KEY },
+    { baseUrl: MAC_AGENT_URL, token: MAC_AGENT_TOKEN },
+  ]) {
+    const base = String(source.baseUrl || '').replace(/\/$/, '')
+    if (!base || seen.has(base)) continue
+    seen.add(base)
+
+    try {
+      const response = await fetchWithDeadline(`${base}/capabilities`, {
+        headers: { Authorization: `Bearer ${source.token}` },
+      })
+      if (!response.ok) {
+        tried.push(`${base}/capabilities -> ${response.status}`)
+        continue
+      }
+      const manifest = JSON.parse(await response.text())
+      if (!manifest?.http?.routes) {
+        tried.push(`${base}/capabilities -> 200 but no http.routes`)
+        continue
+      }
+
+      const registry = createCapabilityRegistry()
+      registerFromCapabilityManifest(registry, manifest, {
+        surface: 'mac',
+        credential: 'agent-token',
+        /* The URL we actually reached, not the one the manifest reports about
+         * itself — a process behind a port map is right about its routes and
+         * wrong about its address. */
+        baseUrl: base,
+      })
+
+      const facets = listCapabilities(registry).map(capabilityFacets)
+      /*
+       * Inverse document frequency over the registry's OWN descriptions, so
+       * "browser" (in 30 capabilities) cannot carry a match and "battery" (in
+       * one) can. Without it every browser_* grant matches every browser route
+       * equally well and the margin test never fires.
+       */
+      const df = new Map()
+      for (const facet of facets) {
+        for (const token of facet.described) df.set(token, (df.get(token) ?? 0) + 1)
+      }
+      const total = facets.length
+
+      CAPABILITY_CORPUS.corpus = {
+        facets,
+        source: `${base}/capabilities`,
+        service: manifest.service ?? null,
+        routeCount: manifest.http.routes.length,
+        actionCount: manifest.actions?.types?.length ?? 0,
+        idf: (token) => Math.max(0, Math.log(total / (1 + (df.get(token) ?? 0)))),
+        /*
+         * The surfaces this inventory does NOT cover, named by the manifest
+         * itself (OFF_BOX_SURFACES). "Not found here" is only "absent" once
+         * every surface has spoken, and none of these ever has: the relay
+         * answers 401 on every path because its auth runs before its router, so
+         * a probe cannot even tell absent from forbidden. Reported on every
+         * resolution so a refusal reads as "I cannot see that far" rather than
+         * "that does not exist".
+         */
+        unpublished: (manifest.surfaces ?? []).map((entry) => entry.surface),
+      }
+      return CAPABILITY_CORPUS
+    } catch (error) {
+      tried.push(`${base}/capabilities -> ${String(error?.message || error)}`)
+    }
+  }
+
+  CAPABILITY_CORPUS.error =
+    `No surface published a capability manifest, so no granted name could be resolved to anything real. Tried: ${tried.join('; ') || 'no base URL configured'}.`
+  return CAPABILITY_CORPUS
+}
+
+function schemaEnumValues(spec) {
+  if (!spec || typeof spec !== 'object') return []
+  if (Array.isArray(spec.enum)) return spec.enum.map(String)
+  if (Array.isArray(spec.items?.enum)) return spec.items.enum.map(String)
+  return []
+}
+
+function leafStrings(value, out = []) {
+  if (typeof value === 'string') out.push(value)
+  else if (Array.isArray(value)) for (const item of value) leafStrings(item, out)
+  else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key)
+      leafStrings(item, out)
+    }
+  }
+  return out
+}
+
+/** Everything the grant itself says, weighted by how much identity it carries. */
+function grantEvidence(tool, args = {}) {
+  const schema = asJsonSchema(tool.input_schema)
+  const properties = schema.properties ?? {}
+  const selectorProps = new Set()
+  const declaredEnums = {}
+  for (const [name, spec] of Object.entries(properties)) {
+    const values = schemaEnumValues(spec)
+    if (values.length) {
+      selectorProps.add(name)
+      declaredEnums[name] = values
+    }
+  }
+
+  /* The enum values the caller chose FOR THIS CALL. The highest-signal thing in
+   * the whole request: the agent's own word for the specific operation. */
+  const chosen = []
+  for (const [key, value] of Object.entries(args ?? {})) {
+    for (const one of Array.isArray(value) ? value : [value]) {
+      if (typeof one !== 'string') continue
+      if (selectorProps.has(key) || (declaredEnums[key] ?? []).includes(one)) {
+        chosen.push(one)
+      }
+    }
+  }
+
+  const weight = new Map()
+  const bump = (token, value) => {
+    if (token) weight.set(token, Math.max(weight.get(token) ?? 0, value))
+  }
+  for (const value of chosen) for (const t of capabilityTokens(value, true)) bump(t, 1)
+  for (const t of capabilityTokens(String(tool.name ?? ''), true)) {
+    bump(t, NAME_EVIDENCE_WEIGHT)
+  }
+  for (const name of Object.keys(properties)) {
+    for (const t of capabilityTokens(name, true)) bump(t, 0.15)
+  }
+  for (const text of leafStrings(tool.input_schema)) {
+    for (const t of capabilityTokens(text)) bump(t, PROSE_EVIDENCE_WEIGHT)
+  }
+  for (const t of capabilityTokens(String(tool.why ?? ''))) bump(t, PROSE_EVIDENCE_WEIGHT)
+
+  /* Anchors are what identifies THIS call, and nothing else. Prose is excluded
+   * on purpose: `why` habitually names the capability the agent already has. */
+  const anchors = new Map()
+  for (const value of chosen) {
+    for (const t of capabilityTokens(value, true)) anchors.set(t, 1)
+  }
+  for (const t of capabilityTokens(String(tool.name ?? ''), true)) {
+    if (!anchors.has(t)) anchors.set(t, NAME_EVIDENCE_WEIGHT)
+  }
+
+  const required = Array.isArray(schema.required) ? schema.required : []
+  return {
+    weight,
+    anchors,
+    properties: Object.keys(properties),
+    declaredEnums,
+    selectorProps,
+    chosen,
+    /* A required property whose value is an enum is a dispatch selector, not a
+     * handle; only free-form required properties are things a route could
+     * consume as a path parameter. */
+    freeRequired: required.filter((name) => !selectorProps.has(name)),
+  }
+}
+
+function suppliesParam(param, evidence, args) {
+  const wanted = normalizeCapabilityName(param, { keepParams: true })
+  const has = (name) => normalizeCapabilityName(name, { keepParams: true }) === wanted
+  return evidence.properties.some(has) || Object.keys(args ?? {}).some(has)
+}
+
+/** GET is the only effect this harness will produce. See invokeResolved(). */
+function isReadOnlyCapability(record) {
+  return (
+    record.kind === 'http' &&
+    String(record.invoke?.method ?? '').toUpperCase() === 'GET'
+  )
+}
+
+function scoreCapability(facet, evidence, args, idf) {
+  /*
+   * 1. INTENT. How much of what this call asked for does the capability
+   *    account for, weighted by how rare each word is in the inventory.
+   */
+  let matched = 0
+  let possible = 0
+  for (const [token, weight] of evidence.anchors) {
+    const value = weight * idf(token)
+    possible += value
+    if (facet.described.has(token)) matched += value
+  }
+  const intent = possible > 0 ? matched / possible : 0
+
+  /*
+   * 2. ARGUMENTS, structural rather than lexical, and the reason
+   *    relay_job_status lands on GET /jobs/:jobId instead of GET /ops/status —
+   *    which shares two of its three name tokens and would otherwise win. A
+   *    route that consumes the handle the grant requires is a better fit than
+   *    one that discards it, and a path parameter named jobId meeting a schema
+   *    property named jobId is not a coincidence.
+   */
+  const params = facet.record.kind === 'http' ? facet.record.requires ?? [] : []
+  let argumentFit
+  if (params.length) {
+    const supplied = params.filter((p) => suppliesParam(p, evidence, args)).length
+    argumentFit = supplied / params.length
+    if (evidence.freeRequired.length && supplied === 0) argumentFit = 0
+  } else {
+    /* No parameters: neutral, unless the grant requires a handle this thing
+     * cannot take, which is evidence against it. */
+    argumentFit = evidence.freeRequired.length ? 0.15 : 0.5
+  }
+
+  /*
+   * 3. IDENTITY, the reverse direction. A capability whose own name contains
+   *    words the grant never used is probably a neighbour of the right answer
+   *    rather than the answer: this is what separates GET /jobs/:jobId from
+   *    GET /jobs/:jobId/receipts, which are otherwise identical on every other
+   *    measure. Prose-level evidence does not count here — only a selector or
+   *    the tool's own name.
+   */
+  const identity = facet.identity.length
+    ? facet.identity.filter(
+        (token) => (evidence.weight.get(token) ?? 0) >= NAME_EVIDENCE_WEIGHT,
+      ).length / facet.identity.length
+    : 0
+
+  return {
+    facet,
+    score:
+      RESOLVE_WEIGHTS.intent * intent +
+      RESOLVE_WEIGHTS.arguments * argumentFit +
+      RESOLVE_WEIGHTS.identity * identity,
+    intent,
+    argumentFit,
+    identity,
+  }
+}
+
+function capabilityLabel(record) {
+  return record.kind === 'http'
+    ? `${record.invoke.method} ${record.invoke.path}`
+    : `${record.kind}:${record.invoke?.action ?? record.invoke?.tool ?? record.name}`
+}
+
+/**
+ * Resolve one CALL of a granted tool against the running system.
+ *
+ * Outcomes: `resolved`, `ambiguous` (a real naming collision, reported with
+ * both candidates), `unresolved` (nothing scored high enough), `unavailable`
+ * (nothing published an inventory). Only the first is ever invoked, and only
+ * when it is also a GET.
+ */
+async function resolveGrantedCall(tool, args = {}) {
+  const { corpus, error } = await capabilityCorpus()
+  if (!corpus) return { status: 'unavailable', why: error }
+
+  const evidence = grantEvidence(tool, args)
+  const ranked = corpus.facets
+    .map((facet) => scoreCapability(facet, evidence, args, corpus.idf))
+    .filter((entry) => entry.score > 0)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        /* Deterministic, and biased toward the option that cannot act. */
+        Number(isReadOnlyCapability(right.facet.record)) -
+          Number(isReadOnlyCapability(left.facet.record)) ||
+        String(left.facet.record.invoke?.path ?? '').length -
+          String(right.facet.record.invoke?.path ?? '').length ||
+        left.facet.record.id.localeCompare(right.facet.record.id),
+    )
+
+  const best = ranked[0]
+  const runnerUp = ranked[1]
+  const nearest = ranked.slice(0, 3).map((entry) => ({
+    capability: capabilityLabel(entry.facet.record),
+    score: Number(entry.score.toFixed(3)),
+  }))
+  const shared = {
+    corpus: {
+      from: corpus.source,
+      routes: corpus.routeCount,
+      actions: corpus.actionCount,
+      noInventoryPublishedBy: corpus.unpublished,
+    },
+    nearest,
+    selectors: evidence.chosen,
+  }
+
+  if (!best || best.score < RESOLVE_MIN_SCORE) {
+    return {
+      status: 'unresolved',
+      why:
+        `Nothing in the inventory scored ${RESOLVE_MIN_SCORE} against this call` +
+        (best ? ` (best was ${capabilityLabel(best.facet.record)} at ${best.score.toFixed(3)})` : '') +
+        '.',
+      ...shared,
+    }
+  }
+
+  const margin = runnerUp ? best.score - runnerUp.score : best.score
+  /*
+   * A near-tie is normally a refusal. The one exception is when the winner is a
+   * read and the runner-up is not: the evidence cannot separate them, and
+   * taking the option that cannot change anything costs a wasted GET at worst.
+   * It is how GET /machine-context is chosen over POST /machine-context/refresh,
+   * which score identically because they are the same idea at two effects.
+   */
+  const tieBrokenTowardRead =
+    margin < RESOLVE_MIN_MARGIN - 1e-9 &&
+    isReadOnlyCapability(best.facet.record) &&
+    runnerUp &&
+    !isReadOnlyCapability(runnerUp.facet.record)
+
+  if (margin < RESOLVE_MIN_MARGIN - 1e-9 && !tieBrokenTowardRead) {
+    return {
+      status: 'ambiguous',
+      why:
+        `${capabilityLabel(best.facet.record)} and ${capabilityLabel(runnerUp.facet.record)} ` +
+        `score within ${margin.toFixed(3)} of each other (${RESOLVE_MIN_MARGIN} required). ` +
+        'Calling either would be a guess, so neither was called.',
+      ...shared,
+    }
+  }
+
+  return {
+    status: 'resolved',
+    capability: best.facet.record,
+    label: capabilityLabel(best.facet.record),
+    confidence: {
+      score: Number(best.score.toFixed(3)),
+      margin: Number(margin.toFixed(3)),
+      band: best.score >= 0.7 ? 'high' : best.score >= 0.55 ? 'medium' : 'low',
+      components: {
+        intent: Number(best.intent.toFixed(3)),
+        arguments: Number(best.argumentFit.toFixed(3)),
+        identity: Number(best.identity.toFixed(3)),
+      },
+      tieBrokenTowardRead: Boolean(tieBrokenTowardRead),
+    },
+    ...shared,
+  }
+}
+
+/**
+ * Read at most `maxBytes` of a response and stop pulling.
+ *
+ * response.text() would buffer the whole thing first, which on this machine
+ * means 686 KB from GET /jobs before any truncation could help. The reader is
+ * cancelled at the cap, so an endless stream (GET /thinking/stream is SSE) ends
+ * at the cap or at the fetch deadline, whichever comes first.
+ */
+async function readCapped(response, maxBytes) {
+  const reader = response.body?.getReader?.()
+  if (!reader) {
+    const text = await response.text()
+    return {
+      text: text.slice(0, maxBytes),
+      truncated: text.length > maxBytes,
+      bytes: text.length,
+    }
+  }
+
+  const chunks = []
+  let bytes = 0
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.length
+    if (bytes >= maxBytes) {
+      chunks.push(value.subarray(0, value.length - (bytes - maxBytes)))
+      truncated = true
+      try {
+        await reader.cancel()
+      } catch {
+        /* Already closed; the cap is what mattered. */
+      }
+      break
+    }
+    chunks.push(value)
+  }
+
+  return {
+    text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8'),
+    truncated,
+    bytes,
+  }
+}
+
+/*
+ * Read-only by default, decided from the route's own declared effect.
+ *
+ * These are reconnaissance agents working out what should exist. Nothing they
+ * call is on the owner's behalf, so a resolution that would POST — /execute,
+ * /plan, anything that writes, and every executor ACTION, which is only
+ * reachable through POST /execute — is described and not performed. The test is
+ * the method the manifest reports for the route, which is the surface's own
+ * statement about the route rather than a list of URLs written here; the same
+ * one rule covers all 74 non-GET routes and all 95 action types without naming
+ * any of them.
+ */
+async function invokeResolved(resolution, args) {
+  const record = resolution.capability
+  if (!isReadOnlyCapability(record)) {
+    return {
+      invoked: false,
+      wouldHaveCalled: resolution.label,
+      why:
+        record.kind === 'http'
+          ? `${record.invoke.method} has side effects. This harness only performs GET, so nothing was called.`
+          : `Executor actions are dispatched through POST /execute on the owner's real machine. This harness only performs GET, so nothing was called.`,
+    }
+  }
+
+  let pathname = record.invoke.path
+  for (const param of record.requires ?? []) {
+    const key = Object.keys(args ?? {}).find(
+      (name) =>
+        normalizeCapabilityName(name, { keepParams: true }) ===
+        normalizeCapabilityName(param, { keepParams: true }),
+    )
+    const value = key === undefined ? undefined : args[key]
+    if (value === undefined || value === null || value === '') {
+      return {
+        invoked: false,
+        wouldHaveCalled: resolution.label,
+        why: `${resolution.label} needs a ${param} and this call did not carry one.`,
+      }
+    }
+    pathname = pathname.replace(
+      new RegExp(`[:{]${param}\\}?`),
+      encodeURIComponent(String(value)),
+    )
+  }
+
+  const url = `${record.invoke.baseUrl ?? MAC_AGENT_URL}${pathname}`
+  try {
+    const response = await fetchWithDeadline(url, {
+      headers: { Authorization: `Bearer ${MAC_AGENT_TOKEN}` },
+    })
+    const { text, truncated, bytes } = await readCapped(response, RESOLVE_MAX_BYTES)
+    return {
+      invoked: true,
+      called: `GET ${url}`,
+      httpStatus: response.status,
+      truncated,
+      ...(truncated
+        ? { bytesRead: bytes, note: `Response exceeded ${RESOLVE_MAX_BYTES} bytes and was cut off there.` }
+        : {}),
+      body: text,
+    }
+  } catch (error) {
+    return {
+      invoked: false,
+      wouldHaveCalled: `GET ${url}`,
+      why: String(error?.message || error),
+    }
+  }
+}
+
+/** The honest note, unchanged in substance, plus whatever was learned trying. */
+function unimplementedNote(resolution) {
+  const base =
+    'This tool was granted a schema and could not be resolved to anything the running system actually has, so it has no implementation. Report what you would have done with it.'
+  if (!resolution) return { error: base }
+  return {
+    error: base,
+    resolution: resolution.status,
+    why: resolution.why,
+    ...(resolution.nearest ? { nearestRealCapabilities: resolution.nearest } : {}),
+    ...(resolution.corpus ? { resolvedAgainst: resolution.corpus } : {}),
+  }
+}
+
+/**
+ * The general implementation for every granted tool that has no hand-written
+ * one. Resolves the call, invokes it if and only if it is a defensible match to
+ * a read-only route, and otherwise says exactly why not.
+ */
+async function runResolvedGrantedTool(tool, args) {
+  const resolution = await resolveGrantedCall(tool, args)
+  if (resolution.status !== 'resolved') return unimplementedNote(resolution)
+
+  const outcome = await invokeResolved(resolution, args)
+  return {
+    resolvedTo: resolution.label,
+    surface: resolution.capability.surface,
+    what: resolution.capability.what ?? null,
+    confidence: resolution.confidence,
+    /* Named even on success: an agent that can see the runner-up can tell when
+     * the match was a coin flip, which is the difference between a finding and
+     * a confident mistake repeated for forty rounds. */
+    alsoConsidered: resolution.nearest.slice(1),
+    resolvedAgainst: resolution.corpus,
+    ...outcome,
+  }
+}
+
+/**
+ * Which granted tools can actually act, for the system prompt.
+ *
+ * A tool is live if ANY of the calls its own schema permits resolves to a
+ * read-only route: an enum tool is several capabilities behind one name, and
+ * mac_read_diagnostics reaches GET /health and GET /machine-context on two of
+ * its twelve checks and nothing on the other ten.
+ */
+async function grantedToolLiveness(state) {
+  const live = []
+  /*
+   * Three buckets, not two. "Nothing matches" and "it matches something this
+   * harness will not perform" are different facts, and collapsing them is how
+   * browser-extension would be told its tools point at nothing when in fact
+   * they land squarely on browser_navigate and browser_click — which is the
+   * message that sent it renaming in the first place.
+   */
+  const described = []
+  const dead = []
+  for (const tool of state.granted.tools) {
+    if (GRANTED_IMPLS[tool.name]) {
+      live.push({ name: tool.name, reaches: ['a hand-written implementation'] })
+      continue
+    }
+    const evidence = grantEvidence(tool, {})
+    const calls = []
+    for (const [property, values] of Object.entries(evidence.declaredEnums)) {
+      for (const value of values) calls.push({ [property]: value })
+    }
+    if (!calls.length) calls.push({})
+
+    const reads = new Set()
+    const writes = new Set()
+    for (const call of calls) {
+      const resolution = await resolveGrantedCall(tool, call)
+      if (resolution.status === 'unavailable') {
+        return { live: [], described: [], dead: [], unavailable: true }
+      }
+      if (resolution.status !== 'resolved') continue
+      ;(isReadOnlyCapability(resolution.capability) ? reads : writes).add(resolution.label)
+    }
+    if (reads.size) live.push({ name: tool.name, reaches: [...reads].sort() })
+    else if (writes.size) described.push({ name: tool.name, reaches: [...writes].sort() })
+    else dead.push(tool.name)
+  }
+  return { live, described, dead, unavailable: false }
 }
 
 const GRANTED_IMPLS = {
@@ -2000,7 +2712,7 @@ async function executeTool(call, { state, transcript, asked }) {
        */
       note:
         kind === 'tool'
-          ? 'Queued for the orchestrator. A granted tool is a schema without an implementation — calling one returns a note saying so. Carry on with what you already have and do not wait on this.'
+          ? 'Queued for the orchestrator. If it is granted, it will be resolved against the running system when you call it — real and read-only means it runs, anything else means you get a description or a refusal with the nearest real capabilities. Carry on with what you already have and do not wait on this.'
           : 'Queued for the orchestrator. An answer arrives in a later round if at all, so carry on rather than waiting.',
     }
   } else if (state.phase === 'task' && PROD_IMPLS[name]) {
@@ -2040,10 +2752,21 @@ async function executeTool(call, { state, transcript, asked }) {
         `  ${name} → ${result.error ? 'ERR' : result.status || 'ok'}\n`,
       )
     } else if (granted) {
-      result = {
-        error:
-          'This tool was granted a schema but has no implementation yet. Report what you would have done with it.',
-      }
+      /*
+       * Every other granted tool goes through the general resolver rather than
+       * straight to the refusal it used to get. GRANTED_IMPLS keeps precedence
+       * because those three were written and reviewed deliberately; everything
+       * else is resolved against the running system's own inventory, and the
+       * honest refusal is still what comes back when nothing matches.
+       */
+      result = await runResolvedGrantedTool(granted, args)
+      process.stdout.write(
+        `  ${name} → ${
+          result.error
+            ? 'unresolved'
+            : `${result.resolvedTo} ${result.invoked ? `called ${result.httpStatus}` : 'described only'}`
+        }\n`,
+      )
     } else {
       result = { error: `Unknown tool: ${name}` }
     }
@@ -2422,6 +3145,11 @@ async function runRound() {
     })),
   ]
 
+  /* Measured before the prompt is written, so the prompt can say which of the
+   * agent's tools are live instead of asserting that none of them are. */
+  GRANTED_LIVENESS = state.granted.tools.length
+    ? await grantedToolLiveness(state)
+    : null
   const instructions = buildSystemPrompt(state)
   const input = [{ role: 'user', content: seedMessage(state) }]
 
@@ -3568,6 +4296,100 @@ const TASK_IMPLS = {
   },
 }
 
+/**
+ * What every granted tool in the system resolves to, without running a round.
+ *
+ * The audit for the resolver: it reads every agent's state, enumerates each
+ * tool's own enum branches, and prints what each branch lands on and at what
+ * confidence. A weight that starts mis-ranking things shows up here as a table
+ * that reads wrong, which is the only way anyone would notice.
+ */
+async function reportResolution() {
+  /* Handles a route needs and a granted call cannot invent — `resolve --invoke
+   * jobId=local_abc` is how GET /jobs/:jobId gets checked against a real job. */
+  const extraArgs = Object.fromEntries(
+    process.argv
+      .slice(3)
+      .filter((arg) => /^[A-Za-z0-9_]+=/.test(arg))
+      .map((arg) => [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)]),
+  )
+  const files = fs
+    .readdirSync(OUT_DIR)
+    .filter((name) => /^state-.*\.json$/.test(name))
+    .sort()
+
+  const { corpus, error } = await capabilityCorpus()
+  process.stdout.write(
+    corpus
+      ? `Inventory: ${corpus.routeCount} routes + ${corpus.actionCount} action types from ${corpus.source}\n` +
+        `No inventory published by: ${corpus.unpublished.join(', ') || 'nothing'}\n\n`
+      : `${error}\n\n`,
+  )
+  if (!corpus) return
+
+  for (const file of files) {
+    const agent = file.replace(/^state-|\.json$/g, '')
+    const state = JSON.parse(fs.readFileSync(path.join(OUT_DIR, file), 'utf8'))
+    for (const tool of state.granted?.tools ?? []) {
+      const evidence = grantEvidence(tool, {})
+      const calls = []
+      for (const [property, values] of Object.entries(evidence.declaredEnums)) {
+        for (const value of values) calls.push({ [property]: value })
+      }
+      if (!calls.length) calls.push({})
+
+      process.stdout.write(`\n${agent} :: ${tool.name}\n`)
+      if (GRANTED_IMPLS[tool.name]) {
+        process.stdout.write('  (hand-written implementation in GRANTED_IMPLS takes precedence)\n')
+      }
+      for (const call of calls) {
+        const label =
+          Object.entries(call)
+            .map(([key, value]) => `${key}=${value}`)
+            .join(',') || '(no selector)'
+        const resolution = await resolveGrantedCall(tool, call)
+        /* What the AGENT would actually receive, not a summary of it — the
+         * shape is half of what makes this usable and the only way to check it
+         * is to look. */
+        if (process.argv.includes('--json')) {
+          const seen = await runResolvedGrantedTool(tool, { ...call, ...extraArgs })
+          process.stdout.write(
+            `  ${label}\n${JSON.stringify(seen, null, 2).replace(/^/gm, '    ')}\n`,
+          )
+          continue
+        }
+        if (resolution.status !== 'resolved') {
+          process.stdout.write(
+            `  ${label.padEnd(38)} ${resolution.status.toUpperCase()} — ${resolution.why}\n`,
+          )
+          continue
+        }
+        const live = isReadOnlyCapability(resolution.capability)
+        process.stdout.write(
+          `  ${label.padEnd(38)} ${live ? 'LIVE  ' : 'DESCR '} ${resolution.label.padEnd(36)} ` +
+            `score=${resolution.confidence.score} margin=${resolution.confidence.margin}` +
+            `${resolution.confidence.tieBrokenTowardRead ? ' (tie→read)' : ''}\n`,
+        )
+        /*
+         * --invoke actually performs the reads, which is the only way to find
+         * out that a resolution the table calls LIVE really answers. A
+         * resolution nobody has ever executed is a claim, not a capability.
+         */
+        if (live && process.argv.includes('--invoke')) {
+          const outcome = await runResolvedGrantedTool(tool, { ...call, ...extraArgs })
+          process.stdout.write(
+            `  ${''.padEnd(38)}   -> ${
+              outcome.invoked
+                ? `HTTP ${outcome.httpStatus}, ${outcome.body.length} bytes${outcome.truncated ? ` (capped from ${outcome.bytesRead})` : ''}`
+                : `not called: ${outcome.why}`
+            }\n`,
+          )
+        }
+      }
+    }
+  }
+}
+
 const command = process.argv[2] || 'run'
 
 /*
@@ -3612,7 +4434,13 @@ try {
   else if (command === 'review') review()
   else if (command === 'grant') grant(process.argv[3])
   else if (command === 'deny') deny(process.argv[3])
-  else if (command === 'prompt') process.stdout.write(`${buildSystemPrompt(loadState())}\n`)
+  else if (command === 'prompt') {
+    const state = loadState()
+    GRANTED_LIVENESS = state.granted.tools.length
+      ? await grantedToolLiveness(state)
+      : null
+    process.stdout.write(`${buildSystemPrompt(state)}\n`)
+  } else if (command === 'resolve') await reportResolution()
   else if (command === 'ablate') await ablate()
   else if (command === 'evals') await buildEvals()
   else if (command === 'phase') {
@@ -3627,7 +4455,7 @@ try {
     fs.rmSync(STATE_PATH(), { force: true })
     process.stdout.write('Reset.\n')
   } else {
-    process.stdout.write('Commands: run | review | grant <id> | deny <id> | phase <recon|capability> | ablate | evals | prompt | reset\n')
+    process.stdout.write('Commands: run | review | grant <id> | deny <id> | phase <recon|capability> | ablate | evals | prompt | resolve | reset\n')
   }
 } catch (error) {
   process.stderr.write(`${error.message}\n`)

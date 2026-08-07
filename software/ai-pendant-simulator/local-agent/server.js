@@ -2262,6 +2262,12 @@ app.listen(PORT, '0.0.0.0', () => {
   // Same deal for page watches: nothing is polled while the Mac is asleep, and
   // the first poll after a restart re-establishes the baseline from the page.
   startPageWatchScheduler()
+  // Nothing was calling this. The import has been here since the sweep was
+  // written, so orphanExpiredLeases() never ran and a command handed to an
+  // extension that then vanished stayed pending forever — no retirement, no
+  // spool entry, no failure the caller could see. Every comment about the 45s
+  // lease was describing a sweep on a timer that was never started.
+  startBrowserBridgeSupervisor()
   // Accessibility trust is per-binary, so it can be lost by a rebuild that
   // nothing else notices — every ui_* step keeps reporting success into
   // nothing. Post a harmless no-op now and on a schedule so the answer is a
