@@ -29,6 +29,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import '../../load-pendant-env.mjs'
+import {
+  deposit as depositToCommons,
+  directory as commonsDirectory,
+  recall as recallFromCommons,
+} from './commons.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '../../..')
@@ -472,6 +477,15 @@ function saveState(state) {
  * The lock is held for the whole round rather than around each file access,
  * because the thing that must not overlap is the round, not the write.
  */
+/*
+ * Off by default so a run is a control unless it was asked to be otherwise.
+ * The claim "the commons cuts rediscovery" is only worth anything against
+ * matched rounds without it, and a store that switches itself on mid-comparison
+ * silently invalidates the arm it lands in.
+ */
+const COMMONS_ON = process.env.HARNESS_COMMONS === '1'
+const COMMONS_DIRECTORY_LIMIT = Number(process.env.HARNESS_COMMONS_LIMIT || 60)
+
 const LOCK_PATH = () => path.join(OUT_DIR, `state-${AGENT_ID}.lock`)
 
 /*
@@ -607,6 +621,34 @@ function buildSystemPrompt(state) {
 
   if (PROFILE) parts.push(`\n---\n${PROFILE}`)
 
+  /*
+   * The commons goes in the prompt rather than behind a tool on purpose.
+   *
+   * Hutchins' speed bug is memory embedded in the instrument already being
+   * read: the marker sits on the airspeed dial, so reading the current value
+   * and the remembered target is one perceptual act with no lookup. A shared
+   * store an agent must decide to query is one more thing to discover, and
+   * would reproduce the cost it exists to remove.
+   *
+   * Only the directory is inlined. The content stays one recall() away, per
+   * Wegner: what a transactive memory system buys you is knowing who knows
+   * what, and the directory is tiny where the content is not.
+   */
+  if (COMMONS_ON) {
+    const index = commonsDirectory(OUT_DIR, { limit: COMMONS_DIRECTORY_LIMIT })
+    if (index.total) {
+      parts.push(
+        `\n---\nAlready established by this system, ${index.shown} of ${index.total} entries. ` +
+          `These are observations that were actually made, by you or by another agent, with how long ago in ` +
+          `parentheses. Treat a fresh entry as true and build on it — re-deriving something listed here spends ` +
+          `a call to learn what you already know, and that is where most of this system's budget has been ` +
+          `going. Call recall("<key>") for the full payload behind any line. Entries marked ABSENT mean ` +
+          `someone looked and it was not there.\n\n` +
+          index.lines.map((line) => `- ${line}`).join('\n'),
+      )
+    }
+  }
+
   const inbox = inboxFor(AGENT_ID, state)
   if (inbox.length) {
     parts.push('\n---\nMessages from other agents:')
@@ -719,6 +761,30 @@ const DISCOVERY_TOOLS = [
 
 const META_TOOLS = [
   ...DISCOVERY_TOOLS,
+  ...(COMMONS_ON
+    ? [
+        {
+          type: 'function',
+          function: {
+            name: 'recall',
+            description:
+              'Fetch the full payload behind one line of the "Already established" list in your prompt. This reads what another agent already observed — it does not re-check it against the live system, which is the point: it is cheap.',
+            parameters: {
+              type: 'object',
+              properties: {
+                key: {
+                  type: 'string',
+                  description:
+                    'The key at the start of a line in the established list, e.g. discover:routes',
+                },
+              },
+              required: ['key'],
+              additionalProperties: false,
+            },
+          },
+        },
+      ]
+    : []),
   {
     type: 'function',
     function: {
@@ -1604,6 +1670,26 @@ async function executeTool(call, { state, transcript, asked }) {
   let result
   let finish = false
 
+  if (name === 'recall') {
+    const found = COMMONS_ON ? recallFromCommons(OUT_DIR, args.key) : null
+    result = found
+      ? {
+          key: found.key,
+          establishedBy: found.observers,
+          ageSeconds: found.ageSeconds,
+          confirmations: found.confirmations,
+          absent: found.absent,
+          content: found.content,
+        }
+      : {
+          error: `Nothing under "${args.key}". It may have expired; the directory in your prompt lists what is current.`,
+        }
+    process.stdout.write(
+      `  recall(${args.key}) ${found ? `→ ${found.ageSeconds}s old` : '→ miss'}\n`,
+    )
+    return { result, finish }
+  }
+
   if (name === 'list_capabilities') {
     result = await discoveryIndex(state)
     process.stdout.write(`  list_capabilities\n`)
@@ -1769,7 +1855,47 @@ async function executeTool(call, { state, transcript, asked }) {
   }
 
   transcript.push({ type: 'tool', name, args, result })
+  depositIfObservation(name, args, result, state)
   return { result, finish }
+}
+
+/*
+ * Every read an agent performs is banked for every other agent, here, in the
+ * executor — never as a tool the agent is asked to call afterwards.
+ *
+ * A discrete "write what you learned" step is the first thing dropped when a
+ * budget gets tight, which is the likeliest reason earlier shared-state
+ * attempts on this project had nothing in them to read. Hutchins' cockpit
+ * marker is the standard to hold to: setting it IS the act of deciding the
+ * speed, not a chore that follows it.
+ *
+ * Only observations of the world are deposited. Proposals, findings and
+ * messages are an agent's own output, and banking those as established fact
+ * would let one agent's opinion arrive in every other agent's prompt wearing
+ * the clothes of something that was measured.
+ */
+const OBSERVATION_TOOLS = new Set([
+  'discover',
+  'describe',
+  'probe_http',
+  'get_hardware_spec',
+])
+
+function depositIfObservation(name, args, result, state) {
+  if (!COMMONS_ON || !OBSERVATION_TOOLS.has(name)) return
+  try {
+    depositToCommons(OUT_DIR, {
+      tool: name,
+      args,
+      result,
+      agent: AGENT_ID,
+      round: state.round,
+    })
+  } catch (error) {
+    /* The commons is an optimisation. A store that cannot be written is a
+     * slower round, not a failed one — never take a round down for it. */
+    process.stdout.write(`  [commons] deposit failed: ${error.message}\n`)
+  }
 }
 
 /**
@@ -2012,7 +2138,10 @@ async function runRound() {
   await proposalPhase(state, tools, instructions, input, transcript, asked)
 
   for (const m of inboxFor(AGENT_ID, state)) state.readMessages.push(m.id)
-  state.rounds.push({ round: state.round, transcript })
+  /* Stamped into the round, not left to the shell that launched it. Which arm
+   * a round belonged to has already been guessed wrong once on this project,
+   * and a guess about the condition invalidates every number derived from it. */
+  state.rounds.push({ round: state.round, commons: COMMONS_ON, transcript })
   saveState(state)
   writeRoundReport(state, transcript, asked)
 
