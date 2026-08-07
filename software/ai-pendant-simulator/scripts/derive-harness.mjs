@@ -924,17 +924,30 @@ const META_TOOLS = [
     function: {
       name: 'request_tool',
       description:
-        'Ask for a capability you do not have. Give a schema precise enough to implement from.',
+        'Ask for a capability you do not have. Give a schema precise enough to implement from. Granting one gives you a SCHEMA, not an implementation — calling it returns a note saying so — so a request is a proposal about what should exist, not a way to obtain it this round.',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string' },
           why: { type: 'string' },
+          /*
+           * The same structural check as `built_from` on a proposal, and for
+           * the same measured reason. Of 66 pending tool requests, 21 were for
+           * tools the agent already had and could not see, and several others
+           * duplicate probe_http or Mac routes already named in the directory.
+           * Asking what is insufficient about the existing ones makes looking a
+           * condition of asking rather than a thing to remember.
+           */
+          why_existing_tools_insufficient: {
+            type: 'string',
+            description:
+              'Which tool or route you already have comes closest, and what exactly it cannot do. If nothing comes close, say what you looked at.',
+          },
           input_schema: { type: 'object', additionalProperties: true },
           example_call: { type: 'object', additionalProperties: true },
           expected_output: { type: 'string' },
         },
-        required: ['name', 'why', 'input_schema', 'expected_output'],
+        required: ['name', 'why', 'why_existing_tools_insufficient', 'input_schema', 'expected_output'],
         additionalProperties: false,
       },
     },
@@ -1891,7 +1904,17 @@ async function executeTool(call, { state, transcript, asked }) {
     result = {
       queued: true,
       id: request.id,
-      note: 'The orchestrator will decide between rounds. Continue without it for now.',
+      /*
+       * Spelled out at the point of asking, because agents have been requesting
+       * tools expecting to receive working ones. 141 requests accumulated
+       * unanswered while agents waited on them, so the honest thing is to say
+       * that a request is a message to the orchestrator rather than a way to
+       * get unblocked in this round.
+       */
+      note:
+        kind === 'tool'
+          ? 'Queued for the orchestrator. A granted tool is a schema without an implementation — calling one returns a note saying so. Carry on with what you already have and do not wait on this.'
+          : 'Queued for the orchestrator. An answer arrives in a later round if at all, so carry on rather than waiting.',
     }
   } else if (state.phase === 'task' && PROD_IMPLS[name]) {
     result = await PROD_IMPLS[name](args, state)
