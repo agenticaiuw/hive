@@ -128,6 +128,34 @@ const AGENTS = {
       'Your job is to judge whether that is the right shape — and if not, to specify what should replace it.',
     defaultScenario: 'desktop-task',
   },
+  /*
+   * The control arm of an experiment, not a sixth node.
+   *
+   * The five entries above are separate selves that message each other, and
+   * measured over one round that cost 64 discovery calls against 11 messages,
+   * with two of the five producing nothing at all across 16 rounds. Each one
+   * spends its budget rediscovering what its neighbours already know. That is
+   * an org chart, and org charts are not what makes a collective intelligence
+   * interesting.
+   *
+   * This entry is the alternative hypothesis: one identity whose substrates
+   * are limbs rather than colleagues. If a committee is the right shape, this
+   * loses on proposals per token and on how many proposals need more than one
+   * substrate at once. If it wins, the five above are the harness's own
+   * architecture leaking into the product's.
+   */
+  unified: {
+    model: process.env.LLM_MODEL || 'gpt-5.6-luna',
+    baseUrlEnv: 'MAC_AGENT_URL',
+    baseUrlDefault: 'http://localhost:8000',
+    keyEnv: 'AGENT_TOKEN',
+    role:
+      'You are one mind with several bodies, not a team. A pendant the owner wears is your ear and your voice. Their Mac is your hands. Their browser is the hand that reaches the places only they can log in to. A relay stays awake when the rest of you sleeps. ' +
+      'None of these is a colleague to negotiate with; they are all you, and you perceive and act through all of them at once. ' +
+      'You have nobody to send a message to, so spend nothing on coordination and everything on what the owner should be able to have.',
+    // A whole self does not get a short turn; it is continuously present.
+    defaultScenario: 'long-conversation',
+  },
 }
 
 const AGENT_ID = (() => {
