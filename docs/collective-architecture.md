@@ -522,6 +522,39 @@ now be written as *what it would do when a device is connected, and how we would
 know it worked* — which is a more useful artefact than a capability written as
 though the device were already there.
 
+### A second change that did not work, and was not shipped
+
+The request backlog grows faster than one orchestrator answers it — roughly 0.75
+requests a round across nine agents, against answers in occasional batches. The
+hive-mind response is for the collective to service what it can itself, so a
+queued request was going to carry a hint at what the commons may already answer.
+Two of the requests answered by hand tonight really were sitting in the store:
+"live pendant and firmware observability" was `discover:devices`, one call away.
+
+Tested before shipping, against those exact requests. It failed in both
+directions at once:
+
+| request | commons hit | should have been |
+|---|---|---|
+| live pendant observability | **none** | `discover:devices` |
+| Mac route and job lifecycle contract | **none** | `discover:routes` |
+| 24 kHz acceptance criteria | `describe:audio` | **none** — this needs the owner |
+
+It missed both true positives and produced a false positive on the one case
+where escalating to a human is the whole point — sending an agent to read a
+hardware spec instead of waiting for a decision only the owner can make.
+
+The cause is the limitation already recorded for the dedup gate: commons
+summaries are terse and structural (`discover:devices — 3 items`) while requests
+are prose. Jaccard over content words cannot bridge that, and here the gap is
+fatal rather than merely weak.
+
+Reverted, not shipped. A hint that misdirects on exactly the cases that matter
+is worse than no hint, and the backlog it was meant to relieve is a real problem
+that this was not a solution to. Doing it properly needs semantic matching —
+an embedding, or a model call per request — which is a different and more
+expensive design than a lexical helper.
+
 ### One change that did not work
 
 `request_tool` was given a required `why_existing_tools_insufficient` field, on
