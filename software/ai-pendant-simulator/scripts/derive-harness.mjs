@@ -665,7 +665,12 @@ function buildSystemPrompt(state) {
    * what, and the directory is tiny where the content is not.
    */
   if (COMMONS_ON) {
-    const index = commonsDirectory(OUT_DIR, { limit: COMMONS_DIRECTORY_LIMIT })
+    const index = commonsDirectory(OUT_DIR, {
+      limit: COMMONS_DIRECTORY_LIMIT,
+      /* Scoped: some questions have no shared answer, and reading a peer's
+       * grants as though they were your own is worse than not knowing. */
+      forAgent: AGENT_ID,
+    })
     if (index.total) {
       parts.push(
         `\n---\nAlready established by this system, ${index.shown} of ${index.total} entries. ` +
@@ -1705,7 +1710,7 @@ async function executeTool(call, { state, transcript, asked }) {
   let finish = false
 
   if (name === 'recall') {
-    const found = COMMONS_ON ? recallFromCommons(OUT_DIR, args.key) : null
+    const found = COMMONS_ON ? recallFromCommons(OUT_DIR, args.key, { forAgent: AGENT_ID }) : null
     result = found
       ? {
           key: found.key,

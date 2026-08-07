@@ -74,7 +74,10 @@ export function saveWatermarks(dir, watermarks) {
 export function markRan(dir, agent, { cycle, now = Date.now() } = {}) {
   const watermarks = loadWatermarks(dir)
   const seen = {}
-  for (const [key, entry] of fold(dir, { now })) seen[key] = entry.hash
+  /* Scoped to this agent, so a key whose answer is personal to each agent is
+   * this agent's own answer — otherwise every peer's observation would read as
+   * a contradiction and the agent would be permanently eligible. */
+  for (const [key, entry] of fold(dir, { now, forAgent: agent })) seen[key] = entry.hash
 
   watermarks[agent] = { seen, lastCycle: cycle, lastRunAt: new Date(now).toISOString() }
   saveWatermarks(dir, watermarks)
@@ -92,7 +95,7 @@ export function markRan(dir, agent, { cycle, now = Date.now() } = {}) {
 export function assess(dir, agent, { cycle, unreadMail = 0, now = Date.now() } = {}) {
   const watermarks = loadWatermarks(dir)
   const mark = watermarks[agent]
-  const entries = fold(dir, { now })
+  const entries = fold(dir, { now, forAgent: agent })
 
   if (!mark) {
     return { agent, eligible: true, score: Infinity, reason: 'has never run' }

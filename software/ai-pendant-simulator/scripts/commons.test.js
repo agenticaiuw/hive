@@ -259,3 +259,77 @@ test('the preview is bounded, so a fat payload cannot swallow the prompt', () =>
   assert.ok(line.length < 400, `preview must stay bounded, was ${line.length}`)
   assert.match(line, /more/)
 })
+
+/*
+ * Some questions do not have a shared answer. `discover:granted` is literally
+ * "what the orchestrator has given YOU"; list_capabilities carries per-agent
+ * counts. Stored as common knowledge they do two kinds of harm: every agent's
+ * observation contradicts the last, and each agent reads another agent's
+ * private state as though it were the world.
+ *
+ * Measured on the live store before this existed: three such keys accounted for
+ * 120 of 201 recorded changes. 60% of every contradiction was false, and since
+ * eligibility counts contradictions the control shell could never reach "nobody
+ * has anything new".
+ */
+test('a question whose answer is personal is scoped to whoever asked', () => {
+  const dir = tempDir()
+  for (const round of [1, 2]) {
+    deposit(dir, { tool: 'discover', args: { category: 'granted' }, result: { items: ['tool-a'] }, agent: 'one', round })
+    deposit(dir, { tool: 'discover', args: { category: 'granted' }, result: { items: ['tool-b'] }, agent: 'two', round })
+  }
+
+  const mine = fold(dir, { forAgent: 'one' }).get('discover:granted')
+  assert.deepEqual(mine.observers, ['one'], 'I see my own answer, not my peer’s')
+  assert.equal(mine.confirmations, 2, 'and it reads as confirmed, not contradicted')
+
+  const theirs = fold(dir, { forAgent: 'two' }).get('discover:granted')
+  assert.notEqual(theirs.hash, mine.hash)
+})
+
+test('a genuinely shared fact is not mistaken for a personal one', () => {
+  const dir = tempDir()
+  const routes = { items: [{ name: '/health' }] }
+  for (const round of [1, 2]) {
+    for (const agent of ['one', 'two']) {
+      deposit(dir, { tool: 'discover', args: { category: 'routes' }, result: routes, agent, round })
+    }
+  }
+
+  const entry = fold(dir, { forAgent: 'one' }).get('discover:routes')
+  assert.deepEqual(entry.observers.sort(), ['one', 'two'], 'still common knowledge')
+})
+
+test('a fact that changed is not mistaken for a personal one', () => {
+  const dir = tempDir()
+  /* Each agent saw it change, which is exactly what a personal key never does. */
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['a'] }, agent: 'one', round: 1 })
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['b'] }, agent: 'one', round: 2 })
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['a'] }, agent: 'two', round: 1 })
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['b'] }, agent: 'two', round: 2 })
+
+  const entry = fold(dir, { forAgent: 'one' }).get('discover:devices')
+  assert.deepEqual(entry.observers.sort(), ['one', 'two'])
+})
+
+test('one observation each is not enough evidence to call a key personal', () => {
+  const dir = tempDir()
+  /* Could equally be a fact that changed in between; treating it as personal
+   * would hide a real change from every agent. */
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['a'] }, agent: 'one', round: 1 })
+  deposit(dir, { tool: 'discover', args: { category: 'devices' }, result: { items: ['b'] }, agent: 'two', round: 1 })
+
+  const entry = fold(dir, { forAgent: 'one' }).get('discover:devices')
+  assert.deepEqual(entry.observers.sort(), ['one', 'two'])
+})
+
+test('without an asker, personal answers are listed separately rather than merged', () => {
+  const dir = tempDir()
+  for (const round of [1, 2]) {
+    deposit(dir, { tool: 'discover', args: { category: 'granted' }, result: { items: ['a'] }, agent: 'one', round })
+    deposit(dir, { tool: 'discover', args: { category: 'granted' }, result: { items: ['b'] }, agent: 'two', round })
+  }
+
+  const keys = [...fold(dir).keys()].sort()
+  assert.deepEqual(keys, ['discover:granted@one', 'discover:granted@two'])
+})
