@@ -66,7 +66,15 @@
  * that the existing one is not produces something better than the duplicate
  * would have been.
  */
-export const SAME_IDEA_AT = 0.3
+/*
+ * Overridable so the threshold itself can be an experimental variable. The
+ * retrospective split — 722 proposals either side of the day this moved from
+ * 0.45 to 0.30, 0 cross-agent clusters before and 3 after — is consistent with
+ * the gate causing convergence rather than corpus size, but three other things
+ * changed in the same window. Settling it needs two runs from one checkpoint
+ * differing only in this number, which is what the env var is for.
+ */
+export const SAME_IDEA_AT = Number(process.env.HARNESS_SAME_IDEA_AT || 0.3)
 export const BLOCK_AT = SAME_IDEA_AT
 export const WARN_AT = 0.22
 
