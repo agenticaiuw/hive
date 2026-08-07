@@ -91,8 +91,10 @@ const RELAY_LANE_LIMIT = 1
 export const RELAY_MIN_INTERVAL_MS = 10_000
 export const RELAY_DAILY_BUDGET_MS = 10 * 60_000
 
-/* One extension lease. Waiting longer cannot help: browserBridge reclaims the
- * command at 45s and the extension has already stopped working on it. */
+/* One extension lease — deliberately the same 45s as browserBridge's
+ * COMMAND_LEASE_MS. At that mark the bridge retires the command for good rather
+ * than re-queueing one that may already have run, so waiting longer cannot help:
+ * there is no command left to answer. */
 const DEFAULT_PER_ORIGIN_TIMEOUT_MS = 45_000
 
 /* A serial lane means the worst case is origins × timeout, so the batch needs
