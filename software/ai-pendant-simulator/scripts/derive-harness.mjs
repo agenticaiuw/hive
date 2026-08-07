@@ -1440,8 +1440,14 @@ async function executeTool(call, { state, transcript, asked }) {
     process.stdout.write(`  list_capabilities\n`)
   } else if (name === 'discover') {
     result = await discoverCategory(args.category, state)
+    /* Not every category is a list. Printing items.length for one that is not
+     * announced a full payload as "→ 0", which reads as an empty surface. */
     process.stdout.write(
-      `  discover(${args.category}) → ${result.items?.length ?? 0}\n`,
+      `  discover(${args.category}) → ${
+        Array.isArray(result.items)
+          ? result.items.length
+          : `${Buffer.byteLength(JSON.stringify(result))}B`
+      }\n`,
     )
   } else if (name === 'describe') {
     result = await describeThing(args.name, state)
@@ -1848,7 +1854,7 @@ async function runRound() {
   const thisRound = (list) =>
     (list || []).filter((item) => item.round === state.round).length
   const counts = [
-    [thisRound(state.proposals), 'capability'],
+    [thisRound(state.proposals), 'capability', 'capabilities'],
     [thisRound(state.changes), 'change'],
     [thisRound(state.findings), 'finding'],
     /* Device-skill requests are queued through the same path as context and
@@ -1859,7 +1865,7 @@ async function runRound() {
   process.stdout.write(
     `\nRound ${state.round} done. ` +
       counts
-        .map(([n, label]) => `${n} ${label}${n === 1 ? '' : 's'}`)
+        .map(([n, one, many]) => `${n} ${n === 1 ? one : (many ?? `${one}s`)}`)
         .join(', ') +
       `.\n` +
       `Review:  node scripts/derive-harness.mjs review\n`,
