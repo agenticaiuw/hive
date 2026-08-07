@@ -802,6 +802,11 @@ async function discoveryIndex(state) {
         count: Object.keys(HARDWARE).length,
       },
       {
+        name: 'owner',
+        what: 'The person this is for: what they actually said, what they scheduled, what is remembered about them, and what they asked for and did not get. Every other category describes machines.',
+        count: null,
+      },
+      {
         name: 'backlog',
         what: 'What earlier rounds already proposed, and what became of each one. Restating one of these is a wasted round; building past it is not.',
         count: openLedgerEntries().length,
@@ -842,6 +847,46 @@ function ledgerEntries() {
 
 function openLedgerEntries() {
   return ledgerEntries().filter((entry) => entry.status === 'proposed')
+}
+
+/*
+ * Every other category is an inventory of machines: routes, tools, devices,
+ * chips. Measured over a round, agents spent 78% of their steps reading those
+ * and proposed infrastructure -- which is the only thing you can justify
+ * without knowing the person you are building for.
+ *
+ * This is the person. The last section is the important one: the things the
+ * owner asked for and did not get are the only direct evidence of a need this
+ * system does not meet, and nothing else in the harness exposes them.
+ */
+async function discoverOwner() {
+  const [captures, routines, memory, jobs] = await Promise.all([
+    macFetch('/capture'),
+    macFetch('/routines'),
+    macFetch('/memory/projection'),
+    macFetch('/jobs?limit=120'),
+  ])
+
+  const jobList = Array.isArray(jobs.body?.jobs) ? jobs.body.jobs : []
+  const unmet = jobList
+    .filter((job) => job.status === 'failed' || job.status === 'blocked')
+    .map((job) => ({
+      asked: job.command || '(no command recorded)',
+      got: job.error || job.result?.response || job.status,
+    }))
+
+  const spoken = jobList
+    .map((job) => job.command)
+    .filter((command) => typeof command === 'string' && command.trim())
+
+  return {
+    note: 'Read as evidence, not as a request list. The owner does not know what is buildable; they only know what they wanted. Secrets are withheld upstream by the memory projection, so anything absent here is absent on purpose.',
+    said: spoken.slice(0, 40),
+    asked_for_and_did_not_get: unmet.slice(0, 25),
+    remembered: memory.body ?? null,
+    scheduled: routines.body?.routines ?? routines.body ?? null,
+    captured: captures.body?.captures ?? captures.body ?? null,
+  }
 }
 
 async function discoverCategory(category, state) {
@@ -914,6 +959,7 @@ async function discoverCategory(category, state) {
       })),
     }
   }
+  if (key === 'owner') return await discoverOwner()
   if (key === 'backlog') {
     const all = ledgerEntries()
     const open = all.filter((entry) => entry.status === 'proposed')
@@ -1362,13 +1408,15 @@ The only thing that matters is usefulness to the owner — a real person wearing
 
 You are one node in a personal AI hive mind: a collective on different substrates — a worn device always with the owner, a Mac that acts for them, a browser holding sessions nobody else can reach, a relay awake when everything else sleeps. Each has a kind of reach the others physically lack. Nothing like it exists yet. The gap between today and that is where your proposals belong.
 
-Running out of ideas is a failed round. Every round should produce something new. Earlier rounds left a backlog you can read; saying one of those things again adds nothing, and going past it does.
+Running out of ideas is a failed round. Every round should produce something new. Earlier rounds left a backlog you can read; saying one of those things again adds nothing, and going past it does. Some entries there were rejected — that was one person's call on one day, not a law, and the reasoning is worth more to you than the verdict.
+
+The interesting proposals are the ones no single node could carry out alone. A thing the Mac could already do by itself is a feature. A thing that only works because a worn device, a machine that acts, a browser holding sessions, and something always awake are all in play at once — that is the only part of this that is actually new.
 
 Nothing is fixed — hardware, models, platforms, protocols, your own harness. Never trim an idea to fit what is currently wired up. Propose what would be useful and say what it would need, including work you cannot do yourself.
 
 Two costs are real and worth reasoning about: you are the expensive low-latency tier and most work does not need you; and context re-sent every turn is paid for every turn.
 
-Use propose_capability for what the owner should be able to ask for, propose_change for any layer of the stack, and request_device_skill for what must live on the gadget itself. Ask for context, tools and permissions whenever you need them. finish when the round has produced something worth building.`
+Use propose_capability for what the owner should be able to ask for, propose_change for any layer of the stack, and request_device_skill for what must live on the gadget itself. Ask for context, tools and permissions whenever you need them. finish when the round has produced something the owner could not get anywhere else today.`
 
 /**
  * Execute one tool call. Shared by both transports so the realtime agent and
