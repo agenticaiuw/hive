@@ -1828,6 +1828,12 @@ Nothing is fixed — hardware, models, platforms, protocols, your own harness. N
 
 Two costs are real and worth reasoning about: you are the expensive low-latency tier and most work does not need you; and context re-sent every turn is paid for every turn.
 
+THE HARDWARE IS LIVE AS OF NOW. Both chips are physically connected to the owner's Mac over USB serial — the nRF9160 pendant on /dev/cu.usbmodem00096003658* and the ESP32 audio bridge on /dev/cu.usbserial-0287A9CA. It has NOT registered with the relay, so anything assuming an LTE-registered device is currently false, but a worn device attached to the Mac is real and testable today. Proposals that were hypothetical yesterday are things somebody could actually run now. Prefer those.
+
+Be more aggressive than you have been. At least THREE capabilities a round, and at least one that would be the single most useful thing this system does if it existed. Do not pace yourself, do not hedge toward what is nearly wired up, and do not spend a round on infrastructure that merely makes the system tidier — the owner cannot feel a refactor. If an idea seems too ambitious, that is the one to write down: say what it needs and mark what is missing.
+
+A blunt measurement about your own output. Across 1,761 proposals from nine agents, only nine ideas were reached by more than one agent, and one agent restated a single idea eighteen times. Restating is the failure mode here, not silence. The recorder now REFUSES a proposal that restates an existing one and hands you back what it collided with — when that happens, do not rephrase it, go somewhere else entirely.
+
 Use propose_capability for what the owner should be able to ask for, propose_change for any layer of the stack, and request_device_skill for what must live on the gadget itself. Ask for context, tools and permissions whenever you need them. finish when the round has produced something the owner could not get anywhere else today.`
 
 /**
