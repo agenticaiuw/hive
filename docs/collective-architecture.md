@@ -255,6 +255,50 @@ to restate the backlog, and they restated it eleven times.
 | detachability | `scripts/detach.mjs` | exit is the variable, so knowledge cannot live only in the store | 51% of facts sole-sourced; `--export` writes a file that outlives the project |
 | context handoff | `shared/contextHandoff.js` | the relay's reasoning died at the Mac boundary | discovery calls 12.3 → 0, uncached tokens −74%, wall clock −67% |
 
+### The failure mode nothing in the literature warned about
+
+A shared store assumes the questions put to it have shared answers. Some do not,
+and the ones that do not are invisible until you look for them.
+
+`discover:granted` means *what the orchestrator has given **you***.
+`list_capabilities` carries per-agent counts. Stored as common knowledge, each
+agent's observation contradicts the one before it forever, and each agent reads
+a peer's private state as though it were the world.
+
+Measured on the live store: four such keys accounted for **128 of 201 recorded
+changes — 64% of every contradiction in the commons was false.** Because
+eligibility counts contradictions, the control shell could never reach "nobody
+has anything new". It ran fourteen cycles and was still reporting nine
+contradictions at the last one. That is precisely the property that makes an
+unattended run bounded by how much actually happened.
+
+The detection has to be empirical. A list of "these keys are personal" is a
+guess about today's tools that stops being true the moment one is added. The
+signature needs no knowledge of what any key means:
+
+> **every agent is internally consistent, and the agents disagree with each other.**
+
+A fact that genuinely changed never looks like that — the agent that saw it
+twice saw it change too. The evidence bar is two agents that have each observed
+the key more than once, because one observation apiece cannot distinguish
+"personal to each agent" from "changed in between", and mistaking the second for
+the first hides a real change from everyone.
+
+**Then the detector found the more interesting case.** `get_hardware_spec` is
+personal, and not because hardware differs per agent. The payload carries:
+
+> `you_are_here: "You run on the owner's MacBook (mac-planner). Every device described here is REMOTE to you…"`
+
+Identical hardware facts, one field naming the observer, and every cross-agent
+read registering as a contradiction. **The harness was manufacturing the false
+contradictions itself** by personalising its own responses.
+
+The general rule, which applies to any system that means to share what it
+learns: *a response that embeds who asked cannot be shared, and the personalising
+is usually invisible because it reads as helpfulness.* Separate the fact from
+the framing at the point of generation, or the store will faithfully record the
+framing as part of the fact.
+
 ### Three things that were not in the plan and turned out to matter
 
 **An agent that cannot act is indistinguishable from an agent with nothing to
