@@ -26,7 +26,9 @@ import {
   startBrowserBridgeSupervisor,
 } from './browserBridge.js'
 import { registerActionLedgerRoutes } from './actionLedgerRoutes.js'
+import { registerAudioRetentionRoutes } from './audioRetention.js'
 import { registerBriefingTriageRoutes } from './briefingTriage.js'
+import { registerPrepareApproveRoutes } from './prepareApprove.js'
 import { registerPageWatchRoutes } from './pageWatchRoutes.js'
 import {
   browserSessionsLocation,
@@ -1348,6 +1350,19 @@ registerActionLedgerRoutes(app)
  * brief the owner had not heard.
  */
 registerBriefingTriageRoutes(app)
+
+/*
+ * Audio expiry, and the sweeper that enforces it. Measured before this landed:
+ * 60.4 MB of the owner's audio on disk with nothing expiring it, and 83% of it
+ * unreachable by name because MAX_STORED_BRIEFINGS caps a COUNT — evicting the
+ * metadata while leaving the file. A sweeper that walked the store would have
+ * found one file and called the disk clean.
+ */
+registerAudioRetentionRoutes(app)
+
+/* Prepare on the Mac, approve from the pendant. Neither route executes. */
+registerPrepareApproveRoutes(app)
+
 registerPageWatchRoutes(app)
 
 
