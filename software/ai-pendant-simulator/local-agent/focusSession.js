@@ -166,7 +166,7 @@ export async function endFocusSession({ id = null, reason = 'completed', announc
  * Re-arm sessions that outlived the process. Called on agent start: a promise
  * to tell the owner when time is up must survive a crash at minute 3.
  */
-export async function resumeFocusSessions({ now = Date.now() } = {}) {
+export async function resumeFocusSessions({ now = Date.now(), announce = true } = {}) {
   const running = loadStore().sessions.filter((session) => session.status === 'running')
   const resumed = []
 
@@ -174,7 +174,7 @@ export async function resumeFocusSessions({ now = Date.now() } = {}) {
     if (session.endsAt <= now) {
       /* The alarm was owed while the process was down. Late is the honest
        * outcome; pretending it never existed is not. */
-      await endFocusSession({ id: session.id, reason: 'completed' })
+      await endFocusSession({ id: session.id, reason: 'completed', announce })
       resumed.push({ id: session.id, outcome: 'ended-late' })
       continue
     }
@@ -201,13 +201,20 @@ export function focusStatus({ now = Date.now() } = {}) {
 }
 
 function armTimer(session) {
+  /* Re-arming must not leave the previous timer running, or a resume after a
+   * reconnect ends up announcing the same session twice. */
+  clearTimeout(timers.get(session.id))
+
   const delay = Math.max(0, session.endsAt - Date.now())
   const timer = setTimeout(() => {
     endFocusSession({ id: session.id, reason: 'completed' }).catch((error) => {
       console.warn(`[focus] Could not end session ${session.id}: ${error.message}`)
     })
   }, delay)
-  /* Deliberately NOT unref'd: the whole point is that this fires. */
+  /* unref'd because the promise lives on disk, not in this timer: the record
+   * plus resumeFocusSessions() is what guarantees the alarm. Holding the event
+   * loop open would only mean a CLI that will not exit for 25 minutes. */
+  timer.unref?.()
   timers.set(session.id, timer)
 }
 

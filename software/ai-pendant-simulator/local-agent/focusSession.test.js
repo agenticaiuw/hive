@@ -66,7 +66,7 @@ test('a session that outlived the process is ended, late, rather than dropped', 
   const started = Date.now() - 40 * 60_000
   await startFocusSession({ minutes: 25, now: started, ...QUIET })
 
-  const resumed = await resumeFocusSessions({ now: Date.now() })
+  const resumed = await resumeFocusSessions({ now: Date.now(), announce: false })
   assert.deepEqual(
     resumed.map((entry) => entry.outcome),
     ['ended-late'],
@@ -79,7 +79,7 @@ test('a session still inside its window is re-armed, not ended', async (t) => {
   sandbox(t)
   const session = await startFocusSession({ minutes: 60, now: Date.now() - 60_000, ...QUIET })
 
-  const resumed = await resumeFocusSessions({ now: Date.now() })
+  const resumed = await resumeFocusSessions({ now: Date.now(), announce: false })
   assert.equal(resumed[0].outcome, 'rearmed')
   assert.equal(activeFocusSession().id, session.id)
 

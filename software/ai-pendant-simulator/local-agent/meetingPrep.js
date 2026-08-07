@@ -204,9 +204,14 @@ export function scanDocuments(roots, { now = new Date(), maxFiles = MAX_SCAN_FIL
 }
 
 /**
- * Name match dominates, recency breaks ties. A document whose filename carries
- * the meeting's words was named by someone who meant it; a fresh file that
- * shares nothing is just fresh.
+ * Filename match dominates; the containing folder is corroboration, not proof.
+ *
+ * Scoring the whole path equally is how "grocery-list.md" ends up in the prep
+ * folder for a pendant meeting — it lives under ~/Documents/Pendant, so the
+ * path matched and the file did not. A folder says what a pile is about; a
+ * filename was chosen by someone who meant this document. So a name match
+ * admits a document on its own, and folder matches only admit one when at least
+ * two of the meeting's words agree.
  */
 export function rankDocuments(candidates, terms) {
   if (!terms.length) return []
@@ -214,16 +219,20 @@ export function rankDocuments(candidates, terms) {
 
   return candidates
     .map((candidate) => {
-      const haystack = `${candidate.path}`.toLowerCase()
-      const matched = terms.filter((term) => haystack.includes(term))
+      const name = candidate.name.toLowerCase()
+      const directory = path.dirname(candidate.path).toLowerCase()
+      const inName = terms.filter((term) => name.includes(term))
+      const inDirectory = terms.filter((term) => !inName.includes(term) && directory.includes(term))
       const ageDays = Math.max(0, (now - Date.parse(candidate.modifiedAt)) / 86_400_000)
+
       return {
         ...candidate,
-        matchedTerms: matched,
-        score: matched.length * 10 + Math.max(0, 5 - ageDays / 14),
+        matchedTerms: [...inName, ...inDirectory],
+        matchedInName: inName,
+        score: inName.length * 10 + inDirectory.length * 3 + Math.max(0, 5 - ageDays / 14),
       }
     })
-    .filter((candidate) => candidate.matchedTerms.length > 0)
+    .filter((candidate) => candidate.matchedInName.length > 0 || candidate.matchedTerms.length >= 2)
     .sort((left, right) => right.score - left.score)
 }
 

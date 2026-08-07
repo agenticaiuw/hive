@@ -64,6 +64,33 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Run AppleScript for deep macOS automation.',
     params: { script: 'string' },
   },
+  /*
+   * Deferred work. These were dispatchable but absent from every schema, so
+   * sanitizeActions dropped them from any plan that named one — and the owner
+   * heard a confident summary for a briefing that was never made. The
+   * capability manifest caught the drift by diffing the two registries.
+   */
+  research_brief: {
+    description:
+      'Research a topic on the web and leave a written brief plus an audio version the owner can play later from the pendant. Use when nobody is waiting for the answer now.',
+    params: {
+      topic: 'string',
+      mode: "optional 'brief' (default) or 'deep'",
+      maxSources: 'optional number',
+    },
+  },
+  play_briefing: {
+    description:
+      'Play a briefing that is already waiting. Defaults to the most recent one.',
+    params: {
+      id: "optional briefing id, or 'latest'",
+      onMac: 'optional boolean — play through the Mac speakers instead',
+    },
+  },
+  list_briefings: {
+    description: 'List the briefings waiting to be played, newest first.',
+    params: { limit: 'optional number, default 20' },
+  },
   open_url: {
     description: 'Open any URL in the default browser (shopping, Gmail, docs, etc.).',
     params: { url: 'string' },
@@ -1098,6 +1125,13 @@ const DISPATCH_ALIASES = new Set([
   'set_keyboard_language',
   'mouse_scroll',
   'show_screen_overlay',
+  /*
+   * Diagnostic, not something to plan: the owner never asks for it, but a
+   * replayed history must not have the step silently dropped.
+   */
+  'check_input_permissions',
+  /* research_brief is the advertised spelling; this is its dispatch alias. */
+  'research_topic',
 ])
 
 export function isKnownActionType(type) {
