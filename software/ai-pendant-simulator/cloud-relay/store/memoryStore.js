@@ -20,6 +20,7 @@ const routines = new Map()
 const routineRuns = new Map()
 const routineLeases = new Map()
 const announcements = new Map()
+const contexts = new Map()
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 
 function pruneExpiredJobs() {
@@ -337,5 +338,40 @@ export function createMemoryStore() {
       announcements.set(announcementId, next)
       return next
     },
+
+    /* ---- migrated contexts ----------------------------------------------
+     * Storage lives on the relay because the relay is the only body awake
+     * when the others sleep — a context stored on the Mac is unreachable at
+     * exactly the moment the pendant needs to hand one over.
+     * -------------------------------------------------------------------- */
+
+    async saveContext(record) {
+      pruneExpiredContexts()
+      contexts.set(record.handleId, { ...record })
+      return record
+    },
+
+    async getContext(handleId) {
+      pruneExpiredContexts()
+      const record = contexts.get(handleId)
+      return record ? { ...record } : null
+    },
+
+    async deleteContext(handleId) {
+      return contexts.delete(handleId)
+    },
+  }
+}
+
+/*
+ * Expiry is enforced on read as well as by this sweep. The sweep keeps the map
+ * from growing; the read-side check is what makes "expired" mean the same
+ * thing whether or not a sweep has run since.
+ */
+function pruneExpiredContexts(now = Date.now()) {
+  for (const [handleId, record] of contexts.entries()) {
+    if (new Date(record.expiresAt || 0).getTime() <= now) {
+      contexts.delete(handleId)
+    }
   }
 }

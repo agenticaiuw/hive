@@ -45,6 +45,14 @@ export function createPlanJob({
   inputTelemetry = null,
   jobId = null,
   status = 'queued',
+  /*
+   * Opaque handle to the reasoning thread that produced this job, stored on
+   * the relay. It travels instead of the context because it is ~60 bytes and
+   * the context is up to 256 KB, and because the receiving body can ask for a
+   * representation shaped for its own model. Null is the normal case and
+   * means "start cold" — see local-agent/contextResume.js.
+   */
+  contextHandle = null,
 }) {
   const now = new Date().toISOString()
 
@@ -54,6 +62,7 @@ export function createPlanJob({
     status,
     command,
     sessionId: sessionId ?? null,
+    contextHandle: contextHandle ?? null,
     inputTelemetry: inputTelemetry ?? null,
     deviceEvents: [],
     actions: [],
@@ -133,6 +142,13 @@ export function publicJob(job) {
     method: job.method ?? null,
     path: job.path ?? null,
     inputTelemetry: job.inputTelemetry ?? null,
+    /*
+     * job.contextHandle is deliberately NOT here. This shape is what any
+     * principal holding mac:jobs:read gets back — the pendant, the phone, the
+     * dashboard — and the handle is a bearer capability for the owner's own
+     * words. The one body that needs it, the Mac bridge, is handed it directly
+     * on /v1/bridge/work under bridge:work:claim.
+     */
     // Hint from audio-native Realtime plan; bridge executes actions without re-planning.
     plannerHint: job.plannerHint ?? null,
     toolsUsed: job.toolsUsed ?? null,

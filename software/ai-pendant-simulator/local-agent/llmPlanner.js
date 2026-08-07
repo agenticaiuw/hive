@@ -728,7 +728,14 @@ export function isFullControlPlanner() {
 export async function planCommand(command, options = {}) {
   // `tier` picks the model and how much prompt it is given. Default is the
   // behaviour every existing caller already had.
-  const { context = null, onProgress = null, tier = 'planner' } = options
+  const {
+    context = null,
+    onProgress = null,
+    tier = 'planner',
+    // A thread another body already built (local-agent/contextResume.js).
+    // Null means plan from a cold start, as every caller did before.
+    resumed = null,
+  } = options
 
   if (FULL_CONTROL_MODE && LLM_ENABLED) {
     try {
@@ -736,6 +743,7 @@ export async function planCommand(command, options = {}) {
         context,
         onProgress,
         tier,
+        resumed,
       })
 
       if (llmPlan.status === 'instant') {
@@ -783,7 +791,7 @@ export async function planCommand(command, options = {}) {
 
 async function planWithLlm(
   command,
-  { context = null, onProgress = null, tier = 'planner' } = {},
+  { context = null, onProgress = null, tier = 'planner', resumed = null } = {},
 ) {
   const background = tier === 'background'
   const home = os.homedir()
@@ -892,6 +900,8 @@ Never invent shell commands or paths outside the whitelist.`
     command,
     model,
     maxTokens,
+    priorMessages: resumed?.resumed ? resumed.messages : [],
+    cacheKey: resumed?.cacheKey ?? null,
   })
 
   if (!content) {
@@ -910,11 +920,20 @@ Never invent shell commands or paths outside the whitelist.`
    * from them are labelled estimates wherever they surface. Every return below
    * carries it: a plan the owner cannot price is a plan they cannot route.
    */
+  const inheritedChars = (resumed?.resumed ? resumed.messages : []).reduce(
+    (total, message) => total + String(message.content || '').length,
+    0,
+  )
   const usage = {
     tier,
     model,
-    promptChars: systemPrompt.length + userContent.length,
+    promptChars: systemPrompt.length + userContent.length + inheritedChars,
     completionChars: content.length,
+    /* Broken out so the cost of inheriting a thread can be compared against
+     * the cost of rediscovering it, which is the only number that decides
+     * whether this mechanism is worth keeping. */
+    inheritedChars,
+    resumed: Boolean(resumed?.resumed),
   }
 
   const parsed = JSON.parse(extractJsonObject(content))
@@ -1005,6 +1024,12 @@ export async function requestLlmPlanContent({
   // before the policy router got.
   model = null,
   maxTokens = null,
+  /*
+   * A reasoning thread migrated from another body, already shaped for this
+   * model by shared/contextHandoff.js. Empty is the normal case.
+   */
+  priorMessages = [],
+  cacheKey = null,
 }) {
   const useStream = typeof onProgress === 'function'
   const hasScreenshot = Boolean(screenshot?.dataUrl)
@@ -1032,7 +1057,29 @@ export async function requestLlmPlanContent({
       ...(LLM_SEND_REASONING && effort !== 'off'
         ? { reasoning: { effort } }
         : {}),
-      messages: [{ role: 'system', content: systemPrompt }, userMessage],
+      /*
+       * Steers repeated calls carrying the same migrated context at the same
+       * server-side cache. The key is the handle ID, never the handle secret —
+       * this field goes to the provider on every request.
+       */
+      ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
+      /*
+       * Order is load-bearing, not cosmetic. Provider prompt caches key on an
+       * exact prefix, so the stable material goes first — this body's system
+       * prompt, then the migrated thread, which is byte-identical for the life
+       * of the handle — and the volatile part, the new request, goes last.
+       * Put the request in the middle and every resume is a fresh prefix and
+       * every resume misses.
+       *
+       * The cache is per-model, so a relay(gpt-realtime-2.1)→Mac(gpt-5.6-luna)
+       * hop cannot hit it however the messages are ordered; a second call on
+       * this body with the same handle can, and does.
+       */
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...(Array.isArray(priorMessages) ? priorMessages : []),
+        userMessage,
+      ],
     }),
   })
 

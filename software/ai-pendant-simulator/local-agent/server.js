@@ -366,6 +366,7 @@ app.post('/plan', async (request, response) => {
       sessionId,
       source: request.body?.source || 'local',
       signal: abortController.signal,
+      contextHandle: request.body?.contextHandle ?? null,
     })
 
     if (plan.status === 'unsupported') {
