@@ -693,6 +693,46 @@ function buildSystemPrompt(state) {
       parts.push(`\n**from ${m.from}** — ${m.subject}\n${m.body}`)
     }
   }
+  /*
+   * What this agent currently holds.
+   *
+   * Measured, three separate ways, that agents cannot tell what they can already
+   * do: one capability proposed eighteen times whose every piece shipped; 21
+   * requests for propose tools the agents had been given; two agents requesting
+   * authenticated Mac access that probe_http already carries the token for. Each
+   * was answerable from information the harness had and never showed them.
+   *
+   * The prompt already listed granted CONTEXT and PERMISSIONS. It never listed
+   * granted TOOLS — the exact thing relay-realtime spent three rounds confused
+   * about — nor what access this agent's own probe carries, nor what it is
+   * already waiting on. So it is assembled here from state rather than left to
+   * be rediscovered, which is the same argument as the commons directory: the
+   * cheapest lookup is the one that never happens.
+   */
+  const holdings = []
+  holdings.push(
+    `- probe_http reaches ${RELAY_URL} and sends this agent's bearer token. Authenticated routes are open to you; "bearer-protected" in a description does not mean closed.`,
+  )
+  if (state.granted.tools.length) {
+    holdings.push(
+      `- Tools granted to you: ${state.granted.tools.map((tool) => tool.name).join(', ')}. ` +
+        'These are SCHEMAS, not implementations — calling one returns a note saying so. describe(name) will show you the grant.',
+    )
+  }
+  if (state.pending.length) {
+    const oldest = state.pending.reduce(
+      (lowest, request) => (Number.isFinite(request.round) && request.round < lowest ? request.round : lowest),
+      state.round,
+    )
+    holdings.push(
+      `- ${state.pending.length} of your requests are queued for the orchestrator, the oldest from round ${oldest}. ` +
+        'Re-asking does not raise their priority; it spends a round.',
+    )
+  }
+  parts.push(
+    `\n---\nWhat you currently hold:\n${holdings.join('\n')}`,
+  )
+
   if (state.granted.context.length) {
     parts.push(
       '\n---\nContext you previously asked for, and which the orchestrator granted:',
