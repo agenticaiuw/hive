@@ -431,7 +431,7 @@ function loadState() {
   } catch {
     return {
       agent: AGENT_ID,
-      model: MODEL,
+      model,
       phase: 'recon',
       readMessages: [],
       round: 0,
@@ -1280,7 +1280,7 @@ function toResponsesTool(tool) {
   }
 }
 
-async function callModel(input, tools, instructions) {
+async function callModel(input, tools, instructions, model = MODEL) {
   const response = await fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: {
@@ -1288,7 +1288,7 @@ async function callModel(input, tools, instructions) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       instructions,
       input,
       tools,
@@ -1996,10 +1996,23 @@ async function proposalPhase(state, tools, instructions, input, transcript, aske
       'Record it by CALLING propose_capability or propose_change. Writing it as text does not record it — anything not passed to a tool is discarded when this round ends.',
   })
 
+  /* The realtime model holds the live conversation but is not served by the
+   * responses API, so a realtime agent's proposal phase would 404 and its
+   * round would silently produce nothing -- the exact failure this whole
+   * phase exists to stop. It proposes with the text model instead. */
+  const proposalModel = IS_REALTIME
+    ? process.env.LLM_MODEL || 'gpt-5.6-luna'
+    : MODEL
+
   process.stdout.write(`  [phase] proposing on the context already gathered\n`)
 
   for (let step = 0; step < PROPOSAL_STEPS; step += 1) {
-    const payload = await callModel(input, proposalTools, instructions)
+    const payload = await callModel(
+      input,
+      proposalTools,
+      instructions,
+      proposalModel,
+    )
     const output = payload.output || []
     input.push(...output)
 
