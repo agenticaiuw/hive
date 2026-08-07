@@ -374,7 +374,16 @@ export function createMemoryStore() {
      * it is the thing a stub would get wrong: see fleetMemory.js.
      * -------------------------------------------------------------------- */
 
-    async appendMemoryEvents(events) {
+    /*
+     * `now` is threaded here for the same reason every other method takes it,
+     * and its absence was a real bug: the post-append sweep ran on the wall
+     * clock while the events had been stamped with the caller's, so an event
+     * written with an explicit `now` more than one TTL behind real time was
+     * expired by the very call that created it. The append still reported
+     * `appended: 1` — the loss was silent, and only visible in the sweep
+     * report's `reasons: {expired: 1}`.
+     */
+    async appendMemoryEvents(events, { now = Date.now() } = {}) {
       for (const event of Array.isArray(events) ? events : []) {
         // Appends are immutable, and a device on a flaky LTE link retries. A
         // re-sent batch must be a no-op, not a second copy of the same fact.
@@ -382,7 +391,7 @@ export function createMemoryStore() {
           memoryEvents.set(event.eventId, { ...event })
         }
       }
-      return sweepMemoryEvents()
+      return sweepMemoryEvents(now)
     },
 
     async listMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {

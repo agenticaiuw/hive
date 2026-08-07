@@ -256,7 +256,7 @@ export function foldMemoryEvents(events, { now = Date.now(), surface = null } = 
 
   for (const record of Array.isArray(events) ? events : []) {
     if (!record?.key || !record?.type) continue
-    const identity = `${record.type} ${record.key}`
+    const identity = `${record.type}\u0000${record.key}`
     const current = winners.get(identity)
     if (!current || isNewer(record, current)) winners.set(identity, record)
   }
@@ -381,7 +381,7 @@ function foldWithTombstones(events) {
   const winners = new Map()
   for (const record of events) {
     if (!record?.key || !record?.type) continue
-    const identity = `${record.type} ${record.key}`
+    const identity = `${record.type}\u0000${record.key}`
     const current = winners.get(identity)
     if (!current || isNewer(record, current)) winners.set(identity, record)
   }
@@ -714,7 +714,7 @@ export async function appendFleetMemory(store, input = {}, options = {}) {
     }
   }
 
-  const report = await store.appendMemoryEvents(events)
+  const report = await store.appendMemoryEvents(events, { now: options?.now ?? Date.now() })
 
   return {
     status: 201,
