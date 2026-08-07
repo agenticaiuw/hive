@@ -478,7 +478,7 @@ function dedupeReferences(references) {
   const seen = new Set()
   const out = []
   for (const reference of references) {
-    const key = `${reference.kind} ${reference.id}`
+    const key = `${reference.kind}\u0000${reference.id}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push(reference)
