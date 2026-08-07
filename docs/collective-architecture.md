@@ -490,6 +490,36 @@ reason they cannot be granted from inside the harness, the propose-tool ones
 closed as a fixed defect, relay-realtime's answered with what it could not have
 discovered. That the backlog existed at all is the finding.
 
+## The one finding underneath the others
+
+Three separate investigations tonight converged on a single phenomenon, and it
+is not the one this document was opened to study.
+
+| symptom | what it turned out to be |
+|---|---|
+| one capability proposed **18 times** | every piece of it shipped, two named in the agent's own prompt |
+| **21** requests for `propose_capability` | the agents had been given it and the phase never advanced |
+| **2** agents requesting authenticated Mac access | `probe_http` already sends the bearer token; the commons records their peers getting HTTP 200 |
+
+**Agents cannot tell what they can already do.** Not merely which primitives
+compose into a capability — that is the composition gap — but whether they
+*possess a tool*, whether they *have an access*, whether a phase has *given them
+a verb*. Each was answerable from information already in front of them.
+
+This is a different problem from the one the commons solves. The commons
+answers *what is true about the world*. Nothing answers *what is true about
+me* — and an agent wrong about its own capabilities burns rounds requesting
+what it holds, and reads externally as unimaginative or repetitive. Every
+measurement in this document that looked like poor agent output was, on
+inspection, this.
+
+The cheap version of the fix is already in: `built_from` on a proposal (177 of
+179 now name real routes), `why_existing_tools_insufficient` on a tool request,
+`describe()` finding granted tools, and recon ending on its own. The expensive
+version — a standing, per-agent statement of *what I currently hold and what
+that lets me do* — has not been built, and on this evidence it would be worth
+more than anything else on the list.
+
 ## Empirical baseline for this class of system
 
 MAST (arXiv 2503.13657), 1600+ annotated traces across 7 frameworks, κ=0.88:
