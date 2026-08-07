@@ -299,7 +299,30 @@ is usually invisible because it reads as helpfulness.* Separate the fact from
 the framing at the point of generation, or the store will faithfully record the
 framing as part of the fact.
 
-### Three things that were not in the plan and turned out to matter
+### Differentiation and detachability pull against each other
+
+Wegner's third finding is that the benefit of a transactive memory system comes
+from *differentiation* — five nodes that all need to know the same things is the
+anti-pattern. This system now has that: at any grouping threshold meaning "the
+same idea", no proposal cluster spans two agents.
+
+The bill arrives on the other side. Measured with `detach.mjs` as the collective
+grew from 5 agents to 9:
+
+| | facts | sole-sourced |
+|---|---|---|
+| 5 agents | 53 | 27 (**51%**) |
+| 9 agents | 97 | 60 (**62%**) |
+
+**More agents made the collective more fragile, not less.** Every agent explores
+its own corner, so growth adds facts faster than it adds second witnesses. The
+intuition that redundancy comes free with scale is exactly backwards here.
+
+The two goals are in genuine tension and cannot both be maximised: overlap is
+waste by Wegner and insurance by exit. Nothing resolves it in general. What the
+system can honestly do is *measure* the position it has taken — which is what
+`detach.mjs` is for — and keep the export path working, so the owner's copy
+never depends on any node still being there.
 
 **An agent that cannot act is indistinguishable from an agent with nothing to
 say.** Three separate times a harness defect arrived dressed as an architecture
