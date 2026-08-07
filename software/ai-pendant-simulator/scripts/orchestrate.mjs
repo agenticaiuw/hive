@@ -77,6 +77,35 @@ function unreadMailByAgent() {
   return counts
 }
 
+/**
+ * How much is waiting on a human, across every agent.
+ *
+ * Read from state each cycle rather than tracked, for the same reason
+ * unreadMailByAgent is: a scheduler holding its own count would drift from what
+ * the agents actually have pending, and the drift would hide exactly the thing
+ * this exists to show.
+ */
+function pendingRequests() {
+  let total = 0
+  let oldestRound = null
+
+  for (const agent of AGENTS) {
+    let state
+    try {
+      state = JSON.parse(fs.readFileSync(path.join(OUT_DIR, `state-${agent}.json`), 'utf8'))
+    } catch {
+      continue
+    }
+    for (const request of state.pending || []) {
+      total += 1
+      if (Number.isFinite(request.round) && (oldestRound === null || request.round < oldestRound)) {
+        oldestRound = request.round
+      }
+    }
+  }
+  return { total, oldestRound }
+}
+
 function runAgent(agent) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [HARNESS, 'run', '--agent', agent], {
@@ -153,6 +182,26 @@ for (; cycle < CYCLES; cycle += 1) {
     `Cycle ${cycle}: running ${run.map((row) => `${row.agent} [${row.reason}]`).join(', ')}` +
       (held.length ? `  ·  holding ${held.map((row) => row.agent).join(', ')}\n` : '\n'),
   )
+
+  /*
+   * Surface the request backlog every cycle, because the alternative was tried
+   * and failed silently: 141 requests accumulated unanswered while this shell
+   * printed rounds and proposals. Inside them were 21 correct diagnoses of a
+   * live harness bug and six agents converging on one blocker — the only
+   * cross-agent agreement this collective has produced. Nothing showed it,
+   * because the loop reported what agents made and never what they asked for.
+   *
+   * A number on every cycle is not a fix. It makes ignoring it a decision
+   * rather than an oversight, which is the difference that mattered here.
+   */
+  const waiting = pendingRequests()
+  if (waiting.total) {
+    process.stdout.write(
+      `  ${waiting.total} requests waiting on the orchestrator` +
+        `${waiting.oldestRound !== null ? `, oldest from round ${waiting.oldestRound}` : ''}` +
+        `  ·  review: node scripts/derive-harness.mjs review --agent <name>\n`,
+    )
+  }
 
   const fingerprintNow = harnessFingerprint()
   if (fingerprintNow !== fingerprintAtStart) {
