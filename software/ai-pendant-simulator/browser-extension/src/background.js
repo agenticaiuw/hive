@@ -1,9 +1,13 @@
 import {
+  commandIdentity,
+  createCommandLedger,
   isScriptableUrl,
   normalizeConfig,
   originPattern,
   pickTargetTab,
+  provenanceFor,
   retryDelay,
+  sanitizeExtraction,
   validateCommand,
   validateNavigationUrl,
 } from './bridge-core.js'
@@ -19,6 +23,26 @@ const CONFIG_KEYS = ['agentUrl', 'agentToken', 'deviceName', 'targetMode', 'inst
 
 let activePoll = null
 let configRevision = 0
+
+/*
+ * One nonce per service-worker incarnation.
+ *
+ * Safari suspends this worker freely, and every restart loses the ledger below
+ * with it. The agent cannot see that happen — the extensionId is stable across
+ * restarts — so it has no way to know that a command it handed out is now
+ * orphaned rather than slow, and it waits out the full lease before deciding.
+ * A nonce that changes on restart makes the restart visible in the heartbeat,
+ * which is what lets the agent retire the orphan immediately instead of leaving
+ * it to be run later by whoever polls next.
+ */
+const INCARNATION_NONCE = crypto.randomUUID()
+
+/*
+ * Survives only as long as this worker does, which is exactly the window that
+ * matters: the agent refuses to hand out anything older than 90s, so a replay
+ * that could double-act has to arrive within seconds of the first attempt.
+ */
+const commandLedger = createCommandLedger()
 
 async function migrateSyncedCredentials() {
   if (!api.storage.sync) return
@@ -136,6 +160,11 @@ async function heartbeat(config) {
     browserName: browserLabel(),
     extensionVersion: api.runtime.getManifest().version,
     userAgent: globalThis.navigator?.userAgent ?? '',
+    /* The lease protocol: nonce says which incarnation of this worker is
+     * holding the lease, capabilities say what it is safe to hand it. */
+    nonce: INCARNATION_NONCE,
+    capabilities: ['idempotency-ledger', 'privacy-boundary', 'provenance'],
+    ledger: commandLedger.stats(),
     ...tab,
   })
 }
@@ -151,13 +180,37 @@ async function pollOnce(config) {
 
   const payload = await response.json()
   const command = payload?.command
+  const identity = commandIdentity(command)
   let result
+
+  /*
+   * The replay check, before anything touches a tab.
+   *
+   * The sequence this exists for leaves no trace on the agent side: the command
+   * runs, the POST of its result fails all three attempts, and the command is
+   * still queued. Whoever polls next gets it again — and "again" for a click or
+   * a navigate means it happens twice on a real page. The agent cannot rule
+   * that out, because from where it stands a command it never got an answer for
+   * and a command that was never run look identical.
+   */
+  const replayed = commandLedger.recall(identity)
+  if (replayed) {
+    await postResultWithRetry(config, command?.commandId, {
+      ...replayed.result,
+      extensionId: config.extensionId,
+      replayed: true,
+    })
+    return true
+  }
 
   try {
     result = { ok: true, result: await executeCommand(command, config) }
   } catch (error) {
     result = { ok: false, error: error?.message || String(error) }
   }
+
+  /* Recorded before the POST, not after: the POST is the step that fails. */
+  commandLedger.remember(identity, result)
 
   await postResultWithRetry(config, command?.commandId, {
     ...result,
@@ -285,26 +338,50 @@ async function updateStatus(patch) {
   }
 }
 
+/**
+ * Run one command, then take everything it produced through the privacy
+ * boundary and stamp it with where it came from.
+ *
+ * The order is the whole point. sanitizeExtraction runs after execution and
+ * before the result is handed back to pollOnce, which is the last moment it is
+ * still inside Safari: past here it is in a different process with a log, a
+ * store and a cloud relay attached, and a credential that reaches the agent has
+ * effectively left the machine.
+ */
 async function executeCommand(command, config) {
   const { type, params } = validateCommand(command)
+  const { result, tab } = await runCommand(type, params, config)
+  const clean = sanitizeExtraction(result)
 
+  return {
+    ...clean.result,
+    provenance: provenanceFor({
+      command,
+      tab,
+      result: clean.result,
+      locator: params.ref || params.selector,
+    }),
+  }
+}
+
+async function runCommand(type, params, config) {
   if (type === 'navigate') {
-    return navigate(params, config)
+    return { result: await navigate(params, config), tab: null }
   }
 
   if (type === 'list_tabs') {
-    return listTabs(params)
+    return { result: await listTabs(params), tab: null }
   }
 
   const tab = await selectTargetTab(params, config.targetMode)
   await assertPageAccess(tab)
 
   if (type === 'capture') {
-    return captureTab(tab)
+    return { result: await captureTab(tab), tab }
   }
 
   if (type === 'wait_for') {
-    return waitForInTab(tab, params)
+    return { result: await waitForInTab(tab, params), tab }
   }
 
   const injection = await api.scripting.executeScript({
@@ -323,11 +400,14 @@ async function executeCommand(command, config) {
   }
 
   return {
-    ...firstResult.result,
-    tabId: tab.id,
-    windowId: tab.windowId,
-    url: tab.url ?? '',
-    title: tab.title ?? firstResult.result?.title ?? '',
+    result: {
+      ...firstResult.result,
+      tabId: tab.id,
+      windowId: tab.windowId,
+      url: tab.url ?? '',
+      title: tab.title ?? firstResult.result?.title ?? '',
+    },
+    tab,
   }
 }
 
@@ -700,6 +780,14 @@ function runInPage(type, params) {
         href: el instanceof HTMLAnchorElement ? el.href?.slice(0, 300) : undefined,
         inputType:
           el instanceof HTMLInputElement ? (el.type || 'text').toLowerCase() : undefined,
+        /* Not for the agent to act on — these are what the privacy boundary
+         * classifies with. A field's own name and autocomplete token are the
+         * only reliable way to tell a card number from a quantity box, and
+         * without them every snapshot ships credential fields as plain
+         * textboxes. sanitizeExtraction strips fieldName back out for anything
+         * it classifies as sensitive. */
+        fieldName: el.getAttribute?.('name') || undefined,
+        autocomplete: el.getAttribute?.('autocomplete') || undefined,
         bounds: {
           x: Math.round(rect.x),
           y: Math.round(rect.y),
