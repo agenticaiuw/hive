@@ -311,6 +311,41 @@ is usually invisible because it reads as helpfulness.* Separate the fact from
 the framing at the point of generation, or the store will faithfully record the
 framing as part of the fact.
 
+### The thing the commons still does not fix
+
+The collective's most-restated request, proposed **eighteen times** by
+relay-realtime across rounds 26–62, is *"keep working after I stop talking, then
+tell me what happened when it's done."*
+
+Every component of it already exists:
+
+| the ask | what ships today |
+|---|---|
+| work continues after the owner leaves | `GET/POST /jobs`, `/jobs/:jobId`, `/jobs/:jobId/cancel` — a 24 h queue the Mac bridge claims from |
+| tell me what happened | `GET /jobs/:jobId/receipts` |
+| tell me **on the pendant** | `/v1/pendant/announce`, `/v1/pendant/speak`, `/v1/announcements` |
+
+The last row is on relay-realtime's *own* surface. It has been asking for a
+capability whose delivery mechanism it probes every round.
+
+And the commons does put the rest in front of it: its prompt now carries
+`discover:routes — 123 items (2m, 9 agents)`, and the preview on that line names
+`GET /jobs`, `/jobs/:jobId` and `/jobs/:jobId/receipts` outright. It can see the
+parts without spending a call. It asked twice more anyway.
+
+**So the missing thing is not the parts. It is that nothing in this system
+represents what the parts already compose into.** The commons is a directory of
+primitives — routes, devices, specs, chips. A capability is a *path through*
+several of them, usually across surfaces, and no agent can see a path by reading
+an inventory. Every one of the 835 proposals is an agent describing an
+experience it wants; not one is an agent noticing that the experience is three
+existing endpoints in a row.
+
+That is the next thing worth building, and it is a different object from the
+commons: not "what exists" but "what is already reachable end to end". It also
+explains the shape of the corpus better than anything else measured tonight —
+the agents are not short of facts, they are short of composition.
+
 ### What the control shell actually bought, stated carefully
 
 Run unslotted so that rounds-per-cycle equals agents-eligible, 9 agents, 8
