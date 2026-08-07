@@ -613,6 +613,33 @@ So: the gate is the best-supported explanation available, and the experiment
 that would settle it is two runs from a common checkpoint differing only in the
 threshold.
 
+#### That experiment was run, and it settled nothing
+
+Two arms from one checkpoint, 10 cycles each, identical in every respect except
+`HARNESS_SAME_IDEA_AT`. Cross-agent clusters counted at a **fixed 0.30 for both
+arms**, so the ruler does not move with the treatment — measuring each arm at its
+own threshold would show more clusters at 0.30 by construction and mean nothing.
+
+| arm | proposals produced | cross-agent clusters |
+|---|---|---|
+| gate 0.45 | 85 | 0 |
+| gate 0.30 | 49 | 0 |
+
+**0 against 0 is not evidence of no effect. It is evidence the experiment could
+not have found one.** Cross-agent clusters run at 9 per 1,761 proposals in the
+full corpus — 0.51%. At 49 proposals an arm expects **0.25** clusters, so zero in
+both is the single most likely outcome whether the gate matters or not. Detecting
+a difference needs roughly 400 proposals an arm, which is 8× the cycles.
+
+Underpowered by a factor I should have computed before running it rather than
+after. The hypothesis is unresolved, and the retrospective 0-vs-3 remains the
+only evidence for it — still confounded, still not enough.
+
+**The arms did measure one thing cleanly.** The tighter gate cut proposal volume
+from 85 to 49 across matched cycles, a **42% reduction**, from one checkpoint
+with everything else held constant. That is the gate doing substantial work
+blocking restatement, and it is the first clean measurement of its cost.
+
 **The methodological point stands regardless:** every number in this document is
 a snapshot, and the ones above were taken at 835 proposals. They were right then.
 Anything quoted from here should carry the corpus size it was measured at.
