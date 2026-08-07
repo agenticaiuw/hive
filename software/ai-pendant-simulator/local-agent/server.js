@@ -245,6 +245,7 @@ import {
 } from './mailTriage.js'
 import { triageNotifications } from './notificationTriage.js'
 import { registerGoalRouterRoutes } from './goalRouter.js'
+import { registerVoiceNotesRoutes } from './voiceNotes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1389,6 +1390,11 @@ registerGoalRouterRoutes(app)
  * owner asks. Writes no `told` fingerprints, so it never spends one of the
  * morning brief's three spoken slots. */
 registerMeetingPrepRoutes(app)
+
+/* The button already records; a note differs from a command only in what
+ * happens next. Lifts the transcript the pipeline already has rather than
+ * opening a second path to the mic. */
+registerVoiceNotesRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
