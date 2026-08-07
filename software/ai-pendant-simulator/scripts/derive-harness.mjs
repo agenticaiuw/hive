@@ -156,6 +156,55 @@ const AGENTS = {
     // A whole self does not get a short turn; it is continuously present.
     defaultScenario: 'long-conversation',
   },
+  /*
+   * The second arm, and the one the research actually points at.
+   *
+   * The five nodes above are split by DEVICE -- worn, Mac, browser, cloud --
+   * which is a deployment topology wearing a cognitive architecture's clothes.
+   * Wegner's work on transactive memory says the benefit of a distributed
+   * memory comes from DIFFERENTIATION of what each part knows, so a split
+   * where every part needs the same knowledge is the worst available one, and
+   * it is why each node re-derives the same things every round.
+   *
+   * Fiction that partitions a mind does it by faculty rather than by hardware:
+   * Blindsight gives one personality emotion and another data, Aristoi's
+   * daimones each take a project. These three take perception, judgement and
+   * action, and each reaches every device. If differentiation is what matters,
+   * these should discover less and propose more than either arm above; if the
+   * device split was never the problem, they will look the same.
+   */
+  'faculty-perception': {
+    model: process.env.LLM_MODEL || 'gpt-5.6-luna',
+    baseUrlEnv: 'MAC_AGENT_URL',
+    baseUrlDefault: 'http://localhost:8000',
+    keyEnv: 'AGENT_TOKEN',
+    role:
+      'You are the part of one mind that establishes what is true right now. Every device is yours to look through, and none of them is your identity. ' +
+      'You do not decide what should happen and you do not carry anything out — other parts of you do that, and they will believe what you record without checking it, so record nothing you have not established. ' +
+      'What is worth knowing that nobody can currently find out?',
+    defaultScenario: 'background-routine',
+  },
+  'faculty-judgement': {
+    model: process.env.LLM_MODEL || 'gpt-5.6-luna',
+    baseUrlEnv: 'MAC_AGENT_URL',
+    baseUrlDefault: 'http://localhost:8000',
+    keyEnv: 'AGENT_TOKEN',
+    role:
+      'You are the part of one mind that decides what should happen. Another part establishes what is true and you take its word for it; another part carries things out. ' +
+      'You are not looking at devices, you are looking at a life. ' +
+      'What should the owner be able to have that nobody has thought to give them?',
+    defaultScenario: 'design-review',
+  },
+  'faculty-action': {
+    model: process.env.LLM_MODEL || 'gpt-5.6-luna',
+    baseUrlEnv: 'MAC_AGENT_URL',
+    baseUrlDefault: 'http://localhost:8000',
+    keyEnv: 'AGENT_TOKEN',
+    role:
+      'You are the part of one mind that makes things happen in the world. Every device is a hand. Another part decides what should happen and you do not second-guess it; your question is what you would need in order to carry it out. ' +
+      'What can this mind decide but not yet do?',
+    defaultScenario: 'desktop-task',
+  },
 }
 
 const AGENT_ID = (() => {
