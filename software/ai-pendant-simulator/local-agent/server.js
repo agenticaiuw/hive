@@ -27,6 +27,8 @@ import {
 } from './browserBridge.js'
 import { registerActionLedgerRoutes } from './actionLedgerRoutes.js'
 import { registerAudioRetentionRoutes } from './audioRetention.js'
+import { registerCatchupRoutes } from './catchupDigest.js'
+import { registerFormPreviewRoutes } from './formPreview.js'
 import { registerBriefingTriageRoutes } from './briefingTriage.js'
 import { registerPrepareApproveRoutes } from './prepareApprove.js'
 import { registerPageWatchRoutes } from './pageWatchRoutes.js'
@@ -1362,6 +1364,18 @@ registerAudioRetentionRoutes(app)
 
 /* Prepare on the Mac, approve from the pendant. Neither route executes. */
 registerPrepareApproveRoutes(app)
+
+/*
+ * One causal account of a gap. Three surfaces already recorded "handed over,
+ * never answered for" and nothing read it: an inflight ledger step, a
+ * lease-expired spool entry, a routine dispatched past the reaper window.
+ * Filing those as occurred makes the owner skip work that never happened.
+ */
+registerCatchupRoutes(app)
+
+/* The literal payload, and an approval that names the bytes it approves. */
+registerFormPreviewRoutes(app)
+
 
 registerPageWatchRoutes(app)
 
