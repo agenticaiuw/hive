@@ -483,6 +483,35 @@ function saveState(state) {
  * matched rounds without it, and a store that switches itself on mid-comparison
  * silently invalidates the arm it lands in.
  */
+/*
+ * Every fetch in this file used to be unbounded, and the round's own deadline is
+ * only consulted BETWEEN steps — so a single request that never returns stalls
+ * the round forever, holds the agent's lock, and blocks its launcher behind it.
+ * Seen for real: faculty-perception sat seven minutes into a round with no
+ * output and no way to end.
+ *
+ * Two bounds, because the two kinds of call fail differently. A reasoning model
+ * legitimately thinks for minutes, so its bound is generous and only catches a
+ * genuinely dead connection. A local Mac agent or relay that has not answered
+ * in twenty seconds is, for the purposes of the agent asking, down — and "down"
+ * is a fact worth recording rather than a reason to wait.
+ */
+const MODEL_TIMEOUT_MS = Number(process.env.HARNESS_MODEL_TIMEOUT_MS || 240_000)
+const PROBE_TIMEOUT_MS = Number(process.env.HARNESS_PROBE_TIMEOUT_MS || 20_000)
+
+async function fetchWithDeadline(url, init = {}, timeoutMs = PROBE_TIMEOUT_MS) {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (error) {
+    /* A bare "The operation was aborted" tells the agent nothing it can act on;
+     * how long it waited is the part that distinguishes down from slow. */
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      throw new Error(`No response within ${Math.round(timeoutMs / 1000)}s`)
+    }
+    throw error
+  }
+}
+
 const COMMONS_ON = process.env.HARNESS_COMMONS === '1'
 const COMMONS_DIRECTORY_LIMIT = Number(process.env.HARNESS_COMMONS_LIMIT || 60)
 
@@ -1170,7 +1199,7 @@ async function discoverCategory(category, state) {
       /* the Mac may simply be off; an empty list is the honest answer */
     }
     try {
-      const relay = await fetch(
+      const relay = await fetchWithDeadline(
         `${String(process.env.RELAY_URL || '').replace(/\/$/, '')}/v1/devices/status`,
         { headers: { Authorization: `Bearer ${process.env.RELAY_API_KEY || ''}` } },
       )
@@ -1281,7 +1310,7 @@ async function probeHttp(args, state) {
   const target = `${RELAY_URL}${args.path.startsWith('/') ? '' : '/'}${args.path}`
 
   try {
-    const response = await fetch(target, {
+    const response = await fetchWithDeadline(target, {
       method,
       headers: {
         Authorization: `Bearer ${RELAY_KEY}`,
@@ -1334,7 +1363,7 @@ const MAC_AGENT_TOKEN = String(process.env.AGENT_TOKEN || '').trim()
 
 async function macFetch(pathname, init) {
   /* Everything but /health is behind the bearer token production also uses. */
-  const response = await fetch(`${MAC_AGENT_URL}${pathname}`, {
+  const response = await fetchWithDeadline(`${MAC_AGENT_URL}${pathname}`, {
     ...init,
     headers: {
       ...(init?.headers || {}),
@@ -1439,21 +1468,25 @@ function toResponsesTool(tool) {
 }
 
 async function callModel(input, tools, instructions, model = MODEL) {
-  const response = await fetch(`${API_BASE}/responses`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json',
+  const response = await fetchWithDeadline(
+    `${API_BASE}/responses`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        instructions,
+        input,
+        tools,
+        tool_choice: 'auto',
+        max_output_tokens: 8192,
+      }),
     },
-    body: JSON.stringify({
-      model,
-      instructions,
-      input,
-      tools,
-      tool_choice: 'auto',
-      max_output_tokens: 8192,
-    }),
-  })
+    MODEL_TIMEOUT_MS,
+  )
   const payload = await response.json()
   if (!response.ok) {
     throw new Error(
@@ -2503,7 +2536,7 @@ async function buildEvals() {
     )
     return
   }
-  const response = await fetch(`${RELAY_URL}/v1/ops/voice-runs`, {
+  const response = await fetchWithDeadline(`${RELAY_URL}/v1/ops/voice-runs`, {
     headers: { Authorization: `Bearer ${RELAY_KEY}` },
   })
   if (!response.ok) throw new Error(`voice-runs fetch failed (${response.status}).`)
