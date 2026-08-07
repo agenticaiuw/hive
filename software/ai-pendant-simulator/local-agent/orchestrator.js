@@ -8,6 +8,7 @@ import {
   classifyTier,
   matchDeterministic,
 } from './policyRouter.js'
+import { ledgerStepObserver, openLedger } from './actionLedger.js'
 import { recordRouting } from './routingStats.js'
 import {
   createSession,
@@ -515,9 +516,40 @@ export async function orchestrateExecute({
     // adds the foreground watch around them: UI steps aimed at the app the plan
     // named instead of at whoever happens to be in front, and a stop if that app
     // goes away mid-plan. It cannot ask anyone anything.
+    /*
+     * The manifest is written and fsynced before the executor sees anything.
+     *
+     * /journal, receipts and undo are all derived AFTER an action runs, and the
+     * derivation is right — but absence of a receipt cannot tell "never
+     * dispatched" from "dispatched, then we crashed", and those two want
+     * opposite recoveries. Recording the intent first is the only thing that
+     * separates them. focusCoordinator awaits onStep before execute([action])
+     * and again after it returns, which is exactly the crash boundary, so the
+     * observer composes in without executor.js or focusPolicy.js changing.
+     */
+    let recordStep = null
+    try {
+      const ledger = openLedger({
+        command,
+        actions,
+        jobId: planMeta?.jobId ?? null,
+        sessionId: sessionId ?? null,
+        source,
+      })
+      recordStep = ledgerStepObserver(ledger)
+    } catch (error) {
+      /* Bookkeeping must never stop the owner's work. A plan that cannot be
+       * recorded still runs; it simply cannot be resumed, which is strictly
+       * better than refusing to act because the notebook is full. */
+      console.warn('action ledger unavailable:', error?.message || error)
+    }
+
     const { results, receipt: focus } = await runFocusSafePlan(actions, {
       execute: executeActions,
-      onStep: ({ phase, seq, action, result }) => {
+      onStep: async ({ phase, seq, action, result }) => {
+        /* Awaited first, so "pending means it never ran" stays true. */
+        await recordStep?.({ phase, seq, action, result })
+
         const stepId = `action-${seq}`
 
         if (phase === 'start') {

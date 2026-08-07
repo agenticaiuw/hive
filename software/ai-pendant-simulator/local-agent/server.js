@@ -21,8 +21,11 @@ import {
   completeBrowserCommand,
   getBrowserStatus,
   pollBrowserCommand,
+  registerBrowserBridgeRoutes,
   registerBrowserHeartbeat,
+  startBrowserBridgeSupervisor,
 } from './browserBridge.js'
+import { registerActionLedgerRoutes } from './actionLedgerRoutes.js'
 import {
   browserSessionsLocation,
   forgetBrowserSession,
@@ -1325,6 +1328,17 @@ app.get('/browser/poll', (request, response) => {
 /* Draining the queue used to mean registering a fake extension and polling
  * each command through the real contract, which also left a phantom device in
  * the heartbeat registry. Cleanup should be an interface, not a trick. */
+/*
+ * The spool and the sweep. Every other sweep in this bridge is a side effect of
+ * traffic, and an offline system has none — which is the state that produced a
+ * queue of stale commands waiting to fire into the owner's Safari.
+ */
+registerBrowserBridgeRoutes(app)
+
+/* Plan manifests, and the resume that reads them. Mounted read-mostly: the one
+ * write route prepares a plan and explicitly does not execute it. */
+registerActionLedgerRoutes(app)
+
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
 })
