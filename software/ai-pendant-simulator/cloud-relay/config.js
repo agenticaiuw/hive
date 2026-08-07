@@ -39,6 +39,27 @@ export const AUDIO_RETENTION_SWEEP_ENABLED =
     .trim()
     .toLowerCase() === 'true'
 
+/*
+ * Outbound announcements (cloud-relay/announce.js).
+ *
+ * ON_CONNECT is the delivery that works against today's firmware: the relay
+ * speaks anything queued down the socket the moment a press opens a
+ * conversation, before the owner has asked for anything. Off by env only.
+ *
+ * PUSH wraps that audio in {"type":"announce"} / {"type":"announced"} control
+ * frames so a pushed announcement can be told apart from a conversation
+ * reply. It stays OFF because the firmware discards unrecognised control
+ * frames on the idle socket today — see the firmware note in announce.js.
+ */
+export const ANNOUNCE_ON_CONNECT =
+  String(process.env.PENDANT_ANNOUNCE_ON_CONNECT || 'true')
+    .trim()
+    .toLowerCase() !== 'false'
+export const ANNOUNCE_PUSH_CONTROL_FRAMES =
+  String(process.env.PENDANT_ANNOUNCE_PUSH || '')
+    .trim()
+    .toLowerCase() === 'true'
+
 // OpenAI only (no OpenRouter / multi-provider router).
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''
 export const OPENAI_API_BASE_URL =

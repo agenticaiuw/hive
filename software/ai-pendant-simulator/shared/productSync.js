@@ -48,13 +48,17 @@ export function normalizeProductSync(input, { limits = PRODUCT_SYNC_LIMITS } = {
 }
 
 export function mergeProductSync(leftInput, rightInput, options = {}) {
+  const { limits = PRODUCT_SYNC_LIMITS } = options
   const left = normalizeProductSync(leftInput, options)
   const right = normalizeProductSync(rightInput, options)
   if (left.accountId !== right.accountId) {
     throw new TypeError('Cannot merge product state from different accounts')
   }
 
-  const sessions = mergeSessions(left.sessions, right.sessions)
+  const sessions = limitSessionWindow(
+    mergeSessionRecords(left.sessions, right.sessions),
+    { limits },
+  )
   const memory = {
     entities: mergeRecords(left.memory.entities, right.memory.entities, 'id'),
     relations: mergeRecords(left.memory.relations, right.memory.relations, 'id'),
@@ -321,7 +325,12 @@ function normalizeMemoryRecords(
   ).sort(compareMemoryOrder)
 }
 
-function mergeSessions(left, right) {
+/*
+ * The unbounded union of two peers' sessions, newest first. Callers that
+ * persist everything they have ever seen (the Mac's local store) want this;
+ * callers that build a sync payload wrap it in limitSessionWindow().
+ */
+export function mergeSessionRecords(left, right) {
   const leftById = new Map(left.map((session) => [session.sessionId, session]))
   const rightById = new Map(right.map((session) => [session.sessionId, session]))
   const ids = [...new Set([...leftById.keys(), ...rightById.keys()])].sort()
@@ -346,6 +355,29 @@ function mergeSessions(left, right) {
     .sort(compareSessionOrder)
 }
 
+/*
+ * Every peer prunes its own store to exactly maxSessions before it syncs, so
+ * the moment two peers diverge their union is over the cap and normalizeSessions()
+ * rejects the merge — permanently, because neither side can shrink further.
+ * The cap belongs to the merged payload, so trim it to the newest window here.
+ *
+ * Overflow is dropped from the payload, never tombstoned: a tombstone asserts
+ * that the user deleted the session and would propagate that deletion to every
+ * other device, whereas falling outside one sync window asserts nothing.
+ */
+export function limitSessionWindow(
+  sessions,
+  { limits = PRODUCT_SYNC_LIMITS } = {},
+) {
+  const ordered = [...sessions].sort(compareSessionOrder)
+  const active = ordered.filter((session) => !session.deletedAt)
+  const deleted = ordered.filter((session) => session.deletedAt)
+  return [
+    ...active.slice(0, limits.maxSessions),
+    ...deleted.slice(0, limits.maxDeletedSessions),
+  ].sort(compareSessionOrder)
+}
+
 function mergeRecords(left, right, idKey) {
   const records = new Map()
   for (const record of [...left, ...right]) {
@@ -359,9 +391,11 @@ function mergeRecords(left, right, idKey) {
 }
 
 function compareSessionOrder(left, right) {
+  // Also orders raw store rows, which reach limitSessionWindow before any
+  // field has been validated, so a missing id must not throw here.
   return (
     compareIso(right.updatedAt, left.updatedAt) ||
-    left.sessionId.localeCompare(right.sessionId)
+    String(left.sessionId || '').localeCompare(String(right.sessionId || ''))
   )
 }
 

@@ -142,3 +142,49 @@ export async function runScheduledTick({
   }
   return { ...summary, runs, closed }
 }
+
+/*
+ * A second clock, riding traffic the relay already serves.
+ *
+ * The Cron Trigger is the clock that works when nobody is around, and it is
+ * the only one that can keep a 7am promise in a silent house. But it is a
+ * single point of failure for the entire feature — a misconfigured trigger, a
+ * plan limit, or a Cloudflare-side hiccup and every routine stops with no
+ * symptom other than nothing happening. That failure mode is invisible, which
+ * is the worst kind.
+ *
+ * So any request that reaches the relay also nudges the schedule. It costs no
+ * extra invocation (it runs in waitUntil, after the response is already on its
+ * way) and no extra latency. The Mac bridge alone polls every few seconds, so
+ * in practice the schedule stays live whenever anything at all is awake.
+ *
+ * It does NOT replace the cron: an idle pendant holds a WebSocket and sends
+ * no requests, so a quiet night produces no traffic to ride.
+ */
+export const OPPORTUNISTIC_TICK_MIN_INTERVAL_MS = 60_000
+let lastOpportunisticAttemptAt = 0
+
+export async function maybeTickOnTraffic({ now = Date.now(), logger = console } = {}) {
+  /*
+   * Isolate-local gate first: this runs on EVERY request, so the common case
+   * must be a number comparison and nothing else. Without it a 5-second
+   * bridge poll would put a D1 read on the relay's busiest path.
+   */
+  if (now - lastOpportunisticAttemptAt < OPPORTUNISTIC_TICK_MIN_INTERVAL_MS) {
+    return null
+  }
+  lastOpportunisticAttemptAt = now
+
+  try {
+    const store = await getStore()
+    /* Durable gate second: many isolates serve this Worker and each has its
+     * own counter, so the shared heartbeat is what actually rate-limits. */
+    const state = await store.getState(SCHEDULER_STATE_KEY)
+    const lastTickAt = Date.parse(state?.data?.tickedAt || '') || 0
+    if (now - lastTickAt < OPPORTUNISTIC_TICK_MIN_INTERVAL_MS) return null
+    return await runScheduledTick({ trigger: 'traffic', now, logger })
+  } catch (error) {
+    logger?.warn?.(`[scheduler] traffic tick failed: ${error?.message || error}`)
+    return null
+  }
+}

@@ -277,15 +277,19 @@ export async function composeOnRelay({
 
 /**
  * Advance a routine past the occurrence that just ran (or was abandoned).
- * Interval schedules count from now; wall-clock schedules from the occurrence,
- * so a run that took four minutes does not push 7:00 to 7:04 forever.
+ *
+ * Always measured from `now`, never from the occurrence that just fired.
+ * Anchoring on the occurrence looks like it protects a 07:00 promise from
+ * drifting to 07:04 after a slow run — but daily and weekly occurrences sit
+ * on a fixed wall-clock grid, so "the first one after now" IS 07:00 tomorrow
+ * either way. What anchoring on the occurrence actually does is hand back a
+ * nextRunAt equal to the instant just processed whenever a routine fires
+ * exactly on its second, and the next tick then runs it a second time.
  */
 export function advanceRoutine(routine, { now = Date.now(), status, error = null }) {
-  const anchor =
-    routine.schedule?.kind === 'interval' ? now : routine.dueSince || now
   return {
     ...routine,
-    nextRunAt: nextRunAt(routine.schedule, Math.max(anchor, now - 1)),
+    nextRunAt: nextRunAt(routine.schedule, now),
     lastRunAt: new Date(now).toISOString(),
     lastStatus: status,
     lastError: error,

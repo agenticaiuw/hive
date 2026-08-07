@@ -4,12 +4,14 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { workspacePath } from './config.js'
 import {
   formatSummary,
   matchMeetingFollowupCommand,
   mostRecentlyEnded,
   pickNotes,
   prepareMeetingFollowup,
+  withoutAgentOutput,
 } from './meetingFollowup.js'
 
 const NOW = new Date('2026-08-07T15:30:00Z')
@@ -97,6 +99,44 @@ test('the file touched during the meeting is the notes, not the best-named one',
   assert.equal(notes.name, 'scratch.md')
 })
 
+/*
+ * From the first real run: Zoom saved the chat for a 22:00 meeting at 21:46,
+ * so a window that opened at the nominal start found nothing and fell back to
+ * a transcript of a different meeting four days earlier.
+ */
+test('a file written just before the nominal start still counts as the notes', () => {
+  const notes = pickNotes(
+    [
+      {
+        path: '/x/summer-interview-agenda.md',
+        name: 'summer-interview-agenda.md',
+        readable: true,
+        modifiedAt: '2026-07-10T09:00:00.000Z',
+      },
+      {
+        path: '/x/2026-08-07 13.46 Interview/meeting_saved_new_chat.txt',
+        name: 'meeting_saved_new_chat.txt',
+        readable: true,
+        /* 14 minutes before the invite says the meeting began. */
+        modifiedAt: '2026-08-07T13:46:00.000Z',
+      },
+    ],
+    meeting(),
+  )
+  assert.equal(notes.name, 'meeting_saved_new_chat.txt')
+})
+
+test('when two files were both written during it, the later one is the notes', () => {
+  const notes = pickNotes(
+    [
+      { path: '/x/early.md', name: 'early.md', readable: true, modifiedAt: '2026-08-07T14:05:00.000Z' },
+      { path: '/x/late.md', name: 'late.md', readable: true, modifiedAt: '2026-08-07T14:55:00.000Z' },
+    ],
+    meeting(),
+  )
+  assert.equal(notes.name, 'late.md')
+})
+
 test('a PDF is never opened as the notes file', () => {
   const notes = pickNotes(
     [
@@ -116,6 +156,42 @@ test('a PDF is never opened as the notes file', () => {
     meeting(),
   )
   assert.equal(notes.name, 'notes.md')
+})
+
+/*
+ * From the first real run: it opened meeting-prep's own COPY of a transcript —
+ * from a different meeting — because copying a file gives it a fresh mtime,
+ * which made it look like the file someone typed into during this meeting.
+ */
+test("the agent's own output folders are not the owner's notes", () => {
+  const original = {
+    path: path.join(os.homedir(), 'Documents/Zoom/2026-08-02 Meetup/transcript.txt'),
+    name: 'transcript.txt',
+    readable: true,
+    modifiedAt: '2026-08-02T21:18:34.000Z',
+  }
+  const agentCopy = {
+    path: path.join(workspacePath, 'meeting-prep/2026-08-07-something/transcript.txt'),
+    name: 'transcript.txt',
+    readable: true,
+    modifiedAt: '2026-08-07T14:40:00.000Z',
+  }
+
+  const kept = withoutAgentOutput([agentCopy, original])
+  assert.deepEqual(kept, [original])
+
+  /* Without the filter the copy wins on mtime, which is exactly what happened. */
+  assert.equal(pickNotes([agentCopy, original], meeting()).path, agentCopy.path)
+  assert.equal(pickNotes(kept, meeting()).path, original.path)
+})
+
+test('a briefing the agent wrote is not read back as meeting material', () => {
+  const kept = withoutAgentOutput([
+    { path: path.join(workspacePath, 'Briefings/morning-2026-08-07.md'), name: 'x', readable: true, modifiedAt: '' },
+    { path: path.join(workspacePath, 'mail-triage/triage_1/REVIEW.md'), name: 'y', readable: true, modifiedAt: '' },
+    { path: path.join(os.homedir(), 'Documents/real-notes.md'), name: 'z', readable: true, modifiedAt: '' },
+  ])
+  assert.deepEqual(kept.map((entry) => entry.name), ['z'])
 })
 
 test('no readable candidate means no notes, rather than a wrong guess', () => {

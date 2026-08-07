@@ -14,6 +14,7 @@ import {
   runBrowserActions,
 } from './browserPage.js'
 import { workspacePath } from './config.js'
+import { usableCapsuleIds } from './evidenceCapsules.js'
 import { appendLog } from './logger.js'
 import { nextRunAt } from './routines.js'
 
@@ -205,15 +206,36 @@ export function deleteWatch(id, { filePath = STORE_PATH } = {}) {
   return true
 }
 
-/** Everything the owner has not been told yet, newest first. */
-export function pendingReports({ filePath = STORE_PATH } = {}) {
+/**
+ * Everything the owner has not been told yet, newest first.
+ *
+ * A report whose evidence has been revoked keeps its row and loses its
+ * contents. Dropping it entirely would make a revocation look like a change
+ * that never happened; showing the before/after would make "delete that page"
+ * mean nothing. The middle answer is the honest one, and it is derived here on
+ * read so no purge has to be remembered.
+ */
+export function pendingReports({ filePath = STORE_PATH, now = Date.now() } = {}) {
   return load(filePath)
     .watches.flatMap((watch) =>
       (watch.reports ?? [])
         .filter((report) => !report.acknowledged)
         .map((report) => ({ ...report, watchId: watch.id, name: watch.name, url: watch.url })),
     )
+    .map((report) => withheldIfRevoked(report, now))
     .sort((left, right) => String(right.at).localeCompare(String(left.at)))
+}
+
+function withheldIfRevoked(report, now) {
+  const { withheld } = usableCapsuleIds(report.capsuleIds ?? [], { now })
+  if (!withheld.length) return report
+
+  return {
+    ...report,
+    changes: [],
+    summary: `${report.name}: a change was recorded, but the evidence for it is no longer available.`,
+    evidenceWithheld: withheld,
+  }
 }
 
 /** Said out loud once; not said again. */
@@ -306,6 +328,14 @@ export async function readWatchValues(watch, target, { options = {} } = {}) {
     pageText,
     title: String(pageResult.data?.title ?? ''),
     url: String(pageResult.data?.url ?? ''),
+    /* One per read in the batch — the whole-page read plus every scoped one.
+     * A per-field selector read is separate evidence from the page it was
+     * scoped out of, and a report that cites one field should not have to
+     * claim the whole page as its source. */
+    capsuleIds: results
+      .filter((entry) => entry?.ok)
+      .map((entry) => entry.data?.evidence?.capsuleId)
+      .filter(Boolean),
   }
 }
 
@@ -384,6 +414,7 @@ export async function checkWatch(
       ? []
       : diffValues(watch.observed.values, read.values, read.pageText)
 
+    const capsuleIds = [...new Set(read.capsuleIds ?? [])]
     const observation = {
       at: startedAt,
       url: read.url || page.url,
@@ -391,6 +422,7 @@ export async function checkWatch(
       values: read.values,
       missing: read.missing,
       disposition: page.disposition,
+      capsuleIds,
     }
 
     let report = null
@@ -403,6 +435,10 @@ export async function checkWatch(
         changes,
         summary: describeChanges(changes, watch.name),
         acknowledged: false,
+        /* The reading this report is derived from. A change is a claim about
+         * two observations, and the second one is the one still on the page —
+         * revoking it is what has to make this report stop being displayed. */
+        capsuleIds,
       }
     }
 
@@ -418,6 +454,7 @@ export async function checkWatch(
       url: observation.url,
       title: observation.title,
       checkedAt: startedAt,
+      capsuleIds,
       report,
       summary: baseline
         ? `${watch.name}: baseline recorded, nothing to report yet.`

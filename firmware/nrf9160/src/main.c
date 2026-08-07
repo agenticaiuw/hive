@@ -19,11 +19,24 @@
 
 #include "audio_opus.h"
 #include "pendant_cloud.h"
+#include "pendant_store.h"
 #include "pendant_ws.h"
 #include "tx_resample_taps.h"
 
 #define LED_NODE DT_ALIAS(led0)
 #define BUTTON_NODE DT_ALIAS(sw0)
+/*
+ * Button 2 = drop a moment bookmark.
+ *
+ * The alternative was a gesture on button 1 (double-press, or press-and-
+ * hold), and both cost the thing this firmware protects hardest: button 1
+ * acts on the ACTIVE EDGE so the microphone is powering up before the
+ * owner's finger has come back off. Any gesture means waiting several
+ * hundred ms to find out which gesture it was, on every single press, to
+ * serve the rarer of the two actions. A second physical button costs
+ * nothing on the hot path.
+ */
+#define MARK_BUTTON_NODE DT_ALIAS(sw1)
 #define I2S_NODE DT_NODELABEL(i2s0)
 
 /*
@@ -452,6 +465,11 @@ static const struct gpio_dt_spec led =
 static const struct gpio_dt_spec button =
 	GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static struct gpio_callback button_callback;
+#ifdef CONFIG_PENDANT_OFFLINE_STORE
+static const struct gpio_dt_spec mark_button =
+	GPIO_DT_SPEC_GET(MARK_BUTTON_NODE, gpios);
+static struct gpio_callback mark_button_callback;
+#endif
 static FATFS sd_fat_fs;
 static struct fs_mount_t sd_mount = {
 	.type = FS_FATFS,
@@ -461,6 +479,9 @@ static struct fs_mount_t sd_mount = {
 };
 
 K_SEM_DEFINE(button_press_sem, 0, 1);
+#ifdef CONFIG_PENDANT_OFFLINE_STORE
+K_SEM_DEFINE(mark_press_sem, 0, 1);
+#endif
 
 /*
  * Mic RX slab is dedicated. audio_workspace is the live PCM TX ring during
@@ -768,6 +789,97 @@ static bool take_remote_press(void)
 	return true;
 }
 
+#ifdef CONFIG_PENDANT_OFFLINE_STORE
+static void mark_button_pressed(const struct device *port,
+				struct gpio_callback *callback,
+				gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+	k_sem_give(&mark_press_sem);
+}
+
+/*
+ * Same shape as pendant_remote_press: plain volatile globals a J-Link writes
+ * over SWD, no protocol on the target.
+ *
+ *   w4 <&pendant_remote_mark> 1     drop a moment bookmark
+ *   w4 <&pendant_remote_offline> 1  take the modem OFFLINE (CFUN=4)
+ *   w4 <&pendant_remote_offline> 0  bring it back and reattach
+ *
+ * pendant_remote_offline is how the offline path is proven without shielding
+ * the antenna: it is the only way to make "no usable link" a repeatable
+ * condition rather than a story about a lift shaft.
+ */
+volatile uint32_t pendant_remote_mark;
+volatile uint32_t pendant_remote_offline;
+static bool link_forced_offline;
+
+static bool take_mark_press(void)
+{
+	if (k_sem_take(&mark_press_sem, K_NO_WAIT) == 0) {
+		return true;
+	}
+	if (pendant_remote_mark != 0U) {
+		pendant_remote_mark = 0U;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Apply the debug offline request. Closing the WebSocket first matters: the
+ * socket is modem-offloaded, so dropping RF underneath it leaves a
+ * descriptor that reports connected and fails every send.
+ */
+static void apply_forced_link_state(void)
+{
+	bool want_offline = pendant_remote_offline != 0U;
+
+	if (want_offline == link_forced_offline) {
+		return;
+	}
+	if (want_offline) {
+		printk("DEBUG: forcing link offline (store-and-forward test)\n");
+		k_mutex_lock(&ws_lock, K_FOREVER);
+		pendant_ws_close();
+		k_mutex_unlock(&ws_lock);
+		pendant_cloud_stream_abort();
+		/*
+		 * Latch BEFORE powering the radio down: pendant_cloud's
+		 * ensure_lte_data_ready() resumes a suspended radio in front
+		 * of every socket, so suspending alone lasts exactly until
+		 * the next press and the capture would come back online
+		 * mid-test.
+		 */
+		pendant_cloud_block_link(true);
+		(void)pendant_cloud_suspend_radio();
+		link_forced_offline = true;
+	} else {
+		printk("DEBUG: restoring link\n");
+		pendant_cloud_block_link(false);
+		(void)pendant_cloud_resume_radio();
+		link_forced_offline = false;
+	}
+}
+
+static bool link_is_forced_offline(void)
+{
+	return link_forced_offline;
+}
+#else
+static inline void apply_forced_link_state(void) {}
+static inline bool link_is_forced_offline(void)
+{
+	return false;
+}
+static inline bool take_mark_press(void)
+{
+	return false;
+}
+#endif /* CONFIG_PENDANT_OFFLINE_STORE */
+
 #ifdef CONFIG_PENDANT_MIC_INJECT
 /*
  * Debug mic injection (harness builds only; see CONFIG_PENDANT_MIC_INJECT).
@@ -785,7 +897,7 @@ static bool take_remote_press(void)
  * so the two sides never need a lock across the debug port.
  *
  *   w4 <&pendant_inject_arm> 1        arm (do this before the press)
- *   <block-write G.711 bytes into pendant_inject_ring at head>
+ *   <block-write G.711 mu-law bytes into pendant_inject_ring at head>
  *   w4 <&pendant_inject_head> <n>     publish the frames just written
  *   w4 <&pendant_inject_eof> 1        no more PCM coming; stop counting
  *                                     underruns and emit silence
@@ -794,26 +906,33 @@ static bool take_remote_press(void)
  * modulo, and makes the unsigned wrap of (head - tail) exact.
  *
  * WIRE FORMAT IS 8-BIT G.711 mu-LAW, NOT LINEAR PCM, and that is a measured
- * decision rather than a stylistic one.  Every block-write front-end this
- * debug port has was benchmarked against the 15,625 frame/s the mic stage
- * consumes:
+ * decision.  Every block-write front-end this debug port has was benchmarked
+ * against the 31,250 B/s a 16-bit mic stage would consume:
  *
- *   JLinkExe w4 (2 frames/command)        3,980 frames/s   3.9x too slow
- *   JLinkExe w8 (4 frames/command)        7,027 frames/s   2.2x too slow
- *   JLinkExe loadfile                     resets the MCU — unusable outright
- *   JLinkGDBServer RSP 'X' block write   ~36,000 BYTES/s
+ *   JLinkExe w4 (2 frames/command)         7,960 B/s   3.9x too slow
+ *   JLinkExe w8 (4 frames/command)        14,054 B/s   2.2x too slow
+ *   JLinkExe loadfile                      resets the MCU — unusable outright
+ *   JLinkGDBServer RSP 'X' block write   ~139,000 B/s   on an IDLE target
  *
- * J-Link Commander costs ~0.5 ms per command no matter how small the command
- * is, so no amount of batching gets it there; only the GDB server's block
- * write does.  At 16-bit that leaves 36,000 against 31,250 B/s — 15% margin,
- * which is not margin at all for a 32.77 ms cadence.  mu-law halves the wire
- * rate to 15,625 B/s (2.3x headroom) and simultaneously doubles the runway
- * this fixed 4 KB of RAM buys, because a frame now costs one byte instead of
- * two.  The expansion is the same deterministic table the legacy reply path
- * already uses, so an utterance still decodes to the identical samples on
- * every run — which is the entire property this rig exists to provide.  The
- * uplink is ~16 kbps Opus SILK-WB, orders of magnitude lossier than G.711, so
- * the quantization costs nothing that survives to the relay.
+ * The last number is the trap.  J-Link Commander costs ~0.5 ms per command no
+ * matter how small, so only the GDB server's block write is even in range —
+ * but its idle throughput is not the throughput available during a call.  The
+ * debug port reaches RAM over the AHB-AP, and it contends with a CPU that is
+ * running Opus, I2S EasyDMA and the LTE stack.  Traced mid-conversation, the
+ * same writes fell to 27-51 kB/s typical with a 114 ms outlier (18 kB/s) — at
+ * or below the 31,250 B/s that 16-bit audio needs.  That is a SUSTAINED rate
+ * deficit, which no amount of extra buffer can fix; it can only be fixed by
+ * sending fewer bytes.
+ *
+ * mu-law halves the wire rate to 15,625 B/s (~2.2x headroom against the
+ * measured in-call median) and simultaneously doubles the runway this fixed
+ * 4 KB of RAM buys, because a frame costs one byte instead of two — 262 ms,
+ * enough to swallow the 114 ms outliers outright.  The expansion is the same
+ * deterministic table the legacy reply path already uses, so an utterance
+ * still decodes to identical samples on every run, which is the entire
+ * property this rig exists to provide.  The uplink is ~16 kbps Opus SILK-WB,
+ * far lossier than G.711, so the quantization costs nothing that survives to
+ * the relay.
  */
 #define PENDANT_INJECT_RING_FRAMES 4096U
 #define PENDANT_INJECT_RING_MASK (PENDANT_INJECT_RING_FRAMES - 1U)
@@ -825,12 +944,17 @@ BUILD_ASSERT(PENDANT_INJECT_RING_FRAMES >= 2U * MIC_STAGE_FRAMES,
 
 /*
  * 4096 mu-law frames = 4,096 B = 262.14 ms at SAMPLE_RATE 15625, against a
- * 32.77 ms stage period: eight stages of runway.  The host refills whenever
- * the ring is half empty, so it has ~131 ms to complete a round trip that
- * measures ~57 ms — see software/ai-pendant-simulator/scripts/inject-audio.mjs.
- * RAM is the binding constraint on this image (95.79% used before this ring),
- * so it does not get to be bigger "just in case"; pendant_inject_underruns is
- * what tells you if it was too small.
+ * 32.77 ms stage period: eight stages of runway, versus a worst observed host
+ * stall of 114 ms.  The host keeps the ring topped up rather than draining it
+ * to a low-water mark, so the whole 262 ms is available as insurance — see
+ * software/ai-pendant-simulator/scripts/inject-audio.mjs.
+ *
+ * 4,096 B is the size RAM permits, not a size chosen for comfort.  This image
+ * had 202,700 of 211,608 B spoken for (95.79%) before the ring existed; the
+ * ring plus 24 B of control words takes it to 206,820 B (97.74%), leaving
+ * 4,788 B.  Doubling it again would not link.  pendant_inject_underruns is
+ * what tells you whether it was enough, which is why it is reported rather
+ * than merely counted.
  */
 volatile uint8_t pendant_inject_ring[PENDANT_INJECT_RING_FRAMES] __aligned(4);
 /* Host writes: 1 = replace mic audio with the ring. */
@@ -3372,6 +3496,17 @@ static int run_conversation(const struct device *i2s)
 	atomic_set(&convo_active, 0);
 	/* Never leave the legacy record path gated by a conversation's hold. */
 	convo_uplink_holding = false;
+#ifdef CONFIG_PENDANT_MIC_INJECT
+	/*
+	 * Injection is scoped to one conversation, and disarming here is the
+	 * safety net for a host that died mid-run. An armed ring nobody is
+	 * feeding does not fail loudly — it silently replaces the microphone
+	 * with silence, so the owner's next press would record nothing and
+	 * look like broken hardware. Bounding that to the conversation it was
+	 * armed for keeps a debug tool from becoming a latent product fault.
+	 */
+	pendant_inject_arm = 0U;
+#endif
 	k_msleep(30);
 	if (result == 0 && atomic_get(&audio_thread_error) != 0) {
 		result = (int)atomic_get(&audio_thread_error);
@@ -3387,12 +3522,14 @@ static int run_conversation(const struct device *i2s)
 	printk("Conversation stats: rx_blocks=%u tx_blocks=%u tx_starved=%u "
 	       "decoded_packets=%u max_loop_ms=%u fifo_left=%u "
 	       "uplink_drops=%u mic_drops=%u tx_peak=%u "
-	       "duck_ms=%u uplink_held=%u" PENDANT_INJECT_STATS_FMT "\n",
+	       "duck_ms=%u uplink_held=%u" PENDANT_INJECT_STATS_FMT
+	       PENDANT_STORE_STATS_FMT "\n",
 	       convo_rx_blocks, convo_tx_blocks, convo_tx_starved,
 	       convo_decoded_packets, convo_max_loop_ms,
 	       (uint32_t)live_fifo_fill(), convo_uplink_drops,
 	       convo_mic_drops, convo_tx_peak, convo_uplink_duck_ms,
-	       convo_uplink_held PENDANT_INJECT_STATS_ARGS);
+	       convo_uplink_held PENDANT_INJECT_STATS_ARGS
+		       PENDANT_STORE_STATS_ARGS);
 	printk("Codec cost: decode avg=%u us max=%u us n=%u | "
 	       "encode avg=%u us max=%u us n=%u\n",
 	       convo_decode_calls
@@ -3471,6 +3608,27 @@ int main(void)
 		audio_cycle_result = error;
 		show_error();
 	}
+#ifdef CONFIG_PENDANT_OFFLINE_STORE
+	/*
+	 * Button 2 is a convenience, not a dependency: if it fails to
+	 * configure, log it and keep going. Losing bookmarks is bad; refusing
+	 * to boot a voice pendant over a spare button is worse.
+	 */
+	if (gpio_is_ready_dt(&mark_button) &&
+	    gpio_pin_configure_dt(&mark_button, GPIO_INPUT) == 0) {
+		gpio_init_callback(&mark_button_callback, mark_button_pressed,
+				   BIT(mark_button.pin));
+		if (gpio_add_callback(mark_button.port,
+				      &mark_button_callback) != 0 ||
+		    gpio_pin_interrupt_configure_dt(
+			    &mark_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Bookmark button unavailable — use "
+			       "pendant_remote_mark\n");
+		}
+	} else {
+		printk("Bookmark button not present on this board\n");
+	}
+#endif
 	if (!device_is_ready(i2s)) {
 		audio_cycle_result = -ENODEV;
 		show_error();
@@ -3484,6 +3642,13 @@ int main(void)
 		audio_cycle_result = sd_mount_result;
 		show_error();
 	}
+
+	/*
+	 * Before LTE, deliberately: the queue must come back from the card
+	 * whether or not this boot ever gets signal. A recovery path that
+	 * depends on the network is not a recovery path.
+	 */
+	pendant_store_init();
 
 #if PENDANT_BOOT_DUMP_PCM_HEX
 	if (sd_ready) {
@@ -3623,7 +3788,8 @@ int main(void)
 		 */
 		audio_cycle_phase = 0U;
 		gpio_pin_set_dt(&led, 0);
-		if (!pendant_ws_connected()) {
+		apply_forced_link_state();
+		if (!pendant_ws_connected() && !link_is_forced_offline()) {
 			int ws_error;
 
 			k_mutex_lock(&ws_lock, K_FOREVER);
@@ -3635,6 +3801,7 @@ int main(void)
 				       ws_error);
 			}
 		}
+
 #if PENDANT_BOOT_AUDIO_CYCLE_TEST
 		if (boot_audio_cycle_test_pending) {
 			boot_audio_cycle_test_pending = false;
@@ -3653,11 +3820,24 @@ int main(void)
 #endif
 		/* Wait for a press. The WS I/O thread keeps the idle socket
 		 * alive (pings + stray drains); main only reconnects. */
+		bool marked = false;
+
 		while (k_sem_take(&button_press_sem, K_MSEC(200)) != 0) {
 			if (take_remote_press()) {
 				break;
 			}
-			if (!pendant_ws_connected()) {
+			/*
+			 * Button 2 needs no radio, no microphone and no
+			 * decision about whether the link is usable. It is
+			 * the one thing this device can always do.
+			 */
+			if (take_mark_press()) {
+				marked = true;
+				break;
+			}
+			apply_forced_link_state();
+			if (!pendant_ws_connected() &&
+			    !link_is_forced_offline()) {
 				int ws_error;
 
 				k_mutex_lock(&ws_lock, K_FOREVER);
@@ -3668,9 +3848,55 @@ int main(void)
 					       ws_error);
 				}
 			}
+
+			/*
+			 * Drain the backlog HERE, inside the wait, not at the
+			 * top of the outer loop: the outer loop only turns
+			 * over when a press ends, so a device sitting idle
+			 * after a dead zone would hold yesterday's memos
+			 * until the owner happened to press the button —
+			 * exactly the person the queue exists to spare.
+			 *
+			 * A live WebSocket is the only honest proof this
+			 * device has that the link works (the modem reports
+			 * an attached network while every relay socket times
+			 * out), so delivery is gated on that and never on a
+			 * timer or on optimism. One item per pass, skipped
+			 * entirely while a press is pending: a held 30 s memo
+			 * takes seconds to upload and the owner must never
+			 * wait behind it.
+			 */
+			if (pendant_ws_connected()) {
+				pendant_store_poll_alerts();
+				if (pendant_store_pending() > 0U &&
+				    k_sem_count_get(&button_press_sem) == 0U &&
+				    pendant_remote_press == 0U) {
+					(void)pendant_store_drain_one(
+						SAMPLE_RATE);
+				}
+			}
 		}
 		/* Latency-first: act on the active edge, never the release. */
 		clear_button_events();
+
+		if (marked) {
+			(void)pendant_store_enqueue_mark(
+				pendant_ws_connected());
+			/* One short flash: marked, nothing else happened. */
+			flash_led(1U, 60, 120);
+			continue;
+		}
+
+		/*
+		 * The owner is here. This is the moment the alert inbox
+		 * exists for, and it deliberately runs BEFORE any decision
+		 * about the link: reading held alerts is a card read and a
+		 * printk, so it works identically with the radio powered off.
+		 */
+		if (pendant_store_inbox_pending() > 0U) {
+			flash_led(2U, 60, 90);
+			pendant_store_surface_inbox();
+		}
 
 		/*
 		 * Press = converse. Full-duplex WebSocket when the socket is
@@ -3682,7 +3908,7 @@ int main(void)
 
 		bool ws_ready = pendant_ws_connected();
 
-		if (!ws_ready) {
+		if (!ws_ready && !link_is_forced_offline()) {
 			k_mutex_lock(&ws_lock, K_FOREVER);
 			ws_ready = pendant_ws_connect() == 0;
 			k_mutex_unlock(&ws_lock);
@@ -3760,6 +3986,37 @@ int main(void)
 				       "pcm_bytes=%u result=%d\n",
 				       k_uptime_get() - lat_press_started,
 				       pendant_cloud_uploaded_pcm_bytes, error);
+				if (error < 0) {
+					/*
+					 * Both uplinks are gone and the mic
+					 * journal on the card is all that is
+					 * left of what the owner said. Take
+					 * ownership of it (a rename, not a
+					 * copy) before the next press
+					 * truncates the file. This is the
+					 * ONLY place a recording is retained
+					 * past its upload attempt — the
+					 * standing rule is that SD is the
+					 * failure path, never the default.
+					 */
+					int queue_error =
+						pendant_store_enqueue_voice(
+							pcm_bytes);
+
+					if (queue_error == 0) {
+						printk("Voice memo held for "
+						       "later delivery "
+						       "(upload=%d)\n",
+						       error);
+						audio_cycle_result = 0;
+						flash_led(2U, 60, 90);
+						clear_button_events();
+						continue;
+					}
+					printk("Could not hold voice memo: "
+					       "%d\n",
+					       queue_error);
+				}
 			} else if (error < 0) {
 				printk("Live stream dead and no SD backup "
 				       "(pcm_bytes=%u recording_on_sd=%d)\n",

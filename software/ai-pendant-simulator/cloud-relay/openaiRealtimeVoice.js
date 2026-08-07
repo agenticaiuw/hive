@@ -10,7 +10,7 @@
  * (actions + spoken_reply). Transcript is optional history/debug only —
  * never required, never the critical hot path. Mac only executes.
  * Tools: get_mac_status, mac_run_actions, browser_run_actions, web_search,
- * mac_delegate.
+ * mac_delegate, read_web_page, relay_job_status.
  * Docs: https://developers.openai.com/api/docs/guides/realtime-websocket
  */
 
@@ -19,6 +19,8 @@ import {
   composeRealtimeInstructions,
   normalizeFleetSnapshot,
 } from './fleetContext.js'
+import { READ_WEB_PAGE_TOOL, runReadWebPage } from './serverBrowser.js'
+import { SPOKEN_MAX_CHARS } from './jobRecall.js'
 
 export const REALTIME_PCM_RATE = 24000
 /* G.711 μ-law (audio/pcmu) is fixed at 8 kHz, 8 bits — 64 kbps. The pendant
@@ -226,6 +228,40 @@ export const REALTIME_TOOLS = [
         },
       },
       required: ['goal'],
+    },
+  },
+  /*
+   * Sixth tool: the relay's own browser. The pendant is worn and the Mac is
+   * usually asleep, so a page read must not depend on the extension being up.
+   * Its schema says plainly what that browser cannot see (logins, the LAN) so
+   * the model routes those to browser_run_actions instead of failing.
+   */
+  READ_WEB_PAGE_TOOL,
+  {
+    type: 'function',
+    name: 'relay_job_status',
+    description:
+      'PROACTIVE. Answer "what happened to the thing I asked you to do on my Mac?" — the status of work ALREADY handed to the Mac, including vague references ("that", "the thing I asked earlier"). Reads the relay job records; needs no Mac round trip, so it answers with the Mac asleep. Call immediately — no confirmation. Do NOT use when: reading live device state such as battery/wifi/volume/frontmost app (get_mac_status), or starting new work (mac_run_actions / mac_delegate). Speak the returned `spoken` sentence essentially verbatim; it already names the task and is sized for the pendant speaker. NEVER upgrade its wording — if it says failed, queued, or unknown, say that; do not report a task as done that this tool did not call done.',
+    parameters: {
+      type: 'object',
+      properties: {
+        reference: {
+          type: 'string',
+          description:
+            'How the owner referred to the task, in their own words ("that", "the Outlook thing", "what I asked earlier"). Pass it through verbatim; do not invent detail. Omit only if they gave none.',
+        },
+        job_id: {
+          type: 'string',
+          description:
+            'Only when the owner named an exact relay job id. Normally omitted.',
+        },
+        transcript: {
+          type: 'string',
+          description:
+            'Optional history label only. Omit if unsure — never block on this.',
+        },
+      },
+      required: [],
     },
   },
 ]
@@ -821,6 +857,13 @@ export async function createStreamingRealtimeSession({
    * Resolves null on timeout; the model then says results are on the way.
    */
   waitForMacResult = null,
+  /*
+   * relay_job_status backing: ({ reference, jobId }) => recallJobStatus(...)
+   * payload. Injected rather than imported so this module keeps knowing
+   * nothing about the store — the same contract waitForMacResult uses, and
+   * what lets the tool be tested without a relay.
+   */
+  lookupJobStatus = null,
   /* Raw X-Device-Time header (+CCLK) — the pendant's LTE network clock. */
   deviceTime = null,
   /*
@@ -999,6 +1042,89 @@ export async function createStreamingRealtimeSession({
       if (audioOut) {
         requestSpokenReply()
       } else {
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['text'] },
+        })
+      }
+      return
+    }
+
+    /*
+     * Server-side page read. Like web_search this answers inside the turn —
+     * no Mac job, no queue — because Cloudflare's browser is the whole point:
+     * it works with the owner's Mac shut. Failures come back described
+     * (rate-limited, sign-in wall, unreachable) so the model can say why and
+     * hand the task to browser_run_actions rather than go silent.
+     */
+    if (name === 'read_web_page') {
+      const output = await runReadWebPage(args)
+      send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify(output),
+        },
+      })
+      if (audioOut) {
+        requestSpokenReply()
+      } else {
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['text'] },
+        })
+      }
+      return
+    }
+
+    /*
+     * "What happened to that thing on my Mac?" — answered from relay records
+     * inside the turn, like web_search. Deliberately NOT a Mac job: the work
+     * being asked about already went to the Mac, and a status question that
+     * needs the Mac awake to answer is useless exactly when it matters.
+     *
+     * It never touches state.actions, so nothing is dispatched and no plan
+     * job is created for a question.
+     */
+    if (name === 'relay_job_status') {
+      const optionalTranscript = String(args.transcript || '').trim()
+      if (optionalTranscript) state.transcript = optionalTranscript
+
+      let output
+      if (typeof lookupJobStatus === 'function') {
+        output = await lookupJobStatus({
+          reference: String(args.reference || '').trim(),
+          jobId: String(args.job_id || '').trim() || null,
+        }).catch((error) => ({
+          ok: false,
+          /* Say the lookup broke. Silence here would read as "nothing to
+           * report", which is a claim this path cannot make. */
+          spoken: "I couldn't reach my record of your Mac tasks.",
+          error: String(error?.message || error).slice(0, SPOKEN_MAX_CHARS),
+        }))
+      } else {
+        output = {
+          ok: false,
+          spoken: "I don't have your Mac task history in this session.",
+        }
+      }
+
+      send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify(output),
+        },
+      })
+      if (audioOut) {
+        requestSpokenReply()
+      } else {
+        /* Text mode (batch planning): the spoken sentence IS the answer, so
+         * carry it as the plan's response rather than leaving the turn to
+         * produce a second, unverified paraphrase. */
+        state.response = String(output.spoken || '').trim() || state.response
         send({
           type: 'response.create',
           response: { output_modalities: ['text'] },
@@ -1332,6 +1458,9 @@ export async function createStreamingRealtimeSession({
           'get_mac_status',
           'mac_run_actions',
           'mac_delegate',
+          /* Grounded too: a recalled status may quote a past volume or wifi
+           * reading, and that is a record, not an invention. */
+          'relay_job_status',
         ])
         const usedMacTool = (state.toolsUsed || []).some((t) => macTools.has(t))
         if (

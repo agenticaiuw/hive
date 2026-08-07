@@ -97,6 +97,7 @@ target_sources(app PRIVATE
   src/audio_opus.c
   src/pendant_cloud.c
   src/pendant_ws.c
+  src/pendant_store.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

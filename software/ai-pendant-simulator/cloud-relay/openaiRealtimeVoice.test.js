@@ -12,15 +12,32 @@ const {
   looksLikeDeviceStateAnswer,
 } = await import('./openaiRealtimeVoice.js')
 
-test('REALTIME_TOOLS expose status + control + search + browser + delegate', () => {
+test('REALTIME_TOOLS expose status + control + search + browser + delegate + page read + job recall', () => {
   const names = REALTIME_TOOLS.map((t) => t.name).sort()
   assert.deepEqual(names, [
     'browser_run_actions',
     'get_mac_status',
     'mac_delegate',
     'mac_run_actions',
+    'read_web_page',
+    'relay_job_status',
     'web_search',
   ])
+})
+
+test('relay_job_status takes a spoken reference and requires nothing', () => {
+  const byName = Object.fromEntries(REALTIME_TOOLS.map((t) => [t.name, t]))
+  const tool = byName.relay_job_status
+  assert.deepEqual(tool.parameters.required || [], [])
+  assert.ok(tool.parameters.properties.reference)
+  assert.ok(tool.parameters.properties.job_id)
+  assert.match(tool.description, /PROACTIVE/)
+  assert.match(tool.description, /Do NOT use when/i)
+  /* The routing risk this schema has to carry: get_mac_status reads the
+   * device now, relay_job_status reads what already happened. */
+  assert.match(tool.description, /get_mac_status/)
+  /* No approval gate, and no room to upgrade a failure into a success. */
+  assert.match(tool.description, /do not report a task as done/i)
 })
 
 test('Realtime action tools require actions/goal, not transcript', () => {

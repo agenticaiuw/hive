@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { PRODUCT_SYNC_LIMITS } from '../../shared/productSync.js'
 import { createD1Store } from './d1Store.js'
 import { createMemoryStore } from './memoryStore.js'
 
@@ -132,10 +133,48 @@ function fixture(accountId, sourceDeviceId, updatedAt) {
   }
 }
 
+function capacityFixture(accountId, sourceDeviceId, secondsOffset) {
+  const cap = PRODUCT_SYNC_LIMITS.maxSessions
+  return {
+    accountId,
+    sourceDeviceId,
+    generatedAt: '2026-08-02T12:00:00.000Z',
+    sessions: Array.from({ length: cap }, (_, index) => ({
+      sessionId: `${sourceDeviceId}-${index}`,
+      title: sourceDeviceId,
+      createdAt: '2026-08-02T11:00:00.000Z',
+      updatedAt: new Date(
+        Date.UTC(2026, 7, 2, 12, 0, index + secondsOffset),
+      ).toISOString(),
+      sourceDeviceId,
+      turns: [],
+    })),
+    memory: {},
+  }
+}
+
 for (const [name, createStore] of [
   ['memory', () => createMemoryStore()],
   ['d1', () => createD1Store(createFakeD1())],
 ]) {
+  test(`${name} product store serves a bounded window once devices diverge`, async () => {
+    const accountId = `owner-${name}-${crypto.randomUUID()}`
+    const cap = PRODUCT_SYNC_LIMITS.maxSessions
+    const store = createStore()
+    await store.mergeProductState(capacityFixture(accountId, 'mac', 0))
+    await store.mergeProductState(capacityFixture(accountId, 'ios', cap))
+
+    const stored = await store.getProductState(accountId)
+    assert.equal(
+      stored.sessions.filter((session) => !session.deletedAt).length,
+      cap,
+    )
+    assert.ok(
+      stored.sessions.every((session) => !session.deletedAt),
+      'sessions outside the window are dropped, never tombstoned',
+    )
+  })
+
   test(`${name} product store retains normalized sessions, turns, and memory`, async () => {
     const accountId = `owner-${name}-${crypto.randomUUID()}`
     const store = createStore()

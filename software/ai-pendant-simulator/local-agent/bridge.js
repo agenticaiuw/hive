@@ -639,6 +639,36 @@ async function syncAgentSnapshot() {
 }
 
 /**
+ * Ask the Mac what the voice agent should know right now.
+ *
+ * The projection is task-scoped by design, but this is a heartbeat: nobody has
+ * spoken yet, so there is no task to scope to and the query is deliberately
+ * empty. What comes back is the surface-stable core — preferences, standing
+ * permissions, open tasks — which is the part worth caching in the prompt
+ * prefix anyway. Per-utterance scoping would have to happen in the relay, at
+ * the point where the words actually exist.
+ *
+ * Returns null on any failure so the caller falls back to the legacy entity
+ * fields: a projection outage should cost the voice agent context quality, not
+ * its whole fleet snapshot.
+ */
+async function fetchVoiceMemoryProjection() {
+  try {
+    const projected = await callLocalAgent(
+      '/memory/projection?surface=voice',
+      { method: 'GET' },
+    )
+    const text = String(projected?.text || '').trim()
+    return text || null
+  } catch (error) {
+    console.warn(
+      `[bridge] Memory projection unavailable, using entity fallback: ${error.message}`,
+    )
+    return null
+  }
+}
+
+/**
  * Push a cache-friendly fleet world-model to the relay for Realtime instructions.
  * Built from live Mac discovery — no hard-coded app or command lists.
  */
@@ -653,6 +683,7 @@ async function syncFleetContext(snapshot) {
       browser: status.browser || null,
       permissions: status.agent?.permissions || status.permissions || null,
       memory: status.memory || snapshot?.context?.memory || null,
+      memoryText: await fetchVoiceMemoryProjection(),
       workingProject:
         status.workingProject || snapshot?.context?.workingProject || null,
       speaker: process.env.PENDANT_SPEAKER_NAME || null,

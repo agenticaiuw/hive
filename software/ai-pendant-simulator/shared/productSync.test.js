@@ -105,6 +105,31 @@ test('rejects oversized turn records before they reach D1', () => {
   )
 })
 
+test('bounds the merged window when both peers are already pruned to the cap', () => {
+  const cap = PRODUCT_SYNC_LIMITS.maxSessions
+  const peer = (sourceDeviceId, secondsOffset) => ({
+    accountId: 'single-owner',
+    sourceDeviceId,
+    generatedAt: '2026-08-02T12:00:00.000Z',
+    sessions: Array.from({ length: cap }, (_, index) => ({
+      sessionId: `${sourceDeviceId}-${index}`,
+      title: sourceDeviceId,
+      createdAt: '2026-08-02T11:00:00.000Z',
+      updatedAt: new Date(
+        Date.UTC(2026, 7, 2, 12, 0, index + secondsOffset),
+      ).toISOString(),
+      sourceDeviceId,
+      turns: [],
+    })),
+    memory: {},
+  })
+
+  const merged = mergeProductSync(peer('mac', 0), peer('ios', cap))
+  assert.equal(merged.sessions.filter((session) => !session.deletedAt).length, cap)
+  // The overflow left the payload; it must not have left as a deletion.
+  assert.equal(merged.sessions.length, cap)
+})
+
 test('refuses to merge records across account boundaries', () => {
   const other = {
     ...state({ sourceDeviceId: 'ios' }),

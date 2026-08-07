@@ -47,7 +47,7 @@ test('migrates the legacy array and rewrites it as an atomic versioned document'
   )
 })
 
-test('restore replaces local state while merge preserves disjoint device turns', (t) => {
+test('restore seeds a fresh store while merge preserves disjoint device turns', (t) => {
   const filePath = withTemporaryStore(t)
   const remote = {
     accountId: 'single-owner',
@@ -145,6 +145,104 @@ test('cloud tombstones survive a stale local merge', (t) => {
   )
   assert.equal(merged.sessions.length, 0)
   assert.equal(merged.state.sessions[0].deletedAt, '2026-08-02T13:00:00.000Z')
+})
+
+function cloudState(sessions, generatedAt = '2026-08-02T13:00:00.000Z') {
+  return {
+    accountId: 'single-owner',
+    sourceDeviceId: 'ios',
+    generatedAt,
+    sessions,
+    memory: {},
+  }
+}
+
+function cloudSession(sessionId, { updatedAt, deletedAt = null }) {
+  return {
+    sessionId,
+    title: sessionId,
+    createdAt: '2026-08-02T11:00:00.000Z',
+    updatedAt,
+    deletedAt,
+    sourceDeviceId: 'ios',
+    turns: [],
+  }
+}
+
+test('a session the sync window omits is kept, not deleted', (t) => {
+  const filePath = withTemporaryStore(t)
+  writeSessionDocumentAtomic(
+    {
+      schemaVersion: LOCAL_SESSION_SCHEMA_VERSION,
+      updatedAt: '2026-08-02T12:00:00.000Z',
+      sessions: [
+        cloudSession('only-on-this-mac', { updatedAt: '2026-08-02T12:00:00.000Z' }),
+      ],
+    },
+    { filePath },
+  )
+
+  restoreSessionState(
+    cloudState([cloudSession('only-in-cloud', { updatedAt: '2026-08-02T13:00:00.000Z' })]),
+    { filePath },
+  )
+
+  const stored = readSessionDocument({ filePath })
+  const kept = stored.sessions.find(
+    (session) => session.sessionId === 'only-on-this-mac',
+  )
+  assert.ok(kept)
+  assert.equal(kept.deletedAt, null)
+  assert.ok(
+    stored.sessions.some((session) => session.sessionId === 'only-in-cloud'),
+  )
+})
+
+test('an explicit tombstone still deletes the local session', (t) => {
+  const filePath = withTemporaryStore(t)
+  writeSessionDocumentAtomic(
+    {
+      schemaVersion: LOCAL_SESSION_SCHEMA_VERSION,
+      updatedAt: '2026-08-02T12:00:00.000Z',
+      sessions: [
+        cloudSession('deleted-elsewhere', { updatedAt: '2026-08-02T12:00:00.000Z' }),
+      ],
+    },
+    { filePath },
+  )
+
+  const result = restoreSessionState(
+    cloudState([
+      cloudSession('deleted-elsewhere', {
+        updatedAt: '2026-08-02T13:00:00.000Z',
+        deletedAt: '2026-08-02T13:00:00.000Z',
+      }),
+    ]),
+    { filePath },
+  )
+
+  assert.equal(result.sessions.length, 0)
+  assert.equal(
+    readSessionDocument({ filePath }).sessions[0].deletedAt,
+    '2026-08-02T13:00:00.000Z',
+  )
+})
+
+test('a fresh store still restores the whole cloud document', (t) => {
+  const filePath = withTemporaryStore(t)
+  const result = restoreSessionState(
+    cloudState([
+      cloudSession('cloud-a', { updatedAt: '2026-08-02T13:00:00.000Z' }),
+      cloudSession('cloud-b', { updatedAt: '2026-08-02T12:30:00.000Z' }),
+    ]),
+    { filePath },
+  )
+
+  assert.deepEqual(
+    result.sessions.map((session) => session.sessionId),
+    ['cloud-a', 'cloud-b'],
+  )
+  assert.equal(readSessionDocument({ filePath }).sessions.length, 2)
 })
 
 test('legacy protocol-only turns are tombstoned and never rendered', (t) => {

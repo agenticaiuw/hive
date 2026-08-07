@@ -29,11 +29,24 @@ import {
   OPUS_WIRE_SAMPLE_RATE,
 } from './opusTranscode.js'
 import { createAudioCapture } from './jobs.js'
+import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
 import { getStore } from './store/index.js'
 import { loadFleetFromStore } from './fleetContext.js'
 import { persistAudioCapture } from './audioStorage.js'
 import { pcmS16leToWavBuffer } from './rawAudio.js'
-import { RELAY_API_KEY } from './config.js'
+import {
+  ANNOUNCE_ON_CONNECT,
+  ANNOUNCE_PUSH_CONTROL_FRAMES,
+  RELAY_API_KEY,
+} from './config.js'
+import {
+  announceDoneFrame,
+  announceOpenFrame,
+  renderAnnouncementPcm,
+  selectDeliverable,
+  streamAnnouncementPcm,
+} from './announce.js'
+import { synthesizeSpeech } from './speak.js'
 import {
   enqueueMacPlanJob,
   trimMacResultForModel,
@@ -147,6 +160,9 @@ export async function handlePendantConverse(request, context) {
       pendingPcm: [],
       idleTimer: null,
       ended: false,
+      /* A queued announcement is currently streaming down this socket. Any
+       * model audio or owner speech clears it — see onAudioDelta/onUserSpeech. */
+      announcing: false,
     }
     convo = state
 
@@ -217,6 +233,12 @@ export async function handlePendantConverse(request, context) {
       onAudioDelta: (pcm) => {
         state.lastActivityAt = Date.now()
         state.lastDownlinkAt = Date.now()
+        /*
+         * The model has something to say, so it wins the socket. Both feed
+         * the same stateful Opus encoder; letting them interleave would
+         * splice a briefing into the middle of an answer.
+         */
+        state.announcing = false
         if (state.replyPcmBytes < CAPTURE_MAX_BYTES) {
           state.replyPcm.push(Buffer.from(pcm))
           state.replyPcmBytes += pcm.length
@@ -237,10 +259,14 @@ export async function handlePendantConverse(request, context) {
       },
       onUserSpeech: () => {
         state.lastActivityAt = Date.now()
+        // Barge-in applies to a briefing exactly as it does to a reply: the
+        // owner talking is the owner saying "not now".
+        const wasAnnouncing = state.announcing
+        state.announcing = false
         // Barge-in: the model stops itself server-side; the device may still
         // hold ~a second of its speech in the jitter ring. Flush it so the
         // owner isn't talked over — but only if agent audio was in flight.
-        if (Date.now() - state.lastDownlinkAt < 5_000) {
+        if (wasAnnouncing || Date.now() - state.lastDownlinkAt < 5_000) {
           sendJson({ type: 'flush' })
         }
       },
@@ -263,6 +289,15 @@ export async function handlePendantConverse(request, context) {
         }
         return null
       },
+      lookupJobStatus: async ({ reference, jobId }) =>
+        recallJobStatus({
+          jobs: await store.listJobs({ type: 'plan', limit: RECALL_JOB_LIMIT }),
+          reference,
+          jobId,
+          /* Everything this conversation itself queued. A duplex session can
+           * run many turns, so all of them are excluded, not just the last. */
+          excludeJobIds: state.jobs,
+        }),
     })
 
     if (state.ended) {
@@ -300,6 +335,142 @@ export async function handlePendantConverse(request, context) {
 
     sendJson({ type: 'started' })
     console.log(`[converse] conversation started device=${deviceId}`)
+
+    /*
+     * The pendant is now in a state where it will PLAY what arrives, so this
+     * is the first moment anything the relay composed on its own can reach
+     * the owner's ear. Not awaited: a queued briefing must never delay the
+     * answer to the question that was just asked.
+     */
+    if (ANNOUNCE_ON_CONNECT) {
+      void playPendingAnnouncements(state).catch((error) => {
+        console.warn(`[converse] announce: ${error?.message || error}`)
+      })
+    }
+  }
+
+  /**
+   * Speak whatever the relay queued for this device while nobody was asking.
+   *
+   * This is the honest answer to "how does a 7am briefing reach the pendant?"
+   * on today's firmware. The device holds one WebSocket open around the clock,
+   * but main.c's idle branch drains and DISCARDS every frame that arrives
+   * while no conversation is active, and binary frames are dropped unless
+   * `convo_started` is set. So the relay cannot wake the pendant — but the
+   * moment a press opens a conversation, the relay speaks first, before the
+   * owner has asked for anything. Unprompted in substance; the press is the
+   * doorbell, not the request.
+   *
+   * The remaining gap, precisely: a truly unprompted 7am announcement needs
+   * (1) firmware that recognises {"type":"announce"} on the idle socket and
+   * arms the I2S playback path without a button press, and (2) the socket to
+   * be owned by a Durable Object, because a Cron Trigger runs in a different
+   * isolate and cannot reach a WebSocket held in a fetch handler's closure.
+   */
+  async function playPendingAnnouncements(state) {
+    /*
+     * Unfiltered on purpose: selectDeliverable also picks up announcements
+     * left 'delivering' by a socket that died mid-briefing, which a
+     * state:'pending' query would hide forever.
+     */
+    const queued = await state.store
+      .listAnnouncements({ deviceId: state.deviceId, limit: 20 })
+      .catch(() => [])
+    const due = selectDeliverable(queued, { limit: 2 })
+    if (!due.length) return
+
+    for (const announcement of due) {
+      if (state.ended || !state.replyEncoder) return
+      /*
+       * Claim before speaking. Two sockets (a reconnect racing a stale one)
+       * would otherwise both play the same briefing.
+       */
+      const claimed = await state.store
+        .updateAnnouncement(announcement.announcementId, {
+          state: 'delivering',
+          deliveringSince: new Date().toISOString(),
+          attempts: Number(announcement.attempts || 0) + 1,
+        })
+        .catch(() => null)
+      if (!claimed) continue
+
+      let pcm
+      try {
+        pcm = await renderAnnouncementPcm({
+          speech: announcement.speech,
+          /* OpenAI's `pcm` response format is 24 kHz mono s16le — already the
+           * pendant's reply format, so nothing is resampled on the way out. */
+          synthesize: synthesizeSpeech,
+        })
+      } catch (error) {
+        /* Put it back: a TTS outage must not silently eat a briefing. */
+        await state.store
+          .updateAnnouncement(announcement.announcementId, { state: 'pending' })
+          .catch(() => {})
+        throw error
+      }
+
+      if (state.ended || !pcm.length) {
+        await state.store
+          .updateAnnouncement(announcement.announcementId, { state: 'pending' })
+          .catch(() => {})
+        continue
+      }
+
+      state.announcing = true
+      if (ANNOUNCE_PUSH_CONTROL_FRAMES) {
+        sendJson(
+          JSON.parse(
+            announceOpenFrame({
+              id: announcement.announcementId,
+              seconds: pcm.length / 2 / REALTIME_PCM_RATE,
+            }),
+          ),
+        )
+      }
+
+      const delivery = await streamAnnouncementPcm({
+        pcm,
+        sampleRate: REALTIME_PCM_RATE,
+        encode: (chunk) => state.replyEncoder.push(chunk),
+        split: (wire) => splitWireFrames(wire),
+        send: (frame) => {
+          state.lastActivityAt = Date.now()
+          state.lastDownlinkAt = Date.now()
+          try {
+            server.send(frame)
+          } catch {
+            state.announcing = false
+          }
+        },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        shouldStop: () => state.ended || !state.announcing,
+      })
+
+      if (ANNOUNCE_PUSH_CONTROL_FRAMES) {
+        sendJson(JSON.parse(announceDoneFrame({ id: announcement.announcementId })))
+      }
+      state.announcing = false
+
+      /*
+       * Interrupted still counts as heard: the owner talked over it, which
+       * they cannot do without having heard it start. Nothing sent at all
+       * goes back on the queue for the next press.
+       */
+      await state.store
+        .updateAnnouncement(announcement.announcementId, {
+          state: delivery.sentBytes > 0 ? 'delivered' : 'pending',
+          deliveredAt: new Date().toISOString(),
+          deliveryPath: delivery.stopped ? 'converse-interrupted' : 'converse',
+        })
+        .catch(() => {})
+      console.log(
+        `[converse] announcement ${announcement.announcementId} ` +
+          `sent=${delivery.sentBytes}B frames=${delivery.sentFrames}` +
+          `${delivery.stopped ? ' (interrupted)' : ''}`,
+      )
+      if (delivery.stopped) return
+    }
   }
 
   async function endConversation(reason) {

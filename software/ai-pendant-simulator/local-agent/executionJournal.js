@@ -6,6 +6,10 @@ import { classifyAction } from './actionRisk.js'
 import { receiptsForJob, undoVaultLocation } from './actionReceipts.js'
 import { describeUndoability } from './undo.js'
 import { allowedFolders, FULL_CONTROL_MODE } from './config.js'
+import {
+  getInputReachability,
+  inputPostingFromReachability,
+} from './inputReachability.js'
 
 /*
  * What ran, in what order, what it touched, how long it took, which tier
@@ -50,6 +54,8 @@ export const JOURNAL_SOURCES = [
   'local-agent/undo.js — describeUndoability(), the same verdict POST /jobs/:id/undo uses',
   'local-agent/routingStats.js — in-memory routing receipts, for tier attribution',
   'local-agent/actionRisk.js — classifyAction(), reported as a label only',
+  'local-agent/focusCoordinator.js — the focus receipt the executing job already stored',
+  'local-agent/evidenceCapsules.js — the capsule ids each receipt already carries',
 ]
 
 /* routingStats truncates the command it stores to 160 characters. Joining on
@@ -169,6 +175,34 @@ export function attributeTier(job, { jobs = [], routing = null } = {}) {
 }
 
 /**
+ * What the focus coordinator saw around this job, if it ran one.
+ *
+ * Read off the receipt the coordinator already put in the job's stored result —
+ * no new store, nothing extra to write, and null for every job that predates it.
+ * A plan stopped on drift is reported as a fact about state, not as anything
+ * waiting on a person: focusCoordinator.js cannot ask, and neither can this.
+ */
+function focusOf(job) {
+  const receipt = job?.result?.focus
+  if (!receipt || typeof receipt !== 'object') return null
+
+  return {
+    targetApp: receipt.targetApp ?? null,
+    foregroundBefore: receipt.focus?.before?.name ?? null,
+    foregroundAfter: receipt.focus?.after?.name ?? null,
+    changed: Boolean(receipt.focus?.changed),
+    restoredTo: receipt.focus?.restored?.restoredTo ?? null,
+    routedSteps: Array.isArray(receipt.plan)
+      ? receipt.plan.filter((step) => step.routedByCoordinator).length
+      : 0,
+    stoppedOnDrift: Boolean(receipt.drift),
+    drift: receipt.drift ?? null,
+    stepsRun: receipt.ranSteps ?? null,
+    stepsRemaining: Array.isArray(receipt.remaining) ? receipt.remaining.length : 0,
+  }
+}
+
+/**
  * One job, fully expanded: its steps in execution order, each with the
  * content-addressed id that doubles as its idempotency key.
  */
@@ -214,6 +248,10 @@ export function journalEntry(job, { jobs = [], routing = null } = {}) {
         message: item.message ?? null,
         error: item.error ?? item.reason ?? null,
       },
+      /* Which evidence capsules this step stood on, straight off the receipt.
+       * `unlinked` is the interesting value: it is how much of the surface has
+       * no provenance yet, reported rather than rounded down to zero. */
+      evidence: receipt.evidence ?? { capsuleIds: [], source: 'unlinked' },
       recordedBy: receipt.synthesized ? 'derived-from-result' : 'executor-receipt',
     }
   })
@@ -239,6 +277,7 @@ export function journalEntry(job, { jobs = [], routing = null } = {}) {
       ? measured.reduce((sum, action) => sum + action.durationMs, 0)
       : null,
     plannedBy: attributeTier(job, { jobs, routing }),
+    focus: focusOf(job),
     undo: { ...undo, undoneAt: job?.undoneAt ?? null },
     counts: {
       actions: actions.length,
@@ -247,7 +286,13 @@ export function journalEntry(job, { jobs = [], routing = null } = {}) {
       failed: actions.filter((action) => !action.ok).length,
       reversible: actions.filter((action) => action.reversible).length,
       snapshotted: actions.filter((action) => action.snapshot).length,
+      evidenced: actions.filter((action) => action.evidence.capsuleIds.length).length,
     },
+    /* Every capsule any step in this job cited, so "what did this run read"
+     * is one field rather than a walk over the steps. */
+    capsuleIds: [
+      ...new Set(actions.flatMap((action) => action.evidence.capsuleIds)),
+    ],
     actions,
   }
 }
@@ -433,7 +478,10 @@ export function parseForegroundApp(infoOutput) {
   }
 }
 
-async function readForegroundApp(execFileImpl) {
+/* Exported because focusCoordinator.js watches the foreground while a plan runs
+ * and must see exactly what /observe reports afterwards. Two readers of the same
+ * fact are two answers waiting to disagree. */
+export async function readForegroundApp(execFileImpl) {
   try {
     const front = await execFileImpl('lsappinfo', ['front'], { timeout: 4000 })
     const asn = String(front.stdout ?? '').trim()
@@ -579,12 +627,18 @@ export async function observeHost({
   roots = allowedFolders,
   execFileImpl = execFileAsync,
   inputProbe = null,
+  inputReachability = getInputReachability(),
 } = {}) {
-  const [foreground, running, inputPosting] = await Promise.all([
+  const [foreground, running, freshProbe] = await Promise.all([
     readForegroundApp(execFileImpl),
     readRunningApps(execFileImpl),
     runInputProbe(inputProbe),
   ])
+
+  /* A probe posted for this request beats a recorded one; a recorded one beats
+   * nothing. `unverified` yields null here, which keeps projectAccessibility's
+   * "absent means NOT PROBED" contract intact instead of feeding it a guess. */
+  const inputPosting = freshProbe ?? inputPostingFromReachability(inputReachability)
 
   const sessions = Array.isArray(browserSessions) ? browserSessions : []
 
@@ -597,6 +651,7 @@ export async function observeHost({
       'lsappinfo front — foreground application',
       'ps -Ao pid=,comm= — running application bundles',
       'local-agent/macos/permissions.js — accessibility, input posting, screen recording',
+      'local-agent/inputReachability.js — startup and periodic no-op input probe',
       'local-agent/browserSessions.js — durable browser sessions',
       'local-agent/config.js — allowedFolders',
     ],
@@ -608,6 +663,12 @@ export async function observeHost({
       apps: running.apps,
     },
     accessibility: projectAccessibility(permissions, { inputPosting }),
+    /* The measurement itself rather than a derivation of it: which binary
+     * posted the test event, when, and what happened. `unverified` means not
+     * probed. This reports the RECORDED probe; a raw `inputProbe` passed in by
+     * a caller feeds `accessibility` above but is not a recorded measurement,
+     * so it does not appear here. */
+    inputReachability,
     browser: {
       sessions: sessions.length,
       tabs: sessions.map((session) => ({

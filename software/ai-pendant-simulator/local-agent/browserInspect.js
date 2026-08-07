@@ -15,6 +15,7 @@ import {
   snapshotPage,
 } from './browserPage.js'
 import { workspacePath } from './config.js'
+import { usableCapsuleIds } from './evidenceCapsules.js'
 
 /*
  * "Make browser work explicitly two-phase: 'inspect' returns a concise result
@@ -135,8 +136,19 @@ export async function inspectPage(
     retrievedAt,
   }
 
-  const findings = buildFindings({ terms, text, elements, source })
-  const proposal = proposeAction({ goal, elements, source })
+  /*
+   * The two readings this inspection is built out of. Minted by
+   * computerControl when the extension answered, not here — a citation that
+   * names a capsule the agent invented locally proves nothing.
+   *
+   * Text findings cite the page read; element findings and the proposal cite
+   * the snapshot, because that is genuinely where each one came from.
+   */
+  const evidence = { text: page.capsuleId ?? null, elements: snap.capsuleId ?? null }
+  const capsuleIds = [...new Set([evidence.text, evidence.elements].filter(Boolean))]
+
+  const findings = buildFindings({ terms, text, elements, source, evidence })
+  const proposal = proposeAction({ goal, elements, source, capsuleId: evidence.elements })
 
   const inspection = {
     inspectionId: `insp_${crypto.randomUUID()}`,
@@ -152,6 +164,7 @@ export async function inspectPage(
     contentHash: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16),
     textLength: text.length,
     elementCount: elements.length,
+    capsuleIds,
     findings,
     proposal,
     acts: [],
@@ -183,7 +196,7 @@ function searchTerms({ look, goal }) {
  * A finding is a claim plus the sentence it came from. A claim without the
  * sentence is the agent asking to be believed.
  */
-function buildFindings({ terms, text, elements, source }) {
+function buildFindings({ terms, text, elements, source, evidence = {} }) {
   const findings = []
 
   for (const term of terms) {
@@ -194,7 +207,11 @@ function buildFindings({ terms, text, elements, source }) {
         term,
         where: 'page text',
         quote,
-        citation: { ...source, locator: `text contains “${term}”` },
+        citation: {
+          ...source,
+          locator: `text contains “${term}”`,
+          capsuleId: evidence.text ?? null,
+        },
       })
       continue
     }
@@ -207,7 +224,11 @@ function buildFindings({ terms, text, elements, source }) {
         term,
         where: 'interactive element',
         quote: String(element.name ?? ''),
-        citation: { ...source, locator: `${element.role} “${element.name}” at ${element.selector}` },
+        citation: {
+          ...source,
+          locator: `${element.role} “${element.name}” at ${element.selector}`,
+          capsuleId: evidence.elements ?? null,
+        },
       })
       continue
     }
@@ -217,7 +238,11 @@ function buildFindings({ terms, text, elements, source }) {
       where: null,
       quote: null,
       missing: true,
-      citation: { ...source, locator: `no occurrence of “${term}” in the ${text.length} characters read` },
+      citation: {
+        ...source,
+        locator: `no occurrence of “${term}” in the ${text.length} characters read`,
+        capsuleId: evidence.text ?? null,
+      },
     })
   }
 
@@ -226,7 +251,11 @@ function buildFindings({ terms, text, elements, source }) {
       term: null,
       where: 'page text',
       quote: text.slice(0, 400),
-      citation: { ...source, locator: 'opening of the main text' },
+      citation: {
+        ...source,
+        locator: 'opening of the main text',
+        capsuleId: evidence.text ?? null,
+      },
     })
   }
 
@@ -239,7 +268,7 @@ function buildFindings({ terms, text, elements, source }) {
  * Returned, not run. A null proposal is a real answer: it means nothing on the
  * page matched, and inventing a click would be worse than saying so.
  */
-export function proposeAction({ goal, elements, source }) {
+export function proposeAction({ goal, elements, source, capsuleId = null }) {
   const intent = ACT_VERBS.find(([pattern]) => pattern.test(String(goal || '')))?.[1] ?? null
   const words = searchTerms({ look: [], goal })
 
@@ -281,7 +310,11 @@ export function proposeAction({ goal, elements, source }) {
           ? `Follows “${element.name}” to ${element.href}.`
           : `Clicks the “${element.name || element.selector}” ${element.role} on ${source.url}.`,
     reversible: type === 'browser_click' && Boolean(element.href),
-    citation: { ...source, locator: `${element.role} “${element.name}” at ${element.selector}` },
+    citation: {
+      ...source,
+      locator: `${element.role} “${element.name}” at ${element.selector}`,
+      capsuleId,
+    },
   }
 }
 
@@ -301,15 +334,29 @@ function scoreElement(element, { words, intent }) {
   if (intent === 'buy' && /add to (cart|basket)|buy now|checkout/.test(name)) score += 4
   if (intent === 'submit' && /submit|send|continue|next|apply|confirm/.test(name)) score += 4
   if (intent === 'search' && element.role === 'textbox' && /search/.test(name)) score += 4
+  /* Tie-breakers only. A link with a real destination is the least surprising
+   * thing to propose *among candidates that already matched* — never a reason
+   * to propose something the goal said nothing about. Proposing the nav bar
+   * because it was the only link on the page is how a preview becomes noise. */
+  if (score <= 0) return 0
   if (intent === 'open' && element.role === 'link') score += 1
-
-  /* A link with a real destination is the least surprising thing to propose. */
   if (element.role === 'link' && href.startsWith('http')) score += 1
   return score
 }
 
-/** The inspection as the owner reads or hears it. */
+/**
+ * The inspection as the owner reads or hears it.
+ *
+ * The capsule check happens here, on the display path, rather than at write
+ * time: an inspection recorded last week is still on disk, and if its source
+ * has since been revoked the quote must stop being spoken without anyone
+ * having had to remember to go back and rewrite the record. Derived on read,
+ * the same shape executionJournal.js uses.
+ */
 export function formatInspection(inspection) {
+  const { withheld } = usableCapsuleIds(inspection.capsuleIds ?? [])
+  const gone = new Map(withheld.map((entry) => [entry.capsuleId, entry]))
+
   const lines = [
     `${inspection.title || inspection.url}`,
     `${inspection.url} — read ${inspection.retrievedAt}. Nothing on the page was touched.`,
@@ -317,12 +364,23 @@ export function formatInspection(inspection) {
   ]
 
   for (const finding of inspection.findings) {
+    const revoked = gone.get(finding.citation?.capsuleId)
+    if (revoked) {
+      lines.push(
+        `· ${finding.term ? `${finding.term}: ` : ''}[evidence ${revoked.capsuleId} ${revoked.state}] ${revoked.reason}`,
+      )
+      continue
+    }
     if (finding.missing) {
       lines.push(`· ${finding.term}: not on the page (${finding.citation.locator})`)
       continue
     }
     lines.push(`· ${finding.term ? `${finding.term}: ` : ''}“${finding.quote}”`)
     lines.push(`      ${finding.citation.locator}`)
+  }
+
+  if (inspection.capsuleIds?.length) {
+    lines.push('', `Evidence: ${inspection.capsuleIds.join(', ')}`)
   }
 
   if (inspection.proposal) {
@@ -408,6 +466,13 @@ export async function actOnInspection(
     pageChanged: fresh.url !== inspection.url,
     ok: true,
     message: String(result?.message ?? 'Done.'),
+    /* What this click stood on: the reading that proposed it, plus the
+     * re-snapshot that located the element it actually hit. The second one
+     * matters — the element may have moved, and the evidence for where it
+     * ended up is a different capsule from the evidence for choosing it. */
+    capsuleIds: [
+      ...new Set([...(inspection.capsuleIds ?? []), fresh.capsuleId].filter(Boolean)),
+    ],
   }
   inspection.acts = [...(inspection.acts ?? []), record]
   saveStore(store)

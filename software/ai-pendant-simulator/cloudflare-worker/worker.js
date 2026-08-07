@@ -32,6 +32,15 @@ export default {
   async fetch(request, env, context) {
     setCloudflareBindings(env)
 
+    // Second clock. Runs in waitUntil so it cannot add a millisecond to any
+    // response, and rate-limits itself to once a minute across the fleet —
+    // see maybeTickOnTraffic() for why the cron alone is not enough.
+    context.waitUntil(
+      import('../cloud-relay/scheduler.js')
+        .then(({ maybeTickOnTraffic }) => maybeTickOnTraffic())
+        .catch(() => {}),
+    )
+
     // Full-duplex pendant WebSocket: must be claimed BEFORE the express
     // bridge — httpServerHandler cannot complete an Upgrade handshake.
     const url = new URL(request.url)

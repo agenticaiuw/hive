@@ -81,7 +81,7 @@ test('the manifest names the registries that disagree instead of hiding them', (
   }
 })
 
-test('the relay tool list is the five the Mac side expects', () => {
+test('the relay tool list is the seven the Mac side expects', () => {
   assert.deepEqual(
     REALTIME_TOOLS.map((tool) => tool.name),
     [
@@ -90,6 +90,16 @@ test('the relay tool list is the five the Mac side expects', () => {
       'browser_run_actions',
       'web_search',
       'mac_delegate',
+      /* Relay-side only: read_web_page runs in cloud-relay/serverBrowser.js and
+       * is never dispatched to this Mac, so it is not the relay-advertises-what-
+       * the-Mac-cannot-do drift the tests above guard against. It is listed here
+       * because this assertion is a snapshot of the whole registry. */
+      'read_web_page',
+      /* Relay-side only for the same reason: relay_job_status reads
+       * cloud-relay job records in cloud-relay/jobRecall.js and dispatches
+       * nothing, which is the point — it answers "did that go through?" with
+       * this Mac asleep. */
+      'relay_job_status',
     ],
   )
 })

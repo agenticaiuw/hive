@@ -96,21 +96,82 @@ const ASKS_SOMETHING =
  * reply on a no-reply address is the failure that would make the owner stop
  * trusting the review list. An address that says do-not-reply is telling the
  * truth about itself.
+ *
+ * The relay clause is not a guess. The first run against this Mac's real inbox
+ * put two Rappi promos in "reference" because their sender is
+ * "rappi_at_hello_rappi_com_mx_…@privaterelay.appleid.com" — nothing in it
+ * reads as no-reply, so they were treated as a person writing. A Hide My Email
+ * relay is an address the owner handed to a signup form; briefing.js's
+ * isBulkMail reached the same conclusion from the same domain.
+ *
+ * The separator is a character class because Apple writes it "no_reply@" and
+ * "\bno-?reply\b" does not match that: an underscore is a word character, so
+ * there is no boundary after "reply".
  */
 const NO_REPLY_SENDER =
-  /\b(no-?reply|noreply|donotreply|do-not-reply|mailer-daemon|bounce|notifications?@|automated@|alerts?@|postmaster)\b|@(?:.*\.)?(?:e?mail|em|mailer|notifications?)\./i
+  /\b(no[-_]?reply|donotreply|do[-_]not[-_]reply|mailer-daemon|bounce|notifications?@|automated@|alerts?@|postmaster)\b|@privaterelay\.appleid\.com|@(?:.*\.)?(?:e?mail|em|mailer|notifications?)\./i
 
-/* Automated but worth keeping: receipts, statements, the record of something
- * that happened. Filed, not answered, not deleted. */
+/*
+ * Automated but worth keeping: receipts, statements, the record of something
+ * that happened or is about to. Filed, not answered, not deleted.
+ *
+ * "Subscription is expiring" is here because the real inbox filed it as noise:
+ * it comes from Apple's bulk domain and says nothing a receipt regex knows, yet
+ * it is a notice about something the owner pays for. Money and account state
+ * are the line — a thing the owner owns changing status is a record, an
+ * invitation to buy something is not.
+ */
 const REFERENCE_SUBJECT =
-  /\b(receipt|invoice|statement|confirmation|confirmed|your (?:order|booking|reservation|appointment|payment)|shipped|out for delivery|itinerary|verification code|security alert|new sign-?in|password (?:reset|changed)|report is ready|has been (?:posted|published|updated)|summary for|transcript|enrollment|grade)\b/i
+  /\b(receipt|invoice|statement|confirmation|confirmed|your (?:order|booking|reservation|appointment|payment|subscription|plan|account|membership)|subscription (?:is )?(?:expiring|expired|renew)|auto[- ]?renew|will (?:expire|renew)|shipped|out for delivery|itinerary|verification code|security alert|new sign-?in|password (?:reset|changed)|report is ready|has been (?:posted|published|updated)|summary for|transcript|enrollment|grade)\b/i
 
 /* Marketing. Nothing here is a record of anything. */
 const NOISE_SUBJECT =
-  /\b(unsubscribe|newsletter|digest|weekly (?:update|roundup|digest)|% off|\d+% off|\bsale\b|\bdeal[s]?\b|save (?:big|up to)|limited time|last chance|flash sale|webinar|promo(?:tion)?|survey|invitation to connect|you may (?:also )?like|recommended for you|new in|back in stock|don'?t miss|exclusive offer|free trial|upgrade (?:now|today))\b/i
+  /\b(unsubscribe|newsletter|digest|weekly (?:update|roundup|digest)|% off|\d+% off|\bsale\b|\bdeal[s]?\b|save (?:big|up to)|limited time|last chance|last call|flash sale|webinar|promo(?:tion)?|survey|invitation to connect|you may (?:also )?like|recommended for you|new in|back in stock|don'?t miss|exclusive offer|free trial|upgrade (?:now|today))\b/i
 
+/*
+ * Local part only. The earlier version also treated any @mail./@email./@news.
+ * domain as marketing, which is how "Your Subscription is Expiring" from
+ * no_reply@email.apple.com ended up in noise — that domain carries a company's
+ * transactional mail as well as its promotions, so it says "automated", not
+ * "advertising". NO_REPLY_SENDER above is where the domain belongs.
+ */
 const NOISE_SENDER =
-  /\b(marketing@|promo(?:tions?)?@|news(?:letter)?@|deals?@|offers?@|hello@|hi@|team@|updates?@|digest@)\b|@(?:mail|email|e|news|marketing|send|sendgrid|mailchimp)\./i
+  /\b(marketing@|promo(?:tions?)?@|news(?:letter)?@|deals?@|offers?@|digest@)/i
+
+/*
+ * A role address is a department, not a person.
+ *
+ * The second real run drafted a reply to "Valerie from Holafly
+ * <community@team.holafly.com>" because the subject ends in a question mark —
+ * "What if your next destination is here?" — and a question from a person is
+ * the definition of reply-soon. Nothing about the address says no-reply and
+ * nothing about the subject says sale, so both earlier gates passed it, and the
+ * owner got a drafted answer to an advert.
+ *
+ * A rhetorical question in a marketing subject is not detectable as text. Who
+ * sent it is: nobody named Valerie reads community@. So a role address is
+ * treated the way a no-reply address is — unless the subject is a reply, which
+ * means the owner wrote INTO that queue first and a real thread exists.
+ */
+const ROLE_SENDER =
+  /(?:^|[<\s."])(?:community|team|hello|hi|info|contact|help|care|service|sales|support|updates?|feedback|hey|news)(?:[._+-][a-z0-9]+)*@/i
+
+/*
+ * A brand wearing a person's name.
+ *
+ * "Premium★Tesla <Sales.SG@premiumtesla.com>" and "Valerie from Holafly"
+ * both reached the drafted buckets on a rhetorical question — "Is your Tesla
+ * road-trip ready?", "What if your next destination is here?" — because a
+ * question from a person is exactly what reply-soon is for. The question is not
+ * distinguishable as text; the display name is. A trademark glyph in a name, or
+ * "<person> from <company>", is a sender who is broadcasting.
+ *
+ * This is envelope-only judgement and it has a ceiling: a marketing question
+ * from firstname@brand.com still reads as a person. The containment is that
+ * being wrong costs the owner a draft file they delete — the drafted buckets
+ * are the only thing at stake, nothing is hidden, and nothing is ever sent.
+ */
+const BRAND_DISPLAY_NAME = /[★☆✦✧™®⭐]|\bfrom\s+\p{Lu}[\p{L}]*\s*$/u
 
 /**
  * Spoken phrasings that mean "triage my inbox".
@@ -182,6 +243,25 @@ export function classifyMessage(message, { now = new Date(), knownPeople = [] } 
     return bucket(reference ? 'reference' : 'noise', score, reasons, baseReasons)
   }
 
+  /*
+   * A department or a brand, not a person — unless the owner already wrote to
+   * them, which is what a "Re:" means and is the only cheap proof that a real
+   * thread exists.
+   */
+  if (!/^re:/i.test(subject)) {
+    const roleAddress = ROLE_SENDER.test(sender)
+    const brandName = BRAND_DISPLAY_NAME.test(displayName(sender))
+    if (roleAddress || brandName) {
+      reasons.push(
+        roleAddress
+          ? 'a role address, not a person — no thread to reply into'
+          : 'the display name is a brand, not a person',
+      )
+      if (reference) reasons.push('a record worth keeping')
+      return bucket(reference ? 'reference' : 'noise', score, reasons, baseReasons)
+    }
+  }
+
   /* A person wrote this. */
   if (DEADLINE_LANGUAGE.test(subject)) {
     reasons.push('names a deadline or asks for an action')
@@ -213,9 +293,13 @@ function bucket(name, score, reasons, baseReasons) {
   return {
     bucket: name,
     score,
-    /* The scorer's reasons are kept alongside the classifier's so the review
-     * list can explain a ranking as well as a bucket. */
-    reasons: [...reasons, ...baseReasons],
+    /*
+     * The scorer's reasons are kept alongside the classifier's so the review
+     * list can explain a ranking as well as a bucket — deduped, because the two
+     * agree often enough that the real inbox produced "marketing subject |
+     * marketing subject" on every promo.
+     */
+    reasons: [...new Set([...reasons, ...baseReasons])],
   }
 }
 
@@ -295,14 +379,21 @@ tell application "Mail"
       set total to count of messages of box
       if total > ${cap} then set total to ${cap}
       if total > 0 then
-        -- One Apple event per column. The per-message alternative is what made
-        -- the first version of this read take twenty seconds for sixty messages.
-        set msgs to messages 1 thru total of box
-        set subs to subject of msgs
-        set snds to sender of msgs
-        set dts to date received of msgs
-        set rds to read status of msgs
-        set mids to message id of msgs
+        -- One Apple event per column, and the range specifier is never
+        -- materialised into a variable first: assigning "messages 1 thru n" to
+        -- a variable resolves it to a LIST of message specifiers, and Mail
+        -- answers a property read on that list with -1728, "Can't get subject
+        -- of {…}". Asking the mailbox for the property of the range keeps it
+        -- one specifier, which is one event returning n subjects. The
+        -- per-message alternative is what made the earlier reader take twenty
+        -- seconds for sixty messages.
+        tell box
+          set subs to subject of messages 1 thru total
+          set snds to sender of messages 1 thru total
+          set dts to date received of messages 1 thru total
+          set rds to read status of messages 1 thru total
+          set mids to message id of messages 1 thru total
+        end tell
         repeat with i from 1 to total
           try
             set d to item i of dts
@@ -396,7 +487,7 @@ tell application "Mail"
 end tell
 return output`
 
-    let stdout = ''
+    let stdout
     try {
       stdout = await osascript(script)
     } catch {
@@ -626,10 +717,12 @@ export async function triageInbox(
    * three" are the same operation with a different cap: urgent before
    * reply-soon, best-scoring first, cut at maxDrafts.
    */
-  const candidates = DRAFTED_BUCKETS.flatMap((name) => buckets[name]).slice(
-    0,
-    Math.max(0, Number(maxDrafts) ?? DEFAULT_MAX_DRAFTS),
-  )
+  /* `?? DEFAULT` would not have caught a non-numeric cap: Number('lots') is
+   * NaN, not nullish, and slice(0, NaN) silently drafts nothing at all. */
+  const draftCap = Number.isFinite(Number(maxDrafts))
+    ? Math.max(0, Number(maxDrafts))
+    : DEFAULT_MAX_DRAFTS
+  const candidates = DRAFTED_BUCKETS.flatMap((name) => buckets[name]).slice(0, draftCap)
 
   let bodies = new Map()
   let bodyError = null
@@ -866,10 +959,12 @@ export function listTriageRuns({ limit = 10 } = {}) {
 export function readTriageRun(id) {
   const summary = load().runs.find((run) => run.id === id)
   if (!summary) return null
-  let review = null
+  let review
   try {
     review = fs.readFileSync(summary.reviewPath, 'utf8')
   } catch {
+    /* The folder can be moved or deleted by the owner; the run summary is still
+     * worth returning without it. */
     review = null
   }
   return { ...summary, review }

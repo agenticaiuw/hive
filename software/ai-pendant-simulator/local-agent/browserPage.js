@@ -229,6 +229,19 @@ export async function addressPage(
   }
 }
 
+/*
+ * The evidence capsule the agent minted for this reading, if it minted one.
+ *
+ * Callers do not mint their own. computerControl.js mints once, at the point
+ * the extension answers, and everything downstream carries the id it was given
+ * — otherwise the same page read once would end up as two capsules that
+ * disagree about nothing, and "which evidence is this summary standing on"
+ * would have two answers.
+ */
+export function evidenceIdOf(result) {
+  return result?.evidence?.capsuleId ?? null
+}
+
 /** Page text in one of the extension's read modes. */
 export async function readPageText(
   target,
@@ -248,6 +261,7 @@ export async function readPageText(
     content: String(result?.content ?? ''),
     title: String(result?.title ?? ''),
     url: String(result?.url ?? ''),
+    capsuleId: evidenceIdOf(result),
   }
 }
 
@@ -262,6 +276,7 @@ export async function snapshotPage(target, { maxElements = 80, options = {} } = 
     elements: Array.isArray(result?.elements) ? result.elements : [],
     title: String(result?.title ?? ''),
     url: String(result?.url ?? ''),
+    capsuleId: evidenceIdOf(result),
   }
 }
 

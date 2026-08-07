@@ -56,6 +56,37 @@ const MAIL_SINCE_HOURS = 72
 
 const followupDirectory = path.join(workspacePath, 'meeting-followup')
 
+/*
+ * Folders inside the workspace that hold what the AGENT wrote, not what the
+ * owner did.
+ *
+ * The first real run picked its notes out of meeting-prep/, which copies
+ * matching documents into a per-meeting folder — and a copy carries the copy's
+ * mtime, so every one of them looks like a file that was touched during the
+ * meeting. The follow-up duly opened a transcript of a DIFFERENT meeting and
+ * quoted it, while the owner's actual copy of the same file sat in
+ * ~/Documents/Zoom and was listed below it as "other related".
+ *
+ * briefing.js learned this in its own shape (isBriefingNote, so the 5pm wrap-up
+ * stops assigning the owner homework about its own output). Same rule: nothing
+ * the agent produced is evidence of anything.
+ */
+const AGENT_OUTPUT_FOLDERS = [
+  'meeting-prep',
+  'meeting-followup',
+  'mail-triage',
+  'briefings',
+  'Briefings',
+  'form-fills',
+  'pipeline-audio',
+].map((name) => `${path.join(workspacePath, name)}${path.sep}`)
+
+export function withoutAgentOutput(candidates) {
+  return (candidates || []).filter(
+    (candidate) => !AGENT_OUTPUT_FOLDERS.some((folder) => candidate.path.startsWith(folder)),
+  )
+}
+
 /**
  * Spoken phrasings that mean "the meeting is over, set me up".
  *
@@ -99,20 +130,33 @@ export function mostRecentlyEnded(events, { now = new Date() } = {}) {
 /**
  * Which of the matched documents is "the meeting notes".
  *
- * A document that was touched while the meeting was happening, or in the hour
- * after it, is the one somebody typed into during the meeting. That beats any
- * amount of filename similarity: a file called "kickoff-agenda.md" from three
- * weeks ago scores well on terms and is not what the owner wants opened.
+ * A document that was touched around the time the meeting happened is the one
+ * somebody typed into during it. That beats any amount of filename similarity:
+ * a file called "kickoff-agenda.md" from three weeks ago scores well on terms
+ * and is not what the owner wants opened.
+ *
+ * The window opens BEFORE the calendar start. On the first real run the right
+ * file — Zoom's saved chat from "2026-08-06 21.44.26 Summer Interview…" — was
+ * written at 21:46 for a meeting the calendar says began at 22:00, so a window
+ * that opened at the nominal start missed it and the fallback opened a
+ * transcript of a different meeting from four days earlier. People join early
+ * and clients stamp the file when the session starts, not when the invite says.
+ *
+ * Inside the window the LATEST file wins rather than the best-named one: once
+ * we know a file was written during the meeting, when it was written is a
+ * stronger claim than what it is called.
  */
-export function pickNotes(documents, meeting, { graceMinutes = 60 } = {}) {
-  const startMs = Date.parse(meeting.start)
+export function pickNotes(documents, meeting, { leadMinutes = 30, graceMinutes = 60 } = {}) {
+  const startMs = Date.parse(meeting.start) - leadMinutes * 60_000
   const endMs = Date.parse(meeting.end) + graceMinutes * 60_000
   const readable = documents.filter((document) => document.readable)
 
-  const touchedDuring = readable.filter((document) => {
-    const modified = Date.parse(document.modifiedAt)
-    return Number.isFinite(modified) && modified >= startMs && modified <= endMs
-  })
+  const touchedDuring = readable
+    .filter((document) => {
+      const modified = Date.parse(document.modifiedAt)
+      return Number.isFinite(modified) && modified >= startMs && modified <= endMs
+    })
+    .sort((left, right) => Date.parse(right.modifiedAt) - Date.parse(left.modifiedAt))
 
   return touchedDuring[0] || readable[0] || null
 }
@@ -156,7 +200,7 @@ export async function prepareMeetingFollowup(
     }
   }
 
-  const candidates = scanDocuments(roots, { now })
+  const candidates = withoutAgentOutput(scanDocuments(roots, { now }))
   const terms = discriminatingTerms(meetingTerms(meeting), candidates)
   const documents = rankDocuments(candidates, terms).slice(0, Math.max(1, maxDocuments))
   const notes = pickNotes(documents, meeting)

@@ -2,7 +2,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { workspacePath } from './config.js'
+import { linkedCapsuleIds } from './evidenceCapsules.js'
 import { resolveUserPath } from './security.js'
+import { annotateInputReachability, getInputReachability } from './inputReachability.js'
 
 /*
  * A receipt for every executed action: what it touched, and whether it can be
@@ -329,6 +331,10 @@ export function buildActionReceipt({
   before = null,
   startedAt,
   finishedAt = new Date().toISOString(),
+  /* Read at receipt time, not at read time: "were events reaching the screen
+   * when this ran" is a different question from "are they now", and a receipt
+   * that answers the second one is dated the moment it is opened. */
+  reachability = getInputReachability(),
 }) {
   const type = String(action?.type ?? '')
   const reversibility = reversibilityFromExecution(type, action, result, before)
@@ -363,6 +369,42 @@ export function buildActionReceipt({
     reversible: reversibility.reversible,
     reversedBy: reversibility.reversedBy,
     irreversibleReason: reversibility.irreversibleReason,
+    /* Annotation only. A ui_click whose reachability is `failed` still ran and
+     * still reports whatever the executor reported; this says the success may
+     * not mean what it looks like. Null for steps that post nothing. */
+    inputReachability: annotateInputReachability(type, reachability),
+    evidence: describeEvidence(action, result),
+  }
+}
+
+/**
+ * Which evidence capsules this step stood on.
+ *
+ * Two sources, and the receipt says which answered. A browser reading carries
+ * its capsule in the result, so the link is a fact. Everything else — the
+ * write_file whose contents came off a logged-in page — is only linked when the
+ * caller tagged the action, so an untagged step reports `unlinked` rather than
+ * being quietly attributed to whatever capsule was minted most recently. A
+ * guessed provenance is worse than none.
+ */
+function describeEvidence(action, result) {
+  const fromResult = linkedCapsuleIds(result)
+  const declared = linkedCapsuleIds({
+    capsuleIds: action?.capsuleIds,
+    params: { capsuleIds: action?.params?.capsuleIds },
+    evidence: action?.evidence ?? null,
+  })
+  const capsuleIds = [...new Set([...fromResult, ...declared])]
+
+  return {
+    capsuleIds,
+    source: fromResult.length
+      ? declared.length
+        ? 'result+declared'
+        : 'result'
+      : declared.length
+        ? 'declared'
+        : 'unlinked',
   }
 }
 
@@ -471,6 +513,11 @@ function describeTouched(action, result) {
  * is synthesized from the raw result rather than showing the owner a blank
  * history — flagged `synthesized` so nobody mistakes it for a real record of
  * what was touched.
+ *
+ * A synthesized receipt carries no `inputReachability`. That fact is only true
+ * of the moment the step ran, and stamping today's measurement onto last
+ * week's job would be exactly the invented measurement this field exists to
+ * stop.
  */
 export function receiptsForJob(job) {
   const results = Array.isArray(job?.result?.results)
@@ -498,6 +545,9 @@ export function receiptsForJob(job) {
       reversible: verdict.reversible,
       reversedBy: verdict.mechanism,
       irreversibleReason: verdict.reason,
+      /* Recoverable even for a pre-capsule job: the ids live in the stored
+       * result, not in the receipt that was never written. */
+      evidence: describeEvidence(item?.action ?? {}, item),
     }
   })
 }

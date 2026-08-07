@@ -18,6 +18,14 @@ export const MAX_CLI_TOOLS_IN_PROMPT = 180
 export const MAX_BROWSER_DEVICES = 6
 export const MAX_MEMORY_LINE = 160
 
+/*
+ * Ceiling for the projected memory block the Mac sends in memory.text. The
+ * projection budgets itself (200 tokens ≈ 800 chars), but that budget lives on
+ * the Mac and this is the relay: a bridge running old or misconfigured code
+ * must not be able to push an unbounded string into every voice turn's prompt.
+ */
+export const MAX_MEMORY_TEXT_CHARS = 2000
+
 /**
  * Static system instructions (cacheable prefix).
  *
@@ -38,6 +46,8 @@ export const VOICE_AGENT_STATIC_INSTRUCTIONS = `You are the wearable pendant voi
 - Device/Mac state ALWAYS uses tools — battery, wifi, volume, focused app, disk, processes, network, what is open, system settings. Prefer get_mac_status. Never guess numbers or invent readings in spoken text alone.
 - Anything that queries or changes the Mac = tool first (get_mac_status, mac_run_actions, browser_run_actions). Chitchat and pure knowledge Q&A = speak only, no tools.
 - Live public facts = web_search. Multi-step or ambiguous computer work = mac_delegate only when a short action list is not enough.
+- Asking what became of work already handed to the Mac ("did that go through", "what's the status of the thing I asked earlier") = relay_job_status, even when the reference is vague. Speak its \`spoken\` sentence as given; never report a task as done that it did not call done.
+- Reading a named public page = read_web_page (relay-side browser, works with the Mac asleep). It has no logins and no LAN access, so anything behind a sign-in or on the home network = browser_run_actions on the Mac.
 - You are self-sufficient for general knowledge, conversation, math, and date/time (owner_local_time is in context). NEVER involve the Mac for questions that are not about the Mac or its apps/files.
 - Never claim success unless a tool call actually queued or completed the work.
 - If a needed surface is offline, say so briefly and offer what you can do without it.
@@ -255,6 +265,19 @@ export function normalizeFleetSnapshot(raw) {
         : [],
     },
     memory: {
+      /*
+       * Preferred: a ready-made prompt block from the Mac's context projection
+       * (typed facts, task-scoped, already budgeted). The relay does not know
+       * which facts exist or what they cost, so it does not try to summarize —
+       * it passes through what the Mac decided was worth saying, bounded.
+       */
+      text: clipText(memory.text, MAX_MEMORY_TEXT_CHARS),
+      /*
+       * Fallback for the agent-snapshot path in loadFleetFromStore(), which
+       * reads the raw context graph and has no projection to offer. Without
+       * these the voice agent would lose memory entirely whenever the
+       * dedicated fleet state is missing.
+       */
       workingProject: memory.workingProject
         ? String(
             memory.workingProject.name ||
@@ -346,6 +369,9 @@ export function fleetFromAgentSnapshot(agentSnapshot, { devices = [] } = {}) {
       macBridgeLastSeen: macBridge?.lastSeenAt || null,
     },
     memory: {
+      // Present only if the Mac put one in /ops/snapshot; this path normally
+      // has just the raw graph, which is why the latest* fallback survives.
+      text: memory.text || null,
       workingProject,
       latestPerson: memory.latestPerson,
       latestTask: memory.latestTask,
@@ -421,6 +447,7 @@ export function formatFleetSnapshotForPrompt(
   lines.push(
     `- web_search: ${fleet.cloud.webSearch ? 'available' : 'unavailable'}`,
   )
+  lines.push('- read_web_page: public pages only (no owner sessions, no LAN)')
   lines.push(`- connected_integrations: ${integrations}`)
 
   // Mac resource inventory (for grounding — not a command menu). Sorted so
@@ -470,6 +497,23 @@ export function formatFleetSnapshotForPrompt(
     }
   }
 
+  /*
+   * Projected memory sits ABOVE the volatile tail, unlike the `### Recent
+   * context` line it replaces. That line was correctly treated as volatile —
+   * it was rebuilt from whatever entity the graph touched last, so a single
+   * file open changed it. The projection is ordered stable-first by
+   * contextProjection.js (preferences and permissions, sorted), so its head is
+   * byte-identical between turns and only earns its place in the cacheable
+   * prefix if it is emitted before the active tab and the clock.
+   *
+   * Headings are demoted one level: the projection is a standalone document
+   * with `##` headings, and pasting those in mid-section would orphan the
+   * environment blocks below it under `## Relevant`.
+   */
+  if (fleet.memory.text) {
+    lines.push(fleet.memory.text.replace(/^## /gm, '### '))
+  }
+
   // ---- Volatile tail (changes between presses; kept below the cache line) ----
   if (fleet.browser.online && fleet.browser.devices.length) {
     lines.push('### Browser now')
@@ -486,16 +530,20 @@ export function formatFleetSnapshotForPrompt(
     }
   }
 
-  // Light memory
-  const memBits = [
-    fleet.memory.workingProject && `project=${fleet.memory.workingProject}`,
-    fleet.memory.latestPerson && `person=${fleet.memory.latestPerson}`,
-    fleet.memory.latestTask && `task=${fleet.memory.latestTask}`,
-    fleet.memory.latestFile && `file=${fleet.memory.latestFile}`,
-  ].filter(Boolean)
-  if (memBits.length) {
-    lines.push('### Recent context')
-    lines.push(memBits.join(' · '))
+  // Light memory — only when the Mac sent no projection (agent-snapshot
+  // fallback path). These are last-touched entity names with no provenance or
+  // expiry, so they stay in the volatile tail where they belong.
+  if (!fleet.memory.text) {
+    const memBits = [
+      fleet.memory.workingProject && `project=${fleet.memory.workingProject}`,
+      fleet.memory.latestPerson && `person=${fleet.memory.latestPerson}`,
+      fleet.memory.latestTask && `task=${fleet.memory.latestTask}`,
+      fleet.memory.latestFile && `file=${fleet.memory.latestFile}`,
+    ].filter(Boolean)
+    if (memBits.length) {
+      lines.push('### Recent context')
+      lines.push(memBits.join(' · '))
+    }
   }
 
   // The model has no clock: give it the owner's local wall time (volatile
@@ -517,7 +565,11 @@ export function formatFleetSnapshotForPrompt(
   } catch {
     localNow = new Date().toISOString()
   }
-  lines.push('### Now')
+  // "Clock", not "Now": the projection contributes its own `Now` section for
+  // what the owner is working on, and two adjacent sections both called Now
+  // meaning different things is exactly the ambiguity that makes a model
+  // answer a time question with a task.
+  lines.push('### Clock')
   // Pendant NITZ time (from the LTE tower) beats the Mac-reported timezone:
   // it stays correct with the Mac asleep, offline, or in another city.
   const parsedDeviceTime = deviceTime ? parseDeviceTime(deviceTime) : null
@@ -539,6 +591,7 @@ export function buildFleetPayloadFromLocal({
   browser = null,
   permissions = null,
   memory = null,
+  memoryText = null,
   workingProject = null,
   speaker = null,
 } = {}) {
@@ -594,13 +647,30 @@ export function buildFleetPayloadFromLocal({
       webSearch: true,
       integrations: [],
     },
-    memory: {
-      workingProject: workingProject || null,
-      latestPerson: memory?.latestPerson || null,
-      latestTask: memory?.latestTask || null,
-      latestFile: memory?.latestFile || null,
-    },
+    /*
+     * With a projection in hand the entity objects are dead weight on the
+     * wire: normalizeFleetSnapshot() reduces each of them to a name anyway, so
+     * the bridge was PUTting a whole working-project record (open threads,
+     * notes, goals) per heartbeat to produce one short line of prompt. Send the
+     * projection alone; the fields below exist only for a bridge that has no
+     * projection to send.
+     */
+    memory: memoryText
+      ? { text: memoryText }
+      : {
+          workingProject: workingProject || null,
+          latestPerson: memory?.latestPerson || null,
+          latestTask: memory?.latestTask || null,
+          latestFile: memory?.latestFile || null,
+        },
   }
+}
+
+/* Multi-line prompt block: keep the newlines, drop the runaway length. */
+function clipText(value, maxChars) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  return text.length > maxChars ? text.slice(0, maxChars).trimEnd() : text
 }
 
 function clip(value) {

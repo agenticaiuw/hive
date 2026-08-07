@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 
 import { JOB_TTL_MS } from '../config.js'
 import {
+  limitSessionWindow,
   normalizeProductSync,
   PRODUCT_SYNC_SCHEMA_VERSION,
   recordVersionKey,
@@ -518,7 +519,12 @@ export function createD1Store(db) {
         sourceDeviceId: 'cloud-d1',
         revision: Number(revisionRow?.revision || 0),
         generatedAt: new Date().toISOString(),
-        sessions,
+        // These rows are the union of every payload ever pushed, so they can
+        // hold more active sessions than any one payload may carry: each device
+        // sends its own newest maxSessions and the upsert never deletes. Served
+        // unwindowed, normalizeProductSync() would reject the account's whole
+        // state forever. Trimming is safe because the rows themselves survive.
+        sessions: limitSessionWindow(sessions),
         memory: { entities, relations },
       })
     },

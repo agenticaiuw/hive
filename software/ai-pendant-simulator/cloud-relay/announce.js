@@ -94,6 +94,73 @@ export function createAnnouncementId() {
  */
 export const ANNOUNCEMENT_DEFAULT_TTL_MS = 6 * 60 * 60 * 1000
 
+/*
+ * Roughly 80 seconds at the pendant's speaking rate. The ceiling is not the
+ * radio — Opus at 16 kbps is about 12 KB a spoken minute — it is what the
+ * owner will stand still for, the same reasoning as BRIEF_MAX_SECONDS in
+ * local-agent/audioBrief.js.
+ */
+export const ANNOUNCEMENT_MAX_CHARS = 1500
+
+/**
+ * Make text safe to say out loud.
+ *
+ * Everything upstream of here writes for a screen. `runWebSearch` is asked for
+ * "2-3 spoken-style sentences" and cheerfully returns markdown headers and
+ * bullet lists anyway; a Mac plan result can carry the same. Sent to TTS
+ * unchanged, the owner hears "hash hash Weather for Madison comma Dane County
+ * colon asterisk Thursday" — which is how a working pipeline still produces an
+ * unusable briefing. Normalising at the announcement boundary means every
+ * producer gets it for free and none of them has to remember.
+ */
+export function speakableText(raw, { maxChars = ANNOUNCEMENT_MAX_CHARS } = {}) {
+  let text = String(raw || '')
+    /* Fenced code and inline backticks are never speech. */
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]*)`/g, '$1')
+    /* Links: say the label, drop the URL. */
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    /*
+     * Headers and blockquotes become sentence boundaries, not symbols. The
+     * second rule is not redundant: a search result often arrives already
+     * flattened onto one line, so "… (20°C). ## Weather for Madison" has no
+     * line start for the anchored pattern to match. A "#" with no trailing
+     * space ("#1 seed") is left alone.
+     */
+    .replace(/^\s{0,3}#{1,6}\s*/gm, '')
+    .replace(/(^|\s)#{1,6}\s+/g, '$1')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    /* List markers likewise: a pause, not the word "asterisk". */
+    .replace(/^\s*[-*+•]\s+/gm, '. ')
+    .replace(/^\s*\d+[.)]\s+/gm, '. ')
+    /* Emphasis and table pipes. */
+    .replace(/(\*\*|__|\*|_|~~)/g, '')
+    .replace(/\|/g, ', ')
+    /* Horizontal rules. */
+    .replace(/^\s*([-=_])\1{2,}\s*$/gm, ' ')
+    .replace(/\s+/g, ' ')
+    /* The rewrites above leave ". ." runs and dangling separators behind. */
+    .replace(/(?:\s*\.){2,}/g, '.')
+    .replace(/([,:;])\s*\./g, '$1')
+    .replace(/\s+([,.;:])/g, '$1')
+    .replace(/^[\s.,;:]+/, '')
+    .replace(/[\s,;:]+$/, '')
+    .trim()
+
+  if (text.length <= maxChars) return text
+  /* Cut at a sentence end so a briefing stops rather than being sliced
+   * mid-word; fall back to a hard cut when there is no sentence to end on. */
+  const clipped = text.slice(0, maxChars)
+  const lastStop = Math.max(
+    clipped.lastIndexOf('. '),
+    clipped.lastIndexOf('! '),
+    clipped.lastIndexOf('? '),
+  )
+  return lastStop > maxChars * 0.5
+    ? clipped.slice(0, lastStop + 1).trim()
+    : `${clipped.trim()}…`
+}
+
 export function createAnnouncement({
   deviceId,
   title,
@@ -105,7 +172,7 @@ export function createAnnouncement({
   now = Date.now(),
   priority = 'normal',
 }) {
-  const text = String(speech || '').replace(/\s+/g, ' ').trim()
+  const text = speakableText(speech)
   if (!text) throw new Error('An announcement needs something to say.')
   const createdAt = new Date(now).toISOString()
   return {
@@ -126,10 +193,30 @@ export function createAnnouncement({
   }
 }
 
+/*
+ * How long a delivery claim is honoured.
+ *
+ * Delivery marks an announcement 'delivering' before speaking it, so a
+ * reconnect racing a stale socket cannot play the same briefing twice. The
+ * cost of that claim is that a Worker killed mid-stream — dropped LTE, an
+ * evicted isolate — leaves the announcement claimed by nobody, and it would
+ * never be spoken again. Past this window the claim is treated as abandoned
+ * and the announcement is deliverable once more. Comfortably longer than the
+ * longest briefing, so this can only ever release a claim that really is dead.
+ */
+export const DELIVERY_CLAIM_TIMEOUT_MS = 5 * 60 * 1000
+
 export function announcementIsLive(announcement, now = Date.now()) {
-  if (!announcement || announcement.state !== 'pending') return false
+  if (!announcement) return false
   const expiresAt = Date.parse(announcement.expiresAt || '')
-  return !Number.isFinite(expiresAt) || expiresAt > now
+  if (Number.isFinite(expiresAt) && expiresAt <= now) return false
+
+  if (announcement.state === 'pending') return true
+  if (announcement.state !== 'delivering') return false
+  const claimedAt = Date.parse(announcement.deliveringSince || '')
+  return (
+    !Number.isFinite(claimedAt) || now - claimedAt > DELIVERY_CLAIM_TIMEOUT_MS
+  )
 }
 
 /**

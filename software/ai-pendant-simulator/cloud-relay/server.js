@@ -25,6 +25,7 @@ import {
   publicJob,
   voiceRunForJob,
 } from './jobs.js'
+import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
 import { getStore } from './store/index.js'
 import { planFromAudio } from './audioPlan.js'
 import {
@@ -84,6 +85,9 @@ import {
   verifyPairingCode,
 } from './deviceAuth.js'
 import { bridgeClaimDelay } from './polling.js'
+import { createRoutine, updateRoutineRecord } from './routines.js'
+import { createAnnouncement, selectDeliverable } from './announce.js'
+import { runScheduledTick, SCHEDULER_STATE_KEY } from './scheduler.js'
 import {
   isRawPcmFormat,
   isG711UlawFormat,
@@ -1280,6 +1284,18 @@ app.post('/v1/pendant/command', async (request, response) => {
                 }
                 return null
               },
+              lookupJobStatus: async ({ reference, jobId: askedJobId }) =>
+                recallJobStatus({
+                  jobs: await store.listJobs({
+                    type: 'plan',
+                    limit: RECALL_JOB_LIMIT,
+                  }),
+                  reference,
+                  jobId: askedJobId,
+                  /* A job this very utterance dispatched is not what "that"
+                   * refers to — the owner is asking about earlier work. */
+                  excludeJobIds: job?.jobId ? [job.jobId] : [],
+                }),
             }).then((opened) => {
               session = opened
               for (const pending of chunksAwaitingSession) {
@@ -2259,7 +2275,6 @@ app.post('/v1/routines/:routineId/run', async (request, response) => {
     nextRunAt: Date.now() - 1,
     dueSince: Date.now() - 1,
   })
-  const { runScheduledTick } = await import('./scheduler.js')
   const result = await runScheduledTick({ trigger: 'manual', limit: 1 })
   response.json({
     ok: true,
@@ -2274,7 +2289,6 @@ app.post('/v1/routines/:routineId/run', async (request, response) => {
  * scheduled() handler calls, only the trigger label differs.
  */
 app.post('/v1/routines/tick', async (_request, response) => {
-  const { runScheduledTick } = await import('./scheduler.js')
   response.json({ ok: true, ...(await runScheduledTick({ trigger: 'manual' })) })
 })
 

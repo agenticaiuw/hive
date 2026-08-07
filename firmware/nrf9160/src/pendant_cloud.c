@@ -314,11 +314,35 @@ static void relay_cache_seed_bootstrap(void)
 	}
 }
 
+/*
+ * Debug-only: make "no usable link" a repeatable condition.
+ *
+ * Powering the modem down is not enough on its own — ensure_lte_data_ready()
+ * below deliberately resumes a suspended radio before every socket, which is
+ * exactly right in production and exactly wrong when the point of the test is
+ * that there is no link. This latch is checked in front of both the resume
+ * and the socket, so an offline run stays offline until the test clears it.
+ */
+static bool link_blocked_for_test;
+
+void pendant_cloud_block_link(bool blocked)
+{
+	link_blocked_for_test = blocked;
+}
+
+bool pendant_cloud_link_blocked(void)
+{
+	return link_blocked_for_test;
+}
+
 static int ensure_lte_data_ready(void)
 {
 	enum lte_lc_nw_reg_status status = LTE_LC_NW_REG_UNKNOWN;
 	int error;
 
+	if (link_blocked_for_test) {
+		return -ENETDOWN;
+	}
 	if (radio_suspended) {
 		error = pendant_cloud_resume_radio();
 		if (error != 0) {
@@ -454,6 +478,12 @@ static int open_relay_socket(void)
 	 * Prefer cache/bootstrap early: dual-capture logs show getaddrinfo
 	 * failing immediately while Cloudflare anycast still answers TLS.
 	 */
+	if (link_blocked_for_test) {
+		/* Debug latch, not a real failure mode — fail fast so the
+		 * offline path runs at its true speed instead of spending a
+		 * minute in DNS and bootstrap retries. */
+		return -ENETDOWN;
+	}
 	relay_cache_seed_bootstrap();
 	ready = ensure_lte_data_ready();
 	if (ready != 0) {
@@ -1392,6 +1422,150 @@ int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 	       k_uptime_get() - lat_announce_socket_done,
 	       k_uptime_get() - lat_announce_started);
 	return error;
+}
+
+/*
+ * Offline store-and-forward delivery for the items that are NOT audio:
+ * moment bookmarks and "the owner read their held alerts".
+ *
+ * These need no new endpoint and no relay change.  The pendant's relay
+ * credential is a DEVICE principal, not the owner's admin key — probed
+ * against the live relay, /v1/announcements and /v1/routines answer 403
+ * ("this device is not allowed to use that route") while /v1/pendant/announce
+ * and /v1/pendant/jobs/<id>/events answer 201 and 202.  So a marker is
+ * delivered the same way every other pendant fact already is: create the job
+ * row, then attach a pipeline event to it.  Both halves are code that was
+ * already here and already proven on hardware.
+ */
+static int announce_marker_job(const char *kind)
+{
+	char body[192];
+	int body_length;
+	int fd;
+	int error;
+
+	announced_job_id[0] = '\0';
+	if (!cloud_initialized) {
+		return -ENOTCONN;
+	}
+	body_length = snprintf(body, sizeof(body),
+			       "{\"deviceId\":\"" PENDANT_DEVICE_ID "\","
+			       "\"pcmBytes\":0,"
+			       "\"sampleRate\":0,"
+			       "\"format\":\"%s\"}",
+			       kind);
+	if (body_length < 0 || (size_t)body_length >= sizeof(body)) {
+		return -EOVERFLOW;
+	}
+
+	fd = open_relay_socket();
+	if (fd < 0) {
+		return fd;
+	}
+	error = send_http_post_header(fd, "/v1/pendant/announce",
+				      "application/json",
+				      (size_t)body_length);
+	if (error == 0) {
+		error = send_all(fd, body, (size_t)body_length);
+	}
+	if (error == 0) {
+		error = receive_http_response(fd);
+	}
+	close(fd);
+	if (error == 0) {
+		error = copy_json_string_value("jobId", announced_job_id,
+					       sizeof(announced_job_id));
+		if (error != 0) {
+			announced_job_id[0] = '\0';
+		}
+	}
+	return error;
+}
+
+int pendant_cloud_post_marker(const char *stage, const char *label,
+			      const char *detail)
+{
+	char path[192];
+	char body[PENDANT_EVENT_BODY_SIZE];
+	int path_length;
+	int body_length;
+	int fd;
+	int error;
+
+	error = announce_marker_job(stage);
+	if (error != 0 || announced_job_id[0] == '\0') {
+		printk("Marker announce failed: %d\n", error);
+		return error != 0 ? error : -ENODATA;
+	}
+
+	path_length = snprintf(path, sizeof(path), "%s%s%s",
+			       PENDANT_EVENT_PATH_PREFIX, announced_job_id,
+			       PENDANT_EVENT_PATH_SUFFIX);
+	if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+		return -EOVERFLOW;
+	}
+	body_length = snprintf(body, sizeof(body),
+			       "{\"stage\":\"%s\","
+			       "\"status\":\"done\","
+			       "\"label\":\"%s\","
+			       "\"detail\":\"%s\","
+			       "\"meta\":{"
+			       "\"storage\":\"microSD\","
+			       "\"origin\":\"pendant-offline-store\"}}",
+			       stage, label, detail);
+	if (body_length < 0 || (size_t)body_length >= sizeof(body)) {
+		return -EOVERFLOW;
+	}
+
+	fd = open_relay_socket();
+	if (fd < 0) {
+		return fd;
+	}
+	error = send_http_post_header(fd, path, "application/json",
+				      (size_t)body_length);
+	if (error == 0) {
+		error = send_all(fd, body, (size_t)body_length);
+	}
+	if (error == 0) {
+		error = receive_http_response(fd);
+	}
+	close(fd);
+	printk("Marker delivered: stage=%s job=%s result=%d\n", stage,
+	       announced_job_id, error);
+	return error;
+}
+
+/*
+ * GET a small JSON document.  The response already lands in http_response[],
+ * so the alert inbox reads the relay without owning a single byte of its own
+ * — which is the difference between this feature fitting in the ~8.9 kB of
+ * free RAM and not fitting at all.
+ */
+int pendant_cloud_get_json(const char *path)
+{
+	int fd;
+	int error;
+
+	if (!cloud_initialized) {
+		return -ENOTCONN;
+	}
+	fd = open_relay_socket();
+	if (fd < 0) {
+		return fd;
+	}
+	error = send_http_get_header(fd, path);
+	if (error == 0) {
+		error = receive_http_response(fd);
+	}
+	close(fd);
+	return error;
+}
+
+const char *pendant_cloud_response_body(void)
+{
+	const char *body = strstr(http_response, "\r\n\r\n");
+
+	return body == NULL ? NULL : body + 4;
 }
 
 struct pcm_writer {

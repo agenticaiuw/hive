@@ -309,6 +309,110 @@ Delete paths:
    `AUDIO_RETENTION_SWEEP_ENABLED=true`. Any other combination returns the list
    of recordings it would have removed and touches nothing.
 
+## Scheduled Routines & Outbound Announcements
+
+`local-agent/routines.js` runs routines on the Mac, and says plainly what that
+costs: "it only fires while the Mac is awake." That cost turned out to be the
+whole feature — the pendant is worn when the owner is *away* from the Mac, so
+the most common moment for a routine to fire is the moment nothing can fire it.
+"Every morning send me the news" was unreachable from a closed lid.
+
+So the **clock** moved to the relay while the **work** stayed wherever it can
+be done. A routine is declared once, in D1, and each occurrence is dispatched
+to whichever half of the stack is awake:
+
+| Situation | Venue | What happens |
+| --- | --- | --- |
+| Mac awake | `mac` | Queued as an ordinary plan job. `bridge.js` takes the same branch a typed dashboard command takes, so the routine behaves identically to one declared on the Mac. |
+| Mac asleep, public web is enough | `relay` | Runs in the Worker: Browser Run for any `sources` the routine names, then a web search. Produces spoken text. |
+| Mac asleep, needs the owner's machine | *deferred* | Calendar, Mail, Notes, files, and the screen do not exist in a Worker, so the occurrence waits (retrying each minute) rather than being answered with a guess. After 12 hours it is dropped with a `missed` receipt instead of piling up. |
+
+The clock is a **Cron Trigger firing every minute** (`wrangler.jsonc` →
+`triggers.crons`). Durable Object alarms were the alternative and were
+rejected: Cloudflare documents no precision guarantee for alarms, so they buy
+no accuracy over a one-minute cron, while adding a second storage backend
+beside D1. The load-bearing constraint on the handler is that **a cron
+invocation on the Workers Free plan gets 10 ms of CPU** (awaiting I/O is free;
+wall clock is 15 minutes) — so `cloud-relay/scheduler.js` is all awaits, loads
+nothing heavy at module scope, and renders no audio.
+
+A cron is a single point of failure for the whole feature, and its failure mode
+is invisible: nothing happens, and nothing says why. So there is a **second
+clock**. Any request the relay already serves also nudges the schedule
+(`maybeTickOnTraffic`, called from `waitUntil` so it adds no latency and costs
+no extra invocation), rate-limited to once a minute against the shared
+heartbeat. The Mac bridge alone polls every few seconds, so the schedule stays
+live whenever anything at all is awake. It does not replace the cron — an idle
+pendant holds a WebSocket and sends no requests, so a quiet night produces no
+traffic to ride, and only the cron can keep a 7am promise in a silent house.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/routines` | Routines, recent run receipts, and the scheduler's last tick — the proof the Cron Trigger is alive. |
+| `POST /v1/routines` | Declare one: `{name, command, schedule, venue, sources, announce}`. |
+| `PATCH /v1/routines/:id` | Edit. A new schedule reschedules and clears any deferral. |
+| `DELETE /v1/routines/:id` | Remove. |
+| `POST /v1/routines/:id/run` | Run now, through the exact path the cron uses. |
+| `POST /v1/routines/tick` | Fire a tick by hand — Cloudflare offers no way to trigger a deployed cron. |
+| `GET /v1/announcements` | The outbound queue. |
+| `POST /v1/announcements` | Queue something for the owner's ear from anywhere. |
+| `POST /v1/announcements/:id/ack` | Mark delivered or dismissed. |
+
+Schedules (`cloud-relay/routineSchedule.js`) are byte-compatible with the two
+shapes `local-agent/routines.js` already accepts, plus two the relay needs:
+
+```jsonc
+{ "kind": "daily",    "at": "07:00", "timezone": "America/Chicago" }
+{ "kind": "weekly",   "at": "17:00", "days": ["weekdays"] }        // "every weekday at 5"
+{ "kind": "interval", "everyMs": 3600000 }                          // floored at 1 min
+{ "kind": "once",     "at": "2026-08-08T13:00:00Z" }                // "tell me in an hour"
+```
+
+Every schedule carries an IANA timezone because a Worker runs in UTC
+everywhere: a naive `setHours(7)` fires "every morning at 7" at 2am Central.
+
+### How an announcement reaches the pendant
+
+The relay could not originate a message before this. `bridge.js` polls for
+work; the pendant answers presses. A briefing composed at 7am sat in a database
+until the owner happened to ask for it.
+
+**What works today, with no firmware change:** the pendant holds one WebSocket
+open around the clock, and the moment a press opens a conversation the relay
+speaks the queue *first*, before the owner has asked for anything
+(`playPendingAnnouncements` in `cloud-relay/pendantConverse.js`). The press is
+a doorbell, not a request. Audio is rendered at delivery time (OpenAI TTS →
+24 kHz mono s16le → the same Opus reply encoder the conversation uses) and
+metered back to real time, because a pre-rendered minute pushed at socket speed
+overruns the pendant's jitter ring. Talking over it stops it, exactly like
+barge-in on a reply.
+
+**What does not work today, and why:** a truly unprompted 7am announcement —
+audio arriving with no press at all. Two things block it, both outside this
+module:
+
+1. **Firmware.** `ws_io_thread_fn()`'s idle branch in
+   `firmware/nrf9160/src/main.c` drains the socket and *discards* everything
+   that arrives while no conversation is active, and binary frames are dropped
+   unless `convo_started` is set. It would need to recognise
+   `{"type":"announce"}` on the idle socket, arm the I2S playback path and the
+   jitter ring without a button press, accept binary frames until
+   `{"type":"announced"}`, and treat a press during playback as barge-in. Note
+   the parser matches control frames with `strstr()` on the quoted tokens
+   `"started"`, `"flush"`, `"end"`, and closes the socket above 640 B — the
+   frame builders in `cloud-relay/announce.js` are guarded against both, with
+   tests.
+2. **Isolate boundary.** A Cron Trigger cannot reach a WebSocket held in a
+   `fetch` handler's closure. Once the firmware can accept a push, the pendant
+   socket has to move into a Durable Object with hibernatable WebSockets, so an
+   alarm or a cron-driven RPC can call `getWebSockets()` and `send()`. **This
+   is the one place a Durable Object becomes necessary** rather than merely
+   available.
+
+`PENDANT_ANNOUNCE_ON_CONNECT` (default on) controls the delivery that works;
+`PENDANT_ANNOUNCE_PUSH` (default off) adds the control frames for the firmware
+that does not exist yet.
+
 ## Context Engineering
 
 - Recent turns (last 6–10) are injected into the LLM planner prompt

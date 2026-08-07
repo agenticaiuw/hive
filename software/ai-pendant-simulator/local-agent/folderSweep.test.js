@@ -103,6 +103,29 @@ test('files that only share their first 64 KB are not duplicates', (t) => {
   assert.equal(byName(plan, 'a (1).bin').disposition, 'keep')
 })
 
+test('a match too large to verify in full is reported, never deleted', (t) => {
+  /* 300 MB of identical zeros: same size, same first 64 KB, over the full-hash
+   * ceiling. The name says "copy", and it is still left alone. */
+  const big = Buffer.alloc(300 * 1024 * 1024)
+  const directory = sandbox(t, {})
+  fs.writeFileSync(path.join(directory, 'recording.mov'), big)
+  fs.writeFileSync(path.join(directory, 'recording (1).mov'), big)
+
+  const started = Date.now()
+  const plan = planSweep({ directory })
+  const elapsed = Date.now() - started
+
+  assert.equal(plan.duplicates.length, 1)
+  assert.equal(plan.duplicates[0].confirmed, false)
+  assert.equal(byName(plan, 'recording (1).mov').disposition, 'flag')
+  assert.equal(byName(plan, 'recording (1).mov').action, null)
+  assert.match(byName(plan, 'recording (1).mov').reason, /too large to verify in full/)
+  assert.ok(
+    elapsed < 20_000,
+    `previewing must not stall on large files (took ${elapsed}ms)`,
+  )
+})
+
 test('screenshots go to dated folders and stale installers go to the archive', (t) => {
   const directory = sandbox(t, {
     'Screenshot 2026-05-04 at 09.14.22.png': { content: 'png', ageDays: 95 },
@@ -122,6 +145,23 @@ test('screenshots go to dated folders and stale installers go to the archive', (
   assert.match(installer.reason, /installer last touched 60 days ago/)
 
   assert.equal(byName(plan, 'yesterday.dmg').disposition, 'keep')
+})
+
+test('a screenshot is a screenshot in whatever language the Mac named it', (t) => {
+  const directory = sandbox(t, {
+    'Screenshot 2026-05-04 at 09.14.22.png': { content: 'en', ageDays: 400 },
+    '截圖 2024-06-11 18.48.18.png': { content: 'zh', ageDays: 400 },
+    'Screen Recording 2025-01-26 at 11.21.35.mov': { content: 'mov', ageDays: 400 },
+  })
+
+  const plan = planSweep({ directory })
+
+  /* All three are the same pile to the owner, so they land in the same place.
+   * Before this, the Chinese-named ones went to Archive as merely "stale". */
+  for (const item of plan.items) {
+    assert.equal(item.disposition, 'file', `${item.name} should be filed as a screenshot`)
+    assert.match(path.relative(directory, item.to), /^Screenshots\//)
+  }
 })
 
 test('previewing moves nothing at all', (t) => {

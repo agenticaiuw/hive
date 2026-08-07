@@ -457,6 +457,7 @@ export async function orchestrateExecute({
   const { updateContextGraphFromExecution } = await import('./contextGraph.js')
   const { throwIfAborted } = await import('./jobControl.js')
   const { stripImageBytes } = await import('./screenCapture.js')
+  const { runFocusSafePlan } = await import('./focusCoordinator.js')
 
   const trace = startThinkingTrace({
     command,
@@ -473,40 +474,61 @@ export async function orchestrateExecute({
       status: 'done',
     })
 
-    const results = []
-    for (const [index, action] of actions.entries()) {
-      throwIfAborted(signal)
+    // The coordinator still hands the executor one action at a time, so the
+    // per-step trace and the per-action receipts are exactly what they were. It
+    // adds the foreground watch around them: UI steps aimed at the app the plan
+    // named instead of at whoever happens to be in front, and a stop if that app
+    // goes away mid-plan. It cannot ask anyone anything.
+    const { results, receipt: focus } = await runFocusSafePlan(actions, {
+      execute: executeActions,
+      onStep: ({ phase, seq, action, result }) => {
+        const stepId = `action-${seq}`
 
-      const stepId = `action-${index}`
+        if (phase === 'start') {
+          throwIfAborted(signal)
+          addThinkingStep(trace.traceId, {
+            id: stepId,
+            label: `Running: ${action.label || action.type}`,
+            detail: action.type,
+            status: 'active',
+          })
+          return
+        }
+
+        addThinkingStep(trace.traceId, {
+          id: stepId,
+          label: result.ok
+            ? `Done: ${action.label || action.type}`
+            : `Failed: ${action.label || action.type}`,
+          detail: result.message || result.error || '',
+          status: 'done',
+        })
+      },
+    })
+
+    throwIfAborted(signal)
+
+    if (focus.drift) {
       addThinkingStep(trace.traceId, {
-        id: stepId,
-        label: `Running: ${action.label || action.type}`,
-        detail: action.type,
-        status: 'active',
-      })
-
-      const [result] = await executeActions([action])
-      results.push(result)
-
-      addThinkingStep(trace.traceId, {
-        id: stepId,
-        label: result.ok
-          ? `Done: ${action.label || action.type}`
-          : `Failed: ${action.label || action.type}`,
-        detail: result.message || result.error || '',
+        id: 'focus-drift',
+        label: 'Stopped: the screen changed under the plan',
+        detail: focus.drift.detail,
         status: 'done',
       })
     }
 
-    throwIfAborted(signal)
+    // Drift means the plan did not finish, whatever the steps that did run said.
+    const status = focus.drift
+      ? 'failed'
+      : results.every((result) => result.ok)
+        ? 'success'
+        : results.some((result) => result.status === 'blocked')
+          ? 'blocked'
+          : 'failed'
 
-    const status = results.every((result) => result.ok)
-      ? 'success'
-      : results.some((result) => result.status === 'blocked')
-        ? 'blocked'
-        : 'failed'
-
-    const responseText = results.map((item) => item.message).join(' ')
+    const responseText = [...results.map((item) => item.message), focus.drift?.detail]
+      .filter(Boolean)
+      .join(' ')
     appendTurn(sessionId, {
       role: 'assistant',
       content: responseText,
@@ -572,6 +594,10 @@ export async function orchestrateExecute({
       response: responseText,
       sessionId,
       thinking,
+      // Carries no copy of `results`, so it never sails past stripImageBytes on
+      // its way into the job store. executionJournal reads it back from there
+      // rather than keeping a second copy of its own.
+      focus,
     }
   } catch (error) {
     if (error?.name === 'JobCancelledError' || error?.code === 'JOB_CANCELLED') {

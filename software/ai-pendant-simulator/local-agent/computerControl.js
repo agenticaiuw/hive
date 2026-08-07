@@ -11,6 +11,7 @@ import {
   runBrowserSessionAction,
 } from './browserSessions.js'
 import { workspacePath } from './config.js'
+import { mintCapsule } from './evidenceCapsules.js'
 import { resolveUserPath } from './security.js'
 import {
   getDisplayBrightness,
@@ -1178,6 +1179,51 @@ async function runProject(action) {
   return success(action, `Started "${command}" in ${projectPath}`)
 }
 
+/*
+ * The browser readings that carry page content out of the extension, and how to
+ * turn each one into the body of an evidence capsule.
+ *
+ * This is the single chokepoint: every browser_* action in the dispatch table
+ * above, and therefore every /execute batch, every relay browser_run_actions
+ * job, and everything browserPage.js sends over loopback, arrives here. A read
+ * that is not in this table mints nothing, which is why the table is data —
+ * adding a new reading action and forgetting its provenance should be one
+ * missing line you can see, not a silent gap.
+ */
+const BROWSER_READINGS = {
+  read_page: (params, result) => ({
+    kind: String(params?.mode || 'main_text'),
+    selector: params?.selector ?? null,
+    content: String(result?.content ?? ''),
+    truncated:
+      Number.isFinite(Number(params?.maxChars)) &&
+      String(result?.content ?? '').length >= Number(params.maxChars),
+  }),
+  snapshot: (_params, result) => ({
+    kind: 'snapshot',
+    selector: null,
+    /* The elements, not the markup: a snapshot's evidentiary content is which
+     * controls were on the page and what they were called. */
+    content: (Array.isArray(result?.elements) ? result.elements : [])
+      .map(
+        (element) =>
+          `${element?.role ?? '?'} "${element?.name ?? ''}" @ ${element?.selector ?? ''}`,
+      )
+      .join('\n'),
+    truncated: false,
+  }),
+  capture: () => ({
+    kind: 'screenshot',
+    selector: null,
+    /* Deliberately empty. The capsule records that a screenshot of this page
+     * was taken and when; the pixels are not provenance we can safely keep,
+     * and redaction.js strips image bytes at every other sink for the same
+     * reason. */
+    content: '',
+    truncated: false,
+  }),
+}
+
 async function runBrowserAction(action, type) {
   const result = await runBrowserSessionAction({
     type,
@@ -1194,8 +1240,56 @@ async function runBrowserAction(action, type) {
   return success(
     action,
     `${result.message ?? 'Browser action completed.'}${recovered}`,
-    { browser: result },
+    { browser: { ...result, evidence: captureBrowserEvidence(action, type, result) } },
   )
+}
+
+/**
+ * Mint the capsule for a reading that already happened.
+ *
+ * After the extension has answered, never before, and every failure is
+ * swallowed: a store that cannot be written must not turn a page the owner
+ * asked for into an error. Provenance is a camera here, exactly as
+ * actionReceipts.observeBeforeAction is.
+ *
+ * Exported for the same reason SUPPORTED_ACTION_TYPES is: which readings carry
+ * provenance is a contract worth checking without a live browser on the other
+ * end of the bridge.
+ */
+export function captureBrowserEvidence(action, type, result) {
+  const describe = BROWSER_READINGS[type]
+  if (!describe) return null
+
+  try {
+    const params = action.params ?? {}
+    const reading = describe(params, result)
+    const minted = mintCapsule({
+      url: result?.url || result?.session?.url || params.url || '',
+      title: result?.title ?? '',
+      region: { kind: reading.kind, selector: reading.selector },
+      content: reading.content,
+      context: 'browser-extension',
+      /* The durable session name, not the numeric tab id: Safari renumbers
+       * tabs between commands, so hashing the number would make every poll a
+       * different observer and defeat the content addressing. */
+      session: result?.session?.id ?? null,
+      tabId: Number.isInteger(result?.tabId) ? result.tabId : null,
+      requestedUrl: params.url || null,
+      recovery: result?.session?.recovery ?? [],
+      truncated: reading.truncated,
+    })
+
+    return {
+      capsuleId: minted.capsuleId,
+      state: minted.state,
+      collapsed: minted.collapsed,
+      contentHash: minted.capsule.contentHash,
+      confidence: minted.capsule.confidence,
+      redaction: minted.capsule.redaction.counts,
+    }
+  } catch (error) {
+    return { capsuleId: null, error: String(error?.message ?? error) }
+  }
 }
 
 async function openBrowserTabSession(action) {

@@ -519,6 +519,51 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       'Forget a named browser session. The tab stays open; only the name is released.',
     params: { session: 'session name' },
   },
+  /*
+   * The two-phase pair, described here so the model can reach them when the
+   * owner asks for a look first. Neither replaces the direct actions: when the
+   * ask is "click the download link", browser_click is still the right answer
+   * and still runs immediately.
+   */
+  browser_inspect: {
+    description:
+      'Read a page and report what it says with quotes and citations, plus ONE proposed next step — without clicking or typing anything. Use when the owner wants to know what is on a page, or asked to see what you would do before you do it.',
+    params: {
+      url: 'string',
+      goal: 'what the owner is trying to do, in their words — drives the proposed step',
+      look: 'optional array of exact strings to find and quote',
+      maxChars: 'optional',
+    },
+  },
+  browser_inspect_act: {
+    description:
+      'Run the step a browser_inspect proposed, on the element it described. Only usable with an inspectionId from browser_inspect.',
+    params: {
+      inspectionId: 'from browser_inspect',
+      text: 'required only when the proposal types into a field',
+    },
+  },
+  sweep_folder_preview: {
+    description:
+      'Look at a folder (Downloads, Desktop) and report what a clean-up would do: half-finished downloads, byte-identical duplicates, stale installers, old files, screenshots. Moves and deletes nothing; returns a plan id. Use for "clean up my Downloads/Desktop", "what can I get rid of", "show me what you would move".',
+    params: {
+      directory: 'optional absolute path, defaults to ~/Downloads',
+      staleDays: 'optional, default 90',
+      installerStaleDays: 'optional, default 30',
+    },
+  },
+  sweep_folder_apply: {
+    description:
+      'Carry out a sweep_folder_preview plan exactly as previewed. Needs the planId from the preview; pass `only` with item ids to do just some of them.',
+    params: {
+      planId: 'from sweep_folder_preview',
+      only: 'optional array of item ids from the preview',
+    },
+  },
+  sweep_folder_undo: {
+    description: 'Put back the files a sweep_folder_apply moved or deleted.',
+    params: { planId: 'from sweep_folder_preview' },
+  },
 }
 
 const SAFE_ACTION_SCHEMA = {

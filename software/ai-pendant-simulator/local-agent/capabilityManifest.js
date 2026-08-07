@@ -96,6 +96,10 @@ const GROUP_NOTES = {
     what: 'Chrome extension bridge: heartbeat, command queue, tab sessions.',
     module: 'local-agent/browserBridge.js + browserSessions.js',
   },
+  evidence: {
+    what: 'Provenance for every browser reading: capsules, TTL, revocation with an audit tombstone.',
+    module: 'local-agent/evidenceCapsules.js',
+  },
   routines: {
     what: 'Scheduled work the owner is not waiting on.',
     module: 'local-agent/routines.js',

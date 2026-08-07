@@ -32,6 +32,15 @@ int pendant_cloud_init(void);
 int pendant_cloud_suspend_radio(void);
 int pendant_cloud_resume_radio(void);
 
+/*
+ * Debug latch used to prove the offline store-and-forward path: while set,
+ * every relay socket fails immediately with -ENETDOWN and the automatic
+ * "resume the radio before we need it" recovery is suppressed. Powering the
+ * modem down alone is not enough, because that recovery would undo it.
+ */
+void pendant_cloud_block_link(bool blocked);
+bool pendant_cloud_link_blocked(void);
+
 int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 				     uint32_t sample_rate);
 
@@ -86,6 +95,23 @@ int pendant_cloud_open_socket(void);
 const char *pendant_cloud_hostname(void);
 const char *pendant_cloud_api_key(void);
 void pendant_cloud_copy_device_time(char *out, size_t out_size);
+
+/*
+ * Deliver a non-audio item from the offline outbox (a moment bookmark, or an
+ * acknowledgement that held alerts were surfaced): create the job row via
+ * /v1/pendant/announce, then attach a pipeline event to it. Device-scoped —
+ * no owner/admin credential and no new relay endpoint required.
+ */
+int pendant_cloud_post_marker(const char *stage, const char *label,
+			      const char *detail);
+
+/*
+ * GET a small JSON document from the relay. On success the body is available
+ * from pendant_cloud_response_body() until the next relay call — it lives in
+ * the existing shared response buffer, so the caller owns no RAM.
+ */
+int pendant_cloud_get_json(const char *path);
+const char *pendant_cloud_response_body(void);
 
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path);
 int pendant_cloud_report_playback_started(void);

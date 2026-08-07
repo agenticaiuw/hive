@@ -34,6 +34,13 @@ import {
   readLatestBriefing,
   runBriefing,
 } from './briefing.js'
+import {
+  buildEvidenceLedger,
+  getCapsule,
+  presentCapsule,
+  revokeCapsules,
+  sweepCapsules,
+} from './evidenceCapsules.js'
 import { fillForm, formFillLocation, getFill, listFills } from './formFill.js'
 import { orchestrateExecute, orchestratePlan } from './orchestrator.js'
 import {
@@ -140,6 +147,11 @@ import {
   journalEntry,
   observeHost,
 } from './executionJournal.js'
+import {
+  getInputReachability,
+  probeInputReachability,
+  startInputReachabilityMonitor,
+} from './inputReachability.js'
 import {
   getMachineContext,
   refreshMachineContext,
@@ -639,6 +651,12 @@ app.get('/jobs/:jobId/receipts', (request, response) => {
       total: receipts.length,
       wrote: receipts.filter((receipt) => receipt.effect === 'write').length,
       reversible: receipts.filter((receipt) => receipt.reversible).length,
+      /* Steps that posted a synthesized event while reachability was failed or
+       * unproven. Not a failure count — a "this success may not mean what it
+       * looks like" count. */
+      inputMayHaveBeenNoOp: receipts.filter(
+        (receipt) => receipt.inputReachability?.warning,
+      ).length,
     },
     receipts,
     snapshotVault: undoVaultLocation(),
@@ -1226,9 +1244,13 @@ app.get('/journal/:jobId', (request, response) => {
  * `permissions` is read with the same quiet call /capabilities uses, so reading
  * this never raises a macOS permission dialog. That report answers "is the TCC
  * checkbox on", which is not the same question as "do synthesized events
- * actually post" — only posting one answers that. `?probeInput=1` posts one: a
- * zero-delta mouse move at the cursor's own location, a genuine no-op. It is
- * opt-in because a pollable GET should not spawn a helper binary every call.
+ * actually post" — only posting one answers that.
+ *
+ * `inputReachability` carries the answer without asking for it: the monitor
+ * posts a no-op event at startup and on a schedule, so the recorded fact —
+ * verified/unverified/failed, the exact bundle tested, the timestamp — is
+ * already there. `?probeInput=1` forces a fresh one, still opt-in because a
+ * pollable GET should not spawn a helper binary every call.
  */
 app.get('/observe', async (request, response) => {
   let permissions
@@ -1248,13 +1270,18 @@ app.get('/observe', async (request, response) => {
     String(request.query.probeInput ?? '').toLowerCase(),
   )
 
+  /* Goes through the recorder rather than calling uiControl directly, so an
+   * on-demand probe and the scheduled one leave the same kind of fact behind
+   * instead of one of them being visible only in this response. */
+  if (wantsProbe) {
+    await probeInputReachability()
+  }
+
   response.json(
     await observeHost({
       permissions,
       browserSessions: listBrowserSessions(),
-      inputProbe: wantsProbe
-        ? async () => (await import('./uiControl.js')).probeInput()
-        : null,
+      inputReachability: getInputReachability(),
     }),
   )
 })
@@ -1703,6 +1730,48 @@ app.post('/browser/inspections/:inspectionId/act', async (request, response) => 
   }
 })
 
+/*
+ * Evidence: where every browser reading came from, and how to delete one.
+ *
+ * GET is derived on read — expiry and revocation take effect here rather than
+ * in a purge someone has to remember to run. The one mutating route removes
+ * content and leaves a tombstone; there is no route that removes a row.
+ */
+app.get('/evidence', (request, response) => {
+  response.json(
+    buildEvidenceLedger({
+      limit: Number(request.query.limit) || 50,
+      host: String(request.query.host || '') || null,
+      jobs: readJobs(),
+    }),
+  )
+})
+
+app.get('/evidence/:capsuleId', (request, response) => {
+  const capsule = presentCapsule(getCapsule(request.params.capsuleId))
+  if (!capsule) {
+    response.status(404).json({ ok: false, error: 'No such evidence capsule.' })
+    return
+  }
+  response.json({ ok: true, capsule })
+})
+
+/* "Forget what you read there." By capsule, by page, or by whole host. */
+app.post('/evidence/revoke', (request, response) => {
+  try {
+    response.json({ ok: true, ...revokeCapsules(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/* Housekeeping: drop the bodies of readings that expired long enough ago to be
+ * useless to anyone. Explicit, never on a timer — "the text is gone" should
+ * always be something somebody asked for. */
+app.post('/evidence/sweep', (request, response) => {
+  response.json({ ok: true, ...sweepCapsules(request.body || {}) })
+})
+
 app.post('/focus', async (request, response) => {
   try {
     response.json({ ok: true, session: await startFocusSession(request.body || {}) })
@@ -2045,6 +2114,19 @@ app.listen(PORT, '0.0.0.0', () => {
   // Same deal for page watches: nothing is polled while the Mac is asleep, and
   // the first poll after a restart re-establishes the baseline from the page.
   startPageWatchScheduler()
+  // Accessibility trust is per-binary, so it can be lost by a rebuild that
+  // nothing else notices — every ui_* step keeps reporting success into
+  // nothing. Post a harmless no-op now and on a schedule so the answer is a
+  // recorded fact with a bundle and a timestamp, not an inference. Annotation
+  // only: this never gates an action.
+  startInputReachabilityMonitor({
+    onResult: (result) => {
+      if (result.status === 'verified') return
+      console.warn(
+        `[input] Reachability ${result.status} for ${result.host?.bundleId ?? 'this binary'}: ${result.detail}`,
+      )
+    },
+  })
   // Keep retrying: an agent booted during a relay outage must still end up
   // with a live work loop once the relay recovers.
   const launchBridge = () => {

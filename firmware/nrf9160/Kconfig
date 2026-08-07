@@ -26,6 +26,66 @@ config PENDANT_MIC_INJECT
 	  the microphone hardware running but ignored. Leave this off in
 	  production: it is a harness feature, not a product feature.
 
+config PENDANT_OFFLINE_STORE
+	bool "Offline store-and-forward outbox on microSD"
+	default y
+	help
+	  The one capability no other node in this system can have: the
+	  pendant is worn and holds non-volatile storage, so it can be
+	  present and remember while the link is down.
+
+	  Adds a durable FIFO outbox on the microSD card holding two kinds of
+	  item: a voice memo whose upload failed, and a moment bookmark the
+	  owner dropped without speaking. Items are delivered oldest-first
+	  when the link returns and are removed ONLY after the relay confirms
+	  receipt.
+
+	  This never writes an extra byte of audio. record_microphone()
+	  already journals to SD only when there is no live uplink at press
+	  time; this option only decides whether that journal is kept
+	  (upload failed) or discarded (upload succeeded).
+
+	  Costs one manifest struct in RAM (see PENDANT_OFFLINE_STORE_SLOTS)
+	  and no buffers: audio is streamed straight off the card.
+
+config PENDANT_OFFLINE_STORE_SLOTS
+	int "Outbox depth"
+	depends on PENDANT_OFFLINE_STORE
+	default 4
+	range 1 8
+	help
+	  Queue slots. Each costs 48 B of RAM and, for a voice item, one
+	  file on the card. Four is about an afternoon of dead-zone captures
+	  at the 30 s recording cap; raise it only with the RAM budget in
+	  hand (the build has ~8.9 kB free).
+
+config PENDANT_ALERT_INBOX
+	bool "Hold relay alerts on the device until the owner interacts"
+	depends on PENDANT_OFFLINE_STORE
+	default y
+	help
+	  Alerts the relay raised while the owner was unreachable are pulled
+	  when there is signal, written to the microSD card, and surfaced on
+	  the owner's next button press — which is exactly the moment the
+	  link may be gone again. Reading them needs no radio at all.
+
+	  The acknowledgement rides back out through the outbox rather than
+	  the radio, so "the owner read this" survives being offline too.
+
+	  Reuses the shared HTTP response buffer, so it owns no RAM beyond
+	  the alert cursor inside the outbox manifest.
+
+config PENDANT_ALERT_STATE_PATH
+	string "Relay path the alert inbox polls"
+	depends on PENDANT_ALERT_INBOX
+	default "/v1/state/pendant-alerts"
+	help
+	  A device-scoped persistent-state key (scope state:read). The owner's
+	  Mac, a routine or the dashboard PUTs {"data":{"alerts":[{"id":…,
+	  "text":…}]}} here with the admin credential; the pendant may only
+	  read it. /v1/announcements would be the natural source but is
+	  admin-scoped — a paired device gets 403.
+
 config PENDANT_BOOT_AGENT_JOB_ID
 	string "Existing relay job to download at boot for diagnostics"
 	default ""

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { workspacePath } from './config.js'
 import {
   mergeProductSync,
+  mergeSessionRecords,
   normalizeProductSync,
   PRODUCT_SYNC_LIMITS,
   visibleProductSync,
@@ -219,7 +220,10 @@ export function mergeSessionState(
     {
       schemaVersion: LOCAL_SESSION_SCHEMA_VERSION,
       updatedAt: merged.generatedAt,
-      sessions: merged.sessions,
+      // The payload is a bounded window, not a census of the account, so it is
+      // folded back over what is already on disk. A session the window omits
+      // stays; deletions still land, because they travel as tombstones.
+      sessions: mergeSessionRecords(localState.sessions, merged.sessions),
     },
     { filePath },
   )
@@ -229,35 +233,15 @@ export function mergeSessionState(
   }
 }
 
-export function restoreSessionState(
-  remoteState,
-  {
-    accountId = SINGLE_OWNER_ACCOUNT_ID,
-    sourceDeviceId = LOCAL_DEVICE_ID,
-    filePath = sessionsPath,
-  } = {},
-) {
-  const remote = normalizeProductSync(remoteState)
-  if (remote.accountId !== accountId) {
-    throw new TypeError('Remote session state belongs to a different account')
-  }
-  const normalized = normalizeProductSync({
-    ...remote,
-    sourceDeviceId,
-    memory: {},
-  })
-  writeSessionDocumentAtomic(
-    {
-      schemaVersion: LOCAL_SESSION_SCHEMA_VERSION,
-      updatedAt: normalized.generatedAt,
-      sessions: normalized.sessions,
-    },
-    { filePath },
-  )
-  return {
-    state: normalized,
-    sessions: visibleProductSync(normalized).sessions,
-  }
+/*
+ * Restoring is the same operation as any other pull. It once replaced the local
+ * document outright, which is only safe while a payload carries every session
+ * the account has; now that it is a window, replacing would delete whatever
+ * fell outside it. The case this exists for is unaffected: a fresh or
+ * reinstalled Mac has nothing local, so the merge lands the whole cloud store.
+ */
+export function restoreSessionState(remoteState, options = {}) {
+  return mergeSessionState(remoteState, options)
 }
 
 export function writeSessionDocumentAtomic(

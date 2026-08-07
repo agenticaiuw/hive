@@ -58,6 +58,19 @@ const PLAN_LIMIT = 20
  * this gets hashed in full before we would propose removing it. */
 const QUICK_SAMPLE_BYTES = 64 * 1024
 
+/*
+ * Ceiling on the full-hash pass.
+ *
+ * This owner's Desktop holds 556 screen recordings totalling ~10 GB. Two of
+ * them agreeing on size and first 64 KB is unlikely but not impossible, and the
+ * cost of finding out by reading both in full is minutes of disk on a machine
+ * they are using. Above this size the pair is reported as an unconfirmed match
+ * and never proposed for deletion — a preview that arrives is worth more than a
+ * certainty that does not, and "probably a duplicate" is the owner's call to
+ * make anyway.
+ */
+const FULL_HASH_MAX_BYTES = 256 * 1024 * 1024
+
 /* Debris. Every one of these is a file some other program abandoned. */
 const TEMPORARY_EXTENSIONS = new Set([
   '.crdownload',
@@ -75,8 +88,37 @@ const TEMPORARY_NAMES = /^(~\$|\._)/
 
 const INSTALLER_EXTENSIONS = new Set(['.dmg', '.pkg', '.mpkg', '.iso', '.msi'])
 
-const SCREENSHOT_NAME =
-  /^(screenshot|screen shot|screen recording|cleanshot|simulator screenshot|capto|shottr)/i
+/*
+ * macOS names screenshots in the system language, and this owner's Desktop has
+ * 30-odd files called 截圖 … alongside the English ones. Matching only the
+ * English prefix filed those as "stale, archive it" — which is not wrong, but it
+ * splits one pile of screenshots across two destinations for no reason the
+ * owner would recognise. The other locales are here for the same reason: this
+ * is the sort of thing you only find by running the preview against real files.
+ */
+const SCREENSHOT_NAME = new RegExp(
+  '^(' +
+    [
+      'screenshot',
+      'screen shot',
+      'screen recording',
+      'cleanshot',
+      'simulator screenshot',
+      'capto',
+      'shottr',
+      '截圖', // Traditional Chinese
+      '截图', // Simplified Chinese
+      'スクリーンショット', // Japanese
+      '스크린샷', // Korean
+      'captura de pantalla', // Spanish
+      'capture d[’\']écran', // French
+      'bildschirmfoto', // German
+      'снимок экрана', // Russian
+      'schermafbeelding', // Dutch
+    ].join('|') +
+    ')',
+  'i',
+)
 
 /* Names a browser or the Finder gives the second copy of something. */
 const COPY_SUFFIX = /^(.*?)(?:[ _-]?\((\d+)\)|[ _-]copy(?:[ _-]\d+)?|[ _-]\d+)$/i
@@ -212,6 +254,13 @@ function findDuplicateSets(files) {
   for (const bucket of byQuick.values()) {
     if (bucket.length < 2) continue
 
+    /* Too big to read twice while the owner waits. Report the match on the
+     * evidence we have and say that is what it is. */
+    if (bucket[0].bytes > FULL_HASH_MAX_BYTES) {
+      sets.push({ ...orderSet(bucket), hash: bucket[0].quickSignature, confirmed: false })
+      continue
+    }
+
     const byFullHash = new Map()
     for (const file of bucket) {
       const digest = fullHash(file.path)
@@ -223,17 +272,20 @@ function findDuplicateSets(files) {
 
     for (const [digest, group] of byFullHash) {
       if (group.length < 2) continue
-      /* The keeper is the original: oldest first, shortest name to break ties,
-       * because "report.pdf" predates "report (1).pdf" in both. */
-      const ordered = [...group].sort(
-        (left, right) =>
-          left.birthtimeMs - right.birthtimeMs || left.name.length - right.name.length,
-      )
-      const [keeper, ...copies] = ordered
-      sets.push({ hash: digest, bytes: keeper.bytes, keeper, copies })
+      sets.push({ ...orderSet(group), hash: digest, confirmed: true })
     }
   }
   return sets
+}
+
+/* The keeper is the original: oldest first, shortest name to break ties,
+ * because "report.pdf" predates "report (1).pdf" in both. */
+function orderSet(group) {
+  const [keeper, ...copies] = [...group].sort(
+    (left, right) =>
+      left.birthtimeMs - right.birthtimeMs || left.name.length - right.name.length,
+  )
+  return { bytes: keeper.bytes, keeper, copies }
 }
 
 function fullHash(filePath) {
@@ -297,9 +349,15 @@ function classifyFile(file, { now, staleDays, installerStaleDays, duplicateSet, 
   if (duplicateSet) {
     classes.push('duplicate')
     const named = looksLikeCopyOf(file.name, duplicateSet.keeper.name)
-    if (named) classes.push('named-copy')
+    /* Both halves have to hold: the bytes have to be proven identical, and the
+     * name has to read as a copy. An unconfirmed match — a file too large to
+     * hash twice — is reported and left alone however its name reads. */
+    if (named && duplicateSet.confirmed) classes.push('named-copy')
+    else if (!duplicateSet.confirmed) classes.push('unconfirmed-duplicate')
     reasons.push(
-      `identical bytes to ${duplicateSet.keeper.name}${named ? ' and named as its copy' : ''}`,
+      duplicateSet.confirmed
+        ? `identical bytes to ${duplicateSet.keeper.name}${named ? ' and named as its copy' : ''}`
+        : `same size and opening bytes as ${duplicateSet.keeper.name}, too large to verify in full`,
     )
   }
 
@@ -438,6 +496,7 @@ export function planSweep({
     totalBytes: items.reduce((sum, item) => sum + (item.action ? item.bytes : 0), 0),
     duplicates: survey.duplicateSets.map((set) => ({
       bytes: set.bytes,
+      confirmed: set.confirmed,
       keeper: set.keeper.name,
       copies: set.copies.map((copy) => copy.name),
     })),

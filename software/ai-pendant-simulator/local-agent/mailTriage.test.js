@@ -148,6 +148,123 @@ test('a stranger with nothing to answer is filed, not thrown away', () => {
   )
 })
 
+/*
+ * Envelopes copied verbatim out of the first run against this Mac's real
+ * inbox. Two of them were filed wrong, and the shape of the mistake is not
+ * something a made-up fixture would have produced: a Hide My Email relay hides
+ * the fact that a promo is automated, and a bulk DOMAIN is not the same claim
+ * as a marketing SENDER.
+ */
+test('the real inbox: promos behind a Hide My Email relay are noise, not reference', () => {
+  const relayed = message({
+    sender:
+      '"Rappi" <sender4@privaterelay.appleid.com>',
+    subject: 'La comida mejor rankeada de tu zona',
+  })
+  const result = classifyMessage(relayed, { now: NOW })
+  assert.equal(result.bucket, 'noise')
+  /* And crucially: never a draft addressed to a relay nobody reads. */
+  assert.ok(!DRAFTED_BUCKETS.includes(result.bucket))
+})
+
+test('the real inbox: a subscription expiring is a record, not an advert', () => {
+  assert.equal(
+    classifyMessage(
+      message({ sender: 'Apple <no_reply@email.apple.com>', subject: 'Your Subscription is Expiring' }),
+      { now: NOW },
+    ).bucket,
+    'reference',
+  )
+})
+
+test('the real inbox: an offer from the same bulk domain is still noise', () => {
+  assert.equal(
+    classifyMessage(
+      message({
+        sender: 'Apple <News@InsideApple.Apple.com>',
+        subject: 'Your $300 new Apple Card offer is waiting. Limited time only.',
+      }),
+      { now: NOW },
+    ).bucket,
+    'noise',
+  )
+})
+
+test('the real inbox: newsletters and percentage-off blasts are noise', () => {
+  for (const [sender, subject] of [
+    [
+      'Goodreads <sender3@privaterelay.appleid.com>',
+      '\u{1F4DA} The Newsletter: What to Read This August',
+    ],
+    [
+      'MuseScore <sender1@privaterelay.appleid.com>',
+      '[Last call] 90% off playing in the sun',
+    ],
+  ]) {
+    assert.equal(classifyMessage(message({ sender, subject }), { now: NOW }).bucket, 'noise', subject)
+  }
+})
+
+/*
+ * The second real run drafted two replies to this sender. A rhetorical question
+ * in an advert is not detectable as text; the address is.
+ */
+test('the real inbox: a rhetorical question from a role address earns no draft', () => {
+  const promo = message({
+    sender: 'Valerie from Holafly <community@team.holafly.com>',
+    subject: 'What if your next destination is here?',
+  })
+  const result = classifyMessage(promo, { now: NOW })
+  assert.ok(!DRAFTED_BUCKETS.includes(result.bucket), `got ${result.bucket}`)
+  assert.match(result.reasons.join(' '), /role address/i)
+})
+
+test('the real inbox: a brand display name is not a person, whatever it asks', () => {
+  const result = classifyMessage(
+    message({
+      sender: 'Premium★Tesla <Sales.SG@premiumtesla.com>',
+      subject: 'Is your Tesla road-trip ready? \u{1F5FA}️',
+    }),
+    { now: NOW },
+  )
+  assert.ok(!DRAFTED_BUCKETS.includes(result.bucket), `got ${result.bucket}`)
+})
+
+test('a person with an ordinary name and an ordinary address still gets a draft', () => {
+  /* The brand and role rules must not swallow the case they exist to protect. */
+  for (const sender of [
+    'Dana Vogel <dana@lab.example>',
+    '"Owner, Hive" <owner@example.edu>',
+    'mateo.peralta@partner.example',
+  ]) {
+    assert.equal(
+      classifyMessage(message({ sender, subject: 'Can you look at this?' }), { now: NOW }).bucket,
+      'reply-soon',
+      sender,
+    )
+  }
+})
+
+test('a thread the owner started with a role address is still a conversation', () => {
+  /* The owner wrote into the queue first, so there is something to reply to —
+   * which is the whole distinction the role-address rule turns on. */
+  assert.equal(
+    classifyMessage(
+      message({ sender: 'Support <support@vendor.example>', subject: 'Re: ticket 4471 — can you confirm?' }),
+      { now: NOW },
+    ).bucket,
+    'reply-soon',
+  )
+})
+
+test('a reason is never printed twice', () => {
+  const { reasons } = classifyMessage(
+    message({ sender: 'deals@shop.example', subject: '50% off — unsubscribe here' }),
+    { now: NOW },
+  )
+  assert.equal(reasons.length, new Set(reasons).size)
+})
+
 test('every classification comes back with at least one reason', () => {
   const cases = [
     { subject: 'Deadline tomorrow' },
