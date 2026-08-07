@@ -1907,12 +1907,52 @@ async function executeTool(call, { state, transcript, asked }) {
  * would let one agent's opinion arrive in every other agent's prompt wearing
  * the clothes of something that was measured.
  */
+/*
+ * Named rather than inferred, and deliberately not "everything that is not an
+ * output tool". These five are the reads the harness implements itself, so it
+ * knows they observe the world without changing it. Tools an agent was granted
+ * later are excluded on purpose: the harness cannot tell whether one of them
+ * mutates, and banking the result of an action as an established fact would put
+ * the outcome of one agent's side effect into every other agent's prompt as
+ * though it were a standing property of the system.
+ */
 const OBSERVATION_TOOLS = new Set([
+  'list_capabilities',
   'discover',
   'describe',
   'probe_http',
   'get_hardware_spec',
 ])
+
+/*
+ * Recon is meant to stop an agent designing before it has looked. Nothing ever
+ * ended it: the phase only moved when someone typed the phase command, so an
+ * agent nobody remembered to promote stayed in recon forever and could not
+ * record a proposal at all — the propose tools are simply not in its list.
+ *
+ * That is not an unproductive agent, it is a silenced one, and it is
+ * indistinguishable from the real thing in every summary. faculty-action sat
+ * here for eighteen rounds, spending 32-42 calls each, saying in plain text
+ * that it had a proposal and no tool to record it with. Twice its round ended
+ * on a request for the tool it was already supposed to have.
+ *
+ * Three rounds, because promotion costs nothing: the capability phase ADDS the
+ * propose tools, it does not take the discovery tools away. An agent can go on
+ * looking for as long as it likes afterwards. So the only thing staying in
+ * recon can buy is the discipline of looking first, which is worth a couple of
+ * rounds and is not worth eighteen.
+ */
+const RECON_MAX_ROUNDS = 3
+
+function advanceOutOfRecon(state) {
+  if (state.phase !== 'recon' || state.round < RECON_MAX_ROUNDS) return
+
+  state.phase = 'capability'
+  process.stdout.write(
+    `  [phase] recon -> capability after ${state.round} rounds; ` +
+      'propose_capability and propose_change are available from the next round.\n',
+  )
+}
 
 function depositIfObservation(name, args, result, state) {
   if (!COMMONS_ON || !OBSERVATION_TOOLS.has(name)) return
@@ -2175,6 +2215,7 @@ async function runRound() {
    * a round belonged to has already been guessed wrong once on this project,
    * and a guess about the condition invalidates every number derived from it. */
   state.rounds.push({ round: state.round, commons: COMMONS_ON, transcript })
+  advanceOutOfRecon(state)
   saveState(state)
   writeRoundReport(state, transcript, asked)
 
