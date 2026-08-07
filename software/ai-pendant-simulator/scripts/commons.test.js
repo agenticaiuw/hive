@@ -76,9 +76,19 @@ test('the directory stays small while the content does not', () => {
 
   const index = directory(dir)
   const bytes = Buffer.byteLength(index.lines.join('\n'))
+  const contentBytes = Buffer.byteLength(JSON.stringify(fat)) * 20
+
   assert.equal(index.total, 20)
-  assert.ok(bytes < 2_000, `directory should stay tiny, was ${bytes}B`)
-  assert.ok(Buffer.byteLength(JSON.stringify(fat)) > 100_000, 'against genuinely large content')
+  assert.ok(contentBytes > 2_000_000, 'against genuinely large content')
+  /* A ratio rather than a byte count. The previous bound was a magic 2 KB, and
+   * when the top entries were given room for a real preview it failed for a
+   * reason that was not the property it existed to protect. What has to stay
+   * true is that the directory is a rounding error against what it stands in
+   * for — not that it never grows. */
+  assert.ok(
+    bytes < contentBytes / 100,
+    `directory is ${bytes}B against ${contentBytes}B of content — no longer an index`,
+  )
 })
 
 test('the directory is capped so it cannot crowd out the prompt', () => {
@@ -200,4 +210,52 @@ test('an entry outlives nothing once its whole lifetime has passed', () => {
   assert.equal(fold(dir, { now: now + BASE_TTL_MS - 1000 }).size, 1)
   assert.equal(fold(dir, { now: now + BASE_TTL_MS + 1000 }).size, 0)
   assert.equal(recall(dir, 'discover:routes', { now: now + BASE_TTL_MS + 1000 }), null)
+})
+
+/*
+ * Measured 2026-08-07: zero recall() calls across 26 rounds with the directory
+ * in the prompt. Agents will not go and fetch the rest, so the most re-derived
+ * entries have to carry enough on their own line to stand in for the call.
+ */
+test('the most re-derived entries carry a real preview, not just a count', () => {
+  const dir = tempDir()
+  const routes = { items: [{ name: '/health' }, { name: '/ops/status' }, { name: '/pipeline' }] }
+
+  /* Confirmations are a direct count of how often this system re-derived the
+   * same fact — so they are what the preview budget is spent on. */
+  for (const agent of ['a', 'b', 'c']) {
+    deposit(dir, { tool: 'discover', args: { category: 'routes' }, result: routes, agent, round: 1 })
+  }
+  deposit(dir, { tool: 'discover', args: { category: 'quiet' }, result: { items: [{ name: '/rare' }] }, agent: 'a', round: 1 })
+
+  const [top] = directory(dir, { previewFor: 1 }).lines
+  assert.match(top, /discover:routes/)
+  assert.match(top, /\/health, \/ops\/status, \/pipeline/)
+})
+
+test('entries past the preview budget stay one line', () => {
+  const dir = tempDir()
+  for (const category of ['a', 'b', 'c']) {
+    deposit(dir, { tool: 'discover', args: { category }, result: { items: [{ name: `/${category}` }] }, agent: 'x', round: 1 })
+  }
+  const lines = directory(dir, { previewFor: 1 }).lines
+  assert.equal(lines.filter((line) => line.includes('\n')).length, 1)
+})
+
+test('a known-absent entry is never padded out with a preview of nothing', () => {
+  const dir = tempDir()
+  deposit(dir, { tool: 'probe_http', args: { method: 'GET', path: '/gone' }, result: { status: 404 }, agent: 'a', round: 1 })
+  const [line] = directory(dir, { previewFor: 8 }).lines
+  assert.match(line, /ABSENT/)
+  assert.equal(line.includes('\n'), false)
+})
+
+test('the preview is bounded, so a fat payload cannot swallow the prompt', () => {
+  const dir = tempDir()
+  const fat = { items: Array.from({ length: 400 }, (_, i) => ({ name: `/route-${i}` })) }
+  deposit(dir, { tool: 'discover', args: { category: 'routes' }, result: fat, agent: 'a', round: 1 })
+
+  const [line] = directory(dir, { previewFor: 8, previewChars: 200 }).lines
+  assert.ok(line.length < 400, `preview must stay bounded, was ${line.length}`)
+  assert.match(line, /more/)
 })
