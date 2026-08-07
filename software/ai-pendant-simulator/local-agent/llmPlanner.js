@@ -6,6 +6,10 @@ import {
   getMachineContext,
 } from './machineContext.js'
 import { stripProtocolTerminators } from '../shared/protocolText.js'
+/* The executor's dispatch table is the authority on what can actually run;
+ * see isKnownActionType. computerControl does not import this file, so there
+ * is no cycle. */
+import { SUPPORTED_ACTION_TYPES } from './computerControl.js'
 
 // Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
 // Cloudflare uses Realtime separately — this process never opens Realtime.
@@ -1134,12 +1138,29 @@ const DISPATCH_ALIASES = new Set([
   'research_topic',
 ])
 
+/*
+ * Anything the executor can dispatch is a legal action, whether or not this
+ * file describes it.
+ *
+ * These two registries kept drifting apart, and the failure is silent and
+ * bad: sanitizeActions drops the step, the run reports success, and the owner
+ * hears a confident summary for work that never happened. It has now happened
+ * three times — briefings, research, and ten capture/focus/tidy actions — each
+ * time because a new capability was wired into computerControl.js and nobody
+ * remembered this list. Deriving the fallback from the dispatch table makes
+ * that class of bug impossible rather than merely detectable.
+ *
+ * The schemas above still matter: they carry the descriptions and parameter
+ * hints that let the model USE an action well. This only stops an undescribed
+ * one from being thrown away.
+ */
 export function isKnownActionType(type) {
   const name = String(type ?? '')
   return (
     Object.hasOwn(FULL_CONTROL_ACTION_SCHEMA, name) ||
     Object.hasOwn(SAFE_ACTION_SCHEMA, name) ||
-    DISPATCH_ALIASES.has(name)
+    DISPATCH_ALIASES.has(name) ||
+    SUPPORTED_ACTION_TYPES.includes(name)
   )
 }
 

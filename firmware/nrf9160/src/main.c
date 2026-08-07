@@ -784,16 +784,38 @@ static bool take_remote_press(void)
  * SPSC ring — the host owns head, this firmware owns tail, fill is derived —
  * so the two sides never need a lock across the debug port.
  *
- *   w4  <&pendant_inject_arm> 1        arm (do this before the press)
- *   loadfile <pcm.bin>, <&pendant_inject_ring + tail*2>
- *   w4  <&pendant_inject_head> <n>     publish the samples just written
- *   w4  <&pendant_inject_eof> 1        no more PCM coming; stop counting
- *                                      underruns and emit silence
+ *   w4 <&pendant_inject_arm> 1        arm (do this before the press)
+ *   <block-write G.711 bytes into pendant_inject_ring at head>
+ *   w4 <&pendant_inject_head> <n>     publish the frames just written
+ *   w4 <&pendant_inject_eof> 1        no more PCM coming; stop counting
+ *                                     underruns and emit silence
  *
  * A power-of-two frame count lets the index difference be a mask instead of a
  * modulo, and makes the unsigned wrap of (head - tail) exact.
+ *
+ * WIRE FORMAT IS 8-BIT G.711 mu-LAW, NOT LINEAR PCM, and that is a measured
+ * decision rather than a stylistic one.  Every block-write front-end this
+ * debug port has was benchmarked against the 15,625 frame/s the mic stage
+ * consumes:
+ *
+ *   JLinkExe w4 (2 frames/command)        3,980 frames/s   3.9x too slow
+ *   JLinkExe w8 (4 frames/command)        7,027 frames/s   2.2x too slow
+ *   JLinkExe loadfile                     resets the MCU — unusable outright
+ *   JLinkGDBServer RSP 'X' block write   ~36,000 BYTES/s
+ *
+ * J-Link Commander costs ~0.5 ms per command no matter how small the command
+ * is, so no amount of batching gets it there; only the GDB server's block
+ * write does.  At 16-bit that leaves 36,000 against 31,250 B/s — 15% margin,
+ * which is not margin at all for a 32.77 ms cadence.  mu-law halves the wire
+ * rate to 15,625 B/s (2.3x headroom) and simultaneously doubles the runway
+ * this fixed 4 KB of RAM buys, because a frame now costs one byte instead of
+ * two.  The expansion is the same deterministic table the legacy reply path
+ * already uses, so an utterance still decodes to the identical samples on
+ * every run — which is the entire property this rig exists to provide.  The
+ * uplink is ~16 kbps Opus SILK-WB, orders of magnitude lossier than G.711, so
+ * the quantization costs nothing that survives to the relay.
  */
-#define PENDANT_INJECT_RING_FRAMES 2048U
+#define PENDANT_INJECT_RING_FRAMES 4096U
 #define PENDANT_INJECT_RING_MASK (PENDANT_INJECT_RING_FRAMES - 1U)
 BUILD_ASSERT((PENDANT_INJECT_RING_FRAMES &
 	      (PENDANT_INJECT_RING_FRAMES - 1U)) == 0U,
@@ -802,16 +824,15 @@ BUILD_ASSERT(PENDANT_INJECT_RING_FRAMES >= 2U * MIC_STAGE_FRAMES,
 	     "inject ring must hold at least two stages of runway");
 
 /*
- * 2048 frames = 4,096 B = 131.07 ms at SAMPLE_RATE 15625, against a 32.77 ms
- * stage period: four stages of runway.  Sized against the host's measured
- * refill round-trip (a J-Link loadfile of a half ring plus the head write),
- * not a guess — see software/ai-pendant-simulator/scripts/inject-audio.mjs,
- * which refills whenever the ring is half empty and therefore has ~65 ms to
- * complete each round trip.  RAM is the binding constraint on this image
- * (95.79% before this ring), so it does not get to be bigger "just in case";
- * pendant_inject_underruns is what tells you if it was too small.
+ * 4096 mu-law frames = 4,096 B = 262.14 ms at SAMPLE_RATE 15625, against a
+ * 32.77 ms stage period: eight stages of runway.  The host refills whenever
+ * the ring is half empty, so it has ~131 ms to complete a round trip that
+ * measures ~57 ms — see software/ai-pendant-simulator/scripts/inject-audio.mjs.
+ * RAM is the binding constraint on this image (95.79% used before this ring),
+ * so it does not get to be bigger "just in case"; pendant_inject_underruns is
+ * what tells you if it was too small.
  */
-volatile int16_t pendant_inject_ring[PENDANT_INJECT_RING_FRAMES] __aligned(4);
+volatile uint8_t pendant_inject_ring[PENDANT_INJECT_RING_FRAMES] __aligned(4);
 /* Host writes: 1 = replace mic audio with the ring. */
 volatile uint32_t pendant_inject_arm;
 /* Host writes: producer index, in frames, free-running mod the ring size. */
@@ -840,8 +861,9 @@ static bool pendant_inject_fill_stage(int16_t *samples, size_t frame_count)
 	size_t take = MIN((size_t)fill, frame_count);
 
 	for (size_t i = 0U; i < take; ++i) {
-		samples[i] = pendant_inject_ring[(tail + i) &
-						 PENDANT_INJECT_RING_MASK];
+		samples[i] = ulaw_to_linear(
+			pendant_inject_ring[(tail + i) &
+					    PENDANT_INJECT_RING_MASK]);
 	}
 	/* Samples are consumed before the tail moves, so the host never
 	 * overwrites a frame this stage is still reading. */

@@ -277,6 +277,21 @@ async function restoreDistractions(blocked) {
   return { shown, failures }
 }
 
+/** Foreground apps, by process name. One query, no per-name lookups. */
+async function runningAppNames() {
+  const { stdout } = await execFileAsync(
+    'osascript',
+    ['-e', 'tell application "System Events" to get name of every process whose background only is false'],
+    { timeout: 15_000 },
+  )
+  return new Set(
+    String(stdout)
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean),
+  )
+}
+
 /**
  * Change visibility for a whole list in one script, and report only the apps
  * that actually changed.
@@ -296,25 +311,46 @@ async function setAppsVisible(apps, visible) {
   const names = [...new Set(apps.map((app) => String(app || '').trim()).filter(Boolean))]
   if (!names.length) return []
 
-  const script = `
-set changed to {}
-tell application "System Events"
-  repeat with candidate in {${names.map((name) => `"${escapeAppleScript(name)}"`).join(', ')}}
-    try
-      -- Only what is already running: launching Slack in order to hide it is absurd.
-      if exists (process candidate) then
-        if visible of process candidate is ${visible ? 'false' : 'true'} then
-          set visible of process candidate to ${visible}
-          set end of changed to (candidate as string)
-        end if
-      end if
-    end try
-  end repeat
-end tell
-set AppleScript's text item delimiters to linefeed
-return changed as text`
+  /*
+   * Ask what is running before naming anything.
+   *
+   * `exists (process "Slack")` for an app that is not running does not answer
+   * false — on this Mac it blocks, and a twelve-name list reliably ran past a
+   * thirty-second timeout with every app reported as a failure. Enumerating the
+   * processes once is a single fast query, and after it every name handed to
+   * System Events is one it already told us about.
+   */
+  const running = await runningAppNames()
+  const present = names.filter((name) => running.has(name))
+  if (!present.length) return []
 
-  const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 30_000 })
+  /*
+   * `repeat with x in {…}` hands out a reference to the list item, and
+   * `process x` on a reference raises — inside a `try` that failure is silent
+   * and the pass reports having changed nothing. Coerce to a string first.
+   */
+  const script = [
+    'set changed to {}',
+    'tell application "System Events"',
+    `repeat with candidate in {${present.map((name) => `"${escapeAppleScript(name)}"`).join(', ')}}`,
+    'set appName to candidate as string',
+    'try',
+    `if visible of process appName is ${visible ? 'false' : 'true'} then`,
+    `set visible of process appName to ${visible}`,
+    'set end of changed to appName',
+    'end if',
+    'end try',
+    'end repeat',
+    'end tell',
+    "set AppleScript's text item delimiters to linefeed",
+    'return changed as text',
+  ]
+
+  const { stdout } = await execFileAsync(
+    'osascript',
+    script.flatMap((line) => ['-e', line]),
+    { timeout: 30_000 },
+  )
   return String(stdout)
     .split('\n')
     .map((name) => name.trim())
