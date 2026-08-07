@@ -651,7 +651,12 @@ function makeId(kind, state) {
     state.denied.filter((r) => r.kind === kind).length +
     (state.granted.context.length +
       state.granted.tools.length +
-      state.granted.permissions.length)
+      state.granted.permissions.length +
+      /* Skills were left out, so a granted one stopped advancing the counter
+       * and two later requests could share a number — mac-planner really did
+       * end up with both s10-qrm2 and s10-d62e. Only the random suffix kept
+       * them apart, which is luck rather than identity. */
+      (state.granted.deviceSkills?.length || 0))
   return `${kind[0]}${n + 1}-${Math.random().toString(36).slice(2, 6)}`
 }
 
@@ -829,6 +834,30 @@ function buildSystemPrompt(state) {
         .map((p) => p.scope)
         .join(', ')}`,
     )
+  }
+  /*
+   * Device skills were write-only. grant() pushed them here and nothing ever
+   * read the array back — not this prompt, not discover('granted'), not
+   * describe() — so an agent was never told its firmware request had been
+   * accepted and asked again. relay-realtime re-requested
+   * offline_voice_memo_store_and_forward four rounds after receiving it, and
+   * mac-planner asked for offline_thought_capture one round after being granted
+   * offline_moment_bookmark. Of 41 skill requests retired today, 14 were
+   * against work already accepted and already built.
+   *
+   * Stated as accepted firmware work rather than as a tool, because that is
+   * what a granted skill is: it never becomes callable, and an agent that
+   * thinks otherwise plans a round around a function that will not be there.
+   */
+  if (state.granted.deviceSkills?.length) {
+    parts.push(
+      '\n---\nDevice skills ACCEPTED as firmware work. These are settled — do not\n' +
+        'ask for them again. They are not callable tools and never will be; the\n' +
+        'pendant does them on its own, so build on the behaviour, not on an API:',
+    )
+    for (const skill of state.granted.deviceSkills) {
+      parts.push(`- ${skill.name} — ${skill.what_it_does || 'accepted'}`)
+    }
   }
   if (state.denied.length) {
     parts.push(
@@ -1392,6 +1421,10 @@ async function discoverCategory(category, state) {
         ...state.granted.permissions.map((p) => ({
           name: p.scope,
           summary: 'permission',
+        })),
+        ...(state.granted.deviceSkills || []).map((s) => ({
+          name: s.name,
+          summary: 'device skill accepted as firmware work — settled, not callable',
         })),
       ],
     }
