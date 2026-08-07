@@ -346,6 +346,35 @@ commons: not "what exists" but "what is already reachable end to end". It also
 explains the shape of the corpus better than anything else measured tonight —
 the agents are not short of facts, they are short of composition.
 
+`propose_capability` now requires `built_from` and `scripts/reachability.mjs`
+checks the answer against what the commons holds. On the first live round after
+it landed, relay-realtime's nineteenth restatement was blocked as a duplicate,
+it was told all six pieces it had named already exist, and it proposed something
+different instead.
+
+#### The blindness underneath it
+
+`/v1/pendant/announce` still reads as *unseen* to that check, and it ships. The
+reason is worth stating because it is the same shape as everything else here:
+
+**The relay has 41 routes and no way to enumerate them.** The Mac agent
+publishes `/capabilities` built from its live router, so `discover:routes` puts
+123 routes into the commons for everyone. The relay publishes nothing
+equivalent, so the only relay knowledge in the commons is whatever paths some
+agent happened to guess and probe.
+
+Which means **the agent that can least see its own surface is the one that most
+restated a request for something on that surface.** relay-realtime is not
+careless; it is blind in the one direction nobody instrumented.
+
+Not fixed here, deliberately. The relay's route table is imperative —
+`scopesFor(method, path)` is a chain of `if` statements, not data — so making it
+self-describing means refactoring auth-scope dispatch, where a mistake is a
+security bug rather than a wrong number. A statically declared list would be the
+hardcoding this project has avoided everywhere else, and would drift silently.
+The Worker cannot be deployed without the owner in any case. So: the highest-
+value next change, and one that should be made awake.
+
 ### What the control shell actually bought, stated carefully
 
 Run unslotted so that rounds-per-cycle equals agents-eligible, 9 agents, 8
