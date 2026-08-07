@@ -490,6 +490,38 @@ reason they cannot be granted from inside the harness, the propose-tool ones
 closed as a fixed defect, relay-realtime's answered with what it could not have
 discovered. That the backlog existed at all is the finding.
 
+## Nobody checked whether the pendant exists
+
+The relay's device table, one authenticated GET away, holds exactly two entries:
+
+    home-macbook-bridge        mac_bridge   ONLINE
+    cloudflare-contract-test   mobile       offline since 2026-07-31
+
+**No nRF9160 has ever registered.** There has been no pendant connected for the
+whole of this run, and a large share of 835 proposals describe what a worn device
+should do. The audio telemetry the agents kept citing from `/pipeline` is
+recorded history from earlier sessions, not a live device — and it reads
+identically to live data unless you go and check.
+
+The causal chain is worth following because every link was measured:
+
+1. The relay publishes no route inventory, so **0 of its 41 routes** are in the
+   commons.
+2. `/v1/devices/status` is therefore not in any agent's directory.
+3. Nobody probed it — not once, across 128 rounds.
+4. So nobody learned there is no pendant.
+5. And capabilities went on being written against hardware that is not there.
+
+This is the surface-blindness section's consequence, made concrete. It is also
+the clearest case yet of the finding underneath everything else: the fact was
+free to obtain, sat one call away behind a token every agent already carries, and
+no amount of proposing substituted for looking.
+
+The correction is not "propose less". It is that anything pendant-shaped should
+now be written as *what it would do when a device is connected, and how we would
+know it worked* — which is a more useful artefact than a capability written as
+though the device were already there.
+
 ## The one finding underneath the others
 
 Three separate investigations tonight converged on a single phenomenon, and it
