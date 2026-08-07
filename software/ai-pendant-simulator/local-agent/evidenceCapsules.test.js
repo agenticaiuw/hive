@@ -74,6 +74,24 @@ test('an unchanged page read twice is one capsule, not two', (t) => {
   assert.equal(listCapsules({}, at).length, 1)
 })
 
+test('capturedAt is first-seen, so a consumer cannot read it as fetch age', (t) => {
+  const at = store(t)
+  const threeWeeks = 21 * 24 * HOUR
+
+  mintCapsule({ ...READING, capturedAt: 0 }, at)
+  const now = mintCapsule({ ...READING, capturedAt: threeWeeks }, at)
+
+  /* The trap originFanOut nearly fell into: this reading was taken just now,
+   * and the capsule it collapsed onto is three weeks old. Freshness belongs to
+   * the caller's own clock; capturedAt answers how long the page has been
+   * stable, which is corroboration, not staleness. */
+  assert.equal(now.capsule.capturedAt, new Date(0).toISOString())
+  assert.equal(now.collapsed, true)
+
+  const ledger = buildEvidenceLedger({ now: threeWeeks }, at)
+  assert.match(ledger.clocks.note, /FIRST seen, not when it was last fetched/)
+})
+
 test('content that moved is different evidence, and says so', (t) => {
   const at = store(t)
 

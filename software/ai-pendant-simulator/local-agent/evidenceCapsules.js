@@ -36,6 +36,15 @@ import { classifySensitivity, maskSecretValue } from './redaction.js'
  *   unchanged page every fifteen minutes produces one capsule, not ninety-six.
  *   Same derivation as actionReceipts.actionIdFor, for the same reason.
  *
+ *   READ THIS BEFORE USING capturedAt AS AN AGE. It is when this content was
+ *   FIRST seen, not when the caller last fetched it — that is the whole point
+ *   of the collapse, and it is the one trap in this design. A page that has not
+ *   changed in three weeks answers a read taken one second ago with a
+ *   three-week-old capsule. Judge freshness on YOUR OWN fetch clock and use
+ *   capturedAt only for the opposite question, corroboration, which gets
+ *   stronger with age rather than weaker. originFanOut.js carries both clocks
+ *   for exactly this reason and nearly scored a live reading as stale.
+ *
  *   Immutable. A minted capsule is never rewritten. Re-capturing identical
  *   content returns the existing capsule untouched. The only permitted mutation
  *   is REMOVING content — revocation and TTL retirement — which leaves every
@@ -807,6 +816,9 @@ export function buildEvidenceLedger(
       defaultMs: DEFAULT_TTL_MS,
       retireGraceMs: RETIRE_GRACE_MS,
       note: 'Expiry withholds the body on read. Retirement removes it from the store. Neither removes the tombstone.',
+    },
+    clocks: {
+      note: 'capturedAt is when this content was FIRST seen, not when it was last fetched — capsules are content-addressed, so an unchanged page collapses onto the capsule minted for it weeks ago. Judge freshness on your own fetch clock; capturedAt answers the opposite question (how long this has been stable), which gets stronger with age.',
     },
     observers: {
       note: 'Tab and session ids are HMACs under a store-local salt. A tab id is only meaningful alongside the context that issued it, so the context is part of the input and two pseudonyms never compare equal across contexts.',
