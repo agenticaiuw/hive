@@ -21,9 +21,16 @@ accumulated, none answered. Inside: 21 correct diagnoses of a live harness bug,
 a defect report from relay-realtime that was right in every particular and
 repeated three times over 40 rounds, and six agents converging on one blocker.
 
-Across 835 proposals, cross-agent convergence is *zero*. In the requests it is
+Across 835 proposals, cross-agent convergence was *zero*. In the requests it is
 five of nine agents asking the same question. **The measurement was pointed at
 the wrong output.**
+
+*Updated later the same night:* at 1,761 proposals it is 9 clusters spanning two
+agents — still only 1%, but no longer zero, and what they agree on is real (an
+offline catch-up digest; save-from-Safari-hear-on-pendant; prepare on the Mac and
+approve from the pendant; never silently guess a timezone). Possibly the dedup
+gate forcing agents off restatement and onto new ground, possibly just volume —
+untested.
 
 **2. Agents cannot tell what they can already do.** One capability proposed
 eighteen times whose every piece ships. Twenty-one requests for tools the agents

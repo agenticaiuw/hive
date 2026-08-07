@@ -555,6 +555,43 @@ that this was not a solution to. Doing it properly needs semantic matching —
 an embedding, or a model call per request — which is a different and more
 expensive design than a lexical helper.
 
+### Update: the convergence appeared once the corpus doubled
+
+The retraction above was correct when it was made, at 835 proposals: zero
+clusters spanning two agents at any threshold meaning "the same idea". It is no
+longer the current reading. At **1,761 proposals, 9 clusters span two agents**
+— 1%, still overwhelmingly self-repetition, and no longer zero.
+
+What they converged on is not filler:
+
+- *"I was offline — tell me what happened while I was away, in order, and what
+  still needs me."* — faculty-perception, unified
+- *"Highlight something in Safari, say save this for later, hear it on the
+  pendant."* — browser-extension, relay-realtime
+- *"Prepare this action on my Mac, and let me approve it from the pendant."* —
+  faculty-action, unified
+- *"Before you schedule anything, make sure your clocks and time zones agree. If
+  they don't, tell me the conflict in one sentence and ask. Never silently
+  guess."* — faculty-judgement, faculty-perception
+
+The third is the preview-before-irreversible shape claimed earlier on no
+evidence, retracted, and now reached independently by two agents. The fourth is
+the timezone contradiction, turned from a blocked request into a capability by
+two agents who decided the right behaviour is to surface the conflict rather
+than wait for an answer.
+
+**A hypothesis, marked as one:** the dedup gate may have caused this rather than
+volume alone. Lowering it to 0.30 blocks self-repetition, which forces an agent
+off its worn groove and onto ground it has not covered — and new ground is where
+independent agents can collide. Convergence at 0.45 was invisible partly because
+agents were free to keep restating, and a corpus of restatements has nothing to
+converge *on*. Untested; distinguishing it from "more proposals means more
+chances to overlap" needs a run at each threshold with matched corpus sizes.
+
+**The methodological point stands regardless:** every number in this document is
+a snapshot, and the ones above were taken at 835 proposals. They were right then.
+Anything quoted from here should carry the corpus size it was measured at.
+
 ### One change that did not work
 
 `request_tool` was given a required `why_existing_tools_insufficient` field, on
