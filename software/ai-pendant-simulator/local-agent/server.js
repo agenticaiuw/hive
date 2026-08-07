@@ -189,6 +189,7 @@ import {
 import {
   applySweep,
   formatSweep,
+  getSweep,
   listSweeps,
   planSweep,
   surveyFolder,
@@ -587,10 +588,11 @@ function projectJobForList(job) {
 app.get('/jobs', (request, response) => {
   const all = readJobs()
   const limit = Number.parseInt(String(request.query.limit ?? ''), 10)
-  /* Newest first when limiting, so ?limit=20 means the 20 most recent rather
-   * than the 20 oldest, which is never what a caller wants. */
-  const slice =
-    Number.isFinite(limit) && limit > 0 ? all.slice(-limit).reverse() : all
+  /* recordJobStart unshifts, so the store is already newest-first and the most
+   * recent jobs are at the head. Taking the tail and reversing it returned the
+   * OLDEST jobs in oldest-last order -- wrong twice over, and it made the
+   * dashboard's Jobs view look frozen an hour in the past. */
+  const slice = Number.isFinite(limit) && limit > 0 ? all.slice(0, limit) : all
 
   response.json({
     jobs: slice.map(projectJobForList),
@@ -1617,13 +1619,15 @@ app.get('/sweep', (_request, response) => {
   response.json({ ok: true, plans: listSweeps({}), storePath: sweepPlansLocation() })
 })
 
+/* The plan the owner was shown, item for item — including what has since been
+ * applied to it, so "what did I agree to" and "what happened" are one read. */
 app.get('/sweep/:planId', (request, response) => {
-  const plan = listSweeps({ limit: 50 }).find((item) => item.id === request.params.planId)
+  const plan = getSweep(request.params.planId)
   if (!plan) {
     response.status(404).json({ ok: false, error: 'No such sweep plan.' })
     return
   }
-  response.json({ ok: true, plan })
+  response.json({ ok: true, plan, preview: formatSweep(plan) })
 })
 
 /*

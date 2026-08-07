@@ -1791,8 +1791,29 @@ async function runRound() {
   saveState(state)
   writeRoundReport(state, transcript, asked)
 
+  /*
+   * Proposals and changes are the output of a round; findings and requests are
+   * how it got there. Reporting only the latter two made rounds that produced
+   * real work print "0 new request(s), 0 finding(s)" -- which read as a dead
+   * round and is why several were wrongly written off as unproductive.
+   */
+  const thisRound = (list) =>
+    (list || []).filter((item) => item.round === state.round).length
+  const counts = [
+    [thisRound(state.proposals), 'capability'],
+    [thisRound(state.changes), 'change'],
+    [thisRound(state.findings), 'finding'],
+    /* Device-skill requests are queued through the same path as context and
+     * tool requests, so they are already inside this count. */
+    [asked.length, 'new request'],
+  ]
+
   process.stdout.write(
-    `\nRound ${state.round} done. ${asked.length} new request(s), ${state.findings.filter((f) => f.round === state.round).length} finding(s).\n` +
+    `\nRound ${state.round} done. ` +
+      counts
+        .map(([n, label]) => `${n} ${label}${n === 1 ? '' : 's'}`)
+        .join(', ') +
+      `.\n` +
       `Review:  node scripts/derive-harness.mjs review\n`,
   )
 }
