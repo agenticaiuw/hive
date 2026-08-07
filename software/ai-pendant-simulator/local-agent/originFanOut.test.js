@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { runBrowserActions } from './browserPage.js'
+import { mintCapsule, revokeCapsules } from './evidenceCapsules.js'
 import {
   FANOUT_READ_ONLY,
   RELAY_DAILY_BUDGET_MS,
@@ -297,6 +298,50 @@ test('every result records when it was actually fetched, and staleness is re-jud
    * the caller's decision, taken with the current clock. */
   const lenient = selectFresh(batch, { maxAgeMs: 30 * 24 * 3_600_000, now: clock() + 21 * 24 * 3_600_000 })
   assert.equal(lenient.fresh.length, 1)
+})
+
+test('revoking a source makes the reading stale even when it was just fetched', async (t) => {
+  const { budgetPath } = workspace(t)
+
+  /* Mint the capsule the read will collapse onto, then revoke it — "forget what
+   * you read on that page", after the page was read. */
+  const { capsuleId } = mintCapsule({
+    url: BILLING,
+    title: 'subscription',
+    region: { kind: 'main_text' },
+    content: PAGES[BILLING],
+    context: 'browser-extension',
+  })
+  revokeCapsules({ capsuleId, reason: 'owner asked' })
+
+  const safari = fakeSafari()
+  safari.deps.readText = async () => ({
+    content: PAGES[BILLING],
+    title: 'subscription',
+    url: BILLING,
+    capsuleId,
+  })
+  delete safari.deps.capsule
+
+  const batch = await readOrigins(
+    { origins: [{ url: BILLING, name: 'billing', look: ['renews'] }], maxAgeMs: 60_000 },
+    { ...safari.deps, budgetPath },
+  )
+
+  const billing = batch.results[0]
+  assert.equal(billing.ok, true, 'the read itself still happened — revocation never blocks a fetch')
+  assert.equal(billing.evidenceState, 'revoked')
+  assert.equal(billing.evidenceUsable, false)
+
+  /*
+   * The coupling that matters: a caller consuming `fresh` stops quoting a
+   * revoked source without knowing capsules exist. Age alone would have called
+   * this fresh — it was fetched milliseconds ago.
+   */
+  assert.equal(batch.counts.fresh, 0)
+  assert.equal(batch.counts.stale, 1)
+  assert.match(batch.stale[0].staleBecause, /evidence for this reading is revoked/)
+  assert.equal(batch.freshness.freshAsOf, null)
 })
 
 test('the batch is only as fresh as its stalest reading', async (t) => {

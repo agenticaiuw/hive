@@ -194,9 +194,11 @@ export function normalizeOrigins(input) {
     return {
       url,
       /* The origin, not the full URL, is what a caller groups results by, and
-       * two pages of the same account belong together. */
+       * two pages of the same account belong together. `origin` and `host` are
+       * the display-safe halves of normalizeSource; its `key` is lowercased and
+       * query-stripped for comparison only, so it is deliberately not carried
+       * here where a caller would be tempted to print it. */
       origin: source.origin ?? url,
-      key: source.key,
       name: String(raw.name || source.host || url).slice(0, 120),
       auth,
       backend,
