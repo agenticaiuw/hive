@@ -4,6 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+/* Before capabilityGaps.js, which reaches routines, pageWatch and briefings —
+ * all three default to the owner's real workspace, and the agent app is a live
+ * concurrent writer to every one of them. */
+import './testWorkspace.js'
+
 import {
   ANNOUNCEMENT_EXPECTED_PRODUCERS,
   REASKED_CAPABILITIES,
