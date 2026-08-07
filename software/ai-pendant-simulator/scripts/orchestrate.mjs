@@ -100,8 +100,13 @@ process.stdout.write(
     `Agents run when the commons has moved under them, not because a loop said so.\n\n`,
 )
 
+/* Enough to distinguish one flaky round from a harness that cannot start. */
+const FAILURE_LIMIT = 3
+
 let cycle = 0
 let ran = 0
+let failed = 0
+let consecutiveFailures = 0
 for (; cycle < CYCLES; cycle += 1) {
   const { run, held } = schedule(OUT_DIR, AGENTS, {
     cycle,
@@ -132,24 +137,52 @@ for (; cycle < CYCLES; cycle += 1) {
 
   const results = await Promise.all(run.map((row) => runAgent(row.agent)))
   for (const result of results) {
-    /* Marked after the round, so an agent's own deposits never make it eligible
-     * again — otherwise looking at things would be self-justifying. */
-    markRan(OUT_DIR, result.agent, { cycle })
-    ran += 1
     const done = /Round (\d+) done \[([^\]]+)\]\. (.*)/.exec(result.tail)
     process.stdout.write(
       `  ${result.agent}: ${
-        done ? `round ${done[1]} [${done[2]}] ${done[3]}` : `exit ${result.code}`
+        done ? `round ${done[1]} [${done[2]}] ${done[3]}` : `FAILED (exit ${result.code})`
       }\n`,
     )
+
     if (result.code !== 0) {
+      /*
+       * A failed round observed nothing, so it must NOT advance the watermark.
+       * Marking it would record the agent as having seen everything it did not
+       * see, which both loses the work and suppresses the retry.
+       */
+      failed += 1
+      consecutiveFailures += 1
       process.stdout.write(`    ${result.tail.trim().split('\n').slice(-2).join(' / ')}\n`)
+      continue
     }
+
+    /* Marked after a round that actually happened, so an agent's own deposits
+     * never make it eligible again — otherwise looking would be
+     * self-justifying. */
+    markRan(OUT_DIR, result.agent, { cycle })
+    ran += 1
+    consecutiveFailures = 0
+  }
+
+  /*
+   * Stop rather than grind. An unattended run that keeps spawning a process
+   * which cannot start is the exact waste this shell exists to remove: on
+   * 2026-08-07 a broken edit to the harness cost 24 rounds across 8 cycles
+   * while every one of them reported the same undefined identifier, and the
+   * shell went on scheduling as though nothing were wrong.
+   */
+  if (consecutiveFailures >= FAILURE_LIMIT) {
+    process.stdout.write(
+      `\nStopping: ${consecutiveFailures} rounds in a row failed to run. ` +
+        'That is the harness being broken, not the agents having nothing to say.\n',
+    )
+    break
   }
 }
 
 const minutes = Math.round((Date.now() - started.getTime()) / 60_000)
 process.stdout.write(
-  `\n${ran} rounds across ${cycle} cycles in ${minutes}m.\n` +
+  `\n${ran} rounds across ${cycle} cycles in ${minutes}m` +
+    `${failed ? `, and ${failed} that failed to run` : ''}.\n` +
     `Read the result:  node scripts/harness-stats.mjs --since 1\n`,
 )

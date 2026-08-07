@@ -34,6 +34,7 @@ import {
   directory as commonsDirectory,
   recall as recallFromCommons,
 } from './commons.mjs'
+import { findDuplicate } from './novelty.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '../../..')
@@ -1793,20 +1794,21 @@ async function executeTool(call, { state, transcript, asked }) {
     }
     process.stdout.write(`  spec: ${key}\n`)
   } else if (name === 'propose_capability') {
-    state.proposals.push({ ...args, round: state.round })
-    process.stdout.write(`  IDEA "${args.user_asks}"\n`)
-    result = {
-      recorded: true,
+    result = recordIfNovel(state, args, {
+      kind: 'capability',
+      into: (state.proposals ||= []),
+      describe: (item) => [item.user_asks, item.why_useful].filter(Boolean).join(' '),
+      announce: () => process.stdout.write(`  IDEA "${args.user_asks}"\n`),
       note: 'Noted. Keep going — propose others, including ones that need capabilities that do not exist yet.',
-    }
+    })
   } else if (name === 'propose_change') {
-    state.changes = state.changes || []
-    state.changes.push({ ...args, round: state.round })
-    process.stdout.write(`  CHANGE [${args.layer}] ${args.change.slice(0, 70)}\n`)
-    result = {
-      recorded: true,
+    result = recordIfNovel(state, args, {
+      kind: 'change',
+      into: (state.changes ||= []),
+      describe: (item) => [item.change, item.why].filter(Boolean).join(' '),
+      announce: () => process.stdout.write(`  CHANGE [${args.layer}] ${args.change.slice(0, 70)}\n`),
       note: 'Noted. Keep going, including layers you have not touched yet.',
-    }
+    })
   } else if (name === 'request_device_skill') {
     const request = {
       id: makeId('skill', state),
@@ -1952,6 +1954,55 @@ function advanceOutOfRecon(state) {
     `  [phase] recon -> capability after ${state.round} rounds; ` +
       'propose_capability and propose_change are available from the next round.\n',
   )
+}
+
+/*
+ * Refuse to record what the system already has.
+ *
+ * The capability prompt has always said "do not restate anything already in the
+ * backlog", and the backlog is in the agent's context when it reads that. It did
+ * not work: 11 near-duplicate pairs across 204 ledger entries, one of them
+ * word-for-word, from different agents in different rounds. An instruction not
+ * to repeat yourself is advice.
+ *
+ * Compared against the whole ledger rather than this agent's own proposals,
+ * because the duplicates are mostly across agents — which is the same
+ * rediscovery problem the commons exists for, wearing different clothes.
+ */
+function recordIfNovel(state, args, { kind, into, describe, announce, note }) {
+  const priorEntries = [...(state.proposals || []), ...(state.changes || []), ...ledgerEntries()]
+  const collision = findDuplicate(args, priorEntries, describe)
+
+  if (collision?.verdict === 'block') {
+    process.stdout.write(
+      `  DUP ${kind} ~${collision.score.toFixed(2)} of "${describe(collision.entry).slice(0, 60)}"\n`,
+    )
+    return {
+      recorded: false,
+      why: 'This restates something the system already has, so it was not recorded.',
+      alreadyHave: describe(collision.entry).slice(0, 400),
+      itsId: collision.entry.id ?? null,
+      /* Naming what it collided with, rather than only refusing, is the
+       * difference between a gate and a dead end — the agent can build past
+       * something it can see. */
+      next: 'Propose something this does not already cover, or say what it should become that it is not today.',
+    }
+  }
+
+  announce()
+  into.push({ ...args, round: state.round })
+  return {
+    recorded: true,
+    note,
+    ...(collision
+      ? {
+          closeTo: describe(collision.entry).slice(0, 200),
+          similarity: Number(collision.score.toFixed(2)),
+          heedThis:
+            'Recorded, but it is close to the above. If it is the same idea, the backlog now has it twice.',
+        }
+      : {}),
+  }
 }
 
 function depositIfObservation(name, args, result, state) {
