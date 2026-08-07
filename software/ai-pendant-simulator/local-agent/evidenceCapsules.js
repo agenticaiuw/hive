@@ -198,6 +198,34 @@ export function capsuleIdFor({ sourceKey, regionKey, observer, contentHash }) {
 
 /* ----------------------------------------------------------------- redaction */
 
+/**
+ * Withhold a segment classified as secret, verifying rather than trusting.
+ *
+ * maskSecretValue is written for a `key: value` shape; handed a whole sentence
+ * it appends the marker instead of replacing anything, so
+ * "The wifi password is hunter2." came back as
+ * "The wifi password is hunter2.: [withheld]" -- the secret preserved in full,
+ * and the map claiming action:'withheld' over it. A store that lies about what
+ * it withheld is worse than one that never tried.
+ *
+ * So the mask is used, then checked: if any non-trivial word of the original
+ * survives it, the segment is replaced outright. Withholding one sentence still
+ * leaves the rest of the page readable, which is the point of segmenting.
+ */
+function withheldOrEmpty(text) {
+  /* The same marker redaction.js falls back to when it has no label to keep,
+   * so a reader sees one vocabulary rather than two. */
+  const SECRET_PLACEHOLDER = '[withheld]'
+  const masked = maskSecretValue(text)
+  const survivors = String(text)
+    .split(/[^A-Za-z0-9]+/)
+    .filter((word) => word.length >= 4)
+
+  return survivors.some((word) => masked.includes(word))
+    ? SECRET_PLACEHOLDER
+    : masked
+}
+
 function segmentsOf(text) {
   const segments = []
 
@@ -246,7 +274,7 @@ export function redactionMapFor(rawText) {
     if (!segment.literal) {
       const verdict = classifySensitivity(segment.text)
       if (verdict === 'secret') {
-        emitted = maskSecretValue(segment.text)
+        emitted = withheldOrEmpty(segment.text)
         secrets += 1
         map.push({
           start: cursor,
