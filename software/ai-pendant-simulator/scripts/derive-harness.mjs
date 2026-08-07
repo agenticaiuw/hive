@@ -464,7 +464,48 @@ function normalize(state) {
 
 function saveState(state) {
   fs.mkdirSync(OUT_DIR, { recursive: true })
+  compactRounds(state)
   fs.writeFileSync(STATE_PATH(), `${JSON.stringify(state, null, 2)}\n`)
+}
+
+/*
+ * Keep the round history bounded. This project has already been wedged once by
+ * exactly this shape: a store that capped a COUNT rather than a SIZE, rewritten
+ * in full on every update, until the Mac agent's job store reached 135 MB and
+ * stopped answering. The harness then reproduced it — measured tonight at
+ * 70-100 KB per round per agent with no cap, 8 MB files after 80 rounds, and a
+ * full read-modify-write every round. A long unattended run is precisely the
+ * condition that turns that into a wedge.
+ *
+ * Tool RESULT payloads are 70% of the bytes, and they are the part nothing
+ * reads back: harness-stats counts tool NAMES, the commons holds the payloads
+ * content-addressed already, and proposals and changes live in their own arrays
+ * untouched. So old rounds keep their shape and lose their bulk, and the recent
+ * ones — the only ones anybody reads in full — stay intact.
+ */
+const KEEP_ROUNDS_INTACT = 10
+const MAX_ROUNDS_BYTES = 4 * 1024 * 1024
+
+function compactRounds(state) {
+  const rounds = state.rounds || []
+  if (Buffer.byteLength(JSON.stringify(rounds)) <= MAX_ROUNDS_BYTES) return
+
+  const cutoff = rounds.length - KEEP_ROUNDS_INTACT
+  for (let at = 0; at < cutoff; at += 1) {
+    const round = rounds[at]
+    if (!round?.transcript || round.compacted) continue
+
+    round.transcript = round.transcript.map((item) => {
+      if (item.type !== 'tool' || item.result === undefined) return item
+      const bytes = Buffer.byteLength(JSON.stringify(item.result ?? null))
+      /* Small results are cheaper to keep than to describe. */
+      if (bytes <= 400) return item
+      return { ...item, result: { elided: true, bytes } }
+    })
+    /* Marked so a later save does not walk it again, and so anything reading
+     * this back can tell an elided result from a genuinely empty one. */
+    round.compacted = true
+  }
 }
 
 /*
