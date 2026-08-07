@@ -38,19 +38,37 @@
  *   "Fill out this web form from the information I give you, stop before submitting"
  *   "Fill out this online form using the details we discussed, stop before submitting"
  *
- * A threshold that misses that is a threshold that does nothing, so 0.45 it is.
- * What answers the asymmetry instead is that a block is not a loss: the agent
- * is handed the entry it collided with inside the same round and can say what
- * its idea is that the existing one is not. A re-proposal forced to name its
- * own difference is worth more than the duplicate it replaced.
+ * A threshold that misses that is a threshold that does nothing, which ruled out
+ * cutting high and left 0.45.
  *
- * Two lines rather than one. At or above BLOCK_AT (11 pairs in the ledger,
- * 0.05% of all pairs) the entry is refused. In the band between, it is recorded
- * WITH the neighbour attached, so a genuine refinement survives and the agent
- * can see what it is near. Below, nothing happens.
+ * Two lines rather than one. At or above BLOCK_AT the entry is refused. In the
+ * band between, it is recorded WITH the neighbour attached, so a genuine
+ * refinement survives and the agent can see what it is near. Below, nothing
+ * happens.
+ *
+ * BLOCK_AT then had to come down from 0.45, because 0.45 caught verbatim
+ * restatement and nothing else. relay-realtime proposed one idea eleven times —
+ * "keep working after I stop talking, then tell me what happened" — and every
+ * pair in that family scored between 0.29 and 0.41, so the gate declined to
+ * stop a repetition the brief then reported as a single cluster. A system that
+ * reports repetition it refused to prevent is incoherent, so the gate and the
+ * report now share one number: SAME_IDEA_AT is what "the same idea" means
+ * everywhere, and synthesize.mjs groups by it.
+ *
+ * What makes 0.30 safe rather than merely lower is measured, not argued. Across
+ * all 291,466 proposal pairs in the corpus, the pairs at or above 0.30 are
+ * **64 same-agent and 0 cross-agent**. The gate at this threshold catches an
+ * agent repeating itself and has never once blocked one agent because a
+ * different agent said something similar — which was the whole worry.
+ *
+ * And a block is not a lost idea in any case: the colliding entry is handed
+ * back inside the same round, and an agent forced to say what its proposal is
+ * that the existing one is not produces something better than the duplicate
+ * would have been.
  */
-export const BLOCK_AT = 0.45
-export const WARN_AT = 0.35
+export const SAME_IDEA_AT = 0.3
+export const BLOCK_AT = SAME_IDEA_AT
+export const WARN_AT = 0.22
 
 /* Words shorter than this carry no topic — "the", "and", "for", "with". */
 const MIN_WORD = 4

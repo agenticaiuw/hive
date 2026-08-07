@@ -21,18 +21,18 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { fingerprint, similarity } from './novelty.mjs'
+import { SAME_IDEA_AT, fingerprint, similarity } from './novelty.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const OUT_DIR = path.join(HERE, '../../..', 'diagnostics', 'harness-derivation')
 
 /*
- * Lower than the duplicate threshold on purpose. Blocking a proposal demands
- * near-certainty that it restates another; grouping only has to put related
- * things next to each other, and a reader can see at a glance when a cluster is
- * loose. Erring toward more clusters shows more; erring toward fewer hides.
+ * The same number the gate blocks at, imported rather than repeated. These were
+ * two independent constants once, and the gap between them meant the brief
+ * reported an eleven-proposal cluster that the gate had declined to prevent.
+ * Whatever "the same idea" means, it has to mean one thing.
  */
-const CLUSTER_AT = 0.3
+const CLUSTER_AT = SAME_IDEA_AT
 
 function flag(name) {
   const at = process.argv.indexOf(`--${name}`)
