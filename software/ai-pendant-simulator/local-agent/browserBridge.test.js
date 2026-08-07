@@ -182,3 +182,40 @@ test('cancelling one command leaves the others queued', () => {
   assert.equal(getBrowserCommandResult(spared.commandId).status, 'queued')
   cancelBrowserCommands()
 })
+
+/*
+ * The case the TTL was added for, and did not actually cover.
+ *
+ * Expiry ran only from pollBrowserCommand, which assumed an extension would
+ * eventually connect. This system spent an entire day with `online: false` and
+ * a device row hours stale, so the sweep never ran once and the queue grew
+ * without bound — two commands were sitting in it when this was found.
+ */
+test('the queue is bounded even when no extension ever connects', (t) => {
+  cancelBrowserCommands()
+  t.mock.timers.enable({ apis: ['Date'] })
+
+  const abandoned = enqueueBrowserCommand({ type: 'browser_navigate' })
+  t.mock.timers.tick(90_001)
+
+  /* Nothing polls. The only thing that happens is more work arriving. */
+  const fresh = enqueueBrowserCommand({ type: 'browser_read_page' })
+
+  assert.equal(getBrowserStatus().pendingCommands, 1, 'the dead one was retired')
+  assert.equal(getBrowserCommandResult(abandoned.commandId).expired, true)
+  assert.equal(getBrowserCommandResult(fresh.commandId).status, 'queued')
+  cancelBrowserCommands()
+})
+
+test('enqueueing does not retire a command a caller is still waiting on', (t) => {
+  cancelBrowserCommands()
+  t.mock.timers.enable({ apis: ['Date'] })
+
+  const inFlight = enqueueBrowserCommand({ type: 'browser_navigate' })
+  t.mock.timers.tick(30_000)
+  enqueueBrowserCommand({ type: 'browser_read_page' })
+
+  assert.equal(getBrowserCommandResult(inFlight.commandId).status, 'queued')
+  assert.equal(getBrowserStatus().pendingCommands, 2)
+  cancelBrowserCommands()
+})

@@ -69,6 +69,22 @@ export function getBrowserStatus() {
 }
 
 export function enqueueBrowserCommand(action) {
+  /*
+   * Sweep here too, not only on poll.
+   *
+   * Expiry used to run only from pollBrowserCommand, which quietly assumed an
+   * extension would eventually connect. When one never does — the state this
+   * system has actually been in all day, `online: false` with a device row
+   * whose last heartbeat is hours old — nothing ever ran the sweep, and the
+   * queue grew without bound. Two commands were sitting in it when this was
+   * found, which is exactly the condition the TTL was added to prevent.
+   *
+   * Enqueue is the right second place because it is the only event guaranteed
+   * to happen when the queue is growing: whatever else is broken, something
+   * putting work in is something that can pay for retiring the dead work.
+   */
+  expireStaleCommands()
+
   const commandId = `browser_${crypto.randomUUID()}`
   const command = {
     commandId,
