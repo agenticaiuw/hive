@@ -497,9 +497,20 @@ The relay's device table, one authenticated GET away, holds exactly two entries:
     home-macbook-bridge        mac_bridge   ONLINE
     cloudflare-contract-test   mobile       offline since 2026-07-31
 
-**No nRF9160 has ever registered.** There has been no pendant connected for the
-whole of this run, and a large share of 835 proposals describe what a worn device
-should do. The audio telemetry the agents kept citing from `/pipeline` is
+**No nRF9160 has ever registered with the relay.**
+
+*Corrected 2026-08-07, after the owner said the pendant was connected and I
+checked instead of arguing:* both chips ARE physically present on USB serial —
+`/dev/cu.usbmodem0009600365811/813/815` is the nRF9160 DK's VCOM ports and
+`/dev/cu.usbserial-0287A9CA` is the ESP32 bridge. What is true is narrower than
+what I first wrote: the hardware is attached to the Mac, and it does not appear
+in the relay's device table, which means it is not registering over LTE. "No
+pendant has registered" was right; "there is no pendant" was an overstatement of
+it, and the difference matters because the first is a connectivity bug worth
+fixing while the second would mean the whole worn-device line of work is moot.
+
+It is not moot. A large share of 835 proposals describe what a worn device
+should do, and those are now testable over serial. The audio telemetry the agents kept citing from `/pipeline` is
 recorded history from earlier sessions, not a live device — and it reads
 identically to live data unless you go and check.
 
