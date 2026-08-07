@@ -176,6 +176,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
 const distDir = path.join(rootDir, 'dist')
 
+/*
+ * The dashboard is one SvelteKit app with two hosts: the Cloudflare Worker and
+ * this agent. Serving the very same build here is what stops the local and the
+ * deployed dashboards drifting apart — they were separate codebases, and every
+ * change had to be written twice. Produced by `npm run build:agent` in
+ * software/dashboard-sveltekit.
+ */
+const svelteDashboardDir = path.resolve(
+  rootDir,
+  '../dashboard-sveltekit/build-agent',
+)
+const svelteDashboardIndex = path.join(svelteDashboardDir, 'index.html')
+const hasSvelteDashboard = fs.existsSync(svelteDashboardIndex)
+
 const app = express()
 warmMachineContext()
 
@@ -1503,14 +1517,29 @@ app.get('/memory/projection', (request, response) => {
   response.json({ ok: true, ...projected })
 })
 
+if (hasSvelteDashboard) {
+  // Hashed assets first, so the SPA shell below never answers for /_app/*.
+  app.use('/dashboard', express.static(svelteDashboardDir, { index: false }))
+
+  // Client-side routing means any path under /dashboard is the same document.
+  app.get(['/dashboard', '/dashboard/', '/dashboard/{*splat}'], (request, response) => {
+    issueDashboardSession(request, response)
+    response.sendFile(svelteDashboardIndex)
+  })
+}
+
 if (fs.existsSync(distDir)) {
   app.use('/assets', express.static(path.join(distDir, 'assets')))
   app.use(express.static(distDir, { index: false }))
 
-  app.get(['/dashboard', '/dashboard/'], (request, response) => {
-    issueDashboardSession(request, response)
-    response.sendFile(path.join(distDir, 'dashboard.html'))
-  })
+  // Only when the SvelteKit build is absent — an agent on a tree that has not
+  // run `build:agent` still gets a dashboard rather than a 404.
+  if (!hasSvelteDashboard) {
+    app.get(['/dashboard', '/dashboard/'], (request, response) => {
+      issueDashboardSession(request, response)
+      response.sendFile(path.join(distDir, 'dashboard.html'))
+    })
+  }
 }
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -1531,7 +1560,7 @@ app.listen(PORT, '0.0.0.0', () => {
     })
   }
   launchBridge()
-  if (fs.existsSync(path.join(distDir, 'dashboard.html'))) {
+  if (hasSvelteDashboard || fs.existsSync(path.join(distDir, 'dashboard.html'))) {
     console.log(`Mac Ops dashboard: http://localhost:${PORT}/dashboard`)
   }
 
@@ -1601,7 +1630,8 @@ async function buildHealthPayload() {
     sessionsPath: sessionsLocation(),
     jobsPath: jobsLocation(),
     pipelinePath: pipelineLocation(),
-    dashboardAvailable: fs.existsSync(path.join(distDir, 'dashboard.html')),
+    dashboardAvailable:
+      hasSvelteDashboard || fs.existsSync(path.join(distDir, 'dashboard.html')),
   }
 }
 

@@ -10,20 +10,20 @@
   // a failure is the reason anyone opened this job.
   let toggled = $state(false);
   const open = $derived(entry.failed !== toggled);
-  const state = $derived(
+  const stepState = $derived(
     entry.ok === null ? "waiting" : entry.failed ? "failed" : "done",
   );
 </script>
 
 <li>
-  <div class="event-index {state}">{index + 1}</div>
+  <div class="event-index {stepState}">{index + 1}</div>
   <div class="event-copy">
     <div class="job-step-head">
       <div>
         <span class="event-stage">{entry.type.replaceAll("_", " ")}</span>
         <span class="event-label">{entry.label}</span>
       </div>
-      <span class="status-chip {state === 'failed' ? 'warn' : state === 'done' ? 'ok' : 'run'}"
+      <span class="status-chip {stepState === 'failed' ? 'warn' : stepState === 'done' ? 'ok' : 'run'}"
         ><i aria-hidden="true"></i>{entry.ok === null
           ? "Planned"
           : entry.failed

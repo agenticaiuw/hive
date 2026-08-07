@@ -1574,3 +1574,274 @@ blockquote {
     animation: none;
   }
 }
+
+/* ---------- Jobs ---------- */
+
+.jobs-panel {
+  padding: 18px 20px 20px;
+}
+
+.job-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.job-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.68rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.job-chip:hover {
+  color: #c8d2e0;
+}
+
+.job-chip.on {
+  border-color: rgba(118, 230, 163, 0.4);
+  color: #c8f5d7;
+  background: rgba(118, 230, 163, 0.09);
+}
+
+/* Rail on the left, one job in full on the right. Stacks under 900px so the
+   detail is never a 200px column. */
+.jobs-split {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: 26px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .jobs-split {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+}
+
+.jobs-rail {
+  min-width: 0;
+  max-height: 560px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.job-group + .job-group {
+  margin-top: 18px;
+}
+
+.job-group-head {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.job-group-head span {
+  font-family: var(--font-geist-mono), monospace;
+  letter-spacing: 0;
+}
+
+.jobs-rail .history-main small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.jobs-main {
+  min-width: 0;
+}
+
+.jobs-empty {
+  padding: 26px 0;
+}
+
+.jobs-empty h3 {
+  font-size: 1.4rem;
+  letter-spacing: -0.03em;
+}
+
+.jobs-empty p {
+  margin-top: 8px;
+  max-width: 46ch;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.job-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.job-detail-head h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.job-touches {
+  margin-top: 16px;
+}
+
+.job-touches ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.job-touches li {
+  overflow: hidden;
+  color: #c8d2e0;
+  font-size: 0.76rem;
+  line-height: 1.7;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-result {
+  margin-top: 16px;
+}
+
+.job-result blockquote {
+  white-space: pre-wrap;
+}
+
+.job-evidence-head {
+  margin-top: 22px;
+  margin-bottom: 0;
+}
+
+.job-step-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.job-step-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.job-step-head .status-chip {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  font-size: 0.64rem;
+}
+
+.job-params {
+  margin-top: 8px;
+}
+
+.job-params dd {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.event-index.waiting {
+  color: var(--blue);
+  border-color: rgba(112, 167, 255, 0.28);
+}
+
+/* The command and its output verbatim — this is the evidence, so it is not
+   truncated, only scrolled. */
+.job-output {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.job-output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
+}
+
+.job-output-head .micro-label {
+  margin-bottom: 0;
+}
+
+.job-output-body {
+  max-height: 260px;
+  margin: 0;
+  border-top: 1px solid var(--line);
+  padding: 11px;
+  overflow: auto;
+  color: #c6d0dd;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.68rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.job-output-body[data-stream="stderr"] {
+  color: #ffd9a4;
+}
+
+.job-tools {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.job-note {
+  margin-top: 14px;
+  line-height: 1.55;
+}
+
+.linkish {
+  border: 0;
+  padding: 0;
+  color: #9fc0ff;
+  background: none;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.linkish:hover {
+  color: #cfe0ff;
+}
+
+.status-chip.off i {
+  background: #5d6470;
+}
+
+.run-dot.ok {
+  background: var(--green);
+}
+
+.run-dot.run {
+  background: var(--blue);
+}
+
+.run-dot.warn {
+  background: var(--amber);
+}
+
+.run-dot.off {
+  background: #5d6470;
+}

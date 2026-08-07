@@ -1,14 +1,13 @@
 <script lang="ts">
   import "../app.css";
   import type { Snippet } from "svelte";
-  import type { LayoutServerData } from "./$types";
+  import type { LayoutData } from "./$types";
 
   const TITLE = "AI Pendant Dashboard";
   const DESCRIPTION =
     "Live Cloudflare, Mac bridge, microphone, and voice pipeline diagnostics for the AI Pendant.";
 
-  let { data, children }: { data: LayoutServerData; children: Snippet } =
-    $props();
+  let { data, children }: { data: LayoutData; children: Snippet } = $props();
 </script>
 
 <svelte:head>

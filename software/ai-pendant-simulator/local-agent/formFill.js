@@ -7,14 +7,7 @@ import {
   readJsonWithRecovery,
   writeJsonAtomic,
 } from './atomicJsonStore.js'
-import {
-  addressPage,
-  isHttpUrl,
-  normalizeText,
-  readPageText,
-  runBrowserAction,
-  snapshotPage,
-} from './browserPage.js'
+import { addressPage, isHttpUrl, runBrowserActions } from './browserPage.js'
 import { workspacePath } from './config.js'
 
 /*
@@ -481,21 +474,47 @@ export async function fillForm(
   }
 
   const page = await addressPage(url, { reload, options })
-  const snapshot = await snapshotPage(page.target, { maxElements, options })
-  const formHtml = await readPageText(page.target, {
-    mode: 'html',
-    selector: formSelector,
-    maxChars: MAX_FORM_HTML,
-    options,
-  }).catch(() => ({ content: '' }))
 
-  const { form, controls } = parseFormHtml(formHtml.content, page.url)
-  const elements = linkElements(snapshot.elements, controls)
+  /* One trip for both halves of the picture: the snapshot says how to reach
+   * each control, the markup says what it is called on the wire. */
+  const [snapResult, htmlResult] = await runBrowserActions(
+    [
+      {
+        type: 'browser_snapshot',
+        label: 'find the fields',
+        params: { ...page.target, maxElements },
+      },
+      {
+        type: 'browser_read_page',
+        label: 'read the form markup',
+        params: {
+          ...page.target,
+          mode: 'html',
+          selector: formSelector,
+          maxChars: MAX_FORM_HTML,
+        },
+      },
+    ],
+    options,
+  )
+  if (!snapResult?.ok) {
+    throw new Error(snapResult?.error || 'The form could not be read.')
+  }
+
+  const { form, controls } = parseFormHtml(
+    htmlResult?.ok ? String(htmlResult.data?.content ?? '') : '',
+    page.url,
+  )
+  const elements = linkElements(
+    Array.isArray(snapResult.data?.elements) ? snapResult.data.elements : [],
+    controls,
+  )
 
   const filledByRef = new Map()
   const applied = []
   const warnings = []
   const unmatched = []
+  const planned = []
 
   for (const [key, rawValue] of Object.entries(values)) {
     const hit = matchField(key, elements)
@@ -532,57 +551,101 @@ export async function fillForm(
       continue
     }
 
-    try {
-      if (element.tag === 'select') {
-        await runBrowserAction(
-          'select',
-          { ...page.target, ...locator(element), value: String(rawValue), label: String(rawValue) },
-          options,
-        )
-      } else if (element.inputType === 'checkbox' || element.inputType === 'radio') {
-        const want = truthy(rawValue)
-        if (want !== Boolean(element.checked)) {
-          /* The only click this function makes, and only on a box or a radio. */
-          await runBrowserAction('click', { ...page.target, ...locator(element) }, options)
-        }
-      } else if (isTextLike(element)) {
-        await runBrowserAction(
-          'type',
-          {
-            ...page.target,
-            ...locator(element),
-            text: String(rawValue),
-            /* The extension will press Enter or requestSubmit() if this is
-             * true. It is never true here. */
-            submit: false,
-          },
-          options,
-        )
-      } else {
-        warnings.push(`"${key}" maps to a ${element.role || element.tag} that cannot be typed into.`)
+    const entry = { key, element, matchedBy }
+    if (element.tag === 'select') {
+      entry.action = {
+        type: 'browser_select',
+        label: `set ${element.label || key}`,
+        params: {
+          ...page.target,
+          ...locator(element),
+          value: String(rawValue),
+          label: String(rawValue),
+        },
+      }
+    } else if (element.inputType === 'checkbox' || element.inputType === 'radio') {
+      if (truthy(rawValue) === Boolean(element.checked)) {
+        /* Already in the state the owner asked for; clicking would undo it. */
+        filledByRef.set(element.ref, { value: rawValue })
         continue
       }
-      filledByRef.set(element.ref, { value: rawValue })
-      applied.push({
-        key,
-        field: element.control?.name || element.label || element.selector,
-        label: element.label,
-        matchedBy,
-        ref: element.ref,
-        selector: element.selector,
-      })
-    } catch (error) {
-      warnings.push(`"${key}" could not be filled: ${String(error?.message || error)}`)
+      /* The only click this function makes, and only on a box or a radio. */
+      entry.action = {
+        type: 'browser_click',
+        label: `tick ${element.label || key}`,
+        params: { ...page.target, ...locator(element) },
+      }
+    } else if (isTextLike(element)) {
+      entry.action = {
+        type: 'browser_type',
+        label: `type ${element.label || key}`,
+        params: {
+          ...page.target,
+          ...locator(element),
+          text: String(rawValue),
+          /* The extension presses Enter or calls requestSubmit() when this is
+           * true. It is never true here, and that is the whole product. */
+          submit: false,
+        },
+      }
+    } else {
+      warnings.push(`"${key}" maps to a ${element.role || element.tag} that cannot be typed into.`)
+      continue
     }
+    entry.value = rawValue
+    planned.push(entry)
   }
 
+  /* Every field in one trip. Each action still succeeds or fails on its own —
+   * a selector that stopped matching becomes a warning, not a dead fill. */
+  const fillResults = planned.length
+    ? await runBrowserActions(
+        planned.map((entry) => entry.action),
+        options,
+      )
+    : []
+
+  planned.forEach((entry, index) => {
+    const result = fillResults[index]
+    if (!result?.ok) {
+      warnings.push(
+        `"${entry.key}" could not be filled: ${result?.error ?? 'no result from the browser'}`,
+      )
+      return
+    }
+    filledByRef.set(entry.element.ref, { value: entry.value })
+    applied.push({
+      key: entry.key,
+      field: entry.element.control?.name || entry.element.label || entry.element.selector,
+      label: entry.element.label,
+      matchedBy: entry.matchedBy,
+      ref: entry.element.ref,
+      selector: entry.element.selector,
+    })
+  })
+
   /* Read the page back rather than trusting the writes: checkbox and radio
-   * state is the part the snapshot can actually confirm. */
-  const verification = await snapshotPage(page.target, { maxElements, options }).catch(
-    () => ({ elements: [] }),
-  )
-  const verifiedElements = verification.elements.length
-    ? linkElements(verification.elements, controls)
+   * state is the part the snapshot can actually confirm, and the screenshot is
+   * the part a person can. Both in one trip. */
+  const [verifyResult, captureResult] = await runBrowserActions(
+    [
+      {
+        type: 'browser_snapshot',
+        label: 'read the filled form back',
+        params: { ...page.target, maxElements },
+      },
+      ...(capture
+        ? [{ type: 'browser_capture', label: 'photograph the filled form', params: { ...page.target } }]
+        : []),
+    ],
+    options,
+  ).catch(() => [])
+
+  const verifiedRaw = verifyResult?.ok
+    ? (verifyResult.data?.elements ?? [])
+    : []
+  const verifiedElements = verifiedRaw.length
+    ? linkElements(verifiedRaw, controls)
     : elements
 
   const { entries, omitted } = buildPayload(verifiedElements, filledByRef)
@@ -607,9 +670,9 @@ export async function fillForm(
 
   let screenshot = null
   if (capture) {
-    screenshot = await captureToDisk(page.target, options).catch((error) => ({
-      error: String(error?.message || error),
-    }))
+    screenshot = captureResult?.ok
+      ? writeCapture(captureResult.data)
+      : { error: captureResult?.error ?? 'the browser returned no screenshot' }
   }
 
   const manifest = {
@@ -668,16 +731,18 @@ function summarize({ applied, entries, contract, submitControl, missingRequired 
  * rather than into the store — a base64 PNG in a JSON file is how a durable
  * store becomes a megabyte per fill.
  */
-async function captureToDisk(target, options) {
-  const result = await runBrowserAction('capture', { ...target }, options)
-  const dataUrl = String(result?.imageDataUrl ?? '')
-  const base64 = dataUrl.split(',')[1] ?? ''
-  if (!base64) throw new Error('The browser returned no image data.')
-  const directory = path.join(workspacePath, 'form-fills')
-  fs.mkdirSync(directory, { recursive: true })
-  const file = path.join(directory, `fill-${Date.now()}.png`)
-  fs.writeFileSync(file, Buffer.from(base64, 'base64'), { mode: 0o600 })
-  return { path: file }
+function writeCapture(data) {
+  try {
+    const base64 = String(data?.imageDataUrl ?? '').split(',')[1] ?? ''
+    if (!base64) return { error: 'The browser returned no image data.' }
+    const directory = path.join(workspacePath, 'form-fills')
+    fs.mkdirSync(directory, { recursive: true })
+    const file = path.join(directory, `fill-${Date.now()}.png`)
+    fs.writeFileSync(file, Buffer.from(base64, 'base64'), { mode: 0o600 })
+    return { path: file }
+  } catch (error) {
+    return { error: String(error?.message || error) }
+  }
 }
 
 export function listFills({ filePath = STORE_PATH } = {}) {

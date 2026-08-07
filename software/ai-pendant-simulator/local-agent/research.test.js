@@ -302,10 +302,11 @@ test('readOpenTabs reads the owner tabs over the agent HTTP surface', async () =
     agentFetch: async (routePath, body) => {
       calls.push(body.actions[0].type)
       if (body.actions[0].type === 'browser_list_tabs') {
+        // The extension's payload rides under `browser`, not `result`.
         return {
           results: [
             {
-              result: {
+              browser: {
                 tabs: [
                   { tabId: 1, url: 'https://stripe.com/pricing', title: 'Pricing' },
                   { tabId: 2, url: 'https://news.example/x', title: 'News' },
@@ -317,7 +318,7 @@ test('readOpenTabs reads the owner tabs over the agent HTTP surface', async () =
         }
       }
       return {
-        results: [{ result: { title: 'Pricing', content: 'Per seat pricing. '.repeat(40) } }],
+        results: [{ browser: { title: 'Pricing', content: 'Per seat pricing. '.repeat(40) } }],
       }
     },
   })
@@ -334,7 +335,7 @@ test('page mode falls back to the web when no tab matched', async () => {
   const result = await researchTopic({
     topic: 'ltem coverage',
     mode: 'page',
-    agentFetch: async () => ({ results: [{ result: { tabs: [] } }] }),
+    agentFetch: async () => ({ results: [{ browser: { tabs: [] } }] }),
     llm: async ({ messages }) => {
       const system = messages[0].content
       if (system.includes('You plan web research')) {

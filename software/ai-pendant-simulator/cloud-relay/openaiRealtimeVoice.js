@@ -379,13 +379,33 @@ export function resamplePcmS16le(pcmBuffer, fromRate, toRate) {
 export const UPLINK_TARGET_PEAK = 8000 // ~0.24 FS, ~8.6x on the failing clip
 export const UPLINK_MAX_GAIN = 12
 
+/*
+ * Gain slew, and why it is this slow.
+ *
+ * A conventional fast AGC makes things WORSE here, and the working capture
+ * proves it: with a 1 s rise the 2.7 s of room tone before "what is the
+ * weather in Taipei" was lifted from ~100 RMS to ~1000 — speech level — and
+ * then collapsed to unity the instant the talker started. Replayed against
+ * the live API that session went from a clean answer to zero events. Turn
+ * detection needs the CONTRAST between silence and speech, and a fast AGC is
+ * precisely a contrast eraser.
+ *
+ * So the gain winds up over ~15 s. A normal talker speaks long before that and
+ * pins the gain at unity for the rest of the session; only a mic that stays
+ * quiet for many seconds ever earns a boost. Ducking stays fast (5 ms) so a
+ * sudden loud syllable is never driven into the rails.
+ */
+const UPLINK_RISE_SECONDS = 15
+const UPLINK_FALL_SECONDS = 0.005
+/* Peak-envelope half-life: how long one loud syllable holds the gain down.
+ * Longer than any pause inside real speech, so sentence gaps do not pump. */
+const UPLINK_RELEASE_HALF_LIFE_SECONDS = 30
+
 /**
  * Peak-following gain stage for s16le mono PCM.
  *
  * The gain tracks a decaying peak envelope, so a normal-level talker rides at
- * unity and only a persistently quiet mic gets boosted. Release is slow (a few
- * seconds) so the pauses between sentences are not pumped up to full scale;
- * the fall step is fast so a sudden loud sample ducks before it clips.
+ * unity and only a persistently quiet mic gets boosted.
  */
 export function createUplinkLeveler({
   sampleRate = REALTIME_PCM_RATE,
@@ -395,17 +415,14 @@ export function createUplinkLeveler({
   const rate = Number(sampleRate) > 0 ? Number(sampleRate) : REALTIME_PCM_RATE
   const ceiling = Math.max(1, Number(maxGain) || 1)
   const target = Math.max(1, Number(targetPeak) || 1)
-  // Peak envelope half-life; how long a loud syllable keeps the gain down.
-  const release = Math.pow(0.5, 1 / (rate * 4))
-  // Gain slew: ~1 s to wind all the way up, ~5 ms to duck all the way down.
-  // Asymmetric on purpose — winding up slowly avoids pumping the gaps between
-  // sentences, but a sudden loud syllable has to be ducked before it clips.
-  const riseStep = Math.pow(ceiling, 1 / (rate * 1))
-  const fallStep = Math.pow(ceiling, 1 / (rate * 0.005))
-  // No prior on the mic: the very first loud sample sets the envelope, and
-  // until one arrives the rise slew is the only thing bounding the gain. The
-  // alternative (seeding the envelope at the target) takes ~12 s to wind up,
-  // which is longer than most people wait before speaking.
+  const release = Math.pow(
+    0.5,
+    1 / (rate * UPLINK_RELEASE_HALF_LIFE_SECONDS),
+  )
+  const riseStep = Math.pow(ceiling, 1 / (rate * UPLINK_RISE_SECONDS))
+  const fallStep = Math.pow(ceiling, 1 / (rate * UPLINK_FALL_SECONDS))
+  // No prior on the mic: the first loud sample sets the envelope, and until
+  // one arrives the rise slew is the only thing bounding the gain.
   let peak = 0
   let gain = 1
 
@@ -929,7 +946,7 @@ export async function createStreamingRealtimeSession({
   // a quiet pendant mic still clears the Realtime VAD's absolute gate.
   const leveler = passthroughInput
     ? null
-    : createUplinkLeveler({ sampleRate: REALTIME_PCM_RATE, maxGain: 1 })
+    : createUplinkLeveler({ sampleRate: REALTIME_PCM_RATE })
   const socket = await openRealtimeSocket(realtimeWsUrl(), apiKey)
 
   const state = {

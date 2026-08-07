@@ -97,7 +97,7 @@ test('the submit control is never a fill target', () => {
 })
 
 test('the manifest is what the browser would send, not what we typed', () => {
-  const { form, elements } = linked()
+  const { elements } = linked()
   const filled = new Map([
     ['e0', { value: 'Wisconsin' }],
     ['e2', { value: 'notes from the call' }],

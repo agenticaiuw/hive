@@ -8,9 +8,20 @@ import { resolveRuntimeEnv } from "$lib/server/env";
  * public-path allowlist, then the session check. Pages get a 302 to /login,
  * `/api/*` gets a 401 before any relay call is made.
  */
+/*
+ * The agent build ships as static files with no server behind it, so this hook
+ * runs only while generating the shell. Its gate would 302 that render to
+ * /login and there would be no page at all. Access control for that build is
+ * the Mac agent's own loopback session, which is a stronger gate than a
+ * pairing code: it is unreachable from the network.
+ */
+const AGENT_BUILD = import.meta.env.VITE_DASHBOARD_BACKEND === "agent";
+
 export const handle: Handle = async ({ event, resolve }) => {
   const env = resolveRuntimeEnv(event.platform);
   event.locals.runtimeEnv = env;
+
+  if (AGENT_BUILD) return resolve(event);
 
   const { url, request } = event;
 

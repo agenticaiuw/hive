@@ -46,8 +46,8 @@ function peakOf(pcm) {
 
 test('a mic too quiet for the Realtime VAD is lifted toward the target peak', () => {
   const leveler = createUplinkLeveler()
-  // The failing capture's actual speech peak.
-  const out = leveler.push(tone(928, { seconds: 6 }))
+  // The failing capture's actual speech peak, over the length of that capture.
+  const out = leveler.push(tone(928, { seconds: 20 }))
 
   assert.equal(out.length % 2, 0)
   assert.ok(
@@ -70,13 +70,40 @@ test('a normal-level talker is left alone', () => {
   assert.ok(peakOf(out) < 32767)
 })
 
-test('a quiet mic is levelled within a second, not a dozen', () => {
+/*
+ * The regression that a naive fast AGC caused, locked shut.
+ *
+ * With a 1 s rise, the 2.7 s of room tone before the working capture's talker
+ * said anything got lifted from ~100 RMS to ~1000 — the same level as their
+ * actual voice — and the gain then collapsed to unity the moment they spoke.
+ * Replayed live, that session went from a clean transcript and reply to zero
+ * Realtime events: turn detection reads the CONTRAST between silence and
+ * speech, so an AGC that erases it is worse than no AGC at all.
+ */
+test('room tone before a normal talker speaks is not lifted to speech level', () => {
   const leveler = createUplinkLeveler()
-  // Nobody waits 12 s before talking: one second of -31 dBFS speech has to be
-  // enough to reach a level the Realtime VAD can actually see.
-  leveler.push(tone(928, { seconds: 1 }))
+  // Room tone at the level both real captures actually show.
+  const roomTone = tone(450, { seconds: 2.7, hz: 90 })
+  const levelled = leveler.push(roomTone)
 
-  assert.ok(leveler.gain > 6, `only reached ${leveler.gain}x after 1 s`)
+  assert.ok(
+    leveler.gain < 2,
+    `room tone was already boosted ${leveler.gain}x before anyone spoke`,
+  )
+  assert.ok(peakOf(levelled) < 2 * 450)
+
+  // ...and the talker who follows still rides at unity.
+  leveler.push(tone(32000, { seconds: 1 }))
+  assert.equal(leveler.gain, 1)
+})
+
+test('a quiet mic is levelled well inside one conversation', () => {
+  const leveler = createUplinkLeveler()
+  // The failing run held the socket open for 33 s. Whatever the wind-up costs,
+  // it has to be paid back long before that.
+  leveler.push(tone(928, { seconds: 15 }))
+
+  assert.ok(leveler.gain > 6, `only reached ${leveler.gain}x after 15 s`)
 })
 
 test('levelling never clips and never inverts the waveform', () => {

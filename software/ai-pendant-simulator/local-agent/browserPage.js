@@ -157,23 +157,43 @@ export async function addressPage(
   const before = await listBrowserTabs(options)
   const open = matchTabs(before, url)
   let disposition
+  let after = before
 
   if (!open.length) {
     /* Nothing to reuse. navigate is the only command that can make a tab, and
      * with no tab at all every other command answers "No matching browser tab
      * is available" — verified live. */
-    await runBrowserAction('navigate', { url, newTab: true }, options)
     disposition = 'opened'
   } else if (reload) {
     /* urlContains keeps the reload in the tab that is already there instead of
      * stacking a new one on every poll. */
-    await runBrowserAction('navigate', { url, urlContains: needle }, options)
     disposition = 'reloaded'
   } else {
     disposition = 'reused'
   }
 
-  const after = disposition === 'reused' ? before : await listBrowserTabs(options)
+  if (disposition !== 'reused') {
+    /* Navigate and re-list in one trip: the re-list is only there to catch a
+     * redirect, and paying a second extension poll for it doubled the time a
+     * watch spends holding the browser. */
+    const [navigated, listed] = await runBrowserActions(
+      [
+        {
+          type: 'browser_navigate',
+          label: `open ${url}`,
+          params:
+            disposition === 'opened'
+              ? { url, newTab: true }
+              : { url, urlContains: needle },
+        },
+        { type: 'browser_list_tabs', label: 'confirm landing', params: { limit: 60 } },
+      ],
+      options,
+    )
+    if (!navigated?.ok) throw new Error(navigated?.error || `Could not open ${url}.`)
+    after = Array.isArray(listed?.data?.tabs) ? listed.data.tabs : []
+  }
+
   const landed = matchTabs(after, url)
 
   if (landed.length) {

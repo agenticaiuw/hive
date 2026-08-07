@@ -447,18 +447,23 @@ test('the speech sink returns audio metadata, never the samples', async () => {
   assert.ok(JSON.stringify(result).length < 200_000)
 })
 
-/* Real output from this Mac was 18 superwhisper chunks burying one resume. */
-test('a folder an app is churning collapses to one line', () => {
+/*
+ * Real output from this Mac: 18 superwhisper chunks buried one resume. Each
+ * clip has its OWN directory, so grouping by immediate folder saw eighteen
+ * lone files and collapsed nothing — hence grouping by a bounded ancestor.
+ */
+test('an app churning one-file-per-folder still collapses to one line', () => {
   const lines = summarizeFiles([
-    '~/Documents/superwhisper/recordings/1/output.wav',
-    '~/Documents/superwhisper/recordings/1/meta.json',
-    '~/Documents/superwhisper/recordings/1/raw.wav',
+    '~/Documents/superwhisper/recordings/1786081805/output.wav',
+    '~/Documents/superwhisper/recordings/1786081805/meta.json',
+    '~/Documents/superwhisper/recordings/1786081886/output.wav',
+    '~/Documents/superwhisper/recordings/1786081886/meta.json',
     '~/Downloads/resume.pdf',
     '~/Desktop/offer.pdf',
   ])
 
   assert.deepEqual(lines, [
-    '3 files in ~/Documents/superwhisper/recordings/1/',
+    '4 files in ~/Documents/superwhisper/recordings/',
     '~/Downloads/resume.pdf',
     '~/Desktop/offer.pdf',
   ])

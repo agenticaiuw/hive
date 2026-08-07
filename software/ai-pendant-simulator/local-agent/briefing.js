@@ -327,18 +327,26 @@ export function needsPreparation(event) {
 
 /*
  * "25 files changed" is true and useless when 18 of them are one app's scratch
- * recordings. Anything that touched a folder more than twice is that app
- * working, not the owner, so it collapses to one line and the files the owner
- * actually opened stay visible.
+ * recordings. Grouping by the immediate folder is not enough — superwhisper
+ * gives every clip its own directory, so each looked like a lone file. Group by
+ * a bounded ancestor instead (~/Documents/superwhisper/recordings), which is
+ * the level an app's output actually shares, and collapse anything busy there.
  */
+const FILE_GROUP_DEPTH = 4
 const FILES_PER_FOLDER_BEFORE_COLLAPSE = 2
+
+function fileGroupKey(file) {
+  const segments = file.split('/')
+  segments.pop()
+  return segments.slice(0, FILE_GROUP_DEPTH).join('/') || file
+}
 
 export function summarizeFiles(files = []) {
   const byFolder = new Map()
   for (const file of files) {
-    const folder = file.slice(0, file.lastIndexOf('/')) || file
-    if (!byFolder.has(folder)) byFolder.set(folder, [])
-    byFolder.get(folder).push(file)
+    const key = fileGroupKey(file)
+    if (!byFolder.has(key)) byFolder.set(key, [])
+    byFolder.get(key).push(file)
   }
 
   const lines = []

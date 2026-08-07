@@ -33,7 +33,9 @@ const execFileAsync = promisify(execFile)
  * had already muted their own volume.
  */
 
-const STORE_PATH = path.join(workspacePath, '.pendant-focus.json')
+/* Resolved per call so a test can hold its own session store. */
+const storePath = () =>
+  process.env.PENDANT_FOCUS_STORE_PATH || path.join(workspacePath, '.pendant-focus.json')
 
 /* Apps that interrupt by design. Overridable per call; this is the default for
  * someone who did not want to enumerate their own distractions out loud. */
@@ -59,8 +61,9 @@ const isValidStore = (value) => value && Array.isArray(value.sessions)
 const timers = new Map()
 
 function loadStore() {
-  ensureJsonStore(STORE_PATH, { sessions: [] }, { validate: isValidStore })
-  return readJsonWithRecovery(STORE_PATH, {
+  const filePath = storePath()
+  ensureJsonStore(filePath, { sessions: [] }, { validate: isValidStore })
+  return readJsonWithRecovery(filePath, {
     fallback: { sessions: [] },
     validate: isValidStore,
   })
@@ -68,11 +71,11 @@ function loadStore() {
 
 function saveStore(store) {
   store.sessions = store.sessions.slice(-50)
-  writeJsonAtomic(STORE_PATH, store, { validate: isValidStore })
+  writeJsonAtomic(storePath(), store, { validate: isValidStore })
 }
 
 export function focusStoreLocation() {
-  return STORE_PATH
+  return storePath()
 }
 
 export function activeFocusSession() {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import JobDetail from "./JobDetail.svelte";
   import RoutineDetail from "./RoutineDetail.svelte";
   import {
@@ -58,6 +59,15 @@
       refreshPending = false;
     }
   }
+
+  onMount(() => {
+    void refresh();
+    // A running job changes every few seconds; a hidden tab changes nothing.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 6_000);
+    return () => window.clearInterval(timer);
+  });
 
   const byRecency = (a: JobView, b: JobView) =>
     Date.parse(String(b.updatedAt || b.createdAt || 0)) -

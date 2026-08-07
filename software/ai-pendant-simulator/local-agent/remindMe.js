@@ -211,12 +211,38 @@ function cleanTitle(text, repeat) {
     }
   }
 
-  return title
+  title = title
     .replace(/^\s*(?:,|to|that|about)\s+/i, '')
     .replace(/\bremind\s+me\s+(?:to|that|about)?\s*/gi, '')
     .replace(/\s+/g, ' ')
-    .replace(/^[\s,.-]+|[\s,.-]+$/g, '')
-    .slice(0, 120)
+
+  return stripWhenPhrases(title).slice(0, 120)
+}
+
+/*
+ * The clock is the "when", not the "what". A Reminders item called "call the
+ * landlord at 6 pm" is wrong twice over: the due date already says 6 pm, and
+ * the title reads as a lie at every other time the owner looks at the list.
+ *
+ * Anchored on a digit or a calendar word, so "be at the office" keeps its
+ * office. Repeated until stable, so "at 6 pm tomorrow" comes off whole.
+ */
+const WHEN_TAILS = [
+  /\s*\b(?:at|by|around)\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*$/i,
+  /\s*\b(?:today|tonight|tomorrow|this (?:morning|afternoon|evening))\s*$/i,
+  /\s*\bin\s+\d+\s+(?:minutes?|mins?|hours?|hrs?|days?)\s*$/i,
+  /\s*\b(?:on\s+)?(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*$/i,
+]
+
+function stripWhenPhrases(text) {
+  let title = String(text)
+  for (let pass = 0; pass < 4; pass += 1) {
+    const before = title
+    for (const pattern of WHEN_TAILS) title = title.replace(pattern, '')
+    title = title.replace(/^[\s,.-]+|[\s,.-]+$/g, '')
+    if (title === before) break
+  }
+  return title
 }
 
 function describeDays(days) {

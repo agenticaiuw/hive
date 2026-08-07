@@ -109,7 +109,7 @@ export function extractReadableText(html) {
     .replace(/<[^>]+>/g, ' ')
 
   const text = decodeEntities(body)
-    .replace(/[ \t\f\v ]+/g, ' ')
+    .replace(/[ \t\f\v\u00a0]+/g, ' ')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .split('\n')
     .map((line) => line.trim())
@@ -634,7 +634,7 @@ export async function readOpenTabs({
     ],
   })
 
-  const tabs = (listed?.results?.[0]?.result?.tabs || [])
+  const tabs = (browserPayload(listed)?.tabs || [])
     .map((tab) => ({
       tabId: tab?.tabId ?? tab?.id ?? null,
       url: String(tab?.url ?? ''),
@@ -664,7 +664,7 @@ export async function readOpenTabs({
         },
       ],
     })
-    const payload = read?.results?.[0]?.result ?? {}
+    const payload = browserPayload(read) ?? {}
     const text = String(payload.content ?? '').trim()
     sources.push(
       text.length >= MIN_USEFUL_SOURCE_CHARS
@@ -692,6 +692,14 @@ export async function readOpenTabs({
   }
 
   return { tabs, sources }
+}
+
+/* The extension's own payload rides under `browser` on the action result;
+ * `result` is accepted too so a shape change over there degrades to the web
+ * fallback instead of throwing. */
+function browserPayload(execution) {
+  const first = execution?.results?.[0]
+  return first?.browser ?? first?.result ?? null
 }
 
 async function callAgent(routePath, body) {
@@ -733,7 +741,7 @@ export async function researchTopic({
 
   let queries = []
   let overview = ''
-  let sources = []
+  let sources
 
   if (kind === 'page') {
     const tabs = await readOpenTabs({ match: match || subject, agentFetch })

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { backend } from "$lib/dataSource";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
@@ -135,6 +136,7 @@
         latestRunKey = key;
         void refreshRuns();
         void refresh();
+        void jobsPanel?.refresh();
         if (openTile === "history") void refreshHistory();
       }
     } catch {
@@ -338,9 +340,6 @@
         newestRun.status === "failed",
     ),
   );
-  const latestMacAction = $derived<any>(
-    Array.isArray(snapshot?.logs) ? snapshot!.logs[0] : null,
-  );
   const permissions = $derived<any>(agent.permissions ?? {});
   const browserExtension = $derived<any>(agent.browserExtension ?? {});
   const automationEntries = $derived(
@@ -351,9 +350,6 @@
   );
   const requiredMissing = $derived<string[]>(
     Array.isArray(permissions.requiredMissing) ? permissions.requiredMissing : [],
-  );
-  const activity = $derived<JsonRecord[]>(
-    Array.isArray(snapshot?.activity) ? snapshot!.activity.slice(0, 6) : [],
   );
   const sharedProduct = $derived<any>(snapshot?.product ?? {});
   const sharedSessions = $derived<JsonRecord[]>(
@@ -382,8 +378,6 @@
   const systemTone = $derived<"ok" | "warn" | "off">(
     cloudUp && bridgeUp ? "ok" : cloudUp || bridgeUp ? "warn" : "off",
   );
-  const newestFailedLog = $derived(activity[0]?.status === "failed");
-
   const heroChip = $derived<{ tone: string; word: string } | null>(
     selectedIdle
       ? { tone: "ok", word: "Idle" }
@@ -524,6 +518,9 @@
           <path d="M13.7 2.2v3.4h-3.4" />
         </svg>
       </button>
+      <!-- Nothing to sign out of on the Mac: that build is reachable only from
+           loopback and holds no session of its own. -->
+      {#if backend === "relay"}
       <form action="/api/auth/logout" method="post">
         <button
           class="icon-button"
@@ -548,6 +545,7 @@
           </svg>
         </button>
       </form>
+      {/if}
     </div>
   </header>
 
@@ -776,6 +774,15 @@
 
   <div class="tile-strip">
     <Tile
+      id="jobs"
+      label="Jobs"
+      tone="ok"
+      dotText="Everything the agent has been asked to do"
+      value="What ran"
+      open={openTile === "jobs"}
+      onToggle={() => toggleTile("jobs")}
+    />
+    <Tile
       id="system"
       label="System"
       tone={systemTone}
@@ -809,21 +816,6 @@
       value={browserUp ? "Connected" : "Offline"}
       open={openTile === "browser"}
       onToggle={() => toggleTile("browser")}
-    />
-    <Tile
-      id="activity"
-      label="Activity"
-      tone={activity.length ? (newestFailedLog ? "warn" : "ok") : "off"}
-      dotText={activity.length
-        ? newestFailedLog
-          ? "Latest Mac action failed"
-          : "Mac agent activity ok"
-        : "No Mac agent activity"}
-      value={latestMacAction
-        ? latestMacAction.command || latestMacAction.summary || "—"
-        : "—"}
-      open={openTile === "activity"}
-      onToggle={() => toggleTile("activity")}
     />
     <Tile
       id="history"
@@ -929,36 +921,8 @@
     </section>
   {/if}
 
-  {#if openTile === "activity"}
-    <section
-      id="tile-panel-activity"
-      class="tile-panel"
-      aria-label="Mac agent activity detail"
-    >
-      {#if activity.length}
-        <ol class="activity-list">
-          {#each activity as entry}
-            <li>
-              <span
-                class="activity-dot {entry.status === 'failed' ? 'failed' : ''}"
-                title={entry.status || "complete"}
-                aria-label={entry.status || "complete"}
-                role="img"
-              ></span>
-              <strong>{entry.command || entry.summary || "Agent activity"}</strong
-              >
-              <small>{entry.status || "complete"} · {clock(entry.createdAt)}</small
-              >
-              {#if entry.error}
-                <p>{entry.error}</p>
-              {/if}
-            </li>
-          {/each}
-        </ol>
-      {:else}
-        <p class="panel-empty">No activity</p>
-      {/if}
-    </section>
+  {#if openTile === "jobs"}
+    <JobsPanel bind:this={jobsPanel} />
   {/if}
 
   {#if openTile === "history"}

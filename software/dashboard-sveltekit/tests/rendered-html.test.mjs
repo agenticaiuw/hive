@@ -152,14 +152,9 @@ test("server-renders the Dashboard after pairing-code login", async () => {
 
   // Run strip and the six status tiles.
   assert.match(html, /aria-label="Recent commands"/);
-  for (const tile of [
-    "System",
-    "Mac",
-    "Browser",
-    "Activity",
-    "History",
-    "Memory",
-  ]) {
+  // Jobs replaced Activity: same Mac actions, plus who asked, what each step
+  // touched, and what it returned.
+  for (const tile of ["Jobs", "System", "Mac", "Browser", "History", "Memory"]) {
     assert.match(html, new RegExp(`>${tile}</span>`));
   }
 

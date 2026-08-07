@@ -28,9 +28,13 @@ const BULK_SENDER =
 const BULK_SUBJECT =
   /\b(unsubscribe|newsletter|digest|weekly (?:update|roundup)|sale|% off|deal|webinar|promo|survey|invitation to connect|you may (?:also )?like|recommended for you|new in)\b/i
 
-/* Anything at or above this gets spoken. Tuned so a plain unread mail from a
- * person with no urgency signal does NOT clear it. */
-const IMPORTANCE_THRESHOLD = 3
+/*
+ * Anything at or above this gets spoken. Set by working backwards from the mail
+ * that must NOT clear it: "Lunch sometime?" from a real person, sent an hour
+ * ago, scores 3 on question-mark plus recency alone. A threshold of 3 would
+ * read that aloud, which is the exact failure the owner asked to be spared.
+ */
+const IMPORTANCE_THRESHOLD = 4
 
 const IMMINENT_MEETING_MINUTES = 60
 
@@ -124,7 +128,8 @@ export function scoreReminder(task, { now = new Date() } = {}) {
     score += 4
     reasons.push('past due')
   } else if (dueMs && dueMs - nowMs < 6 * 3_600_000) {
-    score += 3
+    /* Same weight as past due: the owner can still act on this one. */
+    score += 4
     reasons.push('due in the next few hours')
   }
 

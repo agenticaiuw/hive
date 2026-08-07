@@ -252,6 +252,8 @@ export async function executeComputerAction(action) {
       return setMute(action)
     case 'create_reminder':
       return addReminder(action)
+    case 'compose_briefing':
+      return composeBriefingAction(action)
     case 'set_input_source':
     case 'set_keyboard_language':
       return setInputSource(action)
@@ -304,6 +306,43 @@ async function addReminder(action) {
     `Created reminder “${result.title}”${result.due ? ` due ${result.due}` : ''}`,
     result,
   )
+}
+
+async function composeBriefingAction(action) {
+  const { BRIEFING_KINDS, matchBriefingCommand, runBriefing } = await import(
+    './briefing.js'
+  )
+  // The planner sometimes names the brief rather than the kind ("prepare my
+  // workday"); recover the kind from the phrasing instead of failing on it.
+  const requested = String(action.params?.kind || '').trim()
+  const kind =
+    requested in BRIEFING_KINDS
+      ? requested
+      : matchBriefingCommand(requested || action.label || '') || 'morning'
+
+  const result = await runBriefing({
+    kind,
+    sinks: action.params?.sinks || null,
+    play: Boolean(action.params?.play),
+  })
+
+  // Audio and the full note stay out of the action result: it is written to
+  // pendant-jobs.json on every run, and the brief already lives on disk.
+  return success(action, result.spoken, {
+    briefing: {
+      kind: result.kind,
+      title: result.title,
+      spoken: result.spoken,
+      nextActions: result.nextActions,
+      path: result.path ?? null,
+      noteId: result.noteId ?? null,
+      audioPath: result.audio?.wavPath ?? null,
+      seconds: result.audio?.seconds ?? null,
+      skipped: result.skipped,
+      problems: result.problems,
+      sent: result.sent,
+    },
+  })
 }
 
 async function getWeather(action) {

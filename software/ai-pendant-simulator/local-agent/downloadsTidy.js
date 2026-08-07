@@ -30,7 +30,11 @@ import { workspacePath } from './config.js'
  * applied plan leaves an undo manifest for the same reason.
  */
 
-const STORE_PATH = path.join(workspacePath, '.pendant-tidy-plans.json')
+/* Resolved per call rather than at import: a test must be able to point the
+ * plan store somewhere disposable without writing into the owner's workspace. */
+const storePath = () =>
+  process.env.PENDANT_TIDY_STORE_PATH ||
+  path.join(workspacePath, '.pendant-tidy-plans.json')
 const PLAN_LIMIT = 20
 
 /* Bytes hashed per file when checking for real duplicates. A head sample plus
@@ -68,8 +72,9 @@ export function defaultDownloadsPath() {
 }
 
 function loadStore() {
-  ensureJsonStore(STORE_PATH, { plans: [] }, { validate: isValidStore })
-  return readJsonWithRecovery(STORE_PATH, {
+  const filePath = storePath()
+  ensureJsonStore(filePath, { plans: [] }, { validate: isValidStore })
+  return readJsonWithRecovery(filePath, {
     fallback: { plans: [] },
     validate: isValidStore,
   })
@@ -77,7 +82,7 @@ function loadStore() {
 
 function saveStore(store) {
   store.plans = store.plans.slice(-PLAN_LIMIT)
-  writeJsonAtomic(STORE_PATH, store, { validate: isValidStore })
+  writeJsonAtomic(storePath(), store, { validate: isValidStore })
 }
 
 /**
@@ -376,5 +381,5 @@ export function formatBytes(bytes) {
 }
 
 export function tidyPlansLocation() {
-  return STORE_PATH
+  return storePath()
 }
