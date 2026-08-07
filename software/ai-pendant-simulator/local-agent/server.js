@@ -247,6 +247,7 @@ import { triageNotifications } from './notificationTriage.js'
 import { registerGoalRouterRoutes } from './goalRouter.js'
 import { registerVoiceNotesRoutes } from './voiceNotes.js'
 import { registerVisionLoopRoutes } from './visionLoopRoutes.js'
+import { registerWorkbenchRoutes } from './workbenchRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1401,6 +1402,11 @@ registerVoiceNotesRoutes(app)
  * reports today; blocked on an Accessibility grant for this exact binary, and
  * says so rather than degrading into pixels. */
 registerVisionLoopRoutes(app)
+
+/* Plan and hand off durable jobs. Nothing here commits — commitTransaction
+ * belongs to whichever capability owns the work, and the sweeper deletes, so
+ * neither is exposed as a route. */
+registerWorkbenchRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
