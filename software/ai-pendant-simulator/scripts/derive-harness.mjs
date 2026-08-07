@@ -459,6 +459,98 @@ function saveState(state) {
   fs.writeFileSync(STATE_PATH(), `${JSON.stringify(state, null, 2)}\n`)
 }
 
+/*
+ * A round is a read-modify-write that stays open for minutes: loadState at the
+ * top, saveState at the bottom, a model conversation in between. Nothing used
+ * to stop a second launcher from starting the same agent, and when that
+ * happened both processes read the same round number and the later save won —
+ * so a round silently vanished, and the arm looked slow rather than broken.
+ *
+ * Observed 2026-08-07: two launchers on `unified` at once. That run survived
+ * only because their writes happened not to interleave.
+ *
+ * The lock is held for the whole round rather than around each file access,
+ * because the thing that must not overlap is the round, not the write.
+ */
+const LOCK_PATH = () => path.join(OUT_DIR, `state-${AGENT_ID}.lock`)
+
+/*
+ * Longer than the slowest round observed (~4 min) by enough margin that a live
+ * round is never mistaken for a dead one. Reclaim leans on the pid check
+ * first; this bound only matters when the pid has been recycled onto some
+ * unrelated process.
+ */
+const STALE_LOCK_MS = 20 * 60 * 1000
+
+function acquireStateLock() {
+  fs.mkdirSync(OUT_DIR, { recursive: true })
+
+  for (const attempt of [1, 2]) {
+    try {
+      fs.writeFileSync(
+        LOCK_PATH(),
+        `${JSON.stringify({ pid: process.pid, agent: AGENT_ID, startedAt: new Date().toISOString() })}\n`,
+        { flag: 'wx' },
+      )
+      return
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      if (attempt === 2 || !reclaimIfDead()) {
+        throw new Error(
+          `${AGENT_ID} is already running (${describeLockHolder()}). ` +
+            'Two processes on one agent lose rounds. Wait for it, or remove ' +
+            `${LOCK_PATH()} if you are certain it is dead.`,
+        )
+      }
+    }
+  }
+}
+
+function reclaimIfDead() {
+  const holder = readLock()
+  if (!holder) {
+    /* Unparseable or vanished: nothing to respect. */
+    fs.rmSync(LOCK_PATH(), { force: true })
+    return true
+  }
+
+  const age = Date.now() - new Date(holder.startedAt).getTime()
+  if (isProcessAlive(holder.pid) && !(age >= STALE_LOCK_MS)) return false
+
+  fs.rmSync(LOCK_PATH(), { force: true })
+  return true
+}
+
+function releaseStateLock() {
+  /* Only ever drop a lock this process owns — a reclaim may have handed it on. */
+  if (readLock()?.pid === process.pid) fs.rmSync(LOCK_PATH(), { force: true })
+}
+
+function readLock() {
+  try {
+    const holder = JSON.parse(fs.readFileSync(LOCK_PATH(), 'utf8'))
+    return Number.isInteger(holder?.pid) ? holder : null
+  } catch {
+    return null
+  }
+}
+
+function describeLockHolder() {
+  const holder = readLock()
+  return holder ? `pid ${holder.pid}, since ${holder.startedAt}` : 'holder unknown'
+}
+
+function isProcessAlive(pid) {
+  try {
+    /* Signal 0 tests for existence without delivering anything. */
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    /* EPERM means it exists and belongs to somebody else — still alive. */
+    return error.code === 'EPERM'
+  }
+}
+
 /* Short, stable, human-typeable ids so granting is a one-liner at the shell. */
 function makeId(kind, state) {
   const n =
@@ -3004,7 +3096,29 @@ const TASK_IMPLS = {
 }
 
 const command = process.argv[2] || 'run'
+
+/*
+ * Read-only commands are deliberately not gated: review and prompt are what you
+ * reach for to see what a stuck agent is doing, and they would be useless if
+ * they refused while it was running.
+ */
+const MUTATES_STATE = new Set(['run', 'task', 'grant', 'deny', 'phase', 'reset'])
+
 try {
+  /* Inside the try so a refusal reads as one line in a launcher log, not a
+   * stack trace — this is the message a person skims at 3am. */
+  if (MUTATES_STATE.has(command)) {
+    acquireStateLock()
+    process.on('exit', releaseStateLock)
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      /* A killed launcher must not strand its agent behind its own lock. */
+      process.on(signal, () => {
+        releaseStateLock()
+        process.exit(128 + (signal === 'SIGINT' ? 2 : signal === 'SIGTERM' ? 15 : 1))
+      })
+    }
+  }
+
   if (command === 'run') await runRound()
   else if (command === 'task') {
     const goal = process.argv[3]

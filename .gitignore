@@ -54,3 +54,6 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# Harness per-agent round locks: process-local, never shared.
+diagnostics/harness-derivation/*.lock

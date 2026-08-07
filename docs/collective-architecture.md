@@ -58,10 +58,19 @@ boundary is not a reason for a separate context, and it is a large part of why
 every node rediscovers everything — the split runs along the axis that shares
 the *least*, which by Wegner's third finding guarantees maximum overlap.
 
-**This is why the unified experiment failed.** It merged the bodies and left
-the partition untouched. Measured: committee 78% discovery share, unified
-81–90%, and 0 proposals across 8 rounds against the committee's 2–3 per agent
-per round. Merging devices does not fix a device-shaped partition.
+**The first unified experiment did not test this.** It merged the bodies and
+left the partition untouched, and I read its silence as a verdict: committee 78%
+discovery share, unified 81–90%, 0 proposals across 8 rounds.
+
+**Retracted — the 0 was a harness bug, not a result.** The propose tools were
+gated on `state.phase === 'capability'`, so the unified agent had no way to
+record a proposal for any of those rounds. On the rerun, once it reached the
+proposal phase, unified produced 6 proposals in a single round (2026-08-07,
+round 17). Whatever is true about merging bodies, "it proposes nothing" is not.
+
+What survives is the discovery share, which is still the highest of the three
+arms — but see `## Where the comparison actually stands` for why even that is
+not yet a clean read.
 
 ## Four properties that make environment-held knowledge actually cheap
 
@@ -134,6 +143,35 @@ orthogonal.
 For the ambition in `you-scale.md` this is a hard design constraint, not a
 sentiment: **the owner must be able to detach any node, or the whole system, and
 still be himself. So his memory cannot live only in the store.**
+
+## Where the comparison actually stands
+
+2026-08-07. Three arms — committee (5 device-shaped agents), unified (one mind,
+many bodies), faculty (perception / judgement / action). Measured over the same
+wall-clock window:
+
+| arm | rounds | discovery share | proposals/round | findings/round | messages/round |
+|---|---|---|---|---|---|
+| committee | 15 | 49% | 4.47 | 0.60 | 1.40 |
+| unified | 11 | 60% | 0.55 | 5.45 | 0.64 |
+| faculty | 9 | 51% | 0.00 | 6.00 | 4.22 |
+
+**Do not read the proposals column as a verdict.** The arms are not at equal
+maturity: committee agents were at rounds 17–30, unified at 7–17, faculty at
+1–3. Proposing is a late-round behaviour — it starts only once discovery
+saturates. Round-matched on rounds 1–3, *every* arm proposes exactly zero:
+
+| arm | rounds 1–3 | discovery share | proposals/round |
+|---|---|---|---|
+| committee | 15 | 9% | 0.00 |
+| unified | 3 | 54% | 0.00 |
+| faculty | 9 | 51% | 0.00 |
+
+So the only defensible statement today is about **cost**, not output: unified
+spends the largest share of its budget rediscovering, and faculty spends the
+most on talking to itself (4.22 messages/round, 3× committee). The output
+question needs faculty and unified run out to comparable round counts, which is
+what the parity rerun is for.
 
 ## Empirical baseline for this class of system
 
