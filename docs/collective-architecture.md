@@ -522,6 +522,37 @@ now be written as *what it would do when a device is connected, and how we would
 know it worked* — which is a more useful artefact than a capability written as
 though the device were already there.
 
+### One change that did not work
+
+`request_tool` was given a required `why_existing_tools_insufficient` field, on
+the reasoning that made `built_from` work: force the agent to look at what it
+has before asking for more. `built_from` did work — 177 of 179 proposals now
+name real routes. This did not.
+
+Requests per round, all agents, by the round they were made in:
+
+| rounds | requests/round |
+|---|---|
+| 1–20 | 3.65 |
+| 21–40 | 1.85 |
+| 41–60 | 1.20 |
+| 61–75 | **0.27** |
+| 76–95 (after the change) | **0.75** |
+
+The rate was already falling steeply on its own, and went **up** after the
+change. n is small — 15 requests over 20 rounds — so this is not strong evidence
+the field made things worse. It is decisive against the claim that it helped,
+which is the claim that was made for it.
+
+The likeliest confound is that the same window is when the orchestrator started
+answering requests for the first time, and an answered request invites a
+follow-up. That is a good thing happening, not a regression. But it means the
+field's effect is unmeasured rather than demonstrated, and the honest position is
+that it is unproven and cheap rather than that it worked.
+
+Kept anyway: the justification is useful to read when triaging a request, which
+is a benefit independent of whether it reduces volume.
+
 ## The one finding underneath the others
 
 Three separate investigations tonight converged on a single phenomenon, and it
