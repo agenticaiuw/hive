@@ -13,6 +13,10 @@ process.env.PENDANT_EVIDENCE_STORE_PATH = path.join(
   'capsules.json',
 )
 
+/* The activity log has no such lever — logger.js resolves config.logPath once,
+ * at import — so the workspace itself is redirected first. */
+import './testWorkspace.js'
+
 import { getBrowserStatus } from './browserBridge.js'
 import { mintCapsule, revokeCapsules } from './evidenceCapsules.js'
 import {

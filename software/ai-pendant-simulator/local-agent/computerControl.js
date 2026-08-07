@@ -21,6 +21,7 @@ import {
   setOutputVolume,
 } from './systemControls.js'
 import { createReminder } from './reminders.js'
+import { runCapabilityGapAction } from './capabilityGapsActions.js'
 import {
   getCurrentInputSource,
   selectInputSource,
@@ -87,6 +88,15 @@ export async function executeComputerAction(action) {
   }
 
   switch (action.type) {
+    /* Real case labels, not a guard above the switch: readDispatchableActionTypes
+     * parses this file's own source for `case '...':`, so an early return would
+     * work and still leave GET /capabilities reporting these as advertised but
+     * undispatchable — the exact drift it exists to catch. */
+    case 'briefing_triage':
+    case 'review_queue':
+    case 'watch_page':
+    case 'schedule_routine':
+      return runCapabilityGapAction(action)
     case 'run_shell':
       return runShell(action)
     case 'get_battery':

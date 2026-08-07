@@ -4,6 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+/* The plan store is injected per test below, but applying a sweep also files
+ * snapshots into actionReceipts.js's .undo vault, which is fixed to
+ * config.workspacePath at import time. Redirect the workspace before the
+ * module graph is evaluated so nothing lands in the owner's real vault. */
+import './testWorkspace.js'
+
 import {
   applySweep,
   formatSweep,

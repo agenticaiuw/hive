@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+/* runBriefing() writes a note into workspace/briefings and records the run in
+ * audioBrief.js's .pendant-briefings.json. Both paths are module constants off
+ * config.workspacePath, so the workspace is redirected before briefing.js is
+ * evaluated rather than each store being injected. */
+import './testWorkspace.js'
+
 import {
   BRIEFING_KINDS,
   assertNeverSends,

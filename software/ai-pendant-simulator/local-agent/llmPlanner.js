@@ -10,6 +10,7 @@ import { stripProtocolTerminators } from '../shared/protocolText.js'
  * see isKnownActionType. computerControl does not import this file, so there
  * is no cycle. */
 import { SUPPORTED_ACTION_TYPES } from './computerControl.js'
+import { CAPABILITY_GAP_ACTIONS } from './capabilityGapsActions.js'
 
 // Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
 // Cloudflare uses Realtime separately — this process never opens Realtime.
@@ -60,6 +61,10 @@ const LLM_MAX_TOKENS = Math.min(
 const LLM_ENABLED = process.env.LLM_ENABLED !== 'false' && Boolean(LLM_API_KEY)
 
 const FULL_CONTROL_ACTION_SCHEMA = {
+  /* The four verbs whose modules were finished but had no way in. This is also
+   * what makes isKnownActionType accept them — without it sanitizeActions
+   * strips the action out of every plan that names one. */
+  ...CAPABILITY_GAP_ACTIONS,
   run_shell: {
     description: 'Run any shell command on the Mac (zsh). Use for installs, git, npm, curl, etc.',
     params: { command: 'string', cwd: 'optional absolute path', timeout: 'optional ms' },

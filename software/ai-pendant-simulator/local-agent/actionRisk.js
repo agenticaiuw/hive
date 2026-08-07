@@ -8,6 +8,8 @@
 // computer-use still need confirmation. Status shell exists so Realtime can
 // answer battery/wifi without a second Mac LLM.
 
+import { capabilityGapHandsFree } from './capabilityGapsActions.js'
+
 const AUTO_SAFE_ACTIONS = new Set([
   'open_app',
   'open_url',
@@ -148,6 +150,12 @@ export function isStatusShellCommand(command) {
 }
 
 export function classifyAction(action) {
+  /* Returns null for everything else, so no existing verdict moves. Without it
+   * a spoken request for the cross-account brief ends at "waiting for your
+   * approval on the dashboard" — on a device that has no dashboard. */
+  const gap = capabilityGapHandsFree(action)
+  if (gap) return gap
+
   const type = String(action?.type || '')
   if (!type) return { safe: false, reason: 'Action has no type.' }
 

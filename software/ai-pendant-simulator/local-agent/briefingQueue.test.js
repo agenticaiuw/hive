@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 
 import {
   lastBriefingRun,
@@ -16,6 +16,20 @@ import {
   toldFingerprints,
   unheardRunIds,
 } from './briefingQueue.js'
+
+/*
+ * The queue store itself is injected per test via tempStore(), but the revoked-
+ * evidence check reaches evidenceCapsules.js, which reads the owner's real
+ * capsule store unless told otherwise — reviewQueue() does not thread a
+ * filePath that far. capsulesLocation() is resolved per call, so pointing its
+ * env var at a directory of this process's own is enough, and keeps the suite
+ * from reading (and creating) a store the running agent app also writes.
+ */
+const capsuleDirectory = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'pendant-briefing-queue-capsules-'),
+)
+process.env.PENDANT_EVIDENCE_STORE_PATH = path.join(capsuleDirectory, 'capsules.json')
+after(() => fs.rmSync(capsuleDirectory, { force: true, recursive: true }))
 
 function tempStore() {
   return path.join(
