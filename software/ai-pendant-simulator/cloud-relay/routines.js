@@ -68,6 +68,89 @@ export const DEFER_MAX_MS = 12 * 60 * 60 * 1000
 /* A dispatched Mac job that never comes back stops being interesting. */
 export const MAC_RESULT_MAX_WAIT_MS = 30 * 60 * 1000
 
+/*
+ * RETRIES.
+ *
+ * Before this, a failed occurrence was terminal: the catch in runDueRoutines()
+ * filed a "failed" receipt and called advanceRoutine(), which rearms for the
+ * NEXT occurrence. For a daily briefing that costs one morning. For
+ * {kind:'once'} — the shape of "queue this up and tell me when it's done" and
+ * "remind me in an hour" — nextRunAt() returns null, so the task was gone. A
+ * rate-limited web search, a five-second D1 blip, and the thing the owner
+ * asked for silently never happened and nobody was told.
+ *
+ * Three attempts, doubling from a minute. The floor is a minute because the
+ * relay's clock IS a one-minute cron: a shorter delay cannot be honoured and
+ * would only make the retry land on the same tick. The ceiling matters less
+ * than the total window, which planRetry() bounds against the next scheduled
+ * occurrence — a routine must never accumulate retries into its own next run.
+ */
+export const RETRY_MAX_ATTEMPTS = 3
+export const RETRY_BASE_MS = 60_000
+export const RETRY_MAX_MS = 15 * 60 * 1000
+
+/*
+ * Deliberately no jitter. Jitter exists to spread a thundering herd across
+ * many retrying clients; there is exactly one scheduler here, claiming under a
+ * lease, and the only thing jitter would buy is receipts nobody can predict
+ * and tests that assert on ranges.
+ */
+export function retryDelayMs(attempt = 1) {
+  const step = Math.max(1, Math.floor(attempt))
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (step - 1))
+}
+
+/**
+ * The idempotency key: one occurrence of one routine, whatever it takes.
+ *
+ * Every attempt at the same occurrence carries the same key, because
+ * createRunReceipt() derives dueAt from `dueSince`, which retries preserve.
+ * That is what lets a retry ask "did some earlier attempt already finish
+ * this?" and get a true answer.
+ */
+export function occurrenceKey(routineId, dueAt) {
+  return `${routineId}#${dueAt}`
+}
+
+/**
+ * Retry, or stop and tell the owner?
+ *
+ * Pure so the tick pays nothing to decide, and so every stopping reason is
+ * assertable. Order matters: the cheapest checks first, the schedule lookup
+ * (which reparses the schedule) last.
+ */
+export function planRetry(routine, { now = Date.now(), attempt = 1 } = {}) {
+  if (attempt >= RETRY_MAX_ATTEMPTS) {
+    return { retry: false, at: null, reason: `it failed ${attempt} times` }
+  }
+  const at = now + retryDelayMs(attempt)
+
+  /* Same twelve hours as DEFER_MAX_MS, for the same reason: an answer about
+   * this morning is worthless tomorrow, and a backlog of stale retries would
+   * all come due at once. */
+  const dueSince = Number(routine?.dueSince) || now
+  if (at - dueSince > DEFER_MAX_MS) {
+    return { retry: false, at: null, reason: 'the occurrence is too old to retry' }
+  }
+
+  /*
+   * Never retry past the next occurrence. An {interval, everyMs:60000} routine
+   * retrying after a minute would be racing its own schedule — two claims for
+   * what the owner thinks of as one job. When the schedule itself is the
+   * sooner retry, let the schedule do it. A spent one-shot has no next
+   * occurrence (null), which is exactly the case that needs the retry most.
+   */
+  const following = nextRunAt(routine?.schedule, now)
+  if (following !== null && at >= following) {
+    return {
+      retry: false,
+      at: null,
+      reason: 'the next scheduled run arrives sooner than a retry would',
+    }
+  }
+  return { retry: true, at, reason: null }
+}
+
 export function createRoutineId() {
   return `rtn_${crypto.randomUUID()}`
 }
@@ -103,7 +186,7 @@ export function createRoutine({
   const text = String(command || '').trim()
   if (!text) throw new Error('A routine needs a command to run.')
 
-  const normalized = normalizeSchedule(schedule)
+  const normalized = normalizeSchedule(schedule, now)
   if (!normalized.ok) throw new Error(normalized.error)
 
   const due = nextRunAt(normalized.schedule, now)
@@ -132,6 +215,9 @@ export function createRoutine({
     runCount: 0,
     deferredSince: null,
     dueSince: null,
+    /* Attempts already spent on the occurrence named by dueSince. Reset by
+     * advanceRoutine(), so it can never leak into the next occurrence. */
+    attempt: 0,
   }
 }
 
@@ -144,7 +230,7 @@ export function updateRoutineRecord(routine, patch = {}, now = Date.now()) {
   if (patch.sources) next.sources = normalizeSources(patch.sources)
   if (typeof patch.announce === 'boolean') next.announce = patch.announce
   if (patch.schedule) {
-    const normalized = normalizeSchedule(patch.schedule)
+    const normalized = normalizeSchedule(patch.schedule, now)
     if (!normalized.ok) throw new Error(normalized.error)
     const due = nextRunAt(normalized.schedule, now)
     if (due === null) throw new Error('That schedule has no next occurrence.')
@@ -153,6 +239,9 @@ export function updateRoutineRecord(routine, patch = {}, now = Date.now()) {
     next.nextRunAt = due
     next.deferredSince = null
     next.dueSince = null
+    /* Rescheduling abandons whatever occurrence was mid-retry: the owner just
+     * said when they want this, and that answer outranks a pending retry. */
+    next.attempt = 0
   }
   next.updatedAt = new Date(now).toISOString()
   return next
@@ -199,6 +288,11 @@ export function createRunReceipt({
   venue,
   now = Date.now(),
 }) {
+  /* Which occurrence this run belongs to, so a deferred Monday 5pm run that
+   * finally executes on Tuesday morning is not filed as Tuesday's. */
+  const dueAt = new Date(
+    routine.dueSince || routine.nextRunAt || now,
+  ).toISOString()
   return {
     runId: `run_${crypto.randomUUID()}`,
     routineId: routine.routineId,
@@ -213,9 +307,16 @@ export function createRunReceipt({
     announcementId: null,
     summary: null,
     error: null,
-    /* Which occurrence this run belongs to, so a deferred Monday 5pm run that
-     * finally executes on Tuesday morning is not filed as Tuesday's. */
-    dueAt: new Date(routine.dueSince || routine.nextRunAt || now).toISOString(),
+    dueAt,
+    /* 1-based: this receipt IS an attempt, and "attempt 0" reads as a run that
+     * did not happen. The routine's own counter is 0-based (attempts spent). */
+    attempt: Number(routine.attempt || 0) + 1,
+    occurrenceKey: occurrenceKey(routine.routineId, dueAt),
+    /* Whether the owner should read this as the end of the story. A failed
+     * attempt with a retry queued is not; the receipt log keeps every attempt
+     * so "it worked on the third try" is visible rather than inferred. */
+    final: true,
+    nextAttemptAt: null,
   }
 }
 
@@ -296,7 +397,70 @@ export function advanceRoutine(routine, { now = Date.now(), status, error = null
     runCount: Number(routine.runCount || 0) + 1,
     deferredSince: null,
     dueSince: null,
+    /* The occurrence is over however it ended, so its retry budget resets.
+     * Carrying it forward would let one bad morning spend tomorrow's. */
+    attempt: 0,
     updatedAt: new Date(now).toISOString(),
+  }
+}
+
+/**
+ * Keep the occurrence alive for another attempt.
+ *
+ * The opposite of advanceRoutine: `dueSince` is preserved so the next attempt
+ * files against the same occurrence (and therefore the same occurrenceKey),
+ * and `nextRunAt` is the retry instant rather than the schedule's next slot.
+ * runCount is NOT incremented — the owner declared one run, not three.
+ */
+export function retryRoutineRecord(routine, { now = Date.now(), attempt, at, error = null }) {
+  return {
+    ...routine,
+    nextRunAt: at,
+    dueSince: routine.dueSince || routine.nextRunAt || now,
+    attempt,
+    lastStatus: 'retrying',
+    lastError: error,
+    deferredSince: null,
+    updatedAt: new Date(now).toISOString(),
+  }
+}
+
+/**
+ * Say out loud what happened — including, especially, when it did not work.
+ *
+ * runOnRelay() announced successes from the start; every failure path filed a
+ * receipt and stopped. So "tell me exactly what happened when it's done" held
+ * only when nothing went wrong, which is the half the owner can already guess.
+ * A failure the owner is never told about is indistinguishable from a routine
+ * that was never scheduled.
+ *
+ * Never throws: an announcement is the last thing that happens to a run, and
+ * losing the receipt because the speech was empty would be a worse trade.
+ */
+async function announceOutcome({ store, routine, run, now, logger }) {
+  if (!routine || routine.announce === false) return null
+  const label = run.routineName || routine.name || 'A scheduled task'
+  const reason = String(run.error || '').trim()
+  const speech =
+    run.status === 'missed'
+      ? `${label} did not run. ${reason}`
+      : `${label} did not finish. ${reason || 'No reason was recorded.'}`
+  try {
+    const announcement = createAnnouncement({
+      deviceId: routine.deviceId,
+      title: label,
+      speech,
+      routineId: run.routineId,
+      runId: run.runId,
+      now,
+    })
+    await store.createAnnouncement(announcement)
+    return announcement.announcementId
+  } catch (error) {
+    logger?.warn?.(
+      `[routines] could not announce ${run.runId}: ${error?.message || error}`,
+    )
+    return null
   }
 }
 
@@ -340,6 +504,31 @@ export async function runDueRoutines({
     const venue = chooseVenue(withDue, { macOnline })
     const receipt = createRunReceipt({ routine: withDue, trigger, venue, now })
 
+    /*
+     * THE RETRY/COMPLETION RACE.
+     *
+     * A Mac dispatch is fire-and-forget: dispatchToMac() hands the bridge a
+     * job and reapDispatchedRuns() closes it out later. When the reaper gives
+     * up on a slow job (MAC_RESULT_MAX_WAIT_MS) it rearms the occurrence — and
+     * a job the reaper stopped waiting for is not a job the Mac stopped
+     * running. Without this check the retry enqueues the same command while
+     * the first one is still in flight, and "send the email" sends it twice.
+     *
+     * Only on retries: a first attempt cannot be a duplicate, because the
+     * store's lease IS the claim and only one tick can hold it. That keeps
+     * this extra indexed read off the 1,439 minutes a day when nothing is due
+     * — the cron's 10 ms of CPU has no room for a query per claimed routine.
+     */
+    if (Number(withDue.attempt || 0) > 0) {
+      const settled = await findSettledOccurrence(store, receipt)
+      if (settled) {
+        runs.push(
+          await supersedeRun({ store, routine: withDue, receipt, settled, now, logger }),
+        )
+        continue
+      }
+    }
+
     try {
       if (venue === 'defer') {
         runs.push(await deferRoutine({ store, routine: withDue, receipt, now, logger }))
@@ -357,21 +546,102 @@ export async function runDueRoutines({
     } catch (error) {
       const message = String(error?.message || error)
       logger?.warn?.(`[routines] ${withDue.routineId} failed: ${message}`)
-      const finished = {
-        ...receipt,
-        status: 'failed',
-        error: message,
-        finishedAt: new Date(Date.now()).toISOString(),
-      }
-      await store.recordRoutineRun(finished)
-      await store.saveRoutine(
-        advanceRoutine(withDue, { now, status: 'failed', error: message }),
+      runs.push(
+        await failRun({ store, routine: withDue, receipt, now, error: message, logger }),
       )
-      runs.push(finished)
     }
   }
 
   return { runs, macOnline: macOnline === true, claimedCount: claimed.length }
+}
+
+/**
+ * One failed attempt: file it, then either queue another go or stop and say so.
+ */
+async function failRun({ store, routine, receipt, now, error, logger }) {
+  const attempt = Number(receipt.attempt || 1)
+  const plan = planRetry(routine, { now, attempt })
+  const finished = {
+    ...receipt,
+    status: 'failed',
+    error,
+    final: !plan.retry,
+    nextAttemptAt: plan.retry ? new Date(plan.at).toISOString() : null,
+    /* Why the retries stopped, on the row that stopped them. Otherwise "it
+     * gave up" and "it was never retried" look identical in the log. */
+    stoppedBecause: plan.retry ? null : plan.reason,
+    finishedAt: new Date(now).toISOString(),
+  }
+
+  if (plan.retry) {
+    await store.recordRoutineRun(finished)
+    await store.saveRoutine(
+      retryRoutineRecord(routine, { now, attempt, at: plan.at, error }),
+    )
+    logger?.log?.(
+      `[routines] ${routine.routineId} attempt ${attempt} failed; retrying in ` +
+        `${Math.round((plan.at - now) / 1000)}s`,
+    )
+    return finished
+  }
+
+  finished.announcementId = await announceOutcome({
+    store,
+    routine,
+    run: finished,
+    now,
+    logger,
+  })
+  await store.recordRoutineRun(finished)
+  await store.saveRoutine(advanceRoutine(routine, { now, status: 'failed', error }))
+  return finished
+}
+
+/**
+ * A retry that arrived after an earlier attempt already settled the occurrence.
+ *
+ * Recorded rather than silently dropped: "the retry fired and was refused"
+ * is the only evidence that the guard did its job, and a duplicate run that
+ * DID happen would otherwise look identical in the log to one that did not.
+ */
+async function supersedeRun({ store, routine, receipt, settled, now, logger }) {
+  const done = settled.status === 'completed'
+  const finished = {
+    ...receipt,
+    status: 'superseded',
+    error:
+      `Attempt ${receipt.attempt} was dropped: this occurrence ` +
+      (done
+        ? `already completed as ${settled.runId}.`
+        : `is still running on the Mac as ${settled.runId}.`),
+    finishedAt: new Date(now).toISOString(),
+  }
+  await store.recordRoutineRun(finished)
+  /* Advance either way. If it completed, the occurrence is over; if it is
+   * still dispatched, the reaper owns it and will announce the result — what
+   * must not happen is this routine staying armed for the same occurrence. */
+  await store.saveRoutine(
+    advanceRoutine(routine, { now, status: done ? 'completed' : 'dispatched' }),
+  )
+  logger?.log?.(`[routines] ${routine.routineId} retry suppressed: ${finished.error}`)
+  return finished
+}
+
+async function findSettledOccurrence(store, receipt) {
+  /* Bounded at eight: a single occurrence can produce at most
+   * RETRY_MAX_ATTEMPTS receipts, and the index is (routine_id, started_at
+   * DESC), so the rows that could match are the newest ones. */
+  const recent = await store
+    .listRoutineRuns({ routineId: receipt.routineId, limit: 8 })
+    .catch(() => [])
+  return (
+    recent.find(
+      (run) =>
+        run.runId !== receipt.runId &&
+        run.occurrenceKey === receipt.occurrenceKey &&
+        ['completed', 'dispatched'].includes(String(run.status || '')),
+    ) ?? null
+  )
 }
 
 async function deferRoutine({ store, routine, receipt, now, logger }) {
@@ -390,6 +660,16 @@ async function deferRoutine({ store, routine, receipt, now, logger }) {
       error: `The Mac stayed offline for ${Math.round(deferredForMs / 3_600_000)}h; this occurrence was dropped.`,
       finishedAt: new Date(now).toISOString(),
     }
+    /* Told, not just logged. A briefing that quietly never happened because
+     * the lid stayed shut is the failure the owner is least able to notice on
+     * their own — there is no error anywhere they would think to look. */
+    finished.announcementId = await announceOutcome({
+      store,
+      routine,
+      run: finished,
+      now,
+      logger,
+    })
     await store.recordRoutineRun(finished)
     await store.saveRoutine(
       advanceRoutine(routine, { now, status: 'missed', error: finished.error }),
@@ -487,27 +767,27 @@ export async function reapDispatchedRuns({
 
     if (!job || (!done && !failed)) {
       if (now - startedMs > MAC_RESULT_MAX_WAIT_MS) {
-        const timedOut = {
-          ...run,
-          status: 'failed',
-          error: 'The Mac claimed this routine but never returned a result.',
-          finishedAt: new Date(now).toISOString(),
-        }
-        await store.recordRoutineRun(timedOut)
-        closed.push(timedOut)
+        closed.push(
+          await closeFailedDispatch({
+            store,
+            run,
+            now,
+            error: 'The Mac claimed this routine but never returned a result.',
+          }),
+        )
       }
       continue
     }
 
     if (failed) {
-      const finished = {
-        ...run,
-        status: 'failed',
-        error: String(job.error || 'The Mac could not run this routine.'),
-        finishedAt: new Date(now).toISOString(),
-      }
-      await store.recordRoutineRun(finished)
-      closed.push(finished)
+      closed.push(
+        await closeFailedDispatch({
+          store,
+          run,
+          now,
+          error: String(job.error || 'The Mac could not run this routine.'),
+        }),
+      )
       continue
     }
 
@@ -536,6 +816,7 @@ export async function reapDispatchedRuns({
       status: 'completed',
       summary: spoken.slice(0, 600) || null,
       announcementId,
+      final: true,
       finishedAt: new Date(now).toISOString(),
     }
     await store.recordRoutineRun(finished)
@@ -543,4 +824,52 @@ export async function reapDispatchedRuns({
   }
 
   return closed
+}
+
+/**
+ * A Mac dispatch that came back broken, or never came back at all.
+ *
+ * dispatchToMac() advanced the routine the moment it handed the job over, so
+ * the schedule has already moved on and a retry has to put the occurrence
+ * back. That is safe precisely because advanceRoutine() recomputes from the
+ * wall-clock grid rather than from the retry: a 07:00 daily rearmed for
+ * 07:01, retried, and finished at 07:03 still lands on 07:00 tomorrow.
+ */
+async function closeFailedDispatch({ store, run, now, error }) {
+  const routine = await store.getRoutine(run.routineId).catch(() => null)
+  const attempt = Number(run.attempt || 1)
+  const dueSince = Date.parse(run.dueAt || '') || now
+  const plan =
+    routine && routine.enabled !== false
+      ? planRetry({ ...routine, dueSince }, { now, attempt })
+      : {
+          retry: false,
+          at: null,
+          /* A routine the owner deleted or switched off mid-flight: report the
+           * failure, do not resurrect the schedule to chase it. */
+          reason: routine ? 'the routine is disabled' : 'the routine is gone',
+        }
+
+  const finished = {
+    ...run,
+    status: 'failed',
+    error,
+    final: !plan.retry,
+    nextAttemptAt: plan.retry ? new Date(plan.at).toISOString() : null,
+    stoppedBecause: plan.retry ? null : plan.reason,
+    finishedAt: new Date(now).toISOString(),
+  }
+
+  if (plan.retry) {
+    await store.saveRoutine(
+      retryRoutineRecord(
+        { ...routine, dueSince },
+        { now, attempt, at: plan.at, error },
+      ),
+    )
+  } else {
+    finished.announcementId = await announceOutcome({ store, routine, run: finished, now })
+  }
+  await store.recordRoutineRun(finished)
+  return finished
 }

@@ -114,6 +114,21 @@ export async function runScheduledTick({
     return []
   })
 
+  /*
+   * Retries are counted separately from failures on purpose. A tick reporting
+   * ranCount=1 failed=1 looks like a broken schedule; the same tick reporting
+   * retryingCount=1 is a schedule doing its job. Without the distinction the
+   * heartbeat cannot tell "it will be fine in a minute" from "the owner was
+   * just told it will never happen" — and those want opposite reactions.
+   */
+  const attempted = [...runs, ...closed]
+  const retryingCount = attempted.filter(
+    (run) => run.status === 'failed' && run.final === false,
+  ).length
+  const failedCount = attempted.filter(
+    (run) => ['failed', 'missed'].includes(run.status) && run.final !== false,
+  ).length
+
   const summary = {
     trigger,
     tickedAt: new Date(now).toISOString(),
@@ -121,6 +136,8 @@ export async function runScheduledTick({
     dueCount: claimedCount,
     ranCount: runs.length,
     closedCount: closed.length,
+    retryingCount,
+    failedCount,
     macOnline,
     statuses: runs.map((run) => `${run.routineId}:${run.status}`),
   }
@@ -137,10 +154,68 @@ export async function runScheduledTick({
   if (claimedCount || closed.length) {
     logger?.log?.(
       `[scheduler] tick trigger=${trigger} due=${claimedCount} ran=${runs.length}` +
-        ` closed=${closed.length} macOnline=${macOnline} in ${summary.durationMs}ms`,
+        ` closed=${closed.length} retrying=${retryingCount} failed=${failedCount}` +
+        ` macOnline=${macOnline} in ${summary.durationMs}ms`,
     )
   }
   return { ...summary, runs, closed }
+}
+
+/**
+ * The receipt log for one scheduled task: every attempt, in order, with why
+ * the retries stopped.
+ *
+ * GET /v1/routines already returns the newest 25 receipts across ALL routines,
+ * which answers "is the scheduler alive" and not "what happened to the thing I
+ * asked for" — with a handful of routines the one you care about is off the
+ * end of the list. The Mac agent has had /jobs/:jobId/receipts since the
+ * beginning; this is the same question asked of the half that stays awake.
+ *
+ * Exported as a registration function rather than written into server.js so
+ * the route table stays that file's business.
+ */
+export function registerSchedulerRoutes(app) {
+  app.get('/v1/routines/:routineId/runs', async (request, response) => {
+    const store = await getStore()
+    const routineId = String(request.params.routineId || '')
+    const routine = await store.getRoutine(routineId)
+    if (!routine) {
+      response.status(404).json({ ok: false, error: 'Routine not found.' })
+      return
+    }
+
+    const limit = Math.min(Math.max(Number(request.query?.limit) || 25, 1), 100)
+    const runs = await store.listRoutineRuns({ routineId, limit })
+
+    /* Grouped by occurrence, because that is the unit the owner asked for.
+     * Three receipts for one 7am briefing is one thing that happened, not
+     * three — flattening them reads as a routine that fired three times. */
+    const occurrences = new Map()
+    for (const run of runs) {
+      const key = run.occurrenceKey || `${routineId}#${run.dueAt || run.startedAt}`
+      if (!occurrences.has(key)) {
+        occurrences.set(key, { occurrenceKey: key, dueAt: run.dueAt ?? null, attempts: [] })
+      }
+      occurrences.get(key).attempts.push(run)
+    }
+    for (const occurrence of occurrences.values()) {
+      occurrence.attempts.sort((a, b) => Number(a.attempt || 1) - Number(b.attempt || 1))
+      const last = occurrence.attempts.at(-1)
+      occurrence.status = last?.status ?? null
+      occurrence.settled = last?.final !== false
+      occurrence.nextAttemptAt = last?.nextAttemptAt ?? null
+    }
+
+    response.json({
+      ok: true,
+      routine,
+      runs,
+      occurrences: [...occurrences.values()],
+      observedAt: new Date().toISOString(),
+    })
+  })
+
+  return app
 }
 
 /*

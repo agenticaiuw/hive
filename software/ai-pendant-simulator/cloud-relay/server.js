@@ -95,7 +95,11 @@ import {
 import { bridgeClaimDelay } from './polling.js'
 import { createRoutine, updateRoutineRecord } from './routines.js'
 import { createAnnouncement, selectDeliverable } from './announce.js'
-import { runScheduledTick, SCHEDULER_STATE_KEY } from './scheduler.js'
+import {
+  registerSchedulerRoutes,
+  runScheduledTick,
+  SCHEDULER_STATE_KEY,
+} from './scheduler.js'
 import {
   isRawPcmFormat,
   isG711UlawFormat,
@@ -2304,6 +2308,14 @@ app.post('/v1/ops/audio-retention/sweep', async (request, response) => {
  * routes are how a routine gets declared, inspected, and — because Cloudflare
  * offers no way to fire a deployed Cron Trigger by hand — kicked manually.
  * -------------------------------------------------------------------------- */
+
+/*
+ * Per-occurrence run history, grouped so three retry attempts read as one task
+ * rather than three runs. GET /v1/routines only returns the newest 25 receipts
+ * across every routine, which cannot answer "what happened to the thing I
+ * asked for" once more than a couple of routines exist.
+ */
+registerSchedulerRoutes(app)
 
 app.get('/v1/routines', async (_request, response) => {
   const store = await getStore()

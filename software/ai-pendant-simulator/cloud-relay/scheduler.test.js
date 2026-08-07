@@ -79,3 +79,132 @@ test('traffic ticks rate-limit themselves off the shared heartbeat', async () =>
   const ticked = await maybeTickOnTraffic({ now: later })
   assert.equal(ticked?.trigger, 'traffic')
 })
+
+test('the heartbeat separates "will be fine in a minute" from "the owner was told"', async () => {
+  const { runScheduledTick } = await import('./scheduler.js')
+  const { createRoutine, RETRY_MAX_ATTEMPTS, occurrenceKey } = await import('./routines.js')
+  const store = await getStore()
+
+  const routine = createRoutine({
+    name: 'Nightly build check',
+    command: 'check whether the nightly build passed',
+    schedule: { kind: 'interval', everyMs: 3_600_000 },
+    venue: 'mac',
+  })
+  // Parked in the future: this exercises the reaper, which needs no network
+  // and no API key, so the counts are the same on every machine.
+  await store.saveRoutine({ ...routine, nextRunAt: Date.now() + 3_600_000 })
+  await store.createJob({
+    jobId: 'job_sched_fail',
+    type: 'plan',
+    status: 'failed',
+    error: 'the build server refused the connection',
+    createdAt: new Date().toISOString(),
+  })
+  const dueAt = new Date().toISOString()
+  const run = {
+    runId: 'run_sched_1',
+    routineId: routine.routineId,
+    routineName: routine.name,
+    status: 'dispatched',
+    startedAt: dueAt,
+    dueAt,
+    attempt: 1,
+    macJobId: 'job_sched_fail',
+    occurrenceKey: occurrenceKey(routine.routineId, dueAt),
+  }
+  await store.recordRoutineRun(run)
+
+  const retrying = await runScheduledTick({ trigger: 'manual' })
+  assert.equal(retrying.retryingCount, 1)
+  assert.equal(retrying.failedCount, 0)
+
+  // Same failure with the retry budget spent: now it is news.
+  await store.recordRoutineRun({ ...run, status: 'dispatched', attempt: RETRY_MAX_ATTEMPTS })
+  const done = await runScheduledTick({ trigger: 'manual' })
+  assert.equal(done.retryingCount, 0)
+  assert.equal(done.failedCount, 1)
+
+  const state = await store.getState(SCHEDULER_STATE_KEY)
+  assert.equal(state.data.failedCount, 1)
+
+  await store.deleteRoutine(routine.routineId)
+})
+
+test('the receipt log answers "what happened to the thing I asked for"', async () => {
+  const { registerSchedulerRoutes } = await import('./scheduler.js')
+  const { createRoutine, occurrenceKey } = await import('./routines.js')
+  const store = await getStore()
+
+  const routine = createRoutine({
+    name: 'Summarize the contract',
+    command: 'summarize the contract in my downloads folder',
+    schedule: { kind: 'once', inMs: 60_000 },
+  })
+  await store.saveRoutine(routine)
+
+  const dueAt = new Date(Date.now() - 60_000).toISOString()
+  const key = occurrenceKey(routine.routineId, dueAt)
+  for (const [index, attempt] of [1, 2].entries()) {
+    await store.recordRoutineRun({
+      runId: `run_receipt_${attempt}`,
+      routineId: routine.routineId,
+      status: attempt === 2 ? 'completed' : 'failed',
+      startedAt: new Date(Date.now() - 60_000 + index).toISOString(),
+      dueAt,
+      attempt,
+      occurrenceKey: key,
+      final: attempt === 2,
+    })
+  }
+
+  // A route table stand-in: the real one is wired in server.js, which this
+  // module deliberately does not import (it would drag Express into the cron).
+  const routes = new Map()
+  registerSchedulerRoutes({
+    get(path, handler) {
+      routes.set(path, handler)
+    },
+  })
+
+  let body = null
+  await routes.get('/v1/routines/:routineId/runs')(
+    { params: { routineId: routine.routineId }, query: {} },
+    {
+      json(payload) {
+        body = payload
+      },
+      status() {
+        return this
+      },
+    },
+  )
+
+  assert.equal(body.ok, true)
+  // Two attempts, one occurrence. Flattened, this reads as a task that ran
+  // twice — which is the opposite of what the retry guarantees.
+  assert.equal(body.occurrences.length, 1)
+  assert.deepEqual(
+    body.occurrences[0].attempts.map((run) => run.attempt),
+    [1, 2],
+  )
+  assert.equal(body.occurrences[0].status, 'completed')
+  assert.equal(body.occurrences[0].settled, true)
+
+  let missing = null
+  await routes.get('/v1/routines/:routineId/runs')(
+    { params: { routineId: 'rtn_nope' }, query: {} },
+    {
+      json(payload) {
+        missing = payload
+      },
+      status(code) {
+        missing = { code }
+        return this
+      },
+    },
+  )
+  assert.equal(missing.ok, false)
+
+  await store.deleteRoutine(routine.routineId)
+})

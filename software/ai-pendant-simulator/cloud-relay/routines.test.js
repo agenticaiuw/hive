@@ -4,11 +4,17 @@ import test from 'node:test'
 import {
   DEFER_MAX_MS,
   DEFER_RETRY_MS,
+  RETRY_BASE_MS,
+  RETRY_MAX_ATTEMPTS,
+  RETRY_MAX_MS,
   advanceRoutine,
   chooseVenue,
   composeOnRelay,
   createRoutine,
+  occurrenceKey,
+  planRetry,
   reapDispatchedRuns,
+  retryDelayMs,
   routineCanRunOnRelay,
   runDueRoutines,
   updateRoutineRecord,
@@ -43,8 +49,12 @@ function fakeStore() {
       runs.set(run.runId, { ...run })
       return run
     },
-    async listRoutineRuns({ status = null, limit = 25 } = {}) {
+    /* routineId is filtered here because both real stores filter it, and the
+     * retry guard depends on it: a fake that ignored it would let one
+     * routine's receipts suppress another routine's retry. */
+    async listRoutineRuns({ routineId = null, status = null, limit = 25 } = {}) {
       return [...runs.values()]
+        .filter((run) => !routineId || run.routineId === routineId)
         .filter((run) => !status || run.status === status)
         .slice(0, limit)
     },
@@ -298,7 +308,7 @@ test('one failing routine does not take the tick down with it', async () => {
   })
 
   assert.deepEqual(runs.map((run) => run.status).sort(), ['completed', 'failed'])
-  // A failed occurrence still advances; the routine is not stuck on it.
+  // Neither routine is stuck: one advanced, one is queued for another attempt.
   for (const routine of store.routines.values()) assert.ok(routine.nextRunAt > NOW)
 })
 
@@ -435,6 +445,328 @@ test('a Mac job that never came back stops being waited on', async () => {
   const closed = await reapDispatchedRuns({ store, now: NOW + 31 * 60_000 })
   assert.equal(closed[0].status, 'failed')
   assert.match(closed[0].error, /never returned a result/)
+})
+
+/* ---- retries -------------------------------------------------------------
+ * "Queue this up and tell me when it's done" is a one-shot, and a one-shot had
+ * exactly one chance: nextRunAt() returns null for a spent {kind:'once'}, so a
+ * failed attempt used to end the task permanently and silently.
+ * ------------------------------------------------------------------------- */
+
+/* A one-shot whose instant has already passed — the state a queued task is in
+ * on the tick that runs it. Built through createRoutine with a past `now` so
+ * the validation that rejects an unschedulable routine still applies. */
+const queuedTask = (overrides = {}) => ({
+  ...createRoutine({
+    name: 'Compare the two laptops',
+    command: 'compare the two laptops I asked about and say which is better',
+    schedule: { kind: 'once', inMs: 60_000 },
+    venue: 'relay',
+    now: NOW - 60_000,
+    ...overrides,
+  }),
+  nextRunAt: NOW - 1,
+})
+
+test('a queued one-shot survives a transient failure instead of vanishing', async () => {
+  const store = fakeStore()
+  const task = queuedTask()
+  await store.saveRoutine(task)
+  let call = 0
+
+  const first = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => false,
+    webSearch: async () => {
+      call += 1
+      if (call === 1) throw new Error('search rate limited')
+      return { ok: true, summary: 'The lighter one, by a nose.' }
+    },
+    logger: silentLogger,
+  })
+
+  assert.equal(first.runs[0].status, 'failed')
+  assert.equal(first.runs[0].final, false, 'a queued retry is not the end of the story')
+  assert.equal(first.runs[0].nextAttemptAt, new Date(NOW + RETRY_BASE_MS).toISOString())
+  // Nothing is said yet: a failure that is about to be retried is not news.
+  assert.equal(store.announcements.size, 0)
+
+  const armed = store.routines.get(task.routineId)
+  assert.equal(armed.nextRunAt, NOW + RETRY_BASE_MS)
+  assert.equal(armed.attempt, 1)
+  assert.equal(armed.dueSince, NOW - 1, 'the retry belongs to the same occurrence')
+
+  const second = await runDueRoutines({
+    store,
+    now: NOW + RETRY_BASE_MS,
+    isMacOnline: async () => false,
+    webSearch: async () => ({ ok: true, summary: 'The lighter one, by a nose.' }),
+    logger: silentLogger,
+  })
+  assert.equal(second.runs[0].status, 'completed')
+  assert.equal(second.runs[0].attempt, 2)
+  assert.equal(
+    [...store.announcements.values()][0].speech,
+    'The lighter one, by a nose.',
+  )
+  // Both attempts are in the log; "it worked on the second try" is visible.
+  assert.equal(store.runs.size, 2)
+  assert.equal(
+    new Set([...store.runs.values()].map((run) => run.occurrenceKey)).size,
+    1,
+  )
+})
+
+test('when the retries run out the owner is told, not just the log', async () => {
+  const store = fakeStore()
+  const task = { ...queuedTask(), attempt: RETRY_MAX_ATTEMPTS - 1, dueSince: NOW - 1 }
+  await store.saveRoutine(task)
+
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => false,
+    webSearch: async () => {
+      throw new Error('search rate limited')
+    },
+    logger: silentLogger,
+  })
+
+  assert.equal(runs[0].status, 'failed')
+  assert.equal(runs[0].final, true)
+  assert.match(runs[0].stoppedBecause, /failed 3 times/)
+
+  // The whole point of the feature: silence is the one outcome that must not
+  // happen. A queued task that will never finish has to say so out loud.
+  const announcement = [...store.announcements.values()][0]
+  assert.match(announcement.speech, /Compare the two laptops did not finish/)
+  assert.match(announcement.speech, /rate limited/)
+  assert.equal(announcement.runId, runs[0].runId)
+  assert.equal(store.routines.get(task.routineId).nextRunAt, null)
+})
+
+test('a routine the owner asked not to announce stays quiet even when it fails', async () => {
+  const store = fakeStore()
+  await store.saveRoutine({
+    ...queuedTask({ announce: false }),
+    attempt: RETRY_MAX_ATTEMPTS - 1,
+    dueSince: NOW - 1,
+  })
+
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => false,
+    webSearch: async () => {
+      throw new Error('nope')
+    },
+    logger: silentLogger,
+  })
+  assert.equal(runs[0].final, true)
+  assert.equal(store.announcements.size, 0)
+})
+
+test('retries back off, and never outrun the schedule that would rerun it anyway', () => {
+  assert.deepEqual(
+    [1, 2, 3, 9].map(retryDelayMs),
+    [RETRY_BASE_MS, RETRY_BASE_MS * 2, RETRY_BASE_MS * 4, RETRY_MAX_MS],
+  )
+
+  const fast = createRoutine({
+    command: 'check the status page',
+    schedule: { kind: 'interval', everyMs: 60_000 },
+    sources: ['https://example.com/status'],
+    now: NOW,
+  })
+  // A minute-interval routine retrying in a minute is racing itself: two
+  // claims for what the owner thinks of as one job. Let the schedule do it.
+  const raced = planRetry({ ...fast, dueSince: NOW }, { now: NOW, attempt: 1 })
+  assert.equal(raced.retry, false)
+  assert.match(raced.reason, /next scheduled run arrives sooner/)
+
+  // A spent one-shot has no next occurrence at all, which is exactly the case
+  // that has nothing else to fall back on.
+  const once = { ...queuedTask(), dueSince: NOW - 1 }
+  assert.equal(planRetry(once, { now: NOW, attempt: 1 }).retry, true)
+
+  // Twelve hours, same as DEFER_MAX_MS: an answer about this morning is worth
+  // nothing tomorrow, and stale retries would all come due at once.
+  const stale = { ...once, dueSince: NOW - DEFER_MAX_MS - 1 }
+  assert.equal(planRetry(stale, { now: NOW, attempt: 1 }).retry, false)
+  assert.match(planRetry(stale, { now: NOW, attempt: 1 }).reason, /too old/)
+})
+
+/* ---- idempotency ---------------------------------------------------------
+ * dispatchToMac() is fire-and-forget, so a retry and a completion can be in
+ * flight at the same time. The Mac not answering within MAC_RESULT_MAX_WAIT_MS
+ * is not the Mac having stopped.
+ * ------------------------------------------------------------------------- */
+
+test('a retry that races a completion does not run the command a second time', async () => {
+  const store = fakeStore()
+  const routine = { ...dueRoutine(), attempt: 1, dueSince: NOW - 1 }
+  await store.saveRoutine(routine)
+  /* The earlier attempt finished while this retry was already queued. */
+  await store.recordRoutineRun({
+    runId: 'run_first',
+    routineId: routine.routineId,
+    status: 'completed',
+    startedAt: new Date(NOW - 60_000).toISOString(),
+    occurrenceKey: occurrenceKey(routine.routineId, new Date(NOW - 1).toISOString()),
+  })
+
+  let enqueued = 0
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => true,
+    enqueueMacJob: async () => {
+      enqueued += 1
+      return { jobId: 'job_dup' }
+    },
+    logger: silentLogger,
+  })
+
+  assert.equal(enqueued, 0, 'the same command must not reach the Mac twice')
+  assert.equal(runs[0].status, 'superseded')
+  assert.match(runs[0].error, /already completed as run_first/)
+  // The refusal is recorded: "the guard fired" and "nothing was due" have to
+  // look different, or the guard cannot be shown to work.
+  assert.equal(store.runs.size, 2)
+  assert.ok(store.routines.get(routine.routineId).nextRunAt > NOW)
+})
+
+test('a retry while the first attempt is still on the Mac waits rather than doubling', async () => {
+  const store = fakeStore()
+  const routine = { ...dueRoutine(), attempt: 1, dueSince: NOW - 1 }
+  await store.saveRoutine(routine)
+  await store.recordRoutineRun({
+    runId: 'run_inflight',
+    routineId: routine.routineId,
+    status: 'dispatched',
+    startedAt: new Date(NOW - 60_000).toISOString(),
+    macJobId: 'job_slow',
+    occurrenceKey: occurrenceKey(routine.routineId, new Date(NOW - 1).toISOString()),
+  })
+
+  let enqueued = 0
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => true,
+    enqueueMacJob: async () => {
+      enqueued += 1
+      return { jobId: 'job_dup' }
+    },
+    logger: silentLogger,
+  })
+
+  assert.equal(enqueued, 0)
+  assert.match(runs[0].error, /still running on the Mac as run_inflight/)
+})
+
+test('another routine failing at the same instant never suppresses this one', async () => {
+  const store = fakeStore()
+  const mine = { ...dueRoutine(), attempt: 1, dueSince: NOW - 1 }
+  await store.saveRoutine(mine)
+  /* Same occurrence instant, different routine: the key must not collide. */
+  await store.recordRoutineRun({
+    runId: 'run_someone_else',
+    routineId: 'rtn_other',
+    status: 'completed',
+    startedAt: new Date(NOW - 60_000).toISOString(),
+    occurrenceKey: occurrenceKey('rtn_other', new Date(NOW - 1).toISOString()),
+  })
+
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => false,
+    webSearch: async () => ({ ok: true, summary: 'ran fine' }),
+    logger: silentLogger,
+  })
+  assert.equal(runs[0].status, 'completed')
+})
+
+test('a Mac job that failed is retried, and only announced once it is really over', async () => {
+  const store = fakeStore()
+  const routine = dueRoutine()
+  await store.saveRoutine(routine)
+  await store.createJob({ jobId: 'job_bad', status: 'failed', error: 'Mail was locked' })
+  const run = {
+    runId: 'run_mac',
+    routineId: routine.routineId,
+    routineName: routine.name,
+    status: 'dispatched',
+    startedAt: new Date(NOW).toISOString(),
+    dueAt: new Date(NOW).toISOString(),
+    attempt: 1,
+    macJobId: 'job_bad',
+    occurrenceKey: occurrenceKey(routine.routineId, new Date(NOW).toISOString()),
+  }
+  await store.recordRoutineRun(run)
+
+  const retried = await reapDispatchedRuns({ store, now: NOW + 60_000 })
+  assert.equal(retried[0].status, 'failed')
+  assert.equal(retried[0].final, false)
+  assert.equal(store.announcements.size, 0)
+  // dispatchToMac() already advanced the routine to tomorrow; the retry has to
+  // put the occurrence back, and advanceRoutine() will return it to the grid.
+  const armed = store.routines.get(routine.routineId)
+  assert.equal(armed.nextRunAt, NOW + 60_000 + RETRY_BASE_MS)
+  assert.equal(armed.dueSince, NOW)
+
+  await store.recordRoutineRun({ ...run, attempt: RETRY_MAX_ATTEMPTS, status: 'dispatched' })
+  const done = await reapDispatchedRuns({ store, now: NOW + 120_000 })
+  assert.equal(done[0].final, true)
+  assert.match([...store.announcements.values()][0].speech, /Mail was locked/)
+})
+
+test('a routine deleted mid-flight is reported, not resurrected', async () => {
+  const store = fakeStore()
+  await store.createJob({ jobId: 'job_gone', status: 'failed', error: 'boom' })
+  await store.recordRoutineRun({
+    runId: 'run_orphan',
+    routineId: 'rtn_deleted',
+    status: 'dispatched',
+    startedAt: new Date(NOW).toISOString(),
+    dueAt: new Date(NOW).toISOString(),
+    macJobId: 'job_gone',
+  })
+
+  const closed = await reapDispatchedRuns({ store, now: NOW + 60_000 })
+  assert.equal(closed[0].final, true)
+  assert.equal(closed[0].stoppedBecause, 'the routine is gone')
+  assert.equal(store.routines.size, 0)
+  assert.equal(store.announcements.size, 0)
+})
+
+test('an occurrence dropped after a day of lid-closed silence is said out loud', async () => {
+  const store = fakeStore()
+  await store.saveRoutine({
+    ...createRoutine({
+      command: 'summarize my calendar for today',
+      schedule: { kind: 'daily', at: '07:00' },
+      now: NOW,
+    }),
+    nextRunAt: NOW - 1,
+    deferredSince: new Date(NOW - DEFER_MAX_MS - 1).toISOString(),
+  })
+
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => false,
+    logger: silentLogger,
+  })
+
+  assert.equal(runs[0].status, 'missed')
+  // Nothing else in the stack would ever mention this: there is no error the
+  // owner could go looking for, only a briefing that never arrived.
+  const announcement = [...store.announcements.values()][0]
+  assert.match(announcement.speech, /did not run/)
+  assert.match(announcement.speech, /stayed offline/)
 })
 
 test('editing a schedule reschedules and clears any deferral', () => {
