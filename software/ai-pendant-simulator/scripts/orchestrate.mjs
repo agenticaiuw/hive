@@ -15,6 +15,7 @@
  *   node scripts/orchestrate.mjs --agents unified,mac-planner --dry-run
  */
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -94,6 +95,31 @@ function runAgent(agent) {
   })
 }
 
+/*
+ * The harness is re-spawned from disk for every round, so editing it mid-run
+ * changes what the next round executes. On 2026-08-07 a half-applied edit did
+ * exactly that: cycles 0-3 ran, then 24 rounds across 8 cycles died on the same
+ * undefined identifier. Nothing noticed, because a crashed round and a quiet
+ * agent look identical from out here.
+ *
+ * This process already holds its own code in memory, so only the spawned files
+ * matter. Hashing them turns that failure into a clean stop with the reason
+ * attached.
+ */
+const WATCHED = ['derive-harness.mjs', 'commons.mjs', 'novelty.mjs', 'eligibility.mjs']
+
+function harnessFingerprint() {
+  return WATCHED.map((file) => {
+    try {
+      return `${file}:${createHash('sha256').update(fs.readFileSync(path.join(HERE, file))).digest('hex').slice(0, 12)}`
+    } catch {
+      return `${file}:missing`
+    }
+  }).join(' ')
+}
+
+const fingerprintAtStart = harnessFingerprint()
+
 const started = new Date()
 process.stdout.write(
   `Orchestrating ${AGENTS.length} agents, up to ${CYCLES} cycles, ${SLOTS} at a time.\n` +
@@ -127,6 +153,18 @@ for (; cycle < CYCLES; cycle += 1) {
     `Cycle ${cycle}: running ${run.map((row) => `${row.agent} [${row.reason}]`).join(', ')}` +
       (held.length ? `  ·  holding ${held.map((row) => row.agent).join(', ')}\n` : '\n'),
   )
+
+  const fingerprintNow = harnessFingerprint()
+  if (fingerprintNow !== fingerprintAtStart) {
+    process.stdout.write(
+      `\nStopping: the harness changed on disk since this run began.\n` +
+        `  was  ${fingerprintAtStart}\n  now  ${fingerprintNow}\n` +
+        'Every round re-spawns it from disk, so the rest of this run would be ' +
+        'measuring different code than the rounds already recorded. Re-run when ' +
+        'the edit is finished.\n',
+    )
+    break
+  }
 
   if (DRY_RUN) {
     /* Mark anyway, so a dry run still shows how eligibility would evolve rather

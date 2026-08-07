@@ -236,6 +236,43 @@ cannot separate "no longer re-noticing the same thing" from "less grounded
 because it is trusting a summary". And alternation balances maturity but not
 store growth: later commons rounds see a richer directory than earlier ones.
 
+## What is actually built, and what each thing is answering
+
+Every mechanic below existed as a citation in this document before it existed as
+code. The pattern that kept repeating is that **the instruction version does not
+work and the structural version does** — the prompt has always told agents not
+to restate the backlog, and they restated it eleven times.
+
+| mechanism | file | what it answers | measured |
+|---|---|---|---|
+| commons | `scripts/commons.mjs` | rediscovery is the cost, not coordination | discovery share 54.9% → 49.2%, probes 1.88 → 0.81/round |
+| learned decay | same | a per-category TTL table is a guess frozen at writing time | re-observation extends life, contradiction halves it |
+| known-absent | same | no trail ≠ unexplored trail | absence stored with ¼ the lifetime of presence |
+| adaptive preview | same | zero `recall` calls in 26 rounds; "122 items" cannot replace the call | budget goes to the most-confirmed, which *is* the count of re-derivations |
+| eligibility | `scripts/eligibility.mjs` | two agents produced nothing across 16 rounds and were invoked every one | agents held when nothing contradicted or new |
+| control shell | `scripts/orchestrate.mjs` | nobody should decide to run | stops when nothing is eligible |
+| dedup gate | `scripts/novelty.mjs` | 11 near-duplicate pairs in 204 entries, one word-for-word | blocks at 0.45, hands back what it collided with |
+| detachability | `scripts/detach.mjs` | exit is the variable, so knowledge cannot live only in the store | 51% of facts sole-sourced; `--export` writes a file that outlives the project |
+| context handoff | `shared/contextHandoff.js` | the relay's reasoning died at the Mac boundary | discovery calls 12.3 → 0, uncached tokens −74%, wall clock −67% |
+
+### Three things that were not in the plan and turned out to matter
+
+**An agent that cannot act is indistinguishable from an agent with nothing to
+say.** Three separate times a harness defect arrived dressed as an architecture
+result: propose tools gated behind a phase, a proposal phase writing prose
+instead of calling tools, and an agent stranded in recon for eighteen rounds.
+Every one of them produced a clean-looking zero in a comparison table.
+
+**Nothing in the harness could time out.** Every `fetch` was unbounded and the
+round deadline is only consulted between steps, so one dead connection stalls a
+round forever — and, once the state lock existed, blocks its launcher behind it.
+
+**The measurement apparatus needs the same scepticism as the system.** Rounds
+counted by log greps that missed proposals; arms compared at different
+maturities; a condition inferred from which shell had which variable set. Each
+produced a confident, wrong conclusion. Rounds now record their own condition,
+and `harness-stats.mjs` refuses to pool arms that are not comparable.
+
 ## Empirical baseline for this class of system
 
 MAST (arXiv 2503.13657), 1600+ annotated traces across 7 frameworks, κ=0.88:
