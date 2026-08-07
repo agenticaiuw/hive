@@ -47,6 +47,20 @@ export const WATERMARK_FILE = 'orchestrator.json'
  */
 export const MAX_IDLE_CYCLES = 4
 
+/*
+ * How much evidence is worth a round.
+ *
+ * One unseen key scores 1, one piece of unread mail 2, and a contradiction
+ * 3 × how unexpected it was. So this floor admits any genuinely new fact or any
+ * mail, and admits a contradiction only if the key was reasonably stable before
+ * it moved: at the observed rates a change in /ops/status (0.76, so 0.72) is
+ * not enough on its own, while a change in something that had held still is.
+ *
+ * Set at exactly one new fact, because that is the smallest thing this system
+ * can honestly call news, and anything below it is the store's own noise.
+ */
+export const WAKE_AT = 1
+
 export function loadWatermarks(dir) {
   try {
     return JSON.parse(fs.readFileSync(path.join(dir, WATERMARK_FILE), 'utf8'))
@@ -106,7 +120,16 @@ export function assess(dir, agent, { cycle, unreadMail = 0, now = Date.now() } =
   for (const [key, entry] of entries) {
     const seenHash = mark.seen?.[key]
     if (seenHash === undefined) unseen.push(key)
-    else if (seenHash !== entry.hash) contradicted.push(key)
+    /*
+     * Weighted by how unexpected the change was. A key that comes back
+     * different on every single look is a clock, and its changing again says
+     * nothing — measured on the live store, eight such keys (/observe,
+     * /ops/snapshot, /capabilities) produced 45 of 119 changes and kept every
+     * agent permanently eligible. A change is only news if it was not expected.
+     */
+    else if (seenHash !== entry.hash) {
+      contradicted.push({ key, surprise: 1 - (entry.changeRate ?? 0) })
+    }
   }
 
   const idle = Number.isFinite(cycle) && Number.isFinite(mark.lastCycle) ? cycle - mark.lastCycle : 0
@@ -116,20 +139,22 @@ export function assess(dir, agent, { cycle, unreadMail = 0, now = Date.now() } =
    * false, which invalidates whatever it built on top of it — where an unseen
    * key is merely an opportunity.
    */
-  const score = contradicted.length * 3 + unseen.length + unreadMail * 2
+  const surprise = contradicted.reduce((total, row) => total + row.surprise, 0)
+  const score = surprise * 3 + unseen.length + unreadMail * 2
 
-  if (contradicted.length || unseen.length || unreadMail) {
+  if (score >= WAKE_AT) {
+    const worthMentioning = contradicted.filter((row) => row.surprise > 0.1).length
     return {
       agent,
       eligible: true,
       score,
       reason: [
-        contradicted.length && `${contradicted.length} contradicted`,
+        worthMentioning && `${worthMentioning} contradicted`,
         unseen.length && `${unseen.length} new`,
         unreadMail && `${unreadMail} unread`,
       ]
         .filter(Boolean)
-        .join(', '),
+        .join(', ') || 'accumulated churn',
     }
   }
 

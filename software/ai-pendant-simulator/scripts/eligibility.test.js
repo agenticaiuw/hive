@@ -157,3 +157,59 @@ test('an expired entry stops counting as something to catch up on', () => {
   const afterExpiry = now + 24 * 60 * 60 * 1000
   assert.equal(assess(dir, 'late', { cycle: 2, now: afterExpiry }).eligible, false)
 })
+
+/*
+ * A change is only news if it was not expected.
+ *
+ * Measured on the live store: eight keys came back different on essentially
+ * every look (/observe, /ops/snapshot, /capabilities — liveness payloads
+ * carrying a clock) and produced 45 of 119 changes between them. Counting those
+ * as contradictions kept every agent permanently eligible, and the shell ran to
+ * its cycle cap sixteen times without ever reaching "nobody has anything new".
+ */
+test('a key that changes on every look does not wake anyone', () => {
+  const dir = tempDir()
+  const args = { method: 'GET', path: '/observe' }
+  const key = 'probe_http:method=GET path=/observe'
+
+  /*
+   * Different every single time, which is what a clock looks like — and enough
+   * looks to have earned that conclusion. The estimate is smoothed toward
+   * stable, so a handful of changes is deliberately NOT sufficient: at seven
+   * observations this key still scores exactly at the waking line. The real
+   * /observe had fifteen, which is what is reproduced here.
+   */
+  for (const n of Array.from({ length: 15 }, (_, i) => i + 1)) {
+    deposit(dir, { tool: 'probe_http', args, result: { status: 200, at: n }, agent: 'watcher', round: n })
+  }
+  markRan(dir, 'mac-planner', { cycle: 1 })
+  deposit(dir, { tool: 'probe_http', args, result: { status: 200, at: 99 }, agent: 'watcher', round: 16 })
+
+  const verdict = assess(dir, 'mac-planner', { cycle: 2 })
+  assert.equal(verdict.eligible, false, 'a clock ticking is not a reason to think')
+})
+
+test('a key that had held still and then moved does wake someone', () => {
+  const dir = tempDir()
+  const args = { category: 'routes' }
+
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    deposit(dir, { tool: 'discover', args, result: { items: ['stable'] }, agent: 'watcher', round: n })
+  }
+  markRan(dir, 'mac-planner', { cycle: 1 })
+  deposit(dir, { tool: 'discover', args, result: { items: ['stable', 'NEW'] }, agent: 'watcher', round: 7 })
+
+  const verdict = assess(dir, 'mac-planner', { cycle: 2 })
+  assert.equal(verdict.eligible, true)
+  assert.match(verdict.reason, /contradicted/)
+})
+
+test('a brand new key is never discounted for volatility it has not shown', () => {
+  const dir = tempDir()
+  markRan(dir, 'mac-planner', { cycle: 1 })
+  /* One observation says nothing about whether a key moves, so it must not be
+   * treated as noise on no evidence. */
+  deposit(dir, { tool: 'discover', args: { category: 'brand-new' }, result: { items: [1] }, agent: 'x', round: 1 })
+
+  assert.equal(assess(dir, 'mac-planner', { cycle: 2 }).eligible, true)
+})
