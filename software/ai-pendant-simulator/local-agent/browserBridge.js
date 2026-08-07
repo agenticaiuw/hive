@@ -5,6 +5,20 @@ const ONLINE_WINDOW_MS = 70_000
 const COMMAND_LEASE_MS = 45_000
 const MAX_COMPLETED_RESULTS = 200
 
+/*
+ * A queued command outlives the caller that asked for it. waitForBrowserResult
+ * gives up after 45s, so past that there is nobody left to return an answer to
+ * — but the command stayed in the map, and the next extension to connect would
+ * run it. Observed live: a fan-out against an offline extension left five
+ * queued navigations that would have opened tabs in the owner's Safari
+ * whenever it next came online, possibly hours later and unrelated to anything
+ * they were doing.
+ *
+ * Twice the caller's own timeout, so a command still in flight for a caller
+ * that is still waiting is never taken away from it.
+ */
+const COMMAND_TTL_MS = 90_000
+
 export function registerBrowserHeartbeat({
   extensionId,
   tabId,
@@ -69,6 +83,7 @@ export function enqueueBrowserCommand(action) {
 
 export function pollBrowserCommand(extensionId) {
   reclaimExpiredCommands()
+  expireStaleCommands()
 
   if (!isExtensionOnline(extensionId)) {
     registerBrowserHeartbeat({ extensionId })
@@ -155,6 +170,62 @@ function reclaimExpiredCommands() {
       command.claimedBy = null
     }
   }
+}
+
+/**
+ * Retire commands nobody is waiting for any more.
+ *
+ * Expiry is a terminal result rather than a silent delete: a caller that comes
+ * back for the id gets "expired" instead of null, which reads as an answer
+ * rather than as the bridge having lost the command.
+ */
+function expireStaleCommands() {
+  const now = Date.now()
+
+  for (const command of pendingCommands.values()) {
+    if (now - new Date(command.createdAt).getTime() < COMMAND_TTL_MS) continue
+
+    results.set(command.commandId, {
+      ...command,
+      status: 'failed',
+      completedAt: new Date().toISOString(),
+      result: null,
+      error: `Expired after ${Math.round(COMMAND_TTL_MS / 1000)}s without an extension to run it.`,
+      expired: true,
+    })
+    pendingCommands.delete(command.commandId)
+  }
+
+  pruneCompletedResults()
+}
+
+/**
+ * Drop queued commands without impersonating an extension.
+ *
+ * Until this existed the only way to clear the queue was to register a fake
+ * extension and poll each command through the real poll/result contract, which
+ * is a trick rather than an interface — and one that leaves a phantom device
+ * behind in the heartbeat registry.
+ */
+export function cancelBrowserCommands(commandId = null) {
+  const doomed = commandId
+    ? [pendingCommands.get(commandId)].filter(Boolean)
+    : [...pendingCommands.values()]
+
+  for (const command of doomed) {
+    results.set(command.commandId, {
+      ...command,
+      status: 'failed',
+      completedAt: new Date().toISOString(),
+      result: null,
+      error: 'Cancelled before an extension ran it.',
+      cancelled: true,
+    })
+    pendingCommands.delete(command.commandId)
+  }
+
+  pruneCompletedResults()
+  return { cancelled: doomed.map((command) => command.commandId) }
 }
 
 function pruneCompletedResults() {

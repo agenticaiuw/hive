@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  cancelBrowserCommands,
   completeBrowserCommand,
   enqueueBrowserCommand,
   getBrowserCommandResult,
@@ -112,4 +113,72 @@ test('a stale device is pruned by the next heartbeat, without a restart', (t) =>
   const devices = getBrowserStatus().devices.map((device) => device.extensionId)
   assert.equal(devices.includes(phantom), false, 'the residue is gone')
   assert.equal(devices.includes(real), true, 'the device that just checked in survives')
+})
+
+test('a queued command nobody is waiting for expires instead of firing late', (t) => {
+  /* Both clocks, deliberately: createdAt is stamped with new Date() and the
+   * expiry compares against Date.now(). Faking one desyncs them and produces a
+   * failure that reads as a bug in the bridge rather than in the test. */
+  t.mock.timers.enable({ apis: ['Date'] })
+
+  const { commandId } = enqueueBrowserCommand({ type: 'browser_navigate' })
+
+  /* Past COMMAND_TTL_MS: twice waitForBrowserResult's own 45s timeout, so the
+   * caller gave up long ago and there is nobody left to answer. */
+  t.mock.timers.tick(90_001)
+
+  const extensionId = `late-extension-${crypto.randomUUID()}`
+  assert.equal(
+    pollBrowserCommand(extensionId),
+    null,
+    'the extension reconnects and is handed nothing',
+  )
+
+  const result = getBrowserCommandResult(commandId)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.expired, true)
+  assert.match(result.error, /without an extension to run it/)
+})
+
+test('a command a caller is still waiting on is not taken away', (t) => {
+  t.mock.timers.enable({ apis: ['Date'] })
+
+  const { commandId } = enqueueBrowserCommand({ type: 'browser_navigate' })
+  /* Inside waitForBrowserResult's 45s window: the caller is still there. */
+  t.mock.timers.tick(30_000)
+
+  const claimed = pollBrowserCommand(`live-extension-${crypto.randomUUID()}`)
+  assert.equal(claimed?.commandId, commandId)
+})
+
+test('the queue can be drained without impersonating an extension', () => {
+  const first = enqueueBrowserCommand({ type: 'browser_navigate' })
+  const second = enqueueBrowserCommand({ type: 'browser_read_page' })
+
+  const { cancelled } = cancelBrowserCommands()
+
+  assert.ok(cancelled.includes(first.commandId))
+  assert.ok(cancelled.includes(second.commandId))
+  assert.equal(getBrowserStatus().pendingCommands, 0)
+
+  const result = getBrowserCommandResult(first.commandId)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.cancelled, true)
+
+  /* No fake device was registered, which is the whole point — the old drain
+   * left a phantom extension behind in the heartbeat registry. */
+  const devices = getBrowserStatus().devices.map((device) => device.extensionId)
+  assert.equal(devices.some((id) => String(id).includes('cleanup')), false)
+})
+
+test('cancelling one command leaves the others queued', () => {
+  cancelBrowserCommands()
+  const doomed = enqueueBrowserCommand({ type: 'browser_navigate' })
+  const spared = enqueueBrowserCommand({ type: 'browser_read_page' })
+
+  const { cancelled } = cancelBrowserCommands(doomed.commandId)
+
+  assert.deepEqual(cancelled, [doomed.commandId])
+  assert.equal(getBrowserCommandResult(spared.commandId).status, 'queued')
+  cancelBrowserCommands()
 })

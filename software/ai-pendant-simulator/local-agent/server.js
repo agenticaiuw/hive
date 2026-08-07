@@ -17,6 +17,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AGENT_TOKEN, PORT, FULL_CONTROL_MODE } from './config.js'
 import {
+  cancelBrowserCommands,
   completeBrowserCommand,
   getBrowserStatus,
   pollBrowserCommand,
@@ -1318,6 +1319,13 @@ app.get('/browser/poll', (request, response) => {
   }
 
   response.json({ command })
+})
+
+/* Draining the queue used to mean registering a fake extension and polling
+ * each command through the real contract, which also left a phantom device in
+ * the heartbeat registry. Cleanup should be an interface, not a trick. */
+app.delete('/browser/commands/:commandId?', (request, response) => {
+  response.json(cancelBrowserCommands(request.params.commandId ?? null))
 })
 
 app.post('/browser/result/:commandId', (request, response) => {
