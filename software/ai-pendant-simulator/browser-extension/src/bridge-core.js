@@ -92,9 +92,39 @@ export function originPattern(value) {
   return `${url.protocol}//${url.host}/*`
 }
 
-export function validateCommand(command) {
+/*
+ * How old a queued command may be before this extension refuses it.
+ *
+ * The agent has its own expiry, but the agent is a long-lived process the owner
+ * does not restart, and a fix to it only takes effect when they do. Right now
+ * there is a live agent, started before that fix, holding queued commands from
+ * hours ago — they would run the moment this extension next connected, opening
+ * tabs in the owner's Safari with no relation to anything they were doing.
+ *
+ * So the extension refuses on its own account rather than trusting the sender.
+ * It is the side that can be fixed without the owner restarting anything: a
+ * browser extension reloads with the browser.
+ *
+ * 90s matches the agent's own COMMAND_TTL_MS (local-agent/browserBridge.js),
+ * which is twice the 45s a caller waits. Past that nobody is left to receive an
+ * answer, so running the command can only surprise someone.
+ */
+export const MAX_COMMAND_AGE_MS = 90_000
+
+export function validateCommand(command, now = Date.now()) {
   if (!command || typeof command !== 'object') {
     throw new Error('The local agent sent an invalid browser command.')
+  }
+
+  /* Checked before the action is inspected: a stale command should be refused
+   * whatever it asks for, and a malformed stale one is not more welcome. */
+  const queuedAt = Date.parse(command.createdAt ?? '')
+  if (Number.isFinite(queuedAt) && now - queuedAt > MAX_COMMAND_AGE_MS) {
+    throw new Error(
+      `Refused a browser command queued ${Math.round((now - queuedAt) / 1000)}s ago. ` +
+        'Nothing is still waiting for it, so running it now would act on the ' +
+        "owner's browser unprompted.",
+    )
   }
 
   const action = command.action
