@@ -42,6 +42,72 @@ authenticated sessions nobody else can reach, continuous availability across a
 multi-week clock, and the ability to act on a computer. It needs nothing from
 the counterparty.
 
+## The constraint that decides the hardware, not just the software
+
+Always-on capture of *other people's* speech is not a hard problem to be
+engineered around. It is illegal in roughly twelve US states and under GDPR,
+and the exposure lands on the **wearer**, not the vendor.
+
+- **Illinois** (720 ILCS 5/14-2): knowingly recording any part of a private
+  conversation without all-party consent is a **Class 4 felony** on first
+  offence, with a private right of action.
+- **California** (Penal Code 632 / 637.2): the greater of **$5,000 per
+  violation or 3× actual damages, with no requirement to prove any loss**.
+  Multiply by conversations by participants: unbounded, and uninsurable for an
+  individual.
+- **EU**: after *Ryneš* (C-212/13) the household exemption does not cover
+  outward-directed capture, and a worn recorder is outward-directed by
+  construction. The wearer becomes a **data controller** for every bystander.
+
+The shipping products confirm it by their own behaviour. **Limitless was
+acquired by Meta (announced 5 Dec 2025), the Pendant discontinued, and service
+terminated outright in the EU, UK, Brazil, China, Israel, South Korea and
+Turkey the same day** — precisely the jurisdictions where the burden shifts to
+the wearer. *Brewer v. Otter.ai* (consolidated Dec 2025) is litigating exactly
+the posture every pendant ships in: host-only consent, with the consent duty
+contractually pushed onto the customer.
+
+Building a consent mechanism is the wrong answer, because the artifact it
+produces probably is not legally valid consent: CIPA needs consent before the
+capture, and GDPR consent must be freely given and cannot be a precondition of
+an ordinary human interaction.
+
+**So the design is forced, and this is a feature.** Capture is gated to the
+*owner's own speech*: non-enrolled voices never reach durable storage. That is
+legal everywhere, it is technically hard, and nobody ships it well. It also
+happens to be all this product needs — an appeal is built from the owner's own
+account of what happened plus their authenticated records, not from
+transcribing whoever they were standing next to.
+
+## Two dead ends, verified rather than assumed
+
+**Agent-to-agent coordination between different people has already failed.**
+Google Duplex shipped in 2018, hit the disclosure backlash, narrowed to four
+cities and restaurant reservations, and by Oct 2020 the metric Google reported
+was **3M+ business listings updated** — a Maps data-collection pipeline, not
+appointments booked. A2A supplies identity and authorization but no
+non-repudiation and no dispute resolution, so neither agent can promise
+anything its principal is bound by. And once both sides must disclose they are
+AI, natural-language negotiation is strictly worse than the API call it
+emulates. Where a neutral coordinator can exist, it dominates: Calendly beat
+agent-to-agent scheduling and always will.
+
+**Acting with spending authority is not legally blocked — it is legally settled
+against the owner.** UETA §14: a contract formed by an electronic agent binds
+the principal "even if no individual was aware of or reviewed" it. *Moffatt v.
+Air Canada* (2024 BCCRT 149) rejected the argument that the chatbot was a
+separate entity. There is no "my agent did it" defence, and the reliability is
+not close: Anthropic's own Claude for Chrome reports prompt-injection success
+of 23.6% falling to 11.2% after mitigations, and blocks financial sites by
+default.
+
+**The consolidation pattern is the clearest signal in the whole field.**
+Humane → HP ($116M, software and patents, device business explicitly excluded;
+~10,000 units against a 100,000 target, returns exceeding purchases May–Aug
+2024). Limitless → Meta. Bee → Amazon. In every case the acquirer took the team
+and the data and **killed the device**. Nobody has bought one of these as a
+going hardware concern.
+
 ## Why a gate here is not the gate I kept rejecting
 
 Dietvorst, Simmons & Massey (2018, *Management Science*): people are
