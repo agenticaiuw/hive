@@ -259,6 +259,60 @@ test('confidence carries the reasons it is not 1', () => {
 
 /* --------------------------------------------------------------- TTL */
 
+test('usable is true for a live capsule and false in every other state', (t) => {
+  const at = store(t)
+
+  /*
+   * `usable` is the field consumers branch on, and it fails in the dangerous
+   * direction: returning true for a revoked capsule would silently stop a
+   * revocation propagating downstream, and nothing would throw. originFanOut.js
+   * pins this from the consumer side; it is pinned here too, because the
+   * guarantee has to survive that consumer being refactored away.
+   */
+  const live = mintCapsule({ ...READING, capturedAt: 0, ttlMs: HOUR }, at).capsule
+  const expired = mintCapsule(
+    { ...READING, content: 'Stale text.', capturedAt: 0, ttlMs: HOUR },
+    at,
+  ).capsule
+  const revoked = mintCapsule({ ...READING, content: 'Revoked text.', capturedAt: 0 }, at).capsule
+  revokeCapsules({ capsuleId: revoked.capsuleId }, at)
+  const retired = mintCapsule(
+    { ...READING, content: 'Retired text.', capturedAt: 0, ttlMs: HOUR },
+    at,
+  ).capsule
+  sweepCapsules({ now: 48 * HOUR, graceMs: 24 * HOUR }, at)
+
+  const seen = new Set()
+  for (const [capsule, now] of [
+    [live, 30 * 60_000],
+    [expired, 2 * HOUR],
+    [getCapsule(revoked.capsuleId, at), 30 * 60_000],
+    [getCapsule(retired.capsuleId, at), 49 * HOUR],
+  ]) {
+    const shown = presentCapsule(capsule, { now })
+    seen.add(shown.state)
+    assert.equal(
+      shown.usable,
+      shown.state === 'live',
+      `usable disagreed with state "${shown.state}"`,
+    )
+    /* The two must never disagree either: a consumer reading `content` and a
+     * consumer reading `usable` have to reach the same answer. */
+    assert.equal(
+      shown.content !== null,
+      shown.usable,
+      `content and usable disagreed in state "${shown.state}"`,
+    )
+    if (!shown.usable) assert.ok(shown.tombstone, 'an unusable capsule always carries its tombstone')
+  }
+
+  assert.deepEqual(
+    [...seen].sort(),
+    ['expired', 'live', 'retired', 'revoked'],
+    'all four states were actually exercised, not just the easy ones',
+  )
+})
+
 test('past its TTL a capsule stops being shown but keeps its row', (t) => {
   const at = store(t)
   const { capsule } = mintCapsule({ ...READING, capturedAt: 0, ttlMs: HOUR }, at)
