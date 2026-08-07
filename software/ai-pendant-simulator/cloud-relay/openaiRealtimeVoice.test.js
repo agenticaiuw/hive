@@ -302,3 +302,165 @@ test('StreamingPcmResampler accepts mid-press byte chunks', () => {
   assert.ok(total > 0)
   assert.equal(total % 2, 0)
 })
+
+/*
+ * runWebSearch used to report a refusal as ok:true. Same class of bug as
+ * voiceRunForCapture in jobs.js hardcoding 'done' (see jobsVoiceRun.test.js):
+ * the call completed, so success was assumed, and a scheduled routine turned
+ * the apology into a spoken morning briefing.
+ *
+ * The payload shapes below are captured verbatim from the live Responses API
+ * on 2026-08-07. The refusal reproduced 7 times in 12 on gpt-4o-mini.
+ */
+const { webSearchOutcome, runWebSearch } = await import(
+  './openaiRealtimeVoice.js'
+)
+
+const message = (text, annotations = []) => ({
+  type: 'message',
+  content: [{ type: 'output_text', text, annotations }],
+})
+const searchCall = (extra = {}) => ({
+  type: 'web_search_call',
+  status: 'completed',
+  action: { type: 'search', query: 'top world news headline', ...extra },
+})
+
+/* Verbatim: the search ran, completed, retrieved nothing, and the model
+ * answered as though it had no web access at all. */
+const REFUSAL =
+  "I'm sorry, but I don't have access to real-time news updates. For the " +
+  'most current world news headlines, I recommend checking reputable news ' +
+  'sources like BBC News, CNN, or Reuters.'
+
+test('a completed search that produced a refusal is not a success', () => {
+  const outcome = webSearchOutcome({
+    output: [searchCall(), message(REFUSAL)],
+  })
+
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.reason, 'refused')
+  assert.match(outcome.error, /could not retrieve/i)
+  /* The thing that made this bug invisible: it searched, and it succeeded. */
+  assert.equal(outcome.searched, true)
+})
+
+test('runWebSearch surfaces a refusal as ok:false, never as a summary', async () => {
+  /* The whole point: callers must be able to tell an answer from an apology,
+   * and must never be handed the apology as if it were the answer. */
+  const outcome = webSearchOutcome({ output: [searchCall(), message(REFUSAL)] })
+  assert.equal(outcome.ok, false)
+  assert.equal(await runWebSearch('  ').then((r) => r.ok), false)
+})
+
+test('retrieved sources count as grounding even with zero citations', () => {
+  /* The Madison weather query — which worked in production — cites nothing
+   * but retrieves 13 sources. A citations-only rule would break it. */
+  const outcome = webSearchOutcome({
+    output: [
+      searchCall({ sources: Array.from({ length: 13 }, (_, i) => ({ url: `https://w${i}.example` })) }),
+      message("As of 7:38 AM on Friday, August 7, 2026, in Madison, Wisconsin, it's 69°F with cloudy skies."),
+    ],
+  })
+
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.reason, 'grounded')
+  assert.equal(outcome.sourceCount, 13)
+  assert.equal(outcome.citationCount, 0)
+})
+
+test('url citations count as grounding', () => {
+  const outcome = webSearchOutcome({
+    output: [
+      searchCall(),
+      message('Russia launched a ballistic missile strike on Kyiv on August 5.', [
+        { type: 'url_citation', url: 'https://apnews.com/article/x', title: 'AP' },
+      ]),
+    ],
+  })
+
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.reason, 'grounded')
+  assert.equal(outcome.citationCount, 1)
+})
+
+test('an answer with no search call at all is a failure', () => {
+  const outcome = webSearchOutcome({ output: [message('The capital is Paris.')] })
+
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.reason, 'no_search')
+  assert.equal(outcome.searched, false)
+})
+
+test('a search that did not complete is a failure', () => {
+  const outcome = webSearchOutcome({
+    output: [{ type: 'web_search_call', status: 'failed', action: {} }, message('Something.')],
+  })
+
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.reason, 'search_failed')
+})
+
+test('no text is a failure even when the search succeeded', () => {
+  const outcome = webSearchOutcome({ output: [searchCall({ sources: [{ url: 'https://a.example' }] })] })
+
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.reason, 'no_text')
+})
+
+/*
+ * The two guards that keep the fix from becoming the opposite bug. Grounding
+ * is unreliable as a NEGATIVE signal — 2 of 12 correct news answers came back
+ * with no sources and no citations — so an ungrounded answer must still pass.
+ */
+test('a real answer with no sources and no citations still succeeds', () => {
+  const outcome = webSearchOutcome({
+    output: [
+      searchCall(),
+      message(
+        "As of August 7, 2026, the top world news headline is the United States' military intervention in Venezuela.",
+      ),
+    ],
+  })
+
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.reason, 'ungrounded_answer')
+  assert.equal(outcome.grounded, false)
+})
+
+test('an ungrounded "I could not fetch it, you go look" is a failure', () => {
+  /* Verbatim from a live run of the patched function: this one slipped
+   * through an earlier, narrower wording check and would have become a
+   * morning briefing that apologises and hands the job back to the owner. */
+  const outcome = webSearchOutcome({
+    output: [
+      searchCall(),
+      message(
+        'I’m really sorry—I tried to pull up the latest top world headline, but it looks ' +
+          'like I couldn’t fetch live results at the moment. Could you check a reliable news ' +
+          'source like Reuters or AP and let me know?',
+      ),
+    ],
+  })
+
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.reason, 'refused')
+})
+
+test('hedging on top of real sources is still a real answer', () => {
+  /* The counterweight: identical apologetic opening, but it retrieved and
+   * cited, so it carries information and must NOT be judged on wording. */
+  const outcome = webSearchOutcome({
+    output: [
+      searchCall({ sources: [{ url: 'https://apnews.com/a' }] }),
+      message(
+        "I'm sorry, I couldn't directly access Reuters due to access restrictions. Based on " +
+          'the broader context of 2026, the dominant story remains NASA’s Artemis II mission.',
+        [{ type: 'url_citation', url: 'https://apnews.com/a', title: 'AP' }],
+      ),
+    ],
+  })
+
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.reason, 'grounded')
+})

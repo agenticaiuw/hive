@@ -512,6 +512,106 @@ function normalizeActions(raw) {
 }
 
 /*
+ * The model is capable of searching and then answering as though it had not.
+ * Measured 2026-08-07 against the live API, 12 runs of "top world news
+ * headline right now" on gpt-4o-mini: seven came back "I'm sorry, but I don't
+ * have access to real-time news updates" — and in every one of those the
+ * web_search_call was present with status "completed". The tool ran; the model
+ * ignored it. So "did it search" cannot by itself separate an answer from an
+ * apology.
+ *
+ * What does separate them, in order of how much it can be trusted:
+ *
+ *   1. A search call that is absent or did not complete. Unambiguous.
+ *   2. No text at all.
+ *   3. GROUNDING: url_citation annotations, or the retrieved `action.sources`
+ *      (which needs the `include` below to be returned at all). When either is
+ *      present the answer is built on something fetched, and we accept it
+ *      without ever looking at the wording. This is what keeps the working
+ *      weather answer working — it cites nothing but retrieves 13 sources.
+ *   4. LAST RESORT, and only for text that reached here UNGROUNDED: the model
+ *      reporting that it could not get the information. Grounding is unreliable
+ *      as a negative signal — two of twelve correct news answers came back with
+ *      no sources and no citations — so ungrounded cannot mean failure on its
+ *      own, and prose is the only evidence left that the web was used at all.
+ *      In that narrow band, text whose content is "I couldn't get it, you go
+ *      look" is not an answer worth speaking aloud. A grounded response never
+ *      reaches this check, so "I couldn't find a definitive headline, but the
+ *      dominant story remains X" — which cites — still passes.
+ */
+const SEARCH_TEXT_LIMIT = 1200
+
+/*
+ * Last-resort wording check (4). Scoped to the model reporting an INABILITY to
+ * obtain the information, and only consulted when nothing was retrieved. Live
+ * runs produced all of these shapes: "I don't have access to real-time news",
+ * "I tried to pull up the latest headline but couldn't fetch live results",
+ * "I'm unable to browse". Kept to inability, not to hedging.
+ */
+const INABILITY_CLAIM =
+  /\b(?:(?:do not|don't|doesn't) have (?:access|the ability)|no access to|(?:am|'m|is|are) (?:not able|unable) to (?:access|browse|search|retrieve|provide|fetch|find|get|reach)|(?:cannot|can't|could ?n[o']t|was ?n[o']t able to|were ?n[o']t able to) (?:access|browse|search|retrieve|fetch|find|locate|get|reach|pull up|provide))\b/i
+
+/**
+ * Decide whether a Responses payload actually answered, from its structure.
+ * Exported so the decision is testable without touching the network.
+ */
+export function webSearchOutcome(payload) {
+  const items = Array.isArray(payload?.output) ? payload.output : []
+  const searchCalls = items.filter((item) =>
+    String(item?.type || '').includes('web_search'),
+  )
+  const parts = items.flatMap((item) =>
+    Array.isArray(item?.content) ? item.content : [],
+  )
+  const text =
+    String(payload?.output_text || '').trim() ||
+    parts
+      .map((part) => String(part?.text || '').trim())
+      .filter(Boolean)
+      .join(' ')
+
+  const citations = parts
+    .flatMap((part) => (Array.isArray(part?.annotations) ? part.annotations : []))
+    .filter((a) => String(a?.type || '').includes('citation'))
+  const sources = searchCalls.flatMap((call) =>
+    Array.isArray(call?.action?.sources) ? call.action.sources : [],
+  )
+  const grounded = citations.length > 0 || sources.length > 0
+
+  const base = {
+    text,
+    searched: searchCalls.length > 0,
+    grounded,
+    citationCount: citations.length,
+    sourceCount: sources.length,
+  }
+
+  if (!searchCalls.length) {
+    return { ...base, ok: false, reason: 'no_search', error: 'the model answered without searching the web' }
+  }
+  if (!searchCalls.some((call) => String(call.status || 'completed') === 'completed')) {
+    return { ...base, ok: false, reason: 'search_failed', error: 'the web search did not complete' }
+  }
+  if (!text) {
+    return { ...base, ok: false, reason: 'no_text', error: 'search returned no text' }
+  }
+  /* Grounded text is never wording-checked: retrieval already proved the web
+   * was used, and hedging on top of real sources is still a real answer. */
+  if (grounded) return { ...base, ok: true, reason: 'grounded' }
+  /* The model writes curly apostrophes ("couldn’t"), so straighten them before
+   * matching or the pattern silently never fires on real output. */
+  if (INABILITY_CLAIM.test(text.replace(/[‘’ʼ]/g, "'"))) {
+    return {
+      ...base,
+      ok: false,
+      reason: 'refused',
+      error: 'the model reported it could not retrieve the information',
+    }
+  }
+  return { ...base, ok: true, reason: 'ungrounded_answer' }
+}
+
+/*
  * Real web search via OpenAI's Responses API built-in tool (same API key the
  * Worker already holds). The old DuckDuckGo Instant Answer endpoint returned
  * an empty answer for almost everything (weather, news, time abroad), which
@@ -523,55 +623,70 @@ export async function runWebSearch(query) {
   const apiKey = openaiApiKey()
   if (!apiKey) return { ok: false, query: q, error: 'no API key' }
 
+  /* gpt-4o-mini was the default and is the model that produced the apologies.
+   * Forcing the tool (below) fixes it on both, but gpt-4o grounds news answers
+   * far better for ~4-7s, well inside the timeout. Override stays available. */
+  const model = process.env.OPENAI_SEARCH_MODEL || 'gpt-4o'
+
   // Tool type was renamed across API generations; try current name first.
   for (const toolType of ['web_search', 'web_search_preview']) {
-    try {
-      const response = await fetch('https://api.openai.com/v1/responses', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        signal: AbortSignal.timeout(15_000),
-        body: JSON.stringify({
-          model: process.env.OPENAI_SEARCH_MODEL || 'gpt-4o-mini',
+    /* `include` is what makes retrieved sources visible; if a generation of the
+     * API rejects it we retry without and fall back to the other signals. */
+    for (const withInclude of [true, false]) {
+      try {
+        const body = {
+          model,
           input: `Search the web and answer concisely in 2-3 spoken-style sentences: ${q}`,
           tools: [{ type: toolType }],
-        }),
-      })
-      const payload = await response.json().catch(() => ({}))
+          /* Not optional politeness: unforced, this query refused 7 times in
+           * 12; forced, 0 in 12 on the same model. */
+          tool_choice: { type: toolType },
+        }
+        if (withInclude) body.include = ['web_search_call.action.sources']
 
-      if (!response.ok) {
-        const message = payload?.error?.message || `HTTP ${response.status}`
-        // Unknown tool type → try the other name; anything else is real.
-        if (response.status === 400 && /tool/i.test(message)) continue
-        return { ok: false, query: q, error: message }
-      }
-      const text =
-        String(payload.output_text || '').trim() ||
-        (Array.isArray(payload.output)
-          ? payload.output
-              .flatMap((item) =>
-                Array.isArray(item?.content) ? item.content : [],
-              )
-              .map((part) => String(part?.text || '').trim())
-              .filter(Boolean)
-              .join(' ')
-          : '')
-      if (text) {
+        const response = await fetch('https://api.openai.com/v1/responses', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify(body),
+        })
+        const payload = await response.json().catch(() => ({}))
+
+        if (!response.ok) {
+          const message = payload?.error?.message || `HTTP ${response.status}`
+          if (response.status === 400 && withInclude && /include/i.test(message)) {
+            continue // same tool type, without the include
+          }
+          // Unknown tool type → try the other name; anything else is real.
+          if (response.status === 400 && /tool/i.test(message)) break
+          return { ok: false, query: q, error: message }
+        }
+
+        const outcome = webSearchOutcome(payload)
+        if (!outcome.ok) {
+          return {
+            ok: false,
+            query: q,
+            error: outcome.error,
+            reason: outcome.reason,
+          }
+        }
         return {
           ok: true,
           query: q,
-          summary: text.slice(0, 1200),
+          summary: outcome.text.slice(0, SEARCH_TEXT_LIMIT),
           source: 'openai-web-search',
+          grounded: outcome.grounded,
         }
-      }
-      return { ok: false, query: q, error: 'search returned no text' }
-    } catch (error) {
-      return {
-        ok: false,
-        query: q,
-        error: error?.message || 'web search failed',
+      } catch (error) {
+        return {
+          ok: false,
+          query: q,
+          error: error?.message || 'web search failed',
+        }
       }
     }
   }
