@@ -65,7 +65,10 @@ history that reads exactly like live data unless you look.
 - Reported a run as ended when it was a sequential runner working normally.
 - Claimed the agents had converged on two product properties and called it the
   strongest evidence either argument had. Measured it afterwards: zero
-  cross-agent clusters at any threshold meaning "the same idea". Retracted.
+  cross-agent clusters at any threshold meaning "the same idea". Retracted — and
+  then partly vindicated by accident, since at twice the corpus there are 9. The
+  claim was still wrong when made: I asserted it before measuring, and being
+  later shown right by different data does not make an unmeasured claim sound.
 - Claimed a required justification field would cut request volume. It did not;
   the rate was already falling and rose after. Recorded as unproven.
 
