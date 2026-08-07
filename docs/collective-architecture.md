@@ -173,6 +173,69 @@ most on talking to itself (4.22 messages/round, 3× committee). The output
 question needs faculty and unified run out to comparable round counts, which is
 what the parity rerun is for.
 
+### The parity rerun, rounds 15–19, commons rounds excluded
+
+| arm | agents | rounds | discovery share | proposals/round | messages/round | silent rounds |
+|---|---|---|---|---|---|---|
+| committee | 5 | 25 | **35.6%** | **3.32** | 1.32 | 7/25 |
+| unified | 1 | 5 | 63.6% | 2.60 | 0.20 | 2/5 |
+| faculty | 3 | 11 | 45.9% | 2.36 | 4.00 | 4/11 |
+
+Committee wins on both axes at equal maturity: it spends the least of its budget
+rediscovering and produces the most. Unified spends **1.8× committee's share** on
+rediscovery — merging the bodies did not merge what they had to learn.
+
+**The faculty number is not usable, and the reason matters more than the
+number.** `faculty-action` was stuck in the recon phase for eighteen rounds, and
+in recon the propose tools are not in an agent's tool list at all. It spent 32–42
+calls a round and twice ended by saying in plain text that it had a proposal and
+no tool to record it with. Its zero entered this table as though it were a
+finding about partitioning a mind by faculty. It was a finding about a missing
+state transition — the phase only ever moved when a human typed the phase
+command. Fixed by bounding recon at three rounds; promotion costs nothing, since
+the capability phase *adds* propose tools without removing discovery tools.
+
+That is the third time on this project that a harness defect has arrived wearing
+the clothes of an architecture result. All three had the same shape: **an agent
+that cannot act is indistinguishable, in every summary, from an agent with
+nothing to say.**
+
+## Does holding knowledge outside the agents actually help?
+
+The commons (`scripts/commons.mjs`) was built to attack the rediscovery share
+directly. Measured by within-agent alternation — the same agent, consecutive
+rounds, differing only in whether the directory was in its prompt, so round
+maturity cannot masquerade as an effect:
+
+| | control | commons |
+|---|---|---|
+| discovery share (mean of 5 agents) | 54.9% | **49.2%** |
+| probes/round | 1.88 | **0.81** |
+| proposals/round | 4.00 | 4.58 |
+| findings/round | 0.76 | 0.27 |
+| **recall calls, 26 rounds** | — | **0** |
+
+Four of five agents dropped; `relay-realtime` was flat (61.8% → 62.5%).
+
+**Real, and smaller than hoped: about a 10% relative cut, not an order of
+magnitude.** The mechanism is visible in the probes row — agents stop re-probing
+endpoints whose status another agent already established. That is automatic
+endorsement working, in Clark & Chalmers' sense: they treat what they read as
+true instead of re-deriving it.
+
+**The null result is the more interesting half. Not one `recall` call in 26
+rounds.** Agents never once fetched the full payload behind a directory line.
+The entire effect comes from the one-line summaries already in the prompt, which
+is the strongest available evidence for both Wegner (the payoff is the
+directory, not the content) and Hutchins (a store you must decide to query is
+one more thing to discover). It also means the content half of the design is,
+so far, dead weight.
+
+Two honest caveats. Findings/round fell by nearly two thirds, and this run
+cannot separate "no longer re-noticing the same thing" from "less grounded
+because it is trusting a summary". And alternation balances maturity but not
+store growth: later commons rounds see a richer directory than earlier ones.
+
 ## Empirical baseline for this class of system
 
 MAST (arXiv 2503.13657), 1600+ annotated traces across 7 frameworks, κ=0.88:
