@@ -244,6 +244,7 @@ import {
   triageInbox,
 } from './mailTriage.js'
 import { triageNotifications } from './notificationTriage.js'
+import { registerGoalRouterRoutes } from './goalRouter.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1379,6 +1380,10 @@ registerFormPreviewRoutes(app)
 
 registerPageWatchRoutes(app)
 
+/* Give it the goal and let it work out which body should do each part. Decides
+ * only — nothing here executes, so a wrong route costs a re-plan, not an
+ * action on a real page. */
+registerGoalRouterRoutes(app)
 
 app.delete('/browser/commands/:commandId?', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
