@@ -129,6 +129,11 @@ const GROUP_NOTES = {
     what: 'Web form fills, staged and reviewable before submission.',
     module: 'local-agent/formFill.js',
   },
+  origins: {
+    what:
+      'One question read across several authenticated origins at once, routed between the owner\'s Safari and the relay browser. Per-origin provenance and fetch age; reads only.',
+    module: 'local-agent/originFanOut.js',
+  },
   memory: {
     what: 'Durable facts, separate from the per-session transcript.',
     module: 'local-agent/memoryService.js',

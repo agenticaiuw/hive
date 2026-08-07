@@ -43,6 +43,7 @@ import {
 } from './evidenceCapsules.js'
 import { fillForm, formFillLocation, getFill, listFills } from './formFill.js'
 import { orchestrateExecute, orchestratePlan } from './orchestrator.js'
+import { readOrigins, relayBudgetRemainingMs } from './originFanOut.js'
 import {
   acknowledgeReports,
   checkWatch,
@@ -1969,6 +1970,35 @@ app.post('/watches/:watchId/ack', (request, response) => {
   response.json({
     ok: true,
     acknowledged: acknowledgeReports(request.params.watchId),
+  })
+})
+
+/*
+ * One question, several of the owner's authenticated origins, read at once.
+ *
+ * The status hint is passed in rather than probed inside the fan-out: this
+ * process is the one holding the extension's heartbeat, so it can say up front
+ * that Safari is not answering instead of making the first origin discover it
+ * by timing out. See originFanOut.js.
+ */
+app.post('/origins/read', async (request, response) => {
+  try {
+    response.json(
+      await readOrigins({
+        ...(request.body || {}),
+        browserOnline: getBrowserStatus().online,
+      }),
+    )
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/origins/budget', (_request, response) => {
+  response.json({
+    ok: true,
+    browserExtension: getBrowserStatus(),
+    relayBrowserRemainingMs: relayBudgetRemainingMs(),
   })
 })
 
