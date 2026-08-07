@@ -96,12 +96,12 @@ export async function prepareForNextMeeting(
   }))
 
   let mail = []
+  let mailError = null
   try {
     mail = matchMail(await readMail({ limit: 60, unreadOnly: false }), terms)
   } catch (error) {
     /* Mail being unavailable must not cost the owner their documents. */
-    mail = []
-    documents.mailError = String(error?.message || error)
+    mailError = String(error?.message || error)
   }
 
   const decisions = dedupe(extracted.flatMap((document) => document.decisions))
@@ -125,10 +125,21 @@ export async function prepareForNextMeeting(
     },
     agenda: meeting.notes?.trim() || null,
     terms,
-    documents: extracted.map(({ decisions: _d, actions: _a, ...rest }) => rest),
+    /* The quotes are returned once, merged and deduped, rather than repeated
+     * under every document they came from. */
+    documents: extracted.map((document) => ({
+      path: document.path,
+      name: document.name,
+      bytes: document.bytes,
+      modifiedAt: document.modifiedAt,
+      readable: document.readable,
+      matchedTerms: document.matchedTerms,
+      score: document.score,
+    })),
     decisions,
     actions,
     mail,
+    mailError,
     folder,
     brief,
     spoken: speakableSummary({ meeting, decisions, actions, documents: extracted, now }),

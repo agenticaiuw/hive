@@ -87,7 +87,10 @@ function eventStore(kind) {
   }
   return store
 }
-function iso(date) { return date.isNil() ? null : ObjC.unwrap($.NSISO8601DateFormatter.stringFromDate(date)) }
+/* stringFromDate is an instance method — there is no class-level shortcut, and
+ * reaching for one fails at call time rather than at parse time. */
+const ISO_FORMATTER = $.NSISO8601DateFormatter.alloc.init
+function iso(date) { return !date || date.isNil() ? null : ObjC.unwrap(ISO_FORMATTER.stringFromDate(date)) }
 function str(value) { return value && !value.isNil() ? ObjC.unwrap(value) : null }
 `
 

@@ -360,101 +360,6 @@ export function resamplePcmS16le(pcmBuffer, fromRate, toRate) {
   return Buffer.from(output.buffer, output.byteOffset, output.byteLength)
 }
 
-/*
- * Uplink auto-level — the pendant's mic is quieter than the Realtime VAD.
- *
- * OpenAI's server-side turn detection has an ABSOLUTE level gate, not an SNR
- * one. The 2026-08-07T05:19 capture is a clean 33 s recording of "what is my
- * battery level right now?" that whisper-1 transcribes verbatim, but whose
- * speech only peaks at 928/32767 (-31 dBFS). Replayed through
- * createStreamingRealtimeSession it produces literally two events —
- * session.created, session.updated — and nothing else: no speech_started, no
- * commit, no response. The pendant played silence and the run was filed as a
- * success. The identical samples scaled 8x transcribe and answer normally, so
- * the relay levels what it hands the model.
- *
- * Deliberately NOT applied to the stored diagnostic capture: that stays the
- * untouched mic audio, which is the only way to see a mic regression at all.
- */
-export const UPLINK_TARGET_PEAK = 8000 // ~0.24 FS, ~8.6x on the failing clip
-export const UPLINK_MAX_GAIN = 12
-
-/*
- * Gain slew, and why it is this slow.
- *
- * A conventional fast AGC makes things WORSE here, and the working capture
- * proves it: with a 1 s rise the 2.7 s of room tone before "what is the
- * weather in Taipei" was lifted from ~100 RMS to ~1000 — speech level — and
- * then collapsed to unity the instant the talker started. Replayed against
- * the live API that session went from a clean answer to zero events. Turn
- * detection needs the CONTRAST between silence and speech, and a fast AGC is
- * precisely a contrast eraser.
- *
- * So the gain winds up over ~15 s. A normal talker speaks long before that and
- * pins the gain at unity for the rest of the session; only a mic that stays
- * quiet for many seconds ever earns a boost. Ducking stays fast (5 ms) so a
- * sudden loud syllable is never driven into the rails.
- */
-const UPLINK_RISE_SECONDS = 15
-const UPLINK_FALL_SECONDS = 0.005
-/* Peak-envelope half-life: how long one loud syllable holds the gain down.
- * Longer than any pause inside real speech, so sentence gaps do not pump. */
-const UPLINK_RELEASE_HALF_LIFE_SECONDS = 30
-
-/**
- * Peak-following gain stage for s16le mono PCM.
- *
- * The gain tracks a decaying peak envelope, so a normal-level talker rides at
- * unity and only a persistently quiet mic gets boosted.
- */
-export function createUplinkLeveler({
-  sampleRate = REALTIME_PCM_RATE,
-  targetPeak = UPLINK_TARGET_PEAK,
-  maxGain = UPLINK_MAX_GAIN,
-} = {}) {
-  const rate = Number(sampleRate) > 0 ? Number(sampleRate) : REALTIME_PCM_RATE
-  const ceiling = Math.max(1, Number(maxGain) || 1)
-  const target = Math.max(1, Number(targetPeak) || 1)
-  const release = Math.pow(
-    0.5,
-    1 / (rate * UPLINK_RELEASE_HALF_LIFE_SECONDS),
-  )
-  const riseStep = Math.pow(ceiling, 1 / (rate * UPLINK_RISE_SECONDS))
-  const fallStep = Math.pow(ceiling, 1 / (rate * UPLINK_FALL_SECONDS))
-  // No prior on the mic: the first loud sample sets the envelope, and until
-  // one arrives the rise slew is the only thing bounding the gain.
-  let peak = 0
-  let gain = 1
-
-  return {
-    push(pcm) {
-      if (!pcm?.length) return Buffer.alloc(0)
-      const usable = pcm.length - (pcm.length % 2)
-      const out = Buffer.alloc(usable)
-
-      for (let i = 0; i < usable; i += 2) {
-        const sample = pcm.readInt16LE(i)
-        const magnitude = sample < 0 ? -sample : sample
-        peak = magnitude > peak ? magnitude : peak * release
-        const desired = Math.min(ceiling, Math.max(1, target / Math.max(peak, 1)))
-
-        if (desired > gain) gain = Math.min(desired, gain * riseStep)
-        else if (desired < gain) gain = Math.max(desired, gain / fallStep)
-
-        const scaled = Math.round(sample * gain)
-        out.writeInt16LE(
-          scaled > 32767 ? 32767 : scaled < -32768 ? -32768 : scaled,
-          i,
-        )
-      }
-      return out
-    },
-    /** Current gain — telemetry only, so a quiet mic is visible in logs. */
-    get gain() {
-      return gain
-    },
-  }
-}
 
 
 /**
@@ -944,9 +849,6 @@ export async function createStreamingRealtimeSession({
     : new StreamingPcmResampler(inputSampleRate, REALTIME_PCM_RATE)
   // μ-law rides through untouched (the model decodes it); PCM gets levelled so
   // a quiet pendant mic still clears the Realtime VAD's absolute gate.
-  const leveler = passthroughInput
-    ? null
-    : createUplinkLeveler({ sampleRate: REALTIME_PCM_RATE })
   const socket = await openRealtimeSocket(realtimeWsUrl(), apiKey)
 
   const state = {
@@ -1565,9 +1467,8 @@ export async function createStreamingRealtimeSession({
       state.bytesIn += chunk.length
       const toModel = passthroughInput
         ? chunk
-        : leveler.push(resampler.push(chunk))
+        : resampler.push(chunk)
       if (!toModel.length) return
-      state.uplinkGain = leveler ? leveler.gain : 1
       state.bytesToModel += toModel.length
       state.midPressStreamed = true
       // ~200 ms frames: 9600 B at 24 kHz s16le, 1600 B at 8 kHz μ-law.
@@ -1587,7 +1488,7 @@ export async function createStreamingRealtimeSession({
       if (!state.committed) {
         state.committed = true
         const rawTail = resampler ? resampler.flush() : Buffer.alloc(0)
-        const tail = leveler ? leveler.push(rawTail) : rawTail
+        const tail = rawTail
         if (tail.length) {
           state.bytesToModel += tail.length
           send({
@@ -1703,7 +1604,6 @@ export async function createStreamingRealtimeSession({
         bytesIn: state.bytesIn,
         bytesToModel: state.bytesToModel,
         midPressStreamed: state.midPressStreamed,
-        uplinkGain: state.uplinkGain ?? 1,
       }
     },
   }

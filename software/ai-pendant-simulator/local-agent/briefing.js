@@ -274,6 +274,24 @@ export function parseMailMessages(stdout) {
     .sort((left, right) => (right.receivedAt || 0) - (left.receivedAt || 0))
 }
 
+/*
+ * A briefing writes a note, and the 5pm wrap-up reads "notes I created today".
+ * Left alone that closes a loop: the first real run came back with "Follow up
+ * on 'Evening wrap-up'" twice, the agent assigning the owner homework about
+ * its own output. Briefing notes are titled "<kind title> — <date>", so they
+ * are recognisable and excluded.
+ */
+const BRIEFING_NOTE_TITLE = new RegExp(
+  `^(?:${Object.values(BRIEFING_KINDS)
+    .map((shape) => shape.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})\\s+—\\s`,
+  'i',
+)
+
+export function isBriefingNote(note) {
+  return BRIEFING_NOTE_TITLE.test(String(note?.title || ''))
+}
+
 export function parseNotesList(stdout) {
   return splitRows(stdout, 3)
     .map(([created, modified, ...rest]) => ({
@@ -390,7 +408,9 @@ export function deriveNextActions({
   now = new Date(),
 } = {}) {
   const actions = []
-  const todaysNotes = notes.filter((note) => isSameDay(note.createdAt, now))
+  const todaysNotes = notes.filter(
+    (note) => isSameDay(note.createdAt, now) && !isBriefingNote(note),
+  )
 
   for (const note of todaysNotes) {
     actions.push(`Follow up on "${note.title}"`)
@@ -463,7 +483,9 @@ export function composeBriefing({
   const unread = mail.filter((message) => message.unread)
   const priorityMail = unread.filter((message) => !isBulkMail(message))
   const meetingsNeedingPrep = events.filter(needsPreparation)
-  const todaysNotes = notes.filter((note) => isSameDay(note.createdAt, now))
+  const todaysNotes = notes.filter(
+    (note) => isSameDay(note.createdAt, now) && !isBriefingNote(note),
+  )
   const nextActions = deriveNextActions({ notes, events, mail, now })
 
   const sentences = []

@@ -1654,6 +1654,13 @@ blockquote {
   letter-spacing: 0;
 }
 
+/* Outside the history flex row these are plain block buttons, so they need an
+   explicit width for the title's ellipsis to have something to truncate to. */
+.jobs-rail .history-main {
+  width: 100%;
+  padding: 10px 8px;
+}
+
 .jobs-rail .history-main small {
   display: flex;
   align-items: center;

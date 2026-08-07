@@ -79,7 +79,15 @@ export function parseAttributes(source) {
   return attributes
 }
 
-const TAG_PATTERN = /<(\/?)(form|input|select|textarea|button|option)\b([^>]*)>/gi
+const TAG_PATTERN = /<(\/?)(form|label|input|select|textarea|button|option)\b([^>]*)>/gi
+
+/* The text a person reads, from just after a start tag to the next tag. */
+function textAfter(source, index) {
+  const end = source.indexOf('<', index)
+  return String(source.slice(index, end < 0 ? source.length : end))
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 /**
  * Pull the submit contract out of the form's own markup.
@@ -93,8 +101,16 @@ const TAG_PATTERN = /<(\/?)(form|input|select|textarea|button|option)\b([^>]*)>/
 export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
   const source = String(html ?? '').slice(0, MAX_FORM_HTML)
   const controls = []
+  const labelFor = new Map()
   let form = null
   let currentSelect = null
+  /*
+   * The name a person would use for a field lives in its <label>, and the
+   * snapshot cannot always see it: for a <select> the extension's accessible
+   * name falls back to the name attribute, so "Dropdown (select)" — the only
+   * words on screen — matched nothing until this was read out of the markup.
+   */
+  let pendingLabel = ''
   let match
 
   TAG_PATTERN.lastIndex = 0
@@ -102,6 +118,15 @@ export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
     const closing = match[1] === '/'
     const tag = match[2].toLowerCase()
     const attributes = closing ? {} : parseAttributes(match[3])
+
+    if (tag === 'label') {
+      if (!closing) {
+        const text = textAfter(source, match.index + match[0].length)
+        pendingLabel = text
+        if (attributes.for) labelFor.set(attributes.for, text)
+      }
+      continue
+    }
 
     if (tag === 'form') {
       if (!closing && !form) {
@@ -124,8 +149,13 @@ export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
 
     if (tag === 'option') {
       if (!closing && currentSelect) {
+        const text = textAfter(source, match.index + match[0].length)
         currentSelect.options.push({
-          value: attributes.value ?? '',
+          /* An option with no value attribute submits its own text. Reading
+           * only the attribute reported an empty value for a select that would
+           * really have sent "Open this select menu". */
+          value: attributes.value ?? text,
+          text,
           selected: 'selected' in attributes,
         })
       }
@@ -142,12 +172,17 @@ export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
         type: 'select',
         name: attributes.name ?? '',
         id: attributes.id ?? '',
-        label: attributes['aria-label'] ?? '',
+        label:
+          attributes['aria-label'] ??
+          labelFor.get(attributes.id) ??
+          pendingLabel ??
+          '',
         value: '',
         required: 'required' in attributes,
         disabled: 'disabled' in attributes,
         options: [],
       }
+      pendingLabel = ''
       controls.push(currentSelect)
       continue
     }
@@ -160,13 +195,19 @@ export function parseFormHtml(html, pageUrl = 'https://example.invalid/') {
       type,
       name: attributes.name ?? '',
       id: attributes.id ?? '',
-      label: attributes['aria-label'] ?? attributes.placeholder ?? '',
+      label:
+        attributes['aria-label'] ??
+        labelFor.get(attributes.id) ??
+        pendingLabel ??
+        attributes.placeholder ??
+        '',
       value: attributes.value ?? '',
       required: 'required' in attributes,
       disabled: 'disabled' in attributes,
       checked: 'checked' in attributes,
       readonly: 'readonly' in attributes,
     })
+    pendingLabel = ''
   }
 
   return { form, controls }
@@ -216,9 +257,13 @@ export function matchField(key, elements) {
     ['name', (element) => normalizeKey(element.control?.name) === wanted],
     ['id', (element) => normalizeKey(element.control?.id) === wanted],
     ['label', (element) => normalizeKey(element.label) === wanted],
+    ['markup-label', (element) => normalizeKey(element.markupLabel) === wanted],
     [
       'label-contains',
-      (element) => wanted.length >= 3 && normalizeKey(element.label).includes(wanted),
+      (element) =>
+        wanted.length >= 3 &&
+        (normalizeKey(element.label).includes(wanted) ||
+          normalizeKey(element.markupLabel).includes(wanted)),
     ],
     [
       'name-contains',
@@ -297,13 +342,23 @@ export function linkElements(snapshotElements, controls) {
       SUBMIT_INPUT_TYPES.has(inputType) ||
       tag === 'button'
 
+    /* When the snapshot's accessible name is just the wire name, the markup's
+     * <label> is the only thing that reads like what the owner dictated. */
+    const accessible = String(element.name ?? '')
+    const markupLabel = String(control?.label ?? '')
+    const label =
+      markupLabel && normalizeKey(accessible) === normalizeKey(control?.name)
+        ? markupLabel
+        : accessible
+
     return {
       ref: element.ref,
       selector: element.selector,
       role: element.role,
       tag,
       inputType,
-      label: element.name ?? '',
+      label,
+      markupLabel,
       disabled: Boolean(element.disabled),
       checked: element.checked,
       href: element.href,

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-07T05:55:22.424Z",
+  "updatedAt": "2026-08-07T06:09:54.265Z",
   "facts": [
     {
       "id": "fct_e9b89a0f-9197-4a42-b6fe-74f7294b3d38",
@@ -389,6 +389,52 @@
       "createdAt": "2026-08-07T05:47:09.322Z",
       "updatedAt": "2026-08-07T05:55:15.199Z",
       "expiresAt": "2026-09-06T05:55:15.199Z",
+      "lastUsedAt": null,
+      "useCount": 0,
+      "previousValue": null
+    },
+    {
+      "id": "fct_8eae3202-1d0b-4d5f-a614-3733f6e0cd7b",
+      "key": "owner.bike-lock-code",
+      "kind": "entity",
+      "value": "bike lock code: 4829",
+      "surfaces": [],
+      "source": {
+        "origin": "owner",
+        "url": null,
+        "host": null,
+        "jobId": null,
+        "entityId": null,
+        "at": "2026-08-07T06:09:54.181Z"
+      },
+      "confidence": 1,
+      "sensitivity": "secret",
+      "createdAt": "2026-08-07T06:09:54.181Z",
+      "updatedAt": "2026-08-07T06:09:54.181Z",
+      "expiresAt": null,
+      "lastUsedAt": null,
+      "useCount": 0,
+      "previousValue": null
+    },
+    {
+      "id": "fct_f1fd37eb-419a-43ea-a43a-b23cb776cb48",
+      "key": "idea.2026-08-07.a-pendant-that-files-its-own.9ffe03",
+      "kind": "entity",
+      "value": "a pendant that files its own bug reports from the UART log.",
+      "surfaces": [],
+      "source": {
+        "origin": "owner",
+        "url": null,
+        "host": null,
+        "jobId": null,
+        "entityId": null,
+        "at": "2026-08-07T06:09:54.262Z"
+      },
+      "confidence": 1,
+      "sensitivity": "normal",
+      "createdAt": "2026-08-07T06:09:54.262Z",
+      "updatedAt": "2026-08-07T06:09:54.262Z",
+      "expiresAt": null,
       "lastUsedAt": null,
       "useCount": 0,
       "previousValue": null

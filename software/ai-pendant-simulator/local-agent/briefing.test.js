@@ -10,6 +10,7 @@ import {
   formatClock,
   gatherSources,
   isBulkMail,
+  isBriefingNote,
   matchBriefingCommand,
   needsPreparation,
   parseAppleScriptDate,
@@ -218,6 +219,42 @@ Tuesday, August 4, 2026 at 09:00:00|Tuesday, August 4, 2026 at 09:00:00|Old note
   assert.ok(actions.every((action) => action.startsWith('Follow up on')))
   /* A note from Tuesday is not something you wrote today. */
   assert.ok(!actions.some((action) => /Old note/.test(action)))
+})
+
+/*
+ * Regression from the first live 5pm run: the brief writes a note, the wrap-up
+ * reads today's notes, and it came back telling the owner to "Follow up on
+ * 'Evening wrap-up'" — the agent assigning homework about its own output.
+ */
+test('the wrap-up ignores the notes the briefing itself wrote', () => {
+  const notes = parseNotesList(
+    `Friday, August 7, 2026 at 09:00:00|Friday, August 7, 2026 at 09:00:00|Interview Questions
+Friday, August 7, 2026 at 10:00:00|Friday, August 7, 2026 at 10:00:00|Evening wrap-up — Friday, August 7
+Friday, August 7, 2026 at 11:00:00|Friday, August 7, 2026 at 11:00:00|Workday brief — Friday, August 7
+Friday, August 7, 2026 at 12:00:00|Friday, August 7, 2026 at 12:00:00|Morning brief — Friday, August 7
+`,
+  )
+
+  const actions = deriveNextActions({ notes, now: new Date(2026, 7, 7, 17, 0) })
+
+  assert.deepEqual(actions, ['Follow up on "Interview Questions"'])
+  assert.equal(isBriefingNote({ title: 'Evening wrap-up — Friday, August 7' }), true)
+  /* A note that merely mentions a brief is the owner's, and stays. */
+  assert.equal(isBriefingNote({ title: 'Ideas for the morning brief' }), false)
+})
+
+test('the wrap-up count does not include its own notes', () => {
+  const brief = composeBriefing({
+    kind: 'wrapup',
+    notes: parseNotesList(
+      `Friday, August 7, 2026 at 09:00:00|Friday, August 7, 2026 at 09:00:00|Interview Questions
+Friday, August 7, 2026 at 10:00:00|Friday, August 7, 2026 at 10:00:00|Morning brief — Friday, August 7
+`,
+    ),
+    now: new Date(2026, 7, 7, 17, 0),
+  })
+
+  assert.match(brief.spoken, /You wrote 1 note today\./)
 })
 
 test('next actions fall back to meeting prep and human mail when no notes exist', () => {

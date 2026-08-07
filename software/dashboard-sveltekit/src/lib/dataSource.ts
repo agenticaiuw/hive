@@ -62,7 +62,10 @@ let sessionRepair: Promise<boolean> | null = null;
 
 function repairSession() {
   if (!sessionRepair) {
-    sessionRepair = fetch(`${base}/dashboard`, {
+    // `base` already IS the dashboard route the agent sets the cookie on;
+    // appending "/dashboard" again asked for /dashboard/dashboard and 404ed,
+    // so every stale tab stayed stale.
+    sessionRepair = fetch(base || "/", {
       credentials: "same-origin",
       cache: "no-store",
     })
@@ -83,12 +86,27 @@ async function agentRequest(
   init: RequestInit = {},
   retried = false,
 ): Promise<any> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(init.headers || {}) },
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(init.headers || {}) },
+    });
+  } catch (networkError) {
+    /*
+     * `/ops/snapshot` is a third of a megabyte and takes over a second to
+     * build; two in flight at once, or one crossing an agent restart, comes
+     * back as a dropped connection rather than a status. One retry turns that
+     * blip back into data instead of an error banner.
+     */
+    if (retried || String(init.method || "GET").toUpperCase() !== "GET") {
+      throw networkError;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return agentRequest(path, init, true);
+  }
 
   if (response.status === 401 && !retried && (await repairSession())) {
     return agentRequest(path, init, true);
@@ -110,6 +128,151 @@ async function apiRequest(path: string, init: RequestInit = {}): Promise<any> {
     throw new Error(payload.error || `${path} failed (${response.status})`);
   }
   return payload;
+}
+
+/**
+ * The agent's `/ops/snapshot` and the relay's `/api/snapshot` describe the same
+ * machine with different nesting. This is the agent side folded onto the
+ * relay's shape, which the page already speaks.
+ */
+function snapshotFromAgent(snap: any) {
+  const agent = snap?.status?.agent ?? {};
+  const permissions = agent.permissions ?? {};
+  const browser = agent.browserExtension ?? snap?.status?.browser ?? {};
+  const relay = snap?.status?.relay ?? {};
+  const health = relay.payload ?? {};
+  const devices: any[] = Array.isArray(browser.devices) ? browser.devices : [];
+
+  return {
+    ok: Boolean(snap?.ok),
+    status: {
+      agent: {
+        ok: Boolean(agent.ok),
+        version: agent.version ?? null,
+        hostApp: permissions.hostApp ?? null,
+        fullControlMode: Boolean(agent.fullControlMode),
+        llmPlannerEnabled: Boolean(agent.llmPlannerEnabled),
+        permissions: {
+          ready: Boolean(permissions.ready),
+          accessibility: permissions.accessibility ?? {},
+          screenRecording: permissions.screenRecording ?? {},
+          automation: permissions.automation ?? {},
+          requiredMissing: permissions.requiredMissing ?? [],
+        },
+        browserExtension: {
+          online: Boolean(browser.online),
+          pendingCommands: Number(browser.pendingCommands || 0),
+          connectedDevices: devices.filter((device) => device.online).length,
+          lastSeenAt:
+            devices
+              .map((device) => String(device.lastSeenAt || ""))
+              .filter(Boolean)
+              .sort()
+              .at(-1) ?? null,
+        },
+      },
+    },
+    pipeline: Array.isArray(snap?.pipeline) ? snap.pipeline : [],
+    logs: Array.isArray(snap?.logs) ? snap.logs : [],
+    product: {
+      revision: Number(snap?.status?.counts?.entities || 0),
+      sessions: Array.isArray(snap?.sessions) ? snap.sessions : [],
+      memory: { entities: snap?.context?.graph?.entities ?? [] },
+    },
+    cloud: {
+      ok: Boolean(relay.reachable && health.ok),
+      store: health.store ?? null,
+      speechToTextConfigured: Boolean(health.speechToTextConfigured),
+      macBridgeOnline: Boolean(health.macBridgeOnline),
+      models: health.models ?? {},
+    },
+  };
+}
+
+export async function fetchSnapshot(): Promise<any> {
+  if (backend === "agent") return snapshotFromAgent(await agentRequest("/ops/snapshot"));
+  return apiRequest("/api/snapshot");
+}
+
+export async function fetchRuns(): Promise<any[]> {
+  if (backend === "agent") {
+    const payload = await agentRequest("/pipeline");
+    return Array.isArray(payload?.runs) ? payload.runs : [];
+  }
+  const payload = await apiRequest("/api/runs");
+  return Array.isArray(payload?.runs) ? payload.runs : [];
+}
+
+/**
+ * A cheap "has anything changed" probe. The agent has no equivalent and needs
+ * none — it is on the same machine, so the ordinary refreshes are already
+ * cheap and local.
+ */
+export async function fetchLatestRun(): Promise<any> {
+  if (backend === "agent") return null;
+  const payload = await apiRequest("/api/runs/latest");
+  return payload?.latest ?? null;
+}
+
+export async function fetchHistory(query: string, cursor: string) {
+  if (backend === "agent") {
+    const payload = await agentRequest("/pipeline");
+    const runs: any[] = Array.isArray(payload?.runs) ? payload.runs : [];
+    const needle = query.trim().toLowerCase();
+    return {
+      entries: runs
+        .filter(
+          (run) => !needle || String(run.command || "").toLowerCase().includes(needle),
+        )
+        .map((run) => ({
+          pipelineId: run.pipelineId,
+          command: run.command,
+          status: run.status,
+          origin: run.source,
+          createdAt: run.createdAt,
+          // The agent stores recordings per run, but only exposes them by
+          // direction on a separate route, so the row cannot promise one here.
+          audio: { available: false, replyAvailable: false },
+        })),
+      nextCursor: "",
+      hasMore: false,
+      retention: null,
+    };
+  }
+
+  const params = new URLSearchParams({ limit: "24" });
+  if (query.trim()) params.set("q", query.trim());
+  if (cursor) params.set("cursor", cursor);
+  return apiRequest(`/api/history?${params}`);
+}
+
+export async function fetchHistoryDetail(pipelineId: string) {
+  if (backend === "agent") {
+    const payload = await agentRequest("/pipeline");
+    const runs: any[] = Array.isArray(payload?.runs) ? payload.runs : [];
+    return runs.find((run) => run.pipelineId === pipelineId) ?? null;
+  }
+  const payload = await apiRequest(
+    `/api/history/${encodeURIComponent(pipelineId)}`,
+  );
+  return payload?.run ?? null;
+}
+
+/** Memory on the agent already rides along in the snapshot. */
+export async function fetchMemory() {
+  if (backend === "agent") return null;
+  return apiRequest("/api/memory");
+}
+
+export function audioHref(pipelineId: string, voice: "owner" | "reply") {
+  if (backend === "agent") {
+    return `/pipeline/${encodeURIComponent(pipelineId)}/audio/${
+      voice === "reply" ? "output" : "input"
+    }`;
+  }
+  return `/api/history/${encodeURIComponent(pipelineId)}/audio${
+    voice === "reply" ? "?voice=reply" : ""
+  }`;
 }
 
 export async function fetchJobs(): Promise<Fetched<JobView[]>> {

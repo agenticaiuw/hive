@@ -171,6 +171,25 @@ import {
   hasDashboardSession,
   issueDashboardSession,
 } from './dashboardSession.js'
+import { captureNote, forgetCapture, recallCaptures } from './quickCapture.js'
+import { scheduleReminder } from './remindMe.js'
+import {
+  applyTidy,
+  formatPreview,
+  listPlans,
+  planTidy,
+  tidyPlansLocation,
+  undoTidy,
+} from './downloadsTidy.js'
+import {
+  endFocusSession,
+  focusStatus,
+  resumeFocusSessions,
+  startFocusSession,
+} from './focusSession.js'
+import { buildDayPlan, formatBriefing } from './dayPlan.js'
+import { prepareForNextMeeting } from './meetingPrep.js'
+import { triageNotifications } from './notificationTriage.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1346,6 +1365,140 @@ app.post('/routines/:routineId/run', async (request, response) => {
 })
 
 /*
+ * Quick capture, reminders and focus: the things the owner says to a worn
+ * pendant in one breath. Each is one round trip on purpose — a capability that
+ * needs two questions answered before it does anything has already failed the
+ * person walking past a bike rack.
+ */
+app.post('/capture', (request, response) => {
+  try {
+    response.json({ ok: true, ...captureNote(request.body || {}) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/capture', (request, response) => {
+  response.json({
+    ok: true,
+    captures: recallCaptures({
+      query: String(request.query.query ?? ''),
+      limit: Number(request.query.limit) || 10,
+    }),
+  })
+})
+
+app.delete('/capture/:key', (request, response) => {
+  response.json({ ok: forgetCapture(request.params.key) })
+})
+
+app.post('/reminders', async (request, response) => {
+  try {
+    response.json(await scheduleReminder(request.body || {}))
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+/*
+ * Tidy is two routes because "show me what will be moved before doing it" is
+ * two decisions. The plan id is the whole contract: apply cannot invent one,
+ * so nothing moves that the owner has not been shown.
+ */
+app.post('/tidy/preview', (request, response) => {
+  try {
+    const plan = planTidy(request.body || {})
+    response.json({ ok: true, plan, preview: formatPreview(plan) })
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/tidy', (_request, response) => {
+  response.json({ ok: true, plans: listPlans({}), storePath: tidyPlansLocation() })
+})
+
+app.post('/tidy/:planId/apply', (request, response) => {
+  try {
+    response.json(applyTidy(request.params.planId))
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.post('/tidy/:planId/undo', (request, response) => {
+  try {
+    response.json(undoTidy(request.params.planId))
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message })
+  }
+})
+
+app.post('/focus', async (request, response) => {
+  try {
+    response.json({ ok: true, session: await startFocusSession(request.body || {}) })
+  } catch (error) {
+    response.status(409).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/focus', (_request, response) => {
+  response.json({ ok: true, ...focusStatus({}) })
+})
+
+app.delete('/focus', async (_request, response) => {
+  try {
+    response.json({ ok: true, session: await endFocusSession({ reason: 'cancelled' }) })
+  } catch (error) {
+    response.status(404).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/day-plan', async (request, response) => {
+  try {
+    const plan = await buildDayPlan({})
+    response.json({
+      ok: true,
+      ...plan,
+      briefing: formatBriefing(plan, { seconds: Number(request.query.seconds) || 30 }),
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/meeting-prep', async (request, response) => {
+  try {
+    response.json(
+      await prepareForNextMeeting({
+        withinHours: Number(request.query.withinHours) || 24,
+        collect: request.query.collect !== 'false',
+      }),
+    )
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.get('/notifications', async (request, response) => {
+  try {
+    response.json({
+      ok: true,
+      ...(await triageNotifications({
+        /* People the owner already has in their graph are people whose mail is
+         * more likely to matter than a stranger's. */
+        knownPeople: readContextGraph()
+          .entities.filter((entity) => entity.type === 'Person')
+          .map((entity) => entity.name),
+        threshold: Number(request.query.threshold) || undefined,
+      })),
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+/*
  * Page watches: "tell me when the status, price, or availability changes" —
  * and stay quiet otherwise. See pageWatch.js.
  */
@@ -1519,7 +1672,12 @@ app.get('/memory/projection', (request, response) => {
 
 if (hasSvelteDashboard) {
   // Hashed assets first, so the SPA shell below never answers for /_app/*.
-  app.use('/dashboard', express.static(svelteDashboardDir, { index: false }))
+  // `redirect: false` keeps bare /dashboard from 301ing to /dashboard/ — the
+  // shell route below answers both, and browsers cache that redirect.
+  app.use(
+    '/dashboard',
+    express.static(svelteDashboardDir, { index: false, redirect: false }),
+  )
 
   // Client-side routing means any path under /dashboard is the same document.
   app.get(['/dashboard', '/dashboard/', '/dashboard/{*splat}'], (request, response) => {
@@ -1548,6 +1706,10 @@ app.listen(PORT, '0.0.0.0', () => {
   purgeAllCaptures()
   // Routines only fire while this process is up; start the loop with it.
   startRoutineScheduler()
+  // A focus session the owner started before a restart is still owed its alarm.
+  resumeFocusSessions().catch((error) => {
+    console.warn(`[focus] Could not resume sessions: ${error.message}`)
+  })
   // Same deal for page watches: nothing is polled while the Mac is asleep, and
   // the first poll after a restart re-establishes the baseline from the page.
   startPageWatchScheduler()

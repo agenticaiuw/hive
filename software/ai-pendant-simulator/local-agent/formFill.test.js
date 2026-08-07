@@ -19,7 +19,7 @@ const FORM_HTML = `<form action="submitted-form.html" method="get">
   <label>Password <input type="password" name="my-password"></label>
   <label>Textarea <textarea name="my-textarea" rows="3"></textarea></label>
   <label>Disabled input <input type="text" name="my-disabled" disabled></label>
-  <select name="my-select"><option selected>Open this select menu</option><option value="1">One</option><option value="2">Two</option></select>
+  <label>Dropdown (select) <select name="my-select"><option selected>Open this select menu</option><option value="1">One</option><option value="2">Two</option></select></label>
   <input type="file" name="my-file">
   <input class="form-check-input" type="checkbox" name="my-check" id="my-check-1" value="on" checked>
   <input class="form-check-input" type="checkbox" name="my-check" id="my-check-2" value="on">
@@ -88,6 +88,24 @@ test('a dictated label finds the field the backend calls something else', () => 
   assert.equal(matchField('my-textarea', elements).element.ref, 'e2')
   assert.equal(matchField('#my-check-2', elements).element.ref, 'e7')
   assert.equal(matchField('nothing like this on the page', elements), null)
+})
+
+test('a select is found by the words printed next to it', () => {
+  /* The extension's accessible name for a <select> is its name attribute, so
+   * "Dropdown (select)" — the only thing on screen — has to come from markup. */
+  const { elements } = linked()
+  const hit = matchField('Dropdown (select)', elements)
+  assert.equal(hit.element.ref, 'e4')
+  assert.match(hit.matchedBy, /label/)
+  /* And the manifest calls it that too, rather than repeating the wire name. */
+  assert.equal(hit.element.label, 'Dropdown (select)')
+})
+
+test('an option with no value attribute submits its own text', () => {
+  const { elements } = linked()
+  const { entries } = buildPayload(elements, new Map())
+  const select = entries.find((entry) => entry.name === 'my-select')
+  assert.equal(select.value, 'Open this select menu')
 })
 
 test('the submit control is never a fill target', () => {

@@ -252,6 +252,26 @@ export async function executeComputerAction(action) {
       return setMute(action)
     case 'create_reminder':
       return addReminder(action)
+    case 'remind_me':
+      return scheduleReminderAction(action)
+    case 'quick_capture':
+      return quickCaptureAction(action)
+    case 'recall_capture':
+      return recallCaptureAction(action)
+    case 'tidy_downloads_preview':
+      return tidyPreviewAction(action)
+    case 'tidy_downloads_apply':
+      return tidyApplyAction(action)
+    case 'start_focus_session':
+      return startFocusAction(action)
+    case 'end_focus_session':
+      return endFocusAction(action)
+    case 'plan_my_day':
+      return dayPlanAction(action)
+    case 'prepare_for_meeting':
+      return meetingPrepAction(action)
+    case 'triage_notifications':
+      return triageAction(action)
     case 'compose_briefing':
       return composeBriefingAction(action)
     case 'set_input_source':
@@ -292,6 +312,108 @@ export async function executeComputerAction(action) {
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
   }
+}
+
+/*
+ * The quick-capture / reminders / focus family.
+ *
+ * Each of these is a whole capability behind one action, rather than a plan of
+ * five primitive steps, because the owner said it in one breath and every extra
+ * step is another chance for the plan to come back half-done. The modules are
+ * imported lazily for the same reason the builtins are: an action nobody in
+ * this session used should not cost a Calendar or Mail import at boot.
+ */
+async function quickCaptureAction(action) {
+  const { captureNote } = await import('./quickCapture.js')
+  const result = captureNote({
+    text: action.params?.text || action.params?.note || action.label,
+    title: action.params?.title || null,
+    mode: action.params?.mode || null,
+  })
+  return success(action, result.spoken, result)
+}
+
+async function recallCaptureAction(action) {
+  const { recallCaptures } = await import('./quickCapture.js')
+  const captures = recallCaptures({
+    query: action.params?.query || action.params?.text || '',
+    limit: Number(action.params?.limit) || 10,
+  })
+  return success(
+    action,
+    captures.length
+      ? captures.map((capture) => capture.value).join('; ')
+      : 'Nothing saved that matches that.',
+    { captures },
+  )
+}
+
+async function scheduleReminderAction(action) {
+  const { scheduleReminder } = await import('./remindMe.js')
+  const result = await scheduleReminder({
+    text: action.params?.text || action.params?.title || action.label,
+    notes: action.params?.notes || '',
+    listName: action.params?.list || action.params?.listName || null,
+  })
+  return success(action, result.spoken, result)
+}
+
+async function tidyPreviewAction(action) {
+  const { formatPreview, planTidy } = await import('./downloadsTidy.js')
+  const plan = planTidy({
+    directory: action.params?.directory || action.params?.path || undefined,
+    groupBy: action.params?.groupBy || 'type',
+  })
+  /* The preview IS the result. Nothing has moved, and the plan id is the only
+   * way anything ever will. */
+  return success(action, formatPreview(plan), { plan })
+}
+
+async function tidyApplyAction(action) {
+  const { applyTidy } = await import('./downloadsTidy.js')
+  const planId = String(action.params?.planId || action.params?.id || '')
+  if (!planId) throw new Error('tidy_downloads_apply needs the planId from a preview.')
+  const result = applyTidy(planId)
+  return success(action, result.spoken, result)
+}
+
+async function startFocusAction(action) {
+  const { startFocusSession } = await import('./focusSession.js')
+  const session = await startFocusSession({
+    minutes: Number(action.params?.minutes) || 25,
+    label: action.params?.label || 'Focus',
+    mute: action.params?.mute !== false,
+  })
+  return success(action, session.spoken, session)
+}
+
+async function endFocusAction(action) {
+  const { endFocusSession } = await import('./focusSession.js')
+  const session = await endFocusSession({ reason: action.params?.reason || 'cancelled' })
+  return success(action, session.spoken, session)
+}
+
+async function dayPlanAction(action) {
+  const { buildDayPlan, formatBriefing } = await import('./dayPlan.js')
+  const plan = await buildDayPlan({})
+  const briefing = formatBriefing(plan, { seconds: Number(action.params?.seconds) || 30 })
+  return success(action, briefing.text, { briefing, plan })
+}
+
+async function meetingPrepAction(action) {
+  const { prepareForNextMeeting } = await import('./meetingPrep.js')
+  const result = await prepareForNextMeeting({
+    withinHours: Number(action.params?.withinHours) || 24,
+  })
+  return success(action, result.spoken, result)
+}
+
+async function triageAction(action) {
+  const { triageNotifications } = await import('./notificationTriage.js')
+  const result = await triageNotifications({
+    threshold: Number(action.params?.threshold) || undefined,
+  })
+  return success(action, result.spoken, result)
 }
 
 async function addReminder(action) {

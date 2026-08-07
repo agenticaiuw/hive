@@ -57,6 +57,23 @@ const AUTO_SAFE_ACTIONS = new Set([
   'browser_open_session',
   'browser_list_sessions',
   'browser_close_session',
+  // Quick capture, reminders and focus: said in one breath, to a device with no
+  // screen to confirm on. Each writes only to the owner's own stores or to the
+  // apps they were already asking for.
+  'quick_capture',
+  'recall_capture',
+  'remind_me',
+  'start_focus_session',
+  'end_focus_session',
+  'plan_my_day',
+  'prepare_for_meeting',
+  'triage_notifications',
+  'tidy_downloads_preview',
+  // Apply is here rather than in CONFIRM_REASONS because it cannot act on its
+  // own: it replays a stored plan by id, and the only way to get an id is a
+  // preview the owner has already been shown. The gate is the shape of the API,
+  // not a prompt.
+  'tidy_downloads_apply',
 ])
 
 const CONFIRM_REASONS = new Map([

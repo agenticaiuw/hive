@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { backend } from "$lib/dataSource";
+  import {
+    audioHref,
+    backend,
+    fetchHistory,
+    fetchHistoryDetail,
+    fetchLatestRun,
+    fetchMemory,
+    fetchRuns,
+    fetchSnapshot,
+  } from "$lib/dataSource";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
@@ -59,13 +68,7 @@
     snapshotRefreshPending = true;
     refreshing = true;
     try {
-      const response = await fetch("/api/snapshot", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          payload.error || `Dashboard refresh failed (${response.status})`,
-        );
-      }
+      const payload = await fetchSnapshot();
       snapshot = payload;
       error = "";
       const nextRuns: JsonRecord[] = Array.isArray(payload.pipeline)
@@ -84,10 +87,14 @@
       ) {
         return;
       }
-      error =
-        refreshError instanceof Error
-          ? refreshError.message
-          : "Dashboard refresh failed.";
+      // A failed poll on a page that is already showing data is noise; only
+      // say something when there is nothing on screen to trust.
+      if (!snapshot) {
+        error =
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Dashboard refresh failed.";
+      }
     } finally {
       snapshotRefreshPending = false;
       refreshing = false;
@@ -98,16 +105,7 @@
     if (runsRefreshPending) return;
     runsRefreshPending = true;
     try {
-      const response = await fetch("/api/runs", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          payload.error || `Voice-run refresh failed (${response.status})`,
-        );
-      }
-      const nextRuns: JsonRecord[] = Array.isArray(payload.runs)
-        ? payload.runs
-        : [];
+      const nextRuns: JsonRecord[] = await fetchRuns();
       liveRuns = nextRuns;
       // Note the fallback differs from refresh(): the live feed keeps the
       // current selection rather than clearing it.
@@ -125,10 +123,8 @@
   async function checkLatest() {
     if (document.visibilityState !== "visible") return;
     try {
-      const response = await fetch("/api/runs/latest", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) return;
-      const latest = payload.latest;
+      const latest = await fetchLatestRun();
+      if (!latest) return;
       const key = latest
         ? `${latest.pipelineId}|${latest.status}|${latest.updatedAt}`
         : "";
@@ -153,16 +149,7 @@
     historyRefreshPending = true;
     historyLoading = true;
     try {
-      const params = new URLSearchParams({ limit: "24" });
-      if (q.trim()) params.set("q", q.trim());
-      if (cursor) params.set("cursor", cursor);
-      const response = await fetch(`/api/history?${params}`, {
-        cache: "no-store",
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `History failed (${response.status})`);
-      }
+      const payload = await fetchHistory(q, cursor);
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
       historyEntries = append ? [...historyEntries, ...entries] : entries;
       historyNextCursor = String(payload.nextCursor || "");
@@ -186,18 +173,7 @@
     historyDetailLoading = true;
     historyDetailError = "";
     try {
-      const response = await fetch(
-        `/api/history/${encodeURIComponent(pipelineId)}`,
-        { cache: "no-store" },
-      );
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(
-          payload.error || `Run detail failed (${response.status})`,
-        );
-      }
-      historyDetail =
-        payload.run && typeof payload.run === "object" ? payload.run : null;
+      historyDetail = await fetchHistoryDetail(pipelineId);
       if (!historyDetail) throw new Error("Run detail was empty.");
     } catch (detailError) {
       historyDetail = null;
@@ -212,9 +188,8 @@
 
   async function refreshMemory() {
     try {
-      const response = await fetch("/api/memory", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) return;
+      const payload = await fetchMemory();
+      if (!payload) return;
       memoryEntitiesFull = Array.isArray(payload.memory?.entities)
         ? payload.memory.entities
         : [];
@@ -236,10 +211,7 @@
     if (!pipelineId) return;
     const playKey = voice === "reply" ? `${pipelineId}:reply` : pipelineId;
     playingId = playKey;
-    const query = voice === "reply" ? "?voice=reply" : "";
-    const audio = new Audio(
-      `/api/history/${encodeURIComponent(pipelineId)}/audio${query}`,
-    );
+    const audio = new Audio(audioHref(pipelineId, voice));
     audio.addEventListener("ended", () => {
       if (playingId === playKey) playingId = "";
     });
@@ -403,12 +375,12 @@
    */
   const heroOwnAudio = $derived(
     selected?.audio?.captureId && selected?.pipelineId
-      ? `/api/history/${encodeURIComponent(String(selected.pipelineId))}/audio`
+      ? audioHref(String(selected.pipelineId), "owner")
       : "",
   );
   const heroReplyAudio = $derived(
     selected?.audio?.replyCaptureId && selected?.pipelineId
-      ? `/api/history/${encodeURIComponent(String(selected.pipelineId))}/audio?voice=reply`
+      ? audioHref(String(selected.pipelineId), "reply")
       : "",
   );
 
