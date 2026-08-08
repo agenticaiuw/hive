@@ -553,6 +553,58 @@ const GRAPH_KIND_BY_TYPE = {
  * are Action/Tool telemetry that no prompt should ever carry. This lifts only
  * the durable types across, keyed by entity id so re-running is a no-op.
  */
+/**
+ * The one place a graph entity becomes a prompt line.
+ *
+ * Two callers build this string — the importer below and factFromGraphEntity in
+ * contextProjection.js, which mirrors it for entities the store has not seen
+ * yet. They were separate copies, so they could drift, and a drifted copy means
+ * the same entity reads differently depending on whether the sync had run.
+ *
+ * It also collapses a detail that merely restates the name. `note` is the first
+ * detail tried and quickCapture writes the idea text into BOTH fields, so a
+ * captured idea rendered as
+ *
+ *   Note: a pendant that files its own bug reports — a pendant that files its own bug reports
+ *
+ * — the same sentence twice inside one line, billed on every turn that retrieved
+ * it. Comparison is on normalized text rather than bytes because the two fields
+ * differ by punctuation and case often enough that a byte check would miss most
+ * of them.
+ */
+export function graphEntityLine(entity) {
+  const name = String(entity?.name ?? '').trim()
+  if (!name) return ''
+
+  const detail = String(
+    entity?.attributes?.note ||
+      entity?.attributes?.subject ||
+      entity?.attributes?.path ||
+      entity?.attributes?.due ||
+      '',
+  ).trim()
+
+  /* Containment, not equality: a note is frequently the name plus a trailing
+   * period, or the name with a few words appended. Only the genuinely additive
+   * case earns the tokens. */
+  const restates =
+    detail &&
+    (normalizeForOverlap(detail) === normalizeForOverlap(name) ||
+      normalizeForOverlap(name).includes(normalizeForOverlap(detail)))
+
+  return `${entity?.type}: ${name}${detail && !restates ? ` — ${detail}` : ''}`
+}
+
+/** Lowercase, strip punctuation, collapse space. Shared so the two dedupe
+ *  decisions in this codebase cannot disagree about what "the same" means. */
+export function normalizeForOverlap(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export function syncFactsFromContextGraph({ now = Date.now() } = {}, { filePath = FACTS_PATH } = {}) {
   const graph = readContextGraph()
   const imported = []
@@ -574,7 +626,7 @@ export function syncFactsFromContextGraph({ now = Date.now() } = {}, { filePath 
         {
           key: `graph.${entity.id}`,
           kind,
-          value: `${entity.type}: ${entity.name}${detail ? ` — ${detail}` : ''}`,
+          value: graphEntityLine(entity),
           source: {
             origin: 'context-graph',
             entityId: entity.id,
