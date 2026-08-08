@@ -1009,6 +1009,63 @@ export function createD1Store(db) {
       return results.map(parseRecord).filter(Boolean)
     },
 
+    /*
+     * ---- announcement retention ------------------------------------------
+     *
+     * An announcement carries speech, and a routine composed on the relay puts
+     * up to 1500 characters of scraped page text into it (cloud-relay/
+     * routines.js composeOnRelay). Every reader of this table already refuses
+     * an expired row — announcementIsLive() is checked in selectDeliverable
+     * before anything is spoken — so until these two statements existed, an
+     * announcement's text was unreachable AND permanent: the worst of both.
+     * A filter on the read path is not deletion.
+     * ---------------------------------------------------------------------- */
+
+    /** Rows past `expires_at`. NULL expiry is never selected: unknown means keep. */
+    async listExpiredAnnouncements({ before, limit = 200 }) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500)
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_announcements
+            WHERE expires_at IS NOT NULL AND expires_at <= ?1
+            ORDER BY expires_at ASC LIMIT ?2`,
+        )
+        .bind(before, safeLimit)
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    /** What the table holds, split at the same cutoff, in rows and in bytes. */
+    async announcementStats({ before }) {
+      const row = await db
+        .prepare(
+          `SELECT
+             COUNT(*) AS total,
+             COALESCE(SUM(LENGTH(data)), 0) AS total_bytes,
+             SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ?1 THEN 1 ELSE 0 END) AS expired,
+             COALESCE(SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ?1 THEN LENGTH(data) ELSE 0 END), 0) AS expired_bytes,
+             SUM(CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END) AS undated
+           FROM relay_announcements`,
+        )
+        .bind(before)
+        .first()
+      return {
+        total: Number(row?.total || 0),
+        totalBytes: Number(row?.total_bytes || 0),
+        expired: Number(row?.expired || 0),
+        expiredBytes: Number(row?.expired_bytes || 0),
+        undated: Number(row?.undated || 0),
+      }
+    },
+
+    async deleteAnnouncement(announcementId) {
+      const result = await db
+        .prepare('DELETE FROM relay_announcements WHERE announcement_id = ?1')
+        .bind(announcementId)
+        .run()
+      return Boolean(result?.meta?.changes)
+    },
+
     async updateAnnouncement(announcementId, patch) {
       const current = parseRecord(
         await db

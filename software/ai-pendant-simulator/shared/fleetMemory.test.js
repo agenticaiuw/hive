@@ -362,6 +362,35 @@ test('a secret never reaches the prompt in full, asked about or not', () => {
   assert.ok(!projection.text.includes('ghp_abcdefghijklmnopqrstuvwxyz0123'))
 })
 
+test('a secret spoken as a sentence does not reach the prompt either', () => {
+  /*
+   * The test above uses a `key: value` line, which was the one shape
+   * maskSecretValue handled. A secret the owner says out loud has no separator
+   * in it, and that is the ordinary case for a worn pendant -- it went into the
+   * fleet prompt in full with "[withheld]" appended after it.
+   */
+  const projection = projectFleetMemory({
+    events: [
+      makeEvent({
+        type: 'entity',
+        key: 'home.lock',
+        value: 'my bike lock code is 4829',
+      }),
+      makeEvent({
+        type: 'preference',
+        key: 'home.wifi',
+        value: 'the guest wifi password is hunter2',
+      }),
+    ],
+    task: 'what is my bike lock code',
+    now: NOW,
+  })
+
+  assert.ok(!projection.text.includes('4829'), 'a spoken code reached the prompt')
+  assert.ok(!projection.text.includes('hunter2'), 'a spoken password reached the prompt')
+  assert.match(projection.text, /\[withheld\]/)
+})
+
 test('the projection reports which events it shipped, and writes nothing', () => {
   const log = sampleLog()
   const projection = projectFleetMemory({ events: log, now: NOW })
@@ -462,15 +491,84 @@ function migratedD1() {
 }
 
 /*
- * memoryStore keeps its maps at module scope, so tests share one log. maxBytes:0
- * empties it, which is also the honest reading of a zero byte budget: no bytes,
- * no rows.
+ * A store per call, which is now what createMemoryStore() means.
+ *
+ * This helper used to scrub the log with `pruneMemoryEvents({ maxBytes: 0 })`
+ * before every case, because memoryStore.js declared its maps at MODULE scope
+ * and every "new" store was a façade over one shared set. The scrub was the
+ * bug's receipt: a test that has to erase the world before it starts is a test
+ * telling you the world is shared. The isolation test below is what replaced
+ * it.
  */
 async function freshMemoryStore() {
-  const store = createMemoryStore()
-  await store.pruneMemoryEvents({ maxBytes: 0 })
-  return store
+  return createMemoryStore()
 }
+
+/*
+ * Two stores are two stores.
+ *
+ * memoryStore.js declared `jobs`, `states`, `memoryEvents` and eight more maps
+ * at module scope, so `createMemoryStore()` returned a new façade over one
+ * shared set of them. Production never noticed — store/index.js memoizes a
+ * single store per isolate — but the shape was a cross-tenant leak waiting for
+ * the first relay that holds two stores at once, and the memory log is the
+ * worst table for that to happen to: it is the one designed to be pasted into
+ * a prompt.
+ *
+ * It also made the tests lie to each other. Before the fix, the second
+ * assertion below returned the row written to `left`.
+ */
+test('two stores do not share one log, or one anything else', async () => {
+  const left = createMemoryStore()
+  const right = createMemoryStore()
+
+  await left.appendMemoryEvents([
+    makeEvent({ type: 'preference', key: 'editor', value: 'VS Code' }),
+  ])
+
+  assert.deepEqual(await right.listMemoryEvents({ now: NOW }), [])
+  assert.equal((await left.listMemoryEvents({ now: NOW })).length, 1)
+
+  // Memory was the loudest case, not the only one: every map moved.
+  await left.saveState('fleet', { mac: { online: true } })
+  await left.createJob({ jobId: 'job-1', type: 'plan', status: 'queued', createdAt: new Date(NOW).toISOString(), updatedAt: new Date(NOW).toISOString() })
+  await left.saveDevice({ deviceId: 'pendant-1' })
+
+  assert.equal(await right.getState('fleet'), null)
+  assert.deepEqual(await right.listJobs({}), [])
+  assert.deepEqual(await right.listDevices(), [])
+})
+
+/*
+ * The table was applied to the live database by hand and never written into
+ * schema.sql, so the file that describes the database could not rebuild it.
+ * The migration stays — it is what an EXISTING database runs — but a fresh one
+ * must come out of schema.sql alone, and the two must agree column for column.
+ */
+test('schema.sql alone builds the memory table, identically to the migration', () => {
+  const columnsOf = (sqlFiles) => {
+    const db = new DatabaseSync(':memory:')
+    for (const file of sqlFiles) db.exec(fs.readFileSync(path.join(WORKER, file), 'utf8'))
+    return db
+      .prepare('PRAGMA table_info(relay_memory_events)')
+      .all()
+      .map((row) => `${row.name} ${row.type} ${row.notnull} ${row.dflt_value ?? ''}`)
+  }
+
+  const fromSchema = columnsOf(['schema.sql'])
+  assert.ok(fromSchema.length > 0, 'schema.sql must create relay_memory_events')
+  assert.deepEqual(fromSchema, columnsOf(['fleet-memory-migration.sql']))
+
+  const indexes = new DatabaseSync(':memory:')
+  indexes.exec(fs.readFileSync(path.join(WORKER, 'schema.sql'), 'utf8'))
+  assert.deepEqual(
+    indexes
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='relay_memory_events' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all()
+      .map((row) => row.name),
+    ['relay_memory_events_expiry', 'relay_memory_events_fold', 'relay_memory_events_value'],
+  )
+})
 
 test('the migration applies on top of the schema, and applies twice', () => {
   const { db } = migratedD1()
@@ -534,6 +632,44 @@ for (const [name, make] of [
     assert.deepEqual(idsOf(loaded), idsOf(events))
     assert.equal(loaded[0].type, 'preference')
     assert.equal(loaded[0].value, 'VS Code')
+  })
+
+  /*
+   * The write-loss regression, pinned in both stores.
+   *
+   * `appendMemoryEvents` used to call its post-append sweep with no argument,
+   * so the sweep ran on the wall clock while the events it had just written
+   * carried the caller's. An event stamped more than one TTL behind real time
+   * was deleted by the very call that created it — and the call still returned
+   * `appended: 1`. A silent write-loss that reports success is the worst
+   * failure a memory system can have, and the only place it was ever visible
+   * was the sweep report's `reasons: {expired: 1}`, so both are asserted.
+   *
+   * This was NOT previously pinned: the existing round-trip cases all append
+   * with events stamped near real time, so the bug would have gone unnoticed
+   * until a replay, a backfill, or a device with a skewed clock.
+   */
+  test(`${name}: an append on the caller's clock does not expire what it just wrote`, async () => {
+    const store = await make()
+    const longAgo = NOW - 30 * 24 * 60 * 60 * 1000 // many `event` TTLs back
+
+    const { status, body } = await appendFleetMemory(
+      store,
+      {
+        node: 'browser-extension',
+        events: [{ type: 'event', key: 'printer', value: 'the printer was out of paper' }],
+      },
+      { now: longAgo, randomUUID },
+    )
+
+    assert.equal(status, 201)
+    assert.equal(body.appended, 1)
+    assert.equal(body.log?.reasons?.expired ?? 0, 0, 'the write reported success; nothing may have expired')
+    assert.equal(
+      (await store.listMemoryEvents({ now: longAgo })).length,
+      1,
+      'the event the append reported writing must exist',
+    )
   })
 
   test(`${name}: an expired event is unreadable before any sweep has run`, async () => {

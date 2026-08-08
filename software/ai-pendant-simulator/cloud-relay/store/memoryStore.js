@@ -16,33 +16,91 @@ import {
   normalizeJobListLimit,
 } from './jobQuery.js'
 
-const jobs = new Map()
-const devices = new Map()
-const deviceCredentials = new Map()
-const states = new Map()
-const productStates = new Map()
-const routines = new Map()
-const routineRuns = new Map()
-const routineLeases = new Map()
-const announcements = new Map()
-const contexts = new Map()
-const memoryEvents = new Map()
 const AGENT_PROXY_MAX_AGE_MS = 10_000
 
-function pruneExpiredJobs() {
-  const cutoff = Date.now() - JOB_TTL_MS
+/**
+ * A store, with its own state.
+ *
+ * The maps used to sit at module scope, which made `createMemoryStore()` a
+ * misleading name: it handed out a new façade over one shared set of maps. In
+ * production that was invisible — store/index.js memoizes one store per
+ * isolate — but it is a real hazard in two places, and both are the kind that
+ * only bite once something has already gone wrong:
+ *
+ *   - Any future relay that holds more than one store at once (a second
+ *     account, a replay harness, a per-tenant isolate) would serve one
+ *     owner's facts to another. The memory log is the worst table for that to
+ *     happen to, because it is the one designed to be pasted into a prompt.
+ *   - Tests. Two `createMemoryStore()` calls in one process shared a log, so a
+ *     test could pass on rows another test wrote — and fleetMemory.test.js
+ *     already carries a `freshMemoryStore()` helper whose whole job is to
+ *     scrub the shared state before each case. That helper is the bug's
+ *     receipt, not its fix.
+ *
+ * Nothing else changes: every method below closes over these maps instead of
+ * the module's, and none of them use `this`, so a detached method
+ * (`{ listMemoryEvents: store.listMemoryEvents }`) still works.
+ */
+export function createMemoryStore() {
+  const jobs = new Map()
+  const devices = new Map()
+  const deviceCredentials = new Map()
+  const states = new Map()
+  const productStates = new Map()
+  const routines = new Map()
+  const routineRuns = new Map()
+  const routineLeases = new Map()
+  const announcements = new Map()
+  const contexts = new Map()
+  const memoryEvents = new Map()
 
-  for (const [jobId, job] of jobs.entries()) {
-    if (
-      job.type !== 'audio_capture' &&
-      new Date(job.updatedAt).getTime() < cutoff
-    ) {
-      jobs.delete(jobId)
+  function pruneExpiredJobs() {
+    const cutoff = Date.now() - JOB_TTL_MS
+
+    for (const [jobId, job] of jobs.entries()) {
+      if (
+        job.type !== 'audio_capture' &&
+        new Date(job.updatedAt).getTime() < cutoff
+      ) {
+        jobs.delete(jobId)
+      }
     }
   }
-}
 
-export function createMemoryStore() {
+  /*
+   * One sweep for expiry, supersession and the byte ceiling, run on write and
+   * on read. Read-side too, for the same reason contexts are checked on read:
+   * it is what makes "expired" mean the same thing whether or not a write has
+   * happened since, and this store is the one that runs for days in local
+   * development without a single append.
+   */
+  function sweepMemoryEvents(now = Date.now(), maxBytes = MAX_LOG_BYTES) {
+    const { kept, stats } = pruneFleetMemoryEvents([...memoryEvents.values()], {
+      now,
+      maxBytes,
+    })
+
+    if (stats.removed) {
+      memoryEvents.clear()
+      for (const record of kept) memoryEvents.set(record.eventId, record)
+    }
+
+    return stats
+  }
+
+  /*
+   * Expiry is enforced on read as well as by this sweep. The sweep keeps the
+   * map from growing; the read-side check is what makes "expired" mean the
+   * same thing whether or not a sweep has run since.
+   */
+  function pruneExpiredContexts(now = Date.now()) {
+    for (const [handleId, record] of contexts.entries()) {
+      if (new Date(record.expiresAt || 0).getTime() <= now) {
+        contexts.delete(handleId)
+      }
+    }
+  }
+
   return {
     kind: 'memory',
 
@@ -337,6 +395,53 @@ export function createMemoryStore() {
         .slice(0, Math.min(Math.max(Number(limit) || 20, 1), 100))
     },
 
+    /* ---- announcement retention (see d1Store.js for why these exist) ----- */
+
+    /** Rows past `expiresAt`. A missing expiry is never selected: unknown means keep. */
+    async listExpiredAnnouncements({ before, limit = 200 }) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500)
+      return [...announcements.values()]
+        .filter((entry) => {
+          const expiresAt = Date.parse(entry.expiresAt || '')
+          return Number.isFinite(expiresAt) && expiresAt <= Date.parse(before)
+        })
+        .sort((a, b) => String(a.expiresAt).localeCompare(String(b.expiresAt)))
+        .slice(0, safeLimit)
+        .map((entry) => ({ ...entry }))
+    },
+
+    async announcementStats({ before }) {
+      const cutoff = Date.parse(before)
+      let expired = 0
+      let expiredBytes = 0
+      let totalBytes = 0
+      let undated = 0
+      for (const entry of announcements.values()) {
+        const bytes = Buffer.byteLength(JSON.stringify(entry), 'utf8')
+        totalBytes += bytes
+        const expiresAt = Date.parse(entry.expiresAt || '')
+        if (!Number.isFinite(expiresAt)) {
+          undated += 1
+          continue
+        }
+        if (expiresAt <= cutoff) {
+          expired += 1
+          expiredBytes += bytes
+        }
+      }
+      return {
+        total: announcements.size,
+        totalBytes,
+        expired,
+        expiredBytes,
+        undated,
+      }
+    },
+
+    async deleteAnnouncement(announcementId) {
+      return announcements.delete(announcementId)
+    },
+
     async updateAnnouncement(announcementId, patch) {
       const current = announcements.get(announcementId)
       if (!current) return null
@@ -407,39 +512,5 @@ export function createMemoryStore() {
     async pruneMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
       return sweepMemoryEvents(now, maxBytes)
     },
-  }
-}
-
-/*
- * One sweep for expiry, supersession and the byte ceiling, run on write and on
- * read. Read-side too, for the same reason contexts are checked on read: it is
- * what makes "expired" mean the same thing whether or not a write has happened
- * since, and this store is the one that runs for days in local development
- * without a single append.
- */
-function sweepMemoryEvents(now = Date.now(), maxBytes = MAX_LOG_BYTES) {
-  const { kept, stats } = pruneFleetMemoryEvents([...memoryEvents.values()], {
-    now,
-    maxBytes,
-  })
-
-  if (stats.removed) {
-    memoryEvents.clear()
-    for (const record of kept) memoryEvents.set(record.eventId, record)
-  }
-
-  return stats
-}
-
-/*
- * Expiry is enforced on read as well as by this sweep. The sweep keeps the map
- * from growing; the read-side check is what makes "expired" mean the same
- * thing whether or not a sweep has run since.
- */
-function pruneExpiredContexts(now = Date.now()) {
-  for (const [handleId, record] of contexts.entries()) {
-    if (new Date(record.expiresAt || 0).getTime() <= now) {
-      contexts.delete(handleId)
-    }
   }
 }
