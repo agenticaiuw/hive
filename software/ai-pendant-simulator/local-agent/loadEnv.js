@@ -15,6 +15,8 @@ const CANDIDATES = [
   path.resolve(process.cwd(), '../../.env'),
 ]
 
+const appliedKeys = new Set()
+
 function applyEnvFile(filePath) {
   let text
   try {
@@ -36,6 +38,10 @@ function applyEnvFile(filePath) {
     ) {
       value = value.slice(1, -1)
     }
+    /* Recorded whether or not it was applied: a key the shell already set to
+     * the same credential is exactly as sensitive as one read from here, and
+     * the point of the record is to keep it out of children. */
+    appliedKeys.add(key)
     // Do not clobber explicit process env (LaunchAgent / shell).
     if (process.env[key] === undefined || process.env[key] === '') {
       process.env[key] = value
@@ -54,4 +60,19 @@ for (const candidate of CANDIDATES) {
 
 export function envLoadedFrom() {
   return loadedFrom
+}
+
+/**
+ * The keys this file put into process.env, so callers can take them back out.
+ *
+ * A child process started by the agent inherits process.env by default, which
+ * means every `run_shell` action has been running with the relay key, the agent
+ * token and the session secret in its environment — one `env` away from being
+ * printed into stdout, which is then stored on the job and can be composed into
+ * a model prompt. Knowing which keys arrived from the .env file is what lets a
+ * child be given everything EXCEPT the app's own credentials, without anyone
+ * maintaining a list of secret names by hand.
+ */
+export function envKeysFromFile() {
+  return [...appliedKeys]
 }
