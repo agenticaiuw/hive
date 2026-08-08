@@ -166,3 +166,61 @@ test('classification never refuses — every command gets some tier', () => {
     assert.ok([TIER_DETERMINISTIC, TIER_BACKGROUND, TIER_PLANNER].includes(tier))
   }
 })
+
+/*
+ * The browser extension has no context field on /plan, so it appends the active
+ * page as a blank-line-separated bracketed trailer (command-console.js
+ * buildCommandText). Mirrored here rather than imported, so the test states the
+ * contract the router matches against and does not couple to the extension.
+ */
+const withPageTrailer = (
+  command,
+  page = { title: 'Subscriptions - YouTube', url: 'https://www.youtube.com' },
+) => {
+  const label = page.title ? `"${page.title}" — ${page.url}` : page.url
+  return `${command}\n\n[Sent from the browser extension. Active page: ${label}]`
+}
+
+test('the page-context trailer does not knock a command off the fast path', async () => {
+  // (1) plain command matches — the baseline the trailer must preserve.
+  assert.equal((await only('what time is it')).type, 'get_time')
+
+  // (2) the SAME command carrying the extension trailer resolves to the same
+  // builtin with the same slot — no model call, no re-derived clock.
+  assert.equal((await only(withPageTrailer('what time is it'))).type, 'get_time')
+
+  const vol = await only(withPageTrailer('set volume to 30'))
+  assert.equal(vol.type, 'set_volume')
+  assert.equal(vol.params.level, 30)
+
+  assert.equal((await only(withPageTrailer('mute'))).params.muted, true)
+
+  // A page title that itself contains ']' must not end the strip early — the
+  // trailer runs to the LAST bracket at end of input.
+  const brackety = await only(
+    withPageTrailer('what time is it', {
+      title: 'Inbox [Gmail]',
+      url: 'https://mail.google.com',
+    }),
+  )
+  assert.equal(brackety.type, 'get_time')
+})
+
+test('stripping the trailer never invents a match, and inline brackets are safe', async () => {
+  // (3) a command that genuinely needs the page is not in the deterministic
+  // table with or without the trailer — it still falls through to the model.
+  await none(withPageTrailer('summarize this page'))
+  await none(withPageTrailer('what does this page say'))
+
+  // The strip is anchored to a blank line followed by a leading '[' at end of
+  // input, the trailer's defining shape. A command whose own text merely ends
+  // in a bracket, or carries one inline, is left exactly as written (and is
+  // simply not a deterministic command).
+  await none('remind me to file the form [urgent]')
+  await none('open the [draft] folder')
+
+  // And the trailer must not smuggle its own words into the decision: the
+  // "[… Active page: …]" text contains "page", which NEEDS_FULL_SCHEMA would
+  // otherwise catch — but a real builtin underneath still wins.
+  assert.equal((await only(withPageTrailer("what's my battery"))).type, 'get_mac_status')
+})
