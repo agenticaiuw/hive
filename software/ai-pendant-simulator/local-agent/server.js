@@ -83,6 +83,7 @@ import {
   markBriefingPlayed,
   pendantSpeechForBriefing,
   playBriefingOnMac,
+  registerBriefingShelfRoutes,
 } from './audioBrief.js'
 import { readRoutingStats } from './routingStats.js'
 import { purgeAllCaptures, stripImageBytes } from './screenCapture.js'
@@ -1461,6 +1462,17 @@ registerWorkbenchRoutes(app)
  * calling it — /memory/graph/retention returned 404 live, which is the exact
  * failure this whole session was spent diagnosing elsewhere. */
 registerContextGraphRetentionRoutes(app)
+
+/* The shelf's own record of what it dropped. Read-only, and the whole point of
+ * it: an unheard briefing that gets evicted leaves a tombstone, and until this
+ * was mounted the tombstone was visible only by opening
+ * ~/AI-Pendant-Workspace/.pendant-briefings.json by hand — a record the owner
+ * cannot reach is the silent deletion it was built to end.
+ *
+ * Base path is /briefings/shelf and NOT under /research/briefings, where
+ * GET /research/briefings/:id at line 1632 would match "shelf" as an id and
+ * answer 404 for a briefing that never existed. */
+registerBriefingShelfRoutes(app)
 
 /* Reports which of the five wiring splices have landed, so none of it has to
  * be remembered. This is the audit that found the misrouting. */
