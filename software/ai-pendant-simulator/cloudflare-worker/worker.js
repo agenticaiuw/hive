@@ -1,6 +1,15 @@
 import { httpServerHandler } from 'cloudflare:node'
 import { setCloudflareBindings } from '../cloud-relay/cloudflareBindings.js'
 
+/*
+ * The bridge doorbell Durable Object. Wrangler requires DO classes to be
+ * exported from the entry module; the class itself lives in bridgeHub.js and
+ * keeps its module scope light so this re-export costs the 10 ms cron budget
+ * nothing. Bound as BRIDGE_HUB in wrangler.jsonc (new_sqlite_classes — the
+ * Free plan only allows SQLite-backed DO classes).
+ */
+export { BridgeHub } from './bridgeHub.js'
+
 let relayHandlerPromise
 
 export default {
@@ -51,6 +60,18 @@ export default {
         return handlePendantConverse(request, context)
       }
       return new Response('WebSocket upgrade required', { status: 426 })
+    }
+
+    /*
+     * Mac bridge doorbell socket: same rule as the pendant socket — claimed
+     * before Express because httpServerHandler cannot complete an Upgrade.
+     * The handler authenticates (admin key or scoped device token, the same
+     * check the Express routes run) BEFORE forwarding the upgrade to the
+     * device's BridgeHub Durable Object.
+     */
+    if (url.pathname === '/v1/bridge/socket') {
+      const { handleBridgeSocketUpgrade } = await import('./bridgeHub.js')
+      return handleBridgeSocketUpgrade(request, env)
     }
 
     if (!relayHandlerPromise) {

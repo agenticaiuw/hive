@@ -35,6 +35,7 @@ import {
   verifyContextHandle,
 } from '../shared/contextHandoff.js'
 import { getStore } from './store/index.js'
+import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
 import { registerApprovalRoutes } from './approvalStore.js'
 import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
@@ -216,6 +217,14 @@ export async function enqueueMacPlanJob({
       (plan.toolsUsed?.length ? ` toolsUsed=${plan.toolsUsed.join(',')}` : ''),
   )
   await store.createJob(job)
+  /*
+   * Doorbell, not delivery: the row above is the record; this only tells a
+   * connected Mac to claim it now instead of on its next safety poll. Awaited
+   * (a stub fetch is single-digit ms and self-caps at 1.5 s) because Express
+   * has no waitUntil and a fire-and-forget could be cancelled with the
+   * response. Failure is logged inside and never fails the enqueue.
+   */
+  await ringBridgeDoorbell({ store, reason: 'plan', jobId: job.jobId })
   return job
 }
 
@@ -1821,6 +1830,10 @@ app.post('/v1/mac/plan', async (request, response) => {
   if (job.jobId !== transcriptionJob?.jobId) {
     await store.createJob(job)
   }
+  /* Both branches leave a status:'queued' plan job — the announce path's
+   * 'transcribing' row only became claimable in the update above, so this is
+   * its enqueue moment as far as the bridge is concerned. */
+  await ringBridgeDoorbell({ store, reason: 'transcribe-plan', jobId: job.jobId })
 
   response.status(202).json({
     ok: true,
@@ -1873,6 +1886,7 @@ app.post('/v1/mac/execute', async (request, response) => {
     sessionId,
   })
   await store.createJob(job)
+  await ringBridgeDoorbell({ store, reason: 'execute', jobId: job.jobId })
 
   response.status(202).json({
     ok: true,
@@ -2562,6 +2576,9 @@ app.post('/v1/pendant/jobs/:jobId/events', async (request, response) => {
     deviceId: 'pendant-telemetry',
   })
   await store.createJob(proxy)
+  /* Minute-late telemetry makes the live pipeline view lie exactly while the
+   * owner is watching it — ring so a quiet-cadence bridge fetches it now. */
+  await ringBridgeDoorbell({ store, reason: 'pendant-telemetry', jobId: proxy.jobId })
 
   response.status(202).json({
     ok: true,
@@ -2629,6 +2646,9 @@ app.post('/v1/ops/proxy', async (request, response) => {
 
   const job = createAgentProxyJob({ method, path, body, deviceId })
   await store.createJob(job)
+  /* This route then waits up to 28 s for the result, so it is the one that
+   * would break outright if a quiet-cadence bridge waited for a safety poll. */
+  await ringBridgeDoorbell({ store, reason: 'ops-proxy', jobId: job.jobId })
 
   // Dashboard snapshot should jump the queue — drop other ops proxy backlog.
   // Drop only stale backlog (older than 3s), never a peer request created at the same time.
@@ -2669,6 +2689,70 @@ app.post('/v1/ops/proxy', async (request, response) => {
     error: 'Timed out waiting for the home Mac bridge.',
     jobId: job.jobId,
   })
+})
+
+/*
+ * Live bridge reachability, observed rather than inferred: `connected` means
+ * the BridgeHub Durable Object holds an accepted WebSocket from the Mac right
+ * now. This replaces guessing from lastSeenAt heartbeats. `lastDoorbell` is
+ * the most recent ring the hub received and whether any socket heard it —
+ * never a claim that the Mac acted on it.
+ */
+app.get('/v1/bridge/presence', async (request, response) => {
+  const binding = getCloudflareBindings()?.BRIDGE_HUB
+  if (!binding?.idFromName) {
+    // Local Node relay (or a build without the DO binding): there is no hub,
+    // so the only honest answer is "not connected via socket".
+    response.json({
+      ok: true,
+      connected: false,
+      reason: 'bridge_hub_unavailable',
+    })
+    return
+  }
+
+  const store = await getStore()
+  let deviceId = String(request.query.deviceId ?? '').trim()
+  if (deviceId && !principalOwnsDevice(request.relayPrincipal, deviceId)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Blocked for safety: presence is per-device.',
+    })
+    return
+  }
+  if (!deviceId) {
+    const devices = await store.listDevices()
+    deviceId =
+      devices.find((device) => device.deviceType === 'mac_bridge')?.deviceId ||
+      ''
+  }
+  if (!deviceId) {
+    response.json({
+      ok: true,
+      connected: false,
+      reason: 'no_bridge_registered',
+    })
+    return
+  }
+
+  try {
+    const stub = binding.get(binding.idFromName(deviceId))
+    const hubResponse = await stub.fetch('https://bridge-hub/presence')
+    const presence = await hubResponse.json()
+    response.json({
+      ok: true,
+      deviceId,
+      connected: Boolean(presence?.connected),
+      sockets: Number(presence?.sockets || 0),
+      since: presence?.since ?? null,
+      lastDoorbell: presence?.lastDoorbell ?? null,
+    })
+  } catch (error) {
+    response.status(502).json({
+      ok: false,
+      error: `Bridge hub unreachable: ${error.message}`,
+    })
+  }
 })
 
 app.get('/v1/bridge/work', async (request, response) => {
@@ -3262,6 +3346,11 @@ function requiredScopesForRequest(request) {
   }
   if (method === 'GET' && path === '/v1/bridge/work') {
     return ['bridge:work:claim']
+  }
+  /* Same audience as /v1/devices/status: anything allowed to ask "is the Mac
+   * reachable" may ask it precisely instead of guessing from lastSeenAt. */
+  if (method === 'GET' && path === '/v1/bridge/presence') {
+    return ['device:status:read']
   }
   if (
     method === 'POST' &&

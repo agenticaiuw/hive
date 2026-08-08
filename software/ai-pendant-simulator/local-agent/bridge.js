@@ -1,6 +1,10 @@
 import {
   AGENT_TOKEN,
   BRIDGE_DEVICE_ID,
+  BRIDGE_SAFETY_POLL_INTERVAL_MS,
+  BRIDGE_SOCKET_HEARTBEAT_MS,
+  BRIDGE_SOCKET_RECONNECT_BASE_MS,
+  BRIDGE_SOCKET_RECONNECT_MAX_MS,
   HEARTBEAT_INTERVAL_MS,
   LOCAL_AGENT_URL,
   PAIRING_CODE,
@@ -11,6 +15,12 @@ import {
   WORK_RETRY_MAX_MS,
   WORK_POLL_ABORT_MS,
 } from './bridgeConfig.js'
+import {
+  bridgeSocketUrl,
+  createBridgeSocket,
+  createWorkSignal,
+  pollIdleDelay,
+} from './bridgePush.js'
 import {
   spokenConfirmation,
   spokenTextForResult,
@@ -31,6 +41,15 @@ const relayHeaders = {
 
 let running = false
 let productSyncPromise = null
+/*
+ * Doorbell plumbing. The signal is the ONLY coupling between the socket and
+ * the work loop: a work frame, a health flip (either direction) and stop()
+ * all just ring it, and the loop re-evaluates what to do. The claim request
+ * stays the sole way work is fetched — a doorbell is never trusted as
+ * evidence that work exists, only as a reason to look now.
+ */
+const workSignal = createWorkSignal()
+let pushSocket = null
 
 export async function startBridge() {
   if (!RELAY_API_KEY) {
@@ -48,6 +67,25 @@ export async function startBridge() {
   running = true
   console.log(`[bridge] Connecting to relay at ${RELAY_URL}`)
   await registerBridge()
+  /*
+   * Doorbell socket: push delivery for the queue the loop below drains. On
+   * open AND on close it rings the signal — open so the backlog drains
+   * immediately, close so a loop asleep on the quiet cadence wakes and
+   * resumes continuous polling instead of finishing a 60 s nap without
+   * cover. Against a relay deployed before this route the connect fails,
+   * the socket never turns healthy, and the loop runs exactly as before —
+   * one rate-limited log line, capped reconnect backoff, no spam.
+   */
+  pushSocket = createBridgeSocket({
+    url: bridgeSocketUrl(RELAY_URL, BRIDGE_DEVICE_ID),
+    headers: { Authorization: `Bearer ${RELAY_API_KEY}` },
+    heartbeatMs: BRIDGE_SOCKET_HEARTBEAT_MS,
+    reconnectBaseMs: BRIDGE_SOCKET_RECONNECT_BASE_MS,
+    reconnectMaxMs: BRIDGE_SOCKET_RECONNECT_MAX_MS,
+    onWork: () => workSignal.ring(),
+    onHealthyChange: () => workSignal.ring(),
+  })
+  pushSocket.start()
   await syncProductState()
   startHeartbeat()
   await syncAgentSnapshot()
@@ -63,6 +101,12 @@ export async function startBridge() {
 
 export function stopBridge() {
   running = false
+  if (pushSocket) {
+    pushSocket.stop()
+    pushSocket = null
+  }
+  // Wake a loop idling on the safety cadence so shutdown is prompt.
+  workSignal.ring()
 }
 
 async function registerBridge() {
@@ -136,8 +180,27 @@ async function workLoop() {
 
       if (work) {
         await handleWork(work)
+        retryBackoff.reset()
+        // Drain: claim again immediately until the queue answers empty.
+        continue
       }
       retryBackoff.reset()
+
+      /*
+       * Queue is empty. With a healthy doorbell socket, idle a full safety
+       * interval — the doorbell (or a health flip, or stopBridge) wakes the
+       * wait instantly, and a ring that landed while we were polling or
+       * executing is latched so this returns at once instead of napping
+       * through it. With no healthy socket the delay is 0 and this loop is
+       * the old continuous long-poll, unchanged.
+       */
+      const idleMs = pollIdleDelay({
+        socketHealthy: pushSocket?.isHealthy() ?? false,
+        safetyIntervalMs: BRIDGE_SAFETY_POLL_INTERVAL_MS,
+      })
+      if (idleMs > 0 && running) {
+        await workSignal.wait(idleMs)
+      }
     } catch (error) {
       reportWorkLoopError('[bridge] Work loop error', error)
       await sleep(retryBackoff.nextDelay())
