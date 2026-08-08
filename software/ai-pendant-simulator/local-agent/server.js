@@ -251,6 +251,7 @@ import { registerVisionLoopRoutes } from './visionLoopRoutes.js'
 import { registerWorkbenchRoutes } from './workbenchRoutes.js'
 import { registerContextGraphRetentionRoutes } from './contextGraphRetentionRoutes.js'
 import { registerCapabilityGapsRoutes } from './capabilityGaps.js'
+import { registerCapabilityGapInboxRoutes } from './capabilityGapInbox.js'
 import { registerHandleThisRoutes } from './handleThisRoutes.js'
 import { registerBrowserJobRoutes } from './browserJobRunner.js'
 import { registerCrossCheckRoutes } from './crossCheck.js'
@@ -1477,6 +1478,13 @@ registerBriefingShelfRoutes(app)
 /* Reports which of the five wiring splices have landed, so none of it has to
  * be remembered. This is the audit that found the misrouting. */
 registerCapabilityGapsRoutes(app)
+
+/* The runtime gap inbox — what the owner ASKED FOR and could not get. Distinct
+ * from the static audit above: these records are written live by the planner's
+ * unsupported branch, the goal router's unroutable parts, and the executor's
+ * unknown-action path, and each new one is deposited into the design commons so
+ * the committee wakes against real demand instead of only against shipped code. */
+registerCapabilityGapInboxRoutes(app)
 
 /* "Handle this" — gather across the owner's tabs, reconcile what the lenses
  * disagree about, draft through formPreview. No approve or send route exists. */
