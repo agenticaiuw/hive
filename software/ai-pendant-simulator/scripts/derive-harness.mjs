@@ -1515,6 +1515,46 @@ async function describeThing(name, state) {
     }
   }
 
+  /*
+   * A granted DEVICE SKILL — the third read path that was missing, and the one
+   * that made the other two worse rather than better.
+   *
+   * The system prompt now lists accepted skills and discover('granted') returns
+   * them, so an agent sees the name. Asking what it was still came back
+   * "Nothing named …", which reads as "your firmware request was never
+   * accepted" — and an agent that concludes that asks again. That is the exact
+   * loop the write-only array caused: relay-realtime re-requested
+   * offline_voice_memo_store_and_forward four rounds after receiving it.
+   *
+   * It is checked after the granted TOOLS, so a name that is genuinely callable
+   * is still described as the tool it is. What comes back says what the thing
+   * is as loudly as what it does, because a skill never becomes a function and
+   * an agent that reads this as one plans a round around a call that will not
+   * be there.
+   */
+  const grantedSkill = (state.granted.deviceSkills || []).find(
+    (skill) => skill.name === wanted,
+  )
+  if (grantedSkill) {
+    return {
+      name: grantedSkill.name,
+      kind: 'device skill',
+      /* grant() stamps grantedInRound on a skill — NOT requestedInRound, which
+       * is what the context branch above writes. Read the field that is
+       * actually written, with the tool branch's fallback for older entries. */
+      grantedInRound: grantedSkill.grantedInRound ?? grantedSkill.round ?? null,
+      what_it_does:
+        grantedSkill.what_it_does ||
+        'No description was recorded with the request; it was accepted as named.',
+      status: 'ACCEPTED as firmware work. This is settled — do not ask for it again.',
+      callable: false,
+      note:
+        'Not a callable tool and never will be. The pendant does this on its own, ' +
+        'so build on the behaviour rather than on an API; there is no function by ' +
+        'this name to call.',
+    }
+  }
+
   return { error: `Nothing named "${wanted}". Use discover(category) to see valid names.` }
 }
 
@@ -1645,6 +1685,94 @@ async function macFetch(pathname, init) {
 const RESOLVE_WEIGHTS = { intent: 0.5, arguments: 0.3, identity: 0.2 }
 const RESOLVE_MIN_SCORE = Number(process.env.HARNESS_RESOLVE_MIN || 0.45)
 const RESOLVE_MIN_MARGIN = Number(process.env.HARNESS_RESOLVE_MARGIN || 0.1)
+
+/* ======================================================================
+ * SUPPORT: how much the inventory actually said about the thing it matched.
+ *
+ * MEASURED FAILURE (2026-08-06). audio_path_probe{fixture:'sweep'} resolved
+ * LIVE to GET /sweep at 0.557 and was really called; /sweep is the audio
+ * RETENTION sweep, not a frequency sweep. audio_path_probe{mode:'capabilities'}
+ * resolved LIVE to GET /capabilities, the route manifest itself, at 0.613. Both
+ * cleared the 0.45 floor and the 0.10 margin comfortably, and both rested on
+ * exactly ONE shared word.
+ *
+ * WHY IDF DID NOT STOP IT. Three reasons, none of which IDF was ever going to
+ * cover:
+ *
+ *   1. IDF is a RANKING device and the floor is an ABSOLUTE test. `intent` is
+ *      matched/possible — a ratio — so the magnitude of idf largely cancels.
+ *      One rare selector token matching, with all three tool-name tokens
+ *      missing, still yields intent 0.41 (/sweep) and 0.53 (/capabilities),
+ *      because the selector carries weight 1 and each missed name token only
+ *      0.35. There is no value of idf that makes "one word out of four" look
+ *      like a refusal through a ratio.
+ *
+ *   2. The inventory's whole vocabulary is 308 distinct tokens over 214
+ *      capabilities, 110 of them appearing exactly once, because routes ship
+ *      with no per-route description and inherit only a one-line GROUP note.
+ *      /sweep's entire published description is the word "sweep". A token is
+ *      trivially rare when nothing was written; idf(sweep)=2.97 measures the
+ *      silence, not the specificity.
+ *
+ *   3. 0.35 of the 0.45 floor is handed out before any description is
+ *      consulted at all: 0.15 because a route with no path parameters scores
+ *      `arguments` at a "neutral" 0.5, and 0.20 because `identity` over a
+ *      ONE-token path is all-or-nothing and the one token was echoed. Both
+ *      /sweep and /capabilities collected exactly that 0.35, so `intent` only
+ *      had to reach 0.2 to clear the bar.
+ *
+ * WHAT IS ADDED. Not a higher bar — that would suppress the twenty-four
+ * legitimate LIVE branches along with the two bad ones and hide the problem
+ * instead of detecting it. Instead the score is MULTIPLIED by how much
+ * independent evidence there was to be wrong about:
+ *
+ *   agreement  — distinct INFORMATIVE tokens shared by the call's anchors and
+ *                the capability's description. Two independent rare words
+ *                agreeing is corroboration; one is a coincidence.
+ *   vocabulary — distinct INFORMATIVE tokens the inventory published about the
+ *                capability at all. A capability described by one word cannot
+ *                disagree with anything: the only outcome available to it is
+ *                "the word matched or it did not", so a match against it is
+ *                unfalsifiable rather than confirmed.
+ *
+ * "I have almost nothing to match on" is information, and it lowers confidence.
+ *
+ * MEASURED SEPARATION on the 51 branches that resolved before this change:
+ * the two false positives sit at vocabulary 1 (/sweep) and 3 (/capabilities);
+ * the poorest LEGITIMATE lone-word resolution sits at 8 (GET /pipeline), then
+ * 9, 10, 11, 11. The gap is (3, 8]. VOCABULARY_FOR_LONE_WORD is set in the
+ * middle of it: 2x headroom below, 1.33x above. At 4 the /capabilities match
+ * survives; at 10 GET /pipeline starts being discounted below the floor.
+ *
+ * SUPPORT_FLOOR keeps a discounted candidate visible in the nearest-3 list
+ * rather than annihilating it — a refusal that still names GET /sweep at 0.279
+ * is a finding; one that drops it to 0.070 and off the list is a silence.
+ */
+const IDF_INFORMATIVE = Number(process.env.HARNESS_RESOLVE_IDF_FLOOR || 1)
+const VOCABULARY_FOR_LONE_WORD = Number(process.env.HARNESS_RESOLVE_VOCAB || 6)
+const SUPPORT_FLOOR = Number(process.env.HARNESS_RESOLVE_SUPPORT_FLOOR || 0.5)
+
+/*
+ * How far into a granted schema the enum walk goes, and how many one-selector
+ * calls one tool is allowed to expand into.
+ *
+ * MEASURED FAILURE (2026-08-06). The walk only looked at properties.X.enum and
+ * properties.X.items.enum, so mac_workspace_edit's operations[].kind (5 values)
+ * and verify_operation_step's postconditions[].kind (6) and [].sensitivity (3)
+ * contributed nothing and both tools resolved as "(no selector)" — the exact
+ * free-form-string case the resolver says it cannot resolve.
+ *
+ * The branch set is deliberately ONE SELECTOR AT A TIME rather than the cross
+ * product: a branch is "the agent asked for this operation", and a schema with
+ * six enums of five values each is 15,625 cross-product calls and 30 honest
+ * ones. So the count is linear in the number of enum values, not exponential.
+ * The bound still exists because a hostile or generated schema can be linear
+ * and enormous, and enumerating 4,000 branches is its own failure. The largest
+ * real tool in this system expands to 13 branches; 64 is roughly 5x headroom.
+ * Truncation is REPORTED, never silent.
+ */
+const RESOLVE_MAX_SCHEMA_DEPTH = Number(process.env.HARNESS_RESOLVE_DEPTH || 6)
+const RESOLVE_MAX_CALL_BRANCHES = Number(process.env.HARNESS_RESOLVE_BRANCHES || 64)
 /*
  * Bytes, not items. GET /jobs is 686 KB on this machine right now and
  * GET /context-graph is 626 KB; a cap of "50 entries" would have let either of
@@ -1754,14 +1882,66 @@ async function capabilityCorpus() {
         for (const token of facet.described) df.set(token, (df.get(token) ?? 0) + 1)
       }
       const total = facets.length
+      const idf = (token) => Math.max(0, Math.log(total / (1 + (df.get(token) ?? 0))))
+
+      /*
+       * How much the inventory published about each capability, in words that
+       * are not near-universal. 'local', 'agent' and 'js' come off every module
+       * path in the manifest (193 of 214 records) and say nothing about which
+       * capability this is; counting them as description is how a route whose
+       * entire published identity is its own URL looks well described.
+       */
+      for (const facet of facets) {
+        facet.vocabulary = [...facet.described].filter(
+          (token) => idf(token) >= IDF_INFORMATIVE,
+        ).length
+      }
+
+      /*
+       * The route this corpus was READ FROM is not a capability this resolver
+       * can hand back. It is the resolver's own input.
+       *
+       * audio_path_probe{mode:'capabilities'} resolved LIVE to GET
+       * /capabilities and was really called: an audio tool was told its probe
+       * IS the route manifest, and handed back the very document that produced
+       * the answer. On lexical evidence that match is unimpeachable — the enum
+       * value is the route's exact name — which is why no amount of scoring
+       * removes it. It is excluded on a different ground: a resolution to the
+       * publisher is self-reference, never new information, and every
+       * resolution already reports `resolvedAgainst.from` so no agent loses
+       * access to the manifest by this.
+       *
+       * This is not the name table the header rejects. It names nothing about
+       * the system's features; it names the one record this resolver knows
+       * something extra about because it fetched it, and it is derived from
+       * the URL actually used rather than written down.
+       */
+      const publisher = facets.find(
+        (facet) =>
+          facet.record.kind === 'http' &&
+          String(facet.record.invoke?.method ?? '').toUpperCase() === 'GET' &&
+          `${facet.record.invoke?.baseUrl ?? ''}${facet.record.invoke?.path ?? ''}` ===
+            `${base}/capabilities`,
+      )
 
       CAPABILITY_CORPUS.corpus = {
         facets,
+        publisherId: publisher?.record.id ?? null,
+        publisherLabel: publisher ? capabilityLabel(publisher.record) : null,
         source: `${base}/capabilities`,
         service: manifest.service ?? null,
         routeCount: manifest.http.routes.length,
         actionCount: manifest.actions?.types?.length ?? 0,
-        idf: (token) => Math.max(0, Math.log(total / (1 + (df.get(token) ?? 0)))),
+        idf,
+        /* Reported so a thin corpus is visible as a fact about the inventory
+         * rather than as a run of confident-looking low scores. */
+        vocabulary: {
+          distinctTokens: df.size,
+          medianPerCapability: [...facets.map((f) => f.vocabulary)].sort(
+            (left, right) => left - right,
+          )[Math.floor(facets.length / 2)],
+          describedByNameOnly: facets.filter((f) => f.vocabulary <= 1).length,
+        },
         /*
          * The surfaces this inventory does NOT cover, named by the manifest
          * itself (OFF_BOX_SURFACES). "Not found here" is only "absent" once
@@ -1784,11 +1964,155 @@ async function capabilityCorpus() {
   return CAPABILITY_CORPUS
 }
 
-function schemaEnumValues(spec) {
-  if (!spec || typeof spec !== 'object') return []
-  if (Array.isArray(spec.enum)) return spec.enum.map(String)
-  if (Array.isArray(spec.items?.enum)) return spec.items.enum.map(String)
-  return []
+/**
+ * Every enum in a granted schema, at any depth, as a list of dispatch sites.
+ *
+ * The old version read `properties.X.enum` and `properties.X.items.enum` and
+ * stopped, so `properties.X.items.properties.Y.enum` — an array of objects each
+ * carrying a kind, which is how a model writes a batch API — was invisible.
+ * mac_workspace_edit's operations[].kind and verify_operation_step's
+ * postconditions[].kind are exactly that shape, and both tools were reported as
+ * "(no selector)": the resolver told two agents their tools named no operation
+ * when their schemas named eleven between them.
+ *
+ * A site is { path, leaf, values, at }:
+ *   path  — how it reads in a report: 'command', 'operations[].kind'.
+ *   leaf  — the property name a caller actually passes the value under. This
+ *           is what identifies a chosen value in a CALL, at whatever depth.
+ *   at    — the segment list, used to materialise one call per value.
+ *
+ * Bounded by RESOLVE_MAX_SCHEMA_DEPTH. Cycles (a $ref'd schema that contains
+ * itself, or any hand-built object graph) terminate on the seen-set as well,
+ * because a depth bound alone still walks 6 levels of a cycle.
+ */
+function schemaEnumSites(schema, { maxDepth = RESOLVE_MAX_SCHEMA_DEPTH } = {}) {
+  const sites = []
+  const seen = new Set()
+  /* Subtrees the walk refused to enter. Counted rather than ignored: a schema
+   * nested deeper than the bound has selectors that were never scored, which
+   * is not the same fact as a schema that declares none. */
+  const abandoned = []
+
+  const walk = (spec, segments, depth) => {
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return
+    if (seen.has(spec)) return
+    seen.add(spec)
+    if (depth > maxDepth) {
+      abandoned.push(segments.join('.').replace(/\.\[\]/g, '[]'))
+      return
+    }
+
+    const leaf = [...segments].reverse().find((segment) => segment !== '[]')
+    if (Array.isArray(spec.enum) && leaf) {
+      const values = spec.enum.filter((value) => typeof value !== 'object').map(String)
+      if (values.length) {
+        sites.push({
+          /* A trailing '[]' is elided: `directions[]=input` and
+           * `directions=input` are the same statement, and the shorter one is
+           * what every existing report line and score was measured under. */
+          path: segments.join('.').replace(/\.\[\]/g, '[]').replace(/\[\]$/, ''),
+          leaf,
+          values,
+          at: segments,
+        })
+      }
+    }
+
+    for (const [name, child] of Object.entries(spec.properties ?? {})) {
+      walk(child, [...segments, name], depth + 1)
+    }
+    if (Array.isArray(spec.prefixItems)) {
+      for (const child of spec.prefixItems) walk(child, [...segments, '[]'], depth + 1)
+    }
+    for (const child of Array.isArray(spec.items) ? spec.items : [spec.items]) {
+      walk(child, [...segments, '[]'], depth + 1)
+    }
+    /* A union of shapes is several dispatch sites, not none. */
+    for (const key of ['oneOf', 'anyOf', 'allOf']) {
+      for (const child of Array.isArray(spec[key]) ? spec[key] : []) {
+        walk(child, segments, depth + 1)
+      }
+    }
+  }
+
+  walk(schema, [], 0)
+  return { sites, abandoned }
+}
+
+/**
+ * The call a caller would have to write to select `value` at `site`.
+ *
+ * Built by walking the site's segments from the inside out. A terminal '[]' —
+ * the `items.enum` case — collapses to the scalar, which is what the previous
+ * enumeration produced and what invokeResolved's path-parameter substitution
+ * reads; an interior '[]' becomes a one-element array, so operations[].kind
+ * materialises as { operations: [{ kind: 'read' }] }.
+ */
+function callForSite(site, value) {
+  let carried = value
+  for (let index = site.at.length - 1; index >= 0; index -= 1) {
+    const segment = site.at[index]
+    if (segment === '[]') {
+      if (index === site.at.length - 1) continue
+      carried = [carried]
+    } else {
+      carried = { [segment]: carried }
+    }
+  }
+  return carried && typeof carried === 'object' && !Array.isArray(carried)
+    ? carried
+    : { [site.leaf]: carried }
+}
+
+/**
+ * One call per enum value, fairly divided when a schema declares more branches
+ * than the bound allows.
+ *
+ * Even allocation first, then whatever budget is left goes back over the sites
+ * in order. A tool whose first enum has 200 values does not get to swallow the
+ * entire budget and leave its other selectors unenumerated — every site is
+ * represented before any site gets a second turn.
+ */
+function callBranchesForSites(sites, { max = RESOLVE_MAX_CALL_BRANCHES } = {}) {
+  const declared = sites.reduce((sum, site) => sum + site.values.length, 0)
+  const taken = sites.map(() => 0)
+  let budget = Math.max(0, max)
+
+  const share = sites.length ? Math.max(1, Math.floor(budget / sites.length)) : 0
+  for (let round = 0; round < 2 && budget > 0; round += 1) {
+    for (let index = 0; index < sites.length && budget > 0; index += 1) {
+      const want =
+        round === 0
+          ? Math.min(share, sites[index].values.length)
+          : sites[index].values.length - taken[index]
+      const give = Math.min(want, budget)
+      taken[index] += give
+      budget -= give
+    }
+  }
+
+  const branches = []
+  sites.forEach((site, index) => {
+    for (const value of site.values.slice(0, taken[index])) {
+      branches.push({
+        label: `${site.path}=${value}`,
+        site: site.path,
+        value,
+        args: callForSite(site, value),
+      })
+    }
+  })
+
+  return {
+    branches,
+    /* Reported, never silent: a truncated enumeration means "some of this
+     * tool's branches were never scored", which is a different fact from
+     * "they scored nothing". */
+    truncated:
+      branches.length < declared
+        ? { declared, enumerated: branches.length, bound: max, sites: sites.length }
+        : null,
+  }
 }
 
 function leafStrings(value, out = []) {
@@ -1807,27 +2131,59 @@ function leafStrings(value, out = []) {
 function grantEvidence(tool, args = {}) {
   const schema = asJsonSchema(tool.input_schema)
   const properties = schema.properties ?? {}
-  const selectorProps = new Set()
-  const declaredEnums = {}
-  for (const [name, spec] of Object.entries(properties)) {
-    const values = schemaEnumValues(spec)
-    if (values.length) {
-      selectorProps.add(name)
-      declaredEnums[name] = values
-    }
-  }
+  const { sites, abandoned } = schemaEnumSites(schema)
+
+  /* The property NAME a value arrives under, at whatever depth it was
+   * declared. `kind` inside operations[] selects just as much as a top-level
+   * `command` does, and a caller does not restate the path when it calls. */
+  const selectorProps = new Set(sites.map((site) => site.leaf))
+  const declaredEnums = Object.fromEntries(sites.map((site) => [site.path, site.values]))
+  /* A top-level property is a selector if a dispatch site lives ANYWHERE
+   * beneath it: `operations` is an array of tagged operations, which is a
+   * selector container, not a handle a route could take as a path parameter. */
+  const selectorRoots = new Set(
+    sites.map((site) => site.at[0]).filter((name) => name && name !== '[]'),
+  )
+  const { branches: callBranches, truncated: budgetTruncated } =
+    callBranchesForSites(sites)
+  const branchesTruncated =
+    budgetTruncated || abandoned.length
+      ? {
+          ...(budgetTruncated ?? {
+            declared: callBranches.length,
+            enumerated: callBranches.length,
+            bound: RESOLVE_MAX_CALL_BRANCHES,
+            sites: sites.length,
+          }),
+          ...(abandoned.length
+            ? {
+                deeperThan: RESOLVE_MAX_SCHEMA_DEPTH,
+                unwalked: [...new Set(abandoned)].slice(0, 8),
+              }
+            : {}),
+        }
+      : null
 
   /* The enum values the caller chose FOR THIS CALL. The highest-signal thing in
-   * the whole request: the agent's own word for the specific operation. */
+   * the whole request: the agent's own word for the specific operation. Walked
+   * to the same depth the schema was, so a value nested inside an array of
+   * objects counts as the selection it is. */
   const chosen = []
-  for (const [key, value] of Object.entries(args ?? {})) {
-    for (const one of Array.isArray(value) ? value : [value]) {
-      if (typeof one !== 'string') continue
-      if (selectorProps.has(key) || (declaredEnums[key] ?? []).includes(one)) {
-        chosen.push(one)
+  const collectChosen = (value, key, depth) => {
+    if (depth > RESOLVE_MAX_SCHEMA_DEPTH) return
+    if (typeof value === 'string') {
+      if (key && selectorProps.has(key)) chosen.push(value)
+    } else if (Array.isArray(value)) {
+      /* An array keeps its property's name: {directions:['input']} chose
+       * 'input' under 'directions'. */
+      for (const item of value) collectChosen(item, key, depth + 1)
+    } else if (value && typeof value === 'object') {
+      for (const [name, item] of Object.entries(value)) {
+        collectChosen(item, name, depth + 1)
       }
     }
   }
+  collectChosen(args ?? {}, null, 0)
 
   const weight = new Map()
   const bump = (token, value) => {
@@ -1863,10 +2219,13 @@ function grantEvidence(tool, args = {}) {
     declaredEnums,
     selectorProps,
     chosen,
+    /* Each call this tool's own schema permits, one selector at a time. */
+    callBranches,
+    branchesTruncated,
     /* A required property whose value is an enum is a dispatch selector, not a
      * handle; only free-form required properties are things a route could
      * consume as a path parameter. */
-    freeRequired: required.filter((name) => !selectorProps.has(name)),
+    freeRequired: required.filter((name) => !selectorRoots.has(name)),
   }
 }
 
@@ -1932,12 +2291,44 @@ function scoreCapability(facet, evidence, args, idf) {
       ).length / facet.identity.length
     : 0
 
+  /*
+   * 4. SUPPORT. Not a fourth opinion about the match — a statement about how
+   *    much evidence the other three were computed from. See the block above
+   *    RESOLVE_WEIGHTS: intent and identity are RATIOS, and a ratio over a
+   *    one-word description is noise wearing a number.
+   *
+   *    Agreement counts only INFORMATIVE tokens. 'local', 'agent' and 'js' are
+   *    in 193 of the 214 records because every module path in the manifest ends
+   *    in local-agent/something.js; three capabilities "agreeing" on those is
+   *    not three agreements, and without the idf floor
+   *    mac_read_diagnostics{checks:'local_agent_health'} would look
+   *    triple-corroborated against GET /health when only 'health' means
+   *    anything.
+   */
+  let agreement = 0
+  for (const [token] of evidence.anchors) {
+    if (facet.described.has(token) && idf(token) >= IDF_INFORMATIVE) agreement += 1
+  }
+  const vocabulary = facet.vocabulary ?? facet.described.size
+  const support =
+    agreement >= 2
+      ? 1
+      : Math.min(1, Math.max(SUPPORT_FLOOR, vocabulary / VOCABULARY_FOR_LONE_WORD))
+
+  const evidenced =
+    RESOLVE_WEIGHTS.intent * intent +
+    RESOLVE_WEIGHTS.arguments * argumentFit +
+    RESOLVE_WEIGHTS.identity * identity
+
   return {
     facet,
-    score:
-      RESOLVE_WEIGHTS.intent * intent +
-      RESOLVE_WEIGHTS.arguments * argumentFit +
-      RESOLVE_WEIGHTS.identity * identity,
+    score: evidenced * support,
+    /* Kept so a discounted candidate can say what it would have scored had the
+     * inventory described it — which is the actionable half of the refusal. */
+    undiscounted: evidenced,
+    support,
+    agreement,
+    vocabulary,
     intent,
     argumentFit,
     identity,
@@ -1948,6 +2339,22 @@ function capabilityLabel(record) {
   return record.kind === 'http'
     ? `${record.invoke.method} ${record.invoke.path}`
     : `${record.kind}:${record.invoke?.action ?? record.invoke?.tool ?? record.name}`
+}
+
+/**
+ * Why a candidate was discounted, in the terms that would fix it.
+ *
+ * Deliberately says what the INVENTORY failed to publish rather than what the
+ * grant failed to say: the grant is the agent's and cannot be improved from
+ * here, and the actionable repair is a description on the route.
+ */
+function poverty(entry) {
+  return (
+    `the match rests on ${entry.agreement === 1 ? 'a single word' : `${entry.agreement} words`} ` +
+    `and the inventory publishes only ${entry.vocabulary} ` +
+    `informative ${entry.vocabulary === 1 ? 'word' : 'words'} about that capability ` +
+    `(${VOCABULARY_FOR_LONE_WORD} needed before one word may carry a match)`
+  )
 }
 
 /**
@@ -1964,6 +2371,9 @@ async function resolveGrantedCall(tool, args = {}) {
 
   const evidence = grantEvidence(tool, args)
   const ranked = corpus.facets
+    /* See `publisher` in capabilityCorpus(): the endpoint this inventory was
+     * read from is this resolver's input, not an answer it can return. */
+    .filter((facet) => facet.record.id !== corpus.publisherId)
     .map((facet) => scoreCapability(facet, evidence, args, corpus.idf))
     .filter((entry) => entry.score > 0)
     .sort(
@@ -1982,6 +2392,13 @@ async function resolveGrantedCall(tool, args = {}) {
   const nearest = ranked.slice(0, 3).map((entry) => ({
     capability: capabilityLabel(entry.facet.record),
     score: Number(entry.score.toFixed(3)),
+    /* Only when it changed the answer, so the common case stays quiet. */
+    ...(entry.support < 1
+      ? {
+          discountedFrom: Number(entry.undiscounted.toFixed(3)),
+          because: poverty(entry),
+        }
+      : {}),
   }))
   const shared = {
     corpus: {
@@ -1989,18 +2406,57 @@ async function resolveGrantedCall(tool, args = {}) {
       routes: corpus.routeCount,
       actions: corpus.actionCount,
       noInventoryPublishedBy: corpus.unpublished,
+      ...(corpus.publisherLabel
+        ? {
+            notAResolutionTarget: `${corpus.publisherLabel} published this inventory, so resolving to it would return this resolver's own input.`,
+          }
+        : {}),
     },
     nearest,
     selectors: evidence.chosen,
   }
 
   if (!best || best.score < RESOLVE_MIN_SCORE) {
+    /*
+     * The candidate that WOULD have won on lexical evidence alone, when the
+     * poverty discount is what stopped it. Named separately because it is the
+     * whole finding: "GET /capabilities looked like a 0.613 match on the word
+     * 'capabilities' and nothing else was published about it" is a defect
+     * report against the manifest, and printing only the surviving runner-up
+     * hides it behind an unrelated route.
+     */
+    const suppressed = ranked
+      .filter((entry) => entry.support < 1 && entry.undiscounted >= RESOLVE_MIN_SCORE)
+      .sort((left, right) => right.undiscounted - left.undiscounted)[0]
+
     return {
       status: 'unresolved',
       why:
         `Nothing in the inventory scored ${RESOLVE_MIN_SCORE} against this call` +
-        (best ? ` (best was ${capabilityLabel(best.facet.record)} at ${best.score.toFixed(3)})` : '') +
-        '.',
+        (best
+          ? ` (best was ${capabilityLabel(best.facet.record)} at ${best.score.toFixed(3)}` +
+            (best.support < 1
+              ? `, discounted from ${best.undiscounted.toFixed(3)} because ${poverty(best)}`
+              : '') +
+            ')'
+          : '') +
+        '.' +
+        (suppressed && suppressed !== best
+          ? ` ${capabilityLabel(suppressed.facet.record)} would have cleared it at ` +
+            `${suppressed.undiscounted.toFixed(3)} and was held back to ` +
+            `${suppressed.score.toFixed(3)}: ${poverty(suppressed)}.`
+          : ''),
+      ...(suppressed
+        ? {
+            suppressedByPoverty: {
+              capability: capabilityLabel(suppressed.facet.record),
+              wouldHaveScored: Number(suppressed.undiscounted.toFixed(3)),
+              scored: Number(suppressed.score.toFixed(3)),
+              agreeingWords: suppressed.agreement,
+              wordsPublishedAboutIt: suppressed.vocabulary,
+            },
+          }
+        : {}),
       ...shared,
     }
   }
@@ -2037,11 +2493,32 @@ async function resolveGrantedCall(tool, args = {}) {
     confidence: {
       score: Number(best.score.toFixed(3)),
       margin: Number(margin.toFixed(3)),
-      band: best.score >= 0.7 ? 'high' : best.score >= 0.55 ? 'medium' : 'low',
+      /* A discounted match is never called high, whatever the arithmetic says:
+       * the number went down precisely because there was less to go on. */
+      band:
+        best.support < 1
+          ? 'low'
+          : best.score >= 0.7
+            ? 'high'
+            : best.score >= 0.55
+              ? 'medium'
+              : 'low',
       components: {
         intent: Number(best.intent.toFixed(3)),
         arguments: Number(best.argumentFit.toFixed(3)),
         identity: Number(best.identity.toFixed(3)),
+      },
+      /* How much evidence the components were computed from, always reported:
+       * a match on one word against a well-described capability and a match on
+       * one word against a bare URL are different claims and used to print the
+       * same number. */
+      support: {
+        factor: Number(best.support.toFixed(3)),
+        agreeingWords: best.agreement,
+        wordsPublishedAboutIt: best.vocabulary,
+        ...(best.support < 1
+          ? { note: `Score discounted from ${best.undiscounted.toFixed(3)}: ${poverty(best)}.` }
+          : {}),
       },
       tieBrokenTowardRead: Boolean(tieBrokenTowardRead),
     },
@@ -2175,6 +2652,12 @@ function unimplementedNote(resolution) {
     error: base,
     resolution: resolution.status,
     why: resolution.why,
+    /* The near-match the inventory was too thin to justify. An agent reading
+     * this can file a defect against the manifest instead of renaming its
+     * tool, which is the loop this whole resolver exists to end. */
+    ...(resolution.suppressedByPoverty
+      ? { suppressedByPoverty: resolution.suppressedByPoverty }
+      : {}),
     ...(resolution.nearest ? { nearestRealCapabilities: resolution.nearest } : {}),
     ...(resolution.corpus ? { resolvedAgainst: resolution.corpus } : {}),
   }
@@ -2229,11 +2712,9 @@ async function grantedToolLiveness(state) {
       continue
     }
     const evidence = grantEvidence(tool, {})
-    const calls = []
-    for (const [property, values] of Object.entries(evidence.declaredEnums)) {
-      for (const value of values) calls.push({ [property]: value })
-    }
-    if (!calls.length) calls.push({})
+    const calls = evidence.callBranches.length
+      ? evidence.callBranches.map((branch) => branch.args)
+      : [{}]
 
     const reads = new Set()
     const writes = new Set()
@@ -2245,9 +2726,17 @@ async function grantedToolLiveness(state) {
       if (resolution.status !== 'resolved') continue
       ;(isReadOnlyCapability(resolution.capability) ? reads : writes).add(resolution.label)
     }
-    if (reads.size) live.push({ name: tool.name, reaches: [...reads].sort() })
-    else if (writes.size) described.push({ name: tool.name, reaches: [...writes].sort() })
-    else dead.push(tool.name)
+    /* A truncated enumeration means the buckets below are a lower bound, and
+     * the prompt says so rather than presenting them as complete. */
+    const partial = evidence.branchesTruncated
+      ? {
+          onlySomeBranchesChecked: `${evidence.branchesTruncated.enumerated} of ${evidence.branchesTruncated.declared}`,
+        }
+      : {}
+    if (reads.size) live.push({ name: tool.name, reaches: [...reads].sort(), ...partial })
+    else if (writes.size) {
+      described.push({ name: tool.name, reaches: [...writes].sort(), ...partial })
+    } else dead.push(tool.name)
   }
   return { live, described, dead, unavailable: false }
 }
@@ -3540,9 +4029,21 @@ function grant(id) {
       input_schema: request.input_schema,
       grantedInRound: state.round,
     })
+    /*
+     * This used to say the tool "still needs an implementation in this script
+     * before it does anything". That predates the resolver and has been false
+     * since it landed: nothing is hand-written for a granted tool any more, and
+     * calling one scores it against the running system's own manifest. Saying
+     * otherwise sent whoever ran `grant` looking for a switch statement to
+     * extend, which is the table the resolver exists to avoid.
+     */
     process.stdout.write(
-      `Granted the SCHEMA for ${request.name}. It still needs an implementation in this\n` +
-        `script before it does anything — until then the agent is told so explicitly.\n`,
+      `Granted the SCHEMA for ${request.name}. No code is needed here: each CALL is\n` +
+        `resolved against the running system's own capability manifest, and a defensible\n` +
+        `match to a read-only route really runs, a match to anything with side effects is\n` +
+        `described instead, and no match returns that verdict with the nearest real\n` +
+        `capabilities. Enum values resolve one at a time, so branches differ.\n` +
+        `Run \`node scripts/derive-harness.mjs resolve\` to see what this one lands on.\n`,
     )
   }
   saveState(state)
@@ -4355,6 +4856,13 @@ async function reportResolution() {
   process.stdout.write(
     corpus
       ? `Inventory: ${corpus.routeCount} routes + ${corpus.actionCount} action types from ${corpus.source}\n` +
+        /* How much there is to match on, before any tool is scored. A thin
+         * corpus is the precondition for every confident false positive this
+         * resolver has produced, so it is stated first. */
+        `Vocabulary: ${corpus.vocabulary.distinctTokens} distinct tokens, median ` +
+        `${corpus.vocabulary.medianPerCapability} informative words per capability, ` +
+        `${corpus.vocabulary.describedByNameOnly} described by name alone ` +
+        `(a lone word carries a match at ${VOCABULARY_FOR_LONE_WORD})\n` +
         `No inventory published by: ${corpus.unpublished.join(', ') || 'nothing'}\n\n`
       : `${error}\n\n`,
   )
@@ -4365,21 +4873,35 @@ async function reportResolution() {
     const state = JSON.parse(fs.readFileSync(path.join(OUT_DIR, file), 'utf8'))
     for (const tool of state.granted?.tools ?? []) {
       const evidence = grantEvidence(tool, {})
-      const calls = []
-      for (const [property, values] of Object.entries(evidence.declaredEnums)) {
-        for (const value of values) calls.push({ [property]: value })
-      }
-      if (!calls.length) calls.push({})
+      const calls = evidence.callBranches.length
+        ? evidence.callBranches
+        : [{ label: '(no selector)', args: {} }]
 
       process.stdout.write(`\n${agent} :: ${tool.name}\n`)
       if (GRANTED_IMPLS[tool.name]) {
         process.stdout.write('  (hand-written implementation in GRANTED_IMPLS takes precedence)\n')
       }
-      for (const call of calls) {
-        const label =
-          Object.entries(call)
-            .map(([key, value]) => `${key}=${value}`)
-            .join(',') || '(no selector)'
+      /* Said out loud: an enumeration that stopped early is a different claim
+       * from one that finished and found nothing. */
+      if (evidence.branchesTruncated) {
+        const cut = evidence.branchesTruncated
+        const said = []
+        if (cut.enumerated < cut.declared) {
+          said.push(
+            `${cut.enumerated} of ${cut.declared} selector values across ${cut.sites} ` +
+              `enums were enumerated (bound ${cut.bound})`,
+          )
+        }
+        if (cut.unwalked) {
+          said.push(
+            `nested deeper than ${cut.deeperThan} and not walked: ${cut.unwalked.join(', ')}`,
+          )
+        }
+        process.stdout.write(
+          `  TRUNCATED — ${said.join('; ')}. The branches below are a subset.\n`,
+        )
+      }
+      for (const { label, args: call } of calls) {
         const resolution = await resolveGrantedCall(tool, call)
         /* What the AGENT would actually receive, not a summary of it — the
          * shape is half of what makes this usable and the only way to check it
@@ -4401,6 +4923,17 @@ async function reportResolution() {
         process.stdout.write(
           `  ${label.padEnd(38)} ${live ? 'LIVE  ' : 'DESCR '} ${resolution.label.padEnd(36)} ` +
             `score=${resolution.confidence.score} margin=${resolution.confidence.margin}` +
+            /* --why is how the support model gets audited: a resolution that
+             * stands on one word looks exactly like one that stands on four
+             * until the counts are printed beside it. */
+            (process.argv.includes('--why')
+              ? ` agree=${resolution.confidence.support.agreeingWords}` +
+                ` vocab=${resolution.confidence.support.wordsPublishedAboutIt}` +
+                ` sup=${resolution.confidence.support.factor}` +
+                ` [i=${resolution.confidence.components.intent}` +
+                ` a=${resolution.confidence.components.arguments}` +
+                ` id=${resolution.confidence.components.identity}]`
+              : '') +
             `${resolution.confidence.tieBrokenTowardRead ? ' (tie→read)' : ''}\n`,
         )
         /*
@@ -4473,6 +5006,20 @@ try {
       ? await grantedToolLiveness(state)
       : null
     process.stdout.write(`${buildSystemPrompt(state)}\n`)
+  } else if (command === 'describe') {
+    /*
+     * The same describe() the agent calls, reachable without spending a round.
+     * It was only ever behind the model loop, so the only way to find out what
+     * an agent would be told about a name was to pay for a round and read the
+     * transcript — which is how describe() went on returning "Nothing named …"
+     * for every granted device skill without anyone noticing. Read-only, and
+     * deliberately not in MUTATES_STATE: it makes no model call and writes
+     * nothing.
+     */
+    const wanted = process.argv[3]
+    if (!wanted) throw new Error('describe needs a name: describe offline_moment_bookmark')
+    const state = loadState()
+    process.stdout.write(`${JSON.stringify(await describeThing(wanted, state), null, 2)}\n`)
   } else if (command === 'resolve') await reportResolution()
   else if (command === 'ablate') await ablate()
   else if (command === 'evals') await buildEvals()
@@ -4488,7 +5035,7 @@ try {
     fs.rmSync(STATE_PATH(), { force: true })
     process.stdout.write('Reset.\n')
   } else {
-    process.stdout.write('Commands: run | review | grant <id> | deny <id> | phase <recon|capability> | ablate | evals | prompt | resolve | reset\n')
+    process.stdout.write('Commands: run | review | grant <id> | deny <id> | phase <recon|capability> | ablate | evals | prompt | describe <name> | resolve | reset\n')
   }
 } catch (error) {
   process.stderr.write(`${error.message}\n`)

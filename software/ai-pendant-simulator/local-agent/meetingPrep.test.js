@@ -4,6 +4,14 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+/* Before meetingPrep.js. `collect: true` copies the matched documents into
+ * workspacePath/meeting-prep/<date>-<slug>/ and writes BRIEF.md there, and
+ * collectIntoFolder() has neither a { filePath } argument nor a store-path env
+ * var — it closes over the workspacePath that config.js fixes at import time.
+ * Without this redirect those folders land in the owner's real workspace,
+ * alongside the meeting prep the agent app on :8000 is writing for real. */
+import './testWorkspace.js'
+
 import {
   attendeeRoster,
   briefBlindSpots,
