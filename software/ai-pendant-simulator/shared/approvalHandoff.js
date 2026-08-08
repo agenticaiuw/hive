@@ -41,6 +41,17 @@
  * for granting rather than a bookkeeping field, and why the TTL below is a
  * compromise between "long enough to walk away" and "short enough that the
  * world has not moved underneath it".
+ *
+ * AND HONESTLY ABOUT WHAT WE CAN SEE OF IT. Nothing on this system observes a
+ * pendant playing audio. `device_playback` is a pipeline stage with readers in
+ * cloud-relay/jobs.js and local-agent/pipelineTrace.js and no emitter anywhere;
+ * the announcement path calls a briefing `delivered` the moment a socket accepts
+ * one byte. Neither is a person hearing a sentence. So delivery here is a graded
+ * claim — see DELIVERY_EVIDENCE — and only the rungs that witness a HUMAN may set
+ * `deliveredAt`. Bytes on a socket get their own state, `spoken`, and stop there.
+ * Today exactly one rung clears that bar: the owner saying back a confirm word
+ * that nothing but the readback carried, against a record the relay has already
+ * streamed. Both halves, or the approval is not honoured.
  */
 import crypto from 'node:crypto'
 
@@ -542,7 +553,30 @@ export function buildApprovalRequest({
   const ttl = clampTtl(ttlMs)
   const planDigest = planDigestFor(manifest)
   const needsWord = confirmWordRequired(manifest, { pendingCount })
-  const confirmWord = needsWord ? confirmWordFor(planDigest) : null
+
+  /*
+   * THE WORD IS ALWAYS ISSUED. IT IS NOT ALWAYS DEMANDED.
+   *
+   * These were the same decision until delivery got a real implementation, and
+   * they cannot be, because the word turns out to have two jobs and only one of
+   * them is about risk:
+   *
+   *   1. DISAMBIGUATION — "which of the pending plans did you mean". Needed only
+   *      for the tiers in WORD_REQUIRED_TIERS, or when more than one is pending.
+   *      That is what `requiresConfirmWord` still governs, unchanged: a plan made
+   *      of reversible writes is still committable on a bare "yes".
+   *   2. DELIVERY EVIDENCE — the word exists nowhere but inside this readback, so
+   *      hearing it come back is the only witness this system has that a HUMAN
+   *      received the sentence. See DELIVERY_EVIDENCE below for what the
+   *      alternatives are actually worth.
+   *
+   * Job 2 applies to every plan. Issuing the word only for risky ones left the
+   * low-risk ones with no possible delivery witness at all — an approval that
+   * could be prepared, spoken and answered, and never honoured. So the word is
+   * always minted and always spoken; `requiresConfirmWord` decides only whether
+   * omitting it makes the ANSWER unclear.
+   */
+  const confirmWord = confirmWordFor(planDigest)
   const readback = approvalReadback(manifest, { confirmWord, ttlMs: ttl })
 
   return {
@@ -572,9 +606,16 @@ export function buildApprovalRequest({
 
     /* Delivery is a precondition for granting, not a statistic. See
      * evaluateApprovalGrant(): a readback that was never spoken cannot have been
-     * heard, and an approval nobody heard is not an approval. */
+     * heard, and an approval nobody heard is not an approval.
+     *
+     * `deliveryState` and `deliveredAt` are deliberately NOT the same field.
+     * Bytes reaching a socket and words reaching a person are different claims,
+     * and this record refuses to spend one as the other — see DELIVERY_EVIDENCE. */
+    deliveryState: 'undelivered',
+    spokenAt: null,
     deliveredAt: null,
     deliveryPath: null,
+    deliveryEvidence: [],
     attempts: 0,
 
     decidedAt: null,
@@ -594,6 +635,15 @@ export function presentApproval(record) {
     deviceId: record.deviceId,
     ledgerId: record.ledgerId,
     planKey: record.planKey ?? null,
+    /*
+     * CARRIED, because the presented form is not only a view — it is what the
+     * relay hands back to the Mac to commit against, and evaluateApprovalGrant()
+     * compares this field. Omitting it did not hide anything (it is a hash of the
+     * fields the readback is spoken from, and the readback is spoken aloud); it
+     * just made every round-tripped grant come back `plan-changed`, refusing the
+     * approval for a change that never happened.
+     */
+    planDigest: record.planDigest ?? null,
     state: record.state,
     requiresConfirmWord: record.requiresConfirmWord ?? false,
     confirmWord: record.confirmWord ?? null,
@@ -602,8 +652,13 @@ export function presentApproval(record) {
     world: record.world ?? null,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
+    deliveryState: record.deliveryState ?? 'undelivered',
+    spokenAt: record.spokenAt ?? null,
     deliveredAt: record.deliveredAt ?? null,
     deliveryPath: record.deliveryPath ?? null,
+    /* Carried out whole rather than summarised into a boolean. A reader deciding
+     * whether to trust a grant needs to see WHICH rung vouched for it. */
+    deliveryEvidence: Array.isArray(record.deliveryEvidence) ? record.deliveryEvidence : [],
     attempts: record.attempts ?? 0,
     decision: record.decision ?? null,
     decidedAt: record.decidedAt ?? null,
@@ -700,8 +755,14 @@ const refuse = (reason, why, extra = {}) => ({
  *
  * Every branch below is a way an approval can be technically valid and still
  * wrong, and they are checked in the order that produces the most useful
- * refusal — identity, then liveness, then whether the owner could possibly have
- * heard it, then whether the plan and the world still match the description.
+ * refusal — identity, then liveness, then what was actually said, and only then,
+ * for a grant alone, whether the owner could possibly have heard it and whether
+ * the plan and the world still match the description.
+ *
+ * THE GATE STANDS IN FRONT OF THE GRANT, NOT IN FRONT OF THE ANSWER. Delivery
+ * guards one thing: an approval the owner never saw must not count as consent.
+ * A refusal is not consent and a muddle is not consent, so both are read and
+ * settled on their own evidence; only "yes" has to get past `deliveredAt`.
  *
  * `worldNow` is the fingerprint taken AT COMMIT TIME by the body holding the
  * filesystem (the Mac). It is a parameter rather than a call because this module
@@ -739,6 +800,36 @@ export function evaluateApprovalGrant(
     )
   }
 
+  const heard = utterance !== null && utterance !== undefined
+    ? matchApprovalUtterance(utterance, {
+        confirmWord: record.confirmWord ?? null,
+        requiresConfirmWord: record.requiresConfirmWord ?? false,
+      })
+    : { decision: String(decision ?? 'unclear'), why: 'Decision supplied directly.', said: null, matchedWord: null }
+
+  /*
+   * WHAT WAS SAID IS READ BEFORE DELIVERY IS CHECKED, AND ONLY THE GRANT IS
+   * GATED ON IT.
+   *
+   * The delivery rule protects one thing: an approval the owner never saw must
+   * not count as CONSENT. A refusal is not consent, and neither is a muddle. The
+   * first version checked delivery ahead of the utterance, which meant "no,
+   * cancel that" came back as `not-delivered` — the owner declines, and the
+   * system answers with a complaint about its own plumbing, leaving the record
+   * pending for something else to pick up later. Worse than useless: a denial
+   * that does not settle is a denial that can still be granted.
+   *
+   * So denials and unclear answers are read out first and settle on their own
+   * evidence, and the gate stands exactly where the danger is — in front of the
+   * grant, below.
+   */
+  if (heard.decision === 'denied') {
+    return { ok: false, decision: 'denied', reason: 'denied', why: heard.why, heard }
+  }
+  if (heard.decision !== 'granted') {
+    return refuse('unclear', heard.why, { heard })
+  }
+
   /*
    * The rule that makes this a readback rather than a prompt.
    *
@@ -749,24 +840,24 @@ export function evaluateApprovalGrant(
    * what you get if any caller ever wires the grant path before the speak path.
    */
   if (!record.deliveredAt) {
+    /*
+     * Two genuinely different situations, and telling them apart is the
+     * difference between a bug report and an instruction the owner can act on.
+     * Neither of them grants anything: unknown delivery is not delivery.
+     */
+    const spoken = Boolean(record.spokenAt)
     return refuse(
       'not-delivered',
-      'The readback for this approval was never spoken to the pendant, so nobody can have heard what they were approving. Deliver it first.',
+      spoken
+        ? `The readback was streamed to the pendant, but nothing witnesses that it was HEARD — a socket accepting bytes is not a person hearing words, and this system has no playback confirmation to fall back on. ${deliveryRepairSpeech(record)}`
+        : 'The readback for this approval was never spoken to the pendant, so nobody can have heard what they were approving. Deliver it first.',
+      {
+        heard,
+        deliveryState: record.deliveryState ?? 'undelivered',
+        spokenAt: record.spokenAt ?? null,
+        repair: deliveryRepairSpeech(record),
+      },
     )
-  }
-
-  const heard = utterance !== null && utterance !== undefined
-    ? matchApprovalUtterance(utterance, {
-        confirmWord: record.confirmWord ?? null,
-        requiresConfirmWord: record.requiresConfirmWord ?? false,
-      })
-    : { decision: String(decision ?? 'unclear'), why: 'Decision supplied directly.', said: null, matchedWord: null }
-
-  if (heard.decision === 'denied') {
-    return { ok: false, decision: 'denied', reason: 'denied', why: heard.why, heard }
-  }
-  if (heard.decision !== 'granted') {
-    return refuse('unclear', heard.why, { heard })
   }
 
   /*
@@ -839,15 +930,313 @@ export function settleApproval(record, verdict, { now = Date.now(), decidedBy = 
   }
 }
 
-/** Mark that the readback actually reached the pendant. */
-export function markApprovalDelivered(record, { path = 'reply-audio', now = Date.now() } = {}) {
-  if (!record) return null
-  return {
-    ...record,
-    deliveredAt: record.deliveredAt ?? new Date(now).toISOString(),
-    deliveryPath: record.deliveryPath ?? String(path),
-    attempts: (record.attempts ?? 0) + 1,
+/* --------------------------------------------------- delivery evidence */
+
+/*
+ * WHAT "DELIVERED" CAN HONESTLY MEAN ON THIS SYSTEM.
+ *
+ * The first version of this file had `markApprovalDelivered(record)` — a
+ * function that set `deliveredAt` because it was called. That is not evidence,
+ * it is a caller's opinion, and since `deliveredAt` is the ONE precondition
+ * standing between a stray "yes" and an irreversible commit, an opinion is the
+ * wrong thing to build it out of. So delivery is now a graded claim, each rung
+ * named for the body that actually witnesses it, and the record keeps the rung
+ * rather than collapsing it to a timestamp.
+ *
+ * THE LINE THAT MATTERS IS `provesEar`. Only a rung that witnesses a PERSON may
+ * set `deliveredAt`. Everything below that line sets `deliveryState: 'spoken'`
+ * and nothing else, however complete it was.
+ *
+ * This is a deliberate departure from what the announcement path does. In
+ * cloud-relay/pendantConverse.js an announcement becomes `state: 'delivered'` on
+ * `delivery.sentBytes > 0` — one byte accepted by a WebSocket. For a briefing
+ * that is a defensible shortcut; the cost of being wrong is a repeated news
+ * item. For an approval the cost of being wrong is a sent email or a deleted
+ * file, so the same signal is recorded here under its real name — the relay put
+ * bytes on a socket — and is not spent as consent.
+ */
+export const DELIVERY_EVIDENCE = Object.freeze({
+  /*
+   * The owner said back a word that existed nowhere but inside this readback.
+   *
+   * The word is derived from the plan digest, so anyone HOLDING THE RECORD can
+   * compute it — which is exactly why an echo on its own proves nothing and
+   * attestApprovalDelivery() refuses one unless the record was already streamed
+   * to the device. Streamed-then-echoed is the composition that means something:
+   * the audio left the relay for that pendant, and a human then said back a word
+   * only that audio carried.
+   */
+  'owner-echo': Object.freeze({
+    rank: 3,
+    witness: 'the owner',
+    provesEar: true,
+    availableToday: true,
+    why: 'The owner said back the confirm word, which was carried by nothing but this readback.',
+  }),
+
+  /*
+   * The device reporting that it finished playing the readback out of its own
+   * speaker. This is the rung that SHOULD carry delivery, and it does not exist.
+   *
+   * `device_playback` is a pipeline stage with three readers — cloud-relay/jobs.js
+   * looks for a done event, local-agent/pipelineTrace.js looks for the stage —
+   * and no emitter anywhere in the repo or the firmware. Nothing has ever written
+   * one. It is declared here so the gap is visible in the vocabulary rather than
+   * absent from it, and attestApprovalDelivery() REFUSES it: a rung nothing can
+   * produce is a rung anything could claim.
+   */
+  'playback-report': Object.freeze({
+    rank: 2,
+    witness: 'the pendant',
+    provesEar: true,
+    availableToday: false,
+    why: 'The device reported that it played the readback to the end.',
+    gap:
+      'Nothing emits this. The device_playback pipeline stage has readers in cloud-relay/jobs.js and ' +
+      'local-agent/pipelineTrace.js and no writer, so playback confirmation does not exist on this system.',
+  }),
+
+  /*
+   * Every byte of the rendered readback metered onto an open socket at
+   * wall-clock speed, with the stream never stopped.
+   *
+   * Stronger than the announcement path's `sentBytes > 0`: streamAnnouncementPcm
+   * paces itself against real time, so this also means the socket stayed open and
+   * the conversation stayed live for the whole spoken duration. Still not an ear.
+   * The modem queue can overrun, the pendant can be in a bag, the owner can be in
+   * another room.
+   */
+  'stream-complete': Object.freeze({
+    rank: 1,
+    witness: 'the relay socket',
+    provesEar: false,
+    availableToday: true,
+    why: 'The whole readback was metered onto an open pendant socket and the stream was never stopped.',
+    gap: 'A socket accepting bytes is not a person hearing words.',
+  }),
+
+  /*
+   * Some bytes went out and the stream ended early — a barge-in, a dropped
+   * socket, an ended conversation.
+   *
+   * announce.js treats an interrupted briefing as heard, on the reasoning that
+   * the owner cannot talk over something they did not hear start. That is fine
+   * for a briefing and wrong here: a readback names its irreversible step in the
+   * MIDDLE, so hearing it start is precisely compatible with never hearing the
+   * part that matters.
+   */
+  'stream-partial': Object.freeze({
+    rank: 0,
+    witness: 'the relay socket',
+    provesEar: false,
+    availableToday: true,
+    why: 'Some of the readback went out and the stream stopped early.',
+    gap: 'A readback names what cannot be undone in the middle, so a truncated one may never have said it.',
+  }),
+})
+
+/** The rungs that may set `deliveredAt`. Everything else can only reach 'spoken'. */
+export const DELIVERY_PROVES_HEARING = Object.freeze(
+  Object.entries(DELIVERY_EVIDENCE)
+    .filter(([, grade]) => grade.provesEar)
+    .map(([kind]) => kind),
+)
+
+/* Bounded like every other list in this project. Eight is more attempts than a
+ * thirty-minute window can plausibly hold. */
+const MAX_DELIVERY_EVIDENCE = 8
+
+const declined = (reason, why, record) => ({ ok: false, reason, why, record, evidence: null })
+
+/**
+ * Record evidence that the readback reached the owner. Fails closed.
+ *
+ * Nothing here is taken on the caller's word. The grade is DERIVED from what the
+ * caller can prove — byte counts for a stream, the transcript itself for an echo
+ * — because the caller most likely to be wrong about delivery is the one that
+ * wants the commit to go through.
+ *
+ * Returns `{ ok, reason, why, record, evidence }`. On a refusal the record comes
+ * back UNCHANGED: an attestation that did not convince cannot leave a mark that
+ * a later one might build on.
+ */
+export function attestApprovalDelivery(
+  record,
+  {
+    evidence = null,
+    transcript = null,
+    sentBytes = 0,
+    totalBytes = 0,
+    stopped = false,
+    path = null,
+    now = Date.now(),
+  } = {},
+) {
+  if (!record) return declined('not-found', 'There is no approval record to attest delivery against.', null)
+
+  const kind = String(evidence ?? '')
+  const grade = DELIVERY_EVIDENCE[kind]
+
+  /* An unrecognised rung is not a weak claim, it is no claim. Unknown delivery is
+   * not delivery. */
+  if (!grade) {
+    return declined(
+      'unknown-evidence',
+      `"${kind}" is not a kind of delivery evidence this system knows how to check. Known kinds: ${Object.keys(DELIVERY_EVIDENCE).join(', ')}.`,
+      record,
+    )
   }
+
+  if (!grade.availableToday) {
+    return declined(
+      'evidence-unavailable',
+      `${grade.why} ${grade.gap} Refusing to accept a claim nothing on this system can produce.`,
+      record,
+    )
+  }
+
+  /*
+   * Delivery is a fact, not a counter, so attesting it twice is a no-op.
+   *
+   * The same utterance genuinely does reach two bodies — the relay attests it on
+   * the way past and the Mac attests it again from the same transcript on the
+   * commit — and without this the record grows a second identical entry every
+   * hop. Streaming is exempt: a retried readback is a real second attempt and
+   * `attempts` is there to count them.
+   */
+  if (grade.provesEar && record.deliveredAt) {
+    const already = (Array.isArray(record.deliveryEvidence) ? record.deliveryEvidence : []).findLast(
+      (entry) => entry?.provesEar,
+    )
+    return { ok: true, reason: 'already-delivered', why: grade.why, evidence: already ?? null, record }
+  }
+
+  const observed = kind === 'owner-echo'
+    ? echoEvidence(record, transcript)
+    : streamEvidence({ sentBytes, totalBytes, stopped })
+
+  if (!observed.ok) return declined(observed.reason, observed.why, record)
+
+  const settled = DELIVERY_EVIDENCE[observed.kind]
+  const at = new Date(now).toISOString()
+  const entry = {
+    kind: observed.kind,
+    at,
+    provesEar: settled.provesEar,
+    ...observed.detail,
+  }
+
+  /* Monotonic in both fields. Delivery is a thing that happened; a later, weaker
+   * attestation cannot un-happen it, and a retry does not move the moment. */
+  const deliveredAt = settled.provesEar ? (record.deliveredAt ?? at) : (record.deliveredAt ?? null)
+
+  return {
+    ok: true,
+    reason: null,
+    why: settled.why,
+    evidence: entry,
+    record: {
+      ...record,
+      deliveryState: deliveredAt ? 'delivered' : 'spoken',
+      spokenAt: record.spokenAt ?? at,
+      deliveredAt,
+      /* The path names the FIRST route that carried it, matching how deliveredAt
+       * keeps the first moment rather than the latest. */
+      deliveryPath: record.deliveryPath ?? String(path ?? observed.kind),
+      deliveryEvidence: [...(Array.isArray(record.deliveryEvidence) ? record.deliveryEvidence : []), entry].slice(
+        -MAX_DELIVERY_EVIDENCE,
+      ),
+      /* Retries of the SPEAKING are attempts. Hearing it back is not an attempt,
+       * it is the outcome. */
+      attempts: (record.attempts ?? 0) + (settled.provesEar ? 0 : 1),
+    },
+  }
+}
+
+/*
+ * An echo is only worth something on top of a stream.
+ *
+ * confirmWordFor() is deterministic over the plan digest, so the word is not a
+ * secret and never was — the module says so where CONFIRM_WORDS is defined.
+ * Anyone holding the record can compute it, which means an echo presented by
+ * itself proves only that the presenter holds the record. What it cannot be
+ * faked into is the conjunction: the relay streamed this readback at this device,
+ * AND a voice on that device then said the word back. The stream is what binds
+ * the echo to a person instead of to a caller.
+ */
+function echoEvidence(record, transcript) {
+  if (!record.spokenAt) {
+    return {
+      ok: false,
+      reason: 'not-spoken',
+      why:
+        'The confirm word came back before this readback was ever streamed to the pendant. The word is derived from ' +
+        'the plan and is not a secret, so an echo with nothing spoken behind it proves only that somebody holds the ' +
+        'record. Speak it first.',
+    }
+  }
+
+  const word = String(record.confirmWord ?? '').trim()
+  if (!word) {
+    return {
+      ok: false,
+      reason: 'no-confirm-word',
+      why: 'This approval carries no confirm word, so there is nothing the owner could say back that only the readback could have told them.',
+    }
+  }
+
+  const said = normalize(transcript)
+  if (!said || !new RegExp(`\\b${word}\\b`).test(said)) {
+    return {
+      ok: false,
+      reason: 'no-echo',
+      why: `Nothing in what was said back matches the word this readback asked for, so nothing witnesses that the owner heard it. Say "approve ${word}".`,
+    }
+  }
+
+  return { ok: true, kind: 'owner-echo', detail: { matchedWord: word } }
+}
+
+/*
+ * The grade of a stream is arithmetic, not an argument. A caller passing
+ * `stream-complete` with half the bytes gets `stream-partial`, and a caller
+ * passing zero bytes gets nothing at all — neither of which changes what may be
+ * granted, because no stream rung sets deliveredAt.
+ */
+function streamEvidence({ sentBytes, totalBytes, stopped }) {
+  const sent = Number(sentBytes) || 0
+  const total = Number(totalBytes) || 0
+
+  if (sent <= 0) {
+    return {
+      ok: false,
+      reason: 'nothing-sent',
+      why: 'No bytes of the readback reached the socket, so there is nothing to record. The approval stays undelivered and deliverable.',
+    }
+  }
+
+  const complete = !stopped && total > 0 && sent >= total
+  return {
+    ok: true,
+    kind: complete ? 'stream-complete' : 'stream-partial',
+    detail: { sentBytes: sent, totalBytes: total, stopped: Boolean(stopped) },
+  }
+}
+
+/**
+ * What to say when an answer arrived but nothing witnesses that the readback was
+ * heard. The repair, not the complaint.
+ */
+export function deliveryRepairSpeech(record) {
+  if (!record) return null
+  if (record.deliveredAt) return null
+  const word = String(record.confirmWord ?? '').trim()
+  if (!record.spokenAt) {
+    return 'There is a prepared action waiting, but I have not read it out to you yet. Press again and I will.'
+  }
+  return word
+    ? `I need to know you heard that. To approve it, say: approve ${word}.`
+    : 'I need to know you heard that before I can act on it.'
 }
 
 /** Live means pending and not yet expired. Nothing else is deliverable. */
@@ -968,6 +1357,14 @@ export const APPROVAL_STORE_CONTRACT = Object.freeze({
   note:
     'Uses the existing saveState/getState pair on cloud-relay/store; no new store method is required. ' +
     'The index is a bounded id list per device because getState is key-addressed and cannot scan.',
+  /*
+   * NAMED, because for a while this object was the only thing standing where the
+   * implementation should have been. A contract of strings describing calls
+   * nobody makes reads exactly like a finished design, and the cost of that
+   * particular illusion here was total: with no writer for `deliveredAt`,
+   * evaluateApprovalGrant() refused every grant that was ever put to it.
+   */
+  implementedBy: 'cloud-relay/approvalStore.js',
 })
 
 export function approvalStateKey(approvalId) {

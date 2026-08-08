@@ -15,12 +15,12 @@ import {
   approvalReadback,
   approvalSpeech,
   approvalStateKey,
+  attestApprovalDelivery,
   buildApprovalRequest,
   confirmWordFor,
   confirmWordRequired,
   evaluateApprovalGrant,
   indexApproval,
-  markApprovalDelivered,
   matchApprovalUtterance,
   planDigestFor,
   presentApproval,
@@ -88,9 +88,38 @@ function manifest(overrides = {}) {
   }
 }
 
+/*
+ * Both witnesses, in the order the real system produces them: the relay streams
+ * the readback, and only then can an echo of the confirm word mean anything.
+ * There is no shortcut past this in the module and there is none here either.
+ */
 function delivered(overrides = {}) {
   const record = buildApprovalRequest({ manifest: manifest(), now: NOW, ...overrides })
-  return markApprovalDelivered(record, { now: NOW + 1000 })
+  const spoken = attestApprovalDelivery(record, {
+    evidence: 'stream-complete',
+    sentBytes: 4096,
+    totalBytes: 4096,
+    now: NOW + 1000,
+  })
+  assert.equal(spoken.ok, true, spoken.why)
+  const heard = attestApprovalDelivery(spoken.record, {
+    evidence: 'owner-echo',
+    transcript: `approve ${record.confirmWord}`,
+    now: NOW + 2000,
+  })
+  assert.equal(heard.ok, true, heard.why)
+  return heard.record
+}
+
+/** Streamed and nothing more: bytes on a socket, which is not an ear. */
+function spokenOnly(overrides = {}) {
+  const record = buildApprovalRequest({ manifest: manifest(), now: NOW, ...overrides })
+  return attestApprovalDelivery(record, {
+    evidence: 'stream-complete',
+    sentBytes: 4096,
+    totalBytes: 4096,
+    now: NOW + 1000,
+  }).record
 }
 
 /* ------------------------------------------------------------- readback */
@@ -533,15 +562,22 @@ test('an expired approval is never spoken', () => {
   assert.equal(selectApprovalToSpeak([stale], { now: NOW + APPROVAL_MAX_TTL_MS }).approval, null)
 })
 
-test('delivery is recorded once however many attempts it takes', () => {
+test('speaking is recorded once however many attempts it takes', () => {
   const record = buildApprovalRequest({ manifest: manifest(), now: NOW })
-  const once = markApprovalDelivered(record, { now: NOW + 1000 })
-  const twice = markApprovalDelivered(once, { now: NOW + 9000 })
+  const once = attestApprovalDelivery(record, {
+    evidence: 'stream-complete', sentBytes: 4096, totalBytes: 4096, now: NOW + 1000,
+  }).record
+  const twice = attestApprovalDelivery(once, {
+    evidence: 'stream-complete', sentBytes: 4096, totalBytes: 4096, now: NOW + 9000,
+  }).record
 
-  // The first time it was heard is what a grant is checked against; the retries
-  // are a count, not a new fact.
-  assert.equal(twice.deliveredAt, once.deliveredAt)
+  // The first time it went out is the moment; the retries are a count, not a
+  // new fact.
+  assert.equal(twice.spokenAt, once.spokenAt)
   assert.equal(twice.attempts, 2)
+  // And however many times it is streamed, streaming never becomes hearing.
+  assert.equal(twice.deliveredAt, null)
+  assert.equal(twice.deliveryState, 'spoken')
 })
 
 test('an approval control frame stays inside what the firmware will accept', () => {

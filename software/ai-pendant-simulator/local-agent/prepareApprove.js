@@ -39,6 +39,7 @@ import {
   APPROVAL_STORE_CONTRACT,
   approvalIndexKey,
   approvalStateKey,
+  attestApprovalDelivery,
   buildApprovalRequest,
   evaluateApprovalGrant,
   planDigestFor,
@@ -328,6 +329,29 @@ export function commitApproval({
   }
 
   /*
+   * THE UTTERANCE IS EVIDENCE BEFORE IT IS AN ANSWER.
+   *
+   * evaluateApprovalGrant() checks delivery before it reads what was said, and
+   * on this system the only witness that a HUMAN heard the readback is the owner
+   * saying back a word that nothing but the readback carried. Reading the answer
+   * without first letting it stand as evidence would refuse every grant on a
+   * precondition the same sentence had just satisfied — which is precisely the
+   * shape the loop was stuck in.
+   *
+   * This is not a way around the delivery check, and it cannot become one. An
+   * echo is refused outright unless the record already carries `spokenAt` from
+   * the relay that streamed it; the confirm word is derived from the plan digest
+   * and was never a secret, so an echo with no stream behind it proves only that
+   * somebody holds the record. Both halves, or nothing.
+   */
+  const attested = attestApprovalDelivery(approval, {
+    evidence: 'owner-echo',
+    transcript: utterance,
+    now,
+  })
+  const record = attested.ok ? attested.record : approval
+
+  /*
    * The record's own checks first, before anything touches the disk.
    *
    * Two reasons, and the second is the one that matters. Cheapness is the
@@ -342,9 +366,9 @@ export function commitApproval({
    * decided from the record itself, and the world is checked below once the
    * plan is in hand.
    */
-  const liveness = evaluateApprovalGrant(approval, { utterance, decision, decidedBy, now })
+  const liveness = evaluateApprovalGrant(record, { utterance, decision, decidedBy, now })
   if (!liveness.ok) {
-    const settledEarly = settleApproval(approval, liveness, { now, decidedBy })
+    const settledEarly = settleApproval(record, liveness, { now, decidedBy })
     return {
       ok: false,
       committed: false,
@@ -357,12 +381,12 @@ export function commitApproval({
     }
   }
 
-  const manifest = getLedger(approval.ledgerId, { filePath })
+  const manifest = getLedger(record.ledgerId, { filePath })
   if (!manifest) {
     return refusal(
       'plan-missing',
-      `The manifest ${approval.ledgerId} is no longer on this Mac. A bounded store drops the oldest records, so an approval can outlive the plan it names — refusing rather than guessing what it described.`,
-      { approval: presentApproval(settleApproval(approval, { decision: 'refused', reason: 'plan-missing' }, { now, decidedBy })) },
+      `The manifest ${record.ledgerId} is no longer on this Mac. A bounded store drops the oldest records, so an approval can outlive the plan it names — refusing rather than guessing what it described.`,
+      { approval: presentApproval(settleApproval(record, { decision: 'refused', reason: 'plan-missing' }, { now, decidedBy })) },
     )
   }
 
@@ -371,7 +395,7 @@ export function commitApproval({
     return refusal(recovered.reason, recovered.why, {
       steps: recovered.steps ?? null,
       approval: presentApproval(
-        settleApproval(approval, { decision: 'refused', reason: recovered.reason, why: recovered.why }, { now, decidedBy }),
+        settleApproval(record, { decision: 'refused', reason: recovered.reason, why: recovered.why }, { now, decidedBy }),
       ),
     })
   }
@@ -390,7 +414,7 @@ export function commitApproval({
     )
   }
 
-  const verdict = evaluateApprovalGrant(approval, {
+  const verdict = evaluateApprovalGrant(record, {
     utterance,
     decision,
     decidedBy,
@@ -404,7 +428,7 @@ export function commitApproval({
     now,
   })
 
-  const settled = settleApproval(approval, verdict, { now, decidedBy })
+  const settled = settleApproval(record, verdict, { now, decidedBy })
 
   if (!verdict.ok) {
     return {
@@ -444,6 +468,15 @@ export function commitApproval({
       note: world.blindSteps
         ? `${world.blindSteps} step(s) leave no local state to compare, so nothing could confirm the world around them is unchanged.`
         : 'Every step in this plan had an observable target and all of them still match.',
+      /* WHICH WITNESS VOUCHED FOR THE CONSENT, carried out with the commit for
+       * the same reason blindSteps is: a caller writing "the owner approved this"
+       * into a receipt should be able to see what that claim actually rests on. */
+      delivery: {
+        state: settled.deliveryState ?? 'undelivered',
+        spokenAt: settled.spokenAt ?? null,
+        deliveredAt: settled.deliveredAt ?? null,
+        evidence: Array.isArray(settled.deliveryEvidence) ? settled.deliveryEvidence : [],
+      },
     },
   }
 }
