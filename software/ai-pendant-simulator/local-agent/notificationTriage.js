@@ -215,12 +215,29 @@ export async function triageNotifications(
     unavailable: [mail, events, reminders].filter((entry) => entry.error).map((entry) => entry.error),
     important,
     suppressed,
-    spoken: speak(important, suppressed),
+    spoken: speak(important, suppressed, {
+      /*
+       * Every source returning nothing at once is the signature of a missing
+       * Automation grant, not of a quiet morning: EventKit and Mail both answer
+       * [] when unauthorised rather than throwing, so `error` stays empty and
+       * this read looks successful. This Mac has no grant today, which makes it
+       * the live case. "Nothing waiting for you" is the reassuring reading and
+       * therefore the dangerous one — the same trap already corrected in
+       * briefingTriage.js, meetingPrep.js and dayPlan.js.
+       */
+      blind:
+        !(mail.value || []).length &&
+        !(events.value || []).length &&
+        !(reminders.value || []).length,
+    }),
   }
 }
 
-function speak(important, suppressed) {
+function speak(important, suppressed, { blind = false } = {}) {
   if (!important.length) {
+    if (blind) {
+      return 'Mail, calendar and reminders all came back empty at once. That is what a missing Automation grant looks like as much as a quiet morning, so I am not going to tell you nothing needs you.'
+    }
     return suppressed
       ? `Nothing important. I looked at ${suppressed} thing${suppressed === 1 ? '' : 's'} and none of them need you.`
       : 'Nothing waiting for you.'

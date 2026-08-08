@@ -78,7 +78,26 @@ export function formatBriefing(plan, { seconds = 30, now = new Date() } = {}) {
 
   const timed = plan.events
   if (!timed.length && !plan.tasks.length) {
-    return finishBriefing(['Your calendar is clear and nothing is overdue.'], budget, seconds)
+    /*
+     * Both sources empty at once is the signature of an unauthorised read, not
+     * of a free day. appleData.js cannot tell the two apart under osascript —
+     * EventKit returns [] either way — and this Mac currently has no Automation
+     * grant, so this is the live case rather than a hypothetical. A real
+     * calendar with a subscribed holiday feed does not go blank on the same day
+     * the task list empties.
+     *
+     * briefingTriage.js and meetingPrep.js already corroborate the pair instead
+     * of trusting either read alone; this said "your calendar is clear" with
+     * total confidence, which is the reassuring direction and therefore the
+     * dangerous one. The owner skips a meeting they were told they did not have.
+     */
+    return finishBriefing(
+      [
+        'I could not read your calendar or your reminders — both came back empty at once, which is what a missing Automation grant looks like as well as a free day. I am not going to tell you the day is clear when I cannot see it.',
+      ],
+      budget,
+      seconds,
+    )
   }
 
   if (timed.length) {
