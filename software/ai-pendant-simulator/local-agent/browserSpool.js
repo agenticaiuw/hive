@@ -70,9 +70,55 @@ export function browserSpoolLocation() {
   return STORE_PATH
 }
 
+/**
+ * The size of a value as the writer will actually write it.
+ *
+ * atomicJsonStore.writeJsonAtomic serialises with an indent of two. This
+ * measured without it and the difference was not academic: four hundred spool
+ * entries of six hundred characters produced a 306,682-byte file against a
+ * 262,144-byte budget the code believed it was inside — 17% over. A budget
+ * measured with a different serializer than the writer uses is not a budget,
+ * it is a hope with a number on it. browserProvenance.storeBytesOf says the
+ * same thing and this is the same correction.
+ */
 export function spoolBytesOf(entry) {
-  return Buffer.byteLength(JSON.stringify(entry ?? null), 'utf8')
+  try {
+    const serialized = JSON.stringify(entry ?? null, null, 2)
+    return serialized === undefined ? 0 : Buffer.byteLength(serialized, 'utf8')
+  } catch {
+    /* Unserialisable is unstorable: price it as maximally expensive so it is
+     * evicted first rather than wedging the store. */
+    return Number.MAX_SAFE_INTEGER
+  }
 }
+
+/**
+ * What one entry costs INSIDE the store, which is not what it costs alone.
+ *
+ * An entry sits two levels down — store object, then `entries` array — so every
+ * line of it gains the four spaces of that nesting, plus the comma and newline
+ * that separate it from the next one. Summing entries at indent zero, or even
+ * at the store's own indent, understates the array by well over ten percent
+ * once there are a few hundred of them.
+ */
+function nestedBytesOf(entry) {
+  const serialized = JSON.stringify(entry ?? null, null, 2)
+  if (serialized === undefined) return Number.MAX_SAFE_INTEGER
+  const lines = serialized.split('\n').length
+  return Buffer.byteLength(serialized, 'utf8') + 4 * lines + 2
+}
+
+/* The store as it will be written, with the drop counters at their widest so a
+ * budget checked while they are small does not overrun once they grow. */
+const envelope = (entries) => ({
+  entries,
+  dropped: {
+    entries: Number.MAX_SAFE_INTEGER,
+    bytes: Number.MAX_SAFE_INTEGER,
+    firstAt: '0000-00-00T00:00:00.000Z',
+    lastAt: '0000-00-00T00:00:00.000Z',
+  },
+})
 
 /**
  * Shrink one entry until it fits, keeping the parts that identify it.
@@ -136,12 +182,39 @@ export function spoolBrowserCommand(entry, { filePath = STORE_PATH } = {}) {
 
   store.entries.push(stored)
 
-  while (store.entries.length > 1 && spoolBytesOf(store) > MAX_SPOOL_BYTES) {
+  const evict = () => {
     const evicted = store.entries.shift()
     store.dropped.entries += 1
-    store.dropped.bytes += spoolBytesOf(evicted)
+    store.dropped.bytes += nestedBytesOf(evicted)
     store.dropped.firstAt = store.dropped.firstAt ?? evicted.spooledAt ?? null
     store.dropped.lastAt = evicted.spooledAt ?? null
+    return evicted
+  }
+
+  /*
+   * Estimate first, because it is cheap: the envelope is priced before anything
+   * is admitted — the store is more than its entries and charging only for
+   * entries is how a byte budget quietly overruns its file — and each entry is
+   * charged at what it costs nested inside the array.
+   */
+  let used =
+    spoolBytesOf(envelope([])) +
+    store.entries.reduce((sum, entry) => sum + nestedBytesOf(entry), 0)
+
+  while (store.entries.length > 1 && used > MAX_SPOOL_BYTES) {
+    used -= nestedBytesOf(evict())
+  }
+
+  /*
+   * Then verify, because the estimate above is an estimate. This measures the
+   * store as it will actually be written and drops from the oldest end until it
+   * genuinely fits, which is what turns the budget into a guarantee rather than
+   * an intention. It runs a handful of times at most because the estimate is
+   * close. browserProvenance.pruneRecords ends the same way for the same
+   * reason.
+   */
+  while (store.entries.length > 1 && spoolBytesOf(envelope(store.entries)) > MAX_SPOOL_BYTES) {
+    evict()
   }
 
   writeJsonAtomic(filePath, store, { validate: isValidStore })

@@ -13,7 +13,7 @@ import {
   registerPrepareApproveRoutes,
 } from './prepareApprove.js'
 import { getLedger } from './actionLedger.js'
-import { markApprovalDelivered } from '../shared/approvalHandoff.js'
+import { attestApprovalDelivery } from '../shared/approvalHandoff.js'
 
 /*
  * These tests run against a REAL ledger file and a REAL temp directory rather
@@ -47,7 +47,25 @@ function plan(space) {
   ]
 }
 
-/** Prepare, then mark the readback as actually spoken. */
+/*
+ * Prepare, then record what the relay's speaking actually witnessed.
+ *
+ * This is HALF of delivery and deliberately stops there — a stream is witnessed
+ * by a socket, and a socket is not an ear. The other half is the confirm word
+ * coming back, which commitApproval() attests from the utterance itself, so
+ * every test below that passes a `approve <word>` utterance is exercising the
+ * real two-witness path rather than a record pre-stamped as heard.
+ */
+function spokenToPendant(record) {
+  const attested = attestApprovalDelivery(record, {
+    evidence: 'stream-complete',
+    sentBytes: 4096,
+    totalBytes: 4096,
+  })
+  assert.equal(attested.ok, true, attested.why)
+  return attested.record
+}
+
 function preparedAndHeard(space, overrides = {}) {
   const actions = overrides.actions ?? plan(space)
   const prepared = prepareAction({
@@ -56,7 +74,7 @@ function preparedAndHeard(space, overrides = {}) {
     filePath: space.ledger,
     ...overrides,
   })
-  return { prepared, actions, approval: markApprovalDelivered(prepared.approval) }
+  return { prepared, actions, approval: spokenToPendant(prepared.approval) }
 }
 
 /* ------------------------------------------------------------- prepare */
@@ -435,7 +453,7 @@ test('the routes prepare and decide, and neither one executes', (t) => {
   assert.equal(prepared.status, 201)
   assert.equal(prepared.body.executed, false)
 
-  const approval = markApprovalDelivered(prepared.body.approval)
+  const approval = spokenToPendant(prepared.body.approval)
   const decided = app.call('post', '/approve', {
     body: { approval, utterance: `approve ${approval.confirmWord}`, actions },
   })
@@ -452,7 +470,7 @@ test('a refusal is a 200 so nobody retries it as a transport failure', (t) => {
 
   const actions = plan(space)
   const prepared = app.call('post', '/prepare', { body: { command: 'send it', actions } })
-  const approval = markApprovalDelivered(prepared.body.approval)
+  const approval = spokenToPendant(prepared.body.approval)
   fs.writeFileSync(path.join(space.dir, 'notes.txt'), 'moved on')
 
   const refused = app.call('post', '/approve', {

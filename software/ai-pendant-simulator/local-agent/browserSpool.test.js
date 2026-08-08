@@ -78,7 +78,57 @@ test('the spool is bounded in bytes, whatever the entries weigh', (t) => {
   /* Eviction is oldest-first, so the most recent loss is always the one still
    * on the list — the one somebody might still act on. */
   assert.equal(spool.entries.at(-1).commandId, 'browser_29')
-  assert.equal(fs.statSync(filePath).size <= MAX_SPOOL_BYTES * 1.1, true)
+  /* No slack factor. The ten percent this once allowed was the undercount
+   * below wearing a tolerance's clothes. */
+  assert.ok(
+    fs.statSync(filePath).size <= MAX_SPOOL_BYTES,
+    `the file is ${fs.statSync(filePath).size} bytes, past the ${MAX_SPOOL_BYTES} ceiling`,
+  )
+})
+
+/*
+ * The budget is measured against the FILE, not against a proxy for it.
+ *
+ * Being in bytes was never enough on its own. atomicJsonStore writes with
+ * JSON.stringify(store, null, 2) and this measured JSON.stringify(store) — the
+ * compact form — so every check was made against a number the writer never
+ * produced. Two undercounts compounded: the indentation itself, and the four
+ * further spaces every line of an entry gains from sitting two levels down
+ * inside `entries`.
+ *
+ * Measured, not reasoned about: four hundred entries of six hundred characters
+ * each wrote a 306,682-byte file against the 262,144-byte budget — 17% over,
+ * while readBrowserSpool cheerfully reported 261,902. The overshoot is
+ * proportional to the number of LINES, so it takes MANY SMALL entries to
+ * expose; the thirty fat ones above are nowhere near enough, which is precisely
+ * why that test passed throughout. browserProvenance carries the same test for
+ * the same reason.
+ */
+test('the budget is measured against the file, not against a proxy for it', (t) => {
+  const filePath = withTemporaryStore(t)
+
+  for (let index = 0; index < 400; index += 1) {
+    spoolBrowserCommand(commandOfSize(600, index), { filePath })
+  }
+
+  const fileBytes = fs.statSync(filePath).size
+  assert.ok(
+    fileBytes <= MAX_SPOOL_BYTES,
+    `the file on disk is ${fileBytes} bytes, past the ${MAX_SPOOL_BYTES}-byte budget`,
+  )
+
+  const spool = readBrowserSpool({ filePath })
+  assert.equal(
+    spool.bytes,
+    fileBytes,
+    'the reported size is the size of the file, not an optimistic proxy for it',
+  )
+  assert.equal(spool.maxBytes, MAX_SPOOL_BYTES, 'the shipped budget is what shipped')
+  assert.ok(spool.count < 400, 'the store really did shed entries')
+  assert.ok(spool.dropped.entries > 0, 'and counted what it shed')
+  /* Eviction stayed oldest-first: the newest arrival is still the one on the
+   * end, which is the one somebody might still act on. */
+  assert.equal(spool.entries.at(-1).commandId, 'browser_399')
 })
 
 /*

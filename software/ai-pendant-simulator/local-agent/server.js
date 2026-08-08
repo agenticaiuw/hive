@@ -343,6 +343,49 @@ app.use((request, response, next) => {
  * Derived from the running router and the executor's dispatch table — see
  * capabilityManifest.js for why none of it is written by hand.
  */
+/*
+ * Ask macOS for the grants this agent is missing — owner-initiated only.
+ *
+ * TCC is per-binary, so the prompt has to come from THIS process. Nothing else
+ * can raise it on the agent's behalf: a request from a terminal or a stray node
+ * grants that binary instead, which is why the accessibility grant has been
+ * stuck at false while every check reported it correctly.
+ *
+ * Deliberately a POST with no GET twin, and never called on startup. Raising a
+ * TCC dialog steals the foreground, and visionLoopPreflight refuses to do it
+ * for exactly that reason — an automation feature that interrupts the owner to
+ * ask permission to not interrupt the owner has already lost. This route exists
+ * because the owner asked, at a moment of their choosing.
+ *
+ * `openSettings` defaults false for the same reason: the dialog is one
+ * interruption, and a Settings pane opening behind it is a second.
+ */
+app.post('/permissions/request', async (request, response) => {
+  const openSettings = ['1', 'true', 'yes'].includes(
+    String(request.body?.openSettings ?? '').toLowerCase(),
+  )
+  try {
+    const result = await ensurePermissions({
+      prompt: true,
+      openSettings,
+      preflightAutomation: true,
+      /* Without force, an already-`ready` report short-circuits before the
+       * prompt — and "ready" here means the cached record says so, which is
+       * precisely the state we are trying to re-check. */
+      force: true,
+    })
+    response.json({
+      ok: true,
+      before: result.before,
+      after: result.after,
+      openedSettings: Boolean(result.openedSettings),
+      note: 'A dialog may be waiting on the owner’s screen. Grants take effect for this binary only, and Accessibility needs the agent restarted afterwards.',
+    })
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message })
+  }
+})
+
 app.get('/capabilities', async (_request, response) => {
   let permissions
   try {
