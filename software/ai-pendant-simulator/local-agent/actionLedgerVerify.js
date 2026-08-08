@@ -118,6 +118,13 @@ const IDEMPOTENT_TYPES = new Set([
   'write_file',
   // Re-copying over the copy reproduces the copy.
   'copy_path',
+  // Same judgement, one screen further out: reading the phone changes nothing,
+  // and opening an app or going Home twice leaves the phone where once did.
+  'ios_status',
+  'ios_ocr',
+  'ios_screenshot',
+  'ios_open_app',
+  'ios_home',
 ])
 
 /* Running it again does not repeat the effect — it ADDS one. The second run is
@@ -163,6 +170,14 @@ const UNREPEATABLE_TYPES = new Set([
   'tidy_downloads_apply',
   'sweep_folder_apply',
   'sweep_folder_undo',
+  /* A touch that already reached the phone happened. Replaying the step is a
+   * SECOND tap — a second Send, a second order — and looking at the screen
+   * afterwards cannot tell you which of the two it is showing. */
+  'ios_tap_text',
+  'ios_type_text',
+  'ios_swipe',
+  'ios_scroll',
+  'ios_back',
 ])
 
 export function replaySafetyFor(type) {

@@ -63,6 +63,13 @@ const READ_ONLY_TYPES = new Set([
   'browser_capture',
   'browser_wait_for',
   'browser_list_sessions',
+  /* Looking at the owner's iPhone through the mirroring window. Without these
+   * an OCR of the phone's screen is recorded as a write that "leaves no
+   * reversible trace", which is not a hedge — it is wrong, and the undo surface
+   * is only as useful as the honesty of what it lists. */
+  'ios_status',
+  'ios_ocr',
+  'ios_screenshot',
 ])
 
 /*

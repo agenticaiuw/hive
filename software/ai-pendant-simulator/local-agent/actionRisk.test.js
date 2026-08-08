@@ -117,6 +117,119 @@ test('benign-looking shell commands are still held for confirmation', () => {
   }
 })
 
+/*
+ * The iPhone family is classified by TARGET, not by verb.
+ *
+ * Tapping is how the phone is driven at all — a real task is a dozen touches,
+ * and a dozen approval prompts is a remote control, not an agent. So touching
+ * is ordinary, exactly like ui_click on the Mac, and what gets approved is the
+ * plan. The line is drawn where it actually matters: at touches that cannot be
+ * taken back or that reach other people.
+ */
+test('driving the iPhone runs hands-free', () => {
+  const ordinary = [
+    { type: 'ios_status', params: {} },
+    { type: 'ios_ocr', params: {} },
+    { type: 'ios_screenshot', params: {} },
+    { type: 'ios_open_app', params: { name: 'Instacart' } },
+    { type: 'ios_home', params: {} },
+    { type: 'ios_back', params: {} },
+    { type: 'ios_swipe', params: { direction: 'up' } },
+    { type: 'ios_scroll', params: { direction: 'down' } },
+    { type: 'ios_tap_text', params: { query: 'Instacart' } },
+    { type: 'ios_tap_text', params: { query: 'Add to cart' } },
+    { type: 'ios_tap_text', params: { query: 'Search' } },
+    { type: 'ios_type_text', params: { text: 'oat milk', field: 'Search' } },
+  ]
+  for (const action of ordinary) {
+    assert.equal(
+      classifyAction(action).safe,
+      true,
+      `${action.type} ${JSON.stringify(action.params)} should auto-run`,
+    )
+  }
+
+  // A whole ordinary phone sequence auto-runs end to end. That is the point.
+  assert.equal(classifyPlan(ordinary).autoRun, true)
+})
+
+test('a tap at something irreversible or outward-facing still asks', () => {
+  const held = [
+    { type: 'ios_tap_text', params: { query: 'Place Order' } },
+    { type: 'ios_tap_text', params: { query: 'Send' } },
+    { type: 'ios_tap_text', params: { query: 'Pay now' } },
+    { type: 'ios_tap_text', params: { query: 'Confirm purchase' } },
+    { type: 'ios_tap_text', params: { query: 'Delete' } },
+    { type: 'ios_tap_text', params: { query: 'Unsubscribe' } },
+    { type: 'ios_tap_text', params: { query: 'Transfer' } },
+    { type: 'ios_type_text', params: { text: 'hunter2', field: 'Password' } },
+    { type: 'ios_type_text', params: { text: '4111 1111 1111 1111' } },
+    { type: 'ios_type_text', params: { text: '123', field: 'CVV' } },
+  ]
+  for (const action of held) {
+    const verdict = classifyAction(action)
+    assert.equal(
+      verdict.safe,
+      false,
+      `${action.type} ${JSON.stringify(action.params)} must be held`,
+    )
+    assert.match(verdict.reason, /iPhone/)
+  }
+
+  // One held step holds the plan; the ordinary steps around it are not blamed.
+  const plan = classifyPlan([
+    { type: 'ios_ocr', params: {} },
+    { type: 'ios_tap_text', params: { query: 'Checkout' } },
+    { type: 'ios_tap_text', params: { query: 'Place Order' } },
+  ])
+  assert.equal(plan.autoRun, false)
+  assert.deepEqual(
+    plan.blocked.map((entry) => entry.type),
+    ['ios_tap_text', 'ios_tap_text'],
+  )
+})
+
+test('the escalation list does not swallow ordinary navigation', () => {
+  // Words that merely CONTAIN a held word are not held: "Sender name" is a
+  // form label, "Resend code" is not a send. If this test starts failing the
+  // pattern has widened into the per-tap prompting it exists to avoid.
+  for (const query of [
+    'Sender name',
+    'Recommended',
+    'Deliveries',
+    'Reorder',
+    'Settings',
+    'Messages',
+    'Sent',
+  ]) {
+    assert.equal(
+      classifyAction({ type: 'ios_tap_text', params: { query } }).safe,
+      true,
+      `tapping "${query}" should just run`,
+    )
+  }
+})
+
+test('a routine may drive the phone but may not buy anything', () => {
+  const browsing = classifyPlanForRoutine([
+    { type: 'ios_open_app', params: { name: 'Instacart' } },
+    { type: 'ios_ocr', params: {} },
+    { type: 'ios_tap_text', params: { query: 'Deliveries' } },
+  ])
+  assert.equal(browsing.autoRun, true, 'a routine should be able to look')
+
+  const buying = classifyPlanForRoutine([
+    { type: 'ios_open_app', params: { name: 'Instacart' } },
+    { type: 'ios_tap_text', params: { query: 'Place Order' } },
+  ])
+  assert.equal(buying.autoRun, false)
+  assert.deepEqual(
+    buying.denied.map((entry) => entry.type),
+    ['ios_tap_text'],
+  )
+  assert.match(buying.reason, /cannot approve this on its own/)
+})
+
 test('a benign-looking AppleScript is still held for confirmation', () => {
   const verdict = classifyAction({
     type: 'run_applescript',

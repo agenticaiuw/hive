@@ -569,6 +569,97 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Put back the files a sweep_folder_apply moved or deleted.',
     params: { planId: 'from sweep_folder_preview' },
   },
+  /*
+   * The iPhone family.
+   *
+   * These do not simulate a phone and they are not a sandbox: they drive the
+   * owner's REAL iPhone through the Mac's iPhone Mirroring window, with
+   * screenshots plus OCR for eyes and synthesized touches for hands. Whatever
+   * happens on that screen happens on the phone in their pocket.
+   *
+   * Tapping, typing and swiping are ordinary steps here, exactly like the
+   * Mac's own ui_click and type_text: a real phone task is a dozen touches and
+   * stopping to ask before each one would not be an agent. What the model owes
+   * in exchange is the loop the descriptions keep repeating — READ the screen,
+   * act on text you have just seen, then CHECK the `changed` field to find out
+   * whether anything actually happened. OCR reads text, not meaning; a label
+   * can match while the touch lands on nothing.
+   *
+   * Anything irreversible or outward-facing (paying, ordering, sending,
+   * deleting, passwords, card numbers) is held for the owner's approval
+   * automatically — plan it anyway, and it will be surfaced rather than
+   * silently dropped.
+   *
+   * Prefer the Mac or the web when the task can be done there — this is for
+   * what genuinely needs the phone: iOS-only apps, things tied to the owner's
+   * phone number, checking how something looks on the device.
+   */
+  ios_status: {
+    description:
+      "Check whether the owner's real iPhone is reachable through iPhone Mirroring. Reads only. Returns state ready | off-space | blocked | no-window | not-running. 'off-space' means the mirroring window is on another macOS Space: reading works as-is, and taps or typing will bring the window forward first. Call this first when unsure; only the owner can open or reconnect iPhone Mirroring.",
+    params: {},
+  },
+  ios_ocr: {
+    description:
+      "Read every piece of text currently visible on the owner's real iPhone screen, each with a tap-ready x/y centre. Reads only, changes nothing, and never steals the owner's focus or switches their Space. This is the element tree for the phone — call it before tapping so you tap text you have actually seen.",
+    params: {
+      limit: 'optional max items, default 120',
+      minConfidence: 'optional 0-1, default 0.3',
+    },
+  },
+  ios_screenshot: {
+    description:
+      "Capture a PNG of the owner's real iPhone screen to a file and return the path. Reads only. Use for unlabelled icons and layout questions; prefer ios_ocr when the thing you need has a text label.",
+    params: { path: 'optional absolute path; defaults into the workspace' },
+  },
+  ios_open_app: {
+    description:
+      "Open an app on the owner's REAL iPhone via Spotlight. The normal way to start a phone task.",
+    params: { name: 'app name as it appears on the iPhone, e.g. Notes' },
+  },
+  ios_tap_text: {
+    description:
+      "Tap on-screen text on the owner's REAL iPhone — the main way to drive it. Tap only text you have just read with ios_ocr; the result tells you what was tapped, where, and whether the screen `changed`. If changed is false the touch missed, so re-read and try a different label rather than repeating the same tap. Never repeat a tap just because it seemed not to work: on a real phone the second one may be a second order.",
+    params: {
+      query: 'the visible text to tap (substring match unless exact)',
+      index: 'optional 0-based match to use when several match',
+      exact: 'optional boolean for exact-text match',
+    },
+  },
+  ios_type_text: {
+    description:
+      "Type into whatever text field is already focused on the owner's REAL iPhone. Tap the field first and confirm the keyboard is up. A newline presses return, which in a search or message field submits — leave it out unless you mean to submit. Only US-keyboard characters can be typed; emoji cannot. Say which field you are typing into so a password or payment field can be recognised.",
+    params: {
+      text: 'the literal text to type',
+      field: "optional: the field's on-screen label, e.g. Search, Password",
+    },
+  },
+  ios_swipe: {
+    description:
+      "Flick the owner's REAL iPhone screen — page a Home Screen, dismiss a card, move a carousel. Use ios_scroll for long lists instead.",
+    params: {
+      direction: 'up | down | left | right (finger motion)',
+      distance: 'optional 0.05-0.9 fraction of the screen, default 0.4',
+    },
+  },
+  ios_scroll: {
+    description:
+      "Scroll a list on the owner's REAL iPhone. Reports whether the screen changed, so a list already at its end is visible rather than looping.",
+    params: {
+      direction: 'optional up | down',
+      amount: 'optional pixels, default 300; negative scrolls the other way',
+    },
+  },
+  ios_back: {
+    description:
+      "Go back one screen on the owner's REAL iPhone with the left-edge swipe gesture. Most apps support it; the result reports whether the screen `changed`, and ios_home is the guaranteed way out when it did not.",
+    params: {},
+  },
+  ios_home: {
+    description:
+      "Go to the Home Screen on the owner's REAL iPhone. Always works, and is the way out of an app without tapping anything inside it.",
+    params: {},
+  },
 }
 
 const SAFE_ACTION_SCHEMA = {

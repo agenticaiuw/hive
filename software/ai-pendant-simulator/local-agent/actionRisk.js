@@ -88,7 +88,96 @@ const AUTO_SAFE_ACTIONS = new Set([
   'sweep_folder_apply',
   'sweep_folder_undo',
   'browser_inspect_act',
+  /*
+   * The owner's real iPhone, through iPhone Mirroring.
+   *
+   * Reading is free: ios_status asks whether mirroring is connected, and
+   * ios_ocr / ios_screenshot read the screen that is already there.
+   *
+   * Touching is ORDINARY, on the same footing as ui_click, type_text and
+   * scroll on the Mac side — and that is deliberate, not an oversight. A phone
+   * task is a dozen taps ("open Instacart, reorder my usual"); a dozen
+   * approval prompts is not an agent, it is a very slow remote control. What
+   * gets approved here is the PLAN, exactly as it is for the Mac's own UI
+   * actions, and the steps then run.
+   *
+   * The narrow exception is IOS_CONFIRM_TARGET below: a tap or a keystroke
+   * aimed at something irreversible or outward-facing still stops and asks.
+   * classifyAction consults it for every ios_tap_text / ios_type_text, so
+   * these entries mean "ordinary unless the target says otherwise".
+   */
+  'ios_status',
+  'ios_ocr',
+  'ios_screenshot',
+  'ios_open_app',
+  'ios_home',
+  'ios_back',
+  'ios_swipe',
+  'ios_scroll',
+  'ios_tap_text',
+  'ios_type_text',
 ])
+
+/*
+ * The line between "go" and "ask" on a phone.
+ *
+ * The principle is not "touching is dangerous" — it is that some touches
+ * cannot be taken back and some reach other people. Navigating, searching,
+ * scrolling and opening things are reversible and private: they run. Paying,
+ * ordering, sending, deleting and unsubscribing are not, and neither is
+ * handing over a password or a card number: they ask.
+ *
+ * This is matched against the text the tap is AIMED at — the label the agent
+ * itself chose from OCR — so it fires on "Place Order" and "Send" without
+ * knowing anything about the app. It is deliberately narrow. Widening it until
+ * ordinary navigation trips it would recreate the per-tap prompting this
+ * design exists to avoid; leaving it out entirely would let a hallucinated
+ * planner step buy something.
+ */
+const IOS_CONFIRM_TARGET =
+  /\b(pay|paying|payment|buy|purchase|checkout|check ?out|place (?:the )?order|confirm (?:and )?(?:order|purchase|payment|pay)|order now|send|sending|share|post|publish|delete|remove|erase|unsubscribe|cancel subscription|transfer|withdraw|deposit|wire|sign out|log ?out|reset|factory)\b/i
+
+/* A field the SCREEN calls a secret. The planner reads the screen before it
+ * types, so it can say which field it is typing into; when it does, and the
+ * label looks like this, typing stops and asks. */
+const IOS_SECRET_FIELD =
+  /\b(password|passcode|pass ?phrase|pin|cvv|cvc|security code|card number|credit card|social security|ssn|one[- ]time code|2fa|verification code)\b/i
+
+/* A payment card, by shape, whatever the field claims to be. */
+const IOS_CARD_NUMBER = /\b(?:\d[ -]?){13,19}\b/
+
+/**
+ * Why this phone touch needs approval, or null if it may just run.
+ *
+ * Exported because the routine venue asks the same question: a schedule that
+ * fires at 3am must not be able to tap "Place Order" while nobody is looking.
+ */
+export function iosConfirmReason(action) {
+  const type = String(action?.type || '')
+  const params = action?.params ?? {}
+
+  if (type === 'ios_tap_text') {
+    const target = String(params.query ?? params.text ?? params.label ?? '')
+    if (IOS_CONFIRM_TARGET.test(target)) {
+      return `Tapping "${target.trim()}" on your iPhone could be irreversible or send something, so it needs your approval.`
+    }
+    return null
+  }
+
+  if (type === 'ios_type_text') {
+    const field = String(params.field ?? params.fieldLabel ?? params.label ?? '')
+    if (IOS_SECRET_FIELD.test(field)) {
+      return 'Typing into a password or payment field on your iPhone needs your approval.'
+    }
+    const text = String(params.text ?? params.value ?? '')
+    if (IOS_SECRET_FIELD.test(text) || IOS_CARD_NUMBER.test(text)) {
+      return 'That looks like a card number or a secret, so typing it on your iPhone needs your approval.'
+    }
+    return null
+  }
+
+  return null
+}
 
 const CONFIRM_REASONS = new Map([
   ['run_shell', 'Running a shell command needs your approval.'],
@@ -170,6 +259,13 @@ export function classifyAction(action) {
 
   const confirmReason = CONFIRM_REASONS.get(type)
   if (confirmReason) return { safe: false, reason: confirmReason }
+
+  /* Phone touches are ordinary; the target is what can promote one. Checked
+   * before the allowlist so the promotion cannot be short-circuited by the
+   * type simply being on it. */
+  const phoneReason = iosConfirmReason(action)
+  if (phoneReason) return { safe: false, reason: phoneReason }
+
   if (AUTO_SAFE_ACTIONS.has(type)) return { safe: true }
   return { safe: false, reason: `${type} is not on the hands-free allowlist.` }
 }
@@ -240,12 +336,27 @@ export function classifyPlanForRoutine(actions) {
     return { autoRun: false, blocked: [], denied: [], reason: 'No actions to run.' }
   }
   const voice = classifyPlan(list)
+  /*
+   * The phone joins the deny-list conditionally, by target rather than by type.
+   *
+   * Ordinary phone navigation is exactly the sort of thing a routine should be
+   * able to do — check a delivery, open an app, read a screen. But the
+   * reasoning that keeps send_email off this list applies unchanged to a tap
+   * on "Place Order": a hallucinated planner step must never become a purchase
+   * somebody finds in the morning. iosConfirmReason draws that line once, and
+   * both venues use the same line.
+   */
   const denied = list
-    .filter((action) => ROUTINE_DENY_ACTIONS.has(String(action?.type || '')))
+    .filter(
+      (action) =>
+        ROUTINE_DENY_ACTIONS.has(String(action?.type || '')) ||
+        iosConfirmReason(action),
+    )
     .map((action) => ({
       type: String(action?.type),
       reason:
         CONFIRM_REASONS.get(String(action?.type)) ||
+        iosConfirmReason(action) ||
         `${action?.type} never runs unattended.`,
     }))
   if (denied.length) {
