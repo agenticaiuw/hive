@@ -11,6 +11,28 @@ import {
   validateCommand,
   validateNavigationUrl,
 } from './bridge-core.js'
+import {
+  CONSOLE_SOURCE,
+  EXECUTE_TIMEOUT_MS,
+  HISTORY_KEY,
+  PLAN_TIMEOUT_MS,
+  SESSION_KEY,
+  appendHistory,
+  buildCommandText,
+  interpretExecuteResponse,
+  interpretPlanResponse,
+  newHistoryEntry,
+  outcomeToPatch,
+  patchHistory,
+  scrubPageContext,
+} from './command-console.js'
+import {
+  BRAIN_STORAGE_KEYS,
+  chooseBrainRoute,
+  normalizeBrainConfig,
+  runBrainLoop,
+  summarizeBrainRun,
+} from './brain.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const POLL_ALARM = 'ai-pendant-poll'
@@ -995,6 +1017,226 @@ function runInPage(type, params) {
   throw new Error(`Unsupported browser command: ${type}`)
 }
 
+/* ===================================================================== *
+ * Popup command console: the owner's own commands, sent from the popup to
+ * the Mac agent's plan/execute machinery. Distinct from the poll loop above,
+ * which carries the AGENT's commands into this browser.
+ * ===================================================================== */
+
+/*
+ * storage.local has no transactions, so every read-modify-write of the
+ * history list goes through this one chain; two commands finishing at the
+ * same moment must not eat each other's entries.
+ */
+let historyWrites = Promise.resolve()
+
+function withHistory(mutate) {
+  historyWrites = historyWrites
+    .then(async () => {
+      const values = await api.storage.local.get(HISTORY_KEY)
+      const next = mutate(values[HISTORY_KEY] ?? [])
+      await api.storage.local.set({ [HISTORY_KEY]: next })
+    })
+    .catch((error) => {
+      console.warn('console history write failed:', error?.message || error)
+    })
+  return historyWrites
+}
+
+const patchEntry = (id, patch) =>
+  withHistory((history) => patchHistory(history, id, patch))
+
+/**
+ * POST one console leg to the agent and interpret the response. Unlike the
+ * poll-loop `request()` this gets a long timeout: a /plan can sit in a model
+ * stream for most of a minute and that is normal, not an outage.
+ */
+async function consolePost(config, path, payload, timeoutMs, interpret) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(`${config.agentUrl}${path}`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${config.agentToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    const body = await response.json().catch(() => null)
+    return interpret({ status: response.status, payload: body })
+  } catch (error) {
+    return {
+      kind: 'error',
+      message:
+        error?.name === 'AbortError'
+          ? `The local agent did not answer within ${Math.round(timeoutMs / 1000)}s. Check the dashboard — the job may still be running.`
+          : error?.message || String(error),
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function handleConsoleSubmit({ command, page }) {
+  const text = String(command ?? '').trim()
+  if (!text) return { ok: false, error: 'Type a command first.' }
+
+  const config = await getConfig()
+  if (!config.agentToken) return { ok: false, needsSetup: true }
+
+  const id = crypto.randomUUID()
+  const scrubbedPage = scrubPageContext(page)
+  await withHistory((history) =>
+    appendHistory(history, newHistoryEntry({ id, command: text, page: scrubbedPage })),
+  )
+
+  /* The submit reply only says "accepted". The outcome lands in storage,
+   * which the popup renders live — and still renders after being closed
+   * and reopened, which a sendMessage reply would not survive. */
+  void runConsoleCommand({ id, command: text, page: scrubbedPage, config }).catch(
+    (error) =>
+      patchEntry(id, {
+        state: 'failed',
+        headline: error?.message || String(error),
+        finishedAt: new Date().toISOString(),
+      }),
+  )
+
+  return { ok: true, id }
+}
+
+async function runConsoleCommand({ id, command, page, config }) {
+  /*
+   * The local brain goes first when — and only when — its credential exists.
+   * Today chooseBrainRoute always answers 'mac-planner' (see src/brain.js:
+   * brainEnabled defaults false and there is no model proxy or device token
+   * yet), so this block is exercised by unit tests and skipped in production.
+   */
+  const brainConfig = normalizeBrainConfig(
+    await api.storage.local.get(BRAIN_STORAGE_KEYS),
+  )
+  let brainNote = ''
+
+  if (chooseBrainRoute(brainConfig).route === 'local-brain') {
+    const finished = await runBrainLoop({
+      command,
+      page,
+      config: brainConfig,
+      callModel: (messages) => brainCallModel(brainConfig, messages),
+      runTool: (call) => runBrainTool(call, config),
+    })
+
+    if (finished.status === 'done') {
+      await patchEntry(id, {
+        state: 'answered',
+        headline: finished.response || 'Done.',
+        detail: summarizeBrainRun(finished),
+        finishedAt: new Date().toISOString(),
+      })
+      return
+    }
+    /* Every non-answer is a handoff: the Mac planner gets the command
+     * unchanged, and the entry says the brain stepped aside. */
+    brainNote = summarizeBrainRun(finished)
+  }
+
+  const commandText = buildCommandText(command, page)
+  const stored = await api.storage.local.get(SESSION_KEY)
+  const sessionId = String(stored[SESSION_KEY] ?? '').trim()
+
+  const planOutcome = await consolePost(
+    config,
+    '/plan',
+    {
+      command: commandText,
+      ...(sessionId ? { sessionId } : {}),
+      source: CONSOLE_SOURCE,
+    },
+    PLAN_TIMEOUT_MS,
+    interpretPlanResponse,
+  )
+
+  /* The agent minted (or confirmed) the conversation; keep following it. */
+  if (planOutcome.sessionId) {
+    await api.storage.local.set({ [SESSION_KEY]: planOutcome.sessionId })
+  }
+
+  if (planOutcome.kind !== 'execute') {
+    const patch = outcomeToPatch(planOutcome)
+    if (brainNote) patch.detail = [brainNote, patch.detail].filter(Boolean).join('\n')
+    await patchEntry(id, patch)
+    return
+  }
+
+  /* The planner said requiresConfirmation:false — the one case the popup
+   * executes on its own. Everything else parked above. */
+  await patchEntry(id, { headline: 'Plan ready — executing…' })
+
+  const executeOutcome = await consolePost(
+    config,
+    '/execute',
+    {
+      command: commandText,
+      actions: planOutcome.actions,
+      ...(planOutcome.sessionId ? { sessionId: planOutcome.sessionId } : {}),
+      planMeta: { planner: planOutcome.planner ?? null, source: CONSOLE_SOURCE },
+      source: CONSOLE_SOURCE,
+    },
+    EXECUTE_TIMEOUT_MS,
+    interpretExecuteResponse,
+  )
+
+  await patchEntry(id, outcomeToPatch(executeOutcome))
+}
+
+/**
+ * The brain's model call. Never reached today: runBrainLoop refuses to run
+ * without a ready config, and no ready config can exist until the relay-side
+ * model proxy and scoped device tokens land. No key material lives here.
+ */
+async function brainCallModel(brainConfig, messages) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 60_000)
+
+  try {
+    const response = await fetch(brainConfig.modelProxyUrl, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${brainConfig.deviceToken}`,
+      },
+      body: JSON.stringify({ messages }),
+      signal: controller.signal,
+    })
+    if (!response.ok) throw await responseError(response)
+    const payload = await response.json()
+    return String(payload?.reply ?? payload?.content ?? payload?.text ?? '')
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+/**
+ * The brain's tools ARE the extension's own 11 page commands, run through the
+ * same validation and the same privacy boundary as agent-issued commands —
+ * a locally minted command gets no shortcut past sanitizeExtraction.
+ */
+async function runBrainTool(call, config) {
+  const { type, params } = validateCommand({
+    commandId: `brain-${crypto.randomUUID()}`,
+    createdAt: new Date().toISOString(),
+    action: { type: call?.type, params: call?.params ?? {} },
+  })
+  const { result } = await runCommand(type, params, config)
+  return sanitizeExtraction(result).result
+}
+
 function browserLabel() {
   const userAgent = globalThis.navigator?.userAgent ?? ''
   if (/Edg\//.test(userAgent)) return 'Microsoft Edge'
@@ -1052,6 +1294,15 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void api.storage.local
       .get(STATUS_KEY)
       .then((values) => sendResponse(values[STATUS_KEY] ?? null))
+    return true
+  }
+
+  if (message?.type === 'console:submit') {
+    void handleConsoleSubmit(message)
+      .then(sendResponse)
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      )
     return true
   }
 

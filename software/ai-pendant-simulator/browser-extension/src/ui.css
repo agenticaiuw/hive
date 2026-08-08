@@ -208,3 +208,152 @@ hr {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ===== Popup command console ===== */
+
+.popup {
+  width: 380px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.popup-header h2 {
+  margin-bottom: 0;
+}
+
+.status-mini {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  color: #849992;
+  font-size: 12px;
+}
+
+.command-form {
+  margin-top: 16px;
+}
+
+.command-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.command-row input {
+  flex: 1;
+  margin-top: 0;
+}
+
+.command-row button {
+  flex: 0 0 auto;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: #a6bbb5;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.check-row input {
+  width: auto;
+  margin: 0;
+  accent-color: #1dd6a5;
+}
+
+.command-form .notice {
+  margin-top: 8px;
+  min-height: 0;
+}
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  margin-top: 14px;
+  overflow-y: auto;
+}
+
+.entry {
+  padding: 10px 12px;
+  border: 1px solid #1c3932;
+  border-radius: 12px;
+  background: rgba(8, 22, 19, 0.82);
+}
+
+.entry-command {
+  margin: 0;
+  color: #effaf7;
+  font-size: 13px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.entry-chip {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border: 1px solid #2b574c;
+  border-radius: 999px;
+  color: #79dac0;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.entry-parked .entry-chip {
+  border-color: #6b5b2b;
+  color: #ffd98d;
+}
+
+.entry-failed .entry-chip,
+.entry-refused .entry-chip,
+.entry-lost .entry-chip {
+  border-color: #663a33;
+  color: #ff9d8d;
+}
+
+.entry-working .entry-chip {
+  border-color: #64736f;
+  color: #a6bbb5;
+}
+
+.entry-headline {
+  margin: 6px 0 0;
+  color: #c8d9d4;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.entry-detail {
+  max-height: 120px;
+  margin: 6px 0 0;
+  overflow: auto;
+  color: #849992;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.entry-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #79dac0;
+  font-size: 12px;
+  font-weight: 650;
+}
