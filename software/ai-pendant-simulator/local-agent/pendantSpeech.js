@@ -62,6 +62,115 @@ export function pendantSpeechPayload(pcm, opus, truncated) {
   }
 }
 
+/*
+ * Is this payload's opus track the one the relay will actually serve?
+ *
+ * Deliberately the SAME test cloud-relay's pendantSpeechForJob() applies before
+ * it prefers opus over raw PCM: right container name, Ogg magic, and enough
+ * bytes to be a real stream. Anything the relay would reject must keep its raw
+ * PCM, or the reply would arrive with no playable audio at all.
+ */
+export function hasServableOpus(speech) {
+  if (!speech || typeof speech !== 'object') return false
+  if (String(speech.compressedFormat || '').toLowerCase() !== 'ogg-opus') {
+    return false
+  }
+  const opus = Buffer.from(String(speech.compressedAudioBase64 || ''), 'base64')
+  return opus.length >= 64 && opus.toString('ascii', 0, 4) === 'OggS'
+}
+
+/**
+ * The payload as it should cross the wire to the relay.
+ *
+ * Raw `audioBase64` is 24 kHz s16le PCM: ~2.9 MB per spoken minute before
+ * base64, ~3.8 MB after. A pre-rendered research briefing is minutes long, so a
+ * single result reached ~25 MB and the relay refused the body outright (413) —
+ * the reply never landed at all. The relay does not even serve those bytes: it
+ * prefers the ~16x smaller opus track and only falls back to PCM when no usable
+ * opus exists. So when the opus track is one the relay will serve, the raw PCM
+ * is pure wire cost and is dropped here.
+ *
+ * FALLBACK, kept on purpose: when there is NO servable opus track — encoder
+ * missing or failed, a truncated stream, a payload built before opus existed —
+ * the raw PCM is left exactly as it was. It is then the only audio the pendant
+ * can play, and shipping a large body beats shipping a mute reply.
+ *
+ * Metadata (format, rate, channels, bits, pcmBytes) is always preserved: the
+ * relay validates against it, and the dashboard's TTS event reports from it.
+ * Local callers must keep using the un-stripped object — the Mac dashboard's
+ * output-side audio preview reads `audioBase64` (bridge.js
+ * reportSynthesizedSpeech), so this is applied only when building the relay
+ * body, never to the result the agent keeps for itself.
+ */
+export function pendantSpeechForWire(speech) {
+  if (!hasServableOpus(speech)) {
+    return speech
+  }
+  if (!String(speech.audioBase64 || '')) {
+    return speech
+  }
+
+  const wire = { ...speech }
+  delete wire.audioBase64
+  /* Explicit so an operator reading a stored result can tell this apart from
+   * a synthesis that produced no audio at all. */
+  wire.rawPcmOmitted = true
+  return wire
+}
+
+const WIRE_WALK_MAX_DEPTH = 8
+const WIRE_WALK_MAX_NODES = 5000
+
+/**
+ * Apply the wire form to every pendantSpeech payload a result carries, at any
+ * depth. Returns a new object; the caller's own copy (and its raw PCM) is left
+ * untouched.
+ *
+ * Depth matters: an executed plan carries its runner's output verbatim
+ * (bridge.js does `plan.execution = execution`), and a briefing action attaches
+ * its own full-length payload to the result it returns
+ * (computerControl.js). Stripping only the top level left that nested duplicate
+ * on the wire — a ~29 MB body whose D1 write then failed on size.
+ */
+export function resultForWire(result) {
+  return walkForWire(result, { nodes: 0 }, 0)
+}
+
+function walkForWire(value, state, depth) {
+  if (depth > WIRE_WALK_MAX_DEPTH || state.nodes > WIRE_WALK_MAX_NODES) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    let changed = false
+    const next = value.map((entry) => {
+      state.nodes += 1
+      const mapped = walkForWire(entry, state, depth + 1)
+      if (mapped !== entry) changed = true
+      return mapped
+    })
+    return changed ? next : value
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  /* A speech payload is recognised by its own shape, so it is handled wherever
+   * it sits rather than only under a key named `pendantSpeech`. */
+  if (typeof value.audioBase64 === 'string' && hasServableOpus(value)) {
+    return pendantSpeechForWire(value)
+  }
+
+  let changed = false
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    const mapped = walkForWire(entry, state, depth + 1)
+    if (mapped !== entry) changed = true
+    next[key] = mapped
+  }
+  return changed ? next : value
+}
+
 /**
  * What the pendant should say for a result. Always returns non-empty text —
  * a silent success is indistinguishable from a hang on a voice-first device.

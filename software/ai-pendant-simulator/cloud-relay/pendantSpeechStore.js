@@ -121,10 +121,67 @@ export async function offloadLargePendantSpeech({
   return next
 }
 
+/*
+ * Audio is not only at result.pendantSpeech. An executed plan carries its
+ * runner's output verbatim -- bridge.js does `plan.execution = execution` --
+ * and a briefing action attaches its own full-length payload to the result it
+ * returns (local-agent/computerControl.js). So the same minutes-long audio also
+ * sits at result.execution.results[i].pendantSpeech, and THAT copy is what blew
+ * the row after the top-level one was already offloaded.
+ *
+ * Only result.pendantSpeech is ever served (pendantSpeechForJob reads exactly
+ * that path), so nested copies are diagnostic duplicates: their bulky base64 is
+ * dropped rather than each getting an R2 object nothing would ever read. The
+ * descriptive metadata stays so the dashboard can still report what was
+ * rendered.
+ */
+const NESTED_AUDIO_FIELD_MAX_BYTES = 64 * 1024
+const NESTED_WALK_MAX_DEPTH = 8
+const NESTED_WALK_MAX_NODES = 5000
+
+function stripNestedSpeechAudio(value, state, depth = 0) {
+  if (depth > NESTED_WALK_MAX_DEPTH || state.nodes > NESTED_WALK_MAX_NODES) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    let changed = false
+    const next = value.map((entry) => {
+      state.nodes += 1
+      const mapped = stripNestedSpeechAudio(entry, state, depth + 1)
+      if (mapped !== entry) changed = true
+      return mapped
+    })
+    return changed ? next : value
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  let changed = false
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    if (
+      (key === 'audioBase64' || key === 'compressedAudioBase64') &&
+      typeof entry === 'string' &&
+      entry.length > NESTED_AUDIO_FIELD_MAX_BYTES
+    ) {
+      changed = true
+      next.audioOmitted = true
+      continue
+    }
+    const mapped = stripNestedSpeechAudio(entry, state, depth + 1)
+    if (mapped !== entry) changed = true
+    next[key] = mapped
+  }
+  return changed ? next : value
+}
+
 /**
  * Offload any oversized pendantSpeech carried by a bridge result, returning a
- * result safe to persist. The rest of the result (text, actions, parked
- * markers) is preserved untouched. Never throws.
+ * result safe to persist: the served payload goes to R2, and bulky duplicates
+ * nested deeper in the result are dropped. Text, actions and parked markers are
+ * preserved untouched. Never throws.
  */
 export async function offloadResultSpeechAudio({
   jobId,
@@ -135,21 +192,24 @@ export async function offloadResultSpeechAudio({
   if (!result || typeof result !== 'object') {
     return result
   }
-  const speech = result.pendantSpeech
-  if (!speech || typeof speech !== 'object') {
-    return result
-  }
 
-  const slim = await offloadLargePendantSpeech({
-    jobId,
-    speech,
-    createdAt,
-    bindings,
-  })
-  if (slim === speech) {
+  const speech = result.pendantSpeech
+  const slim =
+    speech && typeof speech === 'object'
+      ? await offloadLargePendantSpeech({ jobId, speech, createdAt, bindings })
+      : speech
+
+  // Walk everything except the served payload, which was just handled above.
+  const { pendantSpeech: _served, ...rest } = result
+  const strippedRest = stripNestedSpeechAudio(rest, { nodes: 0 })
+
+  if (slim === speech && strippedRest === rest) {
     return result
   }
-  return { ...result, pendantSpeech: slim }
+  return {
+    ...strippedRest,
+    ...(speech === undefined ? {} : { pendantSpeech: slim }),
+  }
 }
 
 /**

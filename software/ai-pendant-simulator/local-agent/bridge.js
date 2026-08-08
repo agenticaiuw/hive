@@ -22,6 +22,7 @@ import {
   pollIdleDelay,
 } from './bridgePush.js'
 import {
+  resultForWire,
   spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
@@ -543,13 +544,19 @@ export async function handleWork(work) {
        * fix ignores `parked` and records the ordinary plan_ready it already
        * uses for "plan produced, awaiting execution" — no failure, no retry.
        */
+      /*
+       * resultForWire drops the raw PCM when the opus track is one the relay
+       * will serve. It runs HERE, after reportSynthesizedSpeech() above has
+       * already sent the full-fidelity copy to the Mac dashboard's audio
+       * preview, so only the relay body shrinks.
+       */
       await completeWork(work.jobId, {
         ok:
           parkedForApproval ||
           (plan.status !== 'unsupported' && plan.executed !== false),
         parked: parkedForApproval,
         result: {
-          ...planWithSpeech,
+          ...resultForWire(planWithSpeech),
           executed: plan.executed !== false,
           phase: parkedForApproval ? 'parked_for_approval' : 'complete',
           ...(parkedForApproval
@@ -638,9 +645,11 @@ export async function handleWork(work) {
         label: 'Uploading execution result',
         detail: 'Sending the result and PCM payload back to the cloud relay.',
       })
+      // Same wire trim as the plan branch, and likewise only after
+      // reportSynthesizedSpeech() has taken its full-fidelity copy above.
       await completeWork(work.jobId, {
         ok: Boolean(execution.ok),
-        result: executionWithSpeech,
+        result: resultForWire(executionWithSpeech),
         error: execution.error ?? '',
       })
       await reportPipelineEvent(work, {
