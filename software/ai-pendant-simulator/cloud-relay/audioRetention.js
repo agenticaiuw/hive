@@ -157,6 +157,27 @@ export async function deleteStoredAudio(
   }
 }
 
+/**
+ * Bytes on both sides of the line.
+ *
+ * A sweep that reports only row counts cannot tell four seconds of recording
+ * from forty minutes of it, which makes "what did retention actually free"
+ * unanswerable — and this sweep is the one that will run against the owner's
+ * private audio if it is ever switched on. `audioBytes` is what the capture
+ * recorded for itself; a capture that never recorded one contributes nothing
+ * and is counted separately rather than guessed at.
+ */
+export function audioByteTotals(captures = []) {
+  let bytes = 0
+  let unknown = 0
+  for (const capture of captures) {
+    const value = Number(capture?.audioBytes)
+    if (Number.isFinite(value) && value >= 0) bytes += value
+    else unknown += 1
+  }
+  return { count: captures.length, bytes, unknownBytes: unknown }
+}
+
 export async function sweepExpiredAudio(
   store,
   {
@@ -174,19 +195,33 @@ export async function sweepExpiredAudio(
   })
   const expired = selectExpiredAudioCaptures(captures, { now, maxAgeMs, limit })
   const policy = audioRetentionPolicy({ maxAgeMs, now })
+  const expiredIds = new Set(expired.map((capture) => capture.jobId))
+  const kept = captures.filter((capture) => !expiredIds.has(capture.jobId))
+
+  const describe = (capture) => ({
+    captureId: capture.jobId,
+    createdAt: capture.createdAt,
+    expiresAt: audioCaptureExpiresAt(capture, { maxAgeMs }),
+    storage: capture.audioStorage || 'd1-base64',
+    audioBytes: capture.audioBytes ?? null,
+  })
+
+  const totals = {
+    scanned: audioByteTotals(captures),
+    expired: audioByteTotals(expired),
+    kept: audioByteTotals(kept),
+    /* Only meaningful on a live run; stated as zero on a dry one so the field
+     * is never absent and never has to be inferred. */
+    removed: { count: 0, bytes: 0 },
+  }
 
   if (dryRun) {
     return {
       dryRun: true,
       policy,
       scanned: captures.length,
-      expired: expired.map((capture) => ({
-        captureId: capture.jobId,
-        createdAt: capture.createdAt,
-        expiresAt: audioCaptureExpiresAt(capture, { maxAgeMs }),
-        storage: capture.audioStorage || 'd1-base64',
-        audioBytes: capture.audioBytes ?? null,
-      })),
+      totals,
+      expired: expired.map(describe),
       deleted: [],
     }
   }
@@ -201,19 +236,17 @@ export async function sweepExpiredAudio(
         bindings,
       }),
     )
+    totals.removed.count += 1
+    const bytes = Number(capture?.audioBytes)
+    if (Number.isFinite(bytes) && bytes >= 0) totals.removed.bytes += bytes
   }
 
   return {
     dryRun: false,
     policy,
     scanned: captures.length,
-    expired: expired.map((capture) => ({
-      captureId: capture.jobId,
-      createdAt: capture.createdAt,
-      expiresAt: audioCaptureExpiresAt(capture, { maxAgeMs }),
-      storage: capture.audioStorage || 'd1-base64',
-      audioBytes: capture.audioBytes ?? null,
-    })),
+    totals,
+    expired: expired.map(describe),
     deleted,
   }
 }

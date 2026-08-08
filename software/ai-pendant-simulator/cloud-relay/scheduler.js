@@ -27,6 +27,101 @@ import { createPlanJob } from './jobs.js'
 import { runDueRoutines, reapDispatchedRuns } from './routines.js'
 
 export const SCHEDULER_STATE_KEY = 'scheduler'
+export const RETENTION_STATE_KEY = 'retention'
+
+/*
+ * The clock retention never had.
+ *
+ * Both relay retention policies were reachable only by someone POSTing to an
+ * ops route by hand, which is the same as no retention: the audio sweep had
+ * never run, and announcements had no deleter at all. A policy nothing invokes
+ * is a policy the database has not heard of.
+ *
+ * This rides the tick that already exists rather than adding a second Cron
+ * Trigger (a Workers Free account gets five across all Workers). The budget
+ * rule at the top of this file still applies — a cron invocation gets 10 ms of
+ * CPU — so the sweep is rate-limited to once an hour against a shared durable
+ * timestamp, the modules are imported lazily so a tick that is not due pays
+ * nothing to parse them, and every statement is I/O, which costs no CPU.
+ *
+ * WHAT RUNS AND WHAT DOES NOT:
+ *   - Announcements sweep for real, unless ANNOUNCEMENT_RETENTION_SWEEP_ENABLED
+ *     is set to false. They are relay-composed text with a six-hour deadline
+ *     that no reader will honour past its expiry anyway.
+ *   - Audio is dry-run unless AUDIO_RETENTION_SWEEP_ENABLED is true, which is
+ *     how it already shipped (wrangler.jsonc sets it to "false") and how it
+ *     stays. Recordings are the owner's private voice and nothing but the owner
+ *     should decide that a timer may delete them. Wiring it here means the flag
+ *     now does what it always claimed to do; it does not change what the flag
+ *     is set to.
+ */
+async function runRetentionSweeps({ store, now, logger, force = false }) {
+  const {
+    RETENTION_SWEEP_MIN_INTERVAL_MS,
+    ANNOUNCEMENT_RETENTION_SWEEP_ENABLED,
+    AUDIO_RETENTION_SWEEP_ENABLED,
+  } = await import('./config.js')
+
+  if (!force) {
+    const state = await store.getState(RETENTION_STATE_KEY).catch(() => null)
+    const lastSweptAt = Date.parse(state?.data?.sweptAt || '') || 0
+    if (now - lastSweptAt < RETENTION_SWEEP_MIN_INTERVAL_MS) return null
+  }
+
+  const summary = { sweptAt: new Date(now).toISOString() }
+
+  const { sweepExpiredAnnouncements } = await import('./announceRetention.js')
+  summary.announcements = await sweepExpiredAnnouncements(store, {
+    now,
+    dryRun: !ANNOUNCEMENT_RETENTION_SWEEP_ENABLED,
+  })
+    .then((report) => ({
+      dryRun: report.dryRun,
+      scanned: report.scanned,
+      removed: report.removed,
+      kept: report.kept,
+      eligible: report.eligible.length,
+      failed: report.failed.length,
+    }))
+    .catch((error) => ({ error: String(error?.message ?? error) }))
+
+  const { sweepExpiredAudio } = await import('./audioRetention.js')
+  summary.audio = await sweepExpiredAudio(store, {
+    now,
+    /* The one line that decides whether the owner's recordings are deleted.
+     * Left exactly as the deployment set it. */
+    dryRun: !AUDIO_RETENTION_SWEEP_ENABLED,
+  })
+    .then((report) => ({
+      dryRun: report.dryRun,
+      scanned: report.scanned,
+      expired: report.expired.length,
+      totals: report.totals,
+    }))
+    .catch((error) => ({ error: String(error?.message ?? error) }))
+
+  /* Written whether or not anything was removed: "the sweep ran and found
+   * nothing" and "the sweep never ran" are different answers and only one of
+   * them is fine. */
+  await store
+    .saveState(RETENTION_STATE_KEY, summary, { updatedBy: 'scheduler:retention' })
+    .catch(() => {})
+
+  const removed = summary.announcements?.removed?.count || 0
+  if (removed) {
+    logger?.log?.(
+      `[retention] announcements removed=${removed} bytes=${summary.announcements.removed.bytes}` +
+        ` kept=${summary.announcements.kept?.count ?? '?'}`,
+    )
+  }
+  return summary
+}
+
+/** Sweep on demand, past the once-an-hour gate. For an ops route or a test. */
+export async function runRetentionNow({ now = Date.now(), logger = console } = {}) {
+  const store = await getStore()
+  return runRetentionSweeps({ store, now, logger, force: true })
+}
 
 /* Matches isDeviceOnline() in server.js — one definition of "awake" for the
  * whole relay, or the dashboard and the scheduler will disagree about the Mac. */
@@ -114,6 +209,16 @@ export async function runScheduledTick({
     return []
   })
 
+  /* Retention rides the same tick. Rate-limited to once an hour inside, and it
+   * can never fail a tick: a schedule that stops keeping its promises because
+   * a delete went wrong is a strictly worse outcome than a late sweep. */
+  const retention = await runRetentionSweeps({ store, now, logger }).catch(
+    (error) => {
+      logger?.warn?.(`[retention] sweep failed: ${error?.message || error}`)
+      return { error: String(error?.message ?? error) }
+    },
+  )
+
   /*
    * Retries are counted separately from failures on purpose. A tick reporting
    * ranCount=1 failed=1 looks like a broken schedule; the same tick reporting
@@ -140,6 +245,8 @@ export async function runScheduledTick({
     failedCount,
     macOnline,
     statuses: runs.map((run) => `${run.routineId}:${run.status}`),
+    /* null on the 59 ticks an hour that are inside the rate limit. */
+    retention: retention ?? null,
   }
 
   /*

@@ -60,6 +60,48 @@ export const ANNOUNCE_PUSH_CONTROL_FRAMES =
     .trim()
     .toLowerCase() === 'true'
 
+/*
+ * How long a dead announcement's TEXT is kept after it stops being deliverable.
+ *
+ * An announcement already carries its own deadline: createAnnouncement() stamps
+ * expiresAt from ANNOUNCEMENT_DEFAULT_TTL_MS (6 hours), and announcementIsLive()
+ * refuses anything past it, so an expired row can never be spoken again by any
+ * path. That was the whole enforcement — the row itself was kept forever, and
+ * with it whatever the routine scraped off the public web to compose it.
+ *
+ * This is the grace between "can no longer be delivered" and "is deleted". A
+ * day, so the dashboard can still show that a briefing went unheard, and so a
+ * clock skew between the relay and D1 can never turn into an early delete.
+ *
+ * PROPOSED, not inherited: nothing in the codebase stated a grace before now.
+ */
+export const ANNOUNCEMENT_RETENTION_DEFAULT_GRACE_MS = 1000 * 60 * 60 * 24
+export const ANNOUNCEMENT_RETENTION_GRACE_MS =
+  Number(process.env.ANNOUNCEMENT_RETENTION_GRACE_MS) > 0
+    ? Number(process.env.ANNOUNCEMENT_RETENTION_GRACE_MS)
+    : ANNOUNCEMENT_RETENTION_DEFAULT_GRACE_MS
+
+/*
+ * Unlike AUDIO_RETENTION_SWEEP_ENABLED this defaults ON, and the difference is
+ * deliberate. Deleting a voice recording destroys something irreplaceable that
+ * only the owner ever had. Deleting an expired announcement destroys text that
+ * (a) the relay composed itself, (b) every reader already refuses to use, and
+ * (c) is a copy of a public page. Keeping it was not caution, it was a leak
+ * with a policy printed on it. Set ANNOUNCEMENT_RETENTION_SWEEP_ENABLED=false
+ * to turn it back off.
+ */
+export const ANNOUNCEMENT_RETENTION_SWEEP_ENABLED =
+  String(process.env.ANNOUNCEMENT_RETENTION_SWEEP_ENABLED || 'true')
+    .trim()
+    .toLowerCase() !== 'false'
+
+/* One sweep an hour is plenty for a 6h TTL plus a 24h grace, and it keeps the
+ * cron tick — which gets 10 ms of CPU on Workers Free — from paying for a D1
+ * round trip every single minute. */
+export const RETENTION_SWEEP_MIN_INTERVAL_MS = Number(
+  process.env.RETENTION_SWEEP_MIN_INTERVAL_MS || 60 * 60 * 1000,
+)
+
 // OpenAI only (no OpenRouter / multi-provider router).
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''
 export const OPENAI_API_BASE_URL =
