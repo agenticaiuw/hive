@@ -21,6 +21,7 @@ import {
   setOutputVolume,
 } from './systemControls.js'
 import { createReminder } from './reminders.js'
+import { childEnv } from './childEnv.js'
 import { runCapabilityGapAction } from './capabilityGapsActions.js'
 import {
   getCurrentInputSource,
@@ -747,7 +748,11 @@ async function runShell(action) {
     cwd,
     timeout,
     maxBuffer: 10 * 1024 * 1024,
-    env: process.env,
+    /* Was `process.env`, which handed the relay key, the agent token and the
+     * session secret to every command the planner produced. One `printenv` put
+     * them in stdout, and stdout is stored on the job and read back into later
+     * prompts. */
+    env: childEnv(),
   })
 
   const output = trimOutput(stdout || stderr || 'Command completed.')
