@@ -171,13 +171,180 @@ export function forgetFact(idOrKey, { filePath = FACTS_PATH } = {}) {
 }
 
 export function listFacts(
-  { kind = null, surface = null, includeExpired = false, now = Date.now() } = {},
+  {
+    kind = null,
+    surface = null,
+    includeExpired = false,
+    includeRevoked = false,
+    now = Date.now(),
+  } = {},
   { filePath = FACTS_PATH } = {},
 ) {
   return readFactStore({ filePath })
-    .facts.filter((fact) => (kind ? fact.kind === kind : true))
+    .facts.filter((fact) => (includeRevoked ? true : !fact.revocation))
+    .filter((fact) => (kind ? fact.kind === kind : true))
     .filter((fact) => (surface ? servesSurface(fact, surface) : true))
     .filter((fact) => (includeExpired ? true : !isExpired(fact, now)))
+}
+
+/* ------------------------------------------------- evidence → derived facts */
+
+/**
+ * Which stored facts stand on a given set of evidence capsules.
+ *
+ * TWO STRENGTHS OF MATCH, and they are reported separately because they do not
+ * mean the same thing:
+ *
+ *   'capsuleId' — the fact records this exact capsule. Proof, not inference.
+ *
+ *   'source-url' / 'source-host' — the fact records the page (or the site) the
+ *   capsule was read from, but no capsule id. This is every fact written before
+ *   the join existed; the two United fare observations on this machine are
+ *   exactly that shape. It is an inference, and it is the RIGHT one to act on
+ *   here: the owner revoking a page is saying "forget what you read there", and
+ *   a fact whose own provenance names that page is what they mean. Reported as
+ *   inferred so the distinction survives into the receipt.
+ *
+ * Nothing else matches. A fact with no url and no capsule is never swept up by
+ * a page revocation on a guess.
+ */
+export function factsForCapsules(
+  { capsuleIds = [], url = null, host = null } = {},
+  { filePath = FACTS_PATH } = {},
+) {
+  const wanted = new Set(capsuleIds.filter(Boolean))
+  const pageKey = normalizePageKey(url)
+  const wantedHost = normalizeHostKey(host)
+
+  const matches = []
+  for (const fact of readFactStore({ filePath }).facts) {
+    const carried = Array.isArray(fact.source?.capsuleIds)
+      ? fact.source.capsuleIds
+      : []
+    const byCapsule = carried.filter((id) => wanted.has(id))
+    if (byCapsule.length) {
+      matches.push({ fact, matchedBy: 'capsuleId', capsuleIds: byCapsule, inferred: false })
+      continue
+    }
+    if (pageKey && normalizePageKey(fact.source?.url) === pageKey) {
+      matches.push({ fact, matchedBy: 'source-url', capsuleIds: [], inferred: true })
+      continue
+    }
+    if (wantedHost && normalizeHostKey(fact.source?.host) === wantedHost) {
+      matches.push({ fact, matchedBy: 'source-host', capsuleIds: [], inferred: true })
+    }
+  }
+  return matches
+}
+
+/**
+ * Revoke the facts derived from revoked evidence.
+ *
+ * Mirrors what revokeCapsules does to a capsule, and deliberately so: the VALUE
+ * is removed from disk, every identifying field stays, and the row becomes a
+ * tombstone that proves a claim was made and withdrawn. A read-side filter
+ * would not have been enough — the bytes of the claim would still be sitting in
+ * facts.json, and "revoked" that you can still read is not revoked.
+ *
+ * Already-revoked facts are counted, not re-revoked: the first revocation's
+ * timestamp and reason are the true ones.
+ */
+export function revokeFactsForCapsules(
+  { capsuleIds = [], url = null, host = null, reason = '', now = Date.now() } = {},
+  { filePath = FACTS_PATH } = {},
+) {
+  const matches = factsForCapsules({ capsuleIds, url, host }, { filePath })
+  const revokedAt = new Date(now).toISOString()
+  const store = readFactStore({ filePath })
+  const byId = new Map(store.facts.map((fact) => [fact.id, fact]))
+
+  const revoked = []
+  const alreadyRevoked = []
+  let bytesRemoved = 0
+
+  for (const match of matches) {
+    const fact = byId.get(match.fact.id)
+    if (!fact) continue
+    if (fact.revocation) {
+      alreadyRevoked.push(receiptFor(fact, match))
+      continue
+    }
+
+    bytesRemoved +=
+      Buffer.byteLength(String(fact.value ?? ''), 'utf8') +
+      Buffer.byteLength(String(fact.previousValue ?? ''), 'utf8')
+
+    fact.value = null
+    fact.previousValue = null
+    /* Surfaces are what would put it in a prompt; an empty list is one more
+     * thing that has to go wrong before a revoked claim can be spoken. */
+    fact.surfaces = []
+    fact.revocation = {
+      revokedAt,
+      reason: String(reason || '').slice(0, 200) || null,
+      matchedBy: match.matchedBy,
+      inferred: match.inferred,
+      capsuleIds: match.capsuleIds,
+    }
+    fact.updatedAt = revokedAt
+    revoked.push(receiptFor(fact, match))
+  }
+
+  if (revoked.length) writeFactStore(store, filePath)
+
+  return {
+    revoked,
+    alreadyRevoked,
+    matched: revoked.length + alreadyRevoked.length,
+    /* Counts and bytes, like every other sweep in this codebase. */
+    removedCount: revoked.length,
+    removedBytes: bytesRemoved,
+    keptCount: store.facts.filter((fact) => !fact.revocation).length,
+    keptBytes: store.facts
+      .filter((fact) => !fact.revocation)
+      .reduce((total, fact) => total + Buffer.byteLength(JSON.stringify(fact), 'utf8'), 0),
+    note: 'Values are gone from disk. The rows remain as proof a claim was made and withdrawn.',
+  }
+}
+
+function receiptFor(fact, match) {
+  return {
+    id: fact.id,
+    key: fact.key,
+    kind: fact.kind,
+    matchedBy: match.matchedBy,
+    inferred: match.inferred,
+    capsuleIds: match.capsuleIds,
+    source: { url: fact.source?.url ?? null, host: fact.source?.host ?? null },
+    revokedAt: fact.revocation?.revokedAt ?? null,
+  }
+}
+
+/*
+ * Byte-for-byte the key evidenceCapsules.normalizeSource() builds: origin plus
+ * path, lowercased, query and fragment dropped. Two normalizers that ALMOST
+ * agree are worse than none — strip a trailing slash on one side only and a
+ * revocation of a site's root page silently matches nothing.
+ */
+function normalizePageKey(url) {
+  if (!url) return null
+  const text = String(url).trim()
+  try {
+    const parsed = new URL(text)
+    return `${parsed.origin}${parsed.pathname}`.toLowerCase()
+  } catch {
+    return text.toLowerCase() || null
+  }
+}
+
+/*
+ * A capsule records parsed.host ("www.united.com"); a fact records hostOf(),
+ * which strips the www. Comparing them raw meant a host revocation matched
+ * nothing on exactly the sites that use the prefix.
+ */
+function normalizeHostKey(host) {
+  if (!host) return null
+  return String(host).trim().toLowerCase().replace(/^www\./, '') || null
 }
 
 /**
@@ -221,8 +388,20 @@ export function pruneFacts(
   const store = readFactStore({ filePath })
   const removed = []
   const kept = []
+  /*
+   * A revoked fact has no value left to expire, to go idle, or to crowd a
+   * prompt — it is an audit row of a few hundred bytes. Running it through the
+   * rules below would let a burst of revocations push LIVE facts out of a kind
+   * that is at its cap, which is a store deleting real content to make room for
+   * proof that it deleted content. It is set aside and re-attached at the end.
+   */
+  const revokedRows = []
 
   for (const fact of store.facts) {
+    if (fact.revocation) {
+      revokedRows.push(fact)
+      continue
+    }
     if (isExpired(fact, now)) {
       removed.push({ ...fact, reason: 'expired' })
       continue
@@ -250,19 +429,35 @@ export function pruneFacts(
     }
   }
 
+  /* Revoked rows rejoin the store untouched. Dropping them here would erase
+   * the record that a claim was withdrawn the first time anything pruned. */
+  const finalFacts = [...survivors, ...revokedRows]
+
   if (removed.length) {
-    store.facts = survivors
+    store.facts = finalFacts
     writeFactStore(store, filePath)
   }
 
   return {
     removed: removed.length,
     kept: survivors.length,
+    revokedKept: revokedRows.length,
+    /* Bytes as well as counts: a prune that reports only rows cannot tell a
+     * store that shed four preferences from one that shed a scraped page. */
+    removedBytes: factBytes(removed),
+    keptBytes: factBytes(finalFacts),
     reasons: removed.reduce((counts, fact) => {
       counts[fact.reason] = (counts[fact.reason] || 0) + 1
       return counts
     }, {}),
   }
+}
+
+function factBytes(facts) {
+  return facts.reduce(
+    (total, fact) => total + Buffer.byteLength(JSON.stringify(fact), 'utf8'),
+    0,
+  )
 }
 
 /**
@@ -275,9 +470,26 @@ export function pruneFacts(
  * here rather than trusted, because the caller is a scraper.
  */
 export function rememberBrowserFindings(
-  { jobId = null, url = null, retrievedAt = null, findings = [], now = undefined } = {},
+  {
+    jobId = null,
+    url = null,
+    retrievedAt = null,
+    findings = [],
+    now = undefined,
+    /*
+     * Which reading this batch came off. Accepted at the batch level because
+     * that is how the browser path works — one page read, one capsule, several
+     * claims lifted out of it — and per-finding as well, for a caller that
+     * folded more than one page into a single report. Both are optional: a
+     * finding with no capsule is still a fact, it is just one that revocation
+     * can only reach by page.
+     */
+    capsuleId = null,
+    capsuleIds = [],
+  } = {},
   { filePath = FACTS_PATH } = {},
 ) {
+  const batchCapsuleIds = normalizeCapsuleIds({ capsuleId, capsuleIds })
   // The lease starts when the page was read, not when the job got around to
   // reporting: a finding from a job that ran an hour ago is an hour stale.
   const reported = Date.parse(retrievedAt || '')
@@ -299,7 +511,17 @@ export function rememberBrowserFindings(
           kind: 'observation',
           value,
           surfaces: finding?.surfaces || [],
-          source: { origin: 'browser-job', url, host, jobId, at },
+          source: {
+            origin: 'browser-job',
+            url,
+            host,
+            jobId,
+            at,
+            capsuleIds: [
+              ...batchCapsuleIds,
+              ...normalizeCapsuleIds(finding || {}),
+            ],
+          },
           confidence: finding?.confidence ?? 0.6,
           sensitivity: finding?.sensitivity || null,
           ttlMs: finding?.ttlMs ?? BROWSER_TTL_MS,
@@ -423,7 +645,7 @@ function normalizeSurfaces(surfaces) {
 
 function normalizeSource(source, nowIso) {
   if (!source || typeof source !== 'object') {
-    return { origin: String(source || 'local'), at: nowIso }
+    return { origin: String(source || 'local'), at: nowIso, capsuleIds: [] }
   }
   return {
     origin: String(source.origin || 'local'),
@@ -431,8 +653,35 @@ function normalizeSource(source, nowIso) {
     host: source.host || hostOf(source.url),
     jobId: source.jobId || null,
     entityId: source.entityId || null,
+    /*
+     * The evidence this fact stands on.
+     *
+     * This field is the whole reason revoking a capsule can reach anything.
+     * Without it a fact carried a url and a jobId — enough to say roughly where
+     * it came from, not enough to join back to the specific reading — so
+     * "forget what you read on that page" removed the capsule and left every
+     * claim derived from it sitting in the prompt. A whitelist normalizer that
+     * silently dropped an unknown key made that unfixable from the call site:
+     * a writer could pass capsuleId and it would simply not be stored.
+     */
+    capsuleIds: normalizeCapsuleIds(source),
     at: source.at || nowIso,
   }
+}
+
+export function normalizeCapsuleIds(input) {
+  const raw = [
+    ...(Array.isArray(input?.capsuleIds) ? input.capsuleIds : []),
+    input?.capsuleId,
+  ]
+  return [
+    ...new Set(
+      raw
+        .filter((id) => typeof id === 'string')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ]
 }
 
 function clampConfidence(value) {

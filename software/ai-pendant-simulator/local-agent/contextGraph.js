@@ -3,6 +3,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  applyContextGraphRetention,
+  contextGraphBytes,
+  contextGraphRetentionPolicy,
+} from './contextGraphRetention.js'
+
 export function resolveContextGraphPath(moduleUrl = import.meta.url) {
   return path.join(
     path.dirname(fileURLToPath(moduleUrl)),
@@ -593,8 +599,86 @@ function ensureGraph() {
   }
 }
 
-function writeGraph(graph) {
-  const normalized = normalizeGraph(graph)
+/*
+ * The last time the byte bound actually removed something, so a report can be
+ * asked for after the fact rather than only observed as a smaller file. Reset
+ * on nothing: it is the most recent enforcement, not a running total.
+ */
+let lastRetentionReport = null
+
+export function lastContextGraphRetention() {
+  return lastRetentionReport
+}
+
+/** What the store costs on disk right now, in the units the bound is written in. */
+export function contextGraphSize({ now = Date.now() } = {}) {
+  const graph = readContextGraph()
+  const policy = contextGraphRetentionPolicy()
+  const { report } = applyContextGraphRetention(graph, { now, policy })
+  return {
+    path: graphPath,
+    bytes: contextGraphBytes(graph),
+    entities: graph.entities.length,
+    relations: graph.relations.length,
+    tombstones:
+      graph.tombstones.entities.length + graph.tombstones.relations.length,
+    policy,
+    /* What enforcement WOULD do from here. Read-only: nothing is written. */
+    wouldRemove: report.removed,
+    lastEnforcement: lastRetentionReport,
+  }
+}
+
+/**
+ * Enforce the bound now and write the result.
+ *
+ * Every write already goes through the same pass (see writeGraph), so this is
+ * for asking on purpose rather than for correctness — a machine that has not
+ * executed anything in a week never calls writeGraph and would sit over budget
+ * with nobody to notice.
+ */
+export function sweepContextGraph({ now = Date.now(), policy } = {}) {
+  const graph = readContextGraph()
+  const { graph: next, report, changed } = applyContextGraphRetention(graph, {
+    now,
+    policy: policy || contextGraphRetentionPolicy(),
+  })
+  if (changed) {
+    next.updatedAt = new Date(now).toISOString()
+    writeGraph(next, { retention: false })
+    lastRetentionReport = { ...report, enforcedAt: new Date(now).toISOString() }
+  }
+  return report
+}
+
+/*
+ * `retention: false` exists for the two callers that must not be second-guessed
+ * mid-write: sweepContextGraph, which has already applied the pass and would
+ * otherwise apply it twice, and the recursive call below.
+ */
+function writeGraph(graph, { retention = true } = {}) {
+  let normalized = normalizeGraph(graph)
+
+  /*
+   * The bound is enforced HERE, at the one choke point every mutation goes
+   * through, rather than on a timer. A store that is only over budget between
+   * sweeps is a store that is over budget, and the append path — one Action
+   * entity plus its relations per executed step — is the only thing that ever
+   * makes it grow. Enforcing where the growth happens means the file on disk
+   * is never larger than the policy says it is, which is the difference
+   * between a bound and a preference.
+   */
+  if (retention) {
+    const { graph: bounded, report, changed } = applyContextGraphRetention(
+      normalized,
+      { now: Date.now() },
+    )
+    if (changed) {
+      normalized = normalizeGraph(bounded)
+      lastRetentionReport = { ...report, enforcedAt: new Date().toISOString() }
+    }
+  }
+
   const serialized = `${JSON.stringify(normalized, null, 2)}\n`
   const temporaryPath = `${graphPath}.${process.pid}.${crypto.randomUUID()}.tmp`
   let descriptor
