@@ -717,6 +717,17 @@ function normalizeSource(source, nowIso) {
      * a writer could pass capsuleId and it would simply not be stored.
      */
     capsuleIds: normalizeCapsuleIds(source),
+    /*
+     * How a machine-origin value was sampled, so it can be re-read later.
+     *
+     * Same lesson as capsuleIds, one field along: this whitelist would have
+     * dropped `probe` silently, and a writer naming its probe would have had no
+     * way to tell. Without it a sampled fact records only that a machine said
+     * so and when — which is why preference.timezone has sat at confidence 0.99
+     * with a null expiry disagreeing with the host, unverifiable rather than
+     * merely unverified. See sampledFacts.js.
+     */
+    probe: source.probe || null,
     at: source.at || nowIso,
   }
 }
