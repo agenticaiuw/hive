@@ -14,7 +14,7 @@
  *   node scripts/orchestrate.mjs --cycles 8 --slots 3
  *   node scripts/orchestrate.mjs --agents unified,mac-planner --dry-run
  */
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -163,6 +163,33 @@ let ran = 0
 let failed = 0
 let consecutiveFailures = 0
 for (; cycle < CYCLES; cycle += 1) {
+  /*
+   * Republish the live capability manifest before deciding who runs.
+   *
+   * Twice tonight this loop stopped on "nobody is eligible", correctly, while
+   * a dozen capabilities had just shipped underneath it. The agents could only
+   * learn a route existed by probing for it, they only probe while running,
+   * and they only run while something is new — so a system that changed under
+   * them was invisible precisely because it had gone quiet.
+   *
+   * Cheap by construction: the deposit is content-addressed, so an unchanged
+   * surface is a re-confirmation and wakes nobody, and re-confirmation is
+   * explicitly not novelty. It costs one local HTTP call per cycle and only
+   * matters on the cycle where something actually shipped.
+   *
+   * Failure is deliberately silent here: the agent being down is a normal
+   * state, this loop's job is not to babysit it, and publish-capabilities
+   * already refuses to deposit a guess when it cannot read the live manifest.
+   */
+  try {
+    execFileSync(process.execPath, [path.join(HERE, 'publish-capabilities.mjs')], {
+      stdio: 'ignore',
+      timeout: 30_000,
+    })
+  } catch {
+    /* nothing published; the cycle proceeds on whatever the commons already has */
+  }
+
   const { run, held } = schedule(OUT_DIR, AGENTS, {
     cycle,
     unreadMail: unreadMailByAgent(),
