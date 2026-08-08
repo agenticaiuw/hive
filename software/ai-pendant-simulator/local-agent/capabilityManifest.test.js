@@ -117,6 +117,51 @@ test('the dispatch table is parsed from the switch, so it cannot go stale', () =
   assert.deepEqual([...SUPPORTED_ACTION_TYPES], cases)
 })
 
+/*
+ * The manifest is read by a matcher, not a person: shared/capabilityRegistry.js
+ * scores a caller's request against what each capability SAYS about itself, so
+ * a type with no description is reachable only by spelling its name. All 95
+ * action types shipped that way once, which is why this is a test and not a
+ * comment. A new dispatch case failing here needs a line in llmPlanner's action
+ * schema (preferred — the planner needs it too) or in ACTION_NOTES.
+ */
+test('every dispatchable action type says what it does', () => {
+  const described = describeActions()
+
+  assert.deepEqual(
+    described.undocumented,
+    [],
+    'dispatchable but undescribed, so nothing can find them by meaning',
+  )
+  for (const entry of described.types) {
+    assert.equal(typeof entry.what, 'string', `${entry.type} has no description`)
+  }
+})
+
+test('a route says what IT does, not only what its family does', () => {
+  const app = sampleApp()
+  app.get('/brand-new-surface', (_request, response) => response.end())
+  // A route inside a documented family that nobody has written a line for yet.
+  app.get('/jobs/:jobId/not-written-up-yet', (_request, response) => response.end())
+
+  const manifest = buildCapabilityManifest(app)
+  const byPath = (path) => manifest.http.routes.find((route) => route.path === path)
+
+  // Siblings in one family used to be indistinguishable to a matcher.
+  assert.notEqual(byPath('/jobs').what, byPath('/jobs/:jobId/undo').what)
+  assert.match(byPath('/jobs/:jobId/undo').what, /undo|revert|reverse/i)
+
+  // A route with no line of its own still inherits its family's, so an
+  // unannotated route is never worse off than it was before this table existed.
+  assert.equal(
+    byPath('/jobs/:jobId/not-written-up-yet').what,
+    manifest.http.groups.find((group) => group.group === 'jobs').what,
+  )
+
+  // Rot stays visible in the manifest's own output rather than in a comment.
+  assert.deepEqual(manifest.http.undocumentedRoutes, ['GET /brand-new-surface'])
+})
+
 test('the planner default model in the manifest matches llmPlanner', () => {
   const source = fs.readFileSync(
     new URL('./llmPlanner.js', import.meta.url),
