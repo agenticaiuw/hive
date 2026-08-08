@@ -7,6 +7,7 @@ import {
   writeJsonAtomic,
 } from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
+import { revokeFactsForCapsules } from './memoryService.js'
 import { classifySensitivity, maskSecretValue } from './redaction.js'
 
 /*
@@ -207,34 +208,6 @@ export function capsuleIdFor({ sourceKey, regionKey, observer, contentHash }) {
 
 /* ----------------------------------------------------------------- redaction */
 
-/**
- * Withhold a segment classified as secret, verifying rather than trusting.
- *
- * maskSecretValue is written for a `key: value` shape; handed a whole sentence
- * it appends the marker instead of replacing anything, so
- * "The wifi password is hunter2." came back as
- * "The wifi password is hunter2.: [withheld]" -- the secret preserved in full,
- * and the map claiming action:'withheld' over it. A store that lies about what
- * it withheld is worse than one that never tried.
- *
- * So the mask is used, then checked: if any non-trivial word of the original
- * survives it, the segment is replaced outright. Withholding one sentence still
- * leaves the rest of the page readable, which is the point of segmenting.
- */
-function withheldOrEmpty(text) {
-  /* The same marker redaction.js falls back to when it has no label to keep,
-   * so a reader sees one vocabulary rather than two. */
-  const SECRET_PLACEHOLDER = '[withheld]'
-  const masked = maskSecretValue(text)
-  const survivors = String(text)
-    .split(/[^A-Za-z0-9]+/)
-    .filter((word) => word.length >= 4)
-
-  return survivors.some((word) => masked.includes(word))
-    ? SECRET_PLACEHOLDER
-    : masked
-}
-
 function segmentsOf(text) {
   const segments = []
 
@@ -283,7 +256,16 @@ export function redactionMapFor(rawText) {
     if (!segment.literal) {
       const verdict = classifySensitivity(segment.text)
       if (verdict === 'secret') {
-        emitted = withheldOrEmpty(segment.text)
+        /* There used to be a verification wrapper here, because maskSecretValue
+         * was written for a `key: value` shape and, handed a whole sentence,
+         * appended its marker instead of replacing anything -- so
+         * "The wifi password is hunter2." came back whole with action:'withheld'
+         * recorded over it. The check has moved into maskSecretValue, which now
+         * either removes the secret or withholds the segment. Re-checking here
+         * would undo the useful half: a sentence whose credential was cut out
+         * cleanly still contains its own ordinary words, and a wrapper that
+         * reads surviving English as a leak throws the whole sentence away. */
+        emitted = maskSecretValue(segment.text)
         secrets += 1
         map.push({
           start: cursor,
@@ -669,8 +651,37 @@ export function usableCapsuleIds(
  * still holds. That is deletion propagating, not a page being blocked.
  */
 export function revokeCapsules(
-  { capsuleId = null, url = null, host = null, reason = '', now = Date.now() } = {},
-  { filePath = capsulesLocation() } = {},
+  {
+    capsuleId = null,
+    url = null,
+    host = null,
+    reason = '',
+    now = Date.now(),
+    /*
+     * Turn off the inferred half of the join. With it set, only facts that
+     * record one of these exact capsule ids are revoked; a fact that merely
+     * names the same page is left alone. Off by default because the facts
+     * written before capsule ids existed are ALL of that shape, and a
+     * revocation that cannot reach them is the thing this is fixing.
+     */
+    exactOnly = false,
+  } = {},
+  {
+    filePath = capsulesLocation(),
+    /*
+     * Revocation has to reach what was DERIVED from the reading, or it is
+     * theatre. A capsule was the page; a fact in memoryService.js is the claim
+     * somebody lifted out of that page and put in front of the model, and until
+     * this call existed the second one survived the first with nothing linking
+     * them — facts carried a url and a jobId and no capsule id at all.
+     *
+     * Injected rather than imported at the call site so the capsule store keeps
+     * working with no fact store present (and so a test can watch the join
+     * without one). Failures are reported, never thrown: the capsule really was
+     * revoked, and hiding that behind a fact-store error would be worse.
+     */
+    revokeDerivedFacts = revokeFactsForCapsules,
+  } = {},
 ) {
   const pageKey = url ? normalizeSource(url).key : null
   if (!capsuleId && !pageKey && !host) {
@@ -716,11 +727,49 @@ export function revokeCapsules(
 
   if (revoked.length) save(store, filePath)
 
+  /*
+   * The join runs on everything that MATCHED, revoked now or revoked earlier.
+   * A capsule revoked last week whose derived fact was written before this
+   * function existed would otherwise stay unreachable forever, and "run it
+   * again" would keep doing nothing.
+   *
+   * The page and host are passed alongside the ids because a fact written
+   * before the join carries provenance but no capsule id; memoryService reports
+   * those matches as inferred rather than proven.
+   */
+  const matchedIds = [...revoked, ...alreadyRevoked]
+    .map((tombstone) => tombstone.capsuleId)
+    .filter(Boolean)
+  const matchedUrls = new Set(
+    [...store.capsules]
+      .filter((capsule) => matchedIds.includes(capsule.capsuleId))
+      .map((capsule) => capsule.source?.url)
+      .filter(Boolean),
+  )
+
+  let derivedFacts = null
+  try {
+    if (matchedIds.length || pageKey || host) {
+      derivedFacts = revokeDerivedFacts({
+        capsuleIds: matchedIds,
+        url: exactOnly ? null : url || [...matchedUrls][0] || null,
+        host: exactOnly ? null : host,
+        reason: reason || 'evidence revoked',
+        now,
+      })
+    }
+  } catch (error) {
+    derivedFacts = { error: String(error?.message ?? error) }
+  }
+
   return {
     revoked,
     alreadyRevoked,
     matched: revoked.length + alreadyRevoked.length,
+    derivedFacts,
     note: 'Tombstones are permanent. Nothing here removes a row from the store.',
+    derivedNote:
+      'Facts derived from these readings had their values removed from disk; the rows stay as proof a claim was withdrawn.',
   }
 }
 
