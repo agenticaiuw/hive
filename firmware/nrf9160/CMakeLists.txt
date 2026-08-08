@@ -98,6 +98,8 @@ target_sources(app PRIVATE
   src/pendant_cloud.c
   src/pendant_ws.c
   src/pendant_store.c
+  src/pendant_reflex.c
+  src/haptic.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

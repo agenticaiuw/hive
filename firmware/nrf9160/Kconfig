@@ -93,4 +93,21 @@ config PENDANT_BOOT_AGENT_JOB_ID
 	  When non-empty, download the Mac-generated pendantSpeech payload from
 	  this relay job after LTE initialization. Leave empty in production.
 
+config PENDANT_REFLEX_SELFTEST
+	bool "Debug: install a reflex test recipe at boot when the card has none"
+	default n
+	help
+	  The microSD card cannot be mounted from the host, so a bare card
+	  cannot carry a hand-written recipes.json for bring-up.  With this
+	  option, a boot that finds NO recipes.json installs a RAM-only armed
+	  10-second countdown recipe (id=1: LED burst + haptic double + chime)
+	  exercising every reflex action kind, including the full I2S chime
+	  path, without any file on the card.
+
+	  RAM-only is the safety property: the test recipe is never written to
+	  the card, cannot masquerade as an owner-installed recipe, and stops
+	  appearing the moment a real recipes.json exists.  It costs no RAM
+	  beyond the recipe table slot it borrows.  Leave off in production
+	  builds; enable via reflex-selftest.conf for hardware verification.
+
 source "Kconfig.zephyr"
