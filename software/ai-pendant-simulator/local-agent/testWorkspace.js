@@ -35,6 +35,18 @@ export const testWorkspacePath = fs.mkdtempSync(
 
 process.env.PENDANT_WORKSPACE_PATH = testWorkspacePath
 
+/*
+ * capabilityGapInbox.js mirrors each NEW gap into the design commons — by
+ * default the real diagnostics/harness-derivation at the repo root, which the
+ * design committee reads. A test that trips any gap writer must not wake the
+ * committee on fiction, so the commons is pointed into this temp workspace
+ * too (created eagerly: a missing directory makes the inbox skip the deposit,
+ * and tests should exercise the deposit path, not the skip path). Production
+ * never sets PENDANT_COMMONS_DIR; only this file does.
+ */
+process.env.PENDANT_COMMONS_DIR = path.join(testWorkspacePath, 'harness-derivation')
+fs.mkdirSync(process.env.PENDANT_COMMONS_DIR, { recursive: true })
+
 process.on('exit', () => {
   try {
     fs.rmSync(testWorkspacePath, { force: true, recursive: true })

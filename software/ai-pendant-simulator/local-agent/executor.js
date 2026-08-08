@@ -3,6 +3,7 @@ import path from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { FULL_CONTROL_MODE, allowedApps, allowedUrls, projectPaths, workspacePath } from './config.js'
+import { recordGapSafely } from './capabilityGapInbox.js'
 import { executeComputerAction } from './computerControl.js'
 import { buildActionReceipt, observeBeforeAction } from './actionReceipts.js'
 import {
@@ -31,6 +32,21 @@ export async function executeActions(actions) {
         ? await executeComputerAction(action)
         : await executeSafeAction(action)
     } catch (error) {
+      /*
+       * A plan step no dispatcher has a handler for is design demand, not just
+       * a failure. Both dispatchers (executeSafeAction below and
+       * computerControl.executeComputerAction) throw this exact prefix, so one
+       * catch covers both modes. recordGapSafely never throws — the failed
+       * step must still be reported to the owner exactly as before.
+       */
+      if (String(error?.message ?? '').startsWith('Unsupported action type')) {
+        recordGapSafely({
+          source: 'executor-missing-action',
+          want: String(action?.label || action?.type || 'unknown action'),
+          detail: String(error.message),
+          surface: 'executor',
+        })
+      }
       result = {
         action,
         ok: false,

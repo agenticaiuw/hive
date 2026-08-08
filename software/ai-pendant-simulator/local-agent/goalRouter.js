@@ -846,10 +846,47 @@ export function registerGoalRouterRoutes(app, options = {}) {
       const { buildGoalRoutingContext } = await import('./goalRouterSurfaces.js')
       return buildGoalRoutingContext(deps)
     },
+    /* Test seam: injected recorder for unroutable parts. Defaults to the
+     * capability-gap inbox, loaded lazily below. */
+    recordGap = null,
   } = options
 
   const contextFor = async (request) =>
     loadContext({ app, request, ...(options.contextOptions ?? {}) })
+
+  /*
+   * "Nobody can do this part" is the demand signal the self-design loop feeds
+   * on, and until now this module computed it and let it evaporate (routeGoal
+   * stays pure — recording happens only here, at the HTTP edge, where the plan
+   * is being handed to a real caller). Fire-and-forget: recording must never
+   * delay or fail a routing response, so callers `void` this and every failure
+   * path inside it is swallowed after one warning. The import is lazy for the
+   * same reason loadContext's is — this module must stay importable without
+   * the inbox's config/store behind it.
+   */
+  let warnedInboxUnavailable = false
+  const noteUnroutable = async (plan) => {
+    try {
+      if (!plan?.unroutable?.length) return
+      const record =
+        recordGap ?? (await import('./capabilityGapInbox.js')).recordGapSafely
+      for (const part of plan.unroutable) {
+        record({
+          source: 'goal-router-unroutable',
+          want: part.text || plan.goal,
+          detail: part.why || 'no surface can do this part',
+          surface: 'goal-router',
+        })
+      }
+    } catch (error) {
+      if (!warnedInboxUnavailable) {
+        warnedInboxUnavailable = true
+        console.warn(
+          `[goal-router] capability-gap inbox unavailable: ${String(error?.message ?? error)}`,
+        )
+      }
+    }
+  }
 
   /* What the router can see right now: which bodies answered, what each one is
    * (attended? sessions? which network?), and what it would therefore be
@@ -895,6 +932,7 @@ export function registerGoalRouterRoutes(app, options = {}) {
         access: request.body?.access ?? null,
         observations: request.body?.observations ?? context.observations ?? [],
       })
+      void noteUnroutable(plan)
       response.json({ ok: true, plan })
     } catch (error) {
       response.status(400).json({ ok: false, error: String(error?.message || error) })
@@ -916,6 +954,7 @@ export function registerGoalRouterRoutes(app, options = {}) {
         ...context,
         observations: plan.observations ?? context.observations ?? [],
       })
+      void noteUnroutable(next)
       response.json({ ok: true, plan: next })
     } catch (error) {
       response.status(400).json({ ok: false, error: String(error?.message || error) })
