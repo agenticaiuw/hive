@@ -35,6 +35,7 @@
  * pattern.
  */
 import { DELIVERY_STAGES } from '../shared/audioDelivery.js'
+import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 
 /**
  * Matches the pendant's reply-audio pull and captures the job id.
@@ -140,6 +141,10 @@ export async function recordPendantDownlink({
           deviceId: TELEMETRY_DEVICE_ID,
         }),
       )
+      /* Queued work exists now, so ring — a quiet-cadence bridge would
+       * otherwise show this downlink a safety-poll interval late. Never
+       * throws, matching this function's own contract. */
+      await ringBridgeDoorbell({ store, reason: 'pendant-downlink' })
     }
 
     return event

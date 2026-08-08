@@ -31,3 +31,29 @@ export const WORK_RETRY_MAX_MS = Number(
 export const WORK_POLL_ABORT_MS = Number(
   process.env.BRIDGE_WORK_POLL_ABORT_MS || 8000,
 )
+
+/*
+ * Doorbell socket (push delivery). While the relay socket is HEALTHY the work
+ * loop idles this long between polls — the doorbell wakes it instantly, so
+ * the poll is a safety net, not the delivery path. While the socket is down
+ * (or the deployed relay predates it) the idle delay is zero and the loop is
+ * byte-for-byte the old continuous long-poll.
+ */
+export const BRIDGE_SAFETY_POLL_INTERVAL_MS = Number(
+  process.env.BRIDGE_SAFETY_POLL_INTERVAL_MS || 60_000,
+)
+/* Ping cadence on the doorbell socket, under common 60-90s intermediary idle
+ * cutoffs. The relay answers from the hibernation layer without waking the
+ * Durable Object, so pinging is free on both ends. */
+export const BRIDGE_SOCKET_HEARTBEAT_MS = Number(
+  process.env.BRIDGE_SOCKET_HEARTBEAT_MS || 55_000,
+)
+/* Reconnect backoff for the doorbell socket only. Unlike the poll loop's
+ * tight WORK_RETRY_MAX_MS, this may climb to 30s: while the socket is down
+ * the long-poll is already delivering, so reconnect urgency buys nothing. */
+export const BRIDGE_SOCKET_RECONNECT_BASE_MS = Number(
+  process.env.BRIDGE_SOCKET_RECONNECT_BASE_MS || 1000,
+)
+export const BRIDGE_SOCKET_RECONNECT_MAX_MS = Number(
+  process.env.BRIDGE_SOCKET_RECONNECT_MAX_MS || 30_000,
+)

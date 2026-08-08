@@ -59,6 +59,30 @@
       "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
     }
   ],
+  // The bridge doorbell (cloudflare-worker/bridgeHub.js): one instance per
+  // Mac bridge, named by deviceId. Holds the Mac's idle WebSocket via the
+  // Hibernation API, so a connected-but-quiet Mac accrues no DO duration and
+  // heartbeat pings are auto-answered without ever waking the object. Job
+  // payloads NEVER travel through it — it only tells the bridge to run its
+  // normal authenticated D1 claim immediately instead of on the next safety
+  // poll. Free-plan notes: DO classes must be SQLite-backed (hence
+  // new_sqlite_classes below — new_classes would be rejected at deploy), and
+  // each doorbell ring is one DO request + one Worker subrequest against the
+  // shared 100k/day request budget; at this fleet's job volume that is noise.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BRIDGE_HUB",
+        "class_name": "BridgeHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BridgeHub"]
+    }
+  ],
   // The relay's clock (cloud-relay/scheduler.js). Routines used to fire only
   // from the Mac's 30 s setInterval, which meant they fired only while the
   // Mac was awake — and the pendant is worn precisely when it is not.

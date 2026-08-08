@@ -24,6 +24,9 @@
  */
 import { getStore } from './store/index.js'
 import { createPlanJob } from './jobs.js'
+/* Featherweight (reads one binding, one lazy stub fetch) — safe at module
+ * scope under the 10 ms cron budget. */
+import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { runDueRoutines, reapDispatchedRuns } from './routines.js'
 
 export const SCHEDULER_STATE_KEY = 'scheduler'
@@ -173,6 +176,13 @@ async function enqueueRoutineMacJob(store, { routine, receipt }) {
     },
   })
   await store.createJob(job)
+  /* A routine fires precisely when nobody is pressing buttons, i.e. when the
+   * bridge is most likely idling on its quiet cadence. The doorbell is what
+   * keeps "7:00" from meaning "7:00 plus one safety-poll interval". The
+   * scheduled() entrypoint sets bindings exactly like fetch(), so the hub
+   * binding is reachable from a cron tick; awaiting one stub fetch is I/O,
+   * which the 10 ms CPU budget does not meter. */
+  await ringBridgeDoorbell({ store, reason: 'routine', jobId: job.jobId })
   return job
 }
 
