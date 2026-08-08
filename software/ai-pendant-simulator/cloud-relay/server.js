@@ -36,6 +36,8 @@ import {
 } from '../shared/contextHandoff.js'
 import { getStore } from './store/index.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
+import { registerApprovalRoutes } from './approvalStore.js'
+import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
 import { planFromAudio } from './audioPlan.js'
 import {
   createStreamingRealtimeSession,
@@ -418,6 +420,14 @@ app.use(async (request, response, next) => {
  * the last point on the relay side that witnesses anything real about delivery:
  * a credentialled device asked for this job and the body finished. */
 registerPendantDownlinkWitness(app, { getStore, createAgentProxyJob })
+
+/* Both were finished, tested and committed tonight with no caller. The
+ * approval store is the one that matters: prepareApprove on the Mac depends
+ * on the relay holding the decision, and approvalHandoff already names this
+ * module as its implementation — a contract naming a module nobody calls
+ * reads exactly like a finished design, which is its own warning. */
+registerApprovalRoutes(app, { getStore })
+registerAnnouncementRetentionRoutes(app, { getStore })
 
 app.post('/v1/devices/register', async (request, response) => {
   const deviceId = String(request.body?.deviceId ?? '').trim()

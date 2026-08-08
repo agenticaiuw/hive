@@ -248,6 +248,7 @@ import { registerGoalRouterRoutes } from './goalRouter.js'
 import { registerVoiceNotesRoutes } from './voiceNotes.js'
 import { registerVisionLoopRoutes } from './visionLoopRoutes.js'
 import { registerWorkbenchRoutes } from './workbenchRoutes.js'
+import { registerContextGraphRetentionRoutes } from './contextGraphRetentionRoutes.js'
 import { registerCapabilityGapsRoutes } from './capabilityGaps.js'
 import { registerHandleThisRoutes } from './handleThisRoutes.js'
 import { registerBrowserJobRoutes } from './browserJobRunner.js'
@@ -1456,6 +1457,11 @@ registerVisionLoopRoutes(app)
  * neither is exposed as a route. */
 registerWorkbenchRoutes(app)
 
+/* Bound the context graph. Was built, tested and committed tonight with nobody
+ * calling it — /memory/graph/retention returned 404 live, which is the exact
+ * failure this whole session was spent diagnosing elsewhere. */
+registerContextGraphRetentionRoutes(app)
+
 /* Reports which of the five wiring splices have landed, so none of it has to
  * be remembered. This is the audit that found the misrouting. */
 registerCapabilityGapsRoutes(app)
@@ -2064,77 +2070,14 @@ app.get('/notifications', async (request, response) => {
 })
 
 /*
- * Page watches: "tell me when the status, price, or availability changes" —
- * and stay quiet otherwise. See pageWatch.js.
+ * The /watches routes live in pageWatchRoutes.js and are registered above.
+ * An inline copy sat here and was pure dead weight: Express keeps the FIRST
+ * matching layer, so registerPageWatchRoutes(app) at line 1432 already served
+ * every one of these paths and this block only ever added six shadow layers to
+ * the router — which then showed up as duplicate routes in the published
+ * capability manifest, where they read as two ways to do one thing.
+ * pageWatchRoutes.js warns in its own header against mounting both.
  */
-app.get('/watches', (_request, response) => {
-  response.json({
-    ok: true,
-    watches: listWatches(),
-    storePath: pageWatchLocation(),
-  })
-})
-
-app.post('/watches', (request, response) => {
-  try {
-    response.json({ ok: true, watch: createWatch(request.body || {}) })
-  } catch (error) {
-    response.status(400).json({ ok: false, error: error.message })
-  }
-})
-
-/* Before /watches/:watchId, or "reports" is read as a watch id. */
-app.get('/watches/reports', (_request, response) => {
-  const reports = pendingReports()
-  response.json({
-    ok: true,
-    reports,
-    summary: reports.length
-      ? reports.map((report) => report.summary).join(' ')
-      : 'Nothing you are watching has changed.',
-  })
-})
-
-app.get('/watches/:watchId', (request, response) => {
-  const watch = getWatch(request.params.watchId)
-  if (!watch) {
-    response.status(404).json({ ok: false, error: 'No such watch.' })
-    return
-  }
-  response.json({ ok: true, watch })
-})
-
-app.patch('/watches/:watchId', (request, response) => {
-  try {
-    const watch = updateWatch(request.params.watchId, request.body || {})
-    if (!watch) {
-      response.status(404).json({ ok: false, error: 'No such watch.' })
-      return
-    }
-    response.json({ ok: true, watch })
-  } catch (error) {
-    response.status(400).json({ ok: false, error: error.message })
-  }
-})
-
-app.delete('/watches/:watchId', (request, response) => {
-  response.json({ ok: deleteWatch(request.params.watchId) })
-})
-
-app.post('/watches/:watchId/check', async (request, response) => {
-  try {
-    response.json({ ok: true, ...(await checkWatch(request.params.watchId)) })
-  } catch (error) {
-    response.status(400).json({ ok: false, error: error.message })
-  }
-})
-
-app.post('/watches/:watchId/ack', (request, response) => {
-  response.json({
-    ok: true,
-    acknowledged: acknowledgeReports(request.params.watchId),
-  })
-})
 
 /*
  * One question, several of the owner's authenticated origins, read at once.
