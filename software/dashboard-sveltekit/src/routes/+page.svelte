@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { base } from "$app/paths";
   import {
     audioHref,
     backend,
@@ -446,6 +447,12 @@
       <h1>Dashboard</h1>
     </div>
     <div class="top-actions">
+      <a
+        class="hive-link"
+        href="{base}/hive"
+        title="Hive — fleet observability: runtime ring, design committee, event ticker"
+        >⬡ Hive</a
+      >
       <div class="dot-cluster" aria-label="System status">
         <ClusterDot
           short="Cloud"

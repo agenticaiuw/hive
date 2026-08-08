@@ -1030,11 +1030,170 @@ function ssePushAll() {
 }
 setInterval(ssePushAll, 2000);
 
+// ---------------------------------------------------------------- relay snapshot pusher
+//
+// Every ~8 s a TRIMMED copy of the overview is PUT to the relay's generic
+// state store at /v1/state/hive, so the deployed dashboard (and the iOS shell
+// that loads it) can show the hive when the browser is nowhere near this Mac.
+// The relay's PUT handler has no per-key cap of its own — the effective limits
+// are express.json({ limit: '12mb' }) and, on the production Worker, D1's
+// ~2 MB per-value row limit — so this stays far below both by construction.
+
+const PUSH_INTERVAL_MS = 8000;
+const PUSH_MAX_BYTES = 200 * 1024;
+const PUSH_EVENTS_CAP = 40;
+const PUSH_FEED_CAP = 15;
+
+const capArr = (a, n) => (Array.isArray(a) ? a.slice(0, n) : a);
+const capTail = (a, n) => (Array.isArray(a) ? a.slice(-n) : a);
+
+// Per-source feed caps. Sources not listed are already small (health blobs,
+// counts, orchestrator liveness rows).
+function trimSourceData(key, data) {
+  if (!data || typeof data !== 'object') return data;
+  const d = { ...data };
+  switch (key) {
+    case 'agent.jobs': d.jobs = capArr(d.jobs, PUSH_FEED_CAP); break;
+    case 'agent.journal':
+      d.entries = capArr(d.entries, 6)?.map((e) => ({ ...e, actions: capArr(e.actions, 6) }));
+      break;
+    case 'agent.pipeline':
+      d.runs = capArr(d.runs, 8)?.map((r) => ({ ...r, events: capTail(r.events, 10) }));
+      break;
+    case 'agent.browserStatus': d.devices = capArr(d.devices, PUSH_FEED_CAP); break;
+    case 'agent.browserSpool': d.entries = capArr(d.entries, 10); break;
+    case 'agent.browserSessions': d.sessions = capArr(d.sessions, 10); break;
+    case 'agent.routines': d.routines = capArr(d.routines, PUSH_FEED_CAP); break;
+    case 'agent.memoryFacts': d.facts = capArr(d.facts, PUSH_FEED_CAP); break;
+    case 'agent.capabilities': d.groups = capArr(d.groups, PUSH_FEED_CAP); break;
+    case 'agent.observe':
+      if (d.runningApps) d.runningApps = { ...d.runningApps, apps: capArr(d.runningApps.apps, PUSH_FEED_CAP) };
+      break;
+    case 'relay.devices': d.devices = capArr(d.devices, PUSH_FEED_CAP); break;
+    case 'relay.ops': d.entries = capArr(d.entries, PUSH_FEED_CAP); break;
+    case 'committee.bulletin': d.recent = capTail(d.recent, PUSH_FEED_CAP); break;
+    case 'committee.commons': d.tail = capArr(d.tail, PUSH_FEED_CAP); break;
+  }
+  return d;
+}
+
+function buildPushSnapshot() {
+  const sources = {};
+  for (const k of Object.keys(state)) {
+    sources[k] = { ...sourceMeta(state[k]), data: trimSourceData(k, state[k].data) };
+  }
+  return {
+    schema: 'hive-overview@1',
+    pushedAt: now(),
+    now: now(), startedAt: STARTED_AT, port: boundPort,
+    committeeAgents: COMMITTEE_AGENTS,
+    nodes: computeNodes(), edges: computeEdges(), shared: computeShared(),
+    sources,
+    events: events.slice(-PUSH_EVENTS_CAP),
+    eventSeq,
+  };
+}
+
+let pushInFlight = false;
+let lastPushErr = null;
+let lastPushErrAt = 0;
+let pushedOnceLogged = false;
+
+// A pusher failure must never crash the local server and must not spam the
+// log: complain when the error changes, then at most once per 5 minutes.
+function notePushFailure(msg) {
+  const t = now();
+  if (msg !== lastPushErr || t - lastPushErrAt > 5 * 60 * 1000) {
+    console.error(`[hive] relay snapshot push failed: ${msg}`);
+    lastPushErrAt = t;
+  }
+  lastPushErr = msg;
+}
+
+async function pushSnapshotToRelay() {
+  if (pushInFlight) return;
+  if (!RELAY_API_KEY) { notePushFailure('RELAY_API_KEY missing from .env'); return; }
+  pushInFlight = true;
+  try {
+    const snap = buildPushSnapshot();
+    let body = scrub(JSON.stringify({ data: snap }));
+    if (Buffer.byteLength(body, 'utf8') > PUSH_MAX_BYTES) {
+      // Second pass: drop the heaviest feeds entirely rather than push an
+      // oversized document. Their meta rows (ok/error/at) stay.
+      snap.events = snap.events.slice(-10);
+      for (const k of ['agent.journal', 'agent.pipeline', 'agent.memoryFacts', 'committee.bulletin', 'committee.commons']) {
+        if (snap.sources[k]) snap.sources[k].data = null;
+      }
+      snap.trimmedHard = true;
+      body = scrub(JSON.stringify({ data: snap }));
+      if (Buffer.byteLength(body, 'utf8') > PUSH_MAX_BYTES) {
+        notePushFailure(`snapshot still ${Buffer.byteLength(body, 'utf8')}B after hard trim (cap ${PUSH_MAX_BYTES}B); push skipped`);
+        return;
+      }
+    }
+    const bytes = Buffer.byteLength(body, 'utf8');
+    let res;
+    try {
+      res = await fetch(`${RELAY_BASE}/v1/state/hive`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_API_KEY}` },
+        body,
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (e) {
+      notePushFailure(`fetch failed: ${errStr(e)}`);
+      return;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      notePushFailure(`HTTP ${res.status}: ${trunc(scrub(text), 160)}`);
+      return;
+    }
+    if (lastPushErr) {
+      console.log('[hive] relay snapshot push recovered');
+      lastPushErr = null;
+    }
+    if (!pushedOnceLogged) {
+      pushedOnceLogged = true;
+      console.log(`[hive] relay snapshot push live: ${bytes}B to ${RELAY_BASE}/v1/state/hive every ${PUSH_INTERVAL_MS / 1000}s`);
+    }
+  } catch (e) {
+    notePushFailure(errStr(e));
+  } finally {
+    pushInFlight = false;
+  }
+}
+
+function startPusher() {
+  // First push waits a few seconds so the pollers have data to trim.
+  setTimeout(pushSnapshotToRelay, 4000);
+  setInterval(pushSnapshotToRelay, PUSH_INTERVAL_MS);
+}
+
 // ---------------------------------------------------------------- http server
 
-function sendJson(res, code, obj) {
+// The SvelteKit dashboard reads /api/* cross-origin when the browser is on
+// this Mac: the agent-served page on :8000, and the deployed page probing for
+// a local live feed. Exact allowlist — no wildcard, no other origins.
+const CORS_ORIGINS = new Set([
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
+  'https://ai-pendant-dashboard.your-subdomain.workers.dev',
+]);
+function corsHeaders(req) {
+  const origin = req.headers.origin || '';
+  return CORS_ORIGINS.has(origin)
+    ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' }
+    : { Vary: 'Origin' };
+}
+
+function sendJson(req, res, code, obj) {
   const body = scrub(JSON.stringify(obj));
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...corsHeaders(req),
+  });
   res.end(body);
 }
 
@@ -1042,6 +1201,20 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
   const p = u.pathname;
   try {
+    if (req.method === 'OPTIONS' && p.startsWith('/api/')) {
+      // CORS preflight. Chrome also sends Access-Control-Request-Private-Network
+      // when an https page (the deployed dashboard) targets 127.0.0.1.
+      res.writeHead(204, {
+        ...corsHeaders(req),
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Content-Type',
+        'Access-Control-Max-Age': '600',
+        ...(req.headers['access-control-request-private-network'] === 'true'
+          ? { 'Access-Control-Allow-Private-Network': 'true' }
+          : {}),
+      });
+      return res.end();
+    }
     if (p === '/' || p === '/index.html') {
       let html;
       try { html = await readFile(INDEX_PATH, 'utf8'); } catch (e) {
@@ -1052,11 +1225,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(scrub(html));
     }
     if (p === '/favicon.ico') { res.writeHead(204); return res.end(); }
-    if (p === '/api/overview') return sendJson(res, 200, buildOverview());
+    if (p === '/api/overview') return sendJson(req, res, 200, buildOverview());
     if (p === '/api/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store',
         Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+        ...corsHeaders(req),
       });
       res.write('retry: 3000\n\n');
       const cursorRaw = Number(u.searchParams.get('cursor'));
@@ -1070,12 +1244,12 @@ const server = http.createServer(async (req, res) => {
     const nodeMatch = /^\/api\/node\/([A-Za-z0-9:_-]{1,64})$/.exec(p);
     if (nodeMatch) {
       const detail = await nodeDetail(nodeMatch[1], { job: u.searchParams.get('job') || undefined });
-      return sendJson(res, detail.error ? 404 : 200, { now: now(), ...detail });
+      return sendJson(req, res, detail.error ? 404 : 200, { now: now(), ...detail });
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('not found');
   } catch (e) {
-    try { sendJson(res, 500, { error: errStr(e) }); } catch { /* already ended */ }
+    try { sendJson(req, res, 500, { error: errStr(e) }); } catch { /* already ended */ }
   }
 });
 
@@ -1100,6 +1274,7 @@ function listen(idx = 0) {
     console.log(`[hive] Hive dashboard on http://127.0.0.1:${port}  (agent: ${AGENT_BASE}, relay: ${RELAY_BASE})`);
     console.log(`[hive] AGENT_TOKEN ${AGENT_TOKEN ? 'loaded' : 'MISSING'}, RELAY_API_KEY ${RELAY_API_KEY ? 'loaded' : 'MISSING'} from ${ENV_PATH}`);
     startPollers();
+    startPusher();
   });
 }
 listen();
