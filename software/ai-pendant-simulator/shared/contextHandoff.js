@@ -240,25 +240,16 @@ export function contextItemsFromRealtimeState(state, plan = null) {
 /* ---- redaction ---------------------------------------------------------- */
 
 /*
- * maskSecretValue() is written for a `key: value` line. Given a whole sentence
- * with no separator it takes the entire sentence as the "label" and APPENDS
- * its marker — "my gate code is 4829: [withheld]" — so the secret survives
- * while the record claims it was withheld. evidenceCapsules.js already carries
- * this guard; it is duplicated rather than imported because that module is
- * frozen and because the check is three lines. If any substantial word of the
- * original text is still present, the mask did not mask.
+ * The guard that used to live here — mask, then check whether any substantial
+ * word of the original survived — is gone because maskSecretValue no longer
+ * needs supervising. It used to split on `:`/`=` and treat a separator-less
+ * sentence as its own label, appending the marker and leaving the secret in
+ * place ("my gate code is 4829: [withheld]"); it now removes the value or
+ * withholds the segment. Keeping the guard would be actively harmful: it reads
+ * any surviving word as evidence of a leak, so a sentence whose credential was
+ * cut out precisely would be discarded along with the derivation this module
+ * exists to preserve.
  */
-function withheldOrEmpty(text) {
-  const SECRET_PLACEHOLDER = '[withheld]'
-  const masked = maskSecretValue(text)
-  const survivors = String(text)
-    .split(/[^A-Za-z0-9]+/)
-    .filter((word) => word.length >= 4)
-
-  return survivors.some((word) => masked.includes(word))
-    ? SECRET_PLACEHOLDER
-    : masked
-}
 
 /**
  * Redact item text before it is stored, per line and then per sentence.
@@ -297,7 +288,7 @@ function redactText(value) {
         const verdict = classifySensitivity(piece)
         if (verdict === 'secret') {
           secretCount += 1
-          return withheldOrEmpty(piece)
+          return maskSecretValue(piece)
         }
         if (verdict === 'sensitive') sensitiveCount += 1
         return piece

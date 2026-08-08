@@ -513,10 +513,11 @@ export const PRIVACY_RULES = {
   /*
    * Text that *announces* a secret. These match the label, not the value, so a
    * span replacement over them would strip the word "password" and leave the
-   * password — the exact bug local-agent/redaction.js still has, where
-   * maskSecretValue turns "The wifi password is hunter2." into
-   * "The wifi password is hunter2.: [withheld]". A label match therefore
-   * withholds the whole segment, and withholdSecrets verifies that it did.
+   * password — the bug local-agent/redaction.js used to have, where
+   * maskSecretValue turned "The wifi password is hunter2." into
+   * "The wifi password is hunter2.: [withheld]". That module now splits its
+   * patterns the same way this one does. A label match therefore withholds the
+   * whole segment, and withholdSecrets verifies that it did.
    */
   secretLabelPatterns: [
     '\\b(pass(?:word|phrase|code)|secret|api[\\s_-]?key|auth\\s*token|access\\s*token|private\\s*key)\\b',
@@ -534,8 +535,8 @@ export const PRIVACY_RULES = {
    * Used to audit the value patterns rather than the text: if a value pattern's
    * match is nothing but these words, it matched the announcement and not the
    * secret, and replacing its span would strip the word "password" while
-   * leaving the password — the shape of the bug in local-agent/redaction.js.
-   * withholdSecrets refuses to trust such a match.
+   * leaving the password — the shape of the bug local-agent/redaction.js used
+   * to have. withholdSecrets refuses to trust such a match.
    */
   secretLabelWords: [
     'password',
