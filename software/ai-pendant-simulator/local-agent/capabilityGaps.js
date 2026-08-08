@@ -52,7 +52,7 @@ import {
 } from './capabilityGapsActions.js'
 import { listWatches, watchHealth } from './pageWatch.js'
 import { matchDeterministic } from './policyRouter.js'
-import { listRoutines } from './routines.js'
+import { listRoutines, nextRunAt } from './routines.js'
 
 const RELAY_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -557,15 +557,42 @@ export async function auditCapability(entry, deps = {}) {
     )
   }
 
-  /* 6. Weekday support, for the one ask that needs it. */
+  /*
+   * 6. Weekday support, for the one ask that needs it.
+   *
+   * PROBED, not asserted. This link was a hardcoded `false` carrying a hardcoded
+   * sentence about what routines.js could not do. The store learned `weekly`
+   * afterwards and the audit went on reporting the gap — an audit that states a
+   * conclusion instead of measuring one is the exact failure it exists to catch,
+   * and it was wrong about its own codebase for as long as the constant stood.
+   *
+   * So ask nextRunAt. Friday evening asking for a weekday 07:00 must answer
+   * Monday; answering Saturday is the bug this is looking for, and answering
+   * null means the shape is not stored at all.
+   */
   if (entry.needsWeekdaySchedule) {
-    links.push(
-      link(
-        'weekdaySchedule',
-        false,
-        'local-agent/routines.js nextRunAt() understands {kind:"daily"} and {kind:"interval"} only. "Every weekday morning" cannot be stored, and storing it as daily fires on Saturday. cloud-relay/routineSchedule.js already supports {kind:"weekly", days:[...]} with a timezone — the Mac store does not.',
-      ),
-    )
+    const probe = deps.nextRunAt ?? nextRunAt
+    let ok = false
+    let detail
+    try {
+      /* A Friday 18:00 with a Monday-Friday set: the only correct answer is the
+       * following Monday, and it is the answer daily gets wrong. */
+      const friday = new Date('2026-08-07T18:00:00').getTime()
+      const next = probe({ kind: 'weekly', at: '07:00', days: [1, 2, 3, 4, 5] }, friday)
+      if (next === null || next === undefined) {
+        detail =
+          'local-agent/routines.js nextRunAt() returns nothing for {kind:"weekly"}, so "every weekday morning" cannot be stored. Storing it as daily fires on Saturday.'
+      } else {
+        const day = new Date(next).getDay()
+        ok = day >= 1 && day <= 5
+        detail = ok
+          ? `local-agent/routines.js stores {kind:"weekly", days:[...]}; asked from a Friday evening it answers ${new Date(next).toDateString()}, matching cloud-relay/routineSchedule.js so a routine means the same thing on both sides.`
+          : `local-agent/routines.js accepted {kind:"weekly"} but answered ${new Date(next).toDateString()}, which is not a weekday — the schedule would fire on a day the owner excluded.`
+      }
+    } catch (error) {
+      detail = `local-agent/routines.js nextRunAt() threw on {kind:"weekly"}: ${error.message}`
+    }
+    links.push(link('weekdaySchedule', ok, detail))
   }
 
   /* 7. Anything actually produced. */
