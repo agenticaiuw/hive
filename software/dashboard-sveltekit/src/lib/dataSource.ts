@@ -81,7 +81,12 @@ function repairSession() {
   return sessionRepair;
 }
 
-async function agentRequest(
+/**
+ * Exported for `$lib/command`: the command box talks to the same agent with
+ * the same loopback session, and must inherit the 401 repair + GET retry
+ * behaviour rather than re-implementing a worse copy of it.
+ */
+export async function agentRequest(
   path: string,
   init: RequestInit = {},
   retried = false,

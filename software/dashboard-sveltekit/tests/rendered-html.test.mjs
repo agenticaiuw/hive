@@ -1246,3 +1246,299 @@ test("reports scheduled routines as unreadable from the cloud rather than absent
   assert.match(payload.note, /not readable from the cloud dashboard/);
   assert.match(payload.note, /They run on the Mac whether or not anything is watching/);
 });
+
+/* ------------------------- Ask the hive (universal command box) --------- */
+
+test("renders the ask-the-hive box on the dashboard and hive pages", async () => {
+  const worker = await loadWorker();
+  const cookie = await sessionCookie(worker);
+
+  for (const path of ["/", "/hive"]) {
+    const response = await request(worker, `https://dashboard.example${path}`, {
+      cookie,
+    });
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /aria-label="Ask the hive"/);
+    assert.match(html, /placeholder="Ask the hive…"/);
+    assert.match(html, /aria-label="Send to the hive"/);
+    // The deployed build's honest transport label: this page has no route to
+    // the Mac, so its commands go through the server-held relay key.
+    assert.match(html, />VIA RELAY</);
+    assert.doesNotMatch(html, />LOCAL</);
+  }
+});
+
+test("dispatches an ask-the-hive command and answers its status poll with the key server-side", async () => {
+  const worker = await loadWorker();
+  const relayApiKey = "server-side-relay-secret";
+  const relayCalls = [];
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: relayApiKey,
+    RELAY: {
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        relayCalls.push({
+          path,
+          authorization: request.headers.get("authorization"),
+        });
+        if (path === "/v1/mac/plan") {
+          return Response.json(
+            { ok: true, job: { jobId: "job-cmd-1", status: "queued" } },
+            { status: 202 },
+          );
+        }
+        if (path === "/v1/mac/jobs/job-cmd-1") {
+          return Response.json({
+            ok: true,
+            job: {
+              jobId: "job-cmd-1",
+              type: "plan",
+              status: "plan_ready",
+              command: "what is the battery percentage",
+              createdAt: "2026-08-08T05:00:00.000Z",
+              updatedAt: "2026-08-08T05:00:06.000Z",
+              error: null,
+              result: {
+                response: "Battery is at 84 percent.",
+                summary: "Battery is at 84 percent.",
+                executed: true,
+                phase: "complete",
+                actions: [
+                  {
+                    type: "get_mac_status",
+                    label: "Read battery status",
+                    params: { probe: "battery", api_key: "should-hide-me" },
+                  },
+                ],
+                execution: {
+                  results: [
+                    {
+                      action: { type: "get_mac_status", label: "Read battery status" },
+                      ok: true,
+                      message: "Battery is at 84 percent.",
+                    },
+                  ],
+                },
+                // Megabytes of PCM in production; must never reach the browser.
+                pendantSpeech: { pcmBase64: "AAAA", pcmBytes: 4 },
+              },
+            },
+          });
+        }
+        return Response.json({ ok: false }, { status: 404 });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const dispatch = await postJson(
+    worker,
+    "https://dashboard.example/api/command",
+    { text: "  what is the battery percentage  ", sessionId: "cmdbox-1" },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(dispatch.status, 202);
+  assert.deepEqual(await dispatch.json(), {
+    ok: true,
+    jobId: "job-cmd-1",
+    status: "queued",
+  });
+  assert.equal(relayCalls[0].path, "/v1/mac/plan");
+  assert.equal(relayCalls[0].authorization, `Bearer ${relayApiKey}`);
+
+  const status = await request(
+    worker,
+    "https://dashboard.example/api/command/status/job-cmd-1",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(status.status, 200);
+  const payload = await status.json();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.job.status, "plan_ready");
+  assert.equal(payload.job.result.response, "Battery is at 84 percent.");
+  assert.equal(payload.job.result.executed, true);
+  assert.equal(payload.job.result.results[0].ok, true);
+  assert.equal(
+    payload.job.result.results[0].action.label,
+    "Read battery status",
+  );
+
+  const raw = JSON.stringify(payload);
+  // Allowlist holds: no speech payload, no credentials, key stays server-side.
+  assert.doesNotMatch(raw, /pendantSpeech|pcmBase64/);
+  assert.doesNotMatch(raw, /should-hide-me/);
+  assert.doesNotMatch(raw, new RegExp(relayApiKey));
+});
+
+test("reports a parked-for-approval plan distinctly from a failure", async () => {
+  const worker = await loadWorker();
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: "server-side-relay-secret",
+    RELAY: {
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/v1/mac/jobs/job-parked-1") {
+          // The current contract ("parked is not failed"): an ordinary
+          // plan_ready job, no error, with the parked markers and the
+          // blocked actions inside the result.
+          return Response.json({
+            ok: true,
+            job: {
+              jobId: "job-parked-1",
+              type: "plan",
+              status: "plan_ready",
+              command: "delete my downloads folder",
+              error: null,
+              result: {
+                response: "Waiting for your approval on the dashboard.",
+                executed: false,
+                parked: true,
+                phase: "parked_for_approval",
+                approval: { relayJobId: "job-parked-1", planJobId: "job_77" },
+                awaitingApproval: [
+                  {
+                    type: "run_shell",
+                    reason: "Shell commands need a confirm first.",
+                  },
+                ],
+                actions: [
+                  {
+                    type: "run_shell",
+                    label: "Remove the folder",
+                    params: { command: "rm -rf ~/Downloads" },
+                  },
+                ],
+              },
+            },
+          });
+        }
+        if (path === "/v1/mac/jobs/job-parked-legacy") {
+          // A relay deployed before the parked fix recorded the same plan as
+          // a failure with the approval sentence in job.error; the markers
+          // must still let clients render it as parked, never failed.
+          return Response.json({
+            ok: true,
+            job: {
+              jobId: "job-parked-legacy",
+              type: "plan",
+              status: "failed",
+              command: "delete my downloads folder",
+              error: "Waiting for your approval on the dashboard.",
+              result: {
+                response: "Waiting for your approval on the dashboard.",
+                executed: false,
+                awaitingApproval: [
+                  { type: "run_shell", reason: "Shell commands need a confirm first." },
+                ],
+              },
+            },
+          });
+        }
+        return Response.json({ ok: false, error: "Job not found." }, { status: 404 });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const status = await request(
+    worker,
+    "https://dashboard.example/api/command/status/job-parked-1",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(status.status, 200);
+  const payload = await status.json();
+  assert.equal(payload.job.status, "plan_ready");
+  assert.equal(payload.job.result.parked, true);
+  assert.equal(payload.job.result.phase, "parked_for_approval");
+  assert.equal(payload.job.result.awaitingApproval.length, 1);
+  assert.equal(payload.job.result.awaitingApproval[0].type, "run_shell");
+  assert.match(payload.job.result.awaitingApproval[0].reason, /confirm first/);
+  // The approval sentence survives verbatim for the parked banner.
+  assert.match(payload.job.result.response, /Waiting for your approval/);
+
+  const legacy = await request(
+    worker,
+    "https://dashboard.example/api/command/status/job-parked-legacy",
+    { cookie, runtimeEnv },
+  );
+  const legacyPayload = await legacy.json();
+  assert.equal(legacyPayload.job.status, "failed");
+  assert.equal(legacyPayload.job.result.awaitingApproval.length, 1);
+  assert.match(legacyPayload.job.error, /Waiting for your approval/);
+
+  const missing = await request(
+    worker,
+    "https://dashboard.example/api/command/status/job-unknown",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { ok: false, error: "Job not found." });
+});
+
+test("validates ask-the-hive input and rejects anonymous callers before any relay call", async () => {
+  const worker = await loadWorker();
+  let relayCalls = 0;
+  const runtimeEnv = {
+    ...env,
+    RELAY_API_KEY: "server-side-relay-secret",
+    RELAY: {
+      async fetch() {
+        relayCalls += 1;
+        return Response.json({ ok: true });
+      },
+    },
+  };
+
+  // Anonymous: both the dispatch and the status poll 401 before the relay.
+  const anonymousDispatch = await postJson(
+    worker,
+    "https://dashboard.example/api/command",
+    { text: "open mail", sessionId: "cmdbox-2" },
+    { runtimeEnv },
+  );
+  assert.equal(anonymousDispatch.status, 401);
+  const anonymousStatus = await request(
+    worker,
+    "https://dashboard.example/api/command/status/job-1",
+    { runtimeEnv },
+  );
+  assert.equal(anonymousStatus.status, 401);
+  assert.equal(relayCalls, 0);
+
+  const cookie = await sessionCookie(worker, runtimeEnv);
+  const empty = await postJson(
+    worker,
+    "https://dashboard.example/api/command",
+    { text: "   ", sessionId: "cmdbox-2" },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(empty.status, 400);
+
+  const tooLong = await postJson(
+    worker,
+    "https://dashboard.example/api/command",
+    { text: "x".repeat(2001), sessionId: "cmdbox-2" },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(tooLong.status, 413);
+
+  const badSession = await postJson(
+    worker,
+    "https://dashboard.example/api/command",
+    { text: "open mail", sessionId: "../another/session" },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(badSession.status, 400);
+
+  // Routable as a segment, but not a legal job id (contains "..").
+  const badJobId = await request(
+    worker,
+    "https://dashboard.example/api/command/status/bad..id",
+    { cookie, runtimeEnv },
+  );
+  assert.equal(badJobId.status, 400);
+  assert.equal(relayCalls, 0);
+});

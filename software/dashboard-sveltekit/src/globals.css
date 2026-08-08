@@ -2614,3 +2614,316 @@ blockquote {
   text-overflow: ellipsis;
   min-width: 0;
 }
+
+/* ---------- Ask the hive (universal command box) ---------- */
+
+.cmd-box {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.cmd-card {
+  margin-bottom: 18px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px);
+}
+
+.cmd-bar {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.cmd-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.cmd-bar .cmd-head {
+  margin-bottom: 8px;
+}
+
+.cmd-head .micro-label {
+  margin-right: auto;
+}
+
+.cmd-transport {
+  cursor: help;
+}
+
+.cmd-bar .cmd-head .cmd-transport {
+  margin-right: auto;
+}
+
+.cmd-history-toggle {
+  font-size: 0.7rem;
+}
+
+.cmd-field {
+  border-radius: 14px;
+}
+
+.cmd-bar .cmd-field input {
+  height: 38px;
+  font-size: 0.84rem;
+}
+
+.cmd-bar .send-button {
+  width: 38px;
+  height: 38px;
+}
+
+.cmd-status-block {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.cmd-active-command {
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmd-status-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cmd-arrow {
+  color: #5d6470;
+}
+
+.cmd-stage {
+  color: #5d6470;
+}
+
+.cmd-stage.done {
+  color: var(--green);
+}
+
+.cmd-stage.active {
+  color: var(--blue);
+  animation: hv-blink 1.4s infinite;
+}
+
+.cmd-stage.warn {
+  color: var(--amber);
+}
+
+.cmd-stage.skip {
+  color: #4a505b;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.cmd-terminal {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.cmd-terminal.ok {
+  color: #7ee9a9;
+  border-color: rgba(118, 230, 163, 0.45);
+  background: rgba(118, 230, 163, 0.1);
+}
+
+.cmd-terminal.warn {
+  color: #ffd9a4;
+  border-color: rgba(255, 190, 104, 0.45);
+  background: rgba(255, 190, 104, 0.08);
+}
+
+.cmd-terminal.bad {
+  color: #ffb0ab;
+  border-color: rgba(255, 117, 111, 0.5);
+  background: rgba(255, 117, 111, 0.1);
+}
+
+.cmd-status-detail {
+  color: var(--muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.7rem;
+}
+
+.cmd-error {
+  color: #ffb0ab;
+  border: 1px solid rgba(255, 117, 111, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 117, 111, 0.07);
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.cmd-parked {
+  border: 1px solid rgba(255, 190, 104, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 190, 104, 0.06);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.cmd-parked-note {
+  color: #ffd9a4;
+  font-size: 0.78rem;
+}
+
+.cmd-parked-reasons {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.cmd-parked-reasons code {
+  font-family: var(--font-geist-mono), monospace;
+  color: #ffd9a4;
+  font-size: 0.68rem;
+}
+
+.cmd-parked-tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.cmd-run-button {
+  border: 1px solid rgba(118, 230, 163, 0.45);
+  border-radius: 9px;
+  padding: 7px 12px;
+  color: #c8f5d7;
+  background: rgba(118, 230, 163, 0.12);
+  font-size: 0.76rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.cmd-run-button:hover {
+  background: rgba(118, 230, 163, 0.2);
+}
+
+.cmd-result {
+  display: grid;
+  gap: 8px;
+}
+
+.cmd-result-text {
+  border-left: 2px solid rgba(112, 167, 255, 0.5);
+  padding-left: 10px;
+  color: var(--ink);
+  font-size: 0.84rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cmd-action-list {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+}
+
+.cmd-action-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.74rem;
+}
+
+.cmd-action-list .run-dot {
+  flex: none;
+  transform: translateY(-1px);
+}
+
+.cmd-action-label {
+  color: var(--ink);
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmd-action-message {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.cmd-dismiss {
+  justify-self: start;
+  font-size: 0.72rem;
+}
+
+.cmd-history {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  display: grid;
+  gap: 2px;
+  list-style: none;
+}
+
+.cmd-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.cmd-history-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cmd-history-row .run-dot {
+  flex: none;
+}
+
+.cmd-history-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76rem;
+}
+
+.cmd-history-meta {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}

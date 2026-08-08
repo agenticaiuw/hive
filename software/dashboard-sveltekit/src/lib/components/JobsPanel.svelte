@@ -140,7 +140,7 @@
   }
 </script>
 
-<section class="tile-panel jobs-panel" aria-label="Jobs">
+<section id="tile-panel-jobs" class="tile-panel jobs-panel" aria-label="Jobs">
   {#if error}
     <p class="history-error">{error}</p>
   {/if}
