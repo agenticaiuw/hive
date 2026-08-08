@@ -158,3 +158,57 @@ test('keeps diagnostic audio out of public job payloads', () => {
   assert.equal(capture.status, 'completed')
   assert.equal(publicJob(capture).audioBase64, undefined)
 })
+
+test('a plan parked for approval is neither a completed run nor a failed one', () => {
+  const base = {
+    jobId: 'job_parked',
+    type: 'plan',
+    status: 'plan_ready',
+    command: 'send the weekly report',
+    inputTelemetry: { storage: 'dashboard', inputMode: 'typed' },
+    result: {
+      executed: false,
+      parked: true,
+      phase: 'parked_for_approval',
+      awaitingApproval: [
+        { type: 'send_email', reason: 'Sending email acts on your behalf and needs approval.' },
+      ],
+      actions: [{ type: 'send_email', label: 'Email the report' }],
+    },
+    createdAt: '2026-08-08T12:00:00.000Z',
+    updatedAt: '2026-08-08T12:00:05.000Z',
+  }
+
+  const run = voiceRunForJob(base)
+  /*
+   * Both wrong answers actually shipped: the pre-fix bridge reported parked as
+   * a FAILURE (the 2026-08-08 retry storm), and a parked plan_ready satisfied
+   * this feed's "agent done" clause and rendered as COMPLETED. It is neither —
+   * the flow is waiting on the owner.
+   */
+  assert.equal(run.status, 'processing')
+  const agent = run.events.find((event) => event.stage === 'agent')
+  assert.equal(agent.status, 'waiting')
+  assert.match(agent.label, /Waiting for your approval/)
+  assert.equal(agent.meta.parked, true)
+  assert.equal(agent.meta.awaitingApproval[0].type, 'send_email')
+
+  // An executed plan job still reads as done end-to-end.
+  const executed = voiceRunForJob({
+    ...base,
+    jobId: 'job_done',
+    result: { executed: true, phase: 'complete', execution: { ok: true }, actions: [] },
+  })
+  assert.equal(executed.status, 'completed')
+
+  // Rows a pre-fix bridge recorded as failed keep saying what it claimed; the
+  // routine reaper, not this feed, is the compatibility path for those.
+  const oldRow = voiceRunForJob({
+    ...base,
+    jobId: 'job_old',
+    status: 'failed',
+    error: 'Waiting for your approval on the dashboard.',
+    result: { executed: false, awaitingApproval: [{ type: 'run_shell', reason: 'x' }] },
+  })
+  assert.equal(oldRow.status, 'failed')
+})

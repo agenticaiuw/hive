@@ -155,6 +155,17 @@ test('a dangerous shell action from the relay is never executed hands-free', asy
     posted.result.awaitingApproval.map((entry) => entry.type),
     ['run_shell'],
   )
+  /*
+   * Parked is not failed. This exact report used to go up as ok:false, the
+   * relay recorded a failure, and its routine reaper retried the "failure"
+   * with a planner call every backoff step (live incident, 2026-08-08).
+   */
+  assert.equal(posted.ok, true, 'a parked plan is not a failure')
+  assert.equal(posted.parked, true)
+  assert.equal(posted.result.phase, 'parked_for_approval')
+  assert.equal(posted.result.parked, true)
+  assert.equal(posted.result.approval.relayJobId, 'job-shell')
+  assert.equal(posted.error, '')
 })
 
 test('audio-native battery status shell auto-executes without local LLM', async (t) => {
@@ -495,4 +506,129 @@ test('execution and telemetry follow a session created by planning', async (t) =
       (event) => event.sessionId === 'session-created-by-plan',
     ),
   )
+})
+
+/* ---- routine-originated jobs ---------------------------------------------
+ * cloud-relay/scheduler.js stamps inputTelemetry {storage:'routine',
+ * inputMode:'routine', …} on the plan jobs it enqueues (shape verified against
+ * live job job_3276a969, 2026-08-08). An enabled schedule is standing approval
+ * for its own purpose, so those jobs execute confirm-tier plans hands-free —
+ * everything except the outward/irreversible deny-list, which parks loudly.
+ * ------------------------------------------------------------------------- */
+
+const routineTelemetry = {
+  storage: 'routine',
+  inputMode: 'routine',
+  routineId: 'rtn_2c4cd53a-342e-43f2-bd29-189eeedfe3b8',
+  routineName: 'Morning news',
+  runId: 'run_test',
+}
+
+test('a routine job auto-runs the confirm-tier plan its own command produced', async (t) => {
+  // The plan the Morning news routine actually produced on 2026-08-08 —
+  // the one the voice allowlist parked while the relay retried a phantom failure.
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      requiresConfirmation: true,
+      actions: [
+        {
+          type: 'run_shell',
+          label: 'Research and speak the headlines',
+          params: {
+            command:
+              'node /Users/you/agentic-gadget/software/ai-pendant-simulator/scripts/research-brief.mjs --topic "news" --mode brief',
+            timeout: 120000,
+          },
+        },
+      ],
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [
+        { ok: true, message: 'Three headlines: markets steadied, a storm cleared, and talks resumed.' },
+      ],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-routine-news',
+    command: 'Give me the top world and US news headlines',
+    sessionId: null,
+    inputTelemetry: routineTelemetry,
+  })
+
+  const executeCall = stub.calls.find(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.ok(executeCall, 'the routine plan must execute hands-free')
+  assert.match(
+    JSON.parse(executeCall.body).actions[0].params.command,
+    /research-brief\.mjs/,
+  )
+
+  const completion = stub.calls.filter((call) =>
+    call.toRelay && call.pathname.endsWith('/job-routine-news/result'),
+  ).at(-1)
+  assert.ok(completion, 'the job result should have been posted')
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.ok, true)
+  assert.notEqual(posted.parked, true, 'an executed routine is not parked')
+  assert.equal(posted.result.executed, true)
+  // The reaper announces result.response; it must carry what actually happened.
+  assert.match(posted.result.response, /Three headlines/)
+})
+
+test('a routine plan that wants to send email parks loudly, never runs', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      actions: [
+        {
+          type: 'send_email',
+          label: 'Email the briefing',
+          params: { to: 'someone@example.com', subject: 'News', body: '…' },
+        },
+      ],
+    },
+    '/execute': () => {
+      throw new Error('/execute must never be reached for a deny-listed routine action')
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-routine-email',
+    command: 'send me the news by email',
+    sessionId: null,
+    inputTelemetry: routineTelemetry,
+  })
+
+  const executed = stub.calls.some(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.equal(executed, false, 'deny-listed action was auto-executed by a routine')
+
+  const completion = stub.calls.find((call) =>
+    call.toRelay && call.pathname.endsWith('/job-routine-email/result'),
+  )
+  assert.ok(completion, 'the job result should have been posted')
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.ok, true, 'parked is not failed — failed is what got retried')
+  assert.equal(posted.parked, true)
+  assert.equal(posted.result.phase, 'parked_for_approval')
+  assert.equal(posted.result.executed, false)
+  // Only the deny-list parks a routine, and it is named for the announcement.
+  assert.deepEqual(
+    posted.result.awaitingApproval.map((entry) => entry.type),
+    ['send_email'],
+  )
+  assert.match(posted.result.awaitingApproval[0].reason, /acts on your behalf/)
+  assert.equal(posted.result.approval.relayJobId, 'job-routine-email')
 })

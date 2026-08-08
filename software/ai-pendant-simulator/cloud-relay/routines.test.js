@@ -11,6 +11,7 @@ import {
   chooseVenue,
   composeOnRelay,
   createRoutine,
+  jobParkedForApproval,
   occurrenceKey,
   planRetry,
   reapDispatchedRuns,
@@ -780,4 +781,171 @@ test('editing a schedule reschedules and clears any deferral', () => {
   assert.ok(updated.nextRunAt > NOW)
   assert.match(updated.scheduleText, /every weekday at 17:00/)
   assert.throws(() => updateRoutineRecord(routine, { schedule: { kind: 'nope' } }, NOW))
+})
+
+/* ---- parked is not failed ------------------------------------------------
+ * The 2026-08-08 07:00 incident, as tests. The Morning news plan parked on
+ * the Mac for dashboard approval; the bridge reported that as a FAILURE; the
+ * reaper retried the "failure" — three planner calls in five minutes — and
+ * the parked plan sat behind a dashboard nobody had open. A parked run is now
+ * its own final state, it is announced loudly, and it is never retried.
+ * ------------------------------------------------------------------------- */
+
+const dispatchedRun = (routine, { runId = 'run_parked', jobId = 'job_parked' } = {}) => ({
+  runId,
+  routineId: routine.routineId,
+  routineName: routine.name,
+  status: 'dispatched',
+  startedAt: new Date(NOW).toISOString(),
+  dueAt: new Date(NOW).toISOString(),
+  attempt: 1,
+  macJobId: jobId,
+  occurrenceKey: occurrenceKey(routine.routineId, new Date(NOW).toISOString()),
+})
+
+test('a parked plan closes as awaiting-approval, says so loudly, and is never retried', async () => {
+  const store = fakeStore()
+  const routine = dueRoutine()
+  const rearmedFor = NOW + 86_400_000
+  await store.saveRoutine({ ...routine, nextRunAt: rearmedFor })
+  /* The new bridge dialect: ok report, ordinary plan_ready, parked markers. */
+  await store.createJob({
+    jobId: 'job_parked',
+    type: 'plan',
+    status: 'plan_ready',
+    result: {
+      executed: false,
+      parked: true,
+      phase: 'parked_for_approval',
+      awaitingApproval: [
+        { type: 'send_email', reason: 'Sending email acts on your behalf and needs approval.' },
+      ],
+      response: 'Waiting for your approval on the dashboard.',
+    },
+  })
+  await store.recordRoutineRun(dispatchedRun(routine))
+
+  const closed = await reapDispatchedRuns({ store, now: NOW + 60_000, logger: silentLogger })
+  assert.equal(closed.length, 1)
+  assert.equal(closed[0].status, 'awaiting-approval')
+  assert.equal(closed[0].final, true, 'awaiting-approval settles the occurrence')
+  assert.equal(closed[0].nextAttemptAt, null)
+  assert.equal(closed[0].error, null, 'nothing failed; nothing may say so')
+
+  // LOUD: the owner hears about the parked plan instead of silence.
+  const announcement = [...store.announcements.values()][0]
+  assert.ok(announcement, 'a parked routine must be announced')
+  assert.match(announcement.speech, /Morning news/)
+  assert.match(announcement.speech, /needs your approval on the dashboard/)
+  assert.match(announcement.speech, /acts on your behalf/)
+  assert.equal(announcement.priority, 'high')
+  assert.equal(announcement.runId, 'run_parked')
+
+  // Never retried: the routine stays armed for tomorrow, not for a backoff.
+  const stored = store.routines.get(routine.routineId)
+  assert.equal(stored.nextRunAt, rearmedFor)
+  assert.equal(Number(stored.attempt || 0), 0)
+})
+
+test('an old bridge reporting the park as a failure still must not trigger retries', async () => {
+  const store = fakeStore()
+  const routine = dueRoutine()
+  const rearmedFor = NOW + 86_400_000
+  await store.saveRoutine({ ...routine, nextRunAt: rearmedFor })
+  /*
+   * The pre-fix dialect, verbatim from job_3276a969 (2026-08-08): the relay
+   * stored status 'failed' with the parked plan still in `result`. The reaper
+   * must read the structure, not the status, or one stale bridge re-creates
+   * the retry storm against a fixed relay.
+   */
+  await store.createJob({
+    jobId: 'job_parked',
+    type: 'plan',
+    status: 'failed',
+    error: 'Waiting for your approval on the dashboard.',
+    result: {
+      executed: false,
+      awaitingApproval: [
+        { type: 'run_shell', reason: 'Running a shell command needs your approval.' },
+      ],
+      requiresConfirmation: true,
+    },
+  })
+  await store.recordRoutineRun(dispatchedRun(routine))
+
+  const closed = await reapDispatchedRuns({ store, now: NOW + 60_000, logger: silentLogger })
+  assert.equal(closed[0].status, 'awaiting-approval')
+  assert.equal(closed[0].final, true)
+  assert.match([...store.announcements.values()][0].speech, /needs your approval/)
+  // No retry was armed and no attempt was burned.
+  const stored = store.routines.get(routine.routineId)
+  assert.equal(stored.nextRunAt, rearmedFor)
+  assert.equal(Number(stored.attempt || 0), 0)
+
+  // A genuinely failed execution (executionError, no parked markers) is NOT
+  // mistaken for a park — that path keeps its capped retries.
+  assert.equal(
+    jobParkedForApproval({
+      status: 'failed',
+      result: { executed: false, executionError: 'the script crashed' },
+    }),
+    false,
+  )
+  // And a job the owner already cancelled stops being "awaiting" anything.
+  assert.equal(
+    jobParkedForApproval({
+      status: 'cancelled',
+      result: { executed: false, parked: true },
+    }),
+    false,
+  )
+})
+
+test('a parked routine with announce:false stays quiet but the receipt still says why', async () => {
+  const store = fakeStore()
+  const routine = dueRoutine({ announce: false })
+  await store.saveRoutine({ ...routine, nextRunAt: NOW + 86_400_000 })
+  await store.createJob({
+    jobId: 'job_parked',
+    type: 'plan',
+    status: 'plan_ready',
+    result: { executed: false, parked: true, phase: 'parked_for_approval', awaitingApproval: [] },
+  })
+  await store.recordRoutineRun(dispatchedRun(routine))
+
+  const closed = await reapDispatchedRuns({ store, now: NOW + 60_000, logger: silentLogger })
+  assert.equal(closed[0].status, 'awaiting-approval')
+  assert.equal(store.announcements.size, 0)
+  assert.match(store.runs.get('run_parked').summary, /Parked for your approval/)
+})
+
+test('a queued retry that lands after the park is superseded, not re-planned', async () => {
+  const store = fakeStore()
+  /* An earlier attempt armed a retry; before it fired, the dispatch parked. */
+  const routine = { ...dueRoutine(), attempt: 1, dueSince: NOW - 1 }
+  await store.saveRoutine(routine)
+  await store.recordRoutineRun({
+    runId: 'run_waiting',
+    routineId: routine.routineId,
+    status: 'awaiting-approval',
+    final: true,
+    startedAt: new Date(NOW - 60_000).toISOString(),
+    occurrenceKey: occurrenceKey(routine.routineId, new Date(NOW - 1).toISOString()),
+  })
+
+  let enqueued = 0
+  const { runs } = await runDueRoutines({
+    store,
+    now: NOW,
+    isMacOnline: async () => true,
+    enqueueMacJob: async () => {
+      enqueued += 1
+      return { jobId: 'job_dup' }
+    },
+    logger: silentLogger,
+  })
+
+  assert.equal(enqueued, 0, 'the planner must not be asked the same question again')
+  assert.equal(runs[0].status, 'superseded')
+  assert.match(runs[0].error, /already waiting for your approval as run_waiting/)
 })

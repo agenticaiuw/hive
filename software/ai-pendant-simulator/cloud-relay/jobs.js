@@ -4,6 +4,10 @@ import {
   deliveryRunStatus,
   gradeAudioDelivery,
 } from '../shared/audioDelivery.js'
+/* The one definition of "this plan is parked for the owner's approval" —
+ * shared with the routine reaper so the run feed and the scheduler can never
+ * disagree about what a parked job is. */
+import { jobParkedForApproval } from './routines.js'
 
 export function createJobId() {
   return `job_${crypto.randomUUID()}`
@@ -356,6 +360,18 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
         result.execution?.ok === true ||
         (result.execution && result.executed !== false)),
   )
+  /*
+   * Parked for approval is neither done nor failed, and the feed must not
+   * pick a side. Before this check a parked plan_ready job satisfied the
+   * dashboard's "agent event done" clause and the whole run rendered as
+   * COMPLETED — a plan nobody had approved, reported as finished. Jobs a
+   * pre-fix bridge recorded as status 'failed' keep reading as failed here:
+   * that is what that bridge claimed, and the routine reaper (not this feed)
+   * is the compatibility path that rescues those.
+   */
+  const parkedRun =
+    !['failed', 'cancelled'].includes(String(job.status || '')) &&
+    jobParkedForApproval(job)
   if (result) {
     const actionText = Array.isArray(result.actions)
       ? result.actions
@@ -380,17 +396,21 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
     events.push({
       eventId: `cloud-${job.jobId}-agent`,
       stage: 'agent',
-      status: 'done',
-      label: macActionDone
-        ? 'Plan executed on this Mac'
-        : actionText
-          ? 'Mac action selected'
-          : 'Agent response ready',
-      detail: macActionDone
-        ? 'The Mac already ran the action; speech may still be rendering.'
-        : actionText
-          ? 'The Mac agent produced this action plan from the transcript.'
-          : 'The Mac agent completed this request.',
+      status: parkedRun ? 'waiting' : 'done',
+      label: parkedRun
+        ? 'Waiting for your approval'
+        : macActionDone
+          ? 'Plan executed on this Mac'
+          : actionText
+            ? 'Mac action selected'
+            : 'Agent response ready',
+      detail: parkedRun
+        ? 'The plan is parked for your approval on the dashboard; nothing has run yet.'
+        : macActionDone
+          ? 'The Mac already ran the action; speech may still be rendering.'
+          : actionText
+            ? 'The Mac agent produced this action plan from the transcript.'
+            : 'The Mac agent completed this request.',
       text: agentText,
       source: 'mac-bridge',
       meta: {
@@ -399,6 +419,14 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
         actions: Array.isArray(result.actions) ? result.actions : [],
         executed: macActionDone,
         phase: result.phase || null,
+        ...(parkedRun
+          ? {
+              parked: true,
+              awaitingApproval: Array.isArray(result.awaitingApproval)
+                ? result.awaitingApproval
+                : [],
+            }
+          : {}),
       },
       at: result.thinking?.updatedAt || job.updatedAt,
     })

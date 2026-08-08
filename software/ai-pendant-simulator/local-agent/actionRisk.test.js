@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  ROUTINE_DENY_ACTIONS,
   classifyAction,
   classifyPlan,
+  classifyPlanForRoutine,
   isStatusShellCommand,
 } from './actionRisk.js'
 
@@ -178,4 +180,73 @@ test('Realtime status shell and get_mac_status run hands-free', () => {
     ]).autoRun,
     true,
   )
+})
+
+/* ---- the routine venue ---------------------------------------------------
+ * A schedule the owner wrote and enabled is standing approval for its own
+ * purpose (the local runner has executed routines gate-free since day one).
+ * The 2026-08-08 incident: the 7am briefing planned `run_shell node …`, the
+ * voice allowlist parked it, and the owner heard silence while the relay
+ * retried a phantom failure. These lock the wider routine threshold AND the
+ * hard ceiling above it.
+ * ------------------------------------------------------------------------- */
+
+test('a routine auto-runs confirm-tier work its own command implies', () => {
+  // The exact action the Morning news routine planned on 2026-08-08.
+  const brief = [
+    {
+      type: 'run_shell',
+      label: 'Research and speak the headlines',
+      params: { command: 'node scripts/research-brief.mjs --topic "news" --mode brief' },
+    },
+  ]
+  // Voice threshold: parked (node is not status shell). Unchanged.
+  assert.equal(classifyPlan(brief).autoRun, false)
+  // Routine venue: standing approval — it runs.
+  const verdict = classifyPlanForRoutine(brief)
+  assert.equal(verdict.autoRun, true)
+  assert.equal(verdict.denied.length, 0)
+  // The voice-tier holds are still visible for telemetry, just not enforced.
+  assert.deepEqual(verdict.blocked.map((entry) => entry.type), ['run_shell'])
+
+  // Mixed confirm-tier work (write a file, then read it back) also runs.
+  assert.equal(
+    classifyPlanForRoutine([
+      { type: 'write_file', params: { path: '/tmp/brief.md', content: 'x' } },
+      { type: 'read_file', params: { path: '/tmp/brief.md' } },
+    ]).autoRun,
+    true,
+  )
+})
+
+test('the routine deny-list never runs unattended, whatever else the plan holds', () => {
+  for (const type of ROUTINE_DENY_ACTIONS) {
+    const verdict = classifyPlanForRoutine([
+      { type: 'open_app', params: { appName: 'Notes' } },
+      { type, params: {} },
+    ])
+    assert.equal(verdict.autoRun, false, `${type} must park a routine`)
+    assert.deepEqual(verdict.denied.map((entry) => entry.type), [type])
+    assert.match(verdict.reason, /cannot approve this on its own/)
+  }
+  // The deny-list is exactly the outward/irreversible tier, nothing vaguer.
+  assert.deepEqual(
+    [...ROUTINE_DENY_ACTIONS].sort(),
+    ['computer_use_task', 'delete_path', 'send_email', 'send_message'],
+  )
+})
+
+test('whatever voice may auto-run, a routine may too — the venue only widens', () => {
+  const voiceSafe = [
+    { type: 'open_app', params: { appName: 'Reminders' } },
+    { type: 'run_shell', params: { command: 'pmset -g batt' } },
+  ]
+  assert.equal(classifyPlan(voiceSafe).autoRun, true)
+  const verdict = classifyPlanForRoutine(voiceSafe)
+  assert.equal(verdict.autoRun, true)
+  assert.equal(verdict.blocked.length, 0)
+
+  // An empty plan still does not "run" anywhere.
+  assert.equal(classifyPlanForRoutine([]).autoRun, false)
+  assert.equal(classifyPlanForRoutine(undefined).autoRun, false)
 })

@@ -606,6 +606,7 @@ async function failRun({ store, routine, receipt, now, error, logger }) {
  */
 async function supersedeRun({ store, routine, receipt, settled, now, logger }) {
   const done = settled.status === 'completed'
+  const waiting = settled.status === 'awaiting-approval'
   const finished = {
     ...receipt,
     status: 'superseded',
@@ -613,7 +614,9 @@ async function supersedeRun({ store, routine, receipt, settled, now, logger }) {
       `Attempt ${receipt.attempt} was dropped: this occurrence ` +
       (done
         ? `already completed as ${settled.runId}.`
-        : `is still running on the Mac as ${settled.runId}.`),
+        : waiting
+          ? `is already waiting for your approval as ${settled.runId}.`
+          : `is still running on the Mac as ${settled.runId}.`),
     finishedAt: new Date(now).toISOString(),
   }
   await store.recordRoutineRun(finished)
@@ -621,7 +624,10 @@ async function supersedeRun({ store, routine, receipt, settled, now, logger }) {
    * still dispatched, the reaper owns it and will announce the result — what
    * must not happen is this routine staying armed for the same occurrence. */
   await store.saveRoutine(
-    advanceRoutine(routine, { now, status: done ? 'completed' : 'dispatched' }),
+    advanceRoutine(routine, {
+      now,
+      status: done ? 'completed' : waiting ? 'awaiting-approval' : 'dispatched',
+    }),
   )
   logger?.log?.(`[routines] ${routine.routineId} retry suppressed: ${finished.error}`)
   return finished
@@ -639,7 +645,11 @@ async function findSettledOccurrence(store, receipt) {
       (run) =>
         run.runId !== receipt.runId &&
         run.occurrenceKey === receipt.occurrenceKey &&
-        ['completed', 'dispatched'].includes(String(run.status || '')),
+        /* awaiting-approval settles its occurrence: the owner has the plan,
+         * and a retry could only ask the planner the same question again. */
+        ['completed', 'dispatched', 'awaiting-approval'].includes(
+          String(run.status || ''),
+        ),
     ) ?? null
   )
 }
@@ -742,6 +752,32 @@ async function runOnRelay({ store, routine, receipt, now, readPage, webSearch })
 }
 
 /**
+ * A plan the Mac parked for the owner's approval, in either bridge dialect.
+ *
+ * Bridges carrying the venue-policy fix say it outright: `result.parked` /
+ * `phase: 'parked_for_approval'`. Bridges deployed before it reported the very
+ * same situation as a FAILURE whose result still carries the blocked-action
+ * list and no execution error — the shape behind the 2026-08-08 incident,
+ * where the 7am briefing parked and the reaper retried the "failure" with a
+ * fresh planner call every backoff step. Both dialects must land here, or one
+ * stale bridge turns every parked routine back into that retry storm.
+ */
+export function jobParkedForApproval(job) {
+  const result = job?.result
+  if (!result || typeof result !== 'object') return false
+  /* An owner who cancelled the job already answered; do not announce a wait. */
+  if (String(job.status || '') === 'cancelled') return false
+  if (result.parked === true) return true
+  if (result.phase === 'parked_for_approval') return true
+  return (
+    result.executed === false &&
+    Array.isArray(result.awaitingApproval) &&
+    result.awaitingApproval.length > 0 &&
+    !result.executionError
+  )
+}
+
+/**
  * Close the loop on runs the Mac took: turn a finished plan job into an
  * announcement, and stop waiting on jobs that never came back.
  *
@@ -753,6 +789,7 @@ export async function reapDispatchedRuns({
   store,
   now = Date.now(),
   limit = 10,
+  logger = console,
 }) {
   const pending = await store.listRoutineRuns({ status: 'dispatched', limit })
   const closed = []
@@ -761,6 +798,18 @@ export async function reapDispatchedRuns({
     const startedMs = Date.parse(run.startedAt || '') || now
     if (!run.macJobId) continue
     const job = await store.getJob(run.macJobId).catch(() => null)
+
+    /*
+     * Parked outranks every other reading of the job, including 'failed':
+     * a plan waiting for the owner is not a failure, must never be retried
+     * (asking the planner again cannot answer an approval question), and is
+     * the one outcome whose silence caused this file's production incident.
+     */
+    if (job && jobParkedForApproval(job)) {
+      closed.push(await closeParkedDispatch({ store, run, job, now, logger }))
+      continue
+    }
+
     const done =
       job && ['completed', 'plan_ready'].includes(String(job.status || ''))
     const failed = job && ['failed', 'cancelled'].includes(String(job.status || ''))
@@ -870,6 +919,71 @@ async function closeFailedDispatch({ store, run, now, error }) {
   } else {
     finished.announcementId = await announceOutcome({ store, routine, run: finished, now })
   }
+  await store.recordRoutineRun(finished)
+  return finished
+}
+
+/**
+ * A dispatch whose plan is parked on the Mac waiting for the owner.
+ *
+ * Its own state on purpose: 'awaiting-approval' is neither completed (nothing
+ * ran) nor failed (nothing broke), and the difference decides everything
+ * downstream — it is final for the reaper, it never enters planRetry, it does
+ * not count against the heartbeat's failedCount, and the routine is NOT
+ * rearmed (dispatchToMac already advanced it to the next occurrence; the
+ * occurrence itself is settled by the parked plan).
+ *
+ * And it is LOUD. The failure mode being fixed was not the parking — it was
+ * that nobody was told: the plan sat behind a dashboard nobody had open while
+ * the relay retried a phantom failure. The announcement is high priority so
+ * the next open pendant socket speaks it ahead of routine chatter.
+ */
+async function closeParkedDispatch({ store, run, job, now, logger }) {
+  const routine = await store.getRoutine(run.routineId).catch(() => null)
+  const blocked = Array.isArray(job?.result?.awaitingApproval)
+    ? job.result.awaitingApproval
+    : []
+  const reasons = blocked
+    .map((entry) => String(entry?.reason || entry?.type || '').trim())
+    .filter(Boolean)
+    .join(' ')
+  const label = run.routineName || routine?.name || 'A scheduled task'
+
+  const finished = {
+    ...run,
+    status: 'awaiting-approval',
+    error: null,
+    summary: `Parked for your approval on the dashboard. ${reasons}`
+      .trim()
+      .slice(0, 600),
+    final: true,
+    nextAttemptAt: null,
+    finishedAt: new Date(now).toISOString(),
+  }
+
+  /* Same convention as announceOutcome: a deleted routine or announce:false
+   * stays quiet, but the receipt records the state either way. */
+  if (routine && routine.announce !== false) {
+    try {
+      const announcement = createAnnouncement({
+        deviceId: routine.deviceId,
+        title: label,
+        speech:
+          `${label} planned its work but needs your approval on the dashboard before it can act. ${reasons}`.trim(),
+        routineId: run.routineId,
+        runId: run.runId,
+        priority: 'high',
+        now,
+      })
+      await store.createAnnouncement(announcement)
+      finished.announcementId = announcement.announcementId
+    } catch (error) {
+      logger?.warn?.(
+        `[routines] could not announce parked ${run.runId}: ${error?.message || error}`,
+      )
+    }
+  }
+
   await store.recordRoutineRun(finished)
   return finished
 }
