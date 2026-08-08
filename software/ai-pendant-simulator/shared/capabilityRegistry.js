@@ -1189,8 +1189,12 @@ export function registerFromCapabilityManifest(
           ? `401 means the route exists and the token is wrong; 404 means no such route.`
           : null,
       },
-      what: group.what ?? null,
-      module: group.module ?? null,
+      /* The route's own line first, its family's only as a fallback. A group
+       * blurb is shared by every sibling, so scoring against it alone made
+       * /evidence/revoke and /evidence/sweep the same capability to a matcher.
+       * Older manifests carry no per-route `what` and are unaffected. */
+      what: route.what ?? group.what ?? null,
+      module: route.module ?? group.module ?? null,
       /* A route that ends in a collection and returns ids is the usual source
        * of the ids its siblings require. Declared narrowly: only the parameters
        * a sibling route already asks for, so this stays derivation rather than
@@ -1211,9 +1215,18 @@ export function registerFromCapabilityManifest(
     invoke: { action: action.type },
     auth: { credential, note: 'Dispatched through POST /execute.' },
     requires: [],
-    what: action.plannerAdvertised
-      ? null
-      : 'Executes over POST /execute but is stripped from LLM-authored plans by llmPlanner.sanitizeActions.',
+    /* What the action DOES, plus the drift warning when it applies — they are
+     * different facts and the second used to displace the first, which is how
+     * every planner-advertised type arrived here describing nothing at all. */
+    what:
+      [
+        action.what ?? null,
+        action.plannerAdvertised
+          ? null
+          : 'Executes over POST /execute but is stripped from LLM-authored plans by llmPlanner.sanitizeActions.',
+      ]
+        .filter(Boolean)
+        .join(' ') || null,
     module: manifest.actions?.executor ?? null,
   }))
 
