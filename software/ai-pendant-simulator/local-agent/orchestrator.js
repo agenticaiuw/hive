@@ -8,7 +8,7 @@ import {
   classifyTier,
   matchDeterministic,
 } from './policyRouter.js'
-import { ledgerStepObserver, openLedger } from './actionLedger.js'
+import { closeLedger, ledgerStepObserver, openLedger } from './actionLedger.js'
 import { recordRouting } from './routingStats.js'
 import {
   createSession,
@@ -492,7 +492,8 @@ export async function orchestrateExecute({
   const { executeActions } = await import('./executor.js')
   const { appendLog } = await import('./logger.js')
   const { updateContextGraphFromExecution } = await import('./contextGraph.js')
-  const { throwIfAborted } = await import('./jobControl.js')
+  const jobControl = await import('./jobControl.js')
+  const { runWithCancellation, throwIfAborted } = jobControl
   const { stripImageBytes } = await import('./screenCapture.js')
   const { runFocusSafePlan } = await import('./focusCoordinator.js')
 
@@ -502,6 +503,32 @@ export async function orchestrateExecute({
     source,
     kind: 'execute',
   })
+
+  /*
+   * Closing the manifest, on every path out of this function.
+   *
+   * The ledger's whole recovery story rests on "a run still open is a run that
+   * never came back", and that sentence is only true if a run that DID come back
+   * says so. Nothing on this path used to, so every ordinary /execute stayed
+   * open forever and `GET /ledger/interrupted` returned the entire history.
+   *
+   * Latched, because the three exits overlap: the success return names the
+   * status it computed, the catch names cancelled-or-failed, and the finally is
+   * the backstop for any path that reaches neither. First one to arrive wins,
+   * and it swallows its own failures for the same reason the observer does —
+   * bookkeeping never gets to be the thing that breaks the owner's plan.
+   */
+  let ledgerId = null
+  let ledgerClosed = false
+  const closeRun = (status, outcome) => {
+    if (!ledgerId || ledgerClosed) return
+    ledgerClosed = true
+    try {
+      closeLedger(ledgerId, { status, outcome })
+    } catch (error) {
+      console.warn('action ledger could not be closed:', error?.message || error)
+    }
+  }
 
   try {
     addThinkingStep(trace.traceId, {
@@ -532,10 +559,11 @@ export async function orchestrateExecute({
       const ledger = openLedger({
         command,
         actions,
-        jobId: planMeta?.jobId ?? null,
+        jobId: jobIdForRun({ planMeta, signal, jobControl }),
         sessionId: sessionId ?? null,
         source,
       })
+      ledgerId = ledger.ledgerId
       recordStep = ledgerStepObserver(ledger)
     } catch (error) {
       /* Bookkeeping must never stop the owner's work. A plan that cannot be
@@ -545,7 +573,14 @@ export async function orchestrateExecute({
     }
 
     const { results, receipt: focus } = await runFocusSafePlan(actions, {
-      execute: executeActions,
+      /*
+       * The job's cancel signal, carried down to whatever spawns a child
+       * process. `throwIfAborted` below only ever fires between steps, so
+       * without this a cancel could not touch the step already running.
+       * executor.js takes one argument and stays that way; the scope is how
+       * the signal gets past it.
+       */
+      execute: (batch) => runWithCancellation(signal, () => executeActions(batch)),
       onStep: async ({ phase, seq, action, result }) => {
         /* Awaited first, so "pending means it never ran" stays true. */
         await recordStep?.({ phase, seq, action, result })
@@ -597,6 +632,13 @@ export async function orchestrateExecute({
     const responseText = [...results.map((item) => item.message), focus.drift?.detail]
       .filter(Boolean)
       .join(' ')
+
+    /* The plan is over. Said here rather than after the memory writes below,
+     * because every one of those can throw and none of them changes what the
+     * run did — a ledger left open by a failed context-graph write would be
+     * reported as an abandoned automation, which it is not. */
+    closeRun(status === 'success' ? 'settled' : status, responseText || null)
+
     appendTurn(sessionId, {
       role: 'assistant',
       content: responseText,
@@ -668,7 +710,15 @@ export async function orchestrateExecute({
       focus,
     }
   } catch (error) {
-    if (error?.name === 'JobCancelledError' || error?.code === 'JOB_CANCELLED') {
+    const cancelled = error?.name === 'JobCancelledError' || error?.code === 'JOB_CANCELLED'
+    /* A throw is still an ending, and a process that can run a catch block is
+     * still alive to say so. Only a run whose process stops existing gets to
+     * leave the manifest open — that is the whole distinction the resume path
+     * turns on. The steps are untouched: one left `inflight` here really was
+     * dispatched and really never answered. */
+    closeRun(cancelled ? 'cancelled' : 'failed', error?.message ?? String(error))
+
+    if (cancelled) {
       const thinking = finishThinkingTrace(trace.traceId, {
         status: 'failed',
         summary: error.message || 'Cancelled from dashboard',
@@ -681,7 +731,45 @@ export async function orchestrateExecute({
       summary: error.message,
     })
     throw error
+  } finally {
+    /* Unreachable if either branch above ran, which is the point: it exists for
+     * the path nobody thought of. A ledger this process opened and did not close
+     * would be read as an abandoned run by a process that is demonstrably still
+     * here to execute a finally. */
+    closeRun('abandoned', 'The run left the orchestrator without recording an outcome.')
   }
+}
+
+/*
+ * WHICH JOB THIS RUN BELONGS TO.
+ *
+ * `planMeta` is built by the pendant (bridge.js) before the request is sent, so
+ * it cannot contain the job id — the id does not exist until server.js calls
+ * jobTracker.recordJobStart() on arrival. Reading `planMeta.jobId` therefore
+ * produced null on every run ever made, and a ledger with no jobId cannot answer
+ * "which job wrote this file".
+ *
+ * NO SECOND ID SCHEME. jobTracker mints `local_<uuid>` and that stays the
+ * identity of a run. The join is one server.js already makes and hands us: it
+ * registers the job's AbortController under that id, then passes that same
+ * controller's signal into this function. Object identity on the signal is an
+ * exact match — not a fuzzy one on command text, which two identical concurrent
+ * requests would collide on.
+ *
+ * A caller that already knows its job id wins, because it knows better than a
+ * lookup. A caller with neither (routines.js runs plans that were never
+ * registered as jobs at all) gets null, which is the honest answer: there is no
+ * job, rather than a plausible-looking id belonging to somebody else's run.
+ */
+function jobIdForRun({ planMeta, signal, jobControl }) {
+  const declared = String(planMeta?.jobId ?? '').trim()
+  if (declared) return declared
+  if (!signal || typeof jobControl?.listActiveJobIds !== 'function') return null
+
+  for (const jobId of jobControl.listActiveJobIds()) {
+    if (jobControl.getActiveJob?.(jobId)?.abortController?.signal === signal) return jobId
+  }
+  return null
 }
 
 /**

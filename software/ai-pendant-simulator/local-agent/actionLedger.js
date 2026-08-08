@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import os from 'node:os'
 import path from 'node:path'
 
 import {
@@ -81,6 +82,27 @@ export const LEDGER_VERSION = 1
 export const MAX_STORE_BYTES = 1024 * 1024
 export const MAX_LEDGER_BYTES = 64 * 1024
 
+/*
+ * HOW LONG A LIVE RUN MAY GO WITHOUT TOUCHING THIS FILE.
+ *
+ * Every step transition rewrites and fsyncs the whole store, twice per step, so
+ * a run that is still being driven leaves fingerprints continuously. Silence for
+ * longer than this means nobody is driving it.
+ *
+ * Five minutes is not a guess pulled from nowhere: it is the number
+ * catchupSources.INFLIGHT_STALE_MS already uses for exactly this judgement
+ * (itself borrowed from routines.ROUTINE_LEASE_MS), and it is more than double
+ * config.SHELL_TIMEOUT_MS — the longest a single step is allowed to block before
+ * the executor gives up on it. Two surfaces answering "is this run dead" with
+ * two different numbers is how the dashboard and the digest start disagreeing
+ * about the same run, so this one is deliberately the same number.
+ *
+ * It is only ever the FALLBACK. When the ledger names a process that is provably
+ * gone, the run is abandoned the moment that is observed and nothing waits five
+ * minutes to say so — see ownerIsGone().
+ */
+export const INTERRUPTED_AFTER_MS = 5 * 60 * 1000
+
 /* Deep enough for the nested params real actions carry, shallow enough that a
  * pathological structure cannot turn persisting a manifest into a walk. */
 const MAX_PARAM_DEPTH = 6
@@ -111,8 +133,14 @@ function load(filePath) {
   return readJsonWithRecovery(filePath, { fallback: emptyStore(), validate: isValidStore })
 }
 
-function save(store, filePath) {
-  const pruned = pruneLedgers(store.ledgers)
+/*
+ * The budget is overridable per call for the same reason browserProvenance's is:
+ * the undercount this store used to have is proportional, so a small budget
+ * catches it in forty writes instead of a thousand. The defaults are what
+ * production uses and are asserted separately.
+ */
+function save(store, filePath, budget = {}) {
+  const pruned = pruneLedgers(store.ledgers, budget)
   const next = {
     ...store,
     version: LEDGER_VERSION,
@@ -124,10 +152,24 @@ function save(store, filePath) {
   return next
 }
 
-function jsonBytes(value) {
+/**
+ * The size of a value AS THE STORE WRITES IT.
+ *
+ * atomicJsonStore.writeJsonAtomic serialises with an indent of two. This file
+ * used to measure with `JSON.stringify(value)` — no indent — and compare the
+ * answer to a budget describing a file, which is not a budget, it is a hope with
+ * a number on it. Measured: one small manifest reported 1 378 bytes while the
+ * file it produced was 2 148, a 56% undercount, and browserSpool's sibling of
+ * the same bug put a store stated at 256 KB on disk at 306 682 bytes.
+ *
+ * browserProvenance.storeBytesOf is the same function for the same reason; if
+ * atomicJsonStore ever changes how it serialises, all three have to move
+ * together.
+ */
+export function storeBytesOf(value) {
   try {
-    const serialized = JSON.stringify(value)
-    return serialized === undefined ? 0 : Buffer.byteLength(serialized)
+    const serialized = JSON.stringify(value ?? null, null, 2)
+    return serialized === undefined ? 0 : Buffer.byteLength(serialized, 'utf8')
   } catch {
     /* Unserialisable means unstorable, so treat it as maximally expensive and
      * let it be shed first — jobTracker.jsonBytes reaches the same conclusion
@@ -136,7 +178,75 @@ function jsonBytes(value) {
   }
 }
 
+/*
+ * What one manifest costs INSIDE the store, which is not what it costs alone.
+ *
+ * A ledger sits two levels down — store object, then `ledgers` array — so every
+ * line of it gains the four spaces of that nesting, plus the comma and newline
+ * separating it from the next. The second half of the same undercount: summing
+ * records measured at the top level understates an array of many small records
+ * by well over ten percent even once the indent is right.
+ */
+function nestedBytesOf(ledger) {
+  const serialized = JSON.stringify(ledger ?? null, null, 2)
+  if (serialized === undefined) return Number.MAX_SAFE_INTEGER
+  return Buffer.byteLength(serialized, 'utf8') + 4 * serialized.split('\n').length + 2
+}
+
+/* The store as it will be written, with the counters at their widest so a budget
+ * checked while they are small does not overrun once they grow. */
+const envelope = (ledgers) => ({
+  version: LEDGER_VERSION,
+  droppedLedgers: Number.MAX_SAFE_INTEGER,
+  droppedThrough: '0000-00-00T00:00:00.000Z',
+  ledgers,
+})
+
 const sha256 = (value) => crypto.createHash('sha256').update(String(value ?? '')).digest('hex')
+
+/* ------------------------------------------------------------ liveness */
+
+/*
+ * WHO IS DRIVING THIS RUN.
+ *
+ * A ledger is closed by the process that ran it, so the interesting failure —
+ * the one this whole file exists for — is the process that cannot: killed,
+ * panicked, or taken down with the machine. Nothing it left behind says "I am
+ * gone", because saying so is exactly what it did not get to do.
+ *
+ * Stamping the owner turns that into an observable fact instead of an inference
+ * from a clock. `pid` is checked with signal 0, which asks the kernel whether
+ * the process exists and sends nothing. `host` is recorded because this store
+ * lives in a workspace folder that may be synced between machines, and a pid
+ * from another machine is a number that means nothing here.
+ *
+ * IT CAN ONLY EVER SAY "GONE" WHEN IT IS SURE. A recycled pid reads as alive, an
+ * unstamped ledger (written before this field existed) reads as alive, and a
+ * ledger from another host reads as alive — all of which fall through to the
+ * staleness bound rather than producing a false "your run died". The reverse
+ * mistake is the expensive one: telling the owner a run was abandoned while it
+ * is still typing into their window.
+ */
+function ownerStamp() {
+  return { pid: process.pid, host: os.hostname() }
+}
+
+function pidIsAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    /* EPERM means it exists and belongs to somebody else. Only ESRCH is death. */
+    return error?.code === 'EPERM'
+  }
+}
+
+function ownerIsGone(owner, { pid = process.pid, host = os.hostname(), isAlive = pidIsAlive } = {}) {
+  if (!owner || !Number.isInteger(owner.pid)) return false
+  if (owner.host && owner.host !== host) return false
+  if (owner.pid === pid) return false
+  return !isAlive(owner.pid)
+}
 
 /* ------------------------------------------------------------- identity */
 
@@ -343,6 +453,8 @@ export function openLedger({
   title = null,
   now = Date.now(),
   filePath = ledgerLocation(),
+  maxStoreBytes = MAX_STORE_BYTES,
+  maxLedgerBytes = MAX_LEDGER_BYTES,
 } = {}) {
   const list = Array.isArray(actions) ? actions : []
   if (!list.length) throw new Error('A plan manifest needs at least one action.')
@@ -361,6 +473,9 @@ export function openLedger({
     command: String(command ?? ''),
     title: title ? String(title) : null,
     status: 'open',
+    /* The process that will close this. Read back by interruptedLedgers() to
+     * tell a run nobody is driving from one that is simply slow. */
+    owner: ownerStamp(),
     createdAt: at,
     updatedAt: at,
     closedAt: null,
@@ -375,11 +490,15 @@ export function openLedger({
    * in-memory version would be reading fields the resume will never see. The
    * new ledger is open and newest, so pruneLedgers ranks it first and it
    * survives its own write. */
-  const written = save({ ...store, ledgers: [manifest, ...store.ledgers] }, filePath)
+  const written = save(
+    { ...store, ledgers: [manifest, ...store.ledgers] },
+    filePath,
+    { maxStoreBytes, maxLedgerBytes },
+  )
   return written.ledgers.find((entry) => entry?.ledgerId === manifest.ledgerId) ?? manifest
 }
 
-function mutate(ledgerId, filePath, change) {
+function mutate(ledgerId, filePath, change, budget = {}) {
   const store = load(filePath)
   const index = store.ledgers.findIndex((entry) => entry?.ledgerId === ledgerId)
   if (index === -1) return null
@@ -389,7 +508,7 @@ function mutate(ledgerId, filePath, change) {
 
   const ledgers = [...store.ledgers]
   ledgers[index] = updated
-  const written = save({ ...store, ledgers }, filePath)
+  const written = save({ ...store, ledgers }, filePath, budget)
   return written.ledgers.find((entry) => entry?.ledgerId === ledgerId) ?? null
 }
 
@@ -405,14 +524,22 @@ function withStep(manifest, stepKey, change, now) {
  * "About to dispatch." MUST be durable before the executor sees the action —
  * see the ordering invariant at the top of this file.
  */
-export function markStepStarted(ledgerId, stepKey, { now = Date.now(), filePath = ledgerLocation() } = {}) {
-  return mutate(ledgerId, filePath, (manifest) =>
-    withStep(
-      manifest,
-      stepKey,
-      (step) => ({ ...step, phase: 'inflight', startedAt: new Date(now).toISOString() }),
-      now,
-    ),
+export function markStepStarted(
+  ledgerId,
+  stepKey,
+  { now = Date.now(), filePath = ledgerLocation(), ...budget } = {},
+) {
+  return mutate(
+    ledgerId,
+    filePath,
+    (manifest) =>
+      withStep(
+        manifest,
+        stepKey,
+        (step) => ({ ...step, phase: 'inflight', startedAt: new Date(now).toISOString() }),
+        now,
+      ),
+    budget,
   )
 }
 
@@ -425,13 +552,16 @@ export function markStepStarted(ledgerId, stepKey, { now = Date.now(), filePath 
 export function settleStep(
   ledgerId,
   stepKey,
-  { result = null, receipt = null, now = Date.now(), filePath = ledgerLocation() } = {},
+  { result = null, receipt = null, now = Date.now(), filePath = ledgerLocation(), ...budget } = {},
 ) {
-  return mutate(ledgerId, filePath, (manifest) =>
-    withStep(
-      manifest,
-      stepKey,
-      (step) => ({
+  return mutate(
+    ledgerId,
+    filePath,
+    (manifest) =>
+      withStep(
+        manifest,
+        stepKey,
+        (step) => ({
         ...step,
         phase: 'done',
         finishedAt: new Date(now).toISOString(),
@@ -442,25 +572,54 @@ export function settleStep(
          * job, the journal entry and the undo verdict all hang off this id;
          * copying any of their contents in here would be a second copy waiting
          * to disagree with the first. */
-        receiptId: receipt?.receiptId ?? result?.receipt?.receiptId ?? null,
-        postState: capturePreState({ type: step.type, params: step.params ?? {} }, { now }),
-      }),
-      now,
-    ),
+          receiptId: receipt?.receiptId ?? result?.receipt?.receiptId ?? null,
+          postState: capturePreState({ type: step.type, params: step.params ?? {} }, { now }),
+        }),
+        now,
+      ),
+    budget,
   )
 }
 
+/*
+ * The statuses a run can end in. All of them mean the same thing to
+ * interruptedLedgers() — a process was still alive to say what happened — and
+ * they differ only in WHAT it said. `abandoned` is the odd one: it is a close
+ * performed on behalf of a run by something that outlived it, and it is
+ * deliberately not reachable from the run itself.
+ */
+export const TERMINAL_STATUSES = ['settled', 'failed', 'blocked', 'cancelled', 'abandoned']
+
+/**
+ * Say that the run is over, whatever "over" turned out to mean.
+ *
+ * THIS IS NOT OPTIONAL AND IT IS NOT A SUCCESS PATH. Every terminating branch of
+ * an execution — returned, threw, was cancelled — has to reach this, because the
+ * only thing distinguishing "finished" from "died" in this store is whether
+ * anybody came back to write it down. For eight months nothing on the /execute
+ * path did, and `GET /ledger/interrupted` answered with every plan ever run.
+ *
+ * It does NOT touch the steps. A run closed while a step is still `inflight`
+ * keeps that step inflight: the process knows it stopped, and it still does not
+ * know whether the step landed. Marking it settled to tidy the record would be
+ * inventing the one fact the resume exists to establish.
+ */
 export function closeLedger(
   ledgerId,
-  { status = 'settled', outcome = null, now = Date.now(), filePath = ledgerLocation() } = {},
+  { status = 'settled', outcome = null, now = Date.now(), filePath = ledgerLocation(), ...budget } = {},
 ) {
-  return mutate(ledgerId, filePath, (manifest) => ({
-    ...manifest,
-    status,
-    outcome: outcome ? truncate(String(outcome)) : null,
-    closedAt: new Date(now).toISOString(),
-    updatedAt: new Date(now).toISOString(),
-  }))
+  return mutate(
+    ledgerId,
+    filePath,
+    (manifest) => ({
+      ...manifest,
+      status,
+      outcome: outcome ? truncate(String(outcome)) : null,
+      closedAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    }),
+    budget,
+  )
 }
 
 /* ---------------------------------------------------------------- reads */
@@ -475,7 +634,12 @@ export function listLedgers({ filePath = ledgerLocation(), limit = 20, status = 
   return {
     ok: true,
     storePath: filePath,
-    budget: { maxStoreBytes: MAX_STORE_BYTES, maxLedgerBytes: MAX_LEDGER_BYTES, usedBytes: jsonBytes(store) },
+    budget: {
+      maxStoreBytes: MAX_STORE_BYTES,
+      maxLedgerBytes: MAX_LEDGER_BYTES,
+      usedBytes: storeBytesOf(store),
+      note: 'Measured with the same indentation atomicJsonStore writes, so this is the size of the file rather than a proxy for it.',
+    },
     /* Said out loud rather than left as a silent gap: a bounded store drops
      * things, and a reader who does not know that reads an absence as "the
      * agent never did it". */
@@ -486,24 +650,124 @@ export function listLedgers({ filePath = ledgerLocation(), limit = 20, status = 
 }
 
 /**
- * The runs nobody closed.
+ * The runs that started and never came back.
  *
- * This is the entry point for "the last automation may have been interrupted".
- * A ledger is closed when the plan finishes, in the same process that ran it —
- * so a ledger still `open` at startup is, by construction, a run that did not
- * get to finish saying so.
+ * WHAT "INTERRUPTED" MEANS HERE, and why it is not simply "open".
+ *
+ * The first cut of this function was `status === 'open' || some step inflight`,
+ * which is the right instinct and the wrong predicate, for two separate reasons
+ * that both produce the same symptom — an answer that is 100% noise, in which
+ * the one genuinely abandoned run is invisible among every plan ever run.
+ *
+ *   1. NOT EVERY OPEN LEDGER IS A RUN. POST /ledger, /prepare and the
+ *      form-preview submit manifest all write a plan and deliberately do not
+ *      execute it; that is the entire point of the prepare/approve split. Those
+ *      manifests sit open for as long as the owner takes to answer, which is
+ *      expected to be half an hour. A plan awaiting approval is not a crashed
+ *      run, and calling it one puts a resume prompt in front of the owner for
+ *      something that has not happened yet. So a ledger only qualifies once
+ *      something was DISPATCHED — at least one step out of `pending`. The
+ *      ordering invariant at the top of this file is what makes that readable:
+ *      a step is marked started before the executor sees it, so "nothing left
+ *      pending" is a durable fact rather than an inference.
+ *
+ *   2. AN OPEN LEDGER MAY BE A RUN THAT IS STILL RUNNING. This is the whole
+ *      difficulty. The process that dies cannot say so, so absence of a close is
+ *      ambiguous between "died" and "still working", and a definition that
+ *      resolves that ambiguity by calling every crashed run interrupted forever
+ *      is exactly as useless as one that calls none of them.
+ *
+ * So the run must also be UNATTENDED, established two ways, strongest first:
+ *
+ *   owner-gone   the manifest names the process that opened it, and that pid is
+ *                not there any more. This is a fact, not a timeout: the run is
+ *                reported the instant the agent restarts after a kill, with no
+ *                waiting period at all. See ownerStamp().
+ *   went-cold    the pid reads as alive — or could not be judged at all, being
+ *                recycled, on another host, or written before owners were
+ *                stamped — AND the file has not been touched for
+ *                INTERRUPTED_AFTER_MS. Every step transition fsyncs this store,
+ *                so silence is the only remaining evidence, and it also catches
+ *                the case a pid cannot: a live agent process that dropped a run
+ *                on the floor. This half is a heuristic and is labelled as one
+ *                on every row it produces.
+ *
+ * `unresolved` is the signal the old predicate's second clause was really about,
+ * kept rather than dropped. A run whose process DID come back and close the
+ * ledger, but which left a step marked in flight, is not interrupted — somebody
+ * was there to say what happened — yet nothing knows whether that step landed,
+ * and it is the same resume question. It is reported separately because merging
+ * the two is how "interrupted" stopped meaning anything.
+ *
+ * Everything excluded is counted, not silently dropped: a reader who asks this
+ * question and gets `0` deserves to see that three runs are alive and two plans
+ * are waiting for them.
  */
-export function interruptedLedgers({ filePath = ledgerLocation() } = {}) {
+export function interruptedLedgers({
+  filePath = ledgerLocation(),
+  now = Date.now(),
+  staleAfterMs = INTERRUPTED_AFTER_MS,
+  isAlive = pidIsAlive,
+} = {}) {
   const store = load(filePath)
-  const open = store.ledgers.filter(
-    (entry) => entry?.status === 'open' || entry?.steps?.some((step) => step?.phase === 'inflight'),
-  )
+
+  const interrupted = []
+  const unresolved = []
+  const excluded = { running: 0, prepared: 0, closed: 0 }
+
+  for (const manifest of store.ledgers) {
+    const steps = Array.isArray(manifest?.steps) ? manifest.steps : []
+    const inflight = steps.some((step) => step?.phase === 'inflight')
+
+    if (manifest?.status !== 'open') {
+      excluded.closed += 1
+      if (inflight) {
+        unresolved.push({
+          ...summarizeLedger(manifest),
+          why: 'closed-with-a-step-in-flight',
+          detail:
+            'The process closed this run, so it was alive to say what happened — but a step it dispatched never answered, and nothing here knows whether it landed.',
+        })
+      }
+      continue
+    }
+
+    if (!steps.some((step) => step?.phase !== 'pending')) {
+      excluded.prepared += 1
+      continue
+    }
+
+    const quietForMs = Math.max(0, now - (timeOf(manifest?.updatedAt) || timeOf(manifest?.createdAt)))
+    const gone = ownerIsGone(manifest?.owner, { isAlive })
+    const cold = quietForMs > staleAfterMs
+
+    if (!gone && !cold) {
+      excluded.running += 1
+      continue
+    }
+
+    interrupted.push({
+      ...summarizeLedger(manifest),
+      why: gone ? 'owner-gone' : 'went-cold',
+      quietForMs,
+      detail: gone
+        ? `The process that opened this run (pid ${manifest.owner.pid}) is no longer running, and it never closed the ledger.`
+        : `Nothing has touched this record for ${Math.round(quietForMs / 1000)}s. Every step transition rewrites this file, so a run this quiet is not being driven — though a pid that could not be checked is why this is a judgement rather than an observation.`,
+    })
+  }
+
   return {
     ok: true,
     readOnly: true,
-    count: open.length,
-    note: 'A ledger is closed by the process that ran it. One still open is a run that did not get to finish saying so — it may simply be running right now.',
-    ledgers: open.map(summarizeLedger),
+    at: new Date(now).toISOString(),
+    staleAfterMs,
+    count: interrupted.length,
+    note: 'A run is interrupted when it dispatched a step and then stopped existing: the process that opened it is gone, or the record went quiet for longer than a live run ever does. A plan nobody has dispatched is prepared, not interrupted, and a run that is still writing is still running.',
+    ledgers: interrupted,
+    /* Closed, and still carrying a step that never answered. Same resume
+     * question, different reason — see the note above. */
+    unresolved,
+    excluded,
   }
 }
 
@@ -672,21 +936,21 @@ function shedStepField(step, field, bytes) {
  * grow fat for reasons nobody predicts, so the rule is "a record has a size".
  */
 export function compactLedgerForStore(ledger, { maxBytes = MAX_LEDGER_BYTES } = {}) {
-  if (jsonBytes(ledger) <= maxBytes) return ledger
+  if (nestedBytesOf(ledger) <= maxBytes) return ledger
 
   let steps = Array.isArray(ledger?.steps) ? [...ledger.steps] : []
   const shed = []
 
   for (const field of SHED_ORDER) {
-    if (jsonBytes({ ...ledger, steps }) <= maxBytes) break
+    if (nestedBytesOf({ ...ledger, steps }) <= maxBytes) break
 
     const ranked = steps
-      .map((step, index) => ({ index, bytes: jsonBytes(step?.[field]) }))
+      .map((step, index) => ({ index, bytes: storeBytesOf(step?.[field]) }))
       .filter((entry) => entry.bytes > 0)
       .sort((left, right) => right.bytes - left.bytes)
 
     for (const { index, bytes } of ranked) {
-      if (jsonBytes({ ...ledger, steps }) <= maxBytes) break
+      if (nestedBytesOf({ ...ledger, steps }) <= maxBytes) break
       steps[index] = shedStepField(steps[index], field, bytes)
       if (!shed.includes(field)) shed.push(field)
     }
@@ -725,10 +989,13 @@ export function pruneLedgers(
 
   const kept = []
   const dropped = []
-  let used = 0
+  /* The store is more than its ledgers — the version and the drop counters are
+   * written too — so the envelope is priced before anything is admitted.
+   * Charging only for records is how a byte budget quietly overruns its file. */
+  let used = storeBytesOf(envelope([]))
 
   for (const ledger of ranked) {
-    const bytes = jsonBytes(ledger)
+    const bytes = nestedBytesOf(ledger)
     if (used + bytes <= maxStoreBytes) {
       kept.push(ledger)
       used += bytes
@@ -736,6 +1003,21 @@ export function pruneLedgers(
       dropped.push(ledger)
     }
   }
+
+  /*
+   * Then verify, because the pass above is an estimate.
+   *
+   * It is a close estimate and it is not a guarantee, and the difference is the
+   * whole bug: a budget checked with a different serializer than the writer uses
+   * is not a bound. So the loop below measures the store AS IT WILL BE WRITTEN
+   * and drops from the tail — the lowest-ranked ledger — until it genuinely
+   * fits. `kept` is still in rank order here, which is what makes popping the
+   * right end of it the right thing to drop. It runs a handful of times at most.
+   */
+  while (kept.length && storeBytesOf(envelope(kept)) > maxStoreBytes) {
+    dropped.push(kept.pop())
+  }
+  used = storeBytesOf(envelope(kept))
 
   kept.sort((left, right) => timeOf(right?.createdAt) - timeOf(left?.createdAt))
 

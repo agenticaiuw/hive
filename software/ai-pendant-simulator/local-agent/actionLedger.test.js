@@ -233,9 +233,22 @@ test('a crash mid-plan leaves the interrupted step inflight and the rest pending
     ['done', 'inflight', 'pending'],
   )
 
-  const interrupted = interruptedLedgers({ filePath: box.filePath })
+  /* While this process is still here, a dispatched step that has not answered
+   * is a step that has not answered YET — that is what a slow action looks like
+   * from the outside, and prompting the owner to resume one that is still
+   * running is worse than saying nothing. */
+  assert.equal(interruptedLedgers({ filePath: box.filePath }).count, 0)
+  assert.equal(interruptedLedgers({ filePath: box.filePath }).excluded.running, 1)
+
+  // Once the record has gone quiet for longer than any live run ever does, the
+  // same ledger is the run that never came back.
+  const interrupted = interruptedLedgers({
+    filePath: box.filePath,
+    now: Date.now() + 6 * 60 * 60 * 1000,
+  })
   assert.equal(interrupted.count, 1)
   assert.equal(interrupted.ledgers[0].progress.inflight, 1)
+  assert.equal(interrupted.ledgers[0].why, 'went-cold')
 })
 
 test('a bookkeeping failure never reaches the execution path', async () => {
@@ -262,7 +275,12 @@ test('closes a finished run so it stops counting as interrupted', () => {
     actions: [{ type: 'open_app', params: { appName: 'Notes' } }],
     filePath: box.filePath,
   })
-  assert.equal(interruptedLedgers({ filePath: box.filePath }).count, 1)
+  const later = Date.now() + 6 * 60 * 60 * 1000
+
+  markStepStarted(manifest.ledgerId, manifest.steps[0].stepKey, { filePath: box.filePath })
+  // Dispatched, and nothing has touched the record since: this is what an
+  // abandoned run looks like.
+  assert.equal(interruptedLedgers({ filePath: box.filePath, now: later }).count, 1)
 
   settleStep(manifest.ledgerId, manifest.steps[0].stepKey, {
     result: { ok: true, status: 'success', message: 'Opened Notes' },
@@ -271,7 +289,10 @@ test('closes a finished run so it stops counting as interrupted', () => {
   })
   closeLedger(manifest.ledgerId, { status: 'settled', filePath: box.filePath })
 
-  assert.equal(interruptedLedgers({ filePath: box.filePath }).count, 0)
+  // Closed by the process that ran it, however long ago that was. Age is only
+  // evidence about a run nobody ever finished.
+  assert.equal(interruptedLedgers({ filePath: box.filePath, now: later }).count, 0)
+  assert.equal(interruptedLedgers({ filePath: box.filePath, now: later }).unresolved.length, 0)
   const stored = getLedger(manifest.ledgerId, { filePath: box.filePath })
   assert.equal(stored.status, 'settled')
   assert.equal(stored.steps[0].receiptId, 'rcpt_1')
@@ -451,8 +472,12 @@ test('registers the ledger routes and prepares a plan without running it', async
   const fetched = await call('GET', '/ledger/:ledgerId', { params: { ledgerId } })
   assert.equal(fetched.payload.ledger.ledgerId, ledgerId)
 
+  /* POST /ledger prepares and deliberately does not run. A plan nobody has
+   * dispatched is not an interrupted run, and reporting it as one is how this
+   * query came to answer with every manifest on disk. */
   const interrupted = await call('GET', '/ledger/interrupted')
-  assert.equal(interrupted.payload.count, 1)
+  assert.equal(interrupted.payload.count, 0)
+  assert.equal(interrupted.payload.excluded.prepared, 1)
 
   const listed = await call('GET', '/ledger', { query: { limit: '5' } })
   assert.equal(listed.payload.total, 1)

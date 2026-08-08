@@ -53,6 +53,22 @@ export const safeFileExtensions = new Set(['.txt', '.md'])
 // Set to false to restore the original whitelist-only safe demo mode.
 export const FULL_CONTROL_MODE = process.env.FULL_CONTROL_MODE !== 'false'
 
-export const SHELL_TIMEOUT_MS = Number(
-  process.env.SHELL_TIMEOUT_MS || 120000,
-)
+/*
+ * The wall-clock ceiling on one `run_shell` / `run_applescript` child.
+ *
+ * This is the only definition of it. computerControl.js used to carry its own
+ * DEFAULT_SHELL_TIMEOUT_MS with the same number in it, which made this export a
+ * knob that moved nothing: setting SHELL_TIMEOUT_MS in .env changed this
+ * constant and not one command behaved differently. A config value that no
+ * importer reads is worse than a missing one — it tells whoever reads the
+ * config that the timeout is theirs to set.
+ *
+ * A non-numeric or non-positive value falls back rather than becoming NaN.
+ * `timeout: NaN` disables the ceiling entirely, so a typo in .env would have
+ * removed the limit while looking like it tightened it.
+ */
+const configuredShellTimeoutMs = Number(process.env.SHELL_TIMEOUT_MS)
+export const SHELL_TIMEOUT_MS =
+  Number.isFinite(configuredShellTimeoutMs) && configuredShellTimeoutMs > 0
+    ? configuredShellTimeoutMs
+    : 120_000
