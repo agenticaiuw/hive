@@ -1,3 +1,4 @@
+#include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 #include <samples/cellular/nrf91_crypto_partitions.dtsi>
 
@@ -129,9 +130,19 @@
 	status = "disabled";
 };
 
-/* The Arduino SCL/SDA pins are not used by this prototype. */
+/*
+ * DRV2605L haptic driver breakout (LRA) on the Arduino I2C header:
+ *   SDA -> P0.30, SCL -> P0.31 (the board's default i2c2 pinctrl).
+ *
+ * The breakout may not be physically attached; haptic.c probes address
+ * 0x5A exactly once at boot and degrades every haptic action to an LED
+ * pattern when nothing answers, so enabling the bus costs an absent part
+ * one boot log line.  100 kHz for the same reason the SD bus runs slow:
+ * loose breadboard wiring.
+ */
 &i2c2 {
-	status = "disabled";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
 };
 
 /*

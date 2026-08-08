@@ -18,7 +18,9 @@
 #include <ff.h>
 
 #include "audio_opus.h"
+#include "haptic.h"
 #include "pendant_cloud.h"
+#include "pendant_reflex.h"
 #include "pendant_store.h"
 #include "pendant_ws.h"
 #include "tx_resample_taps.h"
@@ -879,6 +881,48 @@ static inline bool take_mark_press(void)
 	return false;
 }
 #endif /* CONFIG_PENDANT_OFFLINE_STORE */
+
+/*
+ * Button 2 double-press gesture detector (reflex trigger).
+ *
+ * The single press stays a bookmark, and the header's original argument
+ * for button 2 still holds: never make the COMMON action wait for gesture
+ * disambiguation.  So the 600 ms second-press window opens ONLY while a
+ * gesture recipe is actually armed — with none armed this returns
+ * immediately and the bookmark costs exactly what it always cost.  With
+ * one armed, the bookmark is delayed by at most the detection window,
+ * which is the documented ceiling for this trade.
+ *
+ * Returns true when a second press landed inside the window (the caller
+ * fires the gesture recipes instead of bookmarking).  Edges within the
+ * first 100 ms are switch bounce of the SAME press, not a human double —
+ * counting them would turn every scratchy contact into a gesture.
+ */
+#define MARK_GESTURE_WINDOW_MS 600
+#define MARK_GESTURE_DEBOUNCE_MS 100
+
+static bool reflex_mark_double_press(void)
+{
+	int64_t opened_at;
+
+	if (!pendant_reflex_gesture_armed()) {
+		return false;
+	}
+	opened_at = k_uptime_get();
+	while (k_uptime_get() - opened_at < MARK_GESTURE_WINDOW_MS) {
+		k_msleep(10);
+		if (take_mark_press()) {
+			if (k_uptime_get() - opened_at <
+			    MARK_GESTURE_DEBOUNCE_MS) {
+				continue;
+			}
+			printk("Button 2 double-press gesture (%d ms apart)\n",
+			       (int)(k_uptime_get() - opened_at));
+			return true;
+		}
+	}
+	return false;
+}
 
 #ifdef CONFIG_PENDANT_MIC_INJECT
 /*
@@ -2788,6 +2832,27 @@ static inline void tx_fir_push(int16_t sample)
 }
 
 /*
+ * One polyphase output sample at the current tx_phase from the shared FIR
+ * history.  Split out of convo_fill_tx_block so the reflex chime (16 kHz
+ * source, same 125-phase table, NUM=64) reuses the identical arithmetic —
+ * the two paths never run concurrently (the chime plays only while idle).
+ */
+static inline int32_t tx_fir_convolve(void)
+{
+	const int16_t *row = &tx_fir_coeff[tx_phase * TX_FIR_TAPS];
+	const int16_t *window = &tx_fir_hist[tx_fir_pos];
+	int32_t acc = 0;
+
+	for (size_t tap = 0U; tap < TX_FIR_TAPS; ++tap) {
+		acc += (int32_t)row[tap] * (int32_t)window[tap];
+	}
+	acc = (acc + (1 << (TX_FIR_Q - 1))) >> TX_FIR_Q;
+	/* Sum|h| peaks at 1.651, so a transient can ring past
+	 * full scale even though the decoder never does. */
+	return CLAMP(acc, INT16_MIN, INT16_MAX);
+}
+
+/*
  * Fill one TX block (640 words at 31250) from the 24 kHz jitter ring.
  * `*playing` implements the prebuffer/rebuffer gate; silence flows whenever
  * it is off so the duplex transfer never underruns. Filter state persists
@@ -2804,21 +2869,9 @@ static void convo_fill_tx_block(int32_t *words, bool *playing)
 		/* A fully zeroed history convolves to exactly zero at every
 		 * phase, so silence costs nothing. */
 		if (tx_fir_zero_run < TX_FIR_TAPS) {
-			const int16_t *row =
-				&tx_fir_coeff[tx_phase * TX_FIR_TAPS];
-			const int16_t *window = &tx_fir_hist[tx_fir_pos];
-			int32_t acc = 0;
 			uint32_t magnitude;
 
-			for (size_t tap = 0U; tap < TX_FIR_TAPS; ++tap) {
-				acc += (int32_t)row[tap] *
-				       (int32_t)window[tap];
-			}
-			value = (acc + (1 << (TX_FIR_Q - 1))) >> TX_FIR_Q;
-			/* Sum|h| peaks at 1.651, so a transient can ring past
-			 * full scale even though the decoder never does. */
-			value = CLAMP(value, INT16_MIN, INT16_MAX);
-
+			value = tx_fir_convolve();
 			magnitude = (uint32_t)(value < 0 ? -value : value);
 			if (magnitude > convo_tx_peak) {
 				convo_tx_peak = magnitude;
@@ -3000,6 +3053,307 @@ static int convo_queue_preamble(const struct device *i2s)
 }
 
 /*
+ * ---- Reflex chime ----
+ *
+ * A short tone sequence (three ascending notes, 600 ms, faded) generated
+ * as 16 kHz PCM and pushed through the SAME I2S TX path agent audio uses:
+ * PWM clocks + 24-bit/mono/slave/31250 duplex config, sync preamble so the
+ * ESP32 locks (and does not play the preamble as audio — commit 8b5a53c),
+ * word = sample << 8 in the left slot, DROP-only teardown.  16000/31250
+ * reduces to 64/125: same 125-phase FIR table as the conversation's 96/125
+ * fill, only the phase increment differs, so the anti-imaging behavior is
+ * the one already proven on this wire.
+ *
+ * The tones are integer resonators (y[n] = (k*y[n-1] >> 14) - y[n-2], k =
+ * 2*cos(2*pi*f/16000) in Q14, seeded y = A*sin(w)): no sine table, no
+ * softfloat, constants precomputed below.  Amplitude 9000 (~27% FS, the
+ * encode selftest's level) with 12 ms linear fades at each note edge.
+ */
+#define CHIME_RESAMPLE_NUM 64U /* 16000 -> 31250 (shares TX_RESAMPLE_DEN) */
+#define CHIME_FADE_SAMPLES 192U /* 12 ms at 16 kHz */
+#define CHIME_NOTE1_SAMPLES 2720U /* 170 ms */
+#define CHIME_NOTE2_SAMPLES 2720U /* 170 ms */
+#define CHIME_NOTE3_SAMPLES 4160U /* 260 ms */
+#define CHIME_SOURCE_SAMPLES \
+	(CHIME_NOTE1_SAMPLES + CHIME_NOTE2_SAMPLES + CHIME_NOTE3_SAMPLES)
+#define CHIME_OUT_FRAMES \
+	((CHIME_SOURCE_SAMPLES * TX_RESAMPLE_DEN) / CHIME_RESAMPLE_NUM)
+/* Preamble + chime + margin, in whole TX blocks; the play loop counts RX
+ * blocks (one per 20.48 ms) so the tail has PLAYED before DROP discards
+ * the still-queued silence. */
+#define CHIME_PLAY_BLOCKS                                                     \
+	(CONVO_TX_PRIME_BLOCKS +                                              \
+	 (CHIME_OUT_FRAMES + CONVO_TX_BLOCK_FRAMES - 1U) /                    \
+		 CONVO_TX_BLOCK_FRAMES +                                      \
+	 2U)
+
+static const struct chime_note {
+	int32_t k_q14;    /* 2*cos(2*pi*f/16000), Q14 */
+	int32_t seed;     /* 9000*sin(2*pi*f/16000) — second osc state */
+	uint32_t samples; /* note length at 16 kHz */
+} chime_notes[] = {
+	{ 31677, 2303, CHIME_NOTE1_SAMPLES }, /* E5   659 Hz */
+	{ 31039, 2885, CHIME_NOTE2_SAMPLES }, /* G#5  831 Hz */
+	{ 30332, 3405, CHIME_NOTE3_SAMPLES }, /* B5   988 Hz */
+};
+
+static struct {
+	size_t note; /* == ARRAY_SIZE(chime_notes) when finished */
+	uint32_t pos;
+	int32_t y1;
+	int32_t y2;
+} chime_synth;
+
+static void chime_synth_reset(void)
+{
+	chime_synth.note = 0U;
+	chime_synth.pos = 0U;
+	chime_synth.y1 = chime_notes[0].seed;
+	chime_synth.y2 = 0;
+}
+
+/* Next 16 kHz source sample; digital silence forever once the last note
+ * ends, so the FIR tail and the block margin flush to true zero. */
+static int16_t chime_next_sample(void)
+{
+	const struct chime_note *note;
+	int32_t value;
+	int32_t next;
+	uint32_t edge;
+
+	if (chime_synth.note >= ARRAY_SIZE(chime_notes)) {
+		return 0;
+	}
+	note = &chime_notes[chime_synth.note];
+	value = chime_synth.y1;
+	/* k*y1 peaks near 9200*31677 ≈ 2.9e8 — comfortably inside int32. */
+	next = ((note->k_q14 * chime_synth.y1) >> 14) - chime_synth.y2;
+	chime_synth.y2 = chime_synth.y1;
+	chime_synth.y1 = next;
+
+	edge = MIN(chime_synth.pos, note->samples - 1U - chime_synth.pos);
+	if (edge < CHIME_FADE_SAMPLES) {
+		value = value * (int32_t)edge / (int32_t)CHIME_FADE_SAMPLES;
+	}
+
+	if (++chime_synth.pos >= note->samples) {
+		++chime_synth.note;
+		chime_synth.pos = 0U;
+		if (chime_synth.note < ARRAY_SIZE(chime_notes)) {
+			chime_synth.y1 = chime_notes[chime_synth.note].seed;
+			chime_synth.y2 = 0;
+		}
+	}
+	return (int16_t)CLAMP(value, INT16_MIN, INT16_MAX);
+}
+
+/* Twin of convo_fill_tx_block with the jitter ring replaced by the synth
+ * and the phase step at 64/125.  Shares tx_phase/tx_fir state — both users
+ * reset it at their own start and never overlap. */
+static void chime_fill_tx_block(int32_t *words)
+{
+	for (size_t frame = 0U; frame < CONVO_TX_BLOCK_FRAMES; ++frame) {
+		int32_t value = 0;
+
+		if (tx_fir_zero_run < TX_FIR_TAPS) {
+			value = tx_fir_convolve();
+		}
+		words[frame] = value << 8;
+
+		tx_phase += CHIME_RESAMPLE_NUM;
+		if (tx_phase >= TX_RESAMPLE_DEN) {
+			tx_phase -= TX_RESAMPLE_DEN;
+			tx_fir_push(chime_next_sample());
+		}
+	}
+}
+
+/* Same contract as convo_top_up_tx: fill the runway until the slab or the
+ * driver queue is full; K_NO_WAIT everywhere. */
+static int chime_top_up_tx(const struct device *i2s, uint32_t *tx_blocks)
+{
+	for (;;) {
+		void *block;
+		int error;
+
+		if (k_mem_slab_alloc(&convo_tx_slab, &block, K_NO_WAIT) != 0) {
+			return 0;
+		}
+		chime_fill_tx_block((int32_t *)block);
+		error = i2s_write(i2s, block,
+				  CONVO_TX_BLOCK_FRAMES * sizeof(int32_t));
+		if (error != 0) {
+			k_mem_slab_free(&convo_tx_slab, block);
+			if (error == -EAGAIN || error == -ENOMSG) {
+				return 0;
+			}
+			return error;
+		}
+		++*tx_blocks;
+	}
+}
+
+/*
+ * Play the chime while IDLE: full duplex bring-up exactly as
+ * run_conversation does it (i2s_nrfx memcmps the two directions' configs,
+ * and TX-only as a clock slave is an unproven path), mic RX read and
+ * discarded to keep the BOTH transfer alive, then DROP + settle + clocks
+ * off — the same teardown the conversation survives, so the next
+ * conversation's bring-up starts from the identical driver state.
+ *
+ * Runs on the main thread's idle loop only; convo_active is a
+ * belt-and-braces check, not a synchronization point.
+ */
+static int reflex_chime_play(const struct device *i2s, uint8_t chime_index)
+{
+	struct i2s_config config = {
+		.word_size = 24U,
+		.channels = 1U,
+		.format = I2S_FMT_DATA_FORMAT_I2S,
+		.options = I2S_OPT_BIT_CLK_TARGET | I2S_OPT_FRAME_CLK_TARGET,
+		.frame_clk_freq = MIC_FRAME_RATE,
+		.mem_slab = &mic_rx_slab,
+		.block_size = MIC_RX_BLOCK_SIZE,
+		.timeout = 1500,
+	};
+	struct i2s_config tx_config;
+	uint32_t rx_blocks = 0U;
+	uint32_t tx_blocks = 0U;
+	bool i2s_running = false;
+	int error;
+
+	ARG_UNUSED(chime_index); /* one chime today; index reserved */
+
+	if (atomic_get(&convo_active)) {
+		return -EBUSY;
+	}
+	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
+				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
+	if (error != 0) {
+		return error;
+	}
+	tx_resample_reset();
+	chime_synth_reset();
+	mic_clocks_start();
+
+	error = i2s_configure(i2s, I2S_DIR_RX, &config);
+	if (error == 0) {
+		tx_config = config;
+		tx_config.mem_slab = &convo_tx_slab;
+		tx_config.timeout = 0; /* never block the fill loop */
+		error = i2s_configure(i2s, I2S_DIR_TX, &tx_config);
+	}
+	/* ESP32 resynchronizes after every BCLK restart; without the
+	 * preamble the whole chime would be eaten by its sync hunt. */
+	if (error == 0) {
+		error = convo_queue_preamble(i2s);
+	}
+	if (error == 0) {
+		error = chime_top_up_tx(i2s, &tx_blocks);
+	}
+	if (error == 0) {
+		k_msleep(MIC_POWERUP_BUDGET_MS);
+		printk("Chime: start (%u ms, %u source samples -> %u frames, "
+		       "%u blocks)\n",
+		       (unsigned int)(CHIME_SOURCE_SAMPLES / 16U),
+		       (unsigned int)CHIME_SOURCE_SAMPLES,
+		       (unsigned int)CHIME_OUT_FRAMES,
+		       (unsigned int)CHIME_PLAY_BLOCKS);
+		error = i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_START);
+	}
+	if (error == 0) {
+		i2s_running = true;
+		while (rx_blocks < CHIME_PLAY_BLOCKS) {
+			void *block;
+			size_t size;
+
+			error = i2s_read(i2s, &block, &size);
+			if (error != 0) {
+				printk("Chime I2S read failed: %d\n", error);
+				break;
+			}
+			/* Mic audio is discarded — a chime has no uplink —
+			 * but the read itself keeps the duplex transfer
+			 * from dying of RX overrun. */
+			k_mem_slab_free(&mic_rx_slab, block);
+			++rx_blocks;
+			error = chime_top_up_tx(i2s, &tx_blocks);
+			if (error != 0) {
+				printk("Chime I2S write failed: %d\n", error);
+				break;
+			}
+		}
+	}
+
+	if (i2s_running) {
+		/*
+		 * DROP, never DRAIN — identical reasoning to the
+		 * conversation teardown: draining as a clock slave wedges
+		 * i2s_nrfx until power cycle.  Everything still queued here
+		 * is silence by construction (the block budget already
+		 * played the chime tail).
+		 */
+		(void)i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_DROP);
+		k_msleep(MIC_STOP_SETTLE_MS);
+	}
+	mic_clocks_stop();
+	printk("Chime: done error=%d rx_blocks=%u tx_blocks=%u (I2S TX "
+	       "frames left the wire; audible check is the ESP32/speaker's)\n",
+	       error, rx_blocks, tx_blocks);
+	return error;
+}
+
+/*
+ * ---- Reflex action executors ----
+ *
+ * The interpreter (pendant_reflex.c) owns WHAT runs; these own HOW, since
+ * the LED GPIO, the DRV2605L and the I2S chime all live in this file's
+ * world.  All three run on the main thread's idle loop and may block for
+ * the duration of their effect.
+ */
+static void reflex_do_led(uint8_t pattern)
+{
+	switch (pattern) {
+	case REFLEX_LED_DOUBLE:
+		flash_led(2U, 100, 100);
+		break;
+	case REFLEX_LED_TRIPLE:
+		flash_led(3U, 100, 100);
+		break;
+	case REFLEX_LED_BURST:
+		flash_led(6U, 40, 60);
+		break;
+	case REFLEX_LED_LONG:
+		gpio_pin_set_dt(&led, 1);
+		k_msleep(600);
+		gpio_pin_set_dt(&led, 0);
+		break;
+	case REFLEX_LED_SINGLE:
+	default:
+		flash_led(1U, 120, 80);
+		break;
+	}
+}
+
+/* Nonzero when the motor is absent/failed — the interpreter then degrades
+ * this step to the matching LED pattern (probe already logged once). */
+static int reflex_do_haptic(uint8_t pattern)
+{
+	return haptic_play((enum haptic_pattern)pattern);
+}
+
+static int reflex_do_chime(uint8_t chime_index)
+{
+	return reflex_chime_play(DEVICE_DT_GET(I2S_NODE), chime_index);
+}
+
+static const struct pendant_reflex_ops reflex_ops_impl = {
+	.led = reflex_do_led,
+	.haptic = reflex_do_haptic,
+	.chime = reflex_do_chime,
+};
+
+/*
  * WS I/O thread body. All socket work lives here so a stalled modem send
  * can never starve the audio loop's 20 ms TX deadline.
  *
@@ -3056,6 +3410,20 @@ static void ws_io_drain_downlink(void)
 		if (is_text) {
 			ws_rx_buf[MIN((size_t)received,
 				      sizeof(ws_rx_buf) - 1U)] = '\0';
+			/*
+			 * Recipe frames FIRST, on an EXACT "type":"recipe"
+			 * match, and then NEVER through the legacy matching
+			 * below: that matching is substring-based, so any
+			 * recipe whose body happened to contain "end" (or
+			 * "flush"/"started") would be misread as a control
+			 * frame — "end" would kill the live conversation.
+			 * The legacy started/flush/end behavior itself is
+			 * deliberately unchanged.
+			 */
+			if (pendant_reflex_offer_frame(
+				    (const char *)ws_rx_buf)) {
+				continue;
+			}
 			if (strstr((const char *)ws_rx_buf,
 				   "\"started\"") != NULL) {
 				atomic_set(&convo_started, 1);
@@ -3112,13 +3480,25 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 			}
 			/* Swallow pongs and the previous conversation's
 			 * trailing frames every tick, not just at ping
-			 * time, so none of it leads the next conversation. */
+			 * time, so none of it leads the next conversation.
+			 * Recipe frames are the exception: the idle socket
+			 * is exactly where the relay delivers them, so they
+			 * are handed to the reflex layer instead of the
+			 * bin (parse + SD + ack happen on main's idle
+			 * loop, never on this 2.5 KB stack). */
 			for (int drained = 1; drained > 0;) {
 				bool is_text = false;
 
 				drained = pendant_ws_recv(ws_rx_buf,
 							  sizeof(ws_rx_buf),
 							  &is_text);
+				if (drained > 0 && is_text) {
+					ws_rx_buf[MIN((size_t)drained,
+						      sizeof(ws_rx_buf) -
+							      1U)] = '\0';
+					(void)pendant_reflex_offer_frame(
+						(const char *)ws_rx_buf);
+				}
 			}
 			k_mutex_unlock(&ws_lock);
 		}
@@ -3650,6 +4030,15 @@ int main(void)
 	 */
 	pendant_store_init();
 
+	/*
+	 * Reflex layer, also before LTE for the same reason: a timer or a
+	 * daily nudge that only exists once the network is up is not a
+	 * reflex.  Haptic first — its single boot probe decides whether
+	 * every haptic action runs the motor or degrades to LED.
+	 */
+	(void)haptic_init();
+	pendant_reflex_init(&reflex_ops_impl);
+
 #if PENDANT_BOOT_DUMP_PCM_HEX
 	if (sd_ready) {
 		(void)dump_sd_recording_hex();
@@ -3830,11 +4219,44 @@ int main(void)
 			 * Button 2 needs no radio, no microphone and no
 			 * decision about whether the link is usable. It is
 			 * the one thing this device can always do.
+			 *
+			 * A double-press inside 600 ms is the reflex
+			 * gesture; the window only opens while a gesture
+			 * recipe is armed (see reflex_mark_double_press),
+			 * so the plain bookmark path is undelayed until
+			 * the owner installs one.
 			 */
 			if (take_mark_press()) {
+				if (reflex_mark_double_press()) {
+					pendant_reflex_fire_gesture();
+					continue;
+				}
 				marked = true;
 				break;
 			}
+			/*
+			 * Reflex work rides the idle wait, the one context
+			 * where I2S, the codec scratch and the SD card are
+			 * all guaranteed unowned: store a pending downlink
+			 * recipe (+ack upstream), then fire whatever came
+			 * due.  Recipes received mid-conversation sit in
+			 * their one-slot buffer until the conversation
+			 * ends and this loop runs again.
+			 */
+			{
+				char reflex_ack[96];
+
+				if (pendant_reflex_process_pending(
+					    reflex_ack,
+					    sizeof(reflex_ack)) > 0 &&
+				    pendant_ws_connected()) {
+					k_mutex_lock(&ws_lock, K_FOREVER);
+					(void)pendant_ws_send_text(
+						reflex_ack);
+					k_mutex_unlock(&ws_lock);
+				}
+			}
+			pendant_reflex_tick();
 			apply_forced_link_state();
 			if (!pendant_ws_connected() &&
 			    !link_is_forced_offline()) {
