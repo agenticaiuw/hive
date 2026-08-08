@@ -1,5 +1,5 @@
 import { listFacts, servesSurface } from './memoryService.js'
-import { maskSecretValue } from './redaction.js'
+import { classifySensitivity, maskSecretValue } from './redaction.js'
 
 /*
  * Turn the fact store into the smallest prompt that still answers the request.
@@ -22,6 +22,27 @@ import { maskSecretValue } from './redaction.js'
 export const SURFACES = Object.freeze(['voice', 'mac', 'browser', 'ios'])
 
 const STABLE_KINDS = ['preference', 'permission']
+
+/*
+ * Which knowledge-graph entities are worth a prompt line, and what kind of fact
+ * each becomes. Byte-for-byte the table memoryService.syncFactsFromContextGraph
+ * uses, and deliberately so: a fact derived live from the graph here and the
+ * same fact after a sync has run must be one fact, not two spellings of it.
+ * Anything absent from this table (Action, Tool, Device, Model — the telemetry
+ * that is most of the graph) is not memory and never reaches a prompt.
+ */
+const GRAPH_KIND_BY_TYPE = {
+  Person: 'entity',
+  Project: 'entity',
+  File: 'entity',
+  Resource: 'entity',
+  EmailDraft: 'observation',
+  Note: 'observation',
+  Task: 'task',
+}
+
+/* The clip memoryService applies to a fact value, applied to the same values. */
+const MAX_VALUE_CHARS = 400
 
 /* ~4 characters per token for English prose; the char counts are exact. */
 const CHARS_PER_TOKEN = 4
@@ -102,14 +123,26 @@ export function projectContext({
   const budgetChars = budgetTokens * CHARS_PER_TOKEN
   const lines = []
   const factIds = []
+  /*
+   * Two facts can say the same sentence — the graph mints a fresh entity per
+   * occurrence, so three identical "EmailDraft: Question about unknown topic"
+   * rows are normal in a real store. The block this projection replaces
+   * deduplicated by type and name (contextGraph.retrieveLongTermMemory does it
+   * on the way out), so emitting the line three times here would be a straight
+   * regression: the same idea billed three times, and a model reading repetition
+   * as emphasis.
+   */
+  const emitted = new Set()
   let used = 0
   let droppedForBudget = 0
 
   const emit = (line, fact) => {
+    if (emitted.has(line)) return false
     if (used + line.length + 1 > budgetChars) {
       droppedForBudget += 1
       return false
     }
+    emitted.add(line)
     lines.push(line)
     used += line.length + 1
     if (fact) factIds.push(fact.id)
@@ -162,6 +195,102 @@ export function projectContext({
       budgetTokens,
     },
   }
+}
+
+/**
+ * The projection for one conversational turn.
+ *
+ * Same projection, one extra input: the knowledge-graph entities the turn has
+ * ALREADY retrieved. This closes the only gap that made the projection weaker
+ * than the block it replaces. The fact store is refreshed from the graph only
+ * when something POSTs /memory/sync-graph — nothing does it on a timer — so a
+ * projection built from the store alone can be arbitrarily behind on exactly
+ * the thing the owner just did, while the old `## Long-term personal memory`
+ * block read the graph live on every turn. Passing the live entities in costs
+ * no extra I/O (the caller read them to resolve follow-up references anyway)
+ * and makes the projection at least as current as what it replaces.
+ *
+ * Stored facts still win their own metadata: a graph entity that has already
+ * been synced keeps the stored row's id, so touchFacts() can still find it and
+ * idle pruning keeps working.
+ */
+export function projectTurnContext({ longTerm = [], ...options } = {}) {
+  const { surface = 'voice', now = Date.now() } = options
+  const stored = options.facts || listFacts({ surface, now })
+  const merged = new Map(stored.map((fact) => [fact.key, fact]))
+
+  for (const entity of longTerm) {
+    const derived = factFromGraphEntity(entity)
+    if (!derived) continue
+    const existing = merged.get(derived.key)
+    merged.set(
+      derived.key,
+      existing
+        ? {
+            ...derived,
+            // Identity and read history belong to the stored row; only the
+            // value and its freshness come from the live graph.
+            id: existing.id,
+            createdAt: existing.createdAt,
+            lastUsedAt: existing.lastUsedAt,
+            useCount: existing.useCount,
+          }
+        : derived,
+    )
+  }
+
+  return projectContext({ ...options, facts: [...merged.values()] })
+}
+
+/**
+ * One knowledge-graph entity as a fact, without writing anything.
+ *
+ * NOT given an expiry, unlike its synced twin. The entity was just read from
+ * the live graph, which is the same read the block this replaces did, so
+ * expiring it here would drop something the old path shipped. Age still costs
+ * it: freshness() reads source.at, so a stale entity ranks low and simply loses
+ * to something the task actually mentions.
+ */
+export function factFromGraphEntity(entity) {
+  const kind = GRAPH_KIND_BY_TYPE[entity?.type]
+  if (!kind || !entity?.id || !entity?.name) return null
+
+  const detail =
+    entity.attributes?.note ||
+    entity.attributes?.subject ||
+    entity.attributes?.path ||
+    entity.attributes?.due ||
+    ''
+  const value = clip(`${entity.type}: ${entity.name}${detail ? ` — ${detail}` : ''}`)
+  if (!value) return null
+
+  const at = entity.updatedAt || entity.createdAt || null
+
+  return {
+    /* `live:` cannot collide with a stored fact id, so an entity the store has
+     * never seen is never mistaken for one when the read is recorded. */
+    id: `live:graph.${entity.id}`,
+    key: `graph.${entity.id}`,
+    kind,
+    value,
+    surfaces: [],
+    source: { origin: 'context-graph', entityId: entity.id, at },
+    confidence: Number(entity.attributes?.importance) || 0.6,
+    // Inferred, never assumed safe: the graph holds notes the owner spoke, and
+    // "Note: bike lock code" has to stay [withheld] on this path too.
+    sensitivity: classifySensitivity(value),
+    createdAt: entity.createdAt || at,
+    updatedAt: at,
+    expiresAt: null,
+    lastUsedAt: null,
+    useCount: 0,
+  }
+}
+
+function clip(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length <= MAX_VALUE_CHARS ? text : `${text.slice(0, MAX_VALUE_CHARS - 1)}…`
 }
 
 /**

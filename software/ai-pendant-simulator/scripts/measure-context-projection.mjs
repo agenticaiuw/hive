@@ -22,6 +22,7 @@ import {
   formatWorkingProjectForPrompt,
 } from '../local-agent/projectMemory.js'
 import { listFacts, pruneFacts, syncFactsFromContextGraph } from '../local-agent/memoryService.js'
+import { projectPromptBlock } from '../local-agent/orchestrator.js'
 import { readSessions } from '../local-agent/sessionStore.js'
 import { formatFleetSnapshotForPrompt } from '../cloud-relay/fleetContext.js'
 
@@ -150,6 +151,42 @@ const report = (label, afterTokens) => {
 
 report('whole projection:', after.tokens)
 report('uncached portion only:', volatileTail.tokens)
+
+/*
+ * The two columns above price the BLOCKS. This prices the PROMPT — the exact
+ * string orchestratePlan hands the planner, before and after, on this command
+ * and this machine's stores. It is the smaller and the honest number, for two
+ * reasons the block comparison hides:
+ *
+ *   - The fleet "Recent context" line above is the relay's, not the local
+ *     turn's, and formatFleetSnapshotForPrompt already suppresses it whenever
+ *     the bridge has a projection to send. Counting it as saved here counts it
+ *     twice.
+ *   - The session block and the request lines are carried by BOTH paths. Only
+ *     the two memory sections are actually replaced.
+ *
+ * And the projection never touches a one-shot command: commandNeedsMemory()
+ * gates it, because a compact block is ~10 tokens and a projection is ~150, so
+ * projecting onto the fast path would be a loss, not a saving.
+ */
+console.log('')
+console.log(row('LIVE TURN — what planCommand receives', 'chars', 'tokens'))
+const legacyPrompt = measure('legacy promptBlock', conversation.promptBlock)
+const swapped = projectPromptBlock(conversation, { command: task, surface: 'mac' })
+const livePrompt = measure(
+  swapped ? 'projected promptBlock' : 'compact one-shot (projection skipped)',
+  swapped ? swapped.promptBlock : conversation.promptBlock,
+)
+console.log(row(`  ${legacyPrompt.label}`, legacyPrompt.chars, legacyPrompt.tokens))
+console.log(row(`  ${livePrompt.label}`, livePrompt.chars, livePrompt.tokens))
+console.log('')
+const liveSaved = legacyPrompt.tokens - livePrompt.tokens
+console.log(
+  `live turn:                 ${String(liveSaved).padStart(5)} tokens/turn saved` +
+    ` (${((liveSaved / legacyPrompt.tokens) * 100).toFixed(1)}%) on a memory-carrying turn` +
+    ` · ${(liveSaved * turnsPerDay).toLocaleString()} tokens/day` +
+    ` · $${((liveSaved * turnsPerDay * 30 * INPUT_USD_PER_MTOK) / 1_000_000).toFixed(2)}/month at $${INPUT_USD_PER_MTOK}/Mtok`,
+)
 
 /*
  * The claim the owner actually cares about: knowing more must not cost more.
