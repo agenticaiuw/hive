@@ -12,6 +12,7 @@
     fetchSnapshot,
   } from "$lib/dataSource";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
+  import CommandBox from "$lib/components/CommandBox.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
   import Metric from "$lib/components/Metric.svelte";
@@ -415,6 +416,17 @@
   function handleCommandQueued() {
     void refreshRuns();
     void refresh();
+    void jobsPanel?.refresh();
+  }
+
+  /** Parked plans point here: open the Jobs panel and bring it on screen. */
+  function showJobsPanel() {
+    openTile = "jobs";
+    window.setTimeout(() => {
+      document
+        .getElementById("tile-panel-jobs")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
   }
 
   function toggleEvent(id: string) {
@@ -546,6 +558,8 @@
       {/if}
     </div>
   {/if}
+
+  <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
 
   <article class="hero {badTranscript ? 'has-alert' : ''}">
     {#if selected && !selectedIdle}

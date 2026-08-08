@@ -2,6 +2,7 @@
   /* eslint-disable @typescript-eslint/no-explicit-any -- aggregator records are schemaless */
   import { onMount } from "svelte";
   import { base } from "$app/paths";
+  import CommandBox from "$lib/components/CommandBox.svelte";
   import HiveGraph from "$lib/components/HiveGraph.svelte";
   import HiveNodePanel from "$lib/components/HiveNodePanel.svelte";
   import HiveSharedPanel from "$lib/components/HiveSharedPanel.svelte";
@@ -287,6 +288,10 @@
       <span class="hv-badge {badge.cls}" title={badge.title}>{badge.text}</span>
     </div>
   </header>
+
+  <!-- Commands do not depend on hive data, so the box works in every mode —
+       including "NO DATA", which is exactly when the owner wants to poke it. -->
+  <CommandBox variant="bar" />
 
   {#if mode === "unavailable"}
     <div class="hv-dead">
