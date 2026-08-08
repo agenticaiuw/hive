@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { estimateTokens, projectContext } from './contextProjection.js'
+import {
+  estimateTokens,
+  factFromGraphEntity,
+  projectContext,
+  projectTurnContext,
+} from './contextProjection.js'
 
 const NOW = Date.parse('2026-08-07T00:00:00.000Z')
 const DAY = 24 * 60 * 60 * 1000
@@ -214,6 +219,116 @@ test('a realistic store projects to a fraction of what sending all of it costs',
   const saved = 1 - projected.stats.estimatedTokens / estimateTokens(everything)
   assert.ok(saved > 0.9, `expected >90% smaller, got ${(saved * 100).toFixed(1)}%`)
   assert.match(projected.text, /David runs the SAIL GPU cluster/, 'still says the one thing that mattered')
+})
+
+/*
+ * The block this projection replaces deduplicated on the way out — contextGraph
+ * .retrieveLongTermMemory keys on type plus normalized name — and the store it
+ * reads instead does not: the graph mints one entity per occurrence, so three
+ * identical "Question about unknown topic" drafts are the real shape of this
+ * machine's memory. Emitting the line three times would have been a straight
+ * regression against the thing being replaced.
+ */
+test('one idea is billed once, however many rows the store keeps of it', () => {
+  const facts = [
+    fact({ key: 'graph.a', kind: 'observation', value: 'EmailDraft: Question about the GPU cluster' }),
+    fact({ key: 'graph.b', kind: 'observation', value: 'EmailDraft: Question about the GPU cluster' }),
+    fact({ key: 'graph.c', kind: 'observation', value: 'EmailDraft: Question about the GPU cluster' }),
+  ]
+
+  const projected = projectContext({ task: 'the GPU cluster draft', facts, now: NOW })
+  const occurrences = projected.text.split('EmailDraft: Question about the GPU cluster').length - 1
+
+  assert.equal(occurrences, 1, projected.text)
+  assert.equal(projected.factIds.length, 1, 'and only the row that was actually sent is marked read')
+})
+
+test('a turn projects the live graph, not just whatever was last synced to disk', () => {
+  /*
+   * Nothing syncs the graph into the fact store on a timer — only an explicit
+   * POST /memory/sync-graph does — while the block being replaced re-read the
+   * graph on every turn. A projection built from the store alone would go
+   * arbitrarily stale on exactly what the owner just did.
+   */
+  const stored = [fact({ key: 'preference.editor', kind: 'preference', value: 'VS Code' })]
+  const unsynced = {
+    id: 'ent_1',
+    type: 'Person',
+    name: 'David Chen',
+    attributes: { note: 'runs the SAIL GPU cluster' },
+    updatedAt: new Date(NOW).toISOString(),
+  }
+
+  const stale = projectContext({ task: 'email David about the GPU cluster', facts: stored, now: NOW })
+  assert.doesNotMatch(stale.text, /David Chen/)
+
+  const live = projectTurnContext({
+    task: 'email David about the GPU cluster',
+    facts: stored,
+    longTerm: [unsynced],
+    now: NOW,
+  })
+  assert.match(live.text, /Person: David Chen — runs the SAIL GPU cluster/)
+  assert.match(live.text, /editor: VS Code/, 'and the stored facts still ride along')
+})
+
+test('an entity the store already holds keeps the stored row identity', () => {
+  // Otherwise touchFacts() cannot find it and idle pruning starts evicting the
+  // facts that are being read the most.
+  const storedRow = fact({
+    key: 'graph.ent_1',
+    kind: 'entity',
+    value: 'Person: David — stale note',
+    useCount: 12,
+  })
+  const entity = {
+    id: 'ent_1',
+    type: 'Person',
+    name: 'David',
+    attributes: { note: 'runs the SAIL GPU cluster' },
+    updatedAt: new Date(NOW).toISOString(),
+  }
+
+  const projected = projectTurnContext({
+    task: 'David GPU cluster',
+    facts: [storedRow],
+    longTerm: [entity],
+    now: NOW,
+  })
+
+  assert.match(projected.text, /runs the SAIL GPU cluster/, 'the live value wins')
+  assert.doesNotMatch(projected.text, /stale note/)
+  assert.deepEqual(projected.factIds, [storedRow.id], 'but the read is recorded against the stored row')
+})
+
+test('a graph entity carrying a secret is masked on the live path too', () => {
+  const entity = {
+    id: 'ent_9',
+    type: 'Note',
+    name: 'bike lock code',
+    attributes: { note: 'my bike lock code is 4829' },
+    updatedAt: new Date(NOW).toISOString(),
+  }
+
+  const derived = factFromGraphEntity(entity)
+  assert.equal(derived.sensitivity, 'secret')
+
+  const projected = projectTurnContext({
+    task: 'what is my bike lock code',
+    facts: [],
+    longTerm: [entity],
+    now: NOW,
+  })
+  assert.doesNotMatch(projected.text, /4829/)
+  assert.match(projected.text, /\[withheld\]/)
+})
+
+test('graph telemetry is not memory and never becomes a fact', () => {
+  // 84 of the 108 entities on this machine were Action/Tool rows. Letting them
+  // in through the live path would undo the whole point of the store.
+  for (const type of ['Action', 'Tool', 'Device', 'Model']) {
+    assert.equal(factFromGraphEntity({ id: 'x', type, name: 'copy_to_clipboard' }), null, type)
+  }
 })
 
 test('knowing twenty times more does not cost more, and does not lose the point', () => {
