@@ -8,22 +8,46 @@
   </head>
   <body>
     <main class="popup">
-      <p class="eyebrow">AI Pendant</p>
-      <h2>Browser Bridge</h2>
-      <div class="card">
-        <div class="status-row">
-          <span id="status-dot" class="dot"></span>
-          <div class="status-copy">
-            <strong id="status-title">Checking…</strong>
-            <small id="status-detail"></small>
-          </div>
+      <div class="popup-header">
+        <div>
+          <p class="eyebrow">AI Pendant</p>
+          <h2>Browser Bridge</h2>
         </div>
-        <div class="button-row">
-          <button id="connect-now" class="primary" type="button">Connect now</button>
-          <button id="open-settings" type="button">Settings</button>
+        <div class="status-mini" id="status-mini" title="Bridge status">
+          <span id="status-dot" class="dot"></span>
+          <small id="status-title">Checking…</small>
         </div>
       </div>
-      <p class="help">Commands come only from the authenticated agent on this Mac.</p>
+
+      <form id="command-form" class="command-form">
+        <div class="command-row">
+          <input
+            id="command-input"
+            type="text"
+            autocomplete="off"
+            maxlength="2000"
+            placeholder="Ask the agent anything…"
+          />
+          <button id="command-send" class="primary" type="submit">Send</button>
+        </div>
+        <label class="check-row" for="include-page">
+          <input id="include-page" type="checkbox" checked />
+          <span>Include this page (title and address) with the command</span>
+        </label>
+        <p id="command-notice" class="notice"></p>
+      </form>
+
+      <section id="history" class="history" aria-live="polite"></section>
+
+      <div class="button-row">
+        <button id="open-dashboard" type="button">Dashboard</button>
+        <button id="connect-now" type="button">Connect now</button>
+        <button id="open-settings" type="button">Settings</button>
+      </div>
+      <p class="help">
+        Commands go only to the authenticated agent on this Mac. Anything that
+        needs approval waits for you on the dashboard.
+      </p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

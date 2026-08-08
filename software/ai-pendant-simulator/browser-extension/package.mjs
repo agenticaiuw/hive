@@ -17,22 +17,44 @@ fs.mkdirSync(outputDir, { recursive: true })
 fs.cpSync(sourceDir, chromeDir, { recursive: true })
 fs.cpSync(sourceDir, safariDir, { recursive: true })
 
+/*
+ * Every entry point is bundled, not just the service worker. The Safari Xcode
+ * project references the extension resources file-by-file, so a new src/
+ * module (brain.js, command-console.js) must never become a new runtime file
+ * in the build output — it gets bundled into whichever entry imports it, and
+ * the shipped file set stays exactly the set the .pbxproj already knows.
+ */
+const entryPoints = [
+  ['background.js', 'AIPendantBrowserBridge'],
+  ['popup.js', 'AIPendantPopup'],
+  ['options.js', 'AIPendantOptions'],
+]
+
+/* Bundled into the entries above; must not ship as loose files (see note). */
+const bundledOnlyModules = ['brain.js', 'command-console.js']
+
 for (const platformDir of [chromeDir, safariDir]) {
-  execFileSync(
-    rolldownPath,
-    [
-      path.join(sourceDir, 'background.js'),
-      '--format',
-      'iife',
-      '--platform',
-      'browser',
-      '--name',
-      'AIPendantBrowserBridge',
-      '--file',
-      path.join(platformDir, 'background.js'),
-    ],
-    { stdio: 'inherit' },
-  )
+  for (const [entry, globalName] of entryPoints) {
+    execFileSync(
+      rolldownPath,
+      [
+        path.join(sourceDir, entry),
+        '--format',
+        'iife',
+        '--platform',
+        'browser',
+        '--name',
+        globalName,
+        '--file',
+        path.join(platformDir, entry),
+      ],
+      { stdio: 'inherit' },
+    )
+  }
+
+  for (const moduleName of bundledOnlyModules) {
+    fs.rmSync(path.join(platformDir, moduleName), { force: true })
+  }
 
   const manifestPath = path.join(platformDir, 'manifest.json')
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
