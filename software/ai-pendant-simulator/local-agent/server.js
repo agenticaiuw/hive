@@ -1434,7 +1434,9 @@ registerCrossCheckRoutes(app)
  * briefing can be traced to the page rather than argued about. */
 registerBrowserProvenanceRoutes(app)
 
-app.delete('/browser/commands/:commandId?', (request, response) => {
+/* Optional segment in Express 5 / path-to-regexp v8 syntax. The old
+ * `/:commandId?` throws at registration, which took the whole agent down. */
+app.delete('/browser/commands{/:commandId}', (request, response) => {
   response.json(cancelBrowserCommands(request.params.commandId ?? null))
 })
 
