@@ -10,8 +10,10 @@ import {
   resolveSessionRef,
   runBrowserSessionAction,
 } from './browserSessions.js'
-import { workspacePath } from './config.js'
+import { SHELL_TIMEOUT_MS, workspacePath } from './config.js'
 import { mintCapsule } from './evidenceCapsules.js'
+import { currentCancellationSignal, throwIfAborted } from './jobControl.js'
+import { classifySensitivity, maskSecretValue } from './redaction.js'
 import { resolveUserPath } from './security.js'
 import {
   getDisplayBrightness,
@@ -45,8 +47,27 @@ import {
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
-const DEFAULT_SHELL_TIMEOUT_MS = 120_000
 const runningProjects = new Map()
+
+const SHELL_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+/* Grace between "please stop" and "stop": a process that ignores SIGTERM still
+ * has to end, or a cancel that reported success would again be a cancel that
+ * did nothing. */
+const SHELL_KILL_GRACE_MS = 2_000
+
+/*
+ * The interpreter is named rather than left to the platform default, because
+ * the argv on the record has to BE the argv. node's `shell: true` picks
+ * /bin/sh on POSIX and %ComSpec% on Windows; writing down a guess at what it
+ * picked is how a record starts drifting from the thing it describes.
+ */
+const SHELL_BINARY =
+  process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh'
+
+const shellArgvFor = (command) =>
+  process.platform === 'win32'
+    ? [SHELL_BINARY, '/d', '/s', '/c', command]
+    : [SHELL_BINARY, '-c', command]
 
 export async function executeComputerAction(action) {
   // Never let raw tkinter/python overlay hacks claim success — use the native helper.
@@ -56,7 +77,7 @@ export async function executeComputerAction(action) {
       String(action.params?.command ?? ''),
     )
   ) {
-    return showOverlay({
+    const executed = {
       type: 'show_screen_overlay',
       label: action.label || 'Show screen overlay',
       params: {
@@ -68,6 +89,12 @@ export async function executeComputerAction(action) {
         ),
         color: 'black',
       },
+    }
+    return recordRewrite(await showOverlay(executed), {
+      submitted: action,
+      executed,
+      reason: 'overlay-interception',
+      note: 'A tkinter/overrideredirect overlay script was replaced by the native overlay helper. The submitted script was never run.',
     })
   }
 
@@ -83,9 +110,24 @@ export async function executeComputerAction(action) {
    */
   const researchCall = researchCliCall(action)
   if (researchCall) {
-    return researchCall.play
-      ? playBriefing({ ...action, params: researchCall.params })
-      : researchBrief({ ...action, params: researchCall.params })
+    /* The executed form is named for what it actually is. It used to keep
+     * `type: 'run_shell'` with the command swapped out for the parsed flags,
+     * so the record claimed a shell run that never happened and did not carry
+     * the command line it claimed to have run. */
+    const executed = {
+      type: researchCall.play ? 'play_briefing' : 'research_brief',
+      label: action.label || (researchCall.play ? 'Play briefing' : 'Research brief'),
+      params: researchCall.params,
+    }
+    return recordRewrite(
+      await (researchCall.play ? playBriefing(executed) : researchBrief(executed)),
+      {
+        submitted: action,
+        executed,
+        reason: 'research-cli-in-process',
+        note: "scripts/research-brief.mjs was honoured in-process because a subprocess can only return stdout and a briefing's deliverable is rendered audio. No shell command was run.",
+      },
+    )
   }
 
   switch (action.type) {
@@ -100,12 +142,21 @@ export async function executeComputerAction(action) {
       return runCapabilityGapAction(action)
     case 'run_shell':
       return runShell(action)
-    case 'get_battery':
-      return runShell({
-        ...action,
+    case 'get_battery': {
+      // A fixed shell read behind a named action. The result used to come back
+      // labelled `run_shell` with no sign of what had been asked for.
+      const executed = {
         type: 'run_shell',
+        label: action.label || 'Read battery',
         params: { command: 'pmset -g batt' },
+      }
+      return recordRewrite(await runShell(executed), {
+        submitted: action,
+        executed,
+        reason: 'builtin-shell',
+        note: 'get_battery is implemented as a fixed shell read.',
       })
+    }
     case 'get_mac_status': {
       const fields = Array.isArray(action.params?.fields)
         ? action.params.fields.map((f) => String(f).toLowerCase())
@@ -738,29 +789,343 @@ async function runShell(action) {
   const cwd = action.params?.cwd
     ? resolveUserPath(action.params.cwd)
     : undefined
-  const timeout = Number(action.params?.timeout ?? DEFAULT_SHELL_TIMEOUT_MS)
+  const timeoutMs = shellTimeoutFor(action.params?.timeout)
 
   if (!command) {
     throw new Error('run_shell requires a command.')
   }
 
-  const { stdout, stderr } = await execAsync(command, {
-    cwd,
-    timeout,
-    maxBuffer: 10 * 1024 * 1024,
-    /* Was `process.env`, which handed the relay key, the agent token and the
-     * session secret to every command the planner produced. One `printenv` put
-     * them in stdout, and stdout is stored on the job and read back into later
-     * prompts. */
-    env: childEnv(),
-  })
+  /* The signal for the job this action belongs to, if it has one. Null on the
+   * paths that never had a controller (relay jobs, the deterministic fast
+   * path) — recorded as such rather than assumed. */
+  const signal = currentCancellationSignal()
+  throwIfAborted(signal, 'Cancelled before the command started.')
 
-  const output = trimOutput(stdout || stderr || 'Command completed.')
+  const run = await spawnShell({ command, cwd, timeoutMs, signal })
+  const shell = describeShellRun({ command, cwd, timeoutMs, signal, run })
+  const stdout = trimOutput(run.stdout)
+  const stderr = trimOutput(run.stderr)
 
-  return success(action, truncateMessage(output, 280), {
-    stdout: trimOutput(stdout),
-    stderr: trimOutput(stderr),
+  if (shell.ok) {
+    return success(
+      action,
+      truncateMessage(stdout || stderr || 'Command completed.', 280),
+      { stdout, stderr, shell },
+    )
+  }
+
+  /*
+   * A failed command returns rather than throws.
+   *
+   * promisify(exec) rejected on a non-zero exit, and the only thing that
+   * survived was `error.message`: executor.js catches, keeps the message and
+   * builds `{ ok: false, status: 'failed' }` by hand. The exit code, the
+   * signal, the killed flag and the command's own stdout and stderr — all of
+   * which the rejection carried — went on the floor, so "exited 1 with a
+   * useful diagnostic on stderr" and "killed by the timeout" were the same
+   * record. Returning the same shape executor.js would have built keeps the
+   * status identical and keeps the evidence.
+   */
+  return {
+    action,
+    ok: false,
+    status: run.cancelled ? 'cancelled' : 'failed',
+    message: shellFailureMessage(shell, stderr || stdout),
+    reason: shell.outcome,
+    stdout,
+    stderr,
+    shell,
+  }
+}
+
+/**
+ * Run a shell command and report what happened to it, whatever that was.
+ *
+ * Resolves for every outcome a process can have — clean exit, non-zero exit,
+ * timeout kill, cancel kill — and rejects only when the child could not be
+ * started at all. Callers read the outcome off the record instead of
+ * inferring it from whether a promise threw.
+ *
+ * spawn rather than exec, for two things exec cannot do:
+ *
+ *   1. `detached` makes the shell a process-group leader, so a cancel can kill
+ *      `-pid` and take the whole pipeline with it. exec forwards neither
+ *      `detached` nor a group kill, and its own AbortSignal support kills the
+ *      /bin/sh only — `sleep 60 | cat` outlives it and the cancel is a lie.
+ *   2. the timeout has to be ours, because a record has to distinguish "the
+ *      timeout killed it" from "it died of something else", and exec reports
+ *      both as `killed: true`.
+ */
+function spawnShell({ command, cwd, timeoutMs, signal, maxBytes = SHELL_MAX_OUTPUT_BYTES }) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now()
+    let child
+
+    try {
+      child = spawn(command, {
+        cwd,
+        shell: SHELL_BINARY,
+        /* Its own process group. See killGroup below. */
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        /* Was `process.env`, which handed the relay key, the agent token and
+         * the session secret to every command the planner produced. One
+         * `printenv` put them in stdout, and stdout is stored on the job and
+         * read back into later prompts. */
+        env: childEnv(),
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
+
+    const chunks = { stdout: [], stderr: [] }
+    const bytes = { stdout: 0, stderr: 0 }
+    let truncated = false
+    let timedOut = false
+    let cancelled = false
+    let settled = false
+    let escalation = null
+
+    const collect = (stream, name) => {
+      stream?.on('data', (chunk) => {
+        const room = maxBytes - bytes[name]
+        if (room <= 0) {
+          truncated = true
+          return
+        }
+        const slice = chunk.length > room ? chunk.subarray(0, room) : chunk
+        if (slice.length < chunk.length) truncated = true
+        chunks[name].push(slice)
+        bytes[name] += slice.length
+      })
+      /* A broken pipe on a stream we are draining is not the command's error. */
+      stream?.on('error', () => {})
+    }
+    collect(child.stdout, 'stdout')
+    collect(child.stderr, 'stderr')
+
+    /*
+     * The group, not the child. `sh -c 'sleep 60 | cat'` runs the sleep and
+     * the cat as the shell's children; killing the shell alone orphans them
+     * and they keep going, which is exactly the shape of cancel that reports
+     * success and changes nothing.
+     */
+    const killGroup = (which) => {
+      try {
+        process.kill(-child.pid, which)
+      } catch {
+        try {
+          child.kill(which)
+        } catch {
+          // Already gone. Nothing to stop.
+        }
+      }
+    }
+
+    const stop = () => {
+      killGroup('SIGTERM')
+      if (escalation) return
+      escalation = setTimeout(() => killGroup('SIGKILL'), SHELL_KILL_GRACE_MS)
+      escalation.unref?.()
+    }
+
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true
+            stop()
+          }, timeoutMs)
+        : null
+    timer?.unref?.()
+
+    const onAbort = () => {
+      cancelled = true
+      stop()
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+    /* addEventListener on an already-aborted signal never fires. The window is
+     * one synchronous statement wide, and a cancel that lands inside it is
+     * exactly the cancel most likely to be tested. */
+    if (signal?.aborted) onAbort()
+
+    child.on('error', (error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    })
+
+    child.on('close', (code, closeSignal) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve({
+        stdout: Buffer.concat(chunks.stdout).toString('utf8'),
+        stderr: Buffer.concat(chunks.stderr).toString('utf8'),
+        exitCode: code,
+        signal: closeSignal ?? null,
+        timedOut,
+        cancelled,
+        truncated,
+        durationMs: Date.now() - startedAt,
+      })
+    })
+
+    function cleanup() {
+      if (timer) clearTimeout(timer)
+      if (escalation) clearTimeout(escalation)
+      signal?.removeEventListener?.('abort', onAbort)
+    }
   })
+}
+
+/**
+ * What ran, and what became of it.
+ *
+ * The environment is deliberately absent and must stay absent: childEnv.js
+ * strips the agent's credentials out of what a command can see, and recording
+ * the environment here would put them back on the job record — the same leak,
+ * one layer along. The command line itself goes through the project's own
+ * redaction for the same reason, since a planner is perfectly capable of
+ * writing a token into an argument.
+ */
+function describeShellRun({ command, cwd, timeoutMs, signal, run }) {
+  const recorded = redactCommandLine(command)
+
+  return {
+    command: recorded,
+    argv: shellArgvFor(recorded),
+    cwd: cwd ?? null,
+    ok: run.exitCode === 0,
+    outcome: run.cancelled
+      ? 'cancelled'
+      : run.timedOut
+        ? 'timed_out'
+        : run.signal
+          ? 'signalled'
+          : run.exitCode === 0
+            ? 'exited'
+            : 'failed',
+    exitCode: run.exitCode,
+    signal: run.signal,
+    /* `killed` means the process did not choose its own ending. A null exit
+     * code with a signal is the only thing that says so. */
+    killed: run.exitCode === null,
+    timedOut: run.timedOut,
+    cancelled: run.cancelled,
+    timeoutMs,
+    durationMs: run.durationMs,
+    outputTruncated: run.truncated,
+    /*
+     * Whether a cancel could have reached this command at all. False means the
+     * caller ran outside a cancellation scope, so /jobs/:id/cancel would have
+     * stopped the plan between steps and left this command running — worth
+     * saying out loud rather than leaving a reader to assume the stronger
+     * guarantee.
+     */
+    interruptible: Boolean(signal),
+  }
+}
+
+function shellFailureMessage(shell, output) {
+  const tail = output ? `: ${truncateMessage(output, 240)}` : ''
+
+  if (shell.cancelled) {
+    return `Command cancelled; its process group was killed${shell.signal ? ` (${shell.signal})` : ''}${tail}`
+  }
+
+  if (shell.timedOut) {
+    return `Command timed out after ${shell.timeoutMs}ms and was killed${shell.signal ? ` (${shell.signal})` : ''}${tail}`
+  }
+
+  if (shell.exitCode === null) {
+    return `Command was killed by ${shell.signal ?? 'a signal'}${tail}`
+  }
+
+  return `Command exited ${shell.exitCode}${tail}`
+}
+
+/*
+ * Per-action override, bounded by the configured ceiling.
+ *
+ * The ceiling is SHELL_TIMEOUT_MS from config.js — the one definition — so the
+ * documented environment knob is what an operator thinks it is. A shorter
+ * per-action timeout is honoured; a longer one is not, because an action
+ * parameter comes from a model and a model must not be able to talk its way
+ * past an operator's limit.
+ */
+function shellTimeoutFor(requested) {
+  const value = Number(requested)
+  if (!Number.isFinite(value) || value <= 0) return SHELL_TIMEOUT_MS
+  return Math.min(value, SHELL_TIMEOUT_MS)
+}
+
+/*
+ * A command line is stored on the job record and job records are composed into
+ * later prompts, so a credential written into an argument would ride along.
+ * redaction.js already knows what a credential looks like; this only decides
+ * when to call it, because maskSecretValue on ordinary text returns
+ * "[withheld]" for the whole string and an audit record of "[withheld]" tells
+ * nobody anything.
+ */
+function redactCommandLine(command) {
+  const text = String(command ?? '')
+  if (!text) return text
+  return classifySensitivity(text) === 'secret' ? maskSecretValue(text) : text
+}
+
+/**
+ * Attach both forms of a rewritten action to its result.
+ *
+ * Some actions do not run as submitted, on purpose: an overlay script is
+ * replaced by the native helper, and the research CLI is honoured in-process
+ * because a subprocess cannot hand back rendered audio. Both rewrites are
+ * load-bearing and stay. What was missing is that the result carried only the
+ * rewritten form, so the job record — which the ops dashboard renders and
+ * later prompts are composed from — described work nobody had asked for and
+ * lost every trace of what was asked.
+ *
+ * `action` stays the EXECUTED form, because a result describes what happened
+ * and undo.js reads that field to decide what it can reverse. `rewrite` names
+ * both sides and says which is which.
+ */
+function recordRewrite(result, { submitted, executed, reason, note }) {
+  return {
+    ...result,
+    action: executed,
+    rewrite: {
+      reason,
+      note,
+      submitted: describeActionForm(submitted),
+      executed: describeActionForm(executed),
+    },
+  }
+}
+
+function describeActionForm(action) {
+  return {
+    type: String(action?.type ?? ''),
+    label: action?.label ? String(action.label) : null,
+    params: redactActionParams(action?.params),
+  }
+}
+
+/* Same reasoning as redactCommandLine, applied to every string in the params:
+ * the submitted form of a rewritten action is a new capture, and the thing
+ * being captured is usually a shell command. Bounded as well as redacted —
+ * this is a record of intent, not a copy of the payload. */
+function redactActionParams(params) {
+  if (!params || typeof params !== 'object') return {}
+
+  const out = {}
+  for (const [key, value] of Object.entries(params)) {
+    out[key] =
+      typeof value === 'string'
+        ? truncateMessage(redactCommandLine(value), 2_000)
+        : value
+  }
+  return out
 }
 
 async function runAppleScript(action) {
@@ -771,7 +1136,7 @@ async function runAppleScript(action) {
   }
 
   const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], {
-    timeout: DEFAULT_SHELL_TIMEOUT_MS,
+    timeout: SHELL_TIMEOUT_MS,
     maxBuffer: 5 * 1024 * 1024,
   })
 

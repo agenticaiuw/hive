@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  PLAYBACK_UNKNOWN_STATUS,
+  stageIsReportable,
+} from '../../shared/audioDelivery.js'
+import {
   createOpsClient,
   loadOpsSettings,
   saveOpsSettings,
@@ -1199,6 +1203,21 @@ function JobDetail({ job, traceId, onOpenThinking, onCancel, onUndo }) {
   )
 }
 
+/*
+ * How a shell run ended, in the words the record uses.
+ *
+ * "Failed" alone was the whole story here, because the exit code was thrown
+ * away before it ever reached a job. A reader auditing what the agent did on
+ * their Mac could not tell a command that exited 1 from one the timeout killed.
+ */
+function describeShellOutcome(shell) {
+  if (!shell) return null
+  if (shell.cancelled) return `cancelled · killed with ${shell.signal || 'a signal'}`
+  if (shell.timedOut) return `timed out after ${shell.timeoutMs}ms · killed with ${shell.signal || 'a signal'}`
+  if (shell.exitCode === null) return `killed by ${shell.signal || 'a signal'}`
+  return `exit ${shell.exitCode}`
+}
+
 function JobAction({ entry, index }) {
   const [open, setOpen] = useState(false)
   const action = entry.action || {}
@@ -1209,6 +1228,12 @@ function JobAction({ entry, index }) {
     entry.stdout ? ['stdout', entry.stdout] : null,
     entry.stderr ? ['stderr', entry.stderr] : null,
   ].filter(Boolean)
+  const shellOutcome = describeShellOutcome(entry.shell)
+  /* Some actions deliberately do not run as submitted. When one of those is on
+   * the record, the submitted form is shown beside the executed one rather than
+   * left out — the panel used to show only what ran, under the label of a step
+   * nobody had asked for. */
+  const rewrite = entry.rewrite || null
 
   return (
     <li className={`pipeline-event is-${state}`}>
@@ -1227,8 +1252,31 @@ function JobAction({ entry, index }) {
               : failed
                 ? 'Failed'
                 : 'Done'}
+            {shellOutcome ? ` · ${shellOutcome}` : ''}
           </p>
         </div>
+
+        {rewrite ? (
+          <dl className="pipeline-meta">
+            <div>
+              <dt>Submitted</dt>
+              <dd>
+                {rewrite.submitted?.type || 'unknown'}
+                {rewrite.submitted?.params?.command
+                  ? ` — ${truncate(redactInline(rewrite.submitted.params.command), 200)}`
+                  : ''}
+              </dd>
+            </div>
+            <div>
+              <dt>Actually ran</dt>
+              <dd>{rewrite.executed?.type || 'unknown'}</dd>
+            </div>
+            <div>
+              <dt>Why</dt>
+              <dd>{rewrite.note || rewrite.reason}</dd>
+            </div>
+          </dl>
+        ) : null}
 
         {params.length ? (
           <dl className="pipeline-meta">
@@ -1334,11 +1382,19 @@ function RoutineDetail({ routine, onRun }) {
   )
 }
 
+/*
+ * Each step is named for what is actually observed, not for what it would be
+ * nice to have observed. `device_downlink` is new and is the last step any body
+ * on this side of the wire can witness; the two after it can only be reported by
+ * the pendant, which currently reports neither, so stageIsReportable() draws
+ * them as unknown rather than as merely pending.
+ */
 const PIPELINE_STAGES = [
   { id: 'transcription', label: 'Speech → text' },
   { id: 'agent', label: 'Agent + LLM' },
   { id: 'tts', label: 'Text → speech' },
   { id: 'relay_result', label: 'Cloud handoff' },
+  { id: 'device_downlink', label: 'Bytes to pendant' },
   { id: 'reply_downloaded', label: 'nRF download' },
   { id: 'device_playback', label: 'I²S playback' },
 ]
@@ -1411,6 +1467,43 @@ function PipelineView({
   )
 }
 
+/*
+ * The part of a run that used to be invisible: who witnessed the reply getting
+ * to the pendant, and what they did not witness.
+ *
+ * `heard` is printed on its own line because it is the question the owner is
+ * actually asking, and on this build the answer is always "unknown" for a
+ * pendant run. Better an uncomfortable constant than a green tick that means
+ * "the Mac finished".
+ */
+function DeliveryEvidenceCard({ delivery }) {
+  if (!delivery) return null
+
+  const heardLabel =
+    delivery.heard === 'yes'
+      ? 'Yes — the pendant reported playing it'
+      : delivery.heard === 'no-audio'
+        ? 'Nothing was waiting to hear it'
+        : 'Unknown — nothing on this system can say'
+
+  return (
+    <div className="pipeline-input-card">
+      <p className="meta-label">Reply delivery</p>
+      <p>
+        <strong>{delivery.label}</strong>
+        {delivery.witness ? ` · witnessed by ${delivery.witness}` : ''}
+      </p>
+      <p>{delivery.evidence}</p>
+      {delivery.doesNotProve ? (
+        <p className="quiet-lead">Does not prove: {delivery.doesNotProve}</p>
+      ) : null}
+      <p>
+        <strong>Did the owner hear it?</strong> {heardLabel}
+      </p>
+    </div>
+  )
+}
+
 function PipelineFlow({ client, run, onOpenThinking }) {
   const events = Array.isArray(run.events) ? run.events : []
   const totalMs = elapsedBetween(run.createdAt, run.updatedAt)
@@ -1451,6 +1544,8 @@ function PipelineFlow({ client, run, onOpenThinking }) {
           )
         })}
       </div>
+
+      <DeliveryEvidenceCard delivery={run.delivery} />
 
       <div className="pipeline-input-card">
         <p className="meta-label">Recorded audio input</p>
@@ -2106,6 +2201,13 @@ function statusLabel(status) {
     case 'success':
     case 'done':
       return 'Done'
+    /*
+     * Deliberately not "Done" and deliberately not "Sent". The Mac's part
+     * finished, the audio went out, and nothing on this system can say whether
+     * the pendant played it. Saying so is the whole point.
+     */
+    case PLAYBACK_UNKNOWN_STATUS:
+      return 'Playback unknown'
     case 'cancelled':
       return 'Cancelled'
     case 'failed':
@@ -2127,6 +2229,12 @@ function simpleStatus(status) {
   }
   if (status === 'failed' || status === 'blocked') return 'bad'
   if (status === 'cancelled') return 'busy'
+  /*
+   * An unknown last mile is explicitly not 'ok'. It is not 'bad' either —
+   * nothing failed — so it shares the neutral tone with everything else that has
+   * not resolved. What it must never do is fall into the green.
+   */
+  if (status === PLAYBACK_UNKNOWN_STATUS) return 'busy'
   return 'busy'
 }
 
@@ -2230,7 +2338,16 @@ function formatDuration(value) {
 
 function pipelineStageState(events, stageId) {
   const matching = events.filter((event) => event.stage === stageId)
-  if (!matching.length) return 'pending'
+  if (!matching.length) {
+    /*
+     * 'pending' means "not yet". For a stage whose only possible witness never
+     * speaks, "not yet" is a promise the system cannot keep, so it reads as
+     * unknown instead. This is what made a run look like it was still on its way
+     * to the speaker when in fact nothing was ever going to say whether it got
+     * there.
+     */
+    return stageIsReportable(stageId) ? 'pending' : 'unknown'
+  }
   const latest = matching[matching.length - 1]
   if (latest.status === 'failed') return 'failed'
   if (latest.status === 'active' || latest.status === 'waiting') {
