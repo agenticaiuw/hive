@@ -638,12 +638,24 @@ export function eventsFromRoutineRuns(runs = [], { now = Date.now() } = {}) {
  * Words the system tried to put in the owner's ear.
  *
  * This is the surface where "queued" and "occurred" are most often blurred,
- * because both look like a row in the announcements table. `state: 'delivered'`
- * means the pendant actually spoke it — the owner HEARD this, and it is the
- * strongest dedupe signal in the whole digest. `state: 'pending'` past its
- * expiresAt means nobody was listening and the words are gone: EXPIRED, and
- * worth saying out loud, because a briefing that expired unheard is
- * indistinguishable, from the owner's side, from one that was never composed.
+ * because both look like a row in the announcements table. `state: 'pending'`
+ * past its expiresAt means nobody was listening and the words are gone:
+ * EXPIRED, and worth saying out loud, because a briefing that expired unheard
+ * is indistinguishable, from the owner's side, from one that was never
+ * composed.
+ *
+ * `state: 'delivered'` used to be read here as "the pendant actually spoke it —
+ * the owner HEARD this". It never meant that. It was set on `sentBytes > 0`:
+ * bytes accepted by a WebSocket, on a device that reports nothing back about
+ * its own speaker. So the digest was telling the owner they had heard something
+ * that nothing in the system could witness.
+ *
+ * The queue state is now read for what it is — "the relay stopped offering this
+ * one" — and the evidence beside it (`heard`, `deliveryEvidence`,
+ * `deliveryComplete`, written by cloud-relay/announce.js) decides what may be
+ * claimed. Records written before that evidence existed carry none of it; they
+ * keep their dedupe weight, because re-reading every past briefing is its own
+ * harm, but they no longer get to say the pendant spoke.
  */
 export function eventsFromAnnouncements(announcements = [], { now = Date.now() } = {}) {
   return announcements
@@ -660,8 +672,33 @@ export function eventsFromAnnouncements(announcements = [], { now = Date.now() }
       let needsOwnerReason = null
 
       if (delivered) {
-        label = 'occurred'
-        why = 'The pendant spoke this to you.'
+        /*
+         * Three different records wear this one queue state. Only the first has
+         * a witness for the owner's ear, and on the current firmware nothing can
+         * produce it — see PLAYBACK_REPORT_CONTRACT in shared/audioDelivery.js.
+         */
+        const heard = entry.heard
+        const hasEvidence = heard != null || entry.deliveryEvidence != null
+
+        if (heard === 'yes') {
+          label = 'occurred'
+          why = 'The pendant reported playing this to you.'
+        } else if (hasEvidence && entry.deliveryComplete === false) {
+          label = 'indeterminate'
+          why =
+            'Delivery stopped part-way through, so you may have heard the start and none of the rest.'
+          needsOwner = true
+          needsOwnerReason = 'You were meant to hear all of this and may not have.'
+        } else if (hasEvidence) {
+          label = 'indeterminate'
+          why =
+            'The whole briefing was written to the pendant’s open socket. The pendant does not report playback, so whether you heard it is not known.'
+        } else {
+          /* Written before any of this was recorded. Say only what survives. */
+          label = 'occurred'
+          why =
+            'The relay finished sending this to the pendant. This record predates playback evidence, so it cannot say whether you heard it.'
+        }
       } else if (dismissed) {
         label = 'occurred'
         why = 'It reached you and you dismissed it.'

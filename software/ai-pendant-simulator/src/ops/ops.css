@@ -231,7 +231,7 @@ button {
 
 .pipeline-stage-map {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 8px;
   margin: 4px 0 22px;
 }
@@ -292,6 +292,30 @@ button {
 
 .pipeline-stage.is-failed .pipeline-stage-dot {
   background: var(--warn);
+}
+
+/*
+ * A step nothing in this system can report on. Drawn hollow and hatched so it
+ * reads as "no one is coming to fill this in" rather than as a step that is
+ * merely still ahead — the two used to look identical, which is how an
+ * unanswerable question passed for a pending one.
+ */
+.pipeline-stage.is-unknown {
+  color: var(--mute);
+  border-style: dashed;
+  border-color: var(--line);
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 5px,
+    rgba(0, 0, 0, 0.035) 5px,
+    rgba(0, 0, 0, 0.035) 10px
+  );
+}
+
+.pipeline-stage.is-unknown .pipeline-stage-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px #c4bbb0;
 }
 
 .pipeline-input-card {

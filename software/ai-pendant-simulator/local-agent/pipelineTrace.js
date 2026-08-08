@@ -5,6 +5,10 @@ import {
   writeJsonAtomic,
 } from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
+import {
+  deliveryRunStatus,
+  gradeAudioDelivery,
+} from '../shared/audioDelivery.js'
 
 const pipelinePath = path.join(workspacePath, 'pendant-pipeline.json')
 const MAX_RUNS = 80
@@ -97,6 +101,14 @@ export function recordPipelineEvent({
   )
   run.updatedAt = timestamp
   run.status = deriveRunStatus(run.events)
+  /*
+   * Stored beside the status rather than folded into it, because they answer
+   * different questions: `status` is how the run went, `delivery` is who
+   * witnessed what on the way to the pendant's speaker. Collapsing the second
+   * into the first is how "the Mac finished" started reading as "the owner
+   * heard it".
+   */
+  run.delivery = gradeAudioDelivery(run.events)
 
   const nextRuns = [
     run,
@@ -126,35 +138,34 @@ function normalizeEventStatus(value) {
   return 'done'
 }
 
+/*
+ * This used to end with "the relay took the audio, so we're done" for any run
+ * whose input telemetry did not literally say microSD. `device_playback` was
+ * read here and never written by anything, so the check for it could only ever
+ * fail, and every live-LTE pendant run quietly finished on Mac-side evidence.
+ *
+ * Now the last mile is graded against the body that witnessed it. When the
+ * pendant has the bytes and has said nothing, that is reported as
+ * PLAYBACK_UNKNOWN_STATUS — not 'completed' (which would round an unknown up to
+ * a success) and not an endless 'processing' (which would round it up to "still
+ * working" on a run that will never resolve on its own).
+ */
 function deriveRunStatus(events) {
   const latest = events[events.length - 1]
   if (!latest) return 'processing'
   if (latest.status === 'failed') return 'failed'
-  const devicePlayback = [...events]
-    .reverse()
-    .find((event) => event.stage === 'device_playback')
-  if (devicePlayback?.status === 'failed') return 'failed'
-  if (devicePlayback?.status === 'done') return 'completed'
-  if (
-    latest.stage === 'relay_result' &&
-    latest.status === 'done' &&
-    !expectsPendantTelemetry(events)
-  ) {
-    return 'completed'
-  }
-  return 'processing'
-}
 
-function expectsPendantTelemetry(events) {
-  const transcription = events.find(
-    (event) => event.stage === 'transcription',
+  const delivery = gradeAudioDelivery(events)
+  if (delivery.playbackFailed) return 'failed'
+  if (delivery.provesPlayback) return 'completed'
+
+  /* Nothing is settled until the Mac has handed the reply to the relay. */
+  const macDone = events.some(
+    (event) => event.stage === 'relay_result' && event.status === 'done',
   )
-  const telemetry = transcription?.meta?.inputTelemetry
-  return (
-    telemetry &&
-    typeof telemetry === 'object' &&
-    String(telemetry.storage || '').toLowerCase() === 'microsd'
-  )
+  if (!macDone) return 'processing'
+
+  return deliveryRunStatus(delivery, { macDone: true })
 }
 
 function cleanText(value, maxLength) {
