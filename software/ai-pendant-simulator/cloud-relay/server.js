@@ -295,7 +295,27 @@ async function resolveAudioTranscript({
 }
 
 app.use(cors())
-app.use(express.json({ limit: '12mb' }))
+
+/*
+ * Most routes keep a tight body cap. The bridge result route is the one path
+ * that carries a synthesized reply as base64 audio, and a routine that auto-runs
+ * can pre-render a minute+ of 24 kHz PCM -- tens of MB on the wire. At 12mb the
+ * body-parser rejected it with a 413 BEFORE the handler (and its R2 offload)
+ * ever ran, so the audio never left the request. Give only this route a larger
+ * cap; every other endpoint keeps the small, safe limit. The handler then
+ * offloads the audio to R2 (see pendantSpeechStore.js) so nothing oversized is
+ * stored, and the reply-audio download serves the opus track the relay prefers.
+ */
+const BRIDGE_WORK_RESULT_PATH = /^\/v1\/bridge\/work\/[^/]+\/result\/?$/
+const jsonBodyTight = express.json({ limit: '12mb' })
+const jsonBodyBridgeResult = express.json({ limit: '32mb' })
+app.use((request, response, next) => {
+  const parser =
+    request.method === 'POST' && BRIDGE_WORK_RESULT_PATH.test(request.path)
+      ? jsonBodyBridgeResult
+      : jsonBodyTight
+  parser(request, response, next)
+})
 
 app.get('/health', async (_request, response) => {
   const store = await getStore()
@@ -3007,6 +3027,33 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
       })
     }
   }
+})
+
+/*
+ * Last line of defense: turn body-parser and any other unhandled route error
+ * into a structured JSON response instead of Express's default bare-HTML page.
+ * A body over the cap becomes a clean 413 the bridge can read; anything else
+ * becomes a JSON 500 with a message, never an opaque "Internal Server Error"
+ * (or "Payload Too Large") HTML page recorded verbatim as a job's failure.
+ */
+app.use((error, request, response, next) => {
+  if (response.headersSent) {
+    next(error)
+    return
+  }
+  if (error?.type === 'entity.too.large' || Number(error?.status) === 413) {
+    response.status(413).json({
+      ok: false,
+      error: 'Report body exceeds the relay size limit.',
+    })
+    return
+  }
+  console.error('[relay] Unhandled route error:', error?.stack || error)
+  const status = Number(error?.status || error?.statusCode)
+  response.status(status >= 400 && status < 600 ? status : 500).json({
+    ok: false,
+    error: String(error?.message || error).slice(0, 200),
+  })
 })
 
 app.listen(PORT, '0.0.0.0', () => {
