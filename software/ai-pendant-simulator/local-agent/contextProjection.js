@@ -1,4 +1,9 @@
-import { listFacts, servesSurface } from './memoryService.js'
+import {
+  graphEntityLine,
+  listFacts,
+  normalizeForOverlap,
+  servesSurface,
+} from './memoryService.js'
 import { classifySensitivity, maskSecretValue } from './redaction.js'
 
 /*
@@ -133,16 +138,65 @@ export function projectContext({
    * as emphasis.
    */
   const emitted = new Set()
+  /*
+   * Normalized text of everything already emitted, for the near-duplicate the
+   * byte-identical Set cannot catch.
+   *
+   * The same idea reaches the store by two routes: quickCapture writes the
+   * owner's words, and syncFactsFromContextGraph derives a line from the graph
+   * entity built out of the same words. Different keys, different writers,
+   * different bytes — so both were emitted, and the prompt carried
+   *
+   *   - a pendant that files its own bug reports from the UART log.
+   *   - Note: a pendant that files its own bug reports from the UART log
+   *
+   * as if they were two facts. Suppression is by CONTAINMENT rather than
+   * equality, since the derived line is the captured one with a type prefix,
+   * and it is one-directional: a later line adds nothing if what it says is
+   * already on the page. A line that merely SHARES words with an earlier one is
+   * kept — two facts about Downloads are two facts.
+   */
+  const emittedNormals = []
   let used = 0
   let droppedForBudget = 0
+  let droppedAsRestatement = 0
 
   const emit = (line, fact) => {
     if (emitted.has(line)) return false
+    const normal = normalizeForOverlap(line)
+    /*
+     * Containment runs BOTH ways, and the first cut only checked one. The
+     * derived line is the captured one with a type prefix, so it CONTAINS what
+     * came before rather than being contained by it — checking a single
+     * direction let the pair through unchanged.
+     *
+     * Materiality is what keeps this from eating real facts: one line is a
+     * restatement of another only if the longer adds little to the shorter.
+     * "Note: " on a 57-character sentence is 5 characters of nothing; a line
+     * that happens to quote an earlier one and then says something else is a
+     * second fact and survives.
+     *
+     * Short lines are exempt entirely — "Note: yes" is contained in half the
+     * store, and suppressing on three words would drop real facts to save
+     * nothing.
+     */
+    if (normal.length >= 24) {
+      const restates = emittedNormals.some((seen) => {
+        const [shorter, longer] = seen.length <= normal.length ? [seen, normal] : [normal, seen]
+        if (!longer.includes(shorter)) return false
+        return longer.length - shorter.length <= Math.max(12, shorter.length * 0.25)
+      })
+      if (restates) {
+        droppedAsRestatement += 1
+        return false
+      }
+    }
     if (used + line.length + 1 > budgetChars) {
       droppedForBudget += 1
       return false
     }
     emitted.add(line)
+    if (normal) emittedNormals.push(normal)
     lines.push(line)
     used += line.length + 1
     if (fact) factIds.push(fact.id)
@@ -255,13 +309,11 @@ export function factFromGraphEntity(entity) {
   const kind = GRAPH_KIND_BY_TYPE[entity?.type]
   if (!kind || !entity?.id || !entity?.name) return null
 
-  const detail =
-    entity.attributes?.note ||
-    entity.attributes?.subject ||
-    entity.attributes?.path ||
-    entity.attributes?.due ||
-    ''
-  const value = clip(`${entity.type}: ${entity.name}${detail ? ` — ${detail}` : ''}`)
+  /* Built by memoryService so this and the importer cannot drift. A drifted
+   * copy means the same entity reads differently depending on whether the sync
+   * had run, which is exactly the kind of difference nobody would think to look
+   * for. */
+  const value = clip(graphEntityLine(entity))
   if (!value) return null
 
   const at = entity.updatedAt || entity.createdAt || null

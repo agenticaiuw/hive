@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { graphEntityLine } from './memoryService.js'
 import {
   estimateTokens,
   factFromGraphEntity,
@@ -361,4 +362,81 @@ test('knowing twenty times more does not cost more, and does not lose the point'
   assert.ok(promptGrowth * 5 < storeGrowth, detail)
   assert.ok(after.stats.estimatedTokens <= after.stats.budgetTokens, detail)
   assert.match(after.text, /David runs the SAIL GPU cluster/, 'relevance survives the flood')
+})
+
+test('a graph detail that merely restates the name is collapsed', () => {
+  /*
+   * quickCapture writes the idea text into the entity NAME and its note, and
+   * `note` is the first detail tried — so a captured idea rendered as the same
+   * sentence twice inside one line, billed on every turn that retrieved it:
+   *
+   *   Note: a pendant that files its own bug reports — a pendant that files its own bug reports
+   *
+   * Comparison is on normalized text, not bytes: the two fields differ by a
+   * trailing period or a capital often enough that a byte check would miss most
+   * of them.
+   */
+  assert.equal(
+    graphEntityLine({
+      type: 'Note',
+      name: 'a pendant that files its own bug reports',
+      attributes: { note: 'a pendant that files its own bug reports.' },
+    }),
+    'Note: a pendant that files its own bug reports',
+  )
+})
+
+test('a graph detail that genuinely adds is kept', () => {
+  /* The collapse must not eat the case it exists to distinguish from. */
+  assert.equal(
+    graphEntityLine({ type: 'Task', name: 'file taxes', attributes: { due: '2026-04-15' } }),
+    'Task: file taxes — 2026-04-15',
+  )
+})
+
+test('the same idea from two writers is emitted once', () => {
+  /*
+   * One idea reaches the store twice by different routes — quickCapture writes
+   * the owner's words under an `idea.*` key, and syncFactsFromContextGraph
+   * derives a line from the graph entity built out of those same words under a
+   * `graph.*` key. Different keys, different bytes, so the byte-identical Set
+   * passed both and the prompt carried them as two facts.
+   *
+   * Containment has to run BOTH ways: the derived line is the captured one with
+   * a type prefix, so it CONTAINS its twin rather than being contained by it,
+   * and a single-direction check let the pair straight through.
+   */
+  const idea = 'a pendant that files its own bug reports from the UART log'
+  const projection = projectContext({
+    task: 'tell me about the pendant bug reports from the UART log',
+    now: NOW,
+    facts: [
+      fact({ key: 'idea.captured', kind: 'entity', value: `${idea}.` }),
+      fact({ key: 'graph.abc', kind: 'entity', value: `Note: ${idea}` }),
+    ],
+  })
+
+  const hits = projection.text
+    .split('\n')
+    .filter((line) => line.toLowerCase().includes('files its own bug reports'))
+  assert.equal(hits.length, 1, `expected one line, got: ${JSON.stringify(hits)}`)
+})
+
+test('two different facts sharing words both survive', () => {
+  /*
+   * The failure mode of containment suppression is eating real facts. Neither
+   * of these contains the other, so both must ride — a projection that keeps
+   * one fact about Downloads is worse than one that repeats itself.
+   */
+  const projection = projectContext({
+    task: 'what do I know about my Downloads folder',
+    now: NOW,
+    facts: [
+      fact({ key: 'k1', kind: 'entity', value: 'Downloads folder is tidied every Friday' }),
+      fact({ key: 'k2', kind: 'entity', value: 'Downloads folder holds the tax receipts' }),
+    ],
+  })
+
+  const hits = projection.text.split('\n').filter((line) => line.includes('Downloads folder'))
+  assert.equal(hits.length, 2, `both facts must survive, got: ${JSON.stringify(hits)}`)
 })
