@@ -1,6 +1,7 @@
 import { buildConversationContext } from './conversationContext.js'
 import { estimateTokens, projectTurnContext } from './contextProjection.js'
 import { describeResume, resumeContext } from './contextResume.js'
+import { recordGapSafely } from './capabilityGapInbox.js'
 import { planCommand } from './llmPlanner.js'
 import { touchFacts } from './memoryService.js'
 import {
@@ -407,6 +408,18 @@ export async function orchestratePlan({
     })
 
     if (plan.status === 'unsupported') {
+      /*
+       * The ask used to evaporate right here — folded into a thinking step and
+       * never seen by the design loop. File it as a capability gap before
+       * answering. recordGapSafely never throws; recording a refusal must not
+       * be able to break the refusal.
+       */
+      recordGapSafely({
+        source: 'planner-unsupported',
+        want: workingCommand,
+        detail: plan.error || 'Unsupported request',
+        surface: source,
+      })
       addThinkingStep(trace.traceId, {
         id: 'plan',
         label: 'Could not make a safe plan',
