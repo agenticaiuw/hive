@@ -25,6 +25,7 @@ import {
 import { createReminder } from './reminders.js'
 import { childEnv } from './childEnv.js'
 import { runCapabilityGapAction } from './capabilityGapsActions.js'
+import { runIosAction } from './iosControl.js'
 import {
   getCurrentInputSource,
   selectInputSource,
@@ -388,6 +389,22 @@ export async function executeComputerAction(action) {
       return browserInspectAction(action)
     case 'browser_inspect_act':
       return browserInspectActAction(action)
+    /* The owner's real iPhone, through the Mac's iPhone Mirroring window. One
+     * delegate for the family because iosControl.js already dispatches on the
+     * type — but nine real case labels, because readDispatchableActionTypes
+     * parses this switch and a family hidden behind one label would be nine
+     * capabilities GET /capabilities never mentions. */
+    case 'ios_status':
+    case 'ios_ocr':
+    case 'ios_screenshot':
+    case 'ios_open_app':
+    case 'ios_tap_text':
+    case 'ios_type_text':
+    case 'ios_swipe':
+    case 'ios_scroll':
+    case 'ios_back':
+    case 'ios_home':
+      return runIosAction(action)
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
   }
