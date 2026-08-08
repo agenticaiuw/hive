@@ -5,6 +5,7 @@ import {
   servesSurface,
 } from './memoryService.js'
 import { classifySensitivity, maskSecretValue } from './redaction.js'
+import { provenanceSuffix } from './sampledFacts.js'
 
 /*
  * Turn the fact store into the smallest prompt that still answers the request.
@@ -218,7 +219,19 @@ export function projectContext({
     }
   }
 
-  section('## Owner', stable, (fact) => `- ${shortKey(fact)}: ${promptValue(fact, revealSensitive)}`)
+  /*
+   * Provenance rides on the stable head, and only there. A sampled reading and
+   * a stated choice were rendered identically, so nothing downstream — model or
+   * owner reading the prompt — could tell that "timezone: America/Chicago" was
+   * something this Mac reported once rather than something the owner said. The
+   * suffix costs a few tokens on the handful of machine-origin rows and is
+   * empty for everything the owner actually chose.
+   */
+  section(
+    '## Owner',
+    stable,
+    (fact) => `- ${shortKey(fact)}: ${promptValue(fact, revealSensitive)}${provenanceSuffix(fact)}`,
+  )
   section('## Now', openTasks, (fact) => `- ${promptValue(fact, revealSensitive)}`)
   section(
     '## Relevant',
