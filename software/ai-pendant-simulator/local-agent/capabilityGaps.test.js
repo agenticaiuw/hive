@@ -631,7 +631,18 @@ test('a fully wired capability audits as delivered', async () => {
   assert.deepEqual(audit.blocking, [])
 })
 
-test('the weekday ask always reports the schedule shape it cannot have', async () => {
+/*
+ * This used to be "always reports the schedule shape it cannot have", and the
+ * word `always` was the defect. The link was a hardcoded false carrying a
+ * hardcoded sentence, so when routines.js learned `weekly` the audit went on
+ * reporting the gap and the test went on passing — an audit stating a
+ * conclusion rather than measuring one, which is the exact failure this file
+ * exists to catch, aimed at itself.
+ *
+ * Both directions are now pinned: a store that handles weekdays clears the
+ * link, and one that answers Saturday fails it.
+ */
+test('the weekday link is probed against the real scheduler, not asserted', async () => {
   const audit = await auditCapability(
     REASKED_CAPABILITIES.find((entry) => entry.id === 'weekday-work-portal'),
     {
@@ -663,10 +674,53 @@ test('the weekday ask always reports the schedule shape it cannot have', async (
     },
   )
 
+  /* The real routines.js stores weekly, so with everything else wired this ask
+   * has nothing blocking it. */
+  assert.deepEqual(audit.blocking, [])
+  const weekday = audit.links.find((entry) => entry.link === 'weekdaySchedule')
+  assert.equal(weekday.ok, true)
+  assert.match(weekday.evidence, /Mon /, `expected a Monday, got: ${weekday.evidence}`)
+})
+
+test('a scheduler that fires on Saturday fails the weekday link', async () => {
+  /* The failure the probe exists to detect: a store that ACCEPTS the weekly
+   * shape and then answers a day the owner excluded is worse than one that
+   * refuses it, because it looks like it worked. */
+  const audit = await auditCapability(
+    REASKED_CAPABILITIES.find((entry) => entry.id === 'weekday-work-portal'),
+    {
+      nextRunAt: () => new Date('2026-08-08T07:00:00').getTime(), // a Saturday
+      actions: () => ({ types: [{ type: 'briefing_triage' }] }),
+      risk: () => ({ safe: true }),
+      router: async () => ({ intent: 'briefing_triage' }),
+      routines: () => [
+        {
+          id: 'r1',
+          name: 'morning',
+          command: 'check my logged-in accounts',
+          schedule: { kind: 'daily', at: '07:00' },
+          enabled: true,
+        },
+      ],
+      usage: () => ({
+        briefingQueuePath: '/queue.json',
+        briefingQueueExists: true,
+        briefingRuns: 1,
+        shelfRows: 1,
+        shelfUnplayed: 0,
+        triageShelfRows: 1,
+        watches: 0,
+        watchesEverChecked: 0,
+        watchReports: 0,
+      }),
+      health: () => ({ online: true }),
+    },
+  )
+
   assert.deepEqual(audit.blocking, ['weekdaySchedule'])
   assert.match(
     audit.links.find((entry) => entry.link === 'weekdaySchedule').evidence,
-    /Saturday/,
+    /not a weekday/,
   )
 })
 
