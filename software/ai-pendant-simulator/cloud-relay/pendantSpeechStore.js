@@ -24,13 +24,34 @@ import { getCloudflareBindings } from './cloudflareBindings.js'
 import { loadAudioByRef, persistAudioCapture } from './audioStorage.js'
 
 /*
- * The whole stored job row must stay under D1's ~1 MB limit, and the row holds
- * more than the audio (command, actions, telemetry). Keep the summed inline
- * audio comfortably below that; a ~10 s reply still inlines, longer ones spill
- * to R2. Per-field cap decides which individual field is worth an R2 object.
+ * D1 stores the whole job as ONE JSON value, and SQLite refuses a value past its
+ * own ceiling with `string or blob too big: SQLITE_TOOBIG` -- a different, far
+ * smaller limit than the 32 MiB binding-RPC one. Everything below is measured
+ * against that ceiling rather than guessed per field: the row also carries the
+ * command, actions, telemetry, and (for a research brief) markdown and source
+ * text, so "the audio looks small" is not evidence the row will fit.
  */
-export const PENDANT_SPEECH_INLINE_TOTAL_MAX_BYTES = 700 * 1024
+export const D1_VALUE_MAX_BYTES = 1_000_000
+/* Written rows are held well under the ceiling: the remaining fields, UTF-8
+ * expansion of non-ASCII, and later patches (deviceEvents, downlink receipts)
+ * all land in the same value after this write. */
+export const STORED_ROW_TARGET_BYTES = 600_000
+
+/* Per-field trigger for moving one audio field to R2. Kept small because an R2
+ * object costs nothing to make and a reference is ~200 bytes. */
 export const PENDANT_SPEECH_FIELD_INLINE_MAX_BYTES = 64 * 1024
+/* Only a payload whose audio is genuinely tiny is worth leaving inline at all. */
+export const PENDANT_SPEECH_INLINE_TOTAL_MAX_BYTES = 96 * 1024
+
+/** Serialized size in UTF-8 bytes -- the unit SQLite's ceiling is counted in. */
+export function serializedBytes(value) {
+  try {
+    const json = JSON.stringify(value)
+    return json === undefined ? 0 : Buffer.byteLength(json, 'utf8')
+  } catch {
+    return Number.POSITIVE_INFINITY
+  }
+}
 
 /**
  * Return a pendantSpeech object safe to store in D1: large base64 audio fields
@@ -210,6 +231,164 @@ export async function offloadResultSpeechAudio({
     ...strippedRest,
     ...(speech === undefined ? {} : { pendantSpeech: slim }),
   }
+}
+
+/* Every inline audio field, anywhere, replaced by an explicit omission marker. */
+function stripAllInlineAudio(value, reason, state, depth = 0) {
+  if (depth > NESTED_WALK_MAX_DEPTH || state.nodes > NESTED_WALK_MAX_NODES) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      state.nodes += 1
+      return stripAllInlineAudio(entry, reason, state, depth + 1)
+    })
+  }
+  if (!value || typeof value !== 'object') return value
+
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    if (
+      (key === 'audioBase64' || key === 'compressedAudioBase64') &&
+      typeof entry === 'string'
+    ) {
+      next.audioOmitted = true
+      next.audioOmittedReason = reason
+      continue
+    }
+    next[key] = stripAllInlineAudio(entry, reason, state, depth + 1)
+  }
+  return next
+}
+
+/* Last resort before dropping detail wholesale: clip the long prose (a brief's
+ * markdown, scraped source text) that is not the reason anyone reads this row. */
+function truncateLargeStrings(value, maxChars, state, depth = 0) {
+  if (depth > NESTED_WALK_MAX_DEPTH || state.nodes > NESTED_WALK_MAX_NODES) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      state.nodes += 1
+      return truncateLargeStrings(entry, maxChars, state, depth + 1)
+    })
+  }
+  if (typeof value === 'string') {
+    return value.length > maxChars
+      ? `${value.slice(0, maxChars)}…[truncated for storage]`
+      : value
+  }
+  if (!value || typeof value !== 'object') return value
+
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    /* The spoken reply is the point of the row; never clip it. */
+    next[key] =
+      key === 'response' || key === 'summary'
+        ? entry
+        : truncateLargeStrings(entry, maxChars, state, depth + 1)
+  }
+  return next
+}
+
+/* What the reaper, the approval surfaces and the dashboard actually need. */
+function essentialResult(result, notes) {
+  const keep = {}
+  for (const key of [
+    'response',
+    'summary',
+    'executed',
+    'phase',
+    'parked',
+    'approval',
+    'awaitingApproval',
+    'executionError',
+    'planner',
+    'status',
+    'pendantSpeech',
+  ]) {
+    if (result[key] !== undefined) keep[key] = result[key]
+  }
+  if (Array.isArray(result.actions)) {
+    keep.actions = result.actions.slice(0, 20)
+  }
+  keep.storageTrimmed = true
+  keep.storageNotes = notes
+  return keep
+}
+
+/**
+ * Make a result safe to store, deciding from the MEASURED serialized size of the
+ * row that is about to be written rather than from any per-field guess.
+ *
+ * The ladder degrades in the order that costs the owner least, and every rung is
+ * recorded in the stored result so nothing downstream has to infer what happened:
+ *
+ *   1. move the served reply audio to R2, drop nested duplicates  (no loss)
+ *   2. drop every remaining inline audio field                    (audio lost)
+ *   3. clip long prose -- brief markdown, scraped source text     (detail lost)
+ *   4. keep only what the reaper and approval surfaces read       (detail lost)
+ *
+ * A briefing whose text and status survive is worth far more than a run recorded
+ * as failed, so this never throws and never gives up on storing something.
+ */
+export async function prepareResultForStorage({
+  jobId,
+  baseRow = {},
+  result,
+  createdAt,
+  bindings = getCloudflareBindings(),
+  targetBytes = STORED_ROW_TARGET_BYTES,
+  logger = console,
+} = {}) {
+  const notes = []
+  const rowBytes = (candidate) => serializedBytes({ ...baseRow, result: candidate })
+  const startedBytes = rowBytes(result)
+
+  let current = result
+  try {
+    current = await offloadResultSpeechAudio({
+      jobId,
+      result,
+      createdAt,
+      bindings,
+    })
+    if (current !== result) notes.push('audio-offloaded-to-r2')
+  } catch (error) {
+    notes.push('audio-offload-failed')
+    logger?.warn?.(
+      `[relay] pendantSpeech offload failed for ${jobId}: ${
+        error?.message || error
+      }`,
+    )
+    current = result
+  }
+
+  if (!current || typeof current !== 'object' || rowBytes(current) <= targetBytes) {
+    return { result: current, bytes: rowBytes(current), startedBytes, notes }
+  }
+
+  current = stripAllInlineAudio(
+    current,
+    'stored row would exceed the D1 value limit',
+    { nodes: 0 },
+  )
+  notes.push('inline-audio-dropped')
+  if (rowBytes(current) <= targetBytes) {
+    return { result: current, bytes: rowBytes(current), startedBytes, notes }
+  }
+
+  current = truncateLargeStrings(current, 8_000, { nodes: 0 })
+  notes.push('long-text-truncated')
+  if (rowBytes(current) <= targetBytes) {
+    return { result: current, bytes: rowBytes(current), startedBytes, notes }
+  }
+
+  notes.push('reduced-to-essentials')
+  current = essentialResult(current, notes.join(','))
+  return { result: current, bytes: rowBytes(current), startedBytes, notes }
 }
 
 /**
