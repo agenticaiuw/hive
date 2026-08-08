@@ -1,0 +1,947 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive</title>
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --bg: #0a0f16;
+    --panel: #0e1521;
+    --panel-2: #121b2a;
+    --line: #1c2939;
+    --ink: #e7edf4;
+    --ink-2: #9fb0c3;
+    --ink-3: #64768a;
+    /* categorical source palette — validated (dataviz six checks, dark surface) */
+    --src-mac: #3987e5;
+    --src-relay: #d95926;
+    --src-extension: #199e70;
+    --src-committee: #c98500;
+    --src-pendant: #d55181;
+    --src-system: #8395a7; /* neutral ink, not a series */
+    /* status palette — fixed, always paired with a text label */
+    --st-up: #0ca30c;
+    --st-degraded: #fab219;
+    --st-down: #d03b3b;
+    --st-unknown: #7d8896;
+    --st-idle: #5b7ba6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    background-image: radial-gradient(1200px 600px at 30% -10%, #0f1a2b 0%, transparent 60%),
+                      radial-gradient(1000px 500px at 85% -10%, #16121f 0%, transparent 55%);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: auto auto minmax(280px, 45vh) minmax(0, 1fr) 148px;
+    height: 100vh;
+  }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; overflow: hidden;
+    padding: 7px 16px; border-bottom: 1px solid var(--line);
+    background: rgba(10, 15, 22, 0.9);
+  }
+  .wordmark { font-family: var(--mono); font-size: 18px; font-weight: 700; letter-spacing: 0.42em; padding-right: 2px; white-space: nowrap; }
+  .wordmark .hex { color: var(--src-committee); letter-spacing: 0; }
+  #nodeChips { flex-wrap: nowrap; overflow: hidden; }
+  .hchip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); border: 1px solid var(--line); border-radius: 20px; padding: 2px 8px; background: var(--panel); white-space: nowrap; }
+  .hchip b { color: var(--ink); font-weight: 600; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+  .spacer { flex: 1; }
+  #sseChip .dot.live { animation: blink 2s infinite; }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
+  #clock { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+
+  /* ---------- source alerts ---------- */
+  /* stays a grid item even when empty — display:none would shift every section into the wrong grid track */
+  #srcAlerts { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 16px; max-height: 0; overflow: hidden; }
+  #srcAlerts.on { max-height: none; padding: 6px 16px; border-bottom: 1px solid var(--line); }
+  .alert { font-family: var(--mono); font-size: 11px; border-radius: 4px; padding: 3px 8px; border: 1px solid rgba(208,59,59,0.5); color: #f2a1a1; background: rgba(208,59,59,0.1); max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert.parse { border-color: rgba(250,178,25,0.5); color: #ffd57a; background: rgba(250,178,25,0.08); }
+
+  /* ---------- graph ---------- */
+  #graphWrap { position: relative; min-height: 0; display: flex; flex-direction: column; }
+  #graph { width: 100%; flex: 1; min-height: 0; display: block; }
+  .ringTitle { font-family: var(--mono); font-size: 12px; letter-spacing: 0.35em; fill: var(--ink-3); }
+  .edge { stroke: #223349; stroke-width: 1.6; fill: none; }
+  .edge.fresh { stroke: #33507a; }
+  .edge.pulse { stroke: #7fb2ff; stroke-width: 2.2; stroke-dasharray: 5 9; animation: dashflow 0.7s linear infinite; filter: drop-shadow(0 0 4px rgba(127,178,255,0.8)); }
+  @keyframes dashflow { to { stroke-dashoffset: -28; } }
+  .edgeLabel { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-3); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .rt-node, .cm-node { cursor: pointer; }
+  .rt-node .body { fill: #0f1826; stroke-width: 2.4; transition: stroke 0.4s; }
+  .rt-node .halo { opacity: 0; transition: opacity 0.8s; }
+  .rt-node.hot .halo { opacity: 0.35; }
+  .rt-node.sel .body { stroke-width: 3.4; }
+  .rt-node .tag { font-family: var(--mono); font-size: 13px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
+  .rt-node .nlabel { font-size: 12.5px; fill: var(--ink-2); text-anchor: middle; }
+  .rt-node.sel .nlabel { fill: var(--ink); }
+  .rt-node .nstatus { font-family: var(--mono); font-size: 10.5px; text-anchor: middle; }
+  .cm-node circle { fill: #101826; stroke: #3a4a61; stroke-width: 1.6; transition: all 0.6s; }
+  .cm-node.hot circle { stroke: var(--src-committee); filter: drop-shadow(0 0 6px rgba(201,133,0,0.75)); }
+  .cm-node.warm circle { stroke: #8a6a1e; }
+  .cm-node.sel circle { stroke: var(--ink); }
+  .cm-node text { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-2); }
+  .cm-node.hot text { fill: var(--ink); }
+  .cmCenter { font-family: var(--mono); font-size: 11px; fill: var(--ink-3); text-anchor: middle; }
+  .cmCenter.big { font-size: 15px; fill: var(--ink-2); }
+  .ringGuide { fill: none; stroke: #182435; stroke-width: 1; stroke-dasharray: 2 6; }
+  .msgTrail { stroke-linecap: round; }
+  #legend { flex: none; display: flex; gap: 16px; justify-content: center; align-items: center; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; padding: 2px 16px 5px; font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+  #legend .dot { width: 8px; height: 8px; }
+  #legend .lrow { display: flex; gap: 12px; align-items: center; flex: none; }
+
+  /* ---------- panels ---------- */
+  main { display: grid; grid-template-columns: 7fr 5fr; gap: 10px; padding: 8px 16px 4px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .phead { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,0.025), transparent); flex: none; }
+  .phead h2 { font-family: var(--mono); font-size: 12px; letter-spacing: 0.25em; color: var(--ink-2); font-weight: 600; }
+  .pbody { overflow-y: auto; padding: 10px 12px; min-height: 0; scrollbar-width: thin; scrollbar-color: #24344a transparent; }
+  .st { font-family: var(--mono); font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.08em; }
+  .st-up       { color: #7ee27e; background: rgba(12,163,12,0.14);  border: 1px solid rgba(12,163,12,0.45); }
+  .st-degraded { color: #ffd57a; background: rgba(250,178,25,0.1);  border: 1px solid rgba(250,178,25,0.4); }
+  .st-down     { color: #ff9b9b; background: rgba(208,59,59,0.12);  border: 1px solid rgba(208,59,59,0.5); }
+  .st-unknown  { color: #aab4bf; background: rgba(125,136,150,0.12);border: 1px solid rgba(125,136,150,0.4); }
+  .st-idle     { color: #9db8dc; background: rgba(91,123,166,0.12); border: 1px solid rgba(91,123,166,0.4); }
+  .reason { font-size: 11.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sect { margin-bottom: 12px; }
+  .sect h3 { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.28em; color: var(--ink-3); margin-bottom: 6px; border-bottom: 1px dashed var(--line); padding-bottom: 3px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12px; }
+  .kv dt { color: var(--ink-3); }
+  .kv dd { color: var(--ink-2); overflow-wrap: anywhere; }
+  .chiprow { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); border: 1px solid var(--line); background: var(--panel-2); border-radius: 4px; padding: 2px 7px; }
+  .chip b { color: var(--ink); }
+  .feed { display: flex; flex-direction: column; gap: 3px; }
+  .frow { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 3px 6px; border-radius: 5px; background: rgba(255,255,255,0.015); }
+  .frow:hover { background: rgba(255,255,255,0.045); }
+  .frow .age { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; width: 52px; text-align: right; }
+  .frow .typ { font-family: var(--mono); color: var(--ink); flex: none; }
+  .frow .msg { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .frow .ok  { color: #7ee27e; font-family: var(--mono); font-size: 10.5px; }
+  .frow .bad { color: #ff9b9b; font-family: var(--mono); font-size: 10.5px; }
+  .jobrow { cursor: pointer; }
+  .receipts { grid-column: 1 / -1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 2px 0 6px; font-size: 11.5px; }
+  .stagechip { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 9.5px; border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; color: var(--ink-3); margin: 1px 2px 1px 0; }
+  .stagechip.done   { color: #7ee27e; border-color: rgba(12,163,12,0.5); }
+  .stagechip.active { color: #ffd57a; border-color: rgba(250,178,25,0.55); animation: blink 1.4s infinite; }
+  .stagechip.error  { color: #ff9b9b; border-color: rgba(208,59,59,0.55); }
+  .err { color: #ff9b9b; font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+  .mut { color: var(--ink-3); }
+
+  /* ---------- shared tiles ---------- */
+  #sharedGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tile { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-height: 74px; }
+  .tile .tl { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.22em; color: var(--ink-3); margin-bottom: 4px; }
+  .tile .tv { font-family: var(--mono); font-size: 24px; font-weight: 600; color: var(--ink); line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .tile .tv small { font-size: 12px; color: var(--ink-2); font-weight: 400; }
+  .tile .ts { font-size: 11px; color: var(--ink-2); margin-top: 3px; overflow-wrap: anywhere; }
+
+  /* ---------- ticker ---------- */
+  #tickerWrap { border-top: 1px solid var(--line); background: rgba(8,12,18,0.95); padding: 6px 16px 8px; display: flex; flex-direction: column; min-height: 0; }
+  #tickerHead { font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; color: var(--ink-3); margin-bottom: 4px; flex: none; }
+  #ticker { overflow-y: auto; min-height: 0; scrollbar-width: thin; }
+  .tick { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 1.5px 0; animation: fadein 0.5s; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(-3px); } }
+  .tick .tage { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); width: 56px; text-align: right; flex: none; }
+  .tick .tage.fresh { color: var(--ink); }
+  .tick .tsrc { font-family: var(--mono); font-size: 10.5px; flex: none; width: 86px; display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); }
+  .tick .ttext { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="wordmark"><span class="hex">⬡</span> HIVE</span>
+    <span id="nodeChips" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+    <span class="spacer"></span>
+    <span class="hchip" id="srcSummary">sources —</span>
+    <span class="hchip" id="sseChip"><span class="dot" style="background:var(--st-unknown)"></span>connecting</span>
+    <span id="clock" class="num">—</span>
+  </header>
+
+  <div id="srcAlerts"></div>
+
+  <section id="graphWrap">
+    <svg id="graph" viewBox="0 0 1840 560" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="legend"></div>
+  </section>
+
+  <main>
+    <section class="panel" id="nodePanel">
+      <div class="phead" id="nodeHead"><h2>NODE</h2></div>
+      <div class="pbody" id="nodeBody"><span class="mut">loading…</span></div>
+    </section>
+    <section class="panel">
+      <div class="phead"><h2>SHARED / SYNCED ACROSS NODES</h2></div>
+      <div class="pbody"><div id="sharedGrid"></div></div>
+    </section>
+  </main>
+
+  <section id="tickerWrap">
+    <div id="tickerHead">EVENT TICKER — ALL SOURCES, CHRONOLOGICAL</div>
+    <div id="ticker"></div>
+  </section>
+
+<script>
+'use strict';
+// ============================================================ state
+const S = {
+  meta: {},        // sourceKey -> freshness/error meta (updated every push)
+  src: {},         // sourceKey -> data (updated when changed)
+  nodes: [], edges: [], shared: null,
+  events: [], maxSeq: 0,
+  committeeAgents: [],
+  focused: 'mac', detail: null, detailErr: null,
+  clockOffset: 0, sse: 'connecting', dropped: false,
+  edgeSeen: {}, bulletinSeen: new Set(), bulletinPrimed: false,
+  activeDots: 0,
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const SRC_COLOR = { mac: 'var(--src-mac)', relay: 'var(--src-relay)', extension: 'var(--src-extension)', committee: 'var(--src-committee)', pendant: 'var(--src-pendant)', system: 'var(--src-system)' };
+const ST_COLOR = { up: 'var(--st-up)', degraded: 'var(--st-degraded)', down: 'var(--st-down)', unknown: 'var(--st-unknown)', idle: 'var(--st-idle)' };
+const ST_WORD = { up: 'UP', degraded: 'DEGRADED', down: 'DOWN', unknown: 'UNKNOWN', idle: 'IDLE' };
+
+function snow() { return Date.now() - S.clockOffset; } // approx server clock
+function fmtAge(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  if (ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + ' s';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' m';
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + ' h';
+  return Math.floor(h / 24) + ' d';
+}
+function ageSpan(ts, suffix) {
+  if (!ts) return '<span class="mut">—</span>';
+  const ms = typeof ts === 'number' ? ts : Date.parse(ts);
+  if (!isFinite(ms)) return '<span class="mut">—</span>';
+  return `<span class="num" data-ts="${ms}">${fmtAge(snow() - ms)}${suffix || ''}</span>`;
+}
+function tickAges() {
+  const t = snow();
+  document.querySelectorAll('[data-ts]').forEach((el) => {
+    const ms = Number(el.dataset.ts);
+    const age = t - ms;
+    el.textContent = fmtAge(age) + (el.dataset.suffix || '');
+    el.classList.toggle('fresh', age < 12000);
+  });
+  $('clock').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+
+// ============================================================ graph geometry
+let RT = { cx: 430, cy: 296, r: 185 };
+let CM = { cx: 1370, cy: 296, r: 185 };
+let VBW = 1840;
+const VBH = 560;
+const RT_ANGLES = { pendant: -90, mac: 15, extension: 90, ios: 195 };
+const NODE_TAG = { pendant: 'PND', relay: 'RLY', mac: 'MAC', extension: 'EXT', ios: 'IOS' };
+function polar(c, r, deg) { const a = deg * Math.PI / 180; return { x: c.cx + r * Math.cos(a), y: c.cy + r * Math.sin(a) }; }
+function rtPos(id) { return id === 'relay' ? { x: RT.cx, y: RT.cy } : polar(RT, RT.r, RT_ANGLES[id]); }
+let cmPos = {};
+
+function layoutGraph() {
+  // Match the viewBox aspect to the real container so the rings fill the stage.
+  const box = $('graph').getBoundingClientRect();
+  const aspect = box.width / Math.max(180, box.height);
+  VBW = Math.round(Math.min(2900, Math.max(1500, VBH * aspect)));
+  RT = { cx: Math.round(VBW * 0.25), cy: 296, r: 185 };
+  CM = { cx: Math.round(VBW * 0.73), cy: 296, r: 185 };
+}
+
+function buildGraph() {
+  layoutGraph();
+  const svg = $('graph');
+  svg.setAttribute('viewBox', `0 0 ${VBW} ${VBH}`);
+  svg.innerHTML = '';
+  cmPos = {};
+  const el = (n, attrs, text) => {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (text != null) e.textContent = text;
+    return e;
+  };
+  svg.appendChild(el('text', { x: RT.cx, y: 30, class: 'ringTitle', 'text-anchor': 'middle' }, 'RUNTIME RING'));
+  svg.appendChild(el('text', { x: CM.cx, y: 30, class: 'ringTitle', 'text-anchor': 'middle' }, 'DESIGN RING — COMMITTEE'));
+  svg.appendChild(el('circle', { cx: RT.cx, cy: RT.cy, r: RT.r, class: 'ringGuide' }));
+  svg.appendChild(el('circle', { cx: CM.cx, cy: CM.cy, r: CM.r, class: 'ringGuide' }));
+
+  const edgeG = el('g', { id: 'edgeG' });
+  svg.appendChild(edgeG);
+  for (const e of [
+    { id: 'pendant-relay', a: 'pendant', b: 'relay' },
+    { id: 'mac-relay', a: 'mac', b: 'relay' },
+    { id: 'ext-mac', a: 'extension', b: 'mac' },
+    { id: 'ios-relay', a: 'ios', b: 'relay' },
+  ]) {
+    const p1 = rtPos(e.a), p2 = rtPos(e.b);
+    edgeG.appendChild(el('line', { id: 'edge-' + e.id, class: 'edge', x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }));
+    const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+    const dx = p2.x - p1.x, dy = p2.y - p1.y, len = Math.hypot(dx, dy) || 1;
+    const off = e.id === 'ext-mac' ? 16 : 13;
+    edgeG.appendChild(el('text', { id: 'edgelabel-' + e.id, class: 'edgeLabel', x: mx - dy / len * off, y: my + dx / len * off, 'text-anchor': 'middle' }, ''));
+  }
+
+  const nodeG = el('g', { id: 'nodeG' });
+  svg.appendChild(nodeG);
+  for (const id of ['pendant', 'relay', 'mac', 'extension', 'ios']) {
+    const p = rtPos(id);
+    const r = id === 'relay' ? 42 : 34;
+    const g = el('g', { id: 'rt-' + id, class: 'rt-node', 'data-node': id, transform: `translate(${p.x},${p.y})` });
+    g.appendChild(el('circle', { class: 'halo', r: r + 14, fill: 'var(--st-unknown)', filter: 'blur(6px)' }));
+    g.appendChild(el('circle', { class: 'body', r, stroke: 'var(--st-unknown)' }));
+    g.appendChild(el('text', { class: 'tag', y: 5 }, NODE_TAG[id]));
+    const labelY = (id === 'pendant') ? -(r + 24) : r + 20;
+    const statusY = (id === 'pendant') ? -(r + 10) : r + 35;
+    const names = { pendant: 'Pendant', relay: 'Cloud Relay', mac: 'Mac Agent', extension: 'Browser Extension', ios: 'iOS App' };
+    g.appendChild(el('text', { class: 'nlabel', y: labelY }, names[id]));
+    g.appendChild(el('text', { class: 'nstatus', id: 'nstatus-' + id, y: statusY, fill: 'var(--st-unknown)' }, '—'));
+    g.addEventListener('click', () => focus(id));
+    nodeG.appendChild(g);
+  }
+
+  // committee ring
+  const cmG = el('g', { id: 'cmG' });
+  svg.appendChild(cmG);
+  S.committeeAgents.forEach((name, i) => {
+    const ang = -90 + i * (360 / S.committeeAgents.length);
+    const p = polar(CM, CM.r, ang);
+    cmPos[name] = p;
+    const g = el('g', { id: 'cm-' + name, class: 'cm-node', 'data-node': name });
+    const c = el('circle', { cx: p.x, cy: p.y, r: 16 });
+    const title = el('title', {}, name);
+    c.appendChild(title);
+    g.appendChild(c);
+    const lp = polar(CM, CM.r + 26, ang);
+    const anchor = Math.abs(Math.cos(ang * Math.PI / 180)) < 0.35 ? 'middle' : (Math.cos(ang * Math.PI / 180) > 0 ? 'start' : 'end');
+    g.appendChild(el('text', { x: lp.x, y: lp.y + 4, 'text-anchor': anchor }, name));
+    g.addEventListener('click', () => focus(name));
+    cmG.appendChild(g);
+  });
+  svg.appendChild(el('text', { id: 'cmCenter1', class: 'cmCenter big', x: CM.cx, y: CM.cy - 4 }, '—'));
+  svg.appendChild(el('text', { id: 'cmCenter2', class: 'cmCenter', x: CM.cx, y: CM.cy + 16 }, ''));
+  svg.appendChild(el('g', { id: 'msgLayer' }));
+
+  $('legend').innerHTML =
+    `<span class="lrow">` +
+    Object.entries({ mac: 'mac', relay: 'relay', extension: 'extension', committee: 'committee', pendant: 'pendant', system: 'system' })
+      .map(([k, n]) => `<span style="display:inline-flex;gap:5px;align-items:center"><span class="dot" style="background:${SRC_COLOR[k]}"></span>${n}</span>`).join('') + `</span>` +
+    `<span class="lrow" style="opacity:.8">nodes labeled UP / DEGRADED / DOWN / UNKNOWN / IDLE</span>` +
+    `<span class="lrow" style="opacity:.8"><b style="color:var(--src-committee)">bright dot</b>&nbsp;= new committee msg · <b style="color:#6b7a8c">dim</b>&nbsp;= replay of recent msg</span>`;
+}
+
+// ============================================================ message dots
+function animateMessage(from, to, live) {
+  if (!cmPos[from]) return;
+  const targets = to === 'all' ? S.committeeAgents.filter((a) => a !== from) : (cmPos[to] ? [to] : []);
+  targets.forEach((tgt, i) => {
+    if (S.activeDots > 36) return;
+    setTimeout(() => spawnDot(cmPos[from], cmPos[tgt], live && to !== 'all'), i * 60);
+  });
+}
+function spawnDot(p1, p2, live) {
+  const layer = $('msgLayer');
+  const ns = 'http://www.w3.org/2000/svg';
+  const dot = document.createElementNS(ns, 'circle');
+  const trail = document.createElementNS(ns, 'line');
+  const color = live ? 'var(--src-committee)' : '#5d6c7e';
+  dot.setAttribute('r', live ? 4.5 : 3);
+  dot.setAttribute('fill', color);
+  if (live) dot.setAttribute('filter', 'drop-shadow(0 0 5px rgba(201,133,0,0.9))');
+  trail.setAttribute('class', 'msgTrail');
+  trail.setAttribute('stroke', color);
+  trail.setAttribute('stroke-width', live ? 1.6 : 1);
+  trail.setAttribute('opacity', live ? 0.5 : 0.22);
+  layer.appendChild(trail); layer.appendChild(dot);
+  S.activeDots++;
+  const t0 = performance.now(), dur = 1500;
+  const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+  const dx = p2.x - p1.x, dy = p2.y - p1.y, len = Math.hypot(dx, dy) || 1;
+  const bulge = Math.min(46, len * 0.18);
+  const cx = mx - dy / len * bulge, cy = my + dx / len * bulge;
+  function step(t) {
+    let u = (t - t0) / dur;
+    if (u >= 1) { layer.removeChild(dot); layer.removeChild(trail); S.activeDots--; return; }
+    const e = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; // easeInOutQuad
+    const x = (1 - e) * (1 - e) * p1.x + 2 * (1 - e) * e * cx + e * e * p2.x;
+    const y = (1 - e) * (1 - e) * p1.y + 2 * (1 - e) * e * cy + e * e * p2.y;
+    dot.setAttribute('cx', x); dot.setAttribute('cy', y);
+    trail.setAttribute('x1', p1.x); trail.setAttribute('y1', p1.y);
+    trail.setAttribute('x2', x); trail.setAttribute('y2', y);
+    trail.setAttribute('opacity', (live ? 0.5 : 0.22) * (1 - e * 0.7));
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+function ambientReplay() {
+  const b = S.src['committee.bulletin'];
+  if (!b || !b.recent || !b.recent.length) return;
+  const m = b.recent[Math.floor(Math.random() * Math.min(b.recent.length, 40))];
+  animateMessage(m.from, m.to === 'all' ? S.committeeAgents[Math.floor(Math.random() * S.committeeAgents.length)] : m.to, false);
+}
+
+// ============================================================ renderers
+function nodeById(id) { return S.nodes.find((n) => n.id === id); }
+
+const SHORT_LABEL = { mac: 'Mac', relay: 'Relay', extension: 'Ext', pendant: 'Pendant', ios: 'iOS', committee: 'Committee' };
+function renderHeader() {
+  $('nodeChips').innerHTML = S.nodes.map((n) =>
+    `<span class="hchip" title="${esc(n.label)}: ${esc(n.reason || '')}"><span class="dot" style="background:${ST_COLOR[n.status] || ST_COLOR.unknown}"></span>${esc(SHORT_LABEL[n.id] || n.label)} <b>${ST_WORD[n.status] || '?'}</b></span>`
+  ).join('');
+  const keys = Object.keys(S.meta);
+  const bad = keys.filter((k) => S.meta[k] && !S.meta[k].ok && !S.meta[k].unsupported);
+  $('srcSummary').innerHTML = bad.length
+    ? `<span class="dot" style="background:var(--st-down)"></span>sources <b>${keys.length - bad.length}/${keys.length}</b> ok`
+    : `<span class="dot" style="background:var(--st-up)"></span>sources <b>${keys.length}/${keys.length}</b> ok`;
+  const sseCol = S.sse === 'live' ? 'var(--st-up)' : (S.sse === 'reconnecting' ? 'var(--st-degraded)' : 'var(--st-unknown)');
+  $('sseChip').innerHTML = `<span class="dot live" style="background:${sseCol}"></span>${S.sse}`;
+}
+
+function renderAlerts() {
+  const bad = Object.values(S.meta).filter((m) => m && !m.ok && !m.unsupported);
+  const box = $('srcAlerts');
+  box.classList.toggle('on', bad.length > 0);
+  box.innerHTML = bad.map((m) =>
+    `<span class="alert ${m.parseError ? 'parse' : ''}" title="${esc(m.error)}">${m.parseError ? 'parse error' : 'failed'} · ${esc(m.label)} — ${esc(m.error)}</span>`
+  ).join('');
+}
+
+function heartbeatTs(id) {
+  if (id === 'mac') return S.meta['agent.health']?.ok ? S.meta['agent.health'].at : null;
+  if (id === 'relay') return S.meta['relay.health']?.ok ? S.meta['relay.health'].at : null;
+  if (id === 'extension') { const d = S.src['agent.browserStatus']?.devices?.[0]; return d ? Date.parse(d.lastSeenAt) : null; }
+  if (id === 'pendant') {
+    const dev = (S.src['relay.devices']?.devices || []).find((d) => /pendant|wearable|nrf/i.test(`${d.deviceType} ${d.deviceId} ${d.name}`));
+    return dev ? Date.parse(dev.lastSeenAt) : null;
+  }
+  if (id === 'ios') {
+    const dev = (S.src['relay.devices']?.devices || []).find((d) => d.deviceType === 'mobile');
+    return dev ? Date.parse(dev.lastSeenAt) : null;
+  }
+  return null;
+}
+
+function renderGraph() {
+  const t = snow();
+  for (const n of S.nodes) {
+    if (n.id === 'committee') continue;
+    const g = $('rt-' + n.id);
+    if (!g) continue;
+    const col = ST_COLOR[n.status] || ST_COLOR.unknown;
+    g.querySelector('.body').setAttribute('stroke', col);
+    g.querySelector('.halo').setAttribute('fill', col);
+    g.classList.toggle('hot', n.activityAt != null && t - n.activityAt < 12000);
+    g.classList.toggle('sel', S.focused === n.id);
+    const hb = heartbeatTs(n.id);
+    const st = $('nstatus-' + n.id);
+    st.setAttribute('fill', col);
+    st.innerHTML = '';
+    st.textContent = (ST_WORD[n.status] || '?') + (hb ? ' · ' + fmtAge(t - hb) : '');
+    const titleText = `${n.label}: ${ST_WORD[n.status]}\n${n.reason || ''}`;
+    let title = g.querySelector('title');
+    if (!title) { title = document.createElementNS('http://www.w3.org/2000/svg', 'title'); g.appendChild(title); }
+    title.textContent = titleText;
+  }
+  for (const e of S.edges) {
+    const line = $('edge-' + e.id);
+    const lbl = $('edgelabel-' + e.id);
+    if (!line) continue;
+    lbl.textContent = e.label;
+    const act = e.lastActivityAt || 0;
+    line.classList.toggle('fresh', act && t - act < 30000);
+    if (act && act !== S.edgeSeen[e.id]) {
+      if (S.edgeSeen[e.id] !== undefined) {
+        line.classList.add('pulse');
+        clearTimeout(line._pt);
+        line._pt = setTimeout(() => line.classList.remove('pulse'), 2600);
+      }
+      S.edgeSeen[e.id] = act;
+    }
+  }
+  // committee ring
+  const orch = S.src['committee.orchestrator']?.agents || {};
+  let newest = 0;
+  for (const name of S.committeeAgents) {
+    const g = $('cm-' + name);
+    if (!g) continue;
+    const a = orch[name];
+    const last = a?.lastRunAt ? Date.parse(a.lastRunAt) : 0;
+    newest = Math.max(newest, last);
+    const age = t - last;
+    g.classList.toggle('hot', !!last && age < 15 * 60 * 1000);
+    g.classList.toggle('warm', !!last && age >= 15 * 60 * 1000 && age < 2 * 3600 * 1000);
+    g.classList.toggle('sel', S.focused === name);
+    g.querySelector('title').textContent = a
+      ? `${name}\nlast cycle ${a.lastCycle ?? '?'} · last run ${a.lastRunAt || 'never'} (${last ? fmtAge(age) + ' ago' : '—'})\n${a.seenCount} commons keys seen`
+      : `${name}\n(no orchestrator record)`;
+  }
+  const b = S.src['committee.bulletin'];
+  const cm = nodeById('committee');
+  $('cmCenter1').textContent = b ? `round ${b.maxRound}` : '—';
+  $('cmCenter2').textContent = cm ? `${ST_WORD[cm.status] || '?'}${newest ? ' · last cycle ' + fmtAge(t - newest) + ' ago' : ''} · ${b ? b.total + ' msgs' : ''}` : '';
+}
+
+// ---------- shared panel ----------
+function tile(label, valueHtml, subHtml) {
+  return `<div class="tile"><div class="tl">${label}</div><div class="tv">${valueHtml}</div><div class="ts">${subHtml || ''}</div></div>`;
+}
+function srcFail(key) {
+  const m = S.meta[key];
+  if (!m) return `<span class="mut">not polled yet</span>`;
+  return `<span class="err">${esc(m.label)} failed: ${esc(m.error)}</span>`;
+}
+function renderShared() {
+  const sh = S.shared || {};
+  const g = [];
+  // fleet
+  if (sh.fleet && (sh.fleet.macBridgeLastSeenByRelay || sh.fleet.relayReachableFromMac != null)) {
+    const f = sh.fleet;
+    g.push(tile('FLEET SYNC',
+      f.macBridgeOnline == null ? '<span class="mut">—</span>' : (f.macBridgeOnline ? 'linked' : '<span class="err">unlinked</span>'),
+      `relay sees mac: ${f.macBridgeLastSeenByRelay ? ageSpan(f.macBridgeLastSeenByRelay, ' ago') : '—'} · mac sees relay: ${f.relayReachableFromMac == null ? '—' : (f.relayReachableFromMac ? 'reachable' : `<span class="err">${esc(f.relayErrorFromMac || 'unreachable')}</span>`)}`));
+  } else g.push(tile('FLEET SYNC', '—', srcFail('relay.health')));
+  // pipeline
+  if (sh.pipeline) {
+    g.push(tile('PIPELINE RUNS', `${sh.pipeline.inFlight}<small> in flight</small>`,
+      `${sh.pipeline.totalRuns} total · latest ${sh.pipeline.latest ? esc(sh.pipeline.latest.status) + ' ' + ageSpan(sh.pipeline.latest.updatedAt, ' ago') : '—'}`));
+  } else g.push(tile('PIPELINE RUNS', '—', srcFail('agent.pipeline')));
+  // jobs
+  if (sh.jobs) {
+    const parts = Object.entries(sh.jobs.byStatus).map(([k, v]) => `${esc(k)} <b>${v}</b>`).join(' · ');
+    g.push(tile('JOBS (LAST 25)', `${sh.jobs.returned}`, parts + (sh.jobs.latestAt ? ` · newest ${ageSpan(sh.jobs.latestAt, ' ago')}` : '')));
+  } else g.push(tile('JOBS (LAST 25)', '—', srcFail('agent.jobs')));
+  // routines
+  if (sh.routines) {
+    const nx = sh.routines.next;
+    g.push(tile('ROUTINES', `${sh.routines.enabled}<small>/${sh.routines.total} enabled</small>`,
+      nx ? `next: ${esc(nx.name)} in <span class="num">${fmtAge(Date.parse(nx.nextRunAt) ? Date.parse(nx.nextRunAt) - snow() : (nx.nextRunAt - snow()))}</span>${sh.routines.failed ? ` · <span class="err">${sh.routines.failed} failing</span>` : ''}` : '—'));
+  } else g.push(tile('ROUTINES', '—', srcFail('agent.routines')));
+  // memory facts
+  if (sh.memory) {
+    const kinds = Object.entries(sh.memory.byKind).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${esc(k)} <b>${v}</b>`).join(' · ');
+    g.push(tile('MEMORY FACTS', `${sh.memory.totalFacts}`, kinds + (sh.memory.masked ? ` · ${sh.memory.masked} masked` : '')));
+  } else g.push(tile('MEMORY FACTS', '—', srcFail('agent.memoryFacts')));
+  // ledger
+  if (sh.ledger) {
+    const c = sh.ledger.counts || {};
+    g.push(tile('DESIGN LEDGER', `${c.implemented || 0}<small> implemented</small>`,
+      `proposed <b>${c.proposed || 0}</b> · implementing <b>${c.implementing || 0}</b> · duplicate <b>${c.duplicate || 0}</b> · rejected <b>${c.rejected || 0}</b> · total ${sh.ledger.total}`));
+  } else g.push(tile('DESIGN LEDGER', '—', srcFail('committee.ledger')));
+  // commons
+  if (sh.commons) {
+    g.push(tile('COMMONS DEPOSITS', `${sh.commons.atLeast ? '≥' : ''}${sh.commons.depositsLast10m}<small> / 10 min</small>`,
+      sh.commons.lastAt ? `last deposit ${ageSpan(sh.commons.lastAt, ' ago')}` : 'no deposits in tail'));
+  } else g.push(tile('COMMONS DEPOSITS', '—', srcFail('committee.commons')));
+  // catchup
+  if (sh.catchup && sh.catchup.counts) {
+    const c = sh.catchup.counts;
+    g.push(tile('CATCH-UP GAP', `${c.occurred ?? 0}<small> occurred</small>`,
+      `failed <b>${c.failed ?? 0}</b> · expired <b>${c.expired ?? 0}</b> · indeterminate <b>${c.indeterminate ?? 0}</b> · window <span class="num">${fmtAge(sh.catchup.spanMs)}</span>`));
+  } else g.push(tile('CATCH-UP GAP', '—', srcFail('agent.catchup')));
+  // spool
+  if (sh.spool) {
+    g.push(tile('BROWSER SPOOL', `${sh.spool.depth ?? '—'}<small> spooled</small>`,
+      `${sh.spool.pendingCommands ?? 0} pending now${sh.spool.lastReason ? ` · last loss: ${esc(sh.spool.lastReason)}` : ''}`));
+  } else g.push(tile('BROWSER SPOOL', '—', srcFail('agent.browserStatus')));
+  // bulletin
+  if (sh.bulletin) {
+    g.push(tile('COMMITTEE BULLETIN', `${sh.bulletin.total}<small> msgs</small>`,
+      `round ${sh.bulletin.maxRound} · file written ${ageSpan(sh.bulletin.fileMtime, ' ago')}`));
+  } else g.push(tile('COMMITTEE BULLETIN', '—', srcFail('committee.bulletin')));
+  $('sharedGrid').innerHTML = g.join('');
+}
+
+// ---------- ticker ----------
+function renderTicker() {
+  const list = S.events.slice().sort((a, b) => b.at - a.at).slice(0, 120);
+  $('ticker').innerHTML = list.map((e) => {
+    const c = SRC_COLOR[e.source] || SRC_COLOR.system;
+    return `<div class="tick"><span class="tage num" data-ts="${e.at}">${fmtAge(snow() - e.at)}</span>` +
+      `<span class="tsrc"><span class="dot" style="background:${c}"></span>${esc(e.source)}</span>` +
+      `<span class="ttext" title="${esc(e.text)}">${esc(e.text)}</span></div>`;
+  }).join('');
+}
+
+// ---------- node detail panel ----------
+function stChip(status) { return `<span class="st st-${esc(status || 'unknown')}">${ST_WORD[status] || '?'}</span>`; }
+function metaLine(m) {
+  if (!m) return '<span class="mut">not polled yet</span>';
+  if (!m.ok) return `<span class="err">${esc(m.error)}</span>`;
+  return `<span class="mut">polled ${ageSpan(m.at, ' ago')} · ${m.ms} ms</span>`;
+}
+function stageStrip(run) {
+  const CANON = ['transcription', 'command', 'agent', 'tts', 'relay_result', 'device_downlink', 'reply_downloaded', 'device_playback'];
+  const byStage = {};
+  for (const ev of run.events || []) byStage[ev.stage] = ev.status; // last event of each stage wins
+  const extras = Object.keys(byStage).filter((s) => !CANON.includes(s));
+  return CANON.concat(extras).map((s) => {
+    const st = byStage[s];
+    const cls = st == null ? '' : (/done|completed|success/i.test(st) ? 'done' : (/error|fail/i.test(st) ? 'error' : 'active'));
+    return `<span class="stagechip ${cls}" title="${esc(s)}${st ? ': ' + esc(st) : ' (not reached)'}">${esc(s)}</span>`;
+  }).join('');
+}
+function feedRow(age, typ, okFlag, msg, extra) {
+  return `<div class="frow">${age}<span class="typ">${esc(typ)}</span>` +
+    (okFlag == null ? '' : (okFlag ? '<span class="ok">ok</span>' : '<span class="bad">FAIL</span>')) +
+    `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>${extra || ''}</div>`;
+}
+function frowAge(ts) { const ms = typeof ts === 'number' ? ts : Date.parse(ts); return `<span class="age num" ${isFinite(ms) ? `data-ts="${ms}"` : ''}>${isFinite(ms) ? fmtAge(snow() - ms) : '—'}</span>`; }
+
+function renderDetail() {
+  const id = S.focused;
+  const n = nodeById(id);
+  $('nodeHead').innerHTML = `<h2>${esc((n?.label || id).toUpperCase())}</h2>${n ? stChip(n.status) : ''}<span class="reason" title="${esc(n?.reason || '')}">${esc(n?.reason || '')}</span>`;
+  const body = $('nodeBody');
+  const keepScroll = body.scrollTop;
+  if (S.detailErr) { body.innerHTML = `<span class="err">detail fetch failed: ${esc(S.detailErr)}</span>`; return; }
+  const d = S.detail;
+  if (!d || d.id !== id) { body.innerHTML = '<span class="mut">loading…</span>'; return; }
+  let h = '';
+  if (id === 'mac') h = detailMac(d);
+  else if (id === 'relay') h = detailRelay(d);
+  else if (id === 'extension') h = detailExtension(d);
+  else if (id === 'pendant') h = detailPendant(d);
+  else if (id === 'ios') h = detailIos(d);
+  else if (id === 'committee') h = detailCommittee(d);
+  else h = detailAgent(d);
+  body.innerHTML = h;
+  body.scrollTop = keepScroll;
+  body.querySelectorAll('.jobrow').forEach((row) => row.addEventListener('click', () => toggleReceipts(row)));
+}
+
+function detailMac(d) {
+  const s = d.snapshot, o = d.observe, c = d.capabilities, j = d.journal;
+  let h = `<div class="sect"><h3>ENVIRONMENT</h3>`;
+  if (s) {
+    h += `<dl class="kv">
+      <dt>machine</dt><dd>${esc(s.machine?.hostname)} · ${esc(s.machine?.platform)} · ${s.machine?.appCount ?? '—'} apps · tz ${esc(s.machine?.timezone)}</dd>
+      <dt>agent</dt><dd>${esc(s.agent?.service)} v${esc(s.agent?.version)} · full-control ${s.agent?.fullControlMode ? 'on' : 'off'} · llm planner ${s.agent?.llmPlannerEnabled ? 'on' : 'off'} · computer-use loop ${s.agent?.computerUse?.loopEnabled ? 'on' : 'off'} (max ${s.agent?.computerUse?.maxSteps ?? '—'} steps)</dd>
+      <dt>foreground</dt><dd>${o?.foreground ? esc(o.foreground.name) + ' <span class="mut">(' + esc(o.foreground.bundleId) + ')</span>' : metaLine(d.observeMeta)} · ${o?.runningApps ? o.runningApps.count + ' apps, ' + o.runningApps.helperProcesses + ' helpers' : ''}</dd>
+      <dt>project</dt><dd>${s.workingProject ? esc(s.workingProject.name) + ' — ' + esc(s.workingProject.summary) : '—'}</dd>
+      <dt>store counts</dt><dd>${s.counts ? Object.entries(s.counts).map(([k, v]) => `${esc(k)} <b>${v}</b>`).join(' · ') : '—'}</dd>
+    </dl>`;
+  } else h += metaLine(d.snapshotMeta);
+  h += `<div style="margin-top:6px" class="chiprow">`;
+  if (c) {
+    h += `<span class="chip">routes <b>${c.routeCount}</b></span><span class="chip">actions <b>${c.actionCount}</b></span>` +
+      (c.groups || []).slice(0, 14).map((g) => `<span class="chip" title="${esc(g.what)}">${esc(g.group)} <b>${g.routeCount}</b></span>`).join('');
+  } else h += metaLine(d.capabilitiesMeta);
+  h += `</div></div>`;
+
+  h += `<div class="sect"><h3>TOOL CALLS — EXECUTION JOURNAL</h3>`;
+  if (j) {
+    h += `<div class="mut" style="margin-bottom:4px">totals: ${j.totals ? `${j.totals.actions} actions · ${j.totals.wrote} wrote · ${j.totals.failed} failed` : '—'} · window ${j.window ? `${j.window.returned}/${j.window.jobsInStore} jobs` : ''} · ${metaLine(d.journalMeta)}</div><div class="feed">`;
+    const rows = [];
+    for (const e of j.entries || []) {
+      for (const a of e.actions || []) {
+        rows.push({ at: a.finishedAt || a.startedAt || e.finishedAt, a, e });
+      }
+    }
+    rows.sort((x, y) => (Date.parse(y.at) || 0) - (Date.parse(x.at) || 0));
+    for (const { at, a, e } of rows.slice(0, 40)) {
+      h += feedRow(frowAge(at), a.type, a.ok,
+        `${a.effect || ''}${a.durationMs != null ? ' · ' + a.durationMs + 'ms' : ''}${a.message ? ' · ' + a.message : ''}${a.error ? ' · ' + a.error : ''}${e.command ? ' — job: ' + e.command : ''}`);
+    }
+    if (!rows.length) h += '<span class="mut">journal returned no actions</span>';
+    h += `</div>`;
+  } else h += metaLine(d.journalMeta);
+  h += `</div>`;
+
+  h += `<div class="sect"><h3>JOBS (CLICK FOR RECEIPTS)</h3>`;
+  if (d.jobs) {
+    h += `<div class="feed">` + (d.jobs.jobs || []).slice(0, 15).map((jb) =>
+      `<div class="frow jobrow" data-job="${esc(jb.jobId)}">${frowAge(jb.updatedAt || jb.createdAt)}<span class="typ">${esc(jb.type)}</span>` +
+      `<span class="${/fail|error/i.test(jb.status) ? 'bad' : 'ok'}">${esc(jb.status)}</span>` +
+      `<span class="msg" title="${esc(jb.command)}">${esc(jb.command || '(no command)')}${jb.actionCount != null ? ` · ${jb.actionCount} action(s)` : ''}${jb.error ? ' · ' + esc(jb.error) : ''}</span></div>` +
+      `<div class="receipts" id="rcpt-${esc(jb.jobId)}" style="display:none"></div>`
+    ).join('') + `</div>`;
+  } else h += metaLine(d.jobsMeta);
+  h += `</div>`;
+
+  h += `<div class="sect"><h3>ROUTINES</h3>`;
+  if (d.routines) {
+    h += `<div class="feed">` + (d.routines.routines || []).map((r) =>
+      feedRow(frowAge(r.lastRunAt), r.name, r.lastStatus ? !/fail/i.test(r.lastStatus) : null,
+        `${r.schedule ? esc(r.schedule.kind + ' ' + (r.schedule.at || '')) : ''} · next in ${r.nextRunAt ? fmtAge((typeof r.nextRunAt === 'number' ? r.nextRunAt : Date.parse(r.nextRunAt)) - snow()) : '—'} · ${r.runCount} runs${r.lastError ? ' · ' + r.lastError : ''}`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.routinesMeta);
+  h += `</div>`;
+
+  h += `<div class="sect"><h3>MEMORY FACTS (SECRET-LOOKING VALUES MASKED)</h3>`;
+  if (d.facts) {
+    h += `<div class="chiprow" style="margin-bottom:5px">` + Object.entries(d.facts.byKind || {}).map(([k, v]) => `<span class="chip">${esc(k)} <b>${v}</b></span>`).join('') + `</div><div class="feed">`;
+    h += (d.facts.facts || []).slice(0, 12).map((f) =>
+      feedRow(frowAge(f.updatedAt), f.key, null, `${f.masked ? '•••••• (masked)' : f.value} · ${f.kind} · conf ${f.confidence} · used ${f.useCount}×`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.factsMeta);
+  h += `</div>`;
+  return h;
+}
+
+function detailRelay(d) {
+  let h = `<div class="sect"><h3>ENVIRONMENT — CLOUD RELAY</h3>`;
+  if (d.health) {
+    const he = d.health;
+    h += `<dl class="kv">
+      <dt>service</dt><dd>${esc(he.service)} v${esc(he.version)} · ${esc(he.platform)} · store ${esc(he.store)}</dd>
+      <dt>mac bridge</dt><dd>${he.macBridgeOnline ? 'online' : '<span class="err">offline</span>'} · last seen ${ageSpan(he.macBridgeLastSeen, ' ago')}</dd>
+      <dt>models</dt><dd>${he.models ? Object.entries(he.models).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(' · ') : '—'}</dd>
+      <dt>capabilities</dt><dd>${he.capabilities ? Object.entries(he.capabilities).filter(([, v]) => v).map(([k]) => esc(k)).join(' · ') : '—'}</dd>
+    </dl>`;
+  } else h += metaLine(d.healthMeta);
+  h += `</div><div class="sect"><h3>DEVICES</h3>`;
+  if (d.devices) {
+    h += `<div class="feed">` + (d.devices.devices || []).map((dev) =>
+      feedRow(frowAge(dev.lastSeenAt), dev.deviceType, dev.online, `${dev.name} (${dev.deviceId}) · registered ${new Date(dev.registeredAt).toLocaleDateString()}`)
+    ).join('') + `</div>`;
+  } else h += d.devicesMeta && d.devicesMeta.unsupported ? '<span class="mut">devices endpoint not available on this relay build (HTTP 404)</span>' : metaLine(d.devicesMeta);
+  h += `</div><div class="sect"><h3>TOOL CALLS — VOICE RUNS (OPS HISTORY)</h3>`;
+  if (d.ops) {
+    h += `<div class="feed">` + (d.ops.entries || []).map((e) =>
+      feedRow(frowAge(e.updatedAt || e.createdAt), e.kind, !/fail|error/i.test(e.status),
+        `${e.status} (job ${e.jobStatus}) · ${e.origin}/${e.inputMode} · ${e.command || e.reply || '(no transcript)'}${e.error ? ' · ' + e.error : ''}${e.actionCount ? ` · ${e.actionCount} action(s)` : ''}`)
+    ).join('') + `</div>`;
+  } else h += d.opsMeta && d.opsMeta.unsupported ? '<span class="mut">ops history endpoint not available (HTTP 404)</span>' : metaLine(d.opsMeta);
+  return h + `</div>`;
+}
+
+function detailExtension(d) {
+  let h = `<div class="sect"><h3>ENVIRONMENT — SAFARI EXTENSION (VIA MAC AGENT)</h3>`;
+  if (d.status) {
+    h += `<dl class="kv"><dt>online</dt><dd>${d.status.online ? 'yes' : '<span class="err">no</span>'} · ${d.status.pendingCommands} pending command(s)</dd>` +
+      (d.status.devices || []).map((dev) => `<dt>device</dt><dd>${esc(dev.deviceName)} · ext v${esc(dev.extensionVersion)} · last poll ${ageSpan(dev.lastSeenAt, ' ago')} · ${dev.tabCount} tab(s)</dd>`).join('') + `</dl>`;
+  } else h += metaLine(d.statusMeta);
+  h += `</div><div class="sect"><h3>NAMED SESSIONS</h3>`;
+  if (d.sessions) {
+    h += `<div class="feed">` + (d.sessions.sessions || []).map((s) =>
+      feedRow(frowAge(s.lastUsedAt), s.id, null, `${s.lastAction || ''} · ${s.title || s.url || ''}`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.sessionsMeta);
+  h += `</div><div class="sect"><h3>RECENT BROWSER JOBS</h3><div class="feed">`;
+  h += (d.browserJobs || []).map((j) => feedRow(frowAge(j.updatedAt || j.createdAt), j.type, !/fail|error/i.test(j.status), `${j.status} · ${j.command || ''}`)).join('') || '<span class="mut">no browser-typed jobs in the last 25</span>';
+  h += `</div></div><div class="sect"><h3>SPOOL — LOST COMMANDS (WITH REASONS)</h3>`;
+  if (d.spool) {
+    h += `<div class="mut" style="margin-bottom:4px">${d.spool.total} total spooled</div><div class="feed">` +
+      (d.spool.entries || []).slice(0, 12).map((e) => feedRow(frowAge(e.spooledAt), e.type || 'command', false, `${e.reason} · ${e.detail || ''} · ${e.attempts} attempt(s)`)).join('') + `</div>`;
+  } else h += metaLine(d.spoolMeta);
+  return h + `</div>`;
+}
+
+function detailPendant(d) {
+  let h = `<div class="sect"><h3>DEVICE (VIA RELAY)</h3>`;
+  if (d.devices) {
+    const rows = (d.devices.devices || []);
+    h += rows.length ? `<div class="feed">` + rows.map((dev) => feedRow(frowAge(dev.lastSeenAt), dev.deviceType, dev.online, `${dev.name} (${dev.deviceId})`)).join('') + `</div>`
+      : '<span class="mut">no pendant-class device registered on the relay — status honest-unknown</span>';
+  } else h += metaLine(d.devicesMeta);
+  h += `</div><div class="sect"><h3>VOICE RUNS FROM THE DEVICE (live_lte / microsd)</h3>`;
+  if (d.voiceRuns) {
+    h += d.voiceRuns.length ? `<div class="feed">` + d.voiceRuns.map((e) =>
+      feedRow(frowAge(e.updatedAt || e.createdAt), e.origin, !/fail|error/i.test(e.status), `${e.status} · ${e.command || e.reply || '(no transcript)'}${e.audioAvailable ? ' · audio saved' : ''}`)
+    ).join('') + `</div>` : '<span class="mut">no device-origin runs in recent ops history</span>';
+  } else h += metaLine(d.opsMeta);
+  h += `</div><div class="sect"><h3>UTTERANCE TRACE — PIPELINE STAGES PER RUN</h3>`;
+  if (d.latestPipeline) {
+    h += (d.latestPipeline || []).map((run) =>
+      `<div style="margin-bottom:7px"><div style="display:flex;gap:8px;align-items:baseline">${frowAge(run.updatedAt || run.createdAt)}<span class="typ num">${esc(run.status)}</span><span class="msg" title="${esc(run.command)}">${esc(run.command || run.kind)}</span></div><div>${stageStrip(run)}</div></div>`
+    ).join('') || '<span class="mut">no pipeline runs</span>';
+  } else h += metaLine(d.pipelineMeta);
+  return h + `</div>`;
+}
+
+function detailIos(d) {
+  let h = `<div class="sect"><h3>ENVIRONMENT</h3><dl class="kv"><dt>architecture</dt><dd>${esc(d.note)}</dd></dl></div><div class="sect"><h3>MOBILE DEVICE ROWS (VIA RELAY)</h3>`;
+  if (d.mobileDevices) {
+    h += d.mobileDevices.length ? `<div class="feed">` + d.mobileDevices.map((dev) =>
+      feedRow(frowAge(dev.lastSeenAt), 'mobile', dev.online, `${dev.name} (${dev.deviceId}) · registered ${new Date(dev.registeredAt).toLocaleDateString()}`)).join('') + `</div>`
+      : '<span class="mut">relay reports no mobile devices</span>';
+  } else h += metaLine(d.devicesMeta);
+  return h + `</div>`;
+}
+
+function detailCommittee(d) {
+  let h = `<div class="sect"><h3>ORCHESTRATOR — AGENT LIVENESS</h3>`;
+  if (d.orchestrator) {
+    h += `<div class="feed">` + Object.entries(d.orchestrator.agents).map(([name, a]) =>
+      feedRow(frowAge(a.lastRunAt), name, null, `cycle ${a.lastCycle ?? '—'} · ${a.seenCount} commons keys seen`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.orchestratorMeta);
+  h += `</div><div class="sect"><h3>LEDGER</h3>`;
+  if (d.ledger) {
+    h += `<div class="chiprow">` + Object.entries(d.ledger.counts).map(([k, v]) => `<span class="chip">${esc(k)} <b>${v}</b></span>`).join('') + `<span class="chip">total <b>${d.ledger.total}</b></span></div>`;
+  } else h += metaLine(d.ledgerMeta);
+  h += `</div><div class="sect"><h3>TOOL CALLS — COMMONS DEPOSITS</h3>`;
+  if (d.commons) {
+    h += `<div class="feed">` + (d.commons.tail || []).slice(0, 18).map((c) =>
+      feedRow(frowAge(c.at), c.tool, !c.absent, `${c.agent} r${c.round} · ${c.key} · ${c.bytes ?? '?'}B · ${c.summary || ''}`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.commonsMeta);
+  h += `</div><div class="sect"><h3>BULLETIN — LATEST INTER-AGENT MESSAGES</h3>`;
+  if (d.bulletin) {
+    h += `<div class="feed">` + (d.bulletin.recent || []).slice(-15).reverse().map((m) =>
+      feedRow('<span class="age num">r' + m.round + '</span>', `${m.from}→${m.to}`, null, `${m.subject}: ${m.body}`)
+    ).join('') + `</div>`;
+  } else h += metaLine(d.bulletinMeta);
+  return h + `</div>`;
+}
+
+function detailAgent(d) {
+  let h = `<div class="sect"><h3>COMMITTEE AGENT — ${esc(d.agent)}</h3>`;
+  h += d.orchestrator
+    ? `<dl class="kv"><dt>last run</dt><dd>${ageSpan(d.orchestrator.lastRunAt, ' ago')} (cycle ${d.orchestrator.lastCycle ?? '—'})</dd><dt>commons keys seen</dt><dd>${d.orchestrator.seenCount}</dd></dl>`
+    : '<span class="mut">no orchestrator record</span>';
+  h += `</div><div class="sect"><h3>DEPOSITS BY THIS AGENT (COMMONS TAIL)</h3><div class="feed">`;
+  h += (d.deposits || []).map((c) => feedRow(frowAge(c.at), c.tool, !c.absent, `r${c.round} · ${c.key} · ${c.summary || ''}`)).join('') || '<span class="mut">none in the current tail</span>';
+  h += `</div></div><div class="sect"><h3>MESSAGES INVOLVING THIS AGENT</h3><div class="feed">`;
+  h += (d.messages || []).map((m) => feedRow('<span class="age num">r' + m.round + '</span>', `${m.from}→${m.to}`, null, `${m.subject}: ${m.body}`)).join('') || '<span class="mut">none in the recent window</span>';
+  return h + `</div></div>`;
+}
+
+async function toggleReceipts(row) {
+  const jobId = row.dataset.job;
+  const box = document.getElementById('rcpt-' + jobId);
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<span class="mut">fetching receipts…</span>';
+  try {
+    const r = await fetch('/api/node/mac?job=' + encodeURIComponent(jobId));
+    const d = await r.json();
+    if (!d.receipts || !d.receipts.ok) { box.innerHTML = `<span class="err">${esc(d.receipts?.error || 'receipts fetch failed')}</span>`; return; }
+    const rc = d.receipts.receipts;
+    const list = rc.receipts || [];
+    box.innerHTML = `<div class="mut">${esc(rc.status)} · ${rc.counts ? `${rc.counts.total} action(s), ${rc.counts.wrote} wrote, ${rc.counts.reversible} reversible` : ''} · undo: ${esc(rc.undo?.canUndo ? 'possible' : (rc.undo?.reason || 'n/a'))}</div>` +
+      list.map((x) => `<div>· <b>${esc(x.type)}</b> ${esc(x.status)} <span class="mut">${x.durationMs ?? '—'} ms · effect ${esc(x.effect ?? '?')}${x.irreversibleReason ? ' · ' + esc(x.irreversibleReason) : ''}</span></div>`).join('');
+  } catch (e) {
+    box.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+// ============================================================ data flow
+function absorbSources(map) {
+  for (const [k, v] of Object.entries(map || {})) {
+    S.meta[k] = { key: v.key, label: v.label, family: v.family, ok: v.ok, at: v.at, ms: v.ms, error: v.error, parseError: v.parseError, unsupported: v.unsupported, version: v.version, intervalMs: v.intervalMs };
+    if ('data' in v && v.data != null) S.src[k] = v.data;
+    if (k === 'committee.bulletin' && v.data) {
+      for (const m of v.data.recent || []) {
+        if (!S.bulletinSeen.has(m.id)) {
+          S.bulletinSeen.add(m.id);
+          if (S.bulletinPrimed) animateMessage(m.from, m.to, true);
+        }
+      }
+      S.bulletinPrimed = true;
+    }
+  }
+}
+function absorbEvents(list) {
+  for (const e of list || []) {
+    if (e.seq <= S.maxSeq) continue;
+    S.maxSeq = e.seq;
+    S.events.push(e);
+  }
+  if (S.events.length > 300) S.events.splice(0, S.events.length - 300);
+}
+function applyOverview(o) {
+  S.clockOffset = Date.now() - o.now;
+  S.committeeAgents = o.committeeAgents || [];
+  S.nodes = o.nodes; S.edges = o.edges; S.shared = o.shared;
+  absorbSources(o.sources);
+  absorbEvents(o.events);
+  S.maxSeq = Math.max(S.maxSeq, o.eventSeq || 0);
+}
+function applyDelta(d) {
+  S.clockOffset = Date.now() - d.t;
+  S.nodes = d.nodes; S.edges = d.edges; S.shared = d.shared;
+  for (const [k, m] of Object.entries(d.meta || {})) {
+    S.meta[k] = { ...(S.meta[k] || {}), ...m };
+  }
+  absorbSources(d.sources);
+  absorbEvents(d.events);
+  renderHeader(); renderAlerts(); renderGraph(); renderShared();
+  if (d.events && d.events.length) renderTicker();
+}
+
+function focus(id) {
+  S.focused = id; S.detail = null; S.detailErr = null;
+  renderGraph(); renderDetail();
+  fetchDetail();
+}
+async function fetchDetail() {
+  const id = S.focused;
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(id));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (S.focused !== id) return;
+    S.detail = d; S.detailErr = null;
+  } catch (e) {
+    if (S.focused !== id) return;
+    S.detailErr = e.message;
+  }
+  renderDetail();
+}
+
+let es = null;
+function openSSE() {
+  es = new EventSource('/api/events?cursor=' + S.maxSeq);
+  es.onopen = async () => {
+    const wasDropped = S.dropped;
+    S.sse = 'live'; S.dropped = false;
+    renderHeader();
+    if (wasDropped) {
+      try { applyOverview(await (await fetch('/api/overview')).json()); rerenderAll(); } catch { /* next delta will heal */ }
+    }
+  };
+  es.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch { return; }
+    if (d.hello) return;
+    applyDelta(d);
+  };
+  es.onerror = () => { S.sse = 'reconnecting'; S.dropped = true; renderHeader(); };
+}
+
+function rerenderAll() {
+  renderHeader(); renderAlerts(); renderGraph(); renderShared(); renderTicker(); renderDetail();
+}
+
+async function boot() {
+  let o;
+  try {
+    o = await (await fetch('/api/overview')).json();
+  } catch (e) {
+    document.body.innerHTML = `<div style="padding:40px;font-family:var(--mono)">overview fetch failed: ${esc(e.message)} — is server.mjs running?</div>`;
+    return;
+  }
+  applyOverview(o);
+  buildGraph();
+  rerenderAll();
+  fetchDetail();
+  openSSE();
+  setInterval(tickAges, 1000);
+  setInterval(() => fetchDetail(), 8000);
+  setInterval(ambientReplay, 8000);
+  setTimeout(ambientReplay, 1500);
+  let rsz = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(rsz);
+    rsz = setTimeout(() => { buildGraph(); S.edgeSeen = {}; renderGraph(); }, 250);
+  });
+}
+boot();
+</script>
+</body>
+</html>
