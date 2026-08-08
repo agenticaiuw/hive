@@ -2919,18 +2919,42 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
     return
   }
 
+  /*
+   * Parked-for-approval, as its own outcome rather than a failure. The bridge
+   * flags it top-level (`parked`) and inside the result (`parked` / `phase:
+   * 'parked_for_approval'`); either is honoured so a proxy that strips unknown
+   * body fields cannot demote the report. The job keeps the ordinary
+   * plan_ready status every approval surface already polls for — what changes
+   * is that the markers are normalised into the stored result, which is where
+   * the routine reaper (cloud-relay/routines.js jobParkedForApproval) reads
+   * them to record the run as awaiting-approval instead of retrying it.
+   */
+  const parked =
+    Boolean(request.body?.parked) ||
+    (result &&
+      typeof result === 'object' &&
+      (result.parked === true || result.phase === 'parked_for_approval'))
+
   const nextStatus =
     job.type === 'plan' ? 'plan_ready' : 'completed'
 
   const updated = await store.updateJob(jobId, {
     status: nextStatus,
-    result,
+    result:
+      parked && result && typeof result === 'object'
+        ? {
+            ...result,
+            parked: true,
+            phase: result.phase || 'parked_for_approval',
+          }
+        : result,
     error: null,
     actions: job.type === 'plan' ? result?.actions ?? [] : job.actions,
   })
 
   response.json({
     ok: true,
+    ...(parked ? { parked: true } : {}),
     job: publicJob(updated),
   })
 })

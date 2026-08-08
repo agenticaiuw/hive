@@ -208,3 +208,79 @@ test('the receipt log answers "what happened to the thing I asked for"', async (
 
   await store.deleteRoutine(routine.routineId)
 })
+
+test('a parked run is neither a failure nor a retry on the heartbeat, and it is announced', async () => {
+  const { runScheduledTick } = await import('./scheduler.js')
+  const { createRoutine, occurrenceKey } = await import('./routines.js')
+  const store = await getStore()
+
+  const routine = createRoutine({
+    name: 'Morning news',
+    command: 'give me the top headlines',
+    schedule: { kind: 'daily', at: '07:00' },
+    venue: 'mac',
+  })
+  const rearmedFor = Date.now() + 3_600_000
+  await store.saveRoutine({ ...routine, nextRunAt: rearmedFor })
+  /* The Mac produced a plan and parked it for approval (new bridge dialect). */
+  await store.createJob({
+    jobId: 'job_sched_parked',
+    type: 'plan',
+    status: 'plan_ready',
+    result: {
+      executed: false,
+      parked: true,
+      phase: 'parked_for_approval',
+      awaitingApproval: [
+        { type: 'send_email', reason: 'Sending email acts on your behalf and needs approval.' },
+      ],
+    },
+    createdAt: new Date().toISOString(),
+  })
+  const dueAt = new Date().toISOString()
+  await store.recordRoutineRun({
+    runId: 'run_sched_parked',
+    routineId: routine.routineId,
+    routineName: routine.name,
+    status: 'dispatched',
+    startedAt: dueAt,
+    dueAt,
+    attempt: 1,
+    macJobId: 'job_sched_parked',
+    occurrenceKey: occurrenceKey(routine.routineId, dueAt),
+  })
+
+  const tick = await runScheduledTick({ trigger: 'manual' })
+  /* The incident heartbeat read failed=1 retrying=1 for a plan that was
+   * simply waiting on its owner. Each number now answers its own question. */
+  assert.equal(tick.awaitingApprovalCount, 1)
+  assert.equal(tick.failedCount, 0)
+  assert.equal(tick.retryingCount, 0)
+  assert.equal(tick.closed[0].status, 'awaiting-approval')
+  assert.equal(tick.closed[0].final, true)
+
+  const state = await store.getState(SCHEDULER_STATE_KEY)
+  assert.equal(state.data.awaitingApprovalCount, 1)
+
+  // Announced loudly, and the routine was left armed for its schedule — no
+  // backoff, no second planner call.
+  const announcements = await store.listAnnouncements({ limit: 50 })
+  const parked = announcements.find((entry) => entry.runId === 'run_sched_parked')
+  assert.ok(parked, 'the parked routine must be announced')
+  assert.match(parked.speech, /needs your approval/)
+  assert.equal(parked.priority, 'high')
+  const stored = await store.getRoutine(routine.routineId)
+  assert.equal(stored.nextRunAt, rearmedFor)
+
+  // A second tick must not announce or close it again: the run is settled.
+  const again = await runScheduledTick({ trigger: 'manual', now: Date.now() + 61_000 })
+  assert.equal(again.awaitingApprovalCount, 0)
+  assert.equal(
+    (await store.listAnnouncements({ limit: 50 })).filter(
+      (entry) => entry.runId === 'run_sched_parked',
+    ).length,
+    1,
+  )
+
+  await store.deleteRoutine(routine.routineId)
+})

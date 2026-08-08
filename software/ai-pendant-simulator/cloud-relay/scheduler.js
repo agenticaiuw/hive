@@ -214,7 +214,7 @@ export async function runScheduledTick({
 
   /* Mac-dispatched runs finish asynchronously; this is where their answers
    * become announcements. Cheap when there are none (one indexed query). */
-  const closed = await reapDispatchedRuns({ store, now }).catch((error) => {
+  const closed = await reapDispatchedRuns({ store, now, logger }).catch((error) => {
     logger?.warn?.(`[scheduler] reap failed: ${error?.message || error}`)
     return []
   })
@@ -243,6 +243,15 @@ export async function runScheduledTick({
   const failedCount = attempted.filter(
     (run) => ['failed', 'missed'].includes(run.status) && run.final !== false,
   ).length
+  /*
+   * Its own count for the same reason retries got one: a run parked for the
+   * owner's approval is neither broken nor done, and folding it into either
+   * column is how the 07:00 incident stayed invisible — three "failures" that
+   * were really one plan waiting behind a dashboard nobody had open.
+   */
+  const awaitingApprovalCount = attempted.filter(
+    (run) => run.status === 'awaiting-approval',
+  ).length
 
   const summary = {
     trigger,
@@ -253,6 +262,7 @@ export async function runScheduledTick({
     closedCount: closed.length,
     retryingCount,
     failedCount,
+    awaitingApprovalCount,
     macOnline,
     statuses: runs.map((run) => `${run.routineId}:${run.status}`),
     /* null on the 59 ticks an hour that are inside the rate limit. */
@@ -272,6 +282,7 @@ export async function runScheduledTick({
     logger?.log?.(
       `[scheduler] tick trigger=${trigger} due=${claimedCount} ran=${runs.length}` +
         ` closed=${closed.length} retrying=${retryingCount} failed=${failedCount}` +
+        ` awaitingApproval=${awaitingApprovalCount}` +
         ` macOnline=${macOnline} in ${summary.durationMs}ms`,
     )
   }

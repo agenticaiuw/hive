@@ -194,3 +194,69 @@ export function classifyPlan(actions) {
       : '',
   }
 }
+
+/*
+ * The ROUTINE venue.
+ *
+ * A schedule the owner wrote and enabled is standing approval for its own
+ * purpose. The local runner has always worked that way — routines.js goes
+ * orchestratePlan → orchestrateExecute with no approval gate at all, "so a
+ * routine can do anything a spoken command can" — and cloud-relay/routines.js
+ * dispatches a Mac-venue routine promising it "behaves identically whichever
+ * side declared it; only the clock moved". Applying the pendant's hands-free
+ * allowlist to those jobs broke that promise in production: the 7am briefing
+ * planned a run_shell, parked for a dashboard nobody was looking at, and the
+ * owner heard silence.
+ *
+ * So a routine plan auto-runs everything a voice command may run, plus the
+ * confirm-tier work the routine's own command implies (run_shell, file writes,
+ * AppleScript) — EXCEPT the deny-list below. Those are the action types whose
+ * CONFIRM_REASONS text already says why: they act outward on the owner's
+ * behalf (send_email, send_message), destroy data (delete_path), or hand the
+ * whole screen to the model (computer_use_task), which is outward-capable by
+ * construction. A hallucinated planner step must never become an email
+ * somebody received while the owner slept. There is no first-class "purchase"
+ * action in this stack; buying anything rides computer_use_task or a send_*
+ * flow, so the same four entries cover it.
+ */
+export const ROUTINE_DENY_ACTIONS = new Set([
+  'send_email',
+  'send_message',
+  'delete_path',
+  'computer_use_task',
+])
+
+/**
+ * classifyPlan for a routine-originated job.
+ *
+ * Same vocabulary, wider venue: `blocked` still reports what the VOICE
+ * threshold would have held (kept for telemetry and the dashboard), while
+ * `denied` is the list that actually parks a routine. autoRun is therefore
+ * "nothing denied", not "nothing blocked".
+ */
+export function classifyPlanForRoutine(actions) {
+  const list = Array.isArray(actions) ? actions : []
+  if (!list.length) {
+    return { autoRun: false, blocked: [], denied: [], reason: 'No actions to run.' }
+  }
+  const voice = classifyPlan(list)
+  const denied = list
+    .filter((action) => ROUTINE_DENY_ACTIONS.has(String(action?.type || '')))
+    .map((action) => ({
+      type: String(action?.type),
+      reason:
+        CONFIRM_REASONS.get(String(action?.type)) ||
+        `${action?.type} never runs unattended.`,
+    }))
+  if (denied.length) {
+    return {
+      autoRun: false,
+      blocked: voice.blocked,
+      denied,
+      reason: `${denied
+        .map((entry) => entry.reason)
+        .join(' ')} A scheduled routine cannot approve this on its own.`,
+    }
+  }
+  return { autoRun: true, blocked: voice.blocked, denied: [], reason: '' }
+}

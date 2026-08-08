@@ -27,7 +27,7 @@ import {
   synthesizePendantSpeech,
 } from './pendantSpeech.js'
 import { synchronizeProductState } from './productSyncClient.js'
-import { classifyPlan } from './actionRisk.js'
+import { classifyPlan, classifyPlanForRoutine } from './actionRisk.js'
 import { stripImageBytes } from './redaction.js'
 import {
   createRateLimitedErrorReporter,
@@ -405,7 +405,18 @@ export async function handleWork(work) {
 
       // Pendant has no confirm UI: auto-run allowlisted / status actions.
       // Status run_shell (pmset, open -a, …) is hands-free via actionRisk.
-      const verdict = classifyPlan(plan.actions)
+      //
+      // A routine-originated job is a different venue: the owner wrote and
+      // enabled the schedule, and that is standing approval for its own
+      // purpose (exactly how local-agent/routines.js has always executed).
+      // classifyPlanForRoutine widens auto-run to everything except the
+      // outward/irreversible deny-list — those still park, and the relay is
+      // told so loudly rather than being handed a fake failure to retry.
+      const routineJob = isRoutineWork(work)
+      const verdict = routineJob
+        ? classifyPlanForRoutine(plan.actions)
+        : classifyPlan(plan.actions)
+      let parkedForApproval = false
       if (verdict.autoRun) {
         const executionStartedAt = Date.now()
         void reportPipelineEvent(planWork, {
@@ -482,8 +493,14 @@ export async function handleWork(work) {
         }
       } else if (Array.isArray(plan.actions) && plan.actions.length) {
         plan.executed = false
+        parkedForApproval = true
         // Array of blocked actions (not a boolean) — dashboard and tests read it.
-        plan.awaitingApproval = verdict.blocked
+        // For a routine job this is the hard deny-list, the only thing that can
+        // park a routine; for voice it is everything over the hands-free line.
+        plan.awaitingApproval =
+          routineJob && Array.isArray(verdict.denied) && verdict.denied.length
+            ? verdict.denied
+            : verdict.blocked
         plan.response =
           spokenTextForResult({ ...plan, awaitingApproval: true }) ||
           'Waiting for your approval on the dashboard.'
@@ -493,7 +510,7 @@ export async function handleWork(work) {
           label: 'Waiting for your approval',
           detail: verdict.reason,
           text: plan.response,
-          meta: { blocked: verdict.blocked },
+          meta: { blocked: plan.awaitingApproval, routineJob },
         })
       }
 
@@ -516,15 +533,39 @@ export async function handleWork(work) {
         label: 'Uploading response to cloud relay',
         detail: 'Sending the answer and PCM payload back for the nRF9160.',
       })
+      /*
+       * Parked is not failed. A plan held for the owner's approval used to be
+       * reported ok:false, which the relay recorded as a FAILURE — and its
+       * routine reaper then retried the "failure", burning a planner call
+       * every backoff step while the parked plan sat unseen (live incident,
+       * 2026-08-08 07:00 briefing). Parked plans now report ok with a
+       * distinct phase and the approval handle. A relay deployed before this
+       * fix ignores `parked` and records the ordinary plan_ready it already
+       * uses for "plan produced, awaiting execution" — no failure, no retry.
+       */
       await completeWork(work.jobId, {
-        ok: plan.status !== 'unsupported' && plan.executed !== false,
+        ok:
+          parkedForApproval ||
+          (plan.status !== 'unsupported' && plan.executed !== false),
+        parked: parkedForApproval,
         result: {
           ...planWithSpeech,
           executed: plan.executed !== false,
-          phase: 'complete',
+          phase: parkedForApproval ? 'parked_for_approval' : 'complete',
+          ...(parkedForApproval
+            ? {
+                parked: true,
+                approval: {
+                  relayJobId: work.jobId,
+                  planJobId: plan.jobId ?? null,
+                  sessionId: activeSessionId ?? null,
+                },
+              }
+            : {}),
         },
-        error:
-          plan.status === 'unsupported'
+        error: parkedForApproval
+          ? ''
+          : plan.status === 'unsupported'
             ? plan.error ?? 'Planning failed on local agent.'
             : plan.executed === false
               ? plan.executionError || plan.response || 'Execution failed.'
@@ -867,7 +908,24 @@ function formatBytes(value) {
   return `${(bytes / 1024).toFixed(1)} KiB`
 }
 
-async function completeWork(jobId, { ok, result, error, partial = false }) {
+/*
+ * A job the relay scheduler enqueued for a routine, verified against a live
+ * job (2026-08-08): cloud-relay/scheduler.js enqueueRoutineMacJob stamps
+ * inputTelemetry { storage: 'routine', inputMode: 'routine', routineId,
+ * routineName, runId }. Either field is accepted; when both are absent the
+ * job falls back to the stricter voice policy, which is the safe direction.
+ */
+function isRoutineWork(work) {
+  const telemetry = work?.inputTelemetry
+  return (
+    telemetry?.storage === 'routine' || telemetry?.inputMode === 'routine'
+  )
+}
+
+async function completeWork(
+  jobId,
+  { ok, result, error, partial = false, parked = false },
+) {
   const response = await fetch(`${RELAY_URL}/v1/bridge/work/${jobId}/result`, {
     method: 'POST',
     headers: relayHeaders,
@@ -881,6 +939,10 @@ async function completeWork(jobId, { ok, result, error, partial = false }) {
       result: stripImageBytes(result),
       error,
       partial: Boolean(partial),
+      // Distinct outcome for a plan held for approval. Relays deployed before
+      // this field ignore it and record plan_ready, which neither fails nor
+      // retries the job — the degradation this report shape was chosen for.
+      ...(parked ? { parked: true } : {}),
     }),
   })
   const raw = await response.text()
@@ -898,7 +960,9 @@ async function completeWork(jobId, { ok, result, error, partial = false }) {
   }
 
   console.log(
-    `[bridge] ${partial ? 'Progress' : 'Completed'} job ${jobId} (${payload.job?.status})`,
+    `[bridge] ${partial ? 'Progress' : 'Completed'} job ${jobId} (${payload.job?.status}${
+      parked ? ', parked for approval' : ''
+    })`,
   )
 }
 
