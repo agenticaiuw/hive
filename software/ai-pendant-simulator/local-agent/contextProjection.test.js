@@ -92,7 +92,13 @@ test('sensitivity selects what reaches the prompt without hiding it from the own
 
   const outbound = projectContext({ task: 'what is the gpu cluster called', facts, now: NOW })
   assert.doesNotMatch(outbound.text, /sk-live/, 'a key never rides to a model provider by accident')
-  assert.match(outbound.text, /RELAY_API_KEY: \[withheld\]/, 'but the model knows the fact exists')
+  // The separator the owner wrote is kept when the credential can be cut out of
+  // the line precisely, so this matches `KEY=[withheld]` as well as `KEY: [withheld]`.
+  assert.match(
+    outbound.text,
+    /RELAY_API_KEY[:=] ?\[withheld\]/,
+    'but the model knows the fact exists',
+  )
   assert.doesNotMatch(outbound.text, /stanford\.edu/, 'unrelated personal detail stays home')
 
   const asked = projectContext({ task: 'what is david stanford email', facts, now: NOW })
@@ -100,6 +106,45 @@ test('sensitivity selects what reaches the prompt without hiding it from the own
 
   const owner = projectContext({ task: 'relay key', facts, now: NOW, revealSensitive: true })
   assert.match(owner.text, /sk-live/, 'the owner is never gated out of their own memory')
+})
+
+test('a secret spoken as a sentence does not ride to the model either', () => {
+  /*
+   * The test above only ever exercised the `KEY=value` shape, which is the one
+   * shape maskSecretValue handled -- so a spoken secret ("my bike lock code is
+   * 4829"), which is how a worn pendant actually receives one, went into the
+   * prompt in full with "[withheld]" appended after it. This is the projection
+   * that gets composed into a third-party prompt, so the marker was a claim the
+   * text itself contradicted.
+   */
+  const facts = [
+    fact({
+      key: 'obs.lock',
+      kind: 'observation',
+      value: 'my bike lock code is 4829',
+      sensitivity: 'secret',
+    }),
+    fact({
+      key: 'pref.wifi',
+      kind: 'preference',
+      value: 'the guest wifi password is hunter2',
+      sensitivity: 'secret',
+    }),
+  ]
+
+  const outbound = projectContext({ task: 'what is my bike lock code', facts, now: NOW })
+
+  assert.doesNotMatch(outbound.text, /4829/, 'a spoken code never rides to a model provider')
+  assert.doesNotMatch(outbound.text, /hunter2/, 'nor does a spoken password')
+  assert.match(outbound.text, /\[withheld\]/, 'the model still learns the fact exists')
+
+  const owner = projectContext({
+    task: 'what is my bike lock code',
+    facts,
+    now: NOW,
+    revealSensitive: true,
+  })
+  assert.match(owner.text, /4829/, 'the owner is never gated out of their own memory')
 })
 
 test('browser findings stay out of conversational context until the task asks for them', () => {

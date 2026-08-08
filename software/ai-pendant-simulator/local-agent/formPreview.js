@@ -139,11 +139,14 @@ const sha256 = (value) =>
  *
  * redaction.maskSecretValue keeps the label and drops the value — right for a
  * remembered fact ("bike lock code: 4829" becomes "bike lock code:
- * [withheld]"), wrong here: it splits on the first colon, so a bare token with
- * no colon in it becomes its own label and is echoed back in full. The shape
- * this module needs is browserBridge.redactAction's, which is the one written
- * for exactly this case — a typed value that is a credential — and says only
- * how long it was.
+ * [withheld]"), wrong here for a different reason than it used to be. It used
+ * to be unsafe: a bare token with no colon in it became its own label and was
+ * echoed back in full. It no longer is. But a form value has no label worth
+ * keeping — the field's own name is already carried beside it — so what that
+ * function preserves is exactly what this module does not need, and what it
+ * drops is the one thing a reader here wants. The shape this module needs is
+ * browserBridge.redactAction's, which is the one written for exactly this case
+ * — a typed value that is a credential — and says only how long it was.
  *
  * The length and nothing else. No digest: a four-digit door code has ten
  * thousand possible values, and publishing sha256 of it alongside "4 chars" is
