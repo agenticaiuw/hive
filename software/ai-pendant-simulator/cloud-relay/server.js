@@ -35,6 +35,7 @@ import {
   verifyContextHandle,
 } from '../shared/contextHandoff.js'
 import { getStore } from './store/index.js'
+import { registerPendantDownlinkWitness } from './pendantDownlink.js'
 import { planFromAudio } from './audioPlan.js'
 import {
   createStreamingRealtimeSession,
@@ -411,6 +412,12 @@ app.use(async (request, response, next) => {
 
   next()
 })
+
+/* Must sit after the auth middleware — it reads request.relayPrincipal — and
+ * before any route, since it wraps the response before a handler runs. This is
+ * the last point on the relay side that witnesses anything real about delivery:
+ * a credentialled device asked for this job and the body finished. */
+registerPendantDownlinkWitness(app, { getStore, createAgentProxyJob })
 
 app.post('/v1/devices/register', async (request, response) => {
   const deviceId = String(request.body?.deviceId ?? '').trim()

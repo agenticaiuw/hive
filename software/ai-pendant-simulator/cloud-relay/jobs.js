@@ -1,4 +1,9 @@
 import crypto from 'node:crypto'
+import {
+  DELIVERY_STAGES,
+  deliveryRunStatus,
+  gradeAudioDelivery,
+} from '../shared/audioDelivery.js'
 
 export function createJobId() {
   return `job_${crypto.randomUUID()}`
@@ -192,18 +197,16 @@ export function voiceRunForCapture(capture) {
   const replyTranscript = String(capture.replyTranscript || '').trim()
   const answered = Boolean(capture.replyCaptureId) || Boolean(replyTranscript)
 
-  return {
-    pipelineId: capture.jobId,
-    kind: 'voice_command',
-    command: transcript,
-    source: 'cloudflare',
-    origin: 'live_lte',
-    status: answered ? 'completed' : 'failed',
-    error: answered
-      ? null
-      : 'The pendant uploaded audio but the agent produced no reply.',
-    events: [
-      {
+  /*
+   * A reply capture is built from the very same PCM buffer that the duplex
+   * handler encodes and server.send()s frame by frame (see the onAudioDelta
+   * callback in pendantConverse.js), so its existence really does witness bytes
+   * going onto the pendant's socket. That is all it witnesses. The pendant is
+   * pushed to here, not asked, so it cannot even be claimed that the device was
+   * awake — only that the relay wrote.
+   */
+  const events = [
+    {
         eventId: `cloud-${capture.jobId}-transcription`,
         stage: 'transcription',
         status: transcript ? 'done' : 'failed',
@@ -231,7 +234,48 @@ export function voiceRunForCapture(capture) {
         meta: null,
         at: capture.updatedAt || capture.createdAt,
       },
-    ],
+    ]
+
+  if (capture.replyCaptureId) {
+    events.push({
+      eventId: `cloud-${capture.jobId}-downlink`,
+      stage: DELIVERY_STAGES.DOWNLINK,
+      status: 'done',
+      label: 'Reply audio written to the pendant socket',
+      detail:
+        'The relay encoded the reply and pushed the frames down the open ' +
+        'conversation socket. Bytes leaving the relay is the whole of what this ' +
+        'observes — nothing here reports that the pendant played them.',
+      text: '',
+      source: 'cloudflare',
+      meta: {
+        pulledByDevice: false,
+        transport: 'websocket',
+        witness: 'relay-socket',
+        replyCaptureId: capture.replyCaptureId,
+      },
+      at: capture.updatedAt || capture.createdAt,
+    })
+  }
+
+  return {
+    pipelineId: capture.jobId,
+    kind: 'voice_command',
+    command: transcript,
+    source: 'cloudflare',
+    origin: 'live_lte',
+    /*
+     * `status` still answers "did the agent produce a reply", which is the
+     * question jobsVoiceRun.test.js locked down. `delivery` answers the separate
+     * question of whether the reply ever became sound, and on this path the
+     * honest answer stops at "the relay wrote bytes at the device".
+     */
+    status: answered ? 'completed' : 'failed',
+    delivery: gradeAudioDelivery(events, { origin: 'live_lte' }),
+    error: answered
+      ? null
+      : 'The pendant uploaded audio but the agent produced no reply.',
+    events,
     createdAt: capture.createdAt,
     updatedAt: capture.updatedAt || capture.createdAt,
     audio: {
@@ -445,31 +489,40 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
     })
   }
 
-  const playbackDone = events.some(
-    (event) => event.stage === 'device_playback' && event.status === 'done',
-  )
-  // Browser-originated runs never reach the pendant, so their finish line is
-  // the Mac's answer rather than I2S playback.
-  const dashboardDone =
-    origin === 'dashboard' &&
-    events.some((event) => event.stage === 'agent' && event.status === 'done')
-  // Pendant runs: show Done as soon as the Mac has executed (Outlook is open),
-  // even if TTS / pendant playback is still in flight.
-  const macDoneForUi =
+  /*
+   * What is actually known about the reply reaching the pendant, graded against
+   * the body that witnessed each step. This used to be a single boolean looking
+   * for a `device_playback` done event that nothing in this system has ever
+   * emitted — so it was always false, and the status fell through to Mac-side
+   * completion. A run the owner may never have heard rendered as "Done".
+   */
+  const delivery = gradeAudioDelivery(events, { origin })
+
+  // The Mac's own finish line: the plan ran. Says nothing about the pendant.
+  const macDone =
     macActionDone ||
     events.some(
       (event) =>
         event.stage === 'agent' &&
         event.status === 'done' &&
-        /executed|Plan executed/i.test(String(event.label || '')),
+        (origin === 'dashboard' ||
+          /executed|Plan executed/i.test(String(event.label || ''))),
     )
+
   const status =
     ['failed', 'cancelled'].includes(job.status) || transcriptionStale
       ? 'failed'
-      : playbackDone || dashboardDone || macDoneForUi
-        ? 'completed'
-        : transcriptionPending
-          ? 'processing'
+      : transcriptionPending
+        ? 'processing'
+        : macDone || delivery.rank > 0
+          ? /*
+             * Browser-originated runs have no speaker waiting, so the Mac's
+             * answer really is their finish line and deliveryRunStatus() says
+             * so. Pendant runs get PLAYBACK_UNKNOWN_STATUS instead of
+             * 'completed': the audio left the relay and nothing on this system
+             * can say whether it was ever played.
+             */
+            deliveryRunStatus(delivery, { macDone })
           : hasTranscript || result
             ? 'processing'
             : 'failed'
@@ -481,6 +534,7 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
     source: 'cloudflare',
     origin,
     status,
+    delivery,
     events,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,

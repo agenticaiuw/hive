@@ -27,6 +27,7 @@
  */
 import crypto from 'node:crypto'
 import { Buffer } from 'node:buffer'
+import { HEARD_UNKNOWN } from '../shared/audioDelivery.js'
 
 /* nRF9160 WS_RX_BUF_BYTES is 640; anything larger closes the socket. Half of
  * that is a ceiling no control frame should ever come near. */
@@ -189,7 +190,60 @@ export function createAnnouncement({
     expiresAt: new Date(now + Math.max(60_000, ttlMs)).toISOString(),
     deliveredAt: null,
     deliveryPath: null,
+    /*
+     * `state` is a QUEUE state — pending / delivering / delivered / dismissed —
+     * and 'delivered' there means only "stop offering this one", not "the owner
+     * heard it". The evidence lives in these three, kept separate so the queue's
+     * bookkeeping can never be spent as proof of an ear.
+     */
+    deliveryEvidence: null,
+    sentBytes: 0,
+    heard: HEARD_UNKNOWN,
     attempts: 0,
+  }
+}
+
+/**
+ * Turn what streamAnnouncementPcm() actually observed into fields that say it.
+ *
+ * The old call site set `state: sentBytes > 0 ? 'delivered' : 'pending'` and
+ * then stamped `deliveredAt` unconditionally — so an announcement that sent zero
+ * bytes went back on the queue carrying a delivery timestamp. Anything reading
+ * `deliveredAt` as evidence was reading a clock, not a delivery.
+ *
+ * `deliveredAt` is now only ever set when bytes really left, and even then it
+ * timestamps a socket write, which is why `heard` stays unknown beside it.
+ */
+export function announcementDeliveryOutcome({
+  sentBytes = 0,
+  sentFrames = 0,
+  stopped = false,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const bytes = Math.max(0, Number(sentBytes) || 0)
+  const sent = bytes > 0
+
+  return {
+    state: sent ? 'delivered' : 'pending',
+    /* No bytes, no timestamp. A null here is the honest value. */
+    deliveredAt: sent ? now() : null,
+    deliveryPath: sent ? (stopped ? 'converse-interrupted' : 'converse') : null,
+    /*
+     * Both rungs are the same rung: the relay socket accepted bytes. An
+     * interrupted briefing is recorded as interrupted rather than quietly
+     * folded into a complete one, because "some of it went out" and "all of it
+     * went out" are different facts even when neither proves an ear.
+     */
+    deliveryEvidence: sent ? 'bytes_sent_to_device' : null,
+    deliveryComplete: sent && !stopped,
+    sentBytes: bytes,
+    sentFrames: Math.max(0, Number(sentFrames) || 0),
+    /*
+     * The pendant never reports playback — the firmware defines the reporters
+     * and calls neither — so this cannot be anything else. See
+     * PLAYBACK_REPORT_CONTRACT in shared/audioDelivery.js.
+     */
+    heard: HEARD_UNKNOWN,
   }
 }
 

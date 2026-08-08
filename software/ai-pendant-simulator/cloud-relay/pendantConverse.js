@@ -32,6 +32,7 @@ import { createAudioCapture } from './jobs.js'
 import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
 import { getStore } from './store/index.js'
 import { loadFleetFromStore } from './fleetContext.js'
+import { createSpokenMemoryWriter } from '../shared/spokenMemory.js'
 import { persistAudioCapture } from './audioStorage.js'
 import { pcmS16leToWavBuffer } from './rawAudio.js'
 import {
@@ -41,6 +42,7 @@ import {
 } from './config.js'
 import {
   announceDoneFrame,
+  announcementDeliveryOutcome,
   announceOpenFrame,
   renderAnnouncementPcm,
   selectDeliverable,
@@ -224,6 +226,16 @@ export async function handlePendantConverse(request, context) {
       return job
     }
 
+    /*
+     * The write end of cross-surface memory, and until now there was none: the
+     * relay has been folding an empty log into every prompt while the only
+     * body that could write memory was the Mac, for utterances that reached
+     * the Mac. Scoped to one conversation so its byte budget cannot be spent
+     * by yesterday, and fire-and-forget below because a fact is worth less
+     * than the audio path it would otherwise be able to stall.
+     */
+    const spokenMemory = createSpokenMemoryWriter({ store })
+
     state.session = await createStreamingRealtimeSession({
       inputSampleRate: OPUS_WIRE_SAMPLE_RATE,
       fleet: loadFleetFromStore(store).catch(() => null),
@@ -256,6 +268,27 @@ export async function handlePendantConverse(request, context) {
       onTurn: (turn) => {
         state.lastActivityAt = Date.now()
         if (turn.transcript || turn.response) state.turns.push(turn)
+        /*
+         * Only the owner's own words. The model's reply is the model agreeing
+         * with itself, and a log that remembers what it said last turn is how
+         * a memory system talks itself into a fact nobody stated.
+         */
+        if (turn.transcript) {
+          spokenMemory.remember(turn.transcript).then(
+            (result) => {
+              // Counts and keys only. A skipped-for-sensitivity result carries
+              // the subject and never the value, and this is where that matters.
+              if (result.appended) {
+                console.log(
+                  `[converse] memory: +${result.appended} event(s), ${result.bytes} B`,
+                )
+              } else if (result.error) {
+                console.warn(`[converse] memory write failed: ${result.error}`)
+              }
+            },
+            (error) => console.warn(`[converse] memory write: ${error?.message}`),
+          )
+        }
       },
       onUserSpeech: () => {
         state.lastActivityAt = Date.now()
@@ -453,21 +486,21 @@ export async function handlePendantConverse(request, context) {
       state.announcing = false
 
       /*
-       * Interrupted still counts as heard: the owner talked over it, which
-       * they cannot do without having heard it start. Nothing sent at all
-       * goes back on the queue for the next press.
+       * Bytes on a socket is the whole of what happened here, and the record now
+       * says so. `state: 'delivered'` remains the QUEUE's way of saying "do not
+       * offer this one again"; whether anyone heard it lives in `heard`, which
+       * is 'unknown' because the pendant reports nothing back. Nothing sent at
+       * all goes back on the queue for the next press — and, unlike before, it
+       * no longer carries a `deliveredAt` while it does.
        */
+      const outcome = announcementDeliveryOutcome(delivery)
       await state.store
-        .updateAnnouncement(announcement.announcementId, {
-          state: delivery.sentBytes > 0 ? 'delivered' : 'pending',
-          deliveredAt: new Date().toISOString(),
-          deliveryPath: delivery.stopped ? 'converse-interrupted' : 'converse',
-        })
+        .updateAnnouncement(announcement.announcementId, outcome)
         .catch(() => {})
       console.log(
         `[converse] announcement ${announcement.announcementId} ` +
           `sent=${delivery.sentBytes}B frames=${delivery.sentFrames}` +
-          `${delivery.stopped ? ' (interrupted)' : ''}`,
+          `${delivery.stopped ? ' (interrupted)' : ''} heard=${outcome.heard}`,
       )
       if (delivery.stopped) return
     }
