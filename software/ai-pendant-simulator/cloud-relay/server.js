@@ -64,6 +64,10 @@ import {
   persistAudioCapture,
 } from './audioStorage.js'
 import {
+  offloadResultSpeechAudio,
+  resolvePendantSpeechBuffers,
+} from './pendantSpeechStore.js'
+import {
   audioCaptureExpiresAt,
   audioRetentionPolicy,
   deleteStoredAudio,
@@ -1692,7 +1696,7 @@ app.get('/v1/pendant/jobs/:jobId/speech', async (request, response) => {
     }
 
     if (job.status === 'plan_ready' || job.status === 'completed') {
-      const pendantSpeech = pendantSpeechForJob(job)
+      const pendantSpeech = await pendantSpeechForJob(job)
       if (pendantSpeech) {
         response.set('X-Pendant-Job-Status', job.status)
         sendPendantAudio(response, pendantSpeech)
@@ -2877,86 +2881,132 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
     return
   }
 
-  if (!ok) {
-    const failed = await store.updateJob(jobId, {
-      status: 'failed',
-      error: error || 'Mac bridge reported failure.',
+  /*
+   * A spoken reply arrives as base64 audio on result.pendantSpeech. Raw PCM for
+   * anything longer than a sentence is megabytes, which overflows D1's per-row
+   * limit the moment updateJob serializes it — the exact failure a routine that
+   * now auto-runs (and therefore synthesizes a full briefing) trips on. Offload
+   * oversized audio to R2 here, keeping only a reference in the row, exactly as
+   * the capture path does. Small voice replies stay inline and untouched.
+   */
+  let stored = result
+  try {
+    stored = await offloadResultSpeechAudio({
+      jobId,
       result,
+      bindings: getCloudflareBindings(),
     })
-
-    response.json({
-      ok: true,
-      job: publicJob(failed),
-    })
-    return
-  }
-
-  if (partial) {
-    const mergedResult =
-      result && typeof result === 'object'
-        ? {
-            ...(job.result && typeof job.result === 'object' ? job.result : {}),
-            ...result,
-            // Explicit so the dashboard can flip to "Done" before TTS finishes.
-            executed: result.executed !== false,
-            phase: result.phase || 'executed',
-          }
-        : job.result
-    const updated = await store.updateJob(jobId, {
-      status: 'processing',
-      result: mergedResult,
-      error: null,
-      actions:
-        job.type === 'plan'
-          ? mergedResult?.actions ?? job.actions ?? []
-          : job.actions,
-    })
-    response.json({
-      ok: true,
-      partial: true,
-      job: publicJob(updated),
-    })
-    return
+  } catch (offloadError) {
+    console.warn(
+      `[relay] pendantSpeech offload failed for ${jobId}: ${
+        offloadError?.message || offloadError
+      }`,
+    )
+    stored = result
   }
 
   /*
-   * Parked-for-approval, as its own outcome rather than a failure. The bridge
-   * flags it top-level (`parked`) and inside the result (`parked` / `phase:
-   * 'parked_for_approval'`); either is honoured so a proxy that strips unknown
-   * body fields cannot demote the report. The job keeps the ordinary
-   * plan_ready status every approval surface already polls for — what changes
-   * is that the markers are normalised into the stored result, which is where
-   * the routine reaper (cloud-relay/routines.js jobParkedForApproval) reads
-   * them to record the run as awaiting-approval instead of retrying it.
+   * Every write below serializes into a single D1 value. Wrap them so a storage
+   * failure becomes a structured JSON error the bridge already treats as a
+   * failed report, never the bare-HTML 500 that an unhandled throw produces.
    */
-  const parked =
-    Boolean(request.body?.parked) ||
-    (result &&
-      typeof result === 'object' &&
-      (result.parked === true || result.phase === 'parked_for_approval'))
+  try {
+    if (!ok) {
+      const failed = await store.updateJob(jobId, {
+        status: 'failed',
+        error: error || 'Mac bridge reported failure.',
+        result: stored,
+      })
 
-  const nextStatus =
-    job.type === 'plan' ? 'plan_ready' : 'completed'
+      response.json({
+        ok: true,
+        job: publicJob(failed),
+      })
+      return
+    }
 
-  const updated = await store.updateJob(jobId, {
-    status: nextStatus,
-    result:
-      parked && result && typeof result === 'object'
-        ? {
-            ...result,
-            parked: true,
-            phase: result.phase || 'parked_for_approval',
-          }
-        : result,
-    error: null,
-    actions: job.type === 'plan' ? result?.actions ?? [] : job.actions,
-  })
+    if (partial) {
+      const mergedResult =
+        stored && typeof stored === 'object'
+          ? {
+              ...(job.result && typeof job.result === 'object'
+                ? job.result
+                : {}),
+              ...stored,
+              // Explicit so the dashboard can flip to "Done" before TTS finishes.
+              executed: stored.executed !== false,
+              phase: stored.phase || 'executed',
+            }
+          : job.result
+      const updated = await store.updateJob(jobId, {
+        status: 'processing',
+        result: mergedResult,
+        error: null,
+        actions:
+          job.type === 'plan'
+            ? mergedResult?.actions ?? job.actions ?? []
+            : job.actions,
+      })
+      response.json({
+        ok: true,
+        partial: true,
+        job: publicJob(updated),
+      })
+      return
+    }
 
-  response.json({
-    ok: true,
-    ...(parked ? { parked: true } : {}),
-    job: publicJob(updated),
-  })
+    /*
+     * Parked-for-approval, as its own outcome rather than a failure. The bridge
+     * flags it top-level (`parked`) and inside the result (`parked` / `phase:
+     * 'parked_for_approval'`); either is honoured so a proxy that strips unknown
+     * body fields cannot demote the report. The job keeps the ordinary
+     * plan_ready status every approval surface already polls for — what changes
+     * is that the markers are normalised into the stored result, which is where
+     * the routine reaper (cloud-relay/routines.js jobParkedForApproval) reads
+     * them to record the run as awaiting-approval instead of retrying it.
+     */
+    const parked =
+      Boolean(request.body?.parked) ||
+      (stored &&
+        typeof stored === 'object' &&
+        (stored.parked === true || stored.phase === 'parked_for_approval'))
+
+    const nextStatus = job.type === 'plan' ? 'plan_ready' : 'completed'
+
+    const updated = await store.updateJob(jobId, {
+      status: nextStatus,
+      result:
+        parked && stored && typeof stored === 'object'
+          ? {
+              ...stored,
+              parked: true,
+              phase: stored.phase || 'parked_for_approval',
+            }
+          : stored,
+      error: null,
+      actions: job.type === 'plan' ? stored?.actions ?? [] : job.actions,
+    })
+
+    response.json({
+      ok: true,
+      ...(parked ? { parked: true } : {}),
+      job: publicJob(updated),
+    })
+  } catch (storeError) {
+    console.error(
+      `[relay] Failed to store bridge result for ${jobId}: ${
+        storeError?.stack || storeError
+      }`,
+    )
+    if (!response.headersSent) {
+      response.status(500).json({
+        ok: false,
+        error: `Could not store bridge result: ${String(
+          storeError?.message || storeError,
+        ).slice(0, 200)}`,
+      })
+    }
+  }
 })
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -3049,50 +3099,50 @@ function sendPendantAudio(response, result) {
   response.status(200).send(result.audio)
 }
 
-function pendantSpeechForJob(job) {
+async function pendantSpeechForJob(job) {
   const speech = job?.result?.pendantSpeech
-  const audioBase64 = String(speech?.audioBase64 || '').trim()
+  if (!speech || typeof speech !== 'object') {
+    return null
+  }
 
   if (
-    !audioBase64 ||
-    String(speech?.format || '').toLowerCase() !== 's16le' ||
-    Number(speech?.sampleRate || 0) !== PENDANT_PCM_SAMPLE_RATE ||
-    Number(speech?.channels || 0) !== PENDANT_PCM_CHANNELS ||
-    Number(speech?.bitsPerSample || 0) !== PENDANT_PCM_BITS
+    String(speech.format || '').toLowerCase() !== 's16le' ||
+    Number(speech.sampleRate || 0) !== PENDANT_PCM_SAMPLE_RATE ||
+    Number(speech.channels || 0) !== PENDANT_PCM_CHANNELS ||
+    Number(speech.bitsPerSample || 0) !== PENDANT_PCM_BITS
   ) {
     return null
   }
 
-  const compressedAudioBase64 = String(
-    speech?.compressedAudioBase64 || '',
-  ).trim()
+  // Bytes come from the inline base64 when present, or from the R2 object the
+  // result handler offloaded a large reply to.
+  const { pcm, opus } = await resolvePendantSpeechBuffers({
+    speech,
+    bindings: getCloudflareBindings(),
+  })
+
   if (
-    compressedAudioBase64 &&
-    String(speech?.compressedFormat || '').toLowerCase() === 'ogg-opus'
+    opus &&
+    String(speech.compressedFormat || '').toLowerCase() === 'ogg-opus' &&
+    opus.length >= 64 &&
+    opus.toString('ascii', 0, 4) === 'OggS'
   ) {
-    const compressedAudio = Buffer.from(compressedAudioBase64, 'base64')
-    if (
-      compressedAudio.length >= 64 &&
-      compressedAudio.toString('ascii', 0, 4) === 'OggS'
-    ) {
-      return {
-        audio: compressedAudio,
-        mimeType: 'audio/ogg',
-        format: 'ogg-opus',
-      }
+    return {
+      audio: opus,
+      mimeType: 'audio/ogg',
+      format: 'ogg-opus',
     }
   }
 
-  const audio = Buffer.from(audioBase64, 'base64')
-  if (!audio.length || audio.length % 2 !== 0) {
-    return null
+  if (pcm && pcm.length && pcm.length % 2 === 0) {
+    return {
+      audio: pcm,
+      mimeType: 'audio/pcm',
+      format: 's16le',
+    }
   }
 
-  return {
-    audio,
-    mimeType: 'audio/pcm',
-    format: 's16le',
-  }
+  return null
 }
 
 function isDeviceOnline(device) {

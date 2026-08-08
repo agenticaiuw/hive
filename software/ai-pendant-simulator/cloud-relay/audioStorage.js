@@ -187,6 +187,46 @@ export async function loadAudioCapture(
   }
 }
 
+/**
+ * Fetch bytes for a stored R2 audio reference (as produced by
+ * persistAudioCapture). Unlike loadAudioCapture this is not tied to an
+ * `audio_capture` record: the pendant-speech path uses it to read reply audio
+ * that was offloaded out of a plan job's D1 row. Returns null when the ref is
+ * not a trusted R2 object or the bucket is unavailable.
+ */
+export async function loadAudioByRef(
+  ref,
+  { bindings = getCloudflareBindings() } = {},
+) {
+  if (!ref || ref.provider !== 'r2' || !isSafeObjectKey(ref.key)) {
+    return null
+  }
+
+  const bucket = bindings?.AUDIO_BUCKET
+  if (!bucket?.get) {
+    return null
+  }
+
+  const object = await bucket.get(ref.key)
+  if (!object) {
+    return null
+  }
+
+  const audio = Buffer.from(await object.arrayBuffer())
+  if (!audio.length) {
+    return null
+  }
+
+  return {
+    audio,
+    contentType:
+      object.httpMetadata?.contentType ||
+      ref.contentType ||
+      'application/octet-stream',
+    source: 'r2',
+  }
+}
+
 function d1Fallback(audioBase64, audioStorageWarning = null) {
   return {
     audioBase64,
@@ -241,17 +281,22 @@ function normalizeObjectPrefix(prefix) {
   return normalized
 }
 
-function isTrustedAudioKey(key, captureId) {
+function isSafeObjectKey(key) {
   const normalizedKey = String(key || '')
-  const normalizedCaptureId = String(captureId || '')
   return (
+    normalizedKey.length > 0 &&
     normalizedKey.length <= 512 &&
     !normalizedKey.startsWith('/') &&
     !normalizedKey.includes('..') &&
-    normalizedKey
-      .split('/')
-      .every((part) => /^[a-zA-Z0-9._-]+$/.test(part)) &&
-    normalizedKey
+    normalizedKey.split('/').every((part) => /^[a-zA-Z0-9._-]+$/.test(part))
+  )
+}
+
+function isTrustedAudioKey(key, captureId) {
+  const normalizedCaptureId = String(captureId || '')
+  return (
+    isSafeObjectKey(key) &&
+    String(key || '')
       .split('/')
       .at(-1)
       ?.startsWith(`${normalizedCaptureId}.`)
