@@ -724,7 +724,10 @@ export function registerBrowserBridgeRoutes(app, { basePath = '/browser' } = {})
     })
   })
 
-  add('delete', `${basePath}/spool/:commandId?`, (request, response) => {
+  /* `{/:commandId}` and not `/:commandId?`: Express 5 uses path-to-regexp v8,
+   * which removed the trailing-? optional syntax and THROWS on it at
+   * registration. That throw is why the agent could not restart at all. */
+  add('delete', `${basePath}/spool{/:commandId}`, (request, response) => {
     response.json({
       ok: true,
       ...clearBrowserSpool(
