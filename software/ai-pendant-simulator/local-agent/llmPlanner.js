@@ -645,6 +645,23 @@ export function actionSchemaForTier(tier = 'planner') {
   return subset
 }
 
+/**
+ * What this file says one action type DOES, regardless of tier or mode.
+ *
+ * These descriptions were written for the planner and read by nobody else, so
+ * GET /capabilities published 95 action types with an empty description and a
+ * caller matching against the manifest could only match on how the type is
+ * spelled. Both schemas are consulted, not the mode-selected one: what
+ * `delete_path` does is not a function of FULL_CONTROL_MODE, and a manifest
+ * whose prose changed with an env var would be worse than none.
+ */
+export function actionDescription(type) {
+  const name = String(type ?? '')
+  const spec = FULL_CONTROL_ACTION_SCHEMA[name] ?? SAFE_ACTION_SCHEMA[name]
+  const description = String(spec?.description ?? '').trim()
+  return description || null
+}
+
 export function isLlmPlannerEnabled() {
   return LLM_ENABLED
 }
@@ -1278,6 +1295,40 @@ export function isKnownActionType(type) {
   )
 }
 
+/*
+ * The brightness a shell command is trying to set, or null if it is not setting
+ * one. Null is the common answer and the safe one: it leaves the command alone.
+ *
+ * Returns 0-1, the range set_brightness takes. A bare integer 0-100 is read as a
+ * percentage because that is how people say it, but a bare 0-1 decimal is taken
+ * literally — "brightness 0.3" and "brightness 30%" mean the same thing and
+ * neither means 30 times full scale.
+ */
+export function brightnessLevelFromText(text) {
+  const command = String(text ?? '')
+  if (!/\bbrightness\b/i.test(command)) return null
+
+  /* A read is not a write. `brightness -l`, `get brightness`, `brightness
+   * --list` all used to be rewritten into a command that changed the display. */
+  if (/\b(?:get|read|show|list|current|status|-l|--list)\b/i.test(command)) return null
+
+  const percent = command.match(/(\d{1,3}(?:\.\d+)?)\s*%/)
+  if (percent) return clampLevel(Number(percent[1]) / 100)
+
+  /* Otherwise the last number in the command — `brightness set 0.4` and
+   * `set-brightness 70` both put the value last, and taking the last one avoids
+   * matching a display index or a flag's own digits earlier in the line. */
+  const numbers = command.match(/\d+(?:\.\d+)?/g)
+  if (!numbers?.length) return null
+  const raw = Number(numbers[numbers.length - 1])
+  if (!Number.isFinite(raw)) return null
+
+  if (raw > 1) return clampLevel(raw / 100)
+  return clampLevel(raw)
+}
+
+const clampLevel = (level) => Math.min(1, Math.max(0, level))
+
 function sanitizeActions(actions) {
   // Light per-action cleanup only — never rewrite the whole plan from command text.
   return actions
@@ -1286,20 +1337,42 @@ function sanitizeActions(actions) {
         return null
       }
 
-      if (
-        action?.type === 'run_shell' &&
-        /brightness/i.test(String(action.params?.command ?? ''))
-      ) {
-        return {
-          type: 'set_brightness',
-          label: action.label || 'Set display brightness',
-          params: { level: 0.5 },
+      /*
+       * A shell command about brightness becomes the structured action — but
+       * only when it is actually setting one, and only at the level the owner
+       * asked for.
+       *
+       * Both halves were wrong. `/brightness/i` matched the whole command, so a
+       * READ like `brightness -l` was rewritten into a write. And the level was
+       * the literal 0.5, so "set brightness to 100%" dimmed the screen to half
+       * and reported success. A rewrite that silently substitutes a different
+       * value is worse than no rewrite: the owner asked for something specific
+       * and got a confident answer to a different question.
+       */
+      if (action?.type === 'run_shell') {
+        const command = String(action.params?.command ?? '')
+        const level = brightnessLevelFromText(command)
+        if (level !== null) {
+          return {
+            type: 'set_brightness',
+            label: action.label || 'Set display brightness',
+            params: { level },
+          }
         }
       }
 
       if (
         (action?.type === 'run_shell' || action?.type === 'run_project') &&
-        /tkinter|mainloop|overrideredirect|screenwidth|overlay/i.test(
+        /*
+         * Kept in step with computerControl.js's own predicate, which is the
+         * one that actually intercepts. This copy carried a bare `overlay`
+         * alternative the executor's did not, so `run_shell echo overlay`
+         * planned as a full-screen black rectangle — a word in passing became a
+         * screen takeover. The executor's `aipendant-screen-overlay` is here
+         * for the reverse reason: it only ever matched on that side, so the two
+         * disagreed in both directions.
+         */
+        /tkinter|mainloop|overrideredirect|screenwidth|aipendant-screen-overlay/i.test(
           String(action.params?.command ?? ''),
         )
       ) {
