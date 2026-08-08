@@ -64,7 +64,7 @@ import {
   persistAudioCapture,
 } from './audioStorage.js'
 import {
-  offloadResultSpeechAudio,
+  prepareResultForStorage,
   resolvePendantSpeechBuffers,
 } from './pendantSpeechStore.js'
 import {
@@ -2856,6 +2856,43 @@ app.get('/v1/bridge/work', async (request, response) => {
   response.status(204).end()
 })
 
+/*
+ * Store a bridge-result patch, and if D1 still refuses the row, store it again
+ * with the result cut down hard rather than losing the run. A briefing whose
+ * text and status survive beats a run recorded as failed, and the stored result
+ * says which rung it landed on (storageNotes / audioOmittedReason) so nothing
+ * downstream has to guess whether audio was ever there.
+ */
+async function storeBridgeResult(store, jobId, patch, { baseRow }) {
+  try {
+    return await store.updateJob(jobId, patch)
+  } catch (error) {
+    if (!patch || patch.result === undefined || patch.result === null) {
+      throw error
+    }
+    console.warn(
+      `[relay] Row refused for ${jobId} (${
+        error?.message || error
+      }); retrying without audio.`,
+    )
+    const degraded = await prepareResultForStorage({
+      jobId,
+      baseRow,
+      result: patch.result,
+      // Force the ladder past every audio rung, whatever the row already holds.
+      targetBytes: 100_000,
+    })
+    return store.updateJob(jobId, {
+      ...patch,
+      result: {
+        ...degraded.result,
+        storageDegraded: true,
+        storageError: String(error?.message || error).slice(0, 200),
+      },
+    })
+  }
+}
+
 app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
   const jobId = request.params.jobId
   const ok = Boolean(request.body?.ok)
@@ -2909,20 +2946,19 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
    * oversized audio to R2 here, keeping only a reference in the row, exactly as
    * the capture path does. Small voice replies stay inline and untouched.
    */
-  let stored = result
-  try {
-    stored = await offloadResultSpeechAudio({
-      jobId,
-      result,
-      bindings: getCloudflareBindings(),
-    })
-  } catch (offloadError) {
-    console.warn(
-      `[relay] pendantSpeech offload failed for ${jobId}: ${
-        offloadError?.message || offloadError
-      }`,
+  const prepared = await prepareResultForStorage({
+    jobId,
+    baseRow: job,
+    result,
+    bindings: getCloudflareBindings(),
+  })
+  const stored = prepared.result
+  if (prepared.notes.length) {
+    console.log(
+      `[relay] result storage for ${jobId}: ${prepared.startedBytes} -> ${
+        prepared.bytes
+      } bytes (${prepared.notes.join(', ')})`,
     )
-    stored = result
   }
 
   /*
@@ -2932,11 +2968,16 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
    */
   try {
     if (!ok) {
-      const failed = await store.updateJob(jobId, {
-        status: 'failed',
-        error: error || 'Mac bridge reported failure.',
-        result: stored,
-      })
+      const failed = await storeBridgeResult(
+        store,
+        jobId,
+        {
+          status: 'failed',
+          error: error || 'Mac bridge reported failure.',
+          result: stored,
+        },
+        { baseRow: job },
+      )
 
       response.json({
         ok: true,
@@ -2958,15 +2999,20 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
               phase: stored.phase || 'executed',
             }
           : job.result
-      const updated = await store.updateJob(jobId, {
-        status: 'processing',
-        result: mergedResult,
-        error: null,
-        actions:
-          job.type === 'plan'
-            ? mergedResult?.actions ?? job.actions ?? []
-            : job.actions,
-      })
+      const updated = await storeBridgeResult(
+        store,
+        jobId,
+        {
+          status: 'processing',
+          result: mergedResult,
+          error: null,
+          actions:
+            job.type === 'plan'
+              ? mergedResult?.actions ?? job.actions ?? []
+              : job.actions,
+        },
+        { baseRow: job },
+      )
       response.json({
         ok: true,
         partial: true,
@@ -2993,19 +3039,24 @@ app.post('/v1/bridge/work/:jobId/result', async (request, response) => {
 
     const nextStatus = job.type === 'plan' ? 'plan_ready' : 'completed'
 
-    const updated = await store.updateJob(jobId, {
-      status: nextStatus,
-      result:
-        parked && stored && typeof stored === 'object'
-          ? {
-              ...stored,
-              parked: true,
-              phase: stored.phase || 'parked_for_approval',
-            }
-          : stored,
-      error: null,
-      actions: job.type === 'plan' ? stored?.actions ?? [] : job.actions,
-    })
+    const updated = await storeBridgeResult(
+      store,
+      jobId,
+      {
+        status: nextStatus,
+        result:
+          parked && stored && typeof stored === 'object'
+            ? {
+                ...stored,
+                parked: true,
+                phase: stored.phase || 'parked_for_approval',
+              }
+            : stored,
+        error: null,
+        actions: job.type === 'plan' ? stored?.actions ?? [] : job.actions,
+      },
+      { baseRow: job },
+    )
 
     response.json({
       ok: true,

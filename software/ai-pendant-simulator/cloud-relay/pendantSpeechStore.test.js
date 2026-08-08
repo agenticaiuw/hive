@@ -3,9 +3,13 @@ import { Buffer } from 'node:buffer'
 import test from 'node:test'
 
 import {
+  D1_VALUE_MAX_BYTES,
+  STORED_ROW_TARGET_BYTES,
   offloadLargePendantSpeech,
   offloadResultSpeechAudio,
+  prepareResultForStorage,
   resolvePendantSpeechBuffers,
+  serializedBytes,
 } from './pendantSpeechStore.js'
 import { createRoutine, occurrenceKey, reapDispatchedRuns } from './routines.js'
 
@@ -282,18 +286,49 @@ test('with no R2 bucket, oversized audio is dropped so the row still stores and 
   assert.equal(closed[0].status, 'completed')
 })
 
-test('a short voice reply is left inline and untouched (no R2 write)', async () => {
+test('a real short voice reply stays inline and writes nothing to R2', async () => {
   const bucket = createFakeR2()
-  // ~100 KB PCM -> ~133 KB base64, well under the inline budget.
-  const { speech } = pendantSpeech({ pcmBytes: 100_000, opusBytes: 4096 })
+  /*
+   * What the hot voice path actually sends now that the bridge drops raw PCM
+   * when a servable opus exists: ~10 s of 16 kbps opus, ~27 KB of base64.
+   */
+  const speech = {
+    format: 's16le',
+    sampleRate: 24000,
+    channels: 1,
+    bitsPerSample: 16,
+    pcmBytes: 480_000,
+    compressedFormat: 'ogg-opus',
+    compressedAudioBase64: oggOpus(20_000).toString('base64'),
+    rawPcmOmitted: true,
+  }
   const slim = await offloadLargePendantSpeech({
     jobId: 'job_voice',
     speech,
     bindings: { AUDIO_BUCKET: bucket },
   })
-  assert.equal(slim, speech, 'small speech is returned unchanged')
-  assert.ok(slim.audioBase64, 'raw PCM stays inline for short replies')
+  assert.equal(slim, speech, 'a small reply is returned unchanged')
+  assert.ok(slim.compressedAudioBase64, 'its opus stays inline')
   assert.equal(bucket.objects.size, 0, 'no R2 object is written for small audio')
+})
+
+test('a reply still carrying six figures of raw PCM is offloaded, not inlined', async () => {
+  const bucket = createFakeR2()
+  /*
+   * The no-opus fallback shape: ~100 KB of PCM is ~133 KB of base64. That is
+   * small next to the old 700 KB guess but a sixth of everything D1 will accept
+   * for the WHOLE row, so it belongs in R2 rather than in the value.
+   */
+  const { speech } = pendantSpeech({ pcmBytes: 100_000, opusBytes: 4096 })
+  const slim = await offloadLargePendantSpeech({
+    jobId: 'job_voice_pcm',
+    speech,
+    bindings: { AUDIO_BUCKET: bucket },
+  })
+  assert.notEqual(slim, speech)
+  assert.equal(slim.audioBase64, undefined)
+  assert.ok(slim.audioRef, 'the PCM is addressable in R2')
+  assert.equal(bucket.objects.size, 1)
 })
 
 test('audio nested in an executed plan is stripped too, so the whole row fits', async () => {
@@ -355,6 +390,160 @@ test('audio nested in an executed plan is stripped too, so the whole row fits', 
   await assert.doesNotReject(async () => {
     await store.updateJob(jobId, { status: 'plan_ready', result: stored })
   }, 'the fully slimmed row must fit D1')
+})
+
+/* ---------------------------------------------------------------------------
+ * SQLITE_TOOBIG. D1 keeps the whole job in one JSON value, and SQLite's own
+ * per-value ceiling (~1 MB) is far below the 32 MiB binding-RPC limit. Once the
+ * bridge stopped shipping raw PCM, a ~1.5 MB opus track base64-encoded inside
+ * that value still blew it -- and a brief carries markdown and source text in
+ * the same row. The decision has to come from the measured serialized size.
+ * ------------------------------------------------------------------------- */
+
+test('an opus track that alone exceeds the D1 value limit is offloaded, and the run still completes', async () => {
+  const bucket = createFakeR2()
+  const store = sizeLimitedStore({ limit: D1_VALUE_MAX_BYTES })
+  const routine = createRoutine({
+    name: 'Morning news',
+    command: 'Give me the top world and US news headlines.',
+    schedule: { kind: 'daily', at: '07:00' },
+    now: NOW,
+  })
+  await store.saveRoutine({ ...routine, nextRunAt: NOW + 86_400_000 })
+
+  const jobId = 'job_toobig'
+  const baseRow = {
+    jobId,
+    type: 'plan',
+    status: 'processing',
+    command: 'Give me the top world and US news headlines.',
+    createdAt: new Date(NOW).toISOString(),
+  }
+  await store.createJob(baseRow)
+
+  // No raw PCM (the bridge strips it now); the opus alone is ~2 MB of base64.
+  const opus = oggOpus(1_500_000)
+  const speech = {
+    format: 's16le',
+    sampleRate: 24000,
+    channels: 1,
+    bitsPerSample: 16,
+    pcmBytes: 18_000_000,
+    compressedFormat: 'ogg-opus',
+    compressedAudioBase64: opus.toString('base64'),
+    rawPcmOmitted: true,
+  }
+  const result = {
+    response: 'Here are the top headlines.',
+    executed: true,
+    phase: 'complete',
+    pendantSpeech: speech,
+    // A brief also carries prose in the same row.
+    markdown: 'x'.repeat(200_000),
+    sources: [{ title: 'Example', text: 'y'.repeat(200_000) }],
+  }
+
+  assert.ok(
+    serializedBytes({ ...baseRow, result }) > D1_VALUE_MAX_BYTES,
+    'the untouched row must exceed the D1 value limit',
+  )
+  await assert.rejects(
+    store.updateJob(jobId, { status: 'plan_ready', result }),
+    /row too big/,
+  )
+
+  const prepared = await prepareResultForStorage({
+    jobId,
+    baseRow,
+    result,
+    bindings: { AUDIO_BUCKET: bucket },
+  })
+
+  // Decided by measurement, and now genuinely under the ceiling.
+  assert.ok(
+    prepared.bytes <= STORED_ROW_TARGET_BYTES,
+    `prepared row should fit the target, got ${prepared.bytes}`,
+  )
+  assert.ok(prepared.startedBytes > prepared.bytes)
+  // The opus went to R2 and is still fetchable; nothing was silently lost.
+  assert.equal(prepared.result.pendantSpeech.compressedAudioBase64, undefined)
+  assert.ok(prepared.result.pendantSpeech.compressedAudioRef)
+  assert.ok(bucket.objects.get(prepared.result.pendantSpeech.compressedAudioRef.key))
+  assert.equal(prepared.result.response, 'Here are the top headlines.')
+
+  let updated
+  await assert.doesNotReject(async () => {
+    updated = await store.updateJob(jobId, {
+      status: 'plan_ready',
+      result: prepared.result,
+      error: null,
+      actions: [],
+    })
+  }, 'the prepared row must store without throwing')
+
+  // The audio round-trips back out of R2 for the pendant download.
+  const buffers = await resolvePendantSpeechBuffers({
+    speech: updated.result.pendantSpeech,
+    bindings: { AUDIO_BUCKET: bucket },
+  })
+  assert.ok(buffers.opus.equals(opus), 'opus round-trips through R2')
+
+  // And the reaper still closes the run as completed, with an announcement.
+  await store.recordRoutineRun(dispatchedRun(routine, jobId))
+  const closed = await reapDispatchedRuns({
+    store,
+    now: NOW + 60_000,
+    logger: silentLogger,
+  })
+  assert.equal(closed[0].status, 'completed')
+  assert.equal(closed[0].final, true)
+  assert.match(
+    [...store.announcements.values()][0].speech,
+    /top headlines/,
+  )
+})
+
+test('with R2 unavailable the audio is dropped explicitly and the row still stores', async () => {
+  const store = sizeLimitedStore({ limit: D1_VALUE_MAX_BYTES })
+  const jobId = 'job_no_r2'
+  const baseRow = { jobId, type: 'plan', status: 'processing' }
+  await store.createJob(baseRow)
+
+  const result = {
+    response: 'Here are the top headlines.',
+    executed: true,
+    pendantSpeech: {
+      format: 's16le',
+      sampleRate: 24000,
+      channels: 1,
+      bitsPerSample: 16,
+      compressedFormat: 'ogg-opus',
+      compressedAudioBase64: oggOpus(1_500_000).toString('base64'),
+    },
+  }
+
+  // No AUDIO_BUCKET binding at all.
+  const prepared = await prepareResultForStorage({
+    jobId,
+    baseRow,
+    result,
+    bindings: {},
+  })
+
+  assert.ok(prepared.bytes <= STORED_ROW_TARGET_BYTES)
+  const speech = prepared.result.pendantSpeech
+  assert.equal(speech.compressedAudioBase64, undefined)
+  // Explicit about the loss rather than pretending there was never audio.
+  assert.ok(
+    speech.audioOmitted || speech.audioStorageWarning,
+    'the drop must be recorded in the stored result',
+  )
+  // The spoken text -- the reason the row exists -- survives.
+  assert.equal(prepared.result.response, 'Here are the top headlines.')
+
+  await assert.doesNotReject(async () => {
+    await store.updateJob(jobId, { status: 'plan_ready', result: prepared.result })
+  })
 })
 
 test('offloadResultSpeechAudio is a no-op for results without speech', async () => {
