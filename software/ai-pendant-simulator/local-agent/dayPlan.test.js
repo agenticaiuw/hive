@@ -135,13 +135,31 @@ test('a briefing never stops mid-sentence — it drops whole lines', async () =>
   assert.ok(!briefing.text.includes('You are done after'), 'the dropped line went whole')
 })
 
-test('an empty day says so instead of saying nothing', async () => {
+test('both sources empty is reported as unreadable, never as a free day', async () => {
+  /*
+   * This used to assert /clear/ and passed for the wrong reason even after the
+   * behaviour was corrected — the replacement sentence contains the word in
+   * "I am not going to tell you the day is clear when I cannot see it". A test
+   * that a regression would also satisfy is not pinning anything, so this
+   * asserts the distinction itself.
+   *
+   * The distinction is the point: appleData.js cannot tell an unauthorised
+   * EventKit read from an empty one, because both return []. Answering in the
+   * reassuring direction is how an owner skips a meeting they were told they
+   * did not have.
+   */
   const plan = await buildDayPlan(
     { now: NOW },
     { readEvents: async () => [], readReminders: async () => [] },
   )
   const briefing = formatBriefing(plan, { now: NOW })
-  assert.match(briefing.text, /clear/)
+
+  assert.match(briefing.text, /could not read/i)
+  assert.doesNotMatch(
+    briefing.text,
+    /\b(?:your calendar is clear|nothing is overdue|you are free|nothing needs you)\b/i,
+    `an unreadable calendar must not be announced as an empty one: ${briefing.text}`,
+  )
 })
 
 test('all-day events shape the day without pretending to have a time', async () => {

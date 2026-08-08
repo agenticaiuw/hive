@@ -132,3 +132,43 @@ test('nothing important says nothing important', async () => {
   assert.equal(result.important.length, 0)
   assert.match(result.spoken, /Nothing important/)
 })
+
+test('every source empty at once is reported as blind, not as a quiet morning', async () => {
+  /*
+   * Mail and EventKit both answer [] when the process has no Automation grant
+   * rather than throwing, so `unavailable` stays empty and the read looks
+   * successful. This Mac has no grant today, which makes it the live case and
+   * not a hypothetical. "Nothing waiting for you" is the reassuring reading,
+   * and the reassuring reading is the one that gets an owner in trouble.
+   */
+  const blind = await triageNotifications(
+    { now: NOW },
+    { readMail: async () => [], readEvents: async () => [], readReminders: async () => [] },
+  )
+
+  assert.equal(blind.important.length, 0)
+  assert.match(blind.spoken, /came back empty at once|could not read/i)
+  assert.doesNotMatch(
+    blind.spoken,
+    /\bnothing waiting for you\b|\bnone of them need you\b/i,
+    `an unreadable scan must not be announced as a clear one: ${blind.spoken}`,
+  )
+})
+
+test('a genuinely quiet scan still says so', async () => {
+  /* The fix must not turn every empty result into an alarm: something was read,
+   * it just did not matter. That is a real answer and stays one. */
+  const quiet = await triageNotifications(
+    { now: NOW },
+    {
+      readMail: async () => [
+        { subject: 'Your receipt', sender: 'noreply@shop.example', receivedAt: NOW.toISOString() },
+      ],
+      readEvents: async () => [],
+      readReminders: async () => [],
+    },
+  )
+
+  assert.equal(quiet.important.length, 0)
+  assert.doesNotMatch(quiet.spoken, /came back empty at once/i)
+})
