@@ -296,6 +296,67 @@ test('a short voice reply is left inline and untouched (no R2 write)', async () 
   assert.equal(bucket.objects.size, 0, 'no R2 object is written for small audio')
 })
 
+test('audio nested in an executed plan is stripped too, so the whole row fits', async () => {
+  const bucket = createFakeR2()
+  const store = sizeLimitedStore({ limit: 1_000_000 })
+  const jobId = 'job_nested'
+  await store.createJob({
+    jobId,
+    type: 'plan',
+    status: 'processing',
+    createdAt: new Date(NOW).toISOString(),
+  })
+
+  /*
+   * The live shape (job_c26aee36): the served payload at the top level AND the
+   * briefing's own full-length copy nested under execution.results[], which is
+   * what overflowed D1 after only the top level had been offloaded.
+   */
+  const served = pendantSpeech({ pcmBytes: 4_000_000 }).speech
+  const nested = pendantSpeech({ pcmBytes: 9_000_000 }).speech
+  const result = {
+    response: 'Your briefing is ready.',
+    executed: true,
+    pendantSpeech: served,
+    execution: {
+      ok: true,
+      results: [
+        { type: 'research_brief', ok: true, seconds: 390, pendantSpeech: nested },
+      ],
+    },
+  }
+
+  await assert.rejects(
+    store.updateJob(jobId, { status: 'plan_ready', result }),
+    /row too big/,
+    'the nested copy alone must overflow the simulated D1 row',
+  )
+
+  const stored = await offloadResultSpeechAudio({
+    jobId,
+    result,
+    bindings: { AUDIO_BUCKET: bucket },
+  })
+
+  // Served payload: offloaded to R2 and still downloadable.
+  assert.equal(stored.pendantSpeech.audioBase64, undefined)
+  assert.ok(stored.pendantSpeech.audioRef)
+  // Nested duplicate: dropped, not given its own R2 object nothing would read.
+  const nestedStored = stored.execution.results[0].pendantSpeech
+  assert.equal(nestedStored.audioBase64, undefined)
+  assert.equal(nestedStored.audioOmitted, true)
+  // Descriptive metadata survives for the dashboard.
+  assert.equal(nestedStored.format, 's16le')
+  assert.equal(nestedStored.pcmBytes, 9_000_000)
+  // Non-audio execution detail is untouched.
+  assert.equal(stored.execution.results[0].seconds, 390)
+  assert.equal(stored.response, 'Your briefing is ready.')
+
+  await assert.doesNotReject(async () => {
+    await store.updateJob(jobId, { status: 'plan_ready', result: stored })
+  }, 'the fully slimmed row must fit D1')
+})
+
 test('offloadResultSpeechAudio is a no-op for results without speech', async () => {
   const result = { response: 'done', executed: true }
   const stored = await offloadResultSpeechAudio({

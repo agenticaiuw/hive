@@ -9,7 +9,10 @@ import {
   clearPendantSpeechCache,
   encodePendantSpeechOpus,
   extractWavePcm,
+  hasServableOpus,
   pendantSpeechCacheSize,
+  pendantSpeechForWire,
+  resultForWire,
   spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
@@ -164,4 +167,107 @@ test('caches canned short phrases and clears on demand', () => {
 
   clearPendantSpeechCache()
   assert.equal(pendantSpeechCacheSize(), 0)
+})
+
+/* ---------------------------------------------------------------------------
+ * The wire form. Raw 24 kHz PCM is ~3.8 MB of base64 per spoken minute, and a
+ * pre-rendered briefing pushed one result to ~29 MB -- refused by the relay
+ * (413), then too large for D1. The relay serves the opus track anyway, so the
+ * raw PCM is dropped when (and only when) that opus is one the relay accepts.
+ * ------------------------------------------------------------------------- */
+
+function speechFixture({ pcmBytes = 400_000, opus = true, validOpus = true } = {}) {
+  const pcm = Buffer.alloc(pcmBytes, 1)
+  const payload = {
+    format: 's16le',
+    sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
+    channels: 1,
+    bitsPerSample: 16,
+    pcmBytes: pcm.length,
+    truncated: false,
+    audioBase64: pcm.toString('base64'),
+  }
+  if (opus) {
+    const bytes = Buffer.alloc(4096, 7)
+    if (validOpus) bytes.write('OggS', 0, 'ascii')
+    payload.compressedFormat = 'ogg-opus'
+    payload.compressedBytes = bytes.length
+    payload.compressedAudioBase64 = bytes.toString('base64')
+  }
+  return payload
+}
+
+test('the wire form drops raw PCM when the relay-servable opus track exists', () => {
+  const speech = speechFixture()
+  assert.equal(hasServableOpus(speech), true)
+
+  const wire = pendantSpeechForWire(speech)
+  assert.equal(wire.audioBase64, undefined, 'raw PCM must not cross the wire')
+  assert.equal(wire.rawPcmOmitted, true)
+  // Everything the relay validates against, and the dashboard reports from.
+  assert.equal(wire.format, 's16le')
+  assert.equal(wire.sampleRate, PENDANT_SPEECH_SAMPLE_RATE)
+  assert.equal(wire.channels, 1)
+  assert.equal(wire.bitsPerSample, 16)
+  assert.equal(wire.pcmBytes, speech.pcmBytes)
+  assert.equal(wire.compressedFormat, 'ogg-opus')
+  assert.equal(wire.compressedAudioBase64, speech.compressedAudioBase64)
+  // The caller's own copy keeps full fidelity for the Mac dashboard preview.
+  assert.ok(speech.audioBase64)
+
+  const shrunk = JSON.stringify(wire).length / JSON.stringify(speech).length
+  assert.ok(shrunk < 0.05, `wire payload should collapse, got ratio ${shrunk}`)
+})
+
+test('raw PCM is KEPT whenever the opus track is missing or unservable', () => {
+  for (const speech of [
+    speechFixture({ opus: false }),
+    speechFixture({ validOpus: false }),
+  ]) {
+    assert.equal(hasServableOpus(speech), false)
+    const wire = pendantSpeechForWire(speech)
+    assert.equal(
+      wire.audioBase64,
+      speech.audioBase64,
+      'without servable opus the PCM is the only playable audio',
+    )
+    assert.equal(wire.rawPcmOmitted, undefined)
+  }
+})
+
+test('nested briefing audio is stripped too, wherever it rides in the result', () => {
+  const served = speechFixture({ pcmBytes: 200_000 })
+  const nested = speechFixture({ pcmBytes: 9_000_000 })
+  const result = {
+    response: 'Your briefing is ready.',
+    executed: true,
+    pendantSpeech: served,
+    execution: {
+      ok: true,
+      results: [{ type: 'research_brief', seconds: 390, pendantSpeech: nested }],
+    },
+  }
+
+  const wire = resultForWire(result)
+  assert.equal(wire.pendantSpeech.audioBase64, undefined)
+  assert.equal(
+    wire.execution.results[0].pendantSpeech.audioBase64,
+    undefined,
+    'the nested copy is what overflowed the row; it must go too',
+  )
+  assert.equal(wire.execution.results[0].pendantSpeech.compressedAudioBase64, nested.compressedAudioBase64)
+  assert.equal(wire.execution.results[0].seconds, 390, 'non-audio detail survives')
+  assert.equal(wire.response, 'Your briefing is ready.')
+  // Non-mutating: the agent's own result still has every byte.
+  assert.ok(result.pendantSpeech.audioBase64)
+  assert.ok(result.execution.results[0].pendantSpeech.audioBase64)
+
+  const ratio = JSON.stringify(wire).length / JSON.stringify(result).length
+  assert.ok(ratio < 0.05, `whole-result wire size should collapse, got ${ratio}`)
+})
+
+test('resultForWire leaves results without audio exactly as they are', () => {
+  const plain = { response: 'Done.', executed: true, actions: [] }
+  assert.equal(resultForWire(plain), plain)
+  assert.equal(resultForWire(null), null)
 })
