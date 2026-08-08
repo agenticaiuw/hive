@@ -806,6 +806,28 @@ function buildSystemPrompt(state) {
       )
     }
   }
+  /*
+   * Corrections attached to grants, surfaced where the agent will read them.
+   *
+   * The note is the only channel for "you got what you asked for AND your
+   * premise was wrong". Storing it and not rendering it would repeat the exact
+   * defect it was added to fix — granted deviceSkills sat unread in state for
+   * the whole run, and agents re-requested work already accepted because
+   * nothing ever told them.
+   */
+  const corrections = [
+    ...state.granted.tools,
+    ...(state.granted.deviceSkills || []),
+    ...state.granted.permissions,
+  ].filter((entry) => entry?.note)
+  if (corrections.length) {
+    holdings.push(
+      `- Corrections issued with your grants — these override what you believed when you asked: ${corrections
+        .map((entry) => `${entry.name || entry.scope}: ${entry.note}`)
+        .join(' | ')}`,
+    )
+  }
+
   if (state.pending.length) {
     const oldest = state.pending.reduce(
       (lowest, request) => (Number.isFinite(request.round) && request.round < lowest ? request.round : lowest),
@@ -3974,11 +3996,28 @@ function flag(name) {
   return i > -1 ? process.argv[i + 1] : undefined
 }
 
+/*
+ * A grant could not carry a message, and that quietly cost the whole loop.
+ *
+ * --text was accepted only for kind:"context". A tool, skill or permission
+ * grant returned a canned string, so the most valuable thing an orchestrator
+ * has to say — "you got it, AND your premise was wrong, here is the real
+ * mechanism" — had no channel except a denial. Measured consequence: agents
+ * asserted there was no scheduler to poll while /routines and the whole
+ * /watches subsystem shipped, and that no priority list existed while
+ * /memory/projection returned live task facts. Nothing corrected them.
+ *
+ * It also starves the eligibility gate. An agent that gets exactly what it
+ * asked for learns nothing new, so it has nothing to react to next cycle, and
+ * the commons goes still — which is the condition that stopped discovery twice
+ * tonight. A grant that carries a correction is itself news.
+ */
 function grant(id) {
   const state = loadState()
   const index = state.pending.findIndex((r) => r.id === id)
   if (index < 0) throw new Error(`No pending request ${id}.`)
   const [request] = state.pending.splice(index, 1)
+  const note = flag('text')
 
   if (request.kind === 'context') {
     const text = flag('text')
@@ -4003,6 +4042,7 @@ function grant(id) {
       scope: flag('scope') || request.scope,
       askedFor: request.scope,
       grantedInRound: state.round,
+      ...(note ? { note } : {}),
     })
   } else if (request.kind === 'skill') {
     /*
@@ -4016,6 +4056,7 @@ function grant(id) {
       name: request.name,
       what_it_does: request.what_it_does,
       grantedInRound: state.round,
+      ...(note ? { note } : {}),
     })
     process.stdout.write(
       `Accepted device skill "${request.name}" — it belongs in firmware, so it is\n` +
@@ -4028,6 +4069,7 @@ function grant(id) {
       why: request.why,
       input_schema: request.input_schema,
       grantedInRound: state.round,
+      ...(note ? { note } : {}),
     })
     /*
      * This used to say the tool "still needs an implementation in this script
