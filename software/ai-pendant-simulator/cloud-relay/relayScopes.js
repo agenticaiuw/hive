@@ -13,8 +13,6 @@
  * for this request, or null for "no rule" — and the auth middleware treats
  * null as DENY, so an unlisted route is closed to everyone, admin included.
  */
-import { fleetMemoryScopesFor } from './fleetContext.js'
-
 export function requiredScopesForRequest(request) {
   return requiredScopesForRoute(request.method, request.path)
 }
@@ -22,11 +20,6 @@ export function requiredScopesForRequest(request) {
 export function requiredScopesForRoute(rawMethod, rawPath) {
   const method = String(rawMethod || '').toUpperCase()
   const path = String(rawPath || '')
-
-  /* Declared next to their handlers in fleetContext.js, so adding a memory
-   * route cannot quietly ship an unscoped write path for the owner's facts. */
-  const memoryScopes = fleetMemoryScopesFor(method, path)
-  if (memoryScopes) return memoryScopes
 
   if (method === 'POST' && path === '/v1/devices/register') return ['admin']
   /*
@@ -102,9 +95,8 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
     return ['speech:synthesize']
   }
   if (
-    (method === 'POST' && path === '/v1/pendant/speak') ||
-    (method === 'GET' &&
-      /^\/v1\/pendant\/jobs\/[^/]+\/speech$/.test(path))
+    method === 'GET' &&
+    /^\/v1\/pendant\/jobs\/[^/]+\/speech$/.test(path)
   ) {
     return ['pendant:speech:read']
   }
@@ -209,21 +201,6 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
    * the same privilege as using it. */
   if (method === 'GET' && path === '/v1/node/presence') {
     return ['device:status:read']
-  }
-
-  /*
-   * local-agent/visionLoopRelay.js has named this route since it was written
-   * and it was never added here, which means it was not merely unimplemented
-   * — it was unreachable, 403 for every principal including the admin key,
-   * because an unlisted path denies universally. The module's own
-   * ENDPOINT_IMPLEMENTED=false is still the honest flag for the missing
-   * handler; this entry only removes the second, invisible reason it could
-   * never have worked. It classifies a structured digest of window controls
-   * (never pixels — see that file's header), so it rides the same privilege
-   * as the Mac's other planning calls.
-   */
-  if (method === 'POST' && path === '/v1/vision/classify-ui-state') {
-    return ['mac:plan']
   }
 
   /*

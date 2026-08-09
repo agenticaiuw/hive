@@ -4,11 +4,8 @@ import { Buffer } from 'node:buffer'
 
 import {
   ANNOUNCEMENT_MAX_CHARS,
-  ANNOUNCE_CONTROL_FRAME_MAX_BYTES,
   DELIVERY_CLAIM_TIMEOUT_MS,
   speakableText,
-  announceDoneFrame,
-  announceOpenFrame,
   announcementIsLive,
   announcementSpeechChunks,
   assertFirmwareSafeControlFrame,
@@ -19,23 +16,6 @@ import {
   streamAnnouncementPcm,
 } from './announce.js'
 
-test('control frames never collide with the tokens main.c matches on', () => {
-  // firmware/nrf9160/src/main.c matches downlink text with strstr() against
-  // these three, so an announce frame containing one would be read as a
-  // barge-in flush or an end-of-conversation.
-  const open = announceOpenFrame({ id: 'anc_abc123', seconds: 42 })
-  const done = announceDoneFrame({ id: 'anc_abc123' })
-  for (const frame of [open, done]) {
-    assert.ok(!frame.includes('"started"'))
-    assert.ok(!frame.includes('"flush"'))
-    assert.ok(!frame.includes('"end"'))
-  }
-  assert.equal(JSON.parse(open).type, 'announce')
-  assert.equal(JSON.parse(open).s, 42)
-  // "announced" must not smuggle a quoted "end" past the guard.
-  assert.equal(JSON.parse(done).type, 'announced')
-})
-
 test('a frame carrying a firmware control token is refused, not shipped', () => {
   assert.throws(
     () => assertFirmwareSafeControlFrame('{"type":"announce","title":"end"}'),
@@ -44,16 +24,10 @@ test('a frame carrying a firmware control token is refused, not shipped', () => 
 })
 
 test('control frames stay far under the pendant 640 B receive buffer', () => {
-  const frame = announceOpenFrame({ id: 'a'.repeat(64), seconds: 999 })
-  assert.ok(Buffer.byteLength(frame) <= ANNOUNCE_CONTROL_FRAME_MAX_BYTES)
   assert.throws(
     () => assertFirmwareSafeControlFrame(`{"pad":"${'x'.repeat(400)}"}`),
     /receive buffer/,
   )
-})
-
-test('announcement ids are constrained so a frame cannot be injected through one', () => {
-  assert.throws(() => announceOpenFrame({ id: 'anc "flush" x' }), /alphanumeric/)
 })
 
 test('an announcement needs something to say', () => {

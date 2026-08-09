@@ -18,6 +18,8 @@
  * can and cannot see.
  */
 
+import { setTimeout as sleepMs } from 'node:timers/promises'
+
 import { getCloudflareBindings } from './cloudflareBindings.js'
 
 /** Quick Actions this harness can drive. Text first — the pendant speaks. */
@@ -356,7 +358,7 @@ export async function readPublicPage(rawUrl, options = {}) {
   }
 
   const body = quickActionBody(target.url, { action, gotoOptions: options.gotoOptions })
-  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const sleep = options.sleep || sleepMs
   const maxWaitMs = Math.max(0, Number(options.maxRateLimitWaitMs) || 0)
 
   let transport = 'none'

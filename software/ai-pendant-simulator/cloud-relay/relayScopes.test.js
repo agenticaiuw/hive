@@ -205,23 +205,6 @@ test('retiring a device is owner work', () => {
   )
 })
 
-test('the vision route is no longer unreachable', () => {
-  /*
-   * local-agent/visionLoopRelay.js has named /v1/vision/classify-ui-state
-   * since it was written and it was never in this table, which meant it was
-   * not merely unimplemented — an unlisted path denies universally, so it was
-   * 403 for every principal including the owner's admin key. Its module flag
-   * ENDPOINT_IMPLEMENTED=false is still the honest signal for the missing
-   * handler; this only removes the second, invisible reason.
-   */
-  assert.deepEqual(
-    requiredScopesForRoute('POST', '/v1/vision/classify-ui-state'),
-    ['mac:plan'],
-  )
-  assert.equal(allows('nrf_pendant', 'POST', '/v1/vision/classify-ui-state'), true)
-  assert.equal(allows('mac_bridge', 'POST', '/v1/vision/classify-ui-state'), false)
-})
-
 test('a scoped token is refused everything outside its role', () => {
   /* The blast radius the admin key hands every node today, denied per role. */
   const forbiddenForBridge = [

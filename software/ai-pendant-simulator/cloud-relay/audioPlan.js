@@ -31,15 +31,6 @@ export function normalizeAudioInputFormat(format) {
   return value || 'wav'
 }
 
-/** @deprecated compat export for older imports/tests. */
-export function geminiAudioMimeType(format) {
-  const fmt = normalizeAudioInputFormat(format)
-  if (fmt === 'mp3') return 'audio/mp3'
-  if (fmt === 'ogg') return 'audio/ogg'
-  if (fmt === 'flac') return 'audio/flac'
-  return 'audio/wav'
-}
-
 export function extractJsonObject(text) {
   let trimmed = String(text || '').trim()
   if (!trimmed) {

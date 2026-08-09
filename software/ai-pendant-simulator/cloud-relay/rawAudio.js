@@ -1,24 +1,3 @@
-import express from 'express'
-
-export const PENDANT_AUDIO_CONTENT_TYPES = Object.freeze([
-  'audio/wav',
-  'audio/x-wav',
-  'audio/ogg',
-  'audio/opus',
-  'audio/pcm',
-  'audio/l16',
-  'audio/pcmu',
-  'audio/basic',
-  'application/octet-stream',
-])
-
-export function createPendantAudioParser({ limit = '12mb' } = {}) {
-  return express.raw({
-    type: PENDANT_AUDIO_CONTENT_TYPES,
-    limit,
-  })
-}
-
 export function pendantAudioFormat({ headerFormat, contentType } = {}) {
   const explicit = String(headerFormat || '').trim().toLowerCase()
   if (explicit) {
@@ -83,23 +62,6 @@ export function ulawToPcmS16le(ulawBuffer) {
     out.writeInt16LE(ULAW_DECODE_TABLE[ulawBuffer[i]], i * 2)
   }
   return out
-}
-
-/** Encode one s16 sample to a μ-law byte (CCITT G.711 reference). */
-export function linearToUlaw(sample) {
-  const BIAS = 0x84
-  const CLIP = 32635
-  let s = sample | 0
-  const sign = s < 0 ? 0x80 : 0
-  if (s < 0) s = -s
-  if (s > CLIP) s = CLIP
-  s += BIAS
-  let exponent = 7
-  for (let mask = 0x4000; (s & mask) === 0 && exponent > 0; exponent--) {
-    mask >>= 1
-  }
-  const mantissa = (s >> (exponent + 3)) & 0x0f
-  return ~(sign | (exponent << 4) | mantissa) & 0xff
 }
 
 /**
