@@ -1,9 +1,0 @@
-.git
-.gitignore
-node_modules/
-dist/
-ios/
-*.md
-.env
-.env.*
-!.env.example
