@@ -685,6 +685,11 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       "Go to the Home Screen on the owner's REAL iPhone. The cheapest action there is: it reaches the phone without bringing the mirroring window forward or taking the owner's focus, so it works while they are using their Mac. Always works, and is the way out of an app without tapping anything inside it.",
     params: {},
   },
+  ios_app_switcher: {
+    description:
+      "Open the App Switcher on the owner's REAL iPhone to see what is currently running. Costs the owner nothing: like ios_home it reaches the phone without bringing the mirroring window forward or taking their focus, so it works while they are using their Mac. This is the only way to learn what is open BEHIND the current app — a screenshot only ever shows the app in front. Follow it with a screen read to see the result.",
+    params: {},
+  },
 }
 
 const SAFE_ACTION_SCHEMA = {

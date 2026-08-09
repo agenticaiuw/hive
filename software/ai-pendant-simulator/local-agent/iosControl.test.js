@@ -758,13 +758,16 @@ test('ios_status says up front whether a write could land at all', async (t) => 
   assert.equal(status.payload.result.state, 'off-space')
   assert.equal(status.payload.result.readable, true)
   assert.equal(status.payload.result.spaceSwitchOnActivate, false)
-  // Pointer actions cannot land, but ios_home still can — so "writes" as a
-  // single yes/no would be a lie in both directions.
+  // Pointer actions cannot land, but the two menu-equivalent actions still
+  // can — so "writes" as a single yes/no would be a lie in both directions.
   assert.equal(status.payload.result.pointerWritesPossible, false)
   assert.equal(status.payload.result.navigationWritesPossible, true)
   assert.equal(status.payload.result.writesPossible, true)
   assert.equal(status.payload.result.writeMechanism, 'targeted')
-  assert.deepEqual(status.payload.result.targetedActions, ['ios_home'])
+  assert.deepEqual(status.payload.result.targetedActions, [
+    'ios_home',
+    'ios_app_switcher',
+  ])
 
   const fine = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'on' })
   const ok = fine.run('ios_status', {})
@@ -1268,6 +1271,7 @@ test('every advertised iPhone action is dispatchable and described', async () =>
   const plannerSource = fs.readFileSync(path.join(HERE, 'llmPlanner.js'), 'utf8')
 
   assert.deepEqual(IOS_ACTION_TYPES, [
+    'ios_app_switcher',
     'ios_back',
     'ios_home',
     'ios_ocr',

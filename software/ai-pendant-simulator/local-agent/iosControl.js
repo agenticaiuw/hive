@@ -816,12 +816,13 @@ const OPERATIONS = {
     result["activeSpaceIsFullscreen"] = (
         None if space_kind is None else space_kind != SPACE_TYPE_DESKTOP)
     # The actions that EXIST on this route, not the chords it could carry.
-    # cmd+2 and cmd+3 were measured working off-Space too, but neither is an
+    # cmd+3 was measured working off-Space too, but Spotlight is not an
     # advertised action, and listing an action nobody can call is how a status
     # field starts lying. The ceiling on this route is the app's View menu,
     # read over the Accessibility API: Home Screen, App Switcher, Spotlight,
     # and nothing else — so there is no fourth thing to go looking for.
-    result["targetedActions"] = ["ios_home"] if result["targetedAvailable"] else []
+    result["targetedActions"] = (
+        ["ios_home", "ios_app_switcher"] if result["targetedAvailable"] else [])
     result["navigationWritesPossible"] = bool(
         result["readsPossible"] and result["targetedAvailable"]
         and result["state"] in ("ready", "off-space"))
@@ -1055,24 +1056,25 @@ const OPERATIONS = {
 `,
   },
   /*
-   * NOT WIRED, AND DELIBERATELY SO: ios_app_switcher.
+   * The second of the two free actions, and the reason it is worth having:
+   * it is the only way to learn what is currently open on the phone without
+   * taking the owner's screen. Reads tell you about the app in front; this
+   * tells you what else is running behind it.
    *
-   * cmd+2 is a menu key equivalent exactly like cmd+1, and it was measured
-   * arriving and acting with the window on another Space while the owner
-   * worked in a fullscreen app and their frontmost app never changed. It would
-   * be the only way to see what is open on the phone without taking the
-   * owner's screen, and the operation itself is two lines:
-   *
-   *   win, before, pid = ready_to_send_targeted()
-   *   press_to(pid, "app_switcher")
-   *
-   * It is left out because an advertised action also needs a dispatch case in
-   * computerControl.js and a description in llmPlanner.js, and adding it in
-   * only this file would ship an action the planner cannot see and the
-   * executor cannot route. Half-wiring it would be worse than not having it.
-   * CHORDS already carries the keycode, so this is a three-file change waiting
-   * to be made, not research waiting to be done.
+   * cmd+2 is a menu key equivalent exactly like cmd+1, measured arriving AND
+   * acting with the window on another Space while the owner worked in a
+   * fullscreen app and their frontmost app never changed.
    */
+  ios_app_switcher: {
+    timeoutMs: 45_000,
+    mechanism: 'targeted',
+    python: `    win, before, pid = ready_to_send_targeted()
+    press_to(pid, "app_switcher")
+    after = settle(win)
+    result = {"mechanism": "targeted", "visible": visible(after)}
+    result.update(diff_screens(before, after))
+`,
+  },
   /*
    * Not an action type: internal, never advertised to the planner and never
    * reachable from a plan. It hands the screen back to whoever had it before
@@ -1192,6 +1194,7 @@ function paramsFor(action) {
       return { amount }
     }
     case 'ios_home':
+    case 'ios_app_switcher':
     case 'ios_back':
       return {}
     case 'ios_restore_focus':
