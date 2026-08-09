@@ -607,6 +607,10 @@ const ROUTE_NOTES = {
     'Is a staged plan still committable, or has the world moved under it? Re-fingerprints what was captured at prepare time and reports the parts it cannot see. It commits nothing and expires nothing, and a match means the observable part is unchanged, not that nothing changed.',
   'POST /approve':
     "Settle a staged decision: check the owner's yes or no against the pending record, the world fingerprint and the plan digest, and hand back either the actions to run or a refusal with the reason to say out loud. A refusal is a normal answer, not an error. Approving is not doing: the actions still go to POST /execute.",
+  'GET /approvals/pending':
+    'What is waiting for the owner right now, from the relay that holds every parked decision: one row per pending approval with its summary, full readback, origin node, risk phrase and deadline. Read-only, fleet-wide — it lists prompts however they were delivered, spoken on the pendant or pushed to a phone. It decides nothing.',
+  'POST /approvals/:approvalId/decision':
+    'Answer one parked approval as the owner at this Mac: approve or deny, forwarded to the relay under this agent’s own credential. Any owner surface may decide any approval — origin only chose where the prompt was pushed. Deciding is not doing: a granted plan still runs nowhere until the body holding its manifest commits it.',
 
   /* ---- workbench ---- */
   'POST /workbench/plan':

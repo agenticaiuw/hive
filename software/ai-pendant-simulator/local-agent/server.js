@@ -31,6 +31,7 @@ import { registerCatchupRoutes } from './catchupDigest.js'
 import { registerFormPreviewRoutes } from './formPreview.js'
 import { registerBriefingTriageRoutes } from './briefingTriage.js'
 import { registerPrepareApproveRoutes } from './prepareApprove.js'
+import { registerApprovalsSurfaceRoutes } from './approvalsSurface.js'
 import { registerPageWatchRoutes } from './pageWatchRoutes.js'
 import {
   browserSessionsLocation,
@@ -1419,6 +1420,10 @@ registerAudioRetentionRoutes(app)
 
 /* Prepare on the Mac, approve from the pendant. Neither route executes. */
 registerPrepareApproveRoutes(app)
+/* The Mac leg of approval-at-origin routing: list the relay's pending
+ * approvals and forward decisions with the agent's own relay credential.
+ * Contract frozen — a Swift consumer builds against these exact shapes. */
+registerApprovalsSurfaceRoutes(app)
 
 /*
  * One causal account of a gap. Three surfaces already recorded "handed over,
