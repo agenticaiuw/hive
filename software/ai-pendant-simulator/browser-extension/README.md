@@ -85,14 +85,44 @@ owner's Safari.
   explicitly set `allowSensitiveInput: true`.
 - Each command result goes back to the same authenticated loopback agent.
 
-The extension is a **sensor/actuator** for the Mac agent (no LLM in the
-extension). After website access is granted it can:
+The extension is a **sensor/actuator** for the Mac agent (its own planning
+brain in `src/brain.js` stays inert until the owner pastes a credential).
+After website access is granted it can:
 
 - **snapshot** interactive elements with stable refs (prefer over desktop screenshots)
-- **list_tabs**, **navigate**, **click** / **type** by ref or CSS selector
+- **list_tabs**, **navigate**, **activate_tab** (find-or-open by URL), **click** / **type** by ref or CSS selector
 - **wait_for**, **scroll**, **select**, **press_key**, **read_page**, **capture** (tab PNG)
 
 Install it only in a browser profile you want AI Pendant to control.
+
+## Affinity: browser work runs in the browser
+
+A command typed into the popup used to go to the Mac wholesale — which is how
+"open ibkr" once opened interactivebrokers.com in the *Mac's* browser session
+instead of the owner's. Now every step of a Mac-planned auto-approved plan is
+capability-tagged (`src/affinity.js`): a plan that is entirely browser work
+(the `browser_*` family, plus `open_url`, which becomes `activate_tab` here)
+executes **in this extension**, through the same validated executor and
+privacy boundary as agent-issued commands. One non-browser step (shell,
+files, other devices) and the whole plan forwards to the hive as before.
+
+Three rules ride along, all unit-tested:
+
+- **Outward steps never auto-run.** A click or keystroke that reads as a
+  commit point — submit, place order, cancel a subscription/investment, send —
+  parks in a local approval queue (`src/execution-status.js`,
+  `localPendingApprovals` in `storage.local`) and waits for the owner. The
+  popup pane for it is a later pass; the background already answers
+  `affinity:list-pending` / `affinity:resolve-approval`.
+- **Completion is honest.** The verdict comes from the ledger of executed
+  steps, never from model prose: a run that only opened and read pages says
+  "changed nothing", and a command that asked for a cancellation that never
+  ran is reported NOT done.
+- **Local is not invisible.** Each locally claimed run is recorded to the hive
+  as node-mesh mail to `@relay` (`browser.task.record`, marked
+  claimed/executed by this node from creation). Only an admin principal can
+  drain `@relay`, so the record can never be claimed as Mac work. Nothing
+  renders these into hive history yet — a named gap, not an accident.
 
 ## Chrome setup
 
