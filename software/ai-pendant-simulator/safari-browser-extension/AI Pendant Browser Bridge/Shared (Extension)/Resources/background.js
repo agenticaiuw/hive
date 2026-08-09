@@ -19,7 +19,8 @@
 		"select",
 		"list_tabs",
 		"capture",
-		"press_key"
+		"press_key",
+		"activate_tab"
 	]);
 	const READ_MODES = new Set([
 		"text",
@@ -75,6 +76,12 @@
 		if (!COMMAND_TYPES.has(type)) throw new Error(`Unsupported browser command: ${String(type ?? "")}`);
 		if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Browser command parameters must be an object.");
 		if (type === "navigate") validateNavigationUrl(params.url);
+		if (type === "activate_tab") {
+			const hasNeedle = String(params.urlContains ?? "").trim();
+			const hasUrl = String(params.url ?? "").trim();
+			if (!hasNeedle && !hasUrl) throw new Error("activate_tab requires urlContains or url.");
+			if (hasUrl) validateNavigationUrl(params.url);
+		}
 		if (type === "click" || type === "type" || type === "select" || type === "scroll") {
 			const hasSelector = String(params.selector ?? "").trim();
 			const hasRef = String(params.ref ?? "").trim();
@@ -648,7 +655,7 @@
 		};
 	}
 	//#endregion
-	//#region src/command-console.js
+	//#region browser-extension/src/command-console.js
 	const CONSOLE_SOURCE = "browser-extension";
 	const HISTORY_KEY = "consoleHistory";
 	const SESSION_KEY = "consoleSessionId";
@@ -869,7 +876,7 @@
 		}
 	}
 	//#endregion
-	//#region src/brain.js
+	//#region browser-extension/src/brain.js
 	const BRAIN_STORAGE_KEYS = [
 		"brainEnabled",
 		"modelProxyUrl",
@@ -1024,6 +1031,11 @@
 			params: "url, newTab?"
 		},
 		{
+			name: "activate_tab",
+			description: "Focus the existing tab matching a URL, or open it.",
+			params: "urlContains | url"
+		},
+		{
 			name: "click",
 			description: "Click an element.",
 			params: "selector | ref"
@@ -1088,10 +1100,16 @@
 			pendingCall: null,
 			response: null,
 			handoffReason: null,
+			parkedCall: null,
+			parkedReason: null,
 			startedAt: new Date(now).toISOString()
 		};
 	}
-	const TERMINAL = new Set(["done", "handoff"]);
+	const TERMINAL = new Set([
+		"done",
+		"handoff",
+		"parked"
+	]);
 	/**
 	* The reducer. Every transition the loop can make is here, pure, so the whole
 	* lifecycle is testable without a model, a browser, or a network.
@@ -1101,6 +1119,8 @@
 	*   {type:'model_error', error}         — while thinking
 	*   {type:'tool_result', ok, result?, error?} — while acting
 	*   {type:'hand_off', reason}           — from anywhere
+	*   {type:'park', reason}               — while acting; the pending call is
+	*                                         refused unattended execution
 	*/
 	function reduceBrain(state, event) {
 		if (!state || TERMINAL.has(state.status)) return state;
@@ -1109,6 +1129,13 @@
 			status: "handoff",
 			pendingCall: null,
 			handoffReason: event.reason || "Handed off to the Mac planner."
+		};
+		if (state.status === "acting" && event?.type === "park") return {
+			...state,
+			status: "parked",
+			parkedCall: state.pendingCall,
+			parkedReason: event.reason || "This step is irreversible or outward-facing.",
+			pendingCall: null
 		};
 		if (state.status === "thinking" && event?.type === "model_reply") {
 			const parsed = parseToolCalls(event.text);
@@ -1325,9 +1352,9 @@ or, when you are finished,
 	}
 	/**
 	* Read a failed POST /v1/infer. Pure, so every branch is testable without a
-	* relay — which matters more than usual here, because the branch the owner
-	* will actually hit first (a credential minted before `llm:infer` joined the
-	* browser_node role) cannot be reproduced locally at all.
+	* relay — which matters more than usual here, because the branch that still
+	* demands a human remedy (a credential minted with an explicit `scopes`
+	* ceiling that leaves out `llm:infer`) cannot be reproduced locally at all.
 	*
 	* Keys on `code`, never on message text: the relay's own comment says the
 	* generic denial stays deliberately vague so a probing token gets no
@@ -1337,7 +1364,7 @@ or, when you are finished,
 	function interpretInferError({ status, payload } = {}) {
 		const code = String(payload?.code ?? "").trim() || "unknown";
 		const relayText = String(payload?.error ?? "").trim();
-		const message = code === "credential_predates_capability" ? "The browser credential was issued before the relay gave this role the ability to think. Re-pair the extension (pendant-credentials.mjs pair --role browser_node) — scopes are frozen when a credential is created." : code === "scope_denied" ? "This credential's role is not allowed to use the relay's inference route." : code === "rate_limited" ? `This device has spent its hourly inference budget${payload?.resetAt ? `; it resets at ${payload.resetAt}` : ""}.` : code === "not_configured" ? "The relay has no model key configured, so it cannot think for this node." : code === "prompt_too_large" || code === "invalid_messages" ? relayText || "The relay refused the prompt." : code === "upstream_error" ? `The model provider refused the request (HTTP ${status ?? "?"}).` : relayText || `The relay returned HTTP ${status ?? "?"}.`;
+		const message = code === "credential_predates_capability" ? "The browser credential was minted with an explicit scope ceiling that leaves out inference. Re-pair the extension with a wider scope list (pendant-credentials.mjs pair --role browser_node) — a narrowed credential never widens on its own." : code === "scope_denied" ? "This credential's role is not allowed to use the relay's inference route." : code === "rate_limited" ? `This device has spent its hourly inference budget${payload?.resetAt ? `; it resets at ${payload.resetAt}` : ""}.` : code === "not_configured" ? "The relay has no model key configured, so it cannot think for this node." : code === "prompt_too_large" || code === "invalid_messages" ? relayText || "The relay refused the prompt." : code === "upstream_error" ? `The model provider refused the request (HTTP ${status ?? "?"}).` : relayText || `The relay returned HTTP ${status ?? "?"}.`;
 		const retryAfter = Number(payload?.retryAfter);
 		const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null;
 		return {
@@ -1352,6 +1379,7 @@ or, when you are finished,
 	function summarizeBrainRun(state) {
 		if (state.status === "done") return `Brain answered after ${state.stepCount} tool call(s).`;
 		if (state.status === "handoff") return `Brain handed off to the Mac planner: ${state.handoffReason}`;
+		if (state.status === "parked") return `Brain stopped before an irreversible step and parked it for approval: ${state.parkedReason}`;
 		return `Brain is ${state.status} (${state.stepCount} tool call(s) so far).`;
 	}
 	/**
@@ -1364,10 +1392,15 @@ or, when you are finished,
 	*        model's text reply. Injected by background.js — and never invoked
 	*        unless config.ready, which today it never is.
 	* @param {(call: {type, params}) => Promise<object>} options.runTool
-	*        runs one of the 11 page commands through the extension's own
+	*        runs one of the extension's page commands through its own
 	*        validated executor and returns its sanitized result.
+	* @param {(call: {type, params}) => {allow: boolean, reason?: string}} [options.assessTool]
+	*        the outward gate (affinity.createOutwardGuard().assess). Consulted
+	*        BEFORE every runTool; {allow:false} parks the call instead of
+	*        running it. Optional so the pure-loop tests stay pure; background.js
+	*        always supplies it.
 	*/
-	async function runBrainLoop({ command, page = null, config, callModel, runTool }) {
+	async function runBrainLoop({ command, page = null, config, callModel, runTool, assessTool = null }) {
 		const normalized = config && "ready" in config ? config : normalizeBrainConfig(config);
 		let state = createBrainState({
 			command,
@@ -1390,26 +1423,375 @@ or, when you are finished,
 				fatal: error?.fatal === true
 			});
 		}
-		else if (state.status === "acting") try {
-			const result = await runTool(state.pendingCall);
-			state = reduceBrain(state, {
-				type: "tool_result",
-				ok: true,
-				result
-			});
-		} catch (error) {
-			state = reduceBrain(state, {
-				type: "tool_result",
-				ok: false,
-				error: error?.message || String(error)
-			});
-		}
-		else break;
+		else if (state.status === "acting") {
+			if (assessTool) {
+				let verdict;
+				try {
+					verdict = assessTool(state.pendingCall);
+				} catch (error) {
+					verdict = {
+						allow: false,
+						reason: `The safety gate itself failed (${error?.message || error}).`
+					};
+				}
+				if (verdict?.allow !== true) {
+					state = reduceBrain(state, {
+						type: "park",
+						reason: verdict?.reason || "This step is irreversible or outward-facing."
+					});
+					continue;
+				}
+			}
+			try {
+				const result = await runTool(state.pendingCall);
+				state = reduceBrain(state, {
+					type: "tool_result",
+					ok: true,
+					result
+				});
+			} catch (error) {
+				state = reduceBrain(state, {
+					type: "tool_result",
+					ok: false,
+					error: error?.message || String(error)
+				});
+			}
+		} else break;
 		if (!TERMINAL.has(state.status)) state = reduceBrain(state, {
 			type: "hand_off",
 			reason: "The loop ran out of turns without finishing."
 		});
 		return state;
+	}
+	//#endregion
+	//#region browser-extension/src/affinity.js
+	const CAPABILITY_BROWSER = "browser";
+	const CAPABILITY_HIVE = "hive";
+	const EFFECT_READ = "read";
+	const EFFECT_OUTWARD = "outward";
+	const LOCAL_CLAIMABLE_ACTIONS = Object.freeze({
+		browser_navigate: "navigate",
+		browser_click: "click",
+		browser_type: "type",
+		browser_read_page: "read_page",
+		browser_snapshot: "snapshot",
+		browser_wait_for: "wait_for",
+		browser_scroll: "scroll",
+		browser_select: "select",
+		browser_list_tabs: "list_tabs",
+		browser_capture: "capture",
+		browser_press_key: "press_key",
+		browser_activate_tab: "activate_tab",
+		open_url: "activate_tab"
+	});
+	/** The local command a hive plan step becomes, or null when it cannot. */
+	function localCallFor(action) {
+		const hiveType = String(action?.type ?? "").trim();
+		const params = action?.params && typeof action.params === "object" && !Array.isArray(action.params) ? { ...action.params } : {};
+		if (COMMAND_TYPES.has(hiveType)) return {
+			type: hiveType,
+			params
+		};
+		const localType = LOCAL_CLAIMABLE_ACTIONS[hiveType];
+		if (!localType) return null;
+		if (hiveType === "open_url") {
+			const url = String(params.url ?? "").trim();
+			if (!url) return null;
+			let urlContains = "";
+			try {
+				urlContains = new URL(url).hostname;
+			} catch {
+				return null;
+			}
+			return {
+				type: "activate_tab",
+				params: {
+					url,
+					urlContains
+				}
+			};
+		}
+		return {
+			type: localType,
+			params
+		};
+	}
+	const READ_COMMANDS = new Set([
+		"read_page",
+		"snapshot",
+		"list_tabs",
+		"wait_for",
+		"capture",
+		"scroll"
+	]);
+	const outwardMatchers = Object.freeze([
+		"\\b(submit|confirm|place\\s+(?:the\\s+)?order|checkout|check\\s+out)\\b",
+		"\\b(buy|sell|trade|invest|transfer|withdraw|deposit|pay(?:ment)?|purchase|donate)\\b",
+		"\\b(send|reply|post|publish|share|tweet|forward)\\b",
+		"\\b(cancel|unsubscribe|terminate|close\\s+(?:my\\s+)?account|deactivat\\w*|delete)\\b",
+		"\\b(sign|agree|accept|consent|authoriz\\w*|approve)\\b",
+		"\\b(book|reserve|order|enroll|register|subscribe|renew)\\b"
+	]).map((source) => new RegExp(source, "i"));
+	/** Does this text describe an outward commit point? '' matches nothing. */
+	function textLooksOutward(text) {
+		const haystack = String(text ?? "");
+		if (!haystack.trim()) return false;
+		return outwardMatchers.some((pattern) => pattern.test(haystack));
+	}
+	/**
+	* The effect tag for one local call.
+	*
+	* `targetName` is what the page itself calls the element (the accessible name
+	* a snapshot recorded). It is the strongest signal there is — the label the
+	* OWNER would read before pressing the same control — so it participates in
+	* the match alongside the planner's label and the raw selector.
+	*
+	* Fail-closed rule for clicks: a click whose target this side cannot describe
+	* AT ALL (a bare ref with no snapshot behind it, an empty selector) is tagged
+	* 'outward'. Not because it is known to be dangerous, but because it is not
+	* known to be safe, and "click the unlabeled thing on a live page" is not a
+	* bet to make unattended.
+	*/
+	function classifyEffect({ type, params = {}, label = "", targetName = "" } = {}) {
+		const command = String(type ?? "").trim();
+		if (READ_COMMANDS.has(command)) return {
+			effect: EFFECT_READ,
+			reason: "Reads the page; changes nothing."
+		};
+		if (command === "navigate" || command === "activate_tab") return {
+			effect: "act",
+			reason: "Opens or focuses a page."
+		};
+		const described = [
+			targetName,
+			label,
+			String(params.selector ?? ""),
+			String(params.ref ?? ""),
+			String(params.text ?? ""),
+			String(params.value ?? params.label ?? "")
+		].filter(Boolean).join(" ");
+		if (command === "click") {
+			const hasName = String(targetName ?? "").trim();
+			const hasSelector = String(params.selector ?? "").trim();
+			if (!hasName && !hasSelector) return {
+				effect: EFFECT_OUTWARD,
+				reason: "Clicks a target this side cannot describe (no snapshot name, no selector) — not provably safe."
+			};
+			if (textLooksOutward(described)) return {
+				effect: EFFECT_OUTWARD,
+				reason: `The click target reads as a commit point: "${(hasName || hasSelector).slice(0, 120)}".`
+			};
+			return {
+				effect: "act",
+				reason: "Clicks an element."
+			};
+		}
+		if (command === "type" || command === "select") {
+			if (params.submit === true) return {
+				effect: EFFECT_OUTWARD,
+				reason: "Typing with submit:true files the form in the same breath."
+			};
+			if (textLooksOutward(described)) return {
+				effect: EFFECT_OUTWARD,
+				reason: "The field or its content reads as part of an outward action."
+			};
+			return {
+				effect: "act",
+				reason: "Edits a field without submitting."
+			};
+		}
+		if (command === "press_key") {
+			const key = String(params.key ?? "").trim().toLowerCase();
+			if (key === "enter" || key === "return") return {
+				effect: EFFECT_OUTWARD,
+				reason: "Enter submits whatever form holds the focus."
+			};
+			return {
+				effect: "act",
+				reason: `Presses ${key || "a key"}.`
+			};
+		}
+		return {
+			effect: EFFECT_OUTWARD,
+			reason: `No effect classification exists for "${command}".`
+		};
+	}
+	/** Tag one hive plan step. Pure; never throws. */
+	function tagPlanStep(action, index = 0) {
+		const localCall = localCallFor(action);
+		const label = String(action?.label ?? action?.type ?? "step");
+		if (!localCall) return {
+			index,
+			label,
+			hiveType: String(action?.type ?? ""),
+			capability: CAPABILITY_HIVE,
+			localCall: null,
+			effect: null,
+			effectReason: ""
+		};
+		const { effect, reason } = classifyEffect({
+			type: localCall.type,
+			params: localCall.params,
+			label
+		});
+		return {
+			index,
+			label,
+			hiveType: String(action?.type ?? ""),
+			capability: CAPABILITY_BROWSER,
+			localCall,
+			effect,
+			effectReason: reason
+		};
+	}
+	/**
+	* THE AFFINITY RULE. A non-empty plan whose every step is browser-capable
+	* executes on this node; anything else forwards to the hive unchanged.
+	*/
+	function routePlan(actions) {
+		const steps = (Array.isArray(actions) ? actions : []).map((action, index) => tagPlanStep(action, index));
+		if (!steps.length) return {
+			route: CAPABILITY_HIVE,
+			steps,
+			reason: "The plan has no steps."
+		};
+		const foreign = steps.filter((step) => step.capability !== CAPABILITY_BROWSER);
+		if (foreign.length) {
+			const named = foreign.slice(0, 3).map((step) => step.hiveType || step.label).join(", ");
+			return {
+				route: CAPABILITY_HIVE,
+				steps,
+				reason: `${foreign.length} of ${steps.length} step(s) need more than a browser (${named}) — the hive keeps the whole plan.`
+			};
+		}
+		return {
+			route: CAPABILITY_BROWSER,
+			steps,
+			reason: `All ${steps.length} step(s) are browser work; this node runs them itself.`
+		};
+	}
+	/**
+	* A stateful wrapper around classifyEffect for tool-by-tool execution.
+	*
+	* The brain clicks by ref, and a ref means nothing outside the snapshot that
+	* minted it. The guard watches snapshot results go past and remembers each
+	* ref's accessible name, so when the model later says {click, ref:"e4"} the
+	* classifier sees "Confirm cancellation" — the words the OWNER would have
+	* read — and not an opaque token. A ref the guard never saw snapshotted is
+	* unclassifiable and therefore parks (classifyEffect's fail-closed rule).
+	*/
+	function createOutwardGuard() {
+		const names = /* @__PURE__ */ new Map();
+		return {
+			/** Feed every successful tool result through here. */
+			observe(call, result) {
+				if (String(call?.type) !== "snapshot") return;
+				for (const element of result?.elements ?? []) {
+					const ref = String(element?.ref ?? "").trim();
+					if (!ref) continue;
+					names.set(ref, {
+						name: String(element?.name ?? ""),
+						role: String(element?.role ?? "")
+					});
+				}
+			},
+			/** What the last snapshot called this ref, if anything. */
+			describeRef(ref) {
+				return names.get(String(ref ?? "").trim()) ?? null;
+			},
+			/**
+			* May this call run unattended? {allow, effect, reason, targetName}.
+			* Read and act steps pass; outward steps do not — deciding what happens
+			* to a parked call is the caller's business, not the guard's.
+			*/
+			assess(call) {
+				const known = names.get(String(call?.params?.ref ?? "").trim());
+				const targetName = known ? [known.name, known.role && `(${known.role})`].filter(Boolean).join(" ") : "";
+				const { effect, reason } = classifyEffect({
+					type: call?.type,
+					params: call?.params ?? {},
+					targetName
+				});
+				return {
+					allow: effect !== EFFECT_OUTWARD,
+					effect,
+					reason,
+					targetName
+				};
+			}
+		};
+	}
+	const NAVIGATION_COMMANDS = new Set(["navigate", "activate_tab"]);
+	/** What a finished run actually did, counted from its steps. */
+	function summarizeEffects(steps = []) {
+		const counts = {
+			read: 0,
+			opened: 0,
+			act: 0,
+			outward: 0,
+			failed: 0
+		};
+		for (const step of steps) {
+			if (step?.ok === false) {
+				counts.failed += 1;
+				continue;
+			}
+			if (step?.effect === "outward") counts.outward += 1;
+			else if (step?.effect === "act") if (NAVIGATION_COMMANDS.has(String(step?.tool ?? ""))) counts.opened += 1;
+			else counts.act += 1;
+			else counts.read += 1;
+		}
+		return counts;
+	}
+	/**
+	* Does the command ASK for an outward effect? Same vocabulary as the step
+	* classifier, applied to the owner's own words — "cancel my recurring
+	* investments" wants a cancellation, and a run that never performed one must
+	* not be allowed to sound as if it did.
+	*/
+	function commandWantsOutwardEffect(command) {
+		return textLooksOutward(command);
+	}
+	/**
+	* The honest completion line for a locally executed run.
+	*
+	* verdict:
+	*   'achieved'   — outward/act effects ran and nothing is pending.
+	*   'recon-only' — nothing on any page was changed; says exactly that.
+	*   'parked'     — stopped at an outward step; the effect has NOT happened.
+	*   'incomplete' — the command wanted an outward effect and none ran.
+	*
+	* The model's own response (if any) survives as color, never as the claim:
+	* headline truth is derived from `steps` and `parked`, which only the
+	* executor writes.
+	*/
+	function honestVerdict({ command, steps = [], parked = [], response = "" } = {}) {
+		const effects = summarizeEffects(steps);
+		const wanted = commandWantsOutwardEffect(command);
+		const said = String(response ?? "").trim();
+		if (parked.length) return {
+			verdict: "parked",
+			headline: "Stopped before the irreversible step — nothing was submitted, cancelled or sent. It is waiting for your approval.",
+			detail: `Parked: ${parked.map((entry) => String(entry?.reason ?? "an irreversible step")).slice(0, 2).join("; ")}. Steps so far: ${describeCounts(effects)}.`
+		};
+		if (effects.act === 0 && effects.outward === 0) return {
+			verdict: "recon-only",
+			headline: said ? `${said} (Read-only: opened and read pages; changed nothing.)` : "Read-only run: opened and read pages; changed nothing.",
+			detail: `Steps: ${describeCounts(effects)}.`
+		};
+		if (wanted && effects.outward === 0) return {
+			verdict: "incomplete",
+			headline: "NOT done: the final submit/cancel/send step never ran, so nothing was changed. " + (said || "The pages were only navigated and read."),
+			detail: `Steps: ${describeCounts(effects)}.`
+		};
+		return {
+			verdict: "achieved",
+			headline: said || "Done.",
+			detail: `Steps: ${describeCounts(effects)}.`
+		};
+	}
+	function describeCounts(effects) {
+		return `${effects.read} read, ${effects.opened} page(s) opened, ${effects.act} page interaction(s), ${effects.outward} approved outward step(s), ${effects.failed} failed`;
 	}
 	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
 	const RELAY_NODE_ADDRESS = "@relay";
@@ -1417,7 +1799,7 @@ or, when you are finished,
 	const MAX_ENVELOPE_BYTES = 64 * 1024;
 	const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/;
 	const RESERVED_ADDRESS_PATTERN = /^@[a-z][a-z0-9-]{1,30}$/;
-	const KIND_PATTERN = /^[a-z][a-z0-9]*(\.[a-z0-9]+){0,5}$/;
+	const KIND_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9][a-z0-9_]*){0,5}$/;
 	const MESSAGE_ID_PATTERN = /^nmsg_[A-Za-z0-9_-]{8,64}$/;
 	/**
 	* A node address, or '' if it is not one. Accepts a registered device id or a
@@ -1461,7 +1843,7 @@ or, when you are finished,
 		return candidate;
 	}
 	//#endregion
-	//#region ../shared/bridgeSocketProtocol.js
+	//#region shared/bridgeSocketProtocol.js
 	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
 	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
 	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
@@ -1476,7 +1858,7 @@ or, when you are finished,
 		}
 	}
 	//#endregion
-	//#region src/relay-peer.js
+	//#region browser-extension/src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://ai-pendant-relay.your-subdomain.workers.dev",
 		"http://127.0.0.1:8787",
@@ -1656,7 +2038,8 @@ or, when you are finished,
 	/** kind → what this extension does with it. */
 	const MESH_KINDS = Object.freeze({
 		"browser.command": "command",
-		"browser.ping": "ping"
+		"browser.ping": "ping",
+		"approval_request": "approval"
 	});
 	const MESH_RESULT_KIND = "browser.command.result";
 	const MESH_PONG_KIND = "browser.pong";
@@ -1738,18 +2121,18 @@ or, when you are finished,
 				});
 				continue;
 			}
-			if (!envelopeIsLive(envelope, now)) {
-				ignored.push({
-					envelope,
-					reason: "expired before it was drained"
-				});
-				continue;
-			}
 			const handling = MESH_KINDS[envelope.kind];
 			if (!handling) {
 				ignored.push({
 					envelope,
 					reason: `no handler for kind "${envelope.kind}"`
+				});
+				continue;
+			}
+			if (handling !== "approval" && !envelopeIsLive(envelope, now)) {
+				ignored.push({
+					envelope,
+					reason: "expired before it was drained"
 				});
 				continue;
 			}
@@ -1761,7 +2144,7 @@ or, when you are finished,
 				continue;
 			}
 			const age = now - (Date.parse(envelope.createdAt) || now);
-			if (age > 6e5) {
+			if (handling !== "approval" && age > 6e5) {
 				ignored.push({
 					envelope,
 					reason: `queued ${Math.round(age / 1e3)}s ago; this node refuses mesh mail older than ${MAX_MESH_COMMAND_AGE_MS / 6e4} minutes`
@@ -1793,15 +2176,46 @@ or, when you are finished,
 		return Number(page?.pending || 0) > (Array.isArray(page?.messages) ? page.messages.length : 0);
 	}
 	/**
+	* Build the Error a failed relay response should throw. One place, because
+	* the wire contract has three parts that drift independently: the human
+	* message (`error` or `message`), the machine name (`code` — e.g. the
+	* ownership 403's `not_your_inbox` since relay 41dbc4b), and the HTTP
+	* status. describeRelayFailure keys on status first and uses code only to
+	* sharpen, so this must carry all three — dropping `code` at this seam once
+	* left the not_your_inbox branch unreachable from live traffic.
+	*/
+	async function relayResponseError(response) {
+		let detail = "";
+		let code = "";
+		try {
+			const payload = await response.json();
+			detail = payload.error || payload.message || "";
+			code = typeof payload.code === "string" ? payload.code : "";
+		} catch {
+			detail = await response.text().catch(() => "");
+		}
+		const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
+		error.status = response.status;
+		if (code) error.code = code;
+		return error;
+	}
+	/**
 	* Why a relay request failed, in a form the UI can act on.
 	*
-	* `code` is present on most relay errors (`scope_denied`, `unknown_node`,
-	* `inbox_full`, `invalid_envelope`, `credential_predates_capability`) and
-	* absent on others — notably the ownership 403, which carries only a message.
-	* So status is the primary signal and code is decoration, never the other way
-	* round. 401 and 403 are split because they need different fixes: 401 is a
-	* credential this relay does not accept, 403 is a credential that is fine but
-	* is not allowed to touch this deviceId.
+	* `code` is present on the relay's refusals (`scope_denied`, `unknown_node`,
+	* `inbox_full`, `invalid_envelope`, `credential_predates_capability`) — and,
+	* since relay commit 41dbc4b, on the ownership 403 as well: both
+	* /v1/node/inbox and /v1/node/inbox/ack now send `not_your_inbox`
+	* (OWNERSHIP_DENIED_CODE in cloud-relay/nodeMailbox.js) beside their
+	* deliberately vague message. Status stays the primary signal and code only
+	* sharpens it, never the other way round: a relay predating that commit — or
+	* any future 403 shipped without a code — must still land on the precise
+	* generic fix, not "unknown". 401 and 403 are split because they need
+	* different fixes: 401 is a credential this relay does not accept, 403 is a
+	* credential that is fine but is not allowed to touch this deviceId — and
+	* when the relay names it `not_your_inbox`, that is stated outright: the
+	* token is valid but paired to a different deviceId than the inbox it
+	* requested.
 	*/
 	function describeRelayFailure(error) {
 		const status = Number(error?.status || 0);
@@ -1811,11 +2225,18 @@ or, when you are finished,
 			code,
 			message: "The relay does not accept this browser's device token. Pair again and paste the new one."
 		};
-		if (status === 403) return {
-			state: "unauthorized",
-			code,
-			message: "This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with."
-		};
+		if (status === 403) {
+			if (code === "not_your_inbox") return {
+				state: "unauthorized",
+				code,
+				message: "This token is valid but paired to a different device ID than the inbox it requested. Set the device ID to the one this token was paired with, or pair again to get a token for this one."
+			};
+			return {
+				state: "unauthorized",
+				code,
+				message: "This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with."
+			};
+		}
 		return {
 			state: "offline",
 			code,
@@ -1926,7 +2347,446 @@ or, when you are finished,
 		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
 	}
 	//#endregion
-	//#region src/background.js
+	//#region browser-extension/src/execution-status.js
+	const EXECUTION_STATUS_KEY = "localExecutionStatus";
+	const PENDING_APPROVALS_KEY = "localPendingApprovals";
+	const APPROVAL_MESSAGE_TYPES = Object.freeze({
+		status: "affinity:get-status",
+		listPending: "affinity:list-pending",
+		resolve: "affinity:resolve-approval"
+	});
+	const APPROVAL_TTL_MS = 10 * 6e4;
+	const MAX_RUNS_KEPT = 8;
+	const MAX_PENDING_KEPT = 12;
+	function createStatusEmitter() {
+		const listeners = /* @__PURE__ */ new Map();
+		return {
+			on(event, handler) {
+				if (!listeners.has(event)) listeners.set(event, /* @__PURE__ */ new Set());
+				listeners.get(event).add(handler);
+				return () => listeners.get(event)?.delete(handler);
+			},
+			emit(event, payload) {
+				for (const handler of listeners.get(event) ?? []) try {
+					handler(payload);
+				} catch {}
+			}
+		};
+	}
+	/**
+	* @param {object} options
+	* @param {object} options.storage  a storage.local-shaped object
+	*                                  ({get(keys), set(values)}) — injected so
+	*                                  tests hand in a plain fake.
+	* @param {object} [options.emitter] createStatusEmitter() output.
+	* @param {() => number} [options.now]
+	*
+	* All writes go through one promise chain, same as background.js's
+	* withHistory: storage.local has no transactions, and two steps finishing
+	* together must not eat each other's entries.
+	*/
+	function createExecutionJournal({ storage, emitter = createStatusEmitter(), now = Date.now } = {}) {
+		if (!storage) throw new Error("createExecutionJournal requires a storage.");
+		let writes = Promise.resolve();
+		const serialize = (mutate) => {
+			writes = writes.then(mutate, mutate);
+			return writes;
+		};
+		const readStatus = async () => (await storage.get("localExecutionStatus"))["localExecutionStatus"] ?? { runs: [] };
+		const readPending = async () => (await storage.get("localPendingApprovals"))["localPendingApprovals"] ?? [];
+		const writeRun = (runId, mutate) => serialize(async () => {
+			const status = await readStatus();
+			const runs = Array.isArray(status.runs) ? [...status.runs] : [];
+			const index = runs.findIndex((run) => run?.runId === runId);
+			if (index === -1) return null;
+			runs[index] = mutate({ ...runs[index] });
+			await storage.set({ [EXECUTION_STATUS_KEY]: { runs } });
+			emitter.emit("run", runs[index]);
+			return runs[index];
+		});
+		return {
+			events: emitter,
+			/** A run exists from the moment the command is claimed locally. */
+			beginRun({ runId, command, origin = "browser-extension", route, executor }) {
+				return serialize(async () => {
+					const status = await readStatus();
+					const runs = Array.isArray(status.runs) ? status.runs : [];
+					const run = {
+						runId,
+						command: String(command ?? ""),
+						origin,
+						route: route ?? "local",
+						executor: executor ?? "browser-extension",
+						state: "executing",
+						steps: [],
+						verdict: null,
+						headline: "",
+						detail: "",
+						hiveRecord: "pending",
+						startedAt: new Date(now()).toISOString(),
+						finishedAt: null
+					};
+					await storage.set({ [EXECUTION_STATUS_KEY]: { runs: [run, ...runs].slice(0, MAX_RUNS_KEPT) } });
+					emitter.emit("run", run);
+					return run;
+				});
+			},
+			/** One executed (or failed) step, already effect-tagged by affinity.js. */
+			recordStep(runId, step) {
+				return writeRun(runId, (run) => ({
+					...run,
+					steps: [...run.steps, {
+						tool: String(step?.tool ?? step?.type ?? "step"),
+						effect: step?.effect ?? null,
+						ok: step?.ok === true,
+						summary: String(step?.summary ?? "").slice(0, 300),
+						at: new Date(now()).toISOString()
+					}].slice(-24)
+				}));
+			},
+			/**
+			* Park an outward step. The run stops here; the approval entry is what a
+			* later popup pass renders, and resolveApproval is what its buttons call.
+			*/
+			parkStep(runId, { call, effect, reason, targetName = "" }) {
+				return serialize(async () => {
+					const pending = await readPending();
+					const entry = {
+						id: `apr-${runId}-${pending.length + 1}`,
+						runId,
+						call: {
+							type: String(call?.type ?? ""),
+							params: call?.params ?? {}
+						},
+						effect: effect ?? "outward",
+						reason: String(reason ?? "This step is irreversible or outward-facing."),
+						targetName: String(targetName ?? ""),
+						state: "pending",
+						requestedAt: new Date(now()).toISOString(),
+						resolvedAt: null,
+						expiresAt: new Date(now() + APPROVAL_TTL_MS).toISOString()
+					};
+					await storage.set({ [PENDING_APPROVALS_KEY]: [entry, ...pending].slice(0, MAX_PENDING_KEPT) });
+					emitter.emit("approval", entry);
+					return entry;
+				});
+			},
+			/** The terminal verdict, from affinity.honestVerdict — never from a model. */
+			finishRun(runId, { state = "finished", verdict, headline, detail } = {}) {
+				return writeRun(runId, (run) => ({
+					...run,
+					state,
+					verdict: verdict ?? run.verdict,
+					headline: String(headline ?? run.headline).slice(0, 500),
+					detail: String(detail ?? run.detail).slice(0, 2e3),
+					finishedAt: new Date(now()).toISOString()
+				}));
+			},
+			/** Stamp whether the hive heard about this run. */
+			markHiveRecord(runId, outcome) {
+				return writeRun(runId, (run) => ({
+					...run,
+					hiveRecord: outcome
+				}));
+			},
+			async getStatus() {
+				await writes;
+				return readStatus();
+			},
+			/** Pending approvals that have not expired. Expiry is enforced on read
+			* AND on resolve, so a stale entry cannot run by being clicked late. */
+			async listPendingApprovals() {
+				await writes;
+				const pending = await readPending();
+				const at = now();
+				return pending.filter((entry) => entry?.state === "pending" && Date.parse(entry.expiresAt ?? "") > at);
+			},
+			/**
+			* Resolve one approval. Returns the entry in its new state, or null when
+			* it does not exist. An expired entry resolves to 'expired' whatever the
+			* verdict was — approving a ten-minute-old click is refused, not honored.
+			* The caller (background.js) is the one who actually executes on
+			* 'approved'; this module only owns the state.
+			*/
+			resolveApproval(id, verdict) {
+				return serialize(async () => {
+					const pending = await readPending();
+					const index = pending.findIndex((entry) => entry?.id === id);
+					if (index === -1) return null;
+					const entry = { ...pending[index] };
+					if (entry.state !== "pending") return entry;
+					entry.state = Date.parse(entry.expiresAt ?? "") <= now() ? "expired" : verdict === "approved" ? "approved" : "declined";
+					entry.resolvedAt = new Date(now()).toISOString();
+					const next = [...pending];
+					next[index] = entry;
+					await storage.set({ [PENDING_APPROVALS_KEY]: next });
+					emitter.emit("approval", entry);
+					return entry;
+				});
+			}
+		};
+	}
+	const BROWSER_TASK_RECORD_KIND = "browser.task.record";
+	const RECORD_TTL_MS = 360 * 6e4;
+	const scrub = (text) => withholdSecrets(String(text ?? "")).text;
+	/**
+	* The submission record — sent WHEN THE RUN BEGINS, already marked claimed
+	* by this node. The invariant the shape encodes: this is a record OF work,
+	* never a request FOR work. `claimable:false` states it; the transport
+	* enforces it (see the module header — the Mac cannot drain '@relay').
+	*/
+	function hiveClaimRecordFor(run, relayConfig) {
+		return sendRequest(relayConfig, {
+			to: "@relay",
+			kind: BROWSER_TASK_RECORD_KIND,
+			correlationId: run.runId,
+			ttlMs: RECORD_TTL_MS,
+			payload: {
+				record: "claim",
+				claimable: false,
+				taskId: run.runId,
+				command: scrub(run.command).slice(0, 500),
+				origin: run.origin ?? "browser-extension",
+				claimedBy: relayConfig.relayDeviceId,
+				executedBy: relayConfig.relayDeviceId,
+				status: "executing",
+				startedAt: run.startedAt
+			}
+		});
+	}
+	/** The terminal record: verdict plus the step trace, same address. */
+	function hiveVerdictRecordFor(run, relayConfig) {
+		return sendRequest(relayConfig, {
+			to: "@relay",
+			kind: BROWSER_TASK_RECORD_KIND,
+			correlationId: run.runId,
+			ttlMs: RECORD_TTL_MS,
+			payload: {
+				record: "verdict",
+				claimable: false,
+				taskId: run.runId,
+				command: scrub(run.command).slice(0, 500),
+				origin: run.origin ?? "browser-extension",
+				claimedBy: relayConfig.relayDeviceId,
+				executedBy: relayConfig.relayDeviceId,
+				status: run.state,
+				verdict: run.verdict,
+				headline: scrub(run.headline).slice(0, 500),
+				steps: (run.steps ?? []).slice(-24).map((step) => ({
+					tool: step.tool,
+					effect: step.effect,
+					ok: step.ok,
+					summary: scrub(step.summary).slice(0, 200),
+					at: step.at
+				})),
+				startedAt: run.startedAt,
+				finishedAt: run.finishedAt
+			}
+		});
+	}
+	const APPROVAL_DECISION_KIND = "approval_decision";
+	const APPROVAL_DECISIONS = Object.freeze(["approve", "deny"]);
+	const SETTLED_PROMPT_TTL_MS = 10 * 6e4;
+	const clean = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+	/**
+	* One approval_request envelope, as the card a surface renders. Returns null
+	* for anything else — wrong kind, no approvalId — so a caller can feed it a
+	* whole drained page and keep only the questions.
+	*
+	* The texts are bounded here, once, because both surfaces put them straight
+	* into UI: a summary is a sentence, a detail is a paragraph, and a payload
+	* that claims otherwise gets trimmed rather than trusted with the layout.
+	*/
+	function approvalPromptFromEnvelope(envelope, { now = Date.now() } = {}) {
+		if (envelope?.kind !== "approval_request") return null;
+		const payload = envelope.payload ?? {};
+		const approvalId = clean(payload.approvalId, 80);
+		if (!approvalId || !envelope.id) return null;
+		const payloadExpiry = Date.parse(String(payload.expiresAt ?? ""));
+		const envelopeExpiry = Date.parse(String(envelope.expiresAt ?? ""));
+		const expiresAt = Number.isFinite(payloadExpiry) ? payloadExpiry : envelopeExpiry;
+		return {
+			approvalId,
+			summary: clean(payload.summary, 200) || "An action is waiting for your approval.",
+			detail: clean(payload.detail, 600),
+			risk: clean(payload.risk, 40),
+			expiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+			envelopeId: envelope.id,
+			from: envelope.from,
+			receivedAt: new Date(now).toISOString(),
+			decision: null,
+			decidedAt: null
+		};
+	}
+	/** Past the approval's own deadline. A prompt with no deadline never expires. */
+	function approvalIsExpired(prompt, now = Date.now()) {
+		const expiresAt = Date.parse(String(prompt?.expiresAt ?? ""));
+		return Number.isFinite(expiresAt) && expiresAt <= now;
+	}
+	/** May the owner still answer this? One predicate for every disabled button. */
+	function approvalIsAnswerable(prompt, now = Date.now()) {
+		return Boolean(prompt?.approvalId) && !prompt.decision && !approvalIsExpired(prompt, now);
+	}
+	/**
+	* Fold freshly drained envelopes into the held prompts. Pure; the caller owns
+	* where the list lives (React state on the phone, storage.local in the
+	* extension).
+	*
+	* Returns { prompts, changed } — and the SAME array when nothing changed, so
+	* a React setState or a storage write can be skipped instead of churned.
+	*/
+	function mergeApprovalPrompts(prompts, envelopes, { now = Date.now() } = {}) {
+		const held = Array.isArray(prompts) ? prompts : [];
+		let list = held;
+		let changed = false;
+		for (const envelope of Array.isArray(envelopes) ? envelopes : []) {
+			const prompt = approvalPromptFromEnvelope(envelope, { now });
+			if (!prompt) continue;
+			const index = list.findIndex((entry) => entry?.approvalId === prompt.approvalId);
+			if (index === -1) {
+				list = changed ? list : [...held];
+				list.push(prompt);
+				changed = true;
+				continue;
+			}
+			const current = list[index];
+			if (current.envelopeId === prompt.envelopeId && current.from === prompt.from) continue;
+			list = changed ? list : [...held];
+			list[index] = {
+				...current,
+				envelopeId: prompt.envelopeId,
+				from: prompt.from
+			};
+			changed = true;
+		}
+		if (!changed) return {
+			prompts: held,
+			changed: false
+		};
+		return {
+			prompts: pruneApprovalPrompts(list, now),
+			changed: true
+		};
+	}
+	/** Mark one prompt decided. Pure; answering is the caller's job, first. */
+	function settleApprovalPrompt(prompts, approvalId, decision, { now = Date.now() } = {}) {
+		return (Array.isArray(prompts) ? prompts : []).map((prompt) => prompt?.approvalId === approvalId ? {
+			...prompt,
+			decision,
+			decidedAt: new Date(now).toISOString()
+		} : prompt);
+	}
+	/** How many prompts still need the owner: live and undecided. */
+	function undecidedApprovalCount(prompts, now = Date.now()) {
+		return (Array.isArray(prompts) ? prompts : []).filter((prompt) => approvalIsAnswerable(prompt, now)).length;
+	}
+	/**
+	* Sweep receipts and enforce the cap. Settled and long-expired cards go
+	* first; a live question is the last thing this will ever drop, and dropping
+	* one at all means MAX_APPROVAL_PROMPTS questions are already unanswered.
+	*/
+	function pruneApprovalPrompts(prompts, now = Date.now(), max = 20) {
+		const list = (Array.isArray(prompts) ? prompts : []).filter((prompt) => {
+			if (!prompt?.approvalId) return false;
+			if (prompt.decidedAt && Date.parse(prompt.decidedAt) + 6e5 <= now) return false;
+			if (!prompt.decision && approvalIsExpired(prompt, now)) return Date.parse(prompt.expiresAt) + SETTLED_PROMPT_TTL_MS > now;
+			return true;
+		});
+		if (list.length <= max) return list;
+		const weight = (prompt) => prompt.decision ? 0 : approvalIsExpired(prompt, now) ? 1 : 2;
+		const drop = new Set([...list].sort((left, right) => weight(left) - weight(right) || String(left.receivedAt ?? "").localeCompare(String(right.receivedAt ?? ""))).slice(0, list.length - max).map((prompt) => prompt.approvalId));
+		return list.filter((prompt) => !drop.has(prompt.approvalId));
+	}
+	/**
+	* The answer, in the exact frozen shape. Returns the fields a sender hands to
+	* its own transport — mesh_send params on the phone, sendRequest() in the
+	* extension — so the payload and the corr cannot be assembled differently on
+	* different surfaces.
+	*/
+	function approvalDecisionBody(prompt, decision) {
+		if (!APPROVAL_DECISIONS.includes(decision)) throw new Error(`An approval decision is "approve" or "deny", not "${String(decision)}".`);
+		if (!prompt?.approvalId || !prompt?.envelopeId || !prompt?.from) throw new Error("A decision needs the prompt it answers: approvalId, envelopeId and from.");
+		return {
+			to: prompt.from,
+			kind: APPROVAL_DECISION_KIND,
+			payload: {
+				approvalId: prompt.approvalId,
+				decision
+			},
+			correlationId: prompt.envelopeId
+		};
+	}
+	//#endregion
+	//#region browser-extension/src/approvals.js
+	const APPROVALS_KEY = "pendingApprovals";
+	/**
+	* What the toolbar badge shows: the number of prompts still waiting on the
+	* owner, or null to fall back to the connection badge. A count outranks 'ON'
+	* because 'ON' is reassurance and a count is a request — amber, like every
+	* "parked, waiting for you" state in this extension's UI.
+	*/
+	function approvalBadge(prompts, now = Date.now()) {
+		const waiting = undecidedApprovalCount(prompts, now);
+		if (!waiting) return null;
+		return {
+			text: String(Math.min(waiting, 99)),
+			color: "#B07C1F"
+		};
+	}
+	/**
+	* Everything between "the owner pressed a button" and "background.js performs
+	* a fetch", as one pure step so the whole decision path is assertable:
+	*
+	*   { ok: true,  request, envelopeId, prompts }   — send `request`, and only
+	*     AFTER it succeeds persist `prompts` (the settled list) and ack
+	*     `envelopeId`. The settle rides in the return value rather than being
+	*     applied by the caller so the two can never disagree about what was
+	*     decided.
+	*   { ok: false, error, prompts }                 — nothing to send; `prompts`
+	*     is the input unchanged, because a refused decision must leave the card
+	*     exactly as pressable or as settled as it already was.
+	*
+	* Refusals mirror the phone's: a prompt this browser no longer holds, one
+	* already answered (an approval is answered once — the double-click and the
+	* stale popup land here), and one past its own deadline.
+	*/
+	function prepareApprovalDecision(prompts, approvalId, decision, { config, now = Date.now() } = {}) {
+		const list = Array.isArray(prompts) ? prompts : [];
+		const prompt = list.find((entry) => entry?.approvalId === approvalId);
+		if (!prompt) return {
+			ok: false,
+			error: "That approval is no longer held here — it may have been pruned or answered elsewhere.",
+			prompts: list
+		};
+		if (prompt.decision) return {
+			ok: false,
+			error: `Already answered: ${prompt.decision === "approve" ? "approved" : "denied"}${prompt.decidedAt ? ` at ${prompt.decidedAt}` : ""}. An approval is answered once.`,
+			prompts: list
+		};
+		if (approvalIsExpired(prompt, now)) return {
+			ok: false,
+			error: "This approval expired before it was answered. Whoever asked must send a fresh one.",
+			prompts: list
+		};
+		let request;
+		try {
+			request = sendRequest(config, approvalDecisionBody(prompt, decision));
+		} catch (error) {
+			return {
+				ok: false,
+				error: error?.message ?? String(error),
+				prompts: list
+			};
+		}
+		return {
+			ok: true,
+			request,
+			envelopeId: prompt.envelopeId,
+			prompts: settleApprovalPrompt(list, approvalId, decision, { now })
+		};
+	}
+	//#endregion
+	//#region browser-extension/src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const POLL_ALARM = "ai-pendant-poll";
 	const POLL_WINDOW_MS = 25e3;
@@ -2165,10 +3025,39 @@ or, when you are finished,
 			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
 		};
 		await api.storage.local.set({ [STATUS_KEY]: status });
-		if (api.action?.setBadgeText) {
-			await api.action.setBadgeText({ text: status.state === "connected" ? "ON" : status.state === "needs-setup" ? "SET" : "!" });
-			if (api.action.setBadgeBackgroundColor) await api.action.setBadgeBackgroundColor({ color: status.state === "connected" ? "#078B70" : "#B54736" });
-		}
+		await refreshBadge(status);
+	}
+	/**
+	* One writer for the toolbar badge, so its two claimants cannot fight.
+	*
+	* Approvals waiting on the owner outrank connection state: 'ON' is
+	* reassurance, a count is a request, and the poll loop repaints the badge
+	* often enough that the count falls away on its own once the last card is
+	* answered or expires. Everything that changes either input — a status
+	* update, a drained approval, a decision — lands here.
+	*/
+	async function refreshBadge(status = null) {
+		if (!api.action?.setBadgeText) return;
+		const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY]);
+		const current = status ?? stored[STATUS_KEY] ?? {};
+		const badge = approvalBadge(stored["pendingApprovals"] ?? []) ?? {
+			text: current.state === "connected" ? "ON" : current.state === "needs-setup" ? "SET" : "!",
+			color: current.state === "connected" ? "#078B70" : "#B54736"
+		};
+		await api.action.setBadgeText({ text: badge.text });
+		if (api.action.setBadgeBackgroundColor) await api.action.setBadgeBackgroundColor({ color: badge.color });
+	}
+	let approvalWrites = Promise.resolve();
+	function withApprovals(mutate) {
+		const run = approvalWrites.then(async () => {
+			const next = await mutate((await api.storage.local.get("pendingApprovals"))["pendingApprovals"] ?? []);
+			if (next) await api.storage.local.set({ [APPROVALS_KEY]: next });
+			return next;
+		});
+		approvalWrites = run.then(() => {}, (error) => {
+			console.warn("approval store write failed:", error?.message || error);
+		});
+		return run;
 	}
 	async function getRelayConfig() {
 		return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS));
@@ -2188,18 +3077,7 @@ or, when you are finished,
 				...descriptor.body ? { body: JSON.stringify(descriptor.body) } : {},
 				signal: controller.signal
 			});
-			if (!response.ok) {
-				let detail = "";
-				try {
-					const payload = await response.json();
-					detail = payload.error || payload.message || "";
-				} catch {
-					detail = await response.text().catch(() => "");
-				}
-				const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
-				error.status = response.status;
-				throw error;
-			}
+			if (!response.ok) throw await relayResponseError(response);
 			return response.status === 204 ? null : await response.json();
 		} finally {
 			clearTimeout(timeout);
@@ -2278,6 +3156,13 @@ or, when you are finished,
 		meshSocketOpen = false;
 	}
 	async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
+		if (handling === "approval") {
+			if (await withApprovals((stored) => {
+				const merged = mergeApprovalPrompts(stored, [envelope]);
+				return merged.changed ? merged.prompts : null;
+			})) await refreshBadge();
+			return;
+		}
 		if (handling === "ping") {
 			await relayFetch(relayConfig, pongMessageFor(envelope, {
 				browser: browserLabel(),
@@ -2429,6 +3314,56 @@ or, when you are finished,
 		} });
 	}
 	/**
+	* The owner's answer to one approval card, from the popup.
+	*
+	* Order is the contract: SEND the decision, THEN persist the settle, THEN ack
+	* the request envelope. A decision recorded but never sent would read as
+	* answered while the requester waits forever; a decision sent but not
+	* recorded merely invites a duplicate answer, which the relay's approvalId
+	* makes idempotent — so the settle waits for the send. The whole
+	* check-send-settle runs inside the approval write chain, which is what makes
+	* two frantic clicks land as one answer and one "answered once" refusal.
+	*/
+	async function decideApproval({ approvalId, decision }) {
+		const relayConfig = await getRelayConfig();
+		if (!relayConfig.ready) return {
+			ok: false,
+			error: relayConfig.reason || "The relay peer is switched off."
+		};
+		let outcome = {
+			ok: false,
+			error: "The decision was not sent."
+		};
+		try {
+			await withApprovals(async (stored) => {
+				const prepared = prepareApprovalDecision(stored, String(approvalId ?? ""), decision, { config: relayConfig });
+				if (!prepared.ok) {
+					outcome = {
+						ok: false,
+						error: prepared.error
+					};
+					return null;
+				}
+				await relayFetch(relayConfig, prepared.request);
+				try {
+					await relayFetch(relayConfig, ackRequest(relayConfig, [prepared.envelopeId]));
+				} catch {}
+				outcome = {
+					ok: true,
+					decision
+				};
+				return prepared.prompts;
+			});
+		} catch (error) {
+			outcome = {
+				ok: false,
+				error: error?.message || String(error)
+			};
+		}
+		await refreshBadge();
+		return outcome;
+	}
+	/**
 	* Run one command, then take everything it produced through the privacy
 	* boundary and stamp it with where it came from.
 	*
@@ -2455,6 +3390,10 @@ or, when you are finished,
 	async function runCommand(type, params, config) {
 		if (type === "navigate") return {
 			result: await navigate(params, config),
+			tab: null
+		};
+		if (type === "activate_tab") return {
+			result: await activateTab(params, config),
 			tab: null
 		};
 		if (type === "list_tabs") return {
@@ -2588,6 +3527,47 @@ or, when you are finished,
 			tabId: tab.id,
 			windowId: tab.windowId,
 			url: tab.url || url
+		};
+	}
+	/**
+	* Find-or-open. Focuses the freshest existing tab matching `urlContains`
+	* (bringing its window forward), and only when nothing matches — and a `url`
+	* was given — opens a new tab. "Open ibkr" means the signed-in tab the owner
+	* already has, not a duplicate and not whatever the active tab was showing.
+	* Needs only the `tabs` permission (already in the manifest); windows.update
+	* requires none.
+	*/
+	async function activateTab(params, _config) {
+		const needle = String(params.urlContains ?? "").trim().toLowerCase();
+		const fallbackUrl = String(params.url ?? "").trim();
+		if (needle) {
+			const match = (await api.tabs.query({})).filter((tab) => Number.isInteger(tab?.id) && isScriptableUrl(tab.url) && String(tab.url).toLowerCase().includes(needle)).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+			if (match) {
+				const tab = await api.tabs.update(match.id, { active: true });
+				if (api.windows?.update && Number.isInteger(tab?.windowId)) await api.windows.update(tab.windowId, { focused: true }).catch(() => {});
+				return {
+					message: `Activated the existing tab matching "${needle}"`,
+					tabId: tab.id,
+					windowId: tab.windowId,
+					url: tab.url ?? match.url ?? "",
+					title: tab.title ?? match.title ?? "",
+					activatedExisting: true
+				};
+			}
+		}
+		if (!fallbackUrl) throw new Error(`No open tab matches "${needle}" and no url was given to open instead.`);
+		const url = validateNavigationUrl(fallbackUrl);
+		let tab = await api.tabs.create({
+			url,
+			active: true
+		});
+		if (params.waitForLoad !== false) tab = await waitForTabLoad(tab.id, 15e3);
+		return {
+			message: `No matching tab was open; opened ${url}`,
+			tabId: tab.id,
+			windowId: tab.windowId,
+			url: tab.url || url,
+			activatedExisting: false
 		};
 	}
 	async function selectTargetTab(params, targetMode) {
@@ -2930,6 +3910,106 @@ or, when you are finished,
 			clearTimeout(timeout);
 		}
 	}
+	let journalInstance = null;
+	function executionJournal() {
+		if (!journalInstance) journalInstance = createExecutionJournal({ storage: api.storage.local });
+		return journalInstance;
+	}
+	/**
+	* Tell the hive about a locally executed run — the owner's rule: "it should
+	* stay in the browser extension but of course it can record the task to the
+	* hive." Sent as node-mesh mail addressed to '@relay', which the Mac agent
+	* can NEVER claim: cloud-relay/nodeMailbox.js lets only an inbox's owner
+	* drain it and only an admin principal owns '@relay'. A record, not a job.
+	*
+	* Best effort by design: an unconfigured or unreachable relay must not stop
+	* local execution, but the run's own status says whether the hive heard.
+	*/
+	async function recordRunToHive(runId, phase) {
+		const journal = executionJournal();
+		const relayConfig = await getRelayConfig();
+		if (!relayConfig.ready) {
+			await journal.markHiveRecord(runId, "unconfigured");
+			return;
+		}
+		const run = (await journal.getStatus()).runs.find((entry) => entry.runId === runId);
+		if (!run) return;
+		try {
+			await relayFetch(relayConfig, phase === "claim" ? hiveClaimRecordFor(run, relayConfig) : hiveVerdictRecordFor(run, relayConfig));
+			await journal.markHiveRecord(runId, phase === "claim" ? "claimed-recorded" : "recorded");
+		} catch (error) {
+			await journal.markHiveRecord(runId, `failed: ${error?.message || error}`);
+		}
+	}
+	/**
+	* The owner approved a parked outward step (via the popup, next pass). The
+	* step runs through the same validated executor as everything else, and the
+	* run's verdict is recomputed from what actually happened. resolveApproval
+	* has already enforced single-use and the 10-minute freshness window.
+	*/
+	async function executeApprovedStep(entry) {
+		const journal = executionJournal();
+		const config = await getConfig();
+		try {
+			const result = await executeCommand({
+				commandId: `approved-${entry.id}`,
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				action: entry.call
+			}, config);
+			await journal.recordStep(entry.runId, {
+				tool: entry.call?.type,
+				effect: EFFECT_OUTWARD,
+				ok: true,
+				summary: `Approved by owner: ${String(result?.message ?? entry.call?.type).slice(0, 250)}`
+			});
+			const run = (await journal.getStatus()).runs.find((candidate) => candidate.runId === entry.runId);
+			const verdict = honestVerdict({
+				command: run?.command ?? "",
+				steps: run?.steps ?? [],
+				parked: []
+			});
+			await journal.finishRun(entry.runId, {
+				state: "finished",
+				...verdict
+			});
+			await recordRunToHive(entry.runId, "verdict");
+			await patchEntry(entry.runId, {
+				state: "executed",
+				headline: verdict.headline,
+				detail: verdict.detail,
+				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+			return {
+				ok: true,
+				ran: true,
+				message: result?.message ?? "Done."
+			};
+		} catch (error) {
+			const message = error?.message || String(error);
+			await journal.recordStep(entry.runId, {
+				tool: entry.call?.type,
+				effect: EFFECT_OUTWARD,
+				ok: false,
+				summary: message.slice(0, 300)
+			});
+			await journal.finishRun(entry.runId, {
+				state: "failed",
+				verdict: "failed",
+				headline: `The approved step failed: ${message}`
+			});
+			await recordRunToHive(entry.runId, "verdict");
+			await patchEntry(entry.runId, {
+				state: "failed",
+				headline: `The approved step failed: ${message}`,
+				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+			return {
+				ok: false,
+				ran: true,
+				error: message
+			};
+		}
+	}
 	async function handleConsoleSubmit({ command, page }) {
 		const text = String(command ?? "").trim();
 		if (!text) return {
@@ -2968,24 +4048,90 @@ or, when you are finished,
 		let brainNote = "";
 		const route = chooseBrainRoute(brainConfig);
 		if (route.route === "local-brain") {
+			const journal = executionJournal();
+			const guard = createOutwardGuard();
+			await journal.beginRun({
+				runId: id,
+				command,
+				route: "local-brain"
+			});
+			await recordRunToHive(id, "claim");
 			const finished = await runBrainLoop({
 				command,
 				page,
 				config: brainConfig,
 				callModel: (messages) => brainCallModel(brainConfig, messages),
-				runTool: (call) => runBrainTool(call, config)
+				runTool: async (call) => {
+					const result = await runBrainTool(call, config);
+					guard.observe(call, result);
+					await journal.recordStep(id, {
+						tool: call?.type,
+						effect: guard.assess(call).effect,
+						ok: true,
+						summary: String(result?.message ?? "").slice(0, 300)
+					});
+					return result;
+				},
+				assessTool: (call) => guard.assess(call)
 			});
+			if (finished.status === "parked") {
+				const assessed = guard.assess(finished.parkedCall ?? {});
+				const parked = await journal.parkStep(id, {
+					call: finished.parkedCall,
+					effect: EFFECT_OUTWARD,
+					reason: finished.parkedReason,
+					targetName: assessed.targetName
+				});
+				const verdict = honestVerdict({
+					command,
+					steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
+					parked: [parked]
+				});
+				await journal.finishRun(id, {
+					state: "parked",
+					...verdict
+				});
+				await recordRunToHive(id, "verdict");
+				await patchEntry(id, {
+					state: "parked",
+					headline: verdict.headline,
+					detail: [
+						`Waiting in this browser's approval queue (${parked.id}).`,
+						verdict.detail,
+						"Approval UI lands with the next popup pass."
+					].join("\n"),
+					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+				return;
+			}
 			if (finished.status === "done") {
 				if (brainConfig.brainRetryAfterAt) await api.storage.local.remove("brainRetryAfterAt").catch(() => {});
+				const verdict = honestVerdict({
+					command,
+					steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
+					parked: [],
+					response: finished.response
+				});
+				await journal.finishRun(id, {
+					state: "finished",
+					...verdict
+				});
+				await recordRunToHive(id, "verdict");
 				await patchEntry(id, {
-					state: "answered",
-					headline: finished.response || "Done.",
-					detail: summarizeBrainRun(finished),
+					state: verdict.verdict === "incomplete" ? "failed" : "answered",
+					headline: verdict.headline,
+					detail: [summarizeBrainRun(finished), verdict.detail].filter(Boolean).join("\n"),
 					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
 				});
 				return;
 			}
 			brainNote = summarizeBrainRun(finished);
+			await journal.finishRun(id, {
+				state: "handed-off",
+				verdict: "handoff",
+				headline: brainNote
+			});
+			await recordRunToHive(id, "verdict");
 		} else if (route.cooldownMs) brainNote = `Brain skipped — ${route.reason}`;
 		const commandText = buildCommandText(command, page);
 		const stored = await api.storage.local.get(SESSION_KEY);
@@ -3002,6 +4148,18 @@ or, when you are finished,
 			await patchEntry(id, patch);
 			return;
 		}
+		const affinity = routePlan(planOutcome.actions);
+		if (affinity.route === "browser") {
+			await patchEntry(id, { headline: "Plan is all browser work — running it in this browser…" });
+			await executePlanLocally({
+				id,
+				command,
+				steps: affinity.steps,
+				config,
+				brainNote
+			});
+			return;
+		}
 		await patchEntry(id, { headline: "Plan ready — executing…" });
 		await patchEntry(id, outcomeToPatch(await consolePost(config, "/execute", {
 			command: commandText,
@@ -3013,6 +4171,98 @@ or, when you are finished,
 			},
 			source: CONSOLE_SOURCE
 		}, EXECUTE_TIMEOUT_MS, interpretExecuteResponse)));
+	}
+	/**
+	* Execute a fully browser-capable plan on this node.
+	*
+	* Steps run in order through the SAME validateCommand → runCommand →
+	* sanitizeExtraction path every agent-issued command takes — a locally
+	* claimed plan gets no shortcut past the privacy boundary. An outward step
+	* stops the run and parks in the approval queue; a failed step stops the run
+	* honestly rather than pressing on into a page in an unknown state.
+	*/
+	async function executePlanLocally({ id, command, steps, config, brainNote = "" }) {
+		const journal = executionJournal();
+		await journal.beginRun({
+			runId: id,
+			command,
+			route: "local-plan"
+		});
+		await recordRunToHive(id, "claim");
+		const parked = [];
+		for (const step of steps) {
+			if (step.effect === "outward") {
+				const remaining = steps.length - step.index - 1;
+				parked.push(await journal.parkStep(id, {
+					call: step.localCall,
+					effect: step.effect,
+					reason: step.effectReason + (remaining ? ` (${remaining} later plan step(s) will not run either way — re-run the command after deciding.)` : ""),
+					targetName: step.label
+				}));
+				break;
+			}
+			try {
+				const result = await executeCommand({
+					commandId: `local-${id}-${step.index}`,
+					createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+					action: step.localCall
+				}, config);
+				await journal.recordStep(id, {
+					tool: step.localCall.type,
+					effect: step.effect,
+					ok: true,
+					summary: String(result?.message ?? step.label).slice(0, 300)
+				});
+			} catch (error) {
+				const message = error?.message || String(error);
+				await journal.recordStep(id, {
+					tool: step.localCall.type,
+					effect: step.effect,
+					ok: false,
+					summary: message.slice(0, 300)
+				});
+				const verdict = honestVerdict({
+					command,
+					steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
+					parked: []
+				});
+				await journal.finishRun(id, {
+					state: "failed",
+					verdict: "failed",
+					headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
+					detail: verdict.detail
+				});
+				await recordRunToHive(id, "verdict");
+				await patchEntry(id, {
+					state: "failed",
+					headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
+					detail: [brainNote, verdict.detail].filter(Boolean).join("\n"),
+					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+				return;
+			}
+		}
+		const verdict = honestVerdict({
+			command,
+			steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
+			parked
+		});
+		await journal.finishRun(id, {
+			state: parked.length ? "parked" : "finished",
+			...verdict
+		});
+		await recordRunToHive(id, "verdict");
+		await patchEntry(id, {
+			state: parked.length ? "parked" : verdict.verdict === "incomplete" ? "failed" : "executed",
+			headline: verdict.headline,
+			detail: [
+				brainNote,
+				`Ran in this browser (affinity: all steps browser-capable).`,
+				verdict.detail,
+				...parked.length ? [`Waiting in this browser's approval queue (${parked[0].id}).`, "Approval UI lands with the next popup pass."] : []
+			].filter(Boolean).join("\n"),
+			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
 	}
 	/**
 	* The brain's model call: POST /v1/infer on the relay
@@ -3170,6 +4420,63 @@ or, when you are finished,
 		}
 		if (message?.type === "relay:drain-now") {
 			startRelayDrain().then(() => sendResponse({ ok: true }));
+			return true;
+		}
+		if (message?.type === "approval:decide") {
+			decideApproval(message).then(sendResponse).catch((error) => sendResponse({
+				ok: false,
+				error: error?.message || String(error)
+			}));
+			return true;
+		}
+		if (message?.type === APPROVAL_MESSAGE_TYPES.status) {
+			executionJournal().getStatus().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
+			return true;
+		}
+		if (message?.type === APPROVAL_MESSAGE_TYPES.listPending) {
+			executionJournal().listPendingApprovals().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
+			return true;
+		}
+		if (message?.type === APPROVAL_MESSAGE_TYPES.resolve) {
+			executionJournal().resolveApproval(String(message.id ?? ""), message.verdict).then(async (entry) => {
+				if (!entry) return {
+					ok: false,
+					error: "No such pending approval."
+				};
+				if (entry.state === "expired") {
+					await executionJournal().finishRun(entry.runId, {
+						state: "expired",
+						verdict: "parked",
+						headline: "The parked step expired before it was approved. Nothing was submitted, cancelled or sent."
+					});
+					await recordRunToHive(entry.runId, "verdict");
+					return {
+						ok: false,
+						error: "That approval expired (steps stay approvable for 10 minutes). Re-run the command."
+					};
+				}
+				if (entry.state === "declined") {
+					await executionJournal().finishRun(entry.runId, {
+						state: "declined",
+						verdict: "parked",
+						headline: "You declined the parked step. Nothing was submitted, cancelled or sent."
+					});
+					await recordRunToHive(entry.runId, "verdict");
+					await patchEntry(entry.runId, {
+						state: "refused",
+						headline: "Declined — the irreversible step was not run.",
+						finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+					});
+					return {
+						ok: true,
+						ran: false
+					};
+				}
+				return executeApprovedStep(entry);
+			}).then(sendResponse).catch((error) => sendResponse({
+				ok: false,
+				error: error?.message || String(error)
+			}));
 			return true;
 		}
 		if (message?.type === "console:submit") {
