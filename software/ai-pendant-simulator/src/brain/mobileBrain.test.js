@@ -16,11 +16,12 @@ import { DEVICE_SCOPES } from '../../cloud-relay/deviceAuth.js'
 import {
   buildBrainSystemPrompt,
   describeSituation,
+  fitMessagesToBudget,
   PROMPT_SCHEMA_BUDGET,
   runMobileBrain,
 } from './mobileBrain.js'
 import { buildMobileCatalogue, renderFullSchema, toolsForDomains } from './mobileDiscovery.js'
-import { extractJsonObject, parseModelJson } from './relayInference.js'
+import { extractJsonObject, INFERENCE_LIMITS, parseModelJson } from './relayInference.js'
 import { MOBILE_TOOL_TYPES } from './mobileTools.js'
 
 /** A model that says exactly what the script says, in order. */
@@ -420,6 +421,59 @@ test('the whole schema fits the prompt budget today, and the budget is measured'
     chars <= PROMPT_SCHEMA_BUDGET,
     `the phone's schema is ${chars} chars, past the ${PROMPT_SCHEMA_BUDGET} budget — the drill-down path now runs on every turn, which costs a round trip. Either raise the budget deliberately or split a domain.`,
   )
+})
+
+/* ------------------------------------------------------- the prompt budget */
+
+test('the thread is fitted to the relay ceilings, keeping the schema and the request', () => {
+  const messages = [
+    { role: 'system', content: 'SCHEMA' },
+    { role: 'user', content: 'THE REQUEST' },
+    ...Array.from({ length: 20 }, (_, i) => ({ role: 'user', content: `obs ${i} ${'x'.repeat(200)}` })),
+  ]
+  const fitted = fitMessagesToBudget(messages, { maxMessages: 8, maxChars: 100000 })
+
+  assert.ok(fitted.length <= 8)
+  assert.equal(fitted[0].content, 'SCHEMA', 'the tool schema was dropped')
+  assert.equal(fitted[1].content, 'THE REQUEST', "the owner's request was dropped")
+  assert.match(fitted[2].content, /dropped to stay inside/)
+  /* What survives is the NEWEST working memory, not the oldest. */
+  assert.match(fitted.at(-1).content, /obs 19/)
+})
+
+test('a character overflow drops messages rather than cutting one in half', () => {
+  const messages = [
+    { role: 'system', content: 'S'.repeat(100) },
+    { role: 'user', content: 'R'.repeat(100) },
+    { role: 'user', content: 'A'.repeat(5000) },
+    { role: 'user', content: 'B'.repeat(5000) },
+  ]
+  const fitted = fitMessagesToBudget(messages, { maxMessages: 40, maxChars: 5500 })
+  for (const message of fitted) {
+    assert.ok(
+      messages.some((original) => original.content === message.content) ||
+        /dropped to stay inside/.test(message.content),
+      'a message was truncated instead of dropped',
+    )
+  }
+})
+
+test('a thread already inside the budget is passed through untouched', () => {
+  const messages = [
+    { role: 'system', content: 'S' },
+    { role: 'user', content: 'R' },
+  ]
+  assert.equal(fitMessagesToBudget(messages), messages)
+})
+
+test('the loop never asks for more tokens than the relay allows', async () => {
+  let seen = null
+  const infer = async ({ maxTokens }) => {
+    seen = maxTokens
+    return { content: JSON.stringify({ status: 'done', say: 'ok' }) }
+  }
+  await runMobileBrain({ command: 'x', infer, ctx: baseCtx() })
+  assert.ok(seen <= INFERENCE_LIMITS.maxTokens, `asked for ${seen} tokens`)
 })
 
 /* --------------------------------------------------------- JSON extraction */
