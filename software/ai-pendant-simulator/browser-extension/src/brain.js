@@ -244,6 +244,20 @@ function validProxyUrl(value) {
  * do not act in seconds"). Both are recorded the same way here, because both
  * answer the only question this side has: how long is asking again certainly
  * wasted?
+ *
+ * WHAT THIS CODE ASSUMES ABOUT THE OTHER SIDE, written here rather than only
+ * in the relay: `retryAfter` on /v1/infer is DEVICE-SCOPED. It means "this
+ * device should not ask this relay again before then", never "this particular
+ * request was unlucky". The invariant is stated in
+ * cloud-relay/nodeInference.js (0fb86a7) and this module is why it exists —
+ * the cooldown keys off the FIELD, not off the status codes, so any future
+ * reason the relay sends it for is honoured without a change here.
+ *
+ * The price of that robustness is this dependency, and it fails silently in
+ * both directions: a request-scoped `retryAfter` would park a fully working
+ * brain for minutes over one unlucky call, and nothing on either side would
+ * error, log, or fail a test. If you are reading this because the brain went
+ * quiet for no visible reason, check that invariant first.
  * ===================================================================== */
 
 /** The instant a `retryAfter` in seconds points at. Null when there isn't one. */
