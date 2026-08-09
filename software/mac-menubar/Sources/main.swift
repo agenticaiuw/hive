@@ -891,12 +891,13 @@ final class FloatingCommandModel: ObservableObject {
 
     /// Wired by the app delegate: Esc inside the SwiftUI hierarchy hides the panel.
     var requestHide: (() -> Void)?
-    /// Wired by the app delegate: hide the HUD, run interactive `screencapture -i`,
-    /// re-show, attach the capture.
+    /// Wired by the app delegate: order the HUD off-screen, capture the whole
+    /// display it was on, re-show, and attach the PNG.
     var requestScreenshot: (() -> Void)?
-    /// Wired by the app delegate: re-key the panel and focus the field (used
-    /// after the file picker closes).
-    var requestFocus: (() -> Void)?
+    /// Wired by the app delegate: present the NSOpenPanel. Lives on the delegate
+    /// because presenting a file panel from an .accessory app needs activation-
+    /// policy juggling and the panel as modal host — see presentFilePicker().
+    var requestPickFiles: (() -> Void)?
 
     private var approvalsTimer: Timer?
     private var panelVisible = false
@@ -1029,28 +1030,9 @@ final class FloatingCommandModel: ObservableObject {
     }
 
     /// True while the NSOpenPanel is up — the delegate suppresses hide-on-blur
-    /// so choosing the FIRST attachment doesn't dismiss the HUD.
-    private(set) var isFilePickerOpen = false
-
-    /// Paperclip: standard multi-select open panel.
-    func pickFiles() {
-        guard !isFilePickerOpen else { return }
-        isFilePickerOpen = true
-        let picker = NSOpenPanel()
-        picker.canChooseFiles = true
-        picker.canChooseDirectories = false
-        picker.allowsMultipleSelection = true
-        picker.level = .modalPanel
-        NSApp.activate(ignoringOtherApps: true)
-        picker.begin { [weak self] response in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.isFilePickerOpen = false
-                if response == .OK { self.addAttachments(urls: picker.urls) }
-                self.requestFocus?()
-            }
-        }
-    }
+    /// so choosing the FIRST attachment doesn't dismiss the HUD. Set by the
+    /// delegate around presentFilePicker().
+    var isFilePickerOpen = false
 
     func cancelListening() {
         if listening { stopListen() }
@@ -1379,7 +1361,7 @@ struct FloatingCommandView: View {
                 .foregroundStyle(.white.opacity(0.92))
                 .onSubmit { model.send() }
 
-            Button { model.pickFiles() } label: {
+            Button { model.requestPickFiles?() } label: {
                 Image(systemName: "paperclip")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.55))
@@ -1397,7 +1379,7 @@ struct FloatingCommandView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Capture a screen region and attach it")
+            .help("Screenshot this screen and attach it")
 
             Button { model.send() } label: {
                 Image(systemName: "arrow.up.circle.fill")
@@ -1510,10 +1492,23 @@ struct FloatingCommandView: View {
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         var accepted = false
-        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+        let fileType = UTType.fileURL.identifier
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(fileType) {
             accepted = true
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
+            // loadItem for the fileURL type returns the URL's byte representation;
+            // decode it directly. loadObject(ofClass: URL.self) is unreliable for
+            // Finder drags, which is why chips never appeared before.
+            provider.loadItem(forTypeIdentifier: fileType, options: nil) { item, _ in
+                var resolved: URL?
+                switch item {
+                case let data as Data:
+                    resolved = URL(dataRepresentation: data, relativeTo: nil)
+                case let url as URL:
+                    resolved = url
+                default:
+                    break
+                }
+                guard let url = resolved else { return }
                 DispatchQueue.main.async { model.addAttachments(urls: [url]) }
             }
         }
@@ -1697,11 +1692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         floatModel.requestHide = { [weak self] in self?.hideFloatPanel() }
         floatModel.requestScreenshot = { [weak self] in self?.captureScreenshotAttachment() }
-        floatModel.requestFocus = { [weak self] in
-            guard let self, let panel = self.floatPanel else { return }
-            panel.makeKeyAndOrderFront(nil)
-            self.focusCommandField()
-        }
+        floatModel.requestPickFiles = { [weak self] in self?.presentFilePicker() }
         floatModel.startApprovalPolling()
         floatModel.$approvals
             .map(\.count)
@@ -1718,6 +1709,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             DistributedNotificationCenter.default().addObserver(
                 self, selector: #selector(smokeSnapshotHUD),
                 name: Notification.Name("com.aipendant.menubar.smoke.snapshotHUD"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeAttachTestFile),
+                name: Notification.Name("com.aipendant.menubar.smoke.attachTestFile"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeSendCommand),
+                name: Notification.Name("com.aipendant.menubar.smoke.sendCommand"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokePickFiles),
+                name: Notification.Name("com.aipendant.menubar.smoke.pickFiles"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeScreenshot),
+                name: Notification.Name("com.aipendant.menubar.smoke.screenshot"),
                 object: nil)
             NSLog("AI Pendant: smoke mode — main window suppressed, HUD toggle listener active")
         }
@@ -2081,31 +2088,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    /// Camera button: tuck the HUD out of the shot, let the owner drag a region
-    /// with `screencapture -i`, then re-show and attach the capture. Cancelling
-    /// the capture (Esc) simply re-shows with nothing added.
+    /// Camera button: immediately screenshot the WHOLE display the pill is on,
+    /// with the HUD excluded. No region drag, no interactive mode. We orderOut
+    /// the panel first, wait a beat so the window server actually drops it from
+    /// the screen (orderOut flips isVisible synchronously but the pixels linger
+    /// a frame — capturing too soon would put the pill in the shot), capture
+    /// that one display, then re-show the pill and attach the PNG as a chip.
     private func captureScreenshotAttachment() {
-        let wasVisible = floatPanel?.isVisible ?? false
-        floatPanel?.orderOut(nil)
+        guard let panel = floatPanel else { return }
+        let wasVisible = panel.isVisible
+        // Read the target display BEFORE hiding — panel.screen is nil off-screen.
+        let targetScreen = panel.screen ?? NSScreen.main
+        let displayIndex = Self.screencaptureDisplayIndex(for: targetScreen)
+        let windowNumber = panel.windowNumber
         let path = NSTemporaryDirectory()
             .appending("aipendant-shot-\(Int(Date().timeIntervalSince1970)).png")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-i", path]
-        process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if wasVisible { self.showFloatPanel() }
-                if FileManager.default.fileExists(atPath: path) {
-                    self.floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
+
+        panel.orderOut(nil)
+
+        // Do NOT capture until the pill's pixels are actually gone. orderOut flips
+        // isVisible synchronously, but the window server composites the removal a
+        // frame or two later. occlusionState is useless here (it lags and never
+        // updates for a background agent panel), so poll the authoritative,
+        // TCC-free on-screen window list for our window number and capture the
+        // instant it disappears — bounded so we always proceed.
+        func captureWhenGone(_ tries: Int) {
+            if Self.windowIsOnScreen(windowNumber), tries < 20 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { captureWhenGone(tries + 1) }
+                return
+            }
+            let pillGone = !Self.windowIsOnScreen(windowNumber)
+            NSLog("AI Pendant: screenshot — pillOnScreen=%d after %d checks, display=%@",
+                  pillGone ? 0 : 1, tries, displayIndex.map(String.init) ?? "main")
+
+            var args: [String] = ["-x"] // -x: silent, no camera sound
+            if let displayIndex { args += ["-D", String(displayIndex)] }
+            args.append(path)
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            process.arguments = args
+            process.terminationHandler = { [weak self] proc in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if wasVisible { self.showFloatPanel() }
+                    let exists = FileManager.default.fileExists(atPath: path)
+                    if proc.terminationStatus == 0, exists {
+                        self.floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
+                        NSLog("AI Pendant: screenshot saved + attached: %@", path)
+                    } else {
+                        self.floatModel.status =
+                            "Screenshot failed — grant AI Pendant Screen Recording in System Settings"
+                        NSLog("AI Pendant: screencapture exit=%d fileExists=%d",
+                              proc.terminationStatus, exists ? 1 : 0)
+                    }
                 }
             }
+            do {
+                try process.run()
+            } catch {
+                NSLog("AI Pendant: screencapture failed to launch: \(error)")
+                if wasVisible { self.showFloatPanel() }
+            }
         }
-        do {
-            try process.run()
-        } catch {
-            NSLog("AI Pendant: screencapture failed to launch: \(error)")
-            if wasVisible { showFloatPanel() }
+        captureWhenGone(0)
+    }
+
+    /// True while the given window number is still in the on-screen window list —
+    /// the authoritative, TCC-free signal that its pixels are composited. Used to
+    /// confirm the pill is gone before a full-screen capture.
+    private static func windowIsOnScreen(_ windowNumber: Int) -> Bool {
+        guard windowNumber != 0,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return false }
+        return list.contains { ($0[kCGWindowNumber as String] as? Int) == windowNumber }
+    }
+
+    /// Maps an NSScreen to `screencapture -D` 1-based index (active-display-list
+    /// order). Single-display Macs resolve to 1 (the main display). Returns nil
+    /// when the screen can't be mapped, in which case the caller omits -D and
+    /// screencapture uses the main display.
+    private static func screencaptureDisplayIndex(for screen: NSScreen?) -> Int? {
+        guard let screen,
+              let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return nil }
+        let targetID = CGDirectDisplayID(num.uint32Value)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success,
+              let idx = ids.firstIndex(of: targetID) else { return nil }
+        return idx + 1
+    }
+
+    /// Paperclip: present a real NSOpenPanel. An .accessory (LSUIElement) app
+    /// backed by a borderless .nonactivatingPanel is the hard case here — a
+    /// free-standing NSOpenPanel run via begin()/runModal() logs as "presented"
+    /// but its window frequently never lands on the current Space (it only
+    /// appears when some OTHER regular window of the app happens to exist), so
+    /// nothing is ever selected. The robust fix is to attach the panel as a
+    /// SHEET of the pill: the pill is a real, visible, key window that already
+    /// joins the active Space and floats over fullscreen apps, so the sheet is
+    /// guaranteed to appear right there and take input.
+    private func presentFilePicker() {
+        guard let panel = floatPanel, panel.isVisible else { return }
+        floatModel.isFilePickerOpen = true // keep the pill from hiding on blur
+
+        // Make sure the pill is key so the sheet is interactive, but stay
+        // .accessory: no policy juggling, no Dock-icon flicker, no Space switch.
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let picker = NSOpenPanel()
+        picker.canChooseFiles = true
+        picker.canChooseDirectories = false
+        picker.allowsMultipleSelection = true
+        picker.message = "Attach files to your command"
+        picker.prompt = "Attach"
+        NSLog("AI Pendant: file picker presenting as sheet on the pill")
+
+        picker.beginSheetModal(for: panel) { [weak self] response in
+            guard let self else { return }
+            let urls = response == .OK ? picker.urls : []
+            NSLog("AI Pendant: file picker closed response=%ld urls=%d", response.rawValue, urls.count)
+            self.floatModel.isFilePickerOpen = false
+            if !urls.isEmpty { self.floatModel.addAttachments(urls: urls) }
+            // Re-key the pill and drop the caret back into the field.
+            if self.floatPanel?.isVisible == true {
+                self.floatPanel?.makeKey()
+                self.focusCommandField()
+            }
         }
     }
 
@@ -2157,6 +2269,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                   panel.frame.width, panel.frame.height,
                   panel.frame.origin.x, panel.frame.origin.y)
         }
+    }
+
+    /// Smoke-harness only: attach a real file path (from AIPENDANT_SMOKE_ATTACH)
+    /// through the EXACT code the file panel's completion uses, so a headless
+    /// test can prove a returned URL becomes a chip and rides the /plan body.
+    @objc private func smokeAttachTestFile() {
+        guard smokeMode,
+              let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_ATTACH"],
+              !path.isEmpty else { return }
+        floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
+        NSLog("AI Pendant: smoke attach — attachments now %d", floatModel.attachments.count)
+    }
+
+    /// Smoke-harness only: fire send() with the currently-staged attachments so
+    /// the test can inspect the POST body the agent receives.
+    @objc private func smokeSendCommand() {
+        guard smokeMode else { return }
+        if floatModel.text.isEmpty { floatModel.text = "look at the attached files" }
+        floatModel.send()
+    }
+
+    /// Smoke-harness only: present the real NSOpenPanel (blocks in runModal;
+    /// the test screencaptures the panel to prove it presents).
+    @objc private func smokePickFiles() {
+        guard smokeMode else { return }
+        presentFilePicker()
+    }
+
+    /// Smoke-harness only: trigger the real full-display screenshot path.
+    @objc private func smokeScreenshot() {
+        guard smokeMode else { return }
+        captureScreenshotAttachment()
     }
 
     /// Menu-bar badge: waveform icon plus a small count while approvals wait.
