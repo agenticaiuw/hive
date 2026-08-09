@@ -881,6 +881,20 @@
 		deviceToken: null
 	});
 	const MAX_FAILURES = 2;
+	const PROMPT_CHAR_BUDGET = Object.freeze({
+		maxMessages: 40,
+		maxPromptChars: 24e3,
+		maxOutputTokens: 2048
+	}).maxPromptChars - 1e3;
+	const FATAL_INFER_CODES = new Set([
+		"credential_predates_capability",
+		"scope_denied",
+		"not_configured",
+		"model_not_allowed",
+		"invalid_messages",
+		"prompt_too_large",
+		"rate_limited"
+	]);
 	/**
 	* The brain's model endpoint is either the relay (https) or a local dev proxy
 	* on loopback. Anything else — plain http to a LAN address, a file URL — is a
@@ -1065,6 +1079,11 @@
 			};
 		}
 		if (state.status === "thinking" && event?.type === "model_error") {
+			if (event.fatal) return {
+				...state,
+				status: "handoff",
+				handoffReason: event.error
+			};
 			const failures = state.failures + 1;
 			return failures >= MAX_FAILURES ? {
 				...state,
@@ -1108,13 +1127,32 @@
 	/**
 	* The prompt is rebuilt from state every turn rather than kept as chat history
 	* so the reducer stays the single source of truth.
+	*
+	* Bounded against the relay's prompt ceiling here rather than discovering it
+	* as a 400: a `read_page` result is up to 50 kB on its own, so a few steps of
+	* transcript can outgrow the whole budget. The system block and the owner's
+	* command are never dropped — without either there is nothing to answer — and
+	* the transcript keeps the MOST RECENT steps, which are the ones the next
+	* decision turns on. Dropped steps are declared in the prompt rather than
+	* silently omitted, so the model is never told a partial history is complete.
 	*/
 	function buildBrainMessages(state) {
 		const tools = BROWSER_TOOLS.map((tool) => `- ${tool.name}(${tool.params}): ${tool.description}`).join("\n");
-		const transcript = state.steps.map((step, index) => {
+		const lines = state.steps.map((step, index) => {
 			const outcome = step.ok ? JSON.stringify(step.result)?.slice(0, 2e3) : `ERROR: ${step.error}`;
 			return `${index + 1}. ${step.tool}(${JSON.stringify(step.params)}) → ${outcome}`;
-		}).join("\n");
+		});
+		const fixedChars = tools.length + String(state.command).length + 400;
+		let budget = Math.max(0, PROMPT_CHAR_BUDGET - fixedChars);
+		const kept = [];
+		for (let index = lines.length - 1; index >= 0; index -= 1) {
+			const cost = lines[index].length + 1;
+			if (cost > budget) break;
+			budget -= cost;
+			kept.unshift(lines[index]);
+		}
+		const dropped = lines.length - kept.length;
+		const transcript = kept.length ? (dropped ? `(${dropped} earlier step(s) omitted to fit the prompt limit)\n` : "") + kept.join("\n") : "";
 		return [
 			{
 				role: "system",
@@ -1208,6 +1246,28 @@ or, when you are finished,
 			reason: "JSON had neither a tool call nor a done response"
 		};
 	}
+	/**
+	* Read a failed POST /v1/infer. Pure, so every branch is testable without a
+	* relay — which matters more than usual here, because the branch the owner
+	* will actually hit first (a credential minted before `llm:infer` joined the
+	* browser_node role) cannot be reproduced locally at all.
+	*
+	* Keys on `code`, never on message text: the relay's own comment says the
+	* generic denial stays deliberately vague so a probing token gets no
+	* scope-enumeration oracle out of it, and vague text is exactly what a text
+	* match would break on.
+	*/
+	function interpretInferError({ status, payload } = {}) {
+		const code = String(payload?.code ?? "").trim() || "unknown";
+		const relayText = String(payload?.error ?? "").trim();
+		const message = code === "credential_predates_capability" ? "The browser credential was issued before the relay gave this role the ability to think. Re-pair the extension (pendant-credentials.mjs pair --role browser_node) — scopes are frozen when a credential is created." : code === "scope_denied" ? "This credential's role is not allowed to use the relay's inference route." : code === "rate_limited" ? `This device has spent its hourly inference budget${payload?.resetAt ? `; it resets at ${payload.resetAt}` : ""}.` : code === "not_configured" ? "The relay has no model key configured, so it cannot think for this node." : code === "prompt_too_large" || code === "invalid_messages" ? relayText || "The relay refused the prompt." : code === "upstream_error" ? `The model provider refused the request (HTTP ${status ?? "?"}).` : relayText || `The relay returned HTTP ${status ?? "?"}.`;
+		return {
+			code,
+			status: status ?? null,
+			message,
+			fatal: FATAL_INFER_CODES.has(code)
+		};
+	}
 	function summarizeBrainRun(state) {
 		if (state.status === "done") return `Brain answered after ${state.stepCount} tool call(s).`;
 		if (state.status === "handoff") return `Brain handed off to the Mac planner: ${state.handoffReason}`;
@@ -1245,7 +1305,8 @@ or, when you are finished,
 		} catch (error) {
 			state = reduceBrain(state, {
 				type: "model_error",
-				error: error?.message || String(error)
+				error: error?.message || String(error),
+				fatal: error?.fatal === true
 			});
 		}
 		else if (state.status === "acting") try {
@@ -2664,27 +2725,48 @@ or, when you are finished,
 		}, EXECUTE_TIMEOUT_MS, interpretExecuteResponse)));
 	}
 	/**
-	* The brain's model call. Never reached today: runBrainLoop refuses to run
-	* without a ready config, and no ready config can exist until the relay-side
-	* model proxy and scoped device tokens land. No key material lives here.
+	* The brain's model call: POST /v1/infer on the relay
+	* (cloud-relay/nodeInference.js). Not reached until the owner configures a
+	* browser_node credential — see the header of src/brain.js. No key material
+	* lives here; the upstream provider key never leaves the relay.
+	*
+	* Deliberately absent from the body: `deviceId`, which the relay takes from
+	* the credential and ignores here, and `model`, which is allow-listed
+	* server-side — naming one outside the list is a 400 rather than a silent
+	* substitution, and this loop has no reason to name one at all.
 	*/
 	async function brainCallModel(brainConfig, messages) {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 6e4);
+		const timeout = setTimeout(() => controller.abort(), 65e3);
 		try {
 			const response = await fetch(brainConfig.modelProxyUrl, {
 				method: "POST",
 				cache: "no-store",
 				headers: {
+					Accept: "application/json",
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${brainConfig.deviceToken}`
 				},
-				body: JSON.stringify({ messages }),
+				body: JSON.stringify({
+					messages,
+					maxTokens: 1024,
+					responseFormat: "json_object"
+				}),
 				signal: controller.signal
 			});
-			if (!response.ok) throw await responseError(response);
-			const payload = await response.json();
-			return String(payload?.reply ?? payload?.content ?? payload?.text ?? "");
+			const payload = await response.json().catch(() => null);
+			if (!response.ok) {
+				const verdict = interpretInferError({
+					status: response.status,
+					payload
+				});
+				const error = new Error(verdict.message);
+				error.code = verdict.code;
+				error.fatal = verdict.fatal;
+				throw error;
+			}
+			if (payload?.budget && payload.budget.enforced === false) console.warn("relay inference budget is advisory: no durable counter was reachable.");
+			return String(payload?.content ?? "");
 		} finally {
 			clearTimeout(timeout);
 		}

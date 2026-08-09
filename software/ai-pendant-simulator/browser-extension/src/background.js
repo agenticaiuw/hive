@@ -29,6 +29,7 @@ import {
 import {
   BRAIN_STORAGE_KEYS,
   chooseBrainRoute,
+  interpretInferError,
   normalizeBrainConfig,
   runBrainLoop,
   summarizeBrainRun,
@@ -1449,28 +1450,62 @@ async function runConsoleCommand({ id, command, page, config }) {
 }
 
 /**
- * The brain's model call. Never reached today: runBrainLoop refuses to run
- * without a ready config, and no ready config can exist until the relay-side
- * model proxy and scoped device tokens land. No key material lives here.
+ * The brain's model call: POST /v1/infer on the relay
+ * (cloud-relay/nodeInference.js). Not reached until the owner configures a
+ * browser_node credential — see the header of src/brain.js. No key material
+ * lives here; the upstream provider key never leaves the relay.
+ *
+ * Deliberately absent from the body: `deviceId`, which the relay takes from
+ * the credential and ignores here, and `model`, which is allow-listed
+ * server-side — naming one outside the list is a 400 rather than a silent
+ * substitution, and this loop has no reason to name one at all.
  */
 async function brainCallModel(brainConfig, messages) {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 60_000)
+  const timeout = setTimeout(() => controller.abort(), 65_000)
 
   try {
     const response = await fetch(brainConfig.modelProxyUrl, {
       method: 'POST',
       cache: 'no-store',
       headers: {
+        Accept: 'application/json',
         'Content-Type': 'application/json',
         Authorization: `Bearer ${brainConfig.deviceToken}`,
       },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({
+        messages,
+        maxTokens: 1_024,
+        /* The prompt demands exactly one JSON object; asking the transport for
+         * the same thing costs nothing and removes the commonest parse
+         * failure. parseToolCalls still tolerates prose, because a refusal can
+         * arrive as prose whatever the request asked for. */
+        responseFormat: 'json_object',
+      }),
       signal: controller.signal,
     })
-    if (!response.ok) throw await responseError(response)
-    const payload = await response.json()
-    return String(payload?.reply ?? payload?.content ?? payload?.text ?? '')
+
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      const verdict = interpretInferError({ status: response.status, payload })
+      const error = new Error(verdict.message)
+      error.code = verdict.code
+      /* Read by runBrainLoop: a settled refusal hands off at once instead of
+       * being retried into the same answer. */
+      error.fatal = verdict.fatal
+      throw error
+    }
+
+    /* A budget the relay could not durably enforce is worth saying out loud
+     * once: the ceiling in the response is advisory, not applied. */
+    if (payload?.budget && payload.budget.enforced === false) {
+      console.warn(
+        'relay inference budget is advisory: no durable counter was reachable.',
+      )
+    }
+
+    return String(payload?.content ?? '')
   } finally {
     clearTimeout(timeout)
   }

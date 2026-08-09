@@ -6,9 +6,11 @@ import {
   BRAIN_DEFAULTS,
   BRAIN_STORAGE_KEYS,
   BROWSER_TOOLS,
+  INFER_LIMITS,
   buildBrainMessages,
   chooseBrainRoute,
   createBrainState,
+  interpretInferError,
   normalizeBrainConfig,
   parseToolCalls,
   reduceBrain,
@@ -253,6 +255,134 @@ test('a dead model endpoint ends in a handoff, not a hang', async () => {
   assert.equal(state.status, 'handoff')
   assert.match(state.handoffReason, /failed twice/)
   assert.match(summarizeBrainRun(state), /handed off to the Mac planner/i)
+})
+
+/* ------------------------------------------------------------------ *
+ * POST /v1/infer failures. Codes and limits mirrored from
+ * cloud-relay/nodeInference.js + cloud-relay/server.js, read 2026-08-09.
+ * ------------------------------------------------------------------ */
+
+test('a credential minted before llm:infer says re-pair, not "broken"', () => {
+  const verdict = interpretInferError({
+    status: 403,
+    payload: {
+      ok: false,
+      code: 'credential_predates_capability',
+      error:
+        'Blocked for safety: this credential was issued before its role gained llm:infer. Re-pair the device to pick it up — scopes are frozen into a credential when it is created.',
+    },
+  })
+  assert.equal(verdict.code, 'credential_predates_capability')
+  assert.equal(verdict.fatal, true)
+  assert.match(verdict.message, /Re-pair/i)
+  assert.match(verdict.message, /browser_node/)
+})
+
+test('settled refusals are fatal; flaky transport is not', () => {
+  const fatal = [
+    'scope_denied',
+    'not_configured',
+    'model_not_allowed',
+    'rate_limited',
+    'prompt_too_large',
+    'invalid_messages',
+  ]
+  for (const code of fatal) {
+    assert.equal(
+      interpretInferError({ status: 403, payload: { code } }).fatal,
+      true,
+      `${code} must not be retried`,
+    )
+  }
+  assert.equal(
+    interpretInferError({ status: 502, payload: { code: 'upstream_error' } }).fatal,
+    false,
+    'a provider hiccup is worth one retry',
+  )
+  assert.equal(interpretInferError({ status: 500, payload: null }).fatal, false)
+})
+
+test('rate limiting reports when the budget comes back', () => {
+  const verdict = interpretInferError({
+    status: 429,
+    payload: { code: 'rate_limited', resetAt: '2026-08-09T12:00:00.000Z' },
+  })
+  assert.match(verdict.message, /2026-08-09T12:00:00\.000Z/)
+})
+
+test('an upstream failure never quotes the provider body', () => {
+  /* The relay strips it on purpose — a provider error can quote the request,
+   * and the request can quote the owner. Nothing here may put it back. */
+  const verdict = interpretInferError({
+    status: 502,
+    payload: {
+      code: 'upstream_error',
+      error: 'The model provider refused the request (HTTP 400).',
+    },
+  })
+  assert.equal(verdict.message, 'The model provider refused the request (HTTP 502).')
+})
+
+test('a fatal model error hands off on the first strike', () => {
+  let state = createBrainState({ command: 'x' })
+  state = reduceBrain(state, {
+    type: 'model_error',
+    error: 'Re-pair the extension.',
+    fatal: true,
+  })
+  assert.equal(state.status, 'handoff')
+  assert.equal(state.handoffReason, 'Re-pair the extension.')
+})
+
+test('the prompt is trimmed to the relay ceiling, and says that it was', () => {
+  let state = createBrainState({ command: 'read everything', maxSteps: 12 })
+  /* Each read_page result is capped at 2 kB in the transcript, so ~20 steps
+   * is comfortably past the 24 kB prompt ceiling. */
+  for (let index = 0; index < 20; index += 1) {
+    state = reduceBrain(state, {
+      type: 'model_reply',
+      text: '{"tool":"read_page","params":{"mode":"text"}}',
+    })
+    state = reduceBrain(state, {
+      type: 'tool_result',
+      ok: true,
+      result: { content: `${index}-${'x'.repeat(4_000)}` },
+    })
+    if (state.status !== 'thinking') break
+  }
+
+  const messages = buildBrainMessages(state)
+  const chars = messages.reduce((sum, message) => sum + message.content.length, 0)
+  assert.ok(
+    chars < INFER_LIMITS.maxPromptChars,
+    `prompt was ${chars} chars, ceiling is ${INFER_LIMITS.maxPromptChars}`,
+  )
+  assert.ok(messages.length <= INFER_LIMITS.maxMessages)
+
+  const transcript = messages.at(-1).content
+  assert.match(transcript, /earlier step\(s\) omitted/)
+
+  /* What survived, by step number. The newest must be present and the oldest
+   * gone — dropping from the wrong end would keep the prompt legal while
+   * starving the next decision of what just happened. */
+  const kept = [...transcript.matchAll(/(?:^|\n)(\d+)\. read_page/g)].map((match) =>
+    Number(match[1]),
+  )
+  assert.ok(kept.length > 1, 'more than one step should still fit')
+  assert.equal(kept.at(-1), state.steps.length, 'the newest step must survive')
+  assert.equal(kept[0] > 1, true, 'the oldest steps are the ones dropped')
+  assert.deepEqual(
+    kept,
+    Array.from({ length: kept.length }, (_, offset) => kept[0] + offset),
+    'the kept steps must be a contiguous, most-recent run',
+  )
+})
+
+test('the command and system block are never dropped to fit', () => {
+  const state = createBrainState({ command: 'q'.repeat(2_000) })
+  const messages = buildBrainMessages(state)
+  assert.equal(messages[0].role, 'system')
+  assert.equal(messages[1].content, 'q'.repeat(2_000))
 })
 
 test('tool transcripts feed the next model turn', () => {
