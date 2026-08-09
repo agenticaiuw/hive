@@ -471,14 +471,30 @@ test('pending counts the page it just leased, so a loop on it never ends', () =>
 })
 
 /* ------------------------------------------------------------------ *
- * Failures: status first, because `code` is not always there.
+ * Failures: status first; `code`, when the relay sends one, sharpens it.
  * ------------------------------------------------------------------ */
 
-test('a 403 with no code is still reported precisely', () => {
-  /* The ownership 403 carries only a message — no `code` — unlike
-   * scope_denied / unknown_node / inbox_full / invalid_envelope. A branch
-   * keyed on code would fall through to "unknown" for the single most likely
-   * misconfiguration the owner will hit. */
+test('the ownership 403 names itself: not_your_inbox pins the exact fix', () => {
+  /* Since relay commit 41dbc4b both inbox routes send code:'not_your_inbox'
+   * beside their deliberately vague message. The code means exactly one
+   * thing — the token is valid but paired to a different deviceId than the
+   * inbox requested — so the description states that outright instead of
+   * guessing at it from the status alone. */
+  const denied = describeRelayFailure({
+    status: 403,
+    code: 'not_your_inbox',
+    message: 'Blocked for safety: a node may only drain its own inbox.',
+  })
+  assert.equal(denied.state, 'unauthorized')
+  assert.equal(denied.code, 'not_your_inbox')
+  assert.match(denied.message, /paired to a different device ID/)
+})
+
+test('a 403 with no code still lands on the precise generic fix', () => {
+  /* The ownership 403 only gained `not_your_inbox` in relay 41dbc4b; status
+   * stays the first key on purpose. A relay predating that commit — or any
+   * future 403 shipped without a code — must still classify as the deviceId
+   * mismatch it almost certainly is, not fall through to "unknown". */
   const denied = describeRelayFailure({ status: 403, message: 'a node may only drain its own inbox.' })
   assert.equal(denied.state, 'unauthorized')
   assert.equal(denied.code, '')
