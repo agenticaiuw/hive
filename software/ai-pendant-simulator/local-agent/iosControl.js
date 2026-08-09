@@ -143,9 +143,11 @@ NOT_RUNNING = ("iPhone Mirroring is not running — open it and connect your "
                "phone.")
 MOVED = ("Nothing was sent to the iPhone: its window moved while it was being "
          "brought forward, so the coordinates could no longer be trusted.")
-BLOCKED = ("iPhone Mirroring is showing a Connect / 'iPhone in Use' screen, so "
-           "nothing was sent. Connecting the phone is physical and only you "
-           "can do it.")
+BLOCKED = ("iPhone Mirroring is showing a Connect screen, so nothing was sent. "
+           "Connecting the phone is physical and only you can do it.")
+PAUSED = ("Nothing was sent to the iPhone: mirroring is paused because the "
+          "iPhone is in use — you picked up your phone. This is normal and not "
+          "a fault; it resumes on its own when the iPhone is locked again.")
 
 
 class PhoneError(RuntimeError):
@@ -310,6 +312,20 @@ def blocked_by(boxes):
     return any(marker in text for marker in BLOCKED_MARKERS)
 
 
+def paused_by_phone_use(boxes):
+    """The owner picked up their phone.
+
+    This is not a fault and not a disconnection — it is the ordinary cost of a
+    shared device, and it resolves the moment they put the phone down and lock
+    it. It reads identically to a never-connected session in phone-harness's
+    vocabulary, which is how a normal interruption came to be reported with the
+    same alarm as a broken setup.
+    """
+    text = " ".join(o["text"] for o in boxes).lower()
+    return ("iphone in use" in text or "due to iphone use" in text
+            or "lock your iphone" in text)
+
+
 def same_bounds(a, b):
     return all(round(a[k]) == round(b[k]) for k in ("x", "y", "w", "h"))
 
@@ -385,6 +401,8 @@ def ready_to_send():
             "Nothing was sent to the iPhone: the front iPhone Mirroring window "
             "shows no readable text, which is not what a live phone screen "
             "looks like, so it is probably not the phone.")
+    if paused_by_phone_use(boxes):
+        raise PhoneError("paused", PAUSED)
     if blocked_by(boxes):
         raise PhoneError("blocked", BLOCKED)
     return win, boxes, prior
@@ -492,7 +510,13 @@ const OPERATIONS = {
             result["readable"] = True
             result["textCount"] = len(boxes)
             result["blocked"] = blocked_by(boxes)
-            if result["blocked"]:
+            result["pausedByPhoneUse"] = paused_by_phone_use(boxes)
+            if result["pausedByPhoneUse"]:
+                # Named separately from 'blocked' because it means something
+                # different to a plan: nothing is broken, the owner is holding
+                # their phone, and it comes back on its own when they lock it.
+                result["state"] = "paused"
+            elif result["blocked"]:
                 result["state"] = "blocked"
             elif result["onScreen"]:
                 result["state"] = "ready"
@@ -504,6 +528,10 @@ const OPERATIONS = {
     result["ready"] = result["state"] == "ready"
     result["writesNeedActivation"] = result["state"] == "off-space"
     result["spaceSwitchOnActivate"] = space_switch_on_activate()
+    # Whether the screen can be seen at all. Measured, not assumed: while the
+    # Mac is locked the window server composites nothing, so the pixels are
+    # unavailable even though the window is still enumerable.
+    result["readsPossible"] = bool(result["readable"])
     # Whether a write could actually land right now, said before anything is
     # attempted. Off-Space plus the Space-switch setting turned off is the one
     # combination where reads work perfectly and every write will refuse.
@@ -836,7 +864,15 @@ function timeoutFor(action) {
 const NO_WINDOW_MESSAGE =
   'iPhone Mirroring has no open window — open the iPhone Mirroring app and leave the window visible.'
 const BLOCKED_MESSAGE =
-  'iPhone Mirroring is showing a Connect / "iPhone in Use" screen. Open iPhone Mirroring and connect the phone — and if it says "iPhone in Use", lock the iPhone so mirroring can resume. I will not tap Connect for you.'
+  'iPhone Mirroring is showing a Connect screen. Open iPhone Mirroring and connect the phone. I will not tap Connect for you — connecting is physical and only the owner can do it.'
+/*
+ * Not a failure of anything. The owner picked up their phone, which pauses
+ * mirroring by design, and it resumes by itself when they lock it again. It
+ * used to be reported in the same words as a broken setup, which turned the
+ * most ordinary interruption there is into an alarm.
+ */
+const PAUSED_MESSAGE =
+  'Mirroring is paused because the iPhone is in use — the owner picked up their phone. Nothing is broken and nothing needs fixing: it resumes on its own once the iPhone is locked again. Retry then, or carry on with something else.'
 /*
  * The abort that matters most. A write asked for the window to be brought
  * forward, it did not demonstrably arrive, and so nothing at all was sent —
@@ -863,6 +899,7 @@ const PROBLEM_BY_CODE = new Map([
   ['no-window', { reason: 'ios-mirroring-window-missing', message: () => NO_WINDOW_MESSAGE }],
   ['not-running', { reason: 'ios-mirroring-window-missing', message: () => NO_WINDOW_MESSAGE }],
   ['blocked', { reason: 'ios-mirroring-blocked', message: () => BLOCKED_MESSAGE }],
+  ['paused', { reason: 'ios-mirroring-paused', message: () => PAUSED_MESSAGE }],
   ['not-frontmost', { reason: 'ios-window-not-frontmost', message: (raw) => raw || NOT_FRONTMOST_MESSAGE }],
   ['moved', { reason: 'ios-window-not-frontmost', message: (raw) => raw || NOT_FRONTMOST_MESSAGE }],
   ['unreadable', { reason: 'ios-screen-unreadable', message: (raw) => raw || 'The iPhone screen could not be read.' }],
@@ -876,7 +913,10 @@ function connectionProblem(text, code = null) {
   }
 
   const message = String(text ?? '')
-  if (/iPhone in Use|showing a connect|connect \/ 'iPhone in Use'/i.test(message)) {
+  if (/iPhone in Use|lock your iphone/i.test(message)) {
+    return { reason: 'ios-mirroring-paused', message: PAUSED_MESSAGE }
+  }
+  if (/showing a connect|to connect/i.test(message)) {
     return { reason: 'ios-mirroring-blocked', message: BLOCKED_MESSAGE }
   }
   if (
@@ -900,6 +940,9 @@ function connectionProblem(text, code = null) {
 function connectionProblemForState(state) {
   if (state === 'no-window' || state === 'not-running') {
     return { reason: 'ios-mirroring-window-missing', message: NO_WINDOW_MESSAGE }
+  }
+  if (state === 'paused') {
+    return { reason: 'ios-mirroring-paused', message: PAUSED_MESSAGE }
   }
   if (state === 'blocked') {
     return { reason: 'ios-mirroring-blocked', message: BLOCKED_MESSAGE }
@@ -1069,7 +1112,15 @@ function describeSuccess(type, result) {
         return `${base}, and taps or typing will first bring iPhone Mirroring to the front.`
       }
       if (state === 'mac-locked') {
-        return "The Mac's screen is locked, so the iPhone cannot be seen or driven — this is the Mac, not the phone. The mirroring window is still there; unlock the Mac and it is reachable again."
+        /* Measured, not assumed: with the screen locked the window is still
+         * enumerable but every capture returns "could not create image from
+         * window". Reading is the foundation of every guard here, so the phone
+         * is not merely hard to drive while the Mac is locked — it is not
+         * drivable at all, and a routine needs to know that before 3am. */
+        return "The Mac's screen is locked, so the iPhone can be neither read nor driven — this is the Mac, not the phone. The mirroring window is still there, but macOS composites nothing while locked, so there is no screen to see or verify against. Unlock the Mac and it is reachable again."
+      }
+      if (state === 'paused') {
+        return 'Mirroring is paused because the iPhone is in use — the owner has their phone in hand. Nothing is broken; it resumes on its own when they lock it.'
       }
       if (state === 'unreadable') {
         return `The iPhone Mirroring window is there but could not be read: ${result?.detail ?? 'no detail'}.`

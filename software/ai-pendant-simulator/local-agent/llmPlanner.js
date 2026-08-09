@@ -590,13 +590,21 @@ const FULL_CONTROL_ACTION_SCHEMA = {
    * automatically — plan it anyway, and it will be surfaced rather than
    * silently dropped.
    *
+   * THE PHONE IS SHARED, so any step can be interrupted at any moment. The
+   * owner picking up their iPhone pauses mirroring, and their Mac locking
+   * takes the screen away entirely. Neither is a fault and neither means the
+   * task was wrong: they are reported as `ios-mirroring-paused` and
+   * `ios-mac-locked`, they resolve by themselves, and the right response is to
+   * say so and offer to continue later — never to retry in a loop, and never
+   * to report the task as failed.
+   *
    * Prefer the Mac or the web when the task can be done there — this is for
    * what genuinely needs the phone: iOS-only apps, things tied to the owner's
    * phone number, checking how something looks on the device.
    */
   ios_status: {
     description:
-      "Check whether the owner's real iPhone is reachable through iPhone Mirroring. Reads only. Returns state ready | off-space | blocked | no-window | not-running. 'off-space' means the mirroring window is on another macOS Space: reading works as-is, and taps or typing will bring the window forward first. Call this first when unsure; only the owner can open or reconnect iPhone Mirroring.",
+      "Check whether the owner's real iPhone is reachable through iPhone Mirroring. Reads only, and the honest preflight: it answers `readsPossible` and `writesPossible` before anything is attempted. States: ready | off-space (window is on another macOS Space — reading works as-is) | paused (the owner is holding their phone; resumes by itself when they lock it) | mac-locked (the Mac's screen is locked, so the phone can be neither read nor driven) | blocked | no-window | not-running. Call this first when unsure, and when a phone step reports paused or mac-locked — those are normal, not failures.",
     params: {},
   },
   ios_ocr: {
