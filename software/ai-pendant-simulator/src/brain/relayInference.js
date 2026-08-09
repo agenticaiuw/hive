@@ -51,11 +51,20 @@ export const INFERENCE_LIMITS = Object.freeze({
 })
 
 export class InferenceUnavailableError extends Error {
-  constructor(message, { status = 0, path = DEFAULT_INFERENCE_PATH } = {}) {
+  constructor(
+    message,
+    { status = 0, path = DEFAULT_INFERENCE_PATH, code = null, staleCredential = false } = {},
+  ) {
     super(message)
     this.name = 'InferenceUnavailableError'
     this.status = status
     this.path = path
+    /* The relay's own code — `credential_predates_capability` or
+     * `scope_denied` — so a caller keys on the field rather than matching
+     * prose that will be reworded. */
+    this.code = code
+    /* True when re-pairing fixes it. The UI can offer the button. */
+    this.staleCredential = staleCredential
   }
 }
 
@@ -116,10 +125,38 @@ export function createRelayInference({
       ...(model ? { model } : {}),
     }, { signal })
 
+    /*
+     * A 403 used to be a guess between two very different failures, and the
+     * error text said so — "either the relay has no inference route yet, or
+     * this phone's credential is missing the scope". The relay now names which
+     * one (server.js:458, `credentialPredatesScopes`), so this stops guessing.
+     *
+     * The distinction is not cosmetic. Scopes are frozen into a credential when
+     * it is created and NOTHING updates them, so the hour after a deploy that
+     * widens a role, every already-paired node fails this way at once — and the
+     * generic message points the owner at the new feature instead of at the
+     * stale token. One is "re-pair, it takes a click"; the other is "this role
+     * genuinely may not do that".
+     */
+    if (response.status === 403 && payload?.code === 'credential_predates_capability') {
+      throw new InferenceUnavailableError(
+        `This phone's credential was issued before it was allowed to reach a model. Re-pair the phone — scopes are frozen into a credential when it is created, so a phone paired before the relay gained this capability never picks it up on its own. Relay said: ${payload.error}`,
+        { status: 403, path, code: payload.code, staleCredential: true },
+      )
+    }
+
+    if (response.status === 403 && payload?.code === 'scope_denied') {
+      throw new InferenceUnavailableError(
+        "This phone is not allowed to reach a model: its role does not carry the llm:infer scope. Re-pairing will not help — the role itself has to grant it.",
+        { status: 403, path, code: payload.code },
+      )
+    }
+
     if (response.status === 404 || response.status === 403) {
+      /* No code: an older relay build, so the honest answer is still both. */
       throw new InferenceUnavailableError(
         `This phone cannot reach a model: the relay answered ${response.status} for ${path}. Either the relay has no inference route deployed yet, or this phone's credential is missing the llm:infer scope — re-pair the phone from the Hive dashboard.`,
-        { status: response.status, path },
+        { status: response.status, path, code: payload?.code ?? null },
       )
     }
 
