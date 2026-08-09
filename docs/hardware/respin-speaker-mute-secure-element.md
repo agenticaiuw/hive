@@ -142,8 +142,11 @@ failure that caused the detour is one a PCB is specifically good at preventing.
 
 ## 1. Bill of materials
 
-Prices and stock are as researched August 2026 and go stale. Anything I could not
-confirm is marked `[unverified]` and repeated in §8.3.
+Two of these rows are **not selected yet** — the speaker and the mute switch —
+and saying so is more useful than filling them with a plausible guess. Both need
+mechanical constraints this document does not own (§5.1, §3.4). Every price here
+is historical or approximate; **none was confirmed against a live cart**, and all
+of them are repeated in §8.3.
 
 ### 1.1 New parts this respin adds
 
@@ -176,11 +179,12 @@ is not fitted. That is a small fraction of pendant-v2's ~$55–65 EVT unit cost.
 | Pick a **3.0–3.6 V** PDM mic instead of the 1.8 V T5837 | Deletes the `XC6206P182MR` 1.8 V LDO **and** the `TXB0102DCUR` level shifter that exist in v1's schematic solely to feed it `[verified: Design_Package_v1.md:13,26]`. v1's own §1 already recommends this. Two parts and a rail removed. |
 | `SD_MODE` moves from VBAT to a GPIO | Saves 8.2 mAh/day (§4.3). One GPIO, one resistor. |
 
-**Sourcing note.** Every part above is stocked by Digi-Key and Mouser; the amp
-and the ATECC608B are also on LCSC, which matters if the boards are assembled at
-JLCPCB as v1 planned. The **speaker (A2) and the switch (B1) are the two items
-with real selection work left**, and the speaker is on pendant-v2's critical
-path already.
+**Sourcing note.** The amp and the ATECC608B are commodity parts carried by
+Digi-Key, Mouser and LCSC — LCSC matters if the boards are assembled at JLCPCB as
+v1 planned, since a part outside their library becomes a hand-placement line
+item. The passives are generic. **The speaker (A2) and the switch (B1) are the
+two items with real selection work left**, and neither has been sourced here;
+the speaker is already on pendant-v2's critical path as §9.3 item 4.
 
 **Lifecycle risk.** The MAX98357A is the part worth watching: it is a Maxim-era
 design now in ADI's catalogue, and ADI has been pruning that catalogue. It reads
