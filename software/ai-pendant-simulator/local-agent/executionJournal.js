@@ -265,6 +265,8 @@ export function journalEntry(job, { jobs = [], routing = null } = {}) {
     command: String(job?.command ?? ''),
     source: job?.source ?? null,
     sessionId: job?.sessionId ?? null,
+    /* Paths only — what the request arrived with (jobTracker row field). */
+    attachments: Array.isArray(job?.attachments) ? job.attachments : [],
     running: job?.status === 'processing',
     error: job?.error ?? null,
     startedAt: job?.createdAt ?? null,

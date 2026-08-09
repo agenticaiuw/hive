@@ -417,11 +417,17 @@ app.get('/capabilities', async (_request, response) => {
 app.post('/plan', async (request, response) => {
   const command = String(request.body?.command ?? '')
   const sessionId = String(request.body?.sessionId ?? '').trim() || null
+  // The HUD's attachment paths (mac-menubar 06171f1). Echoed on the job row
+  // as paths, vetted and put to work by the orchestrator (attachments.js).
+  const attachments = Array.isArray(request.body?.attachments)
+    ? request.body.attachments.map((entry) => String(entry))
+    : null
   const tracked = recordJobStart({
     type: 'plan',
     command,
     sessionId,
     source: request.body?.source || 'local',
+    attachments,
   })
   const abortController = new AbortController()
   registerActiveJob(tracked.jobId, { abortController, kind: 'plan' })
@@ -433,6 +439,7 @@ app.post('/plan', async (request, response) => {
       source: request.body?.source || 'local',
       signal: abortController.signal,
       contextHandle: request.body?.contextHandle ?? null,
+      attachments,
     })
 
     if (plan.status === 'unsupported') {
