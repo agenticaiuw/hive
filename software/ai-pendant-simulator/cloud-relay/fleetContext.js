@@ -817,10 +817,6 @@ export const FLEET_MEMORY_SCOPES = Object.freeze({
   'GET /v1/memory/projection': ['memory:read'],
 })
 
-export function fleetMemoryScopesFor(method, path) {
-  return FLEET_MEMORY_SCOPES[`${String(method).toUpperCase()} ${path}`] ?? null
-}
-
 /**
  * Register the cross-surface memory endpoints on an Express app.
  *

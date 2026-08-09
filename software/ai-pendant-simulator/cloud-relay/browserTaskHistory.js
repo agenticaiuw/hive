@@ -51,15 +51,11 @@
  *     ('not_your_task'). A stolen token can therefore only write fiction
  *     about itself, under its own name, into a JOB_TTL_MS-bounded view; it
  *     cannot create claimable work or touch another node's history.
- *   - browser:work:claim / browser:work:complete (deviceAuth.js) stay
- *     reserved for the future browser WORK QUEUE — relay-assigned work the
- *     extension claims. A record of self-executed work is not a claim on
- *     anything, and spending a work-queue scope name on it would make that
- *     queue's eventual routes read as half-built. A new browser:work:record
- *     scope was considered and rejected: it would re-gate a route its holder
- *     already has a scope for, enforcing it would need kind-level checks that
- *     exist nowhere else, and it could never deny anything real — a scope
- *     that cannot refuse is documentation wearing a uniform.
+ *   - A new browser:work:record scope was considered and rejected: it would
+ *     re-gate a route its holder already has a scope for, enforcing it would
+ *     need kind-level checks that exist nowhere else, and it could never deny
+ *     anything real — a scope that cannot refuse is documentation wearing a
+ *     uniform.
  */
 
 /* Mirrors BROWSER_TASK_RECORD_KIND in browser-extension/src/execution-status.js.

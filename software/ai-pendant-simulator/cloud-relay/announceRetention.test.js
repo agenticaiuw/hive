@@ -11,7 +11,6 @@ import {
   announcementIsSweepable,
   announcementRetentionPolicy,
   normalizeGraceMs,
-  registerAnnouncementRetentionRoutes,
   sweepExpiredAnnouncements,
 } from './announceRetention.js'
 
@@ -252,20 +251,4 @@ test('a store with no stats method still sweeps, and says the totals are unknown
   assert.equal(report.removed.count, 1)
   assert.equal(report.kept.count, null)
   assert.equal(report.kept.bytes, null)
-})
-
-test('the routes register on an Express-shaped app and refuse anything else', () => {
-  const routes = []
-  const app = {
-    get: (path) => routes.push(`GET ${path}`),
-    post: (path) => routes.push(`POST ${path}`),
-  }
-  registerAnnouncementRetentionRoutes(app, { getStore: async () => fakeStore() })
-
-  assert.deepEqual(routes, [
-    'GET /v1/ops/announcement-retention',
-    'POST /v1/ops/announcement-retention/sweep',
-  ])
-  assert.throws(() => registerAnnouncementRetentionRoutes({}, { getStore: () => {} }))
-  assert.throws(() => registerAnnouncementRetentionRoutes(app))
 })

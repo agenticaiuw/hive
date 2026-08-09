@@ -5,7 +5,6 @@ process.env.OPENAI_API_KEY = 'test-openai-key'
 
 const {
   extractJsonObject,
-  geminiAudioMimeType,
   normalizeAudioInputFormat,
   planFromAudio,
 } = await import('./audioPlan.js')
@@ -14,11 +13,6 @@ test('normalizeAudioInputFormat maps common container labels', () => {
   assert.equal(normalizeAudioInputFormat('ogg-opus'), 'ogg')
   assert.equal(normalizeAudioInputFormat('wav'), 'wav')
   assert.equal(normalizeAudioInputFormat('pcm'), 'wav')
-})
-
-test('geminiAudioMimeType maps formats (compat export)', () => {
-  assert.equal(geminiAudioMimeType('wav'), 'audio/wav')
-  assert.equal(geminiAudioMimeType('pcm'), 'audio/wav')
 })
 
 test('extractJsonObject pulls the first JSON object from mixed content', () => {

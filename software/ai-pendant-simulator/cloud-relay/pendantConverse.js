@@ -37,7 +37,6 @@ import { persistAudioCapture } from './audioStorage.js'
 import { pcmS16leToWavBuffer } from './rawAudio.js'
 import {
   ANNOUNCE_ON_CONNECT,
-  ANNOUNCE_PUSH_CONTROL_FRAMES,
   RELAY_API_KEY,
 } from './config.js'
 import {
@@ -47,9 +46,7 @@ import {
 } from './deviceAuth.js'
 import { SOCKET_SCOPES } from './relayScopes.js'
 import {
-  announceDoneFrame,
   announcementDeliveryOutcome,
-  announceOpenFrame,
   renderAnnouncementPcm,
   selectDeliverable,
   streamAnnouncementPcm,
@@ -652,16 +649,6 @@ export async function handlePendantConverse(request, context) {
       }
 
       state.announcing = true
-      if (ANNOUNCE_PUSH_CONTROL_FRAMES) {
-        sendJson(
-          JSON.parse(
-            announceOpenFrame({
-              id: announcement.announcementId,
-              seconds: pcm.length / 2 / REALTIME_PCM_RATE,
-            }),
-          ),
-        )
-      }
 
       const delivery = await streamAnnouncementPcm({
         pcm,
@@ -681,9 +668,6 @@ export async function handlePendantConverse(request, context) {
         shouldStop: () => state.ended || !state.announcing,
       })
 
-      if (ANNOUNCE_PUSH_CONTROL_FRAMES) {
-        sendJson(JSON.parse(announceDoneFrame({ id: announcement.announcementId })))
-      }
       state.announcing = false
 
       /*

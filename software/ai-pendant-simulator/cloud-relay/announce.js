@@ -62,28 +62,6 @@ export function assertFirmwareSafeControlFrame(json) {
   return text
 }
 
-/** Opens a pushed announcement. `s` is the speech length in whole seconds. */
-export function announceOpenFrame({ id, seconds = 0 }) {
-  return assertFirmwareSafeControlFrame(
-    JSON.stringify({ type: 'announce', id: safeId(id), s: Math.round(seconds) }),
-  )
-}
-
-/** Closes it. Deliberately not "announce_end" — see FIRMWARE_CONTROL_TOKENS. */
-export function announceDoneFrame({ id }) {
-  return assertFirmwareSafeControlFrame(
-    JSON.stringify({ type: 'announced', id: safeId(id) }),
-  )
-}
-
-function safeId(id) {
-  const text = String(id || '').trim()
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(text)) {
-    throw new Error('An announcement id must be short and alphanumeric.')
-  }
-  return text
-}
-
 export function createAnnouncementId() {
   return `anc_${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`
 }

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import express from 'express'
 import cors from 'cors'
 import {
@@ -43,7 +44,6 @@ import {
   registerApprovalDeliveryRoutes,
   routeApprovalPrompt,
 } from './approvalDelivery.js'
-import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
 import { composeRelayMail, registerNodeMeshRoutes } from './nodeMailbox.js'
 import {
   BROWSER_TASK_JOB_TYPE,
@@ -56,9 +56,7 @@ import {
   G711_SAMPLE_RATE,
   REALTIME_PCM_RATE,
 } from './openaiRealtimeVoice.js'
-import { loadFleetFromStore,
-  registerFleetMemoryRoutes,
-} from './fleetContext.js'
+import { loadFleetFromStore } from './fleetContext.js'
 import { requiredScopesForRequest } from './relayScopes.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
@@ -116,7 +114,6 @@ import {
   SUPPORTED_DEVICE_TYPES,
   verifyPairingCode,
 } from './deviceAuth.js'
-import { bridgeClaimDelay } from './polling.js'
 import { createRoutine, updateRoutineRecord } from './routines.js'
 import { createAnnouncement, selectDeliverable } from './announce.js'
 import {
@@ -525,7 +522,6 @@ registerApprovalRoutes(app, {
   onStored: ({ store, record }) => routeApprovalPrompt({ store, record }),
 })
 registerApprovalDeliveryRoutes(app, { getStore })
-registerAnnouncementRetentionRoutes(app, { getStore })
 
 /* The node mesh: any node → any node, without the Mac in the path. Registered
  * here rather than written inline for the same reason the two above are — the
@@ -1771,28 +1767,6 @@ app.post('/v1/speak', async (request, response) => {
 })
 
 /*
- * The embedded pendant cannot decode MP3. Return raw signed little-endian
- * PCM so the nRF9160 can stream it directly over I2S to the Bluetooth module.
- */
-app.post('/v1/pendant/speak', async (request, response) => {
-  try {
-    const result = await synthesizeSpeech({
-      text: request.body?.text,
-      language: request.body?.language,
-      format: 'pcm',
-      includeBase64: false,
-    })
-
-    sendPendantAudio(response, result)
-  } catch (error) {
-    response.status(error.message.includes('not configured') ? 503 : 400).json({
-      ok: false,
-      error: error.message || 'Pendant speech synthesis failed.',
-    })
-  }
-})
-
-/*
  * Long-poll a Mac job and, once its result is ready, synthesize the spoken
  * response as raw PCM. This keeps JSON parsing and TTS credentials out of the
  * embedded firmware.
@@ -2557,13 +2531,6 @@ app.post('/v1/ops/audio-retention/sweep', async (request, response) => {
  * across every routine, which cannot answer "what happened to the thing I
  * asked for" once more than a couple of routines exist.
  */
-/*
- * The write end of the cross-surface memory path. Measured before this landed:
- * `rememberFact` existed only under local-agent/, so of the four bodies only
- * the Mac could record anything the others would ever see.
- */
-registerFleetMemoryRoutes(app, { getStore })
-
 registerSchedulerRoutes(app)
 
 app.get('/v1/routines', async (_request, response) => {
@@ -2983,7 +2950,6 @@ app.get('/v1/bridge/work', async (request, response) => {
 
   const store = await getStore()
   const deadline = Date.now() + BRIDGE_POLL_TIMEOUT_MS
-  let emptyClaimCount = 0
 
   while (Date.now() < deadline) {
     const job = await store.claimNextJob(deviceId)
@@ -3035,15 +3001,15 @@ app.get('/v1/bridge/work', async (request, response) => {
     }
 
     // Yield only when the queue is empty. When a job exists, claim returns
-    // immediately (no intentional product delay).
-    const delayMs = bridgeClaimDelay(emptyClaimCount, {
-      minimumMs: BRIDGE_CLAIM_MIN_INTERVAL_MS,
-      maximumMs: BRIDGE_CLAIM_MAX_INTERVAL_MS,
-    })
+    // immediately (no intentional product delay). No exponential backoff —
+    // an empty queue should not climb to multi-second waits.
+    const delayMs =
+      BRIDGE_CLAIM_MIN_INTERVAL_MS > 0
+        ? BRIDGE_CLAIM_MIN_INTERVAL_MS
+        : BRIDGE_CLAIM_MAX_INTERVAL_MS
     if (delayMs > 0) {
       await sleep(delayMs)
     }
-    emptyClaimCount += 1
   }
 
   response.status(204).end()
@@ -3650,8 +3616,3 @@ async function deleteCaptureAudio(request, response, { store, capture }) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}

@@ -75,19 +75,10 @@ export const DEVICE_SCOPES = Object.freeze({
    * `state:write` (it owns agent-snapshot and fleet, the Mac's whole world
    * model) and `bridge:work:claim`, so an extension running on a compromised
    * page could have drained the Mac's work queue.
-   *
-   * browser:work:claim / browser:work:complete are declared here with no
-   * relay route requiring them yet: the extension's own work queue is being
-   * built separately, and an unlisted route is closed to everyone anyway
-   * (requiredScopesForRoute → null → deny), so pre-declaring costs nothing
-   * and saves a re-pair of every installed extension later. Same reasoning as
-   * mac_bridge's context:write above.
    */
   browser_node: Object.freeze([
     'device:heartbeat:self',
     'device:status:read',
-    'browser:work:claim',
-    'browser:work:complete',
     'context:read',
     'node:message:send',
     'node:message:receive',

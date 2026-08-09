@@ -1,8 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "ai-pendant-relay",
-  // opusscript asm.js probes __dirname in its Node branch; Workers ESM has none.
-  "define": { "__dirname": "'/opusscript'" },
   "workers_dev": true,
   "main": "cloudflare-worker/worker.js",
   // NOTE: on Workers Paid, set "limits": { "cpu_ms": 300000 } here — a
