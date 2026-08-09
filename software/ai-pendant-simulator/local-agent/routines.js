@@ -7,6 +7,7 @@ import {
   writeJsonAtomic,
 } from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
+import { executeFinishStatus } from './jobTracker.js'
 import { orchestratePlan, orchestrateExecute } from './orchestrator.js'
 
 /*
@@ -177,6 +178,35 @@ export function updateRoutine(id, patch) {
  * Plan and execute one routine. Same path a spoken command takes, so a routine
  * can do anything the owner could ask for directly.
  */
+/*
+ * A routine run's persisted status, from the outcome runRoutine built.
+ *
+ * A routine IS a plan-and-execute nobody is waiting on, so it must be judged
+ * exactly the way the job store judges an /execute — jobTracker.executeFinishStatus,
+ * reused here rather than re-derived so the two can never drift. The bug this
+ * fixes: the old code stamped 'completed' whenever orchestrateExecute did not
+ * THROW, but it returns { ok:false, status:'failed'|'blocked'|'incomplete' }
+ * without throwing. A routine whose steps failed, or whose goal was never met
+ * (goalVerdict.js), was recorded 'completed' and read as green on the dashboard.
+ *
+ *   - no executed step (an instant plan, or a plan with no actions) → 'completed':
+ *     nothing ran, so the plan itself is the whole outcome
+ *   - executed present → exactly executeFinishStatus of it: 'completed',
+ *     'incomplete' (steps ran, goal not met), or 'failed' (steps failed/blocked)
+ *
+ * lastError carries the run's own sentence on any non-completed status:
+ * executed.error is set only for 'incomplete', and executed.response carries
+ * the summary for a plain failure, so `error ?? response` names what happened
+ * either way.
+ */
+export function routineFinishStatus(outcome) {
+  const executed = outcome?.executed
+  if (!executed) return { status: 'completed', error: null }
+  const status = executeFinishStatus(executed)
+  if (status === 'completed') return { status, error: null }
+  return { status, error: executed.error ?? executed.response ?? null }
+}
+
 export async function runRoutine(id, { force = false } = {}) {
   const store = load()
   const routine = store.routines.find((r) => r.id === id)
@@ -202,8 +232,11 @@ export async function runRoutine(id, { force = false } = {}) {
               source: 'routine',
             }),
           }
-    routine.lastStatus = 'completed'
-    routine.lastError = null
+    /* Not a hardcoded 'completed': an execute that returned ok:false without
+     * throwing (failed, blocked, or goal-not-met) must record its real status. */
+    const finish = routineFinishStatus(outcome)
+    routine.lastStatus = finish.status
+    routine.lastError = finish.error
   } catch (error) {
     outcome = { ok: false, error: String(error?.message || error) }
     routine.lastStatus = 'failed'
