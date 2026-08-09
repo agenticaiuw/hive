@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { WEEKDAYS, nextRunAt } from './routines.js'
+/* Importing routines.js pulls in config.js, which resolves the workspace path
+ * at import time; the shim points it at a throwaway dir first, per convention.
+ * nextRunAt and routineFinishStatus are both pure and touch no store. */
+import './testWorkspace.js'
+import { WEEKDAYS, nextRunAt, routineFinishStatus } from './routines.js'
 
 /*
- * These are all about nextRunAt, which is pure — no store, no workspace, so no
- * isolation shim is needed here. The routine store itself is exercised through
- * capabilityGaps.test.js with injected deps.
+ * These are all about nextRunAt, which is pure — no store, no workspace.
+ * routineFinishStatus is exercised at the bottom; the routine store itself is
+ * exercised through capabilityGaps.test.js with injected deps.
  *
  * Local time is deliberate: a routine is a wall-clock promise ("every weekday
  * at 7"), so every expectation below is written in the machine's own zone the
@@ -110,4 +114,65 @@ test('daily and interval are unchanged', () => {
 
   assert.equal(nextRunAt({ kind: 'nonsense' }, now), null)
   assert.equal(nextRunAt(null, now), null)
+})
+
+/*
+ * routineFinishStatus — the persisted status a routine run gets.
+ *
+ * The incident this pins: orchestrateExecute returns { ok:false, status } for
+ * a failed, blocked, or goal-not-met run WITHOUT throwing, so the old
+ * "did not throw → completed" recorded those as completed. This must mirror
+ * jobTracker.executeFinishStatus exactly, including 'incomplete' by name.
+ */
+test('an instant plan (no execute step) completes: nothing ran to fail', () => {
+  assert.deepEqual(routineFinishStatus({ ok: true, plan: {} }), {
+    status: 'completed',
+    error: null,
+  })
+})
+
+test('a successful execute completes with no error', () => {
+  assert.deepEqual(
+    routineFinishStatus({ ok: true, executed: { ok: true, status: 'success' } }),
+    { status: 'completed', error: null },
+  )
+})
+
+test('a goal-not-met run is incomplete by name, with the run’s sentence', () => {
+  const executed = {
+    ok: false,
+    status: 'incomplete',
+    error: 'Opened the page and looked at it — nothing was cancelled.',
+    response: 'Opened the page and looked at it — nothing was cancelled.',
+  }
+  assert.deepEqual(routineFinishStatus({ ok: true, executed }), {
+    status: 'incomplete',
+    error: 'Opened the page and looked at it — nothing was cancelled.',
+  })
+})
+
+test('a failed run is failed, with lastError from the response summary', () => {
+  /* A plain failure carries no `error` field (only 'incomplete' does), so the
+   * summary in `response` is what names it. */
+  const executed = { ok: false, status: 'failed', response: 'The step could not run.' }
+  assert.deepEqual(routineFinishStatus({ ok: true, executed }), {
+    status: 'failed',
+    error: 'The step could not run.',
+  })
+})
+
+test('a blocked run is failed too — it is not done', () => {
+  const executed = { ok: false, status: 'blocked', response: 'Blocked for safety.' }
+  assert.deepEqual(routineFinishStatus({ ok: true, executed }), {
+    status: 'failed',
+    error: 'Blocked for safety.',
+  })
+})
+
+test('a non-completed run with neither error nor response still records null, not undefined', () => {
+  const executed = { ok: false, status: 'failed' }
+  assert.deepEqual(routineFinishStatus({ ok: true, executed }), {
+    status: 'failed',
+    error: null,
+  })
 })
