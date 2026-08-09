@@ -14,6 +14,7 @@
  * very next command, not after an app restart.
  */
 import { Capacitor } from '@capacitor/core'
+import { createMeshListener } from './meshMailbox.js'
 import { runMobileBrain } from './mobileBrain.js'
 import { createRelayInference } from './relayInference.js'
 
@@ -39,6 +40,24 @@ export function createPhoneBrainSession({
   })
 
   return {
+    /*
+     * Hold the mesh doorbell open, and hand back the stop.
+     *
+     * Deliberately NOT started by this factory. The session is built in a
+     * useMemo and rebuilt whenever the client is, so a socket opened here would
+     * be a socket leaked on every rebuild; the caller owns the lifetime because
+     * only the caller knows when it ends. One effect is the whole wiring:
+     *
+     *   useEffect(() => phoneBrain.startMeshListener(), [phoneBrain])
+     *
+     * Without it the mesh still works — mesh_inbox drains over HTTP whenever
+     * the model asks — but only when the model thinks to ask. The doorbell is
+     * what makes a message from another node arrive rather than be found.
+     */
+    startMeshListener({ onMail = null, onStatus = null } = {}) {
+      return createMeshListener({ client, deviceId, onMail, onStatus })
+    },
+
     async run(command, { sessionId = null, onProgress = null, confirm = null, maxSteps } = {}) {
       const credential = await client.credentialSummary()
 

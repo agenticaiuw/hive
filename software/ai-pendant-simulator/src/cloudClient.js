@@ -1,4 +1,8 @@
 import {
+  BEARER_SUBPROTOCOL_PREFIX,
+  MESH_SUBPROTOCOL,
+} from '../shared/bridgeSocketProtocol.js'
+import {
   clearDeviceCredential,
   loadDeviceCredential,
   storeDeviceCredential,
@@ -191,6 +195,104 @@ export function createCloudClient(settings) {
       }
 
       return payload
+    },
+
+    /* ------------------------------------------------------- the node mesh */
+
+    /*
+     * Post one addressed envelope (`node:message:send`).
+     *
+     * `from` is deliberately not sent. The relay stamps it from the
+     * authenticated principal and ignores a body-supplied one, so including it
+     * would only teach a reader that it means something. Verified against
+     * production: a message sent from this phone's credential came back stamped
+     * with this phone's deviceId.
+     */
+    async sendNodeMessage({ to, kind, payload = {}, correlationId = null, ttlMs = null }) {
+      const { response, payload: body } = await this.postJson('/v1/node/messages', {
+        to,
+        kind,
+        payload,
+        ...(correlationId ? { correlationId } : {}),
+        ...(Number.isFinite(ttlMs) ? { ttlMs } : {}),
+      })
+      if (!response.ok) {
+        throw relayError(response, body, 'That message could not be routed.')
+      }
+      return body
+    },
+
+    /** Lease this device's pending mail (`node:message:receive`). */
+    async drainNodeInbox(deviceId) {
+      const response = await fetch(
+        `${settings.relayUrl}/v1/node/inbox?deviceId=${encodeURIComponent(deviceId)}`,
+        { headers: await authenticationHeaders() },
+      )
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw relayError(response, payload, 'The node inbox could not be drained.')
+      }
+      return payload
+    },
+
+    /** Acknowledge — which deletes (`node:message:receive`). */
+    async ackNodeMessages(deviceId, messageIds) {
+      const { response, payload } = await this.postJson('/v1/node/inbox/ack', {
+        deviceId,
+        messageIds: [...(messageIds || [])],
+      })
+      if (!response.ok) {
+        throw relayError(response, payload, 'Those messages could not be acknowledged.')
+      }
+      return payload
+    },
+
+    /*
+     * Is a node holding a live mesh socket right now (`device:status:read`)?
+     *
+     * Any node's, not only this one's: the relay enforces principalOwnsDevice
+     * on the inbox routes and NOT on this one, which is what makes "is the Mac
+     * reachable" answerable from here. Verified against production.
+     */
+    async nodePresence(deviceId) {
+      const response = await fetch(
+        `${settings.relayUrl}/v1/node/presence?deviceId=${encodeURIComponent(deviceId)}`,
+        { headers: await authenticationHeaders() },
+      )
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw relayError(response, payload, 'Node presence could not be read.')
+      }
+      return payload
+    },
+
+    /*
+     * The mesh doorbell, opened from inside this module for the same reason
+     * `authenticationHeaders` lives here: the credential is consumed, never
+     * returned. A WebSocket handshake cannot be made through fetch(), so this
+     * is the one place outside authenticationHeaders that touches the secret —
+     * and it hands the caller a live socket rather than the token.
+     *
+     * `WebSocketImpl` is a test seam only.
+     */
+    async openNodeSocket(deviceId, { WebSocketImpl = globalThis.WebSocket } = {}) {
+      if (typeof WebSocketImpl !== 'function') {
+        throw new Error('This platform has no WebSocket.')
+      }
+      const storedCredential = await currentCredential()
+      const token = storedCredential?.token || settings.relayApiKey
+      if (!token) {
+        throw new Error('This phone is not paired, so it cannot open a mesh socket.')
+      }
+      /* The token goes in a subprotocol offer, never in the query string —
+       * query strings are what gets logged. */
+      const url = `${settings.relayUrl.replace(/^http/, 'ws')}/v1/node/socket?deviceId=${encodeURIComponent(
+        deviceId,
+      )}`
+      return new WebSocketImpl(url, [
+        MESH_SUBPROTOCOL,
+        `${BEARER_SUBPROTOCOL_PREFIX}${token}`,
+      ])
     },
 
     /*
@@ -438,6 +540,22 @@ export function createCloudClient(settings) {
       await clearDeviceCredential()
     },
   }
+}
+
+/*
+ * A relay refusal, with the machine-readable half kept.
+ *
+ * The relay distinguishes `credential_predates_capability` (re-pair the phone;
+ * the role grants it, this token predates it) from `scope_denied` (re-pairing
+ * will not help) — and the two differ only in `code`, never reliably in prose.
+ * Every caller that wants to tell them apart must read the field, so the field
+ * has to survive the throw.
+ */
+function relayError(response, payload, fallback) {
+  const error = new Error(payload?.error ?? fallback)
+  error.code = payload?.code ?? null
+  error.status = response.status
+  return error
 }
 
 function emptyProductState(accountId, sourceDeviceId) {
