@@ -126,23 +126,98 @@ BUNDLE_ID = "com.apple.ScreenContinuity"
 
 # A phone is much taller than it is wide (354x781 on this Mac -> 0.45). The
 # "Welcome to iPhone Mirroring" window is 640x662 -> 0.97, captures fine, and
-# OCRs nothing at all, so shape is how the two are told apart. The window title
-# is NOT usable for this: kCGWindowName comes back empty unless the reading
-# process holds Screen Recording, so a name test would silently do nothing.
+# OCRs nothing at all.
+#
+# Three independent signals separate them, deliberately, because each has a
+# blind spot. Shape always works. The title works only for a process holding
+# Screen Recording — measured on this Mac, kCGWindowName is "iPhone Mirroring"
+# and "Welcome to iPhone Mirroring" when read by the granted agent and empty
+# when read by an ungranted shell — so it is used but never relied on. And a
+# candidate that OCRs no text is preferred last, which is the Welcome window's
+# actual signature.
 PHONE_ASPECT = 0.46
 
 NO_WINDOW = ("iPhone Mirroring has no open window — open the iPhone Mirroring "
              "app and leave the window visible.")
 NOT_RUNNING = ("iPhone Mirroring is not running — open it and connect your "
                "phone.")
-NOT_FRONTMOST = ("iPhone Mirroring could not be brought to the front, so "
-                 "NOTHING was sent to the phone. A tap or keystroke posted now "
-                 "would have landed on whatever else is on screen.")
-MOVED = ("The iPhone Mirroring window moved while it was being brought "
-         "forward, so NOTHING was sent to the phone.")
+MOVED = ("Nothing was sent to the iPhone: its window moved while it was being "
+         "brought forward, so the coordinates could no longer be trusted.")
 BLOCKED = ("iPhone Mirroring is showing a Connect / 'iPhone in Use' screen, so "
-           "NOTHING was sent. Connecting the phone is physical and only you can "
-           "do it.")
+           "nothing was sent. Connecting the phone is physical and only you "
+           "can do it.")
+
+
+class PhoneError(RuntimeError):
+    """An error with a machine-readable code.
+
+    The caller used to classify these by regex over their own wording, which
+    made the message and the classification the same object: rewording a
+    sentence for the owner silently changed which branch the JS took. The code
+    is the contract; the message is free to be as helpful as it likes.
+    """
+
+    def __init__(self, code, message):
+        RuntimeError.__init__(self, message)
+        self.code = code
+
+
+def screen_locked():
+    """Is the Mac's own screen locked?
+
+    While it is, the window server will not composite anything, so every
+    capture fails with "could not create image from window" — which reads like
+    a broken phone connection and is nothing of the kind. An ambient agent hits
+    this every time its owner walks away, so it is worth naming exactly.
+    """
+    try:
+        info = Quartz.CGSessionCopyCurrentDictionary()
+        if info is None:
+            return None
+        return bool(info.get("CGSSessionScreenIsLocked", 0))
+    except Exception:
+        return None
+
+
+def space_switch_on_activate():
+    """Will macOS follow an app to its Space when the app is activated?
+
+    System Settings > Desktop & Dock > "When switching to an application,
+    switch to a Space with open windows for the application". With this OFF and
+    the mirroring window on another Space, activating the app makes it the
+    active application without ever bringing its window on screen — which is
+    precisely the state the write guard refuses to post into. Reading it turns
+    "could not be brought to the front" from a mystery into a one-line fix.
+
+    None means the key is unset, which is macOS's default of ON.
+    """
+    try:
+        r = subprocess.run(
+            ["defaults", "read", "NSGlobalDomain", "AppleSpacesSwitchOnActivate"],
+            capture_output=True)
+        if r.returncode != 0:
+            return None
+        value = r.stdout.decode(errors="replace").strip().lower()
+        return value not in ("0", "false", "no")
+    except Exception:
+        return None
+
+
+def not_frontmost_error():
+    """The refusal, naming the actual cause when we can identify it."""
+    base = ("Nothing was sent to the iPhone: iPhone Mirroring could not be "
+            "brought to the front, and an event posted while its window is on "
+            "another Space would land on whatever else is on screen.")
+    if space_switch_on_activate() is False:
+        return PhoneError("not-frontmost", base + (
+            " The cause is a macOS setting, not the phone: System Settings > "
+            "Desktop & Dock > 'When switching to an application, switch to a "
+            "Space with open windows for the application' is OFF, so activating "
+            "iPhone Mirroring never follows it to its Space. Turn that on and "
+            "this works unattended."))
+    return PhoneError("not-frontmost", base + (
+        " Bring the iPhone Mirroring window onto the Space you are working in — "
+        "it cannot be reached from behind a fullscreen app."))
 
 # Verbatim from phone-harness helpers._BLOCKED_MARKERS.
 BLOCKED_MARKERS = ("iphone in use", "lock your iphone", "mirroring ended",
@@ -202,7 +277,8 @@ def read_phone(path=None):
     """
     candidates = phone_windows()
     if not candidates:
-        raise RuntimeError(
+        raise PhoneError(
+            "not-running" if _mirror.running_app() is None else "no-window",
             NOT_RUNNING if _mirror.running_app() is None else NO_WINDOW)
     fallback, why = None, "no capture was attempted"
     for win in candidates:
@@ -218,7 +294,14 @@ def read_phone(path=None):
         why = "captured, but no text was recognised on it"
     if fallback is not None:
         return fallback
-    raise RuntimeError(
+    if screen_locked():
+        raise PhoneError(
+            "mac-locked",
+            "The Mac's screen is locked, so nothing can see the iPhone "
+            "Mirroring window — this is the Mac, not the phone. Unlock the Mac "
+            "and the iPhone stays reachable.")
+    raise PhoneError(
+        "unreadable",
         "could not capture the iPhone Mirroring window: " + why)
 
 
@@ -254,9 +337,15 @@ def ready_to_send():
     """
     app = _mirror.running_app()
     if app is None:
-        raise RuntimeError(NOT_RUNNING)
+        raise PhoneError("not-running", NOT_RUNNING)
     if not phone_windows():
-        raise RuntimeError(NO_WINDOW)
+        raise PhoneError("no-window", NO_WINDOW)
+    if screen_locked():
+        raise PhoneError(
+            "mac-locked",
+            "Nothing was sent to the iPhone: the Mac's screen is locked, so "
+            "the mirroring window cannot be brought forward or verified. "
+            "Unlock the Mac and try again.")
     prior = frontmost_app()
     if not _mirror.is_frontmost():
         app.activateWithOptions_(1 << 1)
@@ -269,33 +358,35 @@ def ready_to_send():
             win = onscreen[0]
             break
     if win is None:
-        raise RuntimeError(NOT_FRONTMOST)
+        raise not_frontmost_error()
     # Twice, a beat apart: a window still sliding onto the Space would move out
     # from under the coordinates we are about to aim at.
     time.sleep(0.4)
     settled = phone_windows(on_screen_only=True)
     if not settled or not _mirror.is_frontmost():
-        raise RuntimeError(NOT_FRONTMOST)
+        raise not_frontmost_error()
     if not same_bounds(win, settled[0]):
-        raise RuntimeError(MOVED)
+        raise PhoneError("moved", MOVED)
     win = settled[0]
     image, err = capture(win)
     if image is None:
-        raise RuntimeError(
-            "could not see the phone screen before acting, so nothing was "
-            "sent: " + err)
+        raise PhoneError(
+            "unreadable",
+            "Nothing was sent to the iPhone: its screen could not be read "
+            "before acting — " + err)
     boxes = _ocrmod.recognize(image, win)
     # A live phone screen always says something — a clock at the very least.
     # Nothing readable means the front window is not the phone: most likely the
     # "Welcome to iPhone Mirroring" window, which is the same shape family and
     # captures perfectly. Tapping into that is not a phone tap, so stop.
     if not boxes:
-        raise RuntimeError(
-            "could not see the phone screen before acting, so nothing was "
-            "sent: the front iPhone Mirroring window shows no readable text, "
-            "which is not what a live phone screen looks like.")
+        raise PhoneError(
+            "unreadable",
+            "Nothing was sent to the iPhone: the front iPhone Mirroring window "
+            "shows no readable text, which is not what a live phone screen "
+            "looks like, so it is probably not the phone.")
     if blocked_by(boxes):
-        raise RuntimeError(BLOCKED)
+        raise PhoneError("blocked", BLOCKED)
     return win, boxes, prior
 
 
@@ -303,9 +394,9 @@ def still_there(win):
     """Re-check between steps. Focus can be stolen mid-sequence."""
     now = phone_windows(on_screen_only=True)
     if not now or not _mirror.is_frontmost():
-        raise RuntimeError(NOT_FRONTMOST)
+        raise not_frontmost_error()
     if not same_bounds(win, now[0]):
-        raise RuntimeError(MOVED)
+        raise PhoneError("moved", MOVED)
 
 
 def settle(win, timeout=6.0, interval=0.45):
@@ -353,7 +444,8 @@ try:
 const PROGRAM_EPILOGUE = `
 except BaseException as exc:
     sys.stdout.write("\\n<<phone-harness-result>>" + json.dumps(
-        {"error": {"type": type(exc).__name__, "message": str(exc)}}) + "\\n")
+        {"error": {"type": type(exc).__name__, "message": str(exc),
+                   "code": getattr(exc, "code", None)}}) + "\\n")
     sys.stdout.flush()
     raise SystemExit(3)
 
@@ -378,14 +470,21 @@ const OPERATIONS = {
     python: `    running = _mirror.running_app() is not None
     windows = phone_windows()
     on_screen = phone_windows(on_screen_only=True)
+    locked = screen_locked()
     result = {"appRunning": running, "windowFound": bool(windows),
               "onScreen": bool(on_screen),
               "frontmost": _mirror.is_frontmost(),
+              "macLocked": locked,
               "readable": False, "blocked": False}
     if not running:
         result["state"] = "not-running"
     elif not windows:
         result["state"] = "no-window"
+    elif locked:
+        # Checked before trying to capture: while the Mac is locked every
+        # capture fails, and reporting that as a phone problem sends the owner
+        # to look at the wrong device.
+        result["state"] = "mac-locked"
     else:
         try:
             win, boxes, _image = read_phone()
@@ -404,6 +503,14 @@ const OPERATIONS = {
             result["detail"] = str(probe)
     result["ready"] = result["state"] == "ready"
     result["writesNeedActivation"] = result["state"] == "off-space"
+    result["spaceSwitchOnActivate"] = space_switch_on_activate()
+    # Whether a write could actually land right now, said before anything is
+    # attempted. Off-Space plus the Space-switch setting turned off is the one
+    # combination where reads work perfectly and every write will refuse.
+    result["writesPossible"] = (
+        result["state"] == "ready"
+        or (result["state"] == "off-space"
+            and result["spaceSwitchOnActivate"] is not False))
 `,
   },
   ios_ocr: {
@@ -737,15 +844,43 @@ const BLOCKED_MESSAGE =
  * desktop rather than their phone. The message leads with what did NOT happen.
  */
 const NOT_FRONTMOST_MESSAGE =
-  'Nothing was sent to the iPhone: iPhone Mirroring could not be brought to the front, and a tap or keystroke posted while it is on another Space lands on whatever else is on screen. Bring the iPhone Mirroring window to the current Space and try again.'
+  'Nothing was sent to the iPhone: iPhone Mirroring could not be brought to the front, and a tap or keystroke posted while it is on another Space lands on whatever else is on screen. Bring the iPhone Mirroring window to the Space you are working in and try again.'
 
-function connectionProblem(text) {
+/*
+ * The program's own error code is the contract.
+ *
+ * These used to be classified by regex over our own sentences, which made the
+ * wording and the branch the same object — rewording a message for the owner
+ * would silently change which failure it was recorded as. The program now
+ * raises with a code; the regexes below survive only as a fallback for errors
+ * raised by phone-harness's own helpers underneath us, which have no code.
+ *
+ * For the coded cases the program's message is preferred over the constant,
+ * because the program can say something the constant cannot: which macOS
+ * setting is responsible.
+ */
+const PROBLEM_BY_CODE = new Map([
+  ['no-window', { reason: 'ios-mirroring-window-missing', message: () => NO_WINDOW_MESSAGE }],
+  ['not-running', { reason: 'ios-mirroring-window-missing', message: () => NO_WINDOW_MESSAGE }],
+  ['blocked', { reason: 'ios-mirroring-blocked', message: () => BLOCKED_MESSAGE }],
+  ['not-frontmost', { reason: 'ios-window-not-frontmost', message: (raw) => raw || NOT_FRONTMOST_MESSAGE }],
+  ['moved', { reason: 'ios-window-not-frontmost', message: (raw) => raw || NOT_FRONTMOST_MESSAGE }],
+  ['unreadable', { reason: 'ios-screen-unreadable', message: (raw) => raw || 'The iPhone screen could not be read.' }],
+  ['mac-locked', { reason: 'ios-mac-locked', message: (raw) => raw || "The Mac's screen is locked." }],
+])
+
+function connectionProblem(text, code = null) {
+  const known = code ? PROBLEM_BY_CODE.get(String(code)) : null
+  if (known) {
+    return { reason: known.reason, message: known.message(String(text ?? '').trim()) }
+  }
+
   const message = String(text ?? '')
   if (/iPhone in Use|showing a connect|connect \/ 'iPhone in Use'/i.test(message)) {
     return { reason: 'ios-mirroring-blocked', message: BLOCKED_MESSAGE }
   }
   if (
-    /could not be brought to the front|moved while it was being brought forward|could not see the phone screen before acting/i.test(
+    /could not be brought to the front|moved while it was being brought forward/i.test(
       message,
     )
   ) {
@@ -924,7 +1059,17 @@ function describeSuccess(type, result) {
        * runs apps fullscreen, and it is NOT a fault: reads work as they are,
        * and a write will bring the window forward first. */
       if (state === 'off-space') {
-        return `The iPhone is connected and readable, but its window is on another Space${where}, so reads work while taps and typing will first bring iPhone Mirroring to the front.`
+        const base = `The iPhone is connected and readable, but its window is on another Space${where}, so reads work as they are`
+        /* The one combination where reads look perfect and every write will
+         * refuse. Saying so here means the owner learns it from a status
+         * check rather than from a failed tap. */
+        if (result?.writesPossible === false) {
+          return `${base}. Taps and typing will NOT work until the mirroring window can be brought forward: macOS has "System Settings > Desktop & Dock > When switching to an application, switch to a Space with open windows for the application" turned OFF, so activating iPhone Mirroring never follows it to its Space. Turn that on, or keep the mirroring window on the Space you work in.`
+        }
+        return `${base}, and taps or typing will first bring iPhone Mirroring to the front.`
+      }
+      if (state === 'mac-locked') {
+        return "The Mac's screen is locked, so the iPhone cannot be seen or driven — this is the Mac, not the phone. The mirroring window is still there; unlock the Mac and it is reachable again."
       }
       if (state === 'unreadable') {
         return `The iPhone Mirroring window is there but could not be read: ${result?.detail ?? 'no detail'}.`
@@ -1073,7 +1218,7 @@ async function runOperation(action) {
    * it carries the harness's exact wording. */
   if (payload?.error) {
     const raw = String(payload.error.message ?? '').trim()
-    const problem = connectionProblem(raw)
+    const problem = connectionProblem(raw, payload.error.code)
     if (problem) {
       return failed(action, problem.message, {
         ...evidence,

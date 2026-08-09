@@ -178,6 +178,8 @@ function stubPhone(t, scenario) {
       'def CGWindowListCopyWindowInfo(option, _ignored):',
       '    state = _state()',
       '    return state["onscreen"] if option == kCGWindowListOptionOnScreenOnly else state["all"]',
+      'def CGSessionCopyCurrentDictionary():',
+      '    return {"CGSSessionScreenIsLocked": 1 if _state().get("macLocked") else 0}',
       '',
     ].join('\n'),
   )
@@ -303,12 +305,29 @@ function stubPhone(t, scenario) {
     { mode: 0o755 },
   )
 
+  /* `defaults` too, so the Space-switch diagnosis is scenario-controlled
+   * rather than a reading of whatever this Mac happens to be set to. */
+  fs.writeFileSync(
+    path.join(bin, 'defaults'),
+    [
+      '#!/bin/sh',
+      'case "$PH_STUB_SPACE_SWITCH" in',
+      '  on) echo 1 ;;',
+      '  off) echo 0 ;;',
+      '  *) exit 1 ;;',
+      'esac',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+
   const env = {
     PATH: `${bin}:${process.env.PATH}`,
     PYTHONPATH: lib,
     PH_STUB_STATE: statePath,
     PH_STUB_EVENTS: eventsPath,
     PH_STUB_CAPTURES: capturesPath,
+    PH_STUB_SPACE_SWITCH: scenario?.spaceSwitch ?? 'unset',
   }
 
   const readEvents = () =>
@@ -357,6 +376,7 @@ function stubPhone(t, scenario) {
     PH_STUB_STATE: statePath,
     PH_STUB_EVENTS: eventsPath,
     PH_STUB_CAPTURES: capturesPath,
+    PH_STUB_SPACE_SWITCH: scenario?.spaceSwitch ?? 'unset',
   }
   for (const [key, value] of Object.entries(exported)) process.env[key] = value
   t.after(() => {
@@ -574,7 +594,8 @@ test('a write posts NOTHING when the window cannot be brought to the front', asy
 
   assert.equal(run.status, 3)
   assert.match(run.payload.error.message, /could not be brought to the front/)
-  assert.match(run.payload.error.message, /NOTHING was sent/)
+  assert.match(run.payload.error.message, /Nothing was sent to the iPhone/i)
+  assert.equal(run.payload.error.code, 'not-frontmost')
   assert.deepEqual(
     phone.inputEvents(run.events),
     [],
@@ -582,6 +603,88 @@ test('a write posts NOTHING when the window cannot be brought to the front', asy
   )
   // It did try to activate — refusing is the fallback, not the first move.
   assert.ok(run.events.some((event) => event.event === 'activate'))
+})
+
+test('the refusal names the macOS setting that is actually responsible', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * "Could not be brought to the front" is true and useless on its own. When
+   * Desktop & Dock's "switch to a Space with open windows" is off, activating
+   * the app genuinely cannot follow it to its Space — so the fix is one
+   * setting, and the message should say which.
+   */
+  const off = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    activationWorks: false,
+    spaceSwitch: 'off',
+  })
+  const blocked = off.run('ios_home', {})
+  assert.equal(blocked.payload.error.code, 'not-frontmost')
+  assert.match(blocked.payload.error.message, /Desktop & Dock/)
+  assert.match(blocked.payload.error.message, /switch to a Space/)
+
+  // With the setting on, the window simply is not reachable — no setting to
+  // blame, so we must not blame one.
+  const on = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    activationWorks: false,
+    spaceSwitch: 'on',
+  })
+  const other = on.run('ios_home', {})
+  assert.equal(other.payload.error.code, 'not-frontmost')
+  assert.ok(!/Desktop & Dock/.test(other.payload.error.message))
+  assert.match(other.payload.error.message, /Space you are working in/)
+})
+
+test('a locked Mac is reported as the Mac, not as a phone problem', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * While the Mac is locked the window server composites nothing, so every
+   * capture fails with "could not create image from window" — which reads
+   * exactly like a dead phone connection and sends the owner to look at the
+   * wrong device. Observed live: the agent saw this the moment the Mac locked.
+   */
+  const phone = stubPhone(t, { macLocked: true, onscreen: [], frontmost: false })
+
+  const status = phone.run('ios_status', {})
+  assert.equal(status.payload.result.state, 'mac-locked')
+  assert.equal(status.payload.result.macLocked, true)
+  assert.equal(status.payload.result.windowFound, true)
+
+  const write = phone.run('ios_home', {})
+  assert.equal(write.payload.error.code, 'mac-locked')
+  assert.match(write.payload.error.message, /Nothing was sent to the iPhone/i)
+  assert.match(write.payload.error.message, /Mac's screen is locked/)
+  assert.deepEqual(phone.inputEvents(write.events), [])
+
+  const result = await runIosAction({ type: 'ios_status', params: {} })
+  assert.equal(result.ok, true)
+  assert.match(result.message, /Mac's screen is locked/)
+  assert.match(result.message, /this is the Mac, not the phone/)
+})
+
+test('ios_status says up front whether a write could land at all', async (t) => {
+  if (needsPython(t)) return
+  const stuck = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'off' })
+  const status = stuck.run('ios_status', {})
+  assert.equal(status.payload.result.state, 'off-space')
+  assert.equal(status.payload.result.readable, true)
+  assert.equal(status.payload.result.spaceSwitchOnActivate, false)
+  assert.equal(status.payload.result.writesPossible, false)
+
+  const fine = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'on' })
+  const ok = fine.run('ios_status', {})
+  assert.equal(ok.payload.result.writesPossible, true)
+
+  // And the owner-facing message names the fix rather than only the symptom.
+  const stuckAgain = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'off' })
+  const result = await runIosAction({ type: 'ios_status', params: {} })
+  assert.equal(result.ok, true)
+  assert.equal(result.writesPossible, false)
+  assert.match(result.message, /Desktop & Dock/)
+  assert.deepEqual(stuckAgain.readEvents(), [])
 })
 
 test('every write action aborts without posting when the window stays away', async (t) => {
@@ -599,7 +702,7 @@ test('every write action aborts without posting when the window stays away', asy
     const phone = stubPhone(t, { onscreen: [], frontmost: false, activationWorks: false })
     const run = phone.run(type, EVERY_WRITE_PARAM)
     assert.equal(run.status, 3, `${type} should have refused`)
-    assert.match(run.payload.error.message, /NOTHING was sent/, type)
+    assert.match(run.payload.error.message, /Nothing was sent to the iPhone/i, type)
     assert.deepEqual(phone.inputEvents(run.events), [], `${type} posted an event anyway`)
   }
 })
