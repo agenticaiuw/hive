@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>AI Pendant needs the microphone so you can record voice commands from the dashboard inside this app.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>AI Pendant transcribes your voice into the floating command field on this Mac.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
