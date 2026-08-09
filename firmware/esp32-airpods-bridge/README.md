@@ -1,10 +1,11 @@
 # HUZZAH32 AirPods bridge
 
 Firmware for the original Adafruit Feather HUZZAH32 (#3405). It receives the
-nRF9160's 24 kHz, 16-bit stereo I2S stream and resamples it to the 44.1 kHz
-stereo PCM expected by a Bluetooth Classic A2DP receiver. The stream contains
-only the Mac agent's synthesized reply; microphone recordings go to the cloud
-and are not locally looped back to Bluetooth.
+nRF9160's duplex I2S TX wire — 31,250 frames/s in 32-bit slots, the mono
+sample in the top 16 bits of each 24-bit left-slot word — and resamples it
+to the 44.1 kHz stereo PCM expected by a Bluetooth Classic A2DP receiver.
+The stream contains only the agent's synthesized reply; microphone
+recordings go to the cloud and are not locally looped back to Bluetooth.
 
 ## Wiring
 
@@ -26,7 +27,6 @@ power pins. The shared ground is required.
 From this directory:
 
 ```sh
-node --test
 .venv/bin/pio run
 .venv/bin/pio run --target upload
 .venv/bin/pio device monitor
@@ -35,10 +35,15 @@ node --test
 The upload command requires the HUZZAH32 to be connected to the Mac with a
 data-capable micro-USB cable.
 
-## Configure AirPods
+## Configure the Bluetooth target
 
-Run the local control page in `../airpods-control`, open
-`http://localhost:3000` in Chrome or Edge, and select **Connect HUZZAH32**.
-Web Serial is not available in Safari or Firefox.
+Open the USB serial console with `.venv/bin/pio device monitor` (115200)
+and send JSON lines:
 
-Put the AirPods into pairing mode before selecting **Find & connect**.
+```json
+{"command":"scan"}
+{"command":"connect","target":"..."}
+```
+
+`scan` lists nearby devices; `connect` remembers the chosen speaker or
+earbuds by name. Put the device into pairing mode before connecting.
