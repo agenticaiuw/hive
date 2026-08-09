@@ -94,7 +94,6 @@
   import ApprovalCard from "$lib/components/ApprovalCard.svelte";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import CommandBox from "$lib/components/CommandBox.svelte";
-  import Composer from "$lib/components/Composer.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
   import SystemRow from "$lib/components/SystemRow.svelte";
   import TechnicalDetails from "$lib/components/TechnicalDetails.svelte";
@@ -703,14 +702,11 @@
     {/snippet}
   </AnswerCard>
 
-  <!-- 3 · ASK IT SOMETHING. One section, so the two transports read as one
-       place to ask rather than two unexplained text boxes. -->
+  <!-- 3 · ASK IT SOMETHING. One box for voice and text — the transport is
+       chosen per submission and each submission's card says which path
+       carried it (via this Mac / via relay). -->
   <section class="ask" aria-label="Ask the hive">
     <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
-    <div class="ask-alt">
-      <p class="ask-alt-label">Or speak from this browser</p>
-      <Composer onQueued={handleCommandQueued} />
-    </div>
   </section>
 
   <!-- 4 · WHAT IT DID. -->

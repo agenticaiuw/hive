@@ -103,6 +103,15 @@ export function prepareAction({
   jobId = null,
   sessionId = null,
   source = 'prepare-approve',
+  /*
+   * The node the command came from, threaded into the approval record so the
+   * relay can push the prompt back there instead of leaving it to whichever
+   * dashboard happens to be open. Defaults to `source` because for every
+   * caller today they are the same fact ('floating-hud', 'dashboard', a mesh
+   * node's deviceId); the separate parameter exists for the caller whose
+   * source label is not a routable origin.
+   */
+  origin = null,
   pendingCount = 1,
   ttlMs = APPROVAL_DEFAULT_TTL_MS,
   now = Date.now(),
@@ -125,6 +134,7 @@ export function prepareAction({
   const approval = buildApprovalRequest({
     manifest,
     deviceId,
+    origin: origin ?? source,
     pendingCount,
     ttlMs,
     now,
@@ -519,6 +529,10 @@ export function registerPrepareApproveRoutes(app, { filePath = ledgerLocation() 
           title: request.body?.title ?? null,
           jobId: request.body?.jobId ?? null,
           sessionId: String(request.body?.sessionId ?? '').trim() || null,
+          /* The job's source doubles as the origin unless the caller names one
+           * explicitly — same defaulting as prepareAction itself. */
+          source: String(request.body?.source ?? '').trim() || 'prepare-approve',
+          origin: request.body?.origin ?? null,
           pendingCount: Number(request.body?.pendingCount ?? 1),
           ttlMs: request.body?.ttlMs ?? APPROVAL_DEFAULT_TTL_MS,
           filePath,

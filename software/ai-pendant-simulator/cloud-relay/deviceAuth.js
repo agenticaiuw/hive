@@ -30,6 +30,12 @@ export const DEVICE_SCOPES = Object.freeze({
      * scope in this file whose abuse costs money rather than access.
      */
     'llm:infer',
+    /* Approval-at-origin: the phone lists what is waiting and answers it —
+     * its own prompts arrive as approval_request mesh mail, and the decision
+     * route honours any owner surface. NOT approval:write: a phone never
+     * prepares plans or attests delivery. */
+    'approval:read',
+    'approval:decide',
   ]),
   mac_bridge: Object.freeze([
     'device:heartbeat:self',
@@ -51,6 +57,15 @@ export const DEVICE_SCOPES = Object.freeze({
      * is now one node among several, and these are the scopes that say so. */
     'node:message:send',
     'node:message:receive',
+    /*
+     * The whole approval surface. The bridge is the body that PARKS a plan,
+     * so it creates the record (write), its agent lists what is pending for
+     * the HUD and the local dashboard (read), and its decision forwarder
+     * answers on the owner's behalf when they click on the Mac (decide).
+     */
+    'approval:read',
+    'approval:write',
+    'approval:decide',
   ]),
   /*
    * The browser extension, which until now had NO relay credential at all: it
@@ -79,6 +94,10 @@ export const DEVICE_SCOPES = Object.freeze({
     /* Same argument as mobile: an extension that can hold a socket but cannot
      * think is half a node. */
     'llm:infer',
+    /* Same pair as mobile, same reasoning: a surface that shows approval
+     * cards must be able to list and answer them, and nothing more. */
+    'approval:read',
+    'approval:decide',
   ]),
   nrf_pendant: Object.freeze([
     'device:heartbeat:self',

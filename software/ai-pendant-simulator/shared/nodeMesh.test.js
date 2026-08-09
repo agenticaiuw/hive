@@ -59,10 +59,14 @@ test('junk addresses and junk kinds are refused', () => {
   for (const bad of ['', '  ', 'ab', '@', '@X', 'has space', 'has/slash', null]) {
     assert.equal(normalizeNodeAddress(bad), '', `must reject ${bad}`)
   }
-  for (const bad of ['', 'Browser.Tab', 'browser..tab', 'a'.repeat(80), '../x']) {
+  for (const bad of ['', 'Browser.Tab', 'browser..tab', 'a'.repeat(80), '../x', '_lead', 'a._x']) {
     assert.equal(normalizeNodeKind(bad), '', `must reject ${bad}`)
   }
   assert.equal(normalizeNodeKind('browser.tab.open'), 'browser.tab.open')
+  /* The approval contract's kinds are frozen WITH the underscore in them, so
+   * the charset admits it inside a word — never at the start of a segment. */
+  assert.equal(normalizeNodeKind('approval_request'), 'approval_request')
+  assert.equal(normalizeNodeKind('approval_decision'), 'approval_decision')
 })
 
 test('an envelope carries who, what and a deadline', () => {

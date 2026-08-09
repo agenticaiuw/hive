@@ -81,6 +81,39 @@ test('spokenConfirmation always describes what happened', () => {
   )
 })
 
+test('spokenConfirmation speaks the goal verdict, not the steps, when the goal was not met', () => {
+  // Clean reconnaissance steps with a goal-grounded 'incomplete' verdict:
+  // the pendant must say what was NOT done, never recite steps that sound
+  // like success.
+  assert.equal(
+    spokenConfirmation(
+      { response: 'Cancelling your recurring investments' },
+      {
+        status: 'incomplete',
+        response:
+          'Opened the page and looked around — nothing was cancelled. The next step needs your approval.',
+        results: [
+          { ok: true, message: 'Browser session "ibkr" opened' },
+          { ok: true, message: 'Snapshot: 40 interactive element(s)' },
+        ],
+      },
+    ),
+    'Opened the page and looked around — nothing was cancelled. The next step needs your approval.',
+  )
+  // A step failure still wins: 'incomplete' phrasing never masks a real error.
+  assert.match(
+    spokenConfirmation(
+      {},
+      {
+        status: 'incomplete',
+        response: 'Opened the page — nothing was cancelled.',
+        results: [{ ok: false, message: 'browser crashed' }],
+      },
+    ),
+    /That didn't work/,
+  )
+})
+
 test('extracts 24 kHz mono signed PCM from a macOS WAVE file', () => {
   const temporaryDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'ai-pendant-speech-test-'),

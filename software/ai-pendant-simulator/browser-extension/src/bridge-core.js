@@ -21,6 +21,14 @@ export const COMMAND_TYPES = new Set([
   'list_tabs',
   'capture',
   'press_key',
+  /*
+   * Find-or-open. "Open ibkr" should focus the tab that is already signed in,
+   * not clobber whatever the active tab was showing — `navigate` without
+   * newTab does the clobbering, which is why this is its own verb rather than
+   * a navigate flag. Given urlContains it activates the freshest matching tab;
+   * given url it opens one only when no match exists.
+   */
+  'activate_tab',
 ])
 
 const READ_MODES = new Set([
@@ -160,6 +168,16 @@ export function validateCommand(command, now = Date.now()) {
 
   if (type === 'navigate') {
     validateNavigationUrl(params.url)
+  }
+
+  if (type === 'activate_tab') {
+    const hasNeedle = String(params.urlContains ?? '').trim()
+    const hasUrl = String(params.url ?? '').trim()
+    if (!hasNeedle && !hasUrl) {
+      throw new Error('activate_tab requires urlContains or url.')
+    }
+    /* The fallback open goes through the same gate a navigate would. */
+    if (hasUrl) validateNavigationUrl(params.url)
   }
 
   if (type === 'click' || type === 'type' || type === 'select' || type === 'scroll') {

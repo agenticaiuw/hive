@@ -540,6 +540,7 @@ const ALWAYS_CONFIRMED_TYPES = new Set(['delete_path'])
 export function buildApprovalRequest({
   manifest,
   deviceId = 'nrf9160-pendant',
+  origin = null,
   pendingCount = 1,
   ttlMs = APPROVAL_DEFAULT_TTL_MS,
   now = Date.now(),
@@ -584,6 +585,21 @@ export function buildApprovalRequest({
     approvalId: createApprovalId(),
     deviceId: String(deviceId || '').trim() || 'nrf9160-pendant',
 
+    /*
+     * WHERE THE COMMAND CAME FROM, so the prompt can be pushed back there.
+     *
+     * `deviceId` above answers a different question — which device would SPEAK
+     * the readback — and for a long time it was the only address on the record,
+     * which meant every parked plan sat on the dashboard whoever had asked for
+     * it. `origin` is the job's own source ('nrf9160', 'dashboard',
+     * 'floating-hud', a mesh node's deviceId, …), stamped at park time and
+     * never re-derived later. Routing on it lives in
+     * cloud-relay/approvalDelivery.js; this record only carries the fact.
+     * Null means nobody recorded one, which routes to the fallback surface
+     * (the dashboard and the Mac agent) exactly as before this field existed.
+     */
+    origin: normalizeApprovalOrigin(origin),
+
     /* The join back to the record that already exists. Nothing about the plan is
      * copied here beyond what has to be SAID or COMPARED — the manifest is the
      * plan, and a second copy is a second thing to disagree with the first. */
@@ -626,6 +642,35 @@ export function buildApprovalRequest({
   }
 }
 
+/**
+ * The origin, as a value safe to store and to route on: a trimmed, bounded
+ * string or null. Deliberately NOT validated against a device registry here —
+ * this module also runs on the Mac, which cannot see the relay's registry, and
+ * an origin that names nothing routes to the fallback surface rather than
+ * failing the prepare.
+ */
+export function normalizeApprovalOrigin(value) {
+  const origin = String(value ?? '').trim().slice(0, 128)
+  return origin || null
+}
+
+/**
+ * The prompt, shaped for a screen: one line to list by, the whole readback to
+ * decide by.
+ *
+ * Derived from the record's own `readback` rather than carried as new fields,
+ * so a surface showing `summary` and a pendant speaking the readback can never
+ * describe two different plans. The readback's first sentence is "Ready to
+ * <the ask>." by construction (approvalReadback puts the ask first, while
+ * attention is highest), which is exactly the line a list card needs.
+ */
+export function approvalPromptText(record) {
+  const detail = String(record?.readback ?? '').trim()
+  const firstStop = detail.indexOf('. ')
+  const summary = firstStop > 0 ? detail.slice(0, firstStop + 1) : trimTo(detail, 160)
+  return { summary, detail }
+}
+
 /** What may be read back over HTTP or logged: everything. There is no secret in
  * an approval record — the confirm word is spoken aloud by design. */
 export function presentApproval(record) {
@@ -633,6 +678,9 @@ export function presentApproval(record) {
   return {
     approvalId: record.approvalId,
     deviceId: record.deviceId,
+    /* Absent on records prepared before origin routing existed; null routes to
+     * the fallback surface, so old records keep their old behaviour. */
+    origin: record.origin ?? null,
     ledgerId: record.ledgerId,
     planKey: record.planKey ?? null,
     /*

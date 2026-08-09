@@ -216,6 +216,58 @@
   border-color: rgba(96, 165, 250, 0.45);
 }
 
+/* Approval cards: the plan card's shape, amber instead of blue, because these
+ * arrive FROM the mesh rather than from the owner's own command. */
+.approval-stack {
+  display: grid;
+  gap: 12px;
+  width: min(100%, 360px);
+}
+
+.approval-stack .plan-card {
+  width: 100%;
+}
+
+.approval-card .plan-kicker {
+  color: #fcd34d;
+}
+
+.approval-card .plan-card-glow {
+  background: radial-gradient(circle, rgba(252, 211, 77, 0.22), transparent 70%);
+}
+
+.approval-detail {
+  position: relative;
+  margin: 0 0 10px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.88rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.approval-countdown {
+  position: relative;
+  margin: 0 0 12px;
+  color: #93c5fd;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.approval-countdown.is-expired {
+  color: #ffb4a8;
+}
+
+.approval-card.is-expired,
+.approval-card.is-decided {
+  opacity: 0.72;
+}
+
+.approval-card .primary-button:disabled,
+.approval-card .secondary-button:disabled {
+  cursor: not-allowed;
+}
+
 .composer-overlay {
   width: min(100%, 340px);
   display: grid;

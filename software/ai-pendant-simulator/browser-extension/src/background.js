@@ -36,6 +36,20 @@ import {
   summarizeBrainRun,
 } from './brain.js'
 import {
+  CAPABILITY_BROWSER,
+  EFFECT_OUTWARD,
+  classifyEffect,
+  createOutwardGuard,
+  honestVerdict,
+  routePlan,
+} from './affinity.js'
+import {
+  APPROVAL_MESSAGE_TYPES,
+  createExecutionJournal,
+  hiveClaimRecordFor,
+  hiveVerdictRecordFor,
+} from './execution-status.js'
+import {
   BRIDGE_PING_FRAME,
   BRIDGE_PING_INTERVAL_MS,
   MAC_FRESH_MS,
@@ -58,6 +72,12 @@ import {
   socketProtocols,
   socketUrl,
 } from './relay-peer.js'
+import {
+  APPROVALS_KEY,
+  approvalBadge,
+  mergeApprovalPrompts,
+  prepareApprovalDecision,
+} from './approvals.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const POLL_ALARM = 'ai-pendant-poll'
@@ -395,22 +415,65 @@ async function updateStatus(patch) {
     updatedAt: new Date().toISOString(),
   }
   await api.storage.local.set({ [STATUS_KEY]: status })
+  await refreshBadge(status)
+}
 
-  if (api.action?.setBadgeText) {
-    await api.action.setBadgeText({
-      text:
-        status.state === 'connected'
-          ? 'ON'
-          : status.state === 'needs-setup'
-            ? 'SET'
-            : '!',
-    })
-    if (api.action.setBadgeBackgroundColor) {
-      await api.action.setBadgeBackgroundColor({
-        color: status.state === 'connected' ? '#078B70' : '#B54736',
-      })
-    }
+/**
+ * One writer for the toolbar badge, so its two claimants cannot fight.
+ *
+ * Approvals waiting on the owner outrank connection state: 'ON' is
+ * reassurance, a count is a request, and the poll loop repaints the badge
+ * often enough that the count falls away on its own once the last card is
+ * answered or expires. Everything that changes either input — a status
+ * update, a drained approval, a decision — lands here.
+ */
+async function refreshBadge(status = null) {
+  if (!api.action?.setBadgeText) return
+
+  const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY])
+  const current = status ?? stored[STATUS_KEY] ?? {}
+  const badge = approvalBadge(stored[APPROVALS_KEY] ?? []) ?? {
+    text:
+      current.state === 'connected'
+        ? 'ON'
+        : current.state === 'needs-setup'
+          ? 'SET'
+          : '!',
+    color: current.state === 'connected' ? '#078B70' : '#B54736',
   }
+
+  await api.action.setBadgeText({ text: badge.text })
+  if (api.action.setBadgeBackgroundColor) {
+    await api.action.setBadgeBackgroundColor({ color: badge.color })
+  }
+}
+
+/*
+ * storage.local has no transactions, so every read-modify-write of the
+ * approval list rides one chain, exactly like the console history below: a
+ * doorbell drain and a popup decision finishing together must not eat each
+ * other's cards. Unlike withHistory this returns the caller's own result and
+ * rethrows its error — a decision needs to know whether it went through —
+ * while the chain itself swallows the failure so the next write still runs.
+ */
+let approvalWrites = Promise.resolve()
+
+function withApprovals(mutate) {
+  const run = approvalWrites.then(async () => {
+    const values = await api.storage.local.get(APPROVALS_KEY)
+    const next = await mutate(values[APPROVALS_KEY] ?? [])
+    /* null means "nothing changed" — skip the write, and with it a popup
+     * re-render and a storage.onChanged fan-out that would say nothing. */
+    if (next) await api.storage.local.set({ [APPROVALS_KEY]: next })
+    return next
+  })
+  approvalWrites = run.then(
+    () => {},
+    (error) => {
+      console.warn('approval store write failed:', error?.message || error)
+    },
+  )
+  return run
 }
 
 /* ===================================================================== *
@@ -573,6 +636,24 @@ function closeMeshSocket() {
 }
 
 async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
+  /*
+   * An approval_request is RENDERED, never executed: fold it into the stored
+   * card list (dedupe by approvalId — at-least-once re-sends the same
+   * question under new envelope ids) and put the count on the badge. No
+   * answer goes back from here; the answer is the owner's button in the
+   * popup, which arrives later as 'approval:decide'. The request envelope was
+   * already acked by drainRelayOnce — an ack means "I have this" — and the
+   * decision path acks once more after its send, per the contract.
+   */
+  if (handling === 'approval') {
+    const changed = await withApprovals((stored) => {
+      const merged = mergeApprovalPrompts(stored, [envelope])
+      return merged.changed ? merged.prompts : null
+    })
+    if (changed) await refreshBadge()
+    return
+  }
+
   if (handling === 'ping') {
     await relayFetch(
       relayConfig,
@@ -789,6 +870,56 @@ async function updateRelayStatus(patch) {
 }
 
 /**
+ * The owner's answer to one approval card, from the popup.
+ *
+ * Order is the contract: SEND the decision, THEN persist the settle, THEN ack
+ * the request envelope. A decision recorded but never sent would read as
+ * answered while the requester waits forever; a decision sent but not
+ * recorded merely invites a duplicate answer, which the relay's approvalId
+ * makes idempotent — so the settle waits for the send. The whole
+ * check-send-settle runs inside the approval write chain, which is what makes
+ * two frantic clicks land as one answer and one "answered once" refusal.
+ */
+async function decideApproval({ approvalId, decision }) {
+  const relayConfig = await getRelayConfig()
+  if (!relayConfig.ready) {
+    return { ok: false, error: relayConfig.reason || 'The relay peer is switched off.' }
+  }
+
+  let outcome = { ok: false, error: 'The decision was not sent.' }
+  try {
+    await withApprovals(async (stored) => {
+      const prepared = prepareApprovalDecision(stored, String(approvalId ?? ''), decision, {
+        config: relayConfig,
+      })
+      if (!prepared.ok) {
+        outcome = { ok: false, error: prepared.error }
+        return null
+      }
+
+      await relayFetch(relayConfig, prepared.request)
+
+      /* Ack AFTER the send. Usually a no-op — the drain acked on receipt —
+       * but it covers a re-sent copy the store adopted after that ack, and a
+       * failed ack costs one redelivery the approvalId dedupe absorbs. */
+      try {
+        await relayFetch(relayConfig, ackRequest(relayConfig, [prepared.envelopeId]))
+      } catch {
+        /* The lease will lapse; the settled card swallows the redelivery. */
+      }
+
+      outcome = { ok: true, decision }
+      return prepared.prompts
+    })
+  } catch (error) {
+    outcome = { ok: false, error: error?.message || String(error) }
+  }
+
+  await refreshBadge()
+  return outcome
+}
+
+/**
  * Run one command, then take everything it produced through the privacy
  * boundary and stamp it with where it came from.
  *
@@ -817,6 +948,10 @@ async function executeCommand(command, config) {
 async function runCommand(type, params, config) {
   if (type === 'navigate') {
     return { result: await navigate(params, config), tab: null }
+  }
+
+  if (type === 'activate_tab') {
+    return { result: await activateTab(params, config), tab: null }
   }
 
   if (type === 'list_tabs') {
@@ -994,6 +1129,65 @@ async function navigate(params, config) {
     tabId: tab.id,
     windowId: tab.windowId,
     url: tab.url || url,
+  }
+}
+
+/**
+ * Find-or-open. Focuses the freshest existing tab matching `urlContains`
+ * (bringing its window forward), and only when nothing matches — and a `url`
+ * was given — opens a new tab. "Open ibkr" means the signed-in tab the owner
+ * already has, not a duplicate and not whatever the active tab was showing.
+ * Needs only the `tabs` permission (already in the manifest); windows.update
+ * requires none.
+ */
+async function activateTab(params, _config) {
+  const needle = String(params.urlContains ?? '').trim().toLowerCase()
+  const fallbackUrl = String(params.url ?? '').trim()
+
+  if (needle) {
+    const tabs = await api.tabs.query({})
+    const match = tabs
+      .filter(
+        (tab) =>
+          Number.isInteger(tab?.id) &&
+          isScriptableUrl(tab.url) &&
+          String(tab.url).toLowerCase().includes(needle),
+      )
+      .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
+
+    if (match) {
+      const tab = await api.tabs.update(match.id, { active: true })
+      if (api.windows?.update && Number.isInteger(tab?.windowId)) {
+        await api.windows.update(tab.windowId, { focused: true }).catch(() => {})
+      }
+      return {
+        message: `Activated the existing tab matching "${needle}"`,
+        tabId: tab.id,
+        windowId: tab.windowId,
+        url: tab.url ?? match.url ?? '',
+        title: tab.title ?? match.title ?? '',
+        activatedExisting: true,
+      }
+    }
+  }
+
+  if (!fallbackUrl) {
+    throw new Error(
+      `No open tab matches "${needle}" and no url was given to open instead.`,
+    )
+  }
+
+  const url = validateNavigationUrl(fallbackUrl)
+  let tab = await api.tabs.create({ url, active: true })
+  if (params.waitForLoad !== false) {
+    tab = await waitForTabLoad(tab.id, 15_000)
+  }
+  return {
+    message: `No matching tab was open; opened ${url}`,
+    tabId: tab.id,
+    windowId: tab.windowId,
+    url: tab.url || url,
+    activatedExisting: false,
   }
 }
 
@@ -1510,6 +1704,126 @@ async function consolePost(config, path, payload, timeoutMs, interpret) {
   }
 }
 
+/* ===================================================================== *
+ * Local execution: the journal, the hive record, and approved-step runs.
+ * ===================================================================== */
+
+/*
+ * One journal per worker incarnation, lazily built over storage.local so a
+ * run's trace survives the worker being suspended mid-run (Safari does this
+ * freely). The popup's future approval pane reads the same storage keys —
+ * see execution-status.js for the message and key contract.
+ */
+let journalInstance = null
+
+function executionJournal() {
+  if (!journalInstance) {
+    journalInstance = createExecutionJournal({ storage: api.storage.local })
+  }
+  return journalInstance
+}
+
+/**
+ * Tell the hive about a locally executed run — the owner's rule: "it should
+ * stay in the browser extension but of course it can record the task to the
+ * hive." Sent as node-mesh mail addressed to '@relay', which the Mac agent
+ * can NEVER claim: cloud-relay/nodeMailbox.js lets only an inbox's owner
+ * drain it and only an admin principal owns '@relay'. A record, not a job.
+ *
+ * Best effort by design: an unconfigured or unreachable relay must not stop
+ * local execution, but the run's own status says whether the hive heard.
+ */
+async function recordRunToHive(runId, phase) {
+  const journal = executionJournal()
+  const relayConfig = await getRelayConfig()
+  if (!relayConfig.ready) {
+    await journal.markHiveRecord(runId, 'unconfigured')
+    return
+  }
+
+  const run = (await journal.getStatus()).runs.find((entry) => entry.runId === runId)
+  if (!run) return
+
+  try {
+    const descriptor =
+      phase === 'claim'
+        ? hiveClaimRecordFor(run, relayConfig)
+        : hiveVerdictRecordFor(run, relayConfig)
+    await relayFetch(relayConfig, descriptor)
+    await journal.markHiveRecord(
+      runId,
+      phase === 'claim' ? 'claimed-recorded' : 'recorded',
+    )
+  } catch (error) {
+    await journal.markHiveRecord(runId, `failed: ${error?.message || error}`)
+  }
+}
+
+/**
+ * The owner approved a parked outward step (via the popup, next pass). The
+ * step runs through the same validated executor as everything else, and the
+ * run's verdict is recomputed from what actually happened. resolveApproval
+ * has already enforced single-use and the 10-minute freshness window.
+ */
+async function executeApprovedStep(entry) {
+  const journal = executionJournal()
+  const config = await getConfig()
+
+  try {
+    const result = await executeCommand(
+      {
+        commandId: `approved-${entry.id}`,
+        createdAt: new Date().toISOString(),
+        action: entry.call,
+      },
+      config,
+    )
+    await journal.recordStep(entry.runId, {
+      tool: entry.call?.type,
+      effect: EFFECT_OUTWARD,
+      ok: true,
+      summary: `Approved by owner: ${String(result?.message ?? entry.call?.type).slice(0, 250)}`,
+    })
+    const run = (await journal.getStatus()).runs.find(
+      (candidate) => candidate.runId === entry.runId,
+    )
+    const verdict = honestVerdict({
+      command: run?.command ?? '',
+      steps: run?.steps ?? [],
+      parked: [],
+    })
+    await journal.finishRun(entry.runId, { state: 'finished', ...verdict })
+    await recordRunToHive(entry.runId, 'verdict')
+    await patchEntry(entry.runId, {
+      state: 'executed',
+      headline: verdict.headline,
+      detail: verdict.detail,
+      finishedAt: new Date().toISOString(),
+    })
+    return { ok: true, ran: true, message: result?.message ?? 'Done.' }
+  } catch (error) {
+    const message = error?.message || String(error)
+    await journal.recordStep(entry.runId, {
+      tool: entry.call?.type,
+      effect: EFFECT_OUTWARD,
+      ok: false,
+      summary: message.slice(0, 300),
+    })
+    await journal.finishRun(entry.runId, {
+      state: 'failed',
+      verdict: 'failed',
+      headline: `The approved step failed: ${message}`,
+    })
+    await recordRunToHive(entry.runId, 'verdict')
+    await patchEntry(entry.runId, {
+      state: 'failed',
+      headline: `The approved step failed: ${message}`,
+      finishedAt: new Date().toISOString(),
+    })
+    return { ok: false, ran: true, error: message }
+  }
+}
+
 async function handleConsoleSubmit({ command, page }) {
   const text = String(command ?? '').trim()
   if (!text) return { ok: false, error: 'Type a command first.' }
@@ -1552,13 +1866,71 @@ async function runConsoleCommand({ id, command, page, config }) {
 
   const route = chooseBrainRoute(brainConfig)
   if (route.route === 'local-brain') {
+    /*
+     * The run is journaled and announced to the hive from the moment it is
+     * claimed — local execution must never be invisible execution. The guard
+     * watches every snapshot go past so a later {click, ref} is classified by
+     * the words the OWNER would have read on that control.
+     */
+    const journal = executionJournal()
+    const guard = createOutwardGuard()
+    await journal.beginRun({ runId: id, command, route: 'local-brain' })
+    await recordRunToHive(id, 'claim')
+
     const finished = await runBrainLoop({
       command,
       page,
       config: brainConfig,
       callModel: (messages) => brainCallModel(brainConfig, messages),
-      runTool: (call) => runBrainTool(call, config),
+      runTool: async (call) => {
+        const result = await runBrainTool(call, config)
+        guard.observe(call, result)
+        await journal.recordStep(id, {
+          tool: call?.type,
+          effect: guard.assess(call).effect,
+          ok: true,
+          summary: String(result?.message ?? '').slice(0, 300),
+        })
+        return result
+      },
+      assessTool: (call) => guard.assess(call),
     })
+
+    if (finished.status === 'parked') {
+      /*
+       * The step the loop refused to run unattended. It goes to the approval
+       * queue and NOWHERE else — in particular, not to the Mac planner, which
+       * would be free to do the very thing that was just parked.
+       */
+      const assessed = guard.assess(finished.parkedCall ?? {})
+      const parked = await journal.parkStep(id, {
+        call: finished.parkedCall,
+        effect: EFFECT_OUTWARD,
+        reason: finished.parkedReason,
+        targetName: assessed.targetName,
+      })
+      const verdict = honestVerdict({
+        command,
+        steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
+        parked: [parked],
+      })
+      await journal.finishRun(id, { state: 'parked', ...verdict })
+      await recordRunToHive(id, 'verdict')
+      await patchEntry(id, {
+        state: 'parked',
+        headline: verdict.headline,
+        detail: [
+          `Waiting in this browser's approval queue (${parked.id}).`,
+          verdict.detail,
+          /* TODO(popup pass): render localPendingApprovals and send
+           * affinity:resolve-approval — seam only, popup files are another
+           * agent's surface right now. */
+          'Approval UI lands with the next popup pass.',
+        ].join('\n'),
+        finishedAt: new Date().toISOString(),
+      })
+      return
+    }
 
     if (finished.status === 'done') {
       /* A working call is proof the window it was waiting on has passed —
@@ -1567,17 +1939,38 @@ async function runConsoleCommand({ id, command, page, config }) {
       if (brainConfig.brainRetryAfterAt) {
         await api.storage.local.remove('brainRetryAfterAt').catch(() => {})
       }
+      /*
+       * HONESTY GATE: the model's prose is color, never the claim. The
+       * verdict is computed from the ledger of steps that actually ran — a
+       * run that only read says "changed nothing", and a command that asked
+       * for an outward effect that never ran is reported NOT done.
+       */
+      const runState = (await journal.getStatus()).runs.find((run) => run.runId === id)
+      const verdict = honestVerdict({
+        command,
+        steps: runState?.steps ?? [],
+        parked: [],
+        response: finished.response,
+      })
+      await journal.finishRun(id, { state: 'finished', ...verdict })
+      await recordRunToHive(id, 'verdict')
       await patchEntry(id, {
-        state: 'answered',
-        headline: finished.response || 'Done.',
-        detail: summarizeBrainRun(finished),
+        state: verdict.verdict === 'incomplete' ? 'failed' : 'answered',
+        headline: verdict.headline,
+        detail: [summarizeBrainRun(finished), verdict.detail].filter(Boolean).join('\n'),
         finishedAt: new Date().toISOString(),
       })
       return
     }
-    /* Every non-answer is a handoff: the Mac planner gets the command
-     * unchanged, and the entry says the brain stepped aside. */
+    /* Every non-answer, non-park is a handoff: the Mac planner gets the
+     * command unchanged, and the entry says the brain stepped aside. */
     brainNote = summarizeBrainRun(finished)
+    await journal.finishRun(id, {
+      state: 'handed-off',
+      verdict: 'handoff',
+      headline: brainNote,
+    })
+    await recordRunToHive(id, 'verdict')
   } else if (route.cooldownMs) {
     /* Distinct from "no brain configured": this one is coming back. */
     brainNote = `Brain skipped — ${route.reason}`
@@ -1611,6 +2004,29 @@ async function runConsoleCommand({ id, command, page, config }) {
     return
   }
 
+  /*
+   * AFFINITY ROUTING (the fix for "open ibkr" opening on the Mac). The
+   * planner said requiresConfirmation:false and handed back actions. Before
+   * those actions are POSTed to /execute — which runs them ON THE MAC, in the
+   * Mac's own browser session for open_url — every step is capability-tagged.
+   * A plan that is entirely browser work executes HERE, through the same
+   * validated executor agent-issued commands use. One non-browser step
+   * anywhere and the whole plan forwards to the hive exactly as before.
+   *
+   * Plans the planner itself parked (kind 'parked') are NOT intercepted: the
+   * Mac has already recorded that plan_ready job, its dashboard is the one
+   * approval surface for it, and a second local approval surface for the same
+   * plan would be two buttons that can each fire the same actions once.
+   */
+  const affinity = routePlan(planOutcome.actions)
+  if (affinity.route === CAPABILITY_BROWSER) {
+    await patchEntry(id, {
+      headline: 'Plan is all browser work — running it in this browser…',
+    })
+    await executePlanLocally({ id, command, steps: affinity.steps, config, brainNote })
+    return
+  }
+
   /* The planner said requiresConfirmation:false — the one case the popup
    * executes on its own. Everything else parked above. */
   await patchEntry(id, { headline: 'Plan ready — executing…' })
@@ -1630,6 +2046,111 @@ async function runConsoleCommand({ id, command, page, config }) {
   )
 
   await patchEntry(id, outcomeToPatch(executeOutcome))
+}
+
+/**
+ * Execute a fully browser-capable plan on this node.
+ *
+ * Steps run in order through the SAME validateCommand → runCommand →
+ * sanitizeExtraction path every agent-issued command takes — a locally
+ * claimed plan gets no shortcut past the privacy boundary. An outward step
+ * stops the run and parks in the approval queue; a failed step stops the run
+ * honestly rather than pressing on into a page in an unknown state.
+ */
+async function executePlanLocally({ id, command, steps, config, brainNote = '' }) {
+  const journal = executionJournal()
+  await journal.beginRun({ runId: id, command, route: 'local-plan' })
+  await recordRunToHive(id, 'claim')
+
+  const parked = []
+  for (const step of steps) {
+    if (step.effect === EFFECT_OUTWARD) {
+      parked.push(
+        await journal.parkStep(id, {
+          call: step.localCall,
+          effect: step.effect,
+          reason: step.effectReason,
+          targetName: step.label,
+        }),
+      )
+      break
+    }
+
+    try {
+      const result = await executeCommand(
+        {
+          commandId: `local-${id}-${step.index}`,
+          createdAt: new Date().toISOString(),
+          action: step.localCall,
+        },
+        config,
+      )
+      await journal.recordStep(id, {
+        tool: step.localCall.type,
+        effect: step.effect,
+        ok: true,
+        summary: String(result?.message ?? step.label).slice(0, 300),
+      })
+    } catch (error) {
+      const message = error?.message || String(error)
+      await journal.recordStep(id, {
+        tool: step.localCall.type,
+        effect: step.effect,
+        ok: false,
+        summary: message.slice(0, 300),
+      })
+      const runState = (await journal.getStatus()).runs.find((run) => run.runId === id)
+      const verdict = honestVerdict({ command, steps: runState?.steps ?? [], parked: [] })
+      await journal.finishRun(id, {
+        state: 'failed',
+        verdict: 'failed',
+        headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
+        detail: verdict.detail,
+      })
+      await recordRunToHive(id, 'verdict')
+      await patchEntry(id, {
+        state: 'failed',
+        headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
+        detail: [brainNote, verdict.detail].filter(Boolean).join('\n'),
+        finishedAt: new Date().toISOString(),
+      })
+      return
+    }
+  }
+
+  const runState = (await journal.getStatus()).runs.find((run) => run.runId === id)
+  const verdict = honestVerdict({ command, steps: runState?.steps ?? [], parked })
+  await journal.finishRun(id, {
+    state: parked.length ? 'parked' : 'finished',
+    ...verdict,
+  })
+  await recordRunToHive(id, 'verdict')
+
+  await patchEntry(id, {
+    state: parked.length
+      ? 'parked'
+      : verdict.verdict === 'incomplete'
+        ? 'failed'
+        : 'executed',
+    headline: verdict.headline,
+    detail: [
+      brainNote,
+      `Ran in this browser (affinity: all steps browser-capable).`,
+      verdict.detail,
+      ...(parked.length
+        ? [
+            `Waiting in this browser's approval queue (${parked[0].id}).`,
+            /* TODO(popup pass): render localPendingApprovals + send
+             * affinity:resolve-approval — popup files are fenced off in this
+             * change. */
+            'Approval UI lands with the next popup pass.',
+          ]
+        : []),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    finishedAt: new Date().toISOString(),
+  })
 }
 
 /**
@@ -1864,6 +2385,78 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === 'relay:drain-now') {
     void startRelayDrain().then(() => sendResponse({ ok: true }))
+    return true
+  }
+
+  if (message?.type === 'approval:decide') {
+    void decideApproval(message)
+      .then(sendResponse)
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      )
+    return true
+  }
+
+  /*
+   * LOCAL execution's approval seam (execution-status.js) — distinct from
+   * 'approval:decide' above, which answers HIVE-originated approval cards
+   * over the mesh. These three answer the future popup pane for steps this
+   * extension itself parked; approving one executes it here and nowhere else.
+   */
+  if (message?.type === APPROVAL_MESSAGE_TYPES.status) {
+    void executionJournal()
+      .getStatus()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ error: error?.message || String(error) }))
+    return true
+  }
+
+  if (message?.type === APPROVAL_MESSAGE_TYPES.listPending) {
+    void executionJournal()
+      .listPendingApprovals()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ error: error?.message || String(error) }))
+    return true
+  }
+
+  if (message?.type === APPROVAL_MESSAGE_TYPES.resolve) {
+    void executionJournal()
+      .resolveApproval(String(message.id ?? ''), message.verdict)
+      .then(async (entry) => {
+        if (!entry) return { ok: false, error: 'No such pending approval.' }
+        if (entry.state === 'expired') {
+          await executionJournal().finishRun(entry.runId, {
+            state: 'expired',
+            verdict: 'parked',
+            headline:
+              'The parked step expired before it was approved. Nothing was submitted, cancelled or sent.',
+          })
+          await recordRunToHive(entry.runId, 'verdict')
+          return {
+            ok: false,
+            error: 'That approval expired (steps stay approvable for 10 minutes). Re-run the command.',
+          }
+        }
+        if (entry.state === 'declined') {
+          await executionJournal().finishRun(entry.runId, {
+            state: 'declined',
+            verdict: 'parked',
+            headline: 'You declined the parked step. Nothing was submitted, cancelled or sent.',
+          })
+          await recordRunToHive(entry.runId, 'verdict')
+          await patchEntry(entry.runId, {
+            state: 'refused',
+            headline: 'Declined — the irreversible step was not run.',
+            finishedAt: new Date().toISOString(),
+          })
+          return { ok: true, ran: false }
+        }
+        return executeApprovedStep(entry)
+      })
+      .then(sendResponse)
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      )
     return true
   }
 

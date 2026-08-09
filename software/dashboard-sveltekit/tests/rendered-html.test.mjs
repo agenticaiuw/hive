@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import test from "node:test";
 
+import {
+  submissionBadge,
+  transportFor,
+  voiceAvailable,
+} from "../src/lib/transportRule.js";
+
 // The Cloudflare adapter's Worker entry expects two workerd-only globals:
 // `caches.default` (read at module scope) and the `cloudflare:workers` module.
 // Shimming them is the only accommodation this suite makes — every request
@@ -173,11 +179,15 @@ test("server-renders the Dashboard after pairing-code login", async () => {
     assert.match(html, new RegExp(`>${tile}</span>`));
   }
 
-  // Personal-device composer: record or type a command from this browser.
+  // ONE composer: mic + a single "Ask the hive" field + send. The old second
+  // box ("Or speak from this browser" with its own field) is gone, not hidden.
   assert.match(html, /aria-label="Record a voice command"/);
-  assert.match(html, /aria-label="Type a command"/);
-  assert.match(html, /placeholder="Type a command…"/);
-  assert.match(html, /aria-label="Send command"/);
+  assert.match(html, /placeholder="Ask the hive…"/);
+  assert.match(html, /aria-label="Send to the hive"/);
+  assert.equal(html.match(/placeholder="Ask the hive…"/g).length, 1);
+  assert.doesNotMatch(html, /placeholder="Type a command…"/);
+  assert.doesNotMatch(html, /aria-label="Send command"/);
+  assert.doesNotMatch(html, /Or speak from this browser/);
   // It renders idle on the server; recording chrome only appears after a tap.
   assert.doesNotMatch(html, /Stop recording and send/);
 });
@@ -289,7 +299,7 @@ test("rejects anonymous API requests before calling the relay", async () => {
   assert.doesNotMatch(JSON.stringify(payload), /server-side-relay-secret/);
 
   // The composer endpoints sit behind the same session gate.
-  for (const path of ["/api/command/text", "/api/command/audio"]) {
+  for (const path of ["/api/command", "/api/command/audio"]) {
     const denied = await postJson(
       worker,
       `https://example.com${path}`,
@@ -306,6 +316,8 @@ test("rejects anonymous API requests before calling the relay", async () => {
 });
 
 test("queues a typed dashboard command through the pendant relay pipeline", async () => {
+  // Typed commands from the merged box dispatch through /api/command — the
+  // fire-and-forget /api/command/text twin was deleted with the second box.
   const worker = await loadWorker();
   const relayApiKey = "server-side-relay-secret";
   const relayCalls = [];
@@ -330,7 +342,7 @@ test("queues a typed dashboard command through the pendant relay pipeline", asyn
 
   const response = await postJson(
     worker,
-    "https://dashboard.example/api/command/text",
+    "https://dashboard.example/api/command",
     { text: "  open mail  ", sessionId: "session-dashboard-1" },
     { cookie, runtimeEnv },
   );
@@ -353,47 +365,6 @@ test("queues a typed dashboard command through the pendant relay pipeline", asyn
     source: "dashboard-web",
     inputMode: "typed",
   });
-});
-
-test("validates typed commands before spending a relay call", async () => {
-  const worker = await loadWorker();
-  let relayCalls = 0;
-  const runtimeEnv = {
-    ...env,
-    RELAY_API_KEY: "server-side-relay-secret",
-    RELAY: {
-      async fetch() {
-        relayCalls += 1;
-        return Response.json({ ok: true });
-      },
-    },
-  };
-  const cookie = await sessionCookie(worker, runtimeEnv);
-
-  const empty = await postJson(
-    worker,
-    "https://dashboard.example/api/command/text",
-    { text: "   " },
-    { cookie, runtimeEnv },
-  );
-  assert.equal(empty.status, 400);
-
-  const tooLong = await postJson(
-    worker,
-    "https://dashboard.example/api/command/text",
-    { text: "x".repeat(2001) },
-    { cookie, runtimeEnv },
-  );
-  assert.equal(tooLong.status, 413);
-
-  const invalidSession = await postJson(
-    worker,
-    "https://dashboard.example/api/command/text",
-    { text: "open mail", sessionId: "../another/session" },
-    { cookie, runtimeEnv },
-  );
-  assert.equal(invalidSession.status, 400);
-  assert.equal(relayCalls, 0);
 });
 
 test("transcribes a browser recording and dispatches the transcript", async () => {
@@ -420,8 +391,10 @@ test("transcribes a browser recording and dispatches the transcript", async () =
             internalSecret: relayApiKey,
           });
         }
+        // The relay could not upgrade the announced transcription job in
+        // place and forked a fresh plan job — the id the status poll needs.
         return Response.json(
-          { ok: true, job: { jobId: "job-42", status: "queued" } },
+          { ok: true, job: { jobId: "job-91", status: "queued" } },
           { status: 202 },
         );
       },
@@ -445,7 +418,9 @@ test("transcribes a browser recording and dispatches the transcript", async () =
   const payload = await response.json();
   assert.equal(payload.ok, true);
   assert.equal(payload.queued, true);
-  assert.equal(payload.jobId, "job-42");
+  // The returned id is the CREATED plan job — the handle the merged command
+  // box polls via /api/command/status — not the announced transcription job.
+  assert.equal(payload.jobId, "job-91");
   // Echoed transcripts get the same redaction as every other relay payload.
   assert.match(payload.text, /\[local path\]/);
   const serialized = JSON.stringify(payload);
@@ -1264,7 +1239,7 @@ test("reports scheduled routines as unreadable from the cloud rather than absent
 
 /* ------------------------- Ask the hive (universal command box) --------- */
 
-test("renders the ask-the-hive box on the dashboard and hive pages", async () => {
+test("renders one merged voice+text ask-the-hive box on the dashboard and hive pages", async () => {
   const worker = await loadWorker();
   const cookie = await sessionCookie(worker);
 
@@ -1277,11 +1252,45 @@ test("renders the ask-the-hive box on the dashboard and hive pages", async () =>
     assert.match(html, /aria-label="Ask the hive"/);
     assert.match(html, /placeholder="Ask the hive…"/);
     assert.match(html, /aria-label="Send to the hive"/);
+    // The mic lives in the same box — and it is the ONLY composer: exactly
+    // one input per page, and none of the old second box's markup.
+    assert.match(html, /aria-label="Record a voice command"/);
+    assert.equal(html.match(/placeholder="Ask the hive…"/g).length, 1, path);
+    assert.equal(
+      html.match(/aria-label="Record a voice command"/g).length,
+      1,
+      path,
+    );
+    assert.doesNotMatch(html, /placeholder="Type a command…"/);
+    assert.doesNotMatch(html, /Or speak from this browser/);
     // The deployed build's honest transport label: this page has no route to
     // the Mac, so its commands go through the server-held relay key.
     assert.match(html, />VIA RELAY</);
     assert.doesNotMatch(html, />LOCAL</);
   }
+});
+
+test("chooses each submission's transport by serving host and labels it honestly", () => {
+  // The rule the merged box runs (imported from the same module it uses):
+  // typed goes local exactly when the Mac agent serves the page; voice always
+  // rides the Worker's speech route, which only the relay build has.
+  assert.equal(transportFor("agent", "typed"), "local");
+  assert.equal(transportFor("relay", "typed"), "relay");
+  assert.equal(transportFor("agent", "voice"), "relay");
+  assert.equal(transportFor("relay", "voice"), "relay");
+  assert.equal(voiceAvailable("relay"), true);
+  assert.equal(voiceAvailable("agent"), false);
+
+  // The per-submission badge says which path carried THAT submission.
+  assert.equal(submissionBadge("local", "typed").label, "via this Mac");
+  assert.equal(submissionBadge("relay", "typed").label, "via relay");
+  assert.equal(submissionBadge("relay", "voice").label, "via relay");
+  assert.match(submissionBadge("local", "typed").title, /loopback session/);
+  assert.match(submissionBadge("relay", "voice").title, /transcribed/i);
+  assert.match(
+    submissionBadge("relay", "typed").title,
+    /never reached this browser/,
+  );
 });
 
 test("dispatches an ask-the-hive command and answers its status poll with the key server-side", async () => {

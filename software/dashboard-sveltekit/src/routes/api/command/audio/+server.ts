@@ -112,10 +112,11 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     }
 
     const text = String(transcribePayload.text || "").trim();
-    const jobId = safeIdentifier(transcribePayload.jobId, 160);
+    const transcriptionJobId = safeIdentifier(transcribePayload.jobId, 160);
     const hasSpeech = /[\p{L}\p{N}]/u.test(text);
     let queued = false;
     let queueError = "";
+    let planJobId = "";
 
     if (hasSpeech) {
       const planResponse = await relayFetch("/v1/mac/plan", {
@@ -131,14 +132,25 @@ export const POST: RequestHandler = async ({ request, locals }) => {
           // Keeps the run attributed to the dashboard even if the announced
           // transcription job could not be upgraded in place.
           inputTelemetry,
-          ...(jobId ? { transcriptionJobId: jobId } : {}),
+          ...(transcriptionJobId
+            ? { transcriptionJobId: transcriptionJobId }
+            : {}),
         }),
       });
       const planPayload = (await planResponse.json().catch(() => ({}))) as {
         error?: unknown;
+        job?: { jobId?: unknown } | null;
       };
       if (planResponse.ok) {
         queued = true;
+        // The relay usually upgrades the announced transcription job in
+        // place, but when it cannot it forks a fresh plan job — and THAT id
+        // is the one `/api/command/status/[jobId]` can actually follow.
+        const planJob =
+          planPayload.job && typeof planPayload.job === "object"
+            ? planPayload.job
+            : null;
+        planJobId = planJob ? safeIdentifier(planJob.jobId, 160) : "";
       } else {
         queueError =
           sanitizeText(planPayload.error, 300) ||
@@ -149,7 +161,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     return Response.json(
       {
         ok: true,
-        jobId: jobId || null,
+        // The poll handle for the merged command box: the created plan job
+        // when dispatch succeeded, else the announced transcription job.
+        jobId: planJobId || transcriptionJobId || null,
         text: sanitizeText(text, 300),
         queued,
         ...(hasSpeech ? {} : { noSpeech: true }),
