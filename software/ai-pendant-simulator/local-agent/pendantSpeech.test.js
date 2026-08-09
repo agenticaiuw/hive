@@ -17,6 +17,7 @@ import {
   spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
+  telemetryForWire,
 } from './pendantSpeech.js'
 
 test('selects the agent response before summaries and action labels', () => {
@@ -368,4 +369,68 @@ test("the agent's global activity ring is summarised, never shipped", () => {
   // Everything else is untouched.
   assert.equal(wire.response, 'Done.')
   assert.equal(wire.execution.ok, true)
+})
+
+/* ---------------------------------------------------------------------------
+ * Pipeline telemetry. The bridge's POST to the agent's own /pipeline/events was
+ * still fat after the relay reports were fixed: it carried meta.results, which
+ * is where a briefing payload rides. It came back 413 and the WHOLE event was
+ * lost — including the stage transition the dashboard strip renders. The
+ * receiver drops audio anyway (pipelineTrace.js sanitizeMeta strips /base64/
+ * keys), so those bytes could never have been displayed.
+ * ------------------------------------------------------------------------- */
+
+test('telemetry carries no audio bytes and no activity ring, but keeps the event', () => {
+  const speech = speechFixture({ pcmBytes: 900_000 })
+  const body = {
+    pipelineId: 'job_1',
+    kind: 'plan',
+    stage: 'agent',
+    status: 'done',
+    label: 'Executing actions — done',
+    detail: 'Finished in 812 ms.',
+    text: 'Your briefing is ready.',
+    meta: {
+      resultCount: 1,
+      results: [{ type: 'research_brief', ok: true, pendantSpeech: speech }],
+      logs: Array.from({ length: 200 }, (_, i) => ({ id: i, blob: 'z'.repeat(20_000) })),
+    },
+  }
+
+  const before = Buffer.byteLength(JSON.stringify(body), 'utf8')
+  const wire = telemetryForWire(body)
+  const after = Buffer.byteLength(JSON.stringify(wire), 'utf8')
+
+  assert.ok(before > 4_000_000, 'the fixture must be the real order of size')
+  assert.ok(after < 2_000, `telemetry must stay small, got ${after} B`)
+
+  // No audio blob survives anywhere, at any depth.
+  const counts = blobOccurrences(wire, 1024)
+  assert.equal(counts.size, 0, 'telemetry must carry no audio bytes at all')
+
+  // The event itself — the part the dashboard strip actually renders — is intact.
+  assert.equal(wire.stage, 'agent')
+  assert.equal(wire.status, 'done')
+  assert.equal(wire.label, 'Executing actions — done')
+  assert.equal(wire.detail, 'Finished in 812 ms.')
+  assert.equal(wire.text, 'Your briefing is ready.')
+  // Useful action metadata survives; only the bytes go.
+  assert.equal(wire.meta.resultCount, 1)
+  assert.equal(wire.meta.results[0].type, 'research_brief')
+  assert.equal(wire.meta.results[0].ok, true)
+  assert.equal(wire.meta.results[0].pendantSpeech.audioOmitted, true)
+  assert.equal(wire.meta.results[0].pendantSpeech.format, 's16le')
+  assert.equal(wire.meta.logs.length, 200)
+})
+
+test('telemetry passes through ordinary events untouched', () => {
+  const body = {
+    pipelineId: 'job_2',
+    stage: 'tts',
+    status: 'active',
+    label: 'Rendering response speech',
+    meta: { pcmBytes: 480_000, durationMs: 812 },
+  }
+  const wire = telemetryForWire(body)
+  assert.deepEqual(wire, body)
 })
