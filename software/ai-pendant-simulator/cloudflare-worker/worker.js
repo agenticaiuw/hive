@@ -74,6 +74,18 @@ export default {
       return handleBridgeSocketUpgrade(request, env)
     }
 
+    /*
+     * The node mesh socket: same rule, same reason. This is the one that lets
+     * the browser extension and the iOS shell be reachable without the Mac in
+     * the path — before it, the relay could not tell either of them anything.
+     * Lands on the same per-device BridgeHub instance the Mac uses, so a node
+     * holds exactly one socket however many things the relay wants to say.
+     */
+    if (url.pathname === '/v1/node/socket') {
+      const { handleNodeSocketUpgrade } = await import('./bridgeHub.js')
+      return handleNodeSocketUpgrade(request, env)
+    }
+
     if (!relayHandlerPromise) {
       relayHandlerPromise = import('../cloud-relay/server.js').then(() =>
         httpServerHandler({ port: 8787 }),

@@ -293,3 +293,62 @@ CREATE INDEX IF NOT EXISTS relay_memory_events_fold
 CREATE INDEX IF NOT EXISTS relay_memory_events_value
   ON relay_memory_events(type, at DESC, event_id DESC);
 
+
+-- The node mesh mailbox (cloud-relay/nodeMailbox.js, shared/nodeMesh.js).
+--
+-- One row = one addressed message that has not been acknowledged yet. This is
+-- the DURABLE record; the WebSocket doorbell only says "drain now". That split
+-- is copied deliberately from relay_jobs + BridgeHub rather than reinvented:
+-- a socket that carried payloads would make delivery depend on the socket
+-- being up at the instant of send, which is precisely the failure the mesh
+-- exists to remove.
+--
+-- Not relay_jobs: a job is claimed by whoever asks first and is a unit of WORK
+-- with a result. A mesh message is addressed to exactly one node, has no
+-- result, and must survive that node being offline for hours. Not
+-- relay_announcements: those are spoken to the pendant and carry rendered
+-- speech; these are machine-to-machine and carry JSON.
+--
+-- Acknowledgement DELETES the row. There is no 'delivered' state kept around,
+-- on purpose: a mailbox that retains every message ever exchanged is a log of
+-- everything every node said about the owner, and relay_announcements already
+-- taught this project that a filter on the read path is not deletion.
+-- Unacked rows are swept at expires_at.
+--
+-- This block and node-mesh-migration.sql must stay byte-identical from CREATE
+-- TABLE down: the migration is what an existing database runs, this file is
+-- what a new one is built from.
+CREATE TABLE IF NOT EXISTS relay_node_messages (
+  message_id TEXT PRIMARY KEY,
+  -- The addressee. A device_id, or a reserved '@name' address that no device
+  -- can register under (deviceIds cannot contain '@') — see shared/nodeMesh.js.
+  to_node TEXT NOT NULL,
+  -- Stamped from the authenticated principal, never from the request body.
+  from_node TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  -- NOT NULL, unlike relay_announcements.expires_at. Every message carries a
+  -- deadline because the sweep is the only thing that empties an inbox nobody
+  -- ever drains, and "unknown means keep" would make that inbox permanent.
+  expires_at TEXT NOT NULL,
+  -- Lease, not a delivered flag: a drain hides the row for lease_until so a
+  -- second drain cannot double-deliver, and a node that crashes mid-batch
+  -- gets the batch back when the lease lapses. At-least-once; message_id is
+  -- the receiver's dedupe key.
+  leased_until TEXT,
+  -- Which drain holds the lease. The drain UPDATEs then SELECTs by this token,
+  -- which is what makes the claim atomic without a RETURNING clause.
+  lease_token TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  data TEXT NOT NULL
+);
+
+-- The drain: unexpired, unleased, oldest first, for one addressee.
+CREATE INDEX IF NOT EXISTS relay_node_messages_inbox
+  ON relay_node_messages(to_node, leased_until, created_at ASC);
+
+-- The sweep, and the SELECT that pairs with a lease UPDATE.
+CREATE INDEX IF NOT EXISTS relay_node_messages_expiry
+  ON relay_node_messages(expires_at);
+
+CREATE INDEX IF NOT EXISTS relay_node_messages_lease
+  ON relay_node_messages(lease_token);

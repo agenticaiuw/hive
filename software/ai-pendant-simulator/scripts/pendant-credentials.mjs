@@ -31,7 +31,12 @@
  */
 import '../../load-pendant-env.mjs'
 
-const ROLES = ['mobile', 'mac_bridge', 'nrf_pendant']
+/* Mirrors SUPPORTED_DEVICE_TYPES in cloud-relay/deviceAuth.js. Duplicated
+ * rather than imported: this script runs against a REMOTE relay and must not
+ * imply that the roles this checkout knows about are the ones that relay
+ * accepts. The relay rejects an unknown role on its own; this list only makes
+ * the usage line useful. */
+const ROLES = ['mobile', 'mac_bridge', 'nrf_pendant', 'browser_node']
 
 const USAGE = `Usage:
   pendant-credentials.mjs pair --device-id <id> --role <${ROLES.join('|')}> [--name <label>]
