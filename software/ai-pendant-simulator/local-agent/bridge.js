@@ -17,6 +17,7 @@ import {
   WORK_RETRY_MAX_MS,
   WORK_POLL_ABORT_MS,
 } from './bridgeConfig.js'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { migrationNotice, resolveRelayCredential } from './relayCredential.js'
 import {
   bridgeSocketUrl,
@@ -1259,8 +1260,3 @@ async function callLocalAgent(path, { method = 'POST', body } = {}) {
   return stripImageBytes(payload)
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}

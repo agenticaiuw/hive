@@ -2,6 +2,7 @@ import { spawn, execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
@@ -164,10 +165,6 @@ function isPidAlive(pid) {
   } catch {
     return false
   }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function ensureOverlayHelper() {

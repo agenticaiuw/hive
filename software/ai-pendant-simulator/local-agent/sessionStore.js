@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { writeJsonAtomic } from './atomicJsonStore.js'
 import { workspacePath } from './config.js'
 import {
   mergeProductSync,
@@ -249,34 +250,14 @@ export function writeSessionDocumentAtomic(
   { filePath = sessionsPath } = {},
 ) {
   const document = normalizeLocalDocument(input, LOCAL_DEVICE_ID)
-  const serialized = `${JSON.stringify(document, null, 2)}\n`
-  const bytes = Buffer.byteLength(serialized, 'utf8')
+  const bytes = Buffer.byteLength(JSON.stringify(document, null, 2), 'utf8')
   if (bytes > PRODUCT_SYNC_LIMITS.maxPayloadBytes) {
     throw new RangeError(
       `Local session store exceeds ${PRODUCT_SYNC_LIMITS.maxPayloadBytes} bytes`,
     )
   }
 
-  ensureDirectory(filePath)
-  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`
-  let descriptor
-  try {
-    descriptor = fs.openSync(temporaryPath, 'wx', 0o600)
-    fs.writeFileSync(descriptor, serialized, 'utf8')
-    fs.fsyncSync(descriptor)
-    fs.closeSync(descriptor)
-    descriptor = undefined
-    fs.renameSync(temporaryPath, filePath)
-    fs.chmodSync(filePath, 0o600)
-    fsyncDirectory(path.dirname(filePath))
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor)
-    try {
-      fs.unlinkSync(temporaryPath)
-    } catch {
-      // A successful rename removes the temporary path.
-    }
-  }
+  writeJsonAtomic(filePath, document)
   return document
 }
 
@@ -460,14 +441,3 @@ function ensureDirectory(filePath) {
   }
 }
 
-function fsyncDirectory(directory) {
-  let descriptor
-  try {
-    descriptor = fs.openSync(directory, 'r')
-    fs.fsyncSync(descriptor)
-  } catch {
-    // Some filesystems do not allow fsync on a directory.
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor)
-  }
-}

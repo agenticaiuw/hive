@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { writeJsonAtomic } from './atomicJsonStore.js'
 import {
   applyContextGraphRetention,
   contextGraphBytes,
@@ -679,25 +680,7 @@ function writeGraph(graph, { retention = true } = {}) {
     }
   }
 
-  const serialized = `${JSON.stringify(normalized, null, 2)}\n`
-  const temporaryPath = `${graphPath}.${process.pid}.${crypto.randomUUID()}.tmp`
-  let descriptor
-  try {
-    descriptor = fs.openSync(temporaryPath, 'wx', 0o600)
-    fs.writeFileSync(descriptor, serialized, 'utf8')
-    fs.fsyncSync(descriptor)
-    fs.closeSync(descriptor)
-    descriptor = undefined
-    fs.renameSync(temporaryPath, graphPath)
-    fs.chmodSync(graphPath, 0o600)
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor)
-    try {
-      fs.unlinkSync(temporaryPath)
-    } catch {
-      // A successful rename removes the temporary path.
-    }
-  }
+  writeJsonAtomic(graphPath, normalized)
 }
 
 function normalizeGraph(graph) {

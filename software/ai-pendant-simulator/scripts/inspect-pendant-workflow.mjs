@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import '../../load-pendant-env.mjs'
@@ -609,10 +610,6 @@ function formatMeta(meta) {
 
 function stageLabel(stage) {
   return String(stage || '').replaceAll('_', ' ').toUpperCase()
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function printHelp() {

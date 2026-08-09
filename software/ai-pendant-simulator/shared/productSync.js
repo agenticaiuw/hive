@@ -452,7 +452,7 @@ function assertByteLimit(name, value, maxBytes) {
 }
 
 function copyJson(value) {
-  return JSON.parse(JSON.stringify(value))
+  return structuredClone(value)
 }
 
 function stableStringify(value) {
