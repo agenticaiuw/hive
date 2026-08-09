@@ -12,8 +12,10 @@ import { setCloudflareBindings } from './cloudflareBindings.js'
 import {
   allowedInferModels,
   chargeInferBudget,
+  DEFAULT_INFER_OUTPUT_TOKENS,
   MAX_INFER_CHARS,
   MAX_INFER_MESSAGES,
+  MAX_INFER_OUTPUT_TOKENS,
   normalizeInferMessages,
   resetInProcessInferBudget,
   resolveInferModel,
@@ -284,6 +286,63 @@ test('a successful call returns content, model and usage', async () => {
   assert.deepEqual(result.usage, { total_tokens: 12 })
   assert.equal(sentBody.max_completion_tokens, 64)
   assert.deepEqual(sentBody.response_format, { type: 'json_object' })
+})
+
+test('a cut-off answer says so instead of arriving as bad JSON', async () => {
+  /*
+   * The failure this prevents is genuinely nasty and was silent until an
+   * extension client pointed at the cause. maxTokens DEFAULTS to 512, not to
+   * the 2048 ceiling, so a caller that omits it has a quarter of the budget it
+   * thinks it has. Ask for json_object, run out mid-object, and every layer
+   * downstream reports a malformed model response — while the one fact that
+   * explains it, finish_reason:'length', was in the upstream payload and being
+   * thrown away here.
+   */
+  const cutOff = await runInference({
+    model: 'm',
+    messages: [{ role: 'user', content: 'hi' }],
+    apiKey: 'test-key',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: '{"partial":' }, finish_reason: 'length' }],
+      }),
+    }),
+  })
+  assert.equal(cutOff.truncated, true)
+  assert.equal(cutOff.finishReason, 'length')
+
+  const complete = await runInference({
+    model: 'm',
+    messages: [{ role: 'user', content: 'hi' }],
+    apiKey: 'test-key',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }],
+      }),
+    }),
+  })
+  assert.equal(complete.truncated, false)
+  assert.equal(complete.finishReason, 'stop')
+})
+
+test('omitting maxTokens spends the default, not the ceiling', async () => {
+  /* "Clamped to 2048" reads as "2048 unless you ask for less". It is not:
+   * absent means 512, and the gap has already misled one reader. */
+  let sentBody = null
+  await runInference({
+    model: 'm',
+    messages: [{ role: 'user', content: 'hi' }],
+    apiKey: 'test-key',
+    fetchImpl: async (_url, init) => {
+      sentBody = JSON.parse(init.body)
+      return { ok: true, json: async () => ({ choices: [] }) }
+    },
+  })
+  assert.equal(sentBody.max_completion_tokens, DEFAULT_INFER_OUTPUT_TOKENS)
+  assert.equal(DEFAULT_INFER_OUTPUT_TOKENS, 512)
+  assert.notEqual(DEFAULT_INFER_OUTPUT_TOKENS, MAX_INFER_OUTPUT_TOKENS)
 })
 
 test('maxTokens is clamped, so one call cannot be an unbounded bill', async () => {

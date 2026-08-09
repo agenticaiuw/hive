@@ -56,6 +56,17 @@ export const INFER_RATE_WINDOW_MS = 3_600_000
 export const MAX_INFER_MESSAGES = 40
 export const MAX_INFER_CHARS = 24_000
 export const MAX_INFER_OUTPUT_TOKENS = 2_048
+
+/*
+ * What a caller gets when it does NOT ask. Deliberately a quarter of the
+ * ceiling — this is a billing surface and the common case is a short planner
+ * answer — but the gap between this and MAX_INFER_OUTPUT_TOKENS has misled a
+ * reader already ("clamped to 2048" reads as "2048 unless you ask for less"),
+ * so it is named rather than buried in a parameter default. A caller that
+ * wants the ceiling must ask for it, and one that runs out is told via
+ * `truncated` instead of discovering it as malformed JSON.
+ */
+export const DEFAULT_INFER_OUTPUT_TOKENS = 512
 const UPSTREAM_TIMEOUT_MS = 60_000
 
 /**
@@ -195,7 +206,7 @@ export async function chargeInferBudget({
 export async function runInference({
   model,
   messages,
-  maxTokens = 512,
+  maxTokens = DEFAULT_INFER_OUTPUT_TOKENS,
   responseFormat = null,
   apiKey = LLM_API_KEY,
   baseUrl = LLM_API_BASE_URL,
@@ -214,7 +225,7 @@ export async function runInference({
     model,
     messages,
     max_completion_tokens: Math.min(
-      Math.max(Number(maxTokens) || 512, 1),
+      Math.max(Number(maxTokens) || DEFAULT_INFER_OUTPUT_TOKENS, 1),
       MAX_INFER_OUTPUT_TOKENS,
     ),
   }
@@ -244,11 +255,32 @@ export async function runInference({
   }
 
   const payload = await response.json()
-  const content = payload?.choices?.[0]?.message?.content ?? ''
+  const choice = payload?.choices?.[0] ?? null
+  const content = choice?.message?.content ?? ''
+  const finishReason = choice?.finish_reason ?? null
+
+  /*
+   * Surface the cut-off, or a truncated answer arrives looking like a bad one.
+   *
+   * This was dropped on the floor until an extension client pointed out that
+   * maxTokens DEFAULTS to 512 rather than to the 2048 ceiling — so a caller
+   * that omits it gets a quarter of the budget it thinks it has. Combine that
+   * with responseFormat:'json_object' and the failure is genuinely nasty: the
+   * model stops mid-object, the JSON does not parse, and every layer downstream
+   * reports a malformed model response. The one fact that explains it —
+   * finish_reason:'length' — was sitting in the upstream payload and being
+   * thrown away here.
+   *
+   * `truncated` is computed rather than left to each caller to derive, because
+   * the whole point is that the callers hitting this are the ones who did not
+   * know to look.
+   */
   return {
     content: String(content),
     model: String(payload?.model || model),
     usage: payload?.usage ?? null,
+    finishReason,
+    truncated: finishReason === 'length',
   }
 }
 
@@ -303,6 +335,11 @@ export function registerInferenceRoutes(app, { fetchImpl } = {}) {
         content: result.content,
         model: result.model,
         usage: result.usage,
+        /* A caller that omitted maxTokens got 512, not the 2048 ceiling. If it
+         * ran out mid-answer, say so here rather than letting the client
+         * diagnose its own unparseable JSON. */
+        finishReason: result.finishReason,
+        truncated: result.truncated,
         budget: {
           limit: budget.limit,
           used: budget.used,
