@@ -101,8 +101,6 @@ final class PendantBridgeViewController: CAPBridgeViewController {
     private var mediaCaptureDelegate: PendantMediaCaptureUIDelegate?
 
     override func capacitorDidLoad() {
-        bridge?.registerPluginInstance(PendantSecureStoragePlugin())
-
         if let webView = webView, let capacitorDelegate = webView.uiDelegate {
             let delegate = PendantMediaCaptureUIDelegate(wrapping: capacitorDelegate)
             mediaCaptureDelegate = delegate
