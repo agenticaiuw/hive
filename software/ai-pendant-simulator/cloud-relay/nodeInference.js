@@ -69,6 +69,20 @@ export const MAX_INFER_OUTPUT_TOKENS = 2_048
 export const DEFAULT_INFER_OUTPUT_TOKENS = 512
 
 /*
+ * INVARIANT FOR EVERY FUTURE `retryAfter` ON THIS ROUTE: it is DEVICE-SCOPED.
+ * It means "this device should not ask this relay again before then", never
+ * "this particular request was unlucky".
+ *
+ * This is a contract, not a description, and it is written down because a
+ * client now depends on it in a way that is more robust than keying on my
+ * status codes: the extension parks its whole brain on the PRESENCE of the
+ * field, so a third reason I add later is honoured with no change on its side.
+ * That is the right design — the same argument as `complete` being false for
+ * anything that is not a clean 'stop' rather than an enumerated list — and the
+ * price of it is that I may not send this field for a per-request condition.
+ * Doing so would park a working brain over one unlucky call, and the break
+ * would be silent on both sides. A request-scoped hint needs a different name.
+ *
  * `Retry-After` for a 503 not_configured, in seconds.
  *
  * A FLOOR, NOT A PREDICTION, and the distinction is the whole reason this is
