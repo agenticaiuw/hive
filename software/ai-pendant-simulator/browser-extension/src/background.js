@@ -532,9 +532,11 @@ function ensureMeshSocket(relayConfig, onMail) {
     /*
      * 1008 is how the hub reports a refused handshake once the socket exists.
      * A credential the relay will not accept must not be retried on every
-     * alarm — observed live: a relay deploy invalidated a working token
-     * mid-session, and a hot reconnect loop would have hammered it. The poll
-     * path stays up and reports the real reason.
+     * alarm. Observed live: a token that had just handshaked started being
+     * refused because the device it belonged to was retired mid-session with
+     * DELETE /v1/devices/:deviceId, which takes the credentials with it. A hot
+     * reconnect loop would have hammered the relay for as long as nobody
+     * noticed. The poll path stays up and reports the real reason.
      */
     if (event?.code === 1008 || event?.code === 4001 || event?.code === 4003) {
       meshSocketRefused = true
