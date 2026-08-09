@@ -1,44 +1,135 @@
 <script lang="ts">
+  /*
+   * ===========================================================================
+   * THE DASHBOARD — design rationale
+   * ===========================================================================
+   *
+   * This page used to open with the owner's own question set in the largest
+   * type on screen, a six-dot `STT · AGENT · TTS · RELAY · NRF · PLAY` strip,
+   * `786.3 KiB · 16,000 Hz`, a Details block repeating the question a third
+   * time — and a pill reading "Running" while the plan had actually PARKED and
+   * was waiting for the owner. The question appeared three times; the answer
+   * appeared zero times. Debug telemetry I needed while fixing the audio
+   * pipeline had been promoted to the product.
+   *
+   * Eight principles, and what each one changes here:
+   *
+   * 1. ANSWER FIRST (inverted pyramid, NN/g). "The most important information
+   *    ... is presented first" — the conclusion before the reasoning.
+   *    → The answer is the display-size element. The question is one small
+   *      secondary line above it, and appears exactly once on the page.
+   *      nngroup.com/articles/inverted-pyramid/
+   *
+   * 2. STATUS THAT IS TRUE, IN THE USER'S WORDS (heuristics 1 + 2). #1 asks for
+   *    feedback that builds "trust through open and continuous communication";
+   *    #2 asks for "words, phrases, and concepts familiar to the user, rather
+   *    than internal jargon".
+   *    → `$lib/runState` derives the phase from the run's own events instead of
+   *      echoing `run.status`, which lies. "Needs your approval", "Listening",
+   *      "Thinking", "Answered", "Couldn't do it" — never "processing",
+   *      "plan_ready", or a stage code.
+   *      nngroup.com/articles/ten-usability-heuristics/
+   *
+   * 3. BLOCKED ON A HUMAN OUTRANKS EVERYTHING. Heuristic 9: name the problem in
+   *    plain language and offer the way out.
+   *    → A parked plan gets its own card above the answer, carrying the agent's
+   *      verbatim reason, the steps it prepared, and the Approve button itself.
+   *
+   * 4. PROGRESSIVE DISCLOSURE, TWO LEVELS. "Show users only a few of the most
+   *    important options"; going past two levels loses people; the control must
+   *    be labelled to set expectations.
+   *    → All telemetry — payload, sample rate, format, storage, gain, the stage
+   *      strip, the event log — moves behind one <details> labelled "Technical
+   *      details", with a noun-phrase hint. Kept, not deleted: it is how this
+   *      hardware gets debugged. Nothing inside it opens a third level.
+   *      nngroup.com/articles/progressive-disclosure/
+   *
+   * 5. EMPHASIZE BY DE-EMPHASIZING (Refactoring UI). Three text colours, two
+   *    weights, and "resist immediately reaching for a border" — separate with
+   *    space, not boxes.
+   *    → One type scale (--fs-*), three ink tiers, weights 450/650. The nested
+   *      bordered panels are gone; grouping is spacing.
+   *      medium.com/refactoring-ui/7-practical-tips-for-cheating-at-design-40c736799886
+   *
+   * 6. SPEND THE TOP OF THE PAGE ON DECISIONS. NN/g eyetracking: content just
+   *    above the fold is viewed ~102% more than just below it.
+   *    → Order is: what needs you → what it said → ask it something → what it
+   *      did → system panels. Diagnostics never occupy that space again.
+   *      nngroup.com/articles/page-fold-manifesto/
+   *
+   * 7. STATUS IS NEVER COLOUR ALONE (WCAG 1.4.1), AND MUST BE READABLE
+   *    (1.4.3 / 1.4.11). Every state pill is icon + word + colour; body text
+   *    clears 4.5:1 and every state dot and control edge clears 3:1 on this
+   *    dark surface. Text is #f7f8fa, not #fff — pure white on near-black
+   *    bleeds (Material dark-theme guidance).
+   *    w3.org/WAI/WCAG22/Understanding/use-of-color.html
+   *
+   * 8. NOTHING FABRICATES. A run with no answer looks like a run with no
+   *    answer: the status word takes the display slot and no placeholder stands
+   *    in for a result. Errors are the agent's verbatim text. The spoken-reply
+   *    line reports `delivery.label` as written ("Waiting at the relay") and
+   *    never claims the pendant played anything, because nothing observed that.
+   *
+   * KNOWN DATA GAP: a parked run's events never record that the owner later
+   * approved it — approval starts a separate job — so "Needs your approval"
+   * means "this plan is parked", not "nobody has acted on it". See
+   * `$lib/runState` for how duplicates are collapsed rather than guessed at.
+   */
   import { onMount } from "svelte";
   import { base } from "$app/paths";
   import {
+    approvePlan,
     audioHref,
     backend,
+    canApprovePlan,
     fetchHistory,
     fetchHistoryDetail,
+    fetchJobs,
     fetchLatestRun,
     fetchMemory,
     fetchRuns,
     fetchSnapshot,
   } from "$lib/dataSource";
+  import AnswerCard from "$lib/components/AnswerCard.svelte";
+  import ApprovalCard from "$lib/components/ApprovalCard.svelte";
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import CommandBox from "$lib/components/CommandBox.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
-  import Metric from "$lib/components/Metric.svelte";
   import SystemRow from "$lib/components/SystemRow.svelte";
+  import TechnicalDetails from "$lib/components/TechnicalDetails.svelte";
   import Tile from "$lib/components/Tile.svelte";
   import {
     BAD_TRANSCRIPT_DIAGNOSIS,
     bytes,
     clock,
-    displayCommand,
-    duration,
     hasUsefulTranscript,
     isIdleRun,
     isTranscribing,
-    stageState,
-    stagesFor,
     type JsonRecord,
   } from "$lib/pipeline";
+  import { formatWhen, statusLabel, type JobView } from "$lib/jobs";
+  import {
+    pendingApprovals,
+    runState,
+    withBlockedReasons,
+  } from "$lib/runState";
 
   let snapshot = $state<JsonRecord | null>(null);
   let liveRuns = $state<JsonRecord[]>([]);
+  let jobs = $state<JobView[]>([]);
+  /*
+   * The owner's explicit pick from Recent, and ONLY that. It used to double as
+   * the auto-default (set to runs[0] on every poll), which meant the hero was
+   * pinned to the newest run before the "is this worth showing" rules ever ran
+   * — so a parked run was rendered twice, once in its approval card and again
+   * as the headline. The default now lives in `heroRun`.
+   */
   let selectedId = $state("");
   let error = $state("");
   let refreshing = $state(false);
-  let detailsOpen = $state(false);
-  let toggledEvents = $state<Set<string>>(new Set());
+  let approvingId = $state("");
+  let approvalError = $state("");
   // Jobs answers "what is running and what did it just do", which is the
   // question this page exists for, so it is the one panel open on arrival.
   let openTile = $state("jobs");
@@ -62,6 +153,7 @@
   // as reactive state they would retrigger the effects that read them.
   let snapshotRefreshPending = false;
   let runsRefreshPending = false;
+  let jobsRefreshPending = false;
   let historyRefreshPending = false;
   let latestRunKey = "";
 
@@ -76,10 +168,10 @@
       const nextRuns: JsonRecord[] = Array.isArray(payload.pipeline)
         ? payload.pipeline
         : [];
-      selectedId =
-        selectedId && nextRuns.some((run) => run.pipelineId === selectedId)
-          ? selectedId
-          : nextRuns[0]?.pipelineId || "";
+      // Drop a pick whose run has aged out; never invent one.
+      if (selectedId && !nextRuns.some((run) => run.pipelineId === selectedId)) {
+        selectedId = "";
+      }
     } catch (refreshError) {
       if (
         refreshError instanceof Error &&
@@ -109,16 +201,35 @@
     try {
       const nextRuns: JsonRecord[] = await fetchRuns();
       liveRuns = nextRuns;
-      // Note the fallback differs from refresh(): the live feed keeps the
-      // current selection rather than clearing it.
-      selectedId =
-        selectedId && nextRuns.some((run) => run.pipelineId === selectedId)
-          ? selectedId
-          : nextRuns[0]?.pipelineId || selectedId;
+      if (
+        selectedId &&
+        nextRuns.length &&
+        !nextRuns.some((run) => run.pipelineId === selectedId)
+      ) {
+        selectedId = "";
+      }
     } catch {
       // The slower full snapshot remains available if the direct feed blips.
     } finally {
       runsRefreshPending = false;
+    }
+  }
+
+  /*
+   * The job list is what knows a plan is still parked: a pipeline run records
+   * that it asked for approval and never records the answer. Polled at page
+   * level, not inside the Jobs panel, because "something needs you" has to be
+   * on screen whether or not that panel is open.
+   */
+  async function refreshJobs() {
+    if (jobsRefreshPending) return;
+    jobsRefreshPending = true;
+    try {
+      jobs = (await fetchJobs()).data;
+    } catch {
+      // The approval card simply does not appear; nothing is invented.
+    } finally {
+      jobsRefreshPending = false;
     }
   }
 
@@ -134,6 +245,7 @@
         latestRunKey = key;
         void refreshRuns();
         void refresh();
+        void refreshJobs();
         void jobsPanel?.refresh();
         if (openTile === "history") void refreshHistory();
       }
@@ -233,14 +345,18 @@
       if (document.visibilityState === "visible") void refresh();
     }, 15_000);
     const initialRuns = window.setTimeout(refreshRuns, 0);
+    const initialJobs = window.setTimeout(refreshJobs, 0);
     const probe = window.setInterval(checkLatest, 5_000);
     const runsBackstop = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshRuns();
+      if (document.visibilityState !== "visible") return;
+      void refreshRuns();
+      void refreshJobs();
     }, 15_000);
     const handleVisibility = () => {
       if (document.visibilityState !== "visible") return;
       void checkLatest();
       void refreshRuns();
+      void refreshJobs();
       void refresh();
     };
     document.addEventListener("visibilitychange", handleVisibility);
@@ -248,6 +364,7 @@
       window.clearTimeout(initialSnapshot);
       window.clearInterval(snapshotTimer);
       window.clearTimeout(initialRuns);
+      window.clearTimeout(initialJobs);
       window.clearInterval(probe);
       window.clearInterval(runsBackstop);
       document.removeEventListener("visibilitychange", handleVisibility);
@@ -260,46 +377,56 @@
   const runs = $derived<JsonRecord[]>(
     liveRuns.length ? liveRuns : snapshotRuns,
   );
-  // Prefer an active/recent real run over a stuck empty "transcribing" job.
-  const preferredRun = $derived.by(() => {
+
+  /* Plans the agent prepared and will not run until the owner says so. */
+  const approvals = $derived(withBlockedReasons(pendingApprovals(jobs), runs));
+  const approvedCommands = $derived(
+    new Set(approvals.map((entry) => entry.command.trim().toLowerCase())),
+  );
+
+  /*
+   * The hero shows the newest run that has something to say. A run that is
+   * parked AND already has its own approval card on screen is skipped, so the
+   * owner's question is never printed twice on one page.
+   */
+  const heroRun = $derived.by<JsonRecord | null>(() => {
     const list = runs;
     if (!list.length) return null;
     if (selectedId) {
-      const hit = list.find((run) => run.pipelineId === selectedId);
-      if (hit && !isIdleRun(hit)) return hit;
+      const picked = list.find((run) => run.pipelineId === selectedId);
+      if (picked && !isIdleRun(picked)) return picked;
     }
-    const live = list.find(
-      (run) =>
-        isTranscribing(run) ||
-        (run.status === "processing" && hasUsefulTranscript(run.command)),
-    );
-    if (live) return live;
-    const done = list.find(
-      (run) =>
-        hasUsefulTranscript(run.command) ||
-        run.status === "completed" ||
-        run.status === "failed",
-    );
-    return done ?? null;
+    const worthShowing = (run: JsonRecord) => {
+      const state = runState(run);
+      if (state.phase === "nothing-yet") return false;
+      if (
+        state.phase === "needs-approval" &&
+        approvedCommands.has(state.question.trim().toLowerCase())
+      ) {
+        return false;
+      }
+      return true;
+    };
+    /*
+     * No fallback to "show something anyway". If every run is either empty or
+     * already accounted for by an approval card above, the honest hero is the
+     * empty state — not the same parked run printed a second time.
+     */
+    return list.find(worthShowing) ?? null;
   });
-  const selected = $derived<any>(preferredRun);
+
+  const selected = $derived<any>(heroRun);
+  const hero = $derived(runState(selected));
   const cloud = $derived<any>(snapshot?.cloud ?? {});
   const agent = $derived<any>(snapshot?.status?.agent ?? {});
   const telemetry = $derived<any>(
     selected?.events?.find(
       (candidate: JsonRecord) => candidate.stage === "transcription",
-    )?.meta?.inputTelemetry ?? null,
-  );
-  const selectedTranscribing = $derived(isTranscribing(selected));
-  const selectedIdle = $derived(!selected || isIdleRun(selected));
-  const badTranscript = $derived(
-    Boolean(
-      selected &&
-        !selectedIdle &&
-        !selectedTranscribing &&
-        !hasUsefulTranscript(selected.command) &&
-        selected.status === "failed",
-    ),
+    )?.meta?.inputTelemetry ??
+      selected?.events?.find(
+        (candidate: JsonRecord) => candidate.meta?.inputTelemetry,
+      )?.meta?.inputTelemetry ??
+      null,
   );
   const newestRun = $derived<any>(
     runs.find((run) => hasUsefulTranscript(run.command) || isTranscribing(run)) ??
@@ -352,28 +479,12 @@
   const systemTone = $derived<"ok" | "warn" | "off">(
     cloudUp && bridgeUp ? "ok" : cloudUp || bridgeUp ? "warn" : "off",
   );
-  const heroChip = $derived<{ tone: string; word: string } | null>(
-    selectedIdle
-      ? { tone: "ok", word: "Idle" }
-      : badTranscript
-        ? { tone: "warn", word: "No speech" }
-        : selectedTranscribing ||
-            selected.status === "processing" ||
-            selected.status === "active"
-          ? { tone: "run", word: "Running" }
-          : selected.status === "failed"
-            ? { tone: "warn", word: "Failed" }
-            : { tone: "ok", word: "Done" },
-  );
-
-  const stages = $derived(stagesFor(selected));
 
   /*
-   * Audio sources for the hero card. A run carries audio.captureId for the
-   * owner's voice and audio.replyCaptureId for the agent's; either can be
-   * absent (a typed command has no recording, and a run whose reply was text
-   * only has no reply audio). Both stream through the same server route,
-   * which keeps the relay key off the client.
+   * Audio for the hero. `audio.captureId` is the owner's voice and
+   * `audio.replyCaptureId` the agent's; either can be absent (a typed command
+   * has no recording, a text-only reply has no speech). Both stream through the
+   * same server route, which keeps the relay key off the client.
    */
   const heroOwnAudio = $derived(
     selected?.audio?.captureId && selected?.pipelineId
@@ -386,36 +497,26 @@
       : "",
   );
 
-  const metaSegments = $derived.by(() => {
-    const segments: { title: string; text: string }[] = [];
-    if (!selected) return segments;
-    const audio = bytes(telemetry?.audioBytes);
-    if (audio) segments.push({ title: "Recorded audio", text: audio });
-    const length = duration(telemetry?.durationMs);
-    if (length) segments.push({ title: "Duration", text: length });
-    if (telemetry?.sampleRate) {
-      segments.push({
-        title: "Sample rate",
-        text: `${telemetry.sampleRate.toLocaleString()} Hz`,
-      });
+  async function handleApprove(jobId: string) {
+    approvingId = jobId;
+    approvalError = "";
+    try {
+      await approvePlan(jobId);
+    } catch (failure) {
+      // The agent's own words, never a friendlier invention.
+      approvalError =
+        failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      approvingId = "";
+      await Promise.all([refreshJobs(), refreshRuns(), refresh()]);
+      void jobsPanel?.refresh();
     }
-    if (selected.updatedAt) {
-      segments.push({ title: "Last update", text: clock(selected.updatedAt) });
-    }
-    return segments;
-  });
-
-  // Auto-open the hero details when the selected run failed to transcribe so
-  // the evidence is on screen without a click. Closing it stays closed until
-  // the selection (or its bad-transcript state) changes.
-  $effect(() => {
-    void selectedId;
-    if (badTranscript) detailsOpen = true;
-  });
+  }
 
   function handleCommandQueued() {
     void refreshRuns();
     void refresh();
+    void refreshJobs();
     void jobsPanel?.refresh();
   }
 
@@ -429,14 +530,10 @@
     }, 50);
   }
 
-  function toggleEvent(id: string) {
-    const next = new Set(toggledEvents);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    toggledEvents = next;
+  function scrollToApproval() {
+    document
+      .getElementById("needs-you")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function toggleTile(id: string) {
@@ -544,6 +641,34 @@
     <div class="error-banner">{error}</div>
   {/if}
 
+  <!-- 1 · WHAT NEEDS YOU. Above the answer, because it is the only thing on
+       this page that cannot proceed without the owner. -->
+  {#if approvals.length}
+    <!-- A live region so "needs your approval" is announced when it appears,
+         without stealing focus from whatever the owner is doing (WCAG 4.1.3). -->
+    <div
+      id="needs-you"
+      class="needs-you"
+      role="status"
+      aria-live="polite"
+      aria-label={`${approvals.length} ${approvals.length === 1 ? "plan needs" : "plans need"} your approval`}
+    >
+      <!-- One banner, one decision: the newest in full, the rest as compact
+           rows that still carry their own Approve button. -->
+      {#each approvals as approval, index (approval.jobId)}
+        <ApprovalCard
+          {approval}
+          canApprove={canApprovePlan}
+          compact={index > 0}
+          busy={approvingId === approval.jobId}
+          error={approvingId === approval.jobId ? "" : approvalError}
+          onApprove={handleApprove}
+          onSeePlan={showJobsPanel}
+        />
+      {/each}
+    </div>
+  {/if}
+
   {#if latestBad || requiredMissing.length}
     <div class="alert-strip" aria-label="Attention needed">
       {#if latestBad}
@@ -559,219 +684,76 @@
     </div>
   {/if}
 
-  <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
-
-  <article class="hero {badTranscript ? 'has-alert' : ''}">
-    {#if selected && !selectedIdle}
-      <div class="hero-top">
-        <span class="micro-chip"
-          >{selected.pipelineId === newestRun?.pipelineId
-            ? "Latest"
-            : clock(selected.createdAt)}</span
-        >
-        {#if heroChip}
-          <span
-            class="status-chip {heroChip.tone}"
-            title={`${selected.status} · ${selected.pipelineId}`}
-            ><i aria-hidden="true"></i>{heroChip.word}</span
-          >
-        {/if}
-      </div>
-      <h2 class="hero-command">{displayCommand(selected)}</h2>
-      {#if badTranscript}
-        <span class="alert-chip hero-alert" title={BAD_TRANSCRIPT_DIAGNOSIS}
-          >Speech not detected</span
-        >
+  <!-- 2 · WHAT IT SAID. -->
+  <AnswerCard
+    state={hero}
+    source={String(selected?.source || "")}
+    ownAudio={heroOwnAudio}
+    replyAudio={heroReplyAudio}
+    onNeedsYou={approvals.length ? scrollToApproval : null}
+  >
+    {#snippet details()}
+      {#if selected}
+        <TechnicalDetails
+          run={selected}
+          {telemetry}
+          open={hero.phase === "failed"}
+        />
       {/if}
+    {/snippet}
+  </AnswerCard>
 
-      <div class="stage-rail" aria-label="Pipeline stages">
-        {#each stages as stage, index}
-          {@const state = stageState(selected, stage.id)}
-          {#if index}<i
-              class="stage-link {stageState(selected, stages[index - 1].id) ===
-              'done'
-                ? 'done'
+  <!-- 3 · ASK IT SOMETHING. One section, so the two transports read as one
+       place to ask rather than two unexplained text boxes. -->
+  <section class="ask" aria-label="Ask the hive">
+    <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
+    <div class="ask-alt">
+      <p class="ask-alt-label">Or speak from this browser</p>
+      <Composer onQueued={handleCommandQueued} />
+    </div>
+  </section>
+
+  <!-- 4 · WHAT IT DID. -->
+  {#if runs.length}
+    <section class="recent" aria-label="Recent commands">
+      <p class="section-label">Recent</p>
+      <ul class="recent-list">
+        {#each runs.slice(0, 8) as run (run.pipelineId)}
+          {@const state = runState(run)}
+          <li>
+            <button
+              class="recent-row {run.pipelineId === selected?.pipelineId
+                ? 'selected'
                 : ''}"
-              aria-hidden="true"
-            ></i>{/if}<span
-            class="stage-node {state}"
-            title={`${stage.label}: ${state}`}
-            aria-label={`${stage.label}: ${state}`}
-            role="img"><i aria-hidden="true"></i><em>{stage.short}</em></span
-          >
-        {/each}
-      </div>
-
-      {#if metaSegments.length}
-        <p class="meta-line">{#each metaSegments as segment, index}{#if index}<span class="sep" aria-hidden="true">{" · "}</span>{/if}<span title={segment.title}>{segment.text}</span>{/each}</p>
-      {/if}
-
-      <!--
-        Both voices, playable in place. The relay's audio route forwards Range
-        headers, so a native <audio> element gets a real scrubber and duration
-        rather than the fire-and-forget playback the history rows use.
-      -->
-      {#if heroOwnAudio || heroReplyAudio}
-        <div class="hero-audio">
-          {#if heroOwnAudio}
-            <div class="hero-track">
-              <span class="hero-track-label">You</span>
-              <audio
-                class="hero-player"
-                controls
-                preload="metadata"
-                src={heroOwnAudio}
-                aria-label="Your recording"
-              ></audio>
-            </div>
-          {/if}
-          {#if heroReplyAudio}
-            <div class="hero-track">
-              <span class="hero-track-label">Agent</span>
-              <audio
-                class="hero-player"
-                controls
-                preload="metadata"
-                src={heroReplyAudio}
-                aria-label="The agent's spoken reply"
-              ></audio>
-            </div>
-          {/if}
-          {#if selected?.audio?.replyTranscript}
-            <p class="hero-reply-transcript">
-              “{selected.audio.replyTranscript}”
-            </p>
-          {/if}
-        </div>
-      {/if}
-
-      <button
-        class="details-toggle"
-        onclick={() => (detailsOpen = !detailsOpen)}
-        aria-expanded={detailsOpen}
-        ><span class="chevron {detailsOpen ? 'open' : ''}" aria-hidden="true"
-          >▸</span
-        >Details</button
-      >
-
-      {#if detailsOpen}
-        <div class="details-panel">
-          <p class="pipeline-id">{selected.pipelineId}</p>
-          {#if badTranscript}
-            <p class="details-note">{BAD_TRANSCRIPT_DIAGNOSIS}</p>
-          {/if}
-          <div class="telemetry-grid">
-            <Metric label="Payload" value={bytes(telemetry?.audioBytes) || "—"} />
-            <Metric
-              label="Duration"
-              value={duration(telemetry?.durationMs) || "—"}
-            />
-            <Metric
-              label="Sample rate"
-              value={telemetry?.sampleRate
-                ? `${telemetry.sampleRate.toLocaleString()} Hz`
-                : "—"}
-            />
-            <Metric label="Format" value={telemetry?.format || "—"} />
-            <Metric label="Storage" value={telemetry?.storage || "—"} />
-            <Metric
-              label="Input gain"
-              value={telemetry?.inputGainDb != null
-                ? `+${telemetry.inputGainDb} dB`
-                : "—"}
-            />
-            <Metric label="Transcript" value={selected.command || "empty"} />
-          </div>
-          <ol class="event-list">
-            {#each selected.events ?? [] as event, index}
-              {@const eventId = String(
-                event.eventId || `${event.stage}-${index}`,
-              )}
-              <!-- Failed events start expanded; the toggle set records deviations from that default. -->
-              {@const open =
-                (event.status === "failed") !== toggledEvents.has(eventId)}
-              {@const expandable = Boolean(event.detail || event.text)}
-              <li>
-                <div class="event-index {event.status}">{index + 1}</div>
-                <div class="event-copy">
-                  <button
-                    class="event-row"
-                    onclick={() => toggleEvent(eventId)}
-                    aria-expanded={open}
-                    disabled={!expandable}
-                  >
-                    <span class="event-stage"
-                      >{event.stage?.replaceAll("_", " ")}</span
-                    >
-                    <span class="event-label">{event.label}</span>
-                    <time>{clock(event.at)}</time>
-                  </button>
-                  {#if open && expandable}
-                    {#if event.detail}
-                      <p class="event-detail">{event.detail}</p>
-                    {/if}
-                    {#if event.text}
-                      <blockquote>{event.text}</blockquote>
-                    {/if}
-                  {/if}
-                </div>
-              </li>
-            {/each}
-          </ol>
-        </div>
-      {/if}
-    {:else}
-      <div class="hero-empty">
-        <div class="hero-top">
-          <span class="micro-chip">Idle</span>
-          {#if heroChip}
-            <span class="status-chip {heroChip.tone}"
-              ><i aria-hidden="true"></i>{heroChip.word}</span
+              onclick={() => (selectedId = run.pipelineId)}
+              aria-current={run.pipelineId === selected?.pipelineId
+                ? "true"
+                : undefined}
+              aria-label={`${state.question || "Untitled run"} · ${state.label} · ${clock(run.createdAt)}`}
             >
-          {/if}
-        </div>
-        <h2 class="hero-command">Ready</h2>
-        <p class="hero-hint">Press the pendant or type a command</p>
-      </div>
-    {/if}
-    <Composer onQueued={handleCommandQueued} />
-  </article>
+              <span class="recent-text">
+                {state.answer || state.question || "Untitled run"}
+              </span>
+              <span class="recent-meta">
+                <i class="state-dot {state.tone}" aria-hidden="true"></i>
+                {state.label} · {formatWhen(run.createdAt)}
+              </span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
-  <div class="run-strip" aria-label="Recent commands">
-    {#each runs as run}
-      {@const transcribing = isTranscribing(run)}
-      {@const unreadable = !transcribing && !hasUsefulTranscript(run.command)}
-      {@const statusText = transcribing
-        ? "Transcribing"
-        : unreadable
-          ? "Speech not detected"
-          : run.status}
-      {@const dotTone = unreadable
-        ? "failed"
-        : transcribing
-          ? "processing"
-          : run.status}
-      <button
-        class="run-chip {run.pipelineId === selected?.pipelineId
-          ? 'selected'
-          : ''}"
-        onclick={() => (selectedId = run.pipelineId)}
-        title={`${displayCommand(run)} · ${statusText} · ${clock(run.createdAt)}`}
-        aria-label={`${displayCommand(run)} · ${statusText} · ${clock(run.createdAt)}`}
-        ><i class="run-dot {dotTone}" aria-hidden="true"></i><span
-          >{displayCommand(run)}</span
-        ></button
-      >
-    {/each}
-  </div>
-
+  <!-- 5 · THE MACHINE. Everything below here is diagnostics by design. -->
+  <p class="section-label section-label-standalone">System</p>
   <div class="tile-strip">
     <Tile
       id="jobs"
       label="Jobs"
-      tone="ok"
+      tone={approvals.length ? "warn" : "ok"}
       dotText="Everything the agent has been asked to do"
-      value="What ran"
+      value={approvals.length ? `${approvals.length} need you` : "What ran"}
       open={openTile === "jobs"}
       onToggle={() => toggleTile("jobs")}
     />
@@ -976,7 +958,7 @@
                 >
                   <strong>{entry.command || "(no transcript)"}</strong>
                   <small
-                    >{entry.status || "—"} · {entry.origin || entry.inputMode || "voice"} · {clock(
+                    >{statusLabel(entry.status)} · {entry.origin || entry.inputMode || "voice"} · {clock(
                       entry.createdAt,
                     )}</small
                   >
@@ -1043,7 +1025,7 @@
               <p class="micro-label">Selected run</p>
               <h3>{historyDetail.command || "(no transcript)"}</h3>
             </div>
-            <span>{historyDetail.status || "—"}</span>
+            <span>{statusLabel(historyDetail.status)}</span>
           </div>
           {#if historyDetail.reply}
             <blockquote>{historyDetail.reply}</blockquote>

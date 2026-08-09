@@ -1,0 +1,118 @@
+<script lang="ts">
+  /**
+   * "The hive needs you." The one card on this page that is allowed to shout.
+   *
+   * A parked plan is the only state where the dashboard is blocking on a human,
+   * so it sits above everything — including the answer — and carries its own
+   * action rather than describing one somewhere else (NN/g heuristic 9: name the
+   * problem, offer the way out). Status is carried by an icon, a word and a
+   * colour together, never colour alone (WCAG 1.4.1).
+   *
+   * Only the newest plan is shown in full: one banner, one decision (Polaris).
+   * Older parked plans render `compact`, which still carries its own Approve
+   * button so no pending decision costs an extra click to reach.
+   *
+   * Nothing here is generated: the reasons are the agent's `meta.blocked[]`
+   * verbatim, and the steps are the labels it wrote for its own plan.
+   */
+  import type { PendingApproval } from "$lib/runState";
+
+  let {
+    approval,
+    canApprove,
+    compact = false,
+    busy = false,
+    error = "",
+    onApprove,
+    onSeePlan,
+  }: {
+    approval: PendingApproval;
+    /** False on the deployed build, which has no approve route to the Mac. */
+    canApprove: boolean;
+    compact?: boolean;
+    busy?: boolean;
+    error?: string;
+    onApprove: (jobId: string) => void;
+    onSeePlan: () => void;
+  } = $props();
+
+  const alsoParked = $derived(
+    approval.duplicates === 1
+      ? "1 older copy of this request is also parked."
+      : approval.duplicates > 1
+        ? `${approval.duplicates} older copies of this request are also parked.`
+        : "",
+  );
+</script>
+
+<section
+  class="approval {compact ? 'compact' : ''}"
+  aria-labelledby={`approval-${approval.jobId}`}
+>
+  <p class="approval-flag">
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+      <path
+        d="M8 1.6 15 14H1z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linejoin="round"
+      />
+      <path
+        d="M8 6v3.6"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+      />
+      <circle cx="8" cy="11.8" r="0.9" fill="currentColor" />
+    </svg>
+    <span id={`approval-${approval.jobId}`}>Needs your approval</span>
+  </p>
+
+  <p class="approval-ask">{approval.command || "A prepared plan"}</p>
+
+  {#if !compact}
+    {#if approval.steps.length}
+      <ul class="approval-steps">
+        {#each approval.steps as step, index (index)}
+          <li>{step.label}</li>
+        {/each}
+      </ul>
+    {/if}
+
+    {#if approval.blocked.length}
+      <ul class="approval-why">
+        {#each approval.blocked as reason, index (index)}
+          <li>{reason.reason || reason.type}</li>
+        {/each}
+      </ul>
+    {/if}
+  {/if}
+
+  {#if error}
+    <p class="approval-error" role="alert">{error}</p>
+  {/if}
+
+  <div class="approval-actions">
+    {#if canApprove}
+      <button
+        type="button"
+        class="button-primary"
+        disabled={busy}
+        onclick={() => onApprove(approval.jobId)}
+        >{busy ? "Running it…" : "Approve and run"}</button
+      >
+    {:else if !compact}
+      <p class="approval-remote">
+        Approve this on the Mac dashboard — this page has no route to the Mac.
+      </p>
+    {/if}
+    <button type="button" class="button-quiet" onclick={onSeePlan}
+      >{compact ? "Details" : "See the full plan"}</button
+    >
+  </div>
+
+  {#if !compact && alsoParked}
+    <p class="approval-note">{alsoParked}</p>
+  {/if}
+</section>
