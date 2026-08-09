@@ -20,6 +20,12 @@ import {
   startCloudVoiceCapture,
 } from './voiceCapture'
 import {
+  composerMicView,
+  describeComposerVoiceFailure,
+  mergeTranscriptIntoDraft,
+  transcriptHasSpeech,
+} from './composerVoice'
+import {
   buildPlanSpeech,
   buildResultSpeech,
   speakText,
@@ -66,6 +72,15 @@ function App() {
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showComposer, setShowComposer] = useState(false)
+  /*
+   * The composer's own mic: 'idle' | 'listening' | 'transcribing'. Distinct
+   * from the pendant tap's flow on purpose — the pendant speaks-and-RUNS,
+   * while this dictates INTO THE DRAFT and leaves Run to the owner, so the
+   * submit path stays exactly the typed one. The hint renders under the
+   * composer, the same place its other guidance lives.
+   */
+  const [composerVoice, setComposerVoice] = useState('idle')
+  const [composerVoiceHint, setComposerVoiceHint] = useState('')
   const [isExecuting, setIsExecuting] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
   const [sessions, setSessions] = useState(() => hydrateDashboardState().sessions)
@@ -82,6 +97,11 @@ function App() {
   const transcriptRef = useRef('')
   const listeningModeRef = useRef(false)
   const voiceOriginRef = useRef(false)
+  /* The recorder handle is machinery, not render state (the CommandBox rule);
+   * the token discards a transcription whose composer moved on — same job
+   * runToken does for the dashboard's poll loops. */
+  const composerCaptureRef = useRef(null)
+  const composerVoiceTokenRef = useRef(0)
 
   const cloudClient = useMemo(
     () => createCloudClient(cloudSettings),
@@ -202,6 +222,44 @@ function App() {
     timers.current.forEach((timer) => window.clearTimeout(timer))
     timers.current = []
   }, [])
+
+  /*
+   * Release the composer's microphone and orphan any in-flight transcription.
+   * Bumping the token is what makes a late transcript land nowhere instead of
+   * rewriting the NEXT draft unnoticed. Refs only — no setState — so the
+   * close-effect below may call it without cascading a render.
+   */
+  const releaseComposerCapture = useCallback(() => {
+    composerVoiceTokenRef.current += 1
+    const capture = composerCaptureRef.current
+    composerCaptureRef.current = null
+    if (capture) {
+      try {
+        capture.cancel()
+      } catch {
+        // already stopped
+      }
+    }
+  }, [])
+
+  /* The event-handler shape: hardware back AND the button face reset. */
+  const cancelComposerVoice = useCallback(() => {
+    releaseComposerCapture()
+    setComposerVoice('idle')
+  }, [releaseComposerCapture])
+
+  /*
+   * Closing the composer hands the microphone back. Hardware only: the
+   * visible mic state is reset by openComposer on the next open, so this
+   * effect never setStates.
+   */
+  useEffect(() => {
+    if (!showComposer) {
+      releaseComposerCapture()
+    }
+  }, [showComposer, releaseComposerCapture])
+
+  useEffect(() => () => cancelComposerVoice(), [cancelComposerVoice])
 
   const fetchSessions = useCallback(async () => {
     if (mode === 'mock') {
@@ -464,6 +522,10 @@ function App() {
     listeningModeRef.current = false
     setIsListening(false)
     setPendantStatus('Idle')
+    /* A fresh composer starts with a quiet mic: the close-effect released
+     * the hardware, this is where the button face and hint catch up. */
+    cancelComposerVoice()
+    setComposerVoiceHint('')
     setShowComposer(true)
     setMessage(nextMessage)
   }
@@ -736,8 +798,72 @@ function App() {
     startListening()
   }
 
+  /*
+   * The composer's mic. One button, three states, and the transcript LANDS IN
+   * THE DRAFT — Run stays the only thing that runs. Capture and transcription
+   * are the app's existing pipeline (startCloudVoiceCapture →
+   * cloudClient.transcribeAudio), the exact pair the pendant tap uses on
+   * phones, so no second speech stack ships for this button.
+   */
+  async function handleComposerMic() {
+    if (composerVoice === 'transcribing') {
+      return
+    }
+
+    if (composerVoice === 'listening') {
+      const capture = composerCaptureRef.current
+      composerCaptureRef.current = null
+      if (!capture) {
+        setComposerVoice('idle')
+        return
+      }
+      const token = composerVoiceTokenRef.current
+      setComposerVoice('transcribing')
+      try {
+        const recorded = await capture.stop()
+        const language = navigator.language?.startsWith('ko') ? 'ko' : 'en'
+        const payload = await cloudClient.transcribeAudio({
+          audioBase64: recorded.audioBase64,
+          format: recorded.format,
+          language,
+        })
+        if (token !== composerVoiceTokenRef.current) {
+          return
+        }
+        const transcript = String(payload.text || '').trim()
+        if (!transcriptHasSpeech(transcript)) {
+          setComposerVoiceHint('Nothing captured. Try again, or type instead.')
+          return
+        }
+        setCommand((draft) => mergeTranscriptIntoDraft(draft, transcript))
+        setComposerVoiceHint('')
+      } catch (error) {
+        if (token === composerVoiceTokenRef.current) {
+          setComposerVoiceHint(describeComposerVoiceFailure(error))
+        }
+      } finally {
+        if (token === composerVoiceTokenRef.current) {
+          setComposerVoice('idle')
+        }
+      }
+      return
+    }
+
+    setComposerVoiceHint('')
+    try {
+      const capture = await startCloudVoiceCapture()
+      composerCaptureRef.current = capture
+      setComposerVoice('listening')
+    } catch (error) {
+      setComposerVoiceHint(describeComposerVoiceFailure(error))
+    }
+  }
+
   function handleComposerSubmit(event) {
     event.preventDefault()
+    /* Run mid-dictation must not leave the microphone live, and a transcript
+     * that lands after Run must not rewrite the next draft unnoticed. */
+    cancelComposerVoice()
     const nextCommand = command.trim()
 
     if (!nextCommand) {
@@ -1205,6 +1331,8 @@ function App() {
     setMessage('Demo log exported')
   }
 
+  const composerMic = composerMicView(composerVoice)
+
   return (
     <main className="app-shell pendant-app">
       <section className="pendant-stage" aria-label="AI Pendant">
@@ -1262,6 +1390,28 @@ function App() {
               rows={3}
               autoFocus
             />
+            <div className="composer-voice-row">
+              <button
+                className={`composer-mic ${
+                  composerVoice === 'listening'
+                    ? 'is-listening'
+                    : composerVoice === 'transcribing'
+                      ? 'is-transcribing'
+                      : ''
+                }`}
+                type="button"
+                onClick={handleComposerMic}
+                disabled={composerMic.busy}
+                aria-pressed={composerVoice === 'listening'}
+                aria-label={composerMic.aria}
+              >
+                <span className="composer-mic-dot" aria-hidden="true"></span>
+                {composerMic.label}
+              </button>
+              {composerVoiceHint ? (
+                <p className="composer-voice-hint">{composerVoiceHint}</p>
+              ) : null}
+            </div>
             <div className="confirmation-row">
               <button className="primary-button" type="submit">
                 Run
