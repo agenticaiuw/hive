@@ -101,15 +101,29 @@ export function escalateOutputTokens(current) {
   return Math.min(asked * 2, INFER_LIMITS.maxOutputTokens)
 }
 
+const abnormalStop = (message, code) => {
+  const error = new Error(message)
+  error.code = code
+  /* Fatal in every case here: none of these change on a retry of the same
+   * prompt, and the Mac planner has neither a token ceiling nor this
+   * provider's filter. */
+  error.fatal = true
+  return error
+}
+
 /**
- * Ask for a reply, and buy more room if the first one comes back cut off.
+ * Ask for a reply, and decide what an abnormal ending means.
  *
  * The policy lives here, away from the fetch, because it is the part with a
- * decision in it: how many times to pay again, and what to do when there is
- * nothing left to buy. `send(maxTokens)` is injected and resolves to the
- * relay's `{content, truncated}` — so every branch below is exercised in tests
- * without a relay, which matters because the branch that bites is the one no
- * client can reproduce on purpose.
+ * decision in it: when to pay again, and when paying again buys nothing.
+ * `send(maxTokens)` is injected and resolves to the relay's
+ * `{content, truncated, complete, refusal, finishReason}` — so every branch
+ * below is exercised in tests without a relay, which matters because these are
+ * the branches no client can reproduce on purpose.
+ *
+ * ONLY truncation is retried. A length stop is the one ending more room fixes;
+ * a content filter or a refusal ends the same way however much budget it is
+ * given, so retrying those just bills twice for one refusal.
  */
 export async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKENS) {
   let asked = maxTokens
@@ -118,21 +132,53 @@ export async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKEN
    * is here so a future change to that function cannot spend money forever. */
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const reply = await send(asked)
-    if (!reply?.truncated) return String(reply?.content ?? '')
 
-    const escalated = escalateOutputTokens(asked)
-    if (!escalated) break
-    asked = escalated
+    if (reply?.truncated) {
+      const escalated = escalateOutputTokens(asked)
+      if (!escalated) {
+        throw abnormalStop(
+          `The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`,
+          'truncated',
+        )
+      }
+      asked = escalated
+      continue
+    }
+
+    /*
+     * A declined request, said in the provider's own words. Checked before
+     * `complete`, because a refusal is a CLEAN stop — finish_reason 'stop',
+     * complete true — with the content field empty. Without this the loop
+     * receives "" and reports the model as unusable, which blames the wrong
+     * party and hides the one sentence explaining what happened.
+     */
+    const refusal = String(reply?.refusal ?? '').trim()
+    if (refusal) {
+      throw abnormalStop(`The model declined: ${refusal}`, 'refusal')
+    }
+
+    /*
+     * Strictly false, never falsy. `complete` is a tri-state and null means
+     * the provider sent no finish_reason at all — treating "we could not ask"
+     * as "it failed" would reject every good answer from a provider that
+     * omits the field, which is the same error as reading presence.observed
+     * false as offline.
+     */
+    if (reply?.complete === false) {
+      throw abnormalStop(
+        `The model stopped abnormally (${reply?.finishReason || 'unknown reason'}), ` +
+          'so its answer is not trustworthy.',
+        'incomplete',
+      )
+    }
+
+    return String(reply?.content ?? '')
   }
 
-  const error = new Error(
+  throw abnormalStop(
     `The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`,
+    'truncated',
   )
-  /* Fatal: a reply that will not fit in the ceiling will not fit on a retry,
-   * and the Mac planner has no such ceiling. */
-  error.code = 'truncated'
-  error.fatal = true
-  throw error
 }
 
 /* Conservative margin under maxPromptChars: the ceiling counts every message,
