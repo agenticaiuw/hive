@@ -1018,6 +1018,42 @@ test('ios_status reports pointer reach as measured, in both directions', async (
   assert.equal(dead.pointerWritesPossible, false)
   assert.equal(dead.pointerTargetedPossible, false)
   assert.deepEqual(dead.targetedActions, [])
+
+  /*
+   * AND THE WORLD STILL OVERRULES THE MECHANISM. Caught by running the real
+   * generated program against the owner's Mac while its screen was locked: the
+   * activation route is entirely available there — the symbols resolve, the
+   * window is enumerable, the app is running — and status therefore claimed
+   * pointerWritesPossible true with writeMechanism "targeted-active" for a
+   * machine that composites nothing, cannot be read, and cannot verify a
+   * single thing it did. Having a route is not the same as being able to use
+   * it.
+   */
+  const macLocked = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: false,
+    macLocked: true,
+  })
+  const asleep = macLocked.run('ios_status', {}).payload.result
+  assert.equal(asleep.state, 'mac-locked')
+  assert.equal(asleep.readsPossible, false)
+  assert.equal(asleep.activationAvailable, true, 'the mechanism is fine; the world is not')
+  assert.equal(asleep.pointerTargetedPossible, false)
+  assert.equal(asleep.pointerTargetedBlockedBy, 'unreachable')
+  assert.equal(asleep.pointerWritesPossible, false)
+  assert.equal(asleep.writeMechanism, 'none')
+
+  // Same rule for a phone the owner is holding, and for a password prompt.
+  for (const [label, scenario] of [
+    ['paused', { ocr: { 21250: ['iPhone in Use', 'Lock your iPhone to connect.'], 21251: [] } }],
+    ['mac-login', { ocr: { 21250: ['iPhone Mirroring Is Locked', 'Enter password'], 21251: [] } }],
+  ]) {
+    const phone = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: false, ...scenario })
+    const state = phone.run('ios_status', {}).payload.result
+    assert.equal(state.pointerTargetedPossible, false, label)
+    assert.equal(state.pointerWritesPossible, false, label)
+    assert.equal(state.writeMechanism, 'none', label)
+  }
 })
 
 test('the targeted pointer route posts addressed events and takes no focus', async (t) => {
