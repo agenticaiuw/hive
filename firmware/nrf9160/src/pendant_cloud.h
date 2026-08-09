@@ -39,10 +39,6 @@ int pendant_cloud_resume_radio(void);
  * modem down alone is not enough, because that recovery would undo it.
  */
 void pendant_cloud_block_link(bool blocked);
-bool pendant_cloud_link_blocked(void);
-
-int pendant_cloud_announce_recording(uint32_t pcm_bytes,
-				     uint32_t sample_rate);
 
 /*
  * Live chunked PCM upload (preferred path). Prewarm while idle so Button 1
@@ -57,7 +53,6 @@ int pendant_cloud_announce_recording(uint32_t pcm_bytes,
 int pendant_cloud_stream_prewarm(uint32_t sample_rate);
 /* Re-validate/reopen prewarmed stream at button press (before I2S starts). */
 int pendant_cloud_stream_ensure(uint32_t sample_rate);
-int pendant_cloud_stream_begin(uint32_t sample_rate);
 int pendant_cloud_stream_write(const void *data, size_t length);
 int pendant_cloud_stream_pump(uint32_t budget_ms);
 int pendant_cloud_stream_end(void);
@@ -114,8 +109,6 @@ int pendant_cloud_get_json(const char *path);
 const char *pendant_cloud_response_body(void);
 
 int pendant_cloud_wait_for_agent_reply(const char *pcm_path);
-int pendant_cloud_report_playback_started(void);
-int pendant_cloud_report_playback_result(int playback_result);
 int pendant_cloud_set_job_id_for_diagnostic(const char *job_id);
 
 /*
