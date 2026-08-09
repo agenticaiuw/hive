@@ -76,11 +76,11 @@ function errStr(e) {
   return trunc(scrub(s), 300);
 }
 
-async function fetchJson(url, { headers = {}, timeoutMs = 8000 } = {}) {
+async function fetchJson(url, { headers = {}, method = 'GET', timeoutMs = 8000 } = {}) {
   const t0 = now();
   let res;
   try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+    res = await fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
   } catch (e) {
     return { ok: false, error: `fetch failed: ${errStr(e)}`, ms: now() - t0 };
   }
@@ -106,6 +106,18 @@ function agentGet(p, timeoutMs = 8000) {
 function relayGet(p, timeoutMs = 10000) {
   if (!RELAY_API_KEY) return Promise.resolve({ ok: false, error: 'RELAY_API_KEY missing from .env' });
   return fetchJson(RELAY_BASE + p, { headers: { Authorization: `Bearer ${RELAY_API_KEY}` }, timeoutMs });
+}
+// The only write this dashboard makes to the relay besides the /v1/state/hive
+// snapshot push. The admin key stays on this side of it: the browser asks this
+// server, this server holds the credential. That is the whole point of the
+// migration off an ambient admin key — the page must never carry one.
+function relayPost(p, timeoutMs = 10000) {
+  if (!RELAY_API_KEY) return Promise.resolve({ ok: false, error: 'RELAY_API_KEY missing from .env' });
+  return fetchJson(RELAY_BASE + p, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RELAY_API_KEY}` },
+    timeoutMs,
+  });
 }
 
 // Tail a file efficiently: read only the final maxBytes, return whole lines.
@@ -560,6 +572,60 @@ const POLLERS = [
       return { ok: true, ms: r.ms, data: { entries } };
     },
   },
+  /*
+   * The credential inventory — who can currently act as this hive, and the
+   * one-click way to stop them.
+   *
+   * This is the counterweight to a deliberate decision: the `mobile` role keeps
+   * mac:execute, because a phone brain that cannot act is useless. A phone is
+   * also the most-stolen device in the fleet. The answer chosen was not to
+   * permanently narrow the scope, it was to make revocation instant and
+   * one-action — and a revoke path nobody can find is not one. So the inventory
+   * lives on the wall next to everything else, and every row has a button.
+   *
+   * The relay returns hashes and metadata, never a token; nothing here could
+   * print a secret even if it tried. What it DOES hold is the map of which
+   * devices can act, which is why this source is excluded from the snapshot
+   * pushed to /v1/state/hive — see PUSH_EXCLUDED_SOURCES.
+   */
+  {
+    key: 'relay.credentials', label: 'relay /v1/ops/credentials', family: 'relay', every: 15000,
+    async run() {
+      const r = await relayGet('/v1/ops/credentials');
+      if (!r.ok) return { ...r, unsupported: r.status === 404 };
+      const credentials = (r.json?.credentials || []).map((c) => ({
+        tokenId: c.tokenId,
+        deviceId: c.deviceId,
+        role: c.role,
+        scopeCount: (c.scopes || []).length,
+        scopes: c.scopes || [],
+        createdAt: c.createdAt,
+        lastUsedAt: c.lastUsedAt || null,
+        revokedAt: c.revokedAt || null,
+        expiresAt: c.expiresAt || null,
+      }));
+      const active = credentials.filter((c) => !c.revokedAt);
+      for (const c of active) {
+        const t = tsMs(c.lastUsedAt, 0);
+        const k = `cred:${c.tokenId}`;
+        if (t > (prev[k] || 0)) {
+          const isFirst = prev[k] === undefined;
+          prev[k] = t;
+          if (!isFirst && c.role === 'mobile') { touchEdge('ios-relay', now()); touchNode('ios', now()); }
+        }
+      }
+      return {
+        ok: true, ms: r.ms,
+        data: {
+          credentials,
+          total: credentials.length,
+          active: active.length,
+          revoked: credentials.length - active.length,
+          byRole: active.reduce((acc, c) => ({ ...acc, [c.role]: (acc[c.role] || 0) + 1 }), {}),
+        },
+      };
+    },
+  },
   // ------------- Design committee files -------------
   {
     key: 'committee.bulletin', label: 'bulletin.json', family: 'committee', every: 5000,
@@ -957,6 +1023,7 @@ async function nodeDetail(id, query) {
         id, node,
         health: srcData('relay.health'), healthMeta: meta('relay.health'),
         devices: srcData('relay.devices'), devicesMeta: meta('relay.devices'),
+        credentials: srcData('relay.credentials'), credentialsMeta: meta('relay.credentials'),
         ops: srcData('relay.ops'), opsMeta: meta('relay.ops'),
       };
     case 'extension':
@@ -981,11 +1048,19 @@ async function nodeDetail(id, query) {
     }
     case 'ios': {
       const devices = srcData('relay.devices');
+      const credentials = srcData('relay.credentials');
       return {
         id, node,
-        note: 'iOS app is a web shell that loads the deployed dashboard; it has no dedicated telemetry endpoint.',
+        note: 'The iOS app now reasons on the phone (src/brain/): a planner loop over the phone\'s own tools, with the Mac as one tool among several. It reaches a model through the relay with its own scoped `mobile` credential and never holds an API key.',
         mobileDevices: devices ? (devices.devices || []).filter((d) => d.deviceType === 'mobile') : null,
         devicesMeta: meta('relay.devices'),
+        /* Only the phone's own credentials here — the relay node shows the
+         * whole fleet. This is the row the owner reaches for when the phone is
+         * the thing that went missing. */
+        credentials: credentials
+          ? { ...credentials, credentials: credentials.credentials.filter((c) => c.role === 'mobile') }
+          : null,
+        credentialsMeta: meta('relay.credentials'),
       };
     }
     case 'committee':
@@ -1077,10 +1152,25 @@ function trimSourceData(key, data) {
   return d;
 }
 
+/*
+ * Sources whose DATA never leaves this Mac.
+ *
+ * The push target is /v1/state/hive, and `state:read` is one scope over a
+ * shared key space that a paired pendant, phone or extension all hold. The
+ * credential inventory is the map of which devices can act as this hive — a
+ * stolen phone reading it would learn every other node's tokenId and deviceId.
+ * No token is in it, but the map itself is not something a lost device should
+ * be able to fetch. The meta row (ok/error/at) still travels, so the deployed
+ * dashboard can show that the source is healthy without showing the rows.
+ */
+const PUSH_EXCLUDED_SOURCES = new Set(['relay.credentials']);
+
 function buildPushSnapshot() {
   const sources = {};
   for (const k of Object.keys(state)) {
-    sources[k] = { ...sourceMeta(state[k]), data: trimSourceData(k, state[k].data) };
+    sources[k] = PUSH_EXCLUDED_SOURCES.has(k)
+      ? { ...sourceMeta(state[k]), data: null, withheld: 'local-only' }
+      : { ...sourceMeta(state[k]), data: trimSourceData(k, state[k].data) };
   }
   return {
     schema: 'hive-overview@1',
@@ -1206,7 +1296,7 @@ const server = http.createServer(async (req, res) => {
       // when an https page (the deployed dashboard) targets 127.0.0.1.
       res.writeHead(204, {
         ...corsHeaders(req),
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Content-Type',
         'Access-Control-Max-Age': '600',
         ...(req.headers['access-control-request-private-network'] === 'true'
@@ -1240,6 +1330,69 @@ const server = http.createServer(async (req, res) => {
       sseSend(client, { hello: true, t: now(), port: boundPort, eventSeq });
       req.on('close', () => sseClients.delete(client));
       return;
+    }
+    /*
+     * The one write path. A stolen phone holds a credential with mac:execute
+     * on it, and the answer to that was never "restrict it permanently" — it
+     * was "make killing it one action". So: one button, one POST, and the very
+     * next request carrying that token is refused by the relay.
+     *
+     * The admin key is used HERE and does not exist in the page. The browser
+     * only ever names a tokenId, which the relay already hands out in the
+     * inventory, so nothing secret crosses the loopback socket in either
+     * direction. The server binds 127.0.0.1 and the CORS allowlist is exact.
+     */
+    const revokeMatch = /^\/api\/credentials\/([A-Za-z0-9_-]{1,64})\/revoke$/.exec(p);
+    if (revokeMatch) {
+      if (req.method !== 'POST') return sendJson(req, res, 405, { ok: false, error: 'POST only' });
+      const tokenId = revokeMatch[1];
+      const r = await relayPost(`/v1/ops/credentials/${encodeURIComponent(tokenId)}/revoke`);
+      if (!r.ok) return sendJson(req, res, r.status && r.status >= 400 ? r.status : 502, { ok: false, tokenId, error: r.error });
+      const cred = r.json?.credential || null;
+      /* Device and role, never the tokenId: the ticker is one of the few parts
+       * of this page that DOES travel to /v1/state/hive, and the credential
+       * inventory is deliberately withheld from that push. Naming an id here
+       * would put back through the side door exactly what
+       * PUSH_EXCLUDED_SOURCES keeps out of the front. */
+      pushEvent({
+        at: now(), source: 'relay', kind: 'credential',
+        text: `revoked a ${cred?.role || '?'} credential for ${cred?.deviceId || '?'}${r.json?.alreadyRevoked ? ' — was already revoked' : ''}`,
+      });
+      /*
+       * Land the new state in the cache BEFORE answering.
+       *
+       * The first cut only kicked a re-poll and answered immediately, and the
+       * browser's follow-up detail fetch beat it: the relay had genuinely
+       * revoked the credential and the row still rendered "active". An operator
+       * killing a stolen phone reads that as "it did not work" and clicks
+       * again. The revokedAt below is the relay's own answer to this request,
+       * not a guess, so writing it into the cache is reporting rather than
+       * predicting. The re-poll still runs behind it to pick up lastUsedAt and
+       * anything else that moved.
+       */
+      const credsSource = state['relay.credentials'];
+      if (cred && credsSource?.data?.credentials) {
+        const rows = credsSource.data.credentials.map((row) =>
+          row.tokenId === tokenId ? { ...row, revokedAt: cred.revokedAt } : row,
+        );
+        const active = rows.filter((row) => !row.revokedAt);
+        setSource('relay.credentials', {
+          at: now(),
+          data: {
+            credentials: rows,
+            total: rows.length,
+            active: active.length,
+            revoked: rows.length - active.length,
+            byRole: active.reduce((acc, row) => ({ ...acc, [row.role]: (acc[row.role] || 0) + 1 }), {}),
+          },
+        });
+      }
+      tick(POLLERS.find((x) => x.key === 'relay.credentials'));
+      return sendJson(req, res, 200, {
+        ok: true, tokenId,
+        alreadyRevoked: !!r.json?.alreadyRevoked,
+        credential: cred ? { tokenId: cred.tokenId, deviceId: cred.deviceId, role: cred.role, revokedAt: cred.revokedAt } : null,
+      });
     }
     const nodeMatch = /^\/api\/node\/([A-Za-z0-9:_-]{1,64})$/.exec(p);
     if (nodeMatch) {

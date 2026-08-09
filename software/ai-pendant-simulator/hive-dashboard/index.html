@@ -140,6 +140,18 @@
   .err { color: #ff9b9b; font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
   .mut { color: var(--ink-3); }
 
+  /* ---------- credentials: one row, one button ---------- */
+  .credrow { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 6px; border-radius: 5px; background: rgba(255,255,255,0.015); }
+  .credrow:hover { background: rgba(255,255,255,0.045); }
+  .credrow .role { font-family: var(--mono); color: var(--ink); flex: none; width: 90px; }
+  .credrow .who { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .credrow .tid { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+  .credrow.dead .role, .credrow.dead .who { color: var(--ink-3); text-decoration: line-through; }
+  .revoke { font-family: var(--mono); font-size: 10.5px; color: #ff9b9b; background: transparent; border: 1px solid rgba(208,59,59,0.55); border-radius: 4px; padding: 2px 8px; cursor: pointer; flex: none; }
+  .revoke:hover:not(:disabled) { background: rgba(208,59,59,0.18); color: #ffc9c9; }
+  .revoke:disabled { color: var(--ink-3); border-color: var(--line); cursor: default; }
+  .revoke.arm { color: #ffd57a; border-color: rgba(250,178,25,0.7); }
+
   /* ---------- shared tiles ---------- */
   #sharedGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .tile { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-height: 74px; }
@@ -206,6 +218,10 @@ const S = {
   clockOffset: 0, sse: 'connecting', dropped: false,
   edgeSeen: {}, bulletinSeen: new Set(), bulletinPrimed: false,
   activeDots: 0,
+  /* A revoke in progress must survive the 8 s detail refresh: an armed button
+   * that silently disarms under the operator's cursor is worse than no button,
+   * because they will click the disarmed one and believe it worked. */
+  credArmed: null, credBusy: new Set(),
 };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -620,6 +636,13 @@ function renderDetail() {
   body.innerHTML = h;
   body.scrollTop = keepScroll;
   body.querySelectorAll('.jobrow').forEach((row) => row.addEventListener('click', () => toggleReceipts(row)));
+  body.querySelectorAll('.revoke[data-token]').forEach((btn) => {
+    btn.addEventListener('click', () => revokeCredential(btn));
+    /* A re-render must not disarm a button the operator already armed, nor
+     * offer a second click on one that is mid-flight. */
+    if (S.credArmed === btn.dataset.token) armRevoke(btn);
+    if (S.credBusy.has(btn.dataset.token)) { btn.disabled = true; btn.textContent = 'revoking…'; }
+  });
 }
 
 function detailMac(d) {
@@ -691,6 +714,90 @@ function detailMac(d) {
   return h;
 }
 
+/*
+ * The credential inventory, with the kill switch on every row.
+ *
+ * A `mobile` credential carries mac:execute. That was kept on purpose — a phone
+ * brain that cannot act is useless — and the blast radius is bounded by how
+ * fast the owner can kill it, not by permanently narrowing what it may do. So
+ * revocation had to be one action from the wall they already look at. It is two
+ * clicks: the first arms the button and names what is about to be killed, the
+ * second does it. Nothing here holds the admin key — the page names a tokenId
+ * and the local server, which already has the key, makes the call.
+ */
+function credentialSection(d, { title = 'RELAY CREDENTIALS — WHO CAN ACT AS THIS HIVE' } = {}) {
+  let h = `<div class="sect"><h3>${title}</h3>`;
+  if (!d.credentials) {
+    return h + (d.credentialsMeta && d.credentialsMeta.unsupported
+      ? '<span class="mut">credential inventory not available on this relay build (HTTP 404)</span>'
+      : metaLine(d.credentialsMeta)) + `</div>`;
+  }
+  const c = d.credentials;
+  const rows = c.credentials || [];
+  h += `<div class="chiprow" style="margin-bottom:5px">` +
+    `<span class="chip"><b>${c.active}</b> active</span>` +
+    `<span class="chip"><b>${c.revoked}</b> revoked</span>` +
+    Object.entries(c.byRole || {}).map(([role, n]) => `<span class="chip">${esc(role)} <b>${n}</b></span>`).join('') +
+    `</div>`;
+  if (!rows.length) {
+    return h + '<span class="mut">no device credentials — every client is still on the admin key</span></div>';
+  }
+  h += `<div class="feed">` + rows.map((r) => {
+    const dead = !!r.revokedAt;
+    return `<div class="credrow${dead ? ' dead' : ''}">` +
+      `<span class="role">${esc(r.role)}</span>` +
+      `<span class="who" title="${esc(r.deviceId)}">${esc(r.deviceId)} · ${r.scopeCount} scope(s) · last used ${r.lastUsedAt ? '' : 'never'}</span>` +
+      (r.lastUsedAt ? `<span class="tid">${ageSpan(r.lastUsedAt, ' ago')}</span>` : '') +
+      `<span class="tid">${esc(r.tokenId)}</span>` +
+      (dead
+        ? `<button class="revoke" disabled>revoked</button>`
+        : `<button class="revoke" data-token="${esc(r.tokenId)}" data-device="${esc(r.deviceId)}" data-role="${esc(r.role)}">revoke</button>`) +
+      `</div>`;
+  }).join('') + `</div>`;
+  return h + `</div>`;
+}
+
+function armRevoke(button) {
+  S.credArmed = button.dataset.token;
+  button.classList.add('arm');
+  button.textContent = `kill ${button.dataset.role} ${button.dataset.device}?`;
+}
+
+async function revokeCredential(button) {
+  /* Two clicks, not a confirm() dialog: the armed state names the device on the
+   * button itself, so the thing being killed is visible at the moment of the
+   * decision rather than in a modal that reads "are you sure". */
+  const token = button.dataset.token;
+  if (S.credArmed !== token) {
+    armRevoke(button);
+    setTimeout(() => {
+      if (S.credArmed !== token) return;
+      S.credArmed = null;
+      renderDetail();
+    }, 6000);
+    return;
+  }
+  S.credArmed = null;
+  S.credBusy.add(token);
+  button.disabled = true;
+  button.classList.remove('arm');
+  button.textContent = 'revoking…';
+  try {
+    const r = await fetch('/api/credentials/' + encodeURIComponent(token) + '/revoke', { method: 'POST' });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    button.textContent = j.alreadyRevoked ? 'was revoked' : 'revoked';
+    button.closest('.credrow')?.classList.add('dead');
+    S.credBusy.delete(token);
+    fetchDetail();
+  } catch (e) {
+    S.credBusy.delete(token);
+    button.disabled = false;
+    button.textContent = 'revoke failed';
+    button.title = e.message;
+  }
+}
+
 function detailRelay(d) {
   let h = `<div class="sect"><h3>ENVIRONMENT — CLOUD RELAY</h3>`;
   if (d.health) {
@@ -708,7 +815,8 @@ function detailRelay(d) {
       feedRow(frowAge(dev.lastSeenAt), dev.deviceType, dev.online, `${dev.name} (${dev.deviceId}) · registered ${new Date(dev.registeredAt).toLocaleDateString()}`)
     ).join('') + `</div>`;
   } else h += d.devicesMeta && d.devicesMeta.unsupported ? '<span class="mut">devices endpoint not available on this relay build (HTTP 404)</span>' : metaLine(d.devicesMeta);
-  h += `</div><div class="sect"><h3>TOOL CALLS — VOICE RUNS (OPS HISTORY)</h3>`;
+  h += `</div>` + credentialSection(d);
+  h += `<div class="sect"><h3>TOOL CALLS — VOICE RUNS (OPS HISTORY)</h3>`;
   if (d.ops) {
     h += `<div class="feed">` + (d.ops.entries || []).map((e) =>
       feedRow(frowAge(e.updatedAt || e.createdAt), e.kind, !/fail|error/i.test(e.status),
@@ -769,7 +877,10 @@ function detailIos(d) {
       feedRow(frowAge(dev.lastSeenAt), 'mobile', dev.online, `${dev.name} (${dev.deviceId}) · registered ${new Date(dev.registeredAt).toLocaleDateString()}`)).join('') + `</div>`
       : '<span class="mut">relay reports no mobile devices</span>';
   } else h += metaLine(d.devicesMeta);
-  return h + `</div>`;
+  h += `</div>`;
+  /* The phone is the most-stolen node and the one holding mac:execute, so its
+   * kill switch is on its own panel as well as on the relay's. */
+  return h + credentialSection(d, { title: "THIS PHONE'S CREDENTIALS — REVOKE IF LOST" });
 }
 
 function detailCommittee(d) {
@@ -932,7 +1043,7 @@ async function boot() {
   fetchDetail();
   openSSE();
   setInterval(tickAges, 1000);
-  setInterval(() => fetchDetail(), 8000);
+  setInterval(() => { if (!S.credArmed && !S.credBusy.size) fetchDetail(); }, 8000);
   setInterval(ambientReplay, 8000);
   setTimeout(ambientReplay, 1500);
   let rsz = null;
