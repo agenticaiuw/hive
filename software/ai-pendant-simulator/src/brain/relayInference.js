@@ -23,14 +23,32 @@
  * is a change to createRelayInference and nothing else. The same seam is what
  * lets tests run the whole brain against a stub with no network at all.
  *
- * STATUS AT TIME OF WRITING: the route does not exist on the deployed relay
- * yet — a `mobile` token gets 403 for it today, because the relay's scope table
- * denies unlisted routes by default. That is why unavailability is a named,
- * explained error rather than a generic failure: an owner staring at "the phone
- * can't think" deserves to be told which half is missing.
+ * STATUS AT TIME OF WRITING: the route is built but NOT DEPLOYED — the live
+ * relay still answers 403, because its scope table denies unlisted routes by
+ * default and the Worker has not been redeployed. That is why unavailability is
+ * a named, explained error rather than a generic failure: an owner staring at
+ * "the phone can't think" deserves to be told which half is missing.
+ *
+ * FOUR THINGS THE ROUTE ENFORCES that this file exists to keep the loop inside.
+ * They are refusals, never truncation — a prompt silently cut in half returns a
+ * confident answer to a question nobody asked — so the caller has to fit, not
+ * hope. mobileBrain.js does the fitting; the numbers live here so there is one
+ * copy of them.
  */
 
 export const DEFAULT_INFERENCE_PATH = '/v1/infer'
+
+/*
+ * The relay's caps, mirrored so the loop can stay under them. If these ever
+ * disagree with cloud-relay/nodeInference.js the symptom is a 400 with a `code`
+ * naming which one, which is why the error path below surfaces the code
+ * verbatim instead of flattening it into a sentence.
+ */
+export const INFERENCE_LIMITS = Object.freeze({
+  maxMessages: 40,
+  maxPromptChars: 24000,
+  maxTokens: 2048,
+})
 
 export class InferenceUnavailableError extends Error {
   constructor(message, { status = 0, path = DEFAULT_INFERENCE_PATH } = {}) {
@@ -42,10 +60,25 @@ export class InferenceUnavailableError extends Error {
 }
 
 export class InferenceRateLimitedError extends Error {
-  constructor(message, { retryAfterSeconds = null } = {}) {
+  constructor(message, { resetAt = null, retryAfterSeconds = null } = {}) {
     super(message)
     this.name = 'InferenceRateLimitedError'
+    /* The relay counts per device in that device's Durable Object and answers
+     * with when the window turns over. Back off to THAT, not to a fixed delay:
+     * a retry loop against a per-device budget just spends the next window. */
+    this.resetAt = resetAt
     this.retryAfterSeconds = retryAfterSeconds
+  }
+}
+
+/* A 400 from the route is the loop's own fault — too many messages, too much
+ * prompt, a model it may not ask for. Carrying `code` through is what lets a
+ * caller fix the right thing instead of retrying the same request. */
+export class InferenceRejectedError extends Error {
+  constructor(message, { code = 'invalid_request' } = {}) {
+    super(message)
+    this.name = 'InferenceRejectedError'
+    this.code = code
   }
 }
 
@@ -101,11 +134,23 @@ export function createRelayInference({
       const retryAfter = Number(response.headers?.get?.('retry-after'))
       throw new InferenceRateLimitedError(
         payload?.error || 'This phone has hit its model rate limit on the relay.',
-        { retryAfterSeconds: Number.isFinite(retryAfter) ? retryAfter : null },
+        {
+          resetAt: payload?.resetAt ?? null,
+          retryAfterSeconds: Number.isFinite(retryAfter) ? retryAfter : null,
+        },
+      )
+    }
+
+    if (response.status === 400) {
+      throw new InferenceRejectedError(
+        payload?.error || 'The relay refused this request.',
+        { code: payload?.code || 'invalid_request' },
       )
     }
 
     if (!response.ok || payload?.ok === false) {
+      /* 502 upstream_error deliberately carries no provider text — do not go
+       * looking for it, and do not imply to the owner that we know more. */
       throw new Error(payload?.error || `Model call failed (${response.status}).`)
     }
 
@@ -114,7 +159,15 @@ export function createRelayInference({
       throw new Error('The model returned an empty answer.')
     }
 
-    return { content, model: payload?.model ?? null, usage: payload?.usage ?? null }
+    return {
+      content,
+      model: payload?.model ?? null,
+      usage: payload?.usage ?? null,
+      /* `enforced: false` means no durable counter was reachable and the
+       * ceiling is advisory. Passed through rather than smoothed over, so
+       * nobody reads a number that is not a guarantee. */
+      budget: payload?.budget ?? null,
+    }
   }
 }
 

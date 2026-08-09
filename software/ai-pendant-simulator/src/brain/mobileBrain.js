@@ -45,7 +45,7 @@ import {
   renderToolSchemas,
   toolsForDomains,
 } from './mobileDiscovery.js'
-import { parseModelJson } from './relayInference.js'
+import { INFERENCE_LIMITS, parseModelJson } from './relayInference.js'
 import { runMobileTool, summariseToolResult } from './mobileTools.js'
 
 /*
@@ -406,14 +406,64 @@ export async function runMobileBrain({
 
 /* --------------------------------------------------------------- internals */
 
+/*
+ * Keep the thread inside the relay's ceilings.
+ *
+ * The route refuses over-long requests rather than truncating them — 40
+ * messages, 24,000 prompt characters — which is the right call at that end and
+ * a lost turn at this one. A four-step loop over a big hive snapshot really can
+ * cross the character cap, so the loop drops its OWN oldest observations first
+ * and says in the thread that it did.
+ *
+ * What is never dropped: the system prompt (it is the tool schema) and the
+ * owner's original request (it is the whole job). Everything between them is
+ * working memory, and the newest of it is the part that matters.
+ */
+export function fitMessagesToBudget(
+  messages,
+  { maxMessages = INFERENCE_LIMITS.maxMessages, maxChars = INFERENCE_LIMITS.maxPromptChars } = {},
+) {
+  const size = (list) =>
+    list.reduce((total, message) => total + String(message.content ?? '').length, 0)
+
+  if (messages.length <= maxMessages && size(messages) <= maxChars) return messages
+
+  const head = messages.slice(0, 2) // system + the owner's request
+  const tail = messages.slice(2)
+  const note = {
+    role: 'user',
+    content:
+      '(Earlier tool results were dropped to stay inside this device\'s prompt budget. If you need one again, call the tool again.)',
+  }
+
+  let kept = tail
+  while (
+    kept.length &&
+    (head.length + 1 + kept.length > maxMessages ||
+      size([...head, note, ...kept]) > maxChars)
+  ) {
+    kept = kept.slice(1)
+  }
+
+  return kept.length ? [...head, note, ...kept] : head
+}
+
 async function callModel({ infer, messages, usage, maxTokens = 1200 }) {
-  const answer = await infer({ messages, maxTokens })
+  const fitted = fitMessagesToBudget(messages)
+  if (fitted.length !== messages.length) {
+    usage.trimmed = (usage.trimmed || 0) + (messages.length - fitted.length)
+  }
+  const answer = await infer({
+    messages: fitted,
+    maxTokens: Math.min(maxTokens, INFERENCE_LIMITS.maxTokens),
+  })
   usage.calls += 1
-  usage.promptChars += messages.reduce(
+  usage.promptChars += fitted.reduce(
     (total, message) => total + String(message.content ?? '').length,
     0,
   )
   usage.completionChars += String(answer?.content ?? '').length
+  if (answer?.budget) usage.budget = answer.budget
   return answer
 }
 
