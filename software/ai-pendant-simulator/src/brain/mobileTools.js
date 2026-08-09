@@ -677,9 +677,11 @@ export async function runMobileTool(type, params = {}, ctx = {}) {
       /*
        * The relay's machine-readable half, when it sent one. Two 403s that read
        * almost identically in prose need completely different answers:
-       * `credential_predates_capability` means the role grants this but the
-       * token predates it, so RE-PAIRING FIXES IT, while `scope_denied` means
-       * re-pairing will not help. Keying on message text is how a client ends
+       * `credential_predates_capability` means this credential was minted
+       * with an explicit scope ceiling that leaves this out (ordinary
+       * credentials track their role's live scopes since 9c5c859), so
+       * RE-PAIRING WITH A WIDER SCOPE LIST FIXES IT, while `scope_denied`
+       * means re-pairing will not help. Keying on message text is how a client ends
        * up telling an owner to re-pair forever, so the code travels and the
        * text does not have to be parsed.
        */
