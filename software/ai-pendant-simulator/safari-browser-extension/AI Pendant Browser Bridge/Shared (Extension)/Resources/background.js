@@ -873,7 +873,8 @@
 	const BRAIN_STORAGE_KEYS = [
 		"brainEnabled",
 		"modelProxyUrl",
-		"deviceToken"
+		"deviceToken",
+		"brainRetryAfterAt"
 	];
 	Object.freeze({
 		brainEnabled: false,
@@ -965,10 +966,23 @@
 			return null;
 		}
 	}
+	/** The instant a `retryAfter` in seconds points at. Null when there isn't one. */
+	function cooldownUntil(retryAfterSeconds, now = Date.now()) {
+		const seconds = Number(retryAfterSeconds);
+		if (!Number.isFinite(seconds) || seconds <= 0) return null;
+		return new Date(now + seconds * 1e3).toISOString();
+	}
+	/** Milliseconds still to wait, or 0 when the window has passed or never was. */
+	function cooldownRemainingMs(retryAfterAt, now = Date.now()) {
+		const at = Date.parse(String(retryAfterAt ?? ""));
+		if (!Number.isFinite(at)) return 0;
+		return Math.max(0, at - now);
+	}
 	function normalizeBrainConfig(values = {}) {
 		const brainEnabled = values.brainEnabled === true;
 		const modelProxyUrl = validProxyUrl(values.modelProxyUrl);
 		const deviceToken = String(values.deviceToken ?? "").trim() || null;
+		const brainRetryAfterAt = String(values.brainRetryAfterAt ?? "").trim() || null;
 		let reason = "";
 		if (!brainEnabled) reason = "The local brain is switched off (brainEnabled is not true).";
 		else if (!modelProxyUrl) reason = "No usable modelProxyUrl is configured — the relay-side model proxy has not been set up yet.";
@@ -977,6 +991,7 @@
 			brainEnabled,
 			modelProxyUrl,
 			deviceToken,
+			brainRetryAfterAt,
 			ready: brainEnabled && Boolean(modelProxyUrl) && Boolean(deviceToken),
 			reason
 		};
@@ -985,14 +1000,21 @@
 	* Where a command should go. 'mac-planner' is the answer until the credential
 	* task lands; the caller treats anything but 'local-brain' as the Mac path.
 	*/
-	function chooseBrainRoute(config) {
+	function chooseBrainRoute(config, now = Date.now()) {
 		const normalized = config && "ready" in config ? config : normalizeBrainConfig(config);
-		return normalized.ready ? {
-			route: "local-brain",
-			reason: "Brain configuration is complete."
-		} : {
+		if (!normalized.ready) return {
 			route: "mac-planner",
 			reason: normalized.reason
+		};
+		const waitMs = cooldownRemainingMs(normalized.brainRetryAfterAt, now);
+		if (waitMs > 0) return {
+			route: "mac-planner",
+			reason: `The relay asked not to be called again for ${Math.ceil(waitMs / 1e3)}s (until ${normalized.brainRetryAfterAt}).`,
+			cooldownMs: waitMs
+		};
+		return {
+			route: "local-brain",
+			reason: "Brain configuration is complete."
 		};
 	}
 	const BROWSER_TOOLS = Object.freeze([
@@ -1316,11 +1338,15 @@ or, when you are finished,
 		const code = String(payload?.code ?? "").trim() || "unknown";
 		const relayText = String(payload?.error ?? "").trim();
 		const message = code === "credential_predates_capability" ? "The browser credential was issued before the relay gave this role the ability to think. Re-pair the extension (pendant-credentials.mjs pair --role browser_node) — scopes are frozen when a credential is created." : code === "scope_denied" ? "This credential's role is not allowed to use the relay's inference route." : code === "rate_limited" ? `This device has spent its hourly inference budget${payload?.resetAt ? `; it resets at ${payload.resetAt}` : ""}.` : code === "not_configured" ? "The relay has no model key configured, so it cannot think for this node." : code === "prompt_too_large" || code === "invalid_messages" ? relayText || "The relay refused the prompt." : code === "upstream_error" ? `The model provider refused the request (HTTP ${status ?? "?"}).` : relayText || `The relay returned HTTP ${status ?? "?"}.`;
+		const retryAfter = Number(payload?.retryAfter);
+		const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null;
 		return {
 			code,
 			status: status ?? null,
 			message,
-			fatal: FATAL_INFER_CODES.has(code)
+			fatal: FATAL_INFER_CODES.has(code),
+			retryAfter: seconds,
+			retryAt: cooldownUntil(seconds)
 		};
 	}
 	function summarizeBrainRun(state) {
@@ -2940,7 +2966,8 @@ or, when you are finished,
 	async function runConsoleCommand({ id, command, page, config }) {
 		const brainConfig = normalizeBrainConfig(await api.storage.local.get(BRAIN_STORAGE_KEYS));
 		let brainNote = "";
-		if (chooseBrainRoute(brainConfig).route === "local-brain") {
+		const route = chooseBrainRoute(brainConfig);
+		if (route.route === "local-brain") {
 			const finished = await runBrainLoop({
 				command,
 				page,
@@ -2949,6 +2976,7 @@ or, when you are finished,
 				runTool: (call) => runBrainTool(call, config)
 			});
 			if (finished.status === "done") {
+				if (brainConfig.brainRetryAfterAt) await api.storage.local.remove("brainRetryAfterAt").catch(() => {});
 				await patchEntry(id, {
 					state: "answered",
 					headline: finished.response || "Done.",
@@ -2958,7 +2986,7 @@ or, when you are finished,
 				return;
 			}
 			brainNote = summarizeBrainRun(finished);
-		}
+		} else if (route.cooldownMs) brainNote = `Brain skipped — ${route.reason}`;
 		const commandText = buildCommandText(command, page);
 		const stored = await api.storage.local.get(SESSION_KEY);
 		const sessionId = String(stored["consoleSessionId"] ?? "").trim();
@@ -3026,6 +3054,7 @@ or, when you are finished,
 					status: response.status,
 					payload
 				});
+				if (verdict.retryAt) await api.storage.local.set({ brainRetryAfterAt: verdict.retryAt }).catch(() => {});
 				const error = new Error(verdict.message);
 				error.code = verdict.code;
 				error.fatal = verdict.fatal;

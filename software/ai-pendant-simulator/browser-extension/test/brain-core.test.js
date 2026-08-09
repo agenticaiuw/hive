@@ -11,6 +11,8 @@ import {
   buildBrainMessages,
   callModelWithHeadroom,
   chooseBrainRoute,
+  cooldownRemainingMs,
+  cooldownUntil,
   createBrainState,
   escalateOutputTokens,
   interpretInferError,
@@ -118,7 +120,20 @@ test('the tool catalog covers exactly the executable command set', () => {
   for (const tool of BROWSER_TOOLS) {
     assert.ok(COMMAND_TYPES.has(tool.name), `${tool.name} must be executable`)
   }
-  assert.deepEqual(BRAIN_STORAGE_KEYS, ['brainEnabled', 'modelProxyUrl', 'deviceToken'])
+  /* Three the owner sets, one the extension writes for itself. BRAIN_DEFAULTS
+   * stays the owner-facing three: a cooldown is state, not configuration, and
+   * listing it as a default would invite someone to set it by hand. */
+  assert.deepEqual(BRAIN_STORAGE_KEYS, [
+    'brainEnabled',
+    'modelProxyUrl',
+    'deviceToken',
+    'brainRetryAfterAt',
+  ])
+  assert.deepEqual(Object.keys(BRAIN_DEFAULTS), [
+    'brainEnabled',
+    'modelProxyUrl',
+    'deviceToken',
+  ])
 })
 
 /* ------------------------------------------------------------------ *
@@ -264,6 +279,96 @@ test('a dead model endpoint ends in a handoff, not a hang', async () => {
  * POST /v1/infer failures. Codes and limits mirrored from
  * cloud-relay/nodeInference.js + cloud-relay/server.js, read 2026-08-09.
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Cooldown: "fatal until an operator acts", encoded rather than described.
+ * ------------------------------------------------------------------ */
+
+const READY_VALUES = {
+  brainEnabled: true,
+  modelProxyUrl: 'https://relay.example/v1/infer',
+  deviceToken: 'scoped',
+}
+
+test('the relay says when to ask again; this side only records it', () => {
+  const now = Date.parse('2026-08-09T12:00:00.000Z')
+  assert.equal(cooldownUntil(300, now), '2026-08-09T12:05:00.000Z')
+  /* No number, no cooldown — never a guessed one. */
+  assert.equal(cooldownUntil(null, now), null)
+  assert.equal(cooldownUntil(0, now), null)
+  assert.equal(cooldownUntil(-5, now), null)
+  assert.equal(cooldownUntil('nonsense', now), null)
+})
+
+test('a spent budget parks the brain, and the window lifts on its own', () => {
+  const now = Date.parse('2026-08-09T12:00:00.000Z')
+  const config = { ...READY_VALUES, brainRetryAfterAt: '2026-08-09T12:05:00.000Z' }
+
+  const during = chooseBrainRoute(normalizeBrainConfig(config), now)
+  assert.equal(during.route, 'mac-planner')
+  assert.equal(during.cooldownMs, 300_000)
+  assert.match(during.reason, /300s/)
+
+  /* One second past the window and the brain is simply available again — no
+   * clearing step required for the common case. */
+  const after = chooseBrainRoute(
+    normalizeBrainConfig(config),
+    Date.parse('2026-08-09T12:05:01.000Z'),
+  )
+  assert.equal(after.route, 'local-brain')
+})
+
+test('a cooldown is not a missing credential, and cannot masquerade as one', () => {
+  const config = normalizeBrainConfig({
+    ...READY_VALUES,
+    brainRetryAfterAt: '2999-01-01T00:00:00.000Z',
+  })
+  /* `ready` is about configuration only: this brain IS configured. Collapsing
+   * the two would report a spent budget as "no credential", sending the owner
+   * to re-pair a credential that is fine. */
+  assert.equal(config.ready, true)
+  assert.equal(chooseBrainRoute(config).route, 'mac-planner')
+})
+
+test('a stale or absent cooldown never blocks anything', () => {
+  for (const value of [undefined, null, '', '   ', 'not-a-date']) {
+    const route = chooseBrainRoute(
+      normalizeBrainConfig({ ...READY_VALUES, brainRetryAfterAt: value }),
+    )
+    assert.equal(route.route, 'local-brain', `${JSON.stringify(value)} must not park the brain`)
+  }
+  assert.equal(cooldownRemainingMs('not-a-date'), 0)
+  assert.equal(cooldownRemainingMs(null), 0)
+})
+
+test('both retry-bearing refusals carry their window through', () => {
+  /* 429: a real deadline the relay computed from the budget window. */
+  const limited = interpretInferError({
+    status: 429,
+    payload: {
+      code: 'rate_limited',
+      resetAt: '2026-08-09T13:00:00.000Z',
+      retryAfter: 1_800,
+    },
+  })
+  assert.equal(limited.retryAfter, 1_800)
+  assert.ok(limited.retryAt, 'a deadline must produce a cooldown')
+  assert.equal(limited.fatal, true, 'still hands off now — the cooldown is for later')
+
+  /* 503: an honest floor, not a prediction. Recorded identically, because the
+   * question this side asks is the same one. */
+  const unconfigured = interpretInferError({
+    status: 503,
+    payload: { code: 'not_configured', retryAfter: 300 },
+  })
+  assert.equal(unconfigured.retryAfter, 300)
+  assert.ok(unconfigured.retryAt)
+
+  /* A refusal with no window sets none — the absence is information too. */
+  const denied = interpretInferError({ status: 403, payload: { code: 'scope_denied' } })
+  assert.equal(denied.retryAfter, null)
+  assert.equal(denied.retryAt, null)
+})
 
 test('a credential minted before llm:infer says re-pair, not "broken"', () => {
   const verdict = interpretInferError({

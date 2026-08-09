@@ -46,7 +46,14 @@
  */
 import { COMMAND_TYPES } from './bridge-core.js'
 
-export const BRAIN_STORAGE_KEYS = ['brainEnabled', 'modelProxyUrl', 'deviceToken']
+export const BRAIN_STORAGE_KEYS = [
+  'brainEnabled',
+  'modelProxyUrl',
+  'deviceToken',
+  /* Written by the extension, never by the owner: the instant before which
+   * asking the relay again is certain to be wasted. See COOLDOWN below. */
+  'brainRetryAfterAt',
+]
 
 export const BRAIN_DEFAULTS = Object.freeze({
   brainEnabled: false,
@@ -222,10 +229,43 @@ function validProxyUrl(value) {
   }
 }
 
+/* ===================================================================== *
+ * COOLDOWN: "fatal until an operator acts", encoded rather than described.
+ *
+ * Two failures are settled for now without being settled forever — a spent
+ * hourly budget, and a relay with no model key. Handing off is right in the
+ * moment either way, but marking the brain permanently dead over them would
+ * be wrong, and picking a retry delay myself would be inventing a fact I have
+ * no access to: only the relay knows when a budget window ends, and only an
+ * operator knows when a key gets configured.
+ *
+ * So the relay says. `retryAfter` is a real deadline on a 429 (the window's
+ * end, computed) and an honest floor on a 503 ("a human must act, and humans
+ * do not act in seconds"). Both are recorded the same way here, because both
+ * answer the only question this side has: how long is asking again certainly
+ * wasted?
+ * ===================================================================== */
+
+/** The instant a `retryAfter` in seconds points at. Null when there isn't one. */
+export function cooldownUntil(retryAfterSeconds, now = Date.now()) {
+  const seconds = Number(retryAfterSeconds)
+  if (!Number.isFinite(seconds) || seconds <= 0) return null
+  return new Date(now + seconds * 1_000).toISOString()
+}
+
+/** Milliseconds still to wait, or 0 when the window has passed or never was. */
+export function cooldownRemainingMs(retryAfterAt, now = Date.now()) {
+  const at = Date.parse(String(retryAfterAt ?? ''))
+  if (!Number.isFinite(at)) return 0
+  return Math.max(0, at - now)
+}
+
 export function normalizeBrainConfig(values = {}) {
   const brainEnabled = values.brainEnabled === true
   const modelProxyUrl = validProxyUrl(values.modelProxyUrl)
   const deviceToken = String(values.deviceToken ?? '').trim() || null
+  const brainRetryAfterAt =
+    String(values.brainRetryAfterAt ?? '').trim() || null
 
   let reason = ''
   if (!brainEnabled) {
@@ -240,6 +280,11 @@ export function normalizeBrainConfig(values = {}) {
     brainEnabled,
     modelProxyUrl,
     deviceToken,
+    brainRetryAfterAt,
+    /* `ready` stays a statement about CONFIGURATION only. A cooldown is a
+     * fully configured brain that is temporarily pointless to ask, which is a
+     * different thing and belongs to the router below — collapsing them would
+     * make a spent budget indistinguishable from a missing credential. */
     ready: brainEnabled && Boolean(modelProxyUrl) && Boolean(deviceToken),
     reason,
   }
@@ -249,12 +294,27 @@ export function normalizeBrainConfig(values = {}) {
  * Where a command should go. 'mac-planner' is the answer until the credential
  * task lands; the caller treats anything but 'local-brain' as the Mac path.
  */
-export function chooseBrainRoute(config) {
+export function chooseBrainRoute(config, now = Date.now()) {
   const normalized =
     config && 'ready' in config ? config : normalizeBrainConfig(config)
-  return normalized.ready
-    ? { route: 'local-brain', reason: 'Brain configuration is complete.' }
-    : { route: 'mac-planner', reason: normalized.reason }
+
+  if (!normalized.ready) {
+    return { route: 'mac-planner', reason: normalized.reason }
+  }
+
+  /* Configured, but the relay already said when it is worth asking again. */
+  const waitMs = cooldownRemainingMs(normalized.brainRetryAfterAt, now)
+  if (waitMs > 0) {
+    return {
+      route: 'mac-planner',
+      reason:
+        `The relay asked not to be called again for ${Math.ceil(waitMs / 1_000)}s ` +
+        `(until ${normalized.brainRetryAfterAt}).`,
+      cooldownMs: waitMs,
+    }
+  }
+
+  return { route: 'local-brain', reason: 'Brain configuration is complete.' }
 }
 
 /* ===================================================================== *
@@ -626,7 +686,24 @@ export function interpretInferError({ status, payload } = {}) {
                 ? `The model provider refused the request (HTTP ${status ?? '?'}).`
                 : relayText || `The relay returned HTTP ${status ?? '?'}.`
 
-  return { code, status: status ?? null, message, fatal: FATAL_INFER_CODES.has(code) }
+  /*
+   * Recorded whatever the code is. A 429 sends the budget window's real end
+   * and a 503 sends a floor; both answer "how long is asking again certainly
+   * wasted", which is the only question this side has. Keyed off the field
+   * rather than off the two codes so a route that starts sending it for a
+   * third reason is honoured without a change here.
+   */
+  const retryAfter = Number(payload?.retryAfter)
+  const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null
+
+  return {
+    code,
+    status: status ?? null,
+    message,
+    fatal: FATAL_INFER_CODES.has(code),
+    retryAfter: seconds,
+    retryAt: cooldownUntil(seconds),
+  }
 }
 
 export function summarizeBrainRun(state) {

@@ -1550,7 +1550,8 @@ async function runConsoleCommand({ id, command, page, config }) {
   )
   let brainNote = ''
 
-  if (chooseBrainRoute(brainConfig).route === 'local-brain') {
+  const route = chooseBrainRoute(brainConfig)
+  if (route.route === 'local-brain') {
     const finished = await runBrainLoop({
       command,
       page,
@@ -1560,6 +1561,12 @@ async function runConsoleCommand({ id, command, page, config }) {
     })
 
     if (finished.status === 'done') {
+      /* A working call is proof the window it was waiting on has passed —
+       * clearing it here means a cooldown cannot outlive the condition that
+       * set it, which is the difference between a cooldown and a tombstone. */
+      if (brainConfig.brainRetryAfterAt) {
+        await api.storage.local.remove('brainRetryAfterAt').catch(() => {})
+      }
       await patchEntry(id, {
         state: 'answered',
         headline: finished.response || 'Done.',
@@ -1571,6 +1578,9 @@ async function runConsoleCommand({ id, command, page, config }) {
     /* Every non-answer is a handoff: the Mac planner gets the command
      * unchanged, and the entry says the brain stepped aside. */
     brainNote = summarizeBrainRun(finished)
+  } else if (route.cooldownMs) {
+    /* Distinct from "no brain configured": this one is coming back. */
+    brainNote = `Brain skipped — ${route.reason}`
   }
 
   const commandText = buildCommandText(command, page)
@@ -1673,6 +1683,20 @@ async function postInference(brainConfig, messages, maxTokens) {
 
     if (!response.ok) {
       const verdict = interpretInferError({ status: response.status, payload })
+
+      /*
+       * The relay's own answer to "when is asking again worth it", stored so a
+       * LATER command honours it. Written here rather than thrown upward
+       * because runBrainLoop reduces an error to a handoff reason, and this is
+       * the last point that still has the number. Best effort: a storage write
+       * that fails must not turn a refusal into a crash.
+       */
+      if (verdict.retryAt) {
+        await api.storage.local
+          .set({ brainRetryAfterAt: verdict.retryAt })
+          .catch(() => {})
+      }
+
       const error = new Error(verdict.message)
       error.code = verdict.code
       /* Read by runBrainLoop: a settled refusal hands off at once instead of
