@@ -476,6 +476,63 @@ test('the loop never asks for more tokens than the relay allows', async () => {
   assert.ok(seen <= INFERENCE_LIMITS.maxTokens, `asked for ${seen} tokens`)
 })
 
+/* -------------------------------------------- what a 403 is actually saying */
+
+test('a stale credential and a genuine denial are told apart by code, not prose', async () => {
+  const { createRelayInference, InferenceUnavailableError } = await import('./relayInference.js')
+
+  const clientAnswering = (status, payload) => ({
+    async postJson() {
+      return { response: { status, ok: false, headers: { get: () => null } }, payload }
+    },
+  })
+
+  /* Re-pairing fixes this one — the role grants it, the token predates it. */
+  const stale = createRelayInference({
+    client: clientAnswering(403, {
+      ok: false,
+      code: 'credential_predates_capability',
+      error: 'Blocked for safety: this credential was issued before its role gained llm:infer.',
+    }),
+  })
+  await assert.rejects(
+    () => stale({ messages: [{ role: 'user', content: 'x' }] }),
+    (error) => {
+      assert.ok(error instanceof InferenceUnavailableError)
+      assert.equal(error.code, 'credential_predates_capability')
+      assert.equal(error.staleCredential, true, 'the UI cannot offer a re-pair without this')
+      assert.match(error.message, /Re-pair the phone/)
+      return true
+    },
+  )
+
+  /* Re-pairing does NOT fix this one, and saying so would send the owner in
+   * circles. The role itself has to change. */
+  const denied = createRelayInference({
+    client: clientAnswering(403, { ok: false, code: 'scope_denied', error: 'Blocked for safety.' }),
+  })
+  await assert.rejects(
+    () => denied({ messages: [{ role: 'user', content: 'x' }] }),
+    (error) => {
+      assert.equal(error.code, 'scope_denied')
+      assert.equal(error.staleCredential, false)
+      assert.match(error.message, /Re-pairing will not help/)
+      return true
+    },
+  )
+
+  /* An older relay sends no code, and then both really are possible. */
+  const oldRelay = createRelayInference({ client: clientAnswering(404, {}) })
+  await assert.rejects(
+    () => oldRelay({ messages: [{ role: 'user', content: 'x' }] }),
+    (error) => {
+      assert.equal(error.code, null)
+      assert.match(error.message, /Either the relay has no inference route/)
+      return true
+    },
+  )
+})
+
 /* --------------------------------------------------------- JSON extraction */
 
 test('JSON survives fences, preamble and braces inside strings', () => {
