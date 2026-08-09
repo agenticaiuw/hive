@@ -2,8 +2,6 @@ export const DEFAULT_AGENT_URL = 'http://127.0.0.1:8000'
 export const DEFAULT_TARGET_MODE = 'last-focused'
 export const MAX_SELECTOR_LENGTH = 2_000
 export const MAX_TEXT_LENGTH = 50_000
-export const MAX_SNAPSHOT_ELEMENTS = 80
-export const MAX_READ_CHARS = 50_000
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost'])
 const TARGET_MODES = new Set(['last-focused', 'current-active', 'new-tab'])
@@ -294,16 +292,6 @@ export function isScriptableUrl(value) {
   }
 }
 
-/** Heartbeat-safe origin: no path/query/token leakage. */
-export function safeTabOrigin(url) {
-  try {
-    if (!isScriptableUrl(url)) return ''
-    return new URL(url).origin
-  } catch {
-    return ''
-  }
-}
-
 export function truncateTitle(title, max = 80) {
   const text = String(title ?? '').replace(/\s+/g, ' ').trim()
   if (text.length <= max) return text
@@ -342,11 +330,11 @@ export function commandIdentity(command) {
   return commandId ? `cmd:${commandId}` : ''
 }
 
-const TEXT_ENCODER = typeof TextEncoder === 'function' ? new TextEncoder() : null
+const TEXT_ENCODER = new TextEncoder()
 
 export function byteLengthOf(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value) ?? ''
-  return TEXT_ENCODER ? TEXT_ENCODER.encode(text).length : text.length * 2
+  return TEXT_ENCODER.encode(text).length
 }
 
 /*

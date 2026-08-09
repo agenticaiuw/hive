@@ -19,20 +19,20 @@ import {
   normalizeRelayConfig,
 } from '../src/relay-peer.js'
 import {
-  APPROVAL_DECISION_KIND,
-  APPROVAL_REQUEST_KIND,
   approvalBadge,
   approvalCountdown,
   approvalIsExpired,
-  approvalPromptFromEnvelope,
   mergeApprovalPrompts,
   prepareApprovalDecision,
-  pruneApprovalPrompts,
-  settleApprovalPrompt,
 } from '../src/approvals.js'
 import {
+  APPROVAL_DECISION_KIND,
+  APPROVAL_REQUEST_KIND,
   MAX_APPROVAL_PROMPTS,
   SETTLED_PROMPT_TTL_MS,
+  approvalPromptFromEnvelope,
+  pruneApprovalPrompts,
+  settleApprovalPrompt,
 } from '../../shared/approvalMesh.js'
 
 const NOW = Date.parse('2026-08-09T04:00:00.000Z')

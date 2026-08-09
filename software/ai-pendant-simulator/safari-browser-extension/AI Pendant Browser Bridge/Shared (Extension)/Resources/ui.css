@@ -328,11 +328,6 @@ hr {
   display: block;
 }
 
-.mic-button.is-transcribing {
-  color: #79dac0;
-  animation: mic-pulse 1.1s ease-in-out infinite;
-}
-
 .mic-button:disabled {
   cursor: not-allowed;
 }
@@ -536,10 +531,10 @@ hr {
 }
 
 /* ===== Standalone console =====
- * console.html marks <body class="standalone">: the same DOM as the popover,
- * given room. The column stays readable rather than stretching edge to edge,
- * and the history becomes the flexible region so a tall window shows more
- * outcomes instead of more empty footer. */
+ * popup.html?standalone=1 puts .standalone on <body>: the same DOM as the
+ * popover, given room. The column stays readable rather than stretching edge
+ * to edge, and the history becomes the flexible region so a tall window shows
+ * more outcomes instead of more empty footer. */
 
 .standalone {
   min-width: 360px;

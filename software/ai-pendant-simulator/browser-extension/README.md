@@ -85,8 +85,7 @@ owner's Safari.
   explicitly set `allowSensitiveInput: true`.
 - Each command result goes back to the same authenticated loopback agent.
 
-The extension is a **sensor/actuator** for the Mac agent (its own planning
-brain in `src/brain.js` stays inert until the owner pastes a credential).
+The extension is a **sensor/actuator** for the Mac agent.
 After website access is granted it can:
 
 - **snapshot** interactive elements with stable refs (prefer over desktop screenshots)

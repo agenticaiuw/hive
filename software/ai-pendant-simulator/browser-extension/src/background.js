@@ -27,24 +27,12 @@ import {
   scrubPageContext,
 } from './command-console.js'
 import {
-  BRAIN_STORAGE_KEYS,
-  callModelWithHeadroom,
-  chooseBrainRoute,
-  interpretInferError,
-  normalizeBrainConfig,
-  runBrainLoop,
-  summarizeBrainRun,
-} from './brain.js'
-import {
   CAPABILITY_BROWSER,
   EFFECT_OUTWARD,
-  classifyEffect,
-  createOutwardGuard,
   honestVerdict,
   routePlan,
 } from './affinity.js'
 import {
-  APPROVAL_MESSAGE_TYPES,
   createExecutionJournal,
   hiveClaimRecordFor,
   hiveVerdictRecordFor,
@@ -175,24 +163,17 @@ async function getConfig() {
 }
 
 async function request(config, path, options = {}) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-
-  try {
-    return await fetch(`${config.agentUrl}${path}`, {
-      ...options,
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${config.agentToken}`,
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
-      },
-      signal: controller.signal,
-    })
-  } finally {
-    clearTimeout(timeout)
-  }
+  return fetch(`${config.agentUrl}${path}`, {
+    ...options,
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${config.agentToken}`,
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...options.headers,
+    },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  })
 }
 
 async function postJson(config, path, payload) {
@@ -491,34 +472,27 @@ async function getRelayConfig() {
 }
 
 async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
+    method: descriptor.method,
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      /* The device token, on the wire, in a header — never in the path or a
+       * query string, which is why inboxRequest carries only the deviceId. */
+      Authorization: `Bearer ${relayConfig.deviceToken}`,
+      ...(descriptor.body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(descriptor.body ? { body: JSON.stringify(descriptor.body) } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
 
-  try {
-    const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
-      method: descriptor.method,
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-        /* The device token, on the wire, in a header — never in the path or a
-         * query string, which is why inboxRequest carries only the deviceId. */
-        Authorization: `Bearer ${relayConfig.deviceToken}`,
-        ...(descriptor.body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(descriptor.body ? { body: JSON.stringify(descriptor.body) } : {}),
-      signal: controller.signal,
-    })
-
-    if (!response.ok) {
-      // Tested in relay-peer: carries message, status and the relay's `code`
-      // (e.g. not_your_inbox) so describeRelayFailure can sharpen the fix.
-      throw await relayResponseError(response)
-    }
-
-    return response.status === 204 ? null : await response.json()
-  } finally {
-    clearTimeout(timeout)
+  if (!response.ok) {
+    // Tested in relay-peer: carries message, status and the relay's `code`
+    // (e.g. not_your_inbox) so describeRelayFailure can sharpen the fix.
+    throw await relayResponseError(response)
   }
+
+  return response.status === 204 ? null : await response.json()
 }
 
 /*
@@ -1323,11 +1297,12 @@ function runInPage(type, params) {
 
   const isVisible = (el) => {
     if (!(el instanceof Element)) return false
-    const style = window.getComputedStyle(el)
     if (
-      style.display === 'none' ||
-      style.visibility === 'hidden' ||
-      Number(style.opacity) === 0
+      !el.checkVisibility({
+        opacityProperty: true,
+        visibilityProperty: true,
+        contentVisibilityAuto: true,
+      })
     ) {
       return false
     }
@@ -1671,9 +1646,6 @@ const patchEntry = (id, patch) =>
  * stream for most of a minute and that is normal, not an outage.
  */
 async function consolePost(config, path, payload, timeoutMs, interpret) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
-
   try {
     const response = await fetch(`${config.agentUrl}${path}`, {
       method: 'POST',
@@ -1684,7 +1656,7 @@ async function consolePost(config, path, payload, timeoutMs, interpret) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal: AbortSignal.timeout(timeoutMs),
     })
     const body = await response.json().catch(() => null)
     return interpret({ status: response.status, payload: body })
@@ -1692,12 +1664,10 @@ async function consolePost(config, path, payload, timeoutMs, interpret) {
     return {
       kind: 'error',
       message:
-        error?.name === 'AbortError'
+        error?.name === 'TimeoutError'
           ? `The local agent did not answer within ${Math.round(timeoutMs / 1000)}s. Check the dashboard — the job may still be running.`
           : error?.message || String(error),
     }
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -1708,8 +1678,7 @@ async function consolePost(config, path, payload, timeoutMs, interpret) {
 /*
  * One journal per worker incarnation, lazily built over storage.local so a
  * run's trace survives the worker being suspended mid-run (Safari does this
- * freely). The popup's future approval pane reads the same storage keys —
- * see execution-status.js for the message and key contract.
+ * freely). See execution-status.js for the storage-key contract.
  */
 let journalInstance = null
 
@@ -1756,71 +1725,6 @@ async function recordRunToHive(runId, phase) {
   }
 }
 
-/**
- * The owner approved a parked outward step (via the popup, next pass). The
- * step runs through the same validated executor as everything else, and the
- * run's verdict is recomputed from what actually happened. resolveApproval
- * has already enforced single-use and the 10-minute freshness window.
- */
-async function executeApprovedStep(entry) {
-  const journal = executionJournal()
-  const config = await getConfig()
-
-  try {
-    const result = await executeCommand(
-      {
-        commandId: `approved-${entry.id}`,
-        createdAt: new Date().toISOString(),
-        action: entry.call,
-      },
-      config,
-    )
-    await journal.recordStep(entry.runId, {
-      tool: entry.call?.type,
-      effect: EFFECT_OUTWARD,
-      ok: true,
-      summary: `Approved by owner: ${String(result?.message ?? entry.call?.type).slice(0, 250)}`,
-    })
-    const run = (await journal.getStatus()).runs.find(
-      (candidate) => candidate.runId === entry.runId,
-    )
-    const verdict = honestVerdict({
-      command: run?.command ?? '',
-      steps: run?.steps ?? [],
-      parked: [],
-    })
-    await journal.finishRun(entry.runId, { state: 'finished', ...verdict })
-    await recordRunToHive(entry.runId, 'verdict')
-    await patchEntry(entry.runId, {
-      state: 'executed',
-      headline: verdict.headline,
-      detail: verdict.detail,
-      finishedAt: new Date().toISOString(),
-    })
-    return { ok: true, ran: true, message: result?.message ?? 'Done.' }
-  } catch (error) {
-    const message = error?.message || String(error)
-    await journal.recordStep(entry.runId, {
-      tool: entry.call?.type,
-      effect: EFFECT_OUTWARD,
-      ok: false,
-      summary: message.slice(0, 300),
-    })
-    await journal.finishRun(entry.runId, {
-      state: 'failed',
-      verdict: 'failed',
-      headline: `The approved step failed: ${message}`,
-    })
-    await recordRunToHive(entry.runId, 'verdict')
-    await patchEntry(entry.runId, {
-      state: 'failed',
-      headline: `The approved step failed: ${message}`,
-      finishedAt: new Date().toISOString(),
-    })
-    return { ok: false, ran: true, error: message }
-  }
-}
-
 async function handleConsoleSubmit({ command, page }) {
   const text = String(command ?? '').trim()
   if (!text) return { ok: false, error: 'Type a command first.' }
@@ -1850,129 +1754,6 @@ async function handleConsoleSubmit({ command, page }) {
 }
 
 async function runConsoleCommand({ id, command, page, config }) {
-  /*
-   * The local brain goes first when — and only when — its credential exists.
-   * Today chooseBrainRoute always answers 'mac-planner' (see src/brain.js:
-   * brainEnabled defaults false and there is no model proxy or device token
-   * yet), so this block is exercised by unit tests and skipped in production.
-   */
-  const brainConfig = normalizeBrainConfig(
-    await api.storage.local.get(BRAIN_STORAGE_KEYS),
-  )
-  let brainNote = ''
-
-  const route = chooseBrainRoute(brainConfig)
-  if (route.route === 'local-brain') {
-    /*
-     * The run is journaled and announced to the hive from the moment it is
-     * claimed — local execution must never be invisible execution. The guard
-     * watches every snapshot go past so a later {click, ref} is classified by
-     * the words the OWNER would have read on that control.
-     */
-    const journal = executionJournal()
-    const guard = createOutwardGuard()
-    await journal.beginRun({ runId: id, command, route: 'local-brain' })
-    await recordRunToHive(id, 'claim')
-
-    const finished = await runBrainLoop({
-      command,
-      page,
-      config: brainConfig,
-      callModel: (messages) => brainCallModel(brainConfig, messages),
-      runTool: async (call) => {
-        const result = await runBrainTool(call, config)
-        guard.observe(call, result)
-        await journal.recordStep(id, {
-          tool: call?.type,
-          effect: guard.assess(call).effect,
-          ok: true,
-          summary: String(result?.message ?? '').slice(0, 300),
-        })
-        return result
-      },
-      assessTool: (call) => guard.assess(call),
-    })
-
-    if (finished.status === 'parked') {
-      /*
-       * The step the loop refused to run unattended. It goes to the approval
-       * queue and NOWHERE else — in particular, not to the Mac planner, which
-       * would be free to do the very thing that was just parked.
-       */
-      const assessed = guard.assess(finished.parkedCall ?? {})
-      const parked = await journal.parkStep(id, {
-        call: finished.parkedCall,
-        effect: EFFECT_OUTWARD,
-        reason: finished.parkedReason,
-        targetName: assessed.targetName,
-      })
-      const verdict = honestVerdict({
-        command,
-        steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
-        parked: [parked],
-      })
-      await journal.finishRun(id, { state: 'parked', ...verdict })
-      await recordRunToHive(id, 'verdict')
-      await patchEntry(id, {
-        state: 'parked',
-        headline: verdict.headline,
-        detail: [
-          `Waiting in this browser's approval queue (${parked.id}).`,
-          verdict.detail,
-          /* TODO(popup pass): render localPendingApprovals and send
-           * affinity:resolve-approval — seam only, popup files are another
-           * agent's surface right now. */
-          'Approval UI lands with the next popup pass.',
-        ].join('\n'),
-        finishedAt: new Date().toISOString(),
-      })
-      return
-    }
-
-    if (finished.status === 'done') {
-      /* A working call is proof the window it was waiting on has passed —
-       * clearing it here means a cooldown cannot outlive the condition that
-       * set it, which is the difference between a cooldown and a tombstone. */
-      if (brainConfig.brainRetryAfterAt) {
-        await api.storage.local.remove('brainRetryAfterAt').catch(() => {})
-      }
-      /*
-       * HONESTY GATE: the model's prose is color, never the claim. The
-       * verdict is computed from the ledger of steps that actually ran — a
-       * run that only read says "changed nothing", and a command that asked
-       * for an outward effect that never ran is reported NOT done.
-       */
-      const runState = (await journal.getStatus()).runs.find((run) => run.runId === id)
-      const verdict = honestVerdict({
-        command,
-        steps: runState?.steps ?? [],
-        parked: [],
-        response: finished.response,
-      })
-      await journal.finishRun(id, { state: 'finished', ...verdict })
-      await recordRunToHive(id, 'verdict')
-      await patchEntry(id, {
-        state: verdict.verdict === 'incomplete' ? 'failed' : 'answered',
-        headline: verdict.headline,
-        detail: [summarizeBrainRun(finished), verdict.detail].filter(Boolean).join('\n'),
-        finishedAt: new Date().toISOString(),
-      })
-      return
-    }
-    /* Every non-answer, non-park is a handoff: the Mac planner gets the
-     * command unchanged, and the entry says the brain stepped aside. */
-    brainNote = summarizeBrainRun(finished)
-    await journal.finishRun(id, {
-      state: 'handed-off',
-      verdict: 'handoff',
-      headline: brainNote,
-    })
-    await recordRunToHive(id, 'verdict')
-  } else if (route.cooldownMs) {
-    /* Distinct from "no brain configured": this one is coming back. */
-    brainNote = `Brain skipped — ${route.reason}`
-  }
-
   const commandText = buildCommandText(command, page)
   const stored = await api.storage.local.get(SESSION_KEY)
   const sessionId = String(stored[SESSION_KEY] ?? '').trim()
@@ -1995,9 +1776,7 @@ async function runConsoleCommand({ id, command, page, config }) {
   }
 
   if (planOutcome.kind !== 'execute') {
-    const patch = outcomeToPatch(planOutcome)
-    if (brainNote) patch.detail = [brainNote, patch.detail].filter(Boolean).join('\n')
-    await patchEntry(id, patch)
+    await patchEntry(id, outcomeToPatch(planOutcome))
     return
   }
 
@@ -2020,7 +1799,7 @@ async function runConsoleCommand({ id, command, page, config }) {
     await patchEntry(id, {
       headline: 'Plan is all browser work — running it in this browser…',
     })
-    await executePlanLocally({ id, command, steps: affinity.steps, config, brainNote })
+    await executePlanLocally({ id, command, steps: affinity.steps, config })
     return
   }
 
@@ -2054,7 +1833,7 @@ async function runConsoleCommand({ id, command, page, config }) {
  * stops the run and parks in the approval queue; a failed step stops the run
  * honestly rather than pressing on into a page in an unknown state.
  */
-async function executePlanLocally({ id, command, steps, config, brainNote = '' }) {
+async function executePlanLocally({ id, command, steps, config }) {
   const journal = executionJournal()
   await journal.beginRun({ runId: id, command, route: 'local-plan' })
   await recordRunToHive(id, 'claim')
@@ -2116,7 +1895,7 @@ async function executePlanLocally({ id, command, steps, config, brainNote = '' }
       await patchEntry(id, {
         state: 'failed',
         headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
-        detail: [brainNote, verdict.detail].filter(Boolean).join('\n'),
+        detail: verdict.detail,
         finishedAt: new Date().toISOString(),
       })
       return
@@ -2139,16 +1918,12 @@ async function executePlanLocally({ id, command, steps, config, brainNote = '' }
         : 'executed',
     headline: verdict.headline,
     detail: [
-      brainNote,
       `Ran in this browser (affinity: all steps browser-capable).`,
       verdict.detail,
       ...(parked.length
         ? [
-            `Waiting in this browser's approval queue (${parked[0].id}).`,
-            /* TODO(popup pass): render localPendingApprovals + send
-             * affinity:resolve-approval — popup files are fenced off in this
-             * change. */
-            'Approval UI lands with the next popup pass.',
+            `The parked step (${parked[0].id}) was recorded and did not run. ` +
+              'Re-run the command when you want to do it yourself.',
           ]
         : []),
     ]
@@ -2156,131 +1931,6 @@ async function executePlanLocally({ id, command, steps, config, brainNote = '' }
       .join('\n'),
     finishedAt: new Date().toISOString(),
   })
-}
-
-/**
- * The brain's model call: POST /v1/infer on the relay
- * (cloud-relay/nodeInference.js). Not reached until the owner configures a
- * browser_node credential — see the header of src/brain.js. No key material
- * lives here; the upstream provider key never leaves the relay.
- *
- * Deliberately absent from the body: `deviceId`, which the relay takes from
- * the credential and ignores here, and `model`, which is allow-listed
- * server-side — naming one outside the list is a 400 rather than a silent
- * substitution, and this loop has no reason to name one at all.
- */
-function brainCallModel(brainConfig, messages) {
-  /* The retry POLICY is in brain.js where it is testable; this supplies only
-   * the transport. Each attempt gets its own timeout window. */
-  return callModelWithHeadroom((maxTokens) =>
-    postInference(brainConfig, messages, maxTokens),
-  )
-}
-
-async function postInference(brainConfig, messages, maxTokens) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 65_000)
-  let payload
-
-  try {
-    const response = await fetch(brainConfig.modelProxyUrl, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${brainConfig.deviceToken}`,
-      },
-      body: JSON.stringify({
-        messages,
-        /* Named on purpose. Omitting it does NOT get the 2048 ceiling — the
-         * relay's default is 512, a quarter of it. */
-        maxTokens,
-        /* The prompt demands exactly one JSON object; asking the transport for
-         * the same thing costs nothing and removes the commonest parse
-         * failure. parseToolCalls still tolerates prose, because a refusal can
-         * arrive as prose whatever the request asked for. */
-        responseFormat: 'json_object',
-      }),
-      signal: controller.signal,
-    })
-
-    payload = await response.json().catch(() => null)
-
-    if (!response.ok) {
-      const verdict = interpretInferError({ status: response.status, payload })
-
-      /*
-       * The relay's own answer to "when is asking again worth it", stored so a
-       * LATER command honours it. Written here rather than thrown upward
-       * because runBrainLoop reduces an error to a handoff reason, and this is
-       * the last point that still has the number. Best effort: a storage write
-       * that fails must not turn a refusal into a crash.
-       */
-      if (verdict.retryAt) {
-        await api.storage.local
-          .set({ brainRetryAfterAt: verdict.retryAt })
-          .catch(() => {})
-      }
-
-      const error = new Error(verdict.message)
-      error.code = verdict.code
-      /* Read by runBrainLoop: a settled refusal hands off at once instead of
-       * being retried into the same answer. */
-      error.fatal = verdict.fatal
-      throw error
-    }
-
-    /* A budget the relay could not durably enforce is worth saying out loud
-     * once: the ceiling in the response is advisory, not applied. */
-    if (payload?.budget && payload.budget.enforced === false) {
-      console.warn(
-        'relay inference budget is advisory: no durable counter was reachable.',
-      )
-    }
-  } finally {
-    clearTimeout(timeout)
-  }
-
-  /*
-   * How the generation ENDED is handed up rather than resolved here: in JSON
-   * mode a cut-off or filtered reply is unparseable and would otherwise look
-   * like a garbage answer, which is the diagnosis these fields exist to
-   * prevent. What to do about each ending is callModelWithHeadroom's decision,
-   * not this function's.
-   */
-  if (payload?.truncated) {
-    console.warn(
-      `relay inference was cut off at ${maxTokens} tokens (finishReason: ${
-        payload?.finishReason ?? 'unknown'
-      }).`,
-    )
-  }
-
-  return {
-    content: String(payload?.content ?? ''),
-    truncated: payload?.truncated === true,
-    /* Passed through undegraded: `complete` is a tri-state and null ("the
-     * provider told us nothing") must not arrive here as false. */
-    complete: payload?.complete ?? null,
-    refusal: payload?.refusal ?? null,
-    finishReason: payload?.finishReason ?? null,
-  }
-}
-
-/**
- * The brain's tools ARE the extension's own 11 page commands, run through the
- * same validation and the same privacy boundary as agent-issued commands —
- * a locally minted command gets no shortcut past sanitizeExtraction.
- */
-async function runBrainTool(call, config) {
-  const { type, params } = validateCommand({
-    commandId: `brain-${crypto.randomUUID()}`,
-    createdAt: new Date().toISOString(),
-    action: { type: call?.type, params: call?.params ?? {} },
-  })
-  const { result } = await runCommand(type, params, config)
-  return sanitizeExtraction(result).result
 }
 
 function browserLabel() {
@@ -2395,69 +2045,6 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === 'approval:decide') {
     void decideApproval(message)
-      .then(sendResponse)
-      .catch((error) =>
-        sendResponse({ ok: false, error: error?.message || String(error) }),
-      )
-    return true
-  }
-
-  /*
-   * LOCAL execution's approval seam (execution-status.js) — distinct from
-   * 'approval:decide' above, which answers HIVE-originated approval cards
-   * over the mesh. These three answer the future popup pane for steps this
-   * extension itself parked; approving one executes it here and nowhere else.
-   */
-  if (message?.type === APPROVAL_MESSAGE_TYPES.status) {
-    void executionJournal()
-      .getStatus()
-      .then(sendResponse)
-      .catch((error) => sendResponse({ error: error?.message || String(error) }))
-    return true
-  }
-
-  if (message?.type === APPROVAL_MESSAGE_TYPES.listPending) {
-    void executionJournal()
-      .listPendingApprovals()
-      .then(sendResponse)
-      .catch((error) => sendResponse({ error: error?.message || String(error) }))
-    return true
-  }
-
-  if (message?.type === APPROVAL_MESSAGE_TYPES.resolve) {
-    void executionJournal()
-      .resolveApproval(String(message.id ?? ''), message.verdict)
-      .then(async (entry) => {
-        if (!entry) return { ok: false, error: 'No such pending approval.' }
-        if (entry.state === 'expired') {
-          await executionJournal().finishRun(entry.runId, {
-            state: 'expired',
-            verdict: 'parked',
-            headline:
-              'The parked step expired before it was approved. Nothing was submitted, cancelled or sent.',
-          })
-          await recordRunToHive(entry.runId, 'verdict')
-          return {
-            ok: false,
-            error: 'That approval expired (steps stay approvable for 10 minutes). Re-run the command.',
-          }
-        }
-        if (entry.state === 'declined') {
-          await executionJournal().finishRun(entry.runId, {
-            state: 'declined',
-            verdict: 'parked',
-            headline: 'You declined the parked step. Nothing was submitted, cancelled or sent.',
-          })
-          await recordRunToHive(entry.runId, 'verdict')
-          await patchEntry(entry.runId, {
-            state: 'refused',
-            headline: 'Declined — the irreversible step was not run.',
-            finishedAt: new Date().toISOString(),
-          })
-          return { ok: true, ran: false }
-        }
-        return executeApprovedStep(entry)
-      })
       .then(sendResponse)
       .catch((error) =>
         sendResponse({ ok: false, error: error?.message || String(error) }),

@@ -35,8 +35,8 @@
  *      effect did NOT happen.
  *
  * Everything here is pure — no browser APIs, no fetch, no storage — so the
- * whole policy is unit-testable in plain node, the same split brain.js and
- * relay-peer.js use. background.js supplies the impure edges.
+ * whole policy is unit-testable in plain node, the same split relay-peer.js
+ * uses. background.js supplies the impure edges.
  */
 import { COMMAND_TYPES } from './bridge-core.js'
 
@@ -409,16 +409,6 @@ export function summarizeEffects(steps = []) {
 }
 
 /**
- * Does the command ASK for an outward effect? Same vocabulary as the step
- * classifier, applied to the owner's own words — "cancel my recurring
- * investments" wants a cancellation, and a run that never performed one must
- * not be allowed to sound as if it did.
- */
-export function commandWantsOutwardEffect(command) {
-  return textLooksOutward(command)
-}
-
-/**
  * The honest completion line for a locally executed run.
  *
  * verdict:
@@ -433,7 +423,11 @@ export function commandWantsOutwardEffect(command) {
  */
 export function honestVerdict({ command, steps = [], parked = [], response = '' } = {}) {
   const effects = summarizeEffects(steps)
-  const wanted = commandWantsOutwardEffect(command)
+  /* Does the command ASK for an outward effect? Same vocabulary as the step
+   * classifier, applied to the owner's own words — "cancel my recurring
+   * investments" wants a cancellation, and a run that never performed one
+   * must not be allowed to sound as if it did. */
+  const wanted = textLooksOutward(command)
   const said = String(response ?? '').trim()
 
   if (parked.length) {
