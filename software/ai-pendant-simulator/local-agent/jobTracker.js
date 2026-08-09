@@ -39,7 +39,15 @@ export function readJobs() {
   return readJsonWithRecovery(jobsPath, { fallback: [], ...ARRAY_STORE })
 }
 
-export function recordJobStart({ type, command, sessionId = null, source = 'local' }) {
+export function recordJobStart({
+  type,
+  command,
+  sessionId = null,
+  source = 'local',
+  /* Paths only, exactly as the caller was given them — the row says what was
+   * attached to the request, even when the run later refuses to use it. */
+  attachments = null,
+}) {
   const now = new Date().toISOString()
   const job = {
     jobId: `local_${crypto.randomUUID()}`,
@@ -48,6 +56,9 @@ export function recordJobStart({ type, command, sessionId = null, source = 'loca
     command: String(command ?? ''),
     sessionId,
     source,
+    ...(Array.isArray(attachments) && attachments.length
+      ? { attachments: attachments.map((entry) => String(entry)) }
+      : {}),
     result: null,
     error: null,
     createdAt: now,

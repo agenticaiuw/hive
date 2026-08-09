@@ -1,3 +1,8 @@
+import {
+  attachmentsPromptBlock,
+  describeAttachmentProblems,
+  prepareAttachments,
+} from './attachments.js'
 import { buildConversationContext } from './conversationContext.js'
 import { estimateTokens, projectTurnContext } from './contextProjection.js'
 import { describeResume, resumeContext } from './contextResume.js'
@@ -36,7 +41,7 @@ const INSTANT_INFO_TYPES = new Set([
 const FAST_PATH_ENABLED = process.env.PENDANT_FAST_PATH !== 'off'
 
 export async function orchestratePlan({
-  command,
+  command: rawCommand,
   sessionId,
   source = 'local',
   signal = null,
@@ -47,8 +52,19 @@ export async function orchestratePlan({
    * existed.
    */
   contextHandle = null,
+  /*
+   * Absolute paths the HUD attached (mac-menubar 06171f1). Vetted before any
+   * other work: each must exist and be a regular file, and credential paths
+   * are refused by name — attachments.js says why. When the array is present
+   * the redundant " [attached: …]" suffix is stripped from the command so the
+   * model sees each path exactly once, in the attachments block.
+   */
+  attachments = null,
 }) {
   const { throwIfAborted } = await import('./jobControl.js')
+  const prepared = prepareAttachments({ command: rawCommand, attachments })
+  const command = prepared.command
+  const attachmentPaths = prepared.attachments.map((file) => file.path)
   let activeSessionId = sessionId
 
   if (!activeSessionId) {
@@ -84,6 +100,51 @@ export async function orchestratePlan({
       ],
     })
 
+    /*
+     * Attachments are settled before any context is built or model is asked:
+     * one bad path fails the whole request, loudly. Planning around a missing
+     * file yields a plan that reads a file that is not there, and planning
+     * with "the attachments that survived" is a request the owner never made.
+     */
+    if (prepared.problems.length) {
+      const refusal = describeAttachmentProblems(prepared.problems)
+      addThinkingStep(trace.traceId, {
+        id: 'attachments',
+        label: 'Could not use the attached files',
+        detail: refusal,
+        status: 'done',
+        meta: { problems: prepared.problems },
+      })
+      const finished = finishThinkingTrace(trace.traceId, {
+        status: 'failed',
+        summary: refusal,
+      })
+      return {
+        status: 'unsupported',
+        command,
+        actions: [],
+        requiresConfirmation: true,
+        error: refusal,
+        planner: 'attachments',
+        attachments: attachmentPaths,
+        attachmentProblems: prepared.problems,
+        sessionId: activeSessionId,
+        thinking: finished,
+      }
+    }
+
+    if (prepared.attachments.length) {
+      addThinkingStep(trace.traceId, {
+        id: 'attachments',
+        label: `Attached ${prepared.attachments.length} file${
+          prepared.attachments.length === 1 ? '' : 's'
+        }`,
+        detail: attachmentPaths.join(', '),
+        status: 'done',
+        meta: { attachments: attachmentPaths },
+      })
+    }
+
     addThinkingStep(trace.traceId, {
       id: 'context',
       label: 'Checking recent chat and memory',
@@ -117,10 +178,15 @@ export async function orchestratePlan({
      * Pick the cheapest path that reaches the same result. This never refuses
      * anything: a deterministic hit is a claim that no planner could do better,
      * and every other tier is just a starting point that can escalate.
+     *
+     * A request with attachments always goes to the planner: the deterministic
+     * templates know nothing about attached files, so a fast-path hit would run
+     * a plan that ignores the very files the owner just handed over.
      */
-    const deterministic = FAST_PATH_ENABLED
-      ? await matchDeterministic(workingCommand).catch(() => null)
-      : null
+    const deterministic =
+      FAST_PATH_ENABLED && !prepared.attachments.length
+        ? await matchDeterministic(workingCommand).catch(() => null)
+        : null
     const route = classifyTier(workingCommand, { source, deterministic })
 
     addThinkingStep(trace.traceId, {
@@ -257,6 +323,22 @@ export async function orchestratePlan({
           },
         ],
       })
+    }
+
+    /*
+     * The attachments block travels exactly the way context does: appended to
+     * context.promptBlock, which llmPlanner sends ahead of "Current request:"
+     * and whose tail the tool-discovery pre-pass reads (so `files` gets
+     * picked). Appended AFTER the projection swap above — the swap REPLACES
+     * promptBlock wholesale, and a block appended before it would be lost.
+     */
+    if (prepared.attachments.length) {
+      context.promptBlock = [
+        context.promptBlock,
+        attachmentsPromptBlock(prepared.attachments),
+      ]
+        .filter(Boolean)
+        .join('\n\n')
     }
 
     if (contextHandle) {
@@ -398,6 +480,16 @@ export async function orchestratePlan({
       if (plan.usage) usage.push(plan.usage)
     }
 
+    /*
+     * Every way out of this function spreads `plan`, so stamping once here
+     * puts the vetted paths on the ready plan, the instant answer and the
+     * unsupported refusal alike — which is what the job store and the
+     * dashboards read back as "this run had these files".
+     */
+    if (attachmentPaths.length) {
+      plan = { ...plan, attachments: attachmentPaths }
+    }
+
     const routing = () => ({
       command: workingCommand,
       tier: effectiveTier,
@@ -448,6 +540,11 @@ export async function orchestratePlan({
         traceId: trace.traceId,
         command: workingCommand,
       })
+      /* The realizer deliberately rebuilds the plan from scratch, which drops
+       * the stamp applied above; the run still had its files. */
+      if (attachmentPaths.length) {
+        plan = { ...plan, attachments: attachmentPaths }
+      }
     }
 
     if (plan.status === 'instant') {
