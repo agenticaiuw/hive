@@ -459,15 +459,24 @@ export async function handleWork(work) {
           // Await so the final completeWork cannot race ahead of this patch.
           if (plan.executed) {
             try {
+              /*
+               * Trimmed like the final report. This one has no pendantSpeech of
+               * its own, but it still spreads `plan` -- and therefore
+               * plan.execution, which carries the agent's whole activity-log
+               * ring. Untrimmed it was a ~45 MB body that the relay refused
+               * (413) and that also blew the agent's own /pipeline/events cap,
+               * so the dashboard lost the very "executed" signal this report
+               * exists to deliver.
+               */
               await completeWork(work.jobId, {
                 ok: true,
                 partial: true,
-                result: {
+                result: resultForWire({
                   ...plan,
                   executed: true,
                   phase: 'executed',
                   pendantSpeech: undefined,
-                },
+                }),
               })
             } catch (err) {
               console.warn(

@@ -121,19 +121,55 @@ export function pendantSpeechForWire(speech) {
 const WIRE_WALK_MAX_DEPTH = 8
 const WIRE_WALK_MAX_NODES = 5000
 
+/*
+ * The single canonical home for this job's reply audio. Every relay-side reader
+ * of audio -- pendantSpeechForJob, /v1/pendant/jobs/:jobId/speech, jobs.js's TTS
+ * event, history.js -- reads exactly this path, so it is the one position that
+ * must carry bytes. Anything else holding the same audio is duplication.
+ */
+export const CANONICAL_SPEECH_PATH = 'pendantSpeech'
+
+/* Audio small enough that a reference costs more than the bytes. */
+const WIRE_DEDUPE_MIN_CHARS = 4096
+
 /**
- * Apply the wire form to every pendantSpeech payload a result carries, at any
- * depth. Returns a new object; the caller's own copy (and its raw PCM) is left
- * untouched.
+ * The result as it should cross the wire: the reply audio carried ONCE at
+ * `pendantSpeech`, everything else referencing it instead of repeating it.
  *
- * Depth matters: an executed plan carries its runner's output verbatim
- * (bridge.js does `plan.execution = execution`), and a briefing action attaches
- * its own full-length payload to the result it returns
- * (computerControl.js). Stripping only the top level left that nested duplicate
- * on the wire — a ~29 MB body whose D1 write then failed on size.
+ * Measured on the live 2026-08-08 runs, a single 58.5 s briefing is ~3.9 MB, but
+ * one posted body was 45,967,944 B. The excess was not this job's audio at all:
+ * `/execute` returns `logs: readLogs()` -- the agent's GLOBAL 200-entry activity
+ * ring (logger.js), 40 MB on disk, holding the audio of ~30 earlier briefings --
+ * and bridge.js spreads that whole response into the relay result. So the wire
+ * form does two things:
+ *
+ *   - the log ring is summarised, not shipped. It is per-Mac history, not part
+ *     of this job, no relay or dashboard reader consumes `result.logs`, and the
+ *     entries stay on disk where the agent already keeps them;
+ *   - identical audio appearing anywhere else becomes a reference to the
+ *     canonical path rather than a second copy of the bytes.
+ *
+ * Non-audio detail is preserved: `result.results` entries keep their fields
+ * because server.js and history.js summarise actions from them.
  */
 export function resultForWire(result) {
-  return walkForWire(result, { nodes: 0 }, 0)
+  if (!result || typeof result !== 'object') return result
+
+  const state = { nodes: 0, seen: new Map(), canonicalPayload: null }
+  /* Register the canonical payload FIRST so it is the copy that keeps bytes,
+   * whatever order the walk happens to reach the others in. Its own identity is
+   * remembered too, so it never dedupes against its own registration. */
+  const canonical = result.pendantSpeech
+  if (canonical && typeof canonical === 'object') {
+    state.canonicalPayload = canonical
+    for (const key of ['audioBase64', 'compressedAudioBase64']) {
+      const value = canonical[key]
+      if (typeof value === 'string' && value.length >= WIRE_DEDUPE_MIN_CHARS) {
+        state.seen.set(value, CANONICAL_SPEECH_PATH)
+      }
+    }
+  }
+  return walkForWire(result, state, 0)
 }
 
 function walkForWire(value, state, depth) {
@@ -154,21 +190,61 @@ function walkForWire(value, state, depth) {
     return value
   }
 
+  /* The canonical payload is the one position that keeps its bytes. */
+  const isCanonical = value === state.canonicalPayload
+
   /* A speech payload is recognised by its own shape, so it is handled wherever
    * it sits rather than only under a key named `pendantSpeech`. */
   if (typeof value.audioBase64 === 'string' && hasServableOpus(value)) {
-    return pendantSpeechForWire(value)
+    const wireForm = pendantSpeechForWire(value)
+    return isCanonical ? wireForm : dedupeAudioFields(wireForm, state)
   }
 
   let changed = false
   const next = {}
   for (const [key, entry] of Object.entries(value)) {
     state.nodes += 1
+    if (key === 'logs' && Array.isArray(entry)) {
+      changed = true
+      next.logs = {
+        elided: 'agent activity log kept on the Mac, not shipped to the relay',
+        length: entry.length,
+      }
+      continue
+    }
     const mapped = walkForWire(entry, state, depth + 1)
     if (mapped !== entry) changed = true
     next[key] = mapped
   }
-  return changed ? next : value
+  const walked = changed ? next : value
+  return isCanonical ? walked : dedupeAudioFields(walked, state)
+}
+
+/* Bytes already carried elsewhere become a pointer to where they live. */
+function dedupeAudioFields(payload, state) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload
+  }
+
+  let next = payload
+  for (const key of ['audioBase64', 'compressedAudioBase64']) {
+    const value = next[key]
+    if (typeof value !== 'string' || value.length < WIRE_DEDUPE_MIN_CHARS) {
+      continue
+    }
+    const existing = state.seen.get(value)
+    if (existing === undefined) {
+      state.seen.set(value, null)
+      continue
+    }
+    if (next === payload) next = { ...payload }
+    delete next[key]
+    next.audioOmitted = true
+    /* Null marks the first sighting of audio that is not the canonical reply;
+     * it is still a duplicate the second time round, just not of pendantSpeech. */
+    next.audioSameAs = existing || CANONICAL_SPEECH_PATH
+  }
+  return next
 }
 
 /**

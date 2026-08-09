@@ -9,6 +9,7 @@ import {
   clearPendantSpeechCache,
   encodePendantSpeechOpus,
   extractWavePcm,
+  CANONICAL_SPEECH_PATH,
   hasServableOpus,
   pendantSpeechCacheSize,
   pendantSpeechForWire,
@@ -255,7 +256,16 @@ test('nested briefing audio is stripped too, wherever it rides in the result', (
     undefined,
     'the nested copy is what overflowed the row; it must go too',
   )
-  assert.equal(wire.execution.results[0].pendantSpeech.compressedAudioBase64, nested.compressedAudioBase64)
+  // The nested copy's opus is the same bytes as the canonical one, so it is a
+  // reference now rather than a second copy.
+  assert.equal(
+    wire.execution.results[0].pendantSpeech.compressedAudioBase64,
+    undefined,
+  )
+  assert.equal(
+    wire.execution.results[0].pendantSpeech.audioSameAs,
+    'pendantSpeech',
+  )
   assert.equal(wire.execution.results[0].seconds, 390, 'non-audio detail survives')
   assert.equal(wire.response, 'Your briefing is ready.')
   // Non-mutating: the agent's own result still has every byte.
@@ -270,4 +280,92 @@ test('resultForWire leaves results without audio exactly as they are', () => {
   const plain = { response: 'Done.', executed: true, actions: [] }
   assert.equal(resultForWire(plain), plain)
   assert.equal(resultForWire(null), null)
+})
+
+/* ---------------------------------------------------------------------------
+ * The non-duplication invariant. One 58.5 s briefing is ~3.9 MB, yet a live
+ * posted body was 45,967,944 B: /execute returns `logs: readLogs()` -- the
+ * agent's GLOBAL 200-entry ring, 40 MB on disk, holding ~30 earlier briefings'
+ * audio -- and the bridge spread that whole response into the relay result.
+ * The audio must cross the wire ONCE, at the canonical path every relay reader
+ * actually reads, and the ring must not cross it at all.
+ * ------------------------------------------------------------------------- */
+
+/** Every base64-ish blob in a payload, with how many times it appears. */
+function blobOccurrences(value, minChars = 4096, counts = new Map()) {
+  if (Array.isArray(value)) {
+    for (const entry of value) blobOccurrences(entry, minChars, counts)
+  } else if (value && typeof value === 'object') {
+    for (const entry of Object.values(value)) {
+      if (typeof entry === 'string' && entry.length > minChars) {
+        counts.set(entry, (counts.get(entry) || 0) + 1)
+      } else {
+        blobOccurrences(entry, minChars, counts)
+      }
+    }
+  }
+  return counts
+}
+
+test('the reply audio crosses the wire exactly once, however many places hold it', () => {
+  const speech = () => speechFixture({ pcmBytes: 900_000 })
+  const result = {
+    response: 'Your briefing is ready.',
+    executed: true,
+    pendantSpeech: speech(),
+    execution: {
+      ok: true,
+      results: [{ type: 'research_brief', seconds: 58.5, pendantSpeech: speech() }],
+      trace: { rendered: { pendantSpeech: speech() } },
+    },
+  }
+
+  const wire = resultForWire(result)
+  const counts = blobOccurrences(wire)
+  assert.equal(
+    Math.max(0, ...counts.values()),
+    1,
+    'no audio blob may appear twice at any depth',
+  )
+
+  // The one copy lives where every relay reader looks for it.
+  assert.ok(wire.pendantSpeech.compressedAudioBase64)
+  assert.equal(wire.pendantSpeech.audioSameAs, undefined)
+  // The others point at it instead of repeating it, and keep their metadata.
+  for (const copy of [
+    wire.execution.results[0].pendantSpeech,
+    wire.execution.trace.rendered.pendantSpeech,
+  ]) {
+    assert.equal(copy.compressedAudioBase64, undefined)
+    assert.equal(copy.audioBase64, undefined)
+    assert.equal(copy.audioSameAs, CANONICAL_SPEECH_PATH)
+    assert.equal(copy.audioOmitted, true)
+    assert.equal(copy.format, 's16le', 'metadata survives the reference')
+  }
+  assert.equal(wire.execution.results[0].seconds, 58.5)
+})
+
+test("the agent's global activity ring is summarised, never shipped", () => {
+  const noisy = Array.from({ length: 200 }, (_, index) => ({
+    id: `log_${index}`,
+    command: 'Give me the top world and US news headlines',
+    payload: 'z'.repeat(50_000),
+  }))
+  const result = {
+    response: 'Done.',
+    execution: { ok: true, logs: noisy, results: [] },
+  }
+
+  const before = Buffer.byteLength(JSON.stringify(result), 'utf8')
+  const wire = resultForWire(result)
+  const after = Buffer.byteLength(JSON.stringify(wire), 'utf8')
+
+  assert.ok(before > 10_000_000, 'the fixture must be the real order of size')
+  assert.ok(after < 2_000, `the ring must not cross the wire, got ${after} B`)
+  // Summarised, not silently dropped: the count still says what was there.
+  assert.equal(wire.execution.logs.length, 200)
+  assert.match(wire.execution.logs.elided, /not shipped to the relay/)
+  // Everything else is untouched.
+  assert.equal(wire.response, 'Done.')
+  assert.equal(wire.execution.ok, true)
 })
