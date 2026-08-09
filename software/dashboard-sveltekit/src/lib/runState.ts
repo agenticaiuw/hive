@@ -25,6 +25,17 @@
  *                   they cannot disagree; the published record simply carries
  *                   better-worded reasons.
  *   failed          `run.status === "failed"`, or an event failed.
+ *   incomplete      a goal-grounded terminal verdict — jobTracker's
+ *                   'incomplete' (every step ran, the goal was not met) or
+ *                   'cancelled'. Read BEFORE the reply text, because such a
+ *                   run usually ships an honest summary of how far it got and
+ *                   the answered branch keys on exactly that text; without
+ *                   this, a goal-not-met run would headline as "Answered".
+ *                   The table lives in hiveFeed.js (`terminalPhaseFor`) and is
+ *                   the same one jobs.ts renders, so the hero and the feed
+ *                   cannot disagree. read_only / handed_off / finished /
+ *                   recorded come from the same table as terminal-but-not-Done
+ *                   (`no-result` phase, neutral tone, their own words).
  *   listening       the `transcription` stage is still open on a fresh run.
  *   thinking        the last `agent` event is `status: "active"`.
  *   answered        there is reply text and the agent stage closed `done`.
@@ -40,6 +51,7 @@
 
 import { hasUsefulTranscript, isTranscribing, type JsonRecord } from "$lib/pipeline";
 import { isAwaitingApproval, type JobView } from "$lib/jobs";
+import { terminalPhaseFor } from "$lib/hiveFeed.js";
 
 export type RunPhase =
   | "nothing-yet"
@@ -47,6 +59,7 @@ export type RunPhase =
   | "thinking"
   | "needs-approval"
   | "answered"
+  | "incomplete"
   | "no-result"
   | "failed";
 
@@ -58,9 +71,6 @@ export type RunPhase =
  * A spinner that never stops is a fabricated progress indicator.
  */
 const STALE_AFTER_MS = 180_000;
-
-/** The agent's own run status for a plan it is holding. */
-export const NEEDS_APPROVAL_STATUS = "needs_approval";
 
 export type BlockedReason = { type: string; reason: string };
 
@@ -202,8 +212,10 @@ export function runState(run: JsonRecord | null): RunState {
    */
   const published =
     run.approval && typeof run.approval === "object" ? run.approval : null;
+  // `isAwaitingApproval` rather than the one pipeline word: a merged Mac-local
+  // job parks as `plan_ready`, which is the same fact in jobTracker's voice.
   const parked =
-    run.status === NEEDS_APPROVAL_STATUS ||
+    isAwaitingApproval(run.status) ||
     Boolean(published) ||
     agentEvent?.status === "waiting";
 
@@ -258,6 +270,27 @@ export function runState(run: JsonRecord | null): RunState {
       label: "Couldn't do it",
       detail: message ? "" : "The run was recorded as failed with no message.",
       error: message,
+    };
+  }
+
+  /*
+   * Goal-grounded terminal verdicts (jobTracker / browser-task vocabulary),
+   * read BEFORE the reply: an 'incomplete' run usually carries an honest
+   * summary of how far it got, and the answered branch below keys on exactly
+   * that text — without this, a goal-not-met run would headline as "Answered".
+   * `jobStatus` (the Mac job's own verdict) outranks the pipeline's `status`,
+   * the precedence `jobFromRelayHistory` already codified.
+   */
+  const terminal =
+    terminalPhaseFor(run.jobStatus) ?? terminalPhaseFor(run.status);
+  if (terminal) {
+    return {
+      ...base,
+      phase: terminal.phase,
+      tone: terminal.tone,
+      label: terminal.label,
+      // The agent's own account of how far it got — context, never the answer.
+      detail: spokenReply || String(run.error || "").trim(),
     };
   }
 

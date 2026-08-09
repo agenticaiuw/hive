@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Job records cross two backends and are schemaless at this display boundary. */
 
-import { hiveNodeFor } from "$lib/hiveFeed.js";
+import { hiveNodeFor, terminalPhaseFor } from "$lib/hiveFeed.js";
 
 /**
  * One job shape for both backends.
@@ -125,19 +125,16 @@ export function statusLabel(status: unknown) {
   if (value === "queued") return "Queued";
   if (value === "completed") return "Done";
   if (value === "failed") return "Failed";
-  if (value === "cancelled") return "Cancelled";
   if (value === "transcribing") return "Transcribing";
   /*
-   * The browser node's honest vocabulary (browserTaskHistory.js), mirrored
-   * here so a run that finished without doing the thing is never worded "Done".
-   * `read_only`/`handed_off` humanize to "Read Only"/"Handed Off"; the explicit
-   * forms below keep the sentence case the rest of this table uses.
+   * The goal-grounded terminal words — jobTracker's 'incomplete'/'cancelled'
+   * and browserTaskHistory's read_only/handed_off/finished/recorded — come
+   * from the one table the hero also renders (`terminalPhaseFor`), so a run
+   * the feed calls "Incomplete" can never headline as anything else, and a
+   * run that finished without doing the thing is never worded "Done".
    */
-  if (value === "incomplete") return "Incomplete";
-  if (value === "read_only") return "Read only";
-  if (value === "handed_off") return "Handed off";
-  if (value === "finished") return "Finished";
-  if (value === "recorded") return "Recorded";
+  const terminal = terminalPhaseFor(value);
+  if (terminal) return terminal.label;
   return humanizeKey(value);
 }
 
@@ -146,13 +143,13 @@ export function statusTone(status: unknown): "ok" | "run" | "warn" | "off" {
   const value = String(status || "");
   if (isAwaitingApproval(value)) return "warn";
   if (isRunningStatus(value)) return "run";
-  // 'incomplete' is a finished run that did not meet its goal — attention, not
-  // the neutral tone a merely-terminal state gets, and never the "ok" of Done.
-  if (value === "failed" || value === "cancelled" || value === "incomplete") {
-    return "warn";
-  }
-  // Only a genuine success is "ok". read_only / handed_off / finished /
-  // recorded are terminal-but-not-Done, so they stay neutral.
+  if (value === "failed") return "warn";
+  // 'incomplete'/'cancelled' ended without meeting their goal — attention,
+  // never the "ok" of Done; read_only / handed_off / finished / recorded are
+  // terminal-but-not-Done and stay neutral. Same table the hero renders.
+  const terminal = terminalPhaseFor(value);
+  if (terminal) return terminal.tone === "attention" ? "warn" : "off";
+  // Only a genuine success is "ok".
   if (value === "completed") return "ok";
   return "off";
 }

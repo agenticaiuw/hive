@@ -108,6 +108,7 @@
     type JsonRecord,
   } from "$lib/pipeline";
   import { formatWhen, nodeMeta, statusLabel, type JobView } from "$lib/jobs";
+  import { mergeMacLocalHistory, pickHero } from "$lib/hiveFeed.js";
   import {
     pendingApprovals,
     runState,
@@ -167,8 +168,13 @@
       const nextRuns: JsonRecord[] = Array.isArray(payload.pipeline)
         ? payload.pipeline
         : [];
-      // Drop a pick whose run has aged out; never invent one.
-      if (selectedId && !nextRuns.some((run) => run.pipelineId === selectedId)) {
+      // Drop a pick that has aged out of BOTH feeds (pipeline runs and the
+      // Mac-local jobs merged into Recent); never invent one.
+      if (
+        selectedId &&
+        !nextRuns.some((run) => run.pipelineId === selectedId) &&
+        !jobs.some((job) => job.id === selectedId)
+      ) {
         selectedId = "";
       }
     } catch (refreshError) {
@@ -203,7 +209,8 @@
       if (
         selectedId &&
         nextRuns.length &&
-        !nextRuns.some((run) => run.pipelineId === selectedId)
+        !nextRuns.some((run) => run.pipelineId === selectedId) &&
+        !jobs.some((job) => job.id === selectedId)
       ) {
         selectedId = "";
       }
@@ -373,9 +380,25 @@
   const snapshotRuns = $derived<JsonRecord[]>(
     Array.isArray(snapshot?.pipeline) ? snapshot!.pipeline : [],
   );
+  /* Pipeline runs ONLY. Kept separate from `feed` on purpose: the mic
+   * diagnosis (`newestRun`/`latestBad`) reads voice runs, and a newer typed
+   * HUD job must not mask a bad transcript. */
   const runs = $derived<JsonRecord[]>(
     liveRuns.length ? liveRuns : snapshotRuns,
   );
+
+  /*
+   * The hero/Recent candidate set: every hive node's work in one list.
+   * Pipeline runs plus the owner's Mac-local jobs (the floating HUD and the
+   * on-Mac composer), which run through the agent's own /plan+/execute and
+   * never enter the pipeline — so the hero used to sit on a stale pendant run
+   * while newer Mac answers piled up unseen. Same fold History uses
+   * (mergeMacLocalHistory: owner sources only, deduped by id, newest first),
+   * fed from the `jobs` poll this page already runs for the approval cards —
+   * no second fetch. Bridge-executed relay work is stamped 'pendant' and is
+   * excluded by the fold, so a relay run can never appear twice.
+   */
+  const feed = $derived<JsonRecord[]>(mergeMacLocalHistory(runs, jobs));
 
   /* Plans the agent prepared and will not run until the owner says so. */
   const approvals = $derived(withBlockedReasons(pendingApprovals(jobs), runs));
@@ -384,34 +407,21 @@
   );
 
   /*
-   * The hero shows the newest run that has something to say. A run that is
-   * parked AND already has its own approval card on screen is skipped, so the
-   * owner's question is never printed twice on one page.
+   * The hero shows the newest entry — from ANY node — that has something to
+   * say. A run that is parked AND already has its own approval card on screen
+   * is skipped, so the owner's question is never printed twice on one page.
+   * The skip rules live in `pickHero` (hiveFeed.js) so the node test suite
+   * drives the exact code that decides; there is deliberately no fallback to
+   * "show something anyway" — if every entry is empty or already accounted
+   * for, the honest hero is the empty state.
    */
   const heroRun = $derived.by<JsonRecord | null>(() => {
-    const list = runs;
-    if (!list.length) return null;
+    if (!feed.length) return null;
     if (selectedId) {
-      const picked = list.find((run) => run.pipelineId === selectedId);
+      const picked = feed.find((run) => run.pipelineId === selectedId);
       if (picked && !isIdleRun(picked)) return picked;
     }
-    const worthShowing = (run: JsonRecord) => {
-      const state = runState(run);
-      if (state.phase === "nothing-yet") return false;
-      if (
-        state.phase === "needs-approval" &&
-        approvedCommands.has(state.question.trim().toLowerCase())
-      ) {
-        return false;
-      }
-      return true;
-    };
-    /*
-     * No fallback to "show something anyway". If every run is either empty or
-     * already accounted for by an approval card above, the honest hero is the
-     * empty state — not the same parked run printed a second time.
-     */
-    return list.find(worthShowing) ?? null;
+    return pickHero(feed, runState, { approvedCommands });
   });
 
   const selected = $derived<any>(heroRun);
@@ -693,7 +703,11 @@
     onNeedsYou={approvals.length ? scrollToApproval : null}
   >
     {#snippet details()}
-      {#if selected}
+      <!-- A Mac-local job never had a voice pipeline; rendering the six-stage
+           STT rail as permanent "waiting" would be fabricated telemetry, so
+           the developer layer stays off for those. Their evidence (actions,
+           outputs) already lives in the Jobs panel. -->
+      {#if selected && selected.kind !== "mac_local"}
         <TechnicalDetails
           run={selected}
           {telemetry}
@@ -710,12 +724,13 @@
     <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
   </section>
 
-  <!-- 4 · WHAT IT DID. -->
-  {#if runs.length}
+  <!-- 4 · WHAT IT DID — the merged hive feed, not pipeline runs alone, so a
+       HUD or on-Mac composer task is as visible here as a pendant run. -->
+  {#if feed.length}
     <section class="recent" aria-label="Recent commands">
       <p class="section-label">Recent</p>
       <ul class="recent-list">
-        {#each runs.slice(0, 8) as run (run.pipelineId)}
+        {#each feed.slice(0, 8) as run (run.pipelineId)}
           {@const state = runState(run)}
           <li>
             <button
@@ -793,12 +808,12 @@
     <Tile
       id="history"
       label="History"
-      tone={historyEntries.length || runs.length ? "ok" : "off"}
+      tone={historyEntries.length || feed.length ? "ok" : "off"}
       dotText="Messages, recordings, spoken replies"
       value={historyEntries.length
         ? `${historyEntries.length} runs`
-        : runs.length
-          ? `${runs.length} recent`
+        : feed.length
+          ? `${feed.length} recent`
           : "—"}
       open={openTile === "history"}
       onToggle={() => toggleTile("history")}
