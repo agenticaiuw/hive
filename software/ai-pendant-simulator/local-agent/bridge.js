@@ -414,10 +414,51 @@ export async function handleWork(work) {
       // classifyPlanForRoutine widens auto-run to everything except the
       // outward/irreversible deny-list — those still park, and the relay is
       // told so loudly rather than being handed a fake failure to retry.
+      //
+      // THE MODEL'S JUDGEMENT WINS, when it made one. The owner's ruling is
+      // that a spoken request IS the authorization, and that the model — not a
+      // table of action types — decides when something goes beyond what was
+      // asked and deserves a question. llmPlanner now returns
+      // requiresConfirmation false by default and raises it with a reason when
+      // the model wants to ask.
+      //
+      // This gate used to ignore that field entirely and re-decide from the
+      // action types, which broke the intent in both directions: a plan the
+      // model chose to ask about ran anyway if its actions happened to be
+      // allowlisted, and an in-scope plan parked because they were not. The
+      // pendant is the device the owner actually uses, so the override landed
+      // exactly where it hurt most.
+      //
+      // classifyPlan remains the fallback for plans that carry no verdict at
+      // all — the audio-native branch above hardcodes false, and a routine is
+      // still its own venue with its own deny-list.
+      // A spoken-only reply carries no actions, and "run it" is meaningless
+      // there — classifyPlan already answers that case correctly ("No actions
+      // to run"), so the model's verdict only applies when there is something
+      // to execute.
       const routineJob = isRoutineWork(work)
-      const verdict = routineJob
-        ? classifyPlanForRoutine(plan.actions)
-        : classifyPlan(plan.actions)
+      const hasActions = Array.isArray(plan.actions) && plan.actions.length > 0
+      const askedByModel = plan.requiresConfirmation === true
+      const modelReason =
+        plan.confirmReason || 'The planner asked for your approval on this step.'
+      const modelVerdict =
+        hasActions && !routineJob && typeof plan.requiresConfirmation === 'boolean'
+          ? {
+              autoRun: !askedByModel,
+              blocked: askedByModel
+                ? plan.actions.map((action) => ({
+                    type: action?.type ?? 'unknown',
+                    reason: modelReason,
+                  }))
+                : [],
+              reason: askedByModel ? modelReason : '',
+            }
+          : null
+      const verdict =
+        modelVerdict ??
+        (routineJob
+          ? classifyPlanForRoutine(plan.actions)
+          : classifyPlan(plan.actions))
       let parkedForApproval = false
       if (verdict.autoRun) {
         const executionStartedAt = Date.now()

@@ -123,6 +123,33 @@ const AGENTS = {
     defaultScenario: 'multi-step',
   },
   /*
+   * The newest surface, and the first one whose limits were measured on real
+   * hardware before anybody designed for it (2026-08-09). Like browser-extension
+   * it is a FACET today — iosControl.js contains no model call, the ios_* actions
+   * come from mac-planner — but unlike the browser it is on a declared path to
+   * becoming its own node with its own relay socket, so it is given that as a
+   * design mandate rather than a fact.
+   *
+   * Every capability claim below was verified against the owner's actual iPhone,
+   * including the negative ones. An agent told "you can drive a phone" would
+   * design for a phone this cannot drive.
+   */
+  'ios-control': {
+    facetOf: 'mac-planner',
+    model: process.env.LLM_MODEL || 'gpt-5.6-luna',
+    baseUrlEnv: 'MAC_AGENT_URL',
+    baseUrlDefault: 'http://localhost:8000',
+    keyEnv: 'AGENT_TOKEN',
+    role:
+      "You drive the owner's REAL iPhone through macOS iPhone Mirroring, using ios_* actions on the Mac agent. " +
+      'MEASURED, not assumed: READING is free and ambient — screen capture by window id plus Vision OCR works while the mirroring window sits on another Space, so you can watch the phone without touching the owner\'s screen. ios_home works the same way, via events addressed to the Mirroring process. ' +
+      'But TAPPING, TYPING and SWIPING require the window to be frontmost: an off-Space window is neither key nor composited, so pointer and ordinary keystrokes are dropped, and those actions REFUSE rather than act blind — an unaimed tap would land on the owner\'s desktop. ' +
+      'Three hard limits: the Mac being locked means the window has no pixels at all, so nothing can be read or driven overnight; mirroring PAUSES whenever the owner picks up their phone, which is normal and not a fault; and OCR reads text, never the meaning of an unlabelled icon. ' +
+      'The owner has asked that you become an independent node speaking directly to the relay rather than being routed through the Mac planner. You cannot physically leave the Mac — capture and event posting are both Mac-local — so work out what "its own node" should actually mean here, and what it buys.',
+    // A phone task is read, act, read again — verification between every step.
+    defaultScenario: 'multi-step',
+  },
+  /*
    * The shell surface DOES exist and is broader than anyone would design on
    * purpose: computerControl.js runs an arbitrary `command` string, and the
    * only thing between the model and it is actionRisk.classifyAction, which
@@ -444,8 +471,16 @@ function loadState() {
     return normalize(JSON.parse(fs.readFileSync(STATE_PATH(), 'utf8')))
   } catch {
     return {
+      /*
+       * MODEL, not `model` — a bare identifier here threw ReferenceError on the
+       * one path nobody had walked in months: an agent with no state file, i.e.
+       * its very first round. Every existing agent had already been seeded, so
+       * the bug sat dormant until ios-control joined the roster and failed
+       * every cycle with "model is not defined" while reporting only "has
+       * never run" as its reason.
+       */
       agent: AGENT_ID,
-      model,
+      model: MODEL,
       phase: 'recon',
       readMessages: [],
       round: 0,
