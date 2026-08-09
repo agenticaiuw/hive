@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseEnv } from 'node:util'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -17,6 +18,26 @@ const CANDIDATES = [
 
 const appliedKeys = new Set()
 
+/**
+ * Put parsed keys into process.env. Exported only so the precedence rule is
+ * testable without touching the real .env file; not part of the module's API.
+ *
+ * Keys are recorded whether or not they were applied: a key the shell already
+ * set to the same credential is exactly as sensitive as one read from here,
+ * and the point of the record is to keep it out of children (childEnv.js).
+ *
+ * Precedence: an explicit process env value (LaunchAgent / shell) is never
+ * clobbered — the file only fills keys that are unset or empty.
+ */
+export function applyParsedEnv(parsed) {
+  for (const [key, value] of Object.entries(parsed)) {
+    appliedKeys.add(key)
+    if (process.env[key] === undefined || process.env[key] === '') {
+      process.env[key] = value
+    }
+  }
+}
+
 function applyEnvFile(filePath) {
   let text
   try {
@@ -24,29 +45,7 @@ function applyEnvFile(filePath) {
   } catch {
     return false
   }
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (!line || line.startsWith('#')) continue
-    const eq = line.indexOf('=')
-    if (eq <= 0) continue
-    const key = line.slice(0, eq).trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
-    let value = line.slice(eq + 1).trim()
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1)
-    }
-    /* Recorded whether or not it was applied: a key the shell already set to
-     * the same credential is exactly as sensitive as one read from here, and
-     * the point of the record is to keep it out of children. */
-    appliedKeys.add(key)
-    // Do not clobber explicit process env (LaunchAgent / shell).
-    if (process.env[key] === undefined || process.env[key] === '') {
-      process.env[key] = value
-    }
-  }
+  applyParsedEnv(parseEnv(text))
   return true
 }
 
