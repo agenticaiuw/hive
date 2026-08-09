@@ -138,7 +138,7 @@ const MAX_TIMEOUT_MS = 300_000
  * The blocked-interstitial markers ARE taken from it verbatim — that check is
  * correct and worth keeping.
  */
-const PROGRAM_PROLOGUE = `import json, os, subprocess, sys, tempfile, time
+const PROGRAM_PROLOGUE = `import ctypes, ctypes.util, json, os, subprocess, sys, tempfile, time
 
 import Quartz
 from AppKit import NSRunningApplication, NSWorkspace
@@ -353,6 +353,112 @@ def same_bounds(a, b):
     return all(round(a[k]) == round(b[k]) for k in ("x", "y", "w", "h"))
 
 
+# --- Spaces, via private CoreGraphics Services -----------------------------
+#
+# Measured, not assumed. The owner works in FULLSCREEN apps, and macOS gives a
+# fullscreen app a Space that hosts only that app: CGSMoveWindowsToManagedSpace
+# and CGSAddWindowsToSpaces both resolve, both were called against the owner's
+# active Space, and both left the mirroring window off-screen. So while they are
+# in fullscreen, no window can join them, activation must switch Spaces, and
+# pointer input has nowhere to land. That is macOS, not this code.
+#
+# What IS actionable: when the owner is on an ordinary desktop Space and the
+# phone window is on a different one, the window can be moved to THEM instead of
+# dragging them to it. That turns a Space switch into nothing at all.
+#
+# Private API on purpose: this is a personal tool on one Mac, the public
+# alternative is a Space switch the owner has rejected, and the failure mode is
+# a symbol that stops resolving after an OS upgrade — which is detected here
+# rather than assumed, and degrades to the old behaviour.
+SPACE_MOVE_ENABLED = os.environ.get("PH_SPACE_MOVE") != "0"
+SPACE_TYPE_DESKTOP = 0
+
+_cgs = {}
+
+
+def _cgs_load():
+    """Resolve the private symbols once. Any failure disables the feature."""
+    if _cgs:
+        return _cgs
+    _cgs["ok"] = False
+    try:
+        lib = ctypes.CDLL(ctypes.util.find_library("CoreGraphics"))
+        conn_fn = lib._CGSDefaultConnection
+        conn_fn.restype = ctypes.c_int
+        conn_fn.argtypes = []
+        active_fn = lib.CGSGetActiveSpace
+        active_fn.restype = ctypes.c_uint64
+        active_fn.argtypes = [ctypes.c_int]
+        type_fn = lib.CGSSpaceGetType
+        type_fn.restype = ctypes.c_int
+        type_fn.argtypes = [ctypes.c_int, ctypes.c_uint64]
+        move_fn = lib.CGSMoveWindowsToManagedSpace
+        move_fn.restype = None
+        move_fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint64]
+        _cgs.update({"ok": True, "conn": conn_fn(), "active": active_fn,
+                     "type": type_fn, "move": move_fn})
+    except Exception:
+        pass
+    return _cgs
+
+
+def active_space():
+    """(id, type) of the Space the owner is looking at, or (None, None).
+
+    The two env hooks exist because ctypes reaches the real window server and
+    no Python stub can intercept it: a test asking "what does status say on a
+    fullscreen Space" must be able to say which Space it means, rather than
+    reading whatever the machine running the suite happens to be showing.
+    """
+    override = os.environ.get("PH_STUB_SPACE_TYPE")
+    if override:
+        return 1, (SPACE_TYPE_DESKTOP if override == "desktop" else 4)
+    if not SPACE_MOVE_ENABLED:
+        return None, None
+    cgs = _cgs_load()
+    if not cgs.get("ok"):
+        return None, None
+    try:
+        space = int(cgs["active"](cgs["conn"]))
+        return space, int(cgs["type"](cgs["conn"], ctypes.c_uint64(space)))
+    except Exception:
+        return None, None
+
+
+def bring_window_to_owner(win_id):
+    """Move the phone window to the owner's Space. True if it then shows up.
+
+    Refuses against a fullscreen Space rather than pretending: measured, the
+    call is accepted and does nothing there, and a silent no-op that reports
+    success is how a capability comes to be believed in and not work.
+    """
+    if not SPACE_MOVE_ENABLED:
+        return False
+    cgs = _cgs_load()
+    if not cgs.get("ok"):
+        return False
+    space, kind = active_space()
+    if space is None or kind != SPACE_TYPE_DESKTOP:
+        return False
+    try:
+        from Foundation import NSArray, NSNumber
+        import objc
+        windows = NSArray.arrayWithObject_(NSNumber.numberWithInt_(int(win_id)))
+        cgs["move"](cgs["conn"], ctypes.c_void_p(objc.pyobjc_id(windows)),
+                    ctypes.c_uint64(space))
+        time.sleep(0.8)
+        return bool(phone_windows(on_screen_only=True))
+    except Exception:
+        return False
+
+
+def win_id_for_move():
+    """The phone window's id, from the full list — it is off-screen by
+    definition at the moment we want to move it."""
+    candidates = phone_windows()
+    return candidates[0]["id"] if candidates else 0
+
+
 def mirroring_pid():
     apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_ID)
     return int(apps[0].processIdentifier()) if apps else None
@@ -453,6 +559,11 @@ def ready_to_send():
             "the mirroring window cannot be brought forward or verified. "
             "Unlock the Mac and try again.")
     prior = frontmost_app()
+    # Move the window to the owner before considering moving the owner. On an
+    # ordinary desktop Space this makes activation local and instant instead of
+    # a Space switch; on a fullscreen Space it declines and changes nothing.
+    if not phone_windows(on_screen_only=True):
+        bring_window_to_owner(win_id_for_move())
     if not _mirror.is_frontmost():
         app.activateWithOptions_(1 << 1)
     win = None
@@ -629,14 +740,28 @@ const OPERATIONS = {
     # characters and mouse events are dropped, because those need a key window
     # and a composited one respectively. So Home works without disturbing the
     # owner; everything else has to bring the window forward.
+    space, space_kind = active_space()
+    result["activeSpace"] = space
+    result["activeSpaceIsFullscreen"] = (
+        None if space_kind is None else space_kind != SPACE_TYPE_DESKTOP)
     result["targetedActions"] = ["ios_home"] if result["targetedAvailable"] else []
     result["navigationWritesPossible"] = bool(
         result["readsPossible"] and result["targetedAvailable"]
         and result["state"] in ("ready", "off-space"))
+    # A fullscreen Space is the hard blocker, and a different one from the
+    # Space-switch preference: no window can join a fullscreen app's Space at
+    # all, so there is nothing for a pointer event to hit and no setting that
+    # changes it.
     result["pointerWritesPossible"] = bool(
         result["state"] == "ready"
         or (result["state"] == "off-space"
+            and result["activeSpaceIsFullscreen"] is not True
             and result["spaceSwitchOnActivate"] is not False))
+    result["pointerBlockedBy"] = (
+        None if result["pointerWritesPossible"]
+        else "fullscreen-space" if result["activeSpaceIsFullscreen"]
+        else "space-switch-disabled" if result["spaceSwitchOnActivate"] is False
+        else "unreachable")
     result["writesPossible"] = (result["navigationWritesPossible"]
                                 or result["pointerWritesPossible"])
     result["writeMechanism"] = (
@@ -1242,6 +1367,13 @@ function describeSuccess(type, result) {
        * and a write will bring the window forward first. */
       if (state === 'off-space') {
         const base = `The iPhone is connected and readable with its window on another Space${where}, so reading it costs the owner nothing, and ios_home works without touching their screen at all`
+        if (result?.pointerBlockedBy === 'fullscreen-space') {
+          /* The hard one, and worth stating precisely because it is not a
+           * setting and not a bug: macOS gives a fullscreen app a Space that
+           * hosts only that app. Both CGSMoveWindowsToManagedSpace and
+           * CGSAddWindowsToSpaces were tried against it and changed nothing. */
+          return `${base}. Tapping, typing and swiping cannot work right now for a reason no setting fixes: you are in a FULLSCREEN app, and macOS gives a fullscreen app a Space that no other window may join — the mirroring window cannot be put there, so a touch has nothing to land on. Use a normal window instead of fullscreen (maximised is fine) and everything works, with the phone window brought to you rather than you being switched to it.`
+        }
         if (result?.pointerWritesPossible === false) {
           return `${base}. Everything else — tapping, typing, swiping, opening an app — needs the window brought forward, and macOS has "System Settings > Desktop & Dock > When switching to an application, switch to a Space with open windows for the application" turned OFF, so it cannot be. Those actions will refuse rather than act blind.`
         }

@@ -364,6 +364,12 @@ function stubPhone(t, scenario) {
     PH_STUB_EVENTS: eventsPath,
     PH_STUB_CAPTURES: capturesPath,
     PH_STUB_SPACE_SWITCH: scenario?.spaceSwitch ?? 'unset',
+    /* The Spaces work reaches the REAL CoreGraphics through ctypes, which no
+     * Python stub can intercept — and these scenarios carry the ids of the
+     * owner's actual windows. Without this a test run would shuffle real
+     * windows around someone's desk. */
+    PH_SPACE_MOVE: '0',
+    ...(scenario?.spaceType ? { PH_STUB_SPACE_TYPE: scenario.spaceType } : {}),
   }
 
   const readEvents = () =>
@@ -413,6 +419,12 @@ function stubPhone(t, scenario) {
     PH_STUB_EVENTS: eventsPath,
     PH_STUB_CAPTURES: capturesPath,
     PH_STUB_SPACE_SWITCH: scenario?.spaceSwitch ?? 'unset',
+    /* The Spaces work reaches the REAL CoreGraphics through ctypes, which no
+     * Python stub can intercept — and these scenarios carry the ids of the
+     * owner's actual windows. Without this a test run would shuffle real
+     * windows around someone's desk. */
+    PH_SPACE_MOVE: '0',
+    ...(scenario?.spaceType ? { PH_STUB_SPACE_TYPE: scenario.spaceType } : {}),
   }
   for (const [key, value] of Object.entries(exported)) process.env[key] = value
   t.after(() => {
@@ -706,6 +718,37 @@ test('a locked Mac is reported as the Mac, not as a phone problem', async (t) =>
   assert.equal(result.readsPossible, false)
   assert.equal(result.writesPossible, false)
   assert.match(result.message, /neither read nor driven/)
+})
+
+test('a fullscreen Space is named as the hard blocker it is', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * The one no setting fixes. macOS gives a fullscreen app a Space that hosts
+   * only that app: measured on the owner's Mac, CGSMoveWindowsToManagedSpace
+   * and CGSAddWindowsToSpaces both resolved, both were called against the
+   * active Space, and the mirroring window stayed off-screen either way. So a
+   * touch has nothing to land on, and telling the owner to flip a preference
+   * would send them to fix the wrong thing.
+   */
+  const phone = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    spaceType: 'fullscreen',
+    spaceSwitch: 'on', // even with the preference ON, fullscreen still blocks
+  })
+
+  const status = phone.run('ios_status', {})
+  assert.equal(status.payload.result.activeSpaceIsFullscreen, true)
+  assert.equal(status.payload.result.pointerWritesPossible, false)
+  assert.equal(status.payload.result.pointerBlockedBy, 'fullscreen-space')
+  // Reading and ios_home are untouched by any of this.
+  assert.equal(status.payload.result.readsPossible, true)
+  assert.equal(status.payload.result.navigationWritesPossible, true)
+
+  const result = await runIosAction({ type: 'ios_status', params: {} })
+  assert.match(result.message, /FULLSCREEN/)
+  assert.match(result.message, /no other window may join/)
+  assert.ok(!/Desktop & Dock/.test(result.message), 'must not blame the preference')
 })
 
 test('ios_status says up front whether a write could land at all', async (t) => {
