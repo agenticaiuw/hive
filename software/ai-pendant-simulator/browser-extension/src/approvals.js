@@ -24,17 +24,14 @@ import {
   undecidedApprovalCount,
 } from '../../shared/approvalMesh.js'
 
+/* Only the names background.js and popup.js actually consume ride through
+ * this barrel; everything else is imported from shared/approvalMesh.js
+ * directly (as the tests do). */
 export {
-  APPROVAL_DECISION_KIND,
-  APPROVAL_REQUEST_KIND,
   approvalCountdown,
   approvalIsAnswerable,
   approvalIsExpired,
-  approvalPromptFromEnvelope,
   mergeApprovalPrompts,
-  pruneApprovalPrompts,
-  settleApprovalPrompt,
-  undecidedApprovalCount,
 } from '../../shared/approvalMesh.js'
 
 /* Where the prompt list persists. Read by the popup, written by the worker. */

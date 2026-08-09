@@ -2,16 +2,11 @@
  * Execution status, pending approvals, and the hive record — the observable
  * half of local (affinity-routed) execution.
  *
- * Three consumers, one source of truth:
+ * Two consumers, one source of truth:
  *
- *   1. THE POPUP (a later pass, by someone else). It imports the storage keys
- *      and render helpers from this module and reads storage.local — the same
- *      pattern consoleHistory already uses, so an entry survives the popup
- *      closing. It never needs the journal instance itself. The background
- *      answers three runtime messages for it (see MESSAGE TYPES below).
- *   2. THE BACKGROUND WORKER, which owns the single journal instance and is
+ *   1. THE BACKGROUND WORKER, which owns the single journal instance and is
  *      the only writer.
- *   3. THE HIVE. Local execution must not be invisible execution — the owner:
+ *   2. THE HIVE. Local execution must not be invisible execution — the owner:
  *      "it should stay in the browser extension but of course it can record
  *      the task to the hive." Records go out as node-mesh mail addressed to
  *      '@relay' (the relay brain's own inbox), via the request builder
@@ -38,68 +33,25 @@ import { sendRequest } from './relay-peer.js'
 import { withholdSecrets } from './bridge-core.js'
 
 /* ------------------------------------------------------------------ *
- * Storage keys — the popup's read surface. Bump the schema by adding
- * fields, never by renaming these.
+ * Storage keys. Bump the schema by adding fields, never by renaming
+ * these.
  * ------------------------------------------------------------------ */
 
 export const EXECUTION_STATUS_KEY = 'localExecutionStatus'
 export const PENDING_APPROVALS_KEY = 'localPendingApprovals'
 
 /*
- * MESSAGE TYPES the background answers for the (future) approval UI:
- *
- *   {type:'affinity:get-status'}                → the EXECUTION_STATUS_KEY value
- *   {type:'affinity:list-pending'}              → [approval, …] still pending
- *   {type:'affinity:resolve-approval',
- *    id, verdict:'approved'|'declined'}         → {ok, ran?, error?}
- *
- * Approving EXECUTES the parked step in the background and folds the result
- * into the run — the popup only ever says yes or no.
- */
-export const APPROVAL_MESSAGE_TYPES = Object.freeze({
-  status: 'affinity:get-status',
-  listPending: 'affinity:list-pending',
-  resolve: 'affinity:resolve-approval',
-})
-
-/*
- * How long a parked step stays approvable. The same reasoning as
- * MAX_COMMAND_AGE_MS one storey up: a "cancel my plan" click approved hours
- * later lands on whatever page is THERE NOW, which may be neither the page
- * nor the plan the owner looked at. Ten minutes is long enough to notice the
- * badge and short enough that the page is probably still the page.
+ * How long a parked step stays listed as pending. The same reasoning as
+ * MAX_COMMAND_AGE_MS one storey up: a parked "cancel my plan" click acted on
+ * hours later would land on whatever page is THERE NOW, which may be neither
+ * the page nor the plan the owner looked at.
  */
 export const APPROVAL_TTL_MS = 10 * 60_000
 
-/* Bounded lists: the popup renders these, storage.local holds them. */
+/* Bounded lists: storage.local holds them. */
 const MAX_RUNS_KEPT = 8
 const MAX_STEPS_KEPT = 24
 const MAX_PENDING_KEPT = 12
-
-/* ------------------------------------------------------------------ *
- * A tiny emitter, dependency-free, so in-process listeners (tests, a
- * future live view) can watch a run advance without polling storage.
- * ------------------------------------------------------------------ */
-
-export function createStatusEmitter() {
-  const listeners = new Map()
-  return {
-    on(event, handler) {
-      if (!listeners.has(event)) listeners.set(event, new Set())
-      listeners.get(event).add(handler)
-      return () => listeners.get(event)?.delete(handler)
-    },
-    emit(event, payload) {
-      for (const handler of listeners.get(event) ?? []) {
-        try {
-          handler(payload)
-        } catch {
-          /* A broken listener must not break the run it is watching. */
-        }
-      }
-    },
-  }
-}
 
 /* ------------------------------------------------------------------ *
  * The journal: the background's single writer over both storage keys.
@@ -110,14 +62,13 @@ export function createStatusEmitter() {
  * @param {object} options.storage  a storage.local-shaped object
  *                                  ({get(keys), set(values)}) — injected so
  *                                  tests hand in a plain fake.
- * @param {object} [options.emitter] createStatusEmitter() output.
  * @param {() => number} [options.now]
  *
  * All writes go through one promise chain, same as background.js's
  * withHistory: storage.local has no transactions, and two steps finishing
  * together must not eat each other's entries.
  */
-export function createExecutionJournal({ storage, emitter = createStatusEmitter(), now = Date.now } = {}) {
+export function createExecutionJournal({ storage, now = Date.now } = {}) {
   if (!storage) throw new Error('createExecutionJournal requires a storage.')
 
   let writes = Promise.resolve()
@@ -140,13 +91,10 @@ export function createExecutionJournal({ storage, emitter = createStatusEmitter(
       if (index === -1) return null
       runs[index] = mutate({ ...runs[index] })
       await storage.set({ [EXECUTION_STATUS_KEY]: { runs } })
-      emitter.emit('run', runs[index])
       return runs[index]
     })
 
   return {
-    events: emitter,
-
     /** A run exists from the moment the command is claimed locally. */
     beginRun({ runId, command, origin = 'browser-extension', route, executor }) {
       return serialize(async () => {
@@ -172,7 +120,6 @@ export function createExecutionJournal({ storage, emitter = createStatusEmitter(
         await storage.set({
           [EXECUTION_STATUS_KEY]: { runs: [run, ...runs].slice(0, MAX_RUNS_KEPT) },
         })
-        emitter.emit('run', run)
         return run
       })
     },
@@ -195,8 +142,8 @@ export function createExecutionJournal({ storage, emitter = createStatusEmitter(
     },
 
     /**
-     * Park an outward step. The run stops here; the approval entry is what a
-     * later popup pass renders, and resolveApproval is what its buttons call.
+     * Park an outward step. The run stops here; the entry records what was
+     * refused and why, and expires unrun after APPROVAL_TTL_MS.
      */
     parkStep(runId, { call, effect, reason, targetName = '' }) {
       return serialize(async () => {
@@ -210,13 +157,11 @@ export function createExecutionJournal({ storage, emitter = createStatusEmitter(
           targetName: String(targetName ?? ''),
           state: 'pending',
           requestedAt: new Date(now()).toISOString(),
-          resolvedAt: null,
           expiresAt: new Date(now() + APPROVAL_TTL_MS).toISOString(),
         }
         await storage.set({
           [PENDING_APPROVALS_KEY]: [entry, ...pending].slice(0, MAX_PENDING_KEPT),
         })
-        emitter.emit('approval', entry)
         return entry
       })
     },
@@ -241,49 +186,6 @@ export function createExecutionJournal({ storage, emitter = createStatusEmitter(
     async getStatus() {
       await writes
       return readStatus()
-    },
-
-    /** Pending approvals that have not expired. Expiry is enforced on read
-     * AND on resolve, so a stale entry cannot run by being clicked late. */
-    async listPendingApprovals() {
-      await writes
-      const pending = await readPending()
-      const at = now()
-      return pending.filter(
-        (entry) =>
-          entry?.state === 'pending' && Date.parse(entry.expiresAt ?? '') > at,
-      )
-    },
-
-    /**
-     * Resolve one approval. Returns the entry in its new state, or null when
-     * it does not exist. An expired entry resolves to 'expired' whatever the
-     * verdict was — approving a ten-minute-old click is refused, not honored.
-     * The caller (background.js) is the one who actually executes on
-     * 'approved'; this module only owns the state.
-     */
-    resolveApproval(id, verdict) {
-      return serialize(async () => {
-        const pending = await readPending()
-        const index = pending.findIndex((entry) => entry?.id === id)
-        if (index === -1) return null
-        const entry = { ...pending[index] }
-        if (entry.state !== 'pending') return entry
-
-        const expired = Date.parse(entry.expiresAt ?? '') <= now()
-        entry.state = expired
-          ? 'expired'
-          : verdict === 'approved'
-            ? 'approved'
-            : 'declined'
-        entry.resolvedAt = new Date(now()).toISOString()
-
-        const next = [...pending]
-        next[index] = entry
-        await storage.set({ [PENDING_APPROVALS_KEY]: next })
-        emitter.emit('approval', entry)
-        return entry
-      })
     },
   }
 }

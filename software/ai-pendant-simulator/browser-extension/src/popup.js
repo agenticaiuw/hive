@@ -7,9 +7,9 @@
  * kills a command, and reopening it shows what happened while it was closed.
  *
  * THE SAME FILE DRIVES TWO SURFACES: the toolbar popover (popup.html) and the
- * standalone console (console.html, <body class="standalone">) — same DOM ids,
- * same storage keys, so every render path here paints both. The standalone
- * window exists because Safari dismisses the popover on any outside click.
+ * standalone console (popup.html?standalone=1) — same document, same storage
+ * keys, so every render path here paints both. The standalone window exists
+ * because Safari dismisses the popover on any outside click.
  */
 import {
   HISTORY_KEY,
@@ -25,28 +25,17 @@ import {
   approvalIsAnswerable,
   approvalIsExpired,
 } from './approvals.js'
-import { RELAY_STORAGE_KEYS, normalizeRelayConfig } from './relay-peer.js'
 import {
-  blobToBase64,
   chooseVoiceBackend,
   describeRecognitionError,
-  interpretTranscribeResponse,
   mergeTranscript,
-  mimeToFormat,
-  pickRecorderMimeType,
   speechLang,
-  transcribeLanguage,
-  transcribeRequest,
 } from './voice-input.js'
-import {
-  CONSOLE_PAGE,
-  consoleWindowOptions,
-  existingConsoleTab,
-  isStandaloneSurface,
-  planConsoleOpen,
-} from './console-window.js'
 
 const api = globalThis.browser ?? globalThis.chrome
+
+/* The standalone console is this same page under ?standalone=1. */
+const CONSOLE_PAGE = 'popup.html?standalone=1'
 
 const elements = {
   statusDot: document.getElementById('status-dot'),
@@ -68,9 +57,12 @@ const elements = {
 
 /* Which surface this document is. The standalone console hides the pop-out
  * control (it IS the pop-out) and words the page checkbox for a window that
- * is never itself the page being talked about. */
-const standalone = isStandaloneSurface(document)
+ * is never itself the page being talked about. The class on <body> is what
+ * ui.css keys its standalone layout on. */
+const standalone = new URLSearchParams(location.search).get('standalone') === '1'
 if (standalone) {
+  document.body.classList.add('standalone')
+  document.title = 'AI Pendant Console'
   elements.popOut.hidden = true
   if (elements.includePageLabel) {
     elements.includePageLabel.textContent =
@@ -289,74 +281,54 @@ async function currentPage() {
 
 /* ===== Voice input =====
  *
- * The dashboard's "speak from this browser" pipeline, on this surface: a mic
- * beside the box, a listening state, and the transcript LANDING IN THE BOX —
- * Send stays the only thing that sends. The pure halves (backend choice,
- * capture format table, /v1/transcribe descriptor, error wording) live in
- * voice-input.js; this block owns the impure edges: SpeechRecognition,
- * getUserMedia/MediaRecorder, and the one authenticated fetch.
+ * A mic beside the box, a listening state, and the transcript LANDING IN THE
+ * BOX — Send stays the only thing that sends. The pure halves (backend
+ * choice, error wording, transcript merging) live in voice-input.js; this
+ * block owns the one impure edge: SpeechRecognition. There is no cloud
+ * fallback — a browser without Web Speech is told to type.
  */
 
-/* One voice session at a time. `phase` is 'idle' | 'listening' (Web Speech) |
- * 'recording' (MediaRecorder) | 'transcribing' (cloud round trip). */
-const voice = { phase: 'idle', recognition: null, capture: null }
+/* One voice session at a time. `phase` is 'idle' | 'listening'. */
+const voice = { phase: 'idle', recognition: null }
 
 const speechRecognitionCtor = () =>
   globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null
 
-async function relayConfig() {
-  return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS))
-}
-
 function renderMic() {
-  const active = voice.phase !== 'idle'
-  elements.mic.classList.toggle('is-listening', voice.phase === 'listening' || voice.phase === 'recording')
-  elements.mic.classList.toggle('is-transcribing', voice.phase === 'transcribing')
-  elements.mic.setAttribute('aria-pressed', String(voice.phase === 'listening' || voice.phase === 'recording'))
-  elements.mic.disabled = voice.phase === 'transcribing'
-  const label =
-    voice.phase === 'listening' || voice.phase === 'recording'
-      ? 'Stop listening'
-      : voice.phase === 'transcribing'
-        ? 'Transcribing…'
-        : 'Speak a command'
+  const listening = voice.phase === 'listening'
+  elements.mic.classList.toggle('is-listening', listening)
+  elements.mic.setAttribute('aria-pressed', String(listening))
+  const label = listening ? 'Stop listening' : 'Speak a command'
   elements.mic.title = label
   elements.mic.setAttribute('aria-label', label)
   /* The box is the transcript's landing strip while a session runs; typing
    * into it mid-flight would fight the interim results. */
-  elements.input.disabled = active
-  elements.send.disabled = active
-  elements.input.placeholder = active
-    ? voice.phase === 'transcribing'
-      ? 'Transcribing…'
-      : 'Listening…'
-    : 'Ask the agent anything…'
+  elements.input.disabled = listening
+  elements.send.disabled = listening
+  elements.input.placeholder = listening ? 'Listening…' : 'Ask the agent anything…'
 }
 
 function settleVoice() {
   voice.phase = 'idle'
   voice.recognition = null
-  voice.capture = null
   renderMic()
   /* Re-assert honest availability: renderMic's idle state assumes a usable
    * backend, and there may not be one. */
-  void refreshMicAvailability()
+  refreshMicAvailability()
   elements.input.focus()
 }
 
 /** Advertise availability honestly: a mic that cannot work says why. */
-async function refreshMicAvailability() {
+function refreshMicAvailability() {
   if (voice.phase !== 'idle') return
-  const relay = await relayConfig()
   const choice = chooseVoiceBackend({
     hasSpeechRecognition: Boolean(speechRecognitionCtor()),
-    relayReady: relay.ready,
   })
   elements.mic.disabled = choice.backend === 'none'
   elements.mic.title = choice.backend === 'none' ? choice.reason : 'Speak a command'
 }
 
-function startWebSpeech(relay) {
+function startWebSpeech() {
   const Recognition = speechRecognitionCtor()
   const recognition = new Recognition()
   /* The transcript appends to whatever was already typed (mergeTranscript),
@@ -384,13 +356,8 @@ function startWebSpeech(relay) {
 
   recognition.onerror = (event) => {
     if (voice.recognition !== recognition) return
-    const outcome = describeRecognitionError(event.error, { relayReady: relay.ready })
-    if (!outcome.silent) setNotice(outcome.message, !outcome.fallbackToCloud)
-    if (outcome.fallbackToCloud) {
-      voice.recognition = null
-      void startRecording(relay)
-      return
-    }
+    const outcome = describeRecognitionError(event.error)
+    if (!outcome.silent) setNotice(outcome.message, true)
     settleVoice()
   }
 
@@ -412,108 +379,7 @@ function startWebSpeech(relay) {
   }
 }
 
-/** The dashboard's capture, verbatim in behavior: 250 ms chunks, the same
- * mime candidates, the recorder handle kept out of any render path. */
-async function startRecording(relay) {
-  if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-    setNotice('This browser cannot record audio — type a command instead.', true)
-    settleVoice()
-    return
-  }
-  let stream = null
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const mimeType = pickRecorderMimeType(MediaRecorder)
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType })
-      : new MediaRecorder(stream)
-    const chunks = []
-    recorder.ondataavailable = (event) => {
-      if (event.data && event.data.size > 0) chunks.push(event.data)
-    }
-    recorder.start(250)
-    voice.phase = 'recording'
-    voice.capture = {
-      recorder,
-      stream,
-      chunks,
-      relay,
-      mimeType: recorder.mimeType || mimeType || 'audio/webm',
-      startedAt: Date.now(),
-    }
-    renderMic()
-    setNotice('Recording — press the mic again to transcribe.')
-  } catch {
-    stream?.getTracks().forEach((track) => track.stop())
-    setNotice('Microphone blocked — allow mic access for this extension, or type instead.', true)
-    settleVoice()
-  }
-}
-
-async function stopRecordingAndTranscribe() {
-  const capture = voice.capture
-  if (!capture) {
-    settleVoice()
-    return
-  }
-  voice.capture = null
-  voice.phase = 'transcribing'
-  renderMic()
-  setNotice('Transcribing…')
-  try {
-    if (capture.recorder.state !== 'inactive') {
-      /* A wedged recorder must not strand the box in "transcribing". */
-      const stopped = new Promise((resolve) => {
-        capture.recorder.onstop = () => resolve()
-      })
-      capture.recorder.stop()
-      await Promise.race([
-        stopped,
-        new Promise((resolve) => window.setTimeout(resolve, 2000)),
-      ])
-    }
-    const blob = new Blob(capture.chunks, { type: capture.mimeType })
-    if (!blob.size) throw new Error('No audio captured — try again.')
-
-    const request = transcribeRequest(capture.relay, {
-      audioBase64: await blobToBase64(blob),
-      format: mimeToFormat(blob.type || capture.mimeType),
-      language: transcribeLanguage(navigator.language),
-      durationMs: Date.now() - capture.startedAt,
-    })
-    const response = await fetch(`${capture.relay.relayUrl}${request.path}`, {
-      method: request.method,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${capture.relay.deviceToken}`,
-      },
-      body: JSON.stringify(request.body),
-    })
-    let payload = null
-    try {
-      payload = await response.json()
-    } catch {
-      payload = null
-    }
-    const outcome = interpretTranscribeResponse({ status: response.status, payload })
-    if (outcome.kind === 'transcript') {
-      elements.input.value = mergeTranscript(elements.input.value, outcome.text)
-      setNotice('')
-    } else if (outcome.kind === 'no-speech') {
-      setNotice('No speech detected — try again.')
-    } else {
-      setNotice(outcome.message, true)
-    }
-  } catch (error) {
-    setNotice(error?.message || 'Voice transcription failed — type instead.', true)
-  } finally {
-    /* Always hand the microphone back, however the send ended. */
-    capture.stream.getTracks().forEach((track) => track.stop())
-    settleVoice()
-  }
-}
-
-elements.mic.addEventListener('click', async () => {
+elements.mic.addEventListener('click', () => {
   if (voice.phase === 'listening') {
     /* Finishing a Web Speech session: stop() delivers any final result and
      * then onend settles. */
@@ -524,28 +390,19 @@ elements.mic.addEventListener('click', async () => {
     }
     return
   }
-  if (voice.phase === 'recording') {
-    void stopRecordingAndTranscribe()
-    return
-  }
-  if (voice.phase !== 'idle') return
 
   setNotice('')
-  const relay = await relayConfig()
   const choice = chooseVoiceBackend({
     hasSpeechRecognition: Boolean(speechRecognitionCtor()),
-    relayReady: relay.ready,
   })
   if (choice.backend === 'webspeech') {
-    startWebSpeech(relay)
-  } else if (choice.backend === 'cloud') {
-    await startRecording(relay)
+    startWebSpeech()
   } else {
     setNotice(choice.reason, true)
   }
 })
 
-/* A popover that closes mid-recording must not keep the microphone. The
+/* A popover that closes mid-listen must not keep the microphone. The
  * standalone console gets the same courtesy on close. */
 window.addEventListener('pagehide', () => {
   try {
@@ -553,32 +410,33 @@ window.addEventListener('pagehide', () => {
   } catch {
     /* already stopped */
   }
-  const capture = voice.capture
-  voice.capture = null
-  if (!capture) return
-  try {
-    if (capture.recorder.state !== 'inactive') capture.recorder.stop()
-  } catch {
-    /* already stopped */
-  }
-  capture.stream.getTracks().forEach((track) => track.stop())
 })
 
 /* ===== Pop-out =====
  *
- * Safari closes the popover on any outside click, so the pin opens
- * console.html — this same UI — as a standalone window. Called from THIS
- * document on the owner's click; background.js is not involved. The ladder
- * (focus what exists → windows.create popup → pinned tab) is pure in
- * console-window.js; each rung is tried only when the one above it is
- * refused at runtime, because which rung Safari honors is not knowable from
- * feature detection alone.
+ * Safari closes the popover on any outside click, so the pin opens this same
+ * page under ?standalone=1 as its own window. Called from THIS document on
+ * the owner's click; background.js is not involved. The ladder (focus what
+ * exists → windows.create popup → pinned tab) is tried rung by rung, because
+ * which rung Safari honors is not knowable from feature detection alone.
  */
 elements.popOut.addEventListener('click', async () => {
   const url = api.runtime.getURL(CONSOLE_PAGE)
 
   try {
-    const open = existingConsoleTab(await api.tabs.query({ url }))
+    /* Match patterns cannot name a query string, so ask for every popup.html
+     * tab and keep the standalone ones — newest last, since the owner's most
+     * recent pop-out is the one they arranged where they wanted it. */
+    const tabs = await api.tabs.query({ url: `${api.runtime.getURL('popup.html')}*` })
+    const open = (Array.isArray(tabs) ? tabs : [])
+      .filter(
+        (tab) =>
+          tab &&
+          tab.id !== undefined &&
+          tab.id !== null &&
+          String(tab.url ?? '').includes('standalone=1'),
+      )
+      .at(-1)
     if (open) {
       if (open.windowId !== undefined && api.windows?.update) {
         await api.windows.update(open.windowId, { focused: true })
@@ -592,18 +450,25 @@ elements.popOut.addEventListener('click', async () => {
      * opening a fresh console is the acceptable cost. */
   }
 
-  for (const attempt of planConsoleOpen({ hasWindows: Boolean(api.windows?.create) })) {
+  /* Rung 1: a popup-type window (no tab strip in Chrome; a plain window in
+   * browsers that ignore the type — persistence is the point, not chrome).
+   * Rung 2: a pinned tab, the honest last resort when every window shape is
+   * refused — still a page that survives clicking elsewhere. */
+  if (api.windows?.create) {
     try {
-      if (attempt.how === 'window') {
-        await api.windows.create(consoleWindowOptions(url))
-      } else {
-        await api.tabs.create({ url, pinned: true, active: true })
-      }
+      await api.windows.create({ url, type: 'popup', width: 420, height: 680, focused: true })
       if (!standalone) window.close()
       return
     } catch {
-      /* Refused at runtime — fall through to the next rung. */
+      /* Refused at runtime — fall through to the pinned tab. */
     }
+  }
+  try {
+    await api.tabs.create({ url, pinned: true, active: true })
+    if (!standalone) window.close()
+    return
+  } catch {
+    /* Refused too. */
   }
   setNotice('This browser refused to open the console window or a pinned tab.', true)
 })
@@ -664,9 +529,6 @@ api.storage.onChanged.addListener((changes, areaName) => {
   if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue)
   if (changes[HISTORY_KEY]) renderHistory(changes[HISTORY_KEY].newValue)
   if (changes[APPROVALS_KEY]) renderApprovals(changes[APPROVALS_KEY].newValue)
-  /* Pairing the relay peer in settings can turn the cloud mic on while a
-   * standalone console sits open. */
-  if (RELAY_STORAGE_KEYS.some((key) => key in changes)) void refreshMicAvailability()
 })
 
 async function refresh() {
@@ -683,7 +545,7 @@ async function refresh() {
   renderHistory(values[HISTORY_KEY])
   /* Default ON for convenience, but visible and remembered. */
   elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false
-  await refreshMicAvailability()
+  refreshMicAvailability()
 }
 
 void refresh().then(() => elements.input.focus())

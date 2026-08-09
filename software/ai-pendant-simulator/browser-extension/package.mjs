@@ -20,9 +20,9 @@ fs.cpSync(sourceDir, safariDir, { recursive: true })
 /*
  * Every entry point is bundled, not just the service worker. The Safari Xcode
  * project references the extension resources file-by-file, so a new src/
- * module (brain.js, command-console.js) must never become a new runtime file
- * in the build output — it gets bundled into whichever entry imports it, and
- * the shipped file set stays exactly the set the .pbxproj already knows.
+ * module must never become a new runtime file in the build output — it gets
+ * bundled into whichever entry imports it, and the shipped file set stays
+ * exactly the set the .pbxproj already knows.
  */
 const entryPoints = [
   ['background.js', 'AIPendantBrowserBridge'],
@@ -30,25 +30,7 @@ const entryPoints = [
   ['options.js', 'AIPendantOptions'],
 ]
 
-/* Bundled into the entries above; must not ship as loose files (see note). */
-const bundledOnlyModules = [
-  'affinity.js',
-  'approvals.js',
-  'brain.js',
-  'command-console.js',
-  'console-window.js',
-  'execution-status.js',
-  'relay-peer.js',
-  'voice-input.js',
-]
-
-/*
- * console.html is a NEW shipped file (the pop-out console; it re-uses the
- * bundled popup.js, so it adds no JS entry). The Safari .pbxproj references
- * resources file-by-file and does not know it yet — re-run the
- * safari-web-extension-converter step in the README after packaging, or the
- * Safari build ships without the pop-out page while Chrome carries it.
- */
+const entryNames = new Set(entryPoints.map(([entry]) => entry))
 
 for (const platformDir of [chromeDir, safariDir]) {
   for (const [entry, globalName] of entryPoints) {
@@ -69,8 +51,16 @@ for (const platformDir of [chromeDir, safariDir]) {
     )
   }
 
-  for (const moduleName of bundledOnlyModules) {
-    fs.rmSync(path.join(platformDir, moduleName), { force: true })
+  /*
+   * DERIVED, not hand-maintained: every .js the src copy brought along that
+   * is not itself an entry is bundled inside one, and shipping the loose
+   * module beside the bundle is how bridge-core.js once leaked into the
+   * Safari resources. Delete everything that is not an entry.
+   */
+  for (const dirent of fs.readdirSync(platformDir, { withFileTypes: true })) {
+    if (dirent.isFile() && dirent.name.endsWith('.js') && !entryNames.has(dirent.name)) {
+      fs.rmSync(path.join(platformDir, dirent.name), { force: true })
+    }
   }
 
   const manifestPath = path.join(platformDir, 'manifest.json')

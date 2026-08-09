@@ -155,10 +155,10 @@
 		const commandId = String(command?.commandId ?? "").trim();
 		return commandId ? `cmd:${commandId}` : "";
 	}
-	const TEXT_ENCODER = typeof TextEncoder === "function" ? new TextEncoder() : null;
+	const TEXT_ENCODER = new TextEncoder();
 	function byteLengthOf(value) {
 		const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
-		return TEXT_ENCODER ? TEXT_ENCODER.encode(text).length : text.length * 2;
+		return TEXT_ENCODER.encode(text).length;
 	}
 	const LEDGER_MAX_BYTES = 128 * 1024;
 	const LEDGER_TTL_MS = 5 * MAX_COMMAND_AGE_MS;
@@ -655,7 +655,7 @@
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/command-console.js
+	//#region src/command-console.js
 	const CONSOLE_SOURCE = "browser-extension";
 	const HISTORY_KEY = "consoleHistory";
 	const SESSION_KEY = "consoleSessionId";
@@ -876,595 +876,7 @@
 		}
 	}
 	//#endregion
-	//#region browser-extension/src/brain.js
-	const BRAIN_STORAGE_KEYS = [
-		"brainEnabled",
-		"modelProxyUrl",
-		"deviceToken",
-		"brainRetryAfterAt"
-	];
-	Object.freeze({
-		brainEnabled: false,
-		modelProxyUrl: null,
-		deviceToken: null
-	});
-	const MAX_FAILURES = 2;
-	const INFER_LIMITS = Object.freeze({
-		maxMessages: 40,
-		maxPromptChars: 24e3,
-		maxOutputTokens: 2048,
-		defaultOutputTokens: 512
-	});
-	const BRAIN_OUTPUT_TOKENS = 1024;
-	/**
-	* The budget to retry a cut-off reply with, or null when there is no headroom
-	* left to buy.
-	*
-	* A truncated reply in JSON mode is not a bad answer, it is half an answer:
-	* the model stopped mid-object and the parse fails downstream looking like
-	* garbage. One doubling is worth the second billed call because the handoff it
-	* replaces costs a Mac planner call anyway; a second doubling is not, because
-	* a reply that will not fit in the ceiling will not fit next time either.
-	*/
-	function escalateOutputTokens(current) {
-		const asked = Number(current) || INFER_LIMITS.defaultOutputTokens;
-		if (asked >= INFER_LIMITS.maxOutputTokens) return null;
-		return Math.min(asked * 2, INFER_LIMITS.maxOutputTokens);
-	}
-	const abnormalStop = (message, code) => {
-		const error = new Error(message);
-		error.code = code;
-		error.fatal = true;
-		return error;
-	};
-	/**
-	* Ask for a reply, and decide what an abnormal ending means.
-	*
-	* The policy lives here, away from the fetch, because it is the part with a
-	* decision in it: when to pay again, and when paying again buys nothing.
-	* `send(maxTokens)` is injected and resolves to the relay's
-	* `{content, truncated, complete, refusal, finishReason}` — so every branch
-	* below is exercised in tests without a relay, which matters because these are
-	* the branches no client can reproduce on purpose.
-	*
-	* ONLY truncation is retried. A length stop is the one ending more room fixes;
-	* a content filter or a refusal ends the same way however much budget it is
-	* given, so retrying those just bills twice for one refusal.
-	*/
-	async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKENS) {
-		let asked = maxTokens;
-		for (let attempt = 0; attempt < 4; attempt += 1) {
-			const reply = await send(asked);
-			if (reply?.truncated) {
-				const escalated = escalateOutputTokens(asked);
-				if (!escalated) throw abnormalStop(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`, "truncated");
-				asked = escalated;
-				continue;
-			}
-			const refusal = String(reply?.refusal ?? "").trim();
-			if (refusal) throw abnormalStop(`The model declined: ${refusal}`, "refusal");
-			if (reply?.complete === false) throw abnormalStop(`The model stopped abnormally (${reply?.finishReason || "unknown reason"}), so its answer is not trustworthy.`, "incomplete");
-			return String(reply?.content ?? "");
-		}
-		throw abnormalStop(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`, "truncated");
-	}
-	const PROMPT_CHAR_BUDGET = INFER_LIMITS.maxPromptChars - 1e3;
-	const FATAL_INFER_CODES = new Set([
-		"credential_predates_capability",
-		"scope_denied",
-		"not_configured",
-		"model_not_allowed",
-		"invalid_messages",
-		"prompt_too_large",
-		"rate_limited"
-	]);
-	/**
-	* The brain's model endpoint is either the relay (https) or a local dev proxy
-	* on loopback. Anything else — plain http to a LAN address, a file URL — is a
-	* misconfiguration, not a brain.
-	*/
-	function validProxyUrl(value) {
-		try {
-			const url = new URL(String(value ?? ""));
-			if (url.protocol === "https:") return url.href;
-			if (url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname)) return url.href;
-			return null;
-		} catch {
-			return null;
-		}
-	}
-	/** The instant a `retryAfter` in seconds points at. Null when there isn't one. */
-	function cooldownUntil(retryAfterSeconds, now = Date.now()) {
-		const seconds = Number(retryAfterSeconds);
-		if (!Number.isFinite(seconds) || seconds <= 0) return null;
-		return new Date(now + seconds * 1e3).toISOString();
-	}
-	/** Milliseconds still to wait, or 0 when the window has passed or never was. */
-	function cooldownRemainingMs(retryAfterAt, now = Date.now()) {
-		const at = Date.parse(String(retryAfterAt ?? ""));
-		if (!Number.isFinite(at)) return 0;
-		return Math.max(0, at - now);
-	}
-	function normalizeBrainConfig(values = {}) {
-		const brainEnabled = values.brainEnabled === true;
-		const modelProxyUrl = validProxyUrl(values.modelProxyUrl);
-		const deviceToken = String(values.deviceToken ?? "").trim() || null;
-		const brainRetryAfterAt = String(values.brainRetryAfterAt ?? "").trim() || null;
-		let reason = "";
-		if (!brainEnabled) reason = "The local brain is switched off (brainEnabled is not true).";
-		else if (!modelProxyUrl) reason = "No usable modelProxyUrl is configured — the relay-side model proxy has not been set up yet.";
-		else if (!deviceToken) reason = "No deviceToken is configured — scoped device tokens land with the relay proxy task.";
-		return {
-			brainEnabled,
-			modelProxyUrl,
-			deviceToken,
-			brainRetryAfterAt,
-			ready: brainEnabled && Boolean(modelProxyUrl) && Boolean(deviceToken),
-			reason
-		};
-	}
-	/**
-	* Where a command should go. 'mac-planner' is the answer until the credential
-	* task lands; the caller treats anything but 'local-brain' as the Mac path.
-	*/
-	function chooseBrainRoute(config, now = Date.now()) {
-		const normalized = config && "ready" in config ? config : normalizeBrainConfig(config);
-		if (!normalized.ready) return {
-			route: "mac-planner",
-			reason: normalized.reason
-		};
-		const waitMs = cooldownRemainingMs(normalized.brainRetryAfterAt, now);
-		if (waitMs > 0) return {
-			route: "mac-planner",
-			reason: `The relay asked not to be called again for ${Math.ceil(waitMs / 1e3)}s (until ${normalized.brainRetryAfterAt}).`,
-			cooldownMs: waitMs
-		};
-		return {
-			route: "local-brain",
-			reason: "Brain configuration is complete."
-		};
-	}
-	const BROWSER_TOOLS = Object.freeze([
-		{
-			name: "navigate",
-			description: "Open an http(s) URL in a tab.",
-			params: "url, newTab?"
-		},
-		{
-			name: "activate_tab",
-			description: "Focus the existing tab matching a URL, or open it.",
-			params: "urlContains | url"
-		},
-		{
-			name: "click",
-			description: "Click an element.",
-			params: "selector | ref"
-		},
-		{
-			name: "type",
-			description: "Type text into a field.",
-			params: "selector | ref, text, submit?"
-		},
-		{
-			name: "read_page",
-			description: "Read page text/html/forms/landmarks.",
-			params: "mode?, selector?, maxChars?"
-		},
-		{
-			name: "snapshot",
-			description: "List interactive elements with refs.",
-			params: "maxElements?"
-		},
-		{
-			name: "wait_for",
-			description: "Wait until a selector or text appears.",
-			params: "selector | textContains, timeoutMs?"
-		},
-		{
-			name: "scroll",
-			description: "Scroll the page or to an element.",
-			params: "dx?, dy?, selector?, ref?"
-		},
-		{
-			name: "select",
-			description: "Choose an option in a <select>.",
-			params: "selector | ref, value | label"
-		},
-		{
-			name: "list_tabs",
-			description: "List open web tabs.",
-			params: "limit?"
-		},
-		{
-			name: "capture",
-			description: "Screenshot the visible tab.",
-			params: ""
-		},
-		{
-			name: "press_key",
-			description: "Press a keyboard key.",
-			params: "key, selector?"
-		}
-	]);
-	for (const tool of BROWSER_TOOLS) if (!COMMAND_TYPES.has(tool.name)) throw new Error(`brain tool ${tool.name} is not an executable command`);
-	if (BROWSER_TOOLS.length !== COMMAND_TYPES.size) throw new Error("brain tool catalog does not cover every executable command");
-	function createBrainState({ command, page = null, maxSteps = 6, now = Date.now() } = {}) {
-		return {
-			status: "thinking",
-			command: String(command ?? ""),
-			page,
-			steps: [],
-			stepCount: 0,
-			maxSteps,
-			failures: 0,
-			pendingCall: null,
-			response: null,
-			handoffReason: null,
-			parkedCall: null,
-			parkedReason: null,
-			startedAt: new Date(now).toISOString()
-		};
-	}
-	const TERMINAL = new Set([
-		"done",
-		"handoff",
-		"parked"
-	]);
-	/**
-	* The reducer. Every transition the loop can make is here, pure, so the whole
-	* lifecycle is testable without a model, a browser, or a network.
-	*
-	* Events:
-	*   {type:'model_reply', text}          — while thinking
-	*   {type:'model_error', error}         — while thinking
-	*   {type:'tool_result', ok, result?, error?} — while acting
-	*   {type:'hand_off', reason}           — from anywhere
-	*   {type:'park', reason}               — while acting; the pending call is
-	*                                         refused unattended execution
-	*/
-	function reduceBrain(state, event) {
-		if (!state || TERMINAL.has(state.status)) return state;
-		if (event?.type === "hand_off") return {
-			...state,
-			status: "handoff",
-			pendingCall: null,
-			handoffReason: event.reason || "Handed off to the Mac planner."
-		};
-		if (state.status === "acting" && event?.type === "park") return {
-			...state,
-			status: "parked",
-			parkedCall: state.pendingCall,
-			parkedReason: event.reason || "This step is irreversible or outward-facing.",
-			pendingCall: null
-		};
-		if (state.status === "thinking" && event?.type === "model_reply") {
-			const parsed = parseToolCalls(event.text);
-			if (parsed.done) return {
-				...state,
-				status: "done",
-				response: parsed.response
-			};
-			if (parsed.malformed || !parsed.calls.length) {
-				const failures = state.failures + 1;
-				if (failures >= MAX_FAILURES) return {
-					...state,
-					failures,
-					status: "handoff",
-					handoffReason: `The model reply was unusable twice (${parsed.reason || "no tool call"}).`
-				};
-				return {
-					...state,
-					failures
-				};
-			}
-			const call = parsed.calls[0];
-			if (!COMMAND_TYPES.has(call.type)) {
-				const failures = state.failures + 1;
-				return failures >= MAX_FAILURES ? {
-					...state,
-					failures,
-					status: "handoff",
-					handoffReason: `The model asked for an unknown tool twice (${call.type}).`
-				} : {
-					...state,
-					failures
-				};
-			}
-			if (state.stepCount >= state.maxSteps) return {
-				...state,
-				status: "handoff",
-				handoffReason: `Step budget of ${state.maxSteps} spent without an answer.`
-			};
-			return {
-				...state,
-				status: "acting",
-				pendingCall: call,
-				failures: 0
-			};
-		}
-		if (state.status === "thinking" && event?.type === "model_error") {
-			if (event.fatal) return {
-				...state,
-				status: "handoff",
-				handoffReason: event.error
-			};
-			const failures = state.failures + 1;
-			return failures >= MAX_FAILURES ? {
-				...state,
-				failures,
-				status: "handoff",
-				handoffReason: `The model endpoint failed twice: ${event.error}`
-			} : {
-				...state,
-				failures
-			};
-		}
-		if (state.status === "acting" && event?.type === "tool_result") {
-			const step = {
-				tool: state.pendingCall?.type ?? "unknown",
-				params: state.pendingCall?.params ?? {},
-				ok: event.ok === true,
-				...event.ok === true ? { result: event.result ?? null } : { error: String(event.error ?? "Tool failed.") }
-			};
-			const next = {
-				...state,
-				steps: [...state.steps, step],
-				stepCount: state.stepCount + 1,
-				pendingCall: null,
-				failures: event.ok === true ? 0 : state.failures + 1,
-				status: "thinking"
-			};
-			if (next.failures >= MAX_FAILURES) return {
-				...next,
-				status: "handoff",
-				handoffReason: "Tools failed twice in a row."
-			};
-			if (next.stepCount >= next.maxSteps) return step.ok ? next : {
-				...next,
-				status: "handoff",
-				handoffReason: "Out of steps."
-			};
-			return next;
-		}
-		return state;
-	}
-	/**
-	* The prompt is rebuilt from state every turn rather than kept as chat history
-	* so the reducer stays the single source of truth.
-	*
-	* Bounded against the relay's prompt ceiling here rather than discovering it
-	* as a 400: a `read_page` result is up to 50 kB on its own, so a few steps of
-	* transcript can outgrow the whole budget. The system block and the owner's
-	* command are never dropped — without either there is nothing to answer — and
-	* the transcript keeps the MOST RECENT steps, which are the ones the next
-	* decision turns on. Dropped steps are declared in the prompt rather than
-	* silently omitted, so the model is never told a partial history is complete.
-	*/
-	function buildBrainMessages(state) {
-		const tools = BROWSER_TOOLS.map((tool) => `- ${tool.name}(${tool.params}): ${tool.description}`).join("\n");
-		const lines = state.steps.map((step, index) => {
-			const outcome = step.ok ? JSON.stringify(step.result)?.slice(0, 2e3) : `ERROR: ${step.error}`;
-			return `${index + 1}. ${step.tool}(${JSON.stringify(step.params)}) → ${outcome}`;
-		});
-		const fixedChars = tools.length + String(state.command).length + 400;
-		let budget = Math.max(0, PROMPT_CHAR_BUDGET - fixedChars);
-		const kept = [];
-		for (let index = lines.length - 1; index >= 0; index -= 1) {
-			const cost = lines[index].length + 1;
-			if (cost > budget) break;
-			budget -= cost;
-			kept.unshift(lines[index]);
-		}
-		const dropped = lines.length - kept.length;
-		const transcript = kept.length ? (dropped ? `(${dropped} earlier step(s) omitted to fit the prompt limit)\n` : "") + kept.join("\n") : "";
-		return [
-			{
-				role: "system",
-				content: `You are the planning brain of a browser extension. You may either answer the user directly or drive the page with one tool per turn.
-Tools:\n${tools}\nReply with EXACTLY ONE JSON object and nothing else. Either
-  {"tool": "<name>", "params": {…}}
-or, when you are finished,
-  {"done": true, "response": "<what to tell the user>"}
-` + (state.page ? `The user is looking at: "${state.page.title}" — ${state.page.url}\n` : "") + `You have ${Math.max(0, state.maxSteps - state.stepCount)} tool call(s) left.`
-			},
-			{
-				role: "user",
-				content: state.command
-			},
-			...transcript ? [{
-				role: "user",
-				content: `Tool results so far:\n${transcript}`
-			}] : []
-		];
-	}
-	/**
-	* Read a model reply. Accepts a fenced ```json block or a bare JSON object;
-	* plain prose with no JSON at all is taken as a final answer, because a model
-	* that just answered the question should not be punished for skipping the
-	* envelope. Returns {done, response, calls:[{type, params}], malformed, reason}.
-	*/
-	function parseToolCalls(text) {
-		const raw = String(text ?? "").trim();
-		if (!raw) return {
-			done: false,
-			response: null,
-			calls: [],
-			malformed: true,
-			reason: "empty reply"
-		};
-		const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-		const candidate = (fenced ? fenced[1] : raw).trim();
-		const start = candidate.indexOf("{");
-		const end = candidate.lastIndexOf("}");
-		if (start === -1) return {
-			done: true,
-			response: raw,
-			calls: [],
-			malformed: false,
-			reason: ""
-		};
-		if (end <= start) return {
-			done: false,
-			response: null,
-			calls: [],
-			malformed: true,
-			reason: "truncated JSON"
-		};
-		let parsed;
-		try {
-			parsed = JSON.parse(candidate.slice(start, end + 1));
-		} catch (error) {
-			return {
-				done: false,
-				response: null,
-				calls: [],
-				malformed: true,
-				reason: `unparseable JSON: ${error.message}`
-			};
-		}
-		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			if (parsed.done === true || typeof parsed.response === "string" && !parsed.tool) return {
-				done: true,
-				response: String(parsed.response ?? "").trim() || raw,
-				calls: [],
-				malformed: false,
-				reason: ""
-			};
-			const calls = (Array.isArray(parsed.tool_calls) ? parsed.tool_calls : Array.isArray(parsed.tools) ? parsed.tools : parsed.tool ? [parsed] : []).map((item) => ({
-				type: String(item?.tool ?? item?.name ?? item?.type ?? "").trim(),
-				params: item?.params && typeof item.params === "object" && !Array.isArray(item.params) ? item.params : {}
-			})).filter((item) => item.type);
-			if (calls.length) return {
-				done: false,
-				response: null,
-				calls,
-				malformed: false,
-				reason: ""
-			};
-		}
-		return {
-			done: false,
-			response: null,
-			calls: [],
-			malformed: true,
-			reason: "JSON had neither a tool call nor a done response"
-		};
-	}
-	/**
-	* Read a failed POST /v1/infer. Pure, so every branch is testable without a
-	* relay — which matters more than usual here, because the branch that still
-	* demands a human remedy (a credential minted with an explicit `scopes`
-	* ceiling that leaves out `llm:infer`) cannot be reproduced locally at all.
-	*
-	* Keys on `code`, never on message text: the relay's own comment says the
-	* generic denial stays deliberately vague so a probing token gets no
-	* scope-enumeration oracle out of it, and vague text is exactly what a text
-	* match would break on.
-	*/
-	function interpretInferError({ status, payload } = {}) {
-		const code = String(payload?.code ?? "").trim() || "unknown";
-		const relayText = String(payload?.error ?? "").trim();
-		const message = code === "credential_predates_capability" ? "The browser credential was minted with an explicit scope ceiling that leaves out inference. Re-pair the extension with a wider scope list (pendant-credentials.mjs pair --role browser_node) — a narrowed credential never widens on its own." : code === "scope_denied" ? "This credential's role is not allowed to use the relay's inference route." : code === "rate_limited" ? `This device has spent its hourly inference budget${payload?.resetAt ? `; it resets at ${payload.resetAt}` : ""}.` : code === "not_configured" ? "The relay has no model key configured, so it cannot think for this node." : code === "prompt_too_large" || code === "invalid_messages" ? relayText || "The relay refused the prompt." : code === "upstream_error" ? `The model provider refused the request (HTTP ${status ?? "?"}).` : relayText || `The relay returned HTTP ${status ?? "?"}.`;
-		const retryAfter = Number(payload?.retryAfter);
-		const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null;
-		return {
-			code,
-			status: status ?? null,
-			message,
-			fatal: FATAL_INFER_CODES.has(code),
-			retryAfter: seconds,
-			retryAt: cooldownUntil(seconds)
-		};
-	}
-	function summarizeBrainRun(state) {
-		if (state.status === "done") return `Brain answered after ${state.stepCount} tool call(s).`;
-		if (state.status === "handoff") return `Brain handed off to the Mac planner: ${state.handoffReason}`;
-		if (state.status === "parked") return `Brain stopped before an irreversible step and parked it for approval: ${state.parkedReason}`;
-		return `Brain is ${state.status} (${state.stepCount} tool call(s) so far).`;
-	}
-	/**
-	* @param {object} options
-	* @param {string} options.command      what the owner asked for
-	* @param {object|null} options.page    {url, title} context, already scrubbed
-	* @param {object} options.config      normalizeBrainConfig() output
-	* @param {(messages: object[]) => Promise<string>} options.callModel
-	*        POSTs to config.modelProxyUrl with the device token; resolves to the
-	*        model's text reply. Injected by background.js — and never invoked
-	*        unless config.ready, which today it never is.
-	* @param {(call: {type, params}) => Promise<object>} options.runTool
-	*        runs one of the extension's page commands through its own
-	*        validated executor and returns its sanitized result.
-	* @param {(call: {type, params}) => {allow: boolean, reason?: string}} [options.assessTool]
-	*        the outward gate (affinity.createOutwardGuard().assess). Consulted
-	*        BEFORE every runTool; {allow:false} parks the call instead of
-	*        running it. Optional so the pure-loop tests stay pure; background.js
-	*        always supplies it.
-	*/
-	async function runBrainLoop({ command, page = null, config, callModel, runTool, assessTool = null }) {
-		const normalized = config && "ready" in config ? config : normalizeBrainConfig(config);
-		let state = createBrainState({
-			command,
-			page
-		});
-		if (!normalized.ready) return reduceBrain(state, {
-			type: "hand_off",
-			reason: normalized.reason
-		});
-		for (let turn = 0; turn < state.maxSteps * 2 + 2; turn += 1) if (state.status === "thinking") try {
-			const text = await callModel(buildBrainMessages(state));
-			state = reduceBrain(state, {
-				type: "model_reply",
-				text
-			});
-		} catch (error) {
-			state = reduceBrain(state, {
-				type: "model_error",
-				error: error?.message || String(error),
-				fatal: error?.fatal === true
-			});
-		}
-		else if (state.status === "acting") {
-			if (assessTool) {
-				let verdict;
-				try {
-					verdict = assessTool(state.pendingCall);
-				} catch (error) {
-					verdict = {
-						allow: false,
-						reason: `The safety gate itself failed (${error?.message || error}).`
-					};
-				}
-				if (verdict?.allow !== true) {
-					state = reduceBrain(state, {
-						type: "park",
-						reason: verdict?.reason || "This step is irreversible or outward-facing."
-					});
-					continue;
-				}
-			}
-			try {
-				const result = await runTool(state.pendingCall);
-				state = reduceBrain(state, {
-					type: "tool_result",
-					ok: true,
-					result
-				});
-			} catch (error) {
-				state = reduceBrain(state, {
-					type: "tool_result",
-					ok: false,
-					error: error?.message || String(error)
-				});
-			}
-		} else break;
-		if (!TERMINAL.has(state.status)) state = reduceBrain(state, {
-			type: "hand_off",
-			reason: "The loop ran out of turns without finishing."
-		});
-		return state;
-	}
-	//#endregion
-	//#region browser-extension/src/affinity.js
+	//#region src/affinity.js
 	const CAPABILITY_BROWSER = "browser";
 	const CAPABILITY_HIVE = "hive";
 	const EFFECT_READ = "read";
@@ -1670,57 +1082,6 @@ or, when you are finished,
 			reason: `All ${steps.length} step(s) are browser work; this node runs them itself.`
 		};
 	}
-	/**
-	* A stateful wrapper around classifyEffect for tool-by-tool execution.
-	*
-	* The brain clicks by ref, and a ref means nothing outside the snapshot that
-	* minted it. The guard watches snapshot results go past and remembers each
-	* ref's accessible name, so when the model later says {click, ref:"e4"} the
-	* classifier sees "Confirm cancellation" — the words the OWNER would have
-	* read — and not an opaque token. A ref the guard never saw snapshotted is
-	* unclassifiable and therefore parks (classifyEffect's fail-closed rule).
-	*/
-	function createOutwardGuard() {
-		const names = /* @__PURE__ */ new Map();
-		return {
-			/** Feed every successful tool result through here. */
-			observe(call, result) {
-				if (String(call?.type) !== "snapshot") return;
-				for (const element of result?.elements ?? []) {
-					const ref = String(element?.ref ?? "").trim();
-					if (!ref) continue;
-					names.set(ref, {
-						name: String(element?.name ?? ""),
-						role: String(element?.role ?? "")
-					});
-				}
-			},
-			/** What the last snapshot called this ref, if anything. */
-			describeRef(ref) {
-				return names.get(String(ref ?? "").trim()) ?? null;
-			},
-			/**
-			* May this call run unattended? {allow, effect, reason, targetName}.
-			* Read and act steps pass; outward steps do not — deciding what happens
-			* to a parked call is the caller's business, not the guard's.
-			*/
-			assess(call) {
-				const known = names.get(String(call?.params?.ref ?? "").trim());
-				const targetName = known ? [known.name, known.role && `(${known.role})`].filter(Boolean).join(" ") : "";
-				const { effect, reason } = classifyEffect({
-					type: call?.type,
-					params: call?.params ?? {},
-					targetName
-				});
-				return {
-					allow: effect !== EFFECT_OUTWARD,
-					effect,
-					reason,
-					targetName
-				};
-			}
-		};
-	}
 	const NAVIGATION_COMMANDS = new Set(["navigate", "activate_tab"]);
 	/** What a finished run actually did, counted from its steps. */
 	function summarizeEffects(steps = []) {
@@ -1744,15 +1105,6 @@ or, when you are finished,
 		return counts;
 	}
 	/**
-	* Does the command ASK for an outward effect? Same vocabulary as the step
-	* classifier, applied to the owner's own words — "cancel my recurring
-	* investments" wants a cancellation, and a run that never performed one must
-	* not be allowed to sound as if it did.
-	*/
-	function commandWantsOutwardEffect(command) {
-		return textLooksOutward(command);
-	}
-	/**
 	* The honest completion line for a locally executed run.
 	*
 	* verdict:
@@ -1767,7 +1119,7 @@ or, when you are finished,
 	*/
 	function honestVerdict({ command, steps = [], parked = [], response = "" } = {}) {
 		const effects = summarizeEffects(steps);
-		const wanted = commandWantsOutwardEffect(command);
+		const wanted = textLooksOutward(command);
 		const said = String(response ?? "").trim();
 		if (parked.length) return {
 			verdict: "parked",
@@ -1843,7 +1195,7 @@ or, when you are finished,
 		return candidate;
 	}
 	//#endregion
-	//#region shared/bridgeSocketProtocol.js
+	//#region ../shared/bridgeSocketProtocol.js
 	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
 	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
 	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
@@ -1858,7 +1210,7 @@ or, when you are finished,
 		}
 	}
 	//#endregion
-	//#region browser-extension/src/relay-peer.js
+	//#region src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://ai-pendant-relay.your-subdomain.workers.dev",
 		"http://127.0.0.1:8787",
@@ -1895,12 +1247,6 @@ or, when you are finished,
 		"deviceToken",
 		"meshTrustedSenders"
 	]);
-	Object.freeze({
-		relayEnabled: false,
-		relayUrl: null,
-		relayDeviceId: null,
-		deviceToken: null
-	});
 	const DEFAULT_TRUSTED_SENDERS = Object.freeze([RELAY_NODE_ADDRESS]);
 	function normalizeTrustedSenders(value, extra = []) {
 		const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/).filter(Boolean);
@@ -2347,45 +1693,24 @@ or, when you are finished,
 		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
 	}
 	//#endregion
-	//#region browser-extension/src/execution-status.js
+	//#region src/execution-status.js
 	const EXECUTION_STATUS_KEY = "localExecutionStatus";
 	const PENDING_APPROVALS_KEY = "localPendingApprovals";
-	const APPROVAL_MESSAGE_TYPES = Object.freeze({
-		status: "affinity:get-status",
-		listPending: "affinity:list-pending",
-		resolve: "affinity:resolve-approval"
-	});
 	const APPROVAL_TTL_MS = 10 * 6e4;
 	const MAX_RUNS_KEPT = 8;
 	const MAX_PENDING_KEPT = 12;
-	function createStatusEmitter() {
-		const listeners = /* @__PURE__ */ new Map();
-		return {
-			on(event, handler) {
-				if (!listeners.has(event)) listeners.set(event, /* @__PURE__ */ new Set());
-				listeners.get(event).add(handler);
-				return () => listeners.get(event)?.delete(handler);
-			},
-			emit(event, payload) {
-				for (const handler of listeners.get(event) ?? []) try {
-					handler(payload);
-				} catch {}
-			}
-		};
-	}
 	/**
 	* @param {object} options
 	* @param {object} options.storage  a storage.local-shaped object
 	*                                  ({get(keys), set(values)}) — injected so
 	*                                  tests hand in a plain fake.
-	* @param {object} [options.emitter] createStatusEmitter() output.
 	* @param {() => number} [options.now]
 	*
 	* All writes go through one promise chain, same as background.js's
 	* withHistory: storage.local has no transactions, and two steps finishing
 	* together must not eat each other's entries.
 	*/
-	function createExecutionJournal({ storage, emitter = createStatusEmitter(), now = Date.now } = {}) {
+	function createExecutionJournal({ storage, now = Date.now } = {}) {
 		if (!storage) throw new Error("createExecutionJournal requires a storage.");
 		let writes = Promise.resolve();
 		const serialize = (mutate) => {
@@ -2401,11 +1726,9 @@ or, when you are finished,
 			if (index === -1) return null;
 			runs[index] = mutate({ ...runs[index] });
 			await storage.set({ [EXECUTION_STATUS_KEY]: { runs } });
-			emitter.emit("run", runs[index]);
 			return runs[index];
 		});
 		return {
-			events: emitter,
 			/** A run exists from the moment the command is claimed locally. */
 			beginRun({ runId, command, origin = "browser-extension", route, executor }) {
 				return serialize(async () => {
@@ -2427,7 +1750,6 @@ or, when you are finished,
 						finishedAt: null
 					};
 					await storage.set({ [EXECUTION_STATUS_KEY]: { runs: [run, ...runs].slice(0, MAX_RUNS_KEPT) } });
-					emitter.emit("run", run);
 					return run;
 				});
 			},
@@ -2445,8 +1767,8 @@ or, when you are finished,
 				}));
 			},
 			/**
-			* Park an outward step. The run stops here; the approval entry is what a
-			* later popup pass renders, and resolveApproval is what its buttons call.
+			* Park an outward step. The run stops here; the entry records what was
+			* refused and why, and expires unrun after APPROVAL_TTL_MS.
 			*/
 			parkStep(runId, { call, effect, reason, targetName = "" }) {
 				return serialize(async () => {
@@ -2463,11 +1785,9 @@ or, when you are finished,
 						targetName: String(targetName ?? ""),
 						state: "pending",
 						requestedAt: new Date(now()).toISOString(),
-						resolvedAt: null,
 						expiresAt: new Date(now() + APPROVAL_TTL_MS).toISOString()
 					};
 					await storage.set({ [PENDING_APPROVALS_KEY]: [entry, ...pending].slice(0, MAX_PENDING_KEPT) });
-					emitter.emit("approval", entry);
 					return entry;
 				});
 			},
@@ -2492,37 +1812,6 @@ or, when you are finished,
 			async getStatus() {
 				await writes;
 				return readStatus();
-			},
-			/** Pending approvals that have not expired. Expiry is enforced on read
-			* AND on resolve, so a stale entry cannot run by being clicked late. */
-			async listPendingApprovals() {
-				await writes;
-				const pending = await readPending();
-				const at = now();
-				return pending.filter((entry) => entry?.state === "pending" && Date.parse(entry.expiresAt ?? "") > at);
-			},
-			/**
-			* Resolve one approval. Returns the entry in its new state, or null when
-			* it does not exist. An expired entry resolves to 'expired' whatever the
-			* verdict was — approving a ten-minute-old click is refused, not honored.
-			* The caller (background.js) is the one who actually executes on
-			* 'approved'; this module only owns the state.
-			*/
-			resolveApproval(id, verdict) {
-				return serialize(async () => {
-					const pending = await readPending();
-					const index = pending.findIndex((entry) => entry?.id === id);
-					if (index === -1) return null;
-					const entry = { ...pending[index] };
-					if (entry.state !== "pending") return entry;
-					entry.state = Date.parse(entry.expiresAt ?? "") <= now() ? "expired" : verdict === "approved" ? "approved" : "declined";
-					entry.resolvedAt = new Date(now()).toISOString();
-					const next = [...pending];
-					next[index] = entry;
-					await storage.set({ [PENDING_APPROVALS_KEY]: next });
-					emitter.emit("approval", entry);
-					return entry;
-				});
 			}
 		};
 	}
@@ -2717,7 +2006,7 @@ or, when you are finished,
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/approvals.js
+	//#region src/approvals.js
 	const APPROVALS_KEY = "pendingApprovals";
 	/**
 	* What the toolbar badge shows: the number of prompts still waiting on the
@@ -2786,7 +2075,7 @@ or, when you are finished,
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/background.js
+	//#region src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const POLL_ALARM = "ai-pendant-poll";
 	const POLL_WINDOW_MS = 25e3;
@@ -2837,23 +2126,17 @@ or, when you are finished,
 		};
 	}
 	async function request(config, path, options = {}) {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-		try {
-			return await fetch(`${config.agentUrl}${path}`, {
-				...options,
-				cache: "no-store",
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${config.agentToken}`,
-					...options.body ? { "Content-Type": "application/json" } : {},
-					...options.headers
-				},
-				signal: controller.signal
-			});
-		} finally {
-			clearTimeout(timeout);
-		}
+		return fetch(`${config.agentUrl}${path}`, {
+			...options,
+			cache: "no-store",
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${config.agentToken}`,
+				...options.body ? { "Content-Type": "application/json" } : {},
+				...options.headers
+			},
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+		});
 	}
 	async function postJson(config, path, payload) {
 		const response = await request(config, path, {
@@ -3063,25 +2346,19 @@ or, when you are finished,
 		return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS));
 	}
 	async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS) {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), timeoutMs);
-		try {
-			const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
-				method: descriptor.method,
-				cache: "no-store",
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${relayConfig.deviceToken}`,
-					...descriptor.body ? { "Content-Type": "application/json" } : {}
-				},
-				...descriptor.body ? { body: JSON.stringify(descriptor.body) } : {},
-				signal: controller.signal
-			});
-			if (!response.ok) throw await relayResponseError(response);
-			return response.status === 204 ? null : await response.json();
-		} finally {
-			clearTimeout(timeout);
-		}
+		const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
+			method: descriptor.method,
+			cache: "no-store",
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${relayConfig.deviceToken}`,
+				...descriptor.body ? { "Content-Type": "application/json" } : {}
+			},
+			...descriptor.body ? { body: JSON.stringify(descriptor.body) } : {},
+			signal: AbortSignal.timeout(timeoutMs)
+		});
+		if (!response.ok) throw await relayResponseError(response);
+		return response.status === 204 ? null : await response.json();
 	}
 	function ensureMeshSocket(relayConfig, onMail) {
 		if (meshSocket || meshSocketRefused) return;
@@ -3672,8 +2949,11 @@ or, when you are finished,
 		};
 		const isVisible = (el) => {
 			if (!(el instanceof Element)) return false;
-			const style = window.getComputedStyle(el);
-			if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+			if (!el.checkVisibility({
+				opacityProperty: true,
+				visibilityProperty: true,
+				contentVisibilityAuto: true
+			})) return false;
 			const rect = el.getBoundingClientRect();
 			return rect.width > 0 && rect.height > 0;
 		};
@@ -3882,8 +3162,6 @@ or, when you are finished,
 	* stream for most of a minute and that is normal, not an outage.
 	*/
 	async function consolePost(config, path, payload, timeoutMs, interpret) {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await fetch(`${config.agentUrl}${path}`, {
 				method: "POST",
@@ -3894,7 +3172,7 @@ or, when you are finished,
 					"Content-Type": "application/json"
 				},
 				body: JSON.stringify(payload),
-				signal: controller.signal
+				signal: AbortSignal.timeout(timeoutMs)
 			});
 			const body = await response.json().catch(() => null);
 			return interpret({
@@ -3904,10 +3182,8 @@ or, when you are finished,
 		} catch (error) {
 			return {
 				kind: "error",
-				message: error?.name === "AbortError" ? `The local agent did not answer within ${Math.round(timeoutMs / 1e3)}s. Check the dashboard — the job may still be running.` : error?.message || String(error)
+				message: error?.name === "TimeoutError" ? `The local agent did not answer within ${Math.round(timeoutMs / 1e3)}s. Check the dashboard — the job may still be running.` : error?.message || String(error)
 			};
-		} finally {
-			clearTimeout(timeout);
 		}
 	}
 	let journalInstance = null;
@@ -3939,75 +3215,6 @@ or, when you are finished,
 			await journal.markHiveRecord(runId, phase === "claim" ? "claimed-recorded" : "recorded");
 		} catch (error) {
 			await journal.markHiveRecord(runId, `failed: ${error?.message || error}`);
-		}
-	}
-	/**
-	* The owner approved a parked outward step (via the popup, next pass). The
-	* step runs through the same validated executor as everything else, and the
-	* run's verdict is recomputed from what actually happened. resolveApproval
-	* has already enforced single-use and the 10-minute freshness window.
-	*/
-	async function executeApprovedStep(entry) {
-		const journal = executionJournal();
-		const config = await getConfig();
-		try {
-			const result = await executeCommand({
-				commandId: `approved-${entry.id}`,
-				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-				action: entry.call
-			}, config);
-			await journal.recordStep(entry.runId, {
-				tool: entry.call?.type,
-				effect: EFFECT_OUTWARD,
-				ok: true,
-				summary: `Approved by owner: ${String(result?.message ?? entry.call?.type).slice(0, 250)}`
-			});
-			const run = (await journal.getStatus()).runs.find((candidate) => candidate.runId === entry.runId);
-			const verdict = honestVerdict({
-				command: run?.command ?? "",
-				steps: run?.steps ?? [],
-				parked: []
-			});
-			await journal.finishRun(entry.runId, {
-				state: "finished",
-				...verdict
-			});
-			await recordRunToHive(entry.runId, "verdict");
-			await patchEntry(entry.runId, {
-				state: "executed",
-				headline: verdict.headline,
-				detail: verdict.detail,
-				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-			});
-			return {
-				ok: true,
-				ran: true,
-				message: result?.message ?? "Done."
-			};
-		} catch (error) {
-			const message = error?.message || String(error);
-			await journal.recordStep(entry.runId, {
-				tool: entry.call?.type,
-				effect: EFFECT_OUTWARD,
-				ok: false,
-				summary: message.slice(0, 300)
-			});
-			await journal.finishRun(entry.runId, {
-				state: "failed",
-				verdict: "failed",
-				headline: `The approved step failed: ${message}`
-			});
-			await recordRunToHive(entry.runId, "verdict");
-			await patchEntry(entry.runId, {
-				state: "failed",
-				headline: `The approved step failed: ${message}`,
-				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-			});
-			return {
-				ok: false,
-				ran: true,
-				error: message
-			};
 		}
 	}
 	async function handleConsoleSubmit({ command, page }) {
@@ -4044,95 +3251,6 @@ or, when you are finished,
 		};
 	}
 	async function runConsoleCommand({ id, command, page, config }) {
-		const brainConfig = normalizeBrainConfig(await api.storage.local.get(BRAIN_STORAGE_KEYS));
-		let brainNote = "";
-		const route = chooseBrainRoute(brainConfig);
-		if (route.route === "local-brain") {
-			const journal = executionJournal();
-			const guard = createOutwardGuard();
-			await journal.beginRun({
-				runId: id,
-				command,
-				route: "local-brain"
-			});
-			await recordRunToHive(id, "claim");
-			const finished = await runBrainLoop({
-				command,
-				page,
-				config: brainConfig,
-				callModel: (messages) => brainCallModel(brainConfig, messages),
-				runTool: async (call) => {
-					const result = await runBrainTool(call, config);
-					guard.observe(call, result);
-					await journal.recordStep(id, {
-						tool: call?.type,
-						effect: guard.assess(call).effect,
-						ok: true,
-						summary: String(result?.message ?? "").slice(0, 300)
-					});
-					return result;
-				},
-				assessTool: (call) => guard.assess(call)
-			});
-			if (finished.status === "parked") {
-				const assessed = guard.assess(finished.parkedCall ?? {});
-				const parked = await journal.parkStep(id, {
-					call: finished.parkedCall,
-					effect: EFFECT_OUTWARD,
-					reason: finished.parkedReason,
-					targetName: assessed.targetName
-				});
-				const verdict = honestVerdict({
-					command,
-					steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
-					parked: [parked]
-				});
-				await journal.finishRun(id, {
-					state: "parked",
-					...verdict
-				});
-				await recordRunToHive(id, "verdict");
-				await patchEntry(id, {
-					state: "parked",
-					headline: verdict.headline,
-					detail: [
-						`Waiting in this browser's approval queue (${parked.id}).`,
-						verdict.detail,
-						"Approval UI lands with the next popup pass."
-					].join("\n"),
-					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-				});
-				return;
-			}
-			if (finished.status === "done") {
-				if (brainConfig.brainRetryAfterAt) await api.storage.local.remove("brainRetryAfterAt").catch(() => {});
-				const verdict = honestVerdict({
-					command,
-					steps: (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [],
-					parked: [],
-					response: finished.response
-				});
-				await journal.finishRun(id, {
-					state: "finished",
-					...verdict
-				});
-				await recordRunToHive(id, "verdict");
-				await patchEntry(id, {
-					state: verdict.verdict === "incomplete" ? "failed" : "answered",
-					headline: verdict.headline,
-					detail: [summarizeBrainRun(finished), verdict.detail].filter(Boolean).join("\n"),
-					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-				});
-				return;
-			}
-			brainNote = summarizeBrainRun(finished);
-			await journal.finishRun(id, {
-				state: "handed-off",
-				verdict: "handoff",
-				headline: brainNote
-			});
-			await recordRunToHive(id, "verdict");
-		} else if (route.cooldownMs) brainNote = `Brain skipped — ${route.reason}`;
 		const commandText = buildCommandText(command, page);
 		const stored = await api.storage.local.get(SESSION_KEY);
 		const sessionId = String(stored["consoleSessionId"] ?? "").trim();
@@ -4143,9 +3261,7 @@ or, when you are finished,
 		}, PLAN_TIMEOUT_MS, interpretPlanResponse);
 		if (planOutcome.sessionId) await api.storage.local.set({ [SESSION_KEY]: planOutcome.sessionId });
 		if (planOutcome.kind !== "execute") {
-			const patch = outcomeToPatch(planOutcome);
-			if (brainNote) patch.detail = [brainNote, patch.detail].filter(Boolean).join("\n");
-			await patchEntry(id, patch);
+			await patchEntry(id, outcomeToPatch(planOutcome));
 			return;
 		}
 		const affinity = routePlan(planOutcome.actions);
@@ -4155,8 +3271,7 @@ or, when you are finished,
 				id,
 				command,
 				steps: affinity.steps,
-				config,
-				brainNote
+				config
 			});
 			return;
 		}
@@ -4181,7 +3296,7 @@ or, when you are finished,
 	* stops the run and parks in the approval queue; a failed step stops the run
 	* honestly rather than pressing on into a page in an unknown state.
 	*/
-	async function executePlanLocally({ id, command, steps, config, brainNote = "" }) {
+	async function executePlanLocally({ id, command, steps, config }) {
 		const journal = executionJournal();
 		await journal.beginRun({
 			runId: id,
@@ -4236,7 +3351,7 @@ or, when you are finished,
 				await patchEntry(id, {
 					state: "failed",
 					headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
-					detail: [brainNote, verdict.detail].filter(Boolean).join("\n"),
+					detail: verdict.detail,
 					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
 				});
 				return;
@@ -4256,89 +3371,12 @@ or, when you are finished,
 			state: parked.length ? "parked" : verdict.verdict === "incomplete" ? "failed" : "executed",
 			headline: verdict.headline,
 			detail: [
-				brainNote,
 				`Ran in this browser (affinity: all steps browser-capable).`,
 				verdict.detail,
-				...parked.length ? [`Waiting in this browser's approval queue (${parked[0].id}).`, "Approval UI lands with the next popup pass."] : []
+				...parked.length ? [`The parked step (${parked[0].id}) was recorded and did not run. Re-run the command when you want to do it yourself.`] : []
 			].filter(Boolean).join("\n"),
 			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
 		});
-	}
-	/**
-	* The brain's model call: POST /v1/infer on the relay
-	* (cloud-relay/nodeInference.js). Not reached until the owner configures a
-	* browser_node credential — see the header of src/brain.js. No key material
-	* lives here; the upstream provider key never leaves the relay.
-	*
-	* Deliberately absent from the body: `deviceId`, which the relay takes from
-	* the credential and ignores here, and `model`, which is allow-listed
-	* server-side — naming one outside the list is a 400 rather than a silent
-	* substitution, and this loop has no reason to name one at all.
-	*/
-	function brainCallModel(brainConfig, messages) {
-		return callModelWithHeadroom((maxTokens) => postInference(brainConfig, messages, maxTokens));
-	}
-	async function postInference(brainConfig, messages, maxTokens) {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 65e3);
-		let payload;
-		try {
-			const response = await fetch(brainConfig.modelProxyUrl, {
-				method: "POST",
-				cache: "no-store",
-				headers: {
-					Accept: "application/json",
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${brainConfig.deviceToken}`
-				},
-				body: JSON.stringify({
-					messages,
-					maxTokens,
-					responseFormat: "json_object"
-				}),
-				signal: controller.signal
-			});
-			payload = await response.json().catch(() => null);
-			if (!response.ok) {
-				const verdict = interpretInferError({
-					status: response.status,
-					payload
-				});
-				if (verdict.retryAt) await api.storage.local.set({ brainRetryAfterAt: verdict.retryAt }).catch(() => {});
-				const error = new Error(verdict.message);
-				error.code = verdict.code;
-				error.fatal = verdict.fatal;
-				throw error;
-			}
-			if (payload?.budget && payload.budget.enforced === false) console.warn("relay inference budget is advisory: no durable counter was reachable.");
-		} finally {
-			clearTimeout(timeout);
-		}
-		if (payload?.truncated) console.warn(`relay inference was cut off at ${maxTokens} tokens (finishReason: ${payload?.finishReason ?? "unknown"}).`);
-		return {
-			content: String(payload?.content ?? ""),
-			truncated: payload?.truncated === true,
-			complete: payload?.complete ?? null,
-			refusal: payload?.refusal ?? null,
-			finishReason: payload?.finishReason ?? null
-		};
-	}
-	/**
-	* The brain's tools ARE the extension's own 11 page commands, run through the
-	* same validation and the same privacy boundary as agent-issued commands —
-	* a locally minted command gets no shortcut past sanitizeExtraction.
-	*/
-	async function runBrainTool(call, config) {
-		const { type, params } = validateCommand({
-			commandId: `brain-${crypto.randomUUID()}`,
-			createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-			action: {
-				type: call?.type,
-				params: call?.params ?? {}
-			}
-		});
-		const { result } = await runCommand(type, params, config);
-		return sanitizeExtraction(result).result;
 	}
 	function browserLabel() {
 		const userAgent = globalThis.navigator?.userAgent ?? "";
@@ -4424,56 +3462,6 @@ or, when you are finished,
 		}
 		if (message?.type === "approval:decide") {
 			decideApproval(message).then(sendResponse).catch((error) => sendResponse({
-				ok: false,
-				error: error?.message || String(error)
-			}));
-			return true;
-		}
-		if (message?.type === APPROVAL_MESSAGE_TYPES.status) {
-			executionJournal().getStatus().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
-			return true;
-		}
-		if (message?.type === APPROVAL_MESSAGE_TYPES.listPending) {
-			executionJournal().listPendingApprovals().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
-			return true;
-		}
-		if (message?.type === APPROVAL_MESSAGE_TYPES.resolve) {
-			executionJournal().resolveApproval(String(message.id ?? ""), message.verdict).then(async (entry) => {
-				if (!entry) return {
-					ok: false,
-					error: "No such pending approval."
-				};
-				if (entry.state === "expired") {
-					await executionJournal().finishRun(entry.runId, {
-						state: "expired",
-						verdict: "parked",
-						headline: "The parked step expired before it was approved. Nothing was submitted, cancelled or sent."
-					});
-					await recordRunToHive(entry.runId, "verdict");
-					return {
-						ok: false,
-						error: "That approval expired (steps stay approvable for 10 minutes). Re-run the command."
-					};
-				}
-				if (entry.state === "declined") {
-					await executionJournal().finishRun(entry.runId, {
-						state: "declined",
-						verdict: "parked",
-						headline: "You declined the parked step. Nothing was submitted, cancelled or sent."
-					});
-					await recordRunToHive(entry.runId, "verdict");
-					await patchEntry(entry.runId, {
-						state: "refused",
-						headline: "Declined — the irreversible step was not run.",
-						finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-					});
-					return {
-						ok: true,
-						ran: false
-					};
-				}
-				return executeApprovedStep(entry);
-			}).then(sendResponse).catch((error) => sendResponse({
 				ok: false,
 				error: error?.message || String(error)
 			}));

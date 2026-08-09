@@ -72,7 +72,8 @@
  *
  * ---------------------------------------------------------------------------
  * EVERYTHING HERE IS PURE. No fetch, no storage, no browser APIs. The impure
- * edges live in background.js and are injected, the same split brain.js uses.
+ * edges live in background.js and are injected, the same split affinity.js
+ * uses.
  */
 import {
   envelopeIsLive,
@@ -161,13 +162,6 @@ export const RELAY_STORAGE_KEYS = Object.freeze([
   'deviceToken',
   'meshTrustedSenders',
 ])
-
-export const RELAY_DEFAULTS = Object.freeze({
-  relayEnabled: false,
-  relayUrl: null,
-  relayDeviceId: null,
-  deviceToken: null,
-})
 
 /*
  * Who may drive this browser over the mesh.

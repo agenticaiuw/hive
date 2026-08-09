@@ -139,7 +139,7 @@ test('the relay peer stays off until origin, address and credential all exist', 
   assert.equal(config.reason, '')
 })
 
-test('deviceToken is the storage key the inert brain scaffold already declared', () => {
+test('deviceToken is one of the relay storage keys', () => {
   assert.ok(RELAY_STORAGE_KEYS.includes('deviceToken'))
 })
 

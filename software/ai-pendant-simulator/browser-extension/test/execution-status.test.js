@@ -12,14 +12,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  APPROVAL_MESSAGE_TYPES,
   APPROVAL_TTL_MS,
   BROWSER_TASK_RECORD_KIND,
   EXECUTION_STATUS_KEY,
   PENDING_APPROVALS_KEY,
   RECORD_TTL_MS,
   createExecutionJournal,
-  createStatusEmitter,
   hiveClaimRecordFor,
   hiveVerdictRecordFor,
 } from '../src/execution-status.js'
@@ -75,35 +73,6 @@ test('a run advances begin → steps → finish, observable from storage', async
   assert.ok(run.finishedAt)
 })
 
-test('the emitter announces runs and approvals as they change', async () => {
-  const storage = fakeStorage()
-  const emitter = createStatusEmitter()
-  const seen = []
-  emitter.on('run', (run) => seen.push(`run:${run.state}`))
-  emitter.on('approval', (entry) => seen.push(`approval:${entry.state}`))
-
-  const journal = createExecutionJournal({ storage, emitter })
-  await journal.beginRun({ runId: 'r1', command: 'x' })
-  await journal.parkStep('r1', {
-    call: { type: 'click', params: { ref: 'e1' } },
-    reason: 'commit point',
-  })
-  await journal.finishRun('r1', { state: 'parked', verdict: 'parked' })
-
-  assert.deepEqual(seen, ['run:executing', 'approval:pending', 'run:parked'])
-})
-
-test('a broken listener cannot break the run it watches', async () => {
-  const storage = fakeStorage()
-  const emitter = createStatusEmitter()
-  emitter.on('run', () => {
-    throw new Error('listener bug')
-  })
-  const journal = createExecutionJournal({ storage, emitter })
-  await journal.beginRun({ runId: 'r1', command: 'x' })
-  assert.equal(storage.data[EXECUTION_STATUS_KEY].runs.length, 1)
-})
-
 test('the run list is bounded; newest first', async () => {
   const storage = fakeStorage()
   const journal = createExecutionJournal({ storage })
@@ -116,11 +85,11 @@ test('the run list is bounded; newest first', async () => {
 })
 
 /* ------------------------------------------------------------------ *
- * Approvals: single-use, ten-minute freshness, resolve-once.
+ * Parking: the refused step is recorded, bounded, and time-boxed.
  * ------------------------------------------------------------------ */
 
-test('a parked step is listed while fresh and vanishes at its deadline', async () => {
-  let clock = Date.parse('2026-08-09T12:00:00.000Z')
+test('a parked step lands in storage with its reason and a deadline', async () => {
+  const clock = Date.parse('2026-08-09T12:00:00.000Z')
   const storage = fakeStorage()
   const journal = createExecutionJournal({ storage, now: () => clock })
 
@@ -131,62 +100,17 @@ test('a parked step is listed while fresh and vanishes at its deadline', async (
     targetName: 'Cancel recurring investment (button)',
   })
 
-  assert.equal((await journal.listPendingApprovals()).length, 1)
-
-  clock += APPROVAL_TTL_MS + 1_000
+  const pending = storage.data[PENDING_APPROVALS_KEY]
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].id, entry.id)
+  assert.equal(pending[0].state, 'pending')
+  assert.equal(pending[0].call.type, 'click')
+  assert.equal(pending[0].reason, 'commit point')
+  /* The deadline is the freshness rule: a stale park must read as stale. */
   assert.equal(
-    (await journal.listPendingApprovals()).length,
-    0,
-    'a stale approval must not be offered',
+    Date.parse(pending[0].expiresAt) - Date.parse(pending[0].requestedAt),
+    APPROVAL_TTL_MS,
   )
-
-  /* And resolving it late is refused, not honored. */
-  const resolved = await journal.resolveApproval(entry.id, 'approved')
-  assert.equal(resolved.state, 'expired')
-})
-
-test('an approval resolves exactly once', async () => {
-  const storage = fakeStorage()
-  const journal = createExecutionJournal({ storage })
-  await journal.beginRun({ runId: 'r1', command: 'x' })
-  const entry = await journal.parkStep('r1', {
-    call: { type: 'click', params: { ref: 'e1' } },
-    reason: 'commit point',
-  })
-
-  const first = await journal.resolveApproval(entry.id, 'approved')
-  assert.equal(first.state, 'approved')
-
-  /* The double-click: the second resolve returns the settled entry unchanged
-   * rather than approving (or flipping) it again. */
-  const second = await journal.resolveApproval(entry.id, 'declined')
-  assert.equal(second.state, 'approved')
-
-  assert.equal(await journal.resolveApproval('apr-nope', 'approved'), null)
-})
-
-test('declining settles the entry without touching the run steps', async () => {
-  const storage = fakeStorage()
-  const journal = createExecutionJournal({ storage })
-  await journal.beginRun({ runId: 'r1', command: 'x' })
-  const entry = await journal.parkStep('r1', {
-    call: { type: 'click', params: { ref: 'e1' } },
-    reason: 'commit point',
-  })
-  const declined = await journal.resolveApproval(entry.id, 'declined')
-  assert.equal(declined.state, 'declined')
-  const run = storage.data[EXECUTION_STATUS_KEY].runs[0]
-  assert.equal(run.steps.length, 0)
-})
-
-test('the popup seam is stable: keys and message types are named exports', () => {
-  assert.equal(EXECUTION_STATUS_KEY, 'localExecutionStatus')
-  assert.equal(PENDING_APPROVALS_KEY, 'localPendingApprovals')
-  assert.deepEqual(APPROVAL_MESSAGE_TYPES, {
-    status: 'affinity:get-status',
-    listPending: 'affinity:list-pending',
-    resolve: 'affinity:resolve-approval',
-  })
   /* Distinct from the mesh approval surface (approvals.js uses
    * 'pendingApprovals' and 'approval:decide') — two queues, two keys, no
    * collision. */

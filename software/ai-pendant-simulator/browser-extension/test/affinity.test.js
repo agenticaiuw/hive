@@ -5,9 +5,8 @@
  * reported from the ledger, not from a model's prose.
  *
  * Everything under test is pure (affinity.js has no impure edge), so nothing
- * here mocks a browser — same discipline as relay-peer.test.js. The loop
- * integration at the bottom drives runBrainLoop with injected edges only.
- * No test drives a real site, financial or otherwise: fixtures throughout.
+ * here mocks a browser — same discipline as relay-peer.test.js. No test
+ * drives a real site, financial or otherwise: fixtures throughout.
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -23,7 +22,6 @@ import {
   LOCAL_CLAIMABLE_ACTIONS,
   OUTWARD_EFFECT_PATTERNS,
   classifyEffect,
-  commandWantsOutwardEffect,
   createOutwardGuard,
   honestVerdict,
   localCallFor,
@@ -33,7 +31,6 @@ import {
   textLooksOutward,
 } from '../src/affinity.js'
 import { COMMAND_TYPES } from '../src/bridge-core.js'
-import { runBrainLoop, normalizeBrainConfig } from '../src/brain.js'
 
 /* ------------------------------------------------------------------ *
  * Capability tags: a closed table, not a vibe.
@@ -299,8 +296,8 @@ test('an approved outward step makes the run achieved', () => {
     response: 'Cancelled the recurring investment.',
   })
   assert.equal(verdict.verdict, 'achieved')
-  assert.equal(commandWantsOutwardEffect('cancel my recurring investments'), true)
-  assert.equal(commandWantsOutwardEffect('what time is it'), false)
+  assert.equal(textLooksOutward('cancel my recurring investments'), true)
+  assert.equal(textLooksOutward('what time is it'), false)
 })
 
 test('failed steps are counted, not laundered', () => {
@@ -310,85 +307,6 @@ test('failed steps are counted, not laundered', () => {
   ])
   assert.equal(effects.failed, 1)
   assert.equal(effects.act, 0)
-})
-
-/* ------------------------------------------------------------------ *
- * The loop integration: the brain parks instead of clicking.
- * ------------------------------------------------------------------ */
-
-const READY = normalizeBrainConfig({
-  brainEnabled: true,
-  modelProxyUrl: 'https://relay.example/v1/infer',
-  deviceToken: 'scoped',
-})
-
-test('the brain snapshots, then PARKS the cancel click instead of running it', async () => {
-  /* Fixture page, no network, no browser: the injected runTool returns what a
-   * snapshot of a broker-shaped page would have said. */
-  const replies = [
-    '{"tool":"snapshot","params":{}}',
-    '{"tool":"click","params":{"ref":"e1"}}',
-    '{"done":true,"response":"should never be reached"}',
-  ]
-  const ran = []
-  const guard = createOutwardGuard()
-
-  const state = await runBrainLoop({
-    command: 'cancel my recurring investments',
-    config: READY,
-    callModel: async () => replies.shift(),
-    runTool: async (call) => {
-      ran.push(call.type)
-      const result =
-        call.type === 'snapshot'
-          ? {
-              elements: [
-                { ref: 'e0', name: 'Portfolio', role: 'link' },
-                { ref: 'e1', name: 'Cancel recurring investment', role: 'button' },
-              ],
-            }
-          : { message: 'clicked' }
-      guard.observe(call, result)
-      return result
-    },
-    assessTool: (call) => guard.assess(call),
-  })
-
-  assert.equal(state.status, 'parked')
-  assert.deepEqual(ran, ['snapshot'], 'the outward click must never execute')
-  assert.deepEqual(state.parkedCall, { type: 'click', params: { ref: 'e1' } })
-  assert.match(state.parkedReason, /commit point/)
-})
-
-test('a parked loop is terminal and never falls through to a handoff', async () => {
-  const state = await runBrainLoop({
-    command: 'send the message',
-    config: READY,
-    callModel: async () => '{"tool":"press_key","params":{"key":"Enter"}}',
-    runTool: async () => ({}),
-    assessTool: () => ({ allow: false, reason: 'Enter submits the form.' }),
-  })
-  assert.equal(state.status, 'parked')
-  assert.notEqual(state.status, 'handoff')
-})
-
-test('a throwing gate fails closed instead of running the tool', async () => {
-  let toolRan = 0
-  const state = await runBrainLoop({
-    command: 'x',
-    config: READY,
-    callModel: async () => '{"tool":"click","params":{"selector":"#a"}}',
-    runTool: async () => {
-      toolRan += 1
-      return {}
-    },
-    assessTool: () => {
-      throw new Error('gate exploded')
-    },
-  })
-  assert.equal(state.status, 'parked')
-  assert.equal(toolRan, 0)
-  assert.match(state.parkedReason, /gate itself failed/)
 })
 
 /* ------------------------------------------------------------------ *

@@ -7,56 +7,27 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		85BCBAB7301FE074009E2EB5 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAB6301FE074009E2EB5 /* AppDelegate.swift */; };
-		85BCBAB9301FE074009E2EB5 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAB8301FE074009E2EB5 /* SceneDelegate.swift */; };
-		85BCBABC301FE074009E2EB5 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBABA301FE074009E2EB5 /* LaunchScreen.storyboard */; };
-		85BCBABF301FE074009E2EB5 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBABD301FE074009E2EB5 /* Main.storyboard */; };
 		85BCBAC8301FE074009E2EB5 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAC7301FE074009E2EB5 /* AppDelegate.swift */; };
 		85BCBACB301FE074009E2EB5 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAC9301FE074009E2EB5 /* Main.storyboard */; };
-		85BCBAD2301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 85BCBAD1301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		85BCBADC301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 85BCBADB301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		85BCBAE1301FE074009E2EB5 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA6301FE073009E2EB5 /* Main.html */; };
 		85BCBAE2301FE074009E2EB5 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA6301FE073009E2EB5 /* Main.html */; };
-		85BCBAE3301FE074009E2EB5 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA8301FE073009E2EB5 /* Icon.png */; };
 		85BCBAE4301FE074009E2EB5 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA8301FE073009E2EB5 /* Icon.png */; };
-		85BCBAE5301FE074009E2EB5 /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA9301FE073009E2EB5 /* Style.css */; };
 		85BCBAE6301FE074009E2EB5 /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAA9301FE073009E2EB5 /* Style.css */; };
-		85BCBAE7301FE074009E2EB5 /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAAA301FE073009E2EB5 /* Script.js */; };
 		85BCBAE8301FE074009E2EB5 /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAAA301FE073009E2EB5 /* Script.js */; };
-		85BCBAE9301FE074009E2EB5 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAAB301FE073009E2EB5 /* ViewController.swift */; };
 		85BCBAEA301FE074009E2EB5 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAAB301FE073009E2EB5 /* ViewController.swift */; };
-		85BCBAEB301FE074009E2EB5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAAC301FE074009E2EB5 /* Assets.xcassets */; };
 		85BCBAEC301FE074009E2EB5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAAC301FE074009E2EB5 /* Assets.xcassets */; };
-		85BCBAED301FE074009E2EB5 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAAE301FE074009E2EB5 /* SafariWebExtensionHandler.swift */; };
 		85BCBAEE301FE074009E2EB5 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAAE301FE074009E2EB5 /* SafariWebExtensionHandler.swift */; };
 		85BCBB09301FE074009E2EB5 /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB00301FE074009E2EB5 /* popup.js */; };
 		85BCBB0A301FE074009E2EB5 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB01301FE074009E2EB5 /* background.js */; };
 		85BCBB0B301FE074009E2EB5 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB02301FE074009E2EB5 /* popup.html */; };
 		85BCBB0C301FE074009E2EB5 /* options.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB03301FE074009E2EB5 /* options.js */; };
-		85BCBB0D301FE074009E2EB5 /* bridge-core.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB04301FE074009E2EB5 /* bridge-core.js */; };
 		85BCBB0E301FE074009E2EB5 /* ui.css in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB05301FE074009E2EB5 /* ui.css */; };
 		85BCBB0F301FE074009E2EB5 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB06301FE074009E2EB5 /* icons */; };
 		85BCBB10301FE074009E2EB5 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB07301FE074009E2EB5 /* manifest.json */; };
 		85BCBB11301FE074009E2EB5 /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB08301FE074009E2EB5 /* options.html */; };
-		85BCBB12301FE074009E2EB5 /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB00301FE074009E2EB5 /* popup.js */; };
-		85BCBB13301FE074009E2EB5 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB01301FE074009E2EB5 /* background.js */; };
-		85BCBB14301FE074009E2EB5 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB02301FE074009E2EB5 /* popup.html */; };
-		85BCBB15301FE074009E2EB5 /* options.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB03301FE074009E2EB5 /* options.js */; };
-		85BCBB16301FE074009E2EB5 /* bridge-core.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB04301FE074009E2EB5 /* bridge-core.js */; };
-		85BCBB17301FE074009E2EB5 /* ui.css in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB05301FE074009E2EB5 /* ui.css */; };
-		85BCBB18301FE074009E2EB5 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB06301FE074009E2EB5 /* icons */; };
-		85BCBB19301FE074009E2EB5 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB07301FE074009E2EB5 /* manifest.json */; };
-		85BCBB1A301FE074009E2EB5 /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB08301FE074009E2EB5 /* options.html */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		85BCBAD3301FE074009E2EB5 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 85BCBAA0301FE073009E2EB5 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 85BCBAD0301FE074009E2EB5;
-			remoteInfo = "AI Pendant Browser Bridge Extension (iOS)";
-		};
 		85BCBADD301FE074009E2EB5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 85BCBAA0301FE073009E2EB5 /* Project object */;
@@ -67,17 +38,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		85BCBAF4301FE074009E2EB5 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				85BCBAD2301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		85BCBAFB301FE074009E2EB5 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -99,25 +59,16 @@
 		85BCBAAB301FE073009E2EB5 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
 		85BCBAAC301FE074009E2EB5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		85BCBAAE301FE074009E2EB5 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
-		85BCBAB3301FE074009E2EB5 /* AI Pendant Browser Bridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "AI Pendant Browser Bridge.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		85BCBAB6301FE074009E2EB5 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		85BCBAB8301FE074009E2EB5 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
-		85BCBABB301FE074009E2EB5 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
-		85BCBABE301FE074009E2EB5 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
-		85BCBAC0301FE074009E2EB5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		85BCBAC5301FE074009E2EB5 /* AI Pendant Browser Bridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "AI Pendant Browser Bridge.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		85BCBAC7301FE074009E2EB5 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		85BCBACA301FE074009E2EB5 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		85BCBACC301FE074009E2EB5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		85BCBAD1301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "AI Pendant Browser Bridge Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
-		85BCBAD6301FE074009E2EB5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		85BCBADB301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "AI Pendant Browser Bridge Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		85BCBAE0301FE074009E2EB5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		85BCBB00301FE074009E2EB5 /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = Resources/popup.js; sourceTree = "<group>"; };
 		85BCBB01301FE074009E2EB5 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = Resources/background.js; sourceTree = "<group>"; };
 		85BCBB02301FE074009E2EB5 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = Resources/popup.html; sourceTree = "<group>"; };
 		85BCBB03301FE074009E2EB5 /* options.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = options.js; path = Resources/options.js; sourceTree = "<group>"; };
-		85BCBB04301FE074009E2EB5 /* bridge-core.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "bridge-core.js"; path = "Resources/bridge-core.js"; sourceTree = "<group>"; };
 		85BCBB05301FE074009E2EB5 /* ui.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = ui.css; path = Resources/ui.css; sourceTree = "<group>"; };
 		85BCBB06301FE074009E2EB5 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = Resources/icons; sourceTree = "<group>"; };
 		85BCBB07301FE074009E2EB5 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = Resources/manifest.json; sourceTree = "<group>"; };
@@ -125,21 +76,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		85BCBAB0301FE074009E2EB5 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		85BCBAC2301FE074009E2EB5 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		85BCBACE301FE074009E2EB5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -161,9 +98,7 @@
 			children = (
 				85BCBAA4301FE073009E2EB5 /* Shared (App) */,
 				85BCBAAD301FE074009E2EB5 /* Shared (Extension) */,
-				85BCBAB5301FE074009E2EB5 /* iOS (App) */,
 				85BCBAC6301FE074009E2EB5 /* macOS (App) */,
-				85BCBAD5301FE074009E2EB5 /* iOS (Extension) */,
 				85BCBADF301FE074009E2EB5 /* macOS (Extension) */,
 				85BCBAB4301FE074009E2EB5 /* Products */,
 			);
@@ -202,24 +137,10 @@
 		85BCBAB4301FE074009E2EB5 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				85BCBAB3301FE074009E2EB5 /* AI Pendant Browser Bridge.app */,
 				85BCBAC5301FE074009E2EB5 /* AI Pendant Browser Bridge.app */,
-				85BCBAD1301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */,
 				85BCBADB301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		85BCBAB5301FE074009E2EB5 /* iOS (App) */ = {
-			isa = PBXGroup;
-			children = (
-				85BCBAB6301FE074009E2EB5 /* AppDelegate.swift */,
-				85BCBAB8301FE074009E2EB5 /* SceneDelegate.swift */,
-				85BCBABA301FE074009E2EB5 /* LaunchScreen.storyboard */,
-				85BCBABD301FE074009E2EB5 /* Main.storyboard */,
-				85BCBAC0301FE074009E2EB5 /* Info.plist */,
-			);
-			path = "iOS (App)";
 			sourceTree = "<group>";
 		};
 		85BCBAC6301FE074009E2EB5 /* macOS (App) */ = {
@@ -230,14 +151,6 @@
 				85BCBACC301FE074009E2EB5 /* Info.plist */,
 			);
 			path = "macOS (App)";
-			sourceTree = "<group>";
-		};
-		85BCBAD5301FE074009E2EB5 /* iOS (Extension) */ = {
-			isa = PBXGroup;
-			children = (
-				85BCBAD6301FE074009E2EB5 /* Info.plist */,
-			);
-			path = "iOS (Extension)";
 			sourceTree = "<group>";
 		};
 		85BCBADF301FE074009E2EB5 /* macOS (Extension) */ = {
@@ -255,7 +168,6 @@
 				85BCBB01301FE074009E2EB5 /* background.js */,
 				85BCBB02301FE074009E2EB5 /* popup.html */,
 				85BCBB03301FE074009E2EB5 /* options.js */,
-				85BCBB04301FE074009E2EB5 /* bridge-core.js */,
 				85BCBB05301FE074009E2EB5 /* ui.css */,
 				85BCBB06301FE074009E2EB5 /* icons */,
 				85BCBB07301FE074009E2EB5 /* manifest.json */,
@@ -268,27 +180,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		85BCBAB2301FE074009E2EB5 /* AI Pendant Browser Bridge (iOS) */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 85BCBAF5301FE074009E2EB5 /* Build configuration list for PBXNativeTarget "AI Pendant Browser Bridge (iOS)" */;
-			buildPhases = (
-				85BCBAAF301FE074009E2EB5 /* Sources */,
-				85BCBAB0301FE074009E2EB5 /* Frameworks */,
-				85BCBAB1301FE074009E2EB5 /* Resources */,
-				85BCBAF4301FE074009E2EB5 /* Embed Foundation Extensions */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				85BCBAD4301FE074009E2EB5 /* PBXTargetDependency */,
-			);
-			name = "AI Pendant Browser Bridge (iOS)";
-			packageProductDependencies = (
-			);
-			productName = "AI Pendant Browser Bridge (iOS)";
-			productReference = 85BCBAB3301FE074009E2EB5 /* AI Pendant Browser Bridge.app */;
-			productType = "com.apple.product-type.application";
-		};
 		85BCBAC4301FE074009E2EB5 /* AI Pendant Browser Bridge (macOS) */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 85BCBAFC301FE074009E2EB5 /* Build configuration list for PBXNativeTarget "AI Pendant Browser Bridge (macOS)" */;
@@ -309,25 +200,6 @@
 			productName = "AI Pendant Browser Bridge (macOS)";
 			productReference = 85BCBAC5301FE074009E2EB5 /* AI Pendant Browser Bridge.app */;
 			productType = "com.apple.product-type.application";
-		};
-		85BCBAD0301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (iOS) */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 85BCBAF1301FE074009E2EB5 /* Build configuration list for PBXNativeTarget "AI Pendant Browser Bridge Extension (iOS)" */;
-			buildPhases = (
-				85BCBACD301FE074009E2EB5 /* Sources */,
-				85BCBACE301FE074009E2EB5 /* Frameworks */,
-				85BCBACF301FE074009E2EB5 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = "AI Pendant Browser Bridge Extension (iOS)";
-			packageProductDependencies = (
-			);
-			productName = "AI Pendant Browser Bridge Extension (iOS)";
-			productReference = 85BCBAD1301FE074009E2EB5 /* AI Pendant Browser Bridge Extension.appex */;
-			productType = "com.apple.product-type.app-extension";
 		};
 		85BCBADA301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (macOS) */ = {
 			isa = PBXNativeTarget;
@@ -358,13 +230,7 @@
 				LastSwiftUpdateCheck = 2660;
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
-					85BCBAB2301FE074009E2EB5 = {
-						CreatedOnToolsVersion = 26.6;
-					};
 					85BCBAC4301FE074009E2EB5 = {
-						CreatedOnToolsVersion = 26.6;
-					};
-					85BCBAD0301FE074009E2EB5 = {
 						CreatedOnToolsVersion = 26.6;
 					};
 					85BCBADA301FE074009E2EB5 = {
@@ -386,29 +252,13 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				85BCBAB2301FE074009E2EB5 /* AI Pendant Browser Bridge (iOS) */,
 				85BCBAC4301FE074009E2EB5 /* AI Pendant Browser Bridge (macOS) */,
-				85BCBAD0301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (iOS) */,
 				85BCBADA301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (macOS) */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		85BCBAB1301FE074009E2EB5 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				85BCBAE3301FE074009E2EB5 /* Icon.png in Resources */,
-				85BCBABC301FE074009E2EB5 /* LaunchScreen.storyboard in Resources */,
-				85BCBAE1301FE074009E2EB5 /* Main.html in Resources */,
-				85BCBAE7301FE074009E2EB5 /* Script.js in Resources */,
-				85BCBAEB301FE074009E2EB5 /* Assets.xcassets in Resources */,
-				85BCBABF301FE074009E2EB5 /* Main.storyboard in Resources */,
-				85BCBAE5301FE074009E2EB5 /* Style.css in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		85BCBAC3301FE074009E2EB5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -422,22 +272,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		85BCBACF301FE074009E2EB5 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				85BCBB13301FE074009E2EB5 /* background.js in Resources */,
-				85BCBB17301FE074009E2EB5 /* ui.css in Resources */,
-				85BCBB15301FE074009E2EB5 /* options.js in Resources */,
-				85BCBB16301FE074009E2EB5 /* bridge-core.js in Resources */,
-				85BCBB19301FE074009E2EB5 /* manifest.json in Resources */,
-				85BCBB14301FE074009E2EB5 /* popup.html in Resources */,
-				85BCBB18301FE074009E2EB5 /* icons in Resources */,
-				85BCBB12301FE074009E2EB5 /* popup.js in Resources */,
-				85BCBB1A301FE074009E2EB5 /* options.html in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		85BCBAD9301FE074009E2EB5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -445,7 +279,6 @@
 				85BCBB0A301FE074009E2EB5 /* background.js in Resources */,
 				85BCBB0E301FE074009E2EB5 /* ui.css in Resources */,
 				85BCBB0C301FE074009E2EB5 /* options.js in Resources */,
-				85BCBB0D301FE074009E2EB5 /* bridge-core.js in Resources */,
 				85BCBB10301FE074009E2EB5 /* manifest.json in Resources */,
 				85BCBB0B301FE074009E2EB5 /* popup.html in Resources */,
 				85BCBB0F301FE074009E2EB5 /* icons in Resources */,
@@ -457,30 +290,12 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		85BCBAAF301FE074009E2EB5 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				85BCBAE9301FE074009E2EB5 /* ViewController.swift in Sources */,
-				85BCBAB7301FE074009E2EB5 /* AppDelegate.swift in Sources */,
-				85BCBAB9301FE074009E2EB5 /* SceneDelegate.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		85BCBAC1301FE074009E2EB5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				85BCBAEA301FE074009E2EB5 /* ViewController.swift in Sources */,
 				85BCBAC8301FE074009E2EB5 /* AppDelegate.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		85BCBACD301FE074009E2EB5 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				85BCBAED301FE074009E2EB5 /* SafariWebExtensionHandler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -495,11 +310,6 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		85BCBAD4301FE074009E2EB5 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 85BCBAD0301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (iOS) */;
-			targetProxy = 85BCBAD3301FE074009E2EB5 /* PBXContainerItemProxy */;
-		};
 		85BCBADE301FE074009E2EB5 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 85BCBADA301FE074009E2EB5 /* AI Pendant Browser Bridge Extension (macOS) */;
@@ -514,22 +324,6 @@
 				85BCBAA7301FE073009E2EB5 /* Base */,
 			);
 			name = Main.html;
-			sourceTree = "<group>";
-		};
-		85BCBABA301FE074009E2EB5 /* LaunchScreen.storyboard */ = {
-			isa = PBXVariantGroup;
-			children = (
-				85BCBABB301FE074009E2EB5 /* Base */,
-			);
-			name = LaunchScreen.storyboard;
-			sourceTree = "<group>";
-		};
-		85BCBABD301FE074009E2EB5 /* Main.storyboard */ = {
-			isa = PBXVariantGroup;
-			children = (
-				85BCBABE301FE074009E2EB5 /* Base */,
-			);
-			name = Main.storyboard;
 			sourceTree = "<group>";
 		};
 		85BCBAC9301FE074009E2EB5 /* Main.storyboard */ = {
@@ -654,158 +448,6 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
-			};
-			name = Release;
-		};
-		85BCBAF2301FE074009E2EB5 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 9684Z8GZ26;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "AI Pendant Browser Bridge Extension";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"-framework",
-					SafariServices,
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.evanliu.aipendant.browserbridge.Extension;
-				PRODUCT_NAME = "AI Pendant Browser Bridge Extension";
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		85BCBAF3301FE074009E2EB5 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 9684Z8GZ26;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "AI Pendant Browser Bridge Extension";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"-framework",
-					SafariServices,
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.evanliu.aipendant.browserbridge.Extension;
-				PRODUCT_NAME = "AI Pendant Browser Bridge Extension";
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		85BCBAF6301FE074009E2EB5 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 9684Z8GZ26;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "AI Pendant Browser Bridge";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"-framework",
-					SafariServices,
-					"-framework",
-					WebKit,
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.evanliu.aipendant.browserbridge;
-				PRODUCT_NAME = "AI Pendant Browser Bridge";
-				SDKROOT = iphoneos;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		85BCBAF7301FE074009E2EB5 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 9684Z8GZ26;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "AI Pendant Browser Bridge";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"-framework",
-					SafariServices,
-					"-framework",
-					WebKit,
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.evanliu.aipendant.browserbridge;
-				PRODUCT_NAME = "AI Pendant Browser Bridge";
-				SDKROOT = iphoneos;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
@@ -973,24 +615,6 @@
 			buildConfigurations = (
 				85BCBAEF301FE074009E2EB5 /* Debug */,
 				85BCBAF0301FE074009E2EB5 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		85BCBAF1301FE074009E2EB5 /* Build configuration list for PBXNativeTarget "AI Pendant Browser Bridge Extension (iOS)" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				85BCBAF2301FE074009E2EB5 /* Debug */,
-				85BCBAF3301FE074009E2EB5 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		85BCBAF5301FE074009E2EB5 /* Build configuration list for PBXNativeTarget "AI Pendant Browser Bridge (iOS)" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				85BCBAF6301FE074009E2EB5 /* Debug */,
-				85BCBAF7301FE074009E2EB5 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
