@@ -404,6 +404,7 @@ export async function executeComputerAction(action) {
     case 'ios_scroll':
     case 'ios_back':
     case 'ios_home':
+    case 'ios_app_switcher':
       return runIosAction(action)
     default:
       throw new Error(`Unsupported action type: ${action.type}`)
