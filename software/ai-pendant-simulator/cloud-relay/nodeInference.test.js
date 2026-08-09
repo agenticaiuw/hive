@@ -327,6 +327,83 @@ test('a cut-off answer says so instead of arriving as bad JSON', async () => {
   assert.equal(complete.finishReason, 'stop')
 })
 
+test('any abnormal stop is flagged, not just truncation', async () => {
+  /*
+   * The follow-up question to the truncation bug, and it was the right one:
+   * `length` is not the only terminal reason. A content filter ends a
+   * generation with short-or-empty content and truncated:false, so a caller
+   * checking only for truncation acts on a filtered non-answer as a genuine
+   * one — the identical bug one field over.
+   */
+  const answer = async (finish_reason, message = { content: 'x' }) =>
+    runInference({
+      model: 'm',
+      messages: [{ role: 'user', content: 'hi' }],
+      apiKey: 'test-key',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message, finish_reason }] }),
+      }),
+    })
+
+  const filtered = await answer('content_filter', { content: '' })
+  assert.equal(filtered.complete, false, 'a filtered reply is not a complete one')
+  assert.equal(filtered.truncated, false, 'and it is not a truncated one either')
+
+  const cutOff = await answer('length')
+  assert.equal(cutOff.complete, false)
+  assert.equal(cutOff.truncated, true)
+
+  const clean = await answer('stop')
+  assert.equal(clean.complete, true)
+
+  /* A reason nobody has seen yet must fail SAFE — false, not true. This is
+   * why `complete` is not a list of known-bad reasons. */
+  const novel = await answer('some_future_reason')
+  assert.equal(novel.complete, false)
+})
+
+test('an unknown finish reason is unknown, not incomplete', async () => {
+  /* Same distinction nodePresence draws between "offline" and "we could not
+   * ask". Collapsing null into false would flag every good answer from a
+   * provider that omits the field. */
+  const noReason = await runInference({
+    model: 'm',
+    messages: [{ role: 'user', content: 'hi' }],
+    apiKey: 'test-key',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'fine' } }] }),
+    }),
+  })
+  assert.equal(noReason.complete, null)
+  assert.equal(noReason.truncated, false)
+})
+
+test('a structured refusal is surfaced, not flattened into an empty answer', async () => {
+  const refused = await runInference({
+    model: 'm',
+    messages: [{ role: 'user', content: 'hi' }],
+    apiKey: 'test-key',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: { content: null, refusal: 'I cannot help with that.' },
+            finish_reason: 'stop',
+          },
+        ],
+      }),
+    }),
+  })
+  assert.equal(refused.refusal, 'I cannot help with that.')
+  assert.equal(refused.content, '', 'content is genuinely empty')
+  /* A refusal stops cleanly, so `complete` is true — `refusal` is the field
+   * that distinguishes it from a model that simply said nothing. */
+  assert.equal(refused.complete, true)
+})
+
 test('omitting maxTokens spends the default, not the ceiling', async () => {
   /* "Clamped to 2048" reads as "2048 unless you ask for less". It is not:
    * absent means 512, and the gap has already misled one reader. */
