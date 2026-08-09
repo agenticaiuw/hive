@@ -67,6 +67,7 @@ import {
   pongMessageFor,
   pruneEnvelopeLedger,
   reactToFrame,
+  relayResponseError,
   resultMessageFor,
   socketProtocolAccepted,
   socketProtocols,
@@ -509,22 +510,9 @@ async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS)
     })
 
     if (!response.ok) {
-      let detail = ''
-      let code = ''
-      try {
-        const payload = await response.json()
-        detail = payload.error || payload.message || ''
-        // The relay names its refusals (`not_your_inbox`, `scope_denied`, …).
-        // Carry the name so describeRelayFailure can sharpen the message; it
-        // still keys on status first, so a code-less body loses nothing.
-        code = typeof payload.code === 'string' ? payload.code : ''
-      } catch {
-        detail = await response.text().catch(() => '')
-      }
-      const error = new Error(detail || `The relay returned HTTP ${response.status}.`)
-      error.status = response.status
-      if (code) error.code = code
-      throw error
+      // Tested in relay-peer: carries message, status and the relay's `code`
+      // (e.g. not_your_inbox) so describeRelayFailure can sharpen the fix.
+      throw await relayResponseError(response)
     }
 
     return response.status === 204 ? null : await response.json()
