@@ -16,9 +16,56 @@ const MAX_EVENTS_PER_RUN = 80
 const listeners = new Set()
 const ARRAY_STORE = { validate: Array.isArray }
 
+/*
+ * A run status of its own, rather than a flag hung off 'processing'.
+ *
+ * Every reader of `status` — the dashboard's headline chip, the jobs list, the
+ * relay's own view — asks "how is this run doing" and gets one word back. While
+ * "needs approval" was not one of those words, the honest answer had nowhere to
+ * go, and the run rendered as whatever the delivery grade happened to imply.
+ */
+export const NEEDS_APPROVAL_STATUS = 'needs_approval'
+
 export function pipelineLocation() {
   ensureStore()
   return pipelinePath
+}
+
+/**
+ * The approval this run is still waiting on, or null.
+ *
+ * bridge.js writes exactly one shape for a held plan: an `agent` event with
+ * status `waiting`, carrying the blocked actions in `meta.blocked` and the
+ * reason in `detail`. Any LATER agent event means the agent moved again —
+ * the plan was approved and executed, or it failed — so the hold is answered
+ * and this returns null. Approving from the dashboard opens a fresh relay job
+ * and therefore a fresh pipeline id, so a parked run usually keeps this
+ * record: it is the history of a run that did need a person, which is true.
+ */
+export function pendingApproval(events) {
+  const list = Array.isArray(events) ? events : []
+  let waiting = null
+
+  for (const event of list) {
+    if (event?.stage !== 'agent') continue
+    if (event.status === 'waiting') {
+      waiting = event
+      continue
+    }
+    waiting = null
+  }
+
+  if (!waiting) return null
+
+  const blocked = Array.isArray(waiting.meta?.blocked) ? waiting.meta.blocked : []
+  return {
+    since: waiting.at ?? null,
+    /* The effect-worded sentences from actionRisk.js, joined by bridge.js. */
+    reason: waiting.detail || waiting.text || 'This plan needs your approval.',
+    blocked,
+    actionCount: blocked.length,
+    routine: waiting.meta?.routineJob === true,
+  }
 }
 
 export function readPipelineRuns() {
@@ -102,6 +149,14 @@ export function recordPipelineEvent({
   run.updatedAt = timestamp
   run.status = deriveRunStatus(run.events)
   /*
+   * The same reasoning as `delivery` below, for the other end of the run: a
+   * held plan is a QUESTION ADDRESSED TO THE OWNER, and it has to be legible as
+   * one wherever the owner is actually looking. Stored as structure rather than
+   * left buried in one event's meta so a reader gets the blocked actions and
+   * the reason without walking the event list.
+   */
+  run.approval = pendingApproval(run.events)
+  /*
    * Stored beside the status rather than folded into it, because they answer
    * different questions: `status` is how the run went, `delivery` is who
    * witnessed what on the way to the pendant's speaker. Collapsing the second
@@ -157,6 +212,25 @@ function deriveRunStatus(events) {
 
   const delivery = gradeAudioDelivery(events)
   if (delivery.playbackFailed) return 'failed'
+
+  /*
+   * A plan held for the owner is not "still working" and it is not "done".
+   *
+   * This is the second half of the 2026-08-09 incident. bridge.js parked a
+   * plan, recorded `stage: agent, status: waiting`, and then went on to render
+   * and upload speech as usual — so the LAST event was a perfectly ordinary
+   * `relay_result / done`, the delivery grade sat at `held_by_relay`, and this
+   * function returned 'processing'. The dashboard drew "Running" over a run
+   * that had stopped and would never move again, while the only announcement
+   * of the hold was spoken to a pendant with no speaker attached. Nobody was
+   * told anything.
+   *
+   * Checked ahead of every delivery rung, including provesPlayback, because
+   * whether the pendant played "waiting for your approval" does not change the
+   * fact that the plan is still waiting. The question outranks its own audio.
+   */
+  if (pendingApproval(events)) return NEEDS_APPROVAL_STATUS
+
   if (delivery.provesPlayback) return 'completed'
 
   /* Nothing is settled until the Mac has handed the reply to the relay. */

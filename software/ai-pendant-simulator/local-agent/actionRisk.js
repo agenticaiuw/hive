@@ -1,14 +1,37 @@
-// A pendant command is hands-free: there is no screen to confirm on and no
-// keyboard to cancel with. It is also remote — the command text arrives from
-// the cloud relay work queue, so whatever can enqueue a job is what this
-// allowlist is actually protecting the Mac against.
-//
-// Rule: read-only / UI-level actions + a *narrow* status-shell allowlist run
-// without approval. Arbitrary shell, AppleScript, file writes, messaging, and
-// computer-use still need confirmation. Status shell exists so Realtime can
-// answer battery/wifi without a second Mac LLM.
+/*
+ * A pendant command is hands-free: there is no screen to confirm on and no
+ * keyboard to cancel with. It is also remote — the command text arrives from
+ * the cloud relay work queue, so whatever can enqueue a job is what this
+ * allowlist is actually protecting the Mac against.
+ *
+ * THE RULE: IRREVERSIBLE OR OUTWARD-FACING NEEDS A HUMAN; READING DOES NOT.
+ *
+ * The owner said the sentence out loud. That IS the authorization for a read.
+ * Approval exists for the things a read can never be — destroying data,
+ * changing state, reaching another person, spending money — and asking for it
+ * on a look is not caution, it is a broken product: the request dies on a
+ * device with no screen and no speaker, and the owner hears nothing.
+ *
+ * WHICH MEANS THE QUESTION IS "WHAT DOES THIS DO", NOT "WHAT IS THIS MADE OF".
+ *
+ * This file used to answer by action TYPE alone, which put "read my Safari
+ * Reading List" and "empty my trash" in the same tier because both are
+ * AppleScript, and `ls` in the same tier as `rm -rf` because both are
+ * run_shell. On 2026-08-09 that parked a spoken request for four reading-list
+ * items behind an approval nobody had asked for. So the two types whose risk
+ * lives in their ARGUMENT — run_shell and run_applescript — are now classified
+ * by what the script body actually does (scriptEffects.js), and an unreadable
+ * or mixed body is not a read.
+ *
+ * The types whose risk lives in the type itself do not move: write_file,
+ * copy_path and move_path change things; delete_path, send_email, send_message
+ * and computer_use_task are the irreversible/outward tier and are also the
+ * routine deny-list at the bottom of this file. run_project stays too — it runs
+ * whatever a project's own script says today, which nothing here can see.
+ */
 
 import { capabilityGapHandsFree } from './capabilityGapsActions.js'
+import { analyzeAppleScript, analyzeShellCommand } from './scriptEffects.js'
 
 const AUTO_SAFE_ACTIONS = new Set([
   'open_app',
@@ -44,6 +67,24 @@ const AUTO_SAFE_ACTIONS = new Set([
   // Structured status tools (prefer over freeform shell).
   'get_mac_status',
   'get_battery',
+  /*
+   * Answers, not effects. Every one of these reports something and writes
+   * nothing: the cursor's coordinates, the attached displays, whether input
+   * permissions are granted, the current keyboard layout, the clock, the
+   * forecast, a translation, a filename search under one folder, the list of
+   * briefings already made. They were denied only because nobody had put them
+   * on the list, which is the same failure as the AppleScript one above with a
+   * quieter symptom: "get_time is not on the hands-free allowlist."
+   */
+  'get_time',
+  'get_weather',
+  'get_input_source',
+  'check_input_permissions',
+  'cursor_position',
+  'list_displays',
+  'list_briefings',
+  'search_file',
+  'translate_text',
   // Browser extension (hands-free when extension is online).
   'browser_navigate',
   'browser_click',
@@ -179,19 +220,48 @@ export function iosConfirmReason(action) {
   return null
 }
 
+/*
+ * Why each of these is held, said in terms of EFFECT rather than mechanism.
+ *
+ * "Running AppleScript needs your approval" told a future reader of a parked
+ * plan nothing except which API was involved. These sentences have to survive
+ * being read cold, months later, by someone deciding whether to approve.
+ *
+ * run_shell and run_applescript keep an entry here as the fallback for a body
+ * this file could not read at all; when the body IS readable, classifyAction
+ * replaces it with what the script would actually have done.
+ */
 const CONFIRM_REASONS = new Map([
-  ['run_shell', 'Running a shell command needs your approval.'],
-  ['run_project', 'Running a project command needs your approval.'],
-  ['run_applescript', 'Running AppleScript needs your approval.'],
-  ['write_file', 'Writing a file needs your approval.'],
-  ['copy_path', 'Copying a file needs your approval.'],
-  ['move_path', 'Moving a file needs your approval.'],
-  ['delete_path', 'Deleting a file needs your approval.'],
+  [
+    'run_shell',
+    'That shell command does more than report something, so it needs your approval.',
+  ],
+  [
+    'run_project',
+    'A project command runs whatever that project’s script says today, which nothing here can see in advance, so it needs your approval.',
+  ],
+  [
+    'run_applescript',
+    'That script changes an app rather than only reading from it, so it needs your approval.',
+  ],
+  ['write_file', 'Writing a file changes what is on disk, so it needs your approval.'],
+  [
+    'copy_path',
+    'Copying puts a second file somewhere it was not, so it needs your approval.',
+  ],
+  [
+    'move_path',
+    'Moving takes a file out of where you left it, so it needs your approval.',
+  ],
+  [
+    'delete_path',
+    'Deleting cannot be taken back from here, so it needs your approval.',
+  ],
   ['send_email', 'Sending email acts on your behalf and needs approval.'],
   ['send_message', 'Sending a message acts on your behalf and needs approval.'],
   [
     'computer_use_task',
-    'Driving the screen on its own needs your approval.',
+    'Driving the screen on its own can do anything you can do, so it needs your approval.',
   ],
 ])
 
@@ -248,12 +318,37 @@ export function classifyAction(action) {
   const type = String(action?.type || '')
   if (!type) return { safe: false, reason: 'Action has no type.' }
 
+  /*
+   * The two types whose risk is in the argument, not the name. Both consult
+   * scriptEffects.js, which reads the body and answers one question — does this
+   * only look? — and answers "no" whenever it cannot tell.
+   */
   if (type === 'run_shell') {
     const command = action?.params?.command ?? action?.command
+    /* The older, narrower status allowlist still stands on its own: it clears a
+     * couple of things that are not reads at all (`open -a Notes`) on the
+     * separate ground that they are identical to open_app, which is already
+     * hands-free. */
     if (isStatusShellCommand(command)) return { safe: true }
+    const shell = analyzeShellCommand(command)
+    if (shell.read) return { safe: true }
     return {
       safe: false,
-      reason: CONFIRM_REASONS.get('run_shell'),
+      reason: shell.why
+        ? `That shell command ${shell.why}, so it needs your approval.`
+        : CONFIRM_REASONS.get('run_shell'),
+    }
+  }
+
+  if (type === 'run_applescript') {
+    const script = action?.params?.script ?? action?.script
+    const applescript = analyzeAppleScript(script)
+    if (applescript.read) return { safe: true }
+    return {
+      safe: false,
+      reason: applescript.why
+        ? `That script ${applescript.why}, so it needs your approval.`
+        : CONFIRM_REASONS.get('run_applescript'),
     }
   }
 
