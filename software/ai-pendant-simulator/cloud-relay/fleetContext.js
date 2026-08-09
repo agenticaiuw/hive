@@ -16,12 +16,7 @@
  * block correctly in the prompt and to bound it; deciding what belongs in it is
  * not a relay concern, and when it was, only one body could contribute to it.
  */
-import {
-  appendFleetMemory,
-  DEFAULT_PROJECTION_BYTES,
-  projectFleetMemory,
-  readFleetMemoryProjection,
-} from '../shared/fleetMemory.js'
+import { projectFleetMemory } from '../shared/fleetMemory.js'
 
 export const FLEET_STATE_KEY = 'fleet'
 export const MAX_APPLICATIONS_IN_PROMPT = 220
@@ -802,77 +797,4 @@ export async function projectFleetMemoryFromStore(
   } catch {
     return inheritedText ? { text: inheritedText, eventIds: [], stats: null } : null
   }
-}
-
-/* ---- routes ------------------------------------------------------------- */
-
-/*
- * Scopes for the two memory routes, in the shape server.js's
- * requiredScopesForRequest() answers in. Declared next to the handlers rather
- * than only in that table so adding a route cannot quietly ship an unscoped
- * write path for the owner's own facts.
- */
-export const FLEET_MEMORY_SCOPES = Object.freeze({
-  'POST /v1/memory/events': ['memory:write'],
-  'GET /v1/memory/projection': ['memory:read'],
-})
-
-/**
- * Register the cross-surface memory endpoints on an Express app.
- *
- * A registration function rather than routes written into server.js: this is
- * the write end of the same store→prompt path the rest of this module owns, and
- * keeping the two together is what stops the projection and the thing that
- * feeds it from drifting apart. The handlers hold no logic — the request shapes
- * and every budget live in shared/fleetMemory.js, so a body that has the store
- * in-process gets identical behaviour with no HTTP at all.
- */
-export function registerFleetMemoryRoutes(app, { getStore }) {
-  if (!app || typeof getStore !== 'function') {
-    throw new TypeError('registerFleetMemoryRoutes needs an app and getStore().')
-  }
-
-  const send = async (response, operation) => {
-    // The owner's facts, and a projection is shaped per request: never cached
-    // by anything between here and the asking body.
-    response.set('Cache-Control', 'private, no-store')
-    try {
-      const { status, body } = await operation()
-      response.status(status).json(body)
-    } catch (error) {
-      /*
-       * The migration is applied separately from the deploy, so "the code is
-       * live and the table is not" is a real state this route can be in. Left
-       * to Express it is a 500 with a SQL string in it; named here it tells the
-       * operator the one thing that fixes it.
-       */
-      const missingTable = /no such table|relay_memory_events/i.test(
-        error?.message || '',
-      )
-      response.status(missingTable ? 503 : 500).json({
-        ok: false,
-        error: missingTable
-          ? 'Fleet memory is not available: cloudflare-worker/fleet-memory-migration.sql has not been applied.'
-          : error?.message || 'Fleet memory could not be reached.',
-      })
-    }
-  }
-
-  app.post('/v1/memory/events', async (request, response) => {
-    await send(response, async () =>
-      appendFleetMemory(await getStore(), request.body ?? {}),
-    )
-  })
-
-  app.get('/v1/memory/projection', async (request, response) => {
-    await send(response, async () =>
-      readFleetMemoryProjection(await getStore(), {
-        surface: request.query?.surface,
-        task: request.query?.task,
-        budgetBytes: request.query?.budgetBytes ?? DEFAULT_PROJECTION_BYTES,
-      }),
-    )
-  })
-
-  return Object.keys(FLEET_MEMORY_SCOPES)
 }
