@@ -1,0 +1,31 @@
+# West manifest for the pendant firmware's third-party code.
+#
+# The only project is libopus, pinned to the exact Xiph.Org v1.6.1 release
+# commit that was previously vendored verbatim under third_party/opus.
+# `west update` checks it out to the identical path, so the CMake shim in
+# CMakeLists.txt (OpusFunctions.cmake + the *_sources.mk manifests) works
+# unchanged. The checkout is gitignored; this file is the pin.
+#
+# This repo is NOT the NCS workspace — builds still run from
+# /opt/nordic/ncs/v3.4.0 exactly as README.txt documents. This manifest
+# only exists so west can materialize the opus checkout. One-time setup
+# after a fresh clone (west comes from scripts/env.sh):
+#
+#   west init -l firmware/nrf9160   # from the repo root; creates firmware/.west
+#   west update                     # from anywhere under firmware/
+#
+# The vendored tree this replaces was byte-identical to the tag (a subset:
+# vendoring had dropped doc/tests/dnn/meson extras and added the dist-only
+# `package_version` file, which the build never reads).
+manifest:
+  remotes:
+    - name: xiph
+      url-base: https://github.com/xiph
+  projects:
+    - name: opus
+      remote: xiph
+      # Tag v1.6.1, pinned by commit so `west update` is reproducible even
+      # if the tag ever moves.
+      revision: 22244de5a79bd1d6d623c32e72bf1954b56235be
+      path: nrf9160/third_party/opus
+      clone-depth: 1
