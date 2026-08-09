@@ -28,6 +28,7 @@ import {
   choosePeer,
   createEnvelopeLedger,
   describeRelayFailure,
+  relayResponseError,
   envelopeToCommand,
   fitResultPayload,
   hasMoreMail,
@@ -499,6 +500,64 @@ test('a 403 with no code still lands on the precise generic fix', () => {
   assert.equal(denied.state, 'unauthorized')
   assert.equal(denied.code, '')
   assert.match(denied.message, /not for this device ID/)
+})
+
+test('relayResponseError carries all three wire parts onto the thrown error', async () => {
+  /* The seam that once dropped `code` on the floor: the thrown error must
+   * carry message, status AND the relay's name for the refusal, or the
+   * sharpened branches above are unreachable from live traffic. */
+  const error = await relayResponseError({
+    status: 403,
+    json: async () => ({
+      ok: false,
+      code: 'not_your_inbox',
+      error: 'Blocked for safety: a node may only drain its own inbox.',
+    }),
+  })
+  assert.equal(error.status, 403)
+  assert.equal(error.code, 'not_your_inbox')
+  assert.match(error.message, /only drain its own inbox/)
+  // The composition the seam exists for: live wire body → precise UI fix.
+  assert.match(
+    describeRelayFailure(error).message,
+    /paired to a different device ID/,
+  )
+})
+
+test('relayResponseError: no code set when absent or non-string; non-JSON bodies survive', async () => {
+  const codeless = await relayResponseError({
+    status: 403,
+    json: async () => ({ error: 'nope' }),
+  })
+  assert.equal(codeless.status, 403)
+  assert.equal('code' in codeless, false)
+
+  const numericCode = await relayResponseError({
+    status: 403,
+    json: async () => ({ code: 42, error: 'nope' }),
+  })
+  assert.equal('code' in numericCode, false)
+
+  const plainText = await relayResponseError({
+    status: 502,
+    json: async () => {
+      throw new Error('not json')
+    },
+    text: async () => 'Bad gateway',
+  })
+  assert.equal(plainText.message, 'Bad gateway')
+  assert.equal(plainText.status, 502)
+
+  const bodyless = await relayResponseError({
+    status: 500,
+    json: async () => {
+      throw new Error('not json')
+    },
+    text: async () => {
+      throw new Error('no body')
+    },
+  })
+  assert.match(bodyless.message, /HTTP 500/)
 })
 
 test('401 and 403 are told apart, because the fixes differ', () => {

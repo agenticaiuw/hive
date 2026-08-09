@@ -563,6 +563,33 @@ export function hasMoreMail(page) {
 }
 
 /**
+ * Build the Error a failed relay response should throw. One place, because
+ * the wire contract has three parts that drift independently: the human
+ * message (`error` or `message`), the machine name (`code` — e.g. the
+ * ownership 403's `not_your_inbox` since relay 41dbc4b), and the HTTP
+ * status. describeRelayFailure keys on status first and uses code only to
+ * sharpen, so this must carry all three — dropping `code` at this seam once
+ * left the not_your_inbox branch unreachable from live traffic.
+ */
+export async function relayResponseError(response) {
+  let detail = ''
+  let code = ''
+  try {
+    const payload = await response.json()
+    detail = payload.error || payload.message || ''
+    code = typeof payload.code === 'string' ? payload.code : ''
+  } catch {
+    detail = await response.text().catch(() => '')
+  }
+  const error = new Error(
+    detail || `The relay returned HTTP ${response.status}.`,
+  )
+  error.status = response.status
+  if (code) error.code = code
+  return error
+}
+
+/**
  * Why a relay request failed, in a form the UI can act on.
  *
  * `code` is present on the relay's refusals (`scope_denied`, `unknown_node`,
