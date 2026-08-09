@@ -38,19 +38,89 @@
  *   Switcher, cmd+3 Spotlight — while the window is on another Space and the
  *   owner's frontmost app never changes.
  *
- *   It delivers NOTHING ELSE. Plain characters typed into an already-open
- *   Spotlight field produced no change at all ('zzqq', nothing appeared) in
- *   the same run where cmd+3 had just opened it. Mouse events were ignored at
- *   global coordinates, at window-relative coordinates, and as a drag. The
- *   reason is AppKit's dispatch: a menu key equivalent is handled without
- *   regard to which window is key, while ordinary keystrokes need a key window
- *   and mouse events need a composited one to hit-test against.
+ *   It delivers NOTHING ELSE, and the reason is NOT the one this file used to
+ *   give. The old note said ordinary keystrokes need a key window and mouse
+ *   events need a composited one to hit-test against. That was a guess, and it
+ *   is wrong in a way that matters, because it invited the next person to go
+ *   looking for a cleverer way to POST the event. There isn't one. Measured
+ *   2026-08-08 on macOS 26.5.2, owner in a fullscreen Safari on another Space,
+ *   mirroring window off-screen, with cmd+1/cmd+3 passing as controls in the
+ *   same runs:
+ *
+ *     - A CGEventTapCreateForPid tap on iPhone Mirroring's OWN event stream
+ *       shows every one of these events ARRIVING at the process, intact:
+ *       plain mouse down/up, mouse tagged with the window id in
+ *       kCGMouseEventWindowUnderMousePointer(ThatCanHandleThisEvent) plus a
+ *       window-relative point set through CGEventSetWindowLocation, the same
+ *       event posted through SkyLight's SLEventPostToPid, a hand-built 0xf8
+ *       CGSEventRecord posted with SLPSPostEventRecordTo (yabai's route), and
+ *       plain keystrokes. Global location, window-relative location and both
+ *       window-id fields all survive the trip and read back correctly at the
+ *       tap. Delivery is not the problem and never was.
+ *     - The window is ALREADY the app's key window while all this fails:
+ *       AXMain and AXFocused are both true off-Space with the app inactive, so
+ *       yabai's make_key_window has nothing to fix, and measured, it changes
+ *       nothing.
+ *     - What is false is AXFrontmost / NSRunningApplication.isActive.
+ *
+ *   So iPhone Mirroring itself declines to forward pointer and ordinary key
+ *   input to the phone while it is not the ACTIVE application. Menu key
+ *   equivalents survive because NSMenu dispatches them before any of that. No
+ *   posting API can get around an app that has decided not to act.
  *
  * So ios_home takes the targeted route and costs the owner nothing. Everything
  * else — tapping, typing, swiping, scrolling, opening an app — takes the
- * guarded route above. The half-measure is the dangerous one: ios_open_app
- * tried targeted first, Spotlight opened, the app name was dropped, and Return
- * launched whatever Siri had suggested. Asking for Calculator opened Airbnb.
+ * guarded route above. The half-measure is the dangerous one:
+ * ios_open_app tried targeted first, Spotlight opened, the app name was
+ * dropped, and Return launched whatever Siri had suggested. Asking for
+ * Calculator opened Airbnb.
+ *
+ * AND THE TARGETED ROUTE'S CEILING IS NOW MEASURED, NOT ASSUMED
+ * iPhone Mirroring's menu bar reads fine over the Accessibility API from
+ * off-Space, and its View menu contains exactly three items: Home Screen
+ * (cmd+1), App Switcher (cmd+2), Spotlight (cmd+3). There is no fourth thing
+ * this route could ever be taught to do, so nobody needs to go looking.
+ *
+ * The phone's own UI is not reachable that way either: the mirroring window's
+ * accessibility tree is one AXGroup/AXHostingView with ZERO children, so there
+ * is no element to AXPress. (An earlier note recorded "0 windows" from
+ * kAXWindowsAttribute and concluded there was no tree at all. That was a
+ * misread — AXWindows is empty but AXFocusedWindow, AXChildren and
+ * AXUIElementCopyElementAtPosition all return live elements. The tree exists;
+ * the mirrored phone content simply is not in it.)
+ *
+ * THE ONE LEAD THAT IS STILL OPEN, WRITTEN DOWN SO IT IS NOT RE-DERIVED
+ * If the gate really is "the app must be active", then the question becomes
+ * whether the app can be made active without the owner noticing — and
+ * SkyLight's _SLPSSetFrontProcessWithOptions(psn, 0, kCPSNoWindows), where
+ * kCPSNoWindows is 0x400, appears to do exactly that. Measured: it returned 0,
+ * iPhone Mirroring's
+ * NSRunningApplication.isActive flipped to true, and the owner's Space did NOT
+ * change, no window came on screen, and NSWorkspace.frontmostApplication still
+ * reported Safari throughout. Restoring the previous process the same way put
+ * it back exactly.
+ *
+ * Whether pointer input then reaches the phone is UNMEASURED. The one run that
+ * would have answered it landed on a mirroring session that had already
+ * auto-paused, so the drag had nothing to act on and the result was discarded
+ * rather than counted. Do not implement against this until it has been proven,
+ * and prove it with a control in the same run — the safe probe is a plain
+ * keystroke into an already-open Spotlight (harmless, reversible with cmd+1,
+ * and known to be ignored today), because it tests the same gate as a tap
+ * without a tap's side effects. If the character appears, this route unlocks
+ * the whole pointer family while the owner stays in fullscreen; if it does
+ * not, the gate is compositing rather than activation and there is nothing
+ * left short of a virtual display.
+ *
+ * PRIVATE API, DELIBERATELY, AND WHAT THAT COSTS
+ * Nothing in the SHIPPING path uses a private symbol: the measurements above
+ * needed SkyLight (SLPSPostEventRecordTo, SLEventPostToPid,
+ * _SLPSSetFrontProcessWithOptions, SLSSetWindowTags), but none of them beat
+ * plain CGEventPostToPid, so none of them earned a place here. That is worth
+ * stating plainly, because the tempting conclusion from a page of private-API
+ * research is that some of it must have been useful. It was not. The only
+ * private call this file still makes is the Spaces move already documented
+ * below, and it degrades rather than raising when a symbol stops resolving.
  *
  * WHY IT MUST BE A CHILD OF THE AGENT
  * macOS TCC grants are per-binary. The "AI Pendant Agent" app already holds
@@ -733,17 +803,24 @@ const OPERATIONS = {
     # Mac is locked the window server composites nothing, so the pixels are
     # unavailable even though the window is still enumerable.
     result["readsPossible"] = bool(result["readable"])
-    # Two kinds of write, because they have different reach — and the split is
-    # narrower than it first looked. Measured on the real phone: targeted
-    # posting delivers iPhone Mirroring's own MENU KEY EQUIVALENTS (cmd+1/2/3)
-    # while its window is on another Space, and delivers nothing else. Plain
-    # characters and mouse events are dropped, because those need a key window
-    # and a composited one respectively. So Home works without disturbing the
-    # owner; everything else has to bring the window forward.
+    # Two kinds of write, because they have different reach. Measured on the
+    # real phone: targeted posting delivers iPhone Mirroring's own MENU KEY
+    # EQUIVALENTS while its window is on another Space, and delivers nothing
+    # else — not because the events fail to arrive (a per-pid event tap shows
+    # them arriving intact) but because the app declines to forward pointer and
+    # ordinary key input while it is not the ACTIVE application. So Home and
+    # the App Switcher work without disturbing the owner; everything else has
+    # to bring the window forward.
     space, space_kind = active_space()
     result["activeSpace"] = space
     result["activeSpaceIsFullscreen"] = (
         None if space_kind is None else space_kind != SPACE_TYPE_DESKTOP)
+    # The actions that EXIST on this route, not the chords it could carry.
+    # cmd+2 and cmd+3 were measured working off-Space too, but neither is an
+    # advertised action, and listing an action nobody can call is how a status
+    # field starts lying. The ceiling on this route is the app's View menu,
+    # read over the Accessibility API: Home Screen, App Switcher, Spotlight,
+    # and nothing else — so there is no fourth thing to go looking for.
     result["targetedActions"] = ["ios_home"] if result["targetedAvailable"] else []
     result["navigationWritesPossible"] = bool(
         result["readsPossible"] and result["targetedAvailable"]
@@ -768,7 +845,19 @@ const OPERATIONS = {
         "activate-fallback" if result["pointerWritesPossible"]
         else "targeted" if result["navigationWritesPossible"]
         else "none")
-    result["pointerWritesNeedActivation"] = result["state"] == "off-space"
+    # Whether a pointer write will take the owner's screen away from them.
+    # This used to say state == "off-space", which under-reported: the
+    # guarded path activates whenever iPhone Mirroring is not frontmost, so a
+    # window sitting in plain sight on the current Space while the owner works
+    # in another app still costs them their focus. Being visible is not the
+    # same as being active, and it is the second one that the write needs.
+    result["pointerWritesNeedActivation"] = (
+        bool(result["pointerWritesPossible"]) and not result["frontmost"])
+    # Named separately because it is a property of iPhone Mirroring rather
+    # than of this Mac's current arrangement, and no setting changes it:
+    # pointer input is never deliverable without making the app active.
+    result["pointerTargetedPossible"] = False
+    result["pointerTargetedBlockedBy"] = "app-inactive"
 `,
   },
   ios_ocr: {
@@ -805,12 +894,15 @@ const OPERATIONS = {
    * run: CGEventPostToPid delivers KEYBOARD events to iPhone Mirroring while
    * its window is on another Space and another app is frontmost (cmd+2 opened
    * the App Switcher; the owner's frontmost app never changed). The same
-   * mechanism does NOT deliver mouse events — a tap on the Home-Screen search
-   * pill was ignored at global coordinates, at window-relative coordinates,
-   * and as a drag. Keyboard chords are menu key equivalents, which AppKit
-   * dispatches without regard to which window is key; a mouse event has to
-   * hit-test against a window that is actually composited, and an off-Space
-   * window is not.
+   * mechanism does NOT get mouse events ACTED ON — a tap on the Home-Screen
+   * search pill did nothing at global coordinates, at window-relative
+   * coordinates, and as a drag. The wording matters: the events arrive. A
+   * per-pid event tap on iPhone Mirroring shows them landing intact, including
+   * variants carrying the window id and a window-relative point, and including
+   * SkyLight's SLEventPostToPid and SLPSPostEventRecordTo. Keyboard chords work
+   * because they are menu key equivalents, which NSMenu dispatches before any
+   * window is consulted; everything else is refused by iPhone Mirroring itself
+   * while it is not the active application. See the header for the full matrix.
    *
    * So the keyboard family — Home, open an app, type — runs TARGETED: no
    * activation, no frontmost check, no bounds check, no focus taken and none
@@ -884,10 +976,12 @@ const OPERATIONS = {
      * genuinely long operation. */
     timeoutMs: 120_000,
     mechanism: 'pointer',
-    /* Plain characters are dropped by targeted posting — measured: 'zzqq' typed
-     * into an open Spotlight field produced no change at all, while cmd+3 in
-     * the same run opened it. Ordinary keystrokes need a key window; menu key
-     * equivalents do not. So typing takes the guarded path. */
+    /* Plain characters are ignored on the targeted route — measured twice:
+     * 'zzqq' and later 'xx' typed into an open Spotlight field produced no
+     * change at all, while cmd+3 in the same run opened it. Not for want of a
+     * key window: the mirroring window is already AXMain and AXFocused while
+     * this fails. The app wants to be ACTIVE, which is what the guarded path
+     * gives it. So typing takes the guarded path. */
     python: `    win, before, prior = ready_to_send()
     still_there(win)
     _mirror.type_text(p["text"])
@@ -960,6 +1054,25 @@ const OPERATIONS = {
     result.update(diff_screens(before, after))
 `,
   },
+  /*
+   * NOT WIRED, AND DELIBERATELY SO: ios_app_switcher.
+   *
+   * cmd+2 is a menu key equivalent exactly like cmd+1, and it was measured
+   * arriving and acting with the window on another Space while the owner
+   * worked in a fullscreen app and their frontmost app never changed. It would
+   * be the only way to see what is open on the phone without taking the
+   * owner's screen, and the operation itself is two lines:
+   *
+   *   win, before, pid = ready_to_send_targeted()
+   *   press_to(pid, "app_switcher")
+   *
+   * It is left out because an advertised action also needs a dispatch case in
+   * computerControl.js and a description in llmPlanner.js, and adding it in
+   * only this file would ship an action the planner cannot see and the
+   * executor cannot route. Half-wiring it would be worse than not having it.
+   * CHORDS already carries the keycode, so this is a three-file change waiting
+   * to be made, not research waiting to be done.
+   */
   /*
    * Not an action type: internal, never advertised to the planner and never
    * reachable from a plan. It hands the screen back to whoever had it before
