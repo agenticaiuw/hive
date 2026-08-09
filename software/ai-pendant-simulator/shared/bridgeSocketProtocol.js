@@ -59,7 +59,11 @@ export const BRIDGE_MAIL_FRAME = '{"type":"mail"}'
  * never reflected. It stays out of the query string for the same reason: query
  * strings are what gets logged.
  *
- * cloudflare-worker/bridgeHub.js holds the server's copy of these two strings.
+ * cloudflare-worker/bridgeHub.js IMPORTS these two rather than keeping its own
+ * copy — it held private literals until 2026-08-09, which is the same latent
+ * disagreement the ping frame's auto-response comment warns about, one layer
+ * up: negotiation is byte-exact, so a drift of one character reads as "the
+ * browser cannot connect" and nothing logs why.
  * Verified against production on 2026-08-09: offering both, with no
  * Authorization header at all, connects and the server selects
  * "pendant.mesh.v1".

@@ -19,8 +19,16 @@ import test from 'node:test'
 import express from 'express'
 import { createMemoryStore } from './store/memoryStore.js'
 import { setCloudflareBindings } from './cloudflareBindings.js'
-import { registerNodeMeshRoutes } from './nodeMailbox.js'
-import { handleNodeSocketUpgrade } from '../cloudflare-worker/bridgeHub.js'
+import { OWNERSHIP_DENIED_CODE, registerNodeMeshRoutes } from './nodeMailbox.js'
+import {
+  handleNodeSocketUpgrade,
+  selectSubprotocol,
+  upgradeCredential,
+} from '../cloudflare-worker/bridgeHub.js'
+import {
+  BEARER_SUBPROTOCOL_PREFIX,
+  MESH_SUBPROTOCOL,
+} from '../shared/bridgeSocketProtocol.js'
 import { createDeviceCredential } from './deviceAuth.js'
 
 /** A relay with one injected principal, on a port the OS chooses. */
@@ -60,6 +68,36 @@ async function storeWithNodes(deviceIds) {
     await store.saveDevice({ deviceId, deviceType: 'mobile', name: deviceId })
   }
   return store
+}
+
+/*
+ * A BRIDGE_HUB that always answers — the DEPLOYED condition, where every
+ * presence query reaches a Durable Object and comes back `observed:true`.
+ *
+ * The presence test that already existed ran with no binding at all, so it
+ * only ever saw observed:false. That is the one arrangement in which the
+ * unknown-node bug is invisible, which is why it survived: with a hub
+ * reachable, a deviceId that was never paired and a node that is merely asleep
+ * answer identically.
+ *
+ * idFromName is total, exactly as Cloudflare's is: it hashes a name into an
+ * object id and cannot fail on a name nothing was ever registered under.
+ */
+function presenceHub({ connected = new Set() } = {}) {
+  return {
+    idFromName: (name) => name,
+    get: (name) => ({
+      async fetch() {
+        return {
+          json: async () => ({
+            connected: connected.has(name),
+            sockets: connected.has(name) ? 1 : 0,
+            since: connected.has(name) ? '2026-08-08T11:00:00.000Z' : null,
+          }),
+        }
+      },
+    }),
+  }
 }
 
 test.afterEach(() => setCloudflareBindings(null))
@@ -202,6 +240,177 @@ test('presence over HTTP reports pending depth alongside the socket', async () =
   assert.equal(presence.body.observed, false, 'no hub binding in this process')
   assert.equal(presence.body.pending, 1)
   await relay.close()
+})
+
+test('the ownership refusal carries a code, so no client keys on its wording', async () => {
+  /*
+   * Every other refusal on these routes names itself — scope_denied,
+   * credential_predates_capability, unknown_node, inbox_full,
+   * invalid_envelope. This one did not, and it is the likeliest real
+   * misconfiguration of the lot (a wrong deviceId), so the one failure a
+   * client most needs to explain was the one it could not classify. It had to
+   * special-case the bare HTTP status instead, which stops working the moment
+   * these routes grow a second kind of 403.
+   *
+   * Asserted as an EXACT string because switching on it is the entire point;
+   * a match() would pass on a rename that breaks every consumer.
+   */
+  const store = await storeWithNodes(['victim', 'thief'])
+  const stolen = await relayFor(devicePrincipal('thief'), store)
+
+  const drain = await stolen.call('GET', '/v1/node/inbox?deviceId=victim')
+  assert.equal(drain.status, 403)
+  assert.equal(drain.body.code, 'not_your_inbox')
+
+  const ack = await stolen.call('POST', '/v1/node/inbox/ack', {
+    deviceId: 'victim',
+    messageIds: ['nmsg_anything'],
+  })
+  assert.equal(ack.status, 403)
+  assert.equal(ack.body.code, 'not_your_inbox')
+
+  /* The exported constant and the wire value are the same string. A client
+   * that imports it must not be reading a second, drifting copy. */
+  assert.equal(OWNERSHIP_DENIED_CODE, 'not_your_inbox')
+  assert.equal(drain.body.code, OWNERSHIP_DENIED_CODE)
+
+  /*
+   * And the code did NOT buy the prober anything the message was withheld
+   * for. The denial stays deliberately vague — it must not name the inbox it
+   * refused, or a token could enumerate the fleet one 403 at a time.
+   */
+  for (const body of [drain.body, ack.body]) {
+    assert.ok(body.error, 'must still say something human')
+    assert.ok(
+      !JSON.stringify(body).includes('victim'),
+      'the refusal must not echo the deviceId it protected',
+    )
+  }
+
+  /* It is a DISTINCT code, not a generic one: a client switching on `code`
+   * must land somewhere different from an unroutable send. */
+  const unknown = await stolen.call('POST', '/v1/node/messages', {
+    to: 'nobody-here',
+    kind: 'test.a',
+  })
+  assert.equal(unknown.body.code, 'unknown_node')
+  assert.notEqual(unknown.body.code, drain.body.code)
+
+  await stolen.close()
+})
+
+test('presence tells "never paired" apart from "asleep", without touching observed', async () => {
+  /*
+   * THE bug: with a hub reachable, an unregistered deviceId answered
+   * `connected:false, observed:true` — character for character what a real
+   * node that is merely disconnected answers. A typo and a sleeping Mac are
+   * opposite client behaviours: one is a device ID to correct, the other is
+   * the normal resting state and should be rendered as nothing at all.
+   *
+   * The fix must be ADDITIVE. `observed:false` already means "we could not
+   * ask" and clients are told never to draw that as a dead node; spending
+   * that value on "there is nothing to ask about" would collapse a
+   * distinction that is already load-bearing elsewhere.
+   */
+  setCloudflareBindings({ BRIDGE_HUB: presenceHub() })
+  const store = await storeWithNodes(['node-a', 'node-b'])
+  const relay = await relayFor(devicePrincipal('node-a'), store)
+
+  const asleep = await relay.call('GET', '/v1/node/presence?deviceId=node-b')
+  const neverPaired = await relay.call(
+    'GET',
+    '/v1/node/presence?deviceId=typo-node',
+  )
+
+  assert.equal(asleep.body.known, true)
+  assert.equal(neverPaired.body.known, false)
+
+  /*
+   * The strongest form of "additive": the two answers differ in `known` and
+   * in NOTHING else. That fails if the fix leaked into observed/connected,
+   * and it fails if `known` is not actually the discriminator.
+   */
+  assert.deepEqual(
+    { ...asleep.body, known: null, deviceId: null },
+    { ...neverPaired.body, known: null, deviceId: null },
+    'known must be the only field that separates a typo from a sleeping node',
+  )
+  assert.equal(asleep.body.observed, true, 'the hub answered for both')
+  assert.equal(neverPaired.body.observed, true)
+  assert.equal(asleep.body.connected, false)
+  assert.equal(neverPaired.body.connected, false)
+
+  /* A node that IS connected is still reported connected — the lookup did not
+   * become a gate on the answer. */
+  setCloudflareBindings({ BRIDGE_HUB: presenceHub({ connected: new Set(['node-b']) }) })
+  const awake = await relay.call('GET', '/v1/node/presence?deviceId=node-b')
+  assert.equal(awake.body.connected, true)
+  assert.equal(awake.body.known, true)
+  assert.equal(awake.body.sockets, 1)
+
+  await relay.close()
+})
+
+test('presence keeps observed meaning "we could not ask", for a known node', async () => {
+  /*
+   * The third state, unchanged: no hub binding is the deployed relay during a
+   * hub outage and every `npm run relay` on a laptop. A registered node in
+   * that condition is `known:true, observed:false` — we know it exists and we
+   * could not ask about it. Three independent facts, three fields.
+   */
+  setCloudflareBindings(null)
+  const store = await storeWithNodes(['node-a', 'node-b'])
+  const relay = await relayFor(devicePrincipal('node-a'), store)
+
+  const cannotAsk = await relay.call('GET', '/v1/node/presence?deviceId=node-b')
+  assert.equal(cannotAsk.body.known, true)
+  assert.equal(cannotAsk.body.observed, false)
+  assert.equal(cannotAsk.body.connected, false)
+
+  /* Unknown AND unaskable is still legible: known:false is not derived from
+   * observed, so it survives the hub being gone. */
+  const neither = await relay.call('GET', '/v1/node/presence?deviceId=typo-node')
+  assert.equal(neither.body.known, false)
+  assert.equal(neither.body.observed, false)
+
+  /* '@relay' is a real address the send route accepts and no device row will
+   * ever hold. The two routes must not disagree about which addresses exist. */
+  const relayAddress = await relay.call(
+    'GET',
+    `/v1/node/presence?deviceId=${encodeURIComponent('@relay')}`,
+  )
+  assert.equal(
+    relayAddress.body.known,
+    true,
+    'the relay brain is an address you can send to, so it is not an unknown node',
+  )
+
+  await relay.close()
+})
+
+test('presence stays open to any principal, and stays gated on device:status:read', async () => {
+  /*
+   * Pinned because `known` is the first thing this route reveals that is not
+   * about a live socket, and the temptation on review is to bolt
+   * principalOwnsDevice onto it. That would break the feature the route
+   * exists for: answering "is the Mac connected right now" from the phone.
+   * The existence it now reports was already reachable through this route
+   * (a connected node reports connected:true whoever asks) and through the
+   * send route's unknown_node.
+   */
+  setCloudflareBindings({ BRIDGE_HUB: presenceHub({ connected: new Set(['node-b']) }) })
+  const store = await storeWithNodes(['node-a', 'node-b'])
+  const phone = await relayFor(devicePrincipal('node-a'), store)
+
+  const other = await phone.call('GET', '/v1/node/presence?deviceId=node-b')
+  assert.equal(other.status, 200, 'asking about another node is not a refusal')
+  assert.equal(other.body.known, true)
+
+  const { requiredScopesForRoute } = await import('./relayScopes.js')
+  assert.deepEqual(requiredScopesForRoute('GET', '/v1/node/presence'), [
+    'device:status:read',
+  ])
+  await phone.close()
 })
 
 /* ---- the socket upgrade ------------------------------------------------- */
@@ -377,6 +586,62 @@ test('upgradeCredential reports the channel and never the secret', async () => {
   for (const result of [header, sub, none]) {
     assert.ok(!result.source.includes('tok-abc'))
   }
+})
+
+test('the worker negotiates with the SHARED subprotocol strings, not its own', async () => {
+  /*
+   * bridgeHub.js kept private literals for both of these until the shared
+   * module grew them. That is the same latent disagreement bridgeSocketProtocol
+   * warns about for the ping frame, one layer up — and it fails more quietly:
+   * subprotocol negotiation is byte-exact, a browser closes any socket whose
+   * handshake selected a name it did not offer, and nothing on either side
+   * logs a reason. The symptom is "the extension cannot connect".
+   *
+   * Everything below is driven from the SHARED constants, so a drift of one
+   * character in either copy fails this test instead of the fleet. Note that
+   * the older tests in this file hardcode the strings, which is exactly why
+   * they could not have caught it.
+   */
+  /* The exact two-offer handshake bridgeSocketProtocol documents, built from
+   * the constants a client would import rather than retyped here. */
+  const credentialled = new Request('https://relay.invalid/v1/node/socket', {
+    headers: {
+      'Sec-WebSocket-Protocol': `${MESH_SUBPROTOCOL}, ${BEARER_SUBPROTOCOL_PREFIX}tok-abc`,
+    },
+  })
+
+  /* The name the server selects must be the one the client was told to offer. */
+  assert.deepEqual(selectSubprotocol(credentialled), {
+    'Sec-WebSocket-Protocol': MESH_SUBPROTOCOL,
+  })
+
+  /* And the credential is read off the shared prefix, not a private copy. */
+  assert.deepEqual(upgradeCredential(credentialled), {
+    authorization: 'Bearer tok-abc',
+    source: 'subprotocol',
+  })
+
+  /* The mesh name is never mistaken for a credential, and the credential is
+   * never echoed back — a selected bearer.* entry would put the token in the
+   * RESPONSE headers, which is the reason there are two offers and not one. */
+  const meshOnly = new Request('https://relay.invalid/v1/node/socket', {
+    headers: { 'Sec-WebSocket-Protocol': MESH_SUBPROTOCOL },
+  })
+  assert.equal(upgradeCredential(meshOnly).source, 'none')
+  assert.ok(
+    !JSON.stringify(selectSubprotocol(credentialled)).includes('tok-abc'),
+    'the selected protocol must never carry the token',
+  )
+
+  /* A client that offered nothing gets no header at all: RFC 6455 forbids
+   * naming a protocol the client did not offer, and the Mac's header-
+   * authenticated socket offers none. */
+  const bare = new Request('https://relay.invalid/v1/node/socket')
+  assert.equal(selectSubprotocol(bare), undefined)
+  const wrongName = new Request('https://relay.invalid/v1/node/socket', {
+    headers: { 'Sec-WebSocket-Protocol': 'pendant.mesh.v0' },
+  })
+  assert.equal(selectSubprotocol(wrongName), undefined)
 })
 
 test('the mesh socket refuses a missing deviceId, a bad token, and a plain GET', async () => {

@@ -45,10 +45,12 @@
  * lazily inside the upgrade handler below.
  */
 import {
+  BEARER_SUBPROTOCOL_PREFIX,
   BRIDGE_MAIL_FRAME,
   BRIDGE_PING_FRAME,
   BRIDGE_PONG_FRAME,
   BRIDGE_WORK_FRAME,
+  MESH_SUBPROTOCOL,
   parseBridgeFrame,
 } from '../shared/bridgeSocketProtocol.js'
 
@@ -82,15 +84,43 @@ const LAST_DOORBELL_KEY = 'lastDoorbell'
  * because the alternative was a node that cannot connect, and it is NOT
  * ambient credentials: a malicious page cannot read the extension's token, so
  * this opens no cross-site hijacking path the header did not already have.
+ *
+ * BOTH STRINGS ARE IMPORTED, not restated here. They are a contract between
+ * this file and every client that opens the socket, and the argument is the
+ * one bridgeSocketProtocol.js already makes for the ping frame: a constant
+ * that must agree across two files, duplicated, eventually disagrees. The ping
+ * is byte-matched by Cloudflare's auto-response; these are byte-matched by RFC
+ * 6455 subprotocol negotiation, which fails the same silent way — a browser
+ * closes a socket whose handshake selected a name it did not offer, so a drift
+ * of one character reads as "the extension cannot connect" with nothing in any
+ * log saying why.
  * --------------------------------------------------------------------------- */
-const MESH_SUBPROTOCOL = 'pendant.mesh.v1'
-const BEARER_SUBPROTOCOL_PREFIX = 'bearer.'
 
 function offeredSubprotocols(request) {
   return String(request.headers.get('Sec-WebSocket-Protocol') || '')
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean)
+}
+
+/**
+ * The `Sec-WebSocket-Protocol` response header for this handshake, or
+ * undefined when the client offered nothing we speak.
+ *
+ * Extracted from fetch() below so the negotiated name is observable to a test.
+ * It cannot be asserted through fetch(): a 101 response is unconstructible in
+ * Node (undici rejects any status under 200), so the one line that decides
+ * whether a browser keeps or drops the socket had no coverage at all — which
+ * is precisely the line that must byte-match the client's offer.
+ *
+ * Never selects the bearer.* entry, even though the client offered it: echoing
+ * it would put the credential in the RESPONSE headers, where a proxy log
+ * captures it just as happily as it would a query string.
+ */
+export function selectSubprotocol(request) {
+  return offeredSubprotocols(request).includes(MESH_SUBPROTOCOL)
+    ? { 'Sec-WebSocket-Protocol': MESH_SUBPROTOCOL }
+    : undefined
 }
 
 /**
@@ -160,18 +190,12 @@ export class BridgeHub {
        * connection it just opened. RFC 6455: if the client offered any
        * subprotocol, the server's response must name exactly one of them, and
        * a browser enforces that by closing a socket whose handshake selected
-       * something it did not offer. We always select the plain mesh protocol
-       * and never the bearer.* entry — echoing that one would put the token
-       * back on the wire in the RESPONSE headers, where a proxy log would
-       * capture it just as happily.
+       * something it did not offer.
        */
-      const selected = offeredSubprotocols(request).includes(MESH_SUBPROTOCOL)
-        ? { 'Sec-WebSocket-Protocol': MESH_SUBPROTOCOL }
-        : undefined
       return new Response(null, {
         status: 101,
         webSocket: client,
-        headers: selected,
+        headers: selectSubprotocol(request),
       })
     }
 
