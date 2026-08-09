@@ -13,14 +13,54 @@
           <p class="eyebrow">AI Pendant</p>
           <h2>Browser Bridge</h2>
         </div>
-        <div class="status-mini" id="status-mini" title="Bridge status">
-          <span id="status-dot" class="dot"></span>
-          <small id="status-title">Checking…</small>
+        <div class="header-tools">
+          <div class="status-mini" id="status-mini" title="Bridge status">
+            <span id="status-dot" class="dot"></span>
+            <small id="status-title">Checking…</small>
+          </div>
+          <!-- Safari closes this popover on any outside click; the pin opens
+               the same console as a window (or pinned tab) that stays put. -->
+          <button
+            id="pop-out"
+            class="icon-button"
+            type="button"
+            title="Keep this console open in its own window"
+            aria-label="Open the console in its own window"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6.5 3H3.8A1.8 1.8 0 0 0 2 4.8v7.4A1.8 1.8 0 0 0 3.8 14h7.4a1.8 1.8 0 0 0 1.8-1.8V9.5" />
+              <path d="M9.5 2H14v4.5" />
+              <path d="M14 2 7.5 8.5" />
+            </svg>
+          </button>
         </div>
       </div>
 
+      <!-- Approval requests other nodes put to this browser. Rendered by
+           popup.js from storage; empty and hidden until one arrives. -->
+      <section id="approvals" class="approvals" aria-live="polite" hidden></section>
+
       <form id="command-form" class="command-form">
         <div class="command-row">
+          <!-- Speech lands in the box; Send is still the only thing that
+               sends. Backend and availability are decided in popup.js. -->
+          <button
+            id="command-mic"
+            class="mic-button"
+            type="button"
+            title="Speak a command"
+            aria-label="Speak a command"
+            aria-pressed="false"
+          >
+            <svg class="mic-glyph" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="1.8" width="4" height="7.4" rx="2" />
+              <path d="M3.6 7.4a4.4 4.4 0 0 0 8.8 0" />
+              <path d="M8 11.8v2.4" />
+            </svg>
+            <svg class="mic-stop-glyph" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true">
+              <rect x="4" y="4" width="8" height="8" rx="1.5" />
+            </svg>
+          </button>
           <input
             id="command-input"
             type="text"

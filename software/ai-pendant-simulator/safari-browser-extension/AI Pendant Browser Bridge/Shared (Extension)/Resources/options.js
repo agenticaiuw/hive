@@ -30,7 +30,7 @@
 	}
 	typeof TextEncoder === "function" && new TextEncoder();
 	//#endregion
-	//#region ../shared/nodeMesh.js
+	//#region shared/nodeMesh.js
 	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
 	const RELAY_NODE_ADDRESS = "@relay";
 	const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/;
@@ -46,7 +46,7 @@
 		return DEVICE_ADDRESS_PATTERN.test(address) ? address : "";
 	}
 	//#endregion
-	//#region src/relay-peer.js
+	//#region browser-extension/src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://ai-pendant-relay.your-subdomain.workers.dev",
 		"http://127.0.0.1:8787",
@@ -131,11 +131,12 @@
 	}
 	Object.freeze({
 		"browser.command": "command",
-		"browser.ping": "ping"
+		"browser.ping": "ping",
+		"approval_request": "approval"
 	});
 	typeof TextEncoder === "function" && new TextEncoder();
 	//#endregion
-	//#region src/options.js
+	//#region browser-extension/src/options.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const WEBSITE_ORIGINS = ["http://*/*", "https://*/*"];
 	const elements = {
