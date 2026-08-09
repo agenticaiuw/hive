@@ -1,4 +1,5 @@
 import { voiceRunForCapture, voiceRunForJob } from './jobs.js'
+import { BROWSER_TASK_JOB_TYPE } from './browserTaskHistory.js'
 import { stripProtocolTerminators } from '../shared/protocolText.js'
 
 /*
@@ -6,6 +7,12 @@ import { stripProtocolTerminators } from '../shared/protocolText.js'
  * so a run can never appear in one view and not the other. Everything here is
  * pure: the store hands over a page of jobs plus the audio captures that could
  * belong to them, and these helpers shape the response.
+ *
+ * Browser-executed tasks ride the same page: browserTaskHistory.js folds the
+ * extension's 'browser.task.record' mail into relay_jobs rows (type
+ * 'browser_task'), and buildHistoryPage() below shapes those rows next to the
+ * plan-job entries — same store, same cursor, same order — with the fields
+ * that attribute the run to the browser node that executed it.
  */
 
 export const HISTORY_DEFAULT_LIMIT = 20
@@ -247,6 +254,153 @@ export function historyEntryForCapture(capture) {
   }
 }
 
+/*
+ * A browser-executed run, shaped like every other history entry so the
+ * dashboard renders it in the same list — plus the attribution fields:
+ * `executor`/`executedBy`/`claimedBy` say WHICH browser node ran it (stamped
+ * from the sender's credential, never from its payload), and
+ * `claimable:false` restates on the wire what the stores enforce — this is a
+ * record of finished-or-running browser work, never work for the Mac.
+ *
+ * `status` (and `jobStatus`, which the dashboard prefers) carry the honest
+ * vocabulary browserTaskHistory.js stamped at fold time: only a verdict of
+ * 'achieved' ever reads 'completed', so an incomplete browser run can never
+ * render as Done.
+ */
+export function historyEntryForBrowserTask(job) {
+  if (!job || job.type !== BROWSER_TASK_JOB_TYPE) {
+    return null
+  }
+
+  const browser = job.browser && typeof job.browser === 'object' ? job.browser : {}
+  const steps = Array.isArray(browser.steps) ? browser.steps : []
+  const startedMs = Date.parse(job.startedAt ?? job.createdAt ?? '')
+  const finishedMs = Date.parse(job.finishedAt ?? '')
+
+  return {
+    pipelineId: job.jobId,
+    kind: 'browser_task',
+    command: String(job.command || ''),
+    origin: job.origin || 'browser-extension',
+    /* Typed into the extension's console — there is no audio on this path. */
+    inputMode: 'typed',
+    /* The witnessing body. Plan entries say 'cloudflare'; here it is the
+     * executing browser node itself, so the per-device attribution survives
+     * even a client that only knows the plan-entry fields. */
+    source: String(job.executedBy || 'browser'),
+    sessionId: null,
+    status: job.status,
+    jobStatus: job.status,
+    /* The extension's ledger-derived completion line, never model prose. */
+    reply: String(browser.headline || ''),
+    actionCount: steps.filter(
+      (step) => step?.ok && (step.effect === 'act' || step.effect === 'outward'),
+    ).length,
+    eventCount: steps.length,
+    error: job.error ?? null,
+    durationMs:
+      Number.isFinite(startedMs) && Number.isFinite(finishedMs) && finishedMs >= startedMs
+        ? finishedMs - startedMs
+        : null,
+    audio: audioSummary(null),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    executor: 'browser',
+    executedBy: job.executedBy ?? null,
+    claimedBy: job.claimedBy ?? null,
+    claimable: false,
+    verdict: browser.verdict ?? null,
+  }
+}
+
+/**
+ * The single-run view for a browser task: the step trace as pipeline events
+ * and an execution block, shaped so the existing run-detail consumers render
+ * it without learning a second schema.
+ */
+export function browserTaskRunDetail(job) {
+  const entry = historyEntryForBrowserTask(job)
+  if (!entry) {
+    return null
+  }
+
+  const browser = job.browser && typeof job.browser === 'object' ? job.browser : {}
+  const steps = Array.isArray(browser.steps) ? browser.steps : []
+  const terminal = browser.phase === 'verdict'
+
+  const events = steps.map((step, index) => ({
+    eventId: `browser-${job.jobId}-step-${index + 1}`,
+    stage: 'browser',
+    status: step?.ok ? 'done' : 'failed',
+    label: [String(step?.tool || 'step'), step?.effect ? `(${step.effect})` : '']
+      .filter(Boolean)
+      .join(' '),
+    detail: '',
+    text: String(step?.summary || ''),
+    source: entry.executedBy || 'browser',
+    meta: null,
+    at: step?.at ?? job.updatedAt,
+  }))
+
+  events.push({
+    eventId: `browser-${job.jobId}-verdict`,
+    stage: 'verdict',
+    status: !terminal
+      ? 'active'
+      : entry.status === 'needs_approval'
+        ? 'waiting'
+        : ['failed', 'incomplete'].includes(entry.status)
+          ? 'failed'
+          : 'done',
+    label: terminal
+      ? String(browser.headline || `Recorded as ${entry.status}.`)
+      : 'Executing in the browser',
+    detail: terminal
+      ? 'Verdict computed by the extension from its own step ledger.'
+      : 'The browser node claimed this task and has not reported a verdict yet.',
+    text: '',
+    source: entry.executedBy || 'browser',
+    meta: null,
+    at: job.finishedAt ?? job.updatedAt,
+  })
+
+  return {
+    ...entry,
+    events,
+    actions: [],
+    execution: terminal
+      ? {
+          ok:
+            entry.status === 'completed'
+              ? true
+              : entry.status === 'failed'
+                ? false
+                : null,
+          status: entry.status,
+          summary: String(browser.headline || '') || null,
+          response: String(browser.headline || '') || null,
+          planner: 'browser-affinity',
+          results: steps.map((step) => ({
+            ok: step?.ok === true,
+            status: step?.ok ? 'done' : 'failed',
+            message: String(step?.summary || step?.tool || ''),
+            error: step?.ok ? null : String(step?.summary || '') || null,
+          })),
+          actions: steps.map((step) => ({
+            type: String(step?.tool || 'step'),
+            label: String(step?.summary || step?.tool || 'step'),
+          })),
+          thinking: null,
+          pendantSpeech: null,
+        }
+      : null,
+    inputTelemetry: null,
+    transcript: null,
+    transcriptionModel: null,
+    createdBy: job.createdBy ?? entry.executedBy ?? null,
+  }
+}
+
 export function buildHistoryPage({
   jobs = [],
   captures = [],
@@ -255,7 +409,19 @@ export function buildHistoryPage({
   scanLimit = HISTORY_MAX_SCAN,
 } = {}) {
   const safeLimit = normalizeHistoryLimit(limit)
-  const matching = jobs.filter((job) => matchesHistoryQuery(job, query))
+  /* Browser task rows share the page (and therefore the cursor) with plan
+   * jobs, but never the capture linker below: the transcript heuristic would
+   * happily hand a pendant recording to a typed browser run that repeated the
+   * same words. */
+  const planJobs = jobs.filter((job) => job?.type !== BROWSER_TASK_JOB_TYPE)
+  const browserEntries = jobs
+    .filter(
+      (job) =>
+        job?.type === BROWSER_TASK_JOB_TYPE && matchesHistoryQuery(job, query),
+    )
+    .map((job) => historyEntryForBrowserTask(job))
+    .filter(Boolean)
+  const matching = planJobs.filter((job) => matchesHistoryQuery(job, query))
   const links = linkAudioCaptures(matching, captures)
 
   const claimedCaptures = new Set(
@@ -286,6 +452,7 @@ export function buildHistoryPage({
     })
     .filter(Boolean)
     .concat(captureEntries)
+    .concat(browserEntries)
     .sort(
       (left, right) =>
         new Date(right.createdAt || 0) - new Date(left.createdAt || 0),

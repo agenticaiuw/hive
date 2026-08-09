@@ -186,6 +186,14 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
    * Ownership of the addressed inbox is enforced separately by
    * principalOwnsDevice in the handlers — a scope says "you may drain an
    * inbox", not "you may drain that one".
+   *
+   * Mail addressed to '@relay' rides this same scope, whatever its kind —
+   * including 'browser.task.record', the browser extension's executed-work
+   * record. No browser:work:record scope exists, deliberately: what the
+   * relay-side consumer grants is bounded by the consumer itself (attribution
+   * is stamped from the credential, and a sender can only write records about
+   * its own work), not by a second scope on the same route. The full
+   * rationale lives in cloud-relay/browserTaskHistory.js.
    */
   if (method === 'POST' && path === '/v1/node/messages') {
     return ['node:message:send']

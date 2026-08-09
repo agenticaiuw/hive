@@ -44,7 +44,11 @@ import {
   routeApprovalPrompt,
 } from './approvalDelivery.js'
 import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
-import { registerNodeMeshRoutes } from './nodeMailbox.js'
+import { composeRelayMail, registerNodeMeshRoutes } from './nodeMailbox.js'
+import {
+  BROWSER_TASK_JOB_TYPE,
+  consumeBrowserTaskRecordMail,
+} from './browserTaskHistory.js'
 import { registerInferenceRoutes } from './nodeInference.js'
 import { planFromAudio } from './audioPlan.js'
 import {
@@ -87,6 +91,7 @@ import {
   // GET /v1/ops/audio-captures used this without importing it, so every call
   // threw ReferenceError and Express turned it into a bare HTML 500.
   audioCaptureSummary,
+  browserTaskRunDetail,
   buildHistoryPage,
   decodeHistoryCursor,
   HISTORY_MAX_SCAN,
@@ -526,9 +531,18 @@ registerAnnouncementRetentionRoutes(app, { getStore })
  * here rather than written inline for the same reason the two above are — the
  * routing rules and the ownership checks belong next to each other, not spread
  * through 3,000 lines. `relayMail` gives the relay brain first refusal on
- * mail addressed to '@relay'; today that is approval_decision envelopes,
- * consumed and settled in the send request itself. */
-registerNodeMeshRoutes(app, { getStore, relayMail: consumeRelayApprovalMail })
+ * mail addressed to '@relay': approval_decision envelopes are consumed and
+ * settled in the send request itself, and browser.task.record envelopes are
+ * folded into the same job history the RECENT feed reads
+ * (browserTaskHistory.js) — the browser's executed work, attributed and never
+ * claimable. */
+registerNodeMeshRoutes(app, {
+  getStore,
+  relayMail: composeRelayMail(
+    consumeRelayApprovalMail,
+    consumeBrowserTaskRecordMail,
+  ),
+})
 
 /* A brain the phone and the extension can reach while the Mac is asleep. */
 registerInferenceRoutes(app)
@@ -2180,10 +2194,12 @@ app.get('/v1/ops/history', async (request, response) => {
     .toLowerCase()
 
   // voiceRunForJob() drops plan jobs the owner did not start, so read several
-  // pages' worth of rows and let the filter thin them out.
+  // pages' worth of rows and let the filter thin them out. Browser-executed
+  // task records (browserTaskHistory.js) live in the same table and the same
+  // keyset order, so one query pages both kinds of run under one cursor.
   const scanLimit = Math.min(limit * HISTORY_OVERSCAN + 10, HISTORY_MAX_SCAN)
   const jobs = await store.listJobs({
-    type: 'plan',
+    type: ['plan', BROWSER_TASK_JOB_TYPE],
     limit: scanLimit,
     before: cursor,
     search: query || null,
@@ -3519,6 +3535,23 @@ async function loadRunDetail(request, response) {
       return null
     }
     return { store, job, capture: job, link: 'self', run }
+  }
+
+  // Browser-executed tasks: the record IS the run — no plan job, no capture.
+  if (job && job.type === BROWSER_TASK_JOB_TYPE) {
+    if (!principalCanReadJob(request.relayPrincipal, job)) {
+      response.status(403).json({
+        ok: false,
+        error: 'Blocked for safety: this run belongs to another device.',
+      })
+      return null
+    }
+    const run = browserTaskRunDetail(job)
+    if (!run) {
+      response.status(404).json({ ok: false, error: 'Run not found.' })
+      return null
+    }
+    return { store, job, capture: null, link: null, run }
   }
 
   if (!job || job.type !== 'plan') {

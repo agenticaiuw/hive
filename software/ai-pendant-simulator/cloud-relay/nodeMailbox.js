@@ -113,6 +113,27 @@ export function resetNodeMailboxWarnings() {
 }
 
 /**
+ * Chain relay-brain letterbox consumers into one `relayMail` function.
+ *
+ * First refusal in ORDER: the first consumer to answer {consumed:true} wins
+ * and the rest never see the envelope, so each consumer stays a one-kind
+ * switch and adding a kind to the relay brain means adding a consumer to the
+ * chain in server.js — one seam, many kinds, never a second path beside the
+ * letterbox. A consumer that throws fails the send loudly (the sender must
+ * know the relay did not take the message), same as a single consumer did.
+ */
+export function composeRelayMail(...consumers) {
+  return async (delivery) => {
+    for (const consumer of consumers) {
+      if (typeof consumer !== 'function') continue
+      const answer = await consumer(delivery)
+      if (answer?.consumed) return answer
+    }
+    return { consumed: false }
+  }
+}
+
+/**
  * Ring one node's doorbell. Resolves to a report and never rejects: the
  * envelope is already durable when this is called, so a hub outage costs
  * latency, not the message.
@@ -199,9 +220,10 @@ export async function sendNodeMessage({
    * passed here gets first refusal on such mail: it returns
    * `{consumed: true, receipt}` to answer the message synchronously (the row
    * is never written; the sender gets the receipt in the send response), or
-   * `{consumed: false}` to let the kind queue exactly as before. Today's one
-   * consumer is approvalDelivery.js's 'approval_decision' handler, wired in
-   * server.js.
+   * `{consumed: false}` to let the kind queue exactly as before. Consumers:
+   * approvalDelivery.js's 'approval_decision' handler and
+   * browserTaskHistory.js's 'browser.task.record' handler, chained with
+   * composeRelayMail() and wired in server.js.
    */
   relayMail = null,
 } = {}) {
