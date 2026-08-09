@@ -1259,10 +1259,22 @@ const OPERATIONS = {
     # not been measured. Claiming it and being wrong means a tap that silently
     # goes nowhere, which is the failure this module keeps being rewritten for.
     result["activationAvailable"] = activation_available()
-    result["pointerTargetedPossible"] = targeted_pointer_proven()
+    # Gated on the WORLD as well as on the mechanism, and that second clause is
+    # not decoration. Caught by running this against the real Mac while its
+    # screen was locked: the mechanism is perfectly available there, so without
+    # it status reported pointerWritesPossible true and writeMechanism
+    # "targeted-active" for a machine that composites nothing and can neither
+    # be read nor verified. A status field that says yes when the answer is no
+    # is worse than one that says nothing.
+    result["pointerTargetedPossible"] = bool(
+        targeted_pointer_proven()
+        and result["readsPossible"]
+        and result["state"] in ("ready", "off-space"))
     result["pointerTargetedBlockedBy"] = (
         None if result["pointerTargetedPossible"]
         else "activation-unavailable" if not result["activationAvailable"]
+        else "unreachable" if not (result["readsPossible"]
+                                   and result["state"] in ("ready", "off-space"))
         else "off-space-unproven")
     # The actions that EXIST on this route, not the chords it could carry.
     # Home and the App Switcher are menu key equivalents and work whatever the
