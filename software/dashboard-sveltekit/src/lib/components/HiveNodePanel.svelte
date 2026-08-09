@@ -8,6 +8,11 @@
     type HiveNode,
     type HiveSourceMeta,
   } from "$lib/hive";
+  import {
+    armedRevokeLabel,
+    credentialEmptyText,
+    credentialView,
+  } from "$lib/hiveCredentials.js";
 
   let {
     focused,
@@ -51,6 +56,8 @@
       command: string;
       stages: { name: string; cls: string; title: string }[];
     }[];
+    /** Credential inventory with the kill switch on every row. */
+    creds?: { warn: string; view: ReturnType<typeof credentialView> };
     empty?: string;
   };
 
@@ -96,6 +103,36 @@
               : "active";
       return { name: s, cls, title: `${s}${st ? `: ${st}` : " (not reached)"}` };
     });
+  }
+
+  /*
+   * The credential inventory, with the kill switch on every row. Ported from
+   * hive-dashboard/index.html when that page folded into this dashboard.
+   *
+   * Deliberately NOT tucked behind anything: it is the only way to withdraw a
+   * capability from a device that has gone missing, and a kill switch behind a
+   * disclosure is a kill switch nobody finds at the moment they need it.
+   * Scopes are effective (recomputed from live role policy at every request),
+   * so the count is what the credential can do NOW; a `narrowed` row was
+   * minted with an explicit ceiling and policy can only intersect it downward.
+   *
+   * The rows are live-only: the aggregator withholds this source from the
+   * relay snapshot on purpose, so away from the Mac the section says where to
+   * act instead of showing a dead control.
+   */
+  function credSection(role: string, title: string, warn: string): Section {
+    const view = credentialView(src["relay.credentials"], role);
+    const section: Section = { title, creds: { warn, view } };
+    if (!view) {
+      const m = meta["relay.credentials"];
+      if (m?.ok && !m.unsupported) {
+        section.note =
+          "the inventory is local-only (withheld from the relay snapshot) — open this page on the Mac to see or revoke";
+      } else {
+        Object.assign(section, metaNote("relay.credentials"));
+      }
+    }
+    return section;
   }
 
   // ------------------------------------------------------------ per-node builders
@@ -267,6 +304,14 @@
     } else Object.assign(env, metaNote("relay.health"));
     out.push(env);
 
+    out.push(
+      credSection(
+        "",
+        "WHO CAN ACT AS THIS HIVE",
+        "Every row below holds a live credential for the relay. Revoke one to cut that device off immediately.",
+      ),
+    );
+
     const dev: Section = { title: "DEVICES" };
     if (devices) {
       dev.rows = (devices.devices || []).map((d: any) => ({
@@ -424,6 +469,15 @@
         },
       ],
     });
+    /* The phone is the most-stolen node and the one holding mac:execute, so
+     * its kill switch is on its own panel as well as on the relay's. */
+    out.push(
+      credSection(
+        "mobile",
+        "THIS PHONE’S CREDENTIALS",
+        "If the phone is lost, revoke here — this is what stops it acting as you.",
+      ),
+    );
     const dev: Section = { title: "MOBILE DEVICE ROWS (VIA RELAY)" };
     if (devices) {
       dev.rows = (devices.devices || [])
@@ -615,6 +669,51 @@
       };
     }
   }
+
+  // ------------------------------------------------------------ credential revoke (LIVE only)
+
+  /* An armed or in-flight revoke survives the data refreshes: the state lives
+   * here, keyed by tokenId, not in the rendered rows. */
+  let credArmed = $state<string | null>(null);
+  /** tokenId → "busy" | "revoked" | "was revoked" | "failed: <message>" */
+  let credOutcome = $state<Record<string, string>>({});
+
+  /*
+   * Two clicks, not a confirm() dialog: the first arms the button and names
+   * what is about to be killed on the button itself, the second does it. The
+   * POST goes to the local aggregator, which already holds the admin key —
+   * this page only ever names a tokenId, so nothing secret crosses the
+   * loopback socket in either direction. On success the SSE delta lands the
+   * relay's own revokedAt on the row within a beat; the outcome map keeps the
+   * button honest in the meantime.
+   */
+  async function revokeCredential(row: { tokenId: string }) {
+    if (!liveBase) return;
+    const tokenId = String(row.tokenId);
+    if (credArmed !== tokenId) {
+      credArmed = tokenId;
+      setTimeout(() => {
+        if (credArmed === tokenId) credArmed = null;
+      }, 6000);
+      return;
+    }
+    credArmed = null;
+    credOutcome[tokenId] = "busy";
+    try {
+      const response = await fetch(
+        `${liveBase}/api/credentials/${encodeURIComponent(tokenId)}/revoke`,
+        { method: "POST" },
+      );
+      const payload: any = await response.json();
+      if (!payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      credOutcome[tokenId] = payload.alreadyRevoked ? "was revoked" : "revoked";
+    } catch (error) {
+      credOutcome[tokenId] =
+        `failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
 </script>
 
 <div class="hv-panel">
@@ -633,6 +732,77 @@
           <span class="hv-err">{section.err}</span>
         {:else}
           {#if section.note}<div class="hv-mut hv-sect-note">{section.note}</div>{/if}
+          {#if section.creds}
+            {@const cv = section.creds.view}
+            <div class="hv-credbox">
+              <div class="hv-credwarn">{section.creds.warn}</div>
+              {#if cv}
+                <div class="hv-chiprow">
+                  <span class="hv-chip"><b>{cv.active}</b> active</span>
+                  <span class="hv-chip"><b>{cv.revoked}</b> revoked</span>
+                  {#each Object.entries(cv.byRole) as [role, count] (role)}
+                    <span class="hv-chip">{role} <b>{count}</b></span>
+                  {/each}
+                </div>
+                {#if cv.rows.length}
+                  <div class="hv-feed">
+                    {#each cv.rows as row (row.tokenId)}
+                      {@const outcome = credOutcome[row.tokenId] || ""}
+                      {@const failed = outcome.startsWith("failed: ")}
+                      {@const dead =
+                        Boolean(row.revokedAt) ||
+                        outcome === "revoked" ||
+                        outcome === "was revoked"}
+                      <div class="hv-credrow" class:dead>
+                        <span class="hv-cred-role">{row.role}</span>
+                        <!-- The scope names hang off the count: 14 of them
+                             inline would push the revoke button off the end,
+                             and a bare count asks the operator to take the
+                             number on faith right where they are deciding
+                             whether a device keeps its access. -->
+                        <span class="hv-cred-who" title={row.deviceId}
+                          >{row.deviceId} · <span
+                            class="hv-cred-scopes"
+                            title={(row.scopes || []).join("\n") ||
+                              "scope list not reported"}>{row.scopeCount} scope(s)</span
+                          >{#if row.narrowed}&nbsp;· <b
+                              title="minted with an explicit scope ceiling: a scope added to this role will never reach it"
+                              >narrowed</b
+                            >{/if}{#if !row.lastUsedAt}&nbsp;· never used{/if}</span
+                        >
+                        {#if row.lastUsedAt}
+                          <span class="hv-cred-tid">{ageOf(row.lastUsedAt, now, " ago")}</span>
+                        {/if}
+                        <span class="hv-cred-tid">{row.tokenId}</span>
+                        {#if dead}
+                          <button class="hv-revoke" disabled
+                            >{outcome || "revoked"}</button
+                          >
+                        {:else if liveBase}
+                          <button
+                            class="hv-revoke"
+                            class:arm={credArmed === row.tokenId}
+                            disabled={outcome === "busy"}
+                            title={failed ? outcome.slice("failed: ".length) : row.tokenId}
+                            onclick={() => revokeCredential(row)}
+                            >{outcome === "busy"
+                              ? "revoking…"
+                              : failed
+                                ? "revoke failed"
+                                : credArmed === row.tokenId
+                                  ? armedRevokeLabel(row)
+                                  : "revoke"}</button
+                          >
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <span class="hv-mut">{credentialEmptyText(cv)}</span>
+                {/if}
+              {/if}
+            </div>
+          {/if}
           {#if section.kv}
             <dl class="hv-kv">
               {#each section.kv as pair (pair.k + pair.v)}

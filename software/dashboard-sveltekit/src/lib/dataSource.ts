@@ -45,7 +45,7 @@ export const backend: Backend =
       ? "agent"
       : "relay";
 
-export type Fetched<T> = {
+type Fetched<T> = {
   data: T;
   /** Set when the backend answered, but with less than the view asked for. */
   note: string;

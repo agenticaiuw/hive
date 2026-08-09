@@ -53,7 +53,7 @@ import { hasUsefulTranscript, isTranscribing, type JsonRecord } from "$lib/pipel
 import { isAwaitingApproval, type JobView } from "$lib/jobs";
 import { terminalPhaseFor } from "$lib/hiveFeed.js";
 
-export type RunPhase =
+type RunPhase =
   | "nothing-yet"
   | "listening"
   | "thinking"
@@ -72,7 +72,7 @@ export type RunPhase =
  */
 const STALE_AFTER_MS = 180_000;
 
-export type BlockedReason = { type: string; reason: string };
+type BlockedReason = { type: string; reason: string };
 
 export type RunState = {
   phase: RunPhase;
@@ -117,7 +117,7 @@ const EMPTY: RunState = {
   at: "",
 };
 
-export const NOT_HEARD_YET =
+const NOT_HEARD_YET =
   "Audio reached Cloudflare, but speech recognition returned only punctuation.";
 
 function events(run: JsonRecord | null): JsonRecord[] {

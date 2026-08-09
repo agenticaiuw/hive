@@ -35,7 +35,7 @@ export const MAX_COMMAND_LENGTH = 2000;
 
 /** Same conversation id the voice/text composer uses, so one browser is one
  * conversation no matter which box the owner typed into. */
-export const SESSION_STORAGE_KEY = "ai-pendant-dashboard-conversation-id";
+const SESSION_STORAGE_KEY = "ai-pendant-dashboard-conversation-id";
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/;
 
 export function conversationSessionId(): string {
@@ -58,7 +58,7 @@ export function conversationSessionId(): string {
 
 /* ------------------------------------------------------------------ views */
 
-export type CommandActionRow = {
+type CommandActionRow = {
   key: string;
   type: string;
   label: string;
@@ -114,7 +114,7 @@ function resultView(payload: any): CommandResultView {
 
 /* ------------------------------------------------------------- local path */
 
-export type LocalPlanOutcome =
+type LocalPlanOutcome =
   | { kind: "done"; result: CommandResultView }
   | {
       kind: "needs-execute";
@@ -201,7 +201,7 @@ export async function runLocalExecute(
 
 /* ------------------------------------------------------------- relay path */
 
-export type RelayJobView = {
+type RelayJobView = {
   jobId: string;
   status: string;
   error: string;
@@ -232,7 +232,7 @@ export async function dispatchRelayCommand(
 }
 
 /** What `/api/command/audio` reports back for one browser recording. */
-export type VoiceDispatchOutcome = {
+type VoiceDispatchOutcome = {
   /** Poll handle for `/api/command/status/:jobId` when `queued` is true. */
   jobId: string | null;
   /** The transcript, verbatim (already server-side redacted). */

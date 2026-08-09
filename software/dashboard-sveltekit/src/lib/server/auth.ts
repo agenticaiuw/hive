@@ -6,8 +6,8 @@
  */
 import type { RuntimeEnv } from "./env";
 
-export const SESSION_COOKIE = "__Host-pendant_session";
-export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const SESSION_COOKIE = "__Host-pendant_session";
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const MIN_ACCESS_KEY_LENGTH = 16;
 const MIN_SESSION_SECRET_LENGTH = 32;
 
@@ -16,7 +16,7 @@ type SecureEnv = RuntimeEnv & {
   DASHBOARD_SESSION_SECRET: string;
 };
 
-export function hasSecureAuthConfiguration(env: RuntimeEnv): env is SecureEnv {
+function hasSecureAuthConfiguration(env: RuntimeEnv): env is SecureEnv {
   return Boolean(
     env.DASHBOARD_ACCESS_KEY &&
       env.DASHBOARD_ACCESS_KEY.length >= MIN_ACCESS_KEY_LENGTH &&
