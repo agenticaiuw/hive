@@ -539,3 +539,28 @@ function fakeApp() {
   }
   return app
 }
+
+/* -------------------------------------------------------------- origin */
+
+test('prepare threads the job source into the record as its origin', (t) => {
+  const space = workspace(t)
+  const prepared = prepareAction({
+    command: 'tidy the downloads folder',
+    actions: plan(space),
+    source: 'floating-hud',
+    filePath: space.ledger,
+  })
+  assert.equal(prepared.approval.origin, 'floating-hud')
+})
+
+test('an explicit origin outranks the source label', (t) => {
+  const space = workspace(t)
+  const prepared = prepareAction({
+    command: 'tidy the downloads folder',
+    actions: plan(space),
+    source: 'bridge-parked',
+    origin: 'ios-phone-1',
+    filePath: space.ledger,
+  })
+  assert.equal(prepared.approval.origin, 'ios-phone-1')
+})
