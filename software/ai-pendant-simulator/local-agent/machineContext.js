@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -11,17 +10,17 @@ const execFileAsync = promisify(execFile)
  * "Research this and tell me later" is a first-class capability with no action
  * type of its own, because it is not one action — it is a search, a handful of
  * page fetches, a cheap-tier synthesis and two rendered artifacts, and it takes
- * a minute. It reaches the executor through run_shell on its own CLI, and the
- * agent recognises that command and runs it in-process (computerControl.js).
+ * a minute. It reaches the executor through run_shell on a well-known command
+ * line, and the agent recognises that command and runs it in-process
+ * (computerControl.js researchCliCall). The command is a routing token, not a
+ * file: no scripts/research-brief.mjs exists on disk any more — the standalone
+ * CLI was deleted and only the in-process path remains.
  *
  * It lives in the machine block rather than in the action schema because that
  * is what it is: a tool that exists on THIS machine, described next to the
  * other tools that exist on this machine.
  */
-const RESEARCH_CLI = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../scripts/research-brief.mjs',
-)
+const RESEARCH_CLI = 'scripts/research-brief.mjs'
 
 const RESEARCH_BRIEF_PROMPT = `Research briefs (work the owner is NOT waiting for — "look into X and tell me later", "compare the options and leave me an audio recommendation", "summarize this page and read it to me later"):
 - Emit ONE run_shell action: node ${RESEARCH_CLI} --topic "<the topic, in the owner's words>" --mode <brief|compare|page>
