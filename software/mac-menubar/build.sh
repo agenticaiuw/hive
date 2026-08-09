@@ -19,7 +19,6 @@ mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 xcrun swiftc -O -o "$OUT/Contents/MacOS/AI Pendant" Sources/main.swift
 cp Info.plist "$OUT/Contents/Info.plist"
 cp build/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
-printf 'APPL????' > "$OUT/Contents/PkgInfo"
 
 # Prefer an Apple Development identity; fall back to ad-hoc signing.
 IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
