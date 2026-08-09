@@ -11,6 +11,7 @@ import {
 } from './atomicJsonStore.js'
 import { AUDIO_RETENTION_DEFAULT_MAX_AGE_MS } from './audioRetention.js'
 import { workspacePath } from './config.js'
+import { BRIEF_SPEECH_RATE_WPM } from './spokenBudget.js'
 import {
   PENDANT_SPEECH_CHANNELS,
   PENDANT_SPEECH_SAMPLE_RATE,
@@ -36,11 +37,11 @@ import {
 const BRIEFINGS_DIRECTORY = path.join(workspacePath, 'Briefings')
 const STORE_PATH = path.join(workspacePath, '.pendant-briefings.json')
 
-/* 210 wpm is the reply voice — brisk enough that a one-line confirmation does
- * not drag. A minute of unbroken briefing at that rate is exhausting. */
-const BRIEF_SPEECH_RATE_WPM = Number(
-  process.env.PENDANT_BRIEF_SPEECH_RATE || 185,
-)
+/* The briefing speech rate now lives in spokenBudget.js, which needs it to
+ * turn "keep it under 30 seconds" into a word count. One definition: a budget
+ * measured at a rate the renderer does not use is a budget on a voice nobody
+ * hears. Imported here rather than restated, and the name is unchanged. */
+export { BRIEF_SPEECH_RATE_WPM }
 
 /*
  * The reply cap is 10 s. A briefing that stopped at 10 s would not be a

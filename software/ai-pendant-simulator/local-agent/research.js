@@ -1,5 +1,10 @@
 import { requestLlmMessages } from './llmPlanner.js'
 import { AGENT_TOKEN, PORT } from './config.js'
+import {
+  clampSpokenToBudget,
+  parseSpokenBudget,
+  spokenBudgetPromptRule,
+} from './spokenBudget.js'
 
 /*
  * Research the owner is not waiting for.
@@ -395,12 +400,35 @@ const MODE_GOALS = {
     'this and not see the screen.',
 }
 
+/*
+ * The standing spoken-length rule. Unchanged, and used verbatim whenever the
+ * owner said nothing about length — a command with no length instruction must
+ * produce the same prompt, byte for byte, that it produced before this feature
+ * existed. spokenBudget.test.js asserts exactly that against the captured
+ * pre-change string.
+ */
+const SPOKEN_RULE_DEFAULT =
+  '- 3 to 6 keyPoints. "spoken" is 150-320 words of plain spoken English: no markdown, no URLs, no bullet characters, no "click here". Name outlets by name ("according to TechRadar") instead of reading links.'
+
+/* Same rule with the word count removed, so the budget below is the only thing
+ * in the prompt saying how long the script may be. Everything that is about
+ * QUALITY rather than length — no markdown, no URLs, name the outlets, and the
+ * 3-to-6 keyPoint count that belongs to the WRITTEN brief — is kept. */
+const SPOKEN_RULE_BUDGETED =
+  '- 3 to 6 keyPoints. "spoken" is plain spoken English: no markdown, no URLs, no bullet characters, no "click here". Name outlets by name ("according to TechRadar") instead of reading links.'
+
 export async function composeBrief({
   topic,
   mode = 'brief',
   overview = '',
   sources = [],
   llm = requestLlmMessages,
+  /*
+   * The length the owner asked for out loud, or null for "they didn't". Parsed
+   * once in researchTopic() and handed down; see spokenBudget.js for why the
+   * parse lives there and not in the planner.
+   */
+  spokenBudget = null,
 } = {}) {
   const readable = readableSources(sources)
   const corpus = readable
@@ -431,7 +459,11 @@ Return ONLY JSON:
 Rules:
 - Every keyPoint cites at least one source number from the numbered sources below. Never cite a number that is not there.
 - If the sources do not support a claim, leave it out and add it to openQuestions instead.
-- 3 to 6 keyPoints. "spoken" is 150-320 words of plain spoken English: no markdown, no URLs, no bullet characters, no "click here". Name outlets by name ("according to TechRadar") instead of reading links.
+${
+  spokenBudget
+    ? `${SPOKEN_RULE_BUDGETED}\n${spokenBudgetPromptRule(spokenBudget)}`
+    : SPOKEN_RULE_DEFAULT
+}
 - You cannot buy, book, order or pay for anything and you never claim to have done so. Recommending is the whole job.`,
       },
       {
@@ -592,22 +624,44 @@ export function renderBriefMarkdown({
   return lines.filter((line) => line !== undefined).join('\n')
 }
 
-/** What the pendant reads out. Falls back to the written points if needed. */
-export function spokenScript({ topic, brief, sources = [] }) {
+/**
+ * What the pendant reads out. Falls back to the written points if needed.
+ *
+ * This is THE spoken script — the only artifact a stated length budget applies
+ * to. The markdown note built by renderBriefMarkdown() above shares no text
+ * with it (headline, keyPoints, recommendation, openQuestions and the full
+ * source list are written there in full), so capping this can never gut the
+ * filed brief. That separation is the reason the budget can be honoured here
+ * at all.
+ *
+ * THE PREFACE IS PART OF THE LENGTH. "Here's your briefing on <topic>. I read
+ * 1 source." was 130 characters and roughly 7 seconds in the live 2026-08-09
+ * run, and the topic it repeats is the owner's entire command. Asked for three
+ * sentences, two of them would be that. So under a budget the preface is
+ * dropped and the script opens on the news itself — which is also what the
+ * composer is told to write. Without a budget it is unchanged.
+ */
+export function spokenScript({ topic, brief, sources = [], spokenBudget = null }) {
   const spoken = String(brief?.spoken ?? '').trim()
   const readCount = readableSources(sources).length
-  const preface = `Here's your briefing on ${topic}. I read ${readCount} source${
-    readCount === 1 ? '' : 's'
-  }.`
+  const preface = spokenBudget
+    ? ''
+    : `Here's your briefing on ${topic}. I read ${readCount} source${
+        readCount === 1 ? '' : 's'
+      }.`
+  const lead = preface ? `${preface} ` : ''
 
-  if (spoken) return `${preface} ${spoken}`
+  if (spoken) return clampSpokenToBudget(`${lead}${spoken}`, spokenBudget)
 
   const points = (brief?.keyPoints || []).map((entry) => entry.point)
   if (!points.length) {
-    return `${preface} I couldn't read enough to say anything useful. The note on your Mac lists what I tried.`
+    return clampSpokenToBudget(
+      `${lead}I couldn't read enough to say anything useful. The note on your Mac lists what I tried.`,
+      spokenBudget,
+    )
   }
   const tail = brief?.recommendation ? ` My recommendation: ${brief.recommendation}` : ''
-  return `${preface} ${points.join(' ')}${tail}`
+  return clampSpokenToBudget(`${lead}${points.join(' ')}${tail}`, spokenBudget)
 }
 
 /*
@@ -733,11 +787,22 @@ export async function researchTopic({
   llm = requestLlmMessages,
   agentFetch = callAgent,
   onProgress = null,
+  /*
+   * Leave this undefined and the budget is read out of the owner's own words.
+   * Pass null to force today's unbudgeted behaviour, or a budget object to set
+   * one explicitly — both are for callers and tests that already know the
+   * answer. THIS IS THE ONLY PLACE THE COMMAND IS PARSED: composeBrief() and
+   * spokenScript() are handed the result rather than each sniffing the topic,
+   * so there is one answer per run and one place to change it.
+   */
+  spokenBudget = undefined,
 } = {}) {
   const subject = String(topic ?? '').trim()
   if (!subject) throw new Error('Research needs a topic.')
   const kind = RESEARCH_MODES.has(mode) ? mode : 'brief'
   const startedAt = Date.now()
+  const budget =
+    spokenBudget === undefined ? parseSpokenBudget(subject) : spokenBudget
 
   let queries = []
   let overview = ''
@@ -778,13 +843,18 @@ export async function researchTopic({
     sources = web.sources
   }
 
-  onProgress?.({ phase: 'compose', readable: readableSources(sources).length })
+  onProgress?.({
+    phase: 'compose',
+    readable: readableSources(sources).length,
+    spokenBudget: budget,
+  })
   const brief = await composeBrief({
     topic: subject,
     mode: kind,
     overview,
     sources,
     llm,
+    spokenBudget: budget,
   })
 
   const generatedAt = new Date().toISOString()
@@ -798,6 +868,10 @@ export async function researchTopic({
     sources,
     sourcesRead: readableSources(sources).length,
     sourcesSeen: sources.length,
+    /* The written artifact is composed and rendered exactly as it always was.
+     * A budget is a budget on what is READ ALOUD; the filed brief keeps its
+     * headline, its 3-6 cited key points, its recommendation, its open
+     * questions and every source. */
     markdown: renderBriefMarkdown({
       topic: subject,
       mode: kind,
@@ -806,6 +880,7 @@ export async function researchTopic({
       queries,
       generatedAt,
     }),
-    spoken: spokenScript({ topic: subject, brief, sources }),
+    spoken: spokenScript({ topic: subject, brief, sources, spokenBudget: budget }),
+    spokenBudget: budget,
   }
 }
