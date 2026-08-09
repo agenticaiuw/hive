@@ -990,7 +990,7 @@ export function describeActions() {
  */
 export function buildCapabilityManifest(
   app,
-  { permissions = null, staticDir = null, relayUrl = null, version = '0.5.0' } = {},
+  { permissions = null, relayUrl = null, version = '0.5.0' } = {},
 ) {
   const routes = listRoutes(app)
   const groups = [...new Set(routes.map((route) => route.group))].sort()
@@ -1071,8 +1071,5 @@ export function buildCapabilityManifest(
       url: relayUrl || null,
     },
     fullControlMode: FULL_CONTROL_MODE,
-    staticDashboard: Boolean(
-      staticDir && fs.existsSync(path.join(staticDir, 'dashboard.html')),
-    ),
   }
 }
