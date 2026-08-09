@@ -4,12 +4,15 @@ import test from 'node:test'
 import { COMMAND_TYPES } from '../src/bridge-core.js'
 import {
   BRAIN_DEFAULTS,
+  BRAIN_OUTPUT_TOKENS,
   BRAIN_STORAGE_KEYS,
   BROWSER_TOOLS,
   INFER_LIMITS,
   buildBrainMessages,
+  callModelWithHeadroom,
   chooseBrainRoute,
   createBrainState,
+  escalateOutputTokens,
   interpretInferError,
   normalizeBrainConfig,
   parseToolCalls,
@@ -321,6 +324,88 @@ test('an upstream failure never quotes the provider body', () => {
     },
   })
   assert.equal(verdict.message, 'The model provider refused the request (HTTP 502).')
+})
+
+test('this loop never relies on the relay output default', () => {
+  /* The relay gives 512 to a caller that stays silent — a quarter of the
+   * ceiling. Asking for more is the whole reason the field is sent. */
+  assert.equal(INFER_LIMITS.defaultOutputTokens, 512)
+  assert.ok(BRAIN_OUTPUT_TOKENS > INFER_LIMITS.defaultOutputTokens)
+  assert.ok(BRAIN_OUTPUT_TOKENS < INFER_LIMITS.maxOutputTokens)
+})
+
+test('a cut-off reply buys headroom once, then stops', () => {
+  assert.equal(escalateOutputTokens(BRAIN_OUTPUT_TOKENS), INFER_LIMITS.maxOutputTokens)
+  assert.equal(escalateOutputTokens(512), 1_024)
+  /* Never past the ceiling: the relay would clamp it and bill for the clamp. */
+  assert.equal(escalateOutputTokens(1_500), INFER_LIMITS.maxOutputTokens)
+  /* At the ceiling there is no headroom left to buy — retrying would pay for
+   * the same cut-off twice. */
+  assert.equal(escalateOutputTokens(INFER_LIMITS.maxOutputTokens), null)
+  assert.equal(escalateOutputTokens(9_999), null)
+  /* A missing budget is treated as the relay's default, not as zero. */
+  assert.equal(escalateOutputTokens(undefined), 1_024)
+})
+
+test('a truncated reply is retried once with real headroom, then answered', async () => {
+  const asked = []
+  const content = await callModelWithHeadroom(async (maxTokens) => {
+    asked.push(maxTokens)
+    return maxTokens < INFER_LIMITS.maxOutputTokens
+      ? { content: '{"tool":"read_pa', truncated: true }
+      : { content: '{"tool":"read_page","params":{}}', truncated: false }
+  })
+  assert.deepEqual(asked, [BRAIN_OUTPUT_TOKENS, INFER_LIMITS.maxOutputTokens])
+  assert.equal(content, '{"tool":"read_page","params":{}}')
+  /* And the recovered reply is a usable tool call, not just a longer string. */
+  assert.deepEqual(parseToolCalls(content).calls, [
+    { type: 'read_page', params: {} },
+  ])
+})
+
+test('a reply that never fits stops paying, and says why', async () => {
+  const asked = []
+  await assert.rejects(
+    () =>
+      callModelWithHeadroom(async (maxTokens) => {
+        asked.push(maxTokens)
+        return { content: 'half an ob', truncated: true }
+      }),
+    (error) => {
+      assert.equal(error.code, 'truncated')
+      assert.equal(error.fatal, true, 'must hand off, not retry into the same wall')
+      assert.match(error.message, /cut off/)
+      return true
+    },
+  )
+  /* Exactly two billed calls: the first, and the one that bought the ceiling.
+   * A third would be paying twice for an identical refusal. */
+  assert.deepEqual(asked, [BRAIN_OUTPUT_TOKENS, INFER_LIMITS.maxOutputTokens])
+})
+
+test('an untruncated first reply costs exactly one call', async () => {
+  let calls = 0
+  const content = await callModelWithHeadroom(async () => {
+    calls += 1
+    return { content: '{"done":true,"response":"hi"}', truncated: false }
+  })
+  assert.equal(calls, 1)
+  assert.equal(parseToolCalls(content).response, 'hi')
+})
+
+test('truncation at the ceiling hands off instead of looking like garbage', () => {
+  /* The failure this prevents: in JSON mode a cut-off reply is unparseable,
+   * so without the `truncated` signal the loop would burn both strikes
+   * reporting "the model reply was unusable" and never name the real cause. */
+  let state = createBrainState({ command: 'x' })
+  state = reduceBrain(state, {
+    type: 'model_error',
+    error: "The model's reply was cut off at the relay's 2048-token ceiling.",
+    fatal: true,
+  })
+  assert.equal(state.status, 'handoff')
+  assert.match(state.handoffReason, /cut off/)
+  assert.match(summarizeBrainRun(state), /handed off to the Mac planner/i)
 })
 
 test('a fatal model error hands off on the first strike', () => {
