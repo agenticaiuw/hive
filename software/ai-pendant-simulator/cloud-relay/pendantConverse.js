@@ -347,7 +347,7 @@ export async function handlePendantConverse(request, context) {
                * (a bare confirm word, a missing witness). Anything settled or
                * off-topic stops listening; the next press re-reads what is
                * still pending. */
-              const retryable = ['confirm_word_alone', 'not-delivered', 'unclear'].includes(outcome.code)
+              const retryable = ['confirm_word_alone', 'needs_confirm_word'].includes(outcome.code)
               if (!retryable) state.pendingApprovalAnswer = null
               if (outcome.speak) void speakApprovalLine(state, outcome.speak)
               console.log(

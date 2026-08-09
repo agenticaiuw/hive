@@ -457,3 +457,45 @@ test('no role is a de facto admin', () => {
     )
   }
 })
+
+/*
+ * Approval-at-origin routing. The approval routes were registered unreachable
+ * for months (unlisted → denied universally, admin included); these pin who
+ * may do what now that they are listed. The privilege split is the design:
+ * every owner surface may SEE and DECIDE, only the Mac — the body that parks
+ * plans and holds their manifests — may WRITE.
+ */
+test('every owner surface may list and decide approvals; only the Mac may write them', () => {
+  for (const role of ['mac_bridge', 'mobile', 'browser_node']) {
+    assert.equal(allows(role, 'GET', '/v1/approvals'), true, `${role} lists`)
+    assert.equal(allows(role, 'GET', '/v1/approvals/apv_1'), true, `${role} reads one`)
+    assert.equal(
+      allows(role, 'POST', '/v1/approvals/apv_1/decision'),
+      true,
+      `${role} decides — origin controls the prompt, never the decision`,
+    )
+  }
+
+  assert.equal(allows('mac_bridge', 'POST', '/v1/approvals'), true, 'the bridge parks plans')
+  assert.equal(allows('mac_bridge', 'POST', '/v1/approvals/apv_1/settle'), true)
+  assert.equal(allows('mac_bridge', 'POST', '/v1/approvals/apv_1/spoken'), true)
+  assert.equal(allows('mac_bridge', 'POST', '/v1/approvals/apv_1/answer'), true)
+  for (const role of ['mobile', 'browser_node']) {
+    assert.equal(allows(role, 'POST', '/v1/approvals'), false, `${role} never prepares plans`)
+    assert.equal(allows(role, 'POST', '/v1/approvals/apv_1/settle'), false, `${role} never attests`)
+  }
+})
+
+test('the pendant answers by voice on its socket, so its token holds no approval HTTP scope', () => {
+  for (const [method, path] of [
+    ['GET', '/v1/approvals'],
+    ['POST', '/v1/approvals'],
+    ['POST', '/v1/approvals/apv_1/decision'],
+  ]) {
+    assert.equal(
+      allows('nrf_pendant', method, path),
+      false,
+      `a lost pendant's token must not open ${method} ${path}`,
+    )
+  }
+})

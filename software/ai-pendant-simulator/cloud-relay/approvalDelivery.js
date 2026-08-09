@@ -40,6 +40,7 @@ import {
   approvalPromptText,
   matchApprovalUtterance,
   presentApproval,
+  riskLabelFor,
   settleApproval,
 } from '../shared/approvalHandoff.js'
 import {
@@ -197,23 +198,6 @@ export async function routeApprovalPrompt({ store, record, now = Date.now(), sen
     )
     return { channel: 'mesh', to: null, pushed: false, queued: false, error: String(error?.message ?? error) }
   }
-}
-
-/*
- * The manifest's risk summary (actionLedger.js summarizeRisk) is an object of
- * counts; a card wants one phrase. The worst tier present names the whole
- * plan, because that is the step the owner is actually deciding about.
- */
-const RISK_TIER_ORDER = ['uncontained', 'off-machine', 'irreversible-write', 'reversible-write', 'observe']
-
-export function riskLabelFor(risk) {
-  if (!risk || typeof risk !== 'object') return null
-  const tiers = risk.tiers && typeof risk.tiers === 'object' ? risk.tiers : {}
-  const worst = RISK_TIER_ORDER.find((tier) => Number(tiers[tier]) > 0)
-  if (worst) return worst
-  if (Number(risk.irreversible) > 0) return 'irreversible-write'
-  if (Number(risk.writes) > 0) return 'reversible-write'
-  return null
 }
 
 /* --------------------------------------------------------------- deciding */
@@ -396,6 +380,27 @@ export async function answerSpokenApproval({ store, approvalId, utterance, now =
         state: 'pending',
         heard,
         speak: `I heard ${heard.matchedWord}, but not an approval. Say "approve ${record.confirmWord}" to approve, or say cancel.`,
+      }
+    }
+    /*
+     * "Yes, go ahead" against a plan whose word is mandatory: an answer, just
+     * an incomplete one. Detected by re-reading the utterance without the
+     * word requirement — assent-shaped speech gets the repair; everything
+     * else genuinely changed the subject.
+     */
+    const assent = matchApprovalUtterance(utterance, {
+      confirmWord: record.confirmWord ?? null,
+      requiresConfirmWord: false,
+    })
+    if (assent.decision === 'granted') {
+      return {
+        settled: false,
+        code: 'needs_confirm_word',
+        state: 'pending',
+        heard,
+        speak: record.confirmWord
+          ? `This one needs its confirm word. Say "approve ${record.confirmWord}", or say cancel.`
+          : heard.why,
       }
     }
     /* Not addressed to the readback at all. The owner moved on. */
