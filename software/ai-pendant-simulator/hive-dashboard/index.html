@@ -195,9 +195,27 @@
   .ringGuide { fill: none; stroke: #1b2635; stroke-width: 1; stroke-dasharray: 2 6; }
 
   /* ---------- 4. main: focused node | shared + activity ---------- */
-  main { display: grid; grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr); gap: 14px; align-items: start; margin-top: 18px; padding-bottom: 40px; }
+  main { display: grid; grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr); gap: 14px; align-items: stretch; margin-top: 18px; padding-bottom: 40px; }
   @media (max-width: 1040px) { main { grid-template-columns: minmax(0, 1fr); } }
-  .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; align-self: start; }
+  /* The activity feed was capped at 46vh — a number with no relationship to the
+   * column beside it. Measured on a 1900 px window with the node panel's
+   * sections collapsed, the right column ran 442 px past the end of the left one
+   * and the page read as two unrelated halves.
+   *
+   * Side by side, the feed now sizes off the grid row rather than the viewport:
+   * the column stretches to the row, and the feed takes whatever vertical space
+   * the panels above it leave. The flex-basis of 0 below is the whole trick — it
+   * keeps the feed OUT of the row's own height calculation, so the feed grows
+   * into height the node panel has already claimed and never sets that height
+   * itself. Stacked (one column) it is a plain 46vh box again, because there is
+   * no second column for it to agree with. */
+  @media (min-width: 1041px) {
+    .col.fill { align-self: stretch; min-height: 0; }
+    .col.fill > .panel.grow { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+    .col.fill > .panel.grow > .pbody { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+    .col.fill #ticker { flex: 1 1 0; }
+  }
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; overflow: hidden; }
   .phead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 11px 14px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,0.028), transparent); min-width: 0; }
   .phead h2 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
@@ -342,7 +360,7 @@
           <div class="pbody" id="nodeBody"><span class="mut">loading&hellip;</span></div>
         </section>
       </div>
-      <div class="col">
+      <div class="col fill">
         <section class="panel">
           <div class="phead"><h2>Shared across nodes</h2><span class="sub" id="sharedSub"></span></div>
           <div class="pbody" style="padding-top:12px">
@@ -350,7 +368,7 @@
             <div class="more"><button id="sharedMore" type="button"></button></div>
           </div>
         </section>
-        <section class="panel">
+        <section class="panel grow">
           <div class="phead">
             <h2>Activity</h2>
             <span style="flex:1"></span>
@@ -373,7 +391,7 @@ const S = {
   nodes: [], edges: [], shared: null,
   events: [], maxSeq: 0,
   committeeAgents: [],
-  focused: 'mac', detail: null, detailErr: null,
+  focused: 'mac', detail: null, detailErr: null, detailAt: 0,
   clockOffset: 0, sse: 'connecting', dropped: false,
   edgeSeen: {},
   /* A revoke in progress must survive the 8 s detail refresh: an armed button
@@ -898,9 +916,21 @@ function renderDetail() {
     `<span class="sub" title="${esc((n && n.reason) || '')}">${esc((n && n.reason) || 'design-committee agent')}</span>`;
   const body = $('nodeBody');
   const keepScroll = window.scrollY;
-  if (S.detailErr) { body.innerHTML = `<div class="err" style="padding:10px 0">detail fetch failed: ${esc(S.detailErr)}</div>`; return; }
   const d = S.detail;
-  if (!d || d.id !== id) { body.innerHTML = '<div class="mut" style="padding:10px 0">loading&hellip;</div>'; return; }
+  /* A failed refresh is reported ABOVE the last good read, never in place of it.
+   *
+   * This used to replace the whole panel with one error line and return. One
+   * dropped request — a relay restart, a suspended network, anything — took the
+   * revoke buttons off the page, and they are the only route to withdrawing a
+   * device's access; there is no other control for it anywhere. Worse, the page
+   * kept saying "live" in the header while the panel sat on that error, because
+   * the header is fed by SSE and the panel by its own fetch. The section was not
+   * rendering empty, it was not in the DOM at all, and it stayed that way. */
+  const errBar = S.detailErr
+    ? `<div class="err" style="padding:8px 0">detail refresh failed: ${esc(S.detailErr)}` +
+      `${d && d.id === id ? ' &mdash; showing the last good read, retrying every 8 s' : ''}</div>`
+    : '';
+  if (!d || d.id !== id) { body.innerHTML = errBar || '<div class="mut" style="padding:10px 0">loading&hellip;</div>'; return; }
   let h = '';
   if (id === 'mac') h = detailMac(d);
   else if (id === 'relay') h = detailRelay(d);
@@ -909,7 +939,7 @@ function renderDetail() {
   else if (id === 'ios') h = detailIos(d);
   else if (id === 'committee') h = detailCommittee(d);
   else h = detailAgent(d);
-  body.innerHTML = h;
+  body.innerHTML = errBar + h;
   window.scrollTo({ top: keepScroll });
 
   body.querySelectorAll('details[data-sec]').forEach((el) => el.addEventListener('toggle', () => {
@@ -950,16 +980,30 @@ function detailMac(d) {
 
   // Tool calls
   let tools = '';
+  let shown = 0, shownFailed = 0;
   if (j) {
     const rows = [];
     for (const e of j.entries || []) for (const a of e.actions || []) rows.push({ at: a.finishedAt || a.startedAt || e.finishedAt, a, e });
     rows.sort((x, y) => (Date.parse(y.at) || 0) - (Date.parse(x.at) || 0));
     const html = rows.map(({ at, a, e }) => feedRow(frowAge(at), a.type, a.ok,
       `${a.effect || ''}${a.durationMs != null ? ' · ' + a.durationMs + 'ms' : ''}${a.message ? ' · ' + a.message : ''}${a.error ? ' · ' + a.error : ''}${e.command ? ' — ' + e.command : ''}`));
-    tools = `<div class="mut" style="margin-bottom:6px;font-size:12px">${j.totals ? `${j.totals.actions} actions · ${j.totals.wrote} wrote · ${j.totals.failed} failed` : '—'} over ${j.window ? `${j.window.returned} of ${j.window.jobsInStore} jobs` : ''} · ${metaLine(d.journalMeta)}</div>` +
+    /* `totals` comes off the agent's /journal and spans its ENTIRE store, while
+     * `entries` is only the newest slice of it. Printing "119 actions · 25
+     * failed" over 25 rows that read ok, with "over 25 of 120 jobs" tacked on,
+     * read as a straight contradiction — the sentence implies the totals
+     * describe the rows below, and they never did. So: count the rows actually
+     * rendered, put that on the summary where it can be checked against what is
+     * visible, and label the store-wide figures as store-wide. */
+    shown = rows.length;
+    shownFailed = rows.filter((r) => !r.a.ok).length;
+    tools = `<div class="mut" style="margin-bottom:6px;font-size:12px">` +
+      `${shown} action(s) below${shownFailed ? ` · <b style="color:var(--bad-ink)">${shownFailed} failed</b>` : ' · all ok'}` +
+      `${j.window ? ` — from the newest ${j.window.returned} of ${j.window.jobsInStore} jobs` : ''}` +
+      `${j.totals ? `<br>across every job the agent still holds: ${j.totals.actions} actions · ${j.totals.wrote} wrote · ${j.totals.failed} failed` : ''}` +
+      ` · ${metaLine(d.journalMeta)}</div>` +
       (rows.length ? feedList('mac.tools', html, 12) : '<span class="mut">journal returned no actions</span>');
   } else tools = metaLine(d.journalMeta);
-  h += sect('tools', 'Tool calls', tools, { defaultOpen: true, count: j && j.totals ? j.totals.actions + ' actions' : '', flag: j && j.totals && j.totals.failed ? j.totals.failed + ' failed' : '' });
+  h += sect('tools', 'Tool calls', tools, { defaultOpen: true, count: j ? shown + ' shown' : '', flag: j && shownFailed ? shownFailed + ' failed' : '' });
 
   // Jobs
   let jobs = '';
@@ -1047,12 +1091,24 @@ function credentialSection(d, opts) {
   const rows = c.credentials || [];
   h += `<div class="counts" style="margin-bottom:7px"><span class="cchip"><b>${c.active}</b> active</span><span class="cchip"><b>${c.revoked}</b> revoked</span>` +
     Object.entries(c.byRole || {}).map(([role, n]) => `<span class="cchip">${esc(role)} <b>${n}</b></span>`).join('') + `</div>`;
-  if (!rows.length) return h + '<span class="mut">no device credentials — every client is still on the admin key</span></div>';
+  /* An empty list on a FILTERED view means "no device of this kind has ever been
+   * paired", not "nothing can act as this hive" — and saying the second under
+   * the phone's heading, while the fleet's own credentials are live on the relay
+   * panel, is the most dangerous sentence this page could print. */
+  if (!rows.length) {
+    return h + `<span class="mut">${c.scope
+      ? `no ${esc(c.scope)} credential has ever been issued — the ${c.fleetTotal} on the relay belong to other devices, and are listed on the Cloud Relay panel`
+      : 'no device credentials — every client is still on the admin key'}</span></div>`;
+  }
   h += `<div class="feed">` + rows.map((r) => {
     const dead = !!r.revokedAt;
     return `<div class="credrow${dead ? ' dead' : ''}">` +
       `<span class="role">${esc(r.role)}</span>` +
-      `<span class="who" title="${esc(r.deviceId)}">${esc(r.deviceId)} · ${r.scopeCount} scope(s)${r.narrowed ? ' · <b title="minted with an explicit scope ceiling: a scope added to this role will never reach it">narrowed</b>' : ''}${r.lastUsedAt ? '' : ' · never used'}</span>` +
+      /* The scope names hang off the count, not the row: 14 of them inline would
+       * push the revoke button off the end, and "14 scope(s)" alone asks the
+       * operator to take the number on faith right where they are deciding
+       * whether a device keeps its access. */
+      `<span class="who" title="${esc(r.deviceId)}">${esc(r.deviceId)} · <span title="${esc((r.scopes || []).join('\n') || 'scope list not reported')}" style="border-bottom:1px dotted var(--ink-3)">${r.scopeCount} scope(s)</span>${r.narrowed ? ' · <b title="minted with an explicit scope ceiling: a scope added to this role will never reach it">narrowed</b>' : ''}${r.lastUsedAt ? '' : ' · never used'}</span>` +
       (r.lastUsedAt ? `<span class="tid">${ageSpan(r.lastUsedAt, ' ago')}</span>` : '') +
       `<span class="tid">${esc(r.tokenId)}</span>` +
       (dead ? `<button class="revoke" disabled>revoked</button>`
@@ -1310,7 +1366,7 @@ async function fetchDetail() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (S.focused !== id) return;
-    S.detail = d; S.detailErr = null;
+    S.detail = d; S.detailErr = null; S.detailAt = Date.now();
   } catch (e) {
     if (S.focused !== id) return;
     S.detailErr = e.message;
@@ -1327,6 +1383,11 @@ function openSSE() {
     renderHeader();
     if (wasDropped) {
       try { applyOverview(await (await fetch('/api/overview')).json()); rerenderAll(); } catch { /* next delta will heal */ }
+      /* The stream coming back is the news that the server is back. The detail
+       * panel is on a separate fetch, so without this it keeps whatever the
+       * outage left it — an error, or a read from before a restart — under a
+       * header that has already gone green. */
+      fetchDetail();
     }
   };
   es.onmessage = (ev) => {
@@ -1375,7 +1436,21 @@ async function boot() {
   panel.addEventListener('mouseleave', () => { S.hoverDetail = false; fetchDetail(); });
 
   setInterval(tickAges, 1000);
-  setInterval(() => { if (!S.credArmed && !S.credBusy.size && !S.hoverDetail) fetchDetail(); }, 8000);
+  setInterval(() => {
+    if (S.credArmed || S.credBusy.size) return;   // a revoke is mid-decision or mid-flight
+    /* The hover hold exists so a feed gaining rows does not slide a control out
+     * from under the pointer. Two states are never held:
+     *   - errored or empty: there is no control to aim at and nothing to slide,
+     *     and this is the one state that MUST heal itself. Holding it is how a
+     *     single failed fetch used to strand the revoke buttons off the page for
+     *     as long as the pointer stayed put — which, on a panel an operator is
+     *     reading, is indefinitely.
+     *   - stale past 45 s: a pointer parked in the panel (or left there by a
+     *     scrollIntoView that moved the panel under it) should not silently
+     *     freeze the dashboard while the header still reads "live". */
+    if (S.hoverDetail && !S.detailErr && S.detail && Date.now() - S.detailAt < 45000) return;
+    fetchDetail();
+  }, 8000);
 }
 boot();
 </script>
