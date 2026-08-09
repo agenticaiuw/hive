@@ -815,6 +815,92 @@ test('ios_home reaches the phone without activating or taking focus', async (t) 
   assert.equal(run.payload.result.priorApp, undefined, 'no focus was taken, so none is owed back')
 })
 
+test('the targeted path leaves the frontmost app exactly where it found it', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * The stronger form of the assertion above. "No activate call was recorded"
+   * is a statement about which functions ran; this checks the END STATE, which
+   * is what the owner actually experiences — the stub's activateWithOptions_
+   * rewrites frontApp, so an app that took the screen by any route would show
+   * up here.
+   *
+   * This is the invariant the whole targeted route exists for, and it is the
+   * one measured on the real phone on 2026-08-08: with the owner in a
+   * fullscreen Safari on another Space, cmd+1 reached the phone and
+   * NSWorkspace.frontmostApplication read com.apple.Safari before and after.
+   */
+  const phone = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    activationWorks: false,
+    frontApp: { bundleId: 'com.apple.Safari', name: 'Safari' },
+  })
+
+  const before = JSON.parse(fs.readFileSync(phone.statePath, 'utf8')).frontApp
+  const run = phone.run('ios_home', {})
+  assert.equal(run.status, 0)
+  const after = JSON.parse(fs.readFileSync(phone.statePath, 'utf8')).frontApp
+
+  assert.deepEqual(after, before, 'the owner kept their screen')
+  assert.equal(after.bundleId, 'com.apple.Safari')
+  assert.ok(
+    !run.events.some((e) => e.event === 'activate' || e.event === 'activate_fn'),
+    'nothing may be activated on the targeted route',
+  )
+  // And the Space was never touched either: moving the window is part of the
+  // guarded path, and the targeted path must not reach for it.
+  assert.ok(
+    !run.events.some((e) => String(e.event).includes('move')),
+    'the targeted route must not move the window between Spaces',
+  )
+})
+
+test('ios_status never claims pointer reach that iPhone Mirroring does not have', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * Measured 2026-08-08, macOS 26.5.2: pointer and ordinary key events are
+   * DELIVERED to iPhone Mirroring off-Space — a CGEventTapCreateForPid tap on
+   * the app's own stream shows them arriving intact — and the app acts on none
+   * of them while it is not the active application. So there is no targeted
+   * pointer route, on any Space, at any time, and status says so as a constant
+   * rather than as something that might vary with the arrangement of windows.
+   */
+  const offSpace = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'on' })
+  const off = offSpace.run('ios_status', {}).payload.result
+  assert.equal(off.state, 'off-space')
+  assert.equal(off.pointerTargetedPossible, false)
+  assert.equal(off.pointerTargetedBlockedBy, 'app-inactive')
+
+  /*
+   * The regression this test exists for. pointerWritesNeedActivation used to
+   * be `state == "off-space"`, so a window sitting in plain sight on the
+   * current Space while the owner worked in another app reported FALSE — and
+   * the write then activated and took their screen anyway. Visible is not
+   * active, and it is active that the write needs.
+   */
+  const visibleNotFront = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: false })
+  const seen = visibleNotFront.run('ios_status', {}).payload.result
+  assert.equal(seen.state, 'ready')
+  assert.equal(seen.pointerWritesPossible, true)
+  assert.equal(
+    seen.pointerWritesNeedActivation,
+    true,
+    'a visible but inactive window still costs the owner their focus',
+  )
+  assert.equal(seen.pointerTargetedPossible, false)
+
+  const front = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: true })
+  const ready = front.run('ios_status', {}).payload.result
+  assert.equal(ready.pointerWritesNeedActivation, false, 'already active, nothing to take')
+
+  // Unreachable phones claim nothing at all.
+  const shut = stubPhone(t, { appRunning: false, all: [], onscreen: [] })
+  const dead = shut.run('ios_status', {}).payload.result
+  assert.equal(dead.pointerWritesPossible, false)
+  assert.equal(dead.pointerTargetedPossible, false)
+  assert.deepEqual(dead.targetedActions, [])
+})
+
 test('the targeted path still refuses when the world says no', async (t) => {
   if (needsPython(t)) return
   // Not activating is a mechanism change, not a licence. Paused, blocked and
