@@ -44,6 +44,15 @@ export const DEVICE_SCOPES = Object.freeze({
     'mac:plan',
     'mac:jobs:read',
     'speech:transcribe',
+    /* The alert inbox (firmware CONFIG_PENDANT_ALERT_INBOX, default y) polls
+     * one persistent-state key for alerts raised while the owner was
+     * unreachable — pendant_store.c:567. This role predates that feature and
+     * had no way to read it, so the first pendant to run on a scoped token
+     * would have taken a silent 403 on every poll. Deliberately NOT the blanket
+     * `state:read` the mac_bridge holds: that key space also contains the Mac's
+     * agent-snapshot and fleet world-model, and a chest-worn device that can be
+     * lost is the last principal that should be able to read them. */
+    'pendant:alerts:read',
   ]),
 })
 

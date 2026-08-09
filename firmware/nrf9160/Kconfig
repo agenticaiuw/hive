@@ -1,11 +1,43 @@
 mainmenu "nRF9160 agentic pendant"
 
 config PENDANT_RELAY_API_KEY
-	string "AI Pendant cloud relay API key"
+	string "AI Pendant cloud relay API key (shared admin key - legacy)"
 	default ""
 	help
-	  Bearer token used by the deployed AI Pendant cloud relay. Keep this
-	  value out of source control and inject it at build time.
+	  The SHARED ADMIN key. It authenticates as principal kind 'admin' with
+	  scopes ['*'], which means a pendant carrying it can also reach
+	  /v1/ops/*, the routine scheduler, and every other device's data. It is
+	  byte-identical to RELAY_API_KEY in the repo-root .env, so the copy on
+	  this chip is the same secret the Mac and every future node use, and
+	  losing the pendant means rotating it everywhere at once.
+
+	  Kept only as the migration fallback. Set PENDANT_RELAY_DEVICE_TOKEN
+	  instead and leave this empty once the pendant is paired.
+
+config PENDANT_RELAY_DEVICE_TOKEN
+	string "AI Pendant relay device token (scoped, revocable)"
+	default ""
+	help
+	  This pendant's own credential, of the form pdt_<id>.<secret>, minted
+	  once by:
+
+	    node software/ai-pendant-simulator/scripts/pendant-credentials.mjs \
+	      pair --device-id nrf9160-pendant --role nrf_pendant
+
+	  The relay stores only a SHA-256 of the secret, so the token is
+	  printed exactly once and is unrecoverable afterwards. It carries the
+	  nrf_pendant scope set and nothing else: announce, audio upload,
+	  speech read, event write, mac:plan, mac:jobs:read, transcribe,
+	  heartbeat-self. It cannot reach /v1/ops/*, cannot declare routines,
+	  cannot execute on the Mac, and cannot act as another device. If the
+	  pendant is lost, revoke this one token and nothing else changes:
+
+	    pendant-credentials.mjs revoke --token-id <tokenId>
+
+	  When set, this takes precedence over PENDANT_RELAY_API_KEY on every
+	  relay request. Keep it out of source control: put it in secrets.conf,
+	  which is gitignored, and remember that a built image embeds it in
+	  plaintext (build*/zephyr/.config, autoconf.h, zephyr.elf, zephyr.bin).
 
 config PENDANT_MIC_INJECT
 	bool "Debug: replace captured mic audio with debugger-injected PCM"
@@ -80,11 +112,19 @@ config PENDANT_ALERT_STATE_PATH
 	depends on PENDANT_ALERT_INBOX
 	default "/v1/state/pendant-alerts"
 	help
-	  A device-scoped persistent-state key (scope state:read). The owner's
-	  Mac, a routine or the dashboard PUTs {"data":{"alerts":[{"id":…,
-	  "text":…}]}} here with the admin credential; the pendant may only
-	  read it. /v1/announcements would be the natural source but is
-	  admin-scoped — a paired device gets 403.
+	  A device-scoped persistent-state key. The owner's Mac, a routine or
+	  the dashboard PUTs {"data":{"alerts":[{"id":…,"text":…}]}} here with
+	  the admin credential; the pendant may only read it.
+	  /v1/announcements would be the natural source but is admin-scoped —
+	  a paired device gets 403.
+
+	  Reading it needs scope pendant:alerts:read, which the nrf_pendant
+	  role holds. NOT state:read: that one scope covers the whole /v1/state
+	  key space, including the Mac's agent-snapshot and fleet world-model,
+	  and a device that can be lost should not be able to read those. The
+	  relay grants the narrow scope on THIS EXACT PATH only
+	  (cloud-relay/relayScopes.js), so changing this string means changing
+	  that rule too or the poll starts taking a 403.
 
 config PENDANT_BOOT_AGENT_JOB_ID
 	string "Existing relay job to download at boot for diagnostics"

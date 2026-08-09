@@ -204,6 +204,31 @@ export function createD1Store(db) {
       return parseCredential(row)
     },
 
+    /* Newest first, revoked rows included: the operator listing credentials is
+     * usually asking "what did I just kill" as often as "what is live". */
+    async listDeviceCredentials({ deviceId = null, limit = 100 } = {}) {
+      const statement = deviceId
+        ? db
+            .prepare(
+              `SELECT token_id, token_hash, device_id, role, scopes, created_at,
+                      last_used_at, expires_at, revoked_at, updated_at
+               FROM relay_device_credentials
+               WHERE device_id = ?1
+               ORDER BY created_at DESC LIMIT ?2`,
+            )
+            .bind(deviceId, limit)
+        : db
+            .prepare(
+              `SELECT token_id, token_hash, device_id, role, scopes, created_at,
+                      last_used_at, expires_at, revoked_at, updated_at
+               FROM relay_device_credentials
+               ORDER BY created_at DESC LIMIT ?1`,
+            )
+            .bind(limit)
+      const { results = [] } = await statement.all()
+      return results.map(parseCredential).filter(Boolean)
+    },
+
     async touchDeviceCredential(tokenId, lastUsedAt = new Date().toISOString()) {
       await db
         .prepare(

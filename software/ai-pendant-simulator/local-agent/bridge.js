@@ -10,11 +10,14 @@ import {
   PAIRING_CODE,
   PENDANT_ACCOUNT_ID,
   RELAY_API_KEY,
+  RELAY_DEVICE_TOKEN,
+  RELAY_DEVICE_TOKEN_FILE,
   RELAY_URL,
   WORK_RETRY_BASE_MS,
   WORK_RETRY_MAX_MS,
   WORK_POLL_ABORT_MS,
 } from './bridgeConfig.js'
+import { migrationNotice, resolveRelayCredential } from './relayCredential.js'
 import {
   bridgeSocketUrl,
   createBridgeSocket,
@@ -36,9 +39,22 @@ import {
   createRetryBackoff,
 } from './retryPolicy.js'
 
+/*
+ * The bridge's relay credential, resolved once at import.
+ *
+ * Prefers the scoped mac_bridge device token; falls back to the shared admin
+ * RELAY_API_KEY so a fleet mid-migration keeps running. `relayCredential.kind`
+ * is the only thing anything logs — never `.token`.
+ */
+const relayCredential = resolveRelayCredential({
+  deviceToken: RELAY_DEVICE_TOKEN,
+  deviceTokenFile: RELAY_DEVICE_TOKEN_FILE,
+  adminKey: RELAY_API_KEY,
+})
+const relayAuthorization = `Bearer ${relayCredential.token}`
 const relayHeaders = {
   'Content-Type': 'application/json',
-  Authorization: `Bearer ${RELAY_API_KEY}`,
+  Authorization: relayAuthorization,
 }
 
 let running = false
@@ -54,9 +70,24 @@ const workSignal = createWorkSignal()
 let pushSocket = null
 
 export async function startBridge() {
-  if (!RELAY_API_KEY) {
+  if (relayCredential.kind === 'none') {
     throw new Error(
-      'RELAY_API_KEY is required for the Mac bridge. Add it to .env when cloud credentials are ready.',
+      'No relay credential for the Mac bridge. Pair one (node scripts/pendant-credentials.mjs ' +
+        'pair --device-id <id> --role mac_bridge) and set RELAY_DEVICE_TOKEN, or set RELAY_API_KEY in .env.',
+    )
+  }
+
+  /*
+   * Said once per process, at start, so the migration is visible instead of
+   * silent. A bridge still on the admin key looks identical in every other
+   * log line it will ever print.
+   */
+  const notice = migrationNotice(relayCredential)
+  if (notice) {
+    console.warn(notice)
+  } else {
+    console.log(
+      `[bridge] Relay credential: scoped mac_bridge device token (${relayCredential.source}).`,
     )
   }
 
@@ -80,7 +111,7 @@ export async function startBridge() {
    */
   pushSocket = createBridgeSocket({
     url: bridgeSocketUrl(RELAY_URL, BRIDGE_DEVICE_ID),
-    headers: { Authorization: `Bearer ${RELAY_API_KEY}` },
+    headers: { Authorization: relayAuthorization },
     heartbeatMs: BRIDGE_SOCKET_HEARTBEAT_MS,
     reconnectBaseMs: BRIDGE_SOCKET_RECONNECT_BASE_MS,
     reconnectMaxMs: BRIDGE_SOCKET_RECONNECT_MAX_MS,
@@ -124,6 +155,20 @@ async function registerBridge() {
   if (heartbeatResponse.ok) {
     console.log(`[bridge] Resumed existing registration as ${BRIDGE_DEVICE_ID}`)
     return
+  }
+
+  /*
+   * The self-register fallback below is an admin-only route, and pairing
+   * already creates the device row — so on a scoped token this path means the
+   * row is gone (or the token names a different device), and retrying it would
+   * only turn a clear cause into a 403 about scopes. Say the actual fix.
+   */
+  if (relayCredential.kind === 'device') {
+    throw new Error(
+      `Relay has no device row for ${BRIDGE_DEVICE_ID} (heartbeat ${heartbeatResponse.status}). ` +
+        'Re-pair it: node scripts/pendant-credentials.mjs pair --device-id ' +
+        `${BRIDGE_DEVICE_ID} --role mac_bridge`,
+    )
   }
 
   const response = await fetch(`${RELAY_URL}/v1/devices/register`, {
@@ -776,7 +821,7 @@ async function syncProductState() {
 
   productSyncPromise = synchronizeProductState({
     relayUrl: RELAY_URL,
-    authorization: `Bearer ${RELAY_API_KEY}`,
+    authorization: relayAuthorization,
     accountId: PENDANT_ACCOUNT_ID,
     sourceDeviceId: BRIDGE_DEVICE_ID,
   }).catch((error) => {

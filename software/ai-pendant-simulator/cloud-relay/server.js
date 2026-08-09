@@ -46,9 +46,9 @@ import {
   REALTIME_PCM_RATE,
 } from './openaiRealtimeVoice.js'
 import { loadFleetFromStore,
-  fleetMemoryScopesFor,
   registerFleetMemoryRoutes,
 } from './fleetContext.js'
+import { requiredScopesForRequest } from './relayScopes.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
 import {
@@ -2297,6 +2297,69 @@ app.get('/v1/ops/memory', async (request, response) => {
   })
 })
 
+/*
+ * Credential inventory and revocation.
+ *
+ * Pairing (POST /v1/devices/pair, deliberately pre-auth + pairing code) could
+ * always mint a scoped token, but nothing could ever enumerate or kill one, so
+ * the scoped scheme had no operational half and every client kept using the
+ * admin key. These two routes are that half. They live under /v1/ops/ so the
+ * existing table line already demands the admin scope: revocation is an owner
+ * act, and a stolen device token must not be able to revoke its siblings — or
+ * itself, to cover its tracks.
+ *
+ * publicCredential() is the only shape that leaves here: tokenHash never does.
+ * The secret is unrecoverable by construction (pairing prints it once and
+ * stores a SHA-256), so a listing is inventory, never a way back to a token.
+ */
+app.get('/v1/ops/credentials', async (request, response) => {
+  const store = await getStore()
+  if (typeof store.listDeviceCredentials !== 'function') {
+    response.status(503).json({
+      ok: false,
+      error: 'This relay build cannot list credentials.',
+    })
+    return
+  }
+
+  const deviceId = String(request.query?.deviceId || '').trim() || null
+  const credentials = await store.listDeviceCredentials({ deviceId })
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    credentials: credentials.map((record) => publicCredential(record)),
+  })
+})
+
+app.post('/v1/ops/credentials/:tokenId/revoke', async (request, response) => {
+  const tokenId = String(request.params?.tokenId || '').trim()
+  if (!tokenId) {
+    response.status(400).json({ ok: false, error: 'tokenId is required.' })
+    return
+  }
+
+  const store = await getStore()
+  const existing = await store.getDeviceCredential(tokenId)
+  if (!existing) {
+    response.status(404).json({ ok: false, error: 'No such credential.' })
+    return
+  }
+
+  /* Idempotent on purpose: "revoke it again" during an incident must report
+   * success, not a 404-shaped doubt about whether the first one landed. */
+  const revoked = existing.revokedAt
+    ? existing
+    : await store.revokeDeviceCredential(tokenId, new Date().toISOString())
+
+  response.set('Cache-Control', 'private, no-store')
+  response.json({
+    ok: true,
+    alreadyRevoked: Boolean(existing.revokedAt),
+    credential: publicCredential(revoked),
+  })
+})
+
 app.get('/v1/ops/audio-retention', async (request, response) => {
   const store = await getStore()
   const maxAgeMs = normalizeMaxAgeMs(
@@ -3438,100 +3501,6 @@ async function deleteCaptureAudio(request, response, { store, capture }) {
       error: error?.message || 'The recording could not be deleted.',
     })
   }
-}
-
-function requiredScopesForRequest(request) {
-  const method = request.method.toUpperCase()
-  const path = request.path
-
-  /* Declared next to their handlers in fleetContext.js, so adding a memory
-   * route cannot quietly ship an unscoped write path for the owner's facts. */
-  const memoryScopes = fleetMemoryScopesFor(method, path)
-  if (memoryScopes) return memoryScopes
-
-  if (method === 'POST' && path === '/v1/devices/register') return ['admin']
-  if (method === 'POST' && path === '/v1/devices/heartbeat') {
-    return ['device:heartbeat:self']
-  }
-  if (method === 'GET' && path === '/v1/devices/status') {
-    return ['device:status:read']
-  }
-  if (
-    method === 'GET' &&
-    /^\/v1\/product\/state\/[^/]+$/.test(path)
-  ) {
-    return ['product:read']
-  }
-  if (method === 'PUT' && path === '/v1/product/state') {
-    return ['product:write']
-  }
-  if (method === 'GET' && path.startsWith('/v1/state/')) {
-    return ['state:read']
-  }
-  if (method === 'POST' && path === '/v1/context') return ['context:write']
-  if (method === 'POST' && path === '/v1/context/resume') {
-    return ['context:read']
-  }
-  if (method === 'PUT' && path.startsWith('/v1/state/')) {
-    return ['state:write']
-  }
-  if (method === 'POST' && path === '/v1/pendant/announce') {
-    return ['pendant:announce']
-  }
-  if (method === 'POST' && path === '/v1/transcribe') {
-    return ['speech:transcribe']
-  }
-  if (method === 'POST' && path === '/v1/pendant/command') {
-    return ['pendant:audio:upload']
-  }
-  if (method === 'POST' && path === '/v1/speak') {
-    return ['speech:synthesize']
-  }
-  if (
-    (method === 'POST' && path === '/v1/pendant/speak') ||
-    (method === 'GET' &&
-      /^\/v1\/pendant\/jobs\/[^/]+\/speech$/.test(path))
-  ) {
-    return ['pendant:speech:read']
-  }
-  if (method === 'POST' && path === '/v1/mac/plan') return ['mac:plan']
-  if (method === 'POST' && path === '/v1/mac/execute') return ['mac:execute']
-  if (method === 'GET' && /^\/v1\/mac\/jobs\/[^/]+$/.test(path)) {
-    return ['mac:jobs:read']
-  }
-  if (path.startsWith('/v1/ops/')) return ['admin']
-  /*
-   * Scheduling is owner-level configuration: a routine can ask the Mac to do
-   * anything a spoken command can, so declaring one is not something a paired
-   * pendant should be able to do on its own. The owner's RELAY_API_KEY is an
-   * admin principal and holds every scope, so this gates nothing the owner
-   * does — it only keeps a stolen device token out of the schedule.
-   */
-  if (path.startsWith('/v1/routines') || path.startsWith('/v1/announcements')) {
-    return ['admin']
-  }
-  if (
-    method === 'POST' &&
-    /^\/v1\/pendant\/jobs\/[^/]+\/events$/.test(path)
-  ) {
-    return ['pendant:event:write']
-  }
-  if (method === 'GET' && path === '/v1/bridge/work') {
-    return ['bridge:work:claim']
-  }
-  /* Same audience as /v1/devices/status: anything allowed to ask "is the Mac
-   * reachable" may ask it precisely instead of guessing from lastSeenAt. */
-  if (method === 'GET' && path === '/v1/bridge/presence') {
-    return ['device:status:read']
-  }
-  if (
-    method === 'POST' &&
-    /^\/v1\/bridge\/work\/[^/]+\/result$/.test(path)
-  ) {
-    return ['bridge:work:complete']
-  }
-
-  return null
 }
 
 function sleep(ms) {

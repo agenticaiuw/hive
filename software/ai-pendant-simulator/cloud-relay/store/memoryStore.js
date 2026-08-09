@@ -137,6 +137,17 @@ export function createMemoryStore() {
       return record ? { ...record, scopes: [...record.scopes] } : null
     },
 
+    /* Newest first, revoked rows included: the operator listing credentials is
+     * usually asking "what did I just kill" as often as "what is live". */
+    async listDeviceCredentials({ deviceId = null } = {}) {
+      return [...deviceCredentials.values()]
+        .filter((record) => !deviceId || record.deviceId === deviceId)
+        .map((record) => ({ ...record, scopes: [...record.scopes] }))
+        .sort((left, right) =>
+          String(right.createdAt || '').localeCompare(String(left.createdAt || '')),
+        )
+    },
+
     async touchDeviceCredential(tokenId, lastUsedAt = new Date().toISOString()) {
       const current = deviceCredentials.get(tokenId)
       if (!current) {
