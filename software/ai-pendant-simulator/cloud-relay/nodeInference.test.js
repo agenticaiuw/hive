@@ -8,17 +8,22 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import express from 'express'
 import { setCloudflareBindings } from './cloudflareBindings.js'
 import {
   allowedInferModels,
   chargeInferBudget,
+  INFER_RATE_LIMIT_PER_HOUR,
   DEFAULT_INFER_OUTPUT_TOKENS,
   MAX_INFER_CHARS,
   MAX_INFER_MESSAGES,
   MAX_INFER_OUTPUT_TOKENS,
+  NOT_CONFIGURED_RETRY_AFTER_S,
   normalizeInferMessages,
+  registerInferenceRoutes,
   resetInProcessInferBudget,
   resolveInferModel,
+  retryAfterSeconds,
   runInference,
 } from './nodeInference.js'
 
@@ -210,8 +215,41 @@ test('no upstream key means 503, not a crash and not a fake answer', async () =>
       messages: [{ role: 'user', content: 'hi' }],
       apiKey: '',
     }),
-    (error) => error.code === 'not_configured' && error.status === 503,
+    (error) =>
+      error.code === 'not_configured' &&
+      error.status === 503 &&
+      /* Carries a retry floor so a client can encode "fatal until an operator
+       * acts" as a cooldown instead of inventing a number it cannot know. */
+      error.retryAfter === NOT_CONFIGURED_RETRY_AFTER_S,
   )
+})
+
+test('the 503 floor is a floor, and the 429 deadline is a deadline', () => {
+  /*
+   * The two Retry-After values mean genuinely different things and it matters
+   * that they are computed differently.
+   *
+   * The 503's is a FLOOR: a missing model key cannot self-heal, and the relay
+   * has no idea when an operator will act. It claims only "a human must act,
+   * and humans do not act in seconds". Operator-configurable precisely
+   * because five minutes is not a fact about anything.
+   */
+  assert.ok(NOT_CONFIGURED_RETRY_AFTER_S >= 1)
+
+  /* The 429's is a real deadline the relay computed — the end of the budget
+   * window — so it is derived, never guessed. */
+  const now = Date.parse('2026-08-09T12:00:00.000Z')
+  assert.equal(
+    retryAfterSeconds('2026-08-09T12:00:30.000Z', now),
+    30,
+  )
+  /* Rounds up, and never returns 0: "retry after 0 seconds" is a busy-loop
+   * invitation. */
+  assert.equal(retryAfterSeconds('2026-08-09T12:00:00.500Z', now), 1)
+  assert.equal(retryAfterSeconds('2026-08-09T11:59:00.000Z', now), 1)
+  /* Unknown stays unknown rather than becoming a made-up number. */
+  assert.equal(retryAfterSeconds(null, now), null)
+  assert.equal(retryAfterSeconds('not a date', now), null)
 })
 
 test('the upstream body is never echoed back to the caller', async () => {
@@ -435,4 +473,100 @@ test('maxTokens is clamped, so one call cannot be an unbounded bill', async () =
     },
   })
   assert.equal(sentBody.max_completion_tokens, 2_048)
+})
+
+/* ---- the refusal paths over real HTTP ------------------------------------
+ * The Retry-After wiring is three lines of glue, and glue that sets a header
+ * is exactly what fails silently: every unit test above still passes if
+ * response.set() is never called. Mounted on 127.0.0.1:0 so it cannot collide
+ * with the relay on 8787 or the agent on 8000.
+ * ------------------------------------------------------------------------- */
+
+async function inferRelay(principal, { apiKey } = {}) {
+  const app = express()
+  app.use(express.json())
+  app.use((request, _response, next) => {
+    request.relayPrincipal = principal
+    next()
+  })
+  registerInferenceRoutes(app, {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [] }) }),
+    ...(apiKey === undefined ? {} : { apiKey }),
+  })
+  const server = await new Promise((resolve) => {
+    const listener = app.listen(0, '127.0.0.1', () => resolve(listener))
+  })
+  const { port } = server.address()
+  return {
+    async post(body) {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/infer`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return {
+        status: response.status,
+        retryAfterHeader: response.headers.get('retry-after'),
+        body: await response.json(),
+      }
+    },
+    close: () => new Promise((resolve) => server.close(resolve)),
+  }
+}
+
+test('a rate-limited caller gets a real deadline, in the header and the body', async () => {
+  const relay = await inferRelay({
+    kind: 'device',
+    deviceId: 'phone-1',
+    role: 'mobile',
+    scopes: ['llm:infer'],
+  })
+  /* Burn the budget. */
+  for (let call = 0; call < INFER_RATE_LIMIT_PER_HOUR; call += 1) {
+    await chargeInferBudget({ deviceId: 'phone-1' })
+  }
+
+  const limited = await relay.post({ messages: [{ role: 'user', content: 'hi' }] })
+  assert.equal(limited.status, 429)
+  assert.equal(limited.body.code, 'rate_limited')
+  assert.ok(limited.body.resetAt, 'says when the window ends')
+  assert.ok(Number(limited.body.retryAfter) > 0, 'and how long that is')
+  assert.equal(
+    limited.retryAfterHeader,
+    String(limited.body.retryAfter),
+    'the standard header must agree with the body — proxies read the header',
+  )
+  await relay.close()
+})
+
+test('an unconfigured relay sends the retry floor as a header too', async () => {
+  /*
+   * The first version of this test deleted OPENAI_API_KEY/LLM_API_KEY from the
+   * environment and branched on whichever status came back. It passed, and it
+   * tested NOTHING: LLM_API_KEY is a module-level const captured at import, so
+   * the deletes could not reach it, and on any machine with a key configured —
+   * which is every machine that runs this suite — it took the 200 path and
+   * asserted the 200. A test whose name describes a branch it never enters is
+   * worse than no test, because it reports the branch as covered.
+   *
+   * Hence the injected apiKey. Empty string is now unambiguous and the 503 is
+   * asserted unconditionally.
+   */
+  const relay = await inferRelay(
+    { kind: 'device', deviceId: 'phone-2', role: 'mobile', scopes: ['llm:infer'] },
+    { apiKey: '' },
+  )
+  const response = await relay.post({
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+
+  assert.equal(response.status, 503)
+  assert.equal(response.body.code, 'not_configured')
+  assert.equal(response.body.retryAfter, NOT_CONFIGURED_RETRY_AFTER_S)
+  assert.equal(
+    response.retryAfterHeader,
+    String(NOT_CONFIGURED_RETRY_AFTER_S),
+    'the header is the part a client gets for free — it must be set',
+  )
+  await relay.close()
 })

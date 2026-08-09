@@ -67,6 +67,34 @@ export const MAX_INFER_OUTPUT_TOKENS = 2_048
  * `truncated` instead of discovering it as malformed JSON.
  */
 export const DEFAULT_INFER_OUTPUT_TOKENS = 512
+
+/*
+ * `Retry-After` for a 503 not_configured, in seconds.
+ *
+ * A FLOOR, NOT A PREDICTION, and the distinction is the whole reason this is
+ * safe to send. A missing model key is server configuration: it cannot
+ * self-heal, and the relay has no idea when an operator will act. So this
+ * number does not claim "it will be fixed by then" — it claims "a human has
+ * to act, and humans do not act in seconds, so asking again sooner than this
+ * is certain to be wasted."
+ *
+ * That is exactly the reasoning a client cannot do for itself, which is why
+ * the relay owes it: the client knows only that it got a 503. Operators who
+ * know their own response time should set INFER_NOT_CONFIGURED_RETRY_AFTER_S
+ * rather than trusting five minutes to mean anything.
+ */
+export const NOT_CONFIGURED_RETRY_AFTER_S = Math.max(
+  1,
+  Number(process.env.INFER_NOT_CONFIGURED_RETRY_AFTER_S) || 300,
+)
+
+/** Whole seconds until `resetAt`, at least 1. Unlike the 503 floor this is a
+ * real deadline: the budget window's end is a fact the relay computed. */
+export function retryAfterSeconds(resetAt, now = Date.now()) {
+  const at = Date.parse(String(resetAt || ''))
+  if (!Number.isFinite(at)) return null
+  return Math.max(1, Math.ceil((at - now) / 1000))
+}
 const UPSTREAM_TIMEOUT_MS = 60_000
 
 /**
@@ -218,6 +246,7 @@ export async function runInference({
     )
     error.code = 'not_configured'
     error.status = 503
+    error.retryAfter = NOT_CONFIGURED_RETRY_AFTER_S
     throw error
   }
 
@@ -309,7 +338,14 @@ export async function runInference({
  * gate is in relayScopes.js; what this adds is the metering and the model
  * allow-list, neither of which a scope can express.
  */
-export function registerInferenceRoutes(app, { fetchImpl } = {}) {
+/*
+ * `apiKey` joins `fetchImpl` as an injected seam, and it exists because a test
+ * without it silently tested nothing. LLM_API_KEY is a module-level const
+ * captured at import, so a test that deletes the env var cannot reach it — the
+ * "unconfigured relay" case fell through to a 200 on any machine that has a
+ * key, and passed. Defaults to the configured key, so production is unchanged.
+ */
+export function registerInferenceRoutes(app, { fetchImpl, apiKey } = {}) {
   app.post('/v1/infer', async (request, response) => {
     const principal = request.relayPrincipal
     const deviceId =
@@ -333,11 +369,18 @@ export function registerInferenceRoutes(app, { fetchImpl } = {}) {
      * inferences by hanging up mid-response. */
     const budget = await chargeInferBudget({ deviceId })
     if (!budget.allowed) {
+      /* Here the relay knows the exact deadline — the window's end is a value
+       * it computed — so this is a real number, not the floor the 503 sends.
+       * Set the standard header as well as the field: proxies and HTTP
+       * clients act on Retry-After without anyone writing code. */
+      const retryAfter = retryAfterSeconds(budget.resetAt)
+      if (retryAfter) response.set('Retry-After', String(retryAfter))
       response.status(429).json({
         ok: false,
         code: 'rate_limited',
         error: `This device has used its inference budget (${budget.limit}/hour).`,
         resetAt: budget.resetAt,
+        retryAfter,
       })
       return
     }
@@ -349,6 +392,7 @@ export function registerInferenceRoutes(app, { fetchImpl } = {}) {
         maxTokens: request.body?.maxTokens,
         responseFormat: request.body?.responseFormat ?? null,
         fetchImpl,
+        ...(apiKey === undefined ? {} : { apiKey }),
       })
       response.json({
         ok: true,
@@ -376,10 +420,22 @@ export function registerInferenceRoutes(app, { fetchImpl } = {}) {
         },
       })
     } catch (error) {
+      /*
+       * not_configured carries a retry floor. It lets a client encode
+       * "fatal until an operator acts" as a cooldown rather than describing
+       * it: hand off now, and let a LATER session try again once the window
+       * has passed. Without it a client either retries pointlessly or marks
+       * the relay permanently dead, and picking the number itself would be
+       * inventing a fact it has no access to.
+       */
+      if (error?.retryAfter) {
+        response.set('Retry-After', String(error.retryAfter))
+      }
       response.status(error?.status || 502).json({
         ok: false,
         code: error?.code || 'inference_failed',
         error: error?.message || 'Inference failed.',
+        ...(error?.retryAfter ? { retryAfter: error.retryAfter } : {}),
       })
     }
   })
