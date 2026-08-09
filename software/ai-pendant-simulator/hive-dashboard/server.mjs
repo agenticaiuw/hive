@@ -1062,10 +1062,27 @@ async function nodeDetail(id, query) {
         devicesMeta: meta('relay.devices'),
         /* Only the phone's own credentials here — the relay node shows the
          * whole fleet. This is the row the owner reaches for when the phone is
-         * the thing that went missing. */
-        credentials: credentials
-          ? { ...credentials, credentials: credentials.credentials.filter((c) => c.role === 'mobile') }
-          : null,
+         * the thing that went missing.
+         *
+         * The counts are recomputed over the filtered rows. Spreading the
+         * fleet-wide block and swapping only its `credentials` array carried the
+         * parent's totals through, so with no phone paired this panel read
+         * "1 active · 10 revoked · mac_bridge 1" as the heading over an empty
+         * list — the fleet's numbers under the phone's name. `scope` lets the
+         * page say which filter produced the emptiness. */
+        credentials: credentials ? (() => {
+          const mine = (credentials.credentials || []).filter((c) => c.role === 'mobile');
+          const active = mine.filter((c) => !c.revokedAt);
+          return {
+            credentials: mine,
+            total: mine.length,
+            active: active.length,
+            revoked: mine.length - active.length,
+            byRole: active.reduce((acc, c) => ({ ...acc, [c.role]: (acc[c.role] || 0) + 1 }), {}),
+            scope: 'mobile',
+            fleetTotal: credentials.total,
+          };
+        })() : null,
         credentialsMeta: meta('relay.credentials'),
       };
     }
