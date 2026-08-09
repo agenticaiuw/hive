@@ -206,10 +206,17 @@ test('presence over HTTP reports pending depth alongside the socket', async () =
 
 /* ---- the socket upgrade ------------------------------------------------- */
 
-function socketRequest(deviceId, token, { upgrade = 'websocket' } = {}) {
+function socketRequest(
+  deviceId,
+  token,
+  { upgrade = 'websocket', via = 'header' } = {},
+) {
   const headers = new Headers()
   if (upgrade) headers.set('Upgrade', upgrade)
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (token && via === 'header') headers.set('Authorization', `Bearer ${token}`)
+  if (token && via === 'subprotocol') {
+    headers.set('Sec-WebSocket-Protocol', `pendant.mesh.v1, bearer.${token}`)
+  }
   return new Request(
     `https://relay.invalid/v1/node/socket?deviceId=${encodeURIComponent(deviceId)}`,
     { headers },
@@ -305,6 +312,71 @@ test('the mesh socket refuses a role without node:message:receive', async () => 
   const body = await response.json()
   assert.match(body.error, /may only open its own socket/)
   assert.equal(reached.length, 0)
+})
+
+test('a browser can authenticate the handshake, having no way to send a header', async () => {
+  /*
+   * The gap that made the mesh socket useless to the node it was built for: a
+   * service worker's WebSocket constructor cannot set request headers. Its
+   * only extension point is the subprotocol argument, so a header-only
+   * handshake excluded the browser extension entirely.
+   *
+   * Same credential, same ownership rule, different channel.
+   */
+  const { getStore } = await import('./store/index.js')
+  const sharedStore = await getStore()
+  const { token, record } = createDeviceCredential({
+    deviceId: 'browser-node-2',
+    deviceType: 'browser_node',
+  })
+  await sharedStore.saveDeviceCredential(record)
+
+  const reached = []
+  const accepted = await handleNodeSocketUpgrade(
+    socketRequest('browser-node-2', token, { via: 'subprotocol' }),
+    hubEnv(reached),
+  )
+  assert.equal(accepted.status, HUB_REACHED_STATUS)
+  assert.deepEqual(reached, ['browser-node-2'])
+
+  /* And it is not a bypass: ownership still applies through this channel. */
+  const wrongDevice = await handleNodeSocketUpgrade(
+    socketRequest('phone-1', token, { via: 'subprotocol' }),
+    hubEnv(reached),
+  )
+  assert.equal(wrongDevice.status, 403)
+  assert.equal(reached.length, 1, 'the hub was not reached a second time')
+
+  /* A junk subprotocol token is refused like any other junk token. */
+  const junk = await handleNodeSocketUpgrade(
+    socketRequest('browser-node-2', 'pdt_notreal.notreal', { via: 'subprotocol' }),
+    hubEnv(reached),
+  )
+  assert.equal(junk.status, 401)
+})
+
+test('upgradeCredential reports the channel and never the secret', async () => {
+  const { upgradeCredential } = await import('../cloudflare-worker/bridgeHub.js')
+
+  const header = upgradeCredential(socketRequest('n', 'tok-abc', { via: 'header' }))
+  assert.equal(header.source, 'header')
+  assert.equal(header.authorization, 'Bearer tok-abc')
+
+  const sub = upgradeCredential(
+    socketRequest('n', 'tok-abc', { via: 'subprotocol' }),
+  )
+  assert.equal(sub.source, 'subprotocol')
+  assert.equal(sub.authorization, 'Bearer tok-abc')
+
+  const none = upgradeCredential(socketRequest('n', null))
+  assert.equal(none.source, 'none')
+  assert.equal(none.authorization, '')
+
+  /* `source` is the thing that is safe to log. It must be a channel name and
+   * must never contain the credential. */
+  for (const result of [header, sub, none]) {
+    assert.ok(!result.source.includes('tok-abc'))
+  }
 })
 
 test('the mesh socket refuses a missing deviceId, a bad token, and a plain GET', async () => {

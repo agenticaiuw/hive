@@ -54,6 +54,66 @@ import {
 
 const LAST_DOORBELL_KEY = 'lastDoorbell'
 
+/*
+ * ---------------------------------------------------------------------------
+ * HOW A BROWSER AUTHENTICATES A HANDSHAKE
+ *
+ * The mesh socket was header-authenticated, which quietly excluded the exact
+ * node it was built for. A service worker's WebSocket constructor cannot set
+ * request headers — the only extension point the platform gives it is the
+ * subprotocol argument — so the browser extension could never open
+ * /v1/node/socket at all. Verified against the live relay: Upgrade with a
+ * bearer header returns 101, and the identical request from a browser cannot
+ * be made.
+ *
+ * So the credential may also arrive as a subprotocol:
+ *
+ *   new WebSocket(url, ['pendant.mesh.v1', 'bearer.<device token>'])
+ *
+ * The server reads the token off the bearer.* entry and selects
+ * 'pendant.mesh.v1' in its response. Two offers rather than one because the
+ * server must echo a protocol the client offered, and echoing bearer.<token>
+ * would put the credential in the RESPONSE headers too.
+ *
+ * This is confidentially equivalent to the header — both ride the same TLS
+ * handshake — with one honest caveat: proxies and access logs redact
+ * Authorization far more often than they redact Sec-WebSocket-Protocol, so a
+ * token sent this way is likelier to be logged somewhere. It is accepted here
+ * because the alternative was a node that cannot connect, and it is NOT
+ * ambient credentials: a malicious page cannot read the extension's token, so
+ * this opens no cross-site hijacking path the header did not already have.
+ * --------------------------------------------------------------------------- */
+const MESH_SUBPROTOCOL = 'pendant.mesh.v1'
+const BEARER_SUBPROTOCOL_PREFIX = 'bearer.'
+
+function offeredSubprotocols(request) {
+  return String(request.headers.get('Sec-WebSocket-Protocol') || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+/**
+ * The credential for this handshake, from whichever channel carried it.
+ * Returns the Authorization-header form plus the SOURCE — never the secret —
+ * so a caller can log how a node authenticated without logging what with.
+ */
+export function upgradeCredential(request) {
+  const header = String(request.headers.get('Authorization') || '').trim()
+  if (header) return { authorization: header, source: 'header' }
+
+  const bearer = offeredSubprotocols(request).find((entry) =>
+    entry.startsWith(BEARER_SUBPROTOCOL_PREFIX),
+  )
+  if (bearer) {
+    return {
+      authorization: `Bearer ${bearer.slice(BEARER_SUBPROTOCOL_PREFIX.length)}`,
+      source: 'subprotocol',
+    }
+  }
+  return { authorization: '', source: 'none' }
+}
+
 export class BridgeHub {
   constructor(state) {
     this.state = state
@@ -94,7 +154,25 @@ export class BridgeHub {
 
       this.state.acceptWebSocket(server)
       server.serializeAttachment({ connectedAt: new Date().toISOString() })
-      return new Response(null, { status: 101, webSocket: client })
+
+      /*
+       * Echo the selected subprotocol, or a browser client aborts the
+       * connection it just opened. RFC 6455: if the client offered any
+       * subprotocol, the server's response must name exactly one of them, and
+       * a browser enforces that by closing a socket whose handshake selected
+       * something it did not offer. We always select the plain mesh protocol
+       * and never the bearer.* entry — echoing that one would put the token
+       * back on the wire in the RESPONSE headers, where a proxy log would
+       * capture it just as happily.
+       */
+      const selected = offeredSubprotocols(request).includes(MESH_SUBPROTOCOL)
+        ? { 'Sec-WebSocket-Protocol': MESH_SUBPROTOCOL }
+        : undefined
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: selected,
+      })
     }
 
     if (
@@ -322,8 +400,10 @@ async function handleHubUpgrade(request, env, { requiredScopes, denial }) {
     import('../cloud-relay/config.js'),
   ])
 
+  /* Header or subprotocol — a browser can only send the latter. */
+  const credential = upgradeCredential(request)
   const auth = await authenticateRelayRequest({
-    authorization: request.headers.get('Authorization') || '',
+    authorization: credential.authorization,
     adminApiKey: RELAY_API_KEY,
     credentialStore: await getStore(),
   })
