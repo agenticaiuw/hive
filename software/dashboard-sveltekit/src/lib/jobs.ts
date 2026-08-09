@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Job records cross two backends and are schemaless at this display boundary. */
 
-import { hiveNodeFor, terminalPhaseFor } from "$lib/hiveFeed.js";
+import { hiveNodeFor, humanizeKey, terminalPhaseFor } from "$lib/hiveFeed.js";
+
+/* One definition, in the dependency-free module the node tests import. */
+export { humanizeKey };
 
 /**
  * One job shape for both backends.
@@ -95,13 +98,6 @@ export function nodeMeta(record: {
 }) {
   const { label, hint } = hiveNodeFor(record);
   return { label, hint };
-}
-
-export function humanizeKey(key: unknown) {
-  return String(key)
-    .replace(/[_-]+/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/^./, (character) => character.toUpperCase());
 }
 
 /**

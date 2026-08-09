@@ -1,4 +1,112 @@
-@import "tailwindcss";
+/*
+ * Minimal reset, hand-written.
+ *
+ * This replaces `@import "tailwindcss";`. No Tailwind utility class was ever
+ * used; the only thing the page took from Tailwind v4 was its preflight, and
+ * only the declarations below were load-bearing for this markup. Each rule is
+ * kept value-identical to the preflight rule it replaces so the rendered UI
+ * does not move. Preflight rules for elements this app never renders (tables,
+ * textareas, hr, abbr, sub/sup, number/date inputs) and its Firefox-only
+ * tweaks (:-moz-focusring, :-moz-ui-invalid) are deliberately not carried.
+ */
+
+*,
+::before,
+::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  /* Width 0 but style solid, so `border-color`/`border-width` alone work. */
+  border: 0 solid;
+}
+
+html {
+  /* The whole type ramp was designed on preflight's 1.5 baseline. */
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+  tab-size: 4;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Headings inherit body size/weight; each class sets its own scale. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* `.linkish` anchors rely on this to drop the UA underline and blue. */
+a {
+  color: inherit;
+  -webkit-text-decoration: inherit;
+  text-decoration: inherit;
+}
+
+b,
+strong {
+  font-weight: bolder;
+}
+
+small {
+  font-size: 80%;
+}
+
+summary {
+  display: list-item;
+}
+
+/* `.cmd-parked-reasons` etc. set no list-style of their own. */
+ol,
+ul {
+  list-style: none;
+}
+
+img,
+svg,
+video,
+canvas,
+audio {
+  display: block;
+  vertical-align: middle;
+}
+
+img,
+video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Form controls join the page's type and colour instead of the UA theme. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  opacity: 1;
+  background-color: transparent;
+  border-radius: 0;
+}
+
+button,
+input:where([type="button"], [type="reset"], [type="submit"]) {
+  appearance: button;
+}
+
+/* The history search input has no ::placeholder rule of its own. */
+::placeholder {
+  opacity: 1;
+  color: color-mix(in oklab, currentcolor 50%, transparent);
+}
+
+::-webkit-search-decoration {
+  -webkit-appearance: none;
+}
 
 :root {
   /*
@@ -56,16 +164,11 @@
   --measure: 68ch;
 }
 
-* {
-  box-sizing: border-box;
-}
-
 html {
   background: var(--background);
 }
 
 body {
-  margin: 0;
   color: var(--ink);
   background:
     radial-gradient(circle at 78% -10%, rgba(63, 102, 178, 0.22), transparent 32rem),
@@ -73,21 +176,6 @@ body {
     var(--background);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
   min-height: 100vh;
-}
-
-button {
-  font: inherit;
-}
-
-input {
-  font: inherit;
-}
-
-h1,
-h2,
-h3,
-p {
-  margin: 0;
 }
 
 .kicker {
@@ -126,6 +214,8 @@ p {
   padding: 32px;
   background: var(--panel);
   box-shadow: 0 32px 100px rgba(0, 0, 0, 0.38);
+  /* Prefixed twin by hand: the Tailwind build's Lightning CSS used to add it. */
+  -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
 }
 
@@ -1521,62 +1611,6 @@ blockquote {
   font-weight: 650;
 }
 
-/* ---------- Activity ---------- */
-
-.activity-list {
-  display: grid;
-  gap: 0;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.activity-list li {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 4px 10px;
-  border-top: 1px solid var(--line);
-  padding: 9px 0;
-}
-
-.activity-list li:first-child {
-  border-top: 0;
-}
-
-.activity-list strong {
-  overflow: hidden;
-  font-size: 0.76rem;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.activity-list small {
-  color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.66rem;
-  white-space: nowrap;
-}
-
-.activity-list p {
-  grid-column: 2 / -1;
-  color: #ffb8b3;
-  font-size: 0.68rem;
-  line-height: 1.4;
-}
-
-.activity-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--green);
-}
-
-.activity-dot.failed {
-  background: var(--amber);
-}
-
 /* ---------- History panel ---------- */
 
 .history-search {
@@ -1921,15 +1955,6 @@ blockquote {
 
   .topbar {
     flex-wrap: wrap;
-  }
-
-  .hero {
-    min-height: 0;
-    padding: 24px;
-  }
-
-  .hero-command {
-    font-size: clamp(2rem, 9vw, 3.2rem);
   }
 
   .composer-field input {
@@ -2894,6 +2919,104 @@ blockquote {
   color: #778292;
 }
 
+/* ----- credential inventory + kill switch (ported from hive-dashboard) ----- */
+
+.hv-credbox {
+  border: 1px solid rgba(255, 117, 111, 0.45);
+  border-radius: 9px;
+  background: rgba(255, 117, 111, 0.05);
+  padding: 10px 12px;
+  margin: 4px 0 12px;
+  min-width: 0;
+}
+
+.hv-credwarn {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin-bottom: 8px;
+}
+
+.hv-credrow {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  font-size: 12.5px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.hv-credrow:hover {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.hv-cred-role {
+  font-family: var(--font-geist-mono), monospace;
+  color: var(--ink);
+  flex: none;
+  min-width: 74px;
+}
+
+.hv-cred-who {
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.hv-cred-scopes {
+  border-bottom: 1px dotted #778292;
+}
+
+.hv-cred-tid {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  color: #778292;
+  flex: none;
+}
+
+.hv-credrow.dead .hv-cred-role,
+.hv-credrow.dead .hv-cred-who {
+  color: #778292;
+  text-decoration: line-through;
+}
+
+.hv-revoke {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  color: #ffb0ab;
+  border: 1px solid rgba(255, 117, 111, 0.5);
+  border-radius: 6px;
+  padding: 3px 10px;
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.hv-revoke:hover:not(:disabled) {
+  background: rgba(255, 117, 111, 0.22);
+  color: #ffc9c9;
+}
+
+.hv-revoke:disabled {
+  color: #778292;
+  border-color: var(--line);
+  cursor: default;
+}
+
+.hv-revoke.arm {
+  color: #ffd9a4;
+  border-color: rgba(255, 190, 104, 0.55);
+  background: rgba(255, 190, 104, 0.14);
+  font-weight: 700;
+}
+
 /* ----- shared tiles ----- */
 
 .hv-shared-grid {
@@ -3024,6 +3147,8 @@ blockquote {
   padding: 18px 20px;
   border-radius: 18px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);
+  /* Prefixed twin by hand: the Tailwind build's Lightning CSS used to add it. */
+  -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
 }
 

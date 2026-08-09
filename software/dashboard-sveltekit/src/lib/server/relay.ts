@@ -5,14 +5,15 @@
  * `RELAY_API_KEY` must never cross to the browser: every helper below runs on
  * the server and the browser only ever sees the allowlisted output shapes.
  */
+import { redactInline } from "$lib/jobs";
 import type { RuntimeEnv } from "./env";
 
 const DEFAULT_RELAY_URL =
   "https://ai-pendant-relay.your-subdomain.workers.dev";
 
-export type RelayFetch = (path: string, init?: RequestInit) => Promise<Response>;
+type RelayFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
-export type RelayClient = {
+type RelayClient = {
   relayApiKey: string;
   relayFetch: RelayFetch;
 };
@@ -41,7 +42,7 @@ const CONTROL_SENTINEL_LINE =
   /^\s*(?:\[DONE\]|<\|(?:eot_id|im_end|end_of_text)\|>|(?:\[|<|__)?agent[_ -]*response[_ -]*complete(?:\]|>|__)?[.!]?)\s*$/i;
 
 /** Remove transport/control markers without deleting ordinary user prose. */
-export function stripAgentControlSentinels(value: unknown) {
+function stripAgentControlSentinels(value: unknown) {
   return String(value ?? "")
     .split(/\r?\n/)
     .filter((line) => !CONTROL_SENTINEL_LINE.test(line))
@@ -62,13 +63,6 @@ export function sanitizeText(value: unknown, maxLength = 500) {
 /* Values that should never be read off a screen, whoever is looking. */
 const SENSITIVE_KEY =
   /token|secret|password|passwd|api[-_]?key|authorization|cookie|credential|bearer|private[-_]?key/i;
-
-function redactInline(value: string) {
-  return value.replace(
-    /\b(bearer|token|secret|password|api[-_]?key)([=:"'\s]+)(\S{6,})/gi,
-    (_match, label, separator) => `${label}${separator}•••••••`,
-  );
-}
 
 /**
  * The evidence-grade counterpart to `sanitizeText`.

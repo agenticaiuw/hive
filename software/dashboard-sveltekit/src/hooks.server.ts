@@ -39,11 +39,8 @@ export const handle: Handle = async ({ event, resolve }) => {
     url.pathname === "/favicon.svg" ||
     url.pathname === "/og.png" ||
     url.pathname.startsWith("/assets/") ||
-    // SvelteKit's immutable build output (+ legacy prefixes that may still
-    // be bookmarked from older dashboard builds).
-    url.pathname.startsWith("/_app/") ||
-    url.pathname.startsWith("/_next/") ||
-    url.pathname.startsWith("/_vinext/");
+    // SvelteKit's immutable build output.
+    url.pathname.startsWith("/_app/");
 
   if (!publicAsset && !(await hasValidSession(request, env))) {
     if (url.pathname.startsWith("/api/")) {

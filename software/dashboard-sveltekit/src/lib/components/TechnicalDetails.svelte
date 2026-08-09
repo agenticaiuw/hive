@@ -12,7 +12,6 @@
    * A native <details> is used on purpose: keyboard and screen-reader behaviour
    * come free, and it renders closed in server HTML with no JavaScript.
    */
-  import Metric from "./Metric.svelte";
   import {
     bytes,
     clock,
@@ -71,24 +70,34 @@
     </div>
 
     <div class="telemetry-grid">
-      <Metric label="Payload" value={bytes(telemetry?.audioBytes) || "—"} />
-      <Metric label="Duration" value={duration(telemetry?.durationMs) || "—"} />
-      <Metric
-        label="Sample rate"
-        value={telemetry?.sampleRate
-          ? `${telemetry.sampleRate.toLocaleString()} Hz`
-          : "—"}
-      />
-      <Metric label="Format" value={telemetry?.format || "—"} />
-      <Metric label="Storage" value={telemetry?.storage || "—"} />
-      <Metric
-        label="Input gain"
-        value={telemetry?.inputGainDb != null
-          ? `+${telemetry.inputGainDb} dB`
-          : "—"}
-      />
-      <Metric label="Transcript" value={run.command || "empty"} />
-      <Metric label="Run id" value={String(run.pipelineId || "—")} />
+      <div class="metric">
+        <span>Payload</span><strong>{bytes(telemetry?.audioBytes) || "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Duration</span><strong>{duration(telemetry?.durationMs) || "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Sample rate</span><strong>{telemetry?.sampleRate
+            ? `${telemetry.sampleRate.toLocaleString()} Hz`
+            : "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Format</span><strong>{telemetry?.format || "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Storage</span><strong>{telemetry?.storage || "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Input gain</span><strong>{telemetry?.inputGainDb != null
+            ? `+${telemetry.inputGainDb} dB`
+            : "—"}</strong>
+      </div>
+      <div class="metric">
+        <span>Transcript</span><strong>{run.command || "empty"}</strong>
+      </div>
+      <div class="metric">
+        <span>Run id</span><strong>{String(run.pipelineId || "—")}</strong>
+      </div>
     </div>
 
     {#if run.delivery?.heardBecause}

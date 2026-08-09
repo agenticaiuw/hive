@@ -1,7 +1,11 @@
-# Hive — live observability dashboard for the AI pendant hive mind
+# Hive — live observability aggregator for the AI pendant hive mind
 
-One screen that shows, live: which nodes are active, the context/environment and
-tool calls inside each node, and what is shared/synced between nodes.
+One JSON/SSE feed that shows, live: which nodes are active, the
+context/environment and tool calls inside each node, and what is shared/synced
+between nodes. The UI is the SvelteKit dashboard's **/hive** route
+(`software/dashboard-sveltekit`), which reads this server's `/api/*` when the
+browser is on the Mac and the relay snapshot copy everywhere else; the old
+hand-rolled page this server used to serve at `/` was folded into it.
 
 ## Run
 
@@ -9,9 +13,9 @@ tool calls inside each node, and what is shared/synced between nodes.
 node /Users/you/agentic-gadget/software/ai-pendant-simulator/hive-dashboard/server.mjs
 ```
 
-Then open the URL it prints — normally **http://127.0.0.1:8010** (if 8010 is
-busy it walks 8011…8020 and prints which one it bound). Node 18+, zero npm
-dependencies, binds 127.0.0.1 only.
+It binds **http://127.0.0.1:8010** (if 8010 is busy it walks 8011…8020 and
+prints which one it bound). Node 18+, zero npm dependencies, binds 127.0.0.1
+only.
 
 ## What it aggregates
 
@@ -26,12 +30,14 @@ Deliberately **not** called: `GET /memory/projection` (write side effects) and
 
 ## Endpoints
 
-- `GET /` — the dashboard (single self-contained page, works offline)
 - `GET /api/overview` — full aggregated snapshot
 - `GET /api/events` — SSE stream, diffs + new ticker events every ~2 s
 - `GET /api/node/:id` — drill-down (`mac`, `relay`, `extension`, `pendant`,
   `ios`, `committee`, or a committee agent name like `mac-planner`);
   `GET /api/node/mac?job=<jobId>` lazily proxies that job's receipts
+- `POST /api/credentials/:tokenId/revoke` — the one write path: kills a relay
+  credential using the admin key this server already holds (the dashboard only
+  ever names a tokenId)
 
 ## Honesty & secrets
 

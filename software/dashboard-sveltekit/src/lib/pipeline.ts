@@ -19,7 +19,7 @@ export function stagesFor(run: JsonRecord | null) {
   return runOrigin(run) === "dashboard" ? DASHBOARD_STAGES : STAGES;
 }
 
-export function runOrigin(run: JsonRecord | null) {
+function runOrigin(run: JsonRecord | null) {
   const direct = String(run?.origin || "");
   if (direct) return direct;
   const events = Array.isArray(run?.events) ? run.events : [];
@@ -113,13 +113,6 @@ export function stageState(run: JsonRecord | null, stageId: string) {
     return "failed";
   }
   return "done";
-}
-
-export function displayCommand(run: JsonRecord | null) {
-  if (!run || isIdleRun(run)) return "Ready";
-  if (isTranscribing(run)) return "Transcribing…";
-  if (!hasUsefulTranscript(run.command)) return "No speech detected";
-  return run.command;
 }
 
 // Same candidate order as the simulator's voiceCapture so Safari/iOS lands on

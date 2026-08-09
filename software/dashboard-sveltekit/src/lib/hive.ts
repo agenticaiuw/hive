@@ -19,7 +19,7 @@
 
 export const HIVE_LOCAL_BASE = "http://127.0.0.1:8010";
 
-export type HiveStatus = "up" | "degraded" | "down" | "unknown" | "idle";
+type HiveStatus = "up" | "degraded" | "down" | "unknown" | "idle";
 
 export type HiveNode = {
   id: string;
@@ -170,7 +170,7 @@ export async function probeLocalOverview(timeoutMs = 1500): Promise<HiveOverview
   return (await response.json()) as HiveOverview;
 }
 
-export type RelayHivePayload = {
+type RelayHivePayload = {
   data: HiveOverview;
   state: { revision: number; updatedAt: string | null; updatedBy: string | null };
 };

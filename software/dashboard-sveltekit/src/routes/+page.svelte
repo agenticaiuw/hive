@@ -95,7 +95,6 @@
   import ClusterDot from "$lib/components/ClusterDot.svelte";
   import CommandBox from "$lib/components/CommandBox.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
-  import SystemRow from "$lib/components/SystemRow.svelte";
   import TechnicalDetails from "$lib/components/TechnicalDetails.svelte";
   import Tile from "$lib/components/Tile.svelte";
   import {
@@ -832,26 +831,18 @@
   {#if openTile === "system"}
     <section id="tile-panel-system" class="tile-panel" aria-label="System detail">
       <dl class="system-list">
-        <SystemRow label="Relay" value={cloudUp ? "Online" : "Offline"} />
-        <SystemRow label="Queue" value={storeLabel} />
-        <SystemRow
-          label="STT"
-          value={cloud.speechToTextConfigured
-            ? cloud.models?.speechToText || "Workers AI ready"
-            : "Off"}
-        />
-        <SystemRow
-          label="TTS"
-          value={cloud.models?.textToSpeech || "macOS say · 24 kHz"}
-        />
-        <SystemRow
-          label="Bridge"
-          value={bridgeUp ? "Connected" : "Disconnected"}
-        />
-        <SystemRow
-          label="Agent"
-          value={agent.ok ? `v${agent.version}` : "Offline"}
-        />
+        <div><dt>Relay</dt><dd>{cloudUp ? "Online" : "Offline"}</dd></div>
+        <div><dt>Queue</dt><dd>{storeLabel}</dd></div>
+        <div>
+          <dt>STT</dt><dd>{cloud.speechToTextConfigured
+              ? cloud.models?.speechToText || "Workers AI ready"
+              : "Off"}</dd>
+        </div>
+        <div>
+          <dt>TTS</dt><dd>{cloud.models?.textToSpeech || "macOS say · 24 kHz"}</dd>
+        </div>
+        <div><dt>Bridge</dt><dd>{bridgeUp ? "Connected" : "Disconnected"}</dd></div>
+        <div><dt>Agent</dt><dd>{agent.ok ? `v${agent.version}` : "Offline"}</dd></div>
       </dl>
     </section>
   {/if}
@@ -863,21 +854,18 @@
       aria-label="Mac permissions detail"
     >
       <dl class="system-list">
-        <SystemRow
-          label="Accessibility"
-          value={permissions.accessibility?.trusted ? "✓" : "—"}
-        />
-        <SystemRow
-          label="Screen"
-          value={permissions.screenRecording?.granted ? "✓" : "—"}
-        />
-        <SystemRow
-          label="Automation"
-          value={automationEntries.length
-            ? `${grantedAutomation}/${automationEntries.length}`
-            : "Not checked"}
-        />
-        <SystemRow label="Host" value={agent.hostApp || "—"} />
+        <div>
+          <dt>Accessibility</dt><dd>{permissions.accessibility?.trusted ? "✓" : "—"}</dd>
+        </div>
+        <div>
+          <dt>Screen</dt><dd>{permissions.screenRecording?.granted ? "✓" : "—"}</dd>
+        </div>
+        <div>
+          <dt>Automation</dt><dd>{automationEntries.length
+              ? `${grantedAutomation}/${automationEntries.length}`
+              : "Not checked"}</dd>
+        </div>
+        <div><dt>Host</dt><dd>{agent.hostApp || "—"}</dd></div>
       </dl>
       {#if requiredMissing.length}
         <div class="perm-chips">
@@ -896,15 +884,13 @@
       aria-label="Browser bridge detail"
     >
       <dl class="system-list">
-        <SystemRow
-          label="Devices"
-          value={String(browserExtension.connectedDevices ?? 0)}
-        />
-        <SystemRow
-          label="Queued"
-          value={String(browserExtension.pendingCommands ?? 0)}
-        />
-        <SystemRow label="Seen" value={clock(browserExtension.lastSeenAt)} />
+        <div>
+          <dt>Devices</dt><dd>{String(browserExtension.connectedDevices ?? 0)}</dd>
+        </div>
+        <div>
+          <dt>Queued</dt><dd>{String(browserExtension.pendingCommands ?? 0)}</dd>
+        </div>
+        <div><dt>Seen</dt><dd>{clock(browserExtension.lastSeenAt)}</dd></div>
       </dl>
     </section>
   {/if}

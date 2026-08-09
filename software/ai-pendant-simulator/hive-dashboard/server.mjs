@@ -14,13 +14,10 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { stat, open, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = '/Users/you/agentic-gadget';
 const ENV_PATH = path.join(REPO_ROOT, '.env');
 const DIAG_DIR = path.join(REPO_ROOT, 'diagnostics', 'harness-derivation');
-const INDEX_PATH = path.join(__dirname, 'index.html');
 const PORTS = [8010, 8011, 8012, 8013, 8014, 8015, 8016, 8017, 8018, 8019, 8020];
 const STARTED_AT = Date.now();
 
@@ -1328,15 +1325,9 @@ const server = http.createServer(async (req, res) => {
       });
       return res.end();
     }
-    if (p === '/' || p === '/index.html') {
-      let html;
-      try { html = await readFile(INDEX_PATH, 'utf8'); } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        return res.end(`index.html unreadable: ${errStr(e)}`);
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(scrub(html));
-    }
+    /* No HTML here any more: the hand-rolled page moved into the SvelteKit
+     * dashboard's /hive route, which reads this server's /api/*. This process
+     * is the aggregator only. */
     if (p === '/favicon.ico') { res.writeHead(204); return res.end(); }
     if (p === '/api/overview') return sendJson(req, res, 200, buildOverview());
     if (p === '/api/events') {
