@@ -26,6 +26,7 @@ import {
   spokenConfirmation,
   spokenTextForResult,
   synthesizePendantSpeech,
+  telemetryForWire,
 } from './pendantSpeech.js'
 import { synchronizeProductState } from './productSyncClient.js'
 import { classifyPlan, classifyPlanForRoutine } from './actionRisk.js'
@@ -452,7 +453,9 @@ export async function handleWork(work) {
               : 'Executing actions — failed',
             detail: `Finished in ${Date.now() - executionStartedAt} ms.`,
             text: spokenTextForResult(plan),
-            meta: { results: execution?.results ?? null },
+            /* A summary, not the results themselves: the full array carries the
+             * briefing payload, and nothing reads meta.results anywhere. */
+            meta: summarizeActionResults(execution?.results),
           })
           // Dashboard: show Done the moment Outlook (etc.) is open — do not
           // wait for TTS. partial keeps the job open so speech can attach next.
@@ -904,19 +907,45 @@ async function reportPipelineEvent(work, event) {
   try {
     await callLocalAgent('/pipeline/events', {
       method: 'POST',
-      body: {
+      /*
+       * Telemetry never carries audio bytes. The receiver drops them anyway
+       * (pipelineTrace.js sanitizeMeta strips every /base64/ key), so they could
+       * only ever cost us the event: with a briefing payload attached this POST
+       * hit the agent's body limit and returned 413, losing the whole event and
+       * with it the stage transition the dashboard strip renders. Guarding here
+       * rather than at each call site means no future `meta` can reintroduce it.
+       */
+      body: telemetryForWire({
         pipelineId: work.jobId,
         kind: work.type,
         command: work.command,
         sessionId: work.sessionId,
         source: event.source || 'mac-bridge',
         ...event,
-      },
+      }),
     })
   } catch (error) {
     console.warn(
       `[bridge] Pipeline telemetry failed for ${work.jobId}: ${error.message}`,
     )
+  }
+}
+
+/*
+ * What the dashboard can actually use about a set of executed actions: how many
+ * ran, whether each worked, and what kind it was. The results themselves are
+ * where the briefing payload rides, and no reader anywhere consumes
+ * meta.results — sanitizeMeta would strip its audio on arrival regardless.
+ */
+function summarizeActionResults(results) {
+  if (!Array.isArray(results)) return { results: null }
+  return {
+    resultCount: results.length,
+    results: results.slice(0, 20).map((entry) => ({
+      type: entry?.type ?? entry?.action ?? null,
+      ok: entry?.ok !== false,
+      ...(entry?.error ? { error: String(entry.error).slice(0, 240) } : {}),
+    })),
   }
 }
 

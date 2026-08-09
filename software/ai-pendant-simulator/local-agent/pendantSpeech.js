@@ -220,6 +220,50 @@ function walkForWire(value, state, depth) {
   return isCanonical ? walked : dedupeAudioFields(walked, state)
 }
 
+/**
+ * The form for pipeline telemetry: no audio bytes at all, and no activity ring.
+ *
+ * Unlike the relay result, telemetry has no canonical audio position to protect,
+ * because the receiving end throws audio away regardless — pipelineTrace.js
+ * sanitizeMeta() drops every key matching /base64/ and clips strings to 1000
+ * characters before anything is stored. So bytes sent here can never be read by
+ * the dashboard; they only risk the POST.
+ *
+ * And that risk is not theoretical: with the briefing's payload attached, this
+ * POST exceeded the agent's own body limit and came back 413, losing the ENTIRE
+ * event — including the stage and timing the strip does render. Stripping the
+ * payload outright is what keeps the event itself deliverable.
+ */
+export function telemetryForWire(value, state = { nodes: 0 }, depth = 0) {
+  if (depth > WIRE_WALK_MAX_DEPTH || state.nodes > WIRE_WALK_MAX_NODES) {
+    return null
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      state.nodes += 1
+      return telemetryForWire(entry, state, depth + 1)
+    })
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    if (key === 'audioBase64' || key === 'compressedAudioBase64') {
+      next.audioOmitted = true
+      continue
+    }
+    if (key === 'logs' && Array.isArray(entry)) {
+      next.logs = { elided: 'activity log stays on the Mac', length: entry.length }
+      continue
+    }
+    next[key] = telemetryForWire(entry, state, depth + 1)
+  }
+  return next
+}
+
 /* Bytes already carried elsewhere become a pointer to where they live. */
 function dedupeAudioFields(payload, state) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
