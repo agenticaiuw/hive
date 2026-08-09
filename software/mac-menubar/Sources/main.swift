@@ -28,31 +28,17 @@ enum AgentEnv {
     static let envPathDefaultsKey = "AgentEnvPath"
     static let bundleId = "com.aipendant.menubar"
 
-    /// Canonical + legacy secret files. First readable path wins.
+    /// Secrets file: the `defaults write … AgentEnvPath` override (if any),
+    /// then the repo root .env. First readable path wins.
     static var candidateEnvPaths: [String] {
-        let home = NSHomeDirectory()
         var paths: [String] = []
-        // Explicit override from `defaults write … AgentEnvPath`
         if let domain = UserDefaults.standard.persistentDomain(forName: bundleId),
            let override = domain[envPathDefaultsKey] as? String,
            !override.isEmpty {
             paths.append(override)
         }
-        paths.append(contentsOf: [
-            "\(home)/agentic-gadget/.env",
-            "\(home)/agentic-gadget/software/ai-pendant.env",
-            "\(home)/agentic-gadget/software/ai-pendant-simulator/.env",
-        ])
-        // de-dupe, preserve order
-        var seen = Set<String>()
-        return paths.filter { seen.insert($0).inserted }
-    }
-
-    static func registerDefaults() {
-        let preferred =
-            candidateEnvPaths.first { FileManager.default.isReadableFile(atPath: $0) }
-            ?? "\(NSHomeDirectory())/agentic-gadget/.env"
-        UserDefaults.standard.register(defaults: [envPathDefaultsKey: preferred])
+        paths.append("\(NSHomeDirectory())/agentic-gadget/.env")
+        return paths
     }
 
     /// Path shown in error UI — the file we actually expect secrets from.
@@ -89,12 +75,9 @@ struct TraceStep: Decodable, Identifiable {
     let detail: String?
     let status: String?
     let streamText: String?
-    let updatedAt: String?
 }
 
 struct Trace: Decodable {
-    let traceId: String
-    let kind: String?
     let command: String?
     let source: String?
     let status: String?
@@ -108,10 +91,7 @@ struct Job: Decodable, Identifiable {
     let type: String?
     let status: String?
     let command: String?
-    let source: String?
-    let error: String?
     let createdAt: String?
-    let updatedAt: String?
     var id: String { jobId }
 }
 
@@ -133,14 +113,12 @@ struct PendingApproval: Decodable, Identifiable {
     let detail: String?
     let origin: String?
     let risk: String?
-    let createdAt: String?
     let expiresAt: String?
 }
 
 struct ApprovalsResponse: Decodable { let approvals: [PendingApproval]? }
 struct ApprovalDecisionResponse: Decodable {
     let ok: Bool?
-    let state: String?
     let error: String?
 }
 struct LatestTraceResponse: Decodable { let trace: Trace? }
@@ -205,16 +183,14 @@ enum When {
     }
 }
 
-// MARK: - Minimal SSE client (URLSession streaming with auto-reconnect)
+// MARK: - Minimal SSE client (async byte stream with auto-reconnect)
 
-final class SSEClient: NSObject, URLSessionDataDelegate {
-    private var session: URLSession!
-    private var task: URLSessionDataTask?
-    private var buffer = Data()
+final class SSEClient {
     private let url: URL
     private let token: String
     private var stopped = false
     private var reconnectDelay: TimeInterval = 1
+    private var streamTask: Task<Void, Never>?
 
     var onEvent: ((Data) -> Void)?
     var onStateChange: ((Bool) -> Void)?
@@ -222,11 +198,6 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
     init(url: URL, token: String) {
         self.url = url
         self.token = token
-        super.init()
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 60 // server heartbeats every 15s
-        cfg.timeoutIntervalForResource = 60 * 60 * 24 * 7
-        session = URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
     }
 
     func start() {
@@ -236,51 +207,40 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
 
     func stop() {
         stopped = true
-        task?.cancel()
-        task = nil
+        streamTask?.cancel()
+        streamTask = nil
     }
 
     private func connect() {
-        buffer.removeAll()
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        task = session.dataTask(with: request)
-        task?.resume()
-    }
-
-    private func scheduleReconnect() {
-        guard !stopped else { return }
-        let delay = reconnectDelay
-        reconnectDelay = min(reconnectDelay * 2, 10)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.stopped else { return }
-            self.connect()
-        }
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        let ok = (response as? HTTPURLResponse)?.statusCode == 200
-        if ok {
-            reconnectDelay = 1
-            onStateChange?(true)
-            completionHandler(.allow)
-        } else {
-            onStateChange?(false)
-            completionHandler(.cancel)
-        }
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        buffer.append(data)
-        let separator = Data("\n\n".utf8)
-        while let range = buffer.range(of: separator) {
-            let chunk = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
-            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-            handleEventChunk(chunk)
+        request.timeoutInterval = 60 // idle cutoff; the server heartbeats every 15s
+        streamTask = Task { @MainActor [weak self] in
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    self?.reconnectDelay = 1
+                    self?.onStateChange?(true)
+                    // Frames are "\n\n"-separated; a trailing partial frame is
+                    // discarded when the stream ends. NOT .lines — it swallows
+                    // the blank lines that delimit SSE frames.
+                    var frame = Data()
+                    let lf = UInt8(ascii: "\n")
+                    for try await byte in bytes {
+                        if byte == lf, frame.last == lf {
+                            frame.removeLast()
+                            self?.handleEventChunk(frame)
+                            frame.removeAll(keepingCapacity: true)
+                        } else {
+                            frame.append(byte)
+                        }
+                    }
+                }
+            } catch {} // transport errors and cancellation both land in reconnect
+            self?.onStateChange?(false)
+            self?.scheduleReconnect()
         }
     }
 
@@ -298,10 +258,14 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         onEvent?(Data(payloadLines.joined(separator: "\n").utf8))
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        onStateChange?(false)
+    private func scheduleReconnect() {
         guard !stopped else { return }
-        scheduleReconnect()
+        let delay = reconnectDelay
+        reconnectDelay = min(reconnectDelay * 2, 10)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.connect()
+        }
     }
 }
 
@@ -449,6 +413,14 @@ final class AgentModel: ObservableObject {
 }
 
 // MARK: - Shared status styling
+
+/// The two colors the app repeats everywhere: the near-black window "ink" and
+/// the mint accent.
+enum Palette {
+    static let ink = Color(red: 0.043, green: 0.051, blue: 0.078)
+    static let inkNS = NSColor(red: 0.043, green: 0.051, blue: 0.078, alpha: 1)
+    static let accent = Color(red: 0.46, green: 0.90, blue: 0.64)
+}
 
 func statusTint(_ status: String?) -> Color {
     switch (status ?? "").lowercased() {
@@ -666,7 +638,7 @@ struct ActivityView: View {
 
     var body: some View {
         ZStack {
-            Color(red: 0.043, green: 0.051, blue: 0.078).ignoresSafeArea()
+            Palette.ink.ignoresSafeArea()
             VStack(alignment: .leading, spacing: 22) {
                 header
                 if model.tokenAvailable {
@@ -789,7 +761,7 @@ final class WebPane: NSObject, WKUIDelegate, WKNavigationDelegate {
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-        webView.underPageBackgroundColor = NSColor(red: 0.043, green: 0.051, blue: 0.078, alpha: 1)
+        webView.underPageBackgroundColor = Palette.inkNS
     }
 
     /// Loads the dashboard once; later calls are no-ops so the session isn't disturbed.
@@ -841,23 +813,6 @@ final class WebPane: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 }
 
-// MARK: - Window tabs
-
-enum MainTab: String {
-    case dashboard
-    case thisMac
-
-    static let defaultsKey = "SelectedTab"
-
-    static var remembered: MainTab {
-        MainTab(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .dashboard
-    }
-
-    func remember() {
-        UserDefaults.standard.set(rawValue, forKey: MainTab.defaultsKey)
-    }
-}
-
 // MARK: - Floating always-on-top command HUD
 
 /// A file the user attached to the next command (picker, drag-and-drop, or
@@ -870,8 +825,7 @@ struct Attachment: Identifiable {
     /// image/file decision is made by whether ImageIO can decode a thumbnail
     /// (see AttachmentThumbnail), so a mislabeled file still resolves correctly.
     var isImage: Bool {
-        ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "bmp"]
-            .contains(url.pathExtension.lowercased())
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
     }
 }
 
@@ -923,6 +877,31 @@ final class FloatingCommandModel: ObservableObject {
         self.speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
     }
 
+    /// Every agent call has the same shape: Bearer-authorized, and a JSON body
+    /// when present (which also makes it a POST). Callers keep their own token
+    /// guards because each reacts differently to a missing token.
+    private func agentRequest(_ path: String, token: String,
+                              json body: [String: Any]? = nil,
+                              timeout: TimeInterval? = nil) -> URLRequest {
+        var request = URLRequest(url: agentBaseURL.appendingPathComponent(path))
+        if let timeout { request.timeoutInterval = timeout }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let body {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        return request
+    }
+
+    /// Runs the request and hops the completion to the main queue.
+    private func perform(_ request: URLRequest,
+                         _ completion: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async { completion(data, response as? HTTPURLResponse, error) }
+        }.resume()
+    }
+
     func send() {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty || !attachments.isEmpty else {
@@ -944,83 +923,60 @@ final class FloatingCommandModel: ObservableObject {
         }
         busy = true
         status = "Sending…"
-        var request = URLRequest(url: agentBaseURL.appendingPathComponent("plan"))
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = [
             "command": command,
             "source": "floating-hud",
             "autoExecute": true,
         ]
         if !paths.isEmpty { body["attachments"] = paths }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                self?.busy = false
-                if let error {
-                    self?.status = error.localizedDescription
-                    return
-                }
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                guard let data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self?.status = "Bad response (\(code))"
-                    return
-                }
-                // Fire-and-forget auto-execute for safe open_app plans when present.
-                if let actions = json["actions"] as? [[String: Any]], !actions.isEmpty {
-                    self?.execute(actions: actions, command: command, token: token)
-                    let label = (actions.first?["label"] as? String) ?? "Running…"
-                    self?.status = label
-                    self?.text = ""
-                    self?.attachments = []
-                    return
-                }
-                let reply = (json["response"] as? String)
-                    ?? (json["error"] as? String)
-                    ?? "ok"
-                self?.status = reply
-                if json["error"] == nil {
-                    self?.text = ""
-                    self?.attachments = []
-                }
+        perform(agentRequest("plan", token: token, json: body)) { [weak self] data, response, error in
+            self?.busy = false
+            if let error {
+                self?.status = error.localizedDescription
+                return
             }
-        }.resume()
+            let code = response?.statusCode ?? 0
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self?.status = "Bad response (\(code))"
+                return
+            }
+            // Fire-and-forget auto-execute for safe open_app plans when present.
+            if let actions = json["actions"] as? [[String: Any]], !actions.isEmpty {
+                self?.execute(actions: actions, command: command, token: token)
+                let label = (actions.first?["label"] as? String) ?? "Running…"
+                self?.status = label
+                self?.text = ""
+                self?.attachments = []
+                return
+            }
+            let reply = (json["response"] as? String)
+                ?? (json["error"] as? String)
+                ?? "ok"
+            self?.status = reply
+            if json["error"] == nil {
+                self?.text = ""
+                self?.attachments = []
+            }
+        }
     }
 
     private func execute(actions: [[String: Any]], command: String, token: String) {
-        var request = URLRequest(url: agentBaseURL.appendingPathComponent("execute"))
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = [
             "command": command,
             "actions": actions,
             "source": "floating-hud",
         ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            DispatchQueue.main.async {
-                if let data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let response = json["response"] as? String, !response.isEmpty {
-                    self?.status = response
-                } else {
-                    self?.status = "Done"
-                }
+        perform(agentRequest("execute", token: token, json: body)) { [weak self] data, _, _ in
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let response = json["response"] as? String, !response.isEmpty {
+                self?.status = response
+            } else {
+                self?.status = "Done"
             }
-        }.resume()
-    }
-
-    // MARK: Global hotkey label
-
-    /// Records which global shortcut actually bound (nil when every candidate
-    /// failed). The field placeholder shows it — there is deliberately no
-    /// separate idle caption row. Never advertises a failed binding.
-    func applyHotkey(label: String?) {
-        hotkeyLabel = label
+        }
     }
 
     // MARK: Attachments
@@ -1087,25 +1043,20 @@ final class FloatingCommandModel: ObservableObject {
             clearApprovals()
             return
         }
-        var request = URLRequest(url: agentBaseURL.appendingPathComponent("approvals/pending"))
-        request.timeoutInterval = 3
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard error == nil,
-                      (response as? HTTPURLResponse)?.statusCode == 200,
-                      let data,
-                      let decoded = try? JSONDecoder().decode(ApprovalsResponse.self, from: data) else {
-                    self.clearApprovals()
-                    return
-                }
-                let fresh = decoded.approvals ?? []
-                self.approvals = fresh
-                let liveIds = Set(fresh.map(\.id))
-                self.approvalErrors = self.approvalErrors.filter { liveIds.contains($0.key) }
+        perform(agentRequest("approvals/pending", token: token, timeout: 3)) { [weak self] data, response, error in
+            guard let self else { return }
+            guard error == nil,
+                  response?.statusCode == 200,
+                  let data,
+                  let decoded = try? JSONDecoder().decode(ApprovalsResponse.self, from: data) else {
+                self.clearApprovals()
+                return
             }
-        }.resume()
+            let fresh = decoded.approvals ?? []
+            self.approvals = fresh
+            let liveIds = Set(fresh.map(\.id))
+            self.approvalErrors = self.approvalErrors.filter { liveIds.contains($0.key) }
+        }
     }
 
     /// POST /approvals/:id/decision. Success removes the row; failure surfaces
@@ -1114,35 +1065,26 @@ final class FloatingCommandModel: ObservableObject {
         guard let token = tokenProvider(), !token.isEmpty else { return }
         decidingIds.insert(approval.id)
         approvalErrors[approval.id] = nil
-        var request = URLRequest(url: agentBaseURL
-            .appendingPathComponent("approvals")
-            .appendingPathComponent(approval.id)
-            .appendingPathComponent("decision"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["decision": approve ? "approve" : "deny"])
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.decidingIds.remove(approval.id)
-                if let error {
-                    self.approvalErrors[approval.id] = error.localizedDescription
-                    return
-                }
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                let decoded = data.flatMap { try? JSONDecoder().decode(ApprovalDecisionResponse.self, from: $0) }
-                if code == 200, decoded?.ok == true, decoded?.error == nil {
-                    self.approvals.removeAll { $0.id == approval.id }
-                    self.approvalErrors[approval.id] = nil
-                    self.fetchApprovals()   // resync with whatever the agent now holds
-                } else {
-                    self.approvalErrors[approval.id] = decoded?.error ?? "Failed (HTTP \(code))"
-                }
+        let request = agentRequest("approvals/\(approval.id)/decision", token: token,
+                                   json: ["decision": approve ? "approve" : "deny"],
+                                   timeout: 5)
+        perform(request) { [weak self] data, response, error in
+            guard let self else { return }
+            self.decidingIds.remove(approval.id)
+            if let error {
+                self.approvalErrors[approval.id] = error.localizedDescription
+                return
             }
-        }.resume()
+            let code = response?.statusCode ?? 0
+            let decoded = data.flatMap { try? JSONDecoder().decode(ApprovalDecisionResponse.self, from: $0) }
+            if code == 200, decoded?.ok == true, decoded?.error == nil {
+                self.approvals.removeAll { $0.id == approval.id }
+                self.approvalErrors[approval.id] = nil
+                self.fetchApprovals()   // resync with whatever the agent now holds
+            } else {
+                self.approvalErrors[approval.id] = decoded?.error ?? "Failed (HTTP \(code))"
+            }
+        }
     }
 
     func toggleListen() {
@@ -1245,13 +1187,11 @@ struct ApprovalRow: View {
     let onApprove: () -> Void
     let onDeny: () -> Void
 
-    private let accent = Color(red: 0.46, green: 0.90, blue: 0.64)
-
     private var riskColor: Color {
         switch (approval.risk ?? "").lowercased() {
         case "high", "critical": return Color(red: 1.0, green: 0.45, blue: 0.42)
         case "medium", "moderate": return .orange
-        case "low": return accent
+        case "low": return Palette.accent
         default: return Color.white.opacity(0.5)
         }
     }
@@ -1307,7 +1247,7 @@ struct ApprovalRow: View {
                     .foregroundStyle(Color.black.opacity(0.82))
                     .padding(.horizontal, 13)
                     .padding(.vertical, 5)
-                    .background(Capsule().fill(accent.opacity(busy ? 0.35 : 1)))
+                    .background(Capsule().fill(Palette.accent.opacity(busy ? 0.35 : 1)))
             }
             .buttonStyle(.plain)
             .disabled(busy)
@@ -1330,11 +1270,14 @@ enum AttachmentThumbnail {
     static let maxPixel = 256
     private static let cache = NSCache<NSString, NSImage>()
 
-    static func load(path: String) -> NSImage? {
+    /// CGImageSourceCreateThumbnailAtIndex reads only what it needs and hands
+    /// back an already-downsampled CGImage — full-res pixels never enter RAM.
+    /// The click-to-enlarge preview passes its own maxPixel and cached: false —
+    /// it is transient, one at a time, and must never evict a row thumbnail.
+    static func load(path: String, maxPixel: Int = AttachmentThumbnail.maxPixel,
+                     cached: Bool = true) -> NSImage? {
         let key = path as NSString
-        if let hit = cache.object(forKey: key) { return hit }
-        // CGImageSourceCreateThumbnailAtIndex reads only what it needs and hands
-        // back an already-downsampled CGImage — full-res pixels never enter RAM.
+        if cached, let hit = cache.object(forKey: key) { return hit }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,   // honor EXIF orientation
@@ -1345,24 +1288,8 @@ enum AttachmentThumbnail {
               let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         else { return nil }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(image, forKey: key)
+        if cached { cache.setObject(image, forKey: key) }
         return image
-    }
-
-    /// A bigger, screen-sized copy for the click-to-enlarge preview — deliberately
-    /// NOT cached (it's transient and one at a time, freed when the lightbox
-    /// closes) and NOT stored under the row cache key, so the tiny row thumbnail
-    /// is never evicted for the large one.
-    static func loadSized(path: String, maxPixel: Int) -> NSImage? {
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-        ]
-        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
 
@@ -1442,6 +1369,7 @@ struct AttachmentTileView: View {
                 loadingTile
             }
         }
+        .overlay(removeBadge, alignment: .topTrailing)
         .onAppear(perform: loadIfNeeded)
     }
 
@@ -1473,7 +1401,6 @@ struct AttachmentTileView: View {
                 .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         }
         .buttonStyle(.plain)
-        .overlay(removeBadge, alignment: .topTrailing)
         .help("Click to preview · \(attachment.name)")
     }
 
@@ -1494,7 +1421,6 @@ struct AttachmentTileView: View {
         // Same dark material as the pill so the card reads over ANY background
         // the always-on-top HUD floats above (a bare fill would vanish on light).
         .background(HUDMaterial(shape: RoundedRectangle(cornerRadius: corner, style: .continuous)))
-        .overlay(removeBadge, alignment: .topTrailing)
         .help(attachment.url.path)
     }
 
@@ -1505,7 +1431,6 @@ struct AttachmentTileView: View {
             .foregroundStyle(.white.opacity(0.4))
             .frame(width: side, height: side)
             .background(HUDMaterial(shape: RoundedRectangle(cornerRadius: corner, style: .continuous)))
-            .overlay(removeBadge, alignment: .topTrailing)
     }
 
     /// × in the top-right corner. Palette rendering paints a white glyph on a
@@ -1538,8 +1463,6 @@ struct AttachmentTileView: View {
 struct FloatingCommandView: View {
     @ObservedObject var model: FloatingCommandModel
     @State private var dropTargeted = false
-
-    private let accent = Color(red: 0.46, green: 0.90, blue: 0.64)
 
     /// ONE caption, inside the field, showing the live shortcut when bound.
     private var placeholder: String {
@@ -1577,7 +1500,7 @@ struct FloatingCommandView: View {
             Button { model.toggleListen() } label: {
                 Image(systemName: model.listening ? "mic.fill" : "mic")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(model.listening ? accent : Color.white.opacity(0.65))
+                    .foregroundStyle(model.listening ? Palette.accent : Color.white.opacity(0.65))
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
@@ -1613,7 +1536,7 @@ struct FloatingCommandView: View {
             Button { model.send() } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 27))
-                    .foregroundStyle(model.busy ? Color.white.opacity(0.25) : accent)
+                    .foregroundStyle(model.busy ? Color.white.opacity(0.25) : Palette.accent)
             }
             .buttonStyle(.plain)
             .disabled(model.busy)
@@ -1625,7 +1548,7 @@ struct FloatingCommandView: View {
         .background(HUDMaterial(shape: Capsule()))
         .overlay(
             Capsule().strokeBorder(
-                dropTargeted ? accent.opacity(0.75) : Color.clear, lineWidth: 1.5)
+                dropTargeted ? Palette.accent.opacity(0.75) : Color.clear, lineWidth: 1.5)
         )
     }
 
@@ -1745,16 +1668,11 @@ final class GlobalHotkey {
         Candidate(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(cmdKey | shiftKey), label: "⌘⇧Space"),
     ]
 
-    fileprivate static let signature: OSType = {
-        var result: OSType = 0
-        for byte in "AIPD".utf8 { result = (result << 8) | OSType(byte) }
-        return result
-    }()
+    fileprivate static let signature: OSType = 0x4149_5044 // "AIPD"
 
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     private let onPress: () -> Void
-    private(set) var boundLabel: String?
 
     init(onPress: @escaping () -> Void) {
         self.onPress = onPress
@@ -1771,7 +1689,6 @@ final class GlobalHotkey {
                                              hotKeyID, GetEventDispatcherTarget(), 0, &ref)
             if status == noErr, let ref {
                 hotKeyRef = ref
-                boundLabel = candidate.label
                 NSLog("AI Pendant: global hotkey bound: %@", candidate.label)
                 return candidate.label
             }
@@ -1809,19 +1726,31 @@ final class GlobalHotkey {
 }
 
 /// Borderless nonactivating panel that can take key focus while another app
-/// stays active, and hides (never closes) on Esc. `canBecomeKey` must be
-/// overridden: borderless windows refuse key status by default, which would
-/// silently break typing.
+/// stays active, and hides (never closes) on Esc — via its own cancelOperation
+/// and the SwiftUI content's onExitCommand. `canBecomeKey` must be overridden:
+/// borderless windows refuse key status by default, which would silently break
+/// typing.
 final class CommandPanel: NSPanel {
     var onEscape: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { onEscape?() }
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // Esc — belt and braces beside cancelOperation
-            onEscape?()
-            return
-        }
-        super.keyDown(with: event)
+
+    /// Shared HUD chrome for the pill and the image lightbox: borderless,
+    /// floating, joins the ACTIVE Space — including other apps' fullscreen
+    /// Spaces — instead of yanking the user anywhere, and stays clear so the
+    /// SwiftUI content draws every pixel.
+    convenience init(hudContentRect rect: NSRect) {
+        self.init(contentRect: rect,
+                  styleMask: [.borderless, .nonactivatingPanel],
+                  backing: .buffered,
+                  defer: false)
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        hidesOnDeactivate = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        appearance = NSAppearance(named: .darkAqua)
     }
 }
 
@@ -1857,34 +1786,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                               action: #selector(showFloatPanel),
                                               keyEquivalent: "k")
 
-    /// AIPENDANT_SMOKE=1 (test harness only): suppress the cold-launch main
-    /// window and listen for a distributed-notification HUD toggle, so a smoke
-    /// test can exercise the panel without synthetic keystrokes.
-    private var smokeMode: Bool {
-        ProcessInfo.processInfo.environment["AIPENDANT_SMOKE"] == "1"
-    }
-
-    private var agentBaseURL: URL {
-        if smokeMode,
-           let raw = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_AGENT_BASE"],
-           let url = URL(string: raw) {
-            return url
-        }
-        return URL(string: "http://127.0.0.1:8000")!
-    }
+    private let agentBaseURL = URL(string: "http://127.0.0.1:8000")!
 
     // Two-view shell: web dashboard (shared with browser + iPhone) and native local view.
     private var webPane: WebPane?
     private var nativePaneView: NSView?
     private var tabControl: NSSegmentedControl?
-    private var selectedTab: MainTab = .dashboard
+    /// Which tab is up (persisted): false = Dashboard, true = This Mac.
+    private var showingThisMac = false
+    private static let thisMacTabKey = "ShowThisMacTab"
     private static let tabsItemIdentifier = NSToolbarItem.Identifier("tabs")
 
     private let dashboardURL = URL(string: "https://ai-pendant-dashboard.your-subdomain.workers.dev")!
     private let launchAgentLabel = "com.aipendant.agent"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        AgentEnv.registerDefaults()
         buildMainMenu()
         // Variable length: the icon grows a small count title when approvals wait.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1907,7 +1823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let hotkey = GlobalHotkey { [weak self] in self?.toggleFloatPanel() }
         let boundLabel = hotkey.register()
         globalHotkey = hotkey
-        floatModel.applyHotkey(label: boundLabel)
+        floatModel.hotkeyLabel = boundLabel
         floatCommandItem.title = boundLabel.map { "Floating Command (\($0))" } ?? "Floating Command…"
 
         floatModel.requestHide = { [weak self] in self?.hideFloatPanel() }
@@ -1922,54 +1838,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .sink { [weak self] count in self?.applyApprovalBadge(count) }
             .store(in: &cancellables)
 
-        if smokeMode {
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(toggleFloatPanel),
-                name: Notification.Name("com.aipendant.menubar.smoke.toggleHUD"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeSnapshotHUD),
-                name: Notification.Name("com.aipendant.menubar.smoke.snapshotHUD"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeAttachTestFile),
-                name: Notification.Name("com.aipendant.menubar.smoke.attachTestFile"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeSendCommand),
-                name: Notification.Name("com.aipendant.menubar.smoke.sendCommand"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokePickFiles),
-                name: Notification.Name("com.aipendant.menubar.smoke.pickFiles"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeScreenshot),
-                name: Notification.Name("com.aipendant.menubar.smoke.screenshot"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokePreviewImage),
-                name: Notification.Name("com.aipendant.menubar.smoke.previewImage"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeSnapshotPreview),
-                name: Notification.Name("com.aipendant.menubar.smoke.snapshotPreview"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeSetText),
-                name: Notification.Name("com.aipendant.menubar.smoke.setText"),
-                object: nil)
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(smokeOutsideClick),
-                name: Notification.Name("com.aipendant.menubar.smoke.outsideClick"),
-                object: nil)
-            NSLog("AI Pendant: smoke mode — main window suppressed, HUD toggle listener active")
-        }
-
         // A cold launch from Spotlight/Finder/Dock must show the window — otherwise
         // opening the app looks like it did nothing. Launching at login stays quiet
         // in the menu bar.
-        if !launchedAsLoginItem && !smokeMode {
+        if !launchedAsLoginItem {
             showMainWindow()
         }
     }
@@ -1985,10 +1857,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showMainWindow()
         return false
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
     }
 
     // MARK: Main window
@@ -2007,11 +1875,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.appearance = NSAppearance(named: .darkAqua)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            window.backgroundColor = NSColor(red: 0.043, green: 0.051, blue: 0.078, alpha: 1)
+            window.backgroundColor = Palette.inkNS
 
             let container = NSView()
             container.wantsLayer = true
-            container.layer?.backgroundColor = NSColor(red: 0.043, green: 0.051, blue: 0.078, alpha: 1).cgColor
+            container.layer?.backgroundColor = Palette.inkNS.cgColor
 
             let pane = WebPane(url: dashboardURL)
             pane.webView.translatesAutoresizingMaskIntoConstraints = false
@@ -2048,9 +1916,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.center()
             mainWindow = window
 
-            applyTab(MainTab.remembered) // "Dashboard" unless the user last chose otherwise
+            // "Dashboard" unless the user last chose otherwise.
+            applyTab(showThisMac: UserDefaults.standard.bool(forKey: Self.thisMacTabKey))
         } else {
-            applyTab(selectedTab)
+            applyTab(showThisMac: showingThisMac)
         }
         NSApp.setActivationPolicy(.regular) // Dock icon while the window is open
         NSApp.activate(ignoringOtherApps: true)
@@ -2065,10 +1934,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func windowWillClose(_ notification: Notification) {
-        if (notification.object as? NSWindow) === floatPanel {
-            floatModel.panelDidHide() // closed via title-bar button
-            return
-        }
         guard (notification.object as? NSWindow) === mainWindow else { return }
         model.stopLive()
         NSApp.setActivationPolicy(.accessory) // back to menu-bar-only
@@ -2077,23 +1942,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Tabs
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        applyTab(sender.selectedSegment == 1 ? .thisMac : .dashboard)
+        applyTab(showThisMac: sender.selectedSegment == 1)
     }
 
-    private func applyTab(_ tab: MainTab) {
-        selectedTab = tab
-        tab.remember()
-        tabControl?.selectedSegment = (tab == .thisMac) ? 1 : 0
+    private func applyTab(showThisMac: Bool) {
+        showingThisMac = showThisMac
+        UserDefaults.standard.set(showThisMac, forKey: Self.thisMacTabKey)
+        tabControl?.selectedSegment = showThisMac ? 1 : 0
 
-        let showingWeb = (tab == .dashboard)
-        webPane?.webView.isHidden = !showingWeb
-        nativePaneView?.isHidden = showingWeb
+        webPane?.webView.isHidden = showThisMac
+        nativePaneView?.isHidden = !showThisMac
 
-        if showingWeb {
+        if showThisMac {
+            model.startLive()
+        } else {
             webPane?.loadIfNeeded()
             model.stopLive()   // no double work while the web view is in front
-        } else {
-            model.startLive()
         }
     }
 
@@ -2116,7 +1980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                            target: self,
                                            action: #selector(tabChanged(_:)))
         segmented.segmentStyle = .automatic
-        segmented.selectedSegment = (selectedTab == .thisMac) ? 1 : 0
+        segmented.selectedSegment = showingThisMac ? 1 : 0
         tabControl = segmented
 
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -2130,7 +1994,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private func buildStatusMenu() {
         statusMenu.delegate = self
-        statusMenu.autoenablesItems = true
 
         statusMenu.addItem(makeItem("Open AI Pendant", #selector(showMainWindow)))
         floatCommandItem.target = self
@@ -2244,26 +2107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             // Borderless pill: no title bar, no traffic lights, no close box.
             // Esc hides, the global hotkey toggles, an outside click hides (see
             // installClickMonitors), and the background stays draggable.
-            let panel = CommandPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 660, height: 56),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false)
-            panel.isFloatingPanel = true
-            panel.level = .floating
-            // Joins the ACTIVE Space — including other apps' fullscreen Spaces —
-            // instead of yanking the user anywhere. (.moveToActiveSpace is
-            // meaningless alongside .canJoinAllSpaces and was dropped.)
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            let panel = CommandPanel(hudContentRect: NSRect(x: 0, y: 0, width: 660, height: 56))
             panel.isMovableByWindowBackground = true
-            panel.hidesOnDeactivate = false
-            panel.becomesKeyOnlyIfNeeded = false
-            panel.isReleasedWhenClosed = false
-            panel.isOpaque = false
-            panel.backgroundColor = .clear   // SwiftUI draws the pill + card
-            panel.hasShadow = true
-            panel.appearance = NSAppearance(named: .darkAqua)
-            panel.delegate = self
             panel.onEscape = { [weak self] in self?.hideFloatPanel() }
             // "Has the user ever placed this panel?" must be answered from the
             // stored default itself: the frame origin is useless as a signal
@@ -2296,12 +2141,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     /// Global hotkey behavior: hidden → show + focus; visible → hide.
-    @objc private func toggleFloatPanel() {
+    private func toggleFloatPanel() {
         if let panel = floatPanel, panel.isVisible {
-            NSLog("AI Pendant: HUD toggle → hide")
             hideFloatPanel()
         } else {
-            NSLog("AI Pendant: HUD toggle → show")
             showFloatPanel()
         }
     }
@@ -2327,7 +2170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // 256px thumbnail, and not the full-res original at full RAM cost.
         let maxBox = CGSize(width: vis.width * 0.8, height: vis.height * 0.8)
         let maxDim = Int(max(maxBox.width, maxBox.height) * screen.backingScaleFactor)
-        guard let image = AttachmentThumbnail.loadSized(path: url.path, maxPixel: min(maxDim, 4000)) else {
+        guard let image = AttachmentThumbnail.load(path: url.path, maxPixel: min(maxDim, 4000),
+                                                   cached: false) else {
             NSLog("AI Pendant: preview — could not decode %@", url.path)
             return
         }
@@ -2343,20 +2187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         dismissImagePreview(refocusPill: false) // replace any existing preview
 
-        let panel = CommandPanel(
-            contentRect: NSRect(origin: .zero, size: cardSize),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = false
-        panel.isReleasedWhenClosed = false
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.appearance = NSAppearance(named: .darkAqua)
+        let panel = CommandPanel(hudContentRect: NSRect(origin: .zero, size: cardSize))
         // Esc while the preview is key closes ONLY the preview (it's key, so the
         // pill's own Esc handler never sees the event); then the pill is re-keyed.
         panel.onEscape = { [weak self] in self?.dismissImagePreview() }
@@ -2373,8 +2204,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         previewPanel = panel                 // set BEFORE key so the monitors treat it as "inside"
         panel.makeKeyAndOrderFront(nil)
-        NSLog("AI Pendant: image preview open — %@ card %.0fx%.0f",
-              url.lastPathComponent, cardSize.width, cardSize.height)
     }
 
     private func dismissImagePreview(refocusPill: Bool = true) {
@@ -2459,10 +2288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { captureWhenGone(tries + 1) }
                 return
             }
-            let pillGone = !Self.windowIsOnScreen(windowNumber)
-            NSLog("AI Pendant: screenshot — pillOnScreen=%d after %d checks, display=%@",
-                  pillGone ? 0 : 1, tries, displayIndex.map(String.init) ?? "main")
-
             var args: [String] = ["-x"] // -x: silent, no camera sound
             if let displayIndex { args += ["-D", String(displayIndex)] }
             args.append(path)
@@ -2477,7 +2302,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     let exists = FileManager.default.fileExists(atPath: path)
                     if proc.terminationStatus == 0, exists {
                         self.floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
-                        NSLog("AI Pendant: screenshot saved + attached: %@", path)
                     } else {
                         self.floatModel.status =
                             "Screenshot failed — grant AI Pendant Screen Recording in System Settings"
@@ -2547,12 +2371,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         picker.allowsMultipleSelection = true
         picker.message = "Attach files to your command"
         picker.prompt = "Attach"
-        NSLog("AI Pendant: file picker presenting as sheet on the pill")
 
         picker.beginSheetModal(for: panel) { [weak self] response in
             guard let self else { return }
             let urls = response == .OK ? picker.urls : []
-            NSLog("AI Pendant: file picker closed response=%ld urls=%d", response.rawValue, urls.count)
             self.floatModel.isFilePickerOpen = false
             if !urls.isEmpty { self.floatModel.addAttachments(urls: urls) }
             // Re-key the pill and drop the caret back into the field.
@@ -2578,127 +2400,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                   let field = firstEditableTextField(content) else { return }
             panel.makeFirstResponder(field)
         }
-    }
-
-    /// Smoke-harness only: the app renders its own HUD content to a PNG (an app
-    /// may always draw its own windows — no Screen Recording TCC involved) so a
-    /// headless test can SEE the panel. Inert outside AIPENDANT_SMOKE=1.
-    @objc private func smokeSnapshotHUD() {
-        guard smokeMode,
-              let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_SNAPSHOT"],
-              !path.isEmpty,
-              let panel = floatPanel, panel.isVisible,
-              let view = panel.contentView else {
-            NSLog("AI Pendant: smoke snapshot skipped (panel hidden or no path)")
-            return
-        }
-        // Dark ground: the pill floats over a dark HUD material in real life.
-        writeSnapshot(of: view, to: path, ground: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 1))
-        NSLog("AI Pendant: smoke snapshot written — panel %.0fx%.0f at (%.0f, %.0f)",
-              panel.frame.width, panel.frame.height,
-              panel.frame.origin.x, panel.frame.origin.y)
-    }
-
-    /// Smoke-harness only: open the lightbox for the first staged image through
-    /// the SAME path the thumbnail click uses, so the preview can be verified.
-    @objc private func smokePreviewImage() {
-        guard smokeMode,
-              let url = floatModel.attachments.first(where: { $0.isImage })?.url else {
-            NSLog("AI Pendant: smoke preview — no image attachment staged")
-            return
-        }
-        presentImagePreview(url: url)
-    }
-
-    /// Smoke-harness only: render the open lightbox to a PNG. Composited over a
-    /// LIGHT ground to prove the dim backdrop + image read even over a bright desktop.
-    @objc private func smokeSnapshotPreview() {
-        guard smokeMode,
-              let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_PREVIEW_SNAPSHOT"],
-              !path.isEmpty,
-              let panel = previewPanel, panel.isVisible,
-              let view = panel.contentView else {
-            NSLog("AI Pendant: smoke preview snapshot skipped (no lightbox or no path)")
-            return
-        }
-        writeSnapshot(of: view, to: path, ground: NSColor(calibratedWhite: 0.85, alpha: 1))
-        NSLog("AI Pendant: smoke preview snapshot written — panel %.0fx%.0f", panel.frame.width, panel.frame.height)
-    }
-
-    /// Renders a view offscreen (an app may always draw its own windows — no
-    /// Screen Recording TCC) over a solid ground, since the panels are clear and
-    /// the blur material does not composite offline.
-    private func writeSnapshot(of view: NSView, to path: String, ground: NSColor) {
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-        view.cacheDisplay(in: view.bounds, to: rep)
-        let composed = NSImage(size: view.bounds.size)
-        composed.lockFocus()
-        ground.setFill()
-        NSRect(origin: .zero, size: view.bounds.size).fill()
-        rep.draw(in: NSRect(origin: .zero, size: view.bounds.size))
-        composed.unlockFocus()
-        if let tiff = composed.tiffRepresentation,
-           let outRep = NSBitmapImageRep(data: tiff),
-           let data = outRep.representation(using: .png, properties: [:]) {
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
-    }
-
-    /// Smoke-harness only: attach a real file path (from AIPENDANT_SMOKE_ATTACH)
-    /// through the EXACT code the file panel's completion uses, so a headless
-    /// test can prove a returned URL becomes a chip and rides the /plan body.
-    @objc private func smokeAttachTestFile() {
-        guard smokeMode,
-              let raw = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_ATTACH"],
-              !raw.isEmpty else { return }
-        // Newline-separates paths so one run can stage an image AND a non-image
-        // and prove both render styles in a single snapshot. One path → one file.
-        let urls = raw.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
-        floatModel.addAttachments(urls: urls)
-        NSLog("AI Pendant: smoke attach — attachments now %d", floatModel.attachments.count)
-    }
-
-    /// Smoke-harness only: set the draft text (so a hide→reshow can prove the
-    /// typed draft survives the hide, not just the attachments).
-    @objc private func smokeSetText() {
-        guard smokeMode else { return }
-        let t = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_TEXT"] ?? "Draft: compare the Q3 numbers"
-        floatModel.text = t
-        NSLog("AI Pendant: smoke set text — %@", t)
-    }
-
-    /// Smoke-harness only: run the EXACT outside-click handler the mouse monitors
-    /// call, so hide-on-outside-click, draft preservation, and close-both-with-
-    /// preview-open can be verified without synthesizing real desktop clicks.
-    @objc private func smokeOutsideClick() {
-        guard smokeMode else { return }
-        handleClickOutsideHUD()
-        NSLog("AI Pendant: smoke outside-click — after: visible=%d text=%d attach=%d preview=%d",
-              (floatPanel?.isVisible ?? false) ? 1 : 0,
-              floatModel.text.isEmpty ? 0 : 1,
-              floatModel.attachments.count,
-              previewPanel == nil ? 0 : 1)
-    }
-
-    /// Smoke-harness only: fire send() with the currently-staged attachments so
-    /// the test can inspect the POST body the agent receives.
-    @objc private func smokeSendCommand() {
-        guard smokeMode else { return }
-        if floatModel.text.isEmpty { floatModel.text = "look at the attached files" }
-        floatModel.send()
-    }
-
-    /// Smoke-harness only: present the real NSOpenPanel (blocks in runModal;
-    /// the test screencaptures the panel to prove it presents).
-    @objc private func smokePickFiles() {
-        guard smokeMode else { return }
-        presentFilePicker()
-    }
-
-    /// Smoke-harness only: trigger the real full-display screenshot path.
-    @objc private func smokeScreenshot() {
-        guard smokeMode else { return }
-        captureScreenshotAttachment()
     }
 
     /// Menu-bar badge: waveform icon plus a small count while approvals wait.
