@@ -129,18 +129,21 @@ export function createRelayInference({
      * A 403 used to be a guess between two very different failures, and the
      * error text said so — "either the relay has no inference route yet, or
      * this phone's credential is missing the scope". The relay now names which
-     * one (server.js:458, `credentialPredatesScopes`), so this stops guessing.
+     * one (cloud-relay/deviceAuth.js, `credentialNarrowedBelowRole`), so this
+     * stops guessing.
      *
-     * The distinction is not cosmetic. Scopes are frozen into a credential when
-     * it is created and NOTHING updates them, so the hour after a deploy that
-     * widens a role, every already-paired node fails this way at once — and the
-     * generic message points the owner at the new feature instead of at the
-     * stale token. One is "re-pair, it takes a click"; the other is "this role
-     * genuinely may not do that".
+     * The distinction is not cosmetic. An ordinary credential derives its
+     * effective scopes from the live role table on every request, so a deploy
+     * that widens a role reaches every already-paired phone with no re-pair.
+     * What still fails this way is a credential minted with an explicit
+     * `scopes` ceiling: narrowed at pair time, it never widens on its own,
+     * even when its role does. One is "re-pair with a wider scope list, it
+     * takes a click"; the other is "this role genuinely may not do that".
+     * (The wire code keeps its old spelling so shipped clients keep working.)
      */
     if (response.status === 403 && payload?.code === 'credential_predates_capability') {
       throw new InferenceUnavailableError(
-        `This phone's credential was issued before it was allowed to reach a model. Re-pair the phone — scopes are frozen into a credential when it is created, so a phone paired before the relay gained this capability never picks it up on its own. Relay said: ${payload.error}`,
+        `This phone's credential was minted with an explicit scope ceiling that does not cover reaching a model. Re-pair the phone with a wider scope list — a narrowed credential keeps its pair-time ceiling and never widens on its own, even when its role does. Relay said: ${payload.error}`,
         { status: 403, path, code: payload.code, staleCredential: true },
       )
     }
