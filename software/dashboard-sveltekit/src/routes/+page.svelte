@@ -107,7 +107,7 @@
     isTranscribing,
     type JsonRecord,
   } from "$lib/pipeline";
-  import { formatWhen, statusLabel, type JobView } from "$lib/jobs";
+  import { formatWhen, nodeMeta, statusLabel, type JobView } from "$lib/jobs";
   import {
     pendingApprovals,
     runState,
@@ -687,6 +687,7 @@
   <AnswerCard
     state={hero}
     source={String(selected?.source || "")}
+    origin={String(selected?.origin || "")}
     ownAudio={heroOwnAudio}
     replyAudio={heroReplyAudio}
     onNeedsYou={approvals.length ? scrollToApproval : null}
@@ -732,7 +733,8 @@
               </span>
               <span class="recent-meta">
                 <i class="state-dot {state.tone}" aria-hidden="true"></i>
-                {state.label} · {formatWhen(run.createdAt)}
+                {nodeMeta({ origin: run.origin, source: run.source }).label} · {state.label}
+                · {formatWhen(run.createdAt)}
               </span>
             </button>
           </li>
@@ -954,7 +956,11 @@
                 >
                   <strong>{entry.command || "(no transcript)"}</strong>
                   <small
-                    >{statusLabel(entry.status)} · {entry.origin || entry.inputMode || "voice"} · {clock(
+                    >{nodeMeta({
+                      origin: entry.origin,
+                      source: entry.source,
+                      kind: entry.kind,
+                    }).label} · {statusLabel(entry.status)} · {clock(
                       entry.createdAt,
                     )}</small
                   >
@@ -1027,7 +1033,11 @@
             <blockquote>{historyDetail.reply}</blockquote>
           {/if}
           <p class="history-detail-meta">
-            {historyDetail.origin || historyDetail.inputMode || "voice"} ·
+            {nodeMeta({
+              origin: historyDetail.origin,
+              source: historyDetail.source,
+              kind: historyDetail.kind,
+            }).label} ·
             {clock(historyDetail.createdAt)}
             {#if historyDetail.sessionId}
               · chat {historyDetail.sessionId.slice(0, 8)}

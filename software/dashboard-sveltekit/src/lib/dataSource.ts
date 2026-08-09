@@ -25,6 +25,7 @@ import {
   type JobView,
   type RoutineView,
 } from "$lib/jobs";
+import { mergeMacLocalHistory } from "$lib/hiveFeed.js";
 
 export type Backend = "agent" | "relay";
 
@@ -219,7 +220,7 @@ export async function fetchLatestRun(): Promise<any> {
   return payload?.latest ?? null;
 }
 
-export async function fetchHistory(query: string, cursor: string) {
+async function fetchHistoryBase(query: string, cursor: string) {
   if (backend === "agent") {
     const payload = await agentRequest("/pipeline");
     const runs: any[] = Array.isArray(payload?.runs) ? payload.runs : [];
@@ -249,6 +250,37 @@ export async function fetchHistory(query: string, cursor: string) {
   if (query.trim()) params.set("q", query.trim());
   if (cursor) params.set("cursor", cursor);
   return apiRequest(`/api/history?${params}`);
+}
+
+/**
+ * History, with the owner's Mac-local work folded in.
+ *
+ * The base feed (relay `/v1/ops/history` off the Worker, the agent's own
+ * `/pipeline` on the Mac) is the shared record — but neither ever saw the
+ * floating HUD or the on-Mac dashboard composer, whose runs live only in
+ * jobTracker (`GET /jobs`). So on the first page we also read `/jobs` and fold
+ * the owner's Mac-local rows into one list (`mergeMacLocalHistory`, deduped by
+ * id). Older pages skip it: the whole jobTracker window (≤120 rows) already
+ * lands on page one, and re-folding it under every cursor would repeat it.
+ *
+ * Best-effort by design: if `/jobs` is unreachable the shared record still
+ * renders exactly as before, rather than an error taking the whole feed down.
+ */
+export async function fetchHistory(query: string, cursor: string) {
+  const base = await fetchHistoryBase(query, cursor);
+  if (cursor) return base;
+  try {
+    const jobs = (await fetchJobs()).data;
+    const needle = query.trim().toLowerCase();
+    const scoped = needle
+      ? jobs.filter((job) =>
+          `${job.command} ${job.summary}`.toLowerCase().includes(needle),
+        )
+      : jobs;
+    return { ...base, entries: mergeMacLocalHistory(base.entries, scoped) };
+  } catch {
+    return base;
+  }
 }
 
 export async function fetchHistoryDetail(pipelineId: string) {

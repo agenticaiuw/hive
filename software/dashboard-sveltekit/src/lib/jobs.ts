@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Job records cross two backends and are schemaless at this display boundary. */
 
+import { hiveNodeFor } from "$lib/hiveFeed.js";
+
 /**
  * One job shape for both backends.
  *
@@ -53,26 +55,6 @@ export type RoutineView = {
   runCount: number;
 };
 
-/*
- * Who asked for this work. The owner's own pendant commands, work the agent
- * started on its own, and work a schedule fired are indistinguishable in the
- * job list without this — and telling them apart is the whole point.
- */
-const JOB_SOURCES: Record<string, { label: string; hint: string }> = {
-  pendant: { label: "Pendant", hint: "You asked for this from the pendant" },
-  routine: { label: "Routine", hint: "Fired on a schedule, not by you" },
-  recon: { label: "Recon", hint: "The agent started this on its own" },
-  "harness-task": { label: "Harness", hint: "Automated harness run" },
-  "mac-planner": { label: "Planner", hint: "Planned on this Mac" },
-  measure: { label: "Measure", hint: "Benchmark / measurement run" },
-  probe: { label: "Probe", hint: "Health probe" },
-  local: { label: "Local", hint: "Sent from this dashboard or local API" },
-  "user-test": { label: "Manual", hint: "Hand-run test from the owner" },
-  test: { label: "Test", hint: "Automated test run" },
-  dashboard: { label: "Dashboard", hint: "Typed into this dashboard" },
-  cloudflare: { label: "Cloud", hint: "Arrived through the Cloudflare relay" },
-};
-
 const RUNNING_STATUSES = [
   "processing",
   "queued",
@@ -90,14 +72,29 @@ export function isRunningStatus(status: unknown) {
   return RUNNING_STATUSES.includes(String(status));
 }
 
+/**
+ * The node that answered a job, in plain words, from its `source` alone.
+ *
+ * Every per-node label on the page comes from one classifier (`hiveNodeFor`)
+ * so the Jobs panel, the answer card, and the history feed can never disagree
+ * about what "This Mac" or "Pendant" means. `nodeMeta` is the same classifier
+ * when more than the source is known (a history entry's `origin` is the
+ * stronger signal — the relay stamps every run it saw with `source:
+ * "cloudflare"`, so source alone would call a pendant run "Cloud").
+ */
 export function sourceMeta(source: unknown) {
-  const key = String(source || "unknown");
-  return (
-    JOB_SOURCES[key] || {
-      label: key === "unknown" ? "Unknown" : humanizeKey(key),
-      hint: "Origin not recorded",
-    }
-  );
+  const { label, hint } = hiveNodeFor({ source });
+  return { label, hint };
+}
+
+export function nodeMeta(record: {
+  origin?: unknown;
+  source?: unknown;
+  kind?: unknown;
+  executor?: unknown;
+}) {
+  const { label, hint } = hiveNodeFor(record);
+  return { label, hint };
 }
 
 export function humanizeKey(key: unknown) {
@@ -130,6 +127,17 @@ export function statusLabel(status: unknown) {
   if (value === "failed") return "Failed";
   if (value === "cancelled") return "Cancelled";
   if (value === "transcribing") return "Transcribing";
+  /*
+   * The browser node's honest vocabulary (browserTaskHistory.js), mirrored
+   * here so a run that finished without doing the thing is never worded "Done".
+   * `read_only`/`handed_off` humanize to "Read Only"/"Handed Off"; the explicit
+   * forms below keep the sentence case the rest of this table uses.
+   */
+  if (value === "incomplete") return "Incomplete";
+  if (value === "read_only") return "Read only";
+  if (value === "handed_off") return "Handed off";
+  if (value === "finished") return "Finished";
+  if (value === "recorded") return "Recorded";
   return humanizeKey(value);
 }
 
@@ -138,7 +146,13 @@ export function statusTone(status: unknown): "ok" | "run" | "warn" | "off" {
   const value = String(status || "");
   if (isAwaitingApproval(value)) return "warn";
   if (isRunningStatus(value)) return "run";
-  if (value === "failed" || value === "cancelled") return "warn";
+  // 'incomplete' is a finished run that did not meet its goal — attention, not
+  // the neutral tone a merely-terminal state gets, and never the "ok" of Done.
+  if (value === "failed" || value === "cancelled" || value === "incomplete") {
+    return "warn";
+  }
+  // Only a genuine success is "ok". read_only / handed_off / finished /
+  // recorded are terminal-but-not-Done, so they stay neutral.
   if (value === "completed") return "ok";
   return "off";
 }
