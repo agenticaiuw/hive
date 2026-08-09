@@ -363,3 +363,375 @@ test('whatever voice may auto-run, a routine may too — the venue only widens',
   assert.equal(classifyPlanForRoutine([]).autoRun, false)
   assert.equal(classifyPlanForRoutine(undefined).autoRun, false)
 })
+
+/* ---- effect, not mechanism ----------------------------------------------
+ * The 2026-08-09 incident: "what are the four latest items on my Safari
+ * reading list?" planned ONE run_applescript, and the gate parked it because
+ * the ACTION TYPE was AppleScript. The owner heard nothing (no speaker), saw
+ * "Running" (see pipelineTrace.test.js), and had never asked for that
+ * guardrail. These lock the new line: irreversible or outward-facing needs a
+ * person, reading does not, and anything unreadable counts as the former.
+ * ------------------------------------------------------------------------- */
+
+/** The exact script the planner produced on 2026-08-09, tabs and all. */
+const READING_LIST_SCRIPT = `tell application "Safari"
+	set itemsList to every reading list item
+	set rows to {}
+	repeat with i in itemsList
+		set end of rows to {(date added of i), (name of i), (URL of i)}
+	end repeat
+end tell
+set sortedRows to my sortByDate(rows)
+set output to ""
+set n to 0
+repeat with r in sortedRows
+	set n to n + 1
+	set output to output & (n as text) & ". " & (item 2 of r) & " — " & (item 3 of r) & return
+	if n is 4 then exit repeat
+end repeat
+return output`
+
+test('the reading-list read from the 2026-08-09 incident auto-runs', () => {
+  const action = {
+    type: 'run_applescript',
+    label: "Read the four newest items from Safari's Reading List",
+    params: { script: READING_LIST_SCRIPT },
+  }
+  const verdict = classifyAction(action)
+  assert.equal(verdict.safe, true, verdict.reason)
+  // And as the whole plan it actually was: one action, nothing blocked.
+  const plan = classifyPlan([action])
+  assert.equal(plan.autoRun, true)
+  assert.deepEqual(plan.blocked, [])
+})
+
+/*
+ * The wrinkle that makes the incident script hard: it is full of `set ... to`.
+ * A naive "set means mutation" rule parks the read and the incident repeats.
+ * What separates them is the TARGET — a bare local name or an append to a
+ * local list, versus a property of the application being told.
+ */
+test('a local variable assignment is not an application mutation', () => {
+  const local = [
+    'set rows to {}',
+    'set end of rows to {1, 2}',
+    'set n to n + 1',
+    'set output to ""',
+  ].join('\n')
+  assert.equal(
+    classifyAction({ type: 'run_applescript', params: { script: local } }).safe,
+    true,
+  )
+
+  for (const script of [
+    'tell application "Safari" to set the URL of front document to "http://x"',
+    'tell application "Finder"\n\tset name of front window to "x"\nend tell',
+    'set the clipboard to "x"',
+    // Inside a tell block a bare name can resolve to the app's own property.
+    'tell application "Music"\n\ttell current track\n\t\tset rating to 100\n\tend tell\nend tell',
+  ]) {
+    const verdict = classifyAction({ type: 'run_applescript', params: { script } })
+    assert.equal(verdict.safe, false, `should be held: ${script}`)
+    assert.ok(verdict.reason, 'a held script explains what it would change')
+  }
+})
+
+test('a destructive AppleScript still confirms', () => {
+  const destructive = [
+    'tell application "Safari" to delete every reading list item',
+    'tell application "Finder" to empty the trash',
+    'tell application "Finder" to move file "x" to trash',
+    'tell application "Mail" to send outgoing message 1',
+    'tell application "Safari" to close every window',
+    'tell application "Safari" to quit',
+    'tell application "Finder" to duplicate file "a" to folder "b"',
+    'tell application "Notes" to make new note with properties {name:"x"}',
+    'do shell script "rm -rf ~/Documents"',
+    'tell application "System Events" to keystroke "a"',
+    'tell application "System Events" to click button 1 of window 1',
+    'tell application "Finder" to open location "http://example.com"',
+    'run script "delete every window"',
+    'say "hello"',
+  ]
+  for (const script of destructive) {
+    const verdict = classifyAction({ type: 'run_applescript', params: { script } })
+    assert.equal(verdict.safe, false, `should be held: ${script}`)
+    // The reason names the EFFECT, so a parked plan read cold still teaches.
+    assert.ok(verdict.reason.length > 20, `should say why: ${script}`)
+    assert.doesNotMatch(
+      verdict.reason,
+      /^Running AppleScript/,
+      'a reason should describe the effect, not the mechanism',
+    )
+  }
+})
+
+/*
+ * The statement-shape allowlist catches a bare `delete every window`, because
+ * that line is not a shape it recognises. These are the ones it CANNOT catch:
+ * the statement shape is perfectly ordinary — an assignment, a return, a
+ * one-line tell — and the mutation is hiding in the expression. Only the
+ * effect denylist holds these, so this is the test that makes it load-bearing.
+ */
+test('a mutation hidden inside an otherwise-readable statement confirms', () => {
+  for (const script of [
+    'set x to (do shell script "rm -rf ~/Documents")',
+    'return (delete every reading list item)',
+    'tell application "Mail" to set x to (send outgoing message 1)',
+    'tell application "Safari" to set x to (close front window)',
+    'set rows to {}\nset end of rows to (make new note)',
+  ]) {
+    const verdict = classifyAction({ type: 'run_applescript', params: { script } })
+    assert.equal(verdict.safe, false, `should be held: ${script}`)
+    assert.ok(verdict.reason.length > 20, `should say why: ${script}`)
+  }
+})
+
+/*
+ * System Events is the UI-scripting back door, and its read-only uses look
+ * exactly like a read because they ARE one — right up until the same tell block
+ * clicks something. Held on the target rather than on the verb, which is the
+ * only way to hold the ones that have not clicked anything yet.
+ */
+test('a System Events script confirms even when it only reads', () => {
+  const verdict = classifyAction({
+    type: 'run_applescript',
+    params: { script: 'tell application "System Events" to get name of every process' },
+  })
+  assert.equal(verdict.safe, false)
+  assert.match(verdict.reason, /System Events/)
+})
+
+test('a mixed or unreadable AppleScript confirms', () => {
+  const held = [
+    // One read and one mutation: mixed is not a read.
+    'tell application "Safari"\n\tset rows to every reading list item\n\tclose every window\nend tell',
+    // Unterminated string: unparseable is not a read.
+    'tell application "Safari"\n\tset x to "unterminated\nend tell',
+    // A statement shape this checker has never seen.
+    'flurble the wobbet of doom',
+    // Nothing to judge.
+    '',
+    '   ',
+    // Only comments.
+    '-- just a note\n(* and a block *)',
+  ]
+  for (const script of held) {
+    const verdict = classifyAction({ type: 'run_applescript', params: { script } })
+    assert.equal(verdict.safe, false, `should be held: ${JSON.stringify(script)}`)
+    assert.ok(verdict.reason)
+  }
+  // A missing script is held too — classifyAction is called with bare types.
+  assert.equal(classifyAction({ type: 'run_applescript' }).safe, false)
+  assert.equal(classifyAction({ type: 'run_applescript', params: {} }).safe, false)
+})
+
+test('read-only shell commands auto-run', () => {
+  for (const command of [
+    'ls -la ~/Downloads',
+    'cat ~/notes.txt',
+    'head -n 20 ~/notes.txt',
+    'tail -n 5 ~/notes.txt',
+    'grep -i todo ~/notes.txt',
+    'find ~/Documents -name "*.pdf"',
+    'stat ~/notes.txt',
+    'wc -l ~/notes.txt',
+    'du -sh ~/Downloads',
+    'df -h',
+    'date',
+    'date +%s',
+    'pmset -g batt',
+    'system_profiler SPPowerDataType',
+    'defaults read com.apple.dock',
+    'plutil -p ~/Library/Preferences/com.apple.dock.plist',
+    'plutil -convert json -o - ~/Library/Preferences/com.apple.dock.plist',
+    'sw_vers',
+    'uname -a',
+    'ioreg -c AppleSmartBattery',
+    'pgrep Safari',
+    'ps aux',
+    'networksetup -getinfo Wi-Fi',
+    // Piped reads: every stage of the pipeline is a read.
+    'cat ~/notes.txt | grep todo | wc -l',
+    // osascript is judged by the script it carries, not by its own name.
+    'osascript -e \'tell application "Safari" to get URL of current tab of front window\'',
+  ]) {
+    const verdict = classifyAction({ type: 'run_shell', params: { command } })
+    assert.equal(verdict.safe, true, `should auto-run: ${command} (${verdict.reason})`)
+  }
+})
+
+test('a shell command that changes anything still confirms', () => {
+  for (const command of [
+    'rm -rf ~/Documents',
+    'mv ~/a ~/b',
+    'cp ~/a ~/b',
+    'chmod 777 ~/a',
+    'chown me ~/a',
+    'kill -9 123',
+    'killall Safari',
+    'launchctl unload ~/Library/LaunchAgents/x.plist',
+    'brew install cowsay',
+    'npm install -g something',
+    'pip install requests',
+    'curl -o ~/x.sh https://example.com/x.sh',
+    'wget https://example.com/x.sh',
+    'find . -delete',
+    'find . -exec rm {} ;',
+    'defaults write com.apple.dock autohide 1',
+    'plutil -convert xml1 ~/a.plist',
+    'networksetup -setairportpower en0 off',
+    'sysctl -w kern.maxfiles=100',
+    'ls > ~/listing.txt',
+    'cat ~/a >> ~/b',
+    // A read that pipes into something that is not one.
+    'cat ~/notes.txt | tee ~/copy.txt',
+    'ls | xargs rm',
+    // osascript cannot be used to smuggle a mutation past the shell rule.
+    'osascript -e \'tell application "Finder" to quit\'',
+    'osascript ~/some-script.scpt',
+  ]) {
+    const verdict = classifyAction({ type: 'run_shell', params: { command } })
+    assert.equal(verdict.safe, false, `should be held: ${command}`)
+    assert.ok(verdict.reason.length > 20, `should say why: ${command}`)
+  }
+
+  /* sudo would be held anyway — it is not on the read-only list — but the
+   * owner reading a parked plan deserves the actual reason rather than "sudo
+   * is an unknown command". */
+  const elevated = classifyAction({ type: 'run_shell', params: { command: 'sudo ls' } })
+  assert.equal(elevated.safe, false)
+  assert.match(elevated.reason, /as another user/)
+})
+
+test('a chained shell command takes the strictest verdict', () => {
+  // Each of these is a read next to something that is not one.
+  for (const command of [
+    'ls; rm -rf ~/Documents',
+    'ls && rm -rf ~/Documents',
+    'ls || rm -rf ~/Documents',
+    'rm -rf ~/Documents; ls',
+    'ls\nrm -rf ~/Documents',
+    'pmset -g batt; rm -rf /',
+    'pmset -g batt | sh',
+  ]) {
+    assert.equal(
+      classifyAction({ type: 'run_shell', params: { command } }).safe,
+      false,
+      `should be held: ${command}`,
+    )
+  }
+  // Chaining reads with reads is still a read.
+  assert.equal(
+    classifyAction({
+      type: 'run_shell',
+      params: { command: 'sw_vers && uname -a; df -h' },
+    }).safe,
+    true,
+  )
+})
+
+test('a shell command this checker cannot bound confirms', () => {
+  for (const command of [
+    'ls `whoami`',
+    'ls $(whoami)',
+    'ls $HOME',
+    'ls &',
+    'ls "unbalanced',
+    "ls 'unbalanced",
+    '(ls; rm -rf /)',
+    'FOO=bar ls',
+    `ls ${'x'.repeat(900)}`,
+    '',
+    '   ',
+  ]) {
+    assert.equal(
+      classifyAction({ type: 'run_shell', params: { command } }).safe,
+      false,
+      `should be held: ${JSON.stringify(command)}`,
+    )
+  }
+})
+
+/*
+ * The point of the change was to move ONE line, not to open the gate. Nothing
+ * in the irreversible/outward tier may move, whatever its argument says.
+ */
+test('every previously-dangerous action type is unchanged', () => {
+  for (const type of [
+    'run_project',
+    'write_file',
+    'copy_path',
+    'move_path',
+    'delete_path',
+    'send_email',
+    'send_message',
+    'computer_use_task',
+  ]) {
+    for (const params of [
+      {},
+      // Arguments that "look like a read" must not buy anything here.
+      { path: '~/notes.txt', command: 'ls', script: 'get name of window 1' },
+    ]) {
+      const verdict = classifyAction({ type, params })
+      assert.equal(verdict.safe, false, `${type} must still require confirmation`)
+      assert.ok(verdict.reason, `${type} should explain why it is held`)
+    }
+  }
+  // The iOS escalation list is untouched by any of this.
+  assert.equal(
+    classifyAction({ type: 'ios_tap_text', params: { query: 'Place Order' } }).safe,
+    false,
+  )
+  assert.equal(
+    classifyAction({ type: 'ios_type_text', params: { text: '4111 1111 1111 1111' } })
+      .safe,
+    false,
+  )
+  // And the routine ceiling is exactly the same four types.
+  assert.deepEqual(
+    [...ROUTINE_DENY_ACTIONS].sort(),
+    ['computer_use_task', 'delete_path', 'send_email', 'send_message'],
+  )
+})
+
+test('actions that only report an answer are not gated', () => {
+  for (const type of [
+    'get_time',
+    'get_weather',
+    'get_input_source',
+    'check_input_permissions',
+    'cursor_position',
+    'list_displays',
+    'list_briefings',
+    'search_file',
+    'translate_text',
+  ]) {
+    assert.equal(classifyAction({ type, params: {} }).safe, true, `${type} only reads`)
+  }
+})
+
+test('a routine still auto-runs its tier, and reads no longer show up as held', () => {
+  const readingList = [
+    { type: 'run_applescript', params: { script: READING_LIST_SCRIPT } },
+    { type: 'run_shell', params: { command: 'ls ~/Downloads' } },
+  ]
+  const verdict = classifyPlanForRoutine(readingList)
+  assert.equal(verdict.autoRun, true)
+  assert.deepEqual(verdict.denied, [])
+  // Nothing to report to the dashboard either: these were never over the line.
+  assert.deepEqual(verdict.blocked, [])
+
+  // The wider routine venue still covers confirm-tier work, unchanged.
+  assert.equal(
+    classifyPlanForRoutine([
+      { type: 'run_shell', params: { command: 'node scripts/research-brief.mjs' } },
+    ]).autoRun,
+    true,
+  )
+  // And still refuses the deny-list.
+  assert.equal(
+    classifyPlanForRoutine([{ type: 'send_email', params: {} }]).autoRun,
+    false,
+  )
+})
