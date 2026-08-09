@@ -11,6 +11,7 @@ import { stripProtocolTerminators } from '../shared/protocolText.js'
  * is no cycle. */
 import { SUPPORTED_ACTION_TYPES } from './computerControl.js'
 import { CAPABILITY_GAP_ACTIONS } from './capabilityGapsActions.js'
+import { assessPlanCoverage } from './goalVerdict.js'
 
 // Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
 // Cloudflare uses Realtime separately — this process never opens Realtime.
@@ -1031,6 +1032,9 @@ const FULL_CONTROL_RULES = [
   },
   { text: '- Keep plans short (usually 1-3 steps). Use absolute paths under {{home}} when possible.' },
   { text: '- Destructive actions only when the user explicitly asks.' },
+  {
+    text: '- A request to change something (cancel / send / delete / buy / unsubscribe / …) is not completed by a plan that only opens and reads. Include the acting step when you can already see it; when you genuinely must look first, plan the look — the run is then reported as reconnaissance with the change still to do, never as done.',
+  },
   { text: '- If truly impossible, return status "unsupported" with a short reason.' },
 ]
 
@@ -1470,6 +1474,18 @@ async function planWithLlm(
     }
   }
 
+  /*
+   * The upstream half of the false-done incident: a read-only plan for an
+   * irreversible goal ("cancel my recurring investments" planned as open +
+   * snapshot) used to present itself as the whole task. The plan still runs
+   * exactly as before — reconnaissance is legitimate first work — but it is
+   * MARKED as partial, so every surface that shows it says "looking first",
+   * and the execute-side verdict (goalVerdict.applyGoalVerdict) will report
+   * the run as incomplete rather than done. Validation only; the model's
+   * plan is not rewritten.
+   */
+  const coverage = assessPlanCoverage(command, actions)
+
   return {
     status: 'ready',
     command,
@@ -1477,7 +1493,19 @@ async function planWithLlm(
     actions,
     requiresConfirmation,
     ...(requiresConfirmation ? { confirmReason } : {}),
-    safety: safetyLine(confirmReason),
+    ...(coverage.reconnaissance
+      ? {
+          partial: {
+            reconnaissance: true,
+            note: coverage.note,
+            remainder: coverage.goal.gerundPhrase,
+          },
+        }
+      : {}),
+    safety:
+      coverage.reconnaissance && !requiresConfirmation
+        ? coverage.note
+        : safetyLine(confirmReason),
     planner: 'llm',
     fullControl: FULL_CONTROL_MODE,
     usage: summarisedUsage,
