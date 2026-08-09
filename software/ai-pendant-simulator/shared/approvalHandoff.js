@@ -671,6 +671,30 @@ export function approvalPromptText(record) {
   return { summary, detail }
 }
 
+/*
+ * The record's risk, as the one short phrase a card or a list row prints.
+ *
+ * The manifest's risk summary (actionLedger.js summarizeRisk) is an object of
+ * counts, and every screen surface — the mesh approval card, the Mac agent's
+ * pending list — renders this field verbatim in a bounded slot, where
+ * "[object Object]" would be worse than nothing. The worst tier present names
+ * the whole plan, because that is the step the owner is actually deciding
+ * about. A string passes through bounded, so a producer that already spoke in
+ * phrases keeps its wording.
+ */
+const RISK_TIER_ORDER = ['uncontained', 'off-machine', 'irreversible-write', 'reversible-write', 'observe']
+
+export function riskLabelFor(risk) {
+  if (typeof risk === 'string') return trimTo(risk, 40) || null
+  if (!risk || typeof risk !== 'object') return null
+  const tiers = risk.tiers && typeof risk.tiers === 'object' ? risk.tiers : {}
+  const worst = RISK_TIER_ORDER.find((tier) => Number(tiers[tier]) > 0)
+  if (worst) return worst
+  if (Number(risk.irreversible) > 0) return 'irreversible-write'
+  if (Number(risk.writes) > 0) return 'reversible-write'
+  return null
+}
+
 /** What may be read back over HTTP or logged: everything. There is no secret in
  * an approval record — the confirm word is spoken aloud by design. */
 export function presentApproval(record) {

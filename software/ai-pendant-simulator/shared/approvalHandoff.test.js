@@ -12,11 +12,14 @@ import {
   approvalControlFrame,
   approvalIndexKey,
   approvalIsLive,
+  approvalPromptText,
   approvalReadback,
   approvalSpeech,
   approvalStateKey,
   attestApprovalDelivery,
   buildApprovalRequest,
+  normalizeApprovalOrigin,
+  riskLabelFor,
   confirmWordFor,
   confirmWordRequired,
   evaluateApprovalGrant,
@@ -629,4 +632,58 @@ test('re-indexing the same approval does not duplicate it', () => {
   const index = indexApproval(indexApproval({ entries: [] }, record, { now: NOW }), record, { now: NOW })
 
   assert.equal(index.entries.length, 1)
+})
+
+/* -------------------------------------------------------------- origin */
+
+test('the record carries where the command came from, normalised and bounded', () => {
+  const record = buildApprovalRequest({ manifest: manifest(), origin: '  floating-hud  ', now: NOW })
+  assert.equal(record.origin, 'floating-hud')
+
+  const long = buildApprovalRequest({ manifest: manifest(), origin: 'x'.repeat(400), now: NOW })
+  assert.equal(long.origin.length, 128)
+})
+
+test('no origin stays null rather than becoming a guess', () => {
+  const record = buildApprovalRequest({ manifest: manifest(), now: NOW })
+  assert.equal(record.origin, null)
+  assert.equal(buildApprovalRequest({ manifest: manifest(), origin: '   ', now: NOW }).origin, null)
+})
+
+test('presentApproval carries origin, and tolerates records from before it existed', () => {
+  const record = buildApprovalRequest({ manifest: manifest(), origin: 'ios-phone-1', now: NOW })
+  assert.equal(presentApproval(record).origin, 'ios-phone-1')
+
+  /* A record persisted by a pre-origin relay has no such key at all. */
+  const { origin: _dropped, ...legacy } = record
+  assert.equal(presentApproval(legacy).origin, null)
+})
+
+test('normalizeApprovalOrigin is the one spelling rule', () => {
+  assert.equal(normalizeApprovalOrigin(' dashboard '), 'dashboard')
+  assert.equal(normalizeApprovalOrigin(''), null)
+  assert.equal(normalizeApprovalOrigin(null), null)
+  assert.equal(normalizeApprovalOrigin(undefined), null)
+})
+
+/* ------------------------------------------------- prompt presentation */
+
+test('approvalPromptText splits the readback into a list line and the decision text', () => {
+  const record = buildApprovalRequest({ manifest: manifest(), now: NOW })
+  const { summary, detail } = approvalPromptText(record)
+
+  assert.equal(detail, record.readback)
+  assert.ok(summary.length < detail.length, 'the summary is the shorter form')
+  assert.ok(detail.startsWith(summary), 'the summary is the head of the readback, never a rewrite')
+  assert.match(summary, /^Ready to /, 'the first sentence carries the ask')
+})
+
+test('riskLabelFor names the worst tier present and never prints an object', () => {
+  assert.equal(riskLabelFor({ tiers: { 'reversible-write': 2, 'off-machine': 1 } }), 'off-machine')
+  assert.equal(riskLabelFor({ tiers: { observe: 3 } }), 'observe')
+  assert.equal(riskLabelFor({ tiers: {}, writes: 1 }), 'reversible-write')
+  assert.equal(riskLabelFor(null), null)
+  assert.equal(riskLabelFor('already a phrase'), 'already a phrase')
+  const record = buildApprovalRequest({ manifest: manifest(), now: NOW })
+  assert.equal(riskLabelFor(record.risk), 'off-machine')
 })
