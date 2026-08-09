@@ -274,6 +274,24 @@ export async function runInference({
    * `truncated` is computed rather than left to each caller to derive, because
    * the whole point is that the callers hitting this are the ones who did not
    * know to look.
+   *
+   * `complete` generalizes that, and it exists because the same client asked
+   * the right follow-up: is `length` the ONLY terminal reason worth flagging?
+   * It is not. `content_filter` stops a generation too, and it arrives with
+   * short-or-empty content and `truncated:false` — so a caller checking only
+   * for truncation reads a filtered non-answer as a genuine one. That is the
+   * identical bug one field over. Rather than enumerate every reason a
+   * provider might add, `complete` is false for anything that is not a clean
+   * 'stop', so a new reason fails safe instead of silently passing.
+   *
+   * It is a TRI-STATE on purpose, the same distinction nodePresence draws
+   * between "offline" and "we could not ask": null means the provider sent no
+   * finish_reason and we do not know. Collapsing unknown into false would flag
+   * every good answer from a provider that omits the field.
+   *
+   * `refusal` is a structured field the newer models populate when they
+   * decline; content is null in that case. It was being dropped, which made a
+   * refusal indistinguishable from an empty answer.
    */
   return {
     content: String(content),
@@ -281,6 +299,8 @@ export async function runInference({
     usage: payload?.usage ?? null,
     finishReason,
     truncated: finishReason === 'length',
+    complete: finishReason == null ? null : finishReason === 'stop',
+    refusal: choice?.message?.refusal ?? null,
   }
 }
 
@@ -340,6 +360,12 @@ export function registerInferenceRoutes(app, { fetchImpl } = {}) {
          * diagnose its own unparseable JSON. */
         finishReason: result.finishReason,
         truncated: result.truncated,
+        /* False for ANY abnormal stop, not just truncation — a content filter
+         * ends a generation with short content and truncated:false, which a
+         * caller would otherwise act on as a real answer. null means the
+         * provider told us nothing, which is not the same as incomplete. */
+        complete: result.complete,
+        refusal: result.refusal,
         budget: {
           limit: budget.limit,
           used: budget.used,
