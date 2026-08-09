@@ -14,7 +14,8 @@
   "permissions": ["alarms", "storage", "tabs", "scripting"],
   "host_permissions": [
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://ai-pendant-relay.your-subdomain.workers.dev/*"
   ],
   "optional_host_permissions": [
     "http://*/*",

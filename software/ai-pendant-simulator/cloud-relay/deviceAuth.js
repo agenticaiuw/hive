@@ -260,6 +260,50 @@ export function principalHasScopes(principal, ...requiredScopes) {
   )
 }
 
+/**
+ * Would this principal's ROLE allow the request that its stored scopes just
+ * refused?
+ *
+ * ------------------------------------------------------------------------
+ * Scopes are frozen into the credential at pair time. createDeviceCredential
+ * copies DEVICE_SCOPES[role] into the record, authenticateRelayRequest reads
+ * principal.scopes back off that record, and NOTHING anywhere updates a stored
+ * scope list — there is no route, no migration, no sweep. The consequences run
+ * in both directions and both are silent:
+ *
+ *   - Adding a scope to a role does nothing for devices already paired. They
+ *     403 on the new capability forever, and the 403 is indistinguishable from
+ *     "that route does not exist for your role" — which is exactly how a
+ *     deploy gets diagnosed as a broken feature instead of a stale token.
+ *   - Removing a scope from a role does nothing either. Every token issued
+ *     before the removal keeps the privilege permanently.
+ *
+ * This function does NOT fix that; it makes the first case say so. Deriving
+ * effective scopes from the live table at authentication time is the real fix
+ * and is a deliberate security decision, not a bug fix: it would silently
+ * widen every credential in the fleet the moment a role gained a scope. That
+ * belongs to whoever owns the credential model, with the stored list kept as a
+ * per-device restriction rather than repurposed as a cache of policy.
+ *
+ * The distinction this enables is the point: a stale credential gets a message
+ * naming what it lacks and how to fix it, while a genuine denial stays
+ * generic. A token probing routes should not get a scope-enumeration oracle.
+ */
+export function credentialPredatesScopes(principal, requiredScopes = []) {
+  if (principal?.kind !== 'device') return false
+
+  const roleScopes = DEVICE_SCOPES[principal.role]
+  if (!roleScopes) return false
+
+  const held = new Set(principal.scopes || [])
+  const granted = new Set(roleScopes)
+  const missing = requiredScopes
+    .flat()
+    .filter((scope) => !held.has(scope) && granted.has(scope))
+
+  return missing.length > 0 ? missing : false
+}
+
 export function principalOwnsDevice(principal, deviceId) {
   return (
     principal?.kind === 'admin' ||

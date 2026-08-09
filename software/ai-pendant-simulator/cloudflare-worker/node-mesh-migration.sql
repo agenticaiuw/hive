@@ -6,13 +6,29 @@
 -- moment the lid closes. So "the relay tells the extension something" was not
 -- slow, it was impossible.
 --
--- Apply:
+-- Apply THIS FIRST, then `npx wrangler deploy`:
 --   npx wrangler d1 execute ai-pendant-relay-db --remote \
 --     --file cloudflare-worker/node-mesh-migration.sql
+--
+-- That order matters. Deployed code without this table 500s on every mesh
+-- route; this table without the code is inert.
 --
 -- Purely additive: no existing table is touched and no running client reads
 -- these rows, so applying it to a live database changes nothing until a node
 -- opens /v1/node/socket.
+--
+-- THEN RE-PAIR EVERY NODE. Scopes are frozen into a credential when it is
+-- created (deviceAuth.createDeviceCredential copies DEVICE_SCOPES[role] into
+-- the record, and nothing anywhere updates a stored scope list), so a device
+-- paired before this deploy will NOT gain node:message:send /
+-- node:message:receive / llm:infer. It will 403 on the mesh and on inference
+-- until it is re-paired — permanently, not until some refresh.
+--
+-- The relay now names that case rather than leaving it to be guessed: the 403
+-- carries code 'credential_predates_capability' and says which scopes are
+-- missing, instead of the generic "not allowed to use that route" it used to
+-- return. If you see that code after deploying, the feature is fine and the
+-- token is old.
 --
 -- Everything below must stay byte-identical to the matching block in
 -- schema.sql — that file is what a new database is built from, this one is

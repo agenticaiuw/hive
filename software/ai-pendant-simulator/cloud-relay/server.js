@@ -99,6 +99,7 @@ import {
 import {
   authenticateRelayRequest,
   createDeviceCredential,
+  credentialPredatesScopes,
   principalHasScopes,
   principalOwnsDevice,
   publicCredential,
@@ -440,8 +441,37 @@ app.use(async (request, response, next) => {
     !requiredScopes ||
     !principalHasScopes(request.relayPrincipal, ...requiredScopes)
   ) {
+    /*
+     * Two very different failures wore the same message until now.
+     *
+     * Scopes are frozen into a credential at pair time and nothing updates
+     * them, so a device paired before a capability shipped is refused it
+     * forever — and the refusal read exactly like "that route is not for your
+     * role". After a deploy that adds a scope to a role, every existing node
+     * fails this way at once, which is the moment the generic message costs
+     * the most: it points at the new feature instead of at the stale token.
+     *
+     * The stale case names what is missing and what to do. A genuine denial
+     * stays generic on purpose — a token probing routes must not get a
+     * scope-enumeration oracle out of it.
+     */
+    const staleScopes = requiredScopes
+      ? credentialPredatesScopes(request.relayPrincipal, requiredScopes)
+      : false
+    if (staleScopes) {
+      response.status(403).json({
+        ok: false,
+        code: 'credential_predates_capability',
+        error:
+          `Blocked for safety: this credential was issued before its role gained ` +
+          `${staleScopes.join(', ')}. Re-pair the device to pick it up — scopes ` +
+          'are frozen into a credential when it is created.',
+      })
+      return
+    }
     response.status(403).json({
       ok: false,
+      code: 'scope_denied',
       error: 'Blocked for safety: this device is not allowed to use that route.',
     })
     return
