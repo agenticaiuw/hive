@@ -58,3 +58,8 @@ __pycache__/
 # Harness per-agent round locks: process-local, never shared.
 diagnostics/harness-derivation/*.lock
 software/ai-pendant-simulator/local-agent/memory/*.bak
+
+# Xcode per-user IDE state. Never shared, and in a tree where several agents
+# commit concurrently it is exactly the kind of file a stray sweep picks up.
+xcuserdata/
+*.xcuserdatad/
