@@ -79,6 +79,25 @@ export const INBOX_LEASE_MS = 60_000
  */
 export const MAX_INBOX_DEPTH = 500
 
+/*
+ * The machine-readable name for "your credential is fine, that inbox is not
+ * yours" — the refusal principalOwnsDevice raises on the inbox routes.
+ *
+ * It exists because it was the ONE refusal on these routes with no `code`,
+ * while scope_denied / credential_predates_capability / unknown_node /
+ * inbox_full / invalid_envelope all had one. Clients are told to switch on
+ * `code` and never on message text (the text is deliberately vague so a
+ * probing token gets no scope-enumeration oracle), so the absence forced them
+ * to key on the bare HTTP status instead — and 403 alone cannot separate this
+ * from any other 403 the relay might grow later. It is also the likeliest real
+ * misconfiguration on these routes: a wrong deviceId.
+ *
+ * The MESSAGE stays generic on purpose. Adding the code does not widen what a
+ * prober learns: it already knew it got a 403 here, and the code names the
+ * rule that fired without naming the inbox, the owner, or the scope.
+ */
+export const OWNERSHIP_DENIED_CODE = 'not_your_inbox'
+
 const WARN_INTERVAL_MS = 60_000
 let lastWarnAt = 0
 
@@ -309,6 +328,7 @@ export function registerNodeMeshRoutes(app, { getStore }) {
       /* The scope said "you may drain an inbox". This says "not that one". */
       response.status(403).json({
         ok: false,
+        code: OWNERSHIP_DENIED_CODE,
         error: 'Blocked for safety: a node may only drain its own inbox.',
       })
       return
@@ -343,6 +363,7 @@ export function registerNodeMeshRoutes(app, { getStore }) {
     if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
       response.status(403).json({
         ok: false,
+        code: OWNERSHIP_DENIED_CODE,
         error: 'Blocked for safety: a node may only acknowledge its own mail.',
       })
       return
@@ -354,7 +375,40 @@ export function registerNodeMeshRoutes(app, { getStore }) {
     response.json({ ok: true, acknowledged, pending })
   })
 
-  /* GET /v1/node/presence?deviceId=… — is that node holding a socket now. */
+  /*
+   * GET /v1/node/presence?deviceId=… — is that node holding a socket now.
+   *
+   * NO principalOwnsDevice here, deliberately: asking about a node is not the
+   * same privilege as using it, and this is what makes "is the Mac connected
+   * right now" answerable from the phone. The scope table gates it on
+   * device:status:read (NOT node:message:receive) for the same reason.
+   *
+   * THREE INDEPENDENT FACTS, and a client that collapses any two of them will
+   * lie to the owner:
+   *
+   *   known      is there a registered node by that deviceId at all
+   *   observed   could we reach its hub to ask
+   *   connected  is it holding a live socket this second
+   *
+   * `known` is the one added last, and it was added because without it a
+   * deviceId that was never paired answered `connected:false, observed:true` —
+   * character for character what a real, registered, currently-asleep node
+   * answers. Those want opposite client behaviour: one is a typo to correct,
+   * the other is the normal resting state of a node and should be rendered as
+   * nothing at all.
+   *
+   * It is a SEPARATE FIELD rather than a new value of `observed` on purpose.
+   * `observed:false` already means "we could not ask", which clients are told
+   * never to render as a dead node; spending that value on "there is nothing
+   * to ask about" would collapse a distinction that is already load-bearing,
+   * and would silently change the meaning of today's answers for every client
+   * that has not been updated. Orthogonal facts, orthogonal fields.
+   *
+   * The hub is still asked for an unknown deviceId, so `connected`/`observed`
+   * keep exactly the values they have today and this is additive for every
+   * existing caller. The wasted round trip is the price of that compatibility,
+   * and it is bounded by the same scope check as any other presence query.
+   */
   app.get('/v1/node/presence', async (request, response) => {
     const deviceId = String(request.query?.deviceId ?? '').trim()
     if (!deviceId) {
@@ -365,9 +419,20 @@ export function registerNodeMeshRoutes(app, { getStore }) {
     }
     const store = await getStore()
     const presence = await nodePresence({ deviceId })
+    /* Same registry `sendNodeMessage` refuses an unknown addressee against,
+     * INCLUDING its exemption for the reserved '@relay' address, so the two
+     * routes cannot disagree about which addresses exist — a `to` the send
+     * route accepts must never come back `known:false` here. Pairing writes
+     * the device row and the credential together (server.js /v1/devices/pair),
+     * so a node that can authenticate at all is `known`. */
+    const known =
+      normalizeNodeAddress(deviceId) === RELAY_NODE_ADDRESS
+        ? true
+        : Boolean(await store.getDevice(deviceId))
     response.json({
       ok: true,
       deviceId,
+      known,
       ...presence,
       pending: await store.countPendingNodeMessages(deviceId),
     })
