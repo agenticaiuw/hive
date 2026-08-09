@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import { classifyAction } from './actionRisk.js'
 import { receiptsForJob, undoVaultLocation } from './actionReceipts.js'
 import { describeUndoability } from './undo.js'
-import { allowedFolders, FULL_CONTROL_MODE } from './config.js'
+import { allowedFolders } from './config.js'
 import {
   getInputReachability,
   inputPostingFromReachability,
@@ -682,12 +682,10 @@ export async function observeHost({
       })),
     },
     directories: {
-      /* In full control the allowlist is not consulted at all; reporting these
-       * as "the boundary" would be a comfortable lie. */
-      enforced: !FULL_CONTROL_MODE,
-      note: FULL_CONTROL_MODE
-        ? 'FULL_CONTROL_MODE is on: security.assertAllowedPath resolves any path. These are the configured roots, not a limit.'
-        : 'security.assertAllowedPath rejects any path outside these roots.',
+      /* The allowlist is not consulted at all; reporting these as "the
+       * boundary" would be a comfortable lie. */
+      enforced: false,
+      note: 'Full control: any path resolves. These are the configured roots, not a limit.',
       roots: describeRoots(roots),
     },
   }

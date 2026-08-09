@@ -49,8 +49,7 @@
  * NO IMPORTS ON PURPOSE. Every body has to be able to load this: the Mac
  * (node), the relay (node and Cloudflare Workers), the browser extension. A
  * registry that only one surface can parse reintroduces the asymmetry it exists
- * to remove. Surfaces register themselves; see registerSurface() and
- * shared/capabilityRegistryExpress.js.
+ * to remove. Surfaces register themselves; see registerSurface().
  */
 
 export const CAPABILITY_REGISTRY_VERSION = 1

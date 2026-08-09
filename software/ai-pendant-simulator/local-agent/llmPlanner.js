@@ -693,16 +693,6 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
 }
 
-const SAFE_ACTION_SCHEMA = {
-  open_url: { description: 'Open a whitelisted URL.', params: { url: 'string' } },
-  open_app: { description: 'Open a whitelisted app.', params: { appName: 'string' } },
-  open_folder: { description: 'Open a whitelisted folder.', params: { path: 'string' } },
-  create_note: { description: 'Create a markdown note.', params: { filename: 'string', content: 'string' } },
-  copy_to_clipboard: { description: 'Copy text to clipboard.', params: { text: 'string' } },
-  run_project: { description: 'Run npm dev in a whitelisted project.', params: { path: 'string' } },
-  search_file: { description: 'Search whitelisted folders.', params: { root: 'string', query: 'string' } },
-}
-
 /*
  * What the small tier is allowed to plan with.
  *
@@ -756,13 +746,11 @@ export function plannerModelName() {
  * everything else gets the same schema it always got.
  */
 export function actionSchemaForTier(tier = 'planner') {
-  const full = FULL_CONTROL_MODE ? FULL_CONTROL_ACTION_SCHEMA : SAFE_ACTION_SCHEMA
-
-  if (tier !== 'background') return full
+  if (tier !== 'background') return FULL_CONTROL_ACTION_SCHEMA
 
   const subset = {}
   for (const type of BACKGROUND_ACTION_TYPES) {
-    if (full[type]) subset[type] = full[type]
+    if (FULL_CONTROL_ACTION_SCHEMA[type]) subset[type] = FULL_CONTROL_ACTION_SCHEMA[type]
   }
   return subset
 }
@@ -773,9 +761,8 @@ export function actionSchemaForTier(tier = 'planner') {
  * These descriptions were written for the planner and read by nobody else, so
  * GET /capabilities published 95 action types with an empty description and a
  * caller matching against the manifest could only match on how the type is
- * spelled. Both schemas are consulted, not the mode-selected one: what
- * `delete_path` does is not a function of FULL_CONTROL_MODE, and a manifest
- * whose prose changed with an env var would be worse than none.
+ * spelled. What `delete_path` does is not a function of any env var, and a
+ * manifest whose prose changed with one would be worse than none.
  */
 export function actionDescription(type) {
   const description = String(actionSpec(type)?.description ?? '').trim()
@@ -794,7 +781,7 @@ export function actionDescription(type) {
  */
 export function actionSpec(type) {
   const name = String(type ?? '')
-  return FULL_CONTROL_ACTION_SCHEMA[name] ?? SAFE_ACTION_SCHEMA[name] ?? null
+  return FULL_CONTROL_ACTION_SCHEMA[name] ?? null
 }
 
 export function isLlmPlannerEnabled() {
@@ -894,7 +881,7 @@ export async function planCommand(command, options = {}) {
     resumed = null,
   } = options
 
-  if (FULL_CONTROL_MODE && LLM_ENABLED) {
+  if (LLM_ENABLED) {
     try {
       const llmPlan = await planWithLlm(command, {
         context,
@@ -939,9 +926,7 @@ export async function planCommand(command, options = {}) {
     requiresConfirmation: true,
     error: !LLM_ENABLED
       ? 'LLM planner is not configured (set LLM_API_KEY). No hardcoded command matching.'
-      : !FULL_CONTROL_MODE
-        ? 'Full-control LLM planner is disabled (FULL_CONTROL_MODE=false). No hardcoded command matching.'
-        : 'LLM could not plan this command. Rephrase the request or check LLM_API_KEY.',
+      : 'LLM could not plan this command. Rephrase the request or check LLM_API_KEY.',
     planner: 'llm',
   }
 }
@@ -1804,7 +1789,6 @@ export function isKnownActionType(type) {
   const name = String(type ?? '')
   return (
     Object.hasOwn(FULL_CONTROL_ACTION_SCHEMA, name) ||
-    Object.hasOwn(SAFE_ACTION_SCHEMA, name) ||
     DISPATCH_ALIASES.has(name) ||
     SUPPORTED_ACTION_TYPES.includes(name)
   )

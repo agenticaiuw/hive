@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 
 import { matchBriefingCommand } from './briefing.js'
-import { classifyIntent } from './intentRouter.js'
+import { isSmallRequest } from './intentRouter.js'
 import { matchMailTriageCommand } from './mailTriage.js'
 import { matchMeetingFollowupCommand } from './meetingFollowup.js'
 import { findClosestInstalledApp, getMachineContext } from './machineContext.js'
@@ -415,12 +415,12 @@ export function classifyTier(command, { source = 'local', deterministic = null }
   }
 
   /*
-   * The old fuzzy intent table, repurposed. A strong builtin hit does not tell
+   * The old fuzzy intent table, boiled down to keywords. A hit does not tell
    * us which action to run (it was wrong often enough that the orchestrator
    * stopped asking), but it is a fine signal that the request is small.
    */
-  const hint = classifyIntent(text)
-  if (hint.route === 'builtin') {
+  const hint = isSmallRequest(text)
+  if (hint.small) {
     return { tier: TIER_BACKGROUND, reason: `simple ${hint.intent} request` }
   }
 
