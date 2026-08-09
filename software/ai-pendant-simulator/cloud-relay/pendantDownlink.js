@@ -31,8 +31,6 @@
  * `registerPendantDownlinkWitness(app, { getStore, createAgentProxyJob })` there,
  * AFTER the authentication middleware (it reads `request.relayPrincipal`) and
  * BEFORE the route declarations (it wraps the response before the handler runs).
- * The existing `registerFleetMemoryRoutes(app, { getStore })` call is the same
- * pattern.
  */
 import { DELIVERY_STAGES } from '../shared/audioDelivery.js'
 import { ringBridgeDoorbell } from './bridgeDoorbell.js'

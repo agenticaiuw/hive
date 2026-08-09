@@ -35,11 +35,7 @@ import {
 } from './fleetMemory.js'
 import { createD1Store } from '../cloud-relay/store/d1Store.js'
 import { createMemoryStore } from '../cloud-relay/store/memoryStore.js'
-import {
-  loadFleetFromStore,
-  registerFleetMemoryRoutes,
-  FLEET_MEMORY_SCOPES,
-} from '../cloud-relay/fleetContext.js'
+import { loadFleetFromStore } from '../cloud-relay/fleetContext.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WORKER = path.join(HERE, '..', 'cloudflare-worker')
@@ -920,87 +916,4 @@ test('a memory read that throws does not cost the fleet snapshot', async () => {
   )
 
   assert.equal(fleet.mac.hostname, 'home')
-})
-
-test('the routes register themselves, scoped, without touching server.js', async () => {
-  const registered = []
-  const app = {
-    post: (routePath, handler) => registered.push(['POST', routePath, handler]),
-    get: (routePath, handler) => registered.push(['GET', routePath, handler]),
-  }
-  const store = await freshMemoryStore()
-
-  const paths = registerFleetMemoryRoutes(app, { getStore: async () => store })
-
-  assert.deepEqual(
-    registered.map(([method, routePath]) => `${method} ${routePath}`).sort(),
-    Object.keys(FLEET_MEMORY_SCOPES).sort(),
-  )
-  assert.deepEqual(paths.sort(), Object.keys(FLEET_MEMORY_SCOPES).sort())
-  // Every route the module registers declares a scope; an unscoped write path
-  // for the owner's own facts must not be possible to add by accident.
-  for (const [method, routePath] of registered) {
-    assert.ok(FLEET_MEMORY_SCOPES[`${method} ${routePath}`], `${method} ${routePath} is unscoped`)
-  }
-
-  const [, , postHandler] = registered.find(([method]) => method === 'POST')
-  const captured = {}
-  await postHandler(
-    { body: { node: 'ios', events: [{ type: 'task', key: 'k', value: 'a task' }] } },
-    {
-      set: (header, value) => {
-        captured[header] = value
-      },
-      status(code) {
-        captured.status = code
-        return this
-      },
-      json(payload) {
-        captured.body = payload
-      },
-    },
-  )
-
-  assert.equal(captured.status, 201)
-  assert.equal(captured.body.appended, 1)
-  assert.equal(captured['Cache-Control'], 'private, no-store')
-})
-
-/*
- * The migration is applied separately from the deploy, so "the code is live and
- * the table is not" is a state this route will genuinely be in. It should say
- * which file fixes it, not return a SQL string with a 500 on it.
- */
-test('a relay whose migration has not been applied says exactly that', async () => {
-  const registered = []
-  const app = {
-    post: (routePath, handler) => registered.push(['POST', routePath, handler]),
-    get: (routePath, handler) => registered.push(['GET', routePath, handler]),
-  }
-  const unmigrated = {
-    async appendMemoryEvents() {
-      throw new Error('D1_ERROR: no such table: relay_memory_events')
-    },
-  }
-
-  registerFleetMemoryRoutes(app, { getStore: async () => unmigrated })
-  const [, , postHandler] = registered.find(([method]) => method === 'POST')
-
-  const captured = {}
-  await postHandler(
-    { body: { node: 'ios', events: [{ type: 'task', key: 'k', value: 'a task' }] } },
-    {
-      set() {},
-      status(code) {
-        captured.status = code
-        return this
-      },
-      json(payload) {
-        captured.body = payload
-      },
-    },
-  )
-
-  assert.equal(captured.status, 503)
-  assert.match(captured.body.error, /fleet-memory-migration\.sql/)
 })
