@@ -24,7 +24,6 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import express from 'express'
 
 import {
   CAPABILITY_SURFACES,
@@ -42,6 +41,7 @@ import {
   listCapabilities,
   normalizeCapabilityName,
   recordCapabilityObservation,
+  registerCapabilities,
   registerCapability,
   registerFromCapabilityManifest,
   registerGrantedTools,
@@ -51,12 +51,6 @@ import {
   resolveImplementation,
   toCapabilityRegistrySnapshot,
 } from './capabilityRegistry.js'
-import {
-  SAMPLE_PATH_SEGMENT,
-  listExpressRoutes,
-  registerExpressSurface,
-  samplePathFor,
-} from './capabilityRegistryExpress.js'
 
 const NOW = Date.parse('2026-08-07T12:00:00.000Z')
 
@@ -134,39 +128,6 @@ const REALTIME_TOOLS = [
 const EXECUTE_ID = 'mac:http:POST /execute'
 const RECEIPTS_ID = 'mac:http:GET /jobs/*/receipts'
 
-/*
- * The relay's scope table, in the shape requiredScopesForRequest() has in
- * cloud-relay/server.js: an imperative function over (method, path) with
- * regexes for parameterised routes and prefix tests for families. Copied rather
- * than imported because importing server.js starts a server — but copied
- * FAITHFULLY, because the point of the test is that this shape can be probed
- * without being rewritten.
- */
-function relayScopesFor(request) {
-  const method = String(request.method).toUpperCase()
-  const path = request.path
-
-  if (method === 'POST' && path === '/v1/pendant/announce') return ['pendant:announce']
-  if (method === 'GET' && /^\/v1\/mac\/jobs\/[^/]+$/.test(path)) return ['mac:jobs:read']
-  if (path.startsWith('/v1/ops/')) return ['admin']
-  return null
-}
-
-function relayApp() {
-  const app = express()
-  const noop = (_request, response) => response.json({ ok: true })
-
-  app.get('/health', noop)
-  app.post('/v1/pendant/announce', noop)
-  app.get('/v1/mac/jobs/:jobId', noop)
-  app.post('/v1/ops/proxy', noop)
-  /* Deliberately outside the scope table: the honest answer is "unknown", not
-   * a guessed default. */
-  app.get('/v1/undeclared', noop)
-
-  return app
-}
-
 function macRegistry() {
   const registry = createCapabilityRegistry()
   registerFromCapabilityManifest(registry, MAC_MANIFEST, { now: NOW })
@@ -178,17 +139,56 @@ function macRegistry() {
   return registry
 }
 
-function fullRegistry() {
-  const registry = macRegistry()
-  registerExpressSurface(registry, relayApp(), {
+/*
+ * The relay surface, declared directly. This used to be probed off a live
+ * Express router by shared/capabilityRegistryExpress.js; that adapter was
+ * never wired into a real surface and is gone, so the fixture now states the
+ * same records the probe used to derive: scopes as cloud-relay/server.js's
+ * requiredScopesForRequest() answers them, /health public, and /v1/undeclared
+ * deliberately outside the scope table — the honest answer for it is
+ * "unknown", not a guessed default.
+ */
+function registerRelaySurface(registry) {
+  registerSurface(registry, { surface: 'relay', inventorySource: 'declared' }, { now: NOW })
+
+  const route = (method, path, auth, provides = []) => ({
+    name: `${method} ${path}`,
     surface: 'relay',
-    credential: 'device-token',
-    baseUrl: 'https://relay.example',
-    isPublicPath: (path) => path === '/health',
-    scopesFor: relayScopesFor,
-    now: NOW,
+    kind: 'http',
+    status: 'implemented',
+    invoke: { method, path, baseUrl: 'https://relay.example' },
+    auth,
+    provides,
   })
+
+  registerCapabilities(
+    registry,
+    [
+      route('GET', '/health', { credential: 'none', scopes: [], note: null }),
+      route('POST', '/v1/pendant/announce', {
+        credential: 'device-token',
+        scopes: ['pendant:announce'],
+        note: null,
+      }),
+      route('GET', '/v1/mac/jobs/:jobId', {
+        credential: 'device-token',
+        scopes: ['mac:jobs:read'],
+        note: null,
+      }),
+      route('POST', '/v1/ops/proxy', { credential: 'device-token', scopes: ['admin'], note: null }),
+      route('GET', '/v1/undeclared', {
+        credential: 'unknown',
+        scopes: [],
+        note: 'No scope declared for this route by the surface that owns it.',
+      }),
+    ],
+    { now: NOW },
+  )
   return registry
+}
+
+function fullRegistry() {
+  return registerRelaySurface(macRegistry())
 }
 
 /* ---- names -------------------------------------------------------------- */
@@ -684,7 +684,7 @@ test('the report names its own gaps the way the manifest names undocumented grou
   assert.deepEqual(report.ambiguousNames, [
     { name: 'get health', ids: ['mac:http:GET /health', 'relay:http:GET /health'] },
   ])
-  assert.equal(report.bySurface.relay.inventorySource, 'express-router')
+  assert.equal(report.bySurface.relay.inventorySource, 'declared')
   assert.equal(report.bySurface.voice.grantedSchemas, 3)
 })
 
@@ -756,77 +756,10 @@ test('the digest budget is clamped at both ends', () => {
   assert.ok(capabilityDigest(registry, { now: NOW }).bytes <= DEFAULT_DIGEST_BYTES)
 })
 
-/* ---- express adapter ---------------------------------------------------- */
-
-test('routes come off a live router, middleware layers do not', () => {
-  const app = relayApp()
-  app.use((_request, _response, next) => next())
-
-  assert.deepEqual(listExpressRoutes(app), [
-    { method: 'GET', path: '/health', params: [] },
-    { method: 'GET', path: '/v1/mac/jobs/:jobId', params: ['jobId'] },
-    { method: 'POST', path: '/v1/ops/proxy', params: [] },
-    { method: 'POST', path: '/v1/pendant/announce', params: [] },
-    { method: 'GET', path: '/v1/undeclared', params: [] },
-  ])
-})
-
-test('a synthesized path lets the real scope regexes answer about a route', () => {
-  assert.equal(samplePathFor('/v1/mac/jobs/:jobId'), `/v1/mac/jobs/${SAMPLE_PATH_SEGMENT}`)
-  // The relay's own regex, unmodified, matches the probe path exactly as it
-  // matches a real request. This is why requiredScopesForRequest never has to
-  // be rewritten to be enumerable.
-  assert.deepEqual(
-    relayScopesFor({ method: 'GET', path: samplePathFor('/v1/mac/jobs/:jobId') }),
-    ['mac:jobs:read'],
-  )
-})
-
-test('the adapter reads scopes off the surface it is registering, including regex routes', () => {
-  const registry = fullRegistry()
-
-  assert.deepEqual(
-    registry.capabilities.get('relay:http:GET /v1/mac/jobs/*').auth.scopes,
-    ['mac:jobs:read'],
-  )
-  assert.deepEqual(registry.capabilities.get('relay:http:POST /v1/ops/proxy').auth.scopes, ['admin'])
-  assert.equal(registry.capabilities.get('relay:http:GET /health').auth.credential, 'none')
-
-  const undeclared = registry.capabilities.get('relay:http:GET /v1/undeclared')
-  assert.equal(undeclared.auth.credential, 'unknown')
-  assert.match(undeclared.auth.note, /No scope declared/)
-})
-
-test('a scope function that cannot answer yields unknown, never a guessed default', () => {
-  const registry = createCapabilityRegistry()
-  registerExpressSurface(registry, relayApp(), {
-    surface: 'relay',
-    credential: 'device-token',
-    scopesFor: () => {
-      throw new Error('needs a full request')
-    },
-    now: NOW,
-  })
-
-  assert.equal(
-    listCapabilities(registry, { surface: 'relay' }).every(
-      (record) => record.auth.credential === 'unknown',
-    ),
-    true,
-  )
-})
-
 /* ---- the wire ----------------------------------------------------------- */
 
 test('a snapshot survives JSON and carries the peer observations that were the point', () => {
-  const relay = createCapabilityRegistry()
-  registerExpressSurface(relay, relayApp(), {
-    surface: 'relay',
-    credential: 'device-token',
-    isPublicPath: (path) => path === '/health',
-    scopesFor: relayScopesFor,
-    now: NOW,
-  })
+  const relay = registerRelaySurface(createCapabilityRegistry())
   recordCapabilityObservation(
     relay,
     { name: 'POST /v1/pendant/announce', status: 200, by: 'agent/graveyard-pendants' },
@@ -880,8 +813,7 @@ test('a snapshot from another version is refused rather than half-read', () => {
   )
 })
 
-test('the adapter needs an app and the surface vocabulary is shared with fleet memory', () => {
-  assert.throws(() => registerExpressSurface(createCapabilityRegistry(), null, { surface: 'relay' }), /Express app/)
+test('the surface vocabulary is shared with fleet memory', () => {
   /* MEMORY_SURFACES in shared/fleetMemory.js, not imported: that module reaches
    * into local-agent/redaction.js and belongs to another change in flight. The
    * four must stay a prefix of this list — a body named one way for facts and
