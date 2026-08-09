@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(blinky)
+project(pendant)
 
 #
 # libopus 1.6.1 is vendored from the official Xiph.Org release.  Its normal
@@ -100,12 +100,6 @@ target_sources(app PRIVATE
   src/pendant_store.c
   src/pendant_reflex.c
   src/haptic.c
-)
-# On-device keyword matching is opt-in: with CONFIG_PENDANT_LOCAL_COMMANDS
-# off, the module is not compiled at all, so its ~3.7 kB of static RAM and
-# its filterbank are absent from the image rather than merely unreferenced.
-target_sources_ifdef(CONFIG_PENDANT_LOCAL_COMMANDS app PRIVATE
-  src/pendant_local.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

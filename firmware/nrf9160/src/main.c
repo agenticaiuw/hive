@@ -20,7 +20,6 @@
 #include "audio_opus.h"
 #include "haptic.h"
 #include "pendant_cloud.h"
-#include "pendant_local.h"
 #include "pendant_reflex.h"
 #include "pendant_store.h"
 #include "pendant_ws.h"
@@ -406,23 +405,9 @@ static atomic_t convo_flush_req; /* relay said flush (barge-in) */
 static atomic_t convo_end_req;   /* relay said end / transport died */
 /*
  * Uplink gate: 1 = the WS I/O thread may drain the encoder FIFO onto the
- * radio, 0 = it must leave the bytes where they are.
- *
- * This is the whole mechanism behind "a local command never opens an LTE
- * session". The encoder runs from the first mic stage exactly as it always
- * did, so the FIFO fills with real packets from the very start of the
- * utterance — but nothing leaves the chip until the local matcher has had
- * its say. A confident match closes the capture with the gate still shut
- * and the modem has transmitted precisely nothing; anything else opens the
- * gate and the held packets flush in one burst, so the relay receives the
- * complete utterance from its first frame and no audio was ever at risk.
- *
- * The FIFO is ~7 KiB, about 3.5 s of speech at the full uplink rate — an
- * order of magnitude more than the ~900 ms this gate is ever shut for, so
- * the hold cannot saturate the ring the adaptive duck already watches.
- *
- * Without CONFIG_PENDANT_LOCAL_COMMANDS this is set to 1 before the first
- * mic block and never touched again: the pump behaves exactly as it did.
+ * radio, 0 = it must leave the bytes where they are. Set to 1 before the
+ * first mic block of a conversation and cleared at teardown, so a stray
+ * pump between presses can never transmit.
  */
 static atomic_t convo_uplink_gate;
 static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];  /* ws thread only */
@@ -474,15 +459,9 @@ static inline uint32_t cycles_to_us(uint32_t cycles)
 	return (uint32_t)(((uint64_t)cycles * 1000000U) /
 			  sys_clock_hw_cycles_per_sec());
 }
-/*
- * One TX slab serves both worlds: duplex conversation blocks (2,560 B used
- * fully) and the legacy reply path's 1,024 B blocks (partial fill of the
- * same chunks). Four blocks preserve the legacy prefill(3)+1 pattern.
- */
 K_MEM_SLAB_DEFINE_STATIC(convo_tx_slab,
 			 CONVO_TX_BLOCK_FRAMES * sizeof(int32_t),
 			 CONVO_TX_SLAB_BLOCKS, 4);
-#define i2s_slab convo_tx_slab
 
 static const struct gpio_dt_spec led =
 	GPIO_DT_SPEC_GET(LED_NODE, gpios);
@@ -518,7 +497,6 @@ static uint8_t audio_workspace[PENDANT_AUDIO_WORKSPACE_BYTES] __aligned(4);
 BUILD_ASSERT(sizeof(mic_rx_storage) ==
 		     MIC_RX_BLOCK_SIZE * MIC_RX_BLOCK_COUNT,
 	     "mic RX storage size mismatch");
-/* Legacy i2s_slab folded into convo_tx_slab (defined above). */
 /* Processed audio staged between microSD writes (~1 KiB stages). */
 static int16_t mic_stage_samples[MIC_STAGE_FRAMES] __aligned(4);
 static bool live_stream_failed;
@@ -531,6 +509,8 @@ static bool live_tx_saturated;
 /* Defined below with the other capture globals. */
 extern volatile bool recording_on_sd;
 
+#ifdef CONFIG_PENDANT_MIC_INJECT
+/* G.711 expansion for the debug injection ring (harness builds only). */
 static int16_t ulaw_to_linear(uint8_t code)
 {
 	uint8_t u = (uint8_t)(~code);
@@ -538,6 +518,7 @@ static int16_t ulaw_to_linear(uint8_t code)
 
 	return (int16_t)((u & 0x80U) ? (0x84 - t) : (t - 0x84));
 }
+#endif /* CONFIG_PENDANT_MIC_INJECT */
 
 /*
  * Wire-framed Opus packet FIFO in the workspace tail. True SPSC ring: the
@@ -1116,34 +1097,6 @@ static void finish_button_press(void)
 	clear_button_events();
 }
 
-static bool consume_button_event(void)
-{
-	if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
-		finish_button_press();
-		return true;
-	}
-	return false;
-}
-
-static void wait_for_button_press(void)
-{
-	/*
-	 * Latency-first: start work on the active edge. Do not wait for the
-	 * physical release — that used to add hundreds of ms before the mic
-	 * even powered up.
-	 *
-	 * While idle, wake every 5 s to check the half-open live stream. With
-	 * STREAM_MAX_IDLE_MS at 12 s this refreshes on every third wake (~15 s
-	 * cadence): sockets are rebuilt before Cloudflare's ~20 s idle kill but
-	 * NOT unconditionally on every wake — the wake period must stay below
-	 * the idle threshold or every wake tears down TLS + a Realtime session.
-	 */
-	while (k_sem_take(&button_press_sem, K_SECONDS(5)) != 0) {
-		(void)pendant_cloud_stream_prewarm(PENDANT_OPUS_SAMPLE_RATE);
-	}
-	clear_button_events();
-}
-
 static void flash_led(unsigned int count, int on_ms, int off_ms)
 {
 	for (unsigned int flash = 0U; flash < count; ++flash) {
@@ -1163,20 +1116,6 @@ void pendant_notify_reply_first_batch(void)
 	gpio_pin_set_dt(&led, 1);
 	printk("First speech batch ready — solid LED; press button 1 to play "
 	       "(no autoplay; download may still be finishing)\n");
-}
-
-static void wait_for_reply_playback_press(void)
-{
-	/* LED may already be solid from pendant_notify_reply_first_batch(). */
-	if (!pendant_cloud_reply_first_batch) {
-		gpio_pin_set_dt(&led, 1);
-		printk("Reply complete — solid LED; press button 1 to play "
-		       "(no autoplay)\n");
-	} else {
-		printk("Waiting for play press (LED already solid from first "
-		       "speech batch)\n");
-	}
-	wait_for_button_press();
 }
 
 static int mount_sd_card(void)
@@ -1585,18 +1524,6 @@ static void probe_mic_data_driver(void)
 }
 #endif
 
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-/*
- * record_microphone: the press was answered on-device. POSITIVE on purpose
- * — every existing test in the upload path asks `error < 0`, so a new
- * success-shaped outcome cannot be mistaken for a failure by code that
- * predates it.
- */
-#define PENDANT_CAPTURE_LOCAL 1
-/* Slot the offline capture matched, read by main() once I2S is idle. */
-static uint8_t capture_local_slot;
-#endif
-
 static int record_microphone(const struct device *i2s, size_t sample_limit)
 {
 	struct i2s_config config = {
@@ -1641,15 +1568,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	bool sd_open = false;
 	bool live_fail_logged = false;
 	int live_write_error = 0;
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-	/* Matching stops once the verdict lands; the capture continues so a
-	 * fall-through press still records everything it always did. */
-	bool local_active = true;
-	bool local_handled = false;
-	uint8_t local_slot = 0U;
-
-	pendant_local_begin();
-#endif
 
 	recording_on_sd = false;
 	live_stream_failed = false;
@@ -1897,38 +1815,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 				}
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-				/*
-				 * This path runs when the WebSocket is DOWN,
-				 * which is precisely the situation on-device
-				 * matching exists for: with no signal the
-				 * cloud cannot answer at all, and today the
-				 * best this press could do was journal audio
-				 * to the card and hope. An enrolled word gets
-				 * answered here and now, radio or no radio.
-				 */
-				if (local_active) {
-					enum pendant_local_verdict verdict =
-						pendant_local_offer_stage(
-							mic_stage_samples,
-							MIC_STAGE_FRAMES);
-
-					if (verdict != PENDANT_LOCAL_PENDING) {
-						local_active = false;
-					}
-					if (verdict == PENDANT_LOCAL_MATCH) {
-						uint8_t slot =
-							pendant_local_matched_slot();
-
-						if (slot == 0U ||
-						    pendant_reflex_voice_armed(
-							    slot)) {
-							local_slot = slot;
-							local_handled = true;
-						}
-					}
-				}
-#endif
 				stage_frames = 0U;
 				++stage_flush_count;
 
@@ -2025,21 +1911,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			break;
 		}
 
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-		/*
-		 * Answered on-device. Stop the microphone immediately rather
-		 * than running out the 30 s cap: the owner has said their
-		 * word and is waiting for the chime, and every further block
-		 * is battery spent recording a room.
-		 */
-		if (local_handled) {
-			printk("LOCAL matched during offline capture "
-			       "(slot=%u) — ending capture\n",
-			       local_slot);
-			break;
-		}
-#endif
-
 		/*
 		 * Ignore bounce / leftover edges from the start press for the
 		 * first second, then a second press stops recording.
@@ -2086,33 +1957,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			recording_on_sd = false;
 		}
 	}
-
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-	if (local_handled) {
-		/*
-		 * Answered on-device, so there is nothing to upload and no
-		 * failure to report. Throwing the journal away is deliberate
-		 * and is the difference between a command and a memo: a
-		 * recording kept here would be queued in the outbox and
-		 * delivered to a model the moment signal returned, which
-		 * would answer out loud a question the owner already had the
-		 * answer to.
-		 */
-		if (pendant_opus_stream_active()) {
-			pendant_opus_stream_abort();
-		}
-		if (pendant_cloud_stream_active()) {
-			pendant_cloud_stream_abort();
-		}
-		live_fifo_reset();
-		recording_on_sd = false;
-		capture_local_slot = local_slot;
-#ifdef CONFIG_PENDANT_LOCAL_TRACE
-		pendant_local_report();
-#endif
-		return PENDANT_CAPTURE_LOCAL;
-	}
-#endif
 
 	/* Finalize the live encoder (flushes the last partial packet through
 	 * the sink), then drain the FIFO — it can hold ~6 s of encoded audio;
@@ -2183,626 +2027,6 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	return error;
 }
 
-static int queue_i2s_stream_preamble(const struct device *i2s)
-{
-	for (uint32_t block_index = 0U;
-	     block_index < I2S_SYNC_PATTERN_BLOCKS + 1U; ++block_index) {
-		void *block;
-		int16_t *output;
-		int error = k_mem_slab_alloc(&i2s_slab, &block, K_FOREVER);
-
-		if (error != 0) {
-			return error;
-		}
-		output = block;
-
-		for (uint32_t frame = 0U; frame < I2S_BLOCK_FRAMES; ++frame) {
-			int16_t sample = 0;
-
-			if (block_index < I2S_SYNC_PATTERN_BLOCKS) {
-				uint32_t absolute_frame =
-					block_index * I2S_BLOCK_FRAMES + frame;
-
-				sample = (absolute_frame & 1U) != 0U
-					 ? I2S_STREAM_SYNC_B
-					 : I2S_STREAM_SYNC_A;
-			} else if (frame < I2S_SYNC_END_FRAMES) {
-				sample = I2S_STREAM_SYNC_END;
-			}
-
-			output[2U * frame] = sample;
-			output[2U * frame + 1U] = sample;
-		}
-
-		error = i2s_write(i2s, block, I2S_BLOCK_SIZE);
-		if (error != 0) {
-			k_mem_slab_free(&i2s_slab, block);
-			return error;
-		}
-	}
-
-	return 0;
-}
-
-static int play_agent_reply(const struct device *i2s,
-			    const char *pcm_path)
-{
-	struct i2s_config config = {
-		.word_size = 16U,
-		.channels = I2S_CHANNEL_COUNT,
-		.format = I2S_FMT_DATA_FORMAT_I2S,
-		.options = I2S_OPT_FRAME_CLK_CONTROLLER |
-			   I2S_OPT_BIT_CLK_CONTROLLER,
-		.frame_clk_freq = PENDANT_CLOUD_REPLY_SAMPLE_RATE,
-		.mem_slab = &i2s_slab,
-		.block_size = I2S_BLOCK_SIZE,
-		.timeout = 3000,
-	};
-	struct fs_file_t file;
-	struct fs_dirent entry;
-	int16_t mono[I2S_BLOCK_FRAMES];
-	uint32_t queued_blocks = I2S_SYNC_PATTERN_BLOCKS + 1U;
-	uint32_t played_samples = 0U;
-	bool started = false;
-	bool file_open = false;
-	int error;
-
-	error = fs_stat(pcm_path, &entry);
-	if (error != 0 || entry.type != FS_DIR_ENTRY_FILE ||
-	    entry.size == 0U || (entry.size & 1U) != 0U) {
-		return error != 0 ? error : -EBADMSG;
-	}
-
-	fs_file_t_init(&file);
-	error = fs_open(&file, pcm_path, FS_O_READ);
-	if (error != 0) {
-		return error;
-	}
-	file_open = true;
-
-	error = i2s_configure(i2s, I2S_DIR_TX, &config);
-	if (error != 0) {
-		goto out;
-	}
-	error = queue_i2s_stream_preamble(i2s);
-	if (error != 0) {
-		goto out;
-	}
-
-	while (true) {
-		ssize_t bytes_read = fs_read(&file, mono, sizeof(mono));
-		void *block;
-		int16_t *output;
-
-		if (bytes_read < 0) {
-			error = (int)bytes_read;
-			goto out;
-		}
-		if (bytes_read == 0) {
-			break;
-		}
-		if ((bytes_read & 1) != 0) {
-			error = -EBADMSG;
-			goto out;
-		}
-
-		size_t frames = (size_t)bytes_read / sizeof(int16_t);
-
-		error = k_mem_slab_alloc(&i2s_slab, &block, K_FOREVER);
-		if (error != 0) {
-			goto out;
-		}
-		output = block;
-		for (size_t frame = 0U; frame < frames; ++frame) {
-			output[2U * frame] = mono[frame];
-			output[2U * frame + 1U] = mono[frame];
-		}
-		for (size_t frame = frames;
-		     frame < I2S_BLOCK_FRAMES; ++frame) {
-			output[2U * frame] = 0;
-			output[2U * frame + 1U] = 0;
-		}
-
-		error = i2s_write(i2s, block, I2S_BLOCK_SIZE);
-		if (error != 0) {
-			k_mem_slab_free(&i2s_slab, block);
-			goto out;
-		}
-		played_samples += (uint32_t)frames;
-		++queued_blocks;
-
-		if (!started && queued_blocks >= I2S_PREFILL_BLOCKS) {
-			error = i2s_trigger(i2s, I2S_DIR_TX,
-					    I2S_TRIGGER_START);
-			if (error != 0) {
-				goto out;
-			}
-			started = true;
-		}
-	}
-
-	if (!started) {
-		error = i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_START);
-		if (error != 0) {
-			goto out;
-		}
-		started = true;
-	}
-
-	error = i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
-	if (error == 0) {
-		printk("Played %u samples of agent speech at %u Hz\n",
-		       played_samples, PENDANT_CLOUD_REPLY_SAMPLE_RATE);
-	}
-
-out:
-	if (file_open) {
-		int close_error = fs_close(&file);
-
-		if (error == 0) {
-			error = close_error;
-		}
-	}
-	if (error != 0 && started) {
-		(void)i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_DROP);
-	}
-	return error;
-}
-
-/*
- * Conversational autoplay: pull the model's spoken PCM off the upload socket
- * (pendant_cloud_reply_read) and drive I2S as it arrives. An I2S underrun
- * during an LTE stall is recovered by a full reconfigure + preamble — the
- * ESP32 resyncs on the preamble pattern, so a stall is a glitch, not a brick.
- */
-/* Pauses are clean rebuffers now (silence, not noise) — allow more. */
-#define INLINE_REPLY_MAX_RECOVERIES 12U
-
-/* ~500 ms of 8 kHz u-law buffered before the speaker starts. When the
- * downlink proves slower than the stream rate, each starvation raises the
- * refill bar so the reply degrades into ONE longer pause, not stutter. */
-#define INLINE_PREBUFFER_BYTES 4000U
-#define INLINE_REBUFFER_STEP_BYTES 8000U
-/* Opus wire is ~2 KB/s: ~5 packets ≈ 300 ms to start, +~600 ms per pause. */
-#define INLINE_OPUS_PREBUFFER_BYTES 512U
-#define INLINE_OPUS_REBUFFER_STEP 1024U
-#define INLINE_OPUS_MAX_PACKET_BYTES 1275U
-
-/*
- * Pop one complete [u16 BE length][packet] from the wire ring and decode to
- * 24 kHz mono PCM. Returns samples produced, 0 when the ring lacks a full
- * packet, <0 on protocol or decoder error.
- */
-static int inline_opus_next_packet(uint8_t *ring, size_t capacity,
-				   size_t *tail, size_t *count,
-				   int16_t *pcm_out)
-{
-	static uint8_t packet[INLINE_OPUS_MAX_PACKET_BYTES];
-	size_t length;
-
-	if (*count < 2U) {
-		return 0;
-	}
-	length = ((size_t)ring[*tail] << 8) |
-		 ring[(*tail + 1U) % capacity];
-	if (length == 0U || length > sizeof(packet)) {
-		return -EBADMSG;
-	}
-	if (*count < 2U + length) {
-		return 0;
-	}
-	*tail = (*tail + 2U) % capacity;
-	for (size_t i = 0U; i < length; ++i) {
-		packet[i] = ring[(*tail + i) % capacity];
-	}
-	*tail = (*tail + length) % capacity;
-	*count -= 2U + length;
-	return pendant_opus_reply_decode_packet(
-		packet, length, pcm_out, PENDANT_OPUS_REPLY_FRAME_SAMPLES);
-}
-
-static int play_inline_reply(const struct device *i2s)
-{
-	const bool ulaw_reply =
-		pendant_cloud_reply_format == PENDANT_CLOUD_AUDIO_G711_ULAW;
-	const bool opus_reply =
-		pendant_cloud_reply_format == PENDANT_CLOUD_AUDIO_OPUS_FRAMES;
-	const uint32_t reply_rate = pendant_cloud_reply_sample_rate != 0U
-					    ? pendant_cloud_reply_sample_rate
-					    : PENDANT_CLOUD_REPLY_SAMPLE_RATE;
-	struct i2s_config config = {
-		.word_size = 16U,
-		.channels = I2S_CHANNEL_COUNT,
-		.format = I2S_FMT_DATA_FORMAT_I2S,
-		.options = I2S_OPT_FRAME_CLK_CONTROLLER |
-			   I2S_OPT_BIT_CLK_CONTROLLER,
-		/* Opus decodes straight to 24 kHz; u-law is upsampled 3x on
-		 * decode (8 -> 24 kHz). Either way the ESP32 bridge sees the
-		 * 24000 Hz its resampler is hardcoded for. */
-		.frame_clk_freq = ulaw_reply ? reply_rate * 3U : reply_rate,
-		.mem_slab = &i2s_slab,
-		.block_size = I2S_BLOCK_SIZE,
-		.timeout = 3000,
-	};
-	uint32_t recoveries = 0U;
-	uint32_t played_samples = 0U;
-	uint32_t queued_blocks = 0U;
-	uint32_t rebuffer_waits = 0U;
-	bool started = false;
-	bool configured = false;
-	int read_result = 0;
-	int error = 0;
-
-	if (!ulaw_reply && !opus_reply) {
-		/* Legacy 24 kHz PCM path (kept for relay fallback). */
-		int16_t mono[I2S_BLOCK_FRAMES];
-
-		for (;;) {
-			read_result =
-				pendant_cloud_reply_read(mono, sizeof(mono));
-			if (read_result <= 0) {
-				break;
-			}
-			if ((read_result & 1) != 0) {
-				--read_result;
-				if (read_result == 0) {
-					break;
-				}
-			}
-
-			size_t frames = (size_t)read_result / sizeof(int16_t);
-			void *block;
-			int16_t *output;
-
-			if (!configured) {
-				error = i2s_configure(i2s, I2S_DIR_TX, &config);
-				if (error == 0) {
-					error = queue_i2s_stream_preamble(i2s);
-				}
-				if (error != 0) {
-					break;
-				}
-				configured = true;
-				started = false;
-				queued_blocks = I2S_SYNC_PATTERN_BLOCKS + 1U;
-			}
-			error = k_mem_slab_alloc(&i2s_slab, &block, K_MSEC(3000));
-			if (error != 0) {
-				break;
-			}
-			output = block;
-			for (size_t frame = 0U; frame < frames; ++frame) {
-				output[2U * frame] = mono[frame];
-				output[2U * frame + 1U] = mono[frame];
-			}
-			for (size_t frame = frames; frame < I2S_BLOCK_FRAMES;
-			     ++frame) {
-				output[2U * frame] = 0;
-				output[2U * frame + 1U] = 0;
-			}
-			error = i2s_write(i2s, block, I2S_BLOCK_SIZE);
-			if (error != 0) {
-				k_mem_slab_free(&i2s_slab, block);
-				if (++recoveries > INLINE_REPLY_MAX_RECOVERIES) {
-					break;
-				}
-				printk("Inline reply I2S recovery %u (error %d)\n",
-				       recoveries, error);
-				(void)i2s_trigger(i2s, I2S_DIR_TX,
-						  I2S_TRIGGER_DROP);
-				configured = false;
-				error = 0;
-				continue;
-			}
-			played_samples += (uint32_t)frames;
-			++queued_blocks;
-			if (!started && queued_blocks >= I2S_PREFILL_BLOCKS) {
-				error = i2s_trigger(i2s, I2S_DIR_TX,
-						    I2S_TRIGGER_START);
-				if (error != 0) {
-					break;
-				}
-				started = true;
-			}
-		}
-		goto teardown;
-	}
-
-	/*
-	 * Streamed reply (Opus packets or u-law bytes) with a workspace jitter
-	 * ring: LTE delivers in bursts with multi-second gaps, far larger than
-	 * the 4-block (~43 ms) I2S queue. Prebuffer, then absorb; genuine
-	 * starvation pauses cleanly and rebuffers with an escalating floor.
-	 */
-	{
-		uint8_t *ring = audio_workspace;
-		size_t ring_capacity = sizeof(audio_workspace);
-		size_t ring_tail = 0U;
-		size_t ring_head = 0U;
-		size_t ring_count = 0U;
-		/* Decoded-PCM staging: Opus emits 60 ms bursts (1440 samples
-		 * at 24 kHz); u-law interpolation carries 3 at a time. */
-		static int16_t pending_pcm[PENDANT_OPUS_REPLY_FRAME_SAMPLES];
-		size_t pending_length = 0U;
-		size_t pending_offset = 0U;
-		int16_t previous_sample = 0;
-		size_t prebuffer_bytes =
-			opus_reply ? INLINE_OPUS_PREBUFFER_BYTES
-				   : INLINE_PREBUFFER_BYTES;
-		bool reply_eof = false;
-		int stream_error = 0;
-
-		if (opus_reply) {
-			int decoder_bytes = pendant_opus_reply_decoder_begin(
-				audio_workspace, sizeof(audio_workspace));
-
-			if (decoder_bytes < 0) {
-				error = decoder_bytes;
-				goto teardown;
-			}
-			ring = audio_workspace +
-			       ROUND_UP((size_t)decoder_bytes, 4U);
-			ring_capacity = sizeof(audio_workspace) -
-					ROUND_UP((size_t)decoder_bytes, 4U);
-		}
-
-		(void)pendant_cloud_reply_set_nonblocking(true);
-
-		for (;;) {
-			/* 1) Drain LTE into the jitter ring (non-blocking). */
-			while (!reply_eof && ring_count < ring_capacity) {
-				uint8_t chunk[512];
-				size_t want = MIN(sizeof(chunk),
-						  ring_capacity - ring_count);
-
-				read_result =
-					pendant_cloud_reply_read(chunk, want);
-				if (read_result == -EAGAIN) {
-					break;
-				}
-				if (read_result <= 0) {
-					reply_eof = true;
-					stream_error = read_result;
-					break;
-				}
-				for (int i = 0; i < read_result; ++i) {
-					ring[ring_head] = chunk[i];
-					ring_head = (ring_head + 1U) %
-						    ring_capacity;
-				}
-				ring_count += (size_t)read_result;
-				if ((size_t)read_result < want) {
-					break;
-				}
-			}
-
-			bool producer_ready;
-
-			if (opus_reply) {
-				/* A block can start when decoded samples are
-				 * staged or a complete packet is buffered. */
-				size_t need = 2U;
-
-				if (ring_count >= 2U) {
-					need = 2U +
-					       (((size_t)ring[ring_tail] << 8) |
-						ring[(ring_tail + 1U) %
-						     ring_capacity]);
-				}
-				producer_ready =
-					pending_length > pending_offset ||
-					(ring_count >= need && need > 2U);
-			} else {
-				producer_ready =
-					pending_length > pending_offset ||
-					ring_count > 0U;
-			}
-
-			/* 2) Start gate: prebuffer before spinning I2S up. */
-			if (!configured) {
-				if (!producer_ready && reply_eof) {
-					break;
-				}
-				if (ring_count < prebuffer_bytes &&
-				    !reply_eof) {
-					++rebuffer_waits;
-					k_msleep(5);
-					continue;
-				}
-				error = i2s_configure(i2s, I2S_DIR_TX, &config);
-				if (error == 0) {
-					error = queue_i2s_stream_preamble(i2s);
-				}
-				if (error != 0) {
-					break;
-				}
-				configured = true;
-				started = false;
-				queued_blocks = I2S_SYNC_PATTERN_BLOCKS + 1U;
-			}
-
-			/* 3) Emit one full block when data is ready. */
-			if (producer_ready || (reply_eof && ring_count > 0U)) {
-				void *block;
-				int16_t *output;
-				size_t frame = 0U;
-
-				error = k_mem_slab_alloc(&i2s_slab, &block,
-							 K_MSEC(3000));
-				if (error != 0) {
-					break;
-				}
-				output = block;
-				while (frame < I2S_BLOCK_FRAMES) {
-					int16_t sample_value;
-
-					if (pending_offset >= pending_length) {
-						pending_offset = 0U;
-						pending_length = 0U;
-						if (opus_reply) {
-							int got = inline_opus_next_packet(
-								ring,
-								ring_capacity,
-								&ring_tail,
-								&ring_count,
-								pending_pcm);
-
-							if (got < 0) {
-								stream_error =
-									got;
-								reply_eof =
-									true;
-								break;
-							}
-							if (got == 0) {
-								break;
-							}
-							pending_length =
-								(size_t)got;
-						} else {
-							if (ring_count == 0U) {
-								break;
-							}
-							uint8_t code =
-								ring[ring_tail];
-
-							ring_tail =
-								(ring_tail +
-								 1U) %
-								ring_capacity;
-							--ring_count;
-
-							int16_t decoded =
-								ulaw_to_linear(
-									code);
-							int32_t delta =
-								(int32_t)decoded -
-								previous_sample;
-
-							pending_pcm[0] = (int16_t)(previous_sample +
-										   delta / 3);
-							pending_pcm[1] =
-								(int16_t)(previous_sample +
-									  (2 * delta) /
-										  3);
-							pending_pcm[2] = decoded;
-							pending_length = 3U;
-							previous_sample =
-								decoded;
-						}
-						if (pending_length == 0U) {
-							break;
-						}
-					}
-					sample_value =
-						pending_pcm[pending_offset++];
-					output[2U * frame] = sample_value;
-					output[2U * frame + 1U] = sample_value;
-					++frame;
-				}
-				if (frame == 0U) {
-					k_mem_slab_free(&i2s_slab, block);
-					if (reply_eof) {
-						break;
-					}
-					++rebuffer_waits;
-					k_msleep(3);
-					continue;
-				}
-				/* Zero-fill ONLY the final partial block. */
-				for (size_t rest = frame;
-				     rest < I2S_BLOCK_FRAMES; ++rest) {
-					output[2U * rest] = 0;
-					output[2U * rest + 1U] = 0;
-				}
-				error = i2s_write(i2s, block, I2S_BLOCK_SIZE);
-				if (error != 0) {
-					k_mem_slab_free(&i2s_slab, block);
-					if (++recoveries >
-					    INLINE_REPLY_MAX_RECOVERIES) {
-						break;
-					}
-					prebuffer_bytes = MIN(
-						prebuffer_bytes +
-							(opus_reply
-								 ? INLINE_OPUS_REBUFFER_STEP
-								 : INLINE_REBUFFER_STEP_BYTES),
-						ring_capacity / 2U);
-					printk("Inline reply starved; pause+rebuffer %u (error %d, next threshold %u)\n",
-					       recoveries, error,
-					       (unsigned int)prebuffer_bytes);
-					(void)i2s_trigger(i2s, I2S_DIR_TX,
-							  I2S_TRIGGER_DROP);
-					configured = false;
-					error = 0;
-					continue;
-				}
-				played_samples += (uint32_t)frame;
-				++queued_blocks;
-				if (!started &&
-				    queued_blocks >= I2S_PREFILL_BLOCKS) {
-					error = i2s_trigger(i2s, I2S_DIR_TX,
-							    I2S_TRIGGER_START);
-					if (error != 0) {
-						break;
-					}
-					started = true;
-				}
-				if (reply_eof && ring_count == 0U &&
-				    pending_offset >= pending_length) {
-					break;
-				}
-				continue;
-			}
-			if (reply_eof) {
-				break;
-			}
-			/* Mid-play buffer low: keep draining the socket. */
-			++rebuffer_waits;
-			k_msleep(3);
-		}
-		if (opus_reply) {
-			pendant_opus_reply_decoder_end();
-		}
-		if (error == 0 && stream_error != 0 &&
-		    stream_error != -EAGAIN && played_samples == 0U) {
-			read_result = stream_error;
-		}
-	}
-
-teardown:
-	if (configured) {
-		bool drained = false;
-
-		if (!started && error == 0 &&
-		    i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_START) == 0) {
-			started = true;
-		}
-		if (started && error == 0) {
-			drained = i2s_trigger(i2s, I2S_DIR_TX,
-					      I2S_TRIGGER_DRAIN) == 0;
-		}
-		if (!drained) {
-			/* An underrun after the final write parks the driver in
-			 * ERROR, where DRAIN/START fail; DROP is the only reset
-			 * back to READY. Without it every later record/playback
-			 * cycle fails until power cycle. */
-			(void)i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_DROP);
-		}
-	}
-
-	printk("Inline reply played %u samples (read_result=%d error=%d "
-	       "recoveries=%u rebuffer_waits=%u)\n",
-	       played_samples, read_result, error, recoveries, rebuffer_waits);
-
-	if (error != 0) {
-		return error;
-	}
-	if (read_result < 0 && read_result != -EAGAIN && played_samples == 0U) {
-		return read_result;
-	}
-	return 0;
-}
 
 static void show_error(void)
 {
@@ -3487,10 +2711,8 @@ static void ws_io_pump_uplink(void)
 	uint8_t *storage = live_fifo_storage();
 	size_t fill;
 
-	/* Held for the local decision: the packets stay in the FIFO and the
-	 * radio stays silent. Returning (rather than draining into a discard)
-	 * is the point — every byte is still there to send if the verdict
-	 * comes back "cloud". */
+	/* Gate shut: the packets stay in the FIFO and the radio stays
+	 * silent. */
 	if (!atomic_get(&convo_uplink_gate)) {
 		return;
 	}
@@ -3697,13 +2919,8 @@ static void convo_decode_downlink(void)
  * death, or the runaway cap.
  */
 /*
- * Tell the relay a conversation is starting and let the uplink flow.
- *
- * Split out of run_conversation so the local-command path can DEFER it:
- * this function contains the first byte this device transmits for a press,
- * and the whole point of on-device matching is to be able to never call it.
- * Everything before it — mic, I2S, Opus encode, the FIFO — is local work
- * that costs no radio.
+ * Tell the relay a conversation is starting and let the uplink flow. This
+ * function contains the first byte this device transmits for a press.
  */
 static int convo_open_uplink(char *device_time, size_t device_time_capacity)
 {
@@ -3745,19 +2962,8 @@ static int run_conversation(const struct device *i2s)
 	struct i2s_config tx_config;
 	int32_t raw_processing[MIC_RX_BLOCK_FRAMES];
 	char device_time[32];
-	/*
-	 * Has this press been allowed to transmit yet? Without local
-	 * commands the answer is "before the mic even started", exactly as
-	 * before. With them, it stays false until the matcher gives up on
-	 * the utterance being one of the enrolled words.
-	 */
+	/* Has this press been allowed to transmit yet? */
 	bool uplink_open = false;
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-	/* Slot to hand the reflex layer once I2S is torn down; 0 = none. */
-	uint8_t local_fire_slot = 0U;
-	bool local_handled = false;
-	enum pendant_local_verdict local_verdict = PENDANT_LOCAL_PENDING;
-#endif
 	int64_t started_at;
 	int64_t next_led_toggle;
 	size_t stage_frames = 0U;
@@ -3767,7 +2973,6 @@ static int run_conversation(const struct device *i2s)
 	bool hpf_primed = false;
 	int32_t slew_prev = 0;
 	bool slew_primed = false;
-	bool playing = false;
 	bool i2s_running = false;
 	bool stop_sent = false;
 	int result = 0;
@@ -3811,25 +3016,12 @@ static int run_conversation(const struct device *i2s)
 	convo_encode_calls = 0U;
 	convo_encode_max_cycles = 0U;
 
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-	/*
-	 * Say nothing yet. The mic, the encoder and the FIFO all start below
-	 * exactly as they always did; only the radio waits, and only for as
-	 * long as it takes to rule the utterance out as a command word.
-	 *
-	 * An enrollment press never opens the uplink at all — the owner is
-	 * teaching the device a word, not asking a model about it.
-	 */
-	atomic_set(&convo_uplink_gate, 0);
-	pendant_local_begin();
-#else
 	atomic_set(&convo_uplink_gate, 1);
 	error = convo_open_uplink(device_time, sizeof(device_time));
 	if (error != 0) {
 		return error;
 	}
 	uplink_open = true;
-#endif
 
 	error = pendant_opus_stream_begin_packets(SAMPLE_RATE,
 						  audio_workspace,
@@ -3987,22 +3179,6 @@ static int run_conversation(const struct device *i2s)
 					mic_stage_samples, MIC_STAGE_FRAMES);
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-				/*
-				 * Same buffer the encoder just saw, so the
-				 * matcher hears exactly what the relay would
-				 * have. Only while the verdict is open: once
-				 * the uplink is flowing this is a normal
-				 * conversation and the filterbank would be
-				 * pure cost on a loop that has none to spare.
-				 */
-				if (!uplink_open) {
-					local_verdict =
-						pendant_local_offer_stage(
-							mic_stage_samples,
-							MIC_STAGE_FRAMES);
-				}
-#endif
 				stage_frames = 0U;
 			}
 		}
@@ -4010,59 +3186,6 @@ static int run_conversation(const struct device *i2s)
 			result = -EIO;
 			break;
 		}
-
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-		/*
-		 * Act on the verdict OUT here, never inside the sample loop:
-		 * opening the uplink sends a WebSocket text frame, and a
-		 * blocking socket write has no business between two audio
-		 * samples.
-		 */
-		if (!uplink_open && local_verdict != PENDANT_LOCAL_PENDING) {
-			uint8_t slot = pendant_local_matched_slot();
-
-			if (local_verdict == PENDANT_LOCAL_MATCH &&
-			    (slot == 0U ||
-			     pendant_reflex_voice_armed(slot))) {
-				/*
-				 * Done, and the modem never transmitted. slot
-				 * 0 is the enrollment press: the word was
-				 * stored, there is no recipe to run, and
-				 * shipping it to a model would answer a
-				 * question the owner did not ask.
-				 */
-				local_handled = true;
-				local_fire_slot = slot;
-				printk("LOCAL handled press on-device "
-				       "(slot=%u) — no LTE session\n",
-				       slot);
-				break;
-			}
-			if (local_verdict == PENDANT_LOCAL_MATCH) {
-				/*
-				 * The word was recognized but nothing is
-				 * bound to it. Swallowing the press here
-				 * would leave the owner talking to a device
-				 * that silently did nothing, which is worse
-				 * than a cloud round trip.
-				 */
-				printk("LOCAL slot %u matched but no armed "
-				       "recipe — falling through to cloud\n",
-				       slot);
-			}
-			error = convo_open_uplink(device_time,
-						  sizeof(device_time));
-			if (error != 0) {
-				printk("Conversation uplink open failed after "
-				       "local decision: %d\n",
-				       error);
-				result = error;
-				break;
-			}
-			uplink_open = true;
-			error = 0;
-		}
-#endif
 
 		/* The WS thread moves bytes; this loop only decodes. The
 		 * audio thread owns playback state and barge-in flushes. */
@@ -4201,31 +3324,6 @@ teardown:
 	pendant_opus_stream_abort();
 	pendant_opus_reply_decoder_end();
 	clear_button_events();
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-#ifdef CONFIG_PENDANT_LOCAL_TRACE
-	pendant_local_report();
-#endif
-	/*
-	 * Run the recipe LAST, after I2S is torn down and convo_active is
-	 * clear: a chime action reconfigures the same peripheral and
-	 * reflex_chime_play refuses (-EBUSY) while a conversation is live.
-	 * By here the DROP has completed and the clocks are stopped, so the
-	 * chime path owns the bus exactly as it does from the idle loop.
-	 */
-	if (local_handled && local_fire_slot != 0U) {
-		unsigned int fired =
-			pendant_reflex_fire_voice(local_fire_slot);
-
-		printk("LOCAL fired %u recipe(s) for slot %u with the radio "
-		       "untouched\n",
-		       fired, local_fire_slot);
-		result = 0;
-	} else if (local_handled) {
-		/* Enrollment press: the template is stored and saved. */
-		flash_led(2U, 80, 120);
-		result = 0;
-	}
-#endif
 	if (result == 0 && error != 0) {
 		result = error;
 	}
@@ -4315,15 +3413,6 @@ int main(void)
 	 * every haptic action runs the motor or degrades to LED.
 	 */
 	(void)haptic_init();
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-	/*
-	 * Keyword templates load here for the same reason recipes do, only
-	 * more so: the entire point of on-device matching is that it works
-	 * with no network, and a vocabulary that only arrives once LTE is up
-	 * would be useless in exactly the situation it exists for.
-	 */
-	pendant_local_init();
-#endif
 	pendant_reflex_init(&reflex_ops_impl);
 
 #if PENDANT_BOOT_DUMP_PCM_HEX
@@ -4544,12 +3633,6 @@ int main(void)
 				}
 			}
 			pendant_reflex_tick();
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-			/* Erasures and the enroll arm, on the same idle
-			 * cadence and for the same reason: the card and the
-			 * template table are unowned only here. */
-			pendant_local_tick();
-#endif
 			apply_forced_link_state();
 			if (!pendant_ws_connected() &&
 			    !link_is_forced_offline()) {
@@ -4656,31 +3739,6 @@ int main(void)
 
 		gpio_pin_set_dt(&led, 0);
 		audio_cycle_phase = 2U;
-#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
-		if (capture_error == PENDANT_CAPTURE_LOCAL) {
-			/*
-			 * No signal, and the pendant answered anyway. This is
-			 * the case the whole feature is for: the recipe runs
-			 * on the chime, the motor and the LED already on the
-			 * owner's body, and nothing is queued for a network
-			 * that may not come back today.
-			 */
-			if (capture_local_slot != 0U) {
-				unsigned int fired = pendant_reflex_fire_voice(
-					capture_local_slot);
-
-				printk("LOCAL offline press answered: slot=%u "
-				       "recipes=%u\n",
-				       capture_local_slot, fired);
-			} else {
-				flash_led(2U, 80, 120);
-			}
-			capture_local_slot = 0U;
-			audio_cycle_result = 0;
-			clear_button_events();
-			continue;
-		}
-#endif
 		if (capture_error != 0) {
 			printk("Microphone recording failed: %d\n", capture_error);
 			pendant_cloud_stream_abort();

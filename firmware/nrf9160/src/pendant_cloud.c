@@ -81,8 +81,6 @@ static void lte_attach_probe_fn(struct k_work *work)
 #define RELAY_HOSTNAME \
 	"ai-pendant-relay.your-subdomain.workers.dev"
 #define RELAY_PORT "443"
-#define TRANSCRIBE_PATH "/v1/transcribe"
-#define MAC_PLAN_PATH "/v1/mac/plan"
 #define PENDANT_EVENT_PATH_PREFIX "/v1/pendant/jobs/"
 #define PENDANT_EVENT_PATH_SUFFIX "/events"
 #define PENDANT_DEVICE_ID "nrf9160-pendant"
@@ -117,10 +115,8 @@ static void lte_attach_probe_fn(struct k_work *work)
 #define HTTP_RESPONSE_SIZE 2048U
 #define HTTP_HEADER_SIZE 768U
 #define FILE_READ_SIZE 384U
-#define BASE64_SEND_SIZE 512U
 #define TRANSCRIPT_JSON_SIZE 1024U
 #define JOB_ID_SIZE 80U
-#define PLAN_SUFFIX_SIZE 416U
 #define PENDANT_EVENT_BODY_SIZE 512U
 #define HTTP_STREAM_HEADER_SIZE 1536U
 #define HTTP_STREAM_READ_SIZE 1536U
@@ -131,13 +127,6 @@ static const char relay_ca_certificate[] = {
 #include "globalsign_root_ca.pem.inc"
 	0x00
 };
-
-static const char transcription_prefix[] = "{\"audioBase64\":\"";
-static const char transcription_suffix[] =
-	"\",\"format\":\"ogg\",\"language\":\"en\"}";
-static const char plan_prefix[] = "{\"command\":";
-static const char base64_alphabet[] =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static char http_response[HTTP_RESPONSE_SIZE];
 static char transcript_json[TRANSCRIPT_JSON_SIZE];
@@ -352,11 +341,6 @@ static bool link_blocked_for_test;
 void pendant_cloud_block_link(bool blocked)
 {
 	link_blocked_for_test = blocked;
-}
-
-bool pendant_cloud_link_blocked(void)
-{
-	return link_blocked_for_test;
 }
 
 static int ensure_lte_data_ready(void)
@@ -976,83 +960,6 @@ static int send_http_get_header(int fd, const char *path)
 	return send_all(fd, header, (size_t)length);
 }
 
-struct base64_stream {
-	int fd;
-	uint8_t carry[3];
-	uint8_t carry_length;
-	char output[BASE64_SEND_SIZE];
-	size_t output_length;
-};
-
-static int base64_flush(struct base64_stream *stream)
-{
-	int error;
-
-	if (stream->output_length == 0U) {
-		return 0;
-	}
-	error = send_all(stream->fd, stream->output, stream->output_length);
-	if (error == 0) {
-		stream->output_length = 0U;
-	}
-	return error;
-}
-
-static int base64_emit(struct base64_stream *stream, uint8_t count)
-{
-	const uint8_t byte0 = stream->carry[0];
-	const uint8_t byte1 = count > 1U ? stream->carry[1] : 0U;
-	const uint8_t byte2 = count > 2U ? stream->carry[2] : 0U;
-
-	if (stream->output_length + 4U > sizeof(stream->output)) {
-		int error = base64_flush(stream);
-
-		if (error != 0) {
-			return error;
-		}
-	}
-
-	stream->output[stream->output_length++] =
-		base64_alphabet[byte0 >> 2];
-	stream->output[stream->output_length++] =
-		base64_alphabet[((byte0 & 0x03U) << 4) | (byte1 >> 4)];
-	stream->output[stream->output_length++] =
-		count > 1U
-			? base64_alphabet[((byte1 & 0x0fU) << 2) |
-					  (byte2 >> 6)]
-			: '=';
-	stream->output[stream->output_length++] =
-		count > 2U ? base64_alphabet[byte2 & 0x3fU] : '=';
-	stream->carry_length = 0U;
-	return 0;
-}
-
-static int base64_feed(struct base64_stream *stream,
-		       const uint8_t *data, size_t length)
-{
-	for (size_t index = 0U; index < length; ++index) {
-		stream->carry[stream->carry_length++] = data[index];
-		if (stream->carry_length == 3U) {
-			int error = base64_emit(stream, 3U);
-
-			if (error != 0) {
-				return error;
-			}
-		}
-	}
-	return 0;
-}
-
-static int base64_finish(struct base64_stream *stream)
-{
-	int error = 0;
-
-	if (stream->carry_length != 0U) {
-		error = base64_emit(stream, stream->carry_length);
-	}
-	return error == 0 ? base64_flush(stream) : error;
-}
-
 /*
  * Fallback: known-length raw s16le PCM file upload on /v1/pendant/command.
  * Live capture prefers pendant_cloud_stream_* chunked path instead.
@@ -1263,77 +1170,6 @@ static int copy_json_string_value(const char *key_name,
 	return 0;
 }
 
-static int dispatch_transcript_to_mac(uint32_t sample_rate)
-{
-	char plan_suffix[PLAN_SUFFIX_SIZE];
-	const size_t transcript_length = strlen(transcript_json);
-	uint32_t duration_ms;
-	int suffix_length;
-	size_t body_length;
-	int fd;
-	int error;
-
-	if (sample_rate == 0U) {
-		return -EINVAL;
-	}
-	duration_ms = (uint32_t)(
-		((uint64_t)pendant_cloud_uploaded_pcm_bytes * 1000U) /
-		((uint64_t)sample_rate * sizeof(int16_t)));
-	suffix_length = snprintf(
-		plan_suffix, sizeof(plan_suffix),
-		",\"deviceId\":\"" PENDANT_DEVICE_ID "\","
-		"\"transcriptionJobId\":\"%s\","
-			"\"inputTelemetry\":{"
-			"\"audioBytes\":%u,"
-			"\"format\":\"ogg-opus\","
-		"\"sampleRate\":%u,"
-		"\"channels\":1,"
-		"\"bitsPerSample\":16,"
-		"\"inputGainDb\":0,"
-		"\"durationMs\":%u,"
-		"\"storage\":\"microSD\","
-			"\"uploadedFormat\":\"ogg\"}}",
-		transcription_job_id, pendant_cloud_uploaded_pcm_bytes,
-		sample_rate, duration_ms);
-	if (suffix_length < 0 ||
-	    (size_t)suffix_length >= sizeof(plan_suffix)) {
-		return -EOVERFLOW;
-	}
-
-	body_length = sizeof(plan_prefix) - 1U +
-		      transcript_length + (size_t)suffix_length;
-
-	int64_t lat_dispatch_started = k_uptime_get();
-
-	fd = open_relay_socket();
-	if (fd < 0) {
-		return fd;
-	}
-	int64_t lat_dispatch_socket_done = k_uptime_get();
-
-	error = send_http_post_header(fd, MAC_PLAN_PATH,
-				      "application/json", body_length);
-	if (error == 0) {
-		error = send_all(fd, plan_prefix, sizeof(plan_prefix) - 1U);
-	}
-	if (error == 0) {
-		error = send_all(fd, transcript_json, transcript_length);
-	}
-	if (error == 0) {
-		error = send_all(fd, plan_suffix, (size_t)suffix_length);
-	}
-	if (error == 0) {
-		error = receive_http_response(fd);
-	}
-	printk("LAT dispatch socket_ms=%lld rest_ms=%lld total_ms=%lld\n",
-	       lat_dispatch_socket_done - lat_dispatch_started,
-	       k_uptime_get() - lat_dispatch_socket_done,
-	       k_uptime_get() - lat_dispatch_started);
-
-	close(fd);
-	return error;
-}
-
 static int post_pendant_event(const char *stage, const char *status,
 			      const char *label, const char *detail,
 			      int result)
@@ -1393,64 +1229,6 @@ static int post_pendant_event(const char *stage, const char *status,
 	}
 	close(fd);
 	pendant_cloud_last_http_status = previous_http_status;
-	return error;
-}
-
-int pendant_cloud_announce_recording(uint32_t pcm_bytes,
-				     uint32_t sample_rate)
-{
-	char body[192];
-	int body_length;
-	int fd;
-	int error;
-
-	announced_job_id[0] = '\0';
-	if (!cloud_initialized) {
-		return -ENOTCONN;
-	}
-
-	body_length = snprintf(
-		body, sizeof(body),
-			"{\"deviceId\":\"nrf9160-pendant\","
-			"\"pcmBytes\":%u,"
-			"\"sampleRate\":%u,"
-			"\"format\":\"ogg-opus\"}",
-		pcm_bytes, sample_rate);
-	if (body_length < 0 || (size_t)body_length >= sizeof(body)) {
-		return -EOVERFLOW;
-	}
-
-	int64_t lat_announce_started = k_uptime_get();
-
-	fd = open_relay_socket();
-	if (fd < 0) {
-		return fd;
-	}
-	int64_t lat_announce_socket_done = k_uptime_get();
-
-	error = send_http_post_header(
-		fd, "/v1/pendant/announce", "application/json",
-		(size_t)body_length);
-	if (error == 0) {
-		error = send_all(fd, body, (size_t)body_length);
-	}
-	if (error == 0) {
-		error = receive_http_response(fd);
-	}
-	close(fd);
-	if (error == 0) {
-		error = copy_json_string_value(
-			"jobId", announced_job_id, sizeof(announced_job_id));
-		if (error != 0) {
-			announced_job_id[0] = '\0';
-		}
-	}
-	printk("Recording announced: result=%d job=%s\n",
-	       error, announced_job_id[0] != '\0' ? announced_job_id : "-");
-	printk("LAT announce socket_ms=%lld rest_ms=%lld total_ms=%lld\n",
-	       lat_announce_socket_done - lat_announce_started,
-	       k_uptime_get() - lat_announce_socket_done,
-	       k_uptime_get() - lat_announce_started);
 	return error;
 }
 
@@ -2357,11 +2135,6 @@ int pendant_cloud_stream_ensure(uint32_t sample_rate)
 	return error;
 }
 
-int pendant_cloud_stream_begin(uint32_t sample_rate)
-{
-	return pendant_cloud_stream_ensure(sample_rate);
-}
-
 int pendant_cloud_stream_pump(uint32_t budget_ms)
 {
 	int64_t deadline;
@@ -2926,32 +2699,6 @@ int pendant_cloud_wait_for_agent_reply(const char *pcm_path)
 
 	pendant_cloud_reply_result = error;
 	return error;
-}
-
-int pendant_cloud_report_playback_started(void)
-{
-	return post_pendant_event(
-		"device_playback", "active",
-		"Bluetooth playback started",
-		"Pendant started transmitting response PCM over I2S.",
-		0);
-}
-
-int pendant_cloud_report_playback_result(int playback_result)
-{
-	if (playback_result == 0) {
-		return post_pendant_event(
-			"device_playback", "done",
-			"Bluetooth playback completed",
-			"Pendant finished transmitting response PCM over I2S.",
-			0);
-	}
-
-	return post_pendant_event(
-		"device_playback", "failed",
-		"Bluetooth playback failed",
-		"Pendant I2S playback returned an error.",
-		playback_result);
 }
 
 int pendant_cloud_set_job_id_for_diagnostic(const char *job_id)

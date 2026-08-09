@@ -17,7 +17,6 @@
 
 #include "haptic.h"
 #include "pendant_cloud.h"
-#include "pendant_local.h" /* PENDANT_LOCAL_SLOTS bounds the voice trigger */
 #include "pendant_reflex.h"
 
 #define REFLEX_MOUNT "/SD:"
@@ -38,6 +37,14 @@
 #define REFLEX_PENDING_BYTES 512U
 /* Countdown sanity ceiling: one week. */
 #define REFLEX_COUNTDOWN_MAX_S 604800U
+/*
+ * Voice-trigger slot ceiling. The on-device keyword matcher that fired
+ * these (pendant_local, removed) enrolled up to four words; keeping the
+ * same bound means an existing recipes.json with voice recipes still
+ * parses and persists — the recipes are simply inert until a matcher
+ * exists again.
+ */
+#define REFLEX_VOICE_SLOTS 4U
 /* Daily alarms poll the modem clock at most this often. */
 #define REFLEX_CLOCK_POLL_MS 10000
 /*
@@ -54,10 +61,8 @@ enum reflex_trigger {
 	REFLEX_TRIG_GESTURE,
 	/*
 	 * An enrolled word, recognized on-device during a button-initiated
-	 * capture (pendant_local).  This is the trigger that lets a recipe
-	 * run from speech with the modem never transmitting — and the only
-	 * one that works when there is no signal at all.  The spoken word
-	 * carries no meaning of its own: the recipe it is bound to does.
+	 * capture.  The matcher that fired this (pendant_local) has been
+	 * removed; the trigger kind is kept so stored recipes stay valid.
 	 */
 	REFLEX_TRIG_VOICE,
 };
@@ -94,7 +99,7 @@ struct reflex_recipe {
 	 * one are mutually exclusive per recipe and a fifth byte here would
 	 * cost 8 B of padding x 16 recipes on a build with 6.6 kB free:
 	 *   GESTURE  which gesture (REFLEX_GESTURE_B2_DOUBLE)
-	 *   VOICE    which enrolled keyword slot, 1..PENDANT_LOCAL_SLOTS
+	 *   VOICE    which enrolled keyword slot, 1..REFLEX_VOICE_SLOTS
 	 */
 	uint8_t gesture;
 	uint8_t action_count;
@@ -368,7 +373,7 @@ static int reflex_parse_recipe(const char *text, struct reflex_recipe *out)
 		out->trigger = REFLEX_TRIG_VOICE;
 		value = json_find_value(text, "\"voice\"");
 		if (value == NULL || !json_parse_u32(value, &number) ||
-		    number == 0U || number > PENDANT_LOCAL_SLOTS) {
+		    number == 0U || number > REFLEX_VOICE_SLOTS) {
 			return -EINVAL;
 		}
 		out->gesture = (uint8_t)number;
