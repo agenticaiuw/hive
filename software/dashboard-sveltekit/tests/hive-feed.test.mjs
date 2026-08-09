@@ -6,6 +6,8 @@ import {
   isMacLocalOwnerJob,
   jobToHistoryEntry,
   mergeMacLocalHistory,
+  pickHero,
+  terminalPhaseFor,
 } from "../src/lib/hiveFeed.js";
 
 test("names the pendant from either its transport or its source", () => {
@@ -143,4 +145,194 @@ test("mergeMacLocalHistory is a no-op when there is no Mac-local work", () => {
   const base = [{ pipelineId: "a", createdAt: "2026-08-09T00:00:00.000Z" }];
   assert.deepEqual(mergeMacLocalHistory(base, []), base);
   assert.deepEqual(mergeMacLocalHistory(base, [{ source: "recon", id: "r" }]), base);
+});
+
+/* --------------------------------------------- honest terminal verdicts */
+
+test("terminalPhaseFor keeps goal-grounded verdicts out of Answered", () => {
+  // Goal not met, or stopped short: attention tone, never the "ok" of Done.
+  assert.deepEqual(terminalPhaseFor("incomplete"), {
+    phase: "incomplete",
+    label: "Incomplete",
+    tone: "attention",
+  });
+  assert.deepEqual(terminalPhaseFor("cancelled"), {
+    phase: "incomplete",
+    label: "Cancelled",
+    tone: "attention",
+  });
+  // Terminal-but-not-Done stays neutral, with its own honest word.
+  for (const status of ["read_only", "handed_off", "finished", "recorded"]) {
+    const terminal = terminalPhaseFor(status);
+    assert.equal(terminal.phase, "no-result");
+    assert.equal(terminal.tone, "idle");
+    assert.notEqual(terminal.phase, "answered");
+  }
+  assert.equal(terminalPhaseFor("read_only").label, "Read only");
+  assert.equal(terminalPhaseFor("handed_off").label, "Handed off");
+  assert.equal(terminalPhaseFor("finished").label, "Finished");
+  assert.equal(terminalPhaseFor("recorded").label, "Recorded");
+  // Success, failure, running and parked keep their own branches.
+  for (const status of [
+    "completed",
+    "failed",
+    "processing",
+    "queued",
+    "plan_ready",
+    "",
+    undefined,
+  ]) {
+    assert.equal(terminalPhaseFor(status), null);
+  }
+});
+
+/* ---------------------------------------------------------------- the hero */
+
+/*
+ * The same precedence `runState` applies to a merged entry: the goal-grounded
+ * terminal verdict is read BEFORE the reply text, so a summary can never
+ * promote a goal-not-met run to Answered.
+ */
+const stateLike = (entry) =>
+  terminalPhaseFor(entry.jobStatus || entry.status) ??
+  { phase: entry.reply ? "answered" : "nothing-yet" };
+
+const answeredAlways = () => ({ phase: "answered" });
+
+test("hero candidates: the newest node wins, whichever node it is", () => {
+  const relayRun = {
+    pipelineId: "job_relay",
+    command: "weather",
+    status: "completed",
+    reply: "Clear tonight.",
+    origin: "live_lte",
+    source: "cloudflare",
+    createdAt: "2026-08-09T08:00:00.000Z",
+  };
+  const hudJob = {
+    id: "local_hud",
+    source: "floating-hud",
+    command: "open notes",
+    status: "completed",
+    summary: "Opened Notes.",
+    createdAt: "2026-08-09T09:00:00.000Z",
+  };
+
+  // Local job newer → the Mac-local task is the hero (the owner's complaint:
+  // the hero sat on last night's pendant answer while newer HUD work piled up).
+  let merged = mergeMacLocalHistory([relayRun], [hudJob]);
+  assert.equal(pickHero(merged, answeredAlways).pipelineId, "local_hud");
+
+  // Relay run newer → the pendant run stays the hero.
+  const newerRelay = { ...relayRun, createdAt: "2026-08-09T10:00:00.000Z" };
+  merged = mergeMacLocalHistory([newerRelay], [hudJob]);
+  assert.equal(pickHero(merged, answeredAlways).pipelineId, "job_relay");
+});
+
+test("hero candidates: a tie keeps the shared record first; no timestamp never claims newest", () => {
+  const at = "2026-08-09T09:00:00.000Z";
+  const relayRun = { pipelineId: "job_tie", command: "a", status: "completed", createdAt: at };
+  const tieJob = { id: "local_tie", source: "dashboard", command: "b", status: "completed", createdAt: at };
+  const undatedJob = { id: "local_undated", source: "floating-hud", command: "c", status: "completed" };
+
+  const merged = mergeMacLocalHistory([relayRun], [tieJob, undatedJob]);
+  assert.deepEqual(
+    merged.map((entry) => entry.pipelineId),
+    ["job_tie", "local_tie", "local_undated"],
+  );
+  assert.equal(pickHero(merged, answeredAlways).pipelineId, "job_tie");
+});
+
+test("an incomplete local job that is newest heroes as Incomplete, never Answered", () => {
+  const relayRun = {
+    pipelineId: "job_weather",
+    command: "weather",
+    status: "completed",
+    reply: "Clear tonight.",
+    origin: "live_lte",
+    source: "cloudflare",
+    createdAt: "2026-08-08T22:00:00.000Z",
+  };
+  const partial = {
+    id: "local_partial",
+    source: "floating-hud",
+    command: "tidy my desktop",
+    status: "incomplete",
+    summary: "Moved 3 files; 2 could not be sorted.",
+    createdAt: "2026-08-09T09:00:00.000Z",
+  };
+
+  const merged = mergeMacLocalHistory([relayRun], [partial]);
+  const hero = pickHero(merged, stateLike);
+  assert.equal(hero.pipelineId, "local_partial");
+  // The honest summary survived the fold …
+  assert.equal(hero.reply, "Moved 3 files; 2 could not be sorted.");
+  // … and the verdict outranks it: attention, not Answered.
+  const state = stateLike(hero);
+  assert.equal(state.phase, "incomplete");
+  assert.notEqual(state.phase, "answered");
+  assert.equal(state.tone, "attention");
+  assert.equal(state.label, "Incomplete");
+});
+
+test("a relay row that also appears locally is one hero candidate, not two", () => {
+  const shared = {
+    pipelineId: "job_shared",
+    command: "weather",
+    status: "completed",
+    reply: "Clear tonight.",
+    createdAt: "2026-08-09T09:00:00.000Z",
+  };
+  const jobs = [
+    // The bridge's own copy of relay work is stamped 'pendant' — excluded.
+    {
+      id: "local_bridge_copy",
+      source: "pendant",
+      command: "weather",
+      status: "completed",
+      createdAt: "2026-08-09T09:30:00.000Z",
+    },
+    // An id collision with the shared record is dropped, not shown twice.
+    {
+      id: "job_shared",
+      source: "dashboard",
+      command: "weather",
+      status: "completed",
+      createdAt: "2026-08-09T09:30:00.000Z",
+    },
+  ];
+  const merged = mergeMacLocalHistory([shared], jobs);
+  assert.deepEqual(
+    merged.map((entry) => entry.pipelineId),
+    ["job_shared"],
+  );
+  assert.equal(pickHero(merged, answeredAlways).pipelineId, "job_shared");
+});
+
+test("pickHero skips empty runs and already-carded approvals, with no fallback", () => {
+  const entries = [
+    { pipelineId: "a", command: "" },
+    { pipelineId: "b", command: "Send the report" },
+    { pipelineId: "c", command: "older answer" },
+  ];
+  const states = {
+    a: { phase: "nothing-yet", question: "" },
+    b: { phase: "needs-approval", question: "Send the report" },
+    c: { phase: "answered", question: "older answer" },
+  };
+  const stateFor = (entry) => states[entry.pipelineId];
+
+  // The parked run already has its approval card above → the older answer
+  // heroes, so the owner's question is never printed twice on one page.
+  assert.equal(
+    pickHero(entries, stateFor, {
+      approvedCommands: new Set(["send the report"]),
+    }).pipelineId,
+    "c",
+  );
+  // Without a card, the parked run itself is the hero.
+  assert.equal(pickHero(entries, stateFor).pipelineId, "b");
+  // Nothing worth showing → null, never "show something anyway".
+  assert.equal(pickHero([entries[0]], stateFor), null);
+  assert.equal(pickHero([], stateFor), null);
 });

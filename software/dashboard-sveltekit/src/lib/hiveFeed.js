@@ -241,6 +241,54 @@ export function jobToHistoryEntry(job = {}) {
 const timeOf = (entry) =>
   Date.parse(String(entry?.createdAt || entry?.updatedAt || 0)) || 0;
 
+/* --------------------------------------------- honest terminal verdicts */
+
+/**
+ * @typedef {{ phase: "incomplete" | "no-result",
+ *   label: string, tone: "attention" | "idle" }} TerminalPhase
+ */
+
+/*
+ * Job-vocabulary terminal statuses that must never present as "Answered".
+ *
+ * jobTracker's goal-grounded verdict ('incomplete': every planned step ran and
+ * the goal still was not met) and browserTaskHistory's terminal-but-not-Done
+ * words all arrive with an honest summary attached — and a summary is exactly
+ * what the hero's answered branch keys on, so without this table a goal-not-met
+ * run whose summary reads "Moved 3 files; 2 could not be sorted." would
+ * headline as Answered. One table, consumed by BOTH renderers: the hero's
+ * `runState` and the feed's `statusLabel`/`statusTone` (jobs.ts) read it, so
+ * the two surfaces cannot drift about what 'incomplete' means.
+ *
+ * 'completed' is deliberately absent (a genuine success IS the answered path),
+ * and so are 'failed' and the running/parked words — each has an honest branch
+ * of its own already.
+ */
+/** @type {Record<string, TerminalPhase>} */
+const TERMINAL_PHASES = {
+  /* Ended without the goal being met, or stopped short — the owner should
+   * look, so these carry the attention tone and never the "ok" of Done. */
+  incomplete: { phase: "incomplete", label: "Incomplete", tone: "attention" },
+  cancelled: { phase: "incomplete", label: "Cancelled", tone: "attention" },
+  /* Terminal-but-not-Done: ended honestly with nothing to celebrate or fix,
+   * so they stay neutral. Same grouping as browserTaskHistory's mapping. */
+  read_only: { phase: "no-result", label: "Read only", tone: "idle" },
+  handed_off: { phase: "no-result", label: "Handed off", tone: "idle" },
+  finished: { phase: "no-result", label: "Finished", tone: "idle" },
+  recorded: { phase: "no-result", label: "Recorded", tone: "idle" },
+};
+
+/**
+ * The honest presentation for a goal-grounded terminal status, or null when
+ * the status is not one (completed / failed / running / parked all keep their
+ * own branches in `runState`).
+ * @param {unknown} status
+ * @returns {TerminalPhase | null}
+ */
+export function terminalPhaseFor(status) {
+  return TERMINAL_PHASES[norm(status)] ?? null;
+}
+
 /**
  * Fold the owner's Mac-local jobs into a page of relay history: one list,
  * deduped by id, newest first. `base` (the relay/agent history) is trusted as
@@ -265,4 +313,46 @@ export function mergeMacLocalHistory(base = [], jobs = []) {
   return [...(Array.isArray(base) ? base : []), ...folded].sort(
     (left, right) => timeOf(right) - timeOf(left),
   );
+}
+
+/* ---------------------------------------------------------------- the hero */
+
+/**
+ * The newest entry worth headlining, from an already-merged newest-first feed
+ * (`mergeMacLocalHistory` output: pipeline runs plus the owner's Mac-local
+ * jobs). This is what makes the newest answered task from ANY node eligible to
+ * be the hero — before it, the hero read pipeline runs only, so a stale
+ * pendant answer outlived a screenful of newer HUD work.
+ *
+ * The two skip rules are the page's own, moved here so the node test suite
+ * drives the exact code the hero runs:
+ *  - "nothing-yet" has nothing to say;
+ *  - a parked run whose command already has its approval card on screen would
+ *    print the owner's question twice.
+ * No fallback to "show something anyway": if every entry is empty or already
+ * accounted for, the honest hero is the empty state, so this returns null.
+ *
+ * `stateFor` is the page's `runState`, passed in so this module stays
+ * dependency-free; the tests hand it the same `terminalPhaseFor`-first
+ * precedence that `runState` applies.
+ *
+ * @param {any[]} entries newest-first merged feed
+ * @param {(entry: any) => { phase: string, question?: string }} stateFor
+ * @param {{ approvedCommands?: Set<string> }} [options]
+ * @returns {any | null}
+ */
+export function pickHero(entries, stateFor, { approvedCommands } = {}) {
+  const carded = approvedCommands ?? new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const state = stateFor(entry) ?? { phase: "" };
+    if (state.phase === "nothing-yet") continue;
+    if (
+      state.phase === "needs-approval" &&
+      carded.has(String(state.question || "").trim().toLowerCase())
+    ) {
+      continue;
+    }
+    return entry;
+  }
+  return null;
 }
