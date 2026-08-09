@@ -18,11 +18,13 @@ constexpr gpio_num_t I2S_DATA_PIN = GPIO_NUM_14;
 constexpr uint32_t ESP32_MAX_CPU_CLOCK_MHZ = 240;
 i2s_chan_handle_t i2sInput = nullptr;
 
-// Recovered from this Mac's existing Bose SLIII pairing record. The older
-// speaker does not always answer a fresh Classic Bluetooth inquiry, so the
-// prototype can reconnect to its known address directly.
-esp_bd_addr_t BOSE_SLIII_ADDRESS = {0x08, 0xDF, 0x1F, 0xEA, 0x19, 0x33};
-constexpr const char *BOSE_SLIII_NAME = "Bose SLIII";
+/*
+ * No speaker is compiled in. The bridge remembers whatever it last connected
+ * to — name in NVS "target", address in NVS "addr" — and pages that address
+ * on boot, which also covers a bonded device that is powered on but not
+ * discoverable. With nothing remembered it waits for a `connect` or `scan`
+ * command rather than guessing at a device the owner may not even own.
+ */
 // How often to re-page the known address while the link is down.
 constexpr uint32_t RECONNECT_INTERVAL_MS = 30000;
 
@@ -82,8 +84,8 @@ volatile bool targetSelectionPending = false;
  * headphones are discoverable only in pairing mode — AirPods sitting in your
  * ears or in the case never answer an inquiry, so a name scan searches
  * forever. Paging a known address works on any bonded device that is simply
- * powered on. This is why the hardcoded Bose path always reconnected and
- * everything else did not.
+ * powered on. This is why an address-first reconnect works for any bonded
+ * sink, while a name-only search only ever found discoverable ones.
  */
 esp_bd_addr_t knownAddress = {0, 0, 0, 0, 0, 0};
 bool haveKnownAddress = false;
@@ -100,6 +102,23 @@ volatile uint32_t a2dpFramesRequested = 0;
 volatile uint32_t a2dpNonzeroFrames = 0;
 volatile uint32_t ringOverruns = 0;
 volatile uint32_t ringUnderruns = 0;
+/*
+ * The RX DMA drops a whole descriptor silently when the capture task is late:
+ * i2s_channel_read returns ESP_OK and simply never shows those frames. That
+ * loss was invisible until now, and it is exactly what starves the resampler,
+ * so count the driver's own overflow event and the worst read-to-read gap.
+ */
+volatile uint32_t i2sRxOverflows = 0;
+volatile uint32_t i2sMaxReadGapUs = 0;
+// ESP_OK once the driver accepts the overflow hook; reported in the status.
+esp_err_t i2sOverflowCallbackStatus = ESP_FAIL;
+
+// Runs from the I2S ISR: must be in IRAM and must not call into flash.
+bool IRAM_ATTR onI2sRecvOverflow(i2s_chan_handle_t, i2s_event_data_t *,
+                                 void *) {
+  ++i2sRxOverflows;
+  return false;
+}
 volatile uint32_t resamplerStarts = 0;
 volatile uint32_t resamplerSlips = 0;
 volatile uint32_t a2dpCallCount = 0;
@@ -381,6 +400,23 @@ void i2sCaptureTask(void *) {
     }
     if (bytesRead == 0) {
       continue;
+    }
+
+    /*
+     * Time between successive completed reads. One 256-frame block is
+     * 8.192 ms at 31250 Hz and the DMA holds 8 of them (65.5 ms), so a gap
+     * approaching 65 ms means the driver had to overwrite undelivered audio.
+     */
+    {
+      static uint32_t lastReadAtUs = 0;
+      const uint32_t nowUs = micros();
+      if (lastReadAtUs != 0) {
+        const uint32_t gap = nowUs - lastReadAtUs;
+        if (gap > i2sMaxReadGapUs) {
+          i2sMaxReadGapUs = gap;
+        }
+      }
+      lastReadAtUs = nowUs;
     }
 
     const uint32_t receivedAt = millis();
@@ -799,9 +835,10 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   bool nameOrAddressMatches =
       !normalizedTarget.isEmpty() &&
       normalizedFound.indexOf(normalizedTarget) >= 0;
-  if (!nameOrAddressMatches && normalizedTarget == "bose sliii") {
+  if (!nameOrAddressMatches && haveKnownAddress) {
+    // A remembered device that reports a different or empty name still counts.
     nameOrAddressMatches =
-        memcmp(address, BOSE_SLIII_ADDRESS, ESP_BD_ADDR_LEN) == 0;
+        memcmp(address, knownAddress, ESP_BD_ADDR_LEN) == 0;
   }
 
   /*
@@ -834,12 +871,8 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   return matches;
 }
 
-bool isBoseTarget() {
-  String normalized = targetName;
-  normalized.trim();
-  normalized.toLowerCase();
-  return normalized == "bose sliii" || normalized.indexOf("bose") >= 0;
-}
+// True once we have somewhere to reconnect to without a fresh inquiry.
+bool haveRememberedTarget() { return haveKnownAddress; }
 
 /*
  * Page a known address directly. Works for a bonded device that is powered
@@ -854,15 +887,10 @@ void forceKnownConnect() {
     return;
   }
 
-  esp_bd_addr_t *target = nullptr;
-  if (haveKnownAddress) {
-    target = &knownAddress;
-  } else if (isBoseTarget()) {
-    target = &BOSE_SLIII_ADDRESS; // known-good address before first connect
-  }
-  if (target == nullptr) {
+  if (!haveKnownAddress) {
     return;
   }
+  esp_bd_addr_t *target = &knownAddress;
 
   char addressText[18];
   const uint8_t *a = *target;
@@ -876,10 +904,11 @@ void forceKnownConnect() {
 }
 
 void startBluetoothSearch(bool scanOnly = false) {
-  if (!scanOnly && targetName.isEmpty()) {
-    targetName = BOSE_SLIII_NAME;
-    preferences.putString("target", targetName);
-    emitEvent("usb", "Default Bluetooth target set to Bose SLIII.");
+  if (!scanOnly && targetName.isEmpty() && !haveKnownAddress) {
+    emitEvent("usb",
+              "No Bluetooth target remembered. Send {\"command\":\"scan\"} to "
+              "list devices, then {\"command\":\"connect\",\"target\":\"...\"}.");
+    return;
   }
 
   if (a2dpStarted) {
@@ -896,12 +925,10 @@ void startBluetoothSearch(bool scanOnly = false) {
   if (!scanOnly && haveKnownAddress) {
     // Address-first reconnect for whatever we last connected to.
     a2dp.set_auto_reconnect(knownAddress, 12);
-  } else if (!scanOnly && isBoseTarget()) {
-    a2dp.set_auto_reconnect(BOSE_SLIII_ADDRESS, 12);
   } else {
     a2dp.set_auto_reconnect(!scanOnly, 5);
   }
-  /* The SoundLink III uses the legacy fixed PIN documented by Bose. */
+  /* Legacy speakers that still demand a fixed PIN accept the usual one. */
   a2dp.set_pin_code("0000", ESP_BT_PIN_TYPE_FIXED);
   a2dp.set_volume(80);
   a2dp.start();
@@ -909,9 +936,9 @@ void startBluetoothSearch(bool scanOnly = false) {
   emitEvent("searching",
             scanOnly ? "Scanning for nearby Bluetooth audio devices."
                      : "Connecting to “" + targetName +
-                           "”. Put Bose in pairing mode if it does not "
-                           "answer (hold Bluetooth button).");
-  if (!scanOnly && (haveKnownAddress || isBoseTarget())) {
+                           "”. Put the device in pairing mode if it does "
+                           "not answer.");
+  if (!scanOnly && haveRememberedTarget()) {
     delay(500);
     forceKnownConnect();
   }
@@ -1070,12 +1097,30 @@ void configureI2sInput() {
   /*
    * The slave RX module clock must stay at least eight times the external
    * BCLK. The nRF clocks BCLK at 2 MHz, so the default 256x multiple
-   * (8 MHz at 31250 Hz) is too slow; 512x yields exactly 16 MHz.
+   * (8 MHz at 31250 Hz) is too slow. 512x yields exactly 16 MHz — which is
+   * exactly 8x, sitting ON the documented minimum with no margin at all.
+   * 1024x gives 32 MHz (16x BCLK) and costs nothing: in slave mode this
+   * clock only oversamples an externally supplied BCLK, it does not set the
+   * sample rate, so the wire rate is unchanged.
    */
-  standard.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_512;
+  standard.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_1024;
 
   ESP_ERROR_CHECK(i2s_new_channel(&channel, nullptr, &i2sInput));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2sInput, &standard));
+  /*
+   * Count silent DMA drops. Without this the only symptom of a late capture
+   * task is audio that quietly goes missing between the wire and the ring.
+   *
+   * This runs from the I2S ISR, so the handler must live in IRAM. Registration
+   * is best-effort on purpose: losing a diagnostic counter must never keep the
+   * bridge from booting and playing audio.
+   */
+  {
+    i2s_event_callbacks_t callbacks = {};
+    callbacks.on_recv_q_ovf = onI2sRecvOverflow;
+    i2sOverflowCallbackStatus =
+        i2s_channel_register_event_callback(i2sInput, &callbacks, nullptr);
+  }
   // A disconnected/cold DATA header joint must resolve to silence instead of
   // random full-scale samples. A valid nRF 3.3 V output overrides this pull.
   ESP_ERROR_CHECK(gpio_set_pull_mode(I2S_DATA_PIN, GPIO_PULLDOWN_ONLY));
@@ -1103,22 +1148,28 @@ void setup() {
       preferences.getBytes("addr", knownAddress, ESP_BD_ADDR_LEN) ==
       ESP_BD_ADDR_LEN;
   targetName = preferences.getString("target", "");
-  if (targetName.isEmpty()) {
-    targetName = BOSE_SLIII_NAME;
-    preferences.putString("target", targetName);
-  }
 
   configureI2sInput();
-  // 32-bit slot capture doubles the on-stack DMA block to 2 KiB.
-  xTaskCreatePinnedToCore(i2sCaptureTask, "i2s-capture", 6144, nullptr, 4,
+  /*
+   * 32-bit slot capture doubles the on-stack DMA block to 2 KiB. Priority 10
+   * (was 4) keeps the only task with a hard I2S deadline ahead of everything
+   * else scheduled on core 1 — Arduino's loopTask, which emits the once-a-second
+   * diagnostic JSON, runs here too. Missing this deadline does not raise an
+   * error; it silently discards audio.
+   */
+  xTaskCreatePinnedToCore(i2sCaptureTask, "i2s-capture", 6144, nullptr, 10,
                          nullptr, 1);
 
   emitEvent("usb",
-            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, A2DP→Bose SLIII, "
-            "nRF I2S forwarding on. Ensure Bose is powered and not stuck "
-            "on another phone.");
-  // Always try to reconnect the speaker on boot.
-  startBluetoothSearch(false);
+            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, nRF I2S forwarding "
+            "on. A2DP target: " +
+                (targetName.isEmpty() ? String("none remembered — send scan/connect")
+                                      : targetName) +
+                ".");
+  // Reconnect to the remembered sink on boot; otherwise wait for a command.
+  if (haveKnownAddress || !targetName.isEmpty()) {
+    startBluetoothSearch(false);
+  }
 }
 
 void loop() {
@@ -1233,7 +1284,7 @@ void loop() {
    * without a human issuing a command.
    */
   static uint32_t lastReconnectAttemptAt = 0;
-  if (a2dpStarted && (haveKnownAddress || isBoseTarget()) &&
+  if (a2dpStarted && haveRememberedTarget() &&
       millis() - lastReconnectAttemptAt >= RECONNECT_INTERVAL_MS) {
     lastReconnectAttemptAt = millis();
     forceKnownConnect();
@@ -1304,6 +1355,11 @@ void loop() {
     document["ring_overruns"] = ringOverruns;
     document["resampler_starts"] = resamplerStarts;
     document["resampler_slips"] = resamplerSlips;
+    document["i2s_rx_overflows"] = i2sRxOverflows;
+    document["i2s_overflow_hook"] =
+        i2sOverflowCallbackStatus == ESP_OK ? "ok" : "unavailable";
+    document["i2s_max_read_gap_us"] = i2sMaxReadGapUs;
+    i2sMaxReadGapUs = 0;
     serializeJson(document, Serial);
     Serial.println();
   }
