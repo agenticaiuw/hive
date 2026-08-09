@@ -1,16 +1,59 @@
 @import "tailwindcss";
 
 :root {
+  /*
+   * Three text tiers and no more (Refactoring UI): primary, secondary,
+   * ancillary. De-emphasis is done with colour and size, never by dropping
+   * font-weight below 400. Every tier clears WCAG 1.4.3 AA (4.5:1) against
+   * --panel: ink 16.4:1, ink-2 8.2:1, muted 6.0:1. Text is #f7f8fa rather
+   * than #fff because pure white on a near-black surface visibly bleeds
+   * (Material dark-theme guidance).
+   */
   --ink: #f7f8fa;
+  --ink-2: #aab3c1;
   --muted: #8e98a8;
   --panel: rgba(20, 24, 31, 0.88);
   --panel-strong: #151a22;
+  /* Elevation on dark is a lighter overlay, not a shadow on black. */
+  --raise-1: rgba(255, 255, 255, 0.035);
+  --raise-2: rgba(255, 255, 255, 0.06);
   --line: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.16);
   --green: #76e6a3;
   --blue: #70a7ff;
   --amber: #ffbe68;
   --red: #ff756f;
   --background: #080a0f;
+
+  /*
+   * Type scale: six hand-picked steps, not a ratio series. A pure modular
+   * scale lands on fractional pixels and gives no control at the crowded
+   * small end where product UI actually lives; GOV.UK's scale is irregular
+   * for the same reason. Adjacent steps are far enough apart to be
+   * unmistakably different.
+   */
+  --fs-display: clamp(1.75rem, 1.1rem + 2.6vw, 2.75rem); /* the answer */
+  --fs-headline: clamp(1.3rem, 1.05rem + 1vw, 1.6rem); /* status as headline */
+  --fs-title: 1.0625rem;
+  --fs-body: 0.9375rem;
+  --fs-small: 0.8125rem;
+  --fs-micro: 0.6875rem; /* uppercase labels only */
+
+  /* Two weights. Nothing under 400 for UI. */
+  --w-normal: 450;
+  --w-heavy: 650;
+
+  /* Spacing on a 4px base; grouping is done with these, not with borders. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* Prose measure. WCAG 1.4.8 caps a readable line at 80 characters. */
+  --measure: 68ch;
 }
 
 * {
@@ -302,67 +345,433 @@ p {
   font-weight: 650;
 }
 
-/* ---------- Hero ---------- */
+/* ---------- Section labels ---------- */
 
-.hero {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  position: relative;
-  overflow: hidden;
-  min-height: 340px;
-  border: 1px solid var(--line);
-  border-radius: 24px;
-  padding: 40px 40px 32px;
-  background: var(--panel);
-  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(18px);
+.section-label {
+  margin-bottom: var(--s3);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-heavy);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
 }
 
-.hero::after {
-  content: "";
-  position: absolute;
-  width: 250px;
-  height: 250px;
-  right: -100px;
-  bottom: -160px;
+.section-label-standalone {
+  margin-top: var(--s7);
+}
+
+/* ---------- State pill: colour AND icon AND word (WCAG 1.4.1) ---------- */
+
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 4px 11px 4px 9px;
+  color: var(--ink);
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
+  white-space: nowrap;
+}
+
+.state-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: rgba(112, 167, 255, 0.17);
-  filter: blur(8px);
-  pointer-events: none;
+  background: var(--muted);
 }
 
-.hero.has-alert {
-  border-color: rgba(255, 190, 104, 0.35);
+/* Each tone clears 3:1 against the surface behind it (WCAG 1.4.11). */
+.state-pill.ok,
+.state-dot.ok {
+  border-color: rgba(118, 230, 163, 0.4);
+}
+
+.state-pill.ok .state-dot,
+.state-dot.ok {
+  background: var(--green);
+}
+
+.state-pill.live,
+.state-dot.live {
+  border-color: rgba(112, 167, 255, 0.45);
+}
+
+.state-pill.live .state-dot,
+.state-dot.live {
+  background: var(--blue);
+}
+
+.state-pill.attention,
+.state-dot.attention {
+  border-color: rgba(255, 190, 104, 0.5);
+}
+
+.state-pill.attention .state-dot,
+.state-dot.attention {
+  background: var(--amber);
+}
+
+.state-pill.bad,
+.state-dot.bad {
+  border-color: rgba(255, 117, 111, 0.45);
+}
+
+.state-pill.bad .state-dot,
+.state-dot.bad {
+  background: var(--red);
+}
+
+.state-dot.pulsing {
+  animation: state-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes state-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-dot.pulsing {
+    animation: none;
+  }
+}
+
+/* ---------- Buttons ---------- */
+
+.button-primary {
+  border: 1px solid rgba(118, 230, 163, 0.5);
+  border-radius: 10px;
+  padding: 9px 16px;
+  color: #06110b;
+  background: var(--green);
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
+  cursor: pointer;
+}
+
+.button-primary:hover:not(:disabled) {
+  background: #8ff0b5;
+}
+
+.button-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/*
+ * The edge is the only thing that says "this is a button", so WCAG 1.4.11
+ * applies to it: white at 0.34 measures 3.10:1 on --panel and 3.02:1 on the
+ * approval card's amber-tinted surface. --line-strong (0.16) was 1.6:1.
+ */
+.button-quiet {
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 10px;
+  padding: 9px 14px;
+  color: var(--ink-2);
+  background: transparent;
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
+  cursor: pointer;
+}
+
+.button-quiet:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--ink);
+}
+
+/* ---------- What needs you ---------- */
+
+.needs-you {
+  display: grid;
+  gap: var(--s3);
+  margin-bottom: var(--s5);
+}
+
+/*
+ * The one card allowed to shout. Amber edge + tinted fill so it reads as a
+ * different kind of thing at a glance, but no siren: salience comes from
+ * position, size and contrast, not from saturation (NN/g).
+ */
+.approval {
+  border: 1px solid rgba(255, 190, 104, 0.42);
+  border-radius: 18px;
+  padding: var(--s5);
   background:
-    linear-gradient(115deg, rgba(255, 190, 104, 0.07), transparent 55%),
-    var(--panel);
+    linear-gradient(150deg, rgba(255, 190, 104, 0.09), transparent 60%),
+    var(--panel-strong);
 }
 
-.hero > * {
-  position: relative;
-  z-index: 1;
-}
-
-.hero-top {
+.approval-flag {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  margin-bottom: 20px;
+  gap: 8px;
+  color: var(--amber);
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
+  letter-spacing: 0.01em;
 }
 
-.micro-chip {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 8px;
+.approval-ask {
+  margin-top: var(--s2);
+  max-width: var(--measure);
+  color: var(--ink);
+  font-size: var(--fs-title);
+  font-weight: var(--w-heavy);
+  line-height: 1.35;
+}
+
+.approval-steps {
+  margin: var(--s3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  max-width: var(--measure);
+}
+
+.approval-steps li {
+  position: relative;
+  padding-left: 18px;
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+}
+
+.approval-steps li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.62em;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(255, 190, 104, 0.75);
+}
+
+.approval-why {
+  margin: var(--s3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-width: var(--measure);
+}
+
+.approval-why li {
   color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.approval-error {
+  margin-top: var(--s3);
+  max-width: var(--measure);
+  color: #ffd0cd;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.approval-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s4);
+}
+
+.approval-remote {
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.approval-note {
+  margin-top: var(--s3);
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+/*
+ * Second and later parked plans. Still a decision the owner can act on in one
+ * click, but it does not get to spend the top of the page twice.
+ */
+.approval.compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--s4);
+  border-radius: 14px;
+  padding: var(--s3) var(--s4);
+}
+
+.approval.compact .approval-flag {
+  grid-area: 1 / 1;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.09em;
   text-transform: uppercase;
+}
+
+.approval.compact .approval-flag svg {
+  width: 12px;
+  height: 12px;
+}
+
+.approval.compact .approval-ask {
+  grid-area: 2 / 1;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: var(--fs-body);
+  font-weight: var(--w-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval.compact .approval-actions {
+  grid-area: 1 / 2 / 3 / 3;
+  margin-top: 0;
+}
+
+.approval.compact .approval-error {
+  grid-area: 3 / 1 / 4 / 3;
+}
+
+@media (max-width: 620px) {
+  .approval.compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .approval.compact .approval-actions {
+    grid-area: auto;
+    margin-top: var(--s3);
+  }
+}
+
+/* ---------- Answer card: the hero ---------- */
+
+.answer-card {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: var(--s6) var(--s6) var(--s5);
+  background: var(--panel);
+}
+
+.answer-eyebrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+}
+
+.answer-when,
+.answer-source {
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+.answer-source::before {
+  content: "· ";
+  opacity: 0.6;
+}
+
+/*
+ * The question: context, not headline. One small secondary line, once.
+ * "You asked" is set even quieter so the question itself carries the tier.
+ */
+.answer-question {
+  margin-top: var(--s4);
+  max-width: var(--measure);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+}
+
+.answer-question span {
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-heavy);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+/* The one element carrying size + weight + full contrast at once. */
+.answer-headline {
+  margin-top: var(--s3);
+  max-width: var(--measure);
+  color: var(--ink);
+  font-size: var(--fs-display);
+  font-weight: var(--w-heavy);
+  line-height: 1.18;
+  letter-spacing: -0.028em;
+  text-wrap: pretty;
+}
+
+/* Long prose cannot sit at display size and stay readable. */
+.answer-headline[data-size="long"] {
+  font-size: var(--fs-headline);
+  line-height: 1.4;
+  letter-spacing: -0.012em;
+}
+
+/* A two-word status is a headline, not a paragraph. */
+.answer-headline[data-size="word"] {
+  font-size: var(--fs-display);
+  line-height: 1.1;
+}
+
+.answer-sub {
+  margin-top: var(--s3);
+  max-width: var(--measure);
+  color: var(--muted);
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+
+.answer-error {
+  margin-top: var(--s4);
+  max-width: var(--measure);
+  border-left: 2px solid rgba(255, 117, 111, 0.5);
+  padding-left: var(--s3);
+  color: #ffd0cd;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.answer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s4);
+}
+
+.answer-delivery {
+  margin-top: var(--s4);
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+/* Cards give back their generous padding when the screen is narrow. */
+@media (max-width: 620px) {
+  .answer-card {
+    border-radius: 16px;
+    padding: var(--s5) var(--s4) var(--s4);
+  }
+
+  .approval {
+    border-radius: 16px;
+    padding: var(--s4);
+  }
 }
 
 .status-chip {
@@ -411,41 +820,12 @@ p {
   background: var(--amber);
 }
 
-.hero-command {
-  display: -webkit-box;
-  overflow: hidden;
-  max-width: 100%;
-  font-size: clamp(2.4rem, 6vw, 4.6rem);
-  line-height: 0.98;
-  letter-spacing: -0.05em;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-}
-
-.hero-empty {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 14px;
-}
-
-.hero-hint {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.hero-alert {
-  margin-top: 16px;
-}
-
 /* ---------- Composer (speak or type from a personal device) ---------- */
 
+/* The composer no longer sits at the bottom of the hero, so it no longer
+   pushes itself down with auto margins and a large pad. */
 .composer-block {
   width: 100%;
-  margin-top: auto;
-  padding-top: 28px;
 }
 
 .composer {
@@ -575,7 +955,7 @@ p {
   align-items: flex-start;
   width: 100%;
   max-width: 620px;
-  margin-top: 28px;
+  margin-top: var(--s4);
 }
 
 .stage-node {
@@ -645,50 +1025,36 @@ p {
   }
 }
 
-/* ---------- Meta line + details ---------- */
+/* ---------- Playback: your voice and the agent's ---------- */
 
-.meta-line {
-  margin-top: 22px;
-  color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.78rem;
-}
-
-.meta-line .sep {
-  opacity: 0.55;
-}
-
-/* ---------- Hero playback: your voice and the agent's ---------- */
-
-.hero-audio {
+.answer-audio {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 18px;
+  gap: var(--s2);
+  margin-top: var(--s4);
 }
 
-.hero-track {
+.answer-track {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--s3);
 }
 
-.hero-track-label {
-  flex: 0 0 46px;
+.answer-track > span {
+  flex: 0 0 68px;
   color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: var(--fs-micro);
+  font-weight: var(--w-heavy);
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
-.hero-player {
+.answer-track audio {
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
-  max-width: 460px;
-  height: 36px;
+  max-width: 420px;
+  height: 34px;
 }
 
 /*
@@ -696,86 +1062,197 @@ p {
  * engines expose the shadow part, and the filter is the documented fallback
  * for the ones that do not.
  */
-.hero-player::-webkit-media-controls-panel {
+.answer-track audio::-webkit-media-controls-panel {
   background: rgba(255, 255, 255, 0.06);
 }
 
 @supports not selector(::-webkit-media-controls-panel) {
-  .hero-player {
+  .answer-track audio {
     filter: invert(0.92) hue-rotate(180deg);
   }
 }
 
-.hero-reply-transcript {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.5;
-}
-
 @media (max-width: 560px) {
-  .hero-track {
+  .answer-track {
     align-items: flex-start;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--s1);
   }
 
-  .hero-player {
+  .answer-track audio {
     max-width: none;
   }
 }
 
-.details-toggle {
-  display: inline-flex;
+/* ---------- Technical details: disclosure level two, and only two ---------- */
+
+.tech {
+  margin-top: var(--s5);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s4);
+}
+
+.tech > summary {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 18px;
-  border: 0;
-  padding: 0;
-  color: var(--muted);
-  background: none;
-  font-size: 0.72rem;
-  font-weight: 700;
+  gap: 8px;
+  width: fit-content;
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
   cursor: pointer;
+  list-style: none;
 }
 
-.details-toggle:hover {
-  color: #cfe0ff;
+.tech > summary::-webkit-details-marker {
+  display: none;
 }
 
-.details-toggle .chevron {
-  display: inline-block;
+.tech > summary:hover {
+  color: var(--ink);
+}
+
+.tech > summary:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* The chevron is decoration; the label carries the meaning. */
+.tech-chevron {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
   transition: transform 0.15s ease;
 }
 
-.details-toggle .chevron.open {
+.tech[open] > summary .tech-chevron {
   transform: rotate(90deg);
 }
 
-.details-panel {
+/* Information scent: say what is behind the control, not just "more". */
+.tech-hint {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: var(--w-normal);
+}
+
+/* Narrow: the label keeps one line and the scent drops below it. */
+@media (max-width: 620px) {
+  .tech > summary {
+    flex-wrap: wrap;
+    width: 100%;
+    row-gap: 2px;
+  }
+
+  .tech-hint {
+    flex-basis: 100%;
+    padding-left: 13px;
+  }
+}
+
+.tech-body {
+  padding-top: var(--s1);
+}
+
+.tech-note {
+  margin-top: var(--s4);
+  max-width: var(--measure);
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+/* ---------- Ask ---------- */
+
+.ask {
+  margin-top: var(--s5);
+}
+
+.ask-alt {
+  margin-top: var(--s4);
+}
+
+.ask-alt-label {
+  margin-bottom: var(--s2);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-heavy);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+/* ---------- Recent ---------- */
+
+.recent {
+  margin-top: var(--s7);
+}
+
+.recent-list {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-row {
+  display: grid;
+  gap: 3px;
   width: 100%;
-  margin-top: 18px;
-  border-top: 1px solid var(--line);
-  padding-top: 20px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
 }
 
-.pipeline-id {
-  color: #697483;
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.66rem;
+.recent-row:hover {
+  background: var(--raise-1);
 }
 
-.details-note {
-  margin-top: 10px;
-  color: #b0b9c6;
-  font-size: 0.74rem;
-  line-height: 1.5;
+/*
+ * "Which row am I looking at" carried by an accent bar (7.5:1 against the
+ * surface) as well as the fill, because a 1.17:1 background shift is not a
+ * state anyone can see (WCAG 1.4.11). `aria-current` carries it non-visually.
+ */
+.recent-row.selected {
+  border-left-color: var(--blue);
+  background: var(--raise-2);
+}
+
+.recent-row:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.recent-text {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: var(--fs-small);
 }
 
 .telemetry-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  margin-top: 14px;
+  /* Reflows to 2 then 1 column rather than clipping on a phone. */
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: var(--s4);
 }
 
 .metric {
@@ -913,52 +1390,7 @@ blockquote {
   font-size: 0.78rem;
 }
 
-/* ---------- Run strip ---------- */
-
-.run-strip {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-  scrollbar-width: none;
-}
-
-.run-strip::-webkit-scrollbar {
-  display: none;
-}
-
-.run-chip {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: 8px;
-  max-width: 280px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 7px 12px;
-  color: #b7bfca;
-  background: rgba(255, 255, 255, 0.02);
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.run-chip span {
-  overflow: hidden;
-  max-width: 22ch;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-chip:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-}
-
-.run-chip.selected {
-  border-color: rgba(255, 255, 255, 0.28);
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.07);
-}
+/* ---------- Run status dot (jobs + command box) ---------- */
 
 .run-dot {
   flex: 0 0 auto;
@@ -2625,7 +3057,6 @@ blockquote {
 }
 
 .cmd-card {
-  margin-bottom: 18px;
   padding: 18px 20px;
   border-radius: 18px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);

@@ -146,12 +146,27 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.match(html, /aria-label="Sign out"/);
   assert.match(html, /action="\/api\/auth\/logout"/);
 
-  // Hero renders the pre-data empty state on the server.
+  // The answer card is the hero, and with no data it renders the empty state:
+  // what the state is, plus the pathway to the ask box directly below it.
+  assert.match(html, /class="answer-card"/);
   assert.match(html, />Ready</);
   assert.match(html, /Press the pendant or type a command/);
 
-  // Run strip and the six status tiles.
-  assert.match(html, /aria-label="Recent commands"/);
+  /*
+   * Nothing is claimed before data arrives. A cold server render has no runs
+   * and nothing parked, so neither the "needs your approval" region nor the
+   * Recent list may appear — an empty section with a heading and no rows is
+   * exactly the clutter this layout exists to remove. (The old design always
+   * emitted an empty run strip; it no longer does.)
+   */
+  assert.doesNotMatch(html, /id="needs-you"/);
+  assert.doesNotMatch(html, /Needs your approval/);
+  assert.doesNotMatch(html, /class="recent"/);
+
+  // Telemetry is behind a labelled disclosure and is not on a data-free page.
+  assert.doesNotMatch(html, /Sample rate/);
+  assert.doesNotMatch(html, />STT</);
+
   // Jobs replaced Activity: same Mac actions, plus who asked, what each step
   // touched, and what it returned.
   for (const tile of ["Jobs", "System", "Mac", "Browser", "History", "Memory"]) {

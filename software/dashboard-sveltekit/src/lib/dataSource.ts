@@ -346,6 +346,54 @@ export async function undoJob(jobId: string) {
   });
 }
 
+/**
+ * Approving a parked plan.
+ *
+ * The agent parks a plan as a `plan_ready` job and executes nothing; the
+ * approval IS `POST /execute` carrying the plan's own actions back, which is
+ * exactly what the command box already does for a plan it parked itself.
+ *
+ * The actions are re-fetched from `GET /jobs/:jobId` at approve time rather
+ * than taken from the `JobView` on screen: that view has been through
+ * `redactParams`, so approving from it would run the plan with `"••••••• hidden"`
+ * where a real parameter belongs.
+ *
+ * Only the agent build can do this. The deployed Worker has no route that
+ * approves an already-parked pendant plan — `/api/command` would create a
+ * *new* plan, which is not the same thing — so `canApprovePlan` is false there
+ * and the UI says where the owner can act instead of showing a dead button.
+ */
+export const canApprovePlan = backend === "agent";
+
+export async function approvePlan(jobId: string) {
+  if (!canApprovePlan) {
+    throw new Error(
+      "This page has no route to the Mac, so it cannot approve a parked plan.",
+    );
+  }
+  const payload = await agentRequest(`/jobs/${encodeURIComponent(jobId)}`);
+  const job = payload?.job ?? payload;
+  const actions = Array.isArray(job?.result?.actions) ? job.result.actions : [];
+  if (String(job?.status || "") !== "plan_ready") {
+    throw new Error(
+      `This plan is no longer waiting: the agent now reports "${job?.status || "unknown"}".`,
+    );
+  }
+  if (!actions.length) {
+    throw new Error("The agent no longer lists any steps for this plan.");
+  }
+  return agentRequest("/execute", {
+    method: "POST",
+    body: JSON.stringify({
+      command: String(job.command || ""),
+      actions,
+      sessionId: job.sessionId || job.thinking?.sessionId || undefined,
+      planMeta: { planner: "dashboard-approval", source: "dashboard" },
+      source: "dashboard",
+    }),
+  });
+}
+
 /** Routines live only on the Mac; see `runRoutineSupported`. */
 export const runRoutineSupported = backend === "agent";
 
