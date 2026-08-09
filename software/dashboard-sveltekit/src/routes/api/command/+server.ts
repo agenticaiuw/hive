@@ -11,17 +11,18 @@ import {
 export const prerender = false;
 
 /**
- * "Ask the hive" dispatch for every surface that is not the Mac itself.
+ * "Ask the hive" typed dispatch for every surface that is not the Mac itself.
  *
- * Same relay-key pattern as `/api/hive` and `/api/command/text`: the browser
+ * Same relay-key pattern as `/api/hive` and `/api/command/audio`: the browser
  * posts here with its dashboard session, this route creates the plan job on
  * the relay with the server-held `RELAY_API_KEY`, and the browser then polls
  * `/api/command/status/[jobId]` for the outcome. The key never crosses to the
  * client on any build.
  *
- * Kept separate from `/api/command/text` (the hero composer's fire-and-forget
- * queue) on purpose: this one's response is the input to a status poll, and
- * the two callers must be free to evolve without breaking each other.
+ * Voice takes `/api/command/audio` (transcription first, then this same plan
+ * job); both land in the one merged command box's status trail. The old
+ * `/api/command/text` fire-and-forget twin of this route is gone — one box,
+ * one dispatch per kind of input.
  */
 const DASHBOARD_DEVICE_ID = "dashboard-web";
 const MAX_COMMAND_LENGTH = 2000;

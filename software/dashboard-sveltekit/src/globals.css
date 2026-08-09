@@ -820,21 +820,8 @@ p {
   background: var(--amber);
 }
 
-/* ---------- Composer (speak or type from a personal device) ---------- */
-
-/* The composer no longer sits at the bottom of the hero, so it no longer
-   pushes itself down with auto margins and a large pad. */
-.composer-block {
-  width: 100%;
-}
-
-.composer {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  max-width: 620px;
-}
+/* ---------- Composer primitives (mic, field, send) ----------
+   Used by the one merged command box ("Ask the hive"). */
 
 .mic-button {
   display: inline-flex;
@@ -878,12 +865,6 @@ p {
   font-size: 0.76rem;
   font-variant-numeric: tabular-nums;
   font-weight: 700;
-}
-
-.composer-status {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 0.76rem;
 }
 
 .composer-field {
@@ -1169,19 +1150,6 @@ p {
 
 .ask {
   margin-top: var(--s5);
-}
-
-.ask-alt {
-  margin-top: var(--s4);
-}
-
-.ask-alt-label {
-  margin-bottom: var(--s2);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: var(--w-heavy);
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
 }
 
 /* ---------- Recent ---------- */
@@ -1964,10 +1932,6 @@ blockquote {
     font-size: clamp(2rem, 9vw, 3.2rem);
   }
 
-  .composer-block {
-    padding-top: 22px;
-  }
-
   .composer-field input {
     /* 16px keeps iOS Safari from zooming the viewport on focus. */
     font-size: 1rem;
@@ -1991,7 +1955,7 @@ blockquote {
     display: none;
   }
 
-  .composer {
+  .cmd-composer {
     flex-wrap: wrap;
   }
 
@@ -3096,6 +3060,27 @@ blockquote {
   font-size: 0.7rem;
 }
 
+/* Mic + field + send: the one composer row. */
+.cmd-composer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.cmd-composer .composer-field {
+  flex: 1 1 auto;
+}
+
+.cmd-bar .cmd-composer {
+  gap: 8px;
+}
+
+.cmd-bar .mic-button {
+  width: 38px;
+  height: 38px;
+}
+
 .cmd-field {
   border-radius: 14px;
 }
@@ -3118,7 +3103,22 @@ blockquote {
   gap: 8px;
 }
 
+/* Per-submission badge + the command it carried, one row. */
+.cmd-status-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cmd-sub-badge {
+  flex: 0 0 auto;
+  cursor: help;
+}
+
 .cmd-active-command {
+  min-width: 0;
+  flex: 1 1 auto;
   color: var(--muted);
   font-size: 0.76rem;
   overflow: hidden;

@@ -368,3 +368,88 @@ hr {
   font-size: 12px;
   font-weight: 650;
 }
+
+/* ===== Approval cards =====
+ * Amber, like every parked-waiting-for-you state here, and ABOVE the command
+ * box: a question someone else is blocked on outranks a box for asking new
+ * ones. */
+
+.approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.approval {
+  padding: 12px 14px;
+  border: 1px solid #6b5b2b;
+  border-radius: 12px;
+  background: rgba(34, 27, 10, 0.5);
+}
+
+.approval-summary {
+  margin: 0;
+  color: #effaf7;
+  font-size: 13px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.approval-chip {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border: 1px solid #6b5b2b;
+  border-radius: 999px;
+  color: #ffd98d;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-transform: lowercase;
+}
+
+.approval-detail {
+  margin: 6px 0 0;
+  color: #c8d9d4;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.approval-clock {
+  margin: 6px 0 0;
+  color: #ffd98d;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.approval-clock.expired {
+  color: #ff9d8d;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-actions button {
+  flex: 1;
+  min-height: 34px;
+}
+
+.approval-decided,
+.approval-expired {
+  opacity: 0.65;
+}
+
+.approval-expired .approval-chip {
+  border-color: #663a33;
+  color: #ff9d8d;
+}
+
+.approval button:disabled {
+  cursor: not-allowed;
+}

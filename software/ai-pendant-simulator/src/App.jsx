@@ -8,6 +8,14 @@ import {
 import { isNativeCredentialStorage } from './nativeSecureStorage'
 import { createPhoneBrainSession } from './brain/phoneBrain'
 import {
+  approvalCountdown,
+  approvalIsAnswerable,
+  approvalIsExpired,
+  mergeApprovalPrompts,
+  sendApprovalDecision,
+  settleApprovalPrompt,
+} from './brain/approvalRequests'
+import {
   prefersCloudSpeechToText,
   startCloudVoiceCapture,
 } from './voiceCapture'
@@ -116,6 +124,18 @@ function App() {
   )
 
   /*
+   * Approval requests other nodes have put to this phone, rendered as cards.
+   *
+   * `approvals` is the card list (dedupe and expiry rules live in
+   * shared/approvalMesh.js); `approvalNow` is the one coarse clock every
+   * countdown renders against; `approvalBusyId` pins the card whose decision
+   * is on the wire so a double tap cannot answer twice.
+   */
+  const [approvals, setApprovals] = useState([])
+  const [approvalNow, setApprovalNow] = useState(() => Date.now())
+  const [approvalBusyId, setApprovalBusyId] = useState(null)
+
+  /*
    * The mesh doorbell, for as long as this app is mounted.
    *
    * The node-mesh inbox is durable, so mail is never lost without this — it is
@@ -124,8 +144,36 @@ function App() {
    * frame and on every connect, since mail queued while the phone was offline
    * rang a doorbell nobody heard. It degrades to nothing when the phone is
    * unpaired or the platform has no WebSocket, and it never throws in here.
+   *
+   * onMail is where approval requests become cards. The same envelopes stay
+   * buffered for mesh_inbox — the model may read them like any other mail —
+   * but deciding is the owner's tap on the card, never the model's.
    */
-  useEffect(() => phoneBrain.startMeshListener(), [phoneBrain])
+  useEffect(
+    () =>
+      phoneBrain.startMeshListener({
+        onMail: ({ messages }) => {
+          setApprovals((cards) => mergeApprovalPrompts(cards, messages).prompts)
+        },
+      }),
+    [phoneBrain],
+  )
+
+  /*
+   * One 1 Hz tick while any card still counts down. The interval retires
+   * itself when the last live card expires — the final tick is what flips
+   * that card to its disabled "expired" render, so it must land before the
+   * clock stops.
+   */
+  useEffect(() => {
+    const anyLive = () => approvals.some((card) => approvalIsAnswerable(card))
+    if (!anyLive()) return undefined
+    const timer = window.setInterval(() => {
+      setApprovalNow(Date.now())
+      if (!anyLive()) window.clearInterval(timer)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [approvals])
 
   /*
    * The brain's confirmation gate, held open across a render.
@@ -1030,6 +1078,37 @@ function App() {
     voiceOriginRef.current = false
   }
 
+  /*
+   * Answer one approval card. The send and the ack ride the phone's existing
+   * mesh_send / mesh_ack path (sendApprovalDecision), and the card settles
+   * only after the relay accepted the answer — a decision the relay never
+   * heard must stay pressable, not read as given.
+   */
+  async function handleApprovalDecision(card, decision) {
+    if (approvalBusyId || !approvalIsAnswerable(card)) {
+      return
+    }
+
+    setApprovalBusyId(card.approvalId)
+    try {
+      const outcome = await sendApprovalDecision({
+        card,
+        decision,
+        client: cloudClient,
+        deviceId: cloudSettings.mobileDeviceId,
+      })
+
+      if (outcome.ok) {
+        setApprovals((cards) => settleApprovalPrompt(cards, card.approvalId, decision))
+        setMessage(decision === 'approve' ? 'Approved.' : 'Denied.')
+      } else {
+        setMessage(outcome.error || 'The decision could not be sent.')
+      }
+    } finally {
+      setApprovalBusyId(null)
+    }
+  }
+
   function handleSaveCloudSettings() {
     saveCloudSettings(cloudSettings)
     setMessage('Cloud relay settings saved')
@@ -1216,6 +1295,58 @@ function App() {
               ))}
             </div>
           </form>
+        ) : null}
+
+        {approvals.length ? (
+          <div className="approval-stack" aria-label="Approval requests">
+            {approvals.map((card) => {
+              const expired = !card.decision && approvalIsExpired(card, approvalNow)
+              const busy = approvalBusyId === card.approvalId
+              const settled = Boolean(card.decision)
+              return (
+                <div
+                  key={card.approvalId}
+                  className={`plan-card approval-card ${settled ? 'is-decided' : expired ? 'is-expired' : ''}`}
+                >
+                  <div className="plan-card-glow" />
+                  <p className="plan-kicker">
+                    {`Approval · ${card.risk ? `${card.risk} risk` : 'risk unstated'}`}
+                  </p>
+                  <h3 className="plan-title">{card.summary}</h3>
+                  {card.detail ? <p className="approval-detail">{card.detail}</p> : null}
+                  <p className={`approval-countdown ${expired ? 'is-expired' : ''}`}>
+                    {settled
+                      ? `${card.decision === 'approve' ? 'Approved' : 'Denied'} — the answer is on its way back`
+                      : approvalCountdown(card, approvalNow)}
+                  </p>
+                  <div className="confirmation-row">
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={busy || settled || expired}
+                      onClick={() => handleApprovalDecision(card, 'approve')}
+                    >
+                      {card.decision === 'approve'
+                        ? 'Approved'
+                        : expired
+                          ? 'Expired'
+                          : busy
+                            ? 'Sending…'
+                            : 'Approve'}
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={busy || settled || expired}
+                      onClick={() => handleApprovalDecision(card, 'deny')}
+                    >
+                      {card.decision === 'deny' ? 'Denied' : expired ? 'Expired' : 'Deny'}
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         ) : null}
 
         {pendingPlan && pendingPlan.status !== 'error' ? (

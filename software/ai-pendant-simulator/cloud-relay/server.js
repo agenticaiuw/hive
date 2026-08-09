@@ -38,6 +38,11 @@ import { getStore } from './store/index.js'
 import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
 import { registerApprovalRoutes } from './approvalStore.js'
+import {
+  consumeRelayApprovalMail,
+  registerApprovalDeliveryRoutes,
+  routeApprovalPrompt,
+} from './approvalDelivery.js'
 import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
 import { registerNodeMeshRoutes } from './nodeMailbox.js'
 import { registerInferenceRoutes } from './nodeInference.js'
@@ -507,19 +512,23 @@ app.use(async (request, response, next) => {
  * a credentialled device asked for this job and the body finished. */
 registerPendantDownlinkWitness(app, { getStore, createAgentProxyJob })
 
-/* Both were finished, tested and committed tonight with no caller. The
- * approval store is the one that matters: prepareApprove on the Mac depends
- * on the relay holding the decision, and approvalHandoff already names this
- * module as its implementation — a contract naming a module nobody calls
- * reads exactly like a finished design, which is its own warning. */
-registerApprovalRoutes(app, { getStore })
+/* The approval store, with origin routing on the way in: a stored record's
+ * prompt is pushed to the node the command came from (approvalDelivery.js),
+ * and the decision route lets any owner surface answer it. */
+registerApprovalRoutes(app, {
+  getStore,
+  onStored: ({ store, record }) => routeApprovalPrompt({ store, record }),
+})
+registerApprovalDeliveryRoutes(app, { getStore })
 registerAnnouncementRetentionRoutes(app, { getStore })
 
 /* The node mesh: any node → any node, without the Mac in the path. Registered
  * here rather than written inline for the same reason the two above are — the
  * routing rules and the ownership checks belong next to each other, not spread
- * through 3,000 lines. */
-registerNodeMeshRoutes(app, { getStore })
+ * through 3,000 lines. `relayMail` gives the relay brain first refusal on
+ * mail addressed to '@relay'; today that is approval_decision envelopes,
+ * consumed and settled in the send request itself. */
+registerNodeMeshRoutes(app, { getStore, relayMail: consumeRelayApprovalMail })
 
 /* A brain the phone and the extension can reach while the Mac is asleep. */
 registerInferenceRoutes(app)
@@ -2983,6 +2992,15 @@ app.get('/v1/bridge/work', async (request, response) => {
           type: job.type,
           // Lets the bridge log queue-to-claim age per job.
           createdAt: job.createdAt ?? null,
+          /*
+           * WHO ASKED. The deviceId the job was created under ('nrf9160-…'
+           * for a pendant press, a phone's or extension's own id via
+           * /v1/mac/plan). The bridge stamps it — with inputTelemetry.storage
+           * — into the approval record's `origin` when a plan parks, which is
+           * what lets the relay push the prompt back to that node instead of
+           * parking it on a dashboard nobody has open.
+           */
+          createdBy: job.createdBy ?? null,
           command: job.command,
           actions: job.actions,
           sessionId: job.sessionId ?? null,

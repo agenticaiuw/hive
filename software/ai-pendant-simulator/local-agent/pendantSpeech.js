@@ -631,6 +631,18 @@ export function spokenConfirmation(plan, execution) {
     return `That didn't work: ${reason}`.slice(0, MAX_SPOKEN_CHARACTERS)
   }
 
+  // A run whose steps all worked but whose GOAL was not met arrives with
+  // status 'incomplete' and the goal-grounded verdict sentence in
+  // execution.response ("Opened X and looked at the page — nothing was
+  // cancelled…"). Speak that, never the step messages: the steps sound like
+  // success, and the pendant must not.
+  const verdictSentence = String(execution?.response || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (execution?.status === 'incomplete' && verdictSentence) {
+    return verdictSentence.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
   const planned = String(plan?.response || '').replace(/\s+/g, ' ').trim()
   if (spoken.length) {
     return spoken.join('. ').slice(0, MAX_SPOKEN_CHARACTERS)

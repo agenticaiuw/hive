@@ -146,6 +146,40 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
   }
 
   /*
+   * The approval store and its delivery routes (cloud-relay/approvalStore.js,
+   * cloud-relay/approvalDelivery.js). These were registered unreachable for
+   * months — an unlisted path denies universally, admin included — which is
+   * why the whole prepare/approve loop could be built, tested and never once
+   * exercised over HTTP.
+   *
+   * Three scopes because they are three privileges:
+   *   approval:read   — see what is waiting. Every owner surface lists.
+   *   approval:write  — create records and attest delivery/settlement. Only
+   *                     the Mac prepares plans and only relay-side machinery
+   *                     attests, so this is the bridge's scope.
+   *   approval:decide — answer. Every owner surface may decide any approval;
+   *                     origin controls only where the prompt is pushed.
+   */
+  if (
+    method === 'GET' &&
+    (path === '/v1/approvals' || /^\/v1\/approvals\/[^/]+$/.test(path))
+  ) {
+    return ['approval:read']
+  }
+  if (method === 'POST' && path === '/v1/approvals') {
+    return ['approval:write']
+  }
+  if (
+    method === 'POST' &&
+    /^\/v1\/approvals\/[^/]+\/(spoken|answer|settle)$/.test(path)
+  ) {
+    return ['approval:write']
+  }
+  if (method === 'POST' && /^\/v1\/approvals\/[^/]+\/decision$/.test(path)) {
+    return ['approval:decide']
+  }
+
+  /*
    * The node mesh (cloud-relay/nodeMailbox.js). Send is separated from
    * receive because they are different privileges: a node that may be told
    * things is not automatically a node that may tell every other node things.

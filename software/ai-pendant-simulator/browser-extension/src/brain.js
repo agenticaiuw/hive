@@ -33,7 +33,7 @@
  * SHAPE OF THE LOOP once it is on:
  *
  *   command → buildBrainMessages(state) → callModel() → parseToolCalls()
- *          → run one of the extension's own 11 page commands as a tool
+ *          → run one of the extension's own page commands as a tool
  *          → fold the result back into the state → around again,
  *   until the model answers, the step budget runs out, or two consecutive
  *   failures — and every non-answer exit is a HANDOFF: the original command
@@ -332,11 +332,12 @@ export function chooseBrainRoute(config, now = Date.now()) {
 }
 
 /* ===================================================================== *
- * Tools: the extension's own 11 page commands, described for a model.
+ * Tools: the extension's own page commands, described for a model.
  * ===================================================================== */
 
 export const BROWSER_TOOLS = Object.freeze([
   { name: 'navigate', description: 'Open an http(s) URL in a tab.', params: 'url, newTab?' },
+  { name: 'activate_tab', description: 'Focus the existing tab matching a URL, or open it.', params: 'urlContains | url' },
   { name: 'click', description: 'Click an element.', params: 'selector | ref' },
   { name: 'type', description: 'Type text into a field.', params: 'selector | ref, text, submit?' },
   { name: 'read_page', description: 'Read page text/html/forms/landmarks.', params: 'mode?, selector?, maxChars?' },
@@ -372,7 +373,7 @@ export function createBrainState({
   now = Date.now(),
 } = {}) {
   return {
-    status: 'thinking', // thinking | acting | done | handoff
+    status: 'thinking', // thinking | acting | done | handoff | parked
     command: String(command ?? ''),
     page,
     steps: [], // {tool, params, ok, result|error} in execution order
@@ -382,11 +383,23 @@ export function createBrainState({
     pendingCall: null,
     response: null,
     handoffReason: null,
+    /* Set only by the 'park' event: the outward call that was NOT run, and
+     * why. A parked run is terminal HERE — the call moves to the approval
+     * queue (execution-status.js) and, if approved, runs outside this loop. */
+    parkedCall: null,
+    parkedReason: null,
     startedAt: new Date(now).toISOString(),
   }
 }
 
-const TERMINAL = new Set(['done', 'handoff'])
+/*
+ * 'parked' is terminal ON PURPOSE, and it is not 'handoff'. A handoff sends
+ * the command to the Mac planner, which would then be free to DO the outward
+ * thing this loop just refused to do unattended — parking that escalates to
+ * an executor with fewer brakes is not parking. A parked run ends with the
+ * effect not performed and the owner holding the only key.
+ */
+const TERMINAL = new Set(['done', 'handoff', 'parked'])
 
 /**
  * The reducer. Every transition the loop can make is here, pure, so the whole
@@ -397,6 +410,8 @@ const TERMINAL = new Set(['done', 'handoff'])
  *   {type:'model_error', error}         — while thinking
  *   {type:'tool_result', ok, result?, error?} — while acting
  *   {type:'hand_off', reason}           — from anywhere
+ *   {type:'park', reason}               — while acting; the pending call is
+ *                                         refused unattended execution
  */
 export function reduceBrain(state, event) {
   if (!state || TERMINAL.has(state.status)) return state
@@ -407,6 +422,17 @@ export function reduceBrain(state, event) {
       status: 'handoff',
       pendingCall: null,
       handoffReason: event.reason || 'Handed off to the Mac planner.',
+    }
+  }
+
+  if (state.status === 'acting' && event?.type === 'park') {
+    return {
+      ...state,
+      status: 'parked',
+      parkedCall: state.pendingCall,
+      parkedReason:
+        event.reason || 'This step is irreversible or outward-facing.',
+      pendingCall: null,
     }
   }
 
@@ -727,6 +753,9 @@ export function summarizeBrainRun(state) {
   if (state.status === 'handoff') {
     return `Brain handed off to the Mac planner: ${state.handoffReason}`
   }
+  if (state.status === 'parked') {
+    return `Brain stopped before an irreversible step and parked it for approval: ${state.parkedReason}`
+  }
   return `Brain is ${state.status} (${state.stepCount} tool call(s) so far).`
 }
 
@@ -745,10 +774,22 @@ export function summarizeBrainRun(state) {
  *        model's text reply. Injected by background.js — and never invoked
  *        unless config.ready, which today it never is.
  * @param {(call: {type, params}) => Promise<object>} options.runTool
- *        runs one of the 11 page commands through the extension's own
+ *        runs one of the extension's page commands through its own
  *        validated executor and returns its sanitized result.
+ * @param {(call: {type, params}) => {allow: boolean, reason?: string}} [options.assessTool]
+ *        the outward gate (affinity.createOutwardGuard().assess). Consulted
+ *        BEFORE every runTool; {allow:false} parks the call instead of
+ *        running it. Optional so the pure-loop tests stay pure; background.js
+ *        always supplies it.
  */
-export async function runBrainLoop({ command, page = null, config, callModel, runTool }) {
+export async function runBrainLoop({
+  command,
+  page = null,
+  config,
+  callModel,
+  runTool,
+  assessTool = null,
+}) {
   const normalized =
     config && 'ready' in config ? config : normalizeBrainConfig(config)
 
@@ -774,6 +815,30 @@ export async function runBrainLoop({ command, page = null, config, callModel, ru
         })
       }
     } else if (state.status === 'acting') {
+      /*
+       * The outward gate, before the tool touches a page. Parking is NOT a
+       * failure and NOT a handoff: the call is preserved on the state for the
+       * approval queue, and the loop ends with the effect unperformed.
+       */
+      if (assessTool) {
+        let verdict
+        try {
+          verdict = assessTool(state.pendingCall)
+        } catch (error) {
+          /* A broken gate fails closed — an unassessable call does not run. */
+          verdict = {
+            allow: false,
+            reason: `The safety gate itself failed (${error?.message || error}).`,
+          }
+        }
+        if (verdict?.allow !== true) {
+          state = reduceBrain(state, {
+            type: 'park',
+            reason: verdict?.reason || 'This step is irreversible or outward-facing.',
+          })
+          continue
+        }
+      }
       try {
         const result = await runTool(state.pendingCall)
         state = reduceBrain(state, { type: 'tool_result', ok: true, result })

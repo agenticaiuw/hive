@@ -192,6 +192,18 @@ export async function sendNodeMessage({
   correlationId = null,
   ttlMs,
   now = Date.now(),
+  /*
+   * The relay brain's letterbox. Mail addressed to '@relay' used to have
+   * exactly one fate — queue in D1 with no drainer, forever — because the
+   * relay is the switch and nothing ever rang its own doorbell. A consumer
+   * passed here gets first refusal on such mail: it returns
+   * `{consumed: true, receipt}` to answer the message synchronously (the row
+   * is never written; the sender gets the receipt in the send response), or
+   * `{consumed: false}` to let the kind queue exactly as before. Today's one
+   * consumer is approvalDelivery.js's 'approval_decision' handler, wired in
+   * server.js.
+   */
+  relayMail = null,
 } = {}) {
   const envelope = createNodeEnvelope({
     from,
@@ -204,6 +216,21 @@ export async function sendNodeMessage({
   })
 
   const target = normalizeNodeAddress(envelope.to)
+  if (target === RELAY_NODE_ADDRESS && typeof relayMail === 'function') {
+    const answer = await relayMail({ store, envelope, now })
+    if (answer?.consumed) {
+      return {
+        envelope,
+        /* Neither pushed nor queued: the relay took it off the sender's hands
+         * in this very request, so there is nothing left in flight. */
+        pushed: false,
+        queued: false,
+        consumed: true,
+        receipt: answer.receipt ?? null,
+        ring: { rung: false, delivered: 0, reason: 'consumed_by_relay' },
+      }
+    }
+  }
   if (target !== RELAY_NODE_ADDRESS) {
     /* An unregistered addressee is a typo, and a typo that queues silently is
      * a message the sender believes it sent. Refuse it while the caller is
@@ -271,7 +298,7 @@ export async function drainNodeInbox({
  * already run. The scopes live in relayScopes.js; what these handlers add is
  * the half a scope cannot express — WHICH inbox you may touch.
  */
-export function registerNodeMeshRoutes(app, { getStore }) {
+export function registerNodeMeshRoutes(app, { getStore, relayMail = null }) {
   /* POST /v1/node/messages — send. */
   app.post('/v1/node/messages', async (request, response) => {
     const principal = request.relayPrincipal
@@ -295,6 +322,7 @@ export function registerNodeMeshRoutes(app, { getStore }) {
         payload: request.body?.payload ?? {},
         correlationId: request.body?.correlationId ?? null,
         ttlMs: request.body?.ttlMs,
+        relayMail,
       })
       response.status(202).json({
         ok: true,
@@ -304,6 +332,9 @@ export function registerNodeMeshRoutes(app, { getStore }) {
         expiresAt: result.envelope.expiresAt,
         pushed: result.pushed,
         queued: result.queued,
+        /* Present only when the relay answered the message in this request —
+         * the sender learns the outcome without draining anything. */
+        ...(result.consumed ? { consumed: true, receipt: result.receipt } : {}),
       })
     } catch (error) {
       const status = error?.code === 'inbox_full' ? 429 : 400

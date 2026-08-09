@@ -14,12 +14,19 @@ import {
   describeEntry,
 } from './command-console.js'
 import { DEFAULT_AGENT_URL } from './bridge-core.js'
+import {
+  APPROVALS_KEY,
+  approvalCountdown,
+  approvalIsAnswerable,
+  approvalIsExpired,
+} from './approvals.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 
 const elements = {
   statusDot: document.getElementById('status-dot'),
   statusTitle: document.getElementById('status-title'),
+  approvals: document.getElementById('approvals'),
   form: document.getElementById('command-form'),
   input: document.getElementById('command-input'),
   send: document.getElementById('command-send'),
@@ -32,6 +39,122 @@ const elements = {
 }
 
 let dashboardUrl = dashboardUrlFor(DEFAULT_AGENT_URL)
+
+/* ===== Approval cards ===== */
+
+/*
+ * The popup only renders and asks; the decision itself is background.js's
+ * (approval:decide), the same split the command box uses — so a card decided
+ * here is decided even if the popup closes mid-flight, and the storage write
+ * that settles it re-renders every open surface through onChanged.
+ */
+let heldApprovals = []
+let approvalTicker = null
+/* One in-flight decision at a time. The background chain would refuse the
+ * second click anyway ("answered once"); this keeps the first click's card
+ * visibly busy instead of letting two buttons race. */
+let approvalBusyId = null
+
+function renderApprovals(prompts) {
+  heldApprovals = Array.isArray(prompts) ? prompts : []
+  elements.approvals.replaceChildren(...heldApprovals.map((prompt) => renderApprovalCard(prompt)))
+  elements.approvals.hidden = heldApprovals.length === 0
+
+  /* A 1 Hz repaint while any countdown is running. The final tick is what
+   * flips the last live card to its disabled "expired" state, after which the
+   * ticker stops paying for a popup that no longer changes. */
+  const anyLive = heldApprovals.some(
+    (prompt) => approvalIsAnswerable(prompt) && prompt.expiresAt,
+  )
+  if (anyLive && approvalTicker === null) {
+    approvalTicker = window.setInterval(() => renderApprovals(heldApprovals), 1_000)
+  } else if (!anyLive && approvalTicker !== null) {
+    window.clearInterval(approvalTicker)
+    approvalTicker = null
+  }
+}
+
+function renderApprovalCard(prompt) {
+  const expired = !prompt.decision && approvalIsExpired(prompt)
+  const settled = Boolean(prompt.decision)
+  const busy = approvalBusyId === prompt.approvalId
+
+  const item = document.createElement('article')
+  item.className = `approval${settled ? ' approval-decided' : expired ? ' approval-expired' : ''}`
+
+  const summary = document.createElement('p')
+  summary.className = 'approval-summary'
+  summary.textContent = prompt.summary
+
+  const chip = document.createElement('span')
+  chip.className = 'approval-chip'
+  chip.textContent = prompt.risk ? `${prompt.risk} risk` : 'approval'
+  summary.prepend(chip)
+  item.append(summary)
+
+  if (prompt.detail) {
+    const detail = document.createElement('p')
+    detail.className = 'approval-detail'
+    detail.textContent = prompt.detail
+    item.append(detail)
+  }
+
+  const clock = document.createElement('p')
+  clock.className = `approval-clock${expired ? ' expired' : ''}`
+  clock.textContent = settled
+    ? `${prompt.decision === 'approve' ? 'Approved' : 'Denied'} — answer sent`
+    : approvalCountdown(prompt)
+  item.append(clock)
+
+  const row = document.createElement('div')
+  row.className = 'approval-actions'
+
+  const approve = document.createElement('button')
+  approve.type = 'button'
+  approve.className = 'primary'
+  approve.textContent =
+    prompt.decision === 'approve' ? 'Approved' : expired ? 'Expired' : busy ? 'Sending…' : 'Approve'
+
+  const deny = document.createElement('button')
+  deny.type = 'button'
+  deny.className = 'danger'
+  deny.textContent = prompt.decision === 'deny' ? 'Denied' : expired ? 'Expired' : 'Deny'
+
+  for (const button of [approve, deny]) {
+    button.disabled = settled || expired || busy
+  }
+  approve.addEventListener('click', () => void decide(prompt, 'approve'))
+  deny.addEventListener('click', () => void decide(prompt, 'deny'))
+
+  row.append(approve, deny)
+  item.append(row)
+  return item
+}
+
+async function decide(prompt, decision) {
+  if (approvalBusyId || !approvalIsAnswerable(prompt)) return
+  approvalBusyId = prompt.approvalId
+  renderApprovals(heldApprovals)
+
+  try {
+    const reply = await api.runtime.sendMessage({
+      type: 'approval:decide',
+      approvalId: prompt.approvalId,
+      decision,
+    })
+    if (reply?.ok) {
+      setNotice(decision === 'approve' ? 'Approved.' : 'Denied.')
+      /* The settled list arrives through storage.onChanged; nothing to do. */
+    } else {
+      setNotice(reply?.error || 'The decision could not be sent.', true)
+    }
+  } catch (error) {
+    setNotice(error?.message || 'The bridge is not awake yet — try again.', true)
+  } finally {
+    approvalBusyId = null
+    renderApprovals(heldApprovals)
+  }
+}
 
 function renderStatus(status) {
   const state = status?.state || 'offline'
@@ -167,6 +290,7 @@ api.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return
   if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue)
   if (changes[HISTORY_KEY]) renderHistory(changes[HISTORY_KEY].newValue)
+  if (changes[APPROVALS_KEY]) renderApprovals(changes[APPROVALS_KEY].newValue)
 })
 
 async function refresh() {
@@ -175,9 +299,11 @@ async function refresh() {
     'agentUrl',
     HISTORY_KEY,
     INCLUDE_PAGE_KEY,
+    APPROVALS_KEY,
   ])
   dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
   renderStatus(values.bridgeStatus)
+  renderApprovals(values[APPROVALS_KEY])
   renderHistory(values[HISTORY_KEY])
   /* Default ON for convenience, but visible and remembered. */
   elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false

@@ -140,9 +140,18 @@ async function mutateApproval(store, approvalId, change, { updatedBy = WRITER, n
  * that reaches `deliveredAt`, and there cannot be: streaming is witnessed by a
  * socket, and a socket is not an ear.
  */
-export async function speakNextApproval({ store, deviceId, speak, now = Date.now() } = {}) {
+export async function speakNextApproval({ store, deviceId, speak, now = Date.now(), eligible = null } = {}) {
   const records = await listApprovals(store, deviceId, { now })
-  const chosen = selectApprovalToSpeak(records, { deviceId, now })
+  /*
+   * Origin routing's one touch on this path: a caller may narrow WHICH records
+   * this venue speaks. The pendant passes isPendantRoutedApproval so a plan
+   * parked from the phone or the dashboard is not read down an ear that never
+   * asked for it — those prompts travel by their own channel
+   * (cloud-relay/approvalDelivery.js). No predicate means every record, which
+   * is exactly the old behaviour.
+   */
+  const candidates = typeof eligible === 'function' ? records.filter((record) => eligible(record)) : records
+  const chosen = selectApprovalToSpeak(candidates, { deviceId, now })
   if (!chosen.approval) return { spoke: false, reason: 'nothing-waiting', approval: null, waiting: 0 }
 
   const speech = chosen.speech ?? approvalSpeech(chosen.approval)
@@ -336,7 +345,7 @@ export async function settleStoredApproval({ store, approvalId, outcome, now = D
  * because neither needs to look at a filesystem; a grant is returned for the Mac
  * to finish and comes back through /settle.
  */
-export function registerApprovalRoutes(app, { getStore = defaultGetStore } = {}) {
+export function registerApprovalRoutes(app, { getStore = defaultGetStore, onStored = null } = {}) {
   if (!app || typeof app.get !== 'function' || typeof app.post !== 'function') {
     throw new Error('registerApprovalRoutes requires an Express-style app.')
   }
@@ -364,7 +373,29 @@ export function registerApprovalRoutes(app, { getStore = defaultGetStore } = {})
     try {
       const store = await getStore()
       await saveApproval(store, record)
-      response.status(201).json({ ok: true, approval: presentApproval(record) })
+
+      /*
+       * Origin routing rides the store, never gates it. The hook (server.js
+       * passes approvalDelivery's routeApprovalPrompt) pushes the prompt to
+       * the node the command came from; the record is already durable, so a
+       * failed push costs the nudge and nothing else — the fallback surfaces
+       * still list the approval. The outcome is reported to the caller so a
+       * bridge log can say where the prompt actually went.
+       */
+      let delivery = null
+      if (typeof onStored === 'function') {
+        try {
+          delivery = await onStored({ store, record })
+        } catch (error) {
+          delivery = { channel: null, pushed: false, queued: false, error: String(error?.message ?? error) }
+        }
+      }
+
+      response.status(201).json({
+        ok: true,
+        approval: presentApproval(record),
+        ...(delivery ? { delivery } : {}),
+      })
     } catch (error) {
       response.status(400).json({ ok: false, error: String(error?.message ?? error) })
     }

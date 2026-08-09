@@ -74,7 +74,11 @@ export const MAX_TTL_MS = 24 * 60 * 60_000
  * by clients that have no business importing the credential module. */
 const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/
 const RESERVED_ADDRESS_PATTERN = /^@[a-z][a-z0-9-]{1,30}$/
-const KIND_PATTERN = /^[a-z][a-z0-9]*(\.[a-z0-9]+){0,5}$/
+/* Underscores joined the charset for the approval contract, whose kinds are
+ * 'approval_request' and 'approval_decision' (shared/approvalMesh.js) — frozen
+ * with the underscore in them, so the pattern moved rather than the contract.
+ * Segments still begin with a letter or digit; dots still separate them. */
+const KIND_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9][a-z0-9_]*){0,5}$/
 const MESSAGE_ID_PATTERN = /^nmsg_[A-Za-z0-9_-]{8,64}$/
 
 /**

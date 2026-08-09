@@ -1,19 +1,34 @@
 <script lang="ts">
   /**
-   * "Ask the hive" — the universal command box.
+   * "Ask the hive" — THE command box. One per page, voice and text.
    *
-   * One component on every surface (deployed site, iOS shell, menu-bar
-   * WebView, local dashboard). The transport is decided the way /hive decides
-   * LIVE vs SNAPSHOT: served by the Mac agent → same-origin `/plan`/`/execute`
-   * with the loopback session (LOCAL); anywhere else → this app's
-   * `/api/command` server routes, which hold the relay key (VIA RELAY). The
-   * badge says which path ran each command — honest transport, like the hive
-   * badges.
+   * There used to be two places to talk to the agent: this box (typed, with
+   * the status trail) and a second "speak from this browser" composer that
+   * fire-and-forgot into the pendant pipeline. Same agent, two boxes. They are
+   * now one component on every surface (deployed site, iOS shell, menu-bar
+   * WebView, local dashboard): a mic, a field, a send button.
+   *
+   * Transport is chosen per submission by the rule in `$lib/transportRule`:
+   * typed commands run LOCAL when the Mac agent itself serves the page
+   * (same-origin `/plan`/`/execute` with the loopback session) and VIA RELAY
+   * everywhere else (this app's `/api/command` server routes hold the key).
+   * Voice keeps the existing browser-speech pipeline exactly — MediaRecorder
+   * → `/api/command/audio` (Workers AI transcription → the same relay plan
+   * job) — which exists only on the Worker build, so the mic is disabled with
+   * the reason on the agent build instead of recording audio with nowhere to
+   * go.
+   *
+   * Honest transport, per submission: every submission's card carries a badge
+   * recorded at dispatch time — "via this Mac" or "via relay" — for the path
+   * that actually carried it, never a page-level constant. The header badge
+   * still names where the NEXT command will go, kept honest by the mount-time
+   * `/health` probe on the agent build.
    *
    * The status line only ever reports states something actually confirmed:
-   * queued (relay accepted), picked up (the Mac claimed it), planning /
-   * executing, then done, parked for approval, or failed with the real error.
-   * A parked plan is never presented as a failure.
+   * transcribed (the transcript came back), queued (relay accepted), picked
+   * up (the Mac claimed it), planning / executing, then done, parked for
+   * approval, or failed with the real error. A parked plan is never presented
+   * as a failure.
    */
   import { onDestroy, onMount } from "svelte";
   import { base } from "$app/paths";
@@ -23,6 +38,7 @@
     commandTransport,
     conversationSessionId,
     dispatchRelayCommand,
+    dispatchVoiceCommand,
     fetchRelayCommandJob,
     isTerminalRelayStatus,
     loadCommandHistory,
@@ -30,10 +46,19 @@
     runLocalExecute,
     runLocalPlan,
     saveCommandHistory,
+    voiceSupported,
     type CommandHistoryEntry,
     type CommandResultView,
+    type CommandTransport,
     type ParkedInfo,
   } from "$lib/command";
+  import { submissionBadge } from "$lib/transportRule.js";
+  import {
+    blobToBase64,
+    mimeToFormat,
+    pickRecorderMimeType,
+    recordClock,
+  } from "$lib/pipeline";
 
   type Phase =
     | "idle"
@@ -46,6 +71,16 @@
     | "parked"
     | "failed"
     | "still-running";
+
+  type CommandKind = "typed" | "voice";
+
+  type ActiveRecording = {
+    recorder: MediaRecorder;
+    stream: MediaStream;
+    chunks: Blob[];
+    mimeType: string;
+    startedAt: number;
+  };
 
   let {
     variant = "card",
@@ -71,11 +106,20 @@
   let parked = $state<ParkedInfo | null>(null);
   let activeCommand = $state("");
   let activeJobId = $state("");
+  /** How the ACTIVE submission travelled; null when nothing is on the card. */
+  let activeTransport = $state<CommandTransport | null>(null);
+  let activeKind = $state<CommandKind>("typed");
+  /** Confirmed by the transcript itself coming back, never inferred. */
+  let voiceTranscribed = $state(false);
   let pickedUpMs = $state<number | null>(null);
   let finishedMs = $state<number | null>(null);
   let history = $state<CommandHistoryEntry[]>([]);
   let historyOpen = $state(false);
   let localProbeError = $state("");
+  /** Mic/permission problems live under the field, not on a submission card. */
+  let hint = $state("");
+  let recording = $state(false);
+  let recordSeconds = $state(0);
   // Local parked plans hold the prepared actions until the owner says go.
   let pendingExecute = $state<{
     command: string;
@@ -94,6 +138,10 @@
   let runToken = 0;
   let startedAt = 0;
   let historyId = "";
+  // Deliberately a plain binding, not `$state`: the recorder handle is
+  // machinery, and mutating it must never schedule a re-render or re-run the
+  // timer effect below.
+  let activeRecording: ActiveRecording | null = null;
 
   const busy = $derived(
     phase === "sending" ||
@@ -109,32 +157,53 @@
       phase === "still-running",
   );
 
+  /** Where the NEXT command goes; each submission's card records its own. */
   const transportLabel = commandTransport === "local" ? "LOCAL" : "VIA RELAY";
   const transportTitle =
     commandTransport === "local"
-      ? "This page is served by the Mac agent itself: commands run same-origin through its /plan and /execute routes with the loopback session. The relay is not involved."
-      : "This page has no route to the Mac: commands go to this app's own /api/command server route, which creates the relay plan job with a server-held key and polls the job. The key never reaches this browser.";
+      ? "This page is served by the Mac agent itself: typed commands run same-origin through its /plan and /execute routes with the loopback session. The relay is not involved."
+      : "This page has no route to the Mac: commands go to this app's own /api/command server routes, which create the relay plan job with a server-held key and poll the job. The key never reaches this browser.";
+
+  const micTitle = $derived(
+    recording
+      ? "Stop recording and send"
+      : voiceSupported
+        ? "Record a voice command"
+        : "Voice uses the deployed dashboard's speech pipeline; this Mac-served page has no transcription route — type instead.",
+  );
+
+  /** The per-submission honest-transport badge, from what actually carried it. */
+  const subBadge = $derived(
+    activeTransport ? submissionBadge(activeTransport, activeKind) : null,
+  );
 
   type StageView = { id: string; label: string; state: "done" | "active" | "todo" | "warn" | "skip" };
 
   /**
-   * The queued → picked up → planning → executing trail. Only stages this
-   * transport actually has are shown (LOCAL has no queue and no pickup), and
-   * a stage reads "done" only when `progress` recorded it really happening.
+   * The transcribed → queued → picked up → planning → executing trail. Only
+   * stages this submission's transport actually has are shown (LOCAL has no
+   * queue and no pickup; only voice has a transcription hop), and a stage
+   * reads "done" only when something recorded it really happening.
    */
   const stages = $derived.by<StageView[]>(() => {
     if (phase === "idle") return [];
+    const transport = activeTransport ?? commandTransport;
     const activeOrdinal =
       phase === "sending" || phase === "queued"
-        ? 1
+        ? activeKind === "voice" && phase === "sending"
+          ? 0 // the transcribed stage below carries "active" while sending
+          : 1
         : phase === "planning"
           ? 3
           : phase === "executing"
             ? 4
             : 0; // "finishing" and terminal phases have no active stage
     const defs =
-      commandTransport === "relay"
+      transport === "relay"
         ? [
+            ...(activeKind === "voice"
+              ? [{ id: "transcribed", label: "transcribed", ordinal: 0 }]
+              : []),
             { id: "queued", label: "queued", ordinal: 1 },
             { id: "picked-up", label: "picked up", ordinal: 2 },
             { id: "planning", label: "planning", ordinal: 3 },
@@ -146,6 +215,14 @@
           ];
 
     return defs.map(({ id, label, ordinal }): StageView => {
+      if (id === "transcribed") {
+        // Confirmed by the transcript coming back, not by `progress`.
+        if (voiceTranscribed) return { id, label, state: "done" };
+        if (phase === "sending") return { id, label, state: "active" };
+        // A settled voice run with no transcript died right here.
+        if (phase === "failed") return { id, label, state: "warn" };
+        return { id, label, state: "todo" };
+      }
       if (!settled && ordinal === activeOrdinal) return { id, label, state: "active" };
       if (progress >= ordinal) return { id, label, state: "done" };
       if (ordinal === 4 && phase === "parked") return { id, label, state: "warn" };
@@ -172,20 +249,41 @@
     }
   });
 
+  $effect(() => {
+    if (!recording) return;
+    const timer = window.setInterval(() => {
+      const recordStartedAt = activeRecording?.startedAt;
+      if (recordStartedAt) {
+        recordSeconds = Math.floor((Date.now() - recordStartedAt) / 1000);
+      }
+    }, 250);
+    return () => window.clearInterval(timer);
+  });
+
   onDestroy(() => {
     runToken += 1; // abandon any in-flight poll loop
+    // Release the microphone if the page unmounts mid-recording.
+    const pending = activeRecording;
+    activeRecording = null;
+    if (!pending) return;
+    try {
+      if (pending.recorder.state !== "inactive") pending.recorder.stop();
+    } catch {
+      // already stopped
+    }
+    pending.stream.getTracks().forEach((track) => track.stop());
   });
 
   function seconds(ms: number) {
     return `${(ms / 1000).toFixed(1)} s`;
   }
 
-  function rememberSent(command: string) {
+  function rememberSent(command: string, transport: CommandTransport) {
     historyId = crypto.randomUUID();
     const entry: CommandHistoryEntry = {
       id: historyId,
       text: command,
-      transport: commandTransport,
+      transport,
       status: "sent",
       summary: "",
       jobId: null,
@@ -199,6 +297,9 @@
     status: CommandHistoryEntry["status"],
     summary: string,
   ) {
+    // A voice run that died before its transcript never entered history, and
+    // must not overwrite the previous submission's entry.
+    if (!historyId) return;
     history = history.map((entry) =>
       entry.id === historyId
         ? {
@@ -222,6 +323,8 @@
     statusDetail = "";
     pendingExecute = null;
     progress = 0;
+    voiceTranscribed = false;
+    historyId = "";
   }
 
   function settle(
@@ -245,7 +348,7 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     const command = text.trim();
-    if (!command || busy) return;
+    if (!command || busy || recording) return;
     text = "";
     void run(command);
   }
@@ -253,9 +356,12 @@
   async function run(command: string) {
     const token = ++runToken;
     resetOutcome();
+    hint = "";
     activeCommand = command;
+    activeKind = "typed";
+    activeTransport = commandTransport;
     startedAt = Date.now();
-    rememberSent(command);
+    rememberSent(command, commandTransport);
     const sessionId = conversationSessionId();
 
     if (commandTransport === "local") {
@@ -371,7 +477,11 @@
     phase = "queued";
     statusDetail = "Queued — waiting for the Mac to pick it up…";
     onQueued?.();
+    await pollRelayJob(jobId, token);
+  }
 
+  /** Shared by typed relay commands and voice: one poll loop, one truth. */
+  async function pollRelayJob(jobId: string, token: number) {
     const deadline = startedAt + POLL_BUDGET_MS;
     while (token === runToken && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -434,15 +544,149 @@
       "No result after 60 s — the Mac keeps working without this page. Check Jobs for the outcome.";
   }
 
+  /* ------------------------------------------------------------- VOICE */
+
+  async function startRecording() {
+    hint = "";
+    if (busy || !voiceSupported) return;
+    if (
+      typeof MediaRecorder === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      hint = "This browser cannot record audio — type a command instead.";
+      return;
+    }
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = pickRecorderMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.start(250);
+      activeRecording = {
+        recorder,
+        stream,
+        chunks,
+        mimeType: recorder.mimeType || mimeType || "audio/webm",
+        startedAt: Date.now(),
+      };
+      recordSeconds = 0;
+      recording = true;
+    } catch {
+      // The mic stays live if MediaRecorder failed after getUserMedia resolved.
+      stream?.getTracks().forEach((track) => track.stop());
+      hint = "Microphone blocked — allow mic access or type instead.";
+    }
+  }
+
+  /**
+   * Stop the recording and send it down the browser-speech pipeline —
+   * `/api/command/audio` transcribes it server-side and creates the same
+   * relay plan job a typed command creates — then follow that job on the
+   * same status trail.
+   */
+  async function stopAndSend() {
+    const pending = activeRecording;
+    if (!pending) return;
+    activeRecording = null;
+    recording = false;
+    const token = ++runToken;
+    resetOutcome();
+    hint = "";
+    activeCommand = ""; // unknown until the transcript comes back
+    activeKind = "voice";
+    activeTransport = "relay";
+    startedAt = Date.now();
+    phase = "sending";
+    statusDetail = "Transcribing your recording in the cloud…";
+    try {
+      // A recorder that already stopped itself will never fire onstop again,
+      // and a wedged one must not strand the box in "sending".
+      if (pending.recorder.state !== "inactive") {
+        const stopped = new Promise<void>((resolve) => {
+          pending.recorder.onstop = () => resolve();
+        });
+        pending.recorder.stop();
+        await Promise.race([
+          stopped,
+          new Promise<void>((resolve) => window.setTimeout(resolve, 2000)),
+        ]);
+      }
+
+      const blob = new Blob(pending.chunks, { type: pending.mimeType });
+      if (!blob.size) {
+        throw new Error("No audio captured — try again.");
+      }
+      const audioBase64 = await blobToBase64(blob);
+      const outcome = await dispatchVoiceCommand({
+        audioBase64,
+        format: mimeToFormat(blob.type || pending.mimeType),
+        durationMs: Date.now() - pending.startedAt,
+        sessionId: conversationSessionId(),
+        language: navigator.language?.toLowerCase().startsWith("ko")
+          ? "ko"
+          : "en",
+      });
+      if (token !== runToken) return;
+
+      if (outcome.noSpeech) {
+        // Nothing was sent anywhere; not a run, so no card and no history.
+        resetOutcome();
+        phase = "idle";
+        activeTransport = null;
+        hint = "No speech detected — try again.";
+        return;
+      }
+
+      voiceTranscribed = true;
+      activeCommand = outcome.text || "(voice command)";
+      rememberSent(activeCommand, "relay");
+
+      if (!outcome.queued || !outcome.jobId) {
+        // Transcribed fine, but the relay refused the dispatch (its own
+        // sentence, e.g. "Mac bridge is offline…").
+        errorText =
+          outcome.queueError ||
+          "The transcript could not be queued for the Mac.";
+        settle("failed", errorText);
+        statusDetail = `failed after ${seconds(finishedMs ?? 0)}`;
+        return;
+      }
+
+      activeJobId = outcome.jobId;
+      progress = 1;
+      phase = "queued";
+      statusDetail = "Transcribed and queued — waiting for the Mac to pick it up…";
+      onQueued?.();
+      await pollRelayJob(outcome.jobId, token);
+    } catch (sendError) {
+      if (token !== runToken) return;
+      errorText =
+        sendError instanceof Error ? sendError.message : "Voice send failed.";
+      settle("failed", errorText);
+      statusDetail = `failed after ${seconds(finishedMs ?? 0)}`;
+    } finally {
+      // Always hand the microphone back, however the send ended.
+      pending.stream.getTracks().forEach((track) => track.stop());
+    }
+  }
+
   function dismiss() {
     runToken += 1;
     phase = "idle";
     resetOutcome();
     activeCommand = "";
+    activeTransport = null;
+    activeKind = "typed";
   }
 
   function recall(entry: CommandHistoryEntry) {
-    if (busy) return;
+    if (busy || recording) return;
     text = entry.text;
   }
 </script>
@@ -476,44 +720,95 @@
     {/if}
   </div>
 
-  <form class="composer-field cmd-field" onsubmit={submit}>
-    <input
-      bind:value={text}
-      placeholder="Ask the hive…"
-      aria-label="Ask the hive"
-      enterkeyhint="send"
-      maxlength={MAX_COMMAND_LENGTH}
-      disabled={busy}
-    />
+  <div class="cmd-composer">
     <button
-      type="submit"
-      class="send-button"
-      aria-label="Send to the hive"
-      title="Send to the hive"
-      disabled={busy || !text.trim()}
+      type="button"
+      class="mic-button {recording ? 'recording' : ''}"
+      onclick={recording ? stopAndSend : startRecording}
+      disabled={busy || !voiceSupported}
+      aria-label={recording ? "Stop recording and send" : "Record a voice command"}
+      title={micTitle}
     >
-      <svg
-        viewBox="0 0 16 16"
-        width="15"
-        height="15"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.6"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M8 12.5v-9" />
-        <path d="M4.2 7.2 8 3.5l3.8 3.7" />
-      </svg>
+      {#if recording}
+        <svg
+          viewBox="0 0 16 16"
+          width="15"
+          height="15"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <rect x="4" y="4" width="8" height="8" rx="1.5" />
+        </svg>
+      {:else}
+        <svg
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="6" y="1.8" width="4" height="7.4" rx="2" />
+          <path d="M3.6 7.4a4.4 4.4 0 0 0 8.8 0" />
+          <path d="M8 11.8v2.4" />
+        </svg>
+      {/if}
     </button>
-  </form>
+    {#if recording}
+      <span class="record-timer">{recordClock(recordSeconds)}</span>
+    {/if}
+    <form class="composer-field cmd-field" onsubmit={submit}>
+      <input
+        bind:value={text}
+        placeholder="Ask the hive…"
+        aria-label="Ask the hive"
+        enterkeyhint="send"
+        maxlength={MAX_COMMAND_LENGTH}
+        disabled={busy || recording}
+      />
+      <button
+        type="submit"
+        class="send-button"
+        aria-label="Send to the hive"
+        title="Send to the hive"
+        disabled={busy || recording || !text.trim()}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          width="15"
+          height="15"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M8 12.5v-9" />
+          <path d="M4.2 7.2 8 3.5l3.8 3.7" />
+        </svg>
+      </button>
+    </form>
+  </div>
+  {#if hint}
+    <p class="composer-hint">{hint}</p>
+  {/if}
 
   {#if phase !== "idle"}
     <div class="cmd-status-block" aria-live="polite">
-      <p class="cmd-active-command" title={activeCommand}>
-        “{activeCommand}”
-      </p>
+      <div class="cmd-status-head">
+        {#if subBadge}
+          <span class="hv-badge cmd-sub-badge" title={subBadge.title}
+            >{subBadge.label}</span
+          >
+        {/if}
+        <p class="cmd-active-command" title={activeCommand || "Voice command"}>
+          {#if activeCommand}“{activeCommand}”{:else}Voice command{/if}
+        </p>
+      </div>
       <p class="cmd-status-line">
         {#each stages as stage, index (stage.id)}
           {#if index}<span class="cmd-arrow" aria-hidden="true">→</span>{/if}
@@ -637,7 +932,7 @@
             ></i>
             <span class="cmd-history-text">{entry.text}</span>
             <span class="cmd-history-meta"
-              >{entry.transport === "local" ? "LOCAL" : "RELAY"} · {entry.status}</span
+              >{entry.transport === "local" ? "via this Mac" : "via relay"} · {entry.status}</span
             >
           </button>
         </li>

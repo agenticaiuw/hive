@@ -54,6 +54,11 @@ import {
   selectDeliverable,
   streamAnnouncementPcm,
 } from './announce.js'
+import { speakNextApproval } from './approvalStore.js'
+import {
+  answerSpokenApproval,
+  isPendantRoutedApproval,
+} from './approvalDelivery.js'
 import { synthesizeSpeech } from './speak.js'
 import {
   enqueueMacPlanJob,
@@ -213,6 +218,13 @@ export async function handlePendantConverse(request, context) {
       /* A queued announcement is currently streaming down this socket. Any
        * model audio or owner speech clears it — see onAudioDelta/onUserSpeech. */
       announcing: false,
+      /*
+       * The approval whose readback this conversation just spoke, if any. The
+       * NEXT owner utterance is tried against it as a yes/no; ordinary speech
+       * clears it (the owner moved on; the record stays pending for the next
+       * press). Null means no readback is awaiting an answer.
+       */
+      pendingApprovalAnswer: null,
     }
     convo = state
 
@@ -316,6 +328,37 @@ export async function handlePendantConverse(request, context) {
       onTurn: (turn) => {
         state.lastActivityAt = Date.now()
         if (turn.transcript || turn.response) state.turns.push(turn)
+        /*
+         * A readback was just spoken, so this utterance gets first refusal as
+         * its answer. answerSpokenApproval is gated on a decisive yes/no —
+         * "what's my battery" returns not_an_answer and touches nothing — so
+         * feeding it every turn is safe, and the model hearing the same words
+         * costs a slightly puzzled reply, not a commitment.
+         */
+        if (turn.transcript && state.pendingApprovalAnswer) {
+          const approvalId = state.pendingApprovalAnswer
+          void answerSpokenApproval({
+            store: state.store,
+            approvalId,
+            utterance: turn.transcript,
+          })
+            .then((outcome) => {
+              /* One shot per readback unless the machinery asked for a retry
+               * (a bare confirm word, a missing witness). Anything settled or
+               * off-topic stops listening; the next press re-reads what is
+               * still pending. */
+              const retryable = ['confirm_word_alone', 'not-delivered', 'unclear'].includes(outcome.code)
+              if (!retryable) state.pendingApprovalAnswer = null
+              if (outcome.speak) void speakApprovalLine(state, outcome.speak)
+              console.log(
+                `[converse] approval ${approvalId} answer: ${outcome.code}` +
+                  (outcome.state ? ` state=${outcome.state}` : ''),
+              )
+            })
+            .catch((error) => {
+              console.warn(`[converse] approval answer: ${error?.message || error}`)
+            })
+        }
         /*
          * Only the owner's own words. The model's reply is the model agreeing
          * with itself, and a log that remembers what it said last turn is how
@@ -422,11 +465,121 @@ export async function handlePendantConverse(request, context) {
      * is the first moment anything the relay composed on its own can reach
      * the owner's ear. Not awaited: a queued briefing must never delay the
      * answer to the question that was just asked.
+     *
+     * Approvals first, then announcements, CHAINED — both feed the same
+     * stateful Opus encoder, so running them concurrently would splice a
+     * briefing into the middle of a readback. Order is a decision, not an
+     * accident: an approval expires and commits something, a briefing merely
+     * goes stale, and the readback ends with the confirm word the owner is
+     * about to say — burying it under a briefing would ask them to answer a
+     * question three paragraphs old.
      */
-    if (ANNOUNCE_ON_CONNECT) {
-      void playPendingAnnouncements(state).catch((error) => {
-        console.warn(`[converse] announce: ${error?.message || error}`)
+    void speakQueuedApprovals(state)
+      .catch((error) => {
+        console.warn(`[converse] approvals: ${error?.message || error}`)
       })
+      .then(() => {
+        if (!ANNOUNCE_ON_CONNECT || state.ended) return
+        return playPendingAnnouncements(state).catch((error) => {
+          console.warn(`[converse] announce: ${error?.message || error}`)
+        })
+      })
+  }
+
+  /**
+   * Read out the next approval parked for THIS pendant, and remember which
+   * one, so the owner's next words can answer it.
+   *
+   * Everything doing the work here already existed: speakNextApproval picks
+   * the oldest live record and attests exactly what the stream witnessed
+   * (bytes on a socket, never a hearing), and the origin filter keeps prompts
+   * that belong to other surfaces — a phone's card, the HUD's list — off a
+   * speaker nobody asked. What was missing was only this call.
+   */
+  async function speakQueuedApprovals(state) {
+    if (state.ended || !state.replyEncoder || !state.store) return
+
+    const spoken = await speakNextApproval({
+      store: state.store,
+      deviceId: state.deviceId,
+      eligible: isPendantRoutedApproval,
+      speak: async ({ speech }) => {
+        const pcm = await renderAnnouncementPcm({
+          speech,
+          synthesize: synthesizeSpeech,
+        })
+        if (state.ended || !pcm.length) {
+          /* Zero bytes reported keeps the record undelivered and deliverable
+           * — speakNextApproval fails closed on exactly this shape. */
+          return { sentBytes: 0, totalBytes: pcm.length, stopped: true }
+        }
+        state.announcing = true
+        const delivery = await streamAnnouncementPcm({
+          pcm,
+          sampleRate: REALTIME_PCM_RATE,
+          encode: (chunk) => state.replyEncoder.push(chunk),
+          split: (wire) => splitWireFrames(wire),
+          send: (frame) => {
+            state.lastActivityAt = Date.now()
+            state.lastDownlinkAt = Date.now()
+            try {
+              server.send(frame)
+            } catch {
+              state.announcing = false
+            }
+          },
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          shouldStop: () => state.ended || !state.announcing,
+        })
+        state.announcing = false
+        return {
+          sentBytes: delivery.sentBytes,
+          totalBytes: pcm.length,
+          stopped: delivery.stopped,
+          path: 'converse-approval',
+        }
+      },
+    })
+
+    if (spoken.spoke && spoken.approval) {
+      state.pendingApprovalAnswer = spoken.approval.approvalId
+      console.log(
+        `[converse] approval ${spoken.approval.approvalId} read back` +
+          ` (${spoken.waiting} waiting, evidence=${spoken.evidence?.kind ?? 'none'})`,
+      )
+    } else if (spoken.reason && spoken.reason !== 'nothing-waiting') {
+      console.warn(`[converse] approval readback: ${spoken.reason} ${spoken.why ?? ''}`)
+    }
+  }
+
+  /** One short spoken line — "Approved." / the repair prompt — on the same
+   * paced path as everything else this relay says on its own. */
+  async function speakApprovalLine(state, text) {
+    if (state.ended || !state.replyEncoder || !text) return
+    try {
+      const pcm = await renderAnnouncementPcm({ speech: text, synthesize: synthesizeSpeech })
+      if (state.ended || !pcm.length) return
+      state.announcing = true
+      await streamAnnouncementPcm({
+        pcm,
+        sampleRate: REALTIME_PCM_RATE,
+        encode: (chunk) => state.replyEncoder.push(chunk),
+        split: (wire) => splitWireFrames(wire),
+        send: (frame) => {
+          state.lastActivityAt = Date.now()
+          state.lastDownlinkAt = Date.now()
+          try {
+            server.send(frame)
+          } catch {
+            state.announcing = false
+          }
+        },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        shouldStop: () => state.ended || !state.announcing,
+      })
+      state.announcing = false
+    } catch (error) {
+      console.warn(`[converse] approval line: ${error?.message || error}`)
     }
   }
 

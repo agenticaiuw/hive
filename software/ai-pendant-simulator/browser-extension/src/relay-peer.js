@@ -391,6 +391,11 @@ export const MESH_KINDS = Object.freeze({
   'browser.command': 'command',
   /* payload: {} — answer with presence. Costs nothing, proves reachability. */
   'browser.ping': 'ping',
+  /* payload: {approvalId, summary, detail, risk, expiresAt} — RENDER, never
+   * execute: a card in the popup and a count on the badge. The decision goes
+   * back later as 'approval_decision' when the owner presses a button; see
+   * shared/approvalMesh.js for the frozen shape. */
+  'approval_request': 'approval',
 })
 
 export const MESH_RESULT_KIND = 'browser.command.result'
@@ -489,17 +494,32 @@ export function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.n
       ignored.push({ envelope, reason: `addressed to ${envelope.to}, not to this node` })
       continue
     }
-    if (!envelopeIsLive(envelope, now)) {
-      ignored.push({ envelope, reason: 'expired before it was drained' })
-      continue
-    }
 
+    /*
+     * The kind is resolved BEFORE the freshness rules because the two rules
+     * below guard different hazards for different handlings. For a command,
+     * stale means dangerous — a click that happens late happens wrong. For an
+     * approval_request, stale means DISABLED, not invisible: the card's own
+     * payload deadline is the clock that matters, and a request refused here
+     * would be a question the owner was meant to see, silently unasked. So
+     * an approval skips the envelope-expiry and age refusals and surfaces;
+     * the popup renders it "expired" when its payload deadline has passed.
+     */
     const handling = MESH_KINDS[envelope.kind]
     if (!handling) {
       ignored.push({ envelope, reason: `no handler for kind "${envelope.kind}"` })
       continue
     }
 
+    if (handling !== 'approval' && !envelopeIsLive(envelope, now)) {
+      ignored.push({ envelope, reason: 'expired before it was drained' })
+      continue
+    }
+
+    /* Trust stands for approvals too, and matters MORE there: a prompt is a
+     * social lever, and an untrusted node that can put "Approve: sync your
+     * passwords" on the owner's screen has half its attack done. Untrusted
+     * mail is still acked; it is simply never surfaced. */
     if (!trusted.has(envelope.from)) {
       ignored.push({
         envelope,
@@ -511,7 +531,7 @@ export function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.n
     }
 
     const age = now - (Date.parse(envelope.createdAt) || now)
-    if (age > MAX_MESH_COMMAND_AGE_MS) {
+    if (handling !== 'approval' && age > MAX_MESH_COMMAND_AGE_MS) {
       ignored.push({
         envelope,
         reason: `queued ${Math.round(age / 1000)}s ago; this node refuses mesh mail older than ${

@@ -18,12 +18,17 @@
  * so the box renders both identically — only the badge says which path ran it.
  */
 import { agentRequest, backend } from "$lib/dataSource";
+import { transportFor, voiceAvailable } from "$lib/transportRule.js";
 
 export type CommandTransport = "local" | "relay";
 
-/** Decided by which host serves the page, exactly like `$lib/dataSource`. */
-export const commandTransport: CommandTransport =
-  backend === "agent" ? "local" : "relay";
+/** Typed-command transport, decided by which host serves the page — the rule
+ * itself lives in `$lib/transportRule` so the tests can import it directly. */
+export const commandTransport: CommandTransport = transportFor(backend, "typed");
+
+/** Voice rides the Worker's `/api/command/audio` speech route; the Mac agent
+ * has no transcription route, so only the relay build offers the mic. */
+export const voiceSupported: boolean = voiceAvailable(backend);
 
 /** Matches the relay route's cap; enforced client-side for an instant hint. */
 export const MAX_COMMAND_LENGTH = 2000;
@@ -224,6 +229,53 @@ export async function dispatchRelayCommand(
     throw new Error("The relay accepted the command but returned no job id.");
   }
   return { jobId: String(payload.jobId) };
+}
+
+/** What `/api/command/audio` reports back for one browser recording. */
+export type VoiceDispatchOutcome = {
+  /** Poll handle for `/api/command/status/:jobId` when `queued` is true. */
+  jobId: string | null;
+  /** The transcript, verbatim (already server-side redacted). */
+  text: string;
+  /** True when the transcript became a relay plan job for the Mac. */
+  queued: boolean;
+  /** True when transcription heard nothing worth sending. */
+  noSpeech: boolean;
+  /** The relay's own refusal when transcription worked but dispatch did not. */
+  queueError: string;
+};
+
+/**
+ * The browser-speech pipeline, unchanged from the old composer: the recording
+ * goes to this app's `/api/command/audio` server route, which transcribes it
+ * with the server-held relay key and then creates the same `/v1/mac/plan` job
+ * a typed relay command creates. The route now also returns that plan job's
+ * id, so a voice submission rides the same status poll as a typed one.
+ */
+export async function dispatchVoiceCommand(input: {
+  audioBase64: string;
+  format: string;
+  durationMs: number;
+  sessionId: string;
+  language?: string;
+}): Promise<VoiceDispatchOutcome> {
+  const response = await fetch("/api/command/audio", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+  });
+  const payload: any = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Voice send failed (${response.status})`);
+  }
+  return {
+    jobId: payload.jobId ? String(payload.jobId) : null,
+    text: String(payload.text || ""),
+    queued: Boolean(payload.queued),
+    noSpeech: Boolean(payload.noSpeech),
+    queueError: String(payload.queueError || ""),
+  };
 }
 
 export async function fetchRelayCommandJob(jobId: string): Promise<RelayJobView> {

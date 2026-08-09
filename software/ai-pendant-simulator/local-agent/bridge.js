@@ -33,6 +33,7 @@ import {
 } from './pendantSpeech.js'
 import { synchronizeProductState } from './productSyncClient.js'
 import { classifyPlan, classifyPlanForRoutine } from './actionRisk.js'
+import { prepareAction } from './prepareApprove.js'
 import { stripImageBytes } from './redaction.js'
 import {
   createRateLimitedErrorReporter,
@@ -505,6 +506,7 @@ export async function handleWork(work) {
           ? classifyPlanForRoutine(plan.actions)
           : classifyPlan(plan.actions))
       let parkedForApproval = false
+      let parkedApproval = null
       if (verdict.autoRun) {
         const executionStartedAt = Date.now()
         void reportPipelineEvent(planWork, {
@@ -603,13 +605,34 @@ export async function handleWork(work) {
         plan.response =
           spokenTextForResult({ ...plan, awaitingApproval: true }) ||
           'Waiting for your approval on the dashboard.'
+        /*
+         * Approval-at-origin: the park is no longer only a dashboard fact.
+         * A durable approval record — manifest on this disk, decision on the
+         * relay — goes up with the job's own source as `origin`, and the
+         * relay pushes the prompt back to the node the command came from
+         * (spoken on the pendant, a card on the phone or extension, the Mac
+         * agent's surface for local origins). Best-effort: a failure leaves
+         * exactly the old behaviour, a plan parked for the dashboard.
+         */
+        parkedApproval = await createParkedApproval({
+          work,
+          plan,
+          sessionId: activeSessionId,
+          routineJob,
+        })
         await reportPipelineEvent(planWork, {
           stage: 'agent',
           status: 'waiting',
           label: 'Waiting for your approval',
           detail: verdict.reason,
           text: plan.response,
-          meta: { blocked: plan.awaitingApproval, routineJob },
+          meta: {
+            blocked: plan.awaitingApproval,
+            routineJob,
+            ...(parkedApproval
+              ? { approvalId: parkedApproval.approvalId, approvalOrigin: parkedApproval.origin }
+              : {}),
+          },
         })
       }
 
