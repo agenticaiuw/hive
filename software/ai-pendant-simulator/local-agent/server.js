@@ -2257,6 +2257,38 @@ if (fs.existsSync(distDir)) {
   }
 }
 
+/*
+ * Structured errors, never Express's bare HTML page.
+ *
+ * The bridge records whatever a call returns verbatim, so an HTML error page
+ * became the job's failure text — a <!DOCTYPE html> blob in a log line that
+ * hides the cause it is supposed to report. That is how both of today's audio
+ * payload incidents surfaced, on the relay and then here; the relay's own
+ * handler was fixed for exactly this reason.
+ *
+ * Four arguments is what makes Express treat this as an error handler, and it
+ * must come after every route.
+ */
+app.use((error, request, response, next) => {
+  if (response.headersSent) {
+    next(error)
+    return
+  }
+  if (error?.type === 'entity.too.large' || Number(error?.status) === 413) {
+    response.status(413).json({
+      ok: false,
+      error: 'Request body exceeds the local agent size limit.',
+    })
+    return
+  }
+  console.error('[agent] Unhandled route error:', error?.stack || error)
+  const status = Number(error?.status || error?.statusCode)
+  response.status(status >= 400 && status < 600 ? status : 500).json({
+    ok: false,
+    error: String(error?.message || error).slice(0, 200),
+  })
+})
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Pendant Mac Local Agent listening on http://localhost:${PORT}`)
   // Any screenshots left behind by a crashed run die with the old process.
