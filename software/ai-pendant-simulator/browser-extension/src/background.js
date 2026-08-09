@@ -33,6 +33,21 @@ import {
   runBrainLoop,
   summarizeBrainRun,
 } from './brain.js'
+import {
+  MAC_FRESH_MS,
+  RELAY_STORAGE_KEYS,
+  acceptEnvelopes,
+  ackRequest,
+  choosePeer,
+  createEnvelopeLedger,
+  describeRelayPeer,
+  envelopeToCommand,
+  inboxRequest,
+  normalizeRelayConfig,
+  pongMessageFor,
+  pruneEnvelopeLedger,
+  resultMessageFor,
+} from './relay-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const POLL_ALARM = 'ai-pendant-poll'
@@ -41,10 +56,23 @@ const POLL_INTERVAL_MS = 750
 const HEARTBEAT_INTERVAL_MS = 12_000
 const FETCH_TIMEOUT_MS = 7_000
 const STATUS_KEY = 'bridgeStatus'
+const RELAY_STATUS_KEY = 'relayStatus'
+/* Survives the worker restarts the 60 s inbox lease is measured against — see
+ * createEnvelopeLedger's note on why this one cannot live in module scope. */
+const RELAY_LEDGER_KEY = 'relaySeenEnvelopes'
 const CONFIG_KEYS = ['agentUrl', 'agentToken', 'deviceName', 'targetMode', 'instanceId']
 
 let activePoll = null
+let activeRelayDrain = null
 let configRevision = 0
+
+/*
+ * When the Mac last answered, as observed by this worker rather than asserted
+ * by config. choosePeer() turns it into the routing decision; it is reset to 0
+ * on every worker start, so a fresh incarnation treats the Mac as unproven
+ * until a heartbeat succeeds instead of inheriting an optimistic default.
+ */
+let macLastOkAt = 0
 
 /*
  * One nonce per service-worker incarnation.
@@ -281,6 +309,7 @@ async function pollWindow(revision) {
     try {
       if (Date.now() >= nextHeartbeatAt) {
         await heartbeat(config)
+        macLastOkAt = Date.now()
         nextHeartbeatAt = Date.now() + HEARTBEAT_INTERVAL_MS
         await updateStatus({
           state: 'connected',
@@ -358,6 +387,231 @@ async function updateStatus(patch) {
       })
     }
   }
+}
+
+/* ===================================================================== *
+ * The second peer: the relay, reached directly.
+ *
+ * Runs BESIDE the Mac loop above, never instead of it. The two share the
+ * executor, the idempotency ledger and the privacy boundary; what differs is
+ * only where work arrives from and where its answer goes. See relay-peer.js
+ * for the policy and for why this is a poller rather than a socket.
+ * ===================================================================== */
+
+async function getRelayConfig() {
+  return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS))
+}
+
+async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
+      method: descriptor.method,
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        /* The device token, on the wire, in a header — never in the path or a
+         * query string, which is why inboxRequest carries only the deviceId. */
+        Authorization: `Bearer ${relayConfig.deviceToken}`,
+        ...(descriptor.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(descriptor.body ? { body: JSON.stringify(descriptor.body) } : {}),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      let detail = ''
+      try {
+        const payload = await response.json()
+        detail = payload.error || payload.message || ''
+      } catch {
+        detail = await response.text().catch(() => '')
+      }
+      const error = new Error(detail || `The relay returned HTTP ${response.status}.`)
+      error.status = response.status
+      throw error
+    }
+
+    return response.status === 204 ? null : await response.json()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
+  if (handling === 'ping') {
+    await relayFetch(
+      relayConfig,
+      pongMessageFor(
+        envelope,
+        {
+          browser: browserLabel(),
+          extensionVersion: api.runtime.getManifest().version,
+          macFresh: Date.now() - macLastOkAt <= MAC_FRESH_MS,
+          observedAt: new Date().toISOString(),
+        },
+        relayConfig,
+      ),
+    )
+    return
+  }
+
+  let outcome
+  try {
+    const command = envelopeToCommand(envelope)
+    /* The same replay check the Mac path runs, over the same ledger: a mesh
+     * redelivery and an agent re-poll are the same hazard wearing two hats. */
+    const identity = commandIdentity(command)
+    const replayed = commandLedger.recall(identity)
+    if (replayed) {
+      outcome = { ...replayed.result, replayed: true }
+    } else {
+      try {
+        outcome = { ok: true, result: await executeCommand(command, macConfig) }
+      } catch (error) {
+        outcome = { ok: false, error: error?.message || String(error) }
+      }
+      commandLedger.remember(identity, outcome)
+    }
+  } catch (error) {
+    outcome = { ok: false, error: error?.message || String(error) }
+  }
+
+  await relayFetch(relayConfig, resultMessageFor(envelope, outcome, relayConfig))
+}
+
+async function drainRelayOnce(relayConfig, macConfig) {
+  const page = await relayFetch(relayConfig, inboxRequest(relayConfig))
+  const stored = (await api.storage.local.get(RELAY_LEDGER_KEY))[RELAY_LEDGER_KEY] ?? {}
+  const accepted = acceptEnvelopes(page?.messages, {
+    ledger: createEnvelopeLedger(stored),
+    config: relayConfig,
+  })
+
+  /*
+   * Written BEFORE anything runs, for the reason commandLedger.remember is
+   * called before the result POST: the step that fails is the one after this,
+   * and forgetting that a click happened costs the owner a second click on a
+   * real page, while forgetting a result costs one repeated read.
+   */
+  await api.storage.local.set({
+    [RELAY_LEDGER_KEY]: pruneEnvelopeLedger(accepted.ledger),
+  })
+
+  /*
+   * Everything drained is acked, including what this node refused to run. An
+   * ack means "I have this", not "I did this" — leaving a refusal unacked
+   * would redeliver it every 60 s until the inbox hit MAX_INBOX_DEPTH and
+   * started rejecting the sends that mattered.
+   */
+  if (accepted.ackIds.length) {
+    await relayFetch(relayConfig, ackRequest(relayConfig, accepted.ackIds))
+  }
+
+  for (const { envelope, handling } of accepted.run) {
+    try {
+      await runMeshEnvelope(envelope, handling, relayConfig, macConfig)
+    } catch (error) {
+      console.warn(
+        `mesh ${envelope.kind} from ${envelope.from} failed: ${error?.message || error}`,
+      )
+    }
+  }
+
+  return {
+    drained: accepted.ackIds.length,
+    ran: accepted.run.length,
+    ignored: accepted.ignored.length,
+    pending: Number(page?.pending || 0),
+  }
+}
+
+async function relayWindow(revision) {
+  const relayConfig = await getRelayConfig()
+
+  if (!relayConfig.ready) {
+    await updateRelayStatus({
+      state: 'off',
+      connected: false,
+      message: relayConfig.reason,
+    })
+    return
+  }
+
+  const macConfig = await getConfig()
+  const deadline = Date.now() + POLL_WINDOW_MS
+
+  while (Date.now() < deadline && revision === configRevision) {
+    const choice = choosePeer({
+      macConfigured: Boolean(macConfig.agentToken),
+      macLastOkAt,
+      relayReady: true,
+    })
+
+    try {
+      const report = await drainRelayOnce(relayConfig, macConfig)
+      await updateRelayStatus({
+        state: 'connected',
+        connected: true,
+        message: describeRelayPeer(relayConfig, choice),
+        lastConnectedAt: new Date().toISOString(),
+        error: '',
+        ...report,
+      })
+    } catch (error) {
+      await updateRelayStatus({
+        state: error?.status === 401 || error?.status === 403 ? 'unauthorized' : 'offline',
+        connected: false,
+        message:
+          error?.status === 401 || error?.status === 403
+            ? 'The relay rejected this browser\'s device token.'
+            : 'Cannot reach the relay.',
+        error: error?.message || String(error),
+        lastErrorAt: new Date().toISOString(),
+      })
+    }
+
+    /*
+     * Never sleep past the end of the window. RELAY_POLL_IDLE_MS (30 s) is
+     * longer than POLL_WINDOW_MS (25 s), so on a healthy Mac this exits after
+     * one drain and the 30 s alarm is what schedules the next — rather than
+     * holding the service worker awake for a sleep whose wake-up is already
+     * outside its own deadline.
+     */
+    if (Date.now() + choice.relayPollMs >= deadline) break
+    await delay(choice.relayPollMs)
+  }
+}
+
+function startRelayDrain() {
+  if (activeRelayDrain) return activeRelayDrain
+
+  const revision = configRevision
+  activeRelayDrain = relayWindow(revision)
+    .catch(async (error) => {
+      await updateRelayStatus({
+        state: 'error',
+        connected: false,
+        message: 'The relay peer stopped unexpectedly.',
+        error: error?.message || String(error),
+        lastErrorAt: new Date().toISOString(),
+      })
+    })
+    .finally(() => {
+      activeRelayDrain = null
+      if (revision !== configRevision) void startRelayDrain()
+    })
+
+  return activeRelayDrain
+}
+
+async function updateRelayStatus(patch) {
+  const current = (await api.storage.local.get(RELAY_STATUS_KEY))[RELAY_STATUS_KEY] ?? {}
+  await api.storage.local.set({
+    [RELAY_STATUS_KEY]: { ...current, ...patch, updatedAt: new Date().toISOString() },
+  })
 }
 
 /**
@@ -1255,26 +1509,37 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/*
+ * Both peers wake on the same alarm and neither can stop the other: a relay
+ * that is unreachable must not keep the Mac loop from starting, and a Mac that
+ * is asleep is the case the relay peer exists for.
+ */
+function startPeers() {
+  void startPolling()
+  void startRelayDrain()
+}
+
 api.runtime.onInstalled.addListener(async ({ reason }) => {
   await migrateSyncedCredentials()
   await api.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 })
   if (reason === 'install') await api.runtime.openOptionsPage()
-  void startPolling()
+  startPeers()
 })
 
 api.runtime.onStartup.addListener(async () => {
   await migrateSyncedCredentials()
   await api.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 })
-  void startPolling()
+  startPeers()
 })
 
 api.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === POLL_ALARM) void startPolling()
+  if (alarm.name === POLL_ALARM) startPeers()
 })
 
 api.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return
+
   if (
-    areaName === 'local' &&
     ['agentUrl', 'agentToken', 'deviceName', 'targetMode'].some(
       (key) => changes[key],
     )
@@ -1282,11 +1547,17 @@ api.storage.onChanged.addListener((changes, areaName) => {
     configRevision += 1
     void startPolling()
   }
+
+  if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
+    configRevision += 1
+    void startRelayDrain()
+  }
 })
 
 api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'bridge:poll-now') {
     void startPolling().then(() => sendResponse({ ok: true }))
+    void startRelayDrain()
     return true
   }
 
@@ -1294,6 +1565,34 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void api.storage.local
       .get(STATUS_KEY)
       .then((values) => sendResponse(values[STATUS_KEY] ?? null))
+    return true
+  }
+
+  /* Both peers in one answer, so a reader never has to infer the mesh's state
+   * from the Mac's. */
+  if (message?.type === 'peers:get-status') {
+    void Promise.all([
+      api.storage.local.get([STATUS_KEY, RELAY_STATUS_KEY]),
+      getRelayConfig(),
+      getConfig(),
+    ])
+      .then(([values, relayConfig, macConfig]) =>
+        sendResponse({
+          mac: values[STATUS_KEY] ?? null,
+          relay: values[RELAY_STATUS_KEY] ?? null,
+          choice: choosePeer({
+            macConfigured: Boolean(macConfig.agentToken),
+            macLastOkAt,
+            relayReady: relayConfig.ready,
+          }),
+        }),
+      )
+      .catch((error) => sendResponse({ error: error?.message || String(error) }))
+    return true
+  }
+
+  if (message?.type === 'relay:drain-now') {
+    void startRelayDrain().then(() => sendResponse({ ok: true }))
     return true
   }
 
@@ -1311,4 +1610,4 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 void migrateSyncedCredentials()
   .then(() => api.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 }))
-  .then(() => startPolling())
+  .then(() => startPeers())

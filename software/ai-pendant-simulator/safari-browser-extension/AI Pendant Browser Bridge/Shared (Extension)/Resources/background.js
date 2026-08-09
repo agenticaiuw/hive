@@ -36,7 +36,7 @@
 		} catch {
 			throw new Error("Agent URL must be a valid URL.");
 		}
-		if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname)) throw new Error("Agent URL must use http://127.0.0.1 or http://localhost.");
+		if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname)) throw new Error("Agent URL must use http://127.0.0.1 or http://localhost. The relay is reached through the relay peer (relayUrl), not this field.");
 		if (url.username || url.password || url.search || url.hash) throw new Error("Agent URL cannot contain credentials, a query, or a hash.");
 		if (url.pathname !== "/" && url.pathname !== "") throw new Error("Agent URL must not contain a path.");
 		return url.origin;
@@ -1269,6 +1269,412 @@ or, when you are finished,
 		});
 		return state;
 	}
+	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
+	const RELAY_NODE_ADDRESS = "@relay";
+	/** Serialized envelope ceiling. See the SIZE note above. */
+	const MAX_ENVELOPE_BYTES = 64 * 1024;
+	const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/;
+	const RESERVED_ADDRESS_PATTERN = /^@[a-z][a-z0-9-]{1,30}$/;
+	const KIND_PATTERN = /^[a-z][a-z0-9]*(\.[a-z0-9]+){0,5}$/;
+	const MESSAGE_ID_PATTERN = /^nmsg_[A-Za-z0-9_-]{8,64}$/;
+	/**
+	* A node address, or '' if it is not one. Accepts a registered device id or a
+	* reserved '@name' address; rejects everything else, including empty strings
+	* and the whitespace-padded near-misses a hand-typed config produces.
+	*/
+	function normalizeNodeAddress(value) {
+		const address = String(value ?? "").trim();
+		if (RESERVED_ADDRESS_PATTERN.test(address)) return address;
+		return DEVICE_ADDRESS_PATTERN.test(address) ? address : "";
+	}
+	/** A message kind, or '' if it is not one. Lowercase dotted verbs only. */
+	function normalizeNodeKind(value) {
+		const kind = String(value ?? "").trim();
+		return kind.length <= 64 && KIND_PATTERN.test(kind) ? kind : "";
+	}
+	/** True while the envelope is still deliverable. */
+	function envelopeIsLive(envelope, now = Date.now()) {
+		const expiresAt = Date.parse(envelope?.expiresAt || "");
+		return Number.isFinite(expiresAt) && expiresAt > now;
+	}
+	/**
+	* Parse one envelope off the wire. Returns null for anything that is not a
+	* well-formed envelope of a version we speak — a receiver must never have to
+	* guess whether `payload` exists.
+	*/
+	function parseNodeEnvelope(input) {
+		let candidate = input;
+		if (typeof input === "string") try {
+			candidate = JSON.parse(input);
+		} catch {
+			return null;
+		}
+		if (!candidate || typeof candidate !== "object") return null;
+		if (candidate.v !== 1) return null;
+		if (!MESSAGE_ID_PATTERN.test(String(candidate.id || ""))) return null;
+		if (!normalizeNodeAddress(candidate.from)) return null;
+		if (!normalizeNodeAddress(candidate.to)) return null;
+		if (!normalizeNodeKind(candidate.kind)) return null;
+		if (candidate.payload === null || typeof candidate.payload !== "object" || Array.isArray(candidate.payload)) return null;
+		return candidate;
+	}
+	//#endregion
+	//#region src/relay-peer.js
+	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
+		"https://ai-pendant-relay.your-subdomain.workers.dev",
+		"http://127.0.0.1:8787",
+		"http://localhost:8787"
+	]);
+	/**
+	* A usable relay origin, or ''.
+	*
+	* Deliberately NOT a widening of normalizeAgentUrl(). That function's output
+	* is the base URL background.js sends `Authorization: Bearer <agentToken>` to,
+	* and agentToken is the MAC's credential. One URL field covering two origins
+	* therefore means one field that can aim either credential at either host —
+	* and the failure is silent, because both hosts answer 401 the same way. Two
+	* fields, two allowlists, one credential bound to each: a misconfiguration
+	* then costs a failed request instead of a leaked token.
+	*/
+	function normalizeRelayUrl(value) {
+		const candidate = String(value ?? "").trim();
+		if (!candidate) return "";
+		let url;
+		try {
+			url = new URL(candidate);
+		} catch {
+			return "";
+		}
+		if (url.username || url.password || url.search || url.hash) return "";
+		if (url.pathname !== "/" && url.pathname !== "") return "";
+		return RELAY_ORIGIN_ALLOWLIST.includes(url.origin) ? url.origin : "";
+	}
+	const RELAY_STORAGE_KEYS = Object.freeze([
+		"relayEnabled",
+		"relayUrl",
+		"relayDeviceId",
+		"deviceToken",
+		"meshTrustedSenders"
+	]);
+	Object.freeze({
+		relayEnabled: false,
+		relayUrl: null,
+		relayDeviceId: null,
+		deviceToken: null
+	});
+	const DEFAULT_TRUSTED_SENDERS = Object.freeze([RELAY_NODE_ADDRESS]);
+	function normalizeTrustedSenders(value, extra = []) {
+		const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/).filter(Boolean);
+		const senders = new Set(DEFAULT_TRUSTED_SENDERS);
+		for (const candidate of [...raw, ...extra]) {
+			const address = normalizeNodeAddress(candidate);
+			if (address) senders.add(address);
+		}
+		return [...senders];
+	}
+	/**
+	* Refuses to report `ready` unless the origin, the address and the credential
+	* are all present and sane — the same discipline normalizeBrainConfig uses, so
+	* a half-configured relay peer behaves exactly like an absent one.
+	*/
+	function normalizeRelayConfig(values = {}) {
+		const relayEnabled = values.relayEnabled === true;
+		const relayUrl = normalizeRelayUrl(values.relayUrl) || null;
+		const relayDeviceId = normalizeNodeAddress(values.relayDeviceId) || null;
+		const deviceToken = String(values.deviceToken ?? "").trim() || null;
+		let reason = "";
+		if (!relayEnabled) reason = "The relay peer is switched off (relayEnabled is not true).";
+		else if (!relayUrl) reason = "No usable relayUrl is configured. It must be one of the allowlisted relay origins.";
+		else if (!relayDeviceId) reason = "No relayDeviceId is configured — that is the address the relay delivers this extension's mail to.";
+		else if (!deviceToken) reason = "No deviceToken is configured — pair this browser with `pendant-credentials.mjs pair --role browser_node`.";
+		return {
+			relayEnabled,
+			relayUrl,
+			relayDeviceId,
+			deviceToken,
+			trustedSenders: normalizeTrustedSenders(values.meshTrustedSenders),
+			ready: relayEnabled && Boolean(relayUrl) && Boolean(relayDeviceId) && Boolean(deviceToken),
+			reason
+		};
+	}
+	/**
+	* Descriptors rather than fetches, so every URL, method and body this module
+	* can produce is assertable in a unit test without a network or a mock.
+	* `auth: 'device'` is a marker: the caller supplies the token, this module
+	* never holds it and never puts it in a URL.
+	*/
+	function inboxRequest(config) {
+		return {
+			method: "GET",
+			path: `/v1/node/inbox?deviceId=${encodeURIComponent(config.relayDeviceId)}`,
+			auth: "device",
+			body: null
+		};
+	}
+	function ackRequest(config, messageIds) {
+		return {
+			method: "POST",
+			path: "/v1/node/inbox/ack",
+			auth: "device",
+			body: {
+				deviceId: config.relayDeviceId,
+				messageIds: [...messageIds]
+			}
+		};
+	}
+	function sendRequest(config, { to, kind, payload, correlationId = null, ttlMs }) {
+		return {
+			method: "POST",
+			path: "/v1/node/messages",
+			auth: "device",
+			body: {
+				to,
+				kind,
+				payload,
+				...correlationId ? { correlationId } : {},
+				...Number.isFinite(ttlMs) ? { ttlMs } : {}
+			}
+		};
+	}
+	function createEnvelopeLedger(seen = {}) {
+		const entries = {};
+		for (const [id, expiresAt] of Object.entries(seen ?? {})) {
+			const at = Number(expiresAt);
+			if (Number.isFinite(at)) entries[id] = at;
+		}
+		return entries;
+	}
+	/** Forget ids whose envelopes could no longer be delivered anyway. */
+	function pruneEnvelopeLedger(ledger, now = Date.now(), max = 400) {
+		const live = Object.entries(ledger).filter(([, expiresAt]) => expiresAt > now);
+		live.sort((left, right) => left[1] - right[1]);
+		return Object.fromEntries(live.slice(Math.max(0, live.length - max)));
+	}
+	const MAX_MESH_COMMAND_AGE_MS = 10 * 6e4;
+	/** kind → what this extension does with it. */
+	const MESH_KINDS = Object.freeze({
+		"browser.command": "command",
+		"browser.ping": "ping"
+	});
+	const MESH_RESULT_KIND = "browser.command.result";
+	const MESH_PONG_KIND = "browser.pong";
+	const MAX_RESULT_PAYLOAD_BYTES = MAX_ENVELOPE_BYTES - 2048;
+	const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
+	const byteLength = (value) => {
+		const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+		return encoder ? encoder.encode(text).length : text.length * 2;
+	};
+	function fitResultPayload(payload, max = MAX_RESULT_PAYLOAD_BYTES) {
+		if (byteLength(payload) <= max) return {
+			payload,
+			truncated: false
+		};
+		const trimmed = { ...payload };
+		const result = trimmed.result && typeof trimmed.result === "object" ? { ...trimmed.result } : null;
+		if (result && typeof result.content === "string") {
+			let content = result.content;
+			while (content.length > 64) {
+				content = content.slice(0, Math.floor(content.length / 2));
+				result.content = `${content}\n[truncated to fit the 64 KiB node-mesh envelope]`;
+				trimmed.result = result;
+				if (byteLength(trimmed) <= max) return {
+					payload: {
+						...trimmed,
+						truncated: true
+					},
+					truncated: true
+				};
+			}
+		}
+		return {
+			payload: {
+				ok: payload?.ok === true,
+				truncated: true,
+				error: "The result did not fit a 64 KiB node-mesh envelope and no text field could be trimmed. Screenshots and other large blobs cannot cross the mesh; ask the Mac peer for them, or ask for a narrower selector."
+			},
+			truncated: true
+		};
+	}
+	/**
+	* Sort one drained page into what to run, what to ignore, and what to ack.
+	*
+	* EVERYTHING drained is acked, including duplicates, expired mail and mail
+	* this node refuses to execute. An ack is "I have this", not "I did this" —
+	* leaving a message unacked because it was refused would guarantee it comes
+	* back every 60 s forever, and the inbox would fill until MAX_INBOX_DEPTH
+	* started rejecting the sends that mattered.
+	*/
+	function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.now() } = {}) {
+		const trusted = new Set(config?.trustedSenders ?? DEFAULT_TRUSTED_SENDERS);
+		const self = normalizeNodeAddress(config?.relayDeviceId);
+		const seen = { ...ledger };
+		const run = [];
+		const ignored = [];
+		const ackIds = [];
+		for (const raw of Array.isArray(rawMessages) ? rawMessages : []) {
+			const envelope = parseNodeEnvelope(raw);
+			if (!envelope) {
+				ignored.push({
+					envelope: null,
+					reason: "not a node-mesh envelope of a version we speak"
+				});
+				continue;
+			}
+			ackIds.push(envelope.id);
+			if (envelope.id in seen) {
+				ignored.push({
+					envelope,
+					reason: "already handled (at-least-once redelivery)"
+				});
+				continue;
+			}
+			seen[envelope.id] = Date.parse(envelope.expiresAt) || now + 6e5;
+			if (self && envelope.to !== self) {
+				ignored.push({
+					envelope,
+					reason: `addressed to ${envelope.to}, not to this node`
+				});
+				continue;
+			}
+			if (!envelopeIsLive(envelope, now)) {
+				ignored.push({
+					envelope,
+					reason: "expired before it was drained"
+				});
+				continue;
+			}
+			const handling = MESH_KINDS[envelope.kind];
+			if (!handling) {
+				ignored.push({
+					envelope,
+					reason: `no handler for kind "${envelope.kind}"`
+				});
+				continue;
+			}
+			if (!trusted.has(envelope.from)) {
+				ignored.push({
+					envelope,
+					reason: `"${envelope.from}" is not a trusted sender for this browser. Add it to meshTrustedSenders to let it drive tabs.`
+				});
+				continue;
+			}
+			const age = now - (Date.parse(envelope.createdAt) || now);
+			if (age > 6e5) {
+				ignored.push({
+					envelope,
+					reason: `queued ${Math.round(age / 1e3)}s ago; this node refuses mesh mail older than ${MAX_MESH_COMMAND_AGE_MS / 6e4} minutes`
+				});
+				continue;
+			}
+			run.push({
+				envelope,
+				handling
+			});
+		}
+		return {
+			run,
+			ignored,
+			ackIds,
+			ledger: seen
+		};
+	}
+	/**
+	* A mesh envelope, shaped as the command the extension already knows how to
+	* validate and execute — so mesh-borne work goes through exactly the same
+	* validateCommand / sanitizeExtraction path as Mac-borne work, with no second
+	* executor to keep in sync and no shortcut past the privacy boundary.
+	*
+	* createdAt is stamped at DELIVERY, not copied from the envelope: acceptEnvelopes
+	* above has already applied the mesh's own freshness rules, and letting
+	* bridge-core's 90 s rule run a second time over the same field would refuse
+	* every message the durable queue held while the browser was closed.
+	*/
+	function envelopeToCommand(envelope, now = Date.now()) {
+		const payload = envelope?.payload ?? {};
+		const type = String(payload.type ?? "").trim();
+		if (!COMMAND_TYPES.has(type)) throw new Error(`"${type || "(none)"}" is not a browser command this extension can run.`);
+		return {
+			commandId: envelope.id,
+			idempotencyKey: String(payload.idempotencyKey ?? "").trim() || void 0,
+			createdAt: new Date(now).toISOString(),
+			source: "node-mesh",
+			from: envelope.from,
+			action: {
+				type,
+				params: payload.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {}
+			}
+		};
+	}
+	/** The answer to a `browser.command`, addressed back at whoever asked. */
+	function resultMessageFor(envelope, outcome, config) {
+		const { payload, truncated } = fitResultPayload({
+			ok: outcome?.ok === true,
+			...outcome?.ok === true ? { result: outcome.result } : { error: String(outcome?.error ?? "Command failed.") }
+		});
+		return {
+			...sendRequest(config, {
+				to: envelope.from,
+				kind: MESH_RESULT_KIND,
+				payload,
+				correlationId: envelope.id
+			}),
+			truncated
+		};
+	}
+	function pongMessageFor(envelope, presence, config) {
+		return sendRequest(config, {
+			to: envelope.from,
+			kind: MESH_PONG_KIND,
+			payload: {
+				...presence,
+				address: config.relayDeviceId
+			},
+			correlationId: envelope.id
+		});
+	}
+	const MAC_FRESH_MS = 4e4;
+	const RELAY_POLL_IDLE_MS = 3e4;
+	const RELAY_POLL_ACTIVE_MS = 3e3;
+	/**
+	* The whole routing policy, as one pure function.
+	*
+	* Written this way on purpose. "Prefer the Mac, fall back to the relay" is the
+	* kind of rule that otherwise lives as an emergent property of two independent
+	* loops and their timeouts, where the only way to find out what it does is to
+	* unplug something and watch. Here it is a table a test can assert.
+	*
+	* The key decision: `inbound` lists BOTH peers whenever both are usable. A
+	* mesh message is durable and silent — nothing tells the extension it exists —
+	* so an extension that only drained its inbox while the Mac was down would
+	* leave relay mail unread for as long as the Mac stayed up. Preferring the Mac
+	* is a statement about where WORK GOES OUT, not about what is listened to.
+	*/
+	function choosePeer({ macConfigured = false, macLastOkAt = 0, relayReady = false, now = Date.now() } = {}) {
+		const macFresh = macConfigured && now - macLastOkAt <= 4e4;
+		const inbound = [];
+		if (macConfigured) inbound.push("mac");
+		if (relayReady) inbound.push("relay");
+		const outbound = macFresh ? "mac" : relayReady ? "relay" : macConfigured ? "mac" : null;
+		let reason;
+		if (!macConfigured && !relayReady) reason = "Neither peer is configured; this extension is unreachable.";
+		else if (macFresh && relayReady) reason = "Both peers reachable: results go to the Mac (loopback is faster), the relay inbox is drained on a slow cadence.";
+		else if (macFresh) reason = "Only the Mac is configured; the relay peer is off or unconfigured.";
+		else if (relayReady && macConfigured) reason = `The Mac has not answered in ${Math.round((now - macLastOkAt) / 1e3)}s; the relay is carrying this node.`;
+		else if (relayReady) reason = "Only the relay is configured; there is no Mac peer.";
+		else reason = "The Mac is configured but silent, and there is no relay peer to fall back to.";
+		return {
+			inbound,
+			outbound,
+			macFresh,
+			relayPollMs: macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS,
+			reason
+		};
+	}
+	/** One line for the popup and the status store. Never names a credential. */
+	function describeRelayPeer(config, choice) {
+		if (!config.ready) return `Relay peer: off — ${config.reason}`;
+		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
+	}
 	//#endregion
 	//#region src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
@@ -1278,6 +1684,8 @@ or, when you are finished,
 	const HEARTBEAT_INTERVAL_MS = 12e3;
 	const FETCH_TIMEOUT_MS = 7e3;
 	const STATUS_KEY = "bridgeStatus";
+	const RELAY_STATUS_KEY = "relayStatus";
+	const RELAY_LEDGER_KEY = "relaySeenEnvelopes";
 	const CONFIG_KEYS = [
 		"agentUrl",
 		"agentToken",
@@ -1286,7 +1694,9 @@ or, when you are finished,
 		"instanceId"
 	];
 	let activePoll = null;
+	let activeRelayDrain = null;
 	let configRevision = 0;
+	let macLastOkAt = 0;
 	const INCARNATION_NONCE = crypto.randomUUID();
 	const commandLedger = createCommandLedger();
 	async function migrateSyncedCredentials() {
@@ -1451,6 +1861,7 @@ or, when you are finished,
 		while (Date.now() < deadline && revision === configRevision) try {
 			if (Date.now() >= nextHeartbeatAt) {
 				await heartbeat(config);
+				macLastOkAt = Date.now();
 				nextHeartbeatAt = Date.now() + HEARTBEAT_INTERVAL_MS;
 				await updateStatus({
 					state: "connected",
@@ -1504,6 +1915,169 @@ or, when you are finished,
 			await api.action.setBadgeText({ text: status.state === "connected" ? "ON" : status.state === "needs-setup" ? "SET" : "!" });
 			if (api.action.setBadgeBackgroundColor) await api.action.setBadgeBackgroundColor({ color: status.state === "connected" ? "#078B70" : "#B54736" });
 		}
+	}
+	async function getRelayConfig() {
+		return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS));
+	}
+	async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS) {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
+				method: descriptor.method,
+				cache: "no-store",
+				headers: {
+					Accept: "application/json",
+					Authorization: `Bearer ${relayConfig.deviceToken}`,
+					...descriptor.body ? { "Content-Type": "application/json" } : {}
+				},
+				...descriptor.body ? { body: JSON.stringify(descriptor.body) } : {},
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				let detail = "";
+				try {
+					const payload = await response.json();
+					detail = payload.error || payload.message || "";
+				} catch {
+					detail = await response.text().catch(() => "");
+				}
+				const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
+				error.status = response.status;
+				throw error;
+			}
+			return response.status === 204 ? null : await response.json();
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+	async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
+		if (handling === "ping") {
+			await relayFetch(relayConfig, pongMessageFor(envelope, {
+				browser: browserLabel(),
+				extensionVersion: api.runtime.getManifest().version,
+				macFresh: Date.now() - macLastOkAt <= MAC_FRESH_MS,
+				observedAt: (/* @__PURE__ */ new Date()).toISOString()
+			}, relayConfig));
+			return;
+		}
+		let outcome;
+		try {
+			const command = envelopeToCommand(envelope);
+			const identity = commandIdentity(command);
+			const replayed = commandLedger.recall(identity);
+			if (replayed) outcome = {
+				...replayed.result,
+				replayed: true
+			};
+			else {
+				try {
+					outcome = {
+						ok: true,
+						result: await executeCommand(command, macConfig)
+					};
+				} catch (error) {
+					outcome = {
+						ok: false,
+						error: error?.message || String(error)
+					};
+				}
+				commandLedger.remember(identity, outcome);
+			}
+		} catch (error) {
+			outcome = {
+				ok: false,
+				error: error?.message || String(error)
+			};
+		}
+		await relayFetch(relayConfig, resultMessageFor(envelope, outcome, relayConfig));
+	}
+	async function drainRelayOnce(relayConfig, macConfig) {
+		const page = await relayFetch(relayConfig, inboxRequest(relayConfig));
+		const stored = (await api.storage.local.get(RELAY_LEDGER_KEY))[RELAY_LEDGER_KEY] ?? {};
+		const accepted = acceptEnvelopes(page?.messages, {
+			ledger: createEnvelopeLedger(stored),
+			config: relayConfig
+		});
+		await api.storage.local.set({ [RELAY_LEDGER_KEY]: pruneEnvelopeLedger(accepted.ledger) });
+		if (accepted.ackIds.length) await relayFetch(relayConfig, ackRequest(relayConfig, accepted.ackIds));
+		for (const { envelope, handling } of accepted.run) try {
+			await runMeshEnvelope(envelope, handling, relayConfig, macConfig);
+		} catch (error) {
+			console.warn(`mesh ${envelope.kind} from ${envelope.from} failed: ${error?.message || error}`);
+		}
+		return {
+			drained: accepted.ackIds.length,
+			ran: accepted.run.length,
+			ignored: accepted.ignored.length,
+			pending: Number(page?.pending || 0)
+		};
+	}
+	async function relayWindow(revision) {
+		const relayConfig = await getRelayConfig();
+		if (!relayConfig.ready) {
+			await updateRelayStatus({
+				state: "off",
+				connected: false,
+				message: relayConfig.reason
+			});
+			return;
+		}
+		const macConfig = await getConfig();
+		const deadline = Date.now() + POLL_WINDOW_MS;
+		while (Date.now() < deadline && revision === configRevision) {
+			const choice = choosePeer({
+				macConfigured: Boolean(macConfig.agentToken),
+				macLastOkAt,
+				relayReady: true
+			});
+			try {
+				const report = await drainRelayOnce(relayConfig, macConfig);
+				await updateRelayStatus({
+					state: "connected",
+					connected: true,
+					message: describeRelayPeer(relayConfig, choice),
+					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+					error: "",
+					...report
+				});
+			} catch (error) {
+				await updateRelayStatus({
+					state: error?.status === 401 || error?.status === 403 ? "unauthorized" : "offline",
+					connected: false,
+					message: error?.status === 401 || error?.status === 403 ? "The relay rejected this browser's device token." : "Cannot reach the relay.",
+					error: error?.message || String(error),
+					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+			}
+			if (Date.now() + choice.relayPollMs >= deadline) break;
+			await delay(choice.relayPollMs);
+		}
+	}
+	function startRelayDrain() {
+		if (activeRelayDrain) return activeRelayDrain;
+		const revision = configRevision;
+		activeRelayDrain = relayWindow(revision).catch(async (error) => {
+			await updateRelayStatus({
+				state: "error",
+				connected: false,
+				message: "The relay peer stopped unexpectedly.",
+				error: error?.message || String(error),
+				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+		}).finally(() => {
+			activeRelayDrain = null;
+			if (revision !== configRevision) startRelayDrain();
+		});
+		return activeRelayDrain;
+	}
+	async function updateRelayStatus(patch) {
+		const current = (await api.storage.local.get(RELAY_STATUS_KEY))[RELAY_STATUS_KEY] ?? {};
+		await api.storage.local.set({ [RELAY_STATUS_KEY]: {
+			...current,
+			...patch,
+			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+		} });
 	}
 	/**
 	* Run one command, then take everything it produced through the privacy
@@ -2147,22 +2721,27 @@ or, when you are finished,
 	function delay(ms) {
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
+	function startPeers() {
+		startPolling();
+		startRelayDrain();
+	}
 	api.runtime.onInstalled.addListener(async ({ reason }) => {
 		await migrateSyncedCredentials();
 		await api.alarms.create(POLL_ALARM, { periodInMinutes: .5 });
 		if (reason === "install") await api.runtime.openOptionsPage();
-		startPolling();
+		startPeers();
 	});
 	api.runtime.onStartup.addListener(async () => {
 		await migrateSyncedCredentials();
 		await api.alarms.create(POLL_ALARM, { periodInMinutes: .5 });
-		startPolling();
+		startPeers();
 	});
 	api.alarms.onAlarm.addListener((alarm) => {
-		if (alarm.name === POLL_ALARM) startPolling();
+		if (alarm.name === POLL_ALARM) startPeers();
 	});
 	api.storage.onChanged.addListener((changes, areaName) => {
-		if (areaName === "local" && [
+		if (areaName !== "local") return;
+		if ([
 			"agentUrl",
 			"agentToken",
 			"deviceName",
@@ -2171,14 +2750,39 @@ or, when you are finished,
 			configRevision += 1;
 			startPolling();
 		}
+		if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
+			configRevision += 1;
+			startRelayDrain();
+		}
 	});
 	api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 		if (message?.type === "bridge:poll-now") {
 			startPolling().then(() => sendResponse({ ok: true }));
+			startRelayDrain();
 			return true;
 		}
 		if (message?.type === "bridge:get-status") {
 			api.storage.local.get(STATUS_KEY).then((values) => sendResponse(values[STATUS_KEY] ?? null));
+			return true;
+		}
+		if (message?.type === "peers:get-status") {
+			Promise.all([
+				api.storage.local.get([STATUS_KEY, RELAY_STATUS_KEY]),
+				getRelayConfig(),
+				getConfig()
+			]).then(([values, relayConfig, macConfig]) => sendResponse({
+				mac: values[STATUS_KEY] ?? null,
+				relay: values[RELAY_STATUS_KEY] ?? null,
+				choice: choosePeer({
+					macConfigured: Boolean(macConfig.agentToken),
+					macLastOkAt,
+					relayReady: relayConfig.ready
+				})
+			})).catch((error) => sendResponse({ error: error?.message || String(error) }));
+			return true;
+		}
+		if (message?.type === "relay:drain-now") {
+			startRelayDrain().then(() => sendResponse({ ok: true }));
 			return true;
 		}
 		if (message?.type === "console:submit") {
@@ -2190,6 +2794,6 @@ or, when you are finished,
 		}
 		return false;
 	});
-	migrateSyncedCredentials().then(() => api.alarms.create(POLL_ALARM, { periodInMinutes: .5 })).then(() => startPolling());
+	migrateSyncedCredentials().then(() => api.alarms.create(POLL_ALARM, { periodInMinutes: .5 })).then(() => startPeers());
 	//#endregion
 })();

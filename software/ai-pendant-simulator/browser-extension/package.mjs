@@ -31,7 +31,7 @@ const entryPoints = [
 ]
 
 /* Bundled into the entries above; must not ship as loose files (see note). */
-const bundledOnlyModules = ['brain.js', 'command-console.js']
+const bundledOnlyModules = ['brain.js', 'command-console.js', 'relay-peer.js']
 
 for (const platformDir of [chromeDir, safariDir]) {
   for (const [entry, globalName] of entryPoints) {

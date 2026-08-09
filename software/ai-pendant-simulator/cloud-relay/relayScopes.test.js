@@ -15,6 +15,7 @@ import {
 } from './relayScopes.js'
 import {
   createDeviceCredential,
+  credentialPredatesScopes,
   DEVICE_SCOPES,
   principalHasScopes,
 } from './deviceAuth.js'
@@ -304,6 +305,55 @@ test('the two socket routes demand scopes their role actually holds', () => {
       ...SOCKET_SCOPES['/v1/pendant/converse'],
     ),
     false,
+  )
+})
+
+test('a credential paired before a capability shipped says so', () => {
+  /*
+   * Scopes are FROZEN into the credential record at pair time — nothing in the
+   * relay updates a stored scope list. So every node paired before the mesh and
+   * /v1/infer landed keeps its old list and is refused them permanently, and
+   * the refusal used to be worded identically to "that route is not for your
+   * role". After a deploy that is the difference between "re-pair the fleet"
+   * and a day spent debugging a feature that works.
+   */
+  const { record } = createDeviceCredential({
+    deviceId: 'phone-paired-last-month',
+    deviceType: 'mobile',
+    randomBytes: deterministicRandom,
+  })
+  /* What that record looked like before mobile gained the new scopes. */
+  const stale = {
+    kind: 'device',
+    role: 'mobile',
+    deviceId: record.deviceId,
+    scopes: record.scopes.filter(
+      (scope) => !['llm:infer', 'node:message:send', 'node:message:receive'].includes(scope),
+    ),
+  }
+
+  assert.equal(principalHasScopes(stale, 'llm:infer'), false)
+  assert.deepEqual(credentialPredatesScopes(stale, ['llm:infer']), ['llm:infer'])
+  assert.deepEqual(
+    credentialPredatesScopes(stale, ['node:message:receive']),
+    ['node:message:receive'],
+  )
+
+  /* A freshly paired credential of the same role is NOT stale — otherwise the
+   * diagnostic would fire on every genuine denial and mean nothing. */
+  const fresh = principalFor('mobile')
+  assert.equal(credentialPredatesScopes(fresh, ['llm:infer']), false)
+
+  /* And a scope the role never had is a real denial, not a stale one: the
+   * pendant is not one re-pair away from claiming the Mac's work. */
+  assert.equal(
+    credentialPredatesScopes(principalFor('nrf_pendant'), ['bridge:work:claim']),
+    false,
+  )
+  assert.equal(
+    credentialPredatesScopes(stale, ['admin']),
+    false,
+    'no re-pair ever turns a device into an admin',
   )
 })
 

@@ -4,11 +4,59 @@ The Browser Bridge lets the authenticated local Mac agent use a browser profile
 that is already signed into websites. Chrome and Safari share the same Manifest
 V3 source in [`src/`](./src).
 
+## Two peers
+
+The extension has two independent ways in, and the Mac is no longer required
+for either.
+
+| Peer | Transport | Credential | Reaches it when |
+| --- | --- | --- | --- |
+| Mac agent | `http://127.0.0.1:8000`, long-poll | `agentToken` | the Mac is awake |
+| Relay | `https://…workers.dev`, node-mesh inbox | `deviceToken` (`browser_node`) | always |
+
+Both are *listened* to whenever both are configured — mesh mail is durable and
+silent, so an extension that only drained its inbox while the Mac was down
+would leave relay mail unread. The Mac is preferred for *outbound* work because
+loopback is faster, and the relay inbox is drained every 30 s while the Mac is
+healthy and every 3 s once it stops answering. The whole policy is one pure
+function, `choosePeer()` in [`src/relay-peer.js`](./src/relay-peer.js), so it
+can be asserted rather than discovered by unplugging things.
+
+**The relay peer polls; it does not hold a socket.** `GET /v1/node/socket`
+authenticates with an `Authorization` header, and the `WebSocket` constructor
+available to a service worker cannot send one — verified against the live
+relay: with the header 101, without it 401, and with the token in
+`Sec-WebSocket-Protocol` also 401. Delivery is therefore late rather than
+instant. Nothing is lost; a poll interval is spent.
+
+### Setting up the relay peer
+
+```bash
+node scripts/pendant-credentials.mjs pair \
+  --device-id <this-browser> --role browser_node --name "Safari on Evan's Mac"
+```
+
+Paste the printed token into **Settings → Relay peer** along with the same
+`--device-id`, tick the box, and save. `@relay` is trusted by default; any
+other node must be named under *Extra trusted senders* before it may drive
+tabs — the relay lets any paired node address this one, so that allowlist is
+the only thing standing between a second `browser_node` credential and the
+owner's Safari.
+
 ## Security model
 
 - `AGENT_TOKEN` is stored in `storage.local`. It is never placed in
   `storage.sync`, a manifest, a URL, or browser logs.
-- The agent URL is restricted to `127.0.0.1` or `localhost` over HTTP.
+- The agent URL is restricted to `127.0.0.1` or `localhost` over HTTP. It was
+  deliberately **not** widened to accept the relay: that field's value is the
+  base URL `agentToken` is sent to, so one field covering both hosts would be
+  one field that can aim either credential at either host, silently. The relay
+  has its own field, its own origin allowlist and its own token.
+- The relay URL is checked against a named origin allowlist
+  (`RELAY_ORIGIN_ALLOWLIST`), not "any https URL", and `host_permissions` names
+  the single relay origin rather than a wildcard.
+- Mesh mail is deduped on `envelope.id` in `storage.local`, because the inbox
+  lease is 60 s and Safari suspends the worker inside that window.
 - Website access is an optional permission. It is granted from the extension
   settings with an explicit browser prompt and can be revoked there.
 - `chrome://`, `safari-extension://`, `file://`, and other privileged pages

@@ -31,6 +31,24 @@ const READ_MODES = new Set([
   'landmarks',
 ])
 
+/*
+ * The MAC agent's URL, and only ever the Mac agent's.
+ *
+ * This deliberately did NOT grow an https branch when the extension learned to
+ * talk to the relay directly. The value returned here is the base URL that
+ * background.js sends `Authorization: Bearer <agentToken>` to, and agentToken
+ * is the Mac's credential — so a single field accepting both origins is a
+ * single field that can aim either credential at either host, silently, since
+ * both hosts answer a wrong token with the same 401. The relay peer has its
+ * own field, its own allowlist and its own token in relay-peer.js
+ * (normalizeRelayUrl); one credential is bound to each, and a misconfiguration
+ * costs a failed request instead of a leaked token.
+ *
+ * The two endpoints are not interchangeable in any case: the Mac serves
+ * /browser/poll and /plan, the relay serves /v1/node/*. Pointing this at the
+ * relay would produce a poller 404ing forever against a host now holding the
+ * Mac's token.
+ */
 export function normalizeAgentUrl(value) {
   const candidate = String(value ?? '').trim() || DEFAULT_AGENT_URL
   let url
@@ -43,7 +61,8 @@ export function normalizeAgentUrl(value) {
 
   if (url.protocol !== 'http:' || !LOOPBACK_HOSTS.has(url.hostname)) {
     throw new Error(
-      'Agent URL must use http://127.0.0.1 or http://localhost.',
+      'Agent URL must use http://127.0.0.1 or http://localhost. ' +
+        'The relay is reached through the relay peer (relayUrl), not this field.',
     )
   }
 
