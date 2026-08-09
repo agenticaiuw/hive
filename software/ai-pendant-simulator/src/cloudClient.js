@@ -119,6 +119,109 @@ export function createCloudClient(settings) {
       return payload
     },
 
+    /*
+     * The raw POST, status included rather than thrown.
+     *
+     * The brain's model transport (src/brain/relayInference.js) has to tell 403
+     * "the relay has no inference route yet" apart from 401 "this phone was
+     * revoked" apart from 429 "slow down" — three different sentences for the
+     * owner. Every other method here collapses all of them into one Error, so
+     * this is the one that hands back the response.
+     *
+     * It is also the single place a swap to a socket transport would land: the
+     * credential lookup is here and nowhere above it.
+     */
+    async postJson(path, body, { signal = null } = {}) {
+      const response = await fetch(`${settings.relayUrl}${path}`, {
+        method: 'POST',
+        headers: await authenticationHeaders(),
+        body: JSON.stringify(body ?? {}),
+        ...(signal ? { signal } : {}),
+      })
+      const payload = await response.json().catch(() => ({}))
+      return { response, payload }
+    },
+
+    /** One key out of the relay's shared state store (`state:read`). */
+    async readSharedState(stateKey) {
+      const key = String(stateKey ?? '').trim()
+      if (!key) {
+        throw new Error('A state key is required.')
+      }
+
+      const response = await fetch(
+        `${settings.relayUrl}/v1/state/${encodeURIComponent(key)}`,
+        { headers: await authenticationHeaders() },
+      )
+      const payload = await response.json()
+
+      if (response.status === 404) {
+        return null
+      }
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Shared state "${key}" could not be read.`)
+      }
+
+      return payload.state?.data ?? null
+    },
+
+    /** Is the Mac's bridge socket connected right now (`device:status:read`)? */
+    async bridgePresence() {
+      const response = await fetch(`${settings.relayUrl}/v1/bridge/presence`, {
+        headers: await authenticationHeaders(),
+      })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Bridge presence could not be read.')
+      }
+
+      return payload
+    },
+
+    /** Every registered device and when it was last seen (`device:status:read`). */
+    async deviceStatus() {
+      const response = await fetch(`${settings.relayUrl}/v1/devices/status`, {
+        headers: await authenticationHeaders(),
+      })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Device status could not be read.')
+      }
+
+      return payload
+    },
+
+    /*
+     * What this phone is paired as — and never the token itself.
+     *
+     * The brain needs the scope list to build its tool catalogue, and the UI
+     * needs the role and tokenId to show which credential to revoke. Neither
+     * needs the secret, so it does not leave this module.
+     */
+    async credentialSummary() {
+      const stored = await currentCredential()
+      if (!stored?.token) {
+        return {
+          paired: false,
+          source: settings.relayApiKey ? 'admin-key-fallback' : 'none',
+          role: null,
+          tokenId: null,
+          scopes: [],
+        }
+      }
+
+      return {
+        paired: true,
+        source: 'device-credential',
+        role: stored.role ?? 'device',
+        tokenId: stored.tokenId ?? null,
+        scopes: Array.isArray(stored.scopes) ? [...stored.scopes] : [],
+        expiresAt: stored.expiresAt ?? null,
+      }
+    },
+
     async getAgentSnapshot() {
       const response = await fetch(
         `${settings.relayUrl}/v1/state/agent-snapshot`,
