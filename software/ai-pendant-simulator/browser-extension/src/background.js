@@ -36,19 +36,27 @@ import {
   summarizeBrainRun,
 } from './brain.js'
 import {
+  BRIDGE_PING_FRAME,
+  BRIDGE_PING_INTERVAL_MS,
   MAC_FRESH_MS,
   RELAY_STORAGE_KEYS,
   acceptEnvelopes,
   ackRequest,
   choosePeer,
   createEnvelopeLedger,
+  describeRelayFailure,
   describeRelayPeer,
   envelopeToCommand,
+  hasMoreMail,
   inboxRequest,
   normalizeRelayConfig,
   pongMessageFor,
   pruneEnvelopeLedger,
+  reactToFrame,
   resultMessageFor,
+  socketProtocolAccepted,
+  socketProtocols,
+  socketUrl,
 } from './relay-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
@@ -67,6 +75,20 @@ const CONFIG_KEYS = ['agentUrl', 'agentToken', 'deviceName', 'targetMode', 'inst
 let activePoll = null
 let activeRelayDrain = null
 let configRevision = 0
+
+/*
+ * The mesh doorbell, held for as long as this worker lives.
+ *
+ * Not per-poll-window: a socket that is torn down and rebuilt every 25 s is a
+ * poller wearing a costlier hat. It is deliberately NOT treated as proof of
+ * delivery either — see relay-peer.js on why a sweep still runs under it.
+ */
+let meshSocket = null
+let meshSocketOpen = false
+let meshPingTimer = null
+/* Set when the relay refuses the credential, so a doomed socket is not rebuilt
+ * on every alarm. Cleared when the relay config changes. */
+let meshSocketRefused = false
 
 /*
  * When the Mac last answered, as observed by this worker rather than asserted
@@ -442,6 +464,112 @@ async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS)
   }
 }
 
+/*
+ * Open the doorbell, if it is not already open.
+ *
+ * The credential rides as a subprotocol offer because the WebSocket
+ * constructor cannot set a header — see relay-peer.js socketProtocols() for
+ * why there are two offers and why the token never comes back.
+ */
+function ensureMeshSocket(relayConfig, onMail) {
+  if (meshSocket || meshSocketRefused) return
+  const url = socketUrl(relayConfig)
+  const protocols = socketProtocols(relayConfig)
+  if (!url || !protocols.length) return
+
+  let socket
+  try {
+    socket = new WebSocket(url, protocols)
+  } catch (error) {
+    console.warn(`mesh socket could not be created: ${error?.message || error}`)
+    return
+  }
+  meshSocket = socket
+
+  socket.addEventListener('open', () => {
+    /* A server that echoed anything but the plain mesh name would mean the
+     * token came back in a response header. Refuse rather than proceed. */
+    if (!socketProtocolAccepted(socket.protocol)) {
+      console.warn('mesh socket selected an unexpected subprotocol; closing.')
+      try {
+        socket.close()
+      } catch {
+        /* already closing */
+      }
+      return
+    }
+    meshSocketOpen = true
+    void updateRelayStatus({
+      state: 'connected',
+      connected: true,
+      transport: 'socket',
+      message: 'The relay is pushing over its own socket.',
+      lastConnectedAt: new Date().toISOString(),
+      error: '',
+    })
+    /* Cloudflare answers this from the hibernation layer, so an idle socket
+     * costs a frame rather than a woken Durable Object. */
+    meshPingTimer = setInterval(() => {
+      try {
+        socket.send(BRIDGE_PING_FRAME)
+      } catch {
+        /* the close handler will clean up */
+      }
+    }, BRIDGE_PING_INTERVAL_MS)
+  })
+
+  socket.addEventListener('message', (event) => {
+    if (reactToFrame(event?.data).drain) void onMail()
+  })
+
+  socket.addEventListener('close', (event) => {
+    meshSocketOpen = false
+    meshSocket = null
+    if (meshPingTimer) {
+      clearInterval(meshPingTimer)
+      meshPingTimer = null
+    }
+    /*
+     * 1008 is how the hub reports a refused handshake once the socket exists.
+     * A credential the relay will not accept must not be retried on every
+     * alarm — observed live: a relay deploy invalidated a working token
+     * mid-session, and a hot reconnect loop would have hammered it. The poll
+     * path stays up and reports the real reason.
+     */
+    if (event?.code === 1008 || event?.code === 4001 || event?.code === 4003) {
+      meshSocketRefused = true
+      void updateRelayStatus({
+        state: 'unauthorized',
+        connected: false,
+        transport: 'poll',
+        message: 'The relay refused this browser\'s socket credential.',
+        lastErrorAt: new Date().toISOString(),
+      })
+    }
+  })
+
+  socket.addEventListener('error', () => {
+    /* `close` always follows; the browser gives no detail here on purpose. */
+    meshSocketOpen = false
+  })
+}
+
+function closeMeshSocket() {
+  if (meshPingTimer) {
+    clearInterval(meshPingTimer)
+    meshPingTimer = null
+  }
+  if (meshSocket) {
+    try {
+      meshSocket.close()
+    } catch {
+      /* already closed */
+    }
+  }
+  meshSocket = null
+  meshSocketOpen = false
+}
+
 async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
   if (handling === 'ping') {
     await relayFetch(
@@ -526,8 +654,34 @@ async function drainRelayOnce(relayConfig, macConfig) {
     drained: accepted.ackIds.length,
     ran: accepted.run.length,
     ignored: accepted.ignored.length,
+    /*
+     * NOT `pending > 0`. The relay's `pending` counts the page it just leased
+     * you — a one-message drain reports pending:1 and only reads 0 after the
+     * ack — so a caller looping on it never terminates. hasMoreMail does the
+     * comparison that actually means "come back". Measured, not assumed.
+     */
+    more: hasMoreMail(page),
     pending: Number(page?.pending || 0),
   }
+}
+
+/* Drain until the inbox is genuinely empty, bounded so a relay that keeps
+ * reporting more can never hold this worker forever. */
+async function drainRelayUntilEmpty(relayConfig, macConfig, maxPages = 5) {
+  let report = await drainRelayOnce(relayConfig, macConfig)
+  let totals = { ...report, pages: 1 }
+  for (let page = 1; page < maxPages && report.more; page += 1) {
+    report = await drainRelayOnce(relayConfig, macConfig)
+    totals = {
+      drained: totals.drained + report.drained,
+      ran: totals.ran + report.ran,
+      ignored: totals.ignored + report.ignored,
+      more: report.more,
+      pending: report.pending,
+      pages: page + 1,
+    }
+  }
+  return totals
 }
 
 async function relayWindow(revision) {
@@ -545,31 +699,47 @@ async function relayWindow(revision) {
   const macConfig = await getConfig()
   const deadline = Date.now() + POLL_WINDOW_MS
 
+  /*
+   * Open the doorbell first, and drain once regardless of whether it opened.
+   *
+   * The unconditional first drain is the fallback-on-wake path and it is the
+   * important one: Safari suspends this worker freely, and mail that arrived
+   * while it was dead rang a doorbell with nobody listening. A socket cannot
+   * replay that; only a sweep can.
+   */
+  ensureMeshSocket(relayConfig, () =>
+    drainRelayUntilEmpty(relayConfig, macConfig).catch((error) =>
+      console.warn(`mesh doorbell drain failed: ${error?.message || error}`),
+    ),
+  )
+
   while (Date.now() < deadline && revision === configRevision) {
     const choice = choosePeer({
       macConfigured: Boolean(macConfig.agentToken),
       macLastOkAt,
       relayReady: true,
+      socketOpen: meshSocketOpen,
     })
 
     try {
-      const report = await drainRelayOnce(relayConfig, macConfig)
+      const report = await drainRelayUntilEmpty(relayConfig, macConfig)
       await updateRelayStatus({
         state: 'connected',
         connected: true,
+        transport: choice.relayTransport,
         message: describeRelayPeer(relayConfig, choice),
         lastConnectedAt: new Date().toISOString(),
         error: '',
         ...report,
       })
     } catch (error) {
+      /* status first, code second: the ownership 403 carries no `code` at
+       * all, so a code-keyed branch would fall through to "unknown". */
+      const failure = describeRelayFailure(error)
       await updateRelayStatus({
-        state: error?.status === 401 || error?.status === 403 ? 'unauthorized' : 'offline',
+        ...failure,
         connected: false,
-        message:
-          error?.status === 401 || error?.status === 403
-            ? 'The relay rejected this browser\'s device token.'
-            : 'Cannot reach the relay.',
+        transport: meshSocketOpen ? 'socket' : 'poll',
         error: error?.message || String(error),
         lastErrorAt: new Date().toISOString(),
       })
@@ -1521,10 +1691,11 @@ async function postInference(brainConfig, messages, maxTokens) {
   }
 
   /*
-   * `truncated` is handed up rather than resolved here: in JSON mode a cut-off
-   * reply is unparseable and would otherwise look like a garbage answer, which
-   * is the diagnosis the relay added this field to prevent. What to do about
-   * it is callModelWithHeadroom's decision, not this function's.
+   * How the generation ENDED is handed up rather than resolved here: in JSON
+   * mode a cut-off or filtered reply is unparseable and would otherwise look
+   * like a garbage answer, which is the diagnosis these fields exist to
+   * prevent. What to do about each ending is callModelWithHeadroom's decision,
+   * not this function's.
    */
   if (payload?.truncated) {
     console.warn(
@@ -1537,6 +1708,11 @@ async function postInference(brainConfig, messages, maxTokens) {
   return {
     content: String(payload?.content ?? ''),
     truncated: payload?.truncated === true,
+    /* Passed through undegraded: `complete` is a tri-state and null ("the
+     * provider told us nothing") must not arrive here as false. */
+    complete: payload?.complete ?? null,
+    refusal: payload?.refusal ?? null,
+    finishReason: payload?.finishReason ?? null,
   }
 }
 
@@ -1614,6 +1790,10 @@ api.storage.onChanged.addListener((changes, areaName) => {
 
   if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
     configRevision += 1
+    /* A new credential deserves a fresh socket, and clears the refusal latch —
+     * pasting a re-paired token is exactly how the owner fixes a 1008. */
+    meshSocketRefused = false
+    closeMeshSocket()
     void startRelayDrain()
   }
 })
@@ -1648,6 +1828,7 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             macConfigured: Boolean(macConfig.agentToken),
             macLastOkAt,
             relayReady: relayConfig.ready,
+            socketOpen: meshSocketOpen,
           }),
         }),
       )

@@ -21,20 +21,27 @@ import {
   RELAY_ORIGIN_ALLOWLIST,
   RELAY_POLL_ACTIVE_MS,
   RELAY_POLL_IDLE_MS,
+  RELAY_POLL_SOCKET_MS,
   RELAY_STORAGE_KEYS,
   acceptEnvelopes,
   ackRequest,
   choosePeer,
   createEnvelopeLedger,
+  describeRelayFailure,
   envelopeToCommand,
   fitResultPayload,
+  hasMoreMail,
   inboxRequest,
   normalizeRelayConfig,
   normalizeRelayUrl,
   pruneEnvelopeLedger,
+  reactToFrame,
   relayOriginPattern,
   resultMessageFor,
   sendRequest,
+  socketProtocolAccepted,
+  socketProtocols,
+  socketUrl,
 } from '../src/relay-peer.js'
 
 const NOW = Date.parse('2026-08-09T04:00:00.000Z')
@@ -387,8 +394,158 @@ test('a result is addressed back at the sender and correlated to the request', (
 })
 
 /* ------------------------------------------------------------------ *
+ * The doorbell socket.
+ * ------------------------------------------------------------------ */
+
+test('the socket URL carries the deviceId and never the credential', () => {
+  const url = socketUrl(config)
+  assert.equal(
+    url,
+    `${RELAY_ORIGIN_ALLOWLIST[0].replace('https', 'wss')}/v1/node/socket?deviceId=evan-safari-bridge`,
+  )
+  /* Query strings are the part of a request that gets logged. */
+  assert.ok(!url.includes(config.deviceToken))
+  assert.ok(!url.toLowerCase().includes('token'))
+  assert.ok(url.startsWith('wss://'))
+})
+
+test('a loopback dev relay downgrades to ws://, not to nothing', () => {
+  const dev = normalizeRelayConfig({
+    relayEnabled: true,
+    relayUrl: 'http://127.0.0.1:8787',
+    relayDeviceId: 'evan-safari-bridge',
+    deviceToken: 'pdt_not_a_real_token',
+  })
+  assert.ok(socketUrl(dev).startsWith('ws://127.0.0.1:8787/'))
+})
+
+test('the socket URL is empty when the config is not usable', () => {
+  assert.equal(socketUrl({}), '')
+  assert.equal(socketUrl({ relayUrl: 'https://evil.example.com', relayDeviceId: 'x-y-z' }), '')
+})
+
+test('two subprotocol offers, credential second, plain name first', () => {
+  /* RFC 6455 makes the server echo a protocol the client offered. Offering the
+   * plain name gives it something safe to echo; measured live, it selects
+   * "pendant.mesh.v1" and the token never appears in a response header. */
+  const protocols = socketProtocols(config)
+  assert.equal(protocols.length, 2)
+  assert.equal(protocols[0], 'pendant.mesh.v1')
+  assert.equal(protocols[1], `bearer.${config.deviceToken}`)
+})
+
+test('no credential means no offers at all, rather than a bare mesh name', () => {
+  assert.deepEqual(socketProtocols({ deviceToken: '' }), [])
+  assert.deepEqual(socketProtocols({}), [])
+})
+
+test('a server echoing anything but the mesh name is refused', () => {
+  assert.equal(socketProtocolAccepted('pendant.mesh.v1'), true)
+  /* Some stacks select nothing; that is fine and not an echo of the token. */
+  assert.equal(socketProtocolAccepted(''), true)
+  assert.equal(socketProtocolAccepted(`bearer.${config.deviceToken}`), false)
+  assert.equal(socketProtocolAccepted('something.else'), false)
+})
+
+test('the frame table: mail rings, pong does not, junk does not', () => {
+  assert.deepEqual(reactToFrame('{"type":"mail"}'), { drain: true, kind: 'mail' })
+  assert.deepEqual(reactToFrame('{"type":"work"}'), { drain: true, kind: 'work' })
+  assert.deepEqual(reactToFrame('{"type":"pong"}'), { drain: false, kind: 'pong' })
+  assert.deepEqual(reactToFrame('not json'), { drain: false, kind: '' })
+  assert.deepEqual(reactToFrame(null), { drain: false, kind: '' })
+})
+
+/* ------------------------------------------------------------------ *
+ * `pending` does not mean what it looks like.
+ * ------------------------------------------------------------------ */
+
+test('pending counts the page it just leased, so a loop on it never ends', () => {
+  /* Measured on the live relay: a one-message drain reports pending:1, and
+   * only reads 0 after the ack. `while (pending > 0) drain()` spins forever. */
+  assert.equal(hasMoreMail({ messages: [{ id: 'a' }], pending: 1 }), false)
+  assert.equal(hasMoreMail({ messages: [{ id: 'a' }], pending: 2 }), true)
+  assert.equal(hasMoreMail({ messages: [], pending: 0 }), false)
+  assert.equal(hasMoreMail({ messages: [], pending: 3 }), true)
+  assert.equal(hasMoreMail(null), false)
+  assert.equal(hasMoreMail({}), false)
+})
+
+/* ------------------------------------------------------------------ *
+ * Failures: status first, because `code` is not always there.
+ * ------------------------------------------------------------------ */
+
+test('a 403 with no code is still reported precisely', () => {
+  /* The ownership 403 carries only a message — no `code` — unlike
+   * scope_denied / unknown_node / inbox_full / invalid_envelope. A branch
+   * keyed on code would fall through to "unknown" for the single most likely
+   * misconfiguration the owner will hit. */
+  const denied = describeRelayFailure({ status: 403, message: 'a node may only drain its own inbox.' })
+  assert.equal(denied.state, 'unauthorized')
+  assert.equal(denied.code, '')
+  assert.match(denied.message, /not for this device ID/)
+})
+
+test('401 and 403 are told apart, because the fixes differ', () => {
+  assert.match(describeRelayFailure({ status: 401 }).message, /does not accept/)
+  assert.match(describeRelayFailure({ status: 403 }).message, /device ID/)
+  assert.equal(describeRelayFailure({ status: 500 }).state, 'offline')
+  assert.equal(describeRelayFailure({}).state, 'offline')
+})
+
+test('a code is carried through when the relay does send one', () => {
+  assert.equal(describeRelayFailure({ status: 401, code: 'scope_denied' }).code, 'scope_denied')
+})
+
+/* ------------------------------------------------------------------ *
  * The policy, as a table.
  * ------------------------------------------------------------------ */
+
+test('an open socket makes the poller a slow safety sweep', () => {
+  const choice = choosePeer({
+    macConfigured: true,
+    macLastOkAt: NOW,
+    relayReady: true,
+    socketOpen: true,
+    now: NOW,
+  })
+  assert.equal(choice.relayTransport, 'socket')
+  assert.equal(choice.relayPollMs, RELAY_POLL_SOCKET_MS)
+  assert.match(choice.reason, /pushes over its socket/)
+})
+
+test('the sweep is never switched off entirely, even with a socket up', () => {
+  /* A doorbell that already rang cannot ring again, and this worker dies
+   * often. An infinite interval would turn one dropped frame into stranded
+   * mail rather than late mail. */
+  assert.ok(Number.isFinite(RELAY_POLL_SOCKET_MS))
+  assert.ok(RELAY_POLL_SOCKET_MS > RELAY_POLL_IDLE_MS)
+})
+
+test('a closed socket snaps the cadence back to the fallback', () => {
+  const withMac = choosePeer({
+    macConfigured: true,
+    macLastOkAt: NOW,
+    relayReady: true,
+    socketOpen: false,
+    now: NOW,
+  })
+  assert.equal(withMac.relayTransport, 'poll')
+  assert.equal(withMac.relayPollMs, RELAY_POLL_IDLE_MS)
+  assert.match(withMac.reason, /socket is down/)
+
+  const withoutMac = choosePeer({
+    macConfigured: true,
+    macLastOkAt: NOW - 120_000,
+    relayReady: true,
+    socketOpen: false,
+    now: NOW,
+  })
+  assert.equal(withoutMac.relayPollMs, RELAY_POLL_ACTIVE_MS)
+})
+
+test('no relay peer means no transport, not a socket that is merely closed', () => {
+  assert.equal(choosePeer({ macConfigured: true, relayReady: false, now: NOW }).relayTransport, 'none')
+})
 
 test('both peers are LISTENED to whenever both are usable', () => {
   const choice = choosePeer({

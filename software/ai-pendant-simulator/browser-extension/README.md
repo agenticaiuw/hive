@@ -12,22 +12,42 @@ for either.
 | Peer | Transport | Credential | Reaches it when |
 | --- | --- | --- | --- |
 | Mac agent | `http://127.0.0.1:8000`, long-poll | `agentToken` | the Mac is awake |
-| Relay | `https://…workers.dev`, node-mesh inbox | `deviceToken` (`browser_node`) | always |
+| Relay | `wss://…workers.dev` doorbell, HTTPS inbox | `deviceToken` (`browser_node`) | always |
 
 Both are *listened* to whenever both are configured — mesh mail is durable and
 silent, so an extension that only drained its inbox while the Mac was down
 would leave relay mail unread. The Mac is preferred for *outbound* work because
-loopback is faster, and the relay inbox is drained every 30 s while the Mac is
-healthy and every 3 s once it stops answering. The whole policy is one pure
-function, `choosePeer()` in [`src/relay-peer.js`](./src/relay-peer.js), so it
-can be asserted rather than discovered by unplugging things.
+loopback is faster. The whole policy is one pure function, `choosePeer()` in
+[`src/relay-peer.js`](./src/relay-peer.js), so it can be asserted rather than
+discovered by unplugging things.
 
-**The relay peer polls; it does not hold a socket.** `GET /v1/node/socket`
-authenticates with an `Authorization` header, and the `WebSocket` constructor
-available to a service worker cannot send one — verified against the live
-relay: with the header 101, without it 401, and with the token in
-`Sec-WebSocket-Protocol` also 401. Delivery is therefore late rather than
-instant. Nothing is lost; a poll interval is spent.
+**The relay pushes over a socket, with a poller underneath it.** The credential
+rides as a subprotocol offer, because the `WebSocket` constructor available to a
+service worker cannot set an `Authorization` header:
+
+```js
+new WebSocket(url, ['pendant.mesh.v1', 'bearer.' + deviceToken])
+```
+
+Two offers, not one: RFC 6455 makes the server echo a protocol the client
+offered, and echoing the `bearer.` entry would put the token in a response
+header. Measured against production — the server selects `pendant.mesh.v1`, the
+token is never reflected, and a socket opened with no `Authorization` header at
+all still gets a `403` if it names someone else's `deviceId`, so ownership is
+still enforced. The token stays out of the query string, which is what gets
+logged.
+
+The poller remains as a safety sweep — every 5 min while the socket is up, 30 s
+or 3 s when it is not — for three reasons that are about this runtime rather
+than the relay: Safari suspends MV3 workers, so **every wake drains once**
+regardless of the socket (mail that arrived while the worker was dead rang a
+doorbell nobody heard); a frame is not durable while the D1 row is; and a
+credential can stop working under a live socket.
+
+One relay contract worth knowing: **`pending` counts the page it just leased
+you.** A one-message drain reports `pending: 1` and only reads `0` after the
+ack, so `while (pending > 0)` never terminates. Use `hasMoreMail()`, which
+compares `pending` against the page length.
 
 ### Setting up the relay peer
 

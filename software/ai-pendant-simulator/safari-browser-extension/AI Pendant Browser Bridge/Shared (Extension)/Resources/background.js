@@ -903,29 +903,42 @@
 		if (asked >= INFER_LIMITS.maxOutputTokens) return null;
 		return Math.min(asked * 2, INFER_LIMITS.maxOutputTokens);
 	}
+	const abnormalStop = (message, code) => {
+		const error = new Error(message);
+		error.code = code;
+		error.fatal = true;
+		return error;
+	};
 	/**
-	* Ask for a reply, and buy more room if the first one comes back cut off.
+	* Ask for a reply, and decide what an abnormal ending means.
 	*
 	* The policy lives here, away from the fetch, because it is the part with a
-	* decision in it: how many times to pay again, and what to do when there is
-	* nothing left to buy. `send(maxTokens)` is injected and resolves to the
-	* relay's `{content, truncated}` — so every branch below is exercised in tests
-	* without a relay, which matters because the branch that bites is the one no
-	* client can reproduce on purpose.
+	* decision in it: when to pay again, and when paying again buys nothing.
+	* `send(maxTokens)` is injected and resolves to the relay's
+	* `{content, truncated, complete, refusal, finishReason}` — so every branch
+	* below is exercised in tests without a relay, which matters because these are
+	* the branches no client can reproduce on purpose.
+	*
+	* ONLY truncation is retried. A length stop is the one ending more room fixes;
+	* a content filter or a refusal ends the same way however much budget it is
+	* given, so retrying those just bills twice for one refusal.
 	*/
 	async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKENS) {
 		let asked = maxTokens;
 		for (let attempt = 0; attempt < 4; attempt += 1) {
 			const reply = await send(asked);
-			if (!reply?.truncated) return String(reply?.content ?? "");
-			const escalated = escalateOutputTokens(asked);
-			if (!escalated) break;
-			asked = escalated;
+			if (reply?.truncated) {
+				const escalated = escalateOutputTokens(asked);
+				if (!escalated) throw abnormalStop(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`, "truncated");
+				asked = escalated;
+				continue;
+			}
+			const refusal = String(reply?.refusal ?? "").trim();
+			if (refusal) throw abnormalStop(`The model declined: ${refusal}`, "refusal");
+			if (reply?.complete === false) throw abnormalStop(`The model stopped abnormally (${reply?.finishReason || "unknown reason"}), so its answer is not trustworthy.`, "incomplete");
+			return String(reply?.content ?? "");
 		}
-		const error = /* @__PURE__ */ new Error(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`);
-		error.code = "truncated";
-		error.fatal = true;
-		throw error;
+		throw abnormalStop(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`, "truncated");
 	}
 	const PROMPT_CHAR_BUDGET = INFER_LIMITS.maxPromptChars - 1e3;
 	const FATAL_INFER_CODES = new Set([
@@ -1422,6 +1435,21 @@ or, when you are finished,
 		return candidate;
 	}
 	//#endregion
+	//#region ../shared/bridgeSocketProtocol.js
+	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
+	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
+	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
+	const BRIDGE_PING_INTERVAL_MS = 55e3;
+	function parseBridgeFrame(data) {
+		if (typeof data !== "string") return null;
+		try {
+			const parsed = JSON.parse(data);
+			return parsed && typeof parsed.type === "string" ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+	//#endregion
 	//#region src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://ai-pendant-relay.your-subdomain.workers.dev",
@@ -1537,6 +1565,51 @@ or, when you are finished,
 				...correlationId ? { correlationId } : {},
 				...Number.isFinite(ttlMs) ? { ttlMs } : {}
 			}
+		};
+	}
+	/**
+	* Where the socket connects. The deviceId is a path parameter because it is
+	* not a secret; the CREDENTIAL is not here and must never be, because query
+	* strings are the part of a request that gets logged — by Cloudflare, by any
+	* proxy in between, and by the browser's own network panel.
+	*/
+	function socketUrl(config) {
+		const origin = normalizeRelayUrl(config?.relayUrl);
+		const address = normalizeNodeAddress(config?.relayDeviceId);
+		if (!origin || !address) return "";
+		return `${origin.replace(/^http/, "ws")}/v1/node/socket?deviceId=${encodeURIComponent(address)}`;
+	}
+	/**
+	* The two subprotocol offers, in order.
+	*
+	* Two rather than one because RFC 6455 makes the server echo a protocol the
+	* client offered, and a browser closes a socket whose selected protocol it did
+	* not offer. Offering the plain mesh name alongside the credential gives the
+	* server something safe to echo — measured: it selects "pendant.mesh.v1" and
+	* the token never appears in the response.
+	*/
+	function socketProtocols(config) {
+		const token = String(config?.deviceToken ?? "").trim();
+		if (!token) return [];
+		return [MESH_SUBPROTOCOL, `${BEARER_SUBPROTOCOL_PREFIX}${token}`];
+	}
+	/** True when the server picked the protocol we can live with. */
+	function socketProtocolAccepted(selected) {
+		return String(selected ?? "") === "pendant.mesh.v1" || String(selected ?? "") === "";
+	}
+	/**
+	* What one inbound frame means. Pure, so the frame table is a test rather than
+	* a switch buried in an event handler.
+	*/
+	function reactToFrame(raw) {
+		const frame = parseBridgeFrame(raw);
+		if (!frame) return {
+			drain: false,
+			kind: ""
+		};
+		return {
+			drain: frame.type === "mail" || frame.type === "work",
+			kind: frame.type
 		};
 	}
 	function createEnvelopeLedger(seen = {}) {
@@ -1682,6 +1755,48 @@ or, when you are finished,
 		};
 	}
 	/**
+	* Is there mail left AFTER this page?
+	*
+	* `pending` counts the page it just leased you, not what remains beyond it —
+	* a drain returning one message comes back `pending: 1` and only reads 0 once
+	* the ack lands. Measured on the live relay: messages=1, pending=1, then
+	* pending=0 after the ack. So `while (pending > 0) drain()` never terminates;
+	* it re-leases nothing and spins. The only honest read is the comparison.
+	*/
+	function hasMoreMail(page) {
+		return Number(page?.pending || 0) > (Array.isArray(page?.messages) ? page.messages.length : 0);
+	}
+	/**
+	* Why a relay request failed, in a form the UI can act on.
+	*
+	* `code` is present on most relay errors (`scope_denied`, `unknown_node`,
+	* `inbox_full`, `invalid_envelope`, `credential_predates_capability`) and
+	* absent on others — notably the ownership 403, which carries only a message.
+	* So status is the primary signal and code is decoration, never the other way
+	* round. 401 and 403 are split because they need different fixes: 401 is a
+	* credential this relay does not accept, 403 is a credential that is fine but
+	* is not allowed to touch this deviceId.
+	*/
+	function describeRelayFailure(error) {
+		const status = Number(error?.status || 0);
+		const code = String(error?.code ?? "") || "";
+		if (status === 401) return {
+			state: "unauthorized",
+			code,
+			message: "The relay does not accept this browser's device token. Pair again and paste the new one."
+		};
+		if (status === 403) return {
+			state: "unauthorized",
+			code,
+			message: "This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with."
+		};
+		return {
+			state: "offline",
+			code,
+			message: "Cannot reach the relay."
+		};
+	}
+	/**
 	* A mesh envelope, shaped as the command the extension already knows how to
 	* validate and execute — so mesh-borne work goes through exactly the same
 	* validateCommand / sanitizeExtraction path as Mac-borne work, with no second
@@ -1736,6 +1851,7 @@ or, when you are finished,
 		});
 	}
 	const MAC_FRESH_MS = 4e4;
+	const RELAY_POLL_SOCKET_MS = 3e5;
 	const RELAY_POLL_IDLE_MS = 3e4;
 	const RELAY_POLL_ACTIVE_MS = 3e3;
 	/**
@@ -1752,15 +1868,19 @@ or, when you are finished,
 	* leave relay mail unread for as long as the Mac stayed up. Preferring the Mac
 	* is a statement about where WORK GOES OUT, not about what is listened to.
 	*/
-	function choosePeer({ macConfigured = false, macLastOkAt = 0, relayReady = false, now = Date.now() } = {}) {
+	function choosePeer({ macConfigured = false, macLastOkAt = 0, relayReady = false, socketOpen = false, now = Date.now() } = {}) {
 		const macFresh = macConfigured && now - macLastOkAt <= 4e4;
 		const inbound = [];
 		if (macConfigured) inbound.push("mac");
 		if (relayReady) inbound.push("relay");
 		const outbound = macFresh ? "mac" : relayReady ? "relay" : macConfigured ? "mac" : null;
+		const relayTransport = !relayReady ? "none" : socketOpen ? "socket" : "poll";
+		const relayPollMs = !relayReady ? RELAY_POLL_ACTIVE_MS : socketOpen ? RELAY_POLL_SOCKET_MS : macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS;
 		let reason;
 		if (!macConfigured && !relayReady) reason = "Neither peer is configured; this extension is unreachable.";
-		else if (macFresh && relayReady) reason = "Both peers reachable: results go to the Mac (loopback is faster), the relay inbox is drained on a slow cadence.";
+		else if (relayReady && socketOpen && macFresh) reason = "Both peers reachable: the relay pushes over its socket, results go to the Mac (loopback is faster).";
+		else if (relayReady && socketOpen) reason = "The relay is pushing over its socket; the Mac is not answering.";
+		else if (macFresh && relayReady) reason = "Both peers configured, but the relay socket is down — sweeping its inbox on the fallback cadence.";
 		else if (macFresh) reason = "Only the Mac is configured; the relay peer is off or unconfigured.";
 		else if (relayReady && macConfigured) reason = `The Mac has not answered in ${Math.round((now - macLastOkAt) / 1e3)}s; the relay is carrying this node.`;
 		else if (relayReady) reason = "Only the relay is configured; there is no Mac peer.";
@@ -1769,7 +1889,8 @@ or, when you are finished,
 			inbound,
 			outbound,
 			macFresh,
-			relayPollMs: macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS,
+			relayTransport,
+			relayPollMs,
 			reason
 		};
 	}
@@ -1799,6 +1920,10 @@ or, when you are finished,
 	let activePoll = null;
 	let activeRelayDrain = null;
 	let configRevision = 0;
+	let meshSocket = null;
+	let meshSocketOpen = false;
+	let meshPingTimer = null;
+	let meshSocketRefused = false;
 	let macLastOkAt = 0;
 	const INCARNATION_NONCE = crypto.randomUUID();
 	const commandLedger = createCommandLedger();
@@ -2054,6 +2179,78 @@ or, when you are finished,
 			clearTimeout(timeout);
 		}
 	}
+	function ensureMeshSocket(relayConfig, onMail) {
+		if (meshSocket || meshSocketRefused) return;
+		const url = socketUrl(relayConfig);
+		const protocols = socketProtocols(relayConfig);
+		if (!url || !protocols.length) return;
+		let socket;
+		try {
+			socket = new WebSocket(url, protocols);
+		} catch (error) {
+			console.warn(`mesh socket could not be created: ${error?.message || error}`);
+			return;
+		}
+		meshSocket = socket;
+		socket.addEventListener("open", () => {
+			if (!socketProtocolAccepted(socket.protocol)) {
+				console.warn("mesh socket selected an unexpected subprotocol; closing.");
+				try {
+					socket.close();
+				} catch {}
+				return;
+			}
+			meshSocketOpen = true;
+			updateRelayStatus({
+				state: "connected",
+				connected: true,
+				transport: "socket",
+				message: "The relay is pushing over its own socket.",
+				lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+				error: ""
+			});
+			meshPingTimer = setInterval(() => {
+				try {
+					socket.send(BRIDGE_PING_FRAME);
+				} catch {}
+			}, BRIDGE_PING_INTERVAL_MS);
+		});
+		socket.addEventListener("message", (event) => {
+			if (reactToFrame(event?.data).drain) onMail();
+		});
+		socket.addEventListener("close", (event) => {
+			meshSocketOpen = false;
+			meshSocket = null;
+			if (meshPingTimer) {
+				clearInterval(meshPingTimer);
+				meshPingTimer = null;
+			}
+			if (event?.code === 1008 || event?.code === 4001 || event?.code === 4003) {
+				meshSocketRefused = true;
+				updateRelayStatus({
+					state: "unauthorized",
+					connected: false,
+					transport: "poll",
+					message: "The relay refused this browser's socket credential.",
+					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+			}
+		});
+		socket.addEventListener("error", () => {
+			meshSocketOpen = false;
+		});
+	}
+	function closeMeshSocket() {
+		if (meshPingTimer) {
+			clearInterval(meshPingTimer);
+			meshPingTimer = null;
+		}
+		if (meshSocket) try {
+			meshSocket.close();
+		} catch {}
+		meshSocket = null;
+		meshSocketOpen = false;
+	}
 	async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
 		if (handling === "ping") {
 			await relayFetch(relayConfig, pongMessageFor(envelope, {
@@ -2113,8 +2310,28 @@ or, when you are finished,
 			drained: accepted.ackIds.length,
 			ran: accepted.run.length,
 			ignored: accepted.ignored.length,
+			more: hasMoreMail(page),
 			pending: Number(page?.pending || 0)
 		};
+	}
+	async function drainRelayUntilEmpty(relayConfig, macConfig, maxPages = 5) {
+		let report = await drainRelayOnce(relayConfig, macConfig);
+		let totals = {
+			...report,
+			pages: 1
+		};
+		for (let page = 1; page < maxPages && report.more; page += 1) {
+			report = await drainRelayOnce(relayConfig, macConfig);
+			totals = {
+				drained: totals.drained + report.drained,
+				ran: totals.ran + report.ran,
+				ignored: totals.ignored + report.ignored,
+				more: report.more,
+				pending: report.pending,
+				pages: page + 1
+			};
+		}
+		return totals;
 	}
 	async function relayWindow(revision) {
 		const relayConfig = await getRelayConfig();
@@ -2128,17 +2345,20 @@ or, when you are finished,
 		}
 		const macConfig = await getConfig();
 		const deadline = Date.now() + POLL_WINDOW_MS;
+		ensureMeshSocket(relayConfig, () => drainRelayUntilEmpty(relayConfig, macConfig).catch((error) => console.warn(`mesh doorbell drain failed: ${error?.message || error}`)));
 		while (Date.now() < deadline && revision === configRevision) {
 			const choice = choosePeer({
 				macConfigured: Boolean(macConfig.agentToken),
 				macLastOkAt,
-				relayReady: true
+				relayReady: true,
+				socketOpen: meshSocketOpen
 			});
 			try {
-				const report = await drainRelayOnce(relayConfig, macConfig);
+				const report = await drainRelayUntilEmpty(relayConfig, macConfig);
 				await updateRelayStatus({
 					state: "connected",
 					connected: true,
+					transport: choice.relayTransport,
 					message: describeRelayPeer(relayConfig, choice),
 					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
 					error: "",
@@ -2146,9 +2366,9 @@ or, when you are finished,
 				});
 			} catch (error) {
 				await updateRelayStatus({
-					state: error?.status === 401 || error?.status === 403 ? "unauthorized" : "offline",
+					...describeRelayFailure(error),
 					connected: false,
-					message: error?.status === 401 || error?.status === 403 ? "The relay rejected this browser's device token." : "Cannot reach the relay.",
+					transport: meshSocketOpen ? "socket" : "poll",
 					error: error?.message || String(error),
 					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
 				});
@@ -2818,7 +3038,10 @@ or, when you are finished,
 		if (payload?.truncated) console.warn(`relay inference was cut off at ${maxTokens} tokens (finishReason: ${payload?.finishReason ?? "unknown"}).`);
 		return {
 			content: String(payload?.content ?? ""),
-			truncated: payload?.truncated === true
+			truncated: payload?.truncated === true,
+			complete: payload?.complete ?? null,
+			refusal: payload?.refusal ?? null,
+			finishReason: payload?.finishReason ?? null
 		};
 	}
 	/**
@@ -2884,6 +3107,8 @@ or, when you are finished,
 		}
 		if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
 			configRevision += 1;
+			meshSocketRefused = false;
+			closeMeshSocket();
 			startRelayDrain();
 		}
 	});
@@ -2908,7 +3133,8 @@ or, when you are finished,
 				choice: choosePeer({
 					macConfigured: Boolean(macConfig.agentToken),
 					macLastOkAt,
-					relayReady: relayConfig.ready
+					relayReady: relayConfig.ready,
+					socketOpen: meshSocketOpen
 				})
 			})).catch((error) => sendResponse({ error: error?.message || String(error) }));
 			return true;
