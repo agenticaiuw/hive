@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { compactJobForStore } from './jobTracker.js'
+import './testWorkspace.js'
+import {
+  compactJobForStore,
+  executeFinishStatus,
+  getJob,
+  recordJobFinish,
+  recordJobStart,
+} from './jobTracker.js'
 
 const MAX_RESULT_BYTES = 64 * 1024
 
@@ -98,6 +105,46 @@ test('jobs without an object result are left alone', () => {
     const job = { jobId: 'a', result }
     assert.deepEqual(compactJobForStore(job), job)
   }
+})
+
+/*
+ * The /execute → job-store status map. The incident: orchestrator returns the
+ * goal-grounded 'incomplete' (steps ran, goal not met), and server.js's old
+ * `payload.ok ? 'completed' : 'failed'` stamped it FAILED in history.
+ */
+test('a successful payload records as completed', () => {
+  assert.equal(executeFinishStatus({ ok: true, status: 'success' }), 'completed')
+})
+
+test('an incomplete verdict survives by name instead of collapsing to failed', () => {
+  assert.equal(
+    executeFinishStatus({ ok: false, status: 'incomplete' }),
+    'incomplete',
+  )
+})
+
+test('genuine failures stay failed', () => {
+  assert.equal(executeFinishStatus({ ok: false, status: 'failed' }), 'failed')
+  assert.equal(executeFinishStatus({ ok: false, status: 'blocked' }), 'failed')
+  assert.equal(executeFinishStatus({ ok: false }), 'failed')
+  assert.equal(executeFinishStatus(null), 'failed')
+})
+
+test('the store keeps an incomplete finish verbatim, with its honest sentence', () => {
+  const job = recordJobStart({ type: 'execute', command: 'cancel my subscription' })
+
+  recordJobFinish(job.jobId, {
+    status: executeFinishStatus({
+      ok: false,
+      status: 'incomplete',
+      error: 'Opened the page and looked at it — nothing was cancelled.',
+    }),
+    error: 'Opened the page and looked at it — nothing was cancelled.',
+  })
+
+  const stored = getJob(job.jobId)
+  assert.equal(stored.status, 'incomplete')
+  assert.match(stored.error, /nothing was cancelled/)
 })
 
 test('shedding every field still leaves a record inside the budget', () => {

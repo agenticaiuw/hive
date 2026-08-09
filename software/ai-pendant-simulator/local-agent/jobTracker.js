@@ -81,6 +81,26 @@ export function recordJobFinish(
   return job
 }
 
+/*
+ * The store status for a finished /execute payload.
+ *
+ * The orchestrator's terminal `status` is goal-grounded (goalVerdict.js):
+ * 'incomplete' means every planned step ran and the goal still was not met.
+ * server.js used to collapse everything non-ok to 'failed', so those honest
+ * partial runs showed as FAILED in history. 'incomplete' survives by name;
+ * genuine failures ('failed', 'blocked', drift) stay 'failed'.
+ *
+ * 'needs_approval' is deliberately absent: the payload's terminal status is
+ * never that word today — it rides on verdict.remainder.status inside the
+ * recorded result, where the approval-at-origin flow reads it. If the
+ * orchestrator ever returns it terminally, add it here rather than letting it
+ * collapse to 'failed'.
+ */
+export function executeFinishStatus(payload) {
+  if (payload?.ok) return 'completed'
+  return payload?.status === 'incomplete' ? 'incomplete' : 'failed'
+}
+
 export function getJob(jobId) {
   return readJobs().find((item) => item.jobId === jobId) ?? null
 }
