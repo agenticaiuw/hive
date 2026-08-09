@@ -2208,6 +2208,13 @@ function statusLabel(status) {
      */
     case PLAYBACK_UNKNOWN_STATUS:
       return 'Playback unknown'
+    /*
+     * Deliberately not "Done" and deliberately not "Failed": the steps ran,
+     * the goal was not met (goalVerdict.js). Same word the SvelteKit
+     * dashboard shows for this status.
+     */
+    case 'incomplete':
+      return 'Incomplete'
     case 'cancelled':
       return 'Cancelled'
     case 'failed':

@@ -141,6 +141,7 @@ import {
 } from './sessionStore.js'
 import {
   clearJobs,
+  executeFinishStatus,
   getJob,
   jobsLocation,
   markJobUndone,
@@ -531,7 +532,9 @@ app.post('/execute', async (request, response) => {
     })
 
     recordJobFinish(tracked.jobId, {
-      status: payload.ok ? 'completed' : 'failed',
+      // Goal-grounded verdicts survive by name: 'incomplete' (steps ran, goal
+      // not met) must not show as FAILED in history. jobTracker.js owns the map.
+      status: executeFinishStatus(payload),
       // pendant-jobs.json is durable and is rendered in the ops dashboard, so
       // the image bytes are stripped before it is written. The HTTP response
       // still carries them for the immediate caller.
