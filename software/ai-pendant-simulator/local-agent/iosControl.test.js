@@ -663,6 +663,13 @@ test('a locked Mac is reported as the Mac, not as a phone problem', async (t) =>
   assert.equal(result.ok, true)
   assert.match(result.message, /Mac's screen is locked/)
   assert.match(result.message, /this is the Mac, not the phone/)
+  // Measured on this Mac while genuinely locked: the window stays enumerable
+  // and every capture returns "could not create image from window". Reading is
+  // the foundation of every guard, so neither reads nor writes are possible —
+  // the phone is not drivable overnight, and this is where that is stated.
+  assert.equal(result.readsPossible, false)
+  assert.equal(result.writesPossible, false)
+  assert.match(result.message, /neither read nor driven/)
 })
 
 test('ios_status says up front whether a write could land at all', async (t) => {
@@ -826,19 +833,67 @@ test('a write refuses when the window in front is not the phone', async (t) => {
   assert.deepEqual(phone.inputEvents(run.events), [])
 })
 
-test('a Connect / "iPhone in Use" screen stops a write before any event', async (t) => {
+test('a Connect screen stops a write before any event, and is not a pause', async (t) => {
   if (needsPython(t)) return
+  // A session that was never connected, as opposed to one the owner paused by
+  // picking up the phone. Different cause, different fix, different code — and
+  // in neither case may anything be tapped, least of all Connect itself.
   const phone = stubPhone(t, {
     onscreen: [],
     frontmost: false,
     activationWorks: true,
-    ocr: { 21250: ['iPhone in Use', 'Lock your iPhone to use it here'], 21251: [] },
+    ocr: { 21250: ['To connect, open iPhone Mirroring', 'Connect'], 21251: [] },
   })
 
   const run = phone.run('ios_home', {})
   assert.equal(run.status, 3)
-  assert.match(run.payload.error.message, /iPhone in Use/)
+  assert.equal(run.payload.error.code, 'blocked')
   assert.deepEqual(phone.inputEvents(run.events), [], 'tapped through the connect screen')
+
+  const result = await runIosAction({ type: 'ios_home', params: {} })
+  assert.equal(result.reason, 'ios-mirroring-blocked')
+  assert.match(result.message, /will not tap Connect/i)
+})
+
+test('the owner picking up their phone is a pause, not a failure', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * Mirroring pauses whenever the owner unlocks their iPhone. That is the
+   * ordinary cost of a shared device and it fixes itself; reporting it in the
+   * same words as a broken setup taught the planner to treat the most common
+   * interruption there is as an error worth escalating.
+   */
+  const phone = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    activationWorks: true,
+    ocr: {
+      21250: ['iPhone in Use', 'iPhone Mirroring ended due to iPhone use.',
+              'Lock your iPhone to connect.', 'Connect'],
+      21251: [],
+    },
+  })
+
+  const status = phone.run('ios_status', {})
+  assert.equal(status.payload.result.state, 'paused')
+  assert.equal(status.payload.result.pausedByPhoneUse, true)
+  assert.equal(status.payload.result.readable, true, 'the screen is still readable')
+  assert.equal(status.payload.result.writesPossible, false)
+
+  const write = phone.run('ios_home', {})
+  assert.equal(write.payload.error.code, 'paused')
+  assert.deepEqual(phone.inputEvents(write.events), [])
+
+  const result = await runIosAction({ type: 'ios_home', params: {} })
+  assert.equal(result.reason, 'ios-mirroring-paused')
+  assert.match(result.message, /paused because the iPhone is in use/)
+  assert.match(result.message, /Nothing is broken/)
+  assert.match(result.message, /resumes on its own/)
+
+  const reported = await runIosAction({ type: 'ios_status', params: {} })
+  assert.equal(reported.ok, true)
+  assert.equal(reported.state, 'paused')
+  assert.match(reported.message, /paused because the iPhone is in use/)
 })
 
 test('the refusal reaches the caller as a structured, actionable failure', async (t) => {
