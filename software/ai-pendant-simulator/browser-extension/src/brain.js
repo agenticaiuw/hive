@@ -70,7 +70,70 @@ export const INFER_LIMITS = Object.freeze({
   maxMessages: 40,
   maxPromptChars: 24_000,
   maxOutputTokens: 2_048,
+  /* What the relay gives a caller that does not ask — a QUARTER of the
+   * ceiling, not the ceiling. Mirrored here because the gap is the whole
+   * reason this loop names its own budget instead of omitting the field. */
+  defaultOutputTokens: 512,
 })
+
+/*
+ * What this loop asks for, per turn. Above the relay's 512 default because a
+ * tool call plus a short rationale does not reliably fit in 512, and below the
+ * 2048 ceiling because /v1/infer is metered per device and most turns are one
+ * small JSON object. escalateOutputTokens takes it the rest of the way only
+ * when a reply actually comes back cut off.
+ */
+export const BRAIN_OUTPUT_TOKENS = 1_024
+
+/**
+ * The budget to retry a cut-off reply with, or null when there is no headroom
+ * left to buy.
+ *
+ * A truncated reply in JSON mode is not a bad answer, it is half an answer:
+ * the model stopped mid-object and the parse fails downstream looking like
+ * garbage. One doubling is worth the second billed call because the handoff it
+ * replaces costs a Mac planner call anyway; a second doubling is not, because
+ * a reply that will not fit in the ceiling will not fit next time either.
+ */
+export function escalateOutputTokens(current) {
+  const asked = Number(current) || INFER_LIMITS.defaultOutputTokens
+  if (asked >= INFER_LIMITS.maxOutputTokens) return null
+  return Math.min(asked * 2, INFER_LIMITS.maxOutputTokens)
+}
+
+/**
+ * Ask for a reply, and buy more room if the first one comes back cut off.
+ *
+ * The policy lives here, away from the fetch, because it is the part with a
+ * decision in it: how many times to pay again, and what to do when there is
+ * nothing left to buy. `send(maxTokens)` is injected and resolves to the
+ * relay's `{content, truncated}` — so every branch below is exercised in tests
+ * without a relay, which matters because the branch that bites is the one no
+ * client can reproduce on purpose.
+ */
+export async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKENS) {
+  let asked = maxTokens
+
+  /* Bounded by escalateOutputTokens returning null at the ceiling; the guard
+   * is here so a future change to that function cannot spend money forever. */
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const reply = await send(asked)
+    if (!reply?.truncated) return String(reply?.content ?? '')
+
+    const escalated = escalateOutputTokens(asked)
+    if (!escalated) break
+    asked = escalated
+  }
+
+  const error = new Error(
+    `The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`,
+  )
+  /* Fatal: a reply that will not fit in the ceiling will not fit on a retry,
+   * and the Mac planner has no such ceiling. */
+  error.code = 'truncated'
+  error.fatal = true
+  throw error
+}
 
 /* Conservative margin under maxPromptChars: the ceiling counts every message,
  * and being one character over costs a whole failed round trip. */

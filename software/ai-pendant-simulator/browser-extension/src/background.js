@@ -28,6 +28,7 @@ import {
 } from './command-console.js'
 import {
   BRAIN_STORAGE_KEYS,
+  callModelWithHeadroom,
   chooseBrainRoute,
   interpretInferError,
   normalizeBrainConfig,
@@ -1460,9 +1461,18 @@ async function runConsoleCommand({ id, command, page, config }) {
  * server-side — naming one outside the list is a 400 rather than a silent
  * substitution, and this loop has no reason to name one at all.
  */
-async function brainCallModel(brainConfig, messages) {
+function brainCallModel(brainConfig, messages) {
+  /* The retry POLICY is in brain.js where it is testable; this supplies only
+   * the transport. Each attempt gets its own timeout window. */
+  return callModelWithHeadroom((maxTokens) =>
+    postInference(brainConfig, messages, maxTokens),
+  )
+}
+
+async function postInference(brainConfig, messages, maxTokens) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 65_000)
+  let payload
 
   try {
     const response = await fetch(brainConfig.modelProxyUrl, {
@@ -1475,7 +1485,9 @@ async function brainCallModel(brainConfig, messages) {
       },
       body: JSON.stringify({
         messages,
-        maxTokens: 1_024,
+        /* Named on purpose. Omitting it does NOT get the 2048 ceiling — the
+         * relay's default is 512, a quarter of it. */
+        maxTokens,
         /* The prompt demands exactly one JSON object; asking the transport for
          * the same thing costs nothing and removes the commonest parse
          * failure. parseToolCalls still tolerates prose, because a refusal can
@@ -1485,7 +1497,7 @@ async function brainCallModel(brainConfig, messages) {
       signal: controller.signal,
     })
 
-    const payload = await response.json().catch(() => null)
+    payload = await response.json().catch(() => null)
 
     if (!response.ok) {
       const verdict = interpretInferError({ status: response.status, payload })
@@ -1504,10 +1516,27 @@ async function brainCallModel(brainConfig, messages) {
         'relay inference budget is advisory: no durable counter was reachable.',
       )
     }
-
-    return String(payload?.content ?? '')
   } finally {
     clearTimeout(timeout)
+  }
+
+  /*
+   * `truncated` is handed up rather than resolved here: in JSON mode a cut-off
+   * reply is unparseable and would otherwise look like a garbage answer, which
+   * is the diagnosis the relay added this field to prevent. What to do about
+   * it is callModelWithHeadroom's decision, not this function's.
+   */
+  if (payload?.truncated) {
+    console.warn(
+      `relay inference was cut off at ${maxTokens} tokens (finishReason: ${
+        payload?.finishReason ?? 'unknown'
+      }).`,
+    )
+  }
+
+  return {
+    content: String(payload?.content ?? ''),
+    truncated: payload?.truncated === true,
   }
 }
 

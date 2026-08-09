@@ -881,11 +881,53 @@
 		deviceToken: null
 	});
 	const MAX_FAILURES = 2;
-	const PROMPT_CHAR_BUDGET = Object.freeze({
+	const INFER_LIMITS = Object.freeze({
 		maxMessages: 40,
 		maxPromptChars: 24e3,
-		maxOutputTokens: 2048
-	}).maxPromptChars - 1e3;
+		maxOutputTokens: 2048,
+		defaultOutputTokens: 512
+	});
+	const BRAIN_OUTPUT_TOKENS = 1024;
+	/**
+	* The budget to retry a cut-off reply with, or null when there is no headroom
+	* left to buy.
+	*
+	* A truncated reply in JSON mode is not a bad answer, it is half an answer:
+	* the model stopped mid-object and the parse fails downstream looking like
+	* garbage. One doubling is worth the second billed call because the handoff it
+	* replaces costs a Mac planner call anyway; a second doubling is not, because
+	* a reply that will not fit in the ceiling will not fit next time either.
+	*/
+	function escalateOutputTokens(current) {
+		const asked = Number(current) || INFER_LIMITS.defaultOutputTokens;
+		if (asked >= INFER_LIMITS.maxOutputTokens) return null;
+		return Math.min(asked * 2, INFER_LIMITS.maxOutputTokens);
+	}
+	/**
+	* Ask for a reply, and buy more room if the first one comes back cut off.
+	*
+	* The policy lives here, away from the fetch, because it is the part with a
+	* decision in it: how many times to pay again, and what to do when there is
+	* nothing left to buy. `send(maxTokens)` is injected and resolves to the
+	* relay's `{content, truncated}` — so every branch below is exercised in tests
+	* without a relay, which matters because the branch that bites is the one no
+	* client can reproduce on purpose.
+	*/
+	async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKENS) {
+		let asked = maxTokens;
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			const reply = await send(asked);
+			if (!reply?.truncated) return String(reply?.content ?? "");
+			const escalated = escalateOutputTokens(asked);
+			if (!escalated) break;
+			asked = escalated;
+		}
+		const error = /* @__PURE__ */ new Error(`The model's reply was cut off at the relay's ${INFER_LIMITS.maxOutputTokens}-token ceiling.`);
+		error.code = "truncated";
+		error.fatal = true;
+		throw error;
+	}
+	const PROMPT_CHAR_BUDGET = INFER_LIMITS.maxPromptChars - 1e3;
 	const FATAL_INFER_CODES = new Set([
 		"credential_predates_capability",
 		"scope_denied",
@@ -2735,9 +2777,13 @@ or, when you are finished,
 	* server-side — naming one outside the list is a 400 rather than a silent
 	* substitution, and this loop has no reason to name one at all.
 	*/
-	async function brainCallModel(brainConfig, messages) {
+	function brainCallModel(brainConfig, messages) {
+		return callModelWithHeadroom((maxTokens) => postInference(brainConfig, messages, maxTokens));
+	}
+	async function postInference(brainConfig, messages, maxTokens) {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 65e3);
+		let payload;
 		try {
 			const response = await fetch(brainConfig.modelProxyUrl, {
 				method: "POST",
@@ -2749,12 +2795,12 @@ or, when you are finished,
 				},
 				body: JSON.stringify({
 					messages,
-					maxTokens: 1024,
+					maxTokens,
 					responseFormat: "json_object"
 				}),
 				signal: controller.signal
 			});
-			const payload = await response.json().catch(() => null);
+			payload = await response.json().catch(() => null);
 			if (!response.ok) {
 				const verdict = interpretInferError({
 					status: response.status,
@@ -2766,10 +2812,14 @@ or, when you are finished,
 				throw error;
 			}
 			if (payload?.budget && payload.budget.enforced === false) console.warn("relay inference budget is advisory: no durable counter was reachable.");
-			return String(payload?.content ?? "");
 		} finally {
 			clearTimeout(timeout);
 		}
+		if (payload?.truncated) console.warn(`relay inference was cut off at ${maxTokens} tokens (finishReason: ${payload?.finishReason ?? "unknown"}).`);
+		return {
+			content: String(payload?.content ?? ""),
+			truncated: payload?.truncated === true
+		};
 	}
 	/**
 	* The brain's tools ARE the extension's own 11 page commands, run through the
