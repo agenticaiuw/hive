@@ -46,10 +46,13 @@
  *   2. A frame is not durable. The D1 row is. A dropped frame or a reconnect
  *      that lands between the ring and the listener costs nothing only if
  *      something eventually sweeps.
- *   3. A credential can stop working under a live socket — observed while
- *      writing this, when a relay deploy invalidated a working token
- *      mid-session. The socket closes; the node must notice and say so rather
- *      than go quiet.
+ *   3. A credential can stop working under a live socket. Observed while
+ *      writing this: a token that had just handshaked began returning 401 on
+ *      every route, because DELETE /v1/devices/:deviceId had retired the
+ *      device out from under it — that route drops the device row, its
+ *      credentials and its undrained mail together, so retiring a device
+ *      another process is authenticating as revokes it mid-flight. The socket
+ *      closes; the node must notice and say so rather than go quiet.
  *
  * So: the socket is primary and the poller is a safety sweep whose interval
  * stretches to RELAY_POLL_SOCKET_MS while a socket is actually up, and snaps
