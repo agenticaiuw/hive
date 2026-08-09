@@ -383,6 +383,95 @@ test('a reply that never fits stops paying, and says why', async () => {
   assert.deepEqual(asked, [BRAIN_OUTPUT_TOKENS, INFER_LIMITS.maxOutputTokens])
 })
 
+test('a refusal is reported as one, not as an unusable model', async () => {
+  /* The nasty part: a refusal is a CLEAN stop — finish_reason 'stop',
+   * complete true — with empty content. Without the refusal field the loop
+   * gets "" and blames the model for being unusable, hiding the one sentence
+   * that explains what happened. */
+  let calls = 0
+  await assert.rejects(
+    () =>
+      callModelWithHeadroom(async () => {
+        calls += 1
+        return {
+          content: '',
+          truncated: false,
+          complete: true,
+          finishReason: 'stop',
+          refusal: 'I cannot help with that request.',
+        }
+      }),
+    (error) => {
+      assert.equal(error.code, 'refusal')
+      assert.equal(error.fatal, true)
+      assert.match(error.message, /I cannot help with that request\./)
+      return true
+    },
+  )
+  assert.equal(calls, 1, 'a refusal must never be paid for twice')
+})
+
+test('an abnormal stop that is not truncation is not retried', async () => {
+  /* content_filter: short content, truncated false. More headroom fixes
+   * nothing, so buying it would bill twice for one refusal. */
+  let calls = 0
+  await assert.rejects(
+    () =>
+      callModelWithHeadroom(async () => {
+        calls += 1
+        return {
+          content: '{"to',
+          truncated: false,
+          complete: false,
+          finishReason: 'content_filter',
+          refusal: null,
+        }
+      }),
+    (error) => {
+      assert.equal(error.code, 'incomplete')
+      assert.equal(error.fatal, true)
+      assert.match(error.message, /content_filter/)
+      return true
+    },
+  )
+  assert.equal(calls, 1)
+})
+
+test('an unknown finish reason fails safe without being enumerated', async () => {
+  /* The relay reports `complete:false` for anything that is not a clean
+   * 'stop', so a reason invented tomorrow is caught by this client today. */
+  await assert.rejects(
+    () =>
+      callModelWithHeadroom(async () => ({
+        content: 'partial',
+        truncated: false,
+        complete: false,
+        finishReason: 'some_future_reason',
+        refusal: null,
+      })),
+    (error) => {
+      assert.equal(error.code, 'incomplete')
+      assert.match(error.message, /some_future_reason/)
+      return true
+    },
+  )
+})
+
+test('"we could not ask" is not "it failed" — complete:null passes', async () => {
+  /* The tri-state, and the reason it is one. A provider that omits
+   * finish_reason yields null, and treating that as false would reject every
+   * good answer it ever returns — the same error as reading an unobserved
+   * peer as offline. */
+  const content = await callModelWithHeadroom(async () => ({
+    content: '{"done":true,"response":"fine"}',
+    truncated: false,
+    complete: null,
+    finishReason: null,
+    refusal: null,
+  }))
+  assert.equal(parseToolCalls(content).response, 'fine')
+})
+
 test('an untruncated first reply costs exactly one call', async () => {
   let calls = 0
   const content = await callModelWithHeadroom(async () => {
