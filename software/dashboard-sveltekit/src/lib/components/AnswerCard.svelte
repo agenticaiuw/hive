@@ -11,13 +11,14 @@
    * honest status word takes the display slot instead, and nothing stands in
    * for a result that does not exist.
    */
-  import { formatWhen, sourceMeta } from "$lib/jobs";
+  import { formatWhen, nodeMeta } from "$lib/jobs";
   import type { RunState } from "$lib/runState";
   import type { Snippet } from "svelte";
 
   let {
     state,
     source = "",
+    origin = "",
     ownAudio = "",
     replyAudio = "",
     onNeedsYou = null,
@@ -25,6 +26,10 @@
   }: {
     state: RunState;
     source?: string;
+    /** The transport the run came in on (live_lte, dashboard, …). It names the
+     * node the owner would recognise; `source` alone is the relay's own word
+     * ("cloudflare") for everything it witnessed, so it is only the fallback. */
+    origin?: string;
     ownAudio?: string;
     replyAudio?: string;
     /** Jumps to the approval card when this run is the parked one. */
@@ -32,6 +37,8 @@
     /** The collapsed developer layer, rendered by the page. */
     details?: Snippet;
   } = $props();
+
+  const node = $derived(nodeMeta({ origin, source }));
 
   const answered = $derived(state.phase === "answered");
   /** The answer when there is one; otherwise the honest status word. */
@@ -55,10 +62,8 @@
     {#if state.at}
       <span class="answer-when">{formatWhen(state.at)}</span>
     {/if}
-    {#if source}
-      <span class="answer-source" title={sourceMeta(source).hint}
-        >{sourceMeta(source).label}</span
-      >
+    {#if source || origin}
+      <span class="answer-source" title={node.hint}>{node.label}</span>
     {/if}
   </div>
 

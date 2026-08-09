@@ -12,7 +12,7 @@
     "build:agent": "DASHBOARD_TARGET=agent VITE_DASHBOARD_BACKEND=agent vite build",
     "preview": "vite preview",
     "deploy:cloudflare": "npm run build && wrangler deploy --env=\"\"",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
