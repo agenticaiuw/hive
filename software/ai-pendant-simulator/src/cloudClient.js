@@ -546,8 +546,9 @@ export function createCloudClient(settings) {
  * A relay refusal, with the machine-readable half kept.
  *
  * The relay distinguishes `credential_predates_capability` (re-pair the phone;
- * the role grants it, this token predates it) from `scope_denied` (re-pairing
- * will not help) — and the two differ only in `code`, never reliably in prose.
+ * the role grants it, this credential was minted with an explicit scope
+ * ceiling that leaves it out) from `scope_denied` (re-pairing will not help) —
+ * and the two differ only in `code`, never reliably in prose.
  * Every caller that wants to tell them apart must read the field, so the field
  * has to survive the throw.
  */

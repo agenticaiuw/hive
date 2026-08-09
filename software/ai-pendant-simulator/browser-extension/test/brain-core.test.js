@@ -406,14 +406,14 @@ test('both retry-bearing refusals carry their window through', () => {
   assert.equal(denied.retryAt, null)
 })
 
-test('a credential minted before llm:infer says re-pair, not "broken"', () => {
+test('a credential narrowed below its role says re-pair, not "broken"', () => {
   const verdict = interpretInferError({
     status: 403,
     payload: {
       ok: false,
       code: 'credential_predates_capability',
       error:
-        'Blocked for safety: this credential was issued before its role gained llm:infer. Re-pair the device to pick it up — scopes are frozen into a credential when it is created.',
+        'Blocked for safety: this credential is narrowed to a subset of its role and does not carry llm:infer. Re-pair the device with an explicit scope list that includes it — a narrowed credential never widens on its own.',
     },
   })
   assert.equal(verdict.code, 'credential_predates_capability')

@@ -742,14 +742,14 @@ test('mesh rules ship only when a mesh tool did', () => {
   assert.ok(!withoutMesh.includes('mesh_presence'), 'a rule named a tool that was not loaded')
 })
 
-test('a stale credential is told apart from a denial by code, all the way to the model', async () => {
-  /* Scopes are frozen into a credential at pair time. A phone paired before the
-   * mesh shipped holds a `mobile` credential with no node:message:* in it and
-   * 403s forever — and the fix is a re-pair, which is the opposite of the
+test('a narrowed credential is told apart from a denial by code, all the way to the model', async () => {
+  /* A credential minted with an explicit `scopes` ceiling keeps that ceiling
+   * forever. A phone narrowed to a list without node:message:* 403s until it
+   * is re-paired with a wider list — and re-pairing is the opposite of the
    * advice a `scope_denied` deserves. The two differ only in `code`, so the
    * code has to survive the tool boundary and reach the model. */
   const denial = new Error(
-    'Blocked for safety: this credential was issued before its role gained node:message:send.',
+    'Blocked for safety: this credential is narrowed to a subset of its role and does not carry node:message:send.',
   )
   denial.code = 'credential_predates_capability'
   denial.status = 403
@@ -970,7 +970,7 @@ test('the loop never asks for more tokens than the relay allows', async () => {
 
 /* -------------------------------------------- what a 403 is actually saying */
 
-test('a stale credential and a genuine denial are told apart by code, not prose', async () => {
+test('a narrowed credential and a genuine denial are told apart by code, not prose', async () => {
   const { createRelayInference, InferenceUnavailableError } = await import('./relayInference.js')
 
   const clientAnswering = (status, payload) => ({
@@ -979,12 +979,14 @@ test('a stale credential and a genuine denial are told apart by code, not prose'
     },
   })
 
-  /* Re-pairing fixes this one — the role grants it, the token predates it. */
+  /* Re-pairing with a wider scope list fixes this one — the role grants it,
+   * this credential's pair-time ceiling leaves it out. */
   const stale = createRelayInference({
     client: clientAnswering(403, {
       ok: false,
       code: 'credential_predates_capability',
-      error: 'Blocked for safety: this credential was issued before its role gained llm:infer.',
+      error:
+        'Blocked for safety: this credential is narrowed to a subset of its role and does not carry llm:infer.',
     }),
   })
   await assert.rejects(

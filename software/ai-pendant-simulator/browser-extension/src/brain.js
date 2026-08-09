@@ -18,13 +18,19 @@
  *   node scripts/pendant-credentials.mjs pair \
  *        --device-id <id> --role browser_node --name "<label>"
  *
- * MIGRATION, and the failure everyone will hit first: relay scopes are FROZEN
- * into a credential at pair time and no route updates them. `llm:infer` was
- * added to the existing browser_node role, so any extension credential minted
- * before that deploy is refused inference forever, with
- * 403 code:"credential_predates_capability" — which means RE-PAIR, not "the
- * endpoint is broken". A genuine role denial is code:"scope_denied" instead.
- * interpretInferError below keys on those codes rather than message text.
+ * SCOPES, and the one 403 that still means re-pair: the relay derives an
+ * ordinary credential's effective scopes from the live role table on every
+ * request (cloud-relay/deviceAuth.js, effectiveScopesForCredential), so when
+ * browser_node gains a scope like `llm:infer`, an already-paired extension
+ * picks it up with no re-pair — and loses any scope the role loses. The
+ * exception is a credential minted with an explicit `scopes` ceiling: narrowed
+ * at pair time, it never widens on its own, and asking for a scope its role
+ * grants but its ceiling leaves out is refused with
+ * 403 code:"credential_predates_capability" (the old wire spelling, kept
+ * deliberately) — which means RE-PAIR with a wider explicit scope list, not
+ * "the endpoint is broken". A genuine role denial is code:"scope_denied"
+ * instead. interpretInferError below keys on those codes rather than message
+ * text.
  *
  * The brain costs the owner money per call (metered per device, 120/hour), so
  * turning it on stays a deliberate act by the owner. Nothing here does it for
@@ -193,10 +199,11 @@ export async function callModelWithHeadroom(send, maxTokens = BRAIN_OUTPUT_TOKEN
 const PROMPT_CHAR_BUDGET = INFER_LIMITS.maxPromptChars - 1_000
 
 /*
- * Errors there is no point retrying: a stale credential, a denied scope, an
- * unconfigured relay or a model outside the allow-list will answer exactly the
- * same way the second time. Two-strike retry exists for flaky transport, not
- * for a settled "no" — so these hand off to the Mac planner immediately.
+ * Errors there is no point retrying: a credential narrowed below its role, a
+ * denied scope, an unconfigured relay or a model outside the allow-list will
+ * answer exactly the same way the second time. Two-strike retry exists for
+ * flaky transport, not for a settled "no" — so these hand off to the Mac
+ * planner immediately.
  */
 const FATAL_INFER_CODES = new Set([
   'credential_predates_capability',
@@ -481,9 +488,10 @@ export function reduceBrain(state, event) {
   }
 
   if (state.status === 'thinking' && event?.type === 'model_error') {
-    /* A settled "no" — stale credential, denied scope, spent budget — answers
-     * identically next time, so retrying it just makes the owner wait for the
-     * same refusal twice before the handoff they were always going to get. */
+    /* A settled "no" — narrowed credential, denied scope, spent budget —
+     * answers identically next time, so retrying it just makes the owner wait
+     * for the same refusal twice before the handoff they were always going to
+     * get. */
     if (event.fatal) {
       return {
         ...state,
@@ -694,9 +702,9 @@ export function parseToolCalls(text) {
 
 /**
  * Read a failed POST /v1/infer. Pure, so every branch is testable without a
- * relay — which matters more than usual here, because the branch the owner
- * will actually hit first (a credential minted before `llm:infer` joined the
- * browser_node role) cannot be reproduced locally at all.
+ * relay — which matters more than usual here, because the branch that still
+ * demands a human remedy (a credential minted with an explicit `scopes`
+ * ceiling that leaves out `llm:infer`) cannot be reproduced locally at all.
  *
  * Keys on `code`, never on message text: the relay's own comment says the
  * generic denial stays deliberately vague so a probing token gets no
@@ -709,9 +717,10 @@ export function interpretInferError({ status, payload } = {}) {
 
   const message =
     code === 'credential_predates_capability'
-      ? 'The browser credential was issued before the relay gave this role the ' +
-        'ability to think. Re-pair the extension (pendant-credentials.mjs pair ' +
-        '--role browser_node) — scopes are frozen when a credential is created.'
+      ? 'The browser credential was minted with an explicit scope ceiling that ' +
+        'leaves out inference. Re-pair the extension with a wider scope list ' +
+        '(pendant-credentials.mjs pair --role browser_node) — a narrowed ' +
+        'credential never widens on its own.'
       : code === 'scope_denied'
         ? 'This credential\'s role is not allowed to use the relay\'s inference route.'
         : code === 'rate_limited'
