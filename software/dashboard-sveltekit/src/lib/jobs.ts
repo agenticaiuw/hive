@@ -107,9 +107,23 @@ export function humanizeKey(key: unknown) {
     .replace(/^./, (character) => character.toUpperCase());
 }
 
+/**
+ * Statuses that mean "this has stopped and is waiting on the owner".
+ *
+ * `plan_ready` is the agent's word for a job it prepared and did not run;
+ * `needs_approval` is the pipeline run's equivalent. Neither is a word anyone
+ * says out loud, and neither may reach the screen (heuristic 2).
+ */
+const AWAITING_STATUSES = ["plan_ready", "needs_approval", "awaiting_approval"];
+
+export function isAwaitingApproval(status: unknown) {
+  return AWAITING_STATUSES.includes(String(status));
+}
+
 export function statusLabel(status: unknown) {
   const value = String(status || "");
   if (!value) return "Unknown";
+  if (isAwaitingApproval(value)) return "Needs your approval";
   if (value === "processing") return "Running";
   if (value === "queued") return "Queued";
   if (value === "completed") return "Done";
@@ -122,6 +136,7 @@ export function statusLabel(status: unknown) {
 /** Collapses every status onto the four tones the stylesheet knows. */
 export function statusTone(status: unknown): "ok" | "run" | "warn" | "off" {
   const value = String(status || "");
+  if (isAwaitingApproval(value)) return "warn";
   if (isRunningStatus(value)) return "run";
   if (value === "failed" || value === "cancelled") return "warn";
   if (value === "completed") return "ok";

@@ -10,14 +10,20 @@
  * (visibility of system status) is only worth anything if the status is true,
  * and heuristic 2 says it has to be in the user's words, not the system's.
  *
- * So the phase is derived from the run's own EVENTS, which are unambiguous, and
- * every human sentence shown to the owner is either a fixed phrase from the
- * table below or the agent's own verbatim text. Nothing here invents a state
- * the data cannot support:
+ * So the phase is derived from the run itself, and every human sentence shown to
+ * the owner is either a fixed phrase from the table below or the agent's own
+ * verbatim text. Nothing here invents a state the data cannot support:
  *
- *   needs-approval  the last `agent` event is `status: "waiting"`. The agent
- *                   writes `label: "Waiting for your approval"` and
- *                   `meta.blocked[] = [{type, reason}]` there itself.
+ *   needs-approval  `run.status === "needs_approval"` with a `run.approval`
+ *                   record ({since, reason, blocked, actionCount, routine}),
+ *                   which the agent now publishes as a status of its own.
+ *                   Where that is absent — an older agent, or a relay snapshot
+ *                   that has not caught up — the same fact is read off the
+ *                   events: the last `agent` event being `status: "waiting"`,
+ *                   carrying `meta.blocked[]` and its reason in `detail`. Both
+ *                   readings are the agent's own `pendingApproval()` rule, so
+ *                   they cannot disagree; the published record simply carries
+ *                   better-worded reasons.
  *   failed          `run.status === "failed"`, or an event failed.
  *   listening       the `transcription` stage is still open on a fresh run.
  *   thinking        the last `agent` event is `status: "active"`.
@@ -33,7 +39,7 @@
  */
 
 import { hasUsefulTranscript, isTranscribing, type JsonRecord } from "$lib/pipeline";
-import type { JobView } from "$lib/jobs";
+import { isAwaitingApproval, type JobView } from "$lib/jobs";
 
 export type RunPhase =
   | "nothing-yet"
@@ -52,6 +58,9 @@ export type RunPhase =
  * A spinner that never stops is a fabricated progress indicator.
  */
 const STALE_AFTER_MS = 180_000;
+
+/** The agent's own run status for a plan it is holding. */
+export const NEEDS_APPROVAL_STATUS = "needs_approval";
 
 export type BlockedReason = { type: string; reason: string };
 
@@ -183,25 +192,44 @@ export function runState(run: JsonRecord | null): RunState {
   const base = { ...EMPTY, question, spokenReply, delivery, planJobId, at };
 
   /*
-   * Parked first. A parked run keeps `status: "processing"` and still renders
-   * TTS and a relay upload afterwards (it speaks "waiting for your approval"),
-   * so any check that looked at run.status or at the last event of ANY stage
-   * would call this one running. The agent stage is the one that knows.
+   * Parked first, and before anything else looks at `run.status`.
+   *
+   * An older agent leaves a held plan on `status: "processing"` and still
+   * renders TTS and a relay upload afterwards — it speaks "waiting for your
+   * approval" — so a check that read run.status, or the last event of ANY
+   * stage, called this one running. The published `approval` record is the
+   * answer where it exists; the agent stage is the fallback that knows.
    */
-  if (agentEvent?.status === "waiting") {
-    const blocked = blockedFrom(agentEvent);
+  const published =
+    run.approval && typeof run.approval === "object" ? run.approval : null;
+  const parked =
+    run.status === NEEDS_APPROVAL_STATUS ||
+    Boolean(published) ||
+    agentEvent?.status === "waiting";
+
+  if (parked) {
+    const blocked = Array.isArray(published?.blocked)
+      ? published.blocked.map((entry: any) => ({
+          type: String(entry?.type || "action"),
+          reason: String(entry?.reason || ""),
+        }))
+      : blockedFrom(agentEvent);
     return {
       ...base,
       phase: "needs-approval",
       tone: "attention",
-      label: String(agentEvent.label || "Waiting for your approval").trim(),
-      detail: String(agentEvent.detail || blocked[0]?.reason || "").trim(),
+      label: String(agentEvent?.label || "Waiting for your approval").trim(),
+      // The agent's effect-worded sentence, whichever place it published it.
+      detail: String(
+        published?.reason || agentEvent?.detail || blocked[0]?.reason || "",
+      ).trim(),
       blocked,
       plan: textOf(
         events(run)
           .filter((event) => event.stage === "agent" && event.status === "done")
           .at(-1) ?? null,
       ),
+      at: String(published?.since || at),
     };
   }
 
@@ -312,7 +340,7 @@ export type PendingApproval = {
  */
 export function pendingApprovals(jobs: JobView[]): PendingApproval[] {
   const parked = jobs
-    .filter((job) => job.status === "plan_ready")
+    .filter((job) => isAwaitingApproval(job.status))
     .sort(
       (a, b) =>
         Date.parse(String(b.updatedAt || b.createdAt || 0)) -
@@ -350,9 +378,9 @@ export function withBlockedReasons(
 ): PendingApproval[] {
   const reasons = new Map<string, BlockedReason[]>();
   for (const run of runs) {
-    const agentEvent = lastOfStage(run, "agent");
-    if (agentEvent?.status !== "waiting") continue;
-    const blocked = blockedFrom(agentEvent);
+    const state = runState(run);
+    if (state.phase !== "needs-approval") continue;
+    const blocked = state.blocked;
     if (!blocked.length) continue;
     const jobId = planJobIdFrom(run);
     if (jobId) reasons.set(jobId, blocked);
