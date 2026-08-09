@@ -133,6 +133,57 @@ config PENDANT_BOOT_AGENT_JOB_ID
 	  When non-empty, download the Mac-generated pendantSpeech payload from
 	  this relay job after LTE initialization. Leave empty in production.
 
+config PENDANT_LOCAL_COMMANDS
+	bool "Recognize a few enrolled command words on-device before the uplink"
+	default n
+	help
+	  There is still no always-on listening: the button remains the only
+	  thing that starts the microphone. What this changes is the first
+	  ~900 ms after a press.
+
+	  Today every press is a cellular event — the utterance goes to the
+	  relay, a model reads it, and the answer streams back as audio. For
+	  "start the timer" or "stop" that is a data-centre round trip to do
+	  something the reflex layer already does with the radio off.
+
+	  With this option the captured audio is matched against up to four
+	  enrolled keyword templates BEFORE the WebSocket is allowed to
+	  transmit. A confident match fires the recipe bound to that keyword
+	  ({"trigger":{"type":"voice","voice":N}}) and the modem sends
+	  nothing at all. Anything else — a sentence, an unenrolled word, a
+	  match without a clear margin — opens the uplink and proceeds
+	  exactly as today, with every Opus packet encoded during the
+	  decision still sitting in the FIFO, so no audio is lost.
+
+	  Two things this buys that a cloud round trip cannot: the LTE
+	  session for a local command never happens, and the command still
+	  works with no signal at all.
+
+	  Costs ~3.7 kB of static RAM (see the budget comment at the top of
+	  pendant_local.c) and adds a bounded delay before the uplink opens
+	  — at most the decision window (LOCAL_DECIDE_FRAMES, ~900 ms),
+	  usually much less because a long utterance is ruled out as soon as
+	  it outruns a command word.
+
+	  Default off. Recognition failure modes are asymmetric: a missed
+	  local match merely costs what today costs, but a wrong match fires
+	  the wrong recipe silently. Nothing is enrolled until the owner
+	  enrolls it, so enabling this alone changes no behaviour.
+
+config PENDANT_LOCAL_TRACE
+	bool "Print the local matcher's distances and costs after every press"
+	depends on PENDANT_LOCAL_COMMANDS
+	default y
+	help
+	  One line per press with the segment length, the winning and
+	  runner-up DTW distances, the measured feature and match cost in
+	  microseconds, and the thresholds in force.
+
+	  Leave this on until the thresholds have been set from real
+	  presses: they ship as geometry-derived guesses, not as values
+	  measured against the owner's voice, and these two lines are the
+	  only way to move them honestly.
+
 config PENDANT_REFLEX_SELFTEST
 	bool "Debug: install a reflex test recipe at boot when the card has none"
 	default n

@@ -125,6 +125,21 @@ bool pendant_reflex_gesture_armed(void);
 void pendant_reflex_fire_gesture(void);
 
 /*
+ * True when some armed recipe is bound to enrolled keyword `slot`.  The
+ * capture path asks this BEFORE it suppresses the uplink: a word that
+ * matches a slot no recipe wants is not a local command, and letting it
+ * swallow the press would leave the owner talking to nothing.
+ */
+bool pendant_reflex_voice_armed(uint8_t slot);
+
+/*
+ * Run every armed recipe bound to `slot` and return how many fired.  This
+ * is the whole offline path: no radio, no relay, no reply audio — the
+ * device answers with the chime, the motor and the LED it already has.
+ */
+unsigned int pendant_reflex_fire_voice(uint8_t slot);
+
+/*
  * SWD debug hooks (same species as pendant_remote_press): plain volatile
  * words a J-Link writes; tick() consumes them on the main thread.
  *   w4 <&pendant_reflex_reload> 1     re-read /SD:/recipes.json
