@@ -278,6 +278,14 @@ export function principalHasScopes(principal, ...requiredScopes) {
  *   - Removing a scope from a role does nothing either. Every token issued
  *     before the removal keeps the privilege permanently.
  *
+ * THE CONSEQUENCE OF THE SECOND ONE IS EASY TO UNDERSTATE, so it is written
+ * out here rather than left to be inferred: revoking the credential is not
+ * the FASTEST way to withdraw a capability from a device, it is the ONLY way.
+ * There is no other mechanism anywhere in this system. Editing DEVICE_SCOPES
+ * withdraws nothing from anything already paired. Any UI that offers revoke
+ * is therefore not a convenience for a lost-phone story, it is the sole
+ * capability-withdrawal primitive, and it deserves the care that implies.
+ *
  * This function does NOT fix that; it makes the first case say so. Deriving
  * effective scopes from the live table at authentication time is the real fix
  * and is a deliberate security decision, not a bug fix: it would silently
