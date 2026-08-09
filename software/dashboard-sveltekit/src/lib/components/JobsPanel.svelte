@@ -11,6 +11,7 @@
   } from "$lib/dataSource";
   import {
     formatWhen,
+    isAwaitingApproval,
     isRunningStatus,
     sourceMeta,
     statusLabel,
@@ -87,11 +88,27 @@
       ? jobs
       : jobs.filter((job) => job.source === sourceFilter),
   );
+  /*
+   * Sorted by who needs a human, not by recency: a plan the agent parked has
+   * stopped, but filing it under "Finished" reads as done when the opposite is
+   * true. It gets its own group, first.
+   */
+  const needsYou = $derived(
+    visible.filter((job) => isAwaitingApproval(job.status)).sort(byRecency),
+  );
   const running = $derived(
-    visible.filter((job) => isRunningStatus(job.status)).sort(byRecency),
+    visible
+      .filter(
+        (job) => isRunningStatus(job.status) && !isAwaitingApproval(job.status),
+      )
+      .sort(byRecency),
   );
   const finished = $derived(
-    visible.filter((job) => !isRunningStatus(job.status)).sort(byRecency),
+    visible
+      .filter(
+        (job) => !isRunningStatus(job.status) && !isAwaitingApproval(job.status),
+      )
+      .sort(byRecency),
   );
   const scheduled = $derived(
     [...routines].sort(
@@ -104,7 +121,9 @@
   );
   const baseJob = $derived(
     visible.find((job) => `job:${job.id}` === selectedId) ??
-      (selectedRoutine ? null : (running[0] ?? finished[0] ?? null)),
+      (selectedRoutine
+        ? null
+        : (needsYou[0] ?? running[0] ?? finished[0] ?? null)),
   );
   // A lazily loaded detail supersedes the list row it was built from.
   const activeJob = $derived(baseJob ? (details[baseJob.id] ?? baseJob) : null);
@@ -168,6 +187,32 @@
 
   <div class="jobs-split">
     <div class="jobs-rail">
+      {#if needsYou.length}
+        <div class="job-group">
+          <p class="job-group-head">Needs you <span>{needsYou.length}</span></p>
+          {#each needsYou as job}
+            <button
+              type="button"
+              class="history-main {`job:${job.id}` === selectedId ||
+              job.id === activeJob?.id
+                ? 'selected'
+                : ''}"
+              onclick={() => (selectedId = `job:${job.id}`)}
+              aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
+                .label} · ${statusLabel(job.status)}`}
+            >
+              <strong>{truncate(job.command || "Job", 46)}</strong>
+              <small
+                ><i class="run-dot {statusTone(job.status)}" aria-hidden="true"
+                ></i>{sourceMeta(job.source).label} · {statusLabel(job.status)} · {formatWhen(
+                  job.updatedAt || job.createdAt,
+                )}</small
+              >
+            </button>
+          {/each}
+        </div>
+      {/if}
+
       <div class="job-group">
         <p class="job-group-head">Running <span>{running.length}</span></p>
         {#each running as job}
