@@ -36,9 +36,19 @@ const bundledOnlyModules = [
   'approvals.js',
   'brain.js',
   'command-console.js',
+  'console-window.js',
   'execution-status.js',
   'relay-peer.js',
+  'voice-input.js',
 ]
+
+/*
+ * console.html is a NEW shipped file (the pop-out console; it re-uses the
+ * bundled popup.js, so it adds no JS entry). The Safari .pbxproj references
+ * resources file-by-file and does not know it yet — re-run the
+ * safari-web-extension-converter step in the README after packaging, or the
+ * Safari build ships without the pop-out page while Chrome carries it.
+ */
 
 for (const platformDir of [chromeDir, safariDir]) {
   for (const [entry, globalName] of entryPoints) {
