@@ -383,17 +383,27 @@ export function createOutwardGuard() {
  * Honesty at completion: the verdict comes from the ledger, not the model.
  * ===================================================================== */
 
+/*
+ * Navigation-class commands are 'act' for GATING (they do change which page
+ * is in front) but RECON for honesty: a run that only opened and read pages
+ * has changed nothing on any of them, and must say so. This set is what
+ * keeps "opened the page" out of the "did the thing" claim.
+ */
+const NAVIGATION_COMMANDS = new Set(['navigate', 'activate_tab'])
+
 /** What a finished run actually did, counted from its steps. */
 export function summarizeEffects(steps = []) {
-  const counts = { read: 0, act: 0, outward: 0, failed: 0 }
+  const counts = { read: 0, opened: 0, act: 0, outward: 0, failed: 0 }
   for (const step of steps) {
     if (step?.ok === false) {
       counts.failed += 1
       continue
     }
     if (step?.effect === EFFECT_OUTWARD) counts.outward += 1
-    else if (step?.effect === EFFECT_ACT) counts.act += 1
-    else counts.read += 1
+    else if (step?.effect === EFFECT_ACT) {
+      if (NAVIGATION_COMMANDS.has(String(step?.tool ?? ''))) counts.opened += 1
+      else counts.act += 1
+    } else counts.read += 1
   }
   return counts
 }
@@ -469,7 +479,8 @@ export function honestVerdict({ command, steps = [], parked = [], response = '' 
 
 function describeCounts(effects) {
   return (
-    `${effects.read} read, ${effects.act} page interaction(s), ` +
+    `${effects.read} read, ${effects.opened} page(s) opened, ` +
+    `${effects.act} page interaction(s), ` +
     `${effects.outward} approved outward step(s), ${effects.failed} failed`
   )
 }

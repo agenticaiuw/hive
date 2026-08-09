@@ -2065,11 +2065,19 @@ async function executePlanLocally({ id, command, steps, config, brainNote = '' }
   const parked = []
   for (const step of steps) {
     if (step.effect === EFFECT_OUTWARD) {
+      /* The park point is the stop point. Steps after the outward one do NOT
+       * run on approval — approving runs exactly the parked step — and that
+       * is said out loud rather than discovered. */
+      const remaining = steps.length - step.index - 1
       parked.push(
         await journal.parkStep(id, {
           call: step.localCall,
           effect: step.effect,
-          reason: step.effectReason,
+          reason:
+            step.effectReason +
+            (remaining
+              ? ` (${remaining} later plan step(s) will not run either way — re-run the command after deciding.)`
+              : ''),
           targetName: step.label,
         }),
       )

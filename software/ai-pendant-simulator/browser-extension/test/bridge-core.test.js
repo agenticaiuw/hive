@@ -51,6 +51,40 @@ test('navigation permits web URLs and rejects privileged schemes', () => {
   assert.equal(originPattern('https://example.com/path'), 'https://example.com/*')
 })
 
+test('activate_tab needs a target, and its fallback URL passes the same gate', () => {
+  assert.deepEqual(
+    validateCommand({
+      action: { type: 'activate_tab', params: { urlContains: 'interactivebrokers' } },
+    }),
+    { type: 'activate_tab', params: { urlContains: 'interactivebrokers' } },
+  )
+  assert.deepEqual(
+    validateCommand({
+      action: {
+        type: 'activate_tab',
+        params: { url: 'https://example.com/portal', urlContains: 'example.com' },
+      },
+    }),
+    {
+      type: 'activate_tab',
+      params: { url: 'https://example.com/portal', urlContains: 'example.com' },
+    },
+  )
+  assert.throws(
+    () => validateCommand({ action: { type: 'activate_tab', params: {} } }),
+    /urlContains or url/,
+  )
+  /* The find-or-open fallback is still a navigation: privileged schemes are
+   * refused exactly as they are for navigate. */
+  assert.throws(
+    () =>
+      validateCommand({
+        action: { type: 'activate_tab', params: { url: 'file:///etc/passwd' } },
+      }),
+    /Only http/,
+  )
+})
+
 test('commands are validated before touching a tab', () => {
   assert.deepEqual(
     validateCommand({

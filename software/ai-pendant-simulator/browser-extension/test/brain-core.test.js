@@ -112,7 +112,7 @@ test('a not-ready brain never touches the model or the tools', async () => {
 })
 
 /* ------------------------------------------------------------------ *
- * Tool catalog: exactly the 11 page commands, never a 12th.
+ * Tool catalog: exactly the executable command set, never one more.
  * ------------------------------------------------------------------ */
 
 test('the tool catalog covers exactly the executable command set', () => {
@@ -120,6 +120,9 @@ test('the tool catalog covers exactly the executable command set', () => {
   for (const tool of BROWSER_TOOLS) {
     assert.ok(COMMAND_TYPES.has(tool.name), `${tool.name} must be executable`)
   }
+  /* The find-or-open verb the affinity work added: "open ibkr" focuses the
+   * signed-in tab instead of clobbering the active one. */
+  assert.ok(COMMAND_TYPES.has('activate_tab'))
   /* Three the owner sets, one the extension writes for itself. BRAIN_DEFAULTS
    * stays the owner-facing three: a cooldown is state, not configuration, and
    * listing it as a default would invite someone to set it by hand. */
@@ -222,6 +225,39 @@ test('terminal states ignore further events', () => {
   assert.equal(state.status, 'handoff')
   const after = reduceBrain(state, { type: 'model_reply', text: '{"done":true}' })
   assert.equal(after, state)
+})
+
+/* ------------------------------------------------------------------ *
+ * Parking: the outward gate's terminal state. NOT a handoff — a handoff
+ * would send the command to the Mac planner, which could then perform the
+ * very step this loop refused to run unattended.
+ * ------------------------------------------------------------------ */
+
+test('a park while acting preserves the refused call and ends the run', () => {
+  let state = createBrainState({ command: 'cancel my plan' })
+  state = reduceBrain(state, {
+    type: 'model_reply',
+    text: '{"tool":"click","params":{"ref":"e1"}}',
+  })
+  assert.equal(state.status, 'acting')
+
+  state = reduceBrain(state, { type: 'park', reason: 'commit point' })
+  assert.equal(state.status, 'parked')
+  assert.deepEqual(state.parkedCall, { type: 'click', params: { ref: 'e1' } })
+  assert.equal(state.parkedReason, 'commit point')
+  assert.equal(state.pendingCall, null)
+
+  /* Terminal: nothing moves a parked run, and its summary says what waits. */
+  const after = reduceBrain(state, { type: 'model_reply', text: '{"done":true}' })
+  assert.equal(after, state)
+  assert.match(summarizeBrainRun(state), /parked it for approval/)
+})
+
+test('a park outside acting is ignored — there is nothing to park', () => {
+  const thinking = createBrainState({ command: 'x' })
+  const after = reduceBrain(thinking, { type: 'park', reason: 'nope' })
+  assert.equal(after.status, 'thinking')
+  assert.equal(after.parkedCall, null)
 })
 
 /* ------------------------------------------------------------------ *
