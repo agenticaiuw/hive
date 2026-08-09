@@ -40,8 +40,6 @@ target/
 # Zephyr / Nordic
 build/
 build-*/
-!software/airpods-control/build/
-!software/airpods-control/build/sites-vite-plugin.ts
 
 # PlatformIO / Python
 .pio/

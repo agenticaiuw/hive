@@ -9,11 +9,8 @@ relay, and Bluetooth audio bridge.
 - `firmware/esp32-airpods-bridge` — HUZZAH32 Bluetooth A2DP audio bridge
 - `software/ai-pendant-simulator` — local Mac agent, cloud relay, and simulator
 - `software/dashboard-sveltekit` — Mission Control dashboard (Cloudflare Worker)
-- `software/airpods-control` — local Bluetooth control surface
 - `hardware` — datasheets, electrical design, and KiCad sources
-- `docs` — build guides, BOM, plan, and architecture images
-- `diagnostics` — captured audio used for debugging
-- `experiments` — standalone experiments
+- `docs` — build guides and architecture notes
 
 ## Local agent
 
@@ -43,7 +40,3 @@ firmware/nrf9160/scripts/flash.sh               # nrfutil → J-Link 960036581
 ```
 
 ESP32 bridge: `firmware/esp32-airpods-bridge/flash.sh` (PlatformIO in `.venv`).
-## Original working trees
-
-The previous folders under `/Users/you/Claude/Projects` are retained as
-backups until this consolidated tree is fully verified.
