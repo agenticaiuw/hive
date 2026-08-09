@@ -510,14 +510,20 @@ async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS)
 
     if (!response.ok) {
       let detail = ''
+      let code = ''
       try {
         const payload = await response.json()
         detail = payload.error || payload.message || ''
+        // The relay names its refusals (`not_your_inbox`, `scope_denied`, …).
+        // Carry the name so describeRelayFailure can sharpen the message; it
+        // still keys on status first, so a code-less body loses nothing.
+        code = typeof payload.code === 'string' ? payload.code : ''
       } catch {
         detail = await response.text().catch(() => '')
       }
       const error = new Error(detail || `The relay returned HTTP ${response.status}.`)
       error.status = response.status
+      if (code) error.code = code
       throw error
     }
 
@@ -816,8 +822,11 @@ async function relayWindow(revision) {
         ...report,
       })
     } catch (error) {
-      /* status first, code second: the ownership 403 carries no `code` at
-       * all, so a code-keyed branch would fall through to "unknown". */
+      /* status first, code second: describeRelayFailure keys on status and
+       * lets a `code` sharpen it — since relay 41dbc4b the ownership 403
+       * sends `not_your_inbox`, which relayFetch forwards. A code-less
+       * refusal (older relay, future route) still lands on the precise
+       * generic fix rather than "unknown". */
       const failure = describeRelayFailure(error)
       await updateRelayStatus({
         ...failure,
