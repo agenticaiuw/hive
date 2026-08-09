@@ -41,6 +41,12 @@ import {
   RELAY_API_KEY,
 } from './config.js'
 import {
+  authenticateRelayRequest,
+  principalHasScopes,
+  principalOwnsDevice,
+} from './deviceAuth.js'
+import { SOCKET_SCOPES } from './relayScopes.js'
+import {
   announceDoneFrame,
   announcementDeliveryOutcome,
   announceOpenFrame,
@@ -104,20 +110,62 @@ export function isPendantConverseRequest(request, url) {
   )
 }
 
+/*
+ * Authenticate the duplex voice socket.
+ *
+ * This used to be `auth !== 'Bearer ' + RELAY_API_KEY` — an exact match on the
+ * ADMIN key and nothing else. That single line made the scoped scheme
+ * unusable on the pendant: a paired nrf_pendant token was refused here, so the
+ * only credential that could open the pendant's main voice path was the one
+ * that also opens /v1/ops/*. Now it runs the same authenticateRelayRequest the
+ * Express routes and the bridge doorbell run, and demands the scopes this
+ * socket actually exercises — it uploads captured audio and streams the spoken
+ * reply back, i.e. the socket form of /v1/pendant/command plus the speech
+ * read. A device principal must also own the X-Device-Id it claims, so one
+ * paired pendant cannot open a conversation as another.
+ *
+ * The admin key still passes (scopes '*'), which is what keeps today's
+ * unmigrated firmware working while the token is provisioned.
+ */
+async function authenticateConverse(request, deviceId) {
+  const auth = await authenticateRelayRequest({
+    authorization: request.headers.get('Authorization') || '',
+    adminApiKey: RELAY_API_KEY,
+    credentialStore: await getStore(),
+  })
+  if (!auth.ok) {
+    return { ok: false, status: auth.status || 401 }
+  }
+  if (
+    !principalHasScopes(auth.principal, ...SOCKET_SCOPES['/v1/pendant/converse'])
+  ) {
+    return { ok: false, status: 403 }
+  }
+  if (!principalOwnsDevice(auth.principal, deviceId)) {
+    return { ok: false, status: 403 }
+  }
+  return { ok: true, principal: auth.principal }
+}
+
 export async function handlePendantConverse(request, context) {
-  const auth = String(request.headers.get('Authorization') || '')
-  if (!RELAY_API_KEY || auth !== `Bearer ${RELAY_API_KEY}`) {
-    return new Response('Unauthorized', { status: 401 })
+  const deviceIdHeader =
+    String(request.headers.get('X-Device-Id') || '').trim() ||
+    'nrf9160-pendant'
+
+  const authorized = await authenticateConverse(request, deviceIdHeader)
+  if (!authorized.ok) {
+    return new Response(
+      authorized.status === 403
+        ? 'Blocked for safety: this device may not open a pendant conversation.'
+        : 'Unauthorized',
+      { status: authorized.status },
+    )
   }
 
   const pair = new WebSocketPair()
   const [client, server] = Object.values(pair)
   server.accept()
   if ('binaryType' in server) server.binaryType = 'arraybuffer'
-
-  const deviceIdHeader =
-    String(request.headers.get('X-Device-Id') || '').trim() ||
-    'nrf9160-pendant'
 
   /* ---- per-socket state; one conversation at a time, sequential reuse ---- */
   let convo = null

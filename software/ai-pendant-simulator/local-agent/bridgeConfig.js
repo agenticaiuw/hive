@@ -2,6 +2,17 @@ import '../../load-pendant-env.mjs'
 
 export const RELAY_URL = process.env.RELAY_URL || 'http://localhost:8787'
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''
+/*
+ * The bridge's own scoped credential (role mac_bridge), minted once by
+ * scripts/pendant-credentials.mjs. Either the token itself, or a path to a
+ * file holding it — a file keeps the secret out of the process environment,
+ * which is what childEnv.js strips from spawned tools. Empty means "not
+ * commissioned yet", and bridge.js falls back to RELAY_API_KEY with a single
+ * loud line. Only the STRINGS are read here; the precedence and the file read
+ * live in relayCredential.js so they are testable without env mutation.
+ */
+export const RELAY_DEVICE_TOKEN = process.env.RELAY_DEVICE_TOKEN || ''
+export const RELAY_DEVICE_TOKEN_FILE = process.env.RELAY_DEVICE_TOKEN_FILE || ''
 export const PAIRING_CODE = process.env.PAIRING_CODE || ''
 export const PENDANT_ACCOUNT_ID =
   process.env.PENDANT_ACCOUNT_ID || 'single-owner'

@@ -87,6 +87,30 @@ static void lte_attach_probe_fn(struct k_work *work)
 #define PENDANT_EVENT_PATH_SUFFIX "/events"
 #define PENDANT_DEVICE_ID "nrf9160-pendant"
 
+/*
+ * The bearer this pendant presents to the relay.
+ *
+ * Until now this was CONFIG_PENDANT_RELAY_API_KEY everywhere: the SHARED ADMIN
+ * key, principal kind 'admin', scopes ['*'] — the same string the Mac bridge
+ * used and the same one in the repo-root .env. A pendant on the owner's chest
+ * carried a credential that also opens /v1/ops/*, and it could not be revoked
+ * without taking every other node down with it.
+ *
+ * CONFIG_PENDANT_RELAY_DEVICE_TOKEN is this device's own pdt_<id>.<secret>,
+ * paired once with role nrf_pendant. It wins whenever it is non-empty; the
+ * admin key stays as the fallback so an image built before commissioning still
+ * talks to the relay. Both are compile-time string constants, so this costs a
+ * load and a branch, never an allocation.
+ *
+ * The relay accepts either today (see cloud-relay/deviceAuth.js), including on
+ * the /v1/pendant/converse socket, which until this change compared against
+ * the admin key alone and would have refused a device token outright.
+ */
+#define PENDANT_RELAY_BEARER                                                   \
+	(CONFIG_PENDANT_RELAY_DEVICE_TOKEN[0] != '\0'                          \
+		 ? CONFIG_PENDANT_RELAY_DEVICE_TOKEN                           \
+		 : CONFIG_PENDANT_RELAY_API_KEY)
+
 #define TLS_SECURITY_TAG 193
 #define TLS_VERIFY_REQUIRED 2
 /* Sized for JSON status + short transcript (not multi-MB bodies). */
@@ -666,7 +690,7 @@ static int send_http_post_header(int fd, const char *path,
 		"Content-Type: %s\r\n"
 		"Content-Length: %lu\r\n"
 		"Connection: close\r\n\r\n",
-		path, RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
+		path, RELAY_HOSTNAME, PENDANT_RELAY_BEARER,
 		content_type, (unsigned long)content_length);
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
@@ -719,9 +743,15 @@ const char *pendant_cloud_hostname(void)
 	return RELAY_HOSTNAME;
 }
 
+/*
+ * Named for the admin key it used to return; it now returns whatever bearer
+ * this build authenticates with, device token first. pendant_ws.c puts it on
+ * the /v1/pendant/converse upgrade — the one relay path that, before this
+ * change, accepted the admin key and nothing else.
+ */
 const char *pendant_cloud_api_key(void)
 {
-	return CONFIG_PENDANT_RELAY_API_KEY;
+	return PENDANT_RELAY_BEARER;
 }
 
 void pendant_cloud_copy_device_time(char *out, size_t out_size)
@@ -766,7 +796,7 @@ static int send_pendant_command_chunked_header(int fd, uint32_t sample_rate)
 		 * to length-prefixed Opus packets down this same connection. */
 		"X-Reply-Stream: opus\r\n"
 		"Connection: close\r\n\r\n",
-		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
+		RELAY_HOSTNAME, PENDANT_RELAY_BEARER,
 		PENDANT_DEVICE_ID, sample_rate, device_time_line);
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
@@ -794,7 +824,7 @@ static int send_pendant_command_pcm_header(int fd, size_t content_length,
 		"X-Audio-Bits: 16\r\n"
 		"X-Pcm-Bytes: %lu\r\n"
 		"Connection: close\r\n\r\n",
-		RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY,
+		RELAY_HOSTNAME, PENDANT_RELAY_BEARER,
 		(unsigned long)content_length, PENDANT_DEVICE_ID, sample_rate,
 		(unsigned long)content_length);
 
@@ -938,7 +968,7 @@ static int send_http_get_header(int fd, const char *path)
 		"Authorization: Bearer %s\r\n"
 		"Accept: audio/ogg, audio/pcm, application/json\r\n"
 		"Connection: close\r\n\r\n",
-		path, RELAY_HOSTNAME, CONFIG_PENDANT_RELAY_API_KEY);
+		path, RELAY_HOSTNAME, PENDANT_RELAY_BEARER);
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
 		return -EOVERFLOW;
@@ -1939,11 +1969,21 @@ int pendant_cloud_init(void)
 	if (cloud_initialized) {
 		return 0;
 	}
-	if (CONFIG_PENDANT_RELAY_API_KEY[0] == '\0') {
-		printk("PENDANT_RELAY_API_KEY is empty\n");
+	if (PENDANT_RELAY_BEARER[0] == '\0') {
+		printk("No relay credential: set PENDANT_RELAY_DEVICE_TOKEN "
+		       "(preferred) or PENDANT_RELAY_API_KEY in secrets.conf\n");
 		pendant_cloud_init_result = -EACCES;
 		return pendant_cloud_init_result;
 	}
+	/*
+	 * Says WHICH credential this image carries, without printing either.
+	 * A pendant still on the shared admin key is otherwise indistinguishable
+	 * from a migrated one in every log line it will ever emit.
+	 */
+	printk("Relay credential: %s\n",
+	       CONFIG_PENDANT_RELAY_DEVICE_TOKEN[0] != '\0'
+		       ? "scoped device token (nrf_pendant)"
+		       : "SHARED ADMIN KEY - pair a device token and rebuild");
 
 	printk("Initializing nRF9160 modem\n");
 	error = nrf_modem_lib_init();
