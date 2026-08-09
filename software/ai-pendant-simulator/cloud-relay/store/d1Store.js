@@ -649,31 +649,44 @@ export function createD1Store(db) {
       return parseRecord(row)
     },
 
+    /* `type` accepts one type or an array of them (the history feed pages
+     * plan jobs and browser task records through one cursor). Same contract
+     * as memoryStore. */
     async listJobs({ type = null, limit = 40, before = null, search = null } = {}) {
       const safeLimit = normalizeJobListLimit(limit)
       const cursor = normalizeJobCursor(before)
       const needle = normalizeJobSearch(search)
+      const types = Array.isArray(type) ? type.filter(Boolean) : null
 
       // Keep the legacy statements byte-identical when no cursor or search is
       // supplied: every existing caller keeps its exact query plan, and the
       // json_extract() path is only reached by the new history routes.
       if (!cursor && !needle) {
-        const query = type
+        const query = types
           ? db
               .prepare(
                 `SELECT data FROM relay_jobs
+               WHERE type IN (${types.map((_, index) => `?${index + 1}`).join(', ')})
+               ORDER BY created_at DESC, job_id DESC
+               LIMIT ?${types.length + 1}`,
+              )
+              .bind(...types, safeLimit)
+          : type
+            ? db
+                .prepare(
+                  `SELECT data FROM relay_jobs
                WHERE type = ?1
                ORDER BY created_at DESC
                LIMIT ?2`,
-              )
-              .bind(type, safeLimit)
-          : db
-              .prepare(
-                `SELECT data FROM relay_jobs
+                )
+                .bind(type, safeLimit)
+            : db
+                .prepare(
+                  `SELECT data FROM relay_jobs
                ORDER BY created_at DESC
                LIMIT ?1`,
-              )
-              .bind(safeLimit)
+                )
+                .bind(safeLimit)
         const { results = [] } = await query.all()
         return results.map(parseRecord).filter(Boolean)
       }
@@ -682,7 +695,14 @@ export function createD1Store(db) {
       const bindings = []
       const next = () => `?${bindings.length + 1}`
 
-      if (type) {
+      if (types) {
+        const placeholders = types.map((value) => {
+          const placeholder = next()
+          bindings.push(value)
+          return placeholder
+        })
+        conditions.push(`type IN (${placeholders.join(', ')})`)
+      } else if (type) {
         conditions.push(`type = ${next()}`)
         bindings.push(type)
       }
@@ -820,10 +840,14 @@ export function createD1Store(db) {
       for (let attempt = 0; attempt < 40; attempt += 1) {
         // Voice jobs preempt dashboard proxy work: a queued agent_proxy job
         // must never delay a pendant press behind its serial execution.
+        // 'browser_task' rows are records of work a browser node already
+        // executed (browserTaskHistory.js), excluded by TYPE and not merely
+        // by status: the Mac must never be able to claim or re-run one,
+        // whatever status a future writer stamps on it.
         const row = await db
           .prepare(
             `SELECT job_id, data FROM relay_jobs
-             WHERE status = 'queued'
+             WHERE status = 'queued' AND type <> 'browser_task'
              ORDER BY CASE WHEN type = 'agent_proxy' THEN 1 ELSE 0 END ASC,
                       created_at ASC
              LIMIT 1`,

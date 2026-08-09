@@ -252,12 +252,18 @@ export function createMemoryStore() {
       return jobs.get(jobId) ?? null
     },
 
+    /* `type` accepts one type or an array of them (the history feed pages
+     * plan jobs and browser task records through one cursor). Same contract
+     * as d1Store. */
     async listJobs({ type = null, limit = 40, before = null, search = null } = {}) {
       pruneExpiredJobs()
       const safeLimit = normalizeJobListLimit(limit)
       const cursor = normalizeJobCursor(before)
+      const types = Array.isArray(type) ? type.filter(Boolean) : null
       return [...jobs.values()]
-        .filter((job) => !type || job.type === type)
+        .filter((job) =>
+          types ? types.includes(job.type) : !type || job.type === type,
+        )
         .filter((job) => jobIsBeforeCursor(job, cursor))
         .filter((job) => jobMatchesSearch(job, search))
         .sort(compareJobsNewestFirst)
@@ -314,8 +320,12 @@ export function createMemoryStore() {
 
       for (let attempt = 0; attempt < 40; attempt += 1) {
         // Same priority rule as d1Store: voice jobs preempt agent_proxy work.
+        // 'browser_task' rows are records of work a browser node already
+        // executed (browserTaskHistory.js), excluded by TYPE and not merely by
+        // status: the Mac must never be able to claim or re-run one, whatever
+        // status a future writer stamps on it.
         const queued = [...jobs.values()]
-          .filter((job) => job.status === 'queued')
+          .filter((job) => job.status === 'queued' && job.type !== 'browser_task')
           .sort(
             (a, b) =>
               (a.type === 'agent_proxy' ? 1 : 0) -
