@@ -13,6 +13,7 @@
 
 import AppKit
 import Carbon.HIToolbox
+import ImageIO
 import WebKit
 import SwiftUI
 import Combine
@@ -865,8 +866,11 @@ struct Attachment: Identifiable {
     let id = UUID()
     let url: URL
     var name: String { url.lastPathComponent }
+    /// Extension hint only — used to pick the loading placeholder. The real
+    /// image/file decision is made by whether ImageIO can decode a thumbnail
+    /// (see AttachmentThumbnail), so a mislabeled file still resolves correctly.
     var isImage: Bool {
-        ["png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"]
+        ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "bmp"]
             .contains(url.pathExtension.lowercased())
     }
 }
@@ -898,6 +902,10 @@ final class FloatingCommandModel: ObservableObject {
     /// because presenting a file panel from an .accessory app needs activation-
     /// policy juggling and the panel as modal host — see presentFilePicker().
     var requestPickFiles: (() -> Void)?
+    /// Wired by the app delegate: open a large in-app preview (lightbox) of an
+    /// image attachment. Presented as another floating panel, never Preview.app,
+    /// so the user is never bounced out of their current (possibly fullscreen) Space.
+    var requestImagePreview: ((URL) -> Void)?
 
     private var approvalsTimer: Timer?
     private var panelVisible = false
@@ -1029,9 +1037,9 @@ final class FloatingCommandModel: ObservableObject {
         attachments.removeAll { $0.id == id }
     }
 
-    /// True while the NSOpenPanel is up — the delegate suppresses hide-on-blur
-    /// so choosing the FIRST attachment doesn't dismiss the HUD. Set by the
-    /// delegate around presentFilePicker().
+    /// True while the NSOpenPanel is up — the delegate suspends outside-click
+    /// dismissal so a click on the sheet (a non-pill window) doesn't yank the
+    /// host panel out from under it. Set by the delegate around presentFilePicker().
     var isFilePickerOpen = false
 
     func cancelListening() {
@@ -1310,6 +1318,223 @@ struct ApprovalRow: View {
     }
 }
 
+// MARK: - Attachment previews (image thumbnails + file cards)
+
+/// Downsamples file images to small thumbnails via ImageIO, so the composer can
+/// show a real preview without ever holding a full-resolution bitmap in a view.
+/// Returns nil for anything ImageIO can't decode as an image — those fall back
+/// to the file-card style. Results are cached by path so redraws don't re-decode.
+enum AttachmentThumbnail {
+    /// Longest-edge pixel budget: crisp for a ~60pt aspect-fill tile on Retina,
+    /// yet a tiny fraction of a full-frame photo (heavy downsample, low RAM).
+    static let maxPixel = 256
+    private static let cache = NSCache<NSString, NSImage>()
+
+    static func load(path: String) -> NSImage? {
+        let key = path as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        // CGImageSourceCreateThumbnailAtIndex reads only what it needs and hands
+        // back an already-downsampled CGImage — full-res pixels never enter RAM.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,   // honor EXIF orientation
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    /// A bigger, screen-sized copy for the click-to-enlarge preview — deliberately
+    /// NOT cached (it's transient and one at a time, freed when the lightbox
+    /// closes) and NOT stored under the row cache key, so the tiny row thumbnail
+    /// is never evicted for the large one.
+    static func loadSized(path: String, maxPixel: Int) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+}
+
+/// The click-to-enlarge preview card: the image aspect-fit at a comfortable size
+/// on a rounded dark backdrop. The hosting panel is sized exactly to this card
+/// (NOT the whole screen) and centered, so a click OUTSIDE the card is a real
+/// outside-click the monitors turn into "close both". A click ON the card, or
+/// Esc, closes just the preview — both wired by the hosting panel.
+struct ImagePreviewView: View {
+    let image: NSImage
+    let inset: CGFloat
+    let onClose: () -> Void
+    @State private var closeHover = false
+
+    var body: some View {
+        Image(nsImage: image)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)               // aspect-fit inside the card
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(inset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(red: 0.07, green: 0.08, blue: 0.10).opacity(0.97)))  // dim/rounded backdrop
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+            .contentShape(Rectangle())
+            .onTapGesture { onClose() }                   // click the card closes the preview
+            .overlay(closeButton, alignment: .topTrailing) // additive explicit × (lightbox style)
+            .onExitCommand { onClose() }                  // Esc closes (belt & braces)
+    }
+
+    /// ChatGPT/Claude-style lightbox close: a small dark circle with a white ×,
+    /// top-right. Additive — Esc and a backdrop click still close too. Closes
+    /// ONLY the preview; the pill and its attachments are untouched.
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(closeHover ? 1 : 0.85))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.black.opacity(closeHover ? 0.66 : 0.5)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .padding(10)
+        .onHover { closeHover = $0 }
+        .help("Close preview")
+    }
+}
+
+/// One attachment rendered ChatGPT/Claude-style: a rounded, aspect-filled image
+/// thumbnail when the file decodes as an image, otherwise a compact document
+/// card. Both carry a × badge to remove. The thumbnail decodes off the main
+/// thread and is cached, so staging a screenshot shows the capture, not a name.
+struct AttachmentTileView: View {
+    let attachment: Attachment
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    /// ~44–64pt square per the brief; 60 sits well beside the 56pt pill.
+    private let side: CGFloat = 60
+    private let corner: CGFloat = 12
+
+    @State private var thumbnail: NSImage?
+    @State private var didAttempt = false
+
+    var body: some View {
+        Group {
+            if let thumbnail {
+                imageTile(thumbnail)
+            } else if didAttempt || !attachment.isImage {
+                fileCard
+            } else {
+                loadingTile
+            }
+        }
+        .onAppear(perform: loadIfNeeded)
+    }
+
+    /// Decode once, off the main thread; the cache absorbs any repeat appearances.
+    private func loadIfNeeded() {
+        guard thumbnail == nil, !didAttempt else { return }
+        let path = attachment.url.path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = AttachmentThumbnail.load(path: path)
+            DispatchQueue.main.async {
+                self.thumbnail = image
+                self.didAttempt = true
+            }
+        }
+    }
+
+    private func imageTile(_ image: NSImage) -> some View {
+        // The tile is a button (click → enlarge). The × badge is overlaid on top
+        // as its own button, so it removes without triggering the preview.
+        Button(action: onOpen) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)          // aspect-fill, cropped square
+                .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .overlay(removeBadge, alignment: .topTrailing)
+        .help("Click to preview · \(attachment.name)")
+    }
+
+    private var fileCard: some View {
+        HStack(spacing: 8) {
+            Image(systemName: fileGlyph)
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(.white.opacity(0.78))
+            Text(attachment.name)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+                .truncationMode(.middle)               // filename truncated in the middle
+                .frame(maxWidth: 130, alignment: .leading)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: side)
+        // Same dark material as the pill so the card reads over ANY background
+        // the always-on-top HUD floats above (a bare fill would vanish on light).
+        .background(HUDMaterial(shape: RoundedRectangle(cornerRadius: corner, style: .continuous)))
+        .overlay(removeBadge, alignment: .topTrailing)
+        .help(attachment.url.path)
+    }
+
+    /// Neutral square shown only while an image-typed file is still decoding.
+    private var loadingTile: some View {
+        Image(systemName: "photo")
+            .font(.system(size: 18))
+            .foregroundStyle(.white.opacity(0.4))
+            .frame(width: side, height: side)
+            .background(HUDMaterial(shape: RoundedRectangle(cornerRadius: corner, style: .continuous)))
+            .overlay(removeBadge, alignment: .topTrailing)
+    }
+
+    /// × in the top-right corner. Palette rendering paints a white glyph on a
+    /// dark disc so it stays legible over any thumbnail.
+    private var removeBadge: some View {
+        Button(action: onRemove) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 16))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, Color.black.opacity(0.6))
+                .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
+        }
+        .buttonStyle(.plain)
+        .padding(3)
+        .help("Remove")
+    }
+
+    private var fileGlyph: String {
+        switch attachment.url.pathExtension.lowercased() {
+        case "pdf": return "doc.richtext"
+        case "txt", "md", "rtf", "csv", "json", "log": return "doc.text"
+        case "zip", "gz", "tar", "dmg": return "doc.zipper"
+        case "mp4", "mov", "m4v", "avi", "mkv": return "film"
+        case "mp3", "wav", "m4a", "aiff", "aac": return "waveform"
+        default: return "doc.fill"
+        }
+    }
+}
+
 struct FloatingCommandView: View {
     @ObservedObject var model: FloatingCommandModel
     @State private var dropTargeted = false
@@ -1322,13 +1547,17 @@ struct FloatingCommandView: View {
         return model.hotkeyLabel.map { "\(base)  ·  \($0)" } ?? base
     }
 
-    /// The aux card exists only when there is something to show.
+    /// The aux card exists only when there is something to show. Attachments
+    /// render in their own row ABOVE the pill now, so they no longer live here.
     private var hasAux: Bool {
-        !model.status.isEmpty || !model.attachments.isEmpty || !model.approvals.isEmpty
+        !model.status.isEmpty || !model.approvals.isEmpty
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
+            // Attachments preview ABOVE the input — thumbnails for images, cards
+            // for everything else — the way ChatGPT/Claude stage attachments.
+            if !model.attachments.isEmpty { attachmentsRow }
             pill
             if hasAux { auxCard }
         }
@@ -1411,13 +1640,8 @@ struct FloatingCommandView: View {
                     .lineLimit(2)
                     .padding(.vertical, 9)
             }
-            if !model.attachments.isEmpty {
-                if !model.status.isEmpty { hairline }
-                attachmentChips
-                    .padding(.vertical, 8)
-            }
             if !model.approvals.isEmpty {
-                if !model.status.isEmpty || !model.attachments.isEmpty { hairline }
+                if !model.status.isEmpty { hairline }
                 approvalsSection
             }
         }
@@ -1431,36 +1655,24 @@ struct FloatingCommandView: View {
         Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
     }
 
-    private var attachmentChips: some View {
+    /// The row of attachment previews that sits ABOVE the pill. Image files show
+    /// a real thumbnail; everything else shows a file card. It scrolls sideways
+    /// once several are staged, and each preview removes itself independently.
+    private var attachmentsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 ForEach(model.attachments) { attachment in
-                    HStack(spacing: 5) {
-                        Image(systemName: attachment.isImage ? "photo" : "doc")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.55))
-                        Text(attachment.name)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 150)
-                        Button { model.removeAttachment(attachment.id) } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white.opacity(0.45))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Remove")
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color.white.opacity(0.08)))
-                    .help(attachment.url.path)
+                    AttachmentTileView(
+                        attachment: attachment,
+                        onOpen: { model.requestImagePreview?(attachment.url) },
+                        onRemove: { model.removeAttachment(attachment.id) })
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
         }
-        .frame(height: 28)
+        .frame(height: 72)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Hidden entirely (not just empty) whenever the agent has no pending
@@ -1623,6 +1835,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var mainWindow: NSWindow?
     /// Always-on-top compact HUD: text + send while using other apps.
     private var floatPanel: CommandPanel?
+    /// The click-to-enlarge image preview, when open. A floating panel owned by
+    /// the app (not Preview.app). Counts as "inside" the HUD: clicking it never
+    /// hides the pill; clicking truly outside it closes both — see installClickMonitors.
+    private var previewPanel: CommandPanel?
+    /// Mouse-down monitors that drive outside-click dismissal for the
+    /// nonactivating pill. Installed while the pill is shown, removed when hidden.
+    private var globalClickMonitor: Any?
+    private var localClickMonitor: Any?
     private let model = AgentModel()
     private var cancellables = Set<AnyCancellable>()
 
@@ -1693,6 +1913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         floatModel.requestHide = { [weak self] in self?.hideFloatPanel() }
         floatModel.requestScreenshot = { [weak self] in self?.captureScreenshotAttachment() }
         floatModel.requestPickFiles = { [weak self] in self?.presentFilePicker() }
+        floatModel.requestImagePreview = { [weak self] url in self?.presentImagePreview(url: url) }
         floatModel.startApprovalPolling()
         floatModel.$approvals
             .map(\.count)
@@ -1725,6 +1946,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             DistributedNotificationCenter.default().addObserver(
                 self, selector: #selector(smokeScreenshot),
                 name: Notification.Name("com.aipendant.menubar.smoke.screenshot"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokePreviewImage),
+                name: Notification.Name("com.aipendant.menubar.smoke.previewImage"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeSnapshotPreview),
+                name: Notification.Name("com.aipendant.menubar.smoke.snapshotPreview"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeSetText),
+                name: Notification.Name("com.aipendant.menubar.smoke.setText"),
+                object: nil)
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(smokeOutsideClick),
+                name: Notification.Name("com.aipendant.menubar.smoke.outsideClick"),
                 object: nil)
             NSLog("AI Pendant: smoke mode — main window suppressed, HUD toggle listener active")
         }
@@ -2005,8 +2242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showFloatPanel() {
         if floatPanel == nil {
             // Borderless pill: no title bar, no traffic lights, no close box.
-            // Esc hides, the global hotkey toggles, blur hides (see
-            // windowDidResignKey), and the background stays draggable.
+            // Esc hides, the global hotkey toggles, an outside click hides (see
+            // installClickMonitors), and the background stays draggable.
             let panel = CommandPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 660, height: 56),
                 styleMask: [.borderless, .nonactivatingPanel],
@@ -2054,6 +2291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // (and its fullscreen Space) stays exactly where it was.
         floatPanel?.makeKeyAndOrderFront(nil)
         floatModel.panelDidShow()
+        installClickMonitors()   // outside-click dismissal is live only while shown
         focusCommandField()
     }
 
@@ -2069,23 +2307,127 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func hideFloatPanel() {
+        removeClickMonitors()
+        dismissImagePreview(refocusPill: false) // don't leave an orphan preview
         floatModel.cancelListening() // never keep the mic hot on a hidden panel
         floatPanel?.orderOut(nil)
         floatModel.panelDidHide()
+        // Deliberately NOT clearing text/attachments: the draft survives the hide
+        // and is restored on the next summon (send() is the only thing that clears).
     }
 
-    /// Dismissal rule: clicking elsewhere (panel resigns key) hides the HUD —
-    /// UNLESS pending approvals or staged attachments would vanish mid-read,
-    /// the mic is live, or the file picker owns key right now.
-    func windowDidResignKey(_ notification: Notification) {
-        guard (notification.object as? NSWindow) === floatPanel,
-              floatPanel?.isVisible == true else { return }
-        guard !floatModel.isFilePickerOpen else { return }
-        if floatModel.approvals.isEmpty,
-           floatModel.attachments.isEmpty,
-           !floatModel.listening {
-            hideFloatPanel()
+    /// Click-to-enlarge: show the image in a dim, borderless floating lightbox
+    /// owned by the app. Never NSWorkspace.open/Preview.app — that would yank the
+    /// user out of a fullscreen Space. The panel joins the active Space and floats
+    /// over fullscreen apps, exactly like the pill.
+    private func presentImagePreview(url: URL) {
+        guard let screen = floatPanel?.screen ?? NSScreen.main else { return }
+        let vis = screen.visibleFrame
+        // Comfortable max box (points); load a matching downsample — not the row's
+        // 256px thumbnail, and not the full-res original at full RAM cost.
+        let maxBox = CGSize(width: vis.width * 0.8, height: vis.height * 0.8)
+        let maxDim = Int(max(maxBox.width, maxBox.height) * screen.backingScaleFactor)
+        guard let image = AttachmentThumbnail.loadSized(path: url.path, maxPixel: min(maxDim, 4000)) else {
+            NSLog("AI Pendant: preview — could not decode %@", url.path)
+            return
         }
+        // Aspect-fit into the box (modest upscaling for tiny images), then wrap in
+        // the backdrop inset. The panel is EXACTLY this card, centered — so a click
+        // outside it is a genuine outside-click, not "on the preview".
+        let s = image.size
+        let scale = (s.width > 0 && s.height > 0)
+            ? min(maxBox.width / s.width, maxBox.height / s.height, 3) : 1
+        let inset: CGFloat = 14
+        let cardSize = CGSize(width: (s.width * scale + inset * 2).rounded(),
+                              height: (s.height * scale + inset * 2).rounded())
+
+        dismissImagePreview(refocusPill: false) // replace any existing preview
+
+        let panel = CommandPanel(
+            contentRect: NSRect(origin: .zero, size: cardSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.appearance = NSAppearance(named: .darkAqua)
+        // Esc while the preview is key closes ONLY the preview (it's key, so the
+        // pill's own Esc handler never sees the event); then the pill is re-keyed.
+        panel.onEscape = { [weak self] in self?.dismissImagePreview() }
+
+        let host = NSHostingView(rootView: ImagePreviewView(image: image, inset: inset) { [weak self] in
+            self?.dismissImagePreview()
+        })
+        host.frame = NSRect(origin: .zero, size: cardSize)
+        panel.contentView = host
+        panel.setFrame(NSRect(x: (vis.midX - cardSize.width / 2).rounded(),
+                              y: (vis.midY - cardSize.height / 2).rounded(),
+                              width: cardSize.width, height: cardSize.height),
+                       display: true)
+
+        previewPanel = panel                 // set BEFORE key so the monitors treat it as "inside"
+        panel.makeKeyAndOrderFront(nil)
+        NSLog("AI Pendant: image preview open — %@ card %.0fx%.0f",
+              url.lastPathComponent, cardSize.width, cardSize.height)
+    }
+
+    private func dismissImagePreview(refocusPill: Bool = true) {
+        guard previewPanel != nil else { return }
+        previewPanel?.orderOut(nil)
+        previewPanel = nil
+        // Hand key back to the pill so typing resumes right where it left off.
+        if refocusPill, let panel = floatPanel, panel.isVisible {
+            panel.makeKey()
+            focusCommandField()
+        }
+    }
+
+    // MARK: Outside-click dismissal (mouse-down monitors, not resignKey)
+
+    /// Any mouse-down outside the HUD hides the pill immediately — every time, no
+    /// exceptions for staged attachments, pending approvals or live dictation.
+    /// A .nonactivatingPanel can't rely on resignKey (it often keeps key while
+    /// another app is clicked), so we watch mouse-downs directly:
+    ///   • a GLOBAL mouse-down is a click in another app → always outside;
+    ///   • a LOCAL mouse-down is outside only if it hit a window that is NOT the
+    ///     pill (its aux card lives in the same window) or the image preview.
+    /// Suspended while the attach sheet is modal on the pill, so the picker
+    /// doesn't yank its own host window out from under itself.
+    private func installClickMonitors() {
+        guard globalClickMonitor == nil, localClickMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            self?.handleClickOutsideHUD()
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self else { return event }
+            let w = event.window
+            let insideHUD = (w === self.floatPanel) || (w === self.previewPanel)
+            if !insideHUD { self.handleClickOutsideHUD() }
+            return event   // never swallow — the pill's own buttons/field still work
+        }
+    }
+
+    private func removeClickMonitors() {
+        if let m = globalClickMonitor { NSEvent.removeMonitor(m); globalClickMonitor = nil }
+        if let m = localClickMonitor { NSEvent.removeMonitor(m); localClickMonitor = nil }
+    }
+
+    /// A click landed outside the HUD. Hiding is NON-DESTRUCTIVE: the draft (typed
+    /// text + staged attachments) stays in the model and returns on the next
+    /// summon; hideFloatPanel also stops any live dictation so nothing records
+    /// unseen (already-transcribed text is kept). A click truly outside while the
+    /// enlarged preview is open closes BOTH, because hideFloatPanel dismisses it.
+    private func handleClickOutsideHUD() {
+        guard floatPanel?.isVisible == true else { return }
+        guard !floatModel.isFilePickerOpen else { return }
+        hideFloatPanel()
     }
 
     /// Camera button: immediately screenshot the WHOLE display the pill is on,
@@ -2246,18 +2588,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
               let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_SNAPSHOT"],
               !path.isEmpty,
               let panel = floatPanel, panel.isVisible,
-              let view = panel.contentView,
-              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+              let view = panel.contentView else {
             NSLog("AI Pendant: smoke snapshot skipped (panel hidden or no path)")
             return
         }
+        // Dark ground: the pill floats over a dark HUD material in real life.
+        writeSnapshot(of: view, to: path, ground: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 1))
+        NSLog("AI Pendant: smoke snapshot written — panel %.0fx%.0f at (%.0f, %.0f)",
+              panel.frame.width, panel.frame.height,
+              panel.frame.origin.x, panel.frame.origin.y)
+    }
+
+    /// Smoke-harness only: open the lightbox for the first staged image through
+    /// the SAME path the thumbnail click uses, so the preview can be verified.
+    @objc private func smokePreviewImage() {
+        guard smokeMode,
+              let url = floatModel.attachments.first(where: { $0.isImage })?.url else {
+            NSLog("AI Pendant: smoke preview — no image attachment staged")
+            return
+        }
+        presentImagePreview(url: url)
+    }
+
+    /// Smoke-harness only: render the open lightbox to a PNG. Composited over a
+    /// LIGHT ground to prove the dim backdrop + image read even over a bright desktop.
+    @objc private func smokeSnapshotPreview() {
+        guard smokeMode,
+              let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_PREVIEW_SNAPSHOT"],
+              !path.isEmpty,
+              let panel = previewPanel, panel.isVisible,
+              let view = panel.contentView else {
+            NSLog("AI Pendant: smoke preview snapshot skipped (no lightbox or no path)")
+            return
+        }
+        writeSnapshot(of: view, to: path, ground: NSColor(calibratedWhite: 0.85, alpha: 1))
+        NSLog("AI Pendant: smoke preview snapshot written — panel %.0fx%.0f", panel.frame.width, panel.frame.height)
+    }
+
+    /// Renders a view offscreen (an app may always draw its own windows — no
+    /// Screen Recording TCC) over a solid ground, since the panels are clear and
+    /// the blur material does not composite offline.
+    private func writeSnapshot(of view: NSView, to path: String, ground: NSColor) {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
-        // Composite over a fixed dark ground so the (white) text is legible —
-        // the window itself is clear and cacheDisplay yields text over
-        // transparency (the blur material doesn't render offline anyway).
         let composed = NSImage(size: view.bounds.size)
         composed.lockFocus()
-        NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 1).setFill()
+        ground.setFill()
         NSRect(origin: .zero, size: view.bounds.size).fill()
         rep.draw(in: NSRect(origin: .zero, size: view.bounds.size))
         composed.unlockFocus()
@@ -2265,9 +2641,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
            let outRep = NSBitmapImageRep(data: tiff),
            let data = outRep.representation(using: .png, properties: [:]) {
             try? data.write(to: URL(fileURLWithPath: path))
-            NSLog("AI Pendant: smoke snapshot written — panel %.0fx%.0f at (%.0f, %.0f)",
-                  panel.frame.width, panel.frame.height,
-                  panel.frame.origin.x, panel.frame.origin.y)
         }
     }
 
@@ -2276,10 +2649,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// test can prove a returned URL becomes a chip and rides the /plan body.
     @objc private func smokeAttachTestFile() {
         guard smokeMode,
-              let path = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_ATTACH"],
-              !path.isEmpty else { return }
-        floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
+              let raw = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_ATTACH"],
+              !raw.isEmpty else { return }
+        // Newline-separates paths so one run can stage an image AND a non-image
+        // and prove both render styles in a single snapshot. One path → one file.
+        let urls = raw.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+        floatModel.addAttachments(urls: urls)
         NSLog("AI Pendant: smoke attach — attachments now %d", floatModel.attachments.count)
+    }
+
+    /// Smoke-harness only: set the draft text (so a hide→reshow can prove the
+    /// typed draft survives the hide, not just the attachments).
+    @objc private func smokeSetText() {
+        guard smokeMode else { return }
+        let t = ProcessInfo.processInfo.environment["AIPENDANT_SMOKE_TEXT"] ?? "Draft: compare the Q3 numbers"
+        floatModel.text = t
+        NSLog("AI Pendant: smoke set text — %@", t)
+    }
+
+    /// Smoke-harness only: run the EXACT outside-click handler the mouse monitors
+    /// call, so hide-on-outside-click, draft preservation, and close-both-with-
+    /// preview-open can be verified without synthesizing real desktop clicks.
+    @objc private func smokeOutsideClick() {
+        guard smokeMode else { return }
+        handleClickOutsideHUD()
+        NSLog("AI Pendant: smoke outside-click — after: visible=%d text=%d attach=%d preview=%d",
+              (floatPanel?.isVisible ?? false) ? 1 : 0,
+              floatModel.text.isEmpty ? 0 : 1,
+              floatModel.attachments.count,
+              previewPanel == nil ? 0 : 1)
     }
 
     /// Smoke-harness only: fire send() with the currently-staged attachments so
