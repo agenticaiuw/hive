@@ -180,6 +180,35 @@ function stubPhone(t, scenario) {
       '    return state["onscreen"] if option == kCGWindowListOptionOnScreenOnly else state["all"]',
       'def CGSessionCopyCurrentDictionary():',
       '    return {"CGSSessionScreenIsLocked": 1 if _state().get("macLocked") else 0}',
+      // Event constants and constructors. CGEventPostToPid records what was
+      // addressed to which process; CGEventPost records a GLOBAL post, so a
+      // test can tell the two apart — which is the whole safety distinction.
+      'kCGEventFlagMaskCommand = 1048576',
+      'kCGEventFlagMaskShift = 131072',
+      'kCGEventMouseMoved = 5',
+      'kCGEventLeftMouseDown = 1',
+      'kCGEventLeftMouseUp = 2',
+      'kCGEventLeftMouseDragged = 6',
+      'kCGMouseButtonLeft = 0',
+      'kCGHIDEventTap = 0',
+      'def _log(entry):',
+      '    with open(os.environ["PH_STUB_EVENTS"], "a") as f:',
+      '        f.write(json.dumps(entry) + "\\n")',
+      'def CGPointMake(x, y):',
+      '    return (x, y)',
+      'def CGEventCreateKeyboardEvent(source, keycode, down):',
+      '    return {"kind": "key", "keycode": keycode, "down": down, "flags": 0}',
+      'def CGEventCreateMouseEvent(source, kind, point, button):',
+      '    return {"kind": "mouse", "type": kind, "point": point}',
+      'def CGEventSetFlags(ev, flags):',
+      '    ev["flags"] = flags',
+      'def CGEventPostToPid(pid, ev):',
+      '    if ev.get("down") is False:',
+      '        return',
+      '    _log({"event": "targeted_" + ev["kind"], "pid": pid,',
+      '          "keycode": ev.get("keycode"), "flags": ev.get("flags")})',
+      'def CGEventPost(tap, ev):',
+      '    _log({"event": "global_" + ev["kind"]})',
       '',
     ].join('\n'),
   )
@@ -198,6 +227,8 @@ function stubPhone(t, scenario) {
       '        return self._info.get("bundleId")',
       '    def localizedName(self):',
       '        return self._info.get("name")',
+      '    def processIdentifier(self):',
+      '        return self._info.get("pid", 4242)',
       '    def activateWithOptions_(self, options):',
       '        with open(os.environ["PH_STUB_EVENTS"], "a") as f:',
       '            f.write(json.dumps({"event": "restore",',
@@ -213,7 +244,12 @@ function stubPhone(t, scenario) {
       'class NSRunningApplication:',
       '    @staticmethod',
       '    def runningApplicationsWithBundleIdentifier_(bundle_id):',
-      '        known = _state().get("runningBundles", [])',
+      '        state = _state()',
+      '        if bundle_id == "com.apple.ScreenContinuity":',
+      '            if not state.get("appRunning", True):',
+      '                return []',
+      '            return [_Front({"bundleId": bundle_id, "pid": 68343})]',
+      '        known = state.get("runningBundles", [])',
       '        return [_Front({"bundleId": bundle_id})] if bundle_id in known else []',
       '',
     ].join('\n'),
@@ -552,7 +588,7 @@ test('ios_status tells off-Space apart from unreachable', async (t) => {
   assert.equal(off.payload.result.state, 'off-space')
   assert.equal(off.payload.result.readable, true)
   assert.equal(off.payload.result.ready, false)
-  assert.equal(off.payload.result.writesNeedActivation, true)
+  assert.equal(off.payload.result.pointerWritesNeedActivation, true)
   assert.deepEqual(off.events, [], 'even the status probe must not activate')
 
   const onScreen = stubPhone(t, {
@@ -562,7 +598,7 @@ test('ios_status tells off-Space apart from unreachable', async (t) => {
   const ready = onScreen.run('ios_status', {})
   assert.equal(ready.payload.result.state, 'ready')
   assert.equal(ready.payload.result.ready, true)
-  assert.equal(ready.payload.result.writesNeedActivation, false)
+  assert.equal(ready.payload.result.pointerWritesNeedActivation, false)
 
   const gone = stubPhone(t, { all: [], onscreen: [] })
   assert.equal(gone.run('ios_status', {}).payload.result.state, 'no-window')
@@ -619,7 +655,7 @@ test('the refusal names the macOS setting that is actually responsible', async (
     activationWorks: false,
     spaceSwitch: 'off',
   })
-  const blocked = off.run('ios_home', {})
+  const blocked = off.run('ios_swipe', { direction: 'up', distance: 0.4 })
   assert.equal(blocked.payload.error.code, 'not-frontmost')
   assert.match(blocked.payload.error.message, /Desktop & Dock/)
   assert.match(blocked.payload.error.message, /switch to a Space/)
@@ -632,7 +668,7 @@ test('the refusal names the macOS setting that is actually responsible', async (
     activationWorks: false,
     spaceSwitch: 'on',
   })
-  const other = on.run('ios_home', {})
+  const other = on.run('ios_swipe', { direction: 'up', distance: 0.4 })
   assert.equal(other.payload.error.code, 'not-frontmost')
   assert.ok(!/Desktop & Dock/.test(other.payload.error.message))
   assert.match(other.payload.error.message, /Space you are working in/)
@@ -679,30 +715,90 @@ test('ios_status says up front whether a write could land at all', async (t) => 
   assert.equal(status.payload.result.state, 'off-space')
   assert.equal(status.payload.result.readable, true)
   assert.equal(status.payload.result.spaceSwitchOnActivate, false)
-  assert.equal(status.payload.result.writesPossible, false)
+  // Pointer actions cannot land, but ios_home still can — so "writes" as a
+  // single yes/no would be a lie in both directions.
+  assert.equal(status.payload.result.pointerWritesPossible, false)
+  assert.equal(status.payload.result.navigationWritesPossible, true)
+  assert.equal(status.payload.result.writesPossible, true)
+  assert.equal(status.payload.result.writeMechanism, 'targeted')
+  assert.deepEqual(status.payload.result.targetedActions, ['ios_home'])
 
   const fine = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'on' })
   const ok = fine.run('ios_status', {})
-  assert.equal(ok.payload.result.writesPossible, true)
+  assert.equal(ok.payload.result.pointerWritesPossible, true)
+  assert.equal(ok.payload.result.writeMechanism, 'activate-fallback')
 
   // And the owner-facing message names the fix rather than only the symptom.
   const stuckAgain = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'off' })
   const result = await runIosAction({ type: 'ios_status', params: {} })
   assert.equal(result.ok, true)
-  assert.equal(result.writesPossible, false)
+  assert.equal(result.pointerWritesPossible, false)
   assert.match(result.message, /Desktop & Dock/)
   assert.deepEqual(stuckAgain.readEvents(), [])
 })
 
+test('ios_home reaches the phone without activating or taking focus', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * The one action with a targeted route, measured on the real phone: cmd+1 is
+   * a menu key equivalent, so CGEventPostToPid delivers it while the window is
+   * on another Space. Nothing may be activated, and the event must be
+   * ADDRESSED (targeted_key), never broadcast (global_key) — a global post is
+   * what would land on the owner's desktop.
+   */
+  const phone = stubPhone(t, {
+    onscreen: [],
+    frontmost: false,
+    activationWorks: false, // would make the guarded path fail outright
+  })
+
+  const run = phone.run('ios_home', {})
+  assert.equal(run.status, 0, `ios_home should not need the window in front: ${JSON.stringify(run.payload)}`)
+  assert.equal(run.payload.result.mechanism, 'targeted')
+
+  const events = run.events
+  const targeted = events.filter((e) => e.event === 'targeted_key')
+  assert.equal(targeted.length, 1, 'exactly one addressed key event')
+  assert.equal(targeted[0].keycode, 18, 'cmd+1')
+  assert.equal(targeted[0].flags, 1048576, 'the command flag')
+  assert.ok(
+    !events.some((e) => e.event.startsWith('global_')),
+    'nothing may be posted globally on the targeted path',
+  )
+  assert.ok(
+    !events.some((e) => e.event === 'activate'),
+    'the targeted path must never activate the app',
+  )
+  assert.equal(run.payload.result.priorApp, undefined, 'no focus was taken, so none is owed back')
+})
+
+test('the targeted path still refuses when the world says no', async (t) => {
+  if (needsPython(t)) return
+  // Not activating is a mechanism change, not a licence. Paused, blocked and
+  // locked still stop it, because those are facts about the world.
+  const paused = stubPhone(t, {
+    onscreen: [], frontmost: false,
+    ocr: { 21250: ['iPhone in Use', 'Lock your iPhone to connect.'], 21251: [] },
+  })
+  const p = paused.run('ios_home', {})
+  assert.equal(p.payload.error.code, 'paused')
+  assert.deepEqual(paused.inputEvents(p.events), [])
+
+  const locked = stubPhone(t, { macLocked: true, onscreen: [], frontmost: false })
+  const l = locked.run('ios_home', {})
+  assert.equal(l.payload.error.code, 'mac-locked')
+  assert.deepEqual(locked.inputEvents(l.events), [])
+})
+
 test('every write action aborts without posting when the window stays away', async (t) => {
   if (needsPython(t)) return
+  // ios_home is absent: it has a targeted route and does not need the window.
   const writes = [
     'ios_tap_text',
     'ios_type_text',
     'ios_swipe',
     'ios_scroll',
     'ios_back',
-    'ios_home',
     'ios_open_app',
   ]
   for (const type of writes) {
@@ -739,7 +835,7 @@ test('every write action posts its own event once the window is in front', async
     ios_swipe: 'drag',
     ios_back: 'drag',
     ios_scroll: 'scroll_wheel',
-    ios_home: 'press',
+    ios_home: 'targeted_key',
     ios_open_app: 'press',
   }
   for (const [type, event] of Object.entries(expected)) {
