@@ -15,6 +15,7 @@ import { mintCapsule } from './evidenceCapsules.js'
 import { currentCancellationSignal, throwIfAborted } from './jobControl.js'
 import { classifySensitivity, maskSecretValue } from './redaction.js'
 import { resolveUserPath } from './security.js'
+import { answerForShellOutput } from './shellAnswer.js'
 import {
   getDisplayBrightness,
   getOutputVolume,
@@ -195,8 +196,19 @@ export async function executeComputerAction(action) {
         )
       }
       const ok = parts.every((p) => p.ok !== false)
+      /*
+       * Each part came through runShell, so its message is already a spoken
+       * sentence; one utterance is those sentences in a row, not a
+       * newline-joined transcript. The raw command output moves to `stdout`
+       * unformatted (and stays on each entry of `results`) — only the answer
+       * text is composed here.
+       */
       const message = parts
-        .map((p) => p.message || p.stdout || '')
+        .map((p) => p.message || '')
+        .filter(Boolean)
+        .join(' ')
+      const raw = parts
+        .map((p) => p.stdout || '')
         .filter(Boolean)
         .join('\n')
       return {
@@ -204,7 +216,7 @@ export async function executeComputerAction(action) {
         ok,
         status: ok ? 'success' : 'failed',
         message: message || 'Status collected.',
-        stdout: message,
+        stdout: raw || message,
         results: parts,
       }
     }
@@ -825,9 +837,18 @@ async function runShell(action) {
   const stderr = trimOutput(run.stderr)
 
   if (shell.ok) {
+    /*
+     * The message is the ANSWER — the orchestrator's responseText, the
+     * dashboard's hero headline and the pendant's spoken reply are all built
+     * by joining result messages. Raw stdout here once put a whole `df -h`
+     * table on the dashboard and into the speech queue, so shellAnswer.js
+     * turns it into a sentence; the untouched stdout/stderr ride alongside
+     * for the job store and the detail views. The 280 cap stays as the belt
+     * it always was.
+     */
     return success(
       action,
-      truncateMessage(stdout || stderr || 'Command completed.', 280),
+      truncateMessage(answerForShellOutput({ command, stdout, stderr }), 280),
       { stdout, stderr, shell },
     )
   }
