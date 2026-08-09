@@ -3,28 +3,30 @@ Agentic pendant firmware for the nRF9160 DK
 Audio path
 ----------
 
-1. While idle, firmware prewarms TLS + HTTP chunked headers to the relay so
-   Button 1 never waits on a handshake.
-2. Button 1 starts a microphone recording immediately (LED blinks on press;
-   no release wait).
-3. Button 1 stops the recording (after ≥1 s); LED1 turns off.
-4. During capture, raw 15,625 Hz mono s16le PCM is written to microSD and
-   pushed into a RAM ring. Between I2S DMA blocks, a few milliseconds of
-   non-blocking LTE sends drain the ring as HTTP/1.1 chunked body. If the
-   radio falls behind, the stream aborts and a full SD upload runs after stop.
-4. The relay wraps PCM as WAV for STT/multimodal plan and dispatches the
-   command to the Mac agent.
-5. The Mac synthesizes the agent's response, encodes it as 24 kHz Ogg Opus,
-   and returns it through the relay. The nRF9160 decodes it to signed
-   16-bit mono PCM on the microSD card.
-6. Repeating pairs of short LED flashes mean the response is ready; they
-   continue until the playback press so the indication cannot be missed.
-7. Button 1 sends the response over I2S to the ESP32; LED1 remains solid while
-   it plays. The ESP32 is responsible for Bluetooth A2DP output.
+Primary path — full-duplex conversation over one WebSocket:
 
-Production recordings stop on the second button press, with a 30-second safety
-limit. A successful microSD write is still kept as a local backup; the live
-stream is preferred for latency.
+1. While idle, firmware holds a single authenticated WebSocket open to the
+   relay (idle pings defeat Cloudflare's ~100 s kill), so Button 1 never
+   waits on TLS.
+2. Button 1 starts a conversation on the active edge: the microphone
+   records immediately and streams up as ~16 kbps Opus (SILK-WB, 20 ms
+   frames) over that WebSocket while the user is still speaking.
+3. The agent's spoken reply streams DOWN the same socket as 24 kHz Opus
+   packets and plays out over I2S to the ESP32 while capture continues —
+   the model decides when to talk, and barge-in is server-side.
+4. The conversation ends on the second button press, a relay 'end'
+   (mutual silence), transport death, or the 300 s cap.
+
+Fallback — record-then-upload, only when the WebSocket is down at press:
+
+5. The press records with a microSD journal; PCM streams to the relay as
+   a live chunked HTTP upload when the prewarmed socket allows, otherwise
+   a single-shot SD upload runs after stop (second press, ≥1 s, 30 s cap).
+6. The relay transcribes and dispatches the command to the Mac agent as
+   usual, but the reply is NOT voiced on the pendant (the ESP32 bridge
+   speaks the duplex wire format now); transcript and reply audio land in
+   the dashboard. If both uplinks fail, the recording is queued in the SD
+   outbox and delivered when the link returns.
 
 The modem RF stays up during capture so bits can leave the device while the
 user is still speaking. Full-file FAT preallocation and RF suspend/resume
@@ -35,14 +37,16 @@ LED diagnostics:
   two 160 ms flashes once       microSD passed its boot test
   solid during boot             LTE registration is in progress
   off after boot                ready for the first button press
-  toggles every 250 ms          recording
+  toggles every 250 ms          conversation/recording live (solid while
+                                agent audio is buffered)
   continuous rapid 100 ms blink fatal boot error (usually SD or LTE)
+  1 short flash                 moment bookmark stored (button 2)
+  2 finite flashes              held item: voice memo queued for later
+                                delivery, or held alerts surfaced
   3 finite flashes              recording failure
-  4 finite flashes              Opus recording encode failure
-  5 finite flashes              upload/transcription/dispatch failure
-  7 finite flashes              reply download failure
-  8 finite flashes              Opus reply decode failure
-  9 finite flashes              I2S playback failure
+  4 finite flashes              conversation failed
+  5 finite flashes              fallback upload/transcription/dispatch failure
+  3 slow 180 ms flashes         fallback cycle delivered (reply in dashboard)
 
 If the two boot flashes repeat from the beginning, the board is resetting.
 On battery this usually means the supply is sagging during an LTE current
@@ -106,19 +110,35 @@ rails together. The former A0/A1/A2 audio wiring and the MAX98357 are unused.
 Opus implementation
 -------------------
 
-The firmware vendors Xiph.Org libopus 1.6.1 under third_party/opus and builds
-the fixed-point API only. Encoder/decoder state and Ogg payload use a dedicated
-30 KiB workspace. Temporary SILK/CELT allocations use a separate 28 KiB
-NONTHREADSAFE_PSEUDOSTACK protected by a canary and reported high-water scan.
-The microphone has its own six-block RX slab so a bounded live-codec stall does
+The firmware builds Xiph.Org libopus 1.6.1 (fixed-point API only) from a
+west-managed checkout at third_party/opus. The checkout is NOT committed to
+this repo: the pin (exact upstream commit of the v1.6.1 tag) lives in
+west.yml, and the tree it fetches is byte-identical to the previously
+vendored source. One-time setup after a fresh clone:
+
+  source firmware/nrf9160/scripts/env.sh
+  env -u ZEPHYR_BASE west init -l firmware/nrf9160   # creates firmware/.west
+  cd firmware/nrf9160 && env -u ZEPHYR_BASE west update
+
+`env -u ZEPHYR_BASE` matters: env.sh points ZEPHYR_BASE at the NCS install,
+and west would otherwise resolve THAT workspace and try to update all of
+NCS. Run `west update` from inside firmware/ for the same reason. Builds
+are unaffected — they still run from the NCS directory exactly as below.
+
+CMakeLists.txt consumes the checkout through the upstream source manifests
+(cmake/OpusFunctions.cmake + *_sources.mk), so none of opus's own build
+system runs. Encoder/decoder state and Ogg payload use a dedicated 30 KiB
+workspace. Temporary SILK/CELT allocations use a separate 28 KiB
+NONTHREADSAFE_PSEUDOSTACK protected by a canary and reported high-water
+scan. The microphone has its own RX slab so a bounded live-codec stall does
 not overwrite or alias capture buffers. The nrf9160/ns build currently uses
-339788 B of 576 KiB application flash and 147192 B of the 154264 B application
-RAM region, leaving 7072 B static RAM headroom.
+394,592 B of 576 KiB application flash and 203,364 B of the 211,608 B
+application RAM region.
 
 Main stack sizing (do not shrink without measuring)
 ---------------------------------------------------
 
-CONFIG_MAIN_STACK_SIZE is 20480. libopus is compiled with
+CONFIG_MAIN_STACK_SIZE is 10240. libopus is compiled with
 NONTHREADSAFE_PSEUDOSTACK, not VAR_ARRAYS, so codec ALLOC() scratch does not
 consume the calling thread's C stack. GLOBAL_STACK_SIZE in CMakeLists.txt must
 exactly match PENDANT_OPUS_SCRATCH_BYTES in src/audio_opus.h.
@@ -139,7 +159,8 @@ Build and flash
 ---------------
 
 NCS v3.4.0 is installed at /opt/nordic/ncs (toolchain hash ccc010f809). west
-and nrfutil are not on the default PATH until you source the env script:
+and nrfutil are not on the default PATH until you source the env script.
+On a fresh clone, fetch the opus checkout first (see "Opus implementation"):
 
   source scripts/env.sh
   scripts/flash.sh --check          # tools + J-Link SN 960036581, no program

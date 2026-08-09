@@ -40,6 +40,10 @@ target/
 # Zephyr / Nordic
 build/
 build-*/
+# West workspace state and the west-managed libopus checkout; the pin
+# lives in firmware/nrf9160/west.yml (west init -l firmware/nrf9160 && west update)
+firmware/.west/
+firmware/nrf9160/third_party/opus/
 
 # PlatformIO / Python
 .pio/
