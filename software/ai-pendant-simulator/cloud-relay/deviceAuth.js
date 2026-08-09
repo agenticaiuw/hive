@@ -17,6 +17,19 @@ export const DEVICE_SCOPES = Object.freeze({
     'product:read',
     'product:write',
     'state:read',
+    /* Node mesh: hold its own relay socket and exchange addressed messages
+     * with any other node. Before this, a phone could only reach another node
+     * by queueing a mac:* job — i.e. only while the Mac was awake. */
+    'node:message:send',
+    'node:message:receive',
+    /*
+     * A brain, not a remote control. Every other model path a phone could
+     * reach queues a bridge job and is dead when the Mac sleeps, which made
+     * "the iOS app can live without the Mac" false in the one way that
+     * mattered. Metered per device in nodeInference.js — this is the only
+     * scope in this file whose abuse costs money rather than access.
+     */
+    'llm:infer',
   ]),
   mac_bridge: Object.freeze([
     'device:heartbeat:self',
@@ -34,6 +47,38 @@ export const DEVICE_SCOPES = Object.freeze({
      * Mac→Mac or Mac→relay hop does not need a re-pair to exist. */
     'context:read',
     'context:write',
+    /* The Mac keeps mesh access it already had de facto — it was the hub. It
+     * is now one node among several, and these are the scopes that say so. */
+    'node:message:send',
+    'node:message:receive',
+  ]),
+  /*
+   * The browser extension, which until now had NO relay credential at all: it
+   * knew one URL, http://127.0.0.1:8000, and everything it did went through
+   * the Mac agent. Deliberately NOT mac_bridge, which the extension could
+   * otherwise have been handed for convenience — that role carries
+   * `state:write` (it owns agent-snapshot and fleet, the Mac's whole world
+   * model) and `bridge:work:claim`, so an extension running on a compromised
+   * page could have drained the Mac's work queue.
+   *
+   * browser:work:claim / browser:work:complete are declared here with no
+   * relay route requiring them yet: the extension's own work queue is being
+   * built separately, and an unlisted route is closed to everyone anyway
+   * (requiredScopesForRoute → null → deny), so pre-declaring costs nothing
+   * and saves a re-pair of every installed extension later. Same reasoning as
+   * mac_bridge's context:write above.
+   */
+  browser_node: Object.freeze([
+    'device:heartbeat:self',
+    'device:status:read',
+    'browser:work:claim',
+    'browser:work:complete',
+    'context:read',
+    'node:message:send',
+    'node:message:receive',
+    /* Same argument as mobile: an extension that can hold a socket but cannot
+     * think is half a node. */
+    'llm:infer',
   ]),
   nrf_pendant: Object.freeze([
     'device:heartbeat:self',
@@ -53,6 +98,15 @@ export const DEVICE_SCOPES = Object.freeze({
      * agent-snapshot and fleet world-model, and a chest-worn device that can be
      * lost is the last principal that should be able to read them. */
     'pendant:alerts:read',
+    /*
+     * NO node:message:* here, and that is a decision, not an oversight. The
+     * pendant already holds one socket (/v1/pendant/converse) and the modem
+     * has no budget for a second; its receive buffer is 640 B, so it could
+     * not read an inbox page even if it drained one. A scope firmware cannot
+     * exercise is a lie in the credential table. Reaching the pendant is what
+     * the announcement queue is for (POST /v1/pendant/announce, which this
+     * role does hold) — a mesh node addressing the pendant should announce.
+     */
   ]),
 })
 

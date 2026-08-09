@@ -39,6 +39,8 @@ import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
 import { registerApprovalRoutes } from './approvalStore.js'
 import { registerAnnouncementRetentionRoutes } from './announceRetention.js'
+import { registerNodeMeshRoutes } from './nodeMailbox.js'
+import { registerInferenceRoutes } from './nodeInference.js'
 import { planFromAudio } from './audioPlan.js'
 import {
   createStreamingRealtimeSession,
@@ -462,6 +464,15 @@ registerPendantDownlinkWitness(app, { getStore, createAgentProxyJob })
 registerApprovalRoutes(app, { getStore })
 registerAnnouncementRetentionRoutes(app, { getStore })
 
+/* The node mesh: any node → any node, without the Mac in the path. Registered
+ * here rather than written inline for the same reason the two above are — the
+ * routing rules and the ownership checks belong next to each other, not spread
+ * through 3,000 lines. */
+registerNodeMeshRoutes(app, { getStore })
+
+/* A brain the phone and the extension can reach while the Mac is asleep. */
+registerInferenceRoutes(app)
+
 app.post('/v1/devices/register', async (request, response) => {
   const deviceId = String(request.body?.deviceId ?? '').trim()
   const deviceType = String(request.body?.deviceType ?? '').trim()
@@ -555,6 +566,40 @@ app.get('/v1/devices/status', async (_request, response) => {
       ...device,
       online: isDeviceOnline(device),
     })),
+  })
+})
+
+/*
+ * Retire a device. Admin only.
+ *
+ * The relay could register a device and revoke its credentials, but never
+ * forget it, so every throwaway pairing probe anyone ever ran stayed in the
+ * fleet forever as a node that looks real and is permanently offline. A fleet
+ * view that cannot forget gets less true every month.
+ *
+ * This deletes the row AND every credential for it AND any mesh mail still
+ * addressed to it — a token whose device no longer exists, or an inbox nothing
+ * will ever drain, are both worse than either half of the problem alone.
+ */
+app.delete('/v1/devices/:deviceId', async (request, response) => {
+  const deviceId = String(request.params.deviceId || '').trim()
+  const store = await getStore()
+  const device = await store.getDevice(deviceId)
+  if (!device) {
+    response
+      .status(404)
+      .json({ ok: false, error: 'No device is registered with that id.' })
+    return
+  }
+
+  const credentials = await store.listDeviceCredentials({ deviceId })
+  const deleted = await store.deleteDevice(deviceId)
+  response.json({
+    ok: true,
+    deleted,
+    deviceId,
+    /* Count, never the tokens. */
+    credentialsRemoved: credentials.length,
   })
 })
 

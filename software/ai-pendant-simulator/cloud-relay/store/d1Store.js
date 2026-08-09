@@ -157,6 +157,38 @@ export function createD1Store(db) {
       return results.map(parseRecord).filter(Boolean)
     },
 
+    /*
+     * Retire a device row.
+     *
+     * There was no way to remove one, so every throwaway pairing probe any
+     * agent ever ran is still in this table and still shows up in the fleet as
+     * a node that exists. Devices are legitimately retired — a phone is
+     * replaced, an extension is uninstalled — and a fleet view that cannot
+     * forget is one that gets less true every month.
+     *
+     * Credentials go first and unconditionally. relay_device_credentials has a
+     * FOREIGN KEY to this table, so deleting the device with rows still
+     * pointing at it is the ordering that fails; more importantly, a device
+     * row that vanished while a live token still authenticated as its
+     * deviceId would leave a credential nothing owns. Undrained mesh mail goes
+     * with it for the same reason: nothing will ever drain that inbox again.
+     */
+    async deleteDevice(deviceId) {
+      await db
+        .prepare('DELETE FROM relay_device_credentials WHERE device_id = ?1')
+        .bind(deviceId)
+        .run()
+      await db
+        .prepare('DELETE FROM relay_node_messages WHERE to_node = ?1')
+        .bind(deviceId)
+        .run()
+      const result = await db
+        .prepare('DELETE FROM relay_devices WHERE device_id = ?1')
+        .bind(deviceId)
+        .run()
+      return Boolean(result?.meta?.changes)
+    },
+
     async saveDeviceCredential(credential) {
       const updatedAt = credential.updatedAt || new Date().toISOString()
       await db
@@ -1165,6 +1197,112 @@ export function createD1Store(db) {
         .bind(handleId)
         .run()
       return Boolean(result?.meta?.changes)
+    },
+
+    /* ---- node mesh mailbox ----------------------------------------------
+     * Same contract as memoryStore. See cloudflare-worker/schema.sql for why
+     * this is neither relay_jobs (claimed by whoever asks first, has a result)
+     * nor relay_announcements (spoken, carries rendered speech).
+     * -------------------------------------------------------------------- */
+
+    async enqueueNodeMessage(envelope) {
+      await db
+        .prepare(
+          `INSERT INTO relay_node_messages
+             (message_id, to_node, from_node, created_at, expires_at,
+              leased_until, lease_token, attempts, data)
+           VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 0, ?6)
+           ON CONFLICT(message_id) DO NOTHING`,
+        )
+        .bind(
+          envelope.id,
+          envelope.to,
+          envelope.from,
+          envelope.createdAt,
+          envelope.expiresAt,
+          JSON.stringify(envelope),
+        )
+        .run()
+      return envelope
+    },
+
+    /** Unacked, unexpired rows for one addressee. Ignores leases: this is the
+     * "how much is waiting" question presence asks, not a delivery. */
+    async countPendingNodeMessages(toNode, { now = Date.now() } = {}) {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS pending FROM relay_node_messages
+            WHERE to_node = ?1 AND expires_at > ?2`,
+        )
+        .bind(toNode, new Date(now).toISOString())
+        .first()
+      return Number(row?.pending || 0)
+    },
+
+    /**
+     * Lease the next page of mail for one addressee.
+     *
+     * Two statements, not one with RETURNING: the UPDATE is atomic on its own,
+     * so stamping a unique lease_token and then SELECTing by it makes the claim
+     * race-free without depending on a RETURNING clause. Two drains racing the
+     * same inbox split the page between them; neither sees the other's rows.
+     */
+    async leaseNodeMessages(
+      toNode,
+      { limit = 50, leaseMs = 60_000, leaseToken, now = Date.now() } = {},
+    ) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200)
+      const nowIso = new Date(now).toISOString()
+      const leaseUntil = new Date(now + Math.max(1_000, leaseMs)).toISOString()
+      const token = String(leaseToken || `${now}-${Math.random()}`)
+
+      await db
+        .prepare(
+          `UPDATE relay_node_messages
+              SET leased_until = ?3, lease_token = ?4, attempts = attempts + 1
+            WHERE message_id IN (
+              SELECT message_id FROM relay_node_messages
+               WHERE to_node = ?1
+                 AND expires_at > ?2
+                 AND (leased_until IS NULL OR leased_until <= ?2)
+               ORDER BY created_at ASC
+               LIMIT ?5)`,
+        )
+        .bind(toNode, nowIso, leaseUntil, token, safeLimit)
+        .run()
+
+      const { results = [] } = await db
+        .prepare(
+          `SELECT data FROM relay_node_messages
+            WHERE lease_token = ?1 ORDER BY created_at ASC`,
+        )
+        .bind(token)
+        .all()
+      return results.map(parseRecord).filter(Boolean)
+    },
+
+    /** Acknowledge = delete. Scoped by to_node so a node holding a guessed
+     * message id still cannot reach into another node's inbox. */
+    async ackNodeMessages(toNode, messageIds = []) {
+      const ids = [...new Set(messageIds.map(String))].filter(Boolean)
+      if (!ids.length) return 0
+      const placeholders = ids.map((_id, index) => `?${index + 2}`).join(', ')
+      const result = await db
+        .prepare(
+          `DELETE FROM relay_node_messages
+            WHERE to_node = ?1 AND message_id IN (${placeholders})`,
+        )
+        .bind(toNode, ...ids)
+        .run()
+      return Number(result?.meta?.changes || 0)
+    },
+
+    async pruneExpiredNodeMessages({ now = Date.now() } = {}) {
+      const result = await db
+        .prepare('DELETE FROM relay_node_messages WHERE expires_at <= ?1')
+        .bind(new Date(now).toISOString())
+        .run()
+      return Number(result?.meta?.changes || 0)
     },
 
     /* ---- cross-surface memory -------------------------------------------

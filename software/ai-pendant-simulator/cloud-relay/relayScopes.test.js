@@ -81,6 +81,135 @@ test('an nrf_pendant token is accepted for every route the firmware uses', () =>
   }
 })
 
+/* The browser extension's role. It had NO relay credential at all before the
+ * mesh landed — it knew one URL, 127.0.0.1:8000 — so this list is what the
+ * extension must be able to do to be a node rather than a Mac accessory. */
+const BROWSER_NODE_ROUTES = [
+  ['POST', '/v1/devices/heartbeat'],
+  ['GET', '/v1/devices/status'],
+  ['POST', '/v1/node/messages'],
+  ['GET', '/v1/node/inbox'],
+  ['POST', '/v1/node/inbox/ack'],
+  ['GET', '/v1/node/presence'],
+  ['POST', '/v1/infer'],
+  ['POST', '/v1/context/resume'],
+]
+
+test('a browser_node token is accepted for every route the extension needs', () => {
+  for (const [method, path] of BROWSER_NODE_ROUTES) {
+    assert.equal(
+      allows('browser_node', method, path),
+      true,
+      `browser_node must be allowed ${method} ${path}`,
+    )
+  }
+})
+
+test('browser_node is NOT the Mac, which is why it is a separate role', () => {
+  /*
+   * The tempting shortcut was to hand the extension a mac_bridge token. That
+   * role holds state:write — it owns agent-snapshot and fleet, the Mac's whole
+   * world model — and bridge:work:claim, so an extension running inside a
+   * compromised page could have drained the Mac's work queue. These are the
+   * assertions that keep the shortcut from being taken later.
+   */
+  for (const [method, path] of [
+    ['GET', '/v1/bridge/work'],
+    ['POST', '/v1/bridge/work/job-1/result'],
+    ['PUT', '/v1/state/fleet'],
+    ['PUT', '/v1/state/agent-snapshot'],
+    ['GET', '/v1/state/agent-snapshot'],
+    ['POST', '/v1/mac/execute'],
+    ['POST', '/v1/pendant/command'],
+    ['GET', '/v1/ops/credentials'],
+    ['DELETE', '/v1/devices/browser-node-1'],
+  ]) {
+    assert.equal(
+      allows('browser_node', method, path),
+      false,
+      `browser_node must NOT be allowed ${method} ${path}`,
+    )
+  }
+})
+
+test('every node that can hold a mesh socket can also use the mesh', () => {
+  /* A role that can be told mail is waiting but cannot drain it would hold a
+   * socket that does nothing — the failure mode a scope table catches only if
+   * someone asserts the pairing. */
+  for (const role of ['mobile', 'mac_bridge', 'browser_node']) {
+    assert.equal(allows(role, 'GET', '/v1/node/inbox'), true, role)
+    assert.equal(allows(role, 'POST', '/v1/node/inbox/ack'), true, role)
+    assert.equal(allows(role, 'POST', '/v1/node/messages'), true, role)
+    assert.equal(
+      principalHasScopes(principalFor(role), ...SOCKET_SCOPES['/v1/node/socket']),
+      true,
+      `${role} must be able to open /v1/node/socket`,
+    )
+  }
+})
+
+test('the pendant is deliberately not on the mesh', () => {
+  /*
+   * Not an oversight. The nRF9160 already holds one socket and has no modem
+   * budget for a second; its receive buffer is 640 B, so it could not read an
+   * inbox page even if it drained one. A scope firmware cannot exercise is a
+   * lie in the credential table. Reaching the pendant is what
+   * POST /v1/pendant/announce is for, which this role does hold.
+   */
+  assert.equal(allows('nrf_pendant', 'GET', '/v1/node/inbox'), false)
+  assert.equal(allows('nrf_pendant', 'POST', '/v1/node/messages'), false)
+  assert.equal(
+    principalHasScopes(
+      principalFor('nrf_pendant'),
+      ...SOCKET_SCOPES['/v1/node/socket'],
+    ),
+    false,
+  )
+  assert.equal(allows('nrf_pendant', 'POST', '/v1/pendant/announce'), true)
+})
+
+test('inference is metered by role, and the pendant has no brain budget', () => {
+  /* The one route where a leaked token costs money rather than access. */
+  assert.equal(allows('mobile', 'POST', '/v1/infer'), true)
+  assert.equal(allows('browser_node', 'POST', '/v1/infer'), true)
+  assert.equal(allows('nrf_pendant', 'POST', '/v1/infer'), false)
+  assert.equal(allows('mac_bridge', 'POST', '/v1/infer'), false)
+})
+
+test('retiring a device is owner work', () => {
+  /* No node may unregister another, or itself: deleting a device revokes its
+   * credentials and drops its mail, which is not a thing a lost phone should
+   * be able to do to the fleet. */
+  for (const role of Object.keys(DEVICE_SCOPES)) {
+    assert.equal(
+      allows(role, 'DELETE', '/v1/devices/anything'),
+      false,
+      `${role} must not be able to retire a device`,
+    )
+  }
+  assert.deepEqual(
+    requiredScopesForRoute('DELETE', '/v1/devices/some-node'),
+    ['admin'],
+  )
+})
+
+test('the vision route is no longer unreachable', () => {
+  /*
+   * local-agent/visionLoopRelay.js has named /v1/vision/classify-ui-state
+   * since it was written and it was never in this table, which meant it was
+   * not merely unimplemented — an unlisted path denies universally, so it was
+   * 403 for every principal including the owner's admin key. Its module flag
+   * ENDPOINT_IMPLEMENTED=false is still the honest signal for the missing
+   * handler; this only removes the second, invisible reason.
+   */
+  assert.deepEqual(
+    requiredScopesForRoute('POST', '/v1/vision/classify-ui-state'),
+    ['mac:plan'],
+  )
+  assert.equal(allows('nrf_pendant', 'POST', '/v1/vision/classify-ui-state'), true)
+  assert.equal(allows('mac_bridge', 'POST', '/v1/vision/classify-ui-state'), false)
+})
+
 test('a scoped token is refused everything outside its role', () => {
   /* The blast radius the admin key hands every node today, denied per role. */
   const forbiddenForBridge = [

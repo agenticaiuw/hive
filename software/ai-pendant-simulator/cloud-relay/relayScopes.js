@@ -29,6 +29,26 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
   if (memoryScopes) return memoryScopes
 
   if (method === 'POST' && path === '/v1/devices/register') return ['admin']
+  /*
+   * Retiring a device deletes its credentials and its undrained mail. Owner
+   * work, not device work: no node should be able to unregister another.
+   *
+   * The fixed sub-routes are excluded from the id pattern rather than left to
+   * collide. `/v1/devices/:deviceId` otherwise matches /v1/devices/heartbeat,
+   * which would make "DELETE the heartbeat route" a listed path meaning
+   * "retire the device named heartbeat" — a 404 rather than a 403, and a
+   * route table where a reader cannot tell those two apart is one that will
+   * eventually hide a real hole.
+   */
+  if (
+    method === 'DELETE' &&
+    /^\/v1\/devices\/[^/]+$/.test(path) &&
+    !['register', 'heartbeat', 'status', 'pair'].includes(
+      path.slice('/v1/devices/'.length),
+    )
+  ) {
+    return ['admin']
+  }
   if (method === 'POST' && path === '/v1/devices/heartbeat') {
     return ['device:heartbeat:self']
   }
@@ -125,6 +145,57 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
     return ['bridge:work:complete']
   }
 
+  /*
+   * The node mesh (cloud-relay/nodeMailbox.js). Send is separated from
+   * receive because they are different privileges: a node that may be told
+   * things is not automatically a node that may tell every other node things.
+   * Ownership of the addressed inbox is enforced separately by
+   * principalOwnsDevice in the handlers — a scope says "you may drain an
+   * inbox", not "you may drain that one".
+   */
+  if (method === 'POST' && path === '/v1/node/messages') {
+    return ['node:message:send']
+  }
+  if (
+    (method === 'GET' && path === '/v1/node/inbox') ||
+    (method === 'POST' && path === '/v1/node/inbox/ack')
+  ) {
+    return ['node:message:receive']
+  }
+  /* Who is holding a live mesh socket right now. Same audience as
+   * /v1/devices/status and /v1/bridge/presence: observing reachability is not
+   * the same privilege as using it. */
+  if (method === 'GET' && path === '/v1/node/presence') {
+    return ['device:status:read']
+  }
+
+  /*
+   * local-agent/visionLoopRelay.js has named this route since it was written
+   * and it was never added here, which means it was not merely unimplemented
+   * — it was unreachable, 403 for every principal including the admin key,
+   * because an unlisted path denies universally. The module's own
+   * ENDPOINT_IMPLEMENTED=false is still the honest flag for the missing
+   * handler; this entry only removes the second, invisible reason it could
+   * never have worked. It classifies a structured digest of window controls
+   * (never pixels — see that file's header), so it rides the same privilege
+   * as the Mac's other planning calls.
+   */
+  if (method === 'POST' && path === '/v1/vision/classify-ui-state') {
+    return ['mac:plan']
+  }
+
+  /*
+   * The relay's own brain (cloud-relay/nodeInference.js). Its own scope, held
+   * only by the nodes that have a brain to feed, because this is the one route
+   * where a leaked token costs MONEY rather than access — every other scope
+   * here bounds what a thief can read or do, and this one bounds what they can
+   * spend. The per-device budget in nodeInference.js is the other half; a
+   * scope alone would have been a door with no meter behind it.
+   */
+  if (method === 'POST' && path === '/v1/infer') {
+    return ['llm:infer']
+  }
+
   return null
 }
 
@@ -140,6 +211,18 @@ export const SOCKET_SCOPES = Object.freeze({
   /* GET /v1/bridge/socket — the Mac's doorbell. Claiming is what the socket
    * exists to trigger, so it demands exactly the claim scope. */
   '/v1/bridge/socket': Object.freeze(['bridge:work:claim']),
+  /*
+   * GET /v1/node/socket — any node's mesh doorbell. Demands only the RECEIVE
+   * scope: the socket's entire capability is being told that mail is waiting,
+   * and sending is a separate HTTP route with its own scope. A node that may
+   * be reached is not thereby a node that may reach everyone.
+   *
+   * Ownership is the other half and is not expressible here: the handler also
+   * requires principalOwnsDevice(principal, deviceId), so a stolen extension
+   * token opens the extension's socket and nothing else. Both halves are
+   * asserted in bridgeHub.js's handleNodeSocketUpgrade.
+   */
+  '/v1/node/socket': Object.freeze(['node:message:receive']),
   /* GET /v1/pendant/converse — the pendant's full-duplex voice socket. It
    * uploads captured audio and receives the spoken reply, which is the same
    * pair of privileges as the HTTP /v1/pendant/command + speech-read paths. */

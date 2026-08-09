@@ -53,6 +53,8 @@ export function createMemoryStore() {
   const announcements = new Map()
   const contexts = new Map()
   const memoryEvents = new Map()
+  /* message_id → { envelope, leasedUntil, leaseToken, attempts } */
+  const nodeMessages = new Map()
 
   function pruneExpiredJobs() {
     const cutoff = Date.now() - JOB_TTL_MS
@@ -120,6 +122,21 @@ export function createMemoryStore() {
       return [...devices.values()].sort((left, right) =>
         right.updatedAt.localeCompare(left.updatedAt),
       )
+    },
+
+    /* Same contract as d1Store, including the order: credentials and undrained
+     * mail go first, so no token and no inbox can outlive the device it
+     * belongs to. See d1Store.deleteDevice for why. */
+    async deleteDevice(deviceId) {
+      for (const [tokenId, credential] of deviceCredentials.entries()) {
+        if (credential.deviceId === deviceId) {
+          deviceCredentials.delete(tokenId)
+        }
+      }
+      for (const [messageId, entry] of nodeMessages.entries()) {
+        if (entry.envelope.to === deviceId) nodeMessages.delete(messageId)
+      }
+      return devices.delete(deviceId)
     },
 
     async saveDeviceCredential(credential) {
@@ -481,6 +498,94 @@ export function createMemoryStore() {
 
     async deleteContext(handleId) {
       return contexts.delete(handleId)
+    },
+
+    /* ---- node mesh mailbox ----------------------------------------------
+     * Same contract as d1Store, including the LEASE — a stub that handed the
+     * same message to two drains would make local development the only place
+     * the mesh looks exactly-once, and at-least-once is the property every
+     * receiver has to be written against.
+     * -------------------------------------------------------------------- */
+
+    async enqueueNodeMessage(envelope) {
+      /* INSERT ... ON CONFLICT DO NOTHING: a retried send is one message. */
+      if (!nodeMessages.has(envelope.id)) {
+        nodeMessages.set(envelope.id, {
+          envelope,
+          leasedUntil: null,
+          leaseToken: null,
+          attempts: 0,
+        })
+      }
+      return envelope
+    },
+
+    async countPendingNodeMessages(toNode, { now = Date.now() } = {}) {
+      let pending = 0
+      for (const entry of nodeMessages.values()) {
+        if (
+          entry.envelope.to === toNode &&
+          Date.parse(entry.envelope.expiresAt) > now
+        ) {
+          pending += 1
+        }
+      }
+      return pending
+    },
+
+    async leaseNodeMessages(
+      toNode,
+      { limit = 50, leaseMs = 60_000, leaseToken, now = Date.now() } = {},
+    ) {
+      const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200)
+      const token = String(leaseToken || `${now}-${Math.random()}`)
+      const leasedUntil = new Date(now + Math.max(1_000, leaseMs)).toISOString()
+
+      const claimable = [...nodeMessages.values()]
+        .filter(
+          (entry) =>
+            entry.envelope.to === toNode &&
+            Date.parse(entry.envelope.expiresAt) > now &&
+            (!entry.leasedUntil || Date.parse(entry.leasedUntil) <= now),
+        )
+        .sort((a, b) =>
+          String(a.envelope.createdAt).localeCompare(
+            String(b.envelope.createdAt),
+          ),
+        )
+        .slice(0, safeLimit)
+
+      for (const entry of claimable) {
+        entry.leasedUntil = leasedUntil
+        entry.leaseToken = token
+        entry.attempts += 1
+      }
+      return claimable.map((entry) => ({ ...entry.envelope }))
+    },
+
+    async ackNodeMessages(toNode, messageIds = []) {
+      let removed = 0
+      for (const messageId of new Set(messageIds.map(String))) {
+        const entry = nodeMessages.get(messageId)
+        /* Scoped by addressee, exactly as the DELETE's WHERE clause is: a
+         * guessed message id must not reach into another node's inbox. */
+        if (entry && entry.envelope.to === toNode) {
+          nodeMessages.delete(messageId)
+          removed += 1
+        }
+      }
+      return removed
+    },
+
+    async pruneExpiredNodeMessages({ now = Date.now() } = {}) {
+      let removed = 0
+      for (const [messageId, entry] of nodeMessages.entries()) {
+        if (Date.parse(entry.envelope.expiresAt) <= now) {
+          nodeMessages.delete(messageId)
+          removed += 1
+        }
+      }
+      return removed
     },
 
     /* ---- cross-surface memory -------------------------------------------
