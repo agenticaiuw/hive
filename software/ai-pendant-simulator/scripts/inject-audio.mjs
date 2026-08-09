@@ -81,6 +81,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const HOME = os.homedir();
 const REPO = path.resolve(HOME, 'agentic-gadget');
@@ -354,7 +355,6 @@ function escapeBin(b) {
   return Buffer.from(out);
 }
 const hex32 = (v) => (v >>> 0).toString(16).toUpperCase().padStart(8, '0');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ------------------------------------------------------------------- audio
 

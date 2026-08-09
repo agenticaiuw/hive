@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import {
   clearBrowserSpool,
   readBrowserSpool,
@@ -771,8 +772,3 @@ function isOnline(lastSeenAt) {
   return Date.now() - new Date(lastSeenAt).getTime() < ONLINE_WINDOW_MS
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
