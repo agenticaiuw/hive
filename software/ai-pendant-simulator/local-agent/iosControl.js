@@ -29,6 +29,29 @@
  * program raises before a single event is posted. There is no "post it and
  * hope".
  *
+ * EXCEPT FOR ONE ROUTE, AND EXACTLY ONE — measured on the owner's real phone,
+ * each with a passing control in the same run:
+ *
+ *   CGEventPostToPid(pid, ev)  addresses an event to a PROCESS instead of the
+ *   screen, so it cannot land anywhere else whatever is in front. It delivers
+ *   iPhone Mirroring's own MENU KEY EQUIVALENTS — cmd+1 Home, cmd+2 App
+ *   Switcher, cmd+3 Spotlight — while the window is on another Space and the
+ *   owner's frontmost app never changes.
+ *
+ *   It delivers NOTHING ELSE. Plain characters typed into an already-open
+ *   Spotlight field produced no change at all ('zzqq', nothing appeared) in
+ *   the same run where cmd+3 had just opened it. Mouse events were ignored at
+ *   global coordinates, at window-relative coordinates, and as a drag. The
+ *   reason is AppKit's dispatch: a menu key equivalent is handled without
+ *   regard to which window is key, while ordinary keystrokes need a key window
+ *   and mouse events need a composited one to hit-test against.
+ *
+ * So ios_home takes the targeted route and costs the owner nothing. Everything
+ * else — tapping, typing, swiping, scrolling, opening an app — takes the
+ * guarded route above. The half-measure is the dangerous one: ios_open_app
+ * tried targeted first, Spotlight opened, the app name was dropped, and Return
+ * launched whatever Siri had suggested. Asking for Calculator opened Airbnb.
+ *
  * WHY IT MUST BE A CHILD OF THE AGENT
  * macOS TCC grants are per-binary. The "AI Pendant Agent" app already holds
  * Accessibility and Screen Recording, so a phone-harness spawned by this
@@ -330,6 +353,73 @@ def same_bounds(a, b):
     return all(round(a[k]) == round(b[k]) for k in ("x", "y", "w", "h"))
 
 
+def mirroring_pid():
+    apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_ID)
+    return int(apps[0].processIdentifier()) if apps else None
+
+
+def targeted_available():
+    """Can we address events to the mirroring process instead of the screen?"""
+    return hasattr(Quartz, "CGEventPostToPid") and mirroring_pid() is not None
+
+
+# cmd+1 Home, cmd+2 App Switcher, cmd+3 Spotlight — iPhone Mirroring's own menu
+# key equivalents, which is why they arrive even when it is not the active app.
+CHORDS = {"home": (18, Quartz.kCGEventFlagMaskCommand),
+          "app_switcher": (19, Quartz.kCGEventFlagMaskCommand),
+          "spotlight": (20, Quartz.kCGEventFlagMaskCommand),
+          "return": (36, 0)}
+
+
+def send_key_to(pid, keycode, flags=0):
+    """One key, addressed to ONE process.
+
+    CGEventPostToPid hands the event to a specific process rather than to the
+    system event tap, so it cannot arrive anywhere else no matter what is on
+    screen. That is what makes the whole frontmost dance unnecessary here — and
+    it is strictly safer than posting globally, because a misaimed event has
+    nowhere else to go.
+    """
+    for down in (True, False):
+        ev = Quartz.CGEventCreateKeyboardEvent(None, keycode, down)
+        if flags:
+            Quartz.CGEventSetFlags(ev, flags)
+        Quartz.CGEventPostToPid(pid, ev)
+        time.sleep(0.03)
+
+
+def press_to(pid, name):
+    code, flags = CHORDS[name]
+    send_key_to(pid, code, flags)
+
+
+def ready_to_send_targeted():
+    """Preflight for the targeted path. Activates NOTHING and touches no focus.
+
+    There is no frontmost check, no bounds check and no activation here, and
+    their absence is the design rather than an omission: the event is addressed
+    to a process, so "which window is in front" has no bearing on where it
+    lands. What remains are the checks that are about the world rather than the
+    mechanism — is the Mac awake, is mirroring paused, is this a connect screen
+    — plus the read that a later verification will be compared against.
+    """
+    pid = mirroring_pid()
+    if pid is None:
+        raise PhoneError("not-running", NOT_RUNNING)
+    if screen_locked():
+        raise PhoneError(
+            "mac-locked",
+            "Nothing was sent to the iPhone: the Mac's screen is locked, so "
+            "the phone's screen cannot be read and no action could be "
+            "verified. Unlock the Mac and try again.")
+    win, boxes, _image = read_phone()
+    if paused_by_phone_use(boxes):
+        raise PhoneError("paused", PAUSED)
+    if blocked_by(boxes):
+        raise PhoneError("blocked", BLOCKED)
+    return win, boxes, pid
+
+
 def frontmost_app():
     """Who has the screen right now — recorded so it can be given back."""
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
@@ -526,19 +616,34 @@ const OPERATIONS = {
             result["state"] = "unreadable"
             result["detail"] = str(probe)
     result["ready"] = result["state"] == "ready"
-    result["writesNeedActivation"] = result["state"] == "off-space"
     result["spaceSwitchOnActivate"] = space_switch_on_activate()
+    result["targetedAvailable"] = targeted_available()
     # Whether the screen can be seen at all. Measured, not assumed: while the
     # Mac is locked the window server composites nothing, so the pixels are
     # unavailable even though the window is still enumerable.
     result["readsPossible"] = bool(result["readable"])
-    # Whether a write could actually land right now, said before anything is
-    # attempted. Off-Space plus the Space-switch setting turned off is the one
-    # combination where reads work perfectly and every write will refuse.
-    result["writesPossible"] = (
+    # Two kinds of write, because they have different reach — and the split is
+    # narrower than it first looked. Measured on the real phone: targeted
+    # posting delivers iPhone Mirroring's own MENU KEY EQUIVALENTS (cmd+1/2/3)
+    # while its window is on another Space, and delivers nothing else. Plain
+    # characters and mouse events are dropped, because those need a key window
+    # and a composited one respectively. So Home works without disturbing the
+    # owner; everything else has to bring the window forward.
+    result["targetedActions"] = ["ios_home"] if result["targetedAvailable"] else []
+    result["navigationWritesPossible"] = bool(
+        result["readsPossible"] and result["targetedAvailable"]
+        and result["state"] in ("ready", "off-space"))
+    result["pointerWritesPossible"] = bool(
         result["state"] == "ready"
         or (result["state"] == "off-space"
             and result["spaceSwitchOnActivate"] is not False))
+    result["writesPossible"] = (result["navigationWritesPossible"]
+                                or result["pointerWritesPossible"])
+    result["writeMechanism"] = (
+        "activate-fallback" if result["pointerWritesPossible"]
+        else "targeted" if result["navigationWritesPossible"]
+        else "none")
+    result["pointerWritesNeedActivation"] = result["state"] == "off-space"
 `,
   },
   ios_ocr: {
@@ -569,19 +674,40 @@ const OPERATIONS = {
 `,
   },
   /*
-   * The seven writes — the point of the whole module, not an optional extra.
-   * An agent that can read a phone and not touch it is a screen reader.
+   * THE WRITES, AND WHY THERE ARE TWO KINDS
    *
-   * Every one opens with ready_to_send(), which posts nothing and raises
-   * unless the window is provably on screen, frontmost and still, and
-   * re-checks with still_there() immediately before EACH posted event. That
-   * guard is not a capability limit, it is what makes the capability safe to
-   * have: an unverified tap does not miss the phone, it clicks the owner's
-   * real desktop. Every write also reports what changed on screen, so a tap
-   * that matched a label but hit nothing is visible instead of silent.
+   * Measured on the owner's real phone, with a passing control in the same
+   * run: CGEventPostToPid delivers KEYBOARD events to iPhone Mirroring while
+   * its window is on another Space and another app is frontmost (cmd+2 opened
+   * the App Switcher; the owner's frontmost app never changed). The same
+   * mechanism does NOT deliver mouse events — a tap on the Home-Screen search
+   * pill was ignored at global coordinates, at window-relative coordinates,
+   * and as a drag. Keyboard chords are menu key equivalents, which AppKit
+   * dispatches without regard to which window is key; a mouse event has to
+   * hit-test against a window that is actually composited, and an off-Space
+   * window is not.
+   *
+   * So the keyboard family — Home, open an app, type — runs TARGETED: no
+   * activation, no frontmost check, no bounds check, no focus taken and none
+   * to give back. The owner keeps their screen while the agent uses the phone.
+   * There is nothing to guard against on this path, because an event addressed
+   * to a process cannot land on another one; the checks that remain are about
+   * the world (Mac awake, mirroring not paused, not a connect screen) rather
+   * than about the mechanism.
+   *
+   * The pointer family — tap, swipe, scroll, back — has no targeted route, so
+   * it keeps the activate-and-prove path with its guard fully intact. There a
+   * misaimed event genuinely would click the owner's desktop, so it still
+   * refuses to post until the window is provably in front and still.
    */
   ios_open_app: {
     timeoutMs: 60_000,
+    mechanism: 'pointer',
+    /* Spotlight opens targeted, but the app NAME does not arrive, and that
+     * combination is worse than either failure alone: the search field stays
+     * empty and Return activates whatever Siri had already suggested. Measured
+     * on the real phone — asking for Calculator opened Airbnb. So this runs on
+     * the guarded path like anything else that has to type. */
     python: `    win, before, prior = ready_to_send()
     still_there(win)
     _mirror.press("cmd+3")
@@ -593,12 +719,13 @@ const OPERATIONS = {
     _mirror.press("return")
     after = settle(win)
     result = {"opened": p["name"], "priorApp": prior,
-              "visible": visible(after)}
+              "mechanism": "activate-fallback", "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
   ios_tap_text: {
     timeoutMs: 60_000,
+    mechanism: 'pointer',
     /* The OCR that chooses the point comes from ready_to_send()'s own verified
      * capture, so the coordinates and the bounds check describe the same
      * moment. still_there() runs once more between choosing and tapping. */
@@ -622,6 +749,7 @@ const OPERATIONS = {
     result = {"tapped": {"text": hit["text"], "x": round(hit["x"]),
                          "y": round(hit["y"])},
               "matches": len(hits), "priorApp": prior,
+              "mechanism": "activate-fallback",
               "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
@@ -630,17 +758,23 @@ const OPERATIONS = {
     /* Typing is ~30ms a character through real keycodes, so a long string is a
      * genuinely long operation. */
     timeoutMs: 120_000,
+    mechanism: 'pointer',
+    /* Plain characters are dropped by targeted posting — measured: 'zzqq' typed
+     * into an open Spotlight field produced no change at all, while cmd+3 in
+     * the same run opened it. Ordinary keystrokes need a key window; menu key
+     * equivalents do not. So typing takes the guarded path. */
     python: `    win, before, prior = ready_to_send()
     still_there(win)
     _mirror.type_text(p["text"])
     after = settle(win)
     result = {"typed": len(p["text"]), "priorApp": prior,
-              "visible": visible(after)}
+              "mechanism": "activate-fallback", "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
   ios_swipe: {
     timeoutMs: 45_000,
+    mechanism: 'pointer',
     python: `    win, before, prior = ready_to_send()
     cx = win["x"] + win["w"] / 2.0
     cy = win["y"] + win["h"] / 2.0
@@ -653,12 +787,14 @@ const OPERATIONS = {
                  duration=0.12, steps=6)
     after = settle(win)
     result = {"direction": p["direction"], "distance": p["distance"],
-              "priorApp": prior, "visible": visible(after)}
+              "priorApp": prior, "mechanism": "activate-fallback",
+              "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
   ios_back: {
     timeoutMs: 45_000,
+    mechanism: 'pointer',
     /* iOS's interactive-pop gesture: a drag that STARTS at the left edge. It
      * is composed from mirror.drag rather than any invented helper, and the
      * `changed` field is how the planner finds out when an app does not
@@ -670,29 +806,32 @@ const OPERATIONS = {
     _mirror.drag(win["x"] + 3.0, y, win["x"] + win["w"] * 0.65, y,
                  duration=0.25, steps=12)
     after = settle(win)
-    result = {"gesture": "back", "priorApp": prior, "visible": visible(after)}
+    result = {"gesture": "back", "priorApp": prior,
+              "mechanism": "activate-fallback", "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
   ios_scroll: {
     timeoutMs: 45_000,
+    mechanism: 'pointer',
     python: `    win, before, prior = ready_to_send()
     still_there(win)
     _mirror.scroll_wheel(-p["amount"], win["x"] + win["w"] / 2.0,
                          win["y"] + win["h"] / 2.0)
     after = settle(win)
     result = {"amount": p["amount"], "priorApp": prior,
+              "mechanism": "activate-fallback",
               "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
   ios_home: {
     timeoutMs: 45_000,
-    python: `    win, before, prior = ready_to_send()
-    still_there(win)
-    _mirror.press("cmd+1")
+    mechanism: 'targeted',
+    python: `    win, before, pid = ready_to_send_targeted()
+    press_to(pid, "home")
     after = settle(win)
-    result = {"priorApp": prior, "visible": visible(after)}
+    result = {"mechanism": "targeted", "visible": visible(after)}
     result.update(diff_screens(before, after))
 `,
   },
@@ -1102,14 +1241,11 @@ function describeSuccess(type, result) {
        * runs apps fullscreen, and it is NOT a fault: reads work as they are,
        * and a write will bring the window forward first. */
       if (state === 'off-space') {
-        const base = `The iPhone is connected and readable, but its window is on another Space${where}, so reads work as they are`
-        /* The one combination where reads look perfect and every write will
-         * refuse. Saying so here means the owner learns it from a status
-         * check rather than from a failed tap. */
-        if (result?.writesPossible === false) {
-          return `${base}. Taps and typing will NOT work until the mirroring window can be brought forward: macOS has "System Settings > Desktop & Dock > When switching to an application, switch to a Space with open windows for the application" turned OFF, so activating iPhone Mirroring never follows it to its Space. Turn that on, or keep the mirroring window on the Space you work in.`
+        const base = `The iPhone is connected and readable with its window on another Space${where}, so reading it costs the owner nothing, and ios_home works without touching their screen at all`
+        if (result?.pointerWritesPossible === false) {
+          return `${base}. Everything else — tapping, typing, swiping, opening an app — needs the window brought forward, and macOS has "System Settings > Desktop & Dock > When switching to an application, switch to a Space with open windows for the application" turned OFF, so it cannot be. Those actions will refuse rather than act blind.`
         }
-        return `${base}, and taps or typing will first bring iPhone Mirroring to the front.`
+        return `${base}. Tapping, typing, swiping and opening an app will briefly bring iPhone Mirroring to the front, then hand the screen back.`
       }
       if (state === 'mac-locked') {
         /* Measured, not assumed: with the screen locked the window is still
@@ -1165,7 +1301,7 @@ function changeNote(result) {
       : ' The screen changed.'
   }
   if (result?.changed === false) {
-    return ' The screen did NOT change — the touch may have missed, so check before assuming it worked.'
+    return ' The screen did NOT change — the action may not have landed, so check before assuming it worked.'
   }
   return ''
 }

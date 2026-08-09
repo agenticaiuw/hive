@@ -590,6 +590,13 @@ const FULL_CONTROL_ACTION_SCHEMA = {
    * automatically — plan it anyway, and it will be surfaced rather than
    * silently dropped.
    *
+   * READING THE PHONE IS FREE, and so is ios_home: both reach the mirroring
+   * window wherever it is, without switching the owner's Space or taking their
+   * focus, so checking something on the phone while the owner works costs them
+   * nothing. Tapping, typing, swiping and opening an app are different — they
+   * briefly bring the mirroring window to the front and then hand the screen
+   * back. Prefer reading, and prefer ios_home over a tap when either will do.
+   *
    * THE PHONE IS SHARED, so any step can be interrupted at any moment. The
    * owner picking up their iPhone pauses mirroring, and their Mac locking
    * takes the screen away entirely. Neither is a fault and neither means the
@@ -604,7 +611,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
    */
   ios_status: {
     description:
-      "Check whether the owner's real iPhone is reachable through iPhone Mirroring. Reads only, and the honest preflight: it answers `readsPossible` and `writesPossible` before anything is attempted. States: ready | off-space (window is on another macOS Space — reading works as-is) | paused (the owner is holding their phone; resumes by itself when they lock it) | mac-locked (the Mac's screen is locked, so the phone can be neither read nor driven) | blocked | no-window | not-running. Call this first when unsure, and when a phone step reports paused or mac-locked — those are normal, not failures.",
+      "Check whether the owner's real iPhone is reachable through iPhone Mirroring. Reads only, and the honest preflight: it answers `readsPossible`, `pointerWritesPossible` and `writeMechanism` before anything is attempted. States: ready | off-space (window is on another macOS Space — reading and ios_home work as-is, everything else must bring the window forward) | paused (the owner is holding their phone; resumes by itself when they lock it) | mac-locked (the Mac's screen is locked, so the phone can be neither read nor driven) | blocked | no-window | not-running. Call this first when unsure, and when a phone step reports paused or mac-locked — those are normal, not failures.",
     params: {},
   },
   ios_ocr: {
@@ -622,7 +629,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   ios_open_app: {
     description:
-      "Open an app on the owner's REAL iPhone via Spotlight. The normal way to start a phone task.",
+      "Open an app on the owner's REAL iPhone via Spotlight. The normal way to start a phone task. It types the name, so it briefly brings the mirroring window to the front and then hands the screen back. Check `changed` and the visible text afterwards: Spotlight opens on whatever Siri suggests, so confirm the app you asked for is the one that opened.",
     params: { name: 'app name as it appears on the iPhone, e.g. Notes' },
   },
   ios_tap_text: {
@@ -665,7 +672,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   ios_home: {
     description:
-      "Go to the Home Screen on the owner's REAL iPhone. Always works, and is the way out of an app without tapping anything inside it.",
+      "Go to the Home Screen on the owner's REAL iPhone. The cheapest action there is: it reaches the phone without bringing the mirroring window forward or taking the owner's focus, so it works while they are using their Mac. Always works, and is the way out of an app without tapping anything inside it.",
     params: {},
   },
 }
