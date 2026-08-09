@@ -19,6 +19,7 @@ import Combine
 import ServiceManagement
 import Speech
 import AVFoundation
+import UniformTypeIdentifiers
 
 // MARK: - Agent token (never compiled in, never logged, never displayed)
 
@@ -914,8 +915,8 @@ final class FloatingCommandModel: ObservableObject {
     }
 
     func send() {
-        let command = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty || !attachments.isEmpty else {
             status = "Enter a command first"
             return
         }
@@ -923,17 +924,27 @@ final class FloatingCommandModel: ObservableObject {
             status = "Missing AGENT_TOKEN in \(AgentEnv.envPath)"
             return
         }
+        // Attachments ride two ways: a first-class "attachments" array for when
+        // the agent learns the field, plus a plain-text suffix that works today
+        // even while the server ignores the array. Local agent — paths suffice.
+        let paths = attachments.map { $0.url.path }
+        var command = typed
+        if !paths.isEmpty {
+            let suffix = "[attached: \(paths.joined(separator: ", "))]"
+            command = command.isEmpty ? suffix : "\(command) \(suffix)"
+        }
         busy = true
         status = "Sending…"
         var request = URLRequest(url: agentBaseURL.appendingPathComponent("plan"))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "command": command,
             "source": "floating-hud",
             "autoExecute": true,
         ]
+        if !paths.isEmpty { body["attachments"] = paths }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -955,13 +966,17 @@ final class FloatingCommandModel: ObservableObject {
                     let label = (actions.first?["label"] as? String) ?? "Running…"
                     self?.status = label
                     self?.text = ""
+                    self?.attachments = []
                     return
                 }
                 let reply = (json["response"] as? String)
                     ?? (json["error"] as? String)
                     ?? "ok"
                 self?.status = reply
-                if json["error"] == nil { self?.text = "" }
+                if json["error"] == nil {
+                    self?.text = ""
+                    self?.attachments = []
+                }
             }
         }.resume()
     }
@@ -993,12 +1008,52 @@ final class FloatingCommandModel: ObservableObject {
     // MARK: Global hotkey label
 
     /// Records which global shortcut actually bound (nil when every candidate
-    /// failed) and refreshes the idle hint. Never advertises a failed binding.
+    /// failed). The field placeholder shows it — there is deliberately no
+    /// separate idle caption row. Never advertises a failed binding.
     func applyHotkey(label: String?) {
         hotkeyLabel = label
-        if status.hasPrefix("Type a command") {
-            status = "Type a command · \(label ?? "⌘K from menu bar")"
+    }
+
+    // MARK: Attachments
+
+    func addAttachments(urls: [URL]) {
+        for url in urls where url.isFileURL {
+            if !attachments.contains(where: { $0.url.path == url.path }) {
+                attachments.append(Attachment(url: url))
+            }
         }
+    }
+
+    func removeAttachment(_ id: UUID) {
+        attachments.removeAll { $0.id == id }
+    }
+
+    /// True while the NSOpenPanel is up — the delegate suppresses hide-on-blur
+    /// so choosing the FIRST attachment doesn't dismiss the HUD.
+    private(set) var isFilePickerOpen = false
+
+    /// Paperclip: standard multi-select open panel.
+    func pickFiles() {
+        guard !isFilePickerOpen else { return }
+        isFilePickerOpen = true
+        let picker = NSOpenPanel()
+        picker.canChooseFiles = true
+        picker.canChooseDirectories = false
+        picker.allowsMultipleSelection = true
+        picker.level = .modalPanel
+        NSApp.activate(ignoringOtherApps: true)
+        picker.begin { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isFilePickerOpen = false
+                if response == .OK { self.addAttachments(urls: picker.urls) }
+                self.requestFocus?()
+            }
+        }
+    }
+
+    func cancelListening() {
+        if listening { stopListen() }
     }
 
     // MARK: Pending approvals
@@ -1170,6 +1225,29 @@ final class FloatingCommandModel: ObservableObject {
     }
 }
 
+/// Dark translucent material used by the pill and the aux card, clipped to a
+/// shape, with a hairline border. The window itself is clear + borderless.
+struct HUDMaterial<S: InsettableShape>: View {
+    let shape: S
+    var body: some View {
+        shape
+            .fill(Color(red: 0.09, green: 0.10, blue: 0.13).opacity(0.62))
+            .background(VisualEffectBackground().clipShape(shape))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+    }
+}
+
+struct VisualEffectBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
 struct ApprovalRow: View {
     let approval: PendingApproval
     let busy: Bool
@@ -1177,146 +1255,243 @@ struct ApprovalRow: View {
     let onApprove: () -> Void
     let onDeny: () -> Void
 
+    private let accent = Color(red: 0.46, green: 0.90, blue: 0.64)
+
     private var riskColor: Color {
         switch (approval.risk ?? "").lowercased() {
-        case "high", "critical": return .red
+        case "high", "critical": return Color(red: 1.0, green: 0.45, blue: 0.42)
         case "medium", "moderate": return .orange
-        case "low": return .green
-        default: return Color.white.opacity(0.4)
+        case "low": return accent
+        default: return Color.white.opacity(0.5)
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(approval.summary?.isEmpty == false ? approval.summary! : approval.id)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.88))
-                        .lineLimit(2)
-                    HStack(spacing: 6) {
-                        if let risk = approval.risk, !risk.isEmpty {
-                            Text(risk.uppercased())
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(riskColor)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(riskColor.opacity(0.16)))
-                        }
-                        if let expires = approval.expiresAt, !expires.isEmpty {
-                            Text("expires \(When.relative(expires))")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.35))
-                        }
-                        if let origin = approval.origin, !origin.isEmpty {
-                            Text("· \(origin)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.3))
-                                .lineLimit(1)
-                        }
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(approval.summary?.isEmpty == false ? approval.summary! : approval.id)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true) // wrap, don't truncate
+                HStack(spacing: 8) {
+                    if let risk = approval.risk, !risk.isEmpty {
+                        Text(risk.uppercased())
+                            .font(.system(size: 9, weight: .semibold))
+                            .tracking(0.8)
+                            .foregroundStyle(riskColor.opacity(0.95))
+                    }
+                    if let expires = approval.expiresAt, !expires.isEmpty {
+                        Text("expires \(When.relative(expires))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                    if let origin = approval.origin, !origin.isEmpty {
+                        Text(origin)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .lineLimit(1)
                     }
                 }
-                Spacer(minLength: 8)
-                Button { onDeny() } label: {
-                    Text("Deny")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(busy ? 0.3 : 0.8))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.white.opacity(0.08)))
+                if let error, !error.isEmpty {
+                    Text(error)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.red.opacity(0.9))
+                        .lineLimit(2)
                 }
-                .buttonStyle(.plain)
-                .disabled(busy)
-                Button { onApprove() } label: {
-                    Text("Approve")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.46, green: 0.90, blue: 0.64).opacity(busy ? 0.3 : 1))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color(red: 0.46, green: 0.90, blue: 0.64).opacity(0.18)))
-                }
-                .buttonStyle(.plain)
-                .disabled(busy)
             }
-            if let error, !error.isEmpty {
-                Text(error)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.red.opacity(0.9))
-                    .lineLimit(2)
+            Spacer(minLength: 10)
+            Button(action: onDeny) {
+                Text("Deny")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(busy ? 0.25 : 0.55))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .help("Deny")
+            Button(action: onApprove) {
+                Text("Approve")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.black.opacity(0.82))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(accent.opacity(busy ? 0.35 : 1)))
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .help("Approve")
         }
+        .padding(.vertical, 10)
         .help(approval.detail ?? "")
     }
 }
 
 struct FloatingCommandView: View {
     @ObservedObject var model: FloatingCommandModel
+    @State private var dropTargeted = false
 
+    private let accent = Color(red: 0.46, green: 0.90, blue: 0.64)
+
+    /// ONE caption, inside the field, showing the live shortcut when bound.
     private var placeholder: String {
-        model.hotkeyLabel.map { "Command · \($0)" } ?? "Command…"
+        let base = "What can I help you with today?"
+        return model.hotkeyLabel.map { "\(base)  ·  \($0)" } ?? base
+    }
+
+    /// The aux card exists only when there is something to show.
+    private var hasAux: Bool {
+        !model.status.isEmpty || !model.attachments.isEmpty || !model.approvals.isEmpty
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    model.toggleListen()
-                } label: {
-                    Image(systemName: model.listening ? "mic.fill" : "mic")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(model.listening ? Color.green : Color.white.opacity(0.85))
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.white.opacity(0.08)))
-                }
-                .buttonStyle(.plain)
-                .help(model.listening ? "Stop listening" : "Speak a command")
+        VStack(spacing: 10) {
+            pill
+            if hasAux { auxCard }
+        }
+        // Fixed width, content-driven height: the NSHostingView exposes this as
+        // its intrinsic size and AppKit resizes the borderless panel to match
+        // (top edge anchored), so the card grows downward under the pill.
+        .frame(width: 660)
+        .fixedSize(horizontal: false, vertical: true)
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { handleDrop($0) }
+        .onExitCommand { model.requestHide?() }
+    }
 
-                TextField(placeholder, text: $model.text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
-                    .onSubmit { model.send() }
+    // MARK: Pill — one cohesive capsule: mic · field · attach · shot · send
 
-                Button {
-                    model.send()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(model.busy ? Color.white.opacity(0.3) : Color(red: 0.46, green: 0.90, blue: 0.64))
-                }
-                .buttonStyle(.plain)
-                .disabled(model.busy)
+    private var pill: some View {
+        HStack(spacing: 10) {
+            Button { model.toggleListen() } label: {
+                Image(systemName: model.listening ? "mic.fill" : "mic")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(model.listening ? accent : Color.white.opacity(0.65))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
-            Text(model.status)
-                .font(.system(size: 11))
-                .foregroundStyle(Color.white.opacity(0.45))
-                .lineLimit(1)
+            .buttonStyle(.plain)
+            .help(model.listening ? "Stop listening" : "Speak — the transcription lands in the field")
+
+            TextField(placeholder, text: $model.text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15))
+                .foregroundStyle(.white.opacity(0.92))
+                .onSubmit { model.send() }
+
+            Button { model.pickFiles() } label: {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Attach files or images")
+
+            Button { model.requestScreenshot?() } label: {
+                Image(systemName: "camera.viewfinder")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Capture a screen region and attach it")
+
+            Button { model.send() } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 27))
+                    .foregroundStyle(model.busy ? Color.white.opacity(0.25) : accent)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.busy)
+            .help("Send")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .frame(height: 56)
+        .background(HUDMaterial(shape: Capsule()))
+        .overlay(
+            Capsule().strokeBorder(
+                dropTargeted ? accent.opacity(0.75) : Color.clear, lineWidth: 1.5)
+        )
+    }
+
+    // MARK: Aux card — status / attachment chips / approvals, under the pill
+
+    private var auxCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !model.status.isEmpty {
+                Text(model.status)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(2)
+                    .padding(.vertical, 9)
+            }
+            if !model.attachments.isEmpty {
+                if !model.status.isEmpty { hairline }
+                attachmentChips
+                    .padding(.vertical, 8)
+            }
             if !model.approvals.isEmpty {
+                if !model.status.isEmpty || !model.attachments.isEmpty { hairline }
                 approvalsSection
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        // Fixed width, content-driven height: the NSHostingView exposes this as
-        // its intrinsic size and AppKit resizes the panel to match (top edge
-        // anchored), so the panel grows/shrinks with the approvals list.
-        .frame(width: 440)
-        .fixedSize(horizontal: false, vertical: true)
-        .onExitCommand { model.requestHide?() }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(HUDMaterial(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)))
+    }
+
+    private var hairline: some View {
+        Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
+    }
+
+    private var attachmentChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(model.attachments) { attachment in
+                    HStack(spacing: 5) {
+                        Image(systemName: attachment.isImage ? "photo" : "doc")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.55))
+                        Text(attachment.name)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 150)
+                        Button { model.removeAttachment(attachment.id) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(0.45))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove")
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
+                    .help(attachment.url.path)
+                }
+            }
+        }
+        .frame(height: 28)
     }
 
     /// Hidden entirely (not just empty) whenever the agent has no pending
     /// approvals — including when the endpoint doesn't exist yet.
     private var approvalsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider().overlay(Color.white.opacity(0.1))
+        VStack(alignment: .leading, spacing: 0) {
             Text("PENDING APPROVALS")
-                .font(.system(size: 9, weight: .bold))
-                .tracking(1.8)
-                .foregroundStyle(.white.opacity(0.35))
-            ForEach(model.approvals.prefix(5)) { approval in
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(1.6)
+                .foregroundStyle(.white.opacity(0.4))
+                .padding(.top, 10)
+            ForEach(Array(model.approvals.prefix(5).enumerated()), id: \.element.id) { index, approval in
+                if index > 0 { hairline }
                 ApprovalRow(
                     approval: approval,
                     busy: model.decidingIds.contains(approval.id),
@@ -1328,8 +1503,21 @@ struct FloatingCommandView: View {
                 Text("+\(model.approvals.count - 5) more…")
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.35))
+                    .padding(.bottom, 8)
             }
         }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            accepted = true
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                DispatchQueue.main.async { model.addAttachments(urls: [url]) }
+            }
+        }
+        return accepted
     }
 }
 
@@ -1413,12 +1601,21 @@ final class GlobalHotkey {
     }
 }
 
-/// Nonactivating panel that can take key focus while another app stays active,
-/// and hides (rather than closes) on Esc.
+/// Borderless nonactivating panel that can take key focus while another app
+/// stays active, and hides (never closes) on Esc. `canBecomeKey` must be
+/// overridden: borderless windows refuse key status by default, which would
+/// silently break typing.
 final class CommandPanel: NSPanel {
     var onEscape: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { onEscape?() }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // Esc — belt and braces beside cancelOperation
+            onEscape?()
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
 
 // MARK: - App delegate (menu bar + window shell)
@@ -1499,6 +1696,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         floatCommandItem.title = boundLabel.map { "Floating Command (\($0))" } ?? "Floating Command…"
 
         floatModel.requestHide = { [weak self] in self?.hideFloatPanel() }
+        floatModel.requestScreenshot = { [weak self] in self?.captureScreenshotAttachment() }
+        floatModel.requestFocus = { [weak self] in
+            guard let self, let panel = self.floatPanel else { return }
+            panel.makeKeyAndOrderFront(nil)
+            self.focusCommandField()
+        }
         floatModel.startApprovalPolling()
         floatModel.$approvals
             .map(\.count)
@@ -1794,14 +1997,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// on the current Space) or from the status menu.
     @objc func showFloatPanel() {
         if floatPanel == nil {
+            // Borderless pill: no title bar, no traffic lights, no close box.
+            // Esc hides, the global hotkey toggles, blur hides (see
+            // windowDidResignKey), and the background stays draggable.
             let panel = CommandPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 88),
-                styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
+                contentRect: NSRect(x: 0, y: 0, width: 660, height: 56),
+                styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false)
-            panel.title = "Command"
-            panel.titleVisibility = .hidden
-            panel.titlebarAppearsTransparent = true
             panel.isFloatingPanel = true
             panel.level = .floating
             // Joins the ACTIVE Space — including other apps' fullscreen Spaces —
@@ -1812,7 +2015,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             panel.hidesOnDeactivate = false
             panel.becomesKeyOnlyIfNeeded = false
             panel.isReleasedWhenClosed = false
-            panel.backgroundColor = NSColor(red: 0.06, green: 0.07, blue: 0.10, alpha: 0.94)
+            panel.isOpaque = false
+            panel.backgroundColor = .clear   // SwiftUI draws the pill + card
+            panel.hasShadow = true
             panel.appearance = NSAppearance(named: .darkAqua)
             panel.delegate = self
             panel.onEscape = { [weak self] in self?.hideFloatPanel() }
@@ -1825,14 +2030,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             panel.setFrameAutosaveName("AIPendantFloatPanel")
 
             let host = NSHostingView(rootView: FloatingCommandView(model: floatModel))
-            host.frame = NSRect(x: 0, y: 0, width: 440, height: 88)
+            host.frame = NSRect(x: 0, y: 0, width: 660, height: 56)
             panel.contentView = host
             if !hasSavedFrame, let screen = NSScreen.main {
                 let f = screen.visibleFrame
-                // Spotlight-ish: horizontally centered, a bit above center.
-                // Anchored by the TOP edge, which stays fixed as approvals grow
+                // Horizontally centered, lower-middle of the screen. Anchored
+                // by the TOP edge, which stays fixed while the aux card grows
                 // the panel downward.
-                panel.setFrameTopLeftPoint(NSPoint(x: f.midX - 220, y: f.midY + 44))
+                panel.setFrameTopLeftPoint(NSPoint(x: f.midX - 330,
+                                                   y: f.minY + f.height * 0.42))
             }
             floatPanel = panel
         }
@@ -1856,8 +2062,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func hideFloatPanel() {
+        floatModel.cancelListening() // never keep the mic hot on a hidden panel
         floatPanel?.orderOut(nil)
         floatModel.panelDidHide()
+    }
+
+    /// Dismissal rule: clicking elsewhere (panel resigns key) hides the HUD —
+    /// UNLESS pending approvals or staged attachments would vanish mid-read,
+    /// the mic is live, or the file picker owns key right now.
+    func windowDidResignKey(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === floatPanel,
+              floatPanel?.isVisible == true else { return }
+        guard !floatModel.isFilePickerOpen else { return }
+        if floatModel.approvals.isEmpty,
+           floatModel.attachments.isEmpty,
+           !floatModel.listening {
+            hideFloatPanel()
+        }
+    }
+
+    /// Camera button: tuck the HUD out of the shot, let the owner drag a region
+    /// with `screencapture -i`, then re-show and attach the capture. Cancelling
+    /// the capture (Esc) simply re-shows with nothing added.
+    private func captureScreenshotAttachment() {
+        let wasVisible = floatPanel?.isVisible ?? false
+        floatPanel?.orderOut(nil)
+        let path = NSTemporaryDirectory()
+            .appending("aipendant-shot-\(Int(Date().timeIntervalSince1970)).png")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-i", path]
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if wasVisible { self.showFloatPanel() }
+                if FileManager.default.fileExists(atPath: path) {
+                    self.floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
+                }
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            NSLog("AI Pendant: screencapture failed to launch: \(error)")
+            if wasVisible { showFloatPanel() }
+        }
     }
 
     /// Caret into the command field on summon, so hotkey → type needs no click.
@@ -1891,11 +2140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return
         }
         view.cacheDisplay(in: view.bounds, to: rep)
-        // Composite over the panel background so the (white) text is legible —
-        // cacheDisplay alone yields text over transparency.
+        // Composite over a fixed dark ground so the (white) text is legible —
+        // the window itself is clear and cacheDisplay yields text over
+        // transparency (the blur material doesn't render offline anyway).
         let composed = NSImage(size: view.bounds.size)
         composed.lockFocus()
-        (panel.backgroundColor ?? .windowBackgroundColor).setFill()
+        NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 1).setFill()
         NSRect(origin: .zero, size: view.bounds.size).fill()
         rep.draw(in: NSRect(origin: .zero, size: view.bounds.size))
         composed.unlockFocus()
