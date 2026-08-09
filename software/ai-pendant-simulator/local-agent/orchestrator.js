@@ -2,6 +2,7 @@ import { buildConversationContext } from './conversationContext.js'
 import { estimateTokens, projectTurnContext } from './contextProjection.js'
 import { describeResume, resumeContext } from './contextResume.js'
 import { recordGapSafely } from './capabilityGapInbox.js'
+import { applyGoalVerdict } from './goalVerdict.js'
 import { planCommand } from './llmPlanner.js'
 import { touchFacts } from './memoryService.js'
 import {
@@ -693,7 +694,7 @@ export async function orchestrateExecute({
     }
 
     // Drift means the plan did not finish, whatever the steps that did run said.
-    const status = focus.drift
+    const stepStatus = focus.drift
       ? 'failed'
       : results.every((result) => result.ok)
         ? 'success'
@@ -701,9 +702,47 @@ export async function orchestrateExecute({
           ? 'blocked'
           : 'failed'
 
-    const responseText = [...results.map((item) => item.message), focus.drift?.detail]
-      .filter(Boolean)
-      .join(' ')
+    /*
+     * "Every planned step ran" is not "the goal was met" — that gap is the
+     * 2026-08-09 IBKR incident: a plan that opened a brokerage and snapshotted
+     * the page was stamped done against "cancel my recurring investments", and
+     * nothing was cancelled. The verdict compares the STATED GOAL against the
+     * effects the steps actually achieved (goalVerdict.js, standing on the
+     * same per-step results the journal derives from). A clean run whose goal
+     * never got an acting step is 'incomplete', never 'success', and its
+     * response names what WAS done and what was NOT. Failures, blocks and
+     * drift pass through untouched — they were already honest.
+     */
+    const { status, verdict, response: verdictResponse } = applyGoalVerdict({
+      command,
+      actions,
+      results,
+      status: stepStatus,
+    })
+
+    const responseText =
+      verdictResponse ??
+      [...results.map((item) => item.message), focus.drift?.detail]
+        .filter(Boolean)
+        .join(' ')
+
+    if (verdict.goal.wantsChange) {
+      addThinkingStep(trace.traceId, {
+        id: 'goal-check',
+        label: verdict.met
+          ? 'Goal check: the change you asked for ran'
+          : 'Goal check: the goal was not completed',
+        detail: verdict.met
+          ? `An acting step aimed at "${verdict.goal.gerundPhrase}" ran and reported success.`
+          : verdict.summary,
+        status: 'done',
+        meta: {
+          met: verdict.met,
+          carriers: verdict.carriers,
+          remainderNeedsApproval: Boolean(verdict.remainder?.needsApproval),
+        },
+      })
+    }
 
     /* The plan is over. Said here rather than after the memory writes below,
      * because every one of those can throw and none of them changes what the
@@ -762,13 +801,27 @@ export async function orchestrateExecute({
     })
 
     const thinking = finishThinkingTrace(trace.traceId, {
-      status: status === 'success' ? 'done' : 'failed',
+      /* 'incomplete' is passed through by name: renderers that key on 'done'
+       * must never say Done over a goal that was not met. */
+      status:
+        status === 'success'
+          ? 'done'
+          : status === 'incomplete'
+            ? 'incomplete'
+            : 'failed',
       summary: responseText,
     })
 
     return {
       ok: status === 'success',
       status,
+      /* server.js records `payload.error || payload.status` for a non-ok run,
+       * so the job store's row carries the sentence that names what was and
+       * was not done — not just the word 'incomplete'. */
+      ...(status === 'incomplete' ? { error: responseText } : {}),
+      /* The goal-grounded verdict, including the needs_approval-compatible
+       * remainder the approval-at-origin flow can pick up. */
+      verdict,
       results,
       logs,
       contextGraph,
