@@ -632,3 +632,71 @@ test('a routine plan that wants to send email parks loudly, never runs', async (
   assert.match(posted.result.awaitingApproval[0].reason, /acts on your behalf/)
   assert.equal(posted.result.approval.relayJobId, 'job-routine-email')
 })
+
+test('a parked plan grows a relay approval record stamped with the job origin', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ok',
+      planner: 'llm',
+      response: 'Deleting that file.',
+      actions: [
+        {
+          type: 'delete_path',
+          label: 'delete the old export',
+          params: { path: '/tmp/never-exists-bridge-test.txt' },
+        },
+      ],
+    },
+    '/execute': () => {
+      throw new Error('/execute must not be reached for a parked plan')
+    },
+    '/v1/approvals': () => {
+      return { ok: true, delivery: { channel: 'mesh', to: 'ios-phone-1', pushed: true } }
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-origin-park',
+    command: 'delete the old export',
+    sessionId: null,
+    /* The relay stamps the creating principal's deviceId here — for a phone
+     * posting /v1/mac/plan, its own mesh address. */
+    createdBy: 'ios-phone-1',
+  })
+
+  const approvalPost = stub.calls.find(
+    (call) => call.toRelay && call.pathname === '/v1/approvals',
+  )
+  assert.ok(approvalPost, 'the park should create a durable approval record on the relay')
+  const record = JSON.parse(approvalPost.body).approval
+  assert.equal(record.origin, 'ios-phone-1', 'the approval carries where the command came from')
+  assert.equal(record.state, 'pending')
+  assert.ok(record.readback, 'the record carries the sentence any surface would present')
+  assert.equal(record.jobId, 'job-origin-park')
+
+  const completion = stub.calls.find(
+    (call) => call.toRelay && call.pathname.endsWith('/job-origin-park/result'),
+  )
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.parked, true)
+  assert.equal(posted.result.approval.approvalId, record.approvalId, 'the parked result names its record')
+  assert.equal(posted.result.approval.origin, 'ios-phone-1')
+  /* The pre-origin fields still travel — the dashboard reads them today. */
+  assert.equal(posted.result.approval.relayJobId, 'job-origin-park')
+})
+
+test('approvalOriginForWork reads transport first, then the creating principal', async () => {
+  const { approvalOriginForWork } = await import('./bridge.js')
+  assert.equal(
+    approvalOriginForWork({ inputTelemetry: { storage: 'dashboard' }, createdBy: 'ios-phone-1' }),
+    'dashboard',
+    'a typed dashboard command is a dashboard origin whoever typed it',
+  )
+  assert.equal(approvalOriginForWork({ inputTelemetry: { storage: 'live_lte' }, createdBy: 'nrf9160-pendant' }), 'nrf9160')
+  assert.equal(approvalOriginForWork({ inputTelemetry: { storage: 'microsd' } }), 'nrf9160')
+  assert.equal(approvalOriginForWork({ createdBy: 'nrf9160-pendant' }), 'nrf9160')
+  assert.equal(approvalOriginForWork({ createdBy: 'ios-phone-1' }), 'ios-phone-1')
+  assert.equal(approvalOriginForWork({}), 'dashboard', 'no evidence lands on the surface that always worked')
+})

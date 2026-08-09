@@ -687,6 +687,16 @@ export async function handleWork(work) {
                   relayJobId: work.jobId,
                   planJobId: plan.jobId ?? null,
                   sessionId: activeSessionId ?? null,
+                  /* The durable record behind this park, when one was stored:
+                   * the id any surface can decide by, and where the prompt
+                   * was routed. Absent on a failed store — consumers already
+                   * handle the handle without these fields. */
+                  ...(parkedApproval
+                    ? {
+                        approvalId: parkedApproval.approvalId,
+                        origin: parkedApproval.origin,
+                      }
+                    : {}),
                 },
               }
             : {}),
@@ -1076,6 +1086,91 @@ function isRoutineWork(work) {
   return (
     telemetry?.storage === 'routine' || telemetry?.inputMode === 'routine'
   )
+}
+
+/**
+ * The node this job's command came from, as an approval-record origin.
+ *
+ * Two facts identify it, checked in the order of how specific they are.
+ * `inputTelemetry.storage` names the transport ('dashboard' for a typed
+ * command whoever typed it; 'live_lte' / 'microsd' / 'pendant_upload' are all
+ * the pendant), and `createdBy` is the deviceId the relay stamped from the
+ * creating principal — a phone or extension posting /v1/mac/plan puts its own
+ * paired id there, which IS its mesh address. Exported for its test.
+ */
+export function approvalOriginForWork(work) {
+  const storage = String(work?.inputTelemetry?.storage ?? '').toLowerCase()
+  if (storage === 'dashboard') return 'dashboard'
+  if (['live_lte', 'microsd', 'pendant_upload'].includes(storage)) return 'nrf9160'
+
+  const createdBy = String(work?.createdBy ?? '').trim()
+  if (!createdBy) return 'dashboard'
+  if (createdBy === 'nrf9160-pendant') return 'nrf9160'
+  if (createdBy === BRIDGE_DEVICE_ID) return 'mac-bridge'
+  /* A mesh node's own address. The relay checks it against the device
+   * registry before pushing; an id it does not know falls back to the Mac
+   * surface, so a wrong guess here degrades to today's behaviour. */
+  return createdBy
+}
+
+/**
+ * Turn a parked plan into a durable approval record and hand the decision to
+ * the relay. Returns {approvalId, origin, stored} or null; NEVER throws — a
+ * park that cannot grow a record must still park.
+ *
+ * Routine jobs are deliberately excluded. A routine is its own venue with a
+ * standing approval for its own purpose (cloud-relay/routines.js), and its
+ * parked deny-list plans already announce loudly through closeParkedDispatch;
+ * a second, spoken readback for the same park would prompt the owner twice.
+ */
+async function createParkedApproval({ work, plan, sessionId, routineJob }) {
+  if (routineJob) return null
+  try {
+    const origin = approvalOriginForWork(work)
+    const prepared = prepareAction({
+      command: work.command || plan.command || '',
+      actions: plan.actions,
+      /* The device that would SPEAK the readback — the pendant — whatever the
+       * origin. Origin decides whether it is ever spoken there. */
+      deviceId:
+        origin === 'nrf9160'
+          ? String(work.createdBy || '').trim() || 'nrf9160-pendant'
+          : 'nrf9160-pendant',
+      jobId: work.jobId,
+      sessionId: sessionId ?? null,
+      source: origin,
+      origin,
+    })
+
+    const response = await fetch(`${RELAY_URL}/v1/approvals`, {
+      method: 'POST',
+      headers: relayHeaders,
+      body: JSON.stringify({ approval: prepared.approval }),
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok || payload?.ok === false) {
+      console.warn(
+        `[bridge] Approval ${prepared.approval.approvalId} not stored on relay ` +
+          `(${response.status}): ${payload?.error || 'no detail'} — the plan still parks on the dashboard.`,
+      )
+      return { approvalId: prepared.approval.approvalId, origin, stored: false }
+    }
+    console.log(
+      `[bridge] Parked approval ${prepared.approval.approvalId} origin=${origin} ` +
+        `routed=${payload?.delivery?.channel || 'mac-agent'}${payload?.delivery?.pushed ? ' (pushed)' : ''}`,
+    )
+    return {
+      approvalId: prepared.approval.approvalId,
+      origin,
+      stored: true,
+      delivery: payload?.delivery ?? null,
+    }
+  } catch (error) {
+    console.warn(
+      `[bridge] Parked plan left dashboard-only (approval record failed): ${error?.message || error}`,
+    )
+    return null
+  }
 }
 
 async function completeWork(
