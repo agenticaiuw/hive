@@ -99,7 +99,7 @@ import {
 import {
   authenticateRelayRequest,
   createDeviceCredential,
-  credentialPredatesScopes,
+  credentialNarrowedBelowRole,
   principalHasScopes,
   principalOwnsDevice,
   publicCredential,
@@ -358,6 +358,15 @@ app.post('/v1/devices/pair', async (request, response) => {
   const deviceType = String(request.body?.deviceType ?? '').trim()
   const name = String(request.body?.name ?? '').trim()
   const pairingCode = String(request.body?.pairingCode ?? '').trim()
+  /*
+   * Optional, and it can only ever SUBTRACT: createDeviceCredential rejects any
+   * scope outside the requested role, so this pre-auth route (gated by the
+   * pairing code alone, by design, so a device with no credential can obtain
+   * its first one) cannot be used to mint a wider token than the role allows.
+   * Omit it and the credential tracks role policy in both directions forever;
+   * supply it and the credential keeps that ceiling and never re-widens.
+   */
+  const requestedScopes = request.body?.scopes
 
   if (!deviceId || !SUPPORTED_DEVICE_TYPES.includes(deviceType)) {
     response.status(400).json({
@@ -391,6 +400,9 @@ app.post('/v1/devices/pair', async (request, response) => {
       deviceId,
       deviceType,
       now,
+      ...(requestedScopes === undefined || requestedScopes === null
+        ? {}
+        : { scopes: requestedScopes }),
     })
   } catch (error) {
     response.status(400).json({
@@ -442,30 +454,39 @@ app.use(async (request, response, next) => {
     !principalHasScopes(request.relayPrincipal, ...requiredScopes)
   ) {
     /*
-     * Two very different failures wore the same message until now.
+     * Two very different failures wore the same message, and which two has
+     * changed.
      *
-     * Scopes are frozen into a credential at pair time and nothing updates
-     * them, so a device paired before a capability shipped is refused it
-     * forever — and the refusal read exactly like "that route is not for your
-     * role". After a deploy that adds a scope to a role, every existing node
-     * fails this way at once, which is the moment the generic message costs
-     * the most: it points at the new feature instead of at the stale token.
+     * It used to be "paired before the capability shipped" versus "your role is
+     * not allowed here". The first of those no longer happens: an un-narrowed
+     * credential derives its scopes from the live table on every request, so a
+     * role widening reaches it immediately and a re-pair grants it nothing it
+     * did not already have. Every credential in the fleet is un-narrowed.
      *
-     * The stale case names what is missing and what to do. A genuine denial
-     * stays generic on purpose — a token probing routes must not get a
-     * scope-enumeration oracle out of it.
+     * What is left is the case that survives the fix by design: a credential
+     * minted with an explicit `scopes` ceiling is refused what its role grants,
+     * permanently, and only a re-pair with a wider list changes that. That is a
+     * denial with a remedy, and it stays distinguishable from a role denial,
+     * which has none. The generic message is kept for the latter on purpose —
+     * a token probing routes must not get a scope-enumeration oracle out of it.
+     *
+     * The wire code keeps its old spelling: shipped clients (the browser
+     * extension bundle, src/brain/relayInference.js, src/cloudClient.js) switch
+     * on this string, and the action it tells them to take — re-pair — is still
+     * exactly the right one for the case that can still fire.
      */
-    const staleScopes = requiredScopes
-      ? credentialPredatesScopes(request.relayPrincipal, requiredScopes)
+    const withheldScopes = requiredScopes
+      ? credentialNarrowedBelowRole(request.relayPrincipal, requiredScopes)
       : false
-    if (staleScopes) {
+    if (withheldScopes) {
       response.status(403).json({
         ok: false,
         code: 'credential_predates_capability',
         error:
-          `Blocked for safety: this credential was issued before its role gained ` +
-          `${staleScopes.join(', ')}. Re-pair the device to pick it up — scopes ` +
-          'are frozen into a credential when it is created.',
+          'Blocked for safety: this credential is narrowed to a subset of its ' +
+          `role and does not carry ${withheldScopes.join(', ')}. Re-pair the ` +
+          'device with an explicit scope list that includes it — a narrowed ' +
+          'credential never widens on its own.',
       })
       return
     }
