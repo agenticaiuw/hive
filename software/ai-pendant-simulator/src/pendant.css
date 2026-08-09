@@ -290,6 +290,73 @@
   resize: none;
 }
 
+/* The composer's mic: dictation lands in the draft, Run stays the commit.
+ * Blue at rest like the composer's own controls; warm while the mic is
+ * live, the same temperature every "waiting on you" state here uses. */
+.composer-voice-row {
+  display: grid;
+  gap: 6px;
+}
+
+.composer-mic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  border-radius: 14px;
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.composer-mic-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #60a5fa;
+}
+
+.composer-mic.is-listening {
+  border-color: rgba(248, 113, 113, 0.55);
+  background: rgba(248, 113, 113, 0.16);
+  color: #fecaca;
+}
+
+.composer-mic.is-listening .composer-mic-dot {
+  background: #f87171;
+  animation: composer-mic-pulse 1.4s ease-in-out infinite;
+}
+
+.composer-mic.is-transcribing {
+  opacity: 0.75;
+  cursor: wait;
+}
+
+.composer-mic.is-transcribing .composer-mic-dot {
+  background: #fcd34d;
+  animation: composer-mic-pulse 1s ease-in-out infinite;
+}
+
+.composer-voice-hint {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+@keyframes composer-mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(248, 113, 113, 0);
+  }
+}
+
 .composer-suggestions {
   display: grid;
   gap: 8px;
