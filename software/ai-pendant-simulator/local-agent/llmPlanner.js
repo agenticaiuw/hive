@@ -40,9 +40,19 @@ const LLM_VISION_MODEL =
 /*
  * The cheap tier. Same API, smaller model, and — the part that actually moves
  * the bill — a system prompt built from a trimmed action schema and an
- * apps-only machine block instead of the full 26,000-character brief. Point it
- * anywhere with LLM_BACKGROUND_MODEL; the default is the multimodal small model
- * this repo already talks to, so the cheap tier needs no new credentials.
+ * apps-only machine block instead of the full brief. Point it anywhere with
+ * LLM_BACKGROUND_MODEL; the default is the multimodal small model this repo
+ * already talks to, so the cheap tier needs no new credentials.
+ *
+ * It is also the model that picks tool domains for the full tier — see
+ * discoverDomains. Same reasoning: a small judgement on a small prompt.
+ *
+ * The "26,000-character brief" this used to name is gone. The flat schema is
+ * 28,120 characters and no longer ships whole: FULL_CONTROL_ACTION_SCHEMA is
+ * now delivered a domain at a time through toolDiscovery.js, and a measured
+ * everyday command carries ~1,900 of it. The 42,012-character planner prompt
+ * those numbers came from is in llmPlannerDiscovery.test.js, which fails if
+ * the drilled-down one stops being a fraction of it.
  */
 const LLM_BACKGROUND_MODEL = String(
   process.env.LLM_BACKGROUND_MODEL || 'gpt-4.1-mini',
@@ -762,10 +772,23 @@ export function actionSchemaForTier(tier = 'planner') {
  * whose prose changed with an env var would be worse than none.
  */
 export function actionDescription(type) {
-  const name = String(type ?? '')
-  const spec = FULL_CONTROL_ACTION_SCHEMA[name] ?? SAFE_ACTION_SCHEMA[name]
-  const description = String(spec?.description ?? '').trim()
+  const description = String(actionSpec(type)?.description ?? '').trim()
   return description || null
+}
+
+/**
+ * The raw schema entry — description AND parameters — for one action type, or
+ * null for a type no schema describes.
+ *
+ * BY REFERENCE, deliberately. toolDiscovery.js hands these to the model as the
+ * level-3 answer, and a copy would be a second registry: the moment one is
+ * edited and the other is not, the model is planning against a schema the
+ * planner no longer believes. Same reason actionSchemaForTier returns the
+ * shared objects rather than clones. Do not mutate what comes back.
+ */
+export function actionSpec(type) {
+  const name = String(type ?? '')
+  return FULL_CONTROL_ACTION_SCHEMA[name] ?? SAFE_ACTION_SCHEMA[name] ?? null
 }
 
 export function isLlmPlannerEnabled() {
@@ -917,6 +940,264 @@ export async function planCommand(command, options = {}) {
   }
 }
 
+/*
+ * TOOL DISCOVERY — the planner is handed a catalogue, not the library.
+ *
+ * Every planner turn used to carry FULL_CONTROL_ACTION_SCHEMA in full: 92
+ * action types with their parameter hints, ~28,000 characters, on "set the
+ * volume to 30" as much as on a five-step browser job. toolDiscovery.js groups
+ * the executor's live dispatch table into 14 domains; the first-level prompt
+ * carries only the ~820-character domain catalogue, and the tools themselves
+ * arrive at level 3 for the two or three domains this request actually needs.
+ *
+ * The wiring is a BOUNDED PRE-PASS, not an open tool loop: one cheap call to
+ * pick domains, one planning call with just those schemas, and at most one
+ * widening. Two things make it safe to lose no capability:
+ *   - the planning prompt names the domains it did NOT receive and tells the
+ *     model to ask for them ("need_tools") instead of refusing;
+ *   - an "unsupported" from a scoped prompt is never believed on the spot —
+ *     it is re-planned once against the whole schema, which is exactly the
+ *     prompt this file sent before discovery existed.
+ * So the worst case is today's cost plus a small pre-pass, and the common case
+ * is a fraction of it.
+ *
+ * PENDANT_TOOL_DISCOVERY=off restores the flat schema, which is the only way
+ * to A/B this without a code change.
+ */
+const TOOL_DISCOVERY_ENABLED = process.env.PENDANT_TOOL_DISCOVERY !== 'off'
+/* Picking a shelf is a small judgement, so it runs on the small model. Getting
+ * it wrong costs a widening, never a capability. */
+const LLM_DISCOVERY_MODEL = String(
+  process.env.LLM_DISCOVERY_MODEL || LLM_BACKGROUND_MODEL,
+).trim()
+const DISCOVERY_DOMAIN_LIMIT = 4
+/* Enough of the thread for "do that on the other tab" to land in `browser`,
+ * far too little to put the projection's cost back into the prompt. */
+const DISCOVERY_CONTEXT_CHARS = 800
+
+/*
+ * The planning rules, as entries rather than one block, so a rule travels with
+ * the tools it talks about. A prompt scoped to `files` should not spend six
+ * lines on browser sessions — and, worse, should not advertise browser_* to a
+ * model that was given no browser schema. `needs` is the list of action types
+ * a rule names; the rule ships when any of them did. A rule with no `needs` is
+ * about planning itself and always ships.
+ *
+ * With no scoping the filter is a no-op and the block is byte-for-byte the one
+ * this file has always sent. llmPlannerDiscovery.test.js asserts that.
+ */
+const FULL_CONTROL_RULES = [
+  { text: '- Choose dedicated action types yourself. Never invent keyword parsers.' },
+  { text: '- Weather / rain / forecast → get_weather.', needs: ['get_weather'] },
+  { text: '- Time / date / clock → get_time.', needs: ['get_time'] },
+  { text: '- Translation → translate_text.', needs: ['translate_text'] },
+  {
+    text: '- Reminders → create_reminder. Brightness/volume → set_brightness / set_volume / set_mute.',
+    needs: ['create_reminder', 'set_brightness', 'set_volume', 'set_mute'],
+  },
+  {
+    text: "- Brief me / prepare my workday / what did I miss in email / read my schedule / summarize today's notes into next actions → compose_briefing (one action, nothing else). It reads the sources and writes the note itself; do not add create_note or run_applescript alongside it. It never sends, which is what the owner asked for.",
+    needs: ['compose_briefing'],
+  },
+  {
+    text: `- Web / browser / "this page" / site / tab / form on the web:
+  1) Prefer browser_* tools (extension uses the real logged-in profile).
+  2) For anything past a single step, name a session: browser_open_session with session:"work", then pass session:"work" on every later browser_* action so they all hit the same tab.
+  3) Start with browser_list_tabs or browser_snapshot, then click/type by ref or selector.
+  4) Use browser_wait_for after navigations or SPA updates.
+  5) Prefer browser_read_page (main_text/forms) over dumping html.
+  6) Only use browser_capture or desktop computer_use_task when the page is canvas/visual-only or the extension is offline.`,
+    needs: [
+      'browser_open_session',
+      'browser_list_tabs',
+      'browser_snapshot',
+      'browser_read_page',
+      'browser_wait_for',
+      'browser_capture',
+    ],
+  },
+  {
+    text: '- Native Mac apps (Finder, Settings, non-browser UI): ui_menu / ui_find / ui_click; computer_use_task for multi-step unpredictable UI.',
+    needs: ['ui_menu', 'ui_find', 'ui_click', 'computer_use_task'],
+  },
+  {
+    text: '- Prefer dedicated types over long shell/AppleScript.',
+    needs: ['run_shell', 'run_applescript'],
+  },
+  { text: '- Keep plans short (usually 1-3 steps). Use absolute paths under {{home}} when possible.' },
+  { text: '- Destructive actions only when the user explicitly asks.' },
+  { text: '- If truly impossible, return status "unsupported" with a short reason.' },
+]
+
+/**
+ * The system prompt for one planning call.
+ *
+ * Exported because the size of this string is the whole result, and a test
+ * that measures a reconstruction of it measures nothing. Pass `schemaText` to
+ * hand the model a drilled-down subset; omit it and the prompt is identical to
+ * the one this file sent before discovery existed.
+ *
+ * @param toolNames    action types actually in `schemaText`, for rule filtering
+ * @param otherDomains domain names deliberately withheld — naming them is what
+ *                     turns a missing tool into a request instead of a refusal
+ */
+export function buildPlannerSystemPrompt({
+  tier = 'planner',
+  machinePrompt = '',
+  home = os.homedir(),
+  schemaText = null,
+  toolNames = null,
+  otherDomains = [],
+} = {}) {
+  const background = tier === 'background'
+  const schema = schemaText ?? JSON.stringify(actionSchemaForTier(tier), null, 2)
+  const withheld = Array.isArray(otherDomains) ? otherDomains.filter(Boolean) : []
+  const drillDown = withheld.length
+    ? `\n\nTool domains NOT loaded for this request: ${withheld.join(', ')}.
+If nothing above can do the job, do NOT answer "unsupported" — answer {"status":"need_tools","domains":["<domain>"]} and those tools will be given to you.`
+    : ''
+
+  if (background) {
+    return `You are the fast planning layer for a Mac agent. The request is expected to be simple and single-step.
+
+Return ONLY valid JSON:
+{
+  "status": "ready" | "instant" | "unsupported",
+  "response": "optional short spoken answer when status is instant",
+  "actions": [ { "type": "...", "label": "human readable step", "params": { ... } } ],
+  "requiresConfirmation": true only if you are asking permission for a step the owner did not request,
+  "confirmReason": "when asking: what the extra step is, and why you want it",
+  "error": "only when unsupported"
+}
+
+Available action types (this is the complete list you may use):
+${schema}${drillDown}
+
+${machinePrompt}
+
+Rules:
+- The owner's request is your authorization. Do what they asked and do not ask again.
+- Prefer exactly one action. Two is the maximum.
+- Weather → get_weather. Time/date → get_time. Translation → translate_text.
+- Battery / wifi / system status → get_mac_status.
+- If the request needs the web, a browser, native UI clicking, a shell command, email, or more than two steps, return status "unsupported" with error "needs full planner". Do not improvise around a missing action type.
+- Use absolute paths under ${home}.`
+  }
+
+  if (!FULL_CONTROL_MODE) {
+    return `You are the planning layer for a safe Mac local agent.
+Return ONLY valid JSON with status, actions, optional response, and optional error.
+Allowed action types: ${schema}
+Never invent shell commands or paths outside the whitelist.`
+  }
+
+  const loaded = Array.isArray(toolNames) ? new Set(toolNames) : null
+  const rules = FULL_CONTROL_RULES.filter(
+    (rule) => !rule.needs || !loaded || rule.needs.some((type) => loaded.has(type)),
+  )
+    .map((rule) => rule.text.split('{{home}}').join(home))
+    .join('\n')
+
+  return `You are the planning layer for a Mac computer-control agent with FULL access to the user's machine.
+Decide the intent yourself. Do not rely on keyword short-circuits from the client.
+
+Return ONLY valid JSON:
+{
+  "status": "ready" | "instant" | "unsupported",
+  "response": "optional short spoken answer when status is instant",
+  "actions": [
+    { "type": "...", "label": "human readable step", "params": { ... } }
+  ],
+  "requiresConfirmation": true only if you are asking permission — omit it otherwise,
+  "confirmReason": "when asking: what you want to do beyond the request, and why",
+  "error": "only when unsupported"
+}
+
+When to use each status:
+- "instant": you already know the answer (or only need get_weather / get_time / translate_text). Put the spoken answer in "response". For weather/time/translate, prefer those action types and leave response empty — the runtime will fill it.
+- "ready": Mac control / apps / files / media / settings to carry out now.
+- "unsupported": truly impossible on this device.
+
+Permission — you decide, not a rule table:
+- The owner's request IS your authorization. Plan it and let it run. Asking them to confirm what they just asked for is friction they pay on every turn for a decision they already made.
+- Ask ONLY when a step goes beyond what they asked for: something you believe would help but they did not request, or something hard to undo that the literal request does not cover. Then set "requiresConfirmation": true and say in "confirmReason" what the extra step is and why you want it, in one sentence, addressed to them.
+- Asking is per-plan, so keep the extra step in "actions" and explain it — do not silently drop it and do not smuggle it in.
+- Everything you run is recorded and can be undone afterwards. That is what buys you the benefit of the doubt; do not spend it on steps nobody asked for.
+
+Available action types:
+${schema}${drillDown}
+
+${machinePrompt}
+
+Planning rules:
+${rules}`
+}
+
+/**
+ * LEVEL 1: which shelves does this request need?
+ *
+ * The only capability text in this prompt is the domain catalogue — 14 lines,
+ * ~820 characters, no action type named anywhere. Returns the domains the
+ * model asked for, filtered to ones that exist, or an empty list if the model
+ * or the network let us down; an empty list means the caller falls back to the
+ * whole schema, which is what it sent before this existed.
+ */
+async function discoverDomains(command, { headers, context = null, onProgress = null }) {
+  const { normalizeDomains, renderDomainCatalog } = await import('./toolDiscovery.js')
+
+  const systemPrompt = `You are the tool-discovery layer for a Mac agent. You do not plan yet: you choose which shelves of the tool library this request needs, and the tools on them are fetched for you.
+
+Tool domains:
+${renderDomainCatalog()}
+
+Return ONLY valid JSON: {"domains": ["<domain>", ...]}
+
+Rules:
+- Name every domain the request might touch, likeliest first. Two or three is normal; ${DISCOVERY_DOMAIN_LIMIT} is the maximum.
+- Naming one domain too many costs a few tokens. Naming one too few costs a whole round trip, or a worse plan built out of the wrong shelf — so when two could apply, name both.
+- A request to be summarised, caught up, prepared for or told what it missed almost always spans more than one shelf.
+- "shell" and "input" are the general ways into anything this Mac can do that no other shelf covers — a script, or driving an app window. Add them whenever the obvious shelf might not reach the whole job. Choosing between a direct tool and a script happens later; you are only deciding what to put on the table.`
+
+  const thread = String(context?.promptBlock ?? '')
+  const userContent = [
+    thread ? `Recent context:\n${thread.slice(-DISCOVERY_CONTEXT_CHARS)}` : '',
+    `Request:\n${command}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const content = await requestLlmPlanContent({
+    headers,
+    systemPrompt,
+    userContent,
+    // No onProgress: this call is not streamed, so it cannot interleave with
+    // the plan draft the orchestrator is rendering token by token.
+    command,
+    model: LLM_DISCOVERY_MODEL,
+    maxTokens: 120,
+  })
+
+  const parsed = JSON.parse(extractJsonObject(content))
+  const domains = normalizeDomains(parsed.domains, { limit: DISCOVERY_DOMAIN_LIMIT })
+
+  onProgress?.({
+    phase: 'discover_tools',
+    message: domains.length
+      ? `Opened tool domains: ${domains.join(', ')}`
+      : 'No domain matched — loading every tool',
+  })
+
+  return {
+    domains,
+    usage: {
+      tier: 'discovery',
+      model: LLM_DISCOVERY_MODEL,
+      promptChars: systemPrompt.length + userContent.length,
+      completionChars: content.length,
+    },
+  }
+}
+
 async function planWithLlm(
   command,
   { context = null, onProgress = null, tier = 'planner', resumed = null } = {},
@@ -927,144 +1208,193 @@ async function planWithLlm(
   const machinePrompt = formatMachineContextForPrompt(machine, {
     compact: background,
   })
-  const actionSchema = actionSchemaForTier(tier)
   const model = background ? LLM_BACKGROUND_MODEL : LLM_MODEL
   const maxTokens = background
     ? Math.min(LLM_MAX_TOKENS, 768)
     : LLM_MAX_TOKENS
 
+  const discovery = await import('./toolDiscovery.js')
+
   /*
-   * The small tier gets a short brief, not a shortened version of the long one.
-   * Its job is narrow — one obvious action, or admit it cannot — and every rule
-   * about browsers, native UI trees and shell is not just wasted tokens there
-   * but an invitation to attempt something outside its schema.
+   * Which tools this call gets.
+   *
+   * The small tier does not drill down: its schema is already 24 types, and a
+   * second model call to save a few hundred characters would cost more latency
+   * than it saves tokens. It still benefits — the same renderer packs its
+   * schema one tool per line instead of pretty-printed JSON.
    */
-  const systemPrompt = background
-    ? `You are the fast planning layer for a Mac agent. The request is expected to be simple and single-step.
+  let scoped = null
+  let discoveredDomains = null
+  const usage = []
 
-Return ONLY valid JSON:
-{
-  "status": "ready" | "instant" | "unsupported",
-  "response": "optional short spoken answer when status is instant",
-  "actions": [ { "type": "...", "label": "human readable step", "params": { ... } } ],
-  "error": "only when unsupported"
-}
-
-Available action types (this is the complete list you may use):
-${JSON.stringify(actionSchema, null, 2)}
-
-${machinePrompt}
-
-Rules:
-- Prefer exactly one action. Two is the maximum.
-- Weather → get_weather. Time/date → get_time. Translation → translate_text.
-- Battery / wifi / system status → get_mac_status.
-- If the request needs the web, a browser, native UI clicking, a shell command, email, or more than two steps, return status "unsupported" with error "needs full planner". Do not improvise around a missing action type.
-- Use absolute paths under ${home}.`
-    : FULL_CONTROL_MODE
-    ? `You are the planning layer for a Mac computer-control agent with FULL access to the user's machine.
-Decide the intent yourself. Do not rely on keyword short-circuits from the client.
-
-Return ONLY valid JSON:
-{
-  "status": "ready" | "instant" | "unsupported",
-  "response": "optional short spoken answer when status is instant",
-  "actions": [
-    { "type": "...", "label": "human readable step", "params": { ... } }
-  ],
-  "error": "only when unsupported"
-}
-
-When to use each status:
-- "instant": you already know the answer (or only need get_weather / get_time / translate_text). Put the spoken answer in "response". For weather/time/translate, prefer those action types and leave response empty — the runtime will fill it.
-- "ready": Mac control / apps / files / media / settings that need confirmation before running.
-- "unsupported": truly impossible on this device.
-
-Available action types:
-${JSON.stringify(actionSchema, null, 2)}
-
-${machinePrompt}
-
-Planning rules:
-- Choose dedicated action types yourself. Never invent keyword parsers.
-- Weather / rain / forecast → get_weather.
-- Time / date / clock → get_time.
-- Translation → translate_text.
-- Reminders → create_reminder. Brightness/volume → set_brightness / set_volume / set_mute.
-- Brief me / prepare my workday / what did I miss in email / read my schedule / summarize today's notes into next actions → compose_briefing (one action, nothing else). It reads the sources and writes the note itself; do not add create_note or run_applescript alongside it. It never sends, which is what the owner asked for.
-- Web / browser / "this page" / site / tab / form on the web:
-  1) Prefer browser_* tools (extension uses the real logged-in profile).
-  2) For anything past a single step, name a session: browser_open_session with session:"work", then pass session:"work" on every later browser_* action so they all hit the same tab.
-  3) Start with browser_list_tabs or browser_snapshot, then click/type by ref or selector.
-  4) Use browser_wait_for after navigations or SPA updates.
-  5) Prefer browser_read_page (main_text/forms) over dumping html.
-  6) Only use browser_capture or desktop computer_use_task when the page is canvas/visual-only or the extension is offline.
-- Native Mac apps (Finder, Settings, non-browser UI): ui_menu / ui_find / ui_click; computer_use_task for multi-step unpredictable UI.
-- Prefer dedicated types over long shell/AppleScript.
-- Keep plans short (usually 1-3 steps). Use absolute paths under ${home} when possible.
-- Destructive actions only when the user explicitly asks.
-- If truly impossible, return status "unsupported" with a short reason.`
-    : `You are the planning layer for a safe Mac local agent.
-Return ONLY valid JSON with status, actions, optional response, and optional error.
-Allowed action types: ${JSON.stringify(actionSchema, null, 2)}
-Never invent shell commands or paths outside the whitelist.`
+  if (background) {
+    // Its own subset, read back off actionSchemaForTier rather than off
+    // BACKGROUND_ACTION_TYPES, so the cheap tier is handed exactly the types it
+    // was handed before — not one more that happens to be dispatchable.
+    scoped = { toolNames: Object.keys(actionSchemaForTier(tier)), otherDomains: [] }
+  } else if (TOOL_DISCOVERY_ENABLED && FULL_CONTROL_MODE) {
+    try {
+      const picked = await discoverDomains(command, {
+        headers: llmRequestHeaders(),
+        context,
+        onProgress,
+      })
+      usage.push(picked.usage)
+      discoveredDomains = picked.domains
+      if (picked.domains.length) {
+        scoped = {
+          domains: picked.domains,
+          toolNames: discovery.toolsForDomains(picked.domains),
+          otherDomains: discovery.domainsExcept(picked.domains),
+        }
+      }
+    } catch (error) {
+      // Discovery is an optimisation. A failed one costs the pre-pass and
+      // falls through to the prompt this file has always sent.
+      console.warn(`[planner] tool discovery failed: ${error.message}`)
+    }
+  }
 
   const userContent = [context?.promptBlock, `Current request:\n${command}`]
     .filter(Boolean)
     .join('\n\n')
 
   const headers = llmRequestHeaders()
-
-  onProgress?.({
-    phase: 'llm_start',
-    message: `Asking ${model} for a plan`,
-  })
-
-  const content = await requestLlmPlanContent({
-    headers,
-    systemPrompt,
-    userContent,
-    onProgress,
-    command,
-    model,
-    maxTokens,
-    priorMessages: resumed?.resumed ? resumed.messages : [],
-    cacheKey: resumed?.cacheKey ?? null,
-  })
-
-  if (!content) {
-    throw new Error('LLM returned an empty planning response.')
-  }
-
-  onProgress?.({
-    phase: 'llm_parse',
-    message: 'Parsing the plan',
-    partial: content,
-  })
-
-  /*
-   * What this call cost. The streaming completions API returns no usage block,
-   * so the character counts are the ground truth and the token numbers derived
-   * from them are labelled estimates wherever they surface. Every return below
-   * carries it: a plan the owner cannot price is a plan they cannot route.
-   */
   const inheritedChars = (resumed?.resumed ? resumed.messages : []).reduce(
     (total, message) => total + String(message.content || '').length,
     0,
   )
-  const usage = {
-    tier,
-    model,
-    promptChars: systemPrompt.length + userContent.length + inheritedChars,
-    completionChars: content.length,
-    /* Broken out so the cost of inheriting a thread can be compared against
-     * the cost of rediscovering it, which is the only number that decides
-     * whether this mechanism is worth keeping. */
-    inheritedChars,
-    resumed: Boolean(resumed?.resumed),
+
+  let systemPrompt = ''
+  let content = ''
+  let parsed = null
+  let widened = false
+
+  /*
+   * At most two planning calls. The second only happens when the first said it
+   * was missing tools, or refused while holding a subset — the two ways a
+   * drilled-down prompt can be less capable than the flat one. Widening goes
+   * straight to the whole schema rather than adding one domain at a time: a
+   * second wrong guess would cost another round trip, and by this point the
+   * request has already proved it does not fit the catalogue.
+   */
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const schemaText = scoped
+      ? discovery.renderToolSchemas(scoped.toolNames)
+      : JSON.stringify(actionSchemaForTier(tier), null, 2)
+
+    systemPrompt = buildPlannerSystemPrompt({
+      tier,
+      machinePrompt,
+      home,
+      schemaText,
+      toolNames: scoped?.toolNames ?? null,
+      otherDomains: scoped?.otherDomains ?? [],
+    })
+
+    onProgress?.({
+      phase: 'llm_start',
+      message: `Asking ${model} for a plan`,
+    })
+
+    content = await requestLlmPlanContent({
+      headers,
+      systemPrompt,
+      userContent,
+      onProgress,
+      command,
+      model,
+      maxTokens,
+      priorMessages: resumed?.resumed ? resumed.messages : [],
+      cacheKey: resumed?.cacheKey ?? null,
+    })
+
+    if (!content) {
+      throw new Error('LLM returned an empty planning response.')
+    }
+
+    /* What this call cost. The streaming completions API returns no usage
+     * block, so the character counts are the ground truth and the token
+     * numbers derived from them are labelled estimates wherever they surface.
+     * Every return below carries it: a plan the owner cannot price is a plan
+     * they cannot route. */
+    usage.push({
+      tier,
+      model,
+      promptChars: systemPrompt.length + userContent.length + inheritedChars,
+      completionChars: content.length,
+      inheritedChars,
+      resumed: Boolean(resumed?.resumed),
+      /* The number this change exists to move, kept next to the number it is
+       * part of: a prompt total that shrank because the machine inventory
+       * shrank would look identical from the outside. */
+      schemaChars: schemaText.length,
+      toolCount: scoped
+        ? scoped.toolNames.length
+        : Object.keys(actionSchemaForTier(tier)).length,
+      domains: scoped?.domains ?? null,
+    })
+
+    onProgress?.({
+      phase: 'llm_parse',
+      message: 'Parsing the plan',
+      partial: content,
+    })
+
+    parsed = JSON.parse(extractJsonObject(content))
+
+    const shortOfTools =
+      Boolean(scoped) &&
+      !widened &&
+      (parsed.status === 'need_tools' || parsed.status === 'unsupported')
+    if (!shortOfTools) break
+
+    widened = true
+    scoped = null
+    onProgress?.({
+      phase: 'discover_widen',
+      message:
+        parsed.status === 'need_tools'
+          ? 'Plan needs more tools — loading the whole library'
+          : 'Refused with a partial library — re-planning against all of it',
+    })
   }
 
-  const parsed = JSON.parse(extractJsonObject(content))
+  if (parsed.status === 'need_tools') {
+    // Only reachable with discovery disabled mid-flight or a model that keeps
+    // asking after being handed everything. Treat it as the refusal it is,
+    // rather than returning a "ready" plan with no steps in it.
+    parsed = {
+      status: 'unsupported',
+      error: 'The planner asked for tools that do not exist.',
+    }
+  }
+
+  const totals = usage.reduce(
+    (sum, call) => ({
+      promptChars: sum.promptChars + call.promptChars,
+      completionChars: sum.completionChars + call.completionChars,
+    }),
+    { promptChars: 0, completionChars: 0 },
+  )
+  const planningUsage = usage[usage.length - 1]
+  const summarisedUsage = {
+    ...planningUsage,
+    // The total across the pre-pass and every planning call: routingStats
+    // prices a turn off this field, and pricing only the last call would hide
+    // exactly the cost discovery adds.
+    promptChars: totals.promptChars,
+    completionChars: totals.completionChars,
+    calls: usage.length,
+    discovery: usage.some((call) => call.tier === 'discovery'),
+    widened,
+    /* What the pre-pass picked, kept even when the plan widened past it. This
+     * is the only signal that says WHICH domain guess was wrong, and the
+     * taxonomy is tuned by reading it — after widening, `domains` above is
+     * null, which is accurate about the last call and useless as a diagnosis. */
+    discoveryDomains: discoveredDomains,
+  }
+
   const actions = sanitizeActions(
     Array.isArray(parsed.actions) ? parsed.actions : [],
   )
@@ -1078,28 +1408,60 @@ Never invent shell commands or paths outside the whitelist.`
       requiresConfirmation: true,
       error: parsed.error ?? 'LLM could not produce an action plan.',
       planner: 'llm',
-      usage,
+      usage: summarisedUsage,
     }
   }
 
-  if (
-    parsed.status === 'instant' ||
-    (!actions.length && responseText) ||
-    (actions.length &&
-      actions.every((action) =>
-        ['get_weather', 'get_time', 'translate_text'].includes(action.type),
-      ))
-  ) {
+  /*
+   * WHO DECIDES WHETHER TO ASK.
+   *
+   * This used to be a constant: every plan confirmed except one made entirely
+   * of three action types named right here — get_weather, get_time,
+   * translate_text. That trio was the planner's whole theory of risk, and it
+   * was wrong in both directions. Too strict, because "what are the four
+   * latest items on my Safari reading list" plans one read-only AppleScript
+   * and still parked for an approval nobody needed. Too loose, because a plan
+   * the model labelled "instant" skipped confirmation whatever was in it.
+   *
+   * The owner's rule replaces it, and it is about SCOPE, not mechanism: their
+   * request is the authorization. A reminder they asked for is a reminder they
+   * approved; asking again is friction they pay on every turn for a decision
+   * they already made. What genuinely needs asking is a step they did NOT ask
+   * for — something the model thinks would help, or something hard to undo
+   * that goes past the literal request. Only the model can tell those apart,
+   * because the difference is between the plan and the sentence, and no table
+   * of action types can see a sentence.
+   *
+   * So the default is false and the model raises it, with a reason. A code
+   * floor here would quietly rebuild the thing being removed, so there is
+   * none; see the accountability note below for what carries the weight
+   * instead.
+   *
+   * NOTHING THAT RECORDS IS RELAXED. This changes only whether the owner is
+   * asked BEFORE. actionLedger, actionReceipts and the pipeline events still
+   * see every step, and undo still works, which is the half of the trade that
+   * makes the other half affordable.
+   */
+  const requiresConfirmation = parsed.requiresConfirmation === true
+  const confirmReason = requiresConfirmation
+    ? String(parsed.confirmReason || '').trim() ||
+      'The planner asked for approval without saying why.'
+    : ''
+
+  if (parsed.status === 'instant' || (!actions.length && responseText)) {
     return {
       status: actions.length && !responseText ? 'ready' : 'instant',
       command,
       response: responseText || undefined,
       summary: responseText || undefined,
       actions,
-      requiresConfirmation: false,
+      requiresConfirmation,
+      ...(requiresConfirmation
+        ? { confirmReason, safety: safetyLine(confirmReason) }
+        : {}),
       planner: 'llm',
       fullControl: FULL_CONTROL_MODE,
-      usage,
+      usage: summarisedUsage,
     }
   }
 
@@ -1108,14 +1470,28 @@ Never invent shell commands or paths outside the whitelist.`
     command,
     response: responseText || undefined,
     actions,
-    requiresConfirmation: true,
-    safety: FULL_CONTROL_MODE
-      ? 'Full computer control is enabled. Review the plan carefully before confirming.'
-      : 'Actions are prepared first. Nothing is executed on the Mac until you confirm.',
+    requiresConfirmation,
+    ...(requiresConfirmation ? { confirmReason } : {}),
+    safety: safetyLine(confirmReason),
     planner: 'llm',
     fullControl: FULL_CONTROL_MODE,
-    usage,
+    usage: summarisedUsage,
   }
+}
+
+/*
+ * What the plan says about itself. A plan that is about to run must not carry
+ * a sentence telling the owner to review it before confirming — they will be
+ * reading it afterwards. And a plan that IS waiting should lead with the
+ * model's own reason for waiting, not with a generic notice: "I also wanted to
+ * empty the folder, which cannot be undone" is the thing worth reading, and it
+ * is the reason the ask was worth making at all.
+ */
+function safetyLine(confirmReason) {
+  if (!confirmReason) {
+    return 'Running what you asked for. Every step is recorded and can be undone from the ledger.'
+  }
+  return `Waiting on you: ${confirmReason}`
 }
 
 // Deliberating costs seconds of voice latency, so spend it only where it pays:
