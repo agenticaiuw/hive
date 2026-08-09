@@ -116,6 +116,18 @@ function App() {
   )
 
   /*
+   * The mesh doorbell, for as long as this app is mounted.
+   *
+   * The node-mesh inbox is durable, so mail is never lost without this — it is
+   * simply not noticed until the model happens to call mesh_inbox. The socket
+   * is what turns that into an arrival: it drains on every {"type":"mail"}
+   * frame and on every connect, since mail queued while the phone was offline
+   * rang a doorbell nobody heard. It degrades to nothing when the phone is
+   * unpaired or the platform has no WebSocket, and it never throws in here.
+   */
+  useEffect(() => phoneBrain.startMeshListener(), [phoneBrain])
+
+  /*
    * The brain's confirmation gate, held open across a render.
    *
    * runMobileBrain calls `confirm` ONLY when the model asked for permission,

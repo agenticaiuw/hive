@@ -13,10 +13,16 @@
  * laptop lid shut, which is precisely when the phone is the only node awake.
  * So the table below is split by what survives that:
  *
- *   hive, memory, voice, phone  — reachable with a `mobile` device token alone.
- *                                 These work with the Mac asleep. This is the
+ *   hive, memory, mesh,         — reachable with a `mobile` device token alone.
+ *   voice, phone                  These work with the Mac asleep. This is the
  *                                 part that makes the phone a node rather than
- *                                 a remote control.
+ *                                 a remote control. `mesh` is the sharpest case
+ *                                 of it: until the node mesh existed, the only
+ *                                 way this phone could reach the browser
+ *                                 extension was to queue a mac:* job, i.e. only
+ *                                 while the laptop was awake. Now the relay
+ *                                 switches it, and the relay is awake by
+ *                                 construction.
  *   mac                         — delegation. Queues a bridge job, so it is
  *                                 dead while the Mac is offline, and the model
  *                                 is told so by mac_status rather than by
@@ -34,6 +40,7 @@
  * permission when it is about to act beyond what the owner requested, and that
  * judgement lives in the prompt (mobileBrain.js), not in a switch here.
  */
+import { drainMeshInbox, takeBufferedMeshMail } from './meshMailbox.js'
 
 /* Scope names as the relay spells them; cloud-relay/deviceAuth.js is the
  * authority and this file only ever compares against what a credential says it
@@ -48,6 +55,8 @@ export const RELAY_SCOPES = Object.freeze({
   MAC_EXECUTE: 'mac:execute',
   MAC_JOBS: 'mac:jobs:read',
   SPEECH_SYNTHESIZE: 'speech:synthesize',
+  NODE_SEND: 'node:message:send',
+  NODE_RECEIVE: 'node:message:receive',
 })
 
 const DEFAULT_ACCOUNT_ID = 'single-owner'
@@ -61,6 +70,7 @@ export const MOBILE_DOMAIN_NOTES = Object.freeze({
   hive: 'What the other nodes are doing right now: the Mac, the pendant, the relay, the browser.',
   mac: "The owner's Mac, when it is awake: run anything it can do, or check whether it is reachable.",
   memory: 'Remember something for later, or recall what was said on any device.',
+  mesh: 'Message another node directly — the Mac, the browser, the pendant, the relay — and read what they sent you. Works while the Mac is asleep.',
   phone: 'This phone itself: battery, network, clipboard, location, time, opening a link.',
   voice: 'Say something out loud through the phone.',
   /* Never written to by hand — populated only when a tool declares a domain
@@ -361,6 +371,144 @@ export const MOBILE_TOOLS = Object.freeze({
     },
   },
 
+  /* ---------------------------------------------------------------- mesh */
+  mesh_send: {
+    domain: 'mesh',
+    description:
+      'Send a message straight to another node — the Mac, the browser extension, the pendant, or the relay\'s own brain at "@relay". The relay queues it durably, so a node that is asleep gets it when it wakes, and the answer says which happened. The receiver can trust who sent it: the relay stamps the sender from this phone\'s credential.',
+    params: {
+      to: 'the receiving node\'s deviceId, or "@relay" for the relay\'s brain',
+      kind: 'what to do, as a dotted lowercase verb: "ios.notify", "browser.tab.open"',
+      payload: 'a JSON object, under 64 KiB serialised — send a reference, not a file',
+      correlationId: 'optional: the id of the message you are answering',
+      ttlMs: 'optional: how long it stays deliverable. Default 10 minutes, max 24 hours',
+    },
+    needs: [RELAY_SCOPES.NODE_SEND],
+    async run(params, ctx) {
+      const client = requireClient(ctx)
+      const to = text(params?.to, 128).trim()
+      const kind = text(params?.kind, 64).trim()
+      if (!to) throw new Error('mesh_send needs a `to` address.')
+      if (!kind) throw new Error('mesh_send needs a `kind`.')
+
+      const payload =
+        params?.payload && typeof params.payload === 'object' && !Array.isArray(params.payload)
+          ? params.payload
+          : { text: text(params?.payload, 2000) }
+
+      const sent = await client.sendNodeMessage({
+        to,
+        kind,
+        payload,
+        correlationId: params?.correlationId ?? null,
+        ttlMs: Number(params?.ttlMs) || null,
+      })
+      return {
+        messageId: sent?.messageId ?? null,
+        to: sent?.to ?? to,
+        from: sent?.from ?? null,
+        expiresAt: sent?.expiresAt ?? null,
+        /* Which of the two really happened, rather than a cheerful "sent". */
+        delivered: sent?.pushed === true,
+        note:
+          sent?.pushed === true
+            ? 'That node was connected and has it now.'
+            : 'That node is not connected; the relay is holding it until it is.',
+      }
+    },
+  },
+
+  mesh_inbox: {
+    domain: 'mesh',
+    description:
+      "Read the messages other nodes have sent to this phone. Everything waiting comes back at once, already acknowledged so it will not arrive twice, and anything you have been shown before is filtered out for you. Each `from` is stamped by the relay and can be trusted.",
+    params: {
+      ack: 'optional, default true. false leaves the batch to be redelivered in about a minute',
+    },
+    needs: [RELAY_SCOPES.NODE_RECEIVE],
+    async run(params, ctx) {
+      const client = requireClient(ctx)
+      const ack = params?.ack !== false
+      /* Whatever the doorbell already pulled down comes first: the socket
+       * drains on its own, so the relay's copy is gone by the time a tool asks
+       * for it. Without this, mail that arrived seconds ago reads as no mail. */
+      const buffered = takeBufferedMeshMail()
+      const drained = await drainMeshInbox({ client, deviceId: ctx?.deviceId, ack })
+      const messages = [...buffered, ...drained.messages]
+
+      return summariseToolResult({
+        count: messages.length,
+        messages: messages.map((envelope) => ({
+          id: envelope.id,
+          from: envelope.from,
+          kind: envelope.kind,
+          payload: envelope.payload,
+          correlationId: envelope.corr ?? null,
+          sentAt: envelope.createdAt,
+        })),
+        /* Not `pending`: the relay counts what it just leased to you, so that
+         * number is non-zero the instant after a complete drain. */
+        moreWaiting: drained.more,
+        /*
+         * Only when the caller asked not to ack, and only for the envelopes
+         * this drain leased — anything that came out of the socket buffer was
+         * acked by the listener already. A bare `acknowledged: 0` was the
+         * alternative here and it was worse than useless: after a doorbell
+         * drain it reads as "your mail was not acknowledged" when the mail was
+         * acknowledged by someone else a second earlier.
+         */
+        ...(ack
+          ? {}
+          : {
+              unacknowledged: drained.messages.map((envelope) => envelope.id),
+              note: 'These are leased, not deleted. Call mesh_ack with these ids or they arrive again in about a minute.',
+            }),
+      })
+    },
+  },
+
+  mesh_ack: {
+    domain: 'mesh',
+    description:
+      'Acknowledge messages by id, deleting them from this phone\'s inbox. mesh_inbox does this already, so you only need it after reading with ack false. Acknowledging means "I have this", not "I did this" — never withhold one because a message could not be acted on, or it returns every minute forever.',
+    params: { messageIds: 'array of message ids from mesh_inbox' },
+    needs: [RELAY_SCOPES.NODE_RECEIVE],
+    async run(params, ctx) {
+      const client = requireClient(ctx)
+      const messageIds = (Array.isArray(params?.messageIds) ? params.messageIds : [params?.messageIds])
+        .map((id) => text(id, 80).trim())
+        .filter(Boolean)
+      if (!messageIds.length) throw new Error('mesh_ack needs at least one message id.')
+      const result = await client.ackNodeMessages(ctx?.deviceId, messageIds)
+      return { acknowledged: Number(result?.acknowledged || 0), stillWaiting: Number(result?.pending || 0) }
+    },
+  },
+
+  mesh_presence: {
+    domain: 'mesh',
+    description:
+      'Is a node holding a live connection to the relay this second? Ask about any node by deviceId, or omit it for this phone. Answers with whether it is connected, how much mail is waiting for it, and whether the relay could observe it at all.',
+    params: { deviceId: "which node; omit for this phone" },
+    needs: [RELAY_SCOPES.DEVICE_STATUS],
+    async run(params, ctx) {
+      const client = requireClient(ctx)
+      const deviceId = text(params?.deviceId, 128).trim() || String(ctx?.deviceId ?? '')
+      if (!deviceId) throw new Error('mesh_presence needs a deviceId.')
+      const presence = await client.nodePresence(deviceId)
+      return {
+        deviceId,
+        connected: presence?.connected === true,
+        /* False means the relay could not reach that node's hub to ask. It is
+         * NOT "offline", and the difference is the whole reason the field is
+         * here — see the working rule in mobileBrain.js. */
+        observed: presence?.observed === true,
+        sockets: Number(presence?.sockets || 0),
+        connectedSince: presence?.since ?? null,
+        mailWaiting: Number(presence?.pending || 0),
+      }
+    },
+  },
+
   /* --------------------------------------------------------------- voice */
   speak: {
     domain: 'voice',
@@ -526,6 +674,16 @@ export async function runMobileTool(type, params = {}, ctx = {}) {
       ok: false,
       ms: Date.now() - startedAt,
       error: text(error?.message || String(error), 600),
+      /*
+       * The relay's machine-readable half, when it sent one. Two 403s that read
+       * almost identically in prose need completely different answers:
+       * `credential_predates_capability` means the role grants this but the
+       * token predates it, so RE-PAIRING FIXES IT, while `scope_denied` means
+       * re-pairing will not help. Keying on message text is how a client ends
+       * up telling an owner to re-pair forever, so the code travels and the
+       * text does not have to be parsed.
+       */
+      ...(error?.code ? { code: String(error.code) } : {}),
     }
   }
 }

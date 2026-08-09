@@ -43,6 +43,37 @@ export const BRIDGE_WORK_FRAME = '{"type":"work"}'
  */
 export const BRIDGE_MAIL_FRAME = '{"type":"mail"}'
 
+/*
+ * THE HANDSHAKE A BROWSER CAN ACTUALLY PERFORM.
+ *
+ * The Mac's socket authenticates with an `Authorization` header, which is
+ * unavailable to every other node: the WebSocket constructor in a service
+ * worker or a WKWebView takes a URL and a subprotocol list and nothing else.
+ * So the credential rides as a SECOND subprotocol offer:
+ *
+ *   new WebSocket(url, [MESH_SUBPROTOCOL, `${BEARER_SUBPROTOCOL_PREFIX}${token}`])
+ *
+ * Two offers rather than one because RFC 6455 makes the server echo a protocol
+ * the client offered — echoing the `bearer.` entry would put the token in the
+ * response headers, so the server selects the plain mesh name and the secret is
+ * never reflected. It stays out of the query string for the same reason: query
+ * strings are what gets logged.
+ *
+ * cloudflare-worker/bridgeHub.js holds the server's copy of these two strings.
+ * Verified against production on 2026-08-09: offering both, with no
+ * Authorization header at all, connects and the server selects
+ * "pendant.mesh.v1".
+ */
+export const MESH_SUBPROTOCOL = 'pendant.mesh.v1'
+export const BEARER_SUBPROTOCOL_PREFIX = 'bearer.'
+
+/*
+ * How often a node pings. NATs and proxies idle out a quiet socket somewhere
+ * around a minute; Cloudflare answers BRIDGE_PING_FRAME from the hibernation
+ * layer, so the cost of this is a frame, not a woken Durable Object.
+ */
+export const BRIDGE_PING_INTERVAL_MS = 55_000
+
 /* Parse one inbound text frame; null for anything unrecognizable. */
 export function parseBridgeFrame(data) {
   if (typeof data !== 'string') return null

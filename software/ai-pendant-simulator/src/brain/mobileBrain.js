@@ -57,8 +57,18 @@ import { runMobileTool, summariseToolResult } from './mobileTools.js'
  * the real number and fails if it crosses this line. Below the budget, a
  * discovery pre-pass would buy nothing and cost a round trip on a device that
  * is often on a phone network. Above it, the machinery is already here.
+ *
+ * RAISED FROM 6000 TO 8000 when the `mesh` domain landed and the measured
+ * schema went 4,639 → 6,556. This is the deliberate choice the old ceiling's
+ * failure message asked for, not a number nudged until a test passed, so the
+ * arithmetic is here to be argued with: crossing the budget costs one extra
+ * model round trip on EVERY command — the discovery pre-pass — and on cellular
+ * that is a second or two the owner watches. Staying under it costs ~1,900
+ * extra prompt characters, roughly 500 tokens, on every turn. At this size the
+ * round trip is worth far more than the tokens. That stops being true somewhere
+ * near the Mac's 28k, which is why this is a ceiling and not an `Infinity`.
  */
-export const PROMPT_SCHEMA_BUDGET = 6000
+export const PROMPT_SCHEMA_BUDGET = 8000
 
 /* How many shelves the discovery pre-pass may open at once. */
 const DISCOVERY_DOMAIN_LIMIT = 3
@@ -95,6 +105,24 @@ const WORKING_RULES = [
   {
     text: '- Your final answer is spoken automatically. Do not also call speak with it.',
     needs: ['speak'],
+  },
+  /*
+   * The one mesh fact most likely to produce a confidently wrong sentence to
+   * the owner. `observed:false` is the relay saying "I could not ask that
+   * node's hub", and it is returned by the SAME shape as a real disconnection —
+   * connected:false, sockets:0. A model reading only `connected` will report a
+   * healthy node as dead, and the owner has no way to tell that apart from the
+   * truth. It rides as a rule rather than in mesh_presence's description
+   * because it is an instruction about what to SAY, not about what the tool
+   * does.
+   */
+  {
+    text: '- On mesh_presence, "observed": false means the relay could not reach that node to ask — it does NOT mean the node is offline. Never tell the owner a node is down on that basis; say you could not check.',
+    needs: ['mesh_presence'],
+  },
+  {
+    text: '- A mesh message that is queued rather than delivered is not a failure: the relay holds it until that node connects. Say it is waiting, not that it failed.',
+    needs: ['mesh_send'],
   },
   {
     text: '- Speak like a person talking to someone holding a phone. Short sentences. No markdown, no bullet lists, no headings — "say" is read aloud.',
@@ -391,7 +419,16 @@ export async function runMobileBrain({
         steps.slice(-actions.length).map((outcome) => ({
           tool: outcome.tool,
           ok: outcome.ok,
-          ...(outcome.ok ? { result: summariseToolResult(outcome.result) } : { error: outcome.error }),
+          ...(outcome.ok
+            ? { result: summariseToolResult(outcome.result) }
+            : {
+                error: outcome.error,
+                /* The relay's own code, when it sent one. Without it the model
+                 * has only prose to distinguish "re-pair the phone and this
+                 * works" from "re-pairing will not help", and those are
+                 * different sentences to say to the owner. */
+                ...(outcome.code ? { code: outcome.code } : {}),
+              }),
         })),
       )}\n\nContinue. Answer with status "done" and the answer in "say" if you now have it.`,
     })

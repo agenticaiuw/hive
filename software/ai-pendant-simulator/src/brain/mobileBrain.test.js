@@ -13,6 +13,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { DEVICE_SCOPES } from '../../cloud-relay/deviceAuth.js'
+/* The relay's route → scope table, imported rather than transcribed, for the
+ * same reason mobileDiscovery.test.js imports DEVICE_SCOPES: a tool declaring a
+ * scope its route does not require is invisible on a credential that happens to
+ * hold both. */
+import { requiredScopesForRoute } from '../../cloud-relay/relayScopes.js'
 import {
   buildBrainSystemPrompt,
   describeSituation,
@@ -20,9 +25,20 @@ import {
   PROMPT_SCHEMA_BUDGET,
   runMobileBrain,
 } from './mobileBrain.js'
+import {
+  bufferedMeshMail,
+  createMeshListener,
+  drainMeshInbox,
+  resetMeshMailbox,
+} from './meshMailbox.js'
 import { buildMobileCatalogue, renderFullSchema, toolsForDomains } from './mobileDiscovery.js'
 import { extractJsonObject, INFERENCE_LIMITS, parseModelJson } from './relayInference.js'
-import { MOBILE_TOOL_TYPES } from './mobileTools.js'
+import { MOBILE_TOOLS, MOBILE_TOOL_TYPES } from './mobileTools.js'
+import {
+  BRIDGE_MAIL_FRAME,
+  BRIDGE_PING_FRAME,
+  MESH_SUBPROTOCOL,
+} from '../../shared/bridgeSocketProtocol.js'
 
 /** A model that says exactly what the script says, in order. */
 function scriptedModel(...answers) {
@@ -50,6 +66,73 @@ function stubClient(overrides = {}) {
     async deviceStatus() {
       return { ok: true, devices: [{ deviceId: 'home-macbook-bridge', deviceType: 'mac_bridge', online: false }] }
     },
+    ...overrides,
+  }
+}
+
+/*
+ * The mesh dedupe ledger and the socket buffer are module scope — they have to
+ * be, because at-least-once redelivery crosses tool calls and a per-call ledger
+ * would dedupe nothing. That makes them shared state between tests, so every
+ * mesh test starts by clearing them. One test leaking an envelope id into the
+ * next would show up as "the duplicate was filtered", which is exactly the
+ * assertion it would be silently faking.
+ */
+test.beforeEach(() => {
+  resetMeshMailbox()
+})
+
+/*
+ * A WebSocket that does nothing until told to. The listener is a state machine
+ * over four events, and driving it with a real socket would make every test
+ * about the network instead of about the machine.
+ */
+function fakeSocket() {
+  const listeners = new Map()
+  let resolveOpened = null
+  const handedOver = new Promise((resolve) => {
+    resolveOpened = resolve
+  })
+  return {
+    protocol: MESH_SUBPROTOCOL,
+    sent: [],
+    send(frame) {
+      this.sent.push(frame)
+    },
+    close() {
+      this.closed = true
+    },
+    addEventListener(type, handler) {
+      listeners.set(type, handler)
+      /* Every handler is attached in one synchronous block after the await in
+       * connect(), so the last one is the signal that wiring is finished. */
+      if (type === 'error') resolveOpened?.()
+    },
+    emit(type, event = {}) {
+      listeners.get(type)?.(event)
+    },
+    opened: () => handedOver,
+  }
+}
+
+/* Let the listener's own awaits run. It drains without anyone awaiting it —
+ * that is the point of a doorbell — so a test has to yield rather than await. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+/* One envelope, in the shape the relay really returns — verified in
+ * production against GET /v1/node/inbox on 2026-08-09. */
+function envelope(overrides = {}) {
+  const createdAt = overrides.createdAt ?? new Date().toISOString()
+  return {
+    v: 1,
+    id: 'nmsg_TVrhgP2jcIVoaG7laKMdYw',
+    from: 'home-macbook-bridge',
+    to: 'mobile-test',
+    kind: 'ios.notify',
+    payload: { text: 'the build finished' },
+    corr: null,
+    createdAt,
+    expiresAt: new Date(Date.parse(createdAt) + 600_000).toISOString(),
     ...overrides,
   }
 }
@@ -337,6 +420,415 @@ test('unsupported carries the reason to the owner', async () => {
   const outcome = await runMobileBrain({ command: 'take a photo', infer, ctx: baseCtx() })
   assert.equal(outcome.status, 'unsupported')
   assert.match(outcome.say, /no camera tool/)
+})
+
+/* ---------------------------------------------------------------- the mesh */
+
+test('a queued mesh message is reported as waiting, not as a failure', async () => {
+  const sends = []
+  const infer = scriptedModel(
+    {
+      status: 'act',
+      actions: [
+        {
+          tool: 'mesh_send',
+          label: 'tell the browser',
+          params: { to: 'browser-node-1', kind: 'browser.tab.open', payload: { url: 'https://example.com' } },
+        },
+      ],
+    },
+    { status: 'done', say: 'Your browser is not connected, so it is waiting for it.' },
+  )
+
+  const outcome = await runMobileBrain({
+    command: 'open example.com in my browser',
+    infer,
+    ctx: {
+      ...baseCtx(),
+      client: stubClient({
+        async sendNodeMessage(request) {
+          sends.push(request)
+          /* The relay's real 202 body when nothing was holding a socket. */
+          return {
+            ok: true,
+            messageId: 'nmsg_r_obOCK4v9Uru5CA3rgWeQ',
+            to: request.to,
+            from: 'mobile-test',
+            expiresAt: '2026-08-09T04:19:28.591Z',
+            pushed: false,
+            queued: true,
+          }
+        },
+      }),
+    },
+  })
+
+  assert.equal(outcome.status, 'done')
+  assert.equal(sends.length, 1)
+  /* `from` is never sent: the relay stamps it and ignores a body-supplied one,
+   * so putting it on the wire would only imply it means something. */
+  assert.equal(Object.hasOwn(sends[0], 'from'), false)
+  assert.equal(sends[0].kind, 'browser.tab.open')
+
+  const result = outcome.steps[0].result
+  assert.equal(outcome.steps[0].ok, true)
+  assert.equal(result.delivered, false)
+  assert.match(result.note, /holding it until/)
+  /* And the model saw that distinction rather than a bare "ok". */
+  assert.match(infer.seen[1].at(-1).content, /not connected/)
+})
+
+test('mesh mail is deduped across drains, because delivery is at-least-once', async () => {
+  /* The same envelope twice: a lease that lapsed before the ack landed. That is
+   * not an error condition, it is the contract, and the model must be shown the
+   * message exactly once or it will act on it twice. */
+  const acked = []
+  const client = stubClient({
+    async drainNodeInbox() {
+      return { ok: true, messages: [envelope()], pending: 1, leaseMs: 60000 }
+    },
+    async ackNodeMessages(deviceId, messageIds) {
+      acked.push(messageIds)
+      return { ok: true, acknowledged: messageIds.length, pending: 0 }
+    },
+  })
+
+  const first = await drainMeshInbox({ client, deviceId: 'mobile-test' })
+  const second = await drainMeshInbox({ client, deviceId: 'mobile-test' })
+
+  assert.equal(first.messages.length, 1)
+  assert.equal(second.messages.length, 0, 'a redelivered envelope was reported as new mail')
+  assert.equal(second.duplicates.length, 1)
+  /* Both drains ack. An ack for something already deleted is a no-op, and
+   * skipping it would leave the duplicate to come back every lease forever. */
+  assert.equal(acked.length, 2)
+})
+
+test('`pending` counts the page it just leased you, so `more` is the honest field', async () => {
+  /* Measured in production: a drain that returned one message came back with
+   * pending: 1, and only after the ack did it read 0. A caller that loops on
+   * `pending > 0` never stops. */
+  const client = stubClient({
+    async drainNodeInbox() {
+      return { ok: true, messages: [envelope()], pending: 1, leaseMs: 60000 }
+    },
+    async ackNodeMessages() {
+      return { ok: true, acknowledged: 1, pending: 0 }
+    },
+  })
+  const drained = await drainMeshInbox({ client, deviceId: 'mobile-test' })
+  assert.equal(drained.pending, 1)
+  assert.equal(drained.more, false, 'the drainer would have looped on its own leased page')
+})
+
+test('a failed ack still hands over the mail it already drained', async () => {
+  const client = stubClient({
+    async drainNodeInbox() {
+      return { ok: true, messages: [envelope()], pending: 1, leaseMs: 60000 }
+    },
+    async ackNodeMessages() {
+      throw new Error('relay unreachable')
+    },
+  })
+  const drained = await drainMeshInbox({ client, deviceId: 'mobile-test' })
+  assert.equal(drained.messages.length, 1, 'the mail was thrown away over a failed ack')
+  assert.equal(drained.acknowledged, 0)
+})
+
+test('mesh_inbox reads what the socket already drained, so a doorbell never eats mail', async () => {
+  /* The listener drains and acks on its own — that is what makes mail arrive
+   * rather than be found. If the tool only asked the relay, everything the
+   * socket pulled down would be gone by the time the model looked. */
+  const socket = fakeSocket()
+  const client = stubClient({
+    async openNodeSocket() {
+      return socket
+    },
+    async drainNodeInbox() {
+      return { ok: true, messages: [envelope()], pending: 1, leaseMs: 60000 }
+    },
+    async ackNodeMessages() {
+      return { ok: true, acknowledged: 1, pending: 0 }
+    },
+  })
+
+  const stop = createMeshListener({ client, deviceId: 'mobile-test' })
+  await socket.opened()
+  socket.emit('open')
+  await settle()
+  stop()
+
+  assert.equal(bufferedMeshMail(), 1, 'the doorbell drained nothing on connect')
+
+  const infer = scriptedModel(
+    { status: 'act', actions: [{ tool: 'mesh_inbox', label: 'read mail', params: {} }] },
+    { status: 'done', say: 'The Mac says the build finished.' },
+  )
+  const outcome = await runMobileBrain({ command: 'anything for me?', infer, ctx: { ...baseCtx(), client } })
+
+  const result = outcome.steps[0].result
+  assert.equal(result.count, 1)
+  assert.equal(result.messages[0].from, 'home-macbook-bridge')
+  assert.equal(result.messages[0].payload.text, 'the build finished')
+  assert.equal(bufferedMeshMail(), 0, 'the buffer was read but not emptied')
+})
+
+test('reading without acking names the ids that will come back', async () => {
+  /* The only reason to read without acking is that you might not survive to
+   * act, so the ids have to come back with the mail — otherwise the model has
+   * left a batch leased with no way to name it. */
+  const infer = scriptedModel(
+    { status: 'act', actions: [{ tool: 'mesh_inbox', label: 'peek', params: { ack: false } }] },
+    { status: 'done', say: 'One message is waiting.' },
+  )
+  const outcome = await runMobileBrain({
+    command: 'peek at my mail',
+    infer,
+    ctx: {
+      ...baseCtx(),
+      client: stubClient({
+        async drainNodeInbox() {
+          return { ok: true, messages: [envelope()], pending: 1, leaseMs: 60000 }
+        },
+        async ackNodeMessages() {
+          throw new Error('mesh_inbox acked despite ack:false')
+        },
+      }),
+    },
+  })
+  const result = outcome.steps[0].result
+  assert.deepEqual(result.unacknowledged, [envelope().id])
+  assert.match(result.note, /arrive again/)
+})
+
+test('the doorbell drains on connect and on every mail frame, and pings the exact bytes', async () => {
+  const drains = []
+  const socket = fakeSocket()
+  const client = stubClient({
+    async openNodeSocket(deviceId, options) {
+      socket.openedWith = { deviceId, options }
+      return socket
+    },
+    async drainNodeInbox() {
+      drains.push(Date.now())
+      return { ok: true, messages: [], pending: 0, leaseMs: 60000 }
+    },
+    async ackNodeMessages() {
+      return { ok: true, acknowledged: 0, pending: 0 }
+    },
+  })
+
+  let ping = null
+  const stop = createMeshListener({
+    client,
+    deviceId: 'mobile-test',
+    /* Run the ping immediately rather than waiting 55 s of wall clock. */
+    setIntervalImpl: (fn) => {
+      ping = fn
+      return 1
+    },
+    clearIntervalImpl: () => {},
+  })
+  await socket.opened()
+  socket.emit('open')
+  await settle()
+
+  /* Mail queued while this node was disconnected rang a doorbell nobody heard,
+   * so connecting has to drain even though no frame said to. */
+  assert.equal(drains.length, 1, 'connecting did not drain')
+
+  socket.emit('message', { data: BRIDGE_MAIL_FRAME })
+  await settle()
+  assert.equal(drains.length, 2)
+
+  /* Anything that is not a mail frame must not cause a drain — the pong is
+   * answered by Cloudflare's hibernation layer and means nothing here. */
+  socket.emit('message', { data: '{"type":"pong"}' })
+  socket.emit('message', { data: 'not json at all' })
+  await settle()
+  assert.equal(drains.length, 2)
+
+  ping?.()
+  assert.deepEqual(socket.sent, [BRIDGE_PING_FRAME], 'the ping is byte-matched by the relay')
+  stop()
+})
+
+test('stopping mid-handshake closes the socket that arrives late', async () => {
+  /* React unmounts faster than a WebSocket handshake, and StrictMode does it on
+   * purpose. A socket that resolves after the stop would otherwise keep its
+   * listeners, its ping interval and its reconnect loop, with nothing holding a
+   * reference that could close it. */
+  const socket = fakeSocket()
+  let handOver = null
+  const client = stubClient({
+    openNodeSocket: () =>
+      new Promise((resolve) => {
+        handOver = () => resolve(socket)
+      }),
+  })
+
+  const stop = createMeshListener({ client, deviceId: 'mobile-test' })
+  await settle()
+  stop()
+  handOver()
+  await settle()
+
+  assert.equal(socket.closed, true, 'a socket that arrived after the stop was left open')
+  assert.deepEqual(socket.sent, [])
+})
+
+test('an unpaired phone gets no doorbell and no exception', async () => {
+  /* The socket is the optional half. A phone that cannot open one still has the
+   * durable inbox over HTTP, so this must degrade to a status line. */
+  const states = []
+  const client = stubClient({
+    async openNodeSocket() {
+      throw new Error('This phone is not paired, so it cannot open a mesh socket.')
+    },
+  })
+  const stop = createMeshListener({
+    client,
+    deviceId: 'mobile-test',
+    onStatus: (event) => states.push(event.state),
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+  })
+  await settle()
+  stop()
+  assert.ok(states.includes('unavailable'), `saw ${JSON.stringify(states)}`)
+  assert.ok(states.includes('reconnecting'), 'a failed connect did not schedule a retry')
+})
+
+test('presence that could not be observed is never reported as offline', async () => {
+  const infer = scriptedModel(
+    { status: 'act', actions: [{ tool: 'mesh_presence', label: 'check', params: { deviceId: 'home-macbook-bridge' } }] },
+    { status: 'done', say: 'I could not check whether your Mac is connected.' },
+  )
+  const outcome = await runMobileBrain({
+    command: 'is my mac connected?',
+    infer,
+    ctx: {
+      ...baseCtx(),
+      client: stubClient({
+        async nodePresence(deviceId) {
+          /* The relay's honest "I could not ask": connected:false and
+           * observed:false arrive together, in the same shape as a genuine
+           * disconnection. Only `observed` tells them apart. */
+          return { ok: true, deviceId, connected: false, sockets: 0, since: null, observed: false, pending: 0 }
+        },
+      }),
+    },
+  })
+
+  const result = outcome.steps[0].result
+  assert.equal(result.connected, false)
+  assert.equal(result.observed, false)
+
+  /* The rule that stops the model turning that into "your Mac is offline" must
+   * be in the prompt whenever mesh_presence is. */
+  const prompt = infer.seen[0][0].content
+  assert.match(prompt, /"observed": false means the relay could not reach/)
+  assert.match(prompt, /does NOT mean the node is offline/)
+})
+
+test('mesh rules ship only when a mesh tool did', () => {
+  const catalogue = buildMobileCatalogue()
+  const withoutMesh = buildBrainSystemPrompt({
+    schemaText: '(schema)',
+    toolNames: toolsForDomains(['phone'], { catalogue }),
+    situation: 'now',
+  })
+  assert.ok(!withoutMesh.includes('observed'), 'a mesh rule shipped with no mesh tool loaded')
+  assert.ok(!withoutMesh.includes('mesh_presence'), 'a rule named a tool that was not loaded')
+})
+
+test('a stale credential is told apart from a denial by code, all the way to the model', async () => {
+  /* Scopes are frozen into a credential at pair time. A phone paired before the
+   * mesh shipped holds a `mobile` credential with no node:message:* in it and
+   * 403s forever — and the fix is a re-pair, which is the opposite of the
+   * advice a `scope_denied` deserves. The two differ only in `code`, so the
+   * code has to survive the tool boundary and reach the model. */
+  const denial = new Error(
+    'Blocked for safety: this credential was issued before its role gained node:message:send.',
+  )
+  denial.code = 'credential_predates_capability'
+  denial.status = 403
+
+  const infer = scriptedModel(
+    {
+      status: 'act',
+      actions: [{ tool: 'mesh_send', label: 'send', params: { to: '@relay', kind: 'ios.notify', payload: {} } }],
+    },
+    { status: 'done', say: 'This phone needs re-pairing before it can message other nodes.' },
+  )
+  const outcome = await runMobileBrain({
+    command: 'tell the relay hello',
+    infer,
+    ctx: {
+      ...baseCtx(),
+      client: stubClient({
+        async sendNodeMessage() {
+          throw denial
+        },
+      }),
+    },
+  })
+
+  assert.equal(outcome.steps[0].ok, false)
+  assert.equal(outcome.steps[0].code, 'credential_predates_capability')
+  const shown = infer.seen[1].at(-1).content
+  assert.match(shown, /credential_predates_capability/)
+  assert.ok(!shown.includes('scope_denied'))
+})
+
+test('the mesh tools ask for exactly the scopes those relay routes require', () => {
+  /* Not a transcription of the brief — the relay's own route table, imported.
+   * `/v1/node/presence` is the one that surprises: it is gated on
+   * device:status:read, the same audience as /v1/devices/status, NOT on
+   * node:message:receive. Declaring the wrong scope would be invisible on a
+   * `mobile` credential (it holds both) and would silently withhold the tool
+   * from any role that holds one and not the other. */
+  const routeScopes = {
+    mesh_send: requiredScopesForRoute('POST', '/v1/node/messages'),
+    mesh_inbox: requiredScopesForRoute('GET', '/v1/node/inbox'),
+    mesh_ack: requiredScopesForRoute('POST', '/v1/node/inbox/ack'),
+    mesh_presence: requiredScopesForRoute('GET', '/v1/node/presence'),
+  }
+  for (const [tool, required] of Object.entries(routeScopes)) {
+    assert.deepEqual(
+      MOBILE_TOOLS[tool].needs,
+      required,
+      `${tool} declares scopes the relay does not actually require for its route`,
+    )
+  }
+})
+
+test('the mesh socket is opened with the handshake a WKWebView can emit', async () => {
+  /* A WebSocket constructor in a WebView cannot set a request header, so the
+   * credential rides as a subprotocol offer and NEVER in the query string,
+   * which is what gets logged. Verified against production on 2026-08-09: two
+   * offers, no Authorization header, and the server selected the plain mesh
+   * name rather than echoing the bearer entry back in a response header. */
+  const { createCloudClient } = await import('../cloudClient.js')
+  const opened = []
+  class FakeSocket {
+    constructor(url, protocols) {
+      opened.push({ url, protocols })
+    }
+  }
+  const client = createCloudClient({
+    relayUrl: 'https://relay.example',
+    mobileDeviceId: 'mobile-test',
+    deviceCredential: { token: 'pdt_fake.secret', role: 'mobile', scopes: [], tokenId: 'fake' },
+  })
+  await client.openNodeSocket('mobile-test', { WebSocketImpl: FakeSocket })
+
+  const [handshake] = opened
+  assert.match(handshake.url, /^wss:\/\/relay\.example\/v1\/node\/socket\?deviceId=mobile-test$/)
+  assert.ok(!handshake.url.includes('pdt_'), 'the token was put in the URL, which is what gets logged')
+  assert.equal(handshake.protocols.length, 2, 'one offer would make the server echo the token back')
+  assert.equal(handshake.protocols[0], MESH_SUBPROTOCOL)
+  assert.match(handshake.protocols[1], /^bearer\./)
 })
 
 /* ------------------------------------------------------------- the prompt */
