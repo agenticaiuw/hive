@@ -17,6 +17,7 @@
 
 #include "haptic.h"
 #include "pendant_cloud.h"
+#include "pendant_local.h" /* PENDANT_LOCAL_SLOTS bounds the voice trigger */
 #include "pendant_reflex.h"
 
 #define REFLEX_MOUNT "/SD:"
@@ -51,6 +52,14 @@ enum reflex_trigger {
 	REFLEX_TRIG_COUNTDOWN,
 	REFLEX_TRIG_DAILY,
 	REFLEX_TRIG_GESTURE,
+	/*
+	 * An enrolled word, recognized on-device during a button-initiated
+	 * capture (pendant_local).  This is the trigger that lets a recipe
+	 * run from speech with the modem never transmitting — and the only
+	 * one that works when there is no signal at all.  The spoken word
+	 * carries no meaning of its own: the recipe it is bound to does.
+	 */
+	REFLEX_TRIG_VOICE,
 };
 
 enum reflex_action_kind {
@@ -79,7 +88,14 @@ struct reflex_recipe {
 	uint32_t last_daily_key; /* (day<<16)|minute of last daily fire */
 	uint16_t daily_minute;   /* minutes since local midnight */
 	uint8_t trigger;         /* enum reflex_trigger */
-	uint8_t armed;           /* persisted for daily/gesture */
+	uint8_t armed;           /* persisted for daily/gesture/voice */
+	/*
+	 * Trigger sub-selector, shared because the two triggers that need
+	 * one are mutually exclusive per recipe and a fifth byte here would
+	 * cost 8 B of padding x 16 recipes on a build with 6.6 kB free:
+	 *   GESTURE  which gesture (REFLEX_GESTURE_B2_DOUBLE)
+	 *   VOICE    which enrolled keyword slot, 1..PENDANT_LOCAL_SLOTS
+	 */
 	uint8_t gesture;
 	uint8_t action_count;
 	struct reflex_action actions[REFLEX_MAX_ACTIONS];
@@ -340,12 +356,28 @@ static int reflex_parse_recipe(const char *text, struct reflex_recipe *out)
 		    !json_value_is_string(value, "b2_double")) {
 			return -EINVAL; /* only gesture this hardware has */
 		}
+	} else if (json_value_is_string(value, "voice")) {
+		/*
+		 * {"trigger":{"type":"voice","voice":1}} — fires when the
+		 * on-device matcher recognizes enrolled slot 1 during a
+		 * press.  The slot must exist as a number: defaulting it
+		 * would bind a recipe to whichever word happened to be
+		 * enrolled first, and firing the wrong recipe silently is
+		 * the one failure this whole path is built to avoid.
+		 */
+		out->trigger = REFLEX_TRIG_VOICE;
+		value = json_find_value(text, "\"voice\"");
+		if (value == NULL || !json_parse_u32(value, &number) ||
+		    number == 0U || number > PENDANT_LOCAL_SLOTS) {
+			return -EINVAL;
+		}
+		out->gesture = (uint8_t)number;
 	} else {
 		return -EINVAL;
 	}
 
-	/* Optional; daily/gesture default to armed — a stored alarm nobody
-	 * armed is surprising, a stored alarm that runs is the point. */
+	/* Optional; daily/gesture/voice default to armed — a stored alarm
+	 * nobody armed is surprising, a stored alarm that runs is the point. */
 	out->armed = 1U;
 	value = json_find_value(text, "\"armed\"");
 	if (value != NULL) {
@@ -467,6 +499,12 @@ static int reflex_serialize(const struct reflex_recipe *recipe, char *out,
 				 "\"armed\":%u",
 				 recipe->id, recipe->armed);
 		break;
+	case REFLEX_TRIG_VOICE:
+		wrote = snprintf(out, capacity,
+				 "{\"id\":%u,\"trigger\":{\"type\":"
+				 "\"voice\",\"voice\":%u},\"armed\":%u",
+				 recipe->id, recipe->gesture, recipe->armed);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -547,6 +585,8 @@ static const char *reflex_trigger_name(uint8_t trigger)
 		return "daily";
 	case REFLEX_TRIG_GESTURE:
 		return "gesture";
+	case REFLEX_TRIG_VOICE:
+		return "voice";
 	default:
 		return "?";
 	}
@@ -1110,4 +1150,40 @@ void pendant_reflex_fire_gesture(void)
 			reflex_run_actions(recipe, "b2_double");
 		}
 	}
+}
+
+bool pendant_reflex_voice_armed(uint8_t slot)
+{
+	if (!reflex_ready || slot == 0U) {
+		return false;
+	}
+	for (size_t index = 0U; index < REFLEX_MAX_RECIPES; ++index) {
+		if (recipes[index].id != 0U &&
+		    recipes[index].trigger == REFLEX_TRIG_VOICE &&
+		    recipes[index].gesture == slot &&
+		    recipes[index].armed != 0U) {
+			return true;
+		}
+	}
+	return false;
+}
+
+unsigned int pendant_reflex_fire_voice(uint8_t slot)
+{
+	unsigned int fired = 0U;
+
+	if (slot == 0U) {
+		return 0U;
+	}
+	for (size_t index = 0U; index < REFLEX_MAX_RECIPES; ++index) {
+		struct reflex_recipe *recipe = &recipes[index];
+
+		if (recipe->id != 0U &&
+		    recipe->trigger == REFLEX_TRIG_VOICE &&
+		    recipe->gesture == slot && recipe->armed != 0U) {
+			reflex_run_actions(recipe, "voice");
+			++fired;
+		}
+	}
+	return fired;
 }

@@ -20,6 +20,7 @@
 #include "audio_opus.h"
 #include "haptic.h"
 #include "pendant_cloud.h"
+#include "pendant_local.h"
 #include "pendant_reflex.h"
 #include "pendant_store.h"
 #include "pendant_ws.h"
@@ -403,6 +404,27 @@ static atomic_t convo_active;    /* audio loop live: pump/recv at full rate */
 static atomic_t convo_started;
 static atomic_t convo_flush_req; /* relay said flush (barge-in) */
 static atomic_t convo_end_req;   /* relay said end / transport died */
+/*
+ * Uplink gate: 1 = the WS I/O thread may drain the encoder FIFO onto the
+ * radio, 0 = it must leave the bytes where they are.
+ *
+ * This is the whole mechanism behind "a local command never opens an LTE
+ * session". The encoder runs from the first mic stage exactly as it always
+ * did, so the FIFO fills with real packets from the very start of the
+ * utterance — but nothing leaves the chip until the local matcher has had
+ * its say. A confident match closes the capture with the gate still shut
+ * and the modem has transmitted precisely nothing; anything else opens the
+ * gate and the held packets flush in one burst, so the relay receives the
+ * complete utterance from its first frame and no audio was ever at risk.
+ *
+ * The FIFO is ~7 KiB, about 3.5 s of speech at the full uplink rate — an
+ * order of magnitude more than the ~900 ms this gate is ever shut for, so
+ * the hold cannot saturate the ring the adaptive duck already watches.
+ *
+ * Without CONFIG_PENDANT_LOCAL_COMMANDS this is set to 1 before the first
+ * mic block and never touched again: the pump behaves exactly as it did.
+ */
+static atomic_t convo_uplink_gate;
 static uint8_t ws_rx_buf[WS_RX_BUF_BYTES];  /* ws thread only */
 static struct dl_frame dl_tx_frame;         /* ws thread only */
 static struct dl_frame dl_rx_frame;         /* main thread only */
@@ -1563,6 +1585,18 @@ static void probe_mic_data_driver(void)
 }
 #endif
 
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+/*
+ * record_microphone: the press was answered on-device. POSITIVE on purpose
+ * — every existing test in the upload path asks `error < 0`, so a new
+ * success-shaped outcome cannot be mistaken for a failure by code that
+ * predates it.
+ */
+#define PENDANT_CAPTURE_LOCAL 1
+/* Slot the offline capture matched, read by main() once I2S is idle. */
+static uint8_t capture_local_slot;
+#endif
+
 static int record_microphone(const struct device *i2s, size_t sample_limit)
 {
 	struct i2s_config config = {
@@ -1607,6 +1641,15 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	bool sd_open = false;
 	bool live_fail_logged = false;
 	int live_write_error = 0;
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+	/* Matching stops once the verdict lands; the capture continues so a
+	 * fall-through press still records everything it always did. */
+	bool local_active = true;
+	bool local_handled = false;
+	uint8_t local_slot = 0U;
+
+	pendant_local_begin();
+#endif
 
 	recording_on_sd = false;
 	live_stream_failed = false;
@@ -1854,6 +1897,38 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 				}
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+				/*
+				 * This path runs when the WebSocket is DOWN,
+				 * which is precisely the situation on-device
+				 * matching exists for: with no signal the
+				 * cloud cannot answer at all, and today the
+				 * best this press could do was journal audio
+				 * to the card and hope. An enrolled word gets
+				 * answered here and now, radio or no radio.
+				 */
+				if (local_active) {
+					enum pendant_local_verdict verdict =
+						pendant_local_offer_stage(
+							mic_stage_samples,
+							MIC_STAGE_FRAMES);
+
+					if (verdict != PENDANT_LOCAL_PENDING) {
+						local_active = false;
+					}
+					if (verdict == PENDANT_LOCAL_MATCH) {
+						uint8_t slot =
+							pendant_local_matched_slot();
+
+						if (slot == 0U ||
+						    pendant_reflex_voice_armed(
+							    slot)) {
+							local_slot = slot;
+							local_handled = true;
+						}
+					}
+				}
+#endif
 				stage_frames = 0U;
 				++stage_flush_count;
 
@@ -1950,6 +2025,21 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			break;
 		}
 
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+		/*
+		 * Answered on-device. Stop the microphone immediately rather
+		 * than running out the 30 s cap: the owner has said their
+		 * word and is waiting for the chime, and every further block
+		 * is battery spent recording a room.
+		 */
+		if (local_handled) {
+			printk("LOCAL matched during offline capture "
+			       "(slot=%u) — ending capture\n",
+			       local_slot);
+			break;
+		}
+#endif
+
 		/*
 		 * Ignore bounce / leftover edges from the start press for the
 		 * first second, then a second press stops recording.
@@ -1996,6 +2086,33 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			recording_on_sd = false;
 		}
 	}
+
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+	if (local_handled) {
+		/*
+		 * Answered on-device, so there is nothing to upload and no
+		 * failure to report. Throwing the journal away is deliberate
+		 * and is the difference between a command and a memo: a
+		 * recording kept here would be queued in the outbox and
+		 * delivered to a model the moment signal returned, which
+		 * would answer out loud a question the owner already had the
+		 * answer to.
+		 */
+		if (pendant_opus_stream_active()) {
+			pendant_opus_stream_abort();
+		}
+		if (pendant_cloud_stream_active()) {
+			pendant_cloud_stream_abort();
+		}
+		live_fifo_reset();
+		recording_on_sd = false;
+		capture_local_slot = local_slot;
+#ifdef CONFIG_PENDANT_LOCAL_TRACE
+		pendant_local_report();
+#endif
+		return PENDANT_CAPTURE_LOCAL;
+	}
+#endif
 
 	/* Finalize the live encoder (flushes the last partial packet through
 	 * the sink), then drain the FIFO — it can hold ~6 s of encoded audio;
@@ -3370,6 +3487,14 @@ static void ws_io_pump_uplink(void)
 	uint8_t *storage = live_fifo_storage();
 	size_t fill;
 
+	/* Held for the local decision: the packets stay in the FIFO and the
+	 * radio stays silent. Returning (rather than draining into a discard)
+	 * is the point — every byte is still there to send if the verdict
+	 * comes back "cloud". */
+	if (!atomic_get(&convo_uplink_gate)) {
+		return;
+	}
+
 	while ((fill = live_fifo_fill()) >= WS_TX_BATCH_BYTES ||
 	       (live_tx_flush && fill > 0U)) {
 		size_t tail = live_fifo_tail;
@@ -3571,6 +3696,40 @@ static void convo_decode_downlink(void)
  * the second button press, relay 'end' (30 s of mutual silence), transport
  * death, or the runaway cap.
  */
+/*
+ * Tell the relay a conversation is starting and let the uplink flow.
+ *
+ * Split out of run_conversation so the local-command path can DEFER it:
+ * this function contains the first byte this device transmits for a press,
+ * and the whole point of on-device matching is to be able to never call it.
+ * Everything before it — mic, I2S, Opus encode, the FIFO — is local work
+ * that costs no radio.
+ */
+static int convo_open_uplink(char *device_time, size_t device_time_capacity)
+{
+	char start_message[96];
+	int error;
+
+	k_mutex_lock(&ws_lock, K_FOREVER);
+	error = pendant_ws_connect();
+	if (error == 0) {
+		pendant_cloud_copy_device_time(device_time,
+					       device_time_capacity);
+		snprintf(start_message, sizeof(start_message),
+			 "{\"type\":\"start\",\"deviceTime\":\"%s\"}",
+			 device_time);
+		error = pendant_ws_send_text(start_message);
+	}
+	k_mutex_unlock(&ws_lock);
+	if (error == 0) {
+		/* Release the held packets. The WS thread flushes them on its
+		 * next pass, oldest first, so the relay hears the utterance
+		 * from its true beginning. */
+		atomic_set(&convo_uplink_gate, 1);
+	}
+	return error;
+}
+
 static int run_conversation(const struct device *i2s)
 {
 	struct i2s_config config = {
@@ -3586,7 +3745,19 @@ static int run_conversation(const struct device *i2s)
 	struct i2s_config tx_config;
 	int32_t raw_processing[MIC_RX_BLOCK_FRAMES];
 	char device_time[32];
-	char start_message[96];
+	/*
+	 * Has this press been allowed to transmit yet? Without local
+	 * commands the answer is "before the mic even started", exactly as
+	 * before. With them, it stays false until the matcher gives up on
+	 * the utterance being one of the enrolled words.
+	 */
+	bool uplink_open = false;
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+	/* Slot to hand the reflex layer once I2S is torn down; 0 = none. */
+	uint8_t local_fire_slot = 0U;
+	bool local_handled = false;
+	enum pendant_local_verdict local_verdict = PENDANT_LOCAL_PENDING;
+#endif
 	int64_t started_at;
 	int64_t next_led_toggle;
 	size_t stage_frames = 0U;
@@ -3640,20 +3811,25 @@ static int run_conversation(const struct device *i2s)
 	convo_encode_calls = 0U;
 	convo_encode_max_cycles = 0U;
 
-	k_mutex_lock(&ws_lock, K_FOREVER);
-	error = pendant_ws_connect();
-	if (error == 0) {
-		pendant_cloud_copy_device_time(device_time,
-					       sizeof(device_time));
-		snprintf(start_message, sizeof(start_message),
-			 "{\"type\":\"start\",\"deviceTime\":\"%s\"}",
-			 device_time);
-		error = pendant_ws_send_text(start_message);
-	}
-	k_mutex_unlock(&ws_lock);
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+	/*
+	 * Say nothing yet. The mic, the encoder and the FIFO all start below
+	 * exactly as they always did; only the radio waits, and only for as
+	 * long as it takes to rule the utterance out as a command word.
+	 *
+	 * An enrollment press never opens the uplink at all — the owner is
+	 * teaching the device a word, not asking a model about it.
+	 */
+	atomic_set(&convo_uplink_gate, 0);
+	pendant_local_begin();
+#else
+	atomic_set(&convo_uplink_gate, 1);
+	error = convo_open_uplink(device_time, sizeof(device_time));
 	if (error != 0) {
 		return error;
 	}
+	uplink_open = true;
+#endif
 
 	error = pendant_opus_stream_begin_packets(SAMPLE_RATE,
 						  audio_workspace,
@@ -3811,6 +3987,22 @@ static int run_conversation(const struct device *i2s)
 					mic_stage_samples, MIC_STAGE_FRAMES);
 				live_tx_offer_stage(mic_stage_samples,
 						    MIC_STAGE_FRAMES);
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+				/*
+				 * Same buffer the encoder just saw, so the
+				 * matcher hears exactly what the relay would
+				 * have. Only while the verdict is open: once
+				 * the uplink is flowing this is a normal
+				 * conversation and the filterbank would be
+				 * pure cost on a loop that has none to spare.
+				 */
+				if (!uplink_open) {
+					local_verdict =
+						pendant_local_offer_stage(
+							mic_stage_samples,
+							MIC_STAGE_FRAMES);
+				}
+#endif
 				stage_frames = 0U;
 			}
 		}
@@ -3818,6 +4010,59 @@ static int run_conversation(const struct device *i2s)
 			result = -EIO;
 			break;
 		}
+
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+		/*
+		 * Act on the verdict OUT here, never inside the sample loop:
+		 * opening the uplink sends a WebSocket text frame, and a
+		 * blocking socket write has no business between two audio
+		 * samples.
+		 */
+		if (!uplink_open && local_verdict != PENDANT_LOCAL_PENDING) {
+			uint8_t slot = pendant_local_matched_slot();
+
+			if (local_verdict == PENDANT_LOCAL_MATCH &&
+			    (slot == 0U ||
+			     pendant_reflex_voice_armed(slot))) {
+				/*
+				 * Done, and the modem never transmitted. slot
+				 * 0 is the enrollment press: the word was
+				 * stored, there is no recipe to run, and
+				 * shipping it to a model would answer a
+				 * question the owner did not ask.
+				 */
+				local_handled = true;
+				local_fire_slot = slot;
+				printk("LOCAL handled press on-device "
+				       "(slot=%u) — no LTE session\n",
+				       slot);
+				break;
+			}
+			if (local_verdict == PENDANT_LOCAL_MATCH) {
+				/*
+				 * The word was recognized but nothing is
+				 * bound to it. Swallowing the press here
+				 * would leave the owner talking to a device
+				 * that silently did nothing, which is worse
+				 * than a cloud round trip.
+				 */
+				printk("LOCAL slot %u matched but no armed "
+				       "recipe — falling through to cloud\n",
+				       slot);
+			}
+			error = convo_open_uplink(device_time,
+						  sizeof(device_time));
+			if (error != 0) {
+				printk("Conversation uplink open failed after "
+				       "local decision: %d\n",
+				       error);
+				result = error;
+				break;
+			}
+			uplink_open = true;
+			error = 0;
+		}
+#endif
 
 		/* The WS thread moves bytes; this loop only decodes. The
 		 * audio thread owns playback state and barge-in flushes. */
@@ -3939,8 +4184,16 @@ teardown_clocks:
 	gpio_pin_set_dt(&led, 0);
 teardown:
 	atomic_set(&convo_active, 0);
+	/* Whatever happens next, the gate belongs to the NEXT press. */
+	atomic_set(&convo_uplink_gate, 0);
 	k_mutex_lock(&ws_lock, K_FOREVER);
-	if (pendant_ws_connected() && !stop_sent) {
+	/*
+	 * Only a conversation the relay was told about needs telling it is
+	 * over. A press answered on-device was never announced, so a "stop"
+	 * here would be this device's only transmission for that press —
+	 * spending the radio to report that it did not need the radio.
+	 */
+	if (uplink_open && pendant_ws_connected() && !stop_sent) {
 		(void)pendant_ws_send_text("{\"type\":\"stop\"}");
 		stop_sent = true;
 	}
@@ -3948,6 +4201,31 @@ teardown:
 	pendant_opus_stream_abort();
 	pendant_opus_reply_decoder_end();
 	clear_button_events();
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+#ifdef CONFIG_PENDANT_LOCAL_TRACE
+	pendant_local_report();
+#endif
+	/*
+	 * Run the recipe LAST, after I2S is torn down and convo_active is
+	 * clear: a chime action reconfigures the same peripheral and
+	 * reflex_chime_play refuses (-EBUSY) while a conversation is live.
+	 * By here the DROP has completed and the clocks are stopped, so the
+	 * chime path owns the bus exactly as it does from the idle loop.
+	 */
+	if (local_handled && local_fire_slot != 0U) {
+		unsigned int fired =
+			pendant_reflex_fire_voice(local_fire_slot);
+
+		printk("LOCAL fired %u recipe(s) for slot %u with the radio "
+		       "untouched\n",
+		       fired, local_fire_slot);
+		result = 0;
+	} else if (local_handled) {
+		/* Enrollment press: the template is stored and saved. */
+		flash_led(2U, 80, 120);
+		result = 0;
+	}
+#endif
 	if (result == 0 && error != 0) {
 		result = error;
 	}
@@ -4037,6 +4315,15 @@ int main(void)
 	 * every haptic action runs the motor or degrades to LED.
 	 */
 	(void)haptic_init();
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+	/*
+	 * Keyword templates load here for the same reason recipes do, only
+	 * more so: the entire point of on-device matching is that it works
+	 * with no network, and a vocabulary that only arrives once LTE is up
+	 * would be useless in exactly the situation it exists for.
+	 */
+	pendant_local_init();
+#endif
 	pendant_reflex_init(&reflex_ops_impl);
 
 #if PENDANT_BOOT_DUMP_PCM_HEX
@@ -4257,6 +4544,12 @@ int main(void)
 				}
 			}
 			pendant_reflex_tick();
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+			/* Erasures and the enroll arm, on the same idle
+			 * cadence and for the same reason: the card and the
+			 * template table are unowned only here. */
+			pendant_local_tick();
+#endif
 			apply_forced_link_state();
 			if (!pendant_ws_connected() &&
 			    !link_is_forced_offline()) {
@@ -4363,6 +4656,31 @@ int main(void)
 
 		gpio_pin_set_dt(&led, 0);
 		audio_cycle_phase = 2U;
+#ifdef CONFIG_PENDANT_LOCAL_COMMANDS
+		if (capture_error == PENDANT_CAPTURE_LOCAL) {
+			/*
+			 * No signal, and the pendant answered anyway. This is
+			 * the case the whole feature is for: the recipe runs
+			 * on the chime, the motor and the LED already on the
+			 * owner's body, and nothing is queued for a network
+			 * that may not come back today.
+			 */
+			if (capture_local_slot != 0U) {
+				unsigned int fired = pendant_reflex_fire_voice(
+					capture_local_slot);
+
+				printk("LOCAL offline press answered: slot=%u "
+				       "recipes=%u\n",
+				       capture_local_slot, fired);
+			} else {
+				flash_led(2U, 80, 120);
+			}
+			capture_local_slot = 0U;
+			audio_cycle_result = 0;
+			clear_button_events();
+			continue;
+		}
+#endif
 		if (capture_error != 0) {
 			printk("Microphone recording failed: %d\n", capture_error);
 			pendant_cloud_stream_abort();

@@ -101,6 +101,12 @@ target_sources(app PRIVATE
   src/pendant_reflex.c
   src/haptic.c
 )
+# On-device keyword matching is opt-in: with CONFIG_PENDANT_LOCAL_COMMANDS
+# off, the module is not compiled at all, so its ~3.7 kB of static RAM and
+# its filterbank are absent from the image rather than merely unreferenced.
+target_sources_ifdef(CONFIG_PENDANT_LOCAL_COMMANDS app PRIVATE
+  src/pendant_local.c
+)
 target_compile_options(app PRIVATE -fstack-usage)
 
 target_link_libraries(app PRIVATE opus)
