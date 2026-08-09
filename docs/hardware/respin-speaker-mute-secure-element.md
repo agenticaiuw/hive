@@ -157,15 +157,16 @@ ground that way is left blank rather than guessed.
 
 | # | Function | MPN | Mfr | Package | @1 | @100 | Notes |
 |---|---|---|---|---|---|---|---|
-| A1 | I²S Class-D amp | `MAX98357AETE+T` | ADI (ex-Maxim) | TQFN-16, 3.0 × 3.0 × 0.75 mm | ~$2.20–3.73 `[repo]` | ~$1.60 `[repo]` | Carried from v1 BOM (DK 4936122, $3.73) and pendant-v2 row 11 (~$2.20/~$1.60). Lifecycle **Production** as of Aug 2026 — no NRND or EOL flag found. Datasheet already in `hardware/datasheets/`. |
+| A1 | I²S Class-D amp | `MAX98357AETE+T` | ADI (ex-Maxim) | TQFN-16, 3.0 × 3.0 × 0.75 mm | **$3.96** `[live]` | **$2.47** `[live]`, $2.19 @1k | Carried from v1 BOM and pendant-v2 row 11. **Active with 33,392 in stock — but a 20-week factory lead, which is the real risk signal, not the status field.** Order early. ADI's own lifecycle badge is **unverified** (analog.com timed out on 4 attempts). Datasheet already in `hardware/datasheets/`. **Do not "upgrade" off this part:** the `MAX98357B` is **Obsolete, 0 stock**, and ADI's own recommended successor `MAX98360A` — which would have eliminated the MCLK requirement — is **Discontinued at Digi-Key, 0 stock**. Note historical `[repo]` prices ran ~$2.20–3.73; live pricing has moved up, so re-check at order time. |
 | A1-alt | Same, smaller | `MAX98357AEWL+T` | ADI | WLP-9, ~1.3 × 1.3 mm | — | — | Only if Ø34 mm area forces it. WLP needs finer design rules; pendant-v2 §2.1 already flags HDI as a cost step. |
-| A2 | Micro speaker | **must be selected** | — | ≤ 13 mm Ø × 3 mm, 8 Ω | — | — | pendant-v2 row 12 left this empty and §9.3 item 4 flags it. v1's PUI `AS01808MR-R` (18 mm, $3.50 `[repo]`) does not fit. The bench part — Adafruit `#3923` oval, $1.95 `[repo]` — is also the wrong shape. See §5.1. |
+| A2 | Micro speaker | `AS01308MR-2-R` | PUI Audio | Ø13 ± 0.1 × **2.8 ± 0.2 mm**, 8 Ω ± 15 % | $4.46 `[live]` | — | **The ≤3 mm × 1 W brief was unsatisfiable — no such part exists.** At ≤3 mm z-height, 13 mm parts cap at 0.3–0.4 W; 0.7 W needs ~4 mm. This is the best of the set: 0.2 W rated / 0.3 W max, 85 ± 3 dBA, **700 Hz–5 kHz** (the best voice/chime match found), 5 % max THD vs 10 % for the `-R`, and the only one with healthy stock (3,459). Siblings are traps: `AS01308MR-R` has **7 units**, `AS01308MR-5-R` has 131 and a 27-week lead. If 4 mm z-height is acceptable, Raltron `RSP-1100.000-1313-NS1` (13 × 13 × 4.0 mm, 700 mW, $3.18, 1,152 stock) doubles the power. **See §5.1a — this part constrains the chime.** |
 | A3 | Amp shutdown resistor | 560 kΩ ±5 %, 0402 | any | 0402 | <$0.01 | <$0.01 | Sets `SD_MODE` to the (L+R)/2 mono mix. Value derived in §3.3; **fit a second footprint** for tuning. |
 | A4 | Amp output filter | 2 × ferrite bead or LC | any | 0402 | ~$0.10 | ~$0.05 | Class-D EMI. Required near an LTE antenna; see §5.4. May be left unpopulated, but must exist. |
 | A5 | Amp bulk cap | 10 µF X5R/X7R | any | 0603 | ~$0.10 | ~$0.03 | Per datasheet typical application. |
-| B1 | Mic mute switch | **DPDT slide, ≤ 3 mm profile** | C&K / Alps / E-Switch | SMD | — | — | Two poles, not one — see §3.4. Sealed, or booted by the enclosure (§3.4 mechanical). |
+| B1 | Mic mute switch | `CUS-12TB` **(SPDT — see caveat)** | Nidec Copal | SMT right-angle, 1.5 mm stroke | $0.91 `[live]` | $0.6458 `[live]` | **Nothing off the shelf meets ≤3 mm + sealed + SMD simultaneously.** This is the lowest-profile verified part with real stock (4,839, Active). Two caveats that are not cosmetic: (a) it is **SPDT, and §3.4 calls for two poles** — either the second pole's job moves elsewhere or this part is wrong, do not substitute silently; (b) it is rated **300 mA / 4 VDC and marked "non washable"** — fine breaking a 1.8 V mic VDD rail (T5838 draws 330 µA), **never put it on the battery rail**, and it needs a gasketed enclosure slot rather than its own seal. Alternative if 3.5 mm is acceptable: C&K `JS102011SAQN`, $0.85/$0.60, 59,008 stock. Sealed IP67 candidates (Salecom SS-4-M, ES40-S) appear to be factory-direct — **no distributor stock or price could be verified**. |
 | B2 | Mic-live indicator | small LED + resistor | any | 0402 | ~$0.10 | ~$0.05 | Driven from the *load* side of the switch, per pendant-v2 §5.5. |
-| C1 | Secure element (optional) | `ATECC608B` | Microchip | UDFN-8 2 × 3 mm, SOIC-8, or SOT-23-3 | sub-$1 | sub-$1 | I²C. **Zero new pins** — shares the existing bus. See §6 for why this is optional and probably unnecessary. |
+| C1 | Secure element (optional) | `ATECC608C-SSHDA-T` | Microchip | SOIC-8 | **$0.77** `[live]` | ~$0.76 @25, $0.625 @4k `[live]` | I²C. **Zero new pins** — shares the existing bus. The **C** part is *cheaper* than the `ATECC608B` originally specced here ($0.90) and Active with 1,766 in stock, 5-week lead; the B in UDFN-8 remains available at $0.99 with 11,121 stock if the smaller package is needed. SOT-23-3 availability **unverified**. Alternatives are worse: NXP `SE050` is 4–6× the price, and Infineon OPTIGA is effectively unbuyable at prototype volume (stocked variant discontinued, live variant is a 4,000-piece special order). See §6 for why this is optional and probably unnecessary — **the SoC already contains what this part would add.** |
+| C2 | PDM mic (replaces T5838) | `SPH0641LU4H-1` | Knowles | 3.50 × 2.65 × **1.10 mm** | $3.22 `[live]` | $2.01 `[live]` | **This is what makes §1.2's "pick a 3.0–3.6 V mic" concrete.** Supply **1.62–3.6 V**, so it deletes both the 1.8 V LDO and the level shifter that exist in v1 solely to feed a 1.8 V part. Near drop-in mechanically: same 3.50 × 2.65 mm footprint, 1.10 mm vs 1.11 mm. Costs $0.44 more @100 than the TDK `T5838` — almost certainly cheaper than the LDO + shifter + board area it removes on a Ø34 mm PCB. Trade-off to design around: **64.3 dB SNR vs 68 dB, and much hotter sensitivity (−26 dB vs −41 dB) — gain must be re-scaled.** |
 
 **Incremental cost of this respin: roughly $5–8 per unit at quantity 100**
 `[estimate]`, dominated by the amp and the speaker, assuming the secure element
@@ -674,12 +675,28 @@ that the tiny sealed volume stiffens the suspension and the output falls away
 fast. Select on **SPL at 1 kHz and resonant frequency**, not on rated power —
 the amp already has more power than the driver can use (§3.1).
 
-> **Free improvement, available today.** The existing test chime is C5/E5/G5 =
-> **523 / 659 / 784 Hz** `[verified: speaker_zephyr_i2s_test.c:125-137]`. All
-> three fundamentals sit at or below the likely usable corner, so the chime would
-> be reproduced mostly by its harmonics — quiet and thin. **Move the chime up an
-> octave (1046 / 1318 / 1568 Hz).** Design the chime to the speaker; do not
-> expect the speaker to reach down to the chime.
+> **Free improvement, available today — and it applies to TWO chimes, not one.**
+> The test chime is C5/E5/G5 = **523 / 659 / 784 Hz**
+> `[verified: speaker_zephyr_i2s_test.c:125-137]`. The chime that actually
+> **ships** is a different one: E5/G♯5/B5 = **659 / 831 / 988 Hz**
+> `[verified: firmware/nrf9160/src/main.c:3211-3215, chime_notes[]]`. Both sit
+> at or below the usable corner, so both would be reproduced mostly by their
+> harmonics — quiet and thin.
+>
+> This is no longer a prediction. The selected speaker (§1.1 row A2,
+> `AS01308MR-2-R`) is specified **700 Hz–5 kHz with Fo = 1100 Hz ± 20 %**, and
+> output falls off a cliff below Fo — the sibling `-R`'s response plot runs from
+> ~42 dB at 100 Hz to 90 dB at 1 kHz. **Every note of the shipping chime is below
+> Fo, and its lowest note is at the very edge of the rated band.** Move both
+> chimes up an octave (test → 1046 / 1318 / 1568 Hz; shipping → 1318 / 1661 /
+> 1976 Hz), which lands them in the driver's 1–5 kHz sweet spot without changing
+> the chord.
+>
+> **Not done yet, deliberately.** `chime_notes[]` holds Q14 resonator constants,
+> not frequencies, so this is a recomputation rather than an edit — and it should
+> land against the speaker that ships, not the Adafruit `#3923` oval currently on
+> the bench, which has different parameters. Retuning to a part nobody has bought
+> would be tuning to the wrong driver twice.
 
 ### 5.2 Port, back volume, and where the hole goes
 
