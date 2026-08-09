@@ -6,6 +6,7 @@ import {
   saveCloudSettings,
 } from './cloudClient'
 import { isNativeCredentialStorage } from './nativeSecureStorage'
+import { createPhoneBrainSession } from './brain/phoneBrain'
 import {
   prefersCloudSpeechToText,
   startCloudVoiceCapture,
@@ -86,22 +87,56 @@ function App() {
         return
       }
 
-      // Remote/mobile: prefetch cloud TTS while browser speech tries to start.
+      // Remote/mobile/brain: prefetch cloud TTS while browser speech starts.
+      const useCloudVoice = mode === 'remote' || mode === 'brain'
       void speakText(cleaned, {
-        preferCloud: mode === 'remote',
+        preferCloud: useCloudVoice,
         mode,
-        cloudSpeak:
-          mode === 'remote'
-            ? (payload) => cloudClient.speakText(payload)
-            : null,
+        cloudSpeak: useCloudVoice
+          ? (payload) => cloudClient.speakText(payload)
+          : null,
       })
     },
     [cloudClient, mode],
   )
 
-  const isConnected = mode === 'remote'
-    ? remoteStatus === 'Connected' && remoteHealth?.macBridgeOnline
-    : macStatus === 'Connected'
+  /*
+   * The phone's own brain. Rebuilt only when the client is, so the credential
+   * and the inference transport are shared with every other relay call the app
+   * makes — there is exactly one thing in this app that holds the token.
+   */
+  const phoneBrain = useMemo(
+    () =>
+      createPhoneBrainSession({
+        client: cloudClient,
+        deviceId: cloudSettings.mobileDeviceId,
+        speak: (text) => announce(text),
+      }),
+    [announce, cloudClient, cloudSettings.mobileDeviceId],
+  )
+
+  /*
+   * The brain's confirmation gate, held open across a render.
+   *
+   * runMobileBrain calls `confirm` ONLY when the model asked for permission,
+   * and then awaits an answer. There is no rule on this side that decides to
+   * open it — that judgement is the model's, per llmPlanner's design — so this
+   * is a plain promise the pendant tap resolves.
+   *
+   * `brainAsking` exists because the loop is still running while it waits, and
+   * every confirm control in this app is disabled on `isExecuting`. Without it
+   * the model asks a question the owner physically cannot answer — the tap, the
+   * Confirm button and the Cancel button were all dead, and the turn hung until
+   * it timed out. Found by clicking it, not by reading it.
+   */
+  const brainConfirmRef = useRef(null)
+  const [brainAsking, setBrainAsking] = useState(false)
+
+  const isConnected = mode === 'brain'
+    ? remoteStatus === 'Connected'
+    : mode === 'remote'
+      ? remoteStatus === 'Connected' && remoteHealth?.macBridgeOnline
+      : macStatus === 'Connected'
 
   const clearTimers = useCallback(() => {
     timers.current.forEach((timer) => window.clearTimeout(timer))
@@ -214,7 +249,9 @@ function App() {
   function handleModeChange(nextMode) {
     setMode(nextMode)
 
-    if (nextMode === 'remote') {
+    /* The brain talks to the same relay as remote mode; what differs is who
+     * does the thinking, so the same reachability check applies. */
+    if (nextMode === 'remote' || nextMode === 'brain') {
       checkRemoteRelay()
     } else if (nextMode === 'mac') {
       checkMacAgent()
@@ -231,7 +268,7 @@ function App() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (mode === 'remote') {
+      if (mode === 'remote' || mode === 'brain') {
         checkRemoteRelay()
       } else if (mode === 'mac') {
         checkMacAgent()
@@ -273,7 +310,9 @@ function App() {
     timers.current.push(
       window.setTimeout(
         () => {
-          if (mode === 'remote') {
+          if (mode === 'brain') {
+            runPhoneBrain(commandToRun)
+          } else if (mode === 'remote') {
             requestRemotePlan(commandToRun)
           } else if (mode === 'mac') {
             requestMacPlan(commandToRun)
@@ -285,6 +324,80 @@ function App() {
         showListening ? 720 : 260,
       ),
     )
+  }
+
+  /*
+   * The phone thinks for itself.
+   *
+   * Unlike every other path here, this one does not hand the command somewhere
+   * and wait for a plan to confirm — the loop runs on this device, narrates
+   * itself as it goes, and only stops to ask when the MODEL decided to ask. The
+   * Mac is one tool it may choose, so this path still works with the laptop
+   * asleep, which is the entire reason it exists.
+   */
+  async function runPhoneBrain(commandToRun) {
+    setIsExecuting(true)
+    setPendantStatus('Thinking...')
+
+    try {
+      const outcome = await phoneBrain.run(commandToRun, {
+        sessionId: activeSessionId || undefined,
+        onProgress: (event) => {
+          if (event.phase === 'confirm') return // the gate below narrates itself
+          if (event.message) setMessage(event.message)
+          if (event.phase === 'tool') setPendantStatus('Working...')
+        },
+        confirm: ({ actions, reason }) =>
+          new Promise((resolve) => {
+            /* Reuse the pendant's existing confirm gesture rather than
+             * inventing a second one: the owner already knows this shape. */
+            brainConfirmRef.current = resolve
+            setBrainAsking(true)
+            setPendingPlan({
+              status: 'ready',
+              mode: 'brain_confirm',
+              action: 'Permission',
+              summary: reason || 'The phone is asking before it does something extra.',
+              executionMode: 'brain',
+              actions: actions.map((action, index) => ({
+                step: index + 1,
+                action: action.label || action.tool,
+                tool: action.tool,
+                summary: action.label || action.tool,
+                parameters: action.params ?? {},
+              })),
+              parameters: actions.map((action, index) => ({
+                step: index + 1,
+                tool: action.tool,
+                parameters: action.params ?? {},
+              })),
+            })
+            setPendantStatus('Ready')
+            setMessage(reason || 'May I?')
+            announce(reason || 'May I?')
+          }),
+      })
+
+      setPendingPlan(null)
+      setResult(outcome.say)
+      setPendantStatus(outcome.status === 'done' ? 'Done' : 'Idle')
+      setMessage(outcome.status === 'done' ? 'Done' : outcome.status)
+      announce(outcome.say)
+      setRemoteStatus('Connected')
+    } catch (error) {
+      /* relayInference names the two cases an owner can act on — no route
+       * deployed yet, or this phone was revoked — so show the real sentence. */
+      setPendingPlan({ status: 'error', message: error.message })
+      setResult(error.message)
+      setPendantStatus('Idle')
+      setMessage(error.message?.startsWith('Blocked') ? 'Blocked for safety' : 'The phone could not think')
+      announce(buildResultSpeech({ message: error.message, failed: true }))
+    } finally {
+      brainConfirmRef.current = null
+      setBrainAsking(false)
+      voiceOriginRef.current = false
+      setIsExecuting(false)
+    }
   }
 
   function openComposer(nextMessage = 'Type a command') {
@@ -540,7 +653,9 @@ function App() {
   }
 
   function handlePendantTap() {
-    if (isExecuting) {
+    /* The brain waiting on permission is "executing" — answering it is the
+     * whole point of the tap, so this guard must not swallow it. */
+    if (isExecuting && !brainAsking) {
       return
     }
 
@@ -735,7 +850,26 @@ function App() {
   }
 
   async function handleConfirm() {
-    if (!pendingPlan || pendingPlan.status === 'error' || isExecuting) {
+    if (!pendingPlan || pendingPlan.status === 'error') {
+      return
+    }
+
+    /* The brain is mid-loop and waiting on this answer, so `isExecuting` is
+     * true by design here — checking it before this branch would deadlock the
+     * one gate the model asked for. */
+    if (brainConfirmRef.current) {
+      const resolve = brainConfirmRef.current
+      brainConfirmRef.current = null
+      stopSpeaking()
+      setBrainAsking(false)
+      setPendingPlan(null)
+      setPendantStatus('Working...')
+      setMessage('Going ahead.')
+      resolve(true)
+      return
+    }
+
+    if (isExecuting) {
       return
     }
 
@@ -861,6 +995,21 @@ function App() {
 
   function handleCancel() {
     stopSpeaking()
+
+    /* Declining the brain is not the same as cancelling a plan: the loop keeps
+     * running, is told it was refused, and gets to do the part the owner DID
+     * ask for. Killing the turn here would punish it for asking. */
+    if (brainConfirmRef.current) {
+      const resolve = brainConfirmRef.current
+      brainConfirmRef.current = null
+      setBrainAsking(false)
+      setPendingPlan(null)
+      setPendantStatus('Thinking...')
+      setMessage('No — carrying on without that.')
+      resolve(false)
+      return
+    }
+
     setPendingPlan(null)
     setResult('')
     setPendantStatus('Idle')
@@ -1058,11 +1207,21 @@ function App() {
         ) : null}
 
         {pendingPlan && pendingPlan.status !== 'error' ? (
-          <div className={`plan-card ${isExecuting ? 'is-running' : ''}`}>
+          <div className={`plan-card ${isExecuting && !brainAsking ? 'is-running' : ''}`}>
             <div className="plan-card-glow" />
-            <p className="plan-kicker">{isExecuting ? 'Running' : 'Ready'}</p>
+            <p className="plan-kicker">
+              {brainAsking ? 'Asking' : isExecuting ? 'Running' : 'Ready'}
+            </p>
             <h3 className="plan-title">
-              {isExecuting ? 'Working on your Mac…' : 'Confirm this plan'}
+              {brainAsking
+                ? /* The model's own sentence, addressed to the owner — the
+                   * reason it wants to go beyond what they asked for. */
+                  pendingPlan.summary
+                : isExecuting
+                  ? mode === 'brain'
+                    ? 'Working…'
+                    : 'Working on your Mac…'
+                  : 'Confirm this plan'}
             </h3>
             <ol className="plan-steps">
               {(pendingPlan.actions ?? []).map((action, index) => (
@@ -1079,18 +1238,20 @@ function App() {
               <button
                 className="primary-button"
                 type="button"
-                disabled={isExecuting}
+                disabled={isExecuting && !brainAsking}
                 onClick={handleConfirm}
               >
-                {isExecuting ? 'Running…' : 'Confirm'}
+                {brainAsking ? 'Go ahead' : isExecuting ? 'Running…' : 'Confirm'}
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={isExecuting}
+                disabled={isExecuting && !brainAsking}
                 onClick={handleCancel}
               >
-                Cancel
+                {/* Not "Cancel": declining does not end the turn, it tells the
+                    model no and lets it finish what was actually asked. */}
+                {brainAsking ? 'No thanks' : 'Cancel'}
               </button>
             </div>
           </div>
@@ -1158,6 +1319,14 @@ function App() {
             <summary>Developer</summary>
 
             <div className="mode-toggle">
+              <button
+                className={mode === 'brain' ? 'is-selected' : ''}
+                type="button"
+                onClick={() => handleModeChange('brain')}
+                title="The phone reasons and acts on its own. Works with the Mac asleep."
+              >
+                Phone Brain
+              </button>
               <button
                 className={mode === 'mac' ? 'is-selected' : ''}
                 type="button"
@@ -1843,10 +2012,18 @@ function isLocalHost() {
 }
 
 function getDefaultConnectionMode() {
-  // Capacitor serves bundled assets from localhost, but a phone does not host
-  // the Mac agent. Native clients always start through the cloud relay.
+  /*
+   * On the actual phone, the phone's own brain is the default.
+   *
+   * Capacitor serves bundled assets from localhost, but a phone does not host
+   * the Mac agent, so native clients have always started through the relay —
+   * and 'remote' means "the Mac does the thinking", which is exactly the
+   * arrangement that leaves the phone useless with the lid shut. 'brain' talks
+   * to the same relay with the same credential; the difference is who reasons.
+   * The Mac is still reachable from it, as a tool.
+   */
   if (isNativeCredentialStorage()) {
-    return 'remote'
+    return 'brain'
   }
 
   return isLocalHost() ? 'mac' : 'remote'
