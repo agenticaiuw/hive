@@ -107,8 +107,9 @@ export async function executeComputerAction(action) {
    * would work right up to the point that matters: a subprocess can only hand
    * back stdout, and a briefing's deliverable is a megabyte of rendered audio
    * that has to ride on the result object for the pendant to play it. So the
-   * CLI's own arguments are honoured in-process instead. The script still runs
-   * standalone from a terminal — this only short-circuits the agent's copy.
+   * CLI's own arguments are honoured in-process instead. There is no such
+   * script on disk any more — the command line is purely a routing token this
+   * interception recognises.
    */
   const researchCall = researchCliCall(action)
   if (researchCall) {
