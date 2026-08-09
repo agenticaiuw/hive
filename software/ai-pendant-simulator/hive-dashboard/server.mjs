@@ -593,12 +593,18 @@ const POLLERS = [
     async run() {
       const r = await relayGet('/v1/ops/credentials');
       if (!r.ok) return { ...r, unsupported: r.status === 404 };
+      /* `scopes` off the relay is EFFECTIVE scopes — what the credential can do
+       * on its next request, derived from live role policy — not the snapshot
+       * frozen into its row. Only a `narrowed` credential is bounded by that
+       * snapshot, so that flag is carried through and shown; without it a row
+       * reading "11 scope(s)" cannot be told apart from one that is capped. */
       const credentials = (r.json?.credentials || []).map((c) => ({
         tokenId: c.tokenId,
         deviceId: c.deviceId,
         role: c.role,
         scopeCount: (c.scopes || []).length,
         scopes: c.scopes || [],
+        narrowed: !!c.narrowed,
         createdAt: c.createdAt,
         lastUsedAt: c.lastUsedAt || null,
         revokedAt: c.revokedAt || null,

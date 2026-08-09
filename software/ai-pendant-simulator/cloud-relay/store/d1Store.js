@@ -52,6 +52,13 @@ function parseCredential(row) {
     deviceId: row.device_id,
     role: row.role,
     scopes: Array.isArray(scopes) ? scopes : [],
+    /* Only 1 means "this stored list is a ceiling". Anything else — 0, NULL on
+     * a row written before the column existed, a missing column on a database
+     * that predates credential-narrowing-migration.sql — means the credential
+     * tracks live role policy, which is what every credential in the fleet
+     * does. Un-narrowed is the safe reading to default to precisely because it
+     * is the one that lets DEVICE_SCOPES withdraw a capability. */
+    narrowed: row.narrowed === 1,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at || null,
     expiresAt: row.expires_at || null,
@@ -195,8 +202,8 @@ export function createD1Store(db) {
         .prepare(
           `INSERT INTO relay_device_credentials
              (token_id, token_hash, device_id, role, scopes, created_at,
-              last_used_at, expires_at, revoked_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+              last_used_at, expires_at, revoked_at, updated_at, narrowed)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
            ON CONFLICT(token_id) DO UPDATE SET
              token_hash = excluded.token_hash,
              device_id = excluded.device_id,
@@ -205,7 +212,8 @@ export function createD1Store(db) {
              last_used_at = excluded.last_used_at,
              expires_at = excluded.expires_at,
              revoked_at = excluded.revoked_at,
-             updated_at = excluded.updated_at`,
+             updated_at = excluded.updated_at,
+             narrowed = excluded.narrowed`,
         )
         .bind(
           credential.tokenId,
@@ -218,6 +226,7 @@ export function createD1Store(db) {
           credential.expiresAt || null,
           credential.revokedAt || null,
           updatedAt,
+          credential.narrowed ? 1 : 0,
         )
         .run()
       return this.getDeviceCredential(credential.tokenId)
@@ -227,7 +236,7 @@ export function createD1Store(db) {
       const row = await db
         .prepare(
           `SELECT token_id, token_hash, device_id, role, scopes, created_at,
-                  last_used_at, expires_at, revoked_at, updated_at
+                  last_used_at, expires_at, revoked_at, updated_at, narrowed
            FROM relay_device_credentials
            WHERE token_id = ?1`,
         )
@@ -243,7 +252,7 @@ export function createD1Store(db) {
         ? db
             .prepare(
               `SELECT token_id, token_hash, device_id, role, scopes, created_at,
-                      last_used_at, expires_at, revoked_at, updated_at
+                      last_used_at, expires_at, revoked_at, updated_at, narrowed
                FROM relay_device_credentials
                WHERE device_id = ?1
                ORDER BY created_at DESC LIMIT ?2`,
@@ -252,7 +261,7 @@ export function createD1Store(db) {
         : db
             .prepare(
               `SELECT token_id, token_hash, device_id, role, scopes, created_at,
-                      last_used_at, expires_at, revoked_at, updated_at
+                      last_used_at, expires_at, revoked_at, updated_at, narrowed
                FROM relay_device_credentials
                ORDER BY created_at DESC LIMIT ?1`,
             )

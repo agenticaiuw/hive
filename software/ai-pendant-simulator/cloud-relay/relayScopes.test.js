@@ -15,20 +15,31 @@ import {
 } from './relayScopes.js'
 import {
   createDeviceCredential,
-  credentialPredatesScopes,
+  credentialNarrowedBelowRole,
   DEVICE_SCOPES,
+  effectiveScopesForCredential,
   principalHasScopes,
 } from './deviceAuth.js'
 
 const deterministicRandom = (size) => Buffer.alloc(size, size)
 
+/* Built the way authenticateRelayRequest builds one: scopes DERIVED from the
+ * record, never read off it. The two are equal for a freshly minted credential,
+ * which is exactly why reading record.scopes here would look correct forever
+ * while testing a path the relay no longer takes. */
 function principalFor(role) {
   const { record } = createDeviceCredential({
     deviceId: `${role}-fixture`,
     deviceType: role,
     randomBytes: deterministicRandom,
   })
-  return { kind: 'device', role, deviceId: record.deviceId, scopes: record.scopes }
+  return {
+    kind: 'device',
+    role,
+    deviceId: record.deviceId,
+    narrowed: Boolean(record.narrowed),
+    scopes: effectiveScopesForCredential(record),
+  }
 }
 
 function allows(role, method, path) {
@@ -308,53 +319,128 @@ test('the two socket routes demand scopes their role actually holds', () => {
   )
 })
 
-test('a credential paired before a capability shipped says so', () => {
+test('only a NARROWED credential gets the re-pair diagnostic', () => {
   /*
-   * Scopes are FROZEN into the credential record at pair time — nothing in the
-   * relay updates a stored scope list. So every node paired before the mesh and
-   * /v1/infer landed keeps its old list and is refused them permanently, and
-   * the refusal used to be worded identically to "that route is not for your
-   * role". After a deploy that is the difference between "re-pair the fleet"
-   * and a day spent debugging a feature that works.
+   * This used to answer "was this credential paired before the capability
+   * shipped", which mattered when scopes were frozen at pair time and a role
+   * widening reached nothing already in the field. It no longer happens:
+   * effective scopes are derived from the live table on every request, so an
+   * un-narrowed credential — every credential in the fleet — picks a new scope
+   * up on its next request and has nothing to re-pair for.
+   *
+   * A credential minted with an explicit ceiling is the case that survives, and
+   * it survives permanently: no deploy ever widens it. That denial has a remedy
+   * (re-pair with a wider list) and stays distinguishable from a role denial,
+   * which has none.
    */
   const { record } = createDeviceCredential({
     deviceId: 'phone-paired-last-month',
     deviceType: 'mobile',
     randomBytes: deterministicRandom,
   })
-  /* What that record looked like before mobile gained the new scopes. */
-  const stale = {
+
+  /* An old un-narrowed row missing the newer scopes: no diagnostic, because
+   * there is no denial — it holds them. */
+  const untouched = {
     kind: 'device',
     role: 'mobile',
     deviceId: record.deviceId,
-    scopes: record.scopes.filter(
-      (scope) => !['llm:infer', 'node:message:send', 'node:message:receive'].includes(scope),
-    ),
+    narrowed: false,
+    scopes: effectiveScopesForCredential({
+      role: 'mobile',
+      scopes: record.scopes.filter(
+        (scope) => !['llm:infer', 'node:message:send', 'node:message:receive'].includes(scope),
+      ),
+    }),
   }
+  assert.equal(principalHasScopes(untouched, 'llm:infer'), true)
+  assert.equal(credentialNarrowedBelowRole(untouched, ['llm:infer']), false)
 
-  assert.equal(principalHasScopes(stale, 'llm:infer'), false)
-  assert.deepEqual(credentialPredatesScopes(stale, ['llm:infer']), ['llm:infer'])
+  /*
+   * The same answer for a principal that is un-narrowed AND short of its role.
+   * authenticateRelayRequest cannot produce this — an un-narrowed credential is
+   * given its whole role by construction — so this is not a claim that the
+   * state occurs. It pins the function's contract: the answer is about whether
+   * an explicit CEILING is withholding the scope, not about the gap between
+   * some scope list and role policy. Answering from the gap alone would put
+   * "re-pair to pick it up" in front of anyone who ever builds a principal from
+   * a stored row, where it would be false.
+   */
+  assert.equal(
+    credentialNarrowedBelowRole(
+      { kind: 'device', role: 'mobile', narrowed: false, scopes: ['state:read'] },
+      ['llm:infer'],
+    ),
+    false,
+  )
+
+  /* The same missing scopes, on a credential that was narrowed on purpose. */
+  const narrowed = { ...untouched, narrowed: true, scopes: ['state:read'] }
+  assert.equal(principalHasScopes(narrowed, 'llm:infer'), false)
+  assert.deepEqual(credentialNarrowedBelowRole(narrowed, ['llm:infer']), ['llm:infer'])
   assert.deepEqual(
-    credentialPredatesScopes(stale, ['node:message:receive']),
+    credentialNarrowedBelowRole(narrowed, ['node:message:receive']),
     ['node:message:receive'],
   )
 
-  /* A freshly paired credential of the same role is NOT stale — otherwise the
-   * diagnostic would fire on every genuine denial and mean nothing. */
-  const fresh = principalFor('mobile')
-  assert.equal(credentialPredatesScopes(fresh, ['llm:infer']), false)
+  /* A scope the role does not grant is a real denial either way: the pendant is
+   * not one re-pair away from claiming the Mac's work, and no re-pair ever
+   * turns a device into an admin. */
+  assert.equal(
+    credentialNarrowedBelowRole(principalFor('nrf_pendant'), ['bridge:work:claim']),
+    false,
+  )
+  assert.equal(credentialNarrowedBelowRole(narrowed, ['admin']), false)
+  /* Nor does it fire for the admin principal, which holds '*' and is never a
+   * device. */
+  assert.equal(
+    credentialNarrowedBelowRole({ kind: 'admin', role: 'admin', scopes: ['*'] }, ['admin']),
+    false,
+  )
+})
 
-  /* And a scope the role never had is a real denial, not a stale one: the
-   * pendant is not one re-pair away from claiming the Mac's work. */
-  assert.equal(
-    credentialPredatesScopes(principalFor('nrf_pendant'), ['bridge:work:claim']),
-    false,
-  )
-  assert.equal(
-    credentialPredatesScopes(stale, ['admin']),
-    false,
-    'no re-pair ever turns a device into an admin',
-  )
+test('editing DEVICE_SCOPES withdraws from paired devices, in both directions', () => {
+  /*
+   * The route table's half of the credential-model change. A role's entry in
+   * DEVICE_SCOPES is now the live answer for every un-narrowed credential, so
+   * these two statements — which were false before — are what the matrix above
+   * is actually asserting about the fleet, not merely about fresh tokens.
+   *
+   * The rows here are what a paired device's row looks like on either side of a
+   * policy edit; DEVICE_SCOPES is frozen, and it does not need to be mutable,
+   * because the only thing an edit changes for an existing device is whether
+   * its stored list still matches the table.
+   */
+  const wideRow = {
+    role: 'mobile',
+    /* A row from before mac:execute would have been withdrawn from phones. */
+    scopes: [...DEVICE_SCOPES.mobile, 'bridge:work:claim', 'state:write'],
+  }
+  const narrowRow = {
+    role: 'mobile',
+    /* A row from before the mesh and the relay brain shipped. */
+    scopes: ['device:heartbeat:self', 'state:read'],
+  }
+
+  for (const row of [wideRow, narrowRow]) {
+    const principal = {
+      kind: 'device',
+      role: row.role,
+      narrowed: false,
+      scopes: effectiveScopesForCredential(row),
+    }
+    assert.deepEqual(principal.scopes, [...DEVICE_SCOPES.mobile])
+    /* A route mobile is not entitled to stays shut no matter what the row said. */
+    assert.equal(
+      principalHasScopes(principal, ...requiredScopesForRoute('GET', '/v1/bridge/work')),
+      false,
+    )
+    /* A route mobile IS entitled to opens no matter what the row said. */
+    assert.equal(
+      principalHasScopes(principal, ...requiredScopesForRoute('POST', '/v1/infer')),
+      true,
+    )
+  }
 })
 
 test('no role is a de facto admin', () => {

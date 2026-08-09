@@ -39,11 +39,19 @@ import '../../load-pendant-env.mjs'
 const ROLES = ['mobile', 'mac_bridge', 'nrf_pendant', 'browser_node']
 
 const USAGE = `Usage:
-  pendant-credentials.mjs pair --device-id <id> --role <${ROLES.join('|')}> [--name <label>]
+  pendant-credentials.mjs pair --device-id <id> --role <${ROLES.join('|')}> [--name <label>] [--scopes a,b,c]
   pendant-credentials.mjs list [--device-id <id>] [--json]
   pendant-credentials.mjs revoke --token-id <tokenId>
 
 Options:
+  --scopes <a,b,c>    NARROW this credential to a subset of its role, permanently.
+                      Omit it (the normal case) and the credential holds whatever
+                      its role holds at the time of each request — editing
+                      DEVICE_SCOPES then grants AND withdraws with no re-pair.
+                      Supply it and the credential keeps that ceiling forever: it
+                      never picks up a scope the role gains later. The relay
+                      refuses any scope the role does not grant, so this can only
+                      subtract.
   --relay-url <url>   Override RELAY_URL from .env.
   --help              This text.
 
@@ -101,10 +109,34 @@ async function pair(args) {
     fail('PAIRING_CODE is not set in the repo-root .env; the relay refuses pairing without it.')
   }
 
+  /*
+   * Absent and empty are deliberately different. No --scopes at all sends no
+   * `scopes` key, which is the ordinary credential that follows role policy.
+   * `--scopes ""` would be an attempt to mint a credential holding nothing; the
+   * relay rejects it rather than commissioning a device that 403s everywhere,
+   * so it is caught here too with a message that says what was meant.
+   */
+  const narrowing = Object.hasOwn(args, 'scopes')
+  const scopes = narrowing
+    ? String(args.scopes ?? '')
+        .split(',')
+        .map((scope) => scope.trim())
+        .filter(Boolean)
+    : null
+  if (narrowing && !scopes.length) {
+    fail('--scopes was given but named nothing. Omit it to grant the whole role.')
+  }
+
   const response = await fetch(`${relayUrl(args)}/v1/devices/pair`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceId, deviceType: role, name, pairingCode }),
+    body: JSON.stringify({
+      deviceId,
+      deviceType: role,
+      name,
+      pairingCode,
+      ...(narrowing ? { scopes } : {}),
+    }),
   })
   const payload = await readJson(response)
   if (!response.ok || !payload.ok) {
@@ -121,6 +153,13 @@ async function pair(args) {
   console.error(`Paired ${deviceId} as ${credential.role}.`)
   console.error(`  tokenId : ${credential.tokenId}`)
   console.error(`  scopes  : ${credential.scopes.join(', ')}`)
+  console.error(
+    credential.narrowed
+      ? '  ceiling : NARROWED — this list is permanent. The credential will not\n' +
+        '            pick up scopes the role gains later; that needs a re-pair.'
+      : '  ceiling : none — tracks the role. A scope added to or removed from\n' +
+        '            this role reaches this credential on its next request.',
+  )
   console.error(`  created : ${credential.createdAt}`)
   console.error('')
   console.error('The token is printed once on stdout and is unrecoverable afterwards.')
@@ -152,10 +191,15 @@ async function list(args) {
     return
   }
 
+  /* `scopes` from the relay is EFFECTIVE scopes — what the credential can do
+   * right now, derived from live role policy — not the list frozen at pair
+   * time. `ceiling` says which of the two you are looking at. */
   const rows = payload.credentials.map((credential) => ({
     tokenId: credential.tokenId,
     device: credential.deviceId,
     role: credential.role,
+    scopes: (credential.scopes || []).length,
+    ceiling: credential.narrowed ? 'NARROWED' : 'role',
     state: credential.revokedAt ? 'REVOKED' : 'active',
     lastUsed: credential.lastUsedAt || 'never',
     created: credential.createdAt,

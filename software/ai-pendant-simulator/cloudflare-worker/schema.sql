@@ -7,6 +7,14 @@ CREATE TABLE IF NOT EXISTS relay_devices (
 CREATE INDEX IF NOT EXISTS relay_devices_updated_at
   ON relay_devices(updated_at DESC);
 
+-- `scopes` is NOT what this credential may do. Effective scopes are derived
+-- from the live DEVICE_SCOPES table on every request
+-- (cloud-relay/deviceAuth.js, effectiveScopesForCredential); this column is a
+-- pair-time snapshot with no authority unless `narrowed` is 1, in which case it
+-- is a permanent per-device ceiling that role policy may only ever intersect
+-- down. `narrowed` is last in the column list so that a database built from
+-- this file matches one built by credential-narrowing-migration.sql, which
+-- appends it — see d1CredentialSchema.test.js.
 CREATE TABLE IF NOT EXISTS relay_device_credentials (
   token_id TEXT PRIMARY KEY,
   token_hash TEXT NOT NULL,
@@ -18,6 +26,7 @@ CREATE TABLE IF NOT EXISTS relay_device_credentials (
   expires_at TEXT,
   revoked_at TEXT,
   updated_at TEXT NOT NULL,
+  narrowed INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (device_id) REFERENCES relay_devices(device_id)
 );
 
