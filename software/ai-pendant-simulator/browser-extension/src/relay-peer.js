@@ -12,29 +12,49 @@
  * browser: drain my own inbox, act on what is addressed to me, answer.
  *
  * ---------------------------------------------------------------------------
- * WHY THIS IS A POLLER AND NOT A SOCKET
+ * THE DOORBELL, AND THE POLLER UNDER IT
  *
- * The mesh was designed around a doorbell: GET /v1/node/socket, one frame
- * {"type":"mail"}, drain immediately. A browser cannot open it. Verified
- * against the live relay on 2026-08-09:
+ * This module first shipped as a poller, because /v1/node/socket authenticated
+ * only from an `Authorization` header and a service worker's WebSocket
+ * constructor cannot send one. That was a relay bug, not a platform limit, and
+ * it has been fixed (cloudflare-worker/bridgeHub.js, commit 9408983): the
+ * credential may now ride as a second subprotocol offer. Measured against
+ * production on 2026-08-09, with a browser_node credential:
  *
- *   Upgrade + Authorization: Bearer <device token>  -> 101 Switching Protocols
- *   Upgrade, no Authorization header                -> 401
- *   Upgrade + Sec-WebSocket-Protocol: bearer.<tok>  -> 401
+ *   Authorization header only                    -> 101
+ *   no credential at all                         -> 401
+ *   subprotocol only, no Authorization           -> 101, server selects
+ *                                                   "pendant.mesh.v1"
+ *   subprotocol + someone else's deviceId        -> 403
+ *   bearer.<token> offered alone                 -> 101, and NO
+ *                                                   Sec-WebSocket-Protocol in
+ *                                                   the response at all
  *
- * The WebSocket constructor available to a service worker cannot set request
- * headers; its only extension point is the subprotocol argument, and
- * cloudflare-worker/bridgeHub.js handleHubUpgrade reads Authorization and
- * nothing else. So the doorbell is closed to this node until the relay learns
- * to accept a credential a browser can actually send. Until then the durable
- * half of the mesh — the D1 queue behind GET /v1/node/inbox — is reachable
- * over ordinary authenticated HTTPS and delivers every message, just later.
+ * The last two are the ones worth keeping: principalOwnsDevice still runs, so
+ * this is not a weaker door, and the token is never reflected into a response
+ * header even when it is the only offer. End to end, a socket opened this way
+ * received {"type":"pong"} to its ping and {"type":"mail"} when the relay
+ * brain posted a message — which arrived `pushed:true queued:false` rather
+ * than the `pushed:false queued:true` the poller-only build always saw.
  *
- * The property the owner asked for survives: relay → extension with the Mac
- * asleep. What is lost is latency, and only latency: a poll interval instead
- * of one round trip. That trade is stated here rather than hidden in a comment
- * about "eventual" delivery, because it is the one thing a reader of this file
- * should not have to discover by measuring.
+ * SO WHY IS THERE STILL A POLLER. Because the socket cannot be the only way
+ * in, for reasons that are all about this runtime rather than about the relay:
+ *
+ *   1. Safari suspends MV3 service workers. Mail that arrives while the worker
+ *      is dead rings a doorbell nobody hears, so every wake MUST drain once
+ *      regardless of socket state. That is the fallback-on-wake path.
+ *   2. A frame is not durable. The D1 row is. A dropped frame or a reconnect
+ *      that lands between the ring and the listener costs nothing only if
+ *      something eventually sweeps.
+ *   3. A credential can stop working under a live socket — observed while
+ *      writing this, when a relay deploy invalidated a working token
+ *      mid-session. The socket closes; the node must notice and say so rather
+ *      than go quiet.
+ *
+ * So: the socket is primary and the poller is a safety sweep whose interval
+ * stretches to RELAY_POLL_SOCKET_MS while a socket is actually up, and snaps
+ * back to the active cadence the moment it is not. choosePeer() below is where
+ * that is decided, and it is a pure function so the decision is assertable.
  *
  * ---------------------------------------------------------------------------
  * TWO PEERS, NOT A NEW SINGLE POINT OF FAILURE
@@ -58,9 +78,17 @@ import {
   parseNodeEnvelope,
   RELAY_NODE_ADDRESS,
 } from '../../shared/nodeMesh.js'
+import {
+  BEARER_SUBPROTOCOL_PREFIX,
+  BRIDGE_MAIL_FRAME,
+  BRIDGE_PING_FRAME,
+  BRIDGE_PING_INTERVAL_MS,
+  MESH_SUBPROTOCOL,
+  parseBridgeFrame,
+} from '../../shared/bridgeSocketProtocol.js'
 import { COMMAND_TYPES } from './bridge-core.js'
 
-export { RELAY_NODE_ADDRESS }
+export { RELAY_NODE_ADDRESS, BRIDGE_PING_FRAME, BRIDGE_PING_INTERVAL_MS }
 
 /* ===================================================================== *
  * The origin boundary.
@@ -249,6 +277,58 @@ export function sendRequest(config, { to, kind, payload, correlationId = null, t
     },
   }
 }
+
+/* ===================================================================== *
+ * The doorbell socket.
+ * ===================================================================== */
+
+/**
+ * Where the socket connects. The deviceId is a path parameter because it is
+ * not a secret; the CREDENTIAL is not here and must never be, because query
+ * strings are the part of a request that gets logged — by Cloudflare, by any
+ * proxy in between, and by the browser's own network panel.
+ */
+export function socketUrl(config) {
+  const origin = normalizeRelayUrl(config?.relayUrl)
+  const address = normalizeNodeAddress(config?.relayDeviceId)
+  if (!origin || !address) return ''
+  return `${origin.replace(/^http/, 'ws')}/v1/node/socket?deviceId=${encodeURIComponent(address)}`
+}
+
+/**
+ * The two subprotocol offers, in order.
+ *
+ * Two rather than one because RFC 6455 makes the server echo a protocol the
+ * client offered, and a browser closes a socket whose selected protocol it did
+ * not offer. Offering the plain mesh name alongside the credential gives the
+ * server something safe to echo — measured: it selects "pendant.mesh.v1" and
+ * the token never appears in the response.
+ */
+export function socketProtocols(config) {
+  const token = String(config?.deviceToken ?? '').trim()
+  if (!token) return []
+  return [MESH_SUBPROTOCOL, `${BEARER_SUBPROTOCOL_PREFIX}${token}`]
+}
+
+/** True when the server picked the protocol we can live with. */
+export function socketProtocolAccepted(selected) {
+  return String(selected ?? '') === MESH_SUBPROTOCOL || String(selected ?? '') === ''
+}
+
+/**
+ * What one inbound frame means. Pure, so the frame table is a test rather than
+ * a switch buried in an event handler.
+ */
+export function reactToFrame(raw) {
+  const frame = parseBridgeFrame(raw)
+  if (!frame) return { drain: false, kind: '' }
+  /* 'work' is the Mac's frame and lands on the same per-device hub. Draining
+   * on it is harmless and strictly better than ignoring it: this node has no
+   * bridge work queue, but a hub that rang at all means something changed. */
+  return { drain: frame.type === 'mail' || frame.type === 'work', kind: frame.type }
+}
+
+export { BRIDGE_MAIL_FRAME }
 
 /* ===================================================================== *
  * At-least-once: the dedupe ledger.
@@ -445,6 +525,58 @@ export function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.n
 }
 
 /**
+ * Is there mail left AFTER this page?
+ *
+ * `pending` counts the page it just leased you, not what remains beyond it —
+ * a drain returning one message comes back `pending: 1` and only reads 0 once
+ * the ack lands. Measured on the live relay: messages=1, pending=1, then
+ * pending=0 after the ack. So `while (pending > 0) drain()` never terminates;
+ * it re-leases nothing and spins. The only honest read is the comparison.
+ */
+export function hasMoreMail(page) {
+  const pending = Number(page?.pending || 0)
+  const delivered = Array.isArray(page?.messages) ? page.messages.length : 0
+  return pending > delivered
+}
+
+/**
+ * Why a relay request failed, in a form the UI can act on.
+ *
+ * `code` is present on most relay errors (`scope_denied`, `unknown_node`,
+ * `inbox_full`, `invalid_envelope`, `credential_predates_capability`) and
+ * absent on others — notably the ownership 403, which carries only a message.
+ * So status is the primary signal and code is decoration, never the other way
+ * round. 401 and 403 are split because they need different fixes: 401 is a
+ * credential this relay does not accept, 403 is a credential that is fine but
+ * is not allowed to touch this deviceId.
+ */
+export function describeRelayFailure(error) {
+  const status = Number(error?.status || 0)
+  const code = String(error?.code ?? '') || ''
+  if (status === 401) {
+    return {
+      state: 'unauthorized',
+      code,
+      message:
+        'The relay does not accept this browser\'s device token. Pair again and paste the new one.',
+    }
+  }
+  if (status === 403) {
+    return {
+      state: 'unauthorized',
+      code,
+      message:
+        'This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with.',
+    }
+  }
+  return {
+    state: 'offline',
+    code,
+    message: 'Cannot reach the relay.',
+  }
+}
+
+/**
  * A mesh envelope, shaped as the command the extension already knows how to
  * validate and execute — so mesh-borne work goes through exactly the same
  * validateCommand / sanitizeExtraction path as Mac-borne work, with no second
@@ -518,9 +650,15 @@ export function pongMessageFor(envelope, presence, config) {
  */
 export const MAC_FRESH_MS = 40_000
 
-/* Relay poll cadences. The slow one is what a healthy Mac costs: mesh mail is
- * durable, so a message that waits 30 s is late, not lost. The fast one is
- * what the relay becomes when it is the only way through. */
+/* Relay poll cadences, now that polling is the SAFETY SWEEP rather than the
+ * transport. The socket delivers in ~100 ms; these numbers only bound how long
+ * a message can hide if a frame is lost or the socket is down.
+ *
+ * RELAY_POLL_SOCKET_MS is deliberately not Infinity. A doorbell that has
+ * already rung cannot ring again, so a single dropped frame with no sweep
+ * behind it strands that message until something else happens to drain. Five
+ * minutes is cheap — one request — and turns "stranded" into "late". */
+export const RELAY_POLL_SOCKET_MS = 300_000
 export const RELAY_POLL_IDLE_MS = 30_000
 export const RELAY_POLL_ACTIVE_MS = 3_000
 
@@ -542,6 +680,7 @@ export function choosePeer({
   macConfigured = false,
   macLastOkAt = 0,
   relayReady = false,
+  socketOpen = false,
   now = Date.now(),
 } = {}) {
   const macFresh = macConfigured && now - macLastOkAt <= MAC_FRESH_MS
@@ -551,12 +690,31 @@ export function choosePeer({
 
   const outbound = macFresh ? 'mac' : relayReady ? 'relay' : macConfigured ? 'mac' : null
 
+  /* The socket is the transport whenever it is actually up. `socketOpen` is
+   * observed — the worker holds the object — not inferred from config, for the
+   * same reason nodePresence distinguishes observed:false from connected:false:
+   * "I have a socket" and "I am configured to want one" are different claims. */
+  const relayTransport = !relayReady ? 'none' : socketOpen ? 'socket' : 'poll'
+
+  const relayPollMs = !relayReady
+    ? RELAY_POLL_ACTIVE_MS
+    : socketOpen
+      ? RELAY_POLL_SOCKET_MS
+      : macFresh
+        ? RELAY_POLL_IDLE_MS
+        : RELAY_POLL_ACTIVE_MS
+
   let reason
   if (!macConfigured && !relayReady) {
     reason = 'Neither peer is configured; this extension is unreachable.'
+  } else if (relayReady && socketOpen && macFresh) {
+    reason =
+      'Both peers reachable: the relay pushes over its socket, results go to the Mac (loopback is faster).'
+  } else if (relayReady && socketOpen) {
+    reason = 'The relay is pushing over its socket; the Mac is not answering.'
   } else if (macFresh && relayReady) {
     reason =
-      'Both peers reachable: results go to the Mac (loopback is faster), the relay inbox is drained on a slow cadence.'
+      'Both peers configured, but the relay socket is down — sweeping its inbox on the fallback cadence.'
   } else if (macFresh) {
     reason = 'Only the Mac is configured; the relay peer is off or unconfigured.'
   } else if (relayReady && macConfigured) {
@@ -571,7 +729,8 @@ export function choosePeer({
     inbound,
     outbound,
     macFresh,
-    relayPollMs: macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS,
+    relayTransport,
+    relayPollMs,
     reason,
   }
 }
