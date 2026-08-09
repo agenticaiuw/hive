@@ -565,13 +565,20 @@ export function hasMoreMail(page) {
 /**
  * Why a relay request failed, in a form the UI can act on.
  *
- * `code` is present on most relay errors (`scope_denied`, `unknown_node`,
- * `inbox_full`, `invalid_envelope`, `credential_predates_capability`) and
- * absent on others — notably the ownership 403, which carries only a message.
- * So status is the primary signal and code is decoration, never the other way
- * round. 401 and 403 are split because they need different fixes: 401 is a
- * credential this relay does not accept, 403 is a credential that is fine but
- * is not allowed to touch this deviceId.
+ * `code` is present on the relay's refusals (`scope_denied`, `unknown_node`,
+ * `inbox_full`, `invalid_envelope`, `credential_predates_capability`) — and,
+ * since relay commit 41dbc4b, on the ownership 403 as well: both
+ * /v1/node/inbox and /v1/node/inbox/ack now send `not_your_inbox`
+ * (OWNERSHIP_DENIED_CODE in cloud-relay/nodeMailbox.js) beside their
+ * deliberately vague message. Status stays the primary signal and code only
+ * sharpens it, never the other way round: a relay predating that commit — or
+ * any future 403 shipped without a code — must still land on the precise
+ * generic fix, not "unknown". 401 and 403 are split because they need
+ * different fixes: 401 is a credential this relay does not accept, 403 is a
+ * credential that is fine but is not allowed to touch this deviceId — and
+ * when the relay names it `not_your_inbox`, that is stated outright: the
+ * token is valid but paired to a different deviceId than the inbox it
+ * requested.
  */
 export function describeRelayFailure(error) {
   const status = Number(error?.status || 0)
@@ -585,6 +592,15 @@ export function describeRelayFailure(error) {
     }
   }
   if (status === 403) {
+    if (code === 'not_your_inbox') {
+      /* The relay confirmed the exact mismatch, so assert it as fact. */
+      return {
+        state: 'unauthorized',
+        code,
+        message:
+          'This token is valid but paired to a different device ID than the inbox it requested. Set the device ID to the one this token was paired with, or pair again to get a token for this one.',
+      }
+    }
     return {
       state: 'unauthorized',
       code,
