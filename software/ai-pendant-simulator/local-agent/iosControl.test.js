@@ -202,11 +202,40 @@ function stubPhone(t, scenario) {
       '    return {"kind": "mouse", "type": kind, "point": point}',
       'def CGEventSetFlags(ev, flags):',
       '    ev["flags"] = flags',
+      'kCGScrollEventUnitPixel = 0',
+      'def CGEventCreateScrollWheelEvent(source, unit, count, dy):',
+      '    return {"kind": "scroll", "dy": dy, "point": None}',
+      'def CGEventSetLocation(ev, point):',
+      '    ev["point"] = point',
+      // The keycodes iPhone Mirroring actually forwards, reversed. Typing has
+      // to become VISIBLE on the fake screen: ios_open_app now refuses to press
+      // Return until it has SEEN the query on the phone, and a stub whose
+      // keystrokes go nowhere would make that guard untestable — and, worse,
+      // would make it look like a bug.
+      '_TYPED = {0:"a",1:"s",2:"d",3:"f",4:"h",5:"g",6:"z",7:"x",8:"c",9:"v",',
+      '          11:"b",12:"q",13:"w",14:"e",15:"r",16:"y",17:"t",31:"o",',
+      '          32:"u",34:"i",35:"p",37:"l",38:"j",40:"k",45:"n",46:"m",49:" "}',
+      'def _append_typed(text):',
+      '    state = _state()',
+      '    state["typed"] = state.get("typed", "") + text',
+      '    with open(os.environ["PH_STUB_STATE"], "w") as f:',
+      '        json.dump(state, f)',
+      'def _typed_from_key(code, flags):',
+      '    if flags not in (0, kCGEventFlagMaskShift):',
+      '        return',
+      '    ch = _TYPED.get(code)',
+      '    if ch is None:',
+      '        return',
+      '    _append_typed(ch.upper() if flags == kCGEventFlagMaskShift else ch)',
       'def CGEventPostToPid(pid, ev):',
       '    if ev.get("down") is False:',
       '        return',
       '    _log({"event": "targeted_" + ev["kind"], "pid": pid,',
-      '          "keycode": ev.get("keycode"), "flags": ev.get("flags")})',
+      '          "keycode": ev.get("keycode"), "flags": ev.get("flags"),',
+      '          "type": ev.get("type"), "point": ev.get("point"),',
+      '          "dy": ev.get("dy")})',
+      '    if ev["kind"] == "key":',
+      '        _typed_from_key(ev.get("keycode"), ev.get("flags") or 0)',
       'def CGEventPost(tap, ev):',
       '    _log({"event": "global_" + ev["kind"]})',
       '',
@@ -299,6 +328,20 @@ function stubPhone(t, scenario) {
       '    _record("press", combo=combo)',
       'def type_text(text, delay=0.03):',
       '    _record("type_text", length=len(text))',
+      '    state = _state()',
+      '    state["typed"] = state.get("typed", "") + text',
+      '    with open(os.environ["PH_STUB_STATE"], "w") as f:',
+      '        json.dump(state, f)',
+      // The real one is load-bearing (iPhone Mirroring forwards raw keycodes
+      // and ignores the unicode payload), so the targeted typing path asks
+      // phone_harness for it rather than keeping a second copy.
+      '_KEYCODES = {"a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,',
+      '             "v":9,"b":11,"q":12,"w":13,"e":14,"r":15,"y":16,"t":17,',
+      '             "o":31,"u":32,"i":34,"p":35,"l":37,"j":38,"k":40,"n":45,',
+      '             "m":46," ":49}',
+      'def _keycode_for(ch):',
+      '    shifted = ch.isupper()',
+      '    return _KEYCODES.get(ch.lower()), shifted',
       '',
     ].join('\n'),
   )
@@ -311,7 +354,13 @@ function stubPhone(t, scenario) {
       'def recognize(path, window):',
       '    with open(os.environ["PH_STUB_STATE"]) as f:',
       '        state = json.load(f)',
-      '    texts = state.get("ocr", {}).get(str(window["id"]), [])',
+      '    texts = list(state.get("ocr", {}).get(str(window["id"]), []))',
+      // Whatever has been typed shows up on the phone's screen, the way a real
+      // search field would. A scenario can set typingIsSwallowed to model the
+      // failure ios_open_app now guards against: Spotlight opened, the
+      // characters never arrived, and Return would launch the wrong app.
+      '    if texts and state.get("typed") and not state.get("typingIsSwallowed"):',
+      '        texts = texts + [state["typed"]]',
       '    return [{"text": t, "confidence": 0.9,',
       '             "x": window["x"] + window["w"] / 2,',
       '             "y": window["y"] + 40 + i * 30,',
@@ -369,6 +418,12 @@ function stubPhone(t, scenario) {
      * owner's actual windows. Without this a test run would shuffle real
      * windows around someone's desk. */
     PH_SPACE_MOVE: '0',
+    /* Activation reaches SkyLight through ctypes, which no Python stub can
+     * intercept — the same problem as the Spaces work above, and the same
+     * answer. Without pinning it, whether the targeted pointer route is
+     * "available" would depend on the machine running the suite rather than on
+     * the scenario, and every assertion below would be describing this laptop. */
+    PH_STUB_ACTIVATION: scenario?.activation === 'unavailable' ? '0' : '1',
     ...(scenario?.spaceType ? { PH_STUB_SPACE_TYPE: scenario.spaceType } : {}),
   }
 
@@ -424,6 +479,12 @@ function stubPhone(t, scenario) {
      * owner's actual windows. Without this a test run would shuffle real
      * windows around someone's desk. */
     PH_SPACE_MOVE: '0',
+    /* Activation reaches SkyLight through ctypes, which no Python stub can
+     * intercept — the same problem as the Spaces work above, and the same
+     * answer. Without pinning it, whether the targeted pointer route is
+     * "available" would depend on the machine running the suite rather than on
+     * the scenario, and every assertion below would be describing this laptop. */
+    PH_STUB_ACTIVATION: scenario?.activation === 'unavailable' ? '0' : '1',
     ...(scenario?.spaceType ? { PH_STUB_SPACE_TYPE: scenario.spaceType } : {}),
   }
   for (const [key, value] of Object.entries(exported)) process.env[key] = value
@@ -858,41 +919,96 @@ test('the targeted path leaves the frontmost app exactly where it found it', asy
   )
 })
 
-test('ios_status never claims pointer reach that iPhone Mirroring does not have', async (t) => {
+test('ios_status reports pointer reach as measured, in both directions', async (t) => {
   if (needsPython(t)) return
   /*
-   * Measured 2026-08-08, macOS 26.5.2: pointer and ordinary key events are
-   * DELIVERED to iPhone Mirroring off-Space — a CGEventTapCreateForPid tap on
-   * the app's own stream shows them arriving intact — and the app acts on none
-   * of them while it is not the active application. So there is no targeted
-   * pointer route, on any Space, at any time, and status says so as a constant
-   * rather than as something that might vary with the arrangement of windows.
+   * REWRITTEN 2026-08-09, and the previous version of this test was asserting
+   * something false. It pinned pointerTargetedPossible to a constant false on
+   * the reasoning that iPhone Mirroring "declines to forward pointer input
+   * while it is not the active application" — which is true, and which was
+   * then taken to mean the app cannot be made active without taking the
+   * owner's screen. It can:
+   * _SLPSSetFrontProcessWithOptions(psn, 0, kCPSNoWindows) makes it ACTIVE
+   * while fronting nothing.
+   *
+   * Measured on the owner's phone, owner working in another window, with a
+   * cmd+3 control passing in the same run: identical keys posted with
+   * CGEventPostToPid did NOTHING with the app inactive and LANDED with it
+   * active — Spotlight went from its suggestion list to a live search for the
+   * typed string. Frontmost app and active Space were sampled before, during
+   * and after and never changed.
+   *
+   * So this now pins a route that exists, and pins its LIMIT just as hard.
+   */
+  const visibleNotFront = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: false })
+  const seen = visibleNotFront.run('ios_status', {}).payload.result
+  assert.equal(seen.state, 'ready')
+  assert.equal(seen.pointerTargetedPossible, true)
+  assert.equal(seen.pointerTargetedBlockedBy, null)
+  assert.equal(seen.pointerWritesPossible, true)
+  assert.equal(seen.writeMechanism, 'targeted-active')
+  assert.equal(
+    seen.pointerWritesNeedActivation,
+    false,
+    'the targeted route makes the app active without fronting it, so it costs the owner nothing',
+  )
+  // The whole pointer family joins the free actions on this route.
+  assert.deepEqual(seen.targetedActions, [
+    'ios_home',
+    'ios_app_switcher',
+    'ios_open_app',
+    'ios_tap_text',
+    'ios_type_text',
+    'ios_swipe',
+    'ios_scroll',
+    'ios_back',
+  ])
+
+  /*
+   * THE LIMIT, and it is deliberately conservative. The measurement above was
+   * taken with the window on the Space the owner is looking at. Whether a
+   * pointer event can be hit-tested against a window macOS is not compositing
+   * has NOT been measured, so off-Space it does not claim the route. Set
+   * PH_TARGETED_POINTER_OFFSPACE=1 after measuring it, not before.
    */
   const offSpace = stubPhone(t, { onscreen: [], frontmost: false, spaceSwitch: 'on' })
   const off = offSpace.run('ios_status', {}).payload.result
   assert.equal(off.state, 'off-space')
   assert.equal(off.pointerTargetedPossible, false)
-  assert.equal(off.pointerTargetedBlockedBy, 'app-inactive')
+  assert.equal(off.pointerTargetedBlockedBy, 'off-space-unproven')
+  assert.deepEqual(off.targetedActions, ['ios_home', 'ios_app_switcher'])
 
   /*
-   * The regression this test exists for. pointerWritesNeedActivation used to
-   * be `state == "off-space"`, so a window sitting in plain sight on the
-   * current Space while the owner worked in another app reported FALSE — and
-   * the write then activated and took their screen anyway. Visible is not
-   * active, and it is active that the write needs.
+   * THE ORIGINAL REGRESSION, which must stay fixed on the fallback route.
+   * pointerWritesNeedActivation used to be `state == "off-space"`, so a window
+   * in plain sight while the owner worked in another app reported FALSE and
+   * the write then took their screen anyway. With activation unavailable there
+   * is no targeted route, the guarded path is all there is, and the field has
+   * to admit that it will cost them their focus. Visible is not active.
    */
-  const visibleNotFront = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: false })
-  const seen = visibleNotFront.run('ios_status', {}).payload.result
-  assert.equal(seen.state, 'ready')
-  assert.equal(seen.pointerWritesPossible, true)
+  const noSkylight = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: false,
+    activation: 'unavailable',
+  })
+  const fallback = noSkylight.run('ios_status', {}).payload.result
+  assert.equal(fallback.state, 'ready')
+  assert.equal(fallback.activationAvailable, false)
+  assert.equal(fallback.pointerTargetedPossible, false)
+  assert.equal(fallback.pointerTargetedBlockedBy, 'activation-unavailable')
+  assert.equal(fallback.pointerWritesPossible, true)
+  assert.equal(fallback.writeMechanism, 'activate-fallback')
   assert.equal(
-    seen.pointerWritesNeedActivation,
+    fallback.pointerWritesNeedActivation,
     true,
-    'a visible but inactive window still costs the owner their focus',
+    'without the targeted route a visible but inactive window still costs the owner their focus',
   )
-  assert.equal(seen.pointerTargetedPossible, false)
 
-  const front = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: true })
+  const front = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: true,
+    activation: 'unavailable',
+  })
   const ready = front.run('ios_status', {}).payload.result
   assert.equal(ready.pointerWritesNeedActivation, false, 'already active, nothing to take')
 
@@ -902,6 +1018,136 @@ test('ios_status never claims pointer reach that iPhone Mirroring does not have'
   assert.equal(dead.pointerWritesPossible, false)
   assert.equal(dead.pointerTargetedPossible, false)
   assert.deepEqual(dead.targetedActions, [])
+})
+
+test('the targeted pointer route posts addressed events and takes no focus', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * The invariant the whole change exists for. With the window visible but the
+   * app inactive, a tap must:
+   *   - make the app ACTIVE and hand activation straight back,
+   *   - never call activateWithOptions_ (that is what fronts a window),
+   *   - post its mouse events ADDRESSED to the process, never globally,
+   *   - and owe nobody their focus back afterwards.
+   */
+  const phone = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: false,
+    activationWorks: false, // the guarded path would fail outright
+  })
+
+  const before = JSON.parse(fs.readFileSync(phone.statePath, 'utf8')).frontApp
+  const run = phone.run('ios_tap_text', { query: 'Settings', index: 0, exact: false })
+  assert.equal(run.status, 0, `tap should not need fronting: ${JSON.stringify(run.payload)}`)
+  assert.equal(run.payload.result.mechanism, 'targeted-active')
+
+  const events = run.events
+  assert.ok(
+    events.some((e) => e.event === 'activate_targeted'),
+    'the app must be made active',
+  )
+  assert.ok(
+    events.some((e) => e.event === 'restore_targeted'),
+    'activation must be handed straight back',
+  )
+  assert.ok(
+    !events.some((e) => e.event === 'activate' || e.event === 'activate_fn'),
+    'nothing may be fronted',
+  )
+  assert.ok(
+    !events.some((e) => String(e.event).startsWith('global_')),
+    'a pointer event must never be broadcast at the screen',
+  )
+  assert.ok(
+    events.some((e) => e.event === 'targeted_mouse'),
+    'the tap must be addressed to the process',
+  )
+  assert.equal(run.payload.result.priorApp, null, 'no focus was taken, so none is owed back')
+
+  const after = JSON.parse(fs.readFileSync(phone.statePath, 'utf8')).frontApp
+  assert.deepEqual(after, before, 'the owner kept their screen')
+})
+
+test('ios_open_app will not press Return until it has seen what it typed', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * The Airbnb guard. Spotlight opened, the app name never arrived, and Return
+   * launched whatever Siri had already suggested — asking for Calculator
+   * opened Airbnb on the owner's real phone. Typing works now, but "it works
+   * now" is not a safety property: the check is that the query was SEEN on the
+   * phone's own screen before anything was committed.
+   */
+  const swallowed = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: false,
+    typingIsSwallowed: true,
+  })
+  const refused = swallowed.run('ios_open_app', { name: 'Calculator' })
+  assert.notEqual(refused.status, 0, 'it must refuse rather than launch something else')
+  assert.equal(refused.payload.error.code, 'not-typed')
+  assert.ok(
+    !swallowed
+      .readEvents()
+      .some((e) => e.event === 'targeted_key' && e.keycode === 36),
+    'Return must never be pressed when the query did not arrive',
+  )
+
+  // And when the text does arrive, it commits.
+  const working = stubPhone(t, { onscreen: [PHONE_WINDOW], frontmost: false })
+  const opened = working.run('ios_open_app', { name: 'Notes' })
+  assert.equal(opened.status, 0, JSON.stringify(opened.payload))
+  assert.ok(
+    working.readEvents().some((e) => e.event === 'targeted_key' && e.keycode === 36),
+    'Return is pressed once the query is on screen',
+  )
+})
+
+test('a Mac login prompt is recognised and never typed into', async (t) => {
+  if (needsPython(t)) return
+  /*
+   * Resuming a paused session puts up the MAC's password prompt. It is a text
+   * field on a screen that otherwise reads like any other, so an action that
+   * does not know about it types its payload into a password box. This is not
+   * hypothetical — an experiment run against this module while proving the
+   * activation route was polling to fire, and its marker list did not include
+   * this screen.
+   */
+  const locked = stubPhone(t, {
+    onscreen: [PHONE_WINDOW],
+    frontmost: false,
+    ocr: {
+      21250: ['iPhone Mirroring Is Locked', 'Enter the Mac login for "Hive Owner" to continue.', 'Enter password'],
+      21251: [],
+    },
+  })
+
+  const status = locked.run('ios_status', {}).payload.result
+  assert.equal(status.state, 'mac-login')
+  assert.equal(status.needsMacLogin, true)
+
+  for (const [type, params] of [
+    ['ios_type_text', { text: 'hunter2' }],
+    ['ios_tap_text', { query: 'Enter password', index: 0, exact: false }],
+    ['ios_open_app', { name: 'Notes' }],
+    ['ios_home', {}],
+  ]) {
+    const phone = stubPhone(t, {
+      onscreen: [PHONE_WINDOW],
+      frontmost: false,
+      ocr: {
+        21250: ['iPhone Mirroring Is Locked', 'Enter the Mac login for "Hive Owner" to continue.', 'Enter password'],
+        21251: [],
+      },
+    })
+    const run = phone.run(type, params)
+    assert.notEqual(run.status, 0, `${type} must refuse at a password prompt`)
+    assert.equal(run.payload.error.code, 'mac-login', type)
+    assert.deepEqual(
+      phone.inputEvents(phone.readEvents()).filter((e) => String(e.event).includes('key')),
+      [],
+      `${type} must not send a single keystroke at a password field`,
+    )
+  }
 })
 
 test('the targeted path still refuses when the world says no', async (t) => {
