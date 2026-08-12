@@ -65,6 +65,20 @@ for (const platformDir of [chromeDir, safariDir]) {
   const manifestPath = path.join(platformDir, 'manifest.json')
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   delete manifest.background.type
+  if (platformDir === safariDir) {
+    /*
+     * Safari gets the background PAGE form, not a service worker. Measured
+     * 2026-08-12 on the owner's Safari: with `service_worker`, the background
+     * never evaluated at all — no onStartup, no alarms, and runtime messages
+     * returned undefined without waking it, across multiple browser
+     * relaunches (storage timestamps stood still while the popup rendered
+     * stale chips). Apple's own sample extensions use `scripts`; that path
+     * is the one Safari actually exercises. Chrome keeps `service_worker`
+     * (MV3 requires it and rejects `scripts`).
+     */
+    delete manifest.background.service_worker
+    manifest.background.scripts = ['background.js']
+  }
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
