@@ -20,6 +20,7 @@ graph LR
   POT["volume knob · potentiometer"]
   SDC["storage · microSD card"]
   HAP["vibration: haptic driver DRV2605L\n+ buzzer motor (LRA)"]
+  RGB["status light · RGB LED (4-leg)\nsame state machine as the buzzer"]
   
   AMP["audio amplifier MAX98357A\n+ wired speaker"]
   SND(("Bose / AirPods"))
@@ -34,6 +35,7 @@ graph LR
   POT -- "middle → P0.15 · sides → 3V/GND" --> DK
   SDC -- "SPI P0.10–P0.13" --> DK
   HAP -- "I2C P0.30/P0.31 · 0x5A · 4.7k pull-ups" --> DK
+  RGB -- "R P0.03 · G P0.04 · B P0.07 (each ·330R·) · common → GND" --> DK
   ACC["motion sensor: accelerometer\nLSM6DSOX"] -- "I2C 0x6A · INT1 → P0.27" --> DK
   AMP -- "taps I2S nets · SD_MODE → P0.01" --> DK
   ESP -- "A2DP" --> SND
@@ -71,6 +73,66 @@ graph LR
 | Encoder push | nRF **P0.28** | GND | [NOW] |
 | Mic-power sense | mic-VDD node → **100k** → nRF **P0.26** | no pull | [NOW] |
 | Volume pot middle leg | nRF **P0.15** (AIN2) | side legs → 3V rail and GND | [NOW] — firmware flashed |
+
+## Status indicator — RGB LED (NEW, four wires + three resistors)
+
+The light and the vibration are **one** feedback system, driven from one
+state machine in `firmware/nrf9160/src/pendant_status.c`. There is no
+firmware path that lights the LED without deciding the buzz at the same
+moment, on purpose — see that file's header.
+
+| Net | From | To | Status |
+| --- | --- | --- | --- |
+| RGB red | nRF **P0.03** | **330 Ω** → LED **R** leg | [NOW] |
+| RGB green | nRF **P0.04** | **330 Ω** → LED **G** leg | [NOW] |
+| RGB blue | nRF **P0.07** | **330 Ω** → LED **B** leg | [NOW] |
+| RGB common | LED **common** leg (the LONGEST one) | **GND rail** (common-cathode, the default) | [NOW] |
+
+**What each state looks and feels like** (the whole vocabulary; nothing else
+lights this LED):
+
+| state | LED | vibration |
+| --- | --- | --- |
+| idle | off | — |
+| recording (memo / push-to-talk / duplex) | red solid | tick when the mic opens **and** when it closes |
+| thinking (uploading, waiting on the agent) | amber breathing, ~1.5 s | — |
+| needs approval (`approval_readback` arrived) | amber fast blink, ~4 Hz | strong ×2 |
+| done | green flash ~400 ms, then back to what it was | click |
+| failed | red triple-blink, then back | strong, then long |
+| mic muted (red switch cut the mic) | blue breathing, ~3 s | (unchanged: the long buzz a muted press already gave) |
+
+When two could apply at once the order is **muted > needs-approval >
+recording > thinking > done/failed flash > idle**. Muted wins outright: a
+physical switch beat the firmware to it.
+
+**POLARITY — read this before you wire the common leg.** A plain 4-leg RGB
+LED is either common-cathode or common-anode and the part alone will not
+tell you. The **longest leg is the common one** either way.
+
+- **Common-cathode** (the default this firmware ships for): common leg →
+  **GND rail**.
+- **Common-anode**: common leg → **3V rail**, and rebuild with
+  `CONFIG_PENDANT_RGB_COMMON_ANODE=y`.
+
+If you guessed wrong you will not damage anything — you will see it
+immediately: the LED sits bright when it should be dark and **dims where it
+should brighten**, and every colour reads as its opposite (the amber breath
+looks like a blue-green fade-out). Move the common leg to the other rail,
+flip the Kconfig, reflash. Nothing else changes: both wirings run identical
+code at identical brightness.
+
+Brightness is deliberately capped at 25 % duty — this is an indicator on
+something worn against a body, not a torch. The constant is `RGB_DUTY_CAP`
+in `pendant_status.c`.
+
+**Board-controller dependency (three more switches).** P0.03 and P0.04 are
+the DK's LED2/LED3 pins and P0.07 is the DK's Button 2 pin, so the same
+nRF52840 board-controller image that already frees P0.00 and P0.05 must now
+also disable `led2_pin_routing`, `led3_pin_routing` and
+`button2_pin_routing`. **THE TRADEOFF: DK Button 2 is gone**, along with
+LED2 and LED3. The firmware reads none of them — every button it listens to
+is an external one on P0.21–P0.23 — but if the board controller still has
+Button 2 routed, pressing it shorts a PWM output straight to GND.
 
 ## microSD breakout (SPI) — existing
 
@@ -116,11 +178,13 @@ needs) — do **not** add a second ground.
 
 **Board-controller dependency.** Flash the DK's nRF52840 board controller
 with this repo's `firmware/nrf9160/boards/nrf9160dk_nrf52840.overlay`, which
-disables `vcom2_pins_routing` **and** `led4_pin_routing`. Without it the
-interface MCU drives P0.00 (fighting the nRF's TX on every start bit) and
-the on-board LED4 hangs on the RX line. **Cost of the RX pin: DK LED4 is no
-longer usable** — the firmware only ever drives LED1 (P0.02), and P0.03/P0.04
-stay free for a future second indicator.
+disables `vcom2_pins_routing`, `led4_pin_routing` and — since the RGB
+indicator landed — `led2_pin_routing`, `led3_pin_routing` and
+`button2_pin_routing`. Without it the interface MCU drives P0.00 (fighting
+the nRF's TX on every start bit) and the on-board LED4 hangs on the RX line.
+**Cost across the whole overlay: DK LED2, LED3, LED4 and Button 2 are no
+longer usable** — the firmware only ever drives LED1 (P0.02) and reads only
+the external buttons.
 
 ## Off-board
 
@@ -195,6 +259,23 @@ Label names as printed on each breakout. "—" = leave unconnected.
 | OUT− | buzzer motor wire 2 |
 | IN | — |
 
+**status light · RGB LED (4 legs)**
+
+Hold the LED with the legs pointing down; the **longest leg is the common
+one**. On most parts the order is R · common · G · B, but do not trust the
+order — trust the length.
+
+| leg on part | connect to |
+| --- | --- |
+| R (red) | **330 Ω** → DK P0.03 |
+| common (LONGEST) | GND rail (common-cathode default) — or 3V rail for a common-anode part, with `CONFIG_PENDANT_RGB_COMMON_ANODE=y` |
+| G (green) | **330 Ω** → DK P0.04 |
+| B (blue) | **330 Ω** → DK P0.07 |
+
+Three resistors, one per colour — never a single resistor on the common
+leg: shared, the three dice fight for the same current and the colour
+changes every time a channel switches on.
+
 **motion sensor · LSM6DSOX accelerometer**
 | pin on part | connect to |
 | --- | --- |
@@ -238,4 +319,7 @@ Label names as printed on each breakout. "—" = leave unconnected.
 | P0.14 → P0.17 | jumper on the DK (clock) |
 | P0.00 | ESP32 GPIO16 — command UART TX (needs `vcom2_pins_routing` disabled) |
 | P0.05 | ESP32 GPIO17 — command UART RX (needs `led4_pin_routing` disabled; costs DK LED4) |
+| P0.03 | 330 Ω → RGB LED **R** leg (needs `led2_pin_routing` disabled; costs DK LED2) |
+| P0.04 | 330 Ω → RGB LED **G** leg (needs `led3_pin_routing` disabled; costs DK LED3) |
+| P0.07 | 330 Ω → RGB LED **B** leg (needs `button2_pin_routing` disabled; costs DK Button 2) |
 | micro-USB | Mac (flash + debug) |

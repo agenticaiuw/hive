@@ -25,6 +25,7 @@
 #include "pendant_bt.h"
 #include "pendant_cloud.h"
 #include "pendant_reflex.h"
+#include "pendant_status.h"
 #include "pendant_store.h"
 #include "pendant_ws.h"
 #include "tx_resample_taps.h"
@@ -2138,7 +2139,11 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		return error;
 	}
 
-	/* Button press = record NOW. LED + mic; LTE drains ring between I2S. */
+	/* Button press = record NOW. LED + mic; LTE drains ring between I2S.
+	 * One call covers memo, push-to-talk AND the legacy command capture:
+	 * every one of them reaches the microphone through this function, so
+	 * this is the single place "the mic is live" becomes true. */
+	pendant_status_set(PENDANT_STATUS_RECORDING);
 	gpio_pin_set_dt(&led, 1);
 	next_led_toggle = k_uptime_get() + 250;
 	mic_clocks_start();
@@ -2468,11 +2473,20 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 			   (memo_capture_active && take_memo_press()) ||
 			   (ptt_capture_active && take_ptt_press())) {
 			recording_stopped_by_button = true;
-			/* Stop acknowledged: memo closes on a tick, a
-			 * command or question capture on the button click. */
-			haptic_trigger(memo_capture_active
-					       ? HAPTIC_PATTERN_TICK
-					       : HAPTIC_PATTERN_CLICK);
+			/*
+			 * Acknowledge on the EDGE, not after teardown: the
+			 * red light goes out and the exit tick fires here,
+			 * together, because leaving RECORDING is ONE
+			 * transition and pendant_status_set is the only
+			 * thing allowed to make it.
+			 *
+			 * This replaces the old tick-for-memo /
+			 * click-for-command split. Every capture now closes
+			 * the same way, which is the point: the owner should
+			 * not have to remember which button they pressed to
+			 * know what a buzz meant.
+			 */
+			pendant_status_set(PENDANT_STATUS_THINKING);
 			break;
 		}
 	}
@@ -3367,7 +3381,14 @@ static void ws_io_drain_downlink(void)
 			 */
 			if (strstr((const char *)ws_rx_buf,
 				   "\"approval_readback\"") != NULL) {
-				haptic_trigger(HAPTIC_PATTERN_STRONG);
+				/* One call, both channels: the amber fast
+				 * blink and the double strong hit are the
+				 * same transition, so the light can never
+				 * say "nothing to answer" while the motor
+				 * is saying the opposite. Safe from this
+				 * 2.5 KB socket stack — it sets an atomic
+				 * and reschedules work, nothing more. */
+				pendant_status_set(PENDANT_STATUS_APPROVAL);
 				continue;
 			}
 			if (strstr((const char *)ws_rx_buf,
@@ -3730,6 +3751,9 @@ static int run_conversation(const struct device *i2s)
 		goto teardown;
 	}
 
+	/* Duplex capture is a recording like any other — the microphone is
+	 * open and the owner is talking, so it wears the same red. */
+	pendant_status_set(PENDANT_STATUS_RECORDING);
 	gpio_pin_set_dt(&led, 1);
 	next_led_toggle = k_uptime_get() + 250;
 	mic_clocks_start();
@@ -4052,12 +4076,17 @@ static int run_memo_capture(const struct device *i2s)
 	memo_capture_active = true;
 	error = record_microphone(i2s, MAX_RECORD_SAMPLE_COUNT);
 	memo_capture_active = false;
+	/* Mic closed, upload in flight: leaving RECORDING fires the exit tick
+	 * and the amber breath says the work is not finished yet. */
+	pendant_status_set(PENDANT_STATUS_THINKING);
 	gpio_pin_set_dt(&led, 0);
 	if (error != 0) {
 		printk("Memo recording failed: %d\n", error);
 		pendant_cloud_stream_abort();
 		recording_on_sd = false;
 		pendant_cloud_stream_set_memo(false);
+		pendant_status_set(PENDANT_STATUS_IDLE);
+		pendant_status_set(PENDANT_STATUS_FAILED);
 		flash_led(3U, 120, 120);
 		return error;
 	}
@@ -4093,6 +4122,11 @@ static int run_memo_capture(const struct device *i2s)
 				       "(upload=%d)\n",
 				       error);
 				pendant_cloud_stream_set_memo(false);
+				/* Held, not lost: the memo is safe on the
+				 * card, so this is a success the owner can
+				 * walk away from. */
+				pendant_status_set(PENDANT_STATUS_IDLE);
+				pendant_status_set(PENDANT_STATUS_DONE);
 				flash_led(2U, 60, 90);
 				return 0;
 			}
@@ -4103,11 +4137,14 @@ static int run_memo_capture(const struct device *i2s)
 
 	printk("LAT memo_total_ms=%lld result=%d\n",
 	       k_uptime_get() - memo_started, error);
+	pendant_status_set(PENDANT_STATUS_IDLE);
 	if (error < 0) {
+		pendant_status_set(PENDANT_STATUS_FAILED);
 		flash_led(5U, 100, 100);
 		return error;
 	}
 	/* Two calm flashes: memo landed, nothing is going to talk back. */
+	pendant_status_set(PENDANT_STATUS_DONE);
 	flash_led(2U, 60, 90);
 	return 0;
 }
@@ -4374,10 +4411,15 @@ static int run_ptt_question(const struct device *i2s)
 	error = record_microphone(i2s, MAX_RECORD_SAMPLE_COUNT);
 	ptt_capture_active = false;
 	capture_radio_off = false;
+	/* Question captured; the radio, the upload and the answer are all
+	 * still ahead. Amber until the reply plays. */
+	pendant_status_set(PENDANT_STATUS_THINKING);
 	gpio_pin_set_dt(&led, 0);
 	if (error != 0) {
 		printk("PTT capture failed: %d\n", error);
 		recording_on_sd = false;
+		pendant_status_set(PENDANT_STATUS_IDLE);
+		pendant_status_set(PENDANT_STATUS_FAILED);
 		flash_led(3U, 120, 120);
 		return error;
 	}
@@ -4386,6 +4428,8 @@ static int run_ptt_question(const struct device *i2s)
 	if (pcm_bytes == 0U || !recording_on_sd) {
 		printk("PTT capture produced nothing to ask (%u B, sd=%d)\n",
 		       pcm_bytes, recording_on_sd ? 1 : 0);
+		pendant_status_set(PENDANT_STATUS_IDLE);
+		pendant_status_set(PENDANT_STATUS_FAILED);
 		flash_led(3U, 120, 120);
 		return -ENODATA;
 	}
@@ -4476,6 +4520,11 @@ static int run_ptt_question(const struct device *i2s)
 		pendant_cloud_reply_stream_close();
 		printk("LAT ptt_total_ms=%lld play=%d\n",
 		       k_uptime_get() - ptt_started, play_error);
+		/* The answer has been spoken: this is the moment the whole
+		 * blue-button cycle was for. */
+		pendant_status_set(PENDANT_STATUS_IDLE);
+		pendant_status_set(play_error == 0 ? PENDANT_STATUS_DONE
+						   : PENDANT_STATUS_FAILED);
 		flash_led(2U, 60, 90);
 		return play_error;
 	}
@@ -4491,15 +4540,18 @@ static int run_ptt_question(const struct device *i2s)
 		 */
 		int queue_error = pendant_store_enqueue_question(pcm_bytes);
 
+		pendant_status_set(PENDANT_STATUS_IDLE);
 		if (queue_error == 0) {
 			printk("PTT question held offline (upload=%d); the "
 			       "answer will be in history, not in your ear\n",
 			       error);
+			pendant_status_set(PENDANT_STATUS_DONE);
 			flash_led(2U, 60, 90);
 			return 0;
 		}
 		printk("Could not hold PTT question: %d (upload=%d)\n",
 		       queue_error, error);
+		pendant_status_set(PENDANT_STATUS_FAILED);
 		flash_led(5U, 100, 100);
 		return error;
 	}
@@ -4508,6 +4560,8 @@ static int run_ptt_question(const struct device *i2s)
 	 * nothing to say back. Two calm flashes, same as a memo. */
 	printk("PTT question delivered with no spoken reply (HTTP %d)\n",
 	       pendant_cloud_last_http_status);
+	pendant_status_set(PENDANT_STATUS_IDLE);
+	pendant_status_set(PENDANT_STATUS_DONE);
 	flash_led(2U, 60, 90);
 	return 0;
 }
@@ -4746,6 +4800,17 @@ int main(void)
 	 * every haptic action runs the motor or degrades to LED.
 	 */
 	(void)haptic_init();
+	/*
+	 * The status subsystem comes straight after the motor and before
+	 * anything that can succeed or fail, so that the very first
+	 * transition already has both channels: light and buzz go live
+	 * together or the device can contradict itself during boot.
+	 *
+	 * mic_power_is_cut is handed over as a probe rather than pushed:
+	 * the mute indicator has to be continuously true, not only true at
+	 * the instant a capture button is pressed.
+	 */
+	pendant_status_init(mic_power_is_cut);
 	pendant_reflex_init(&reflex_ops_impl);
 
 #if PENDANT_BOOT_DUMP_PCM_HEX
@@ -5121,15 +5186,21 @@ int main(void)
 		}
 		if (ws_ready) {
 			error = run_conversation(i2s);
+			/* Idle first, THEN the verdict: idle is what the
+			 * device goes back to, and it also clears any
+			 * approval the owner just answered out loud. */
+			pendant_status_set(PENDANT_STATUS_IDLE);
 			gpio_pin_set_dt(&led, 0);
 			printk("LAT conversation_ms=%lld result=%d\n",
 			       k_uptime_get() - lat_press_started, error);
 			report_main_stack_headroom("conversation");
 			if (error != 0) {
 				audio_cycle_result = error;
+				pendant_status_set(PENDANT_STATUS_FAILED);
 				flash_led(4U, 100, 100);
 			} else {
 				audio_cycle_result = 0;
+				pendant_status_set(PENDANT_STATUS_DONE);
 			}
 			clear_button_events();
 			continue;
@@ -5145,6 +5216,8 @@ int main(void)
 		);
 		int capture_error = error;
 
+		/* Mic closed; the upload is the work that follows. */
+		pendant_status_set(PENDANT_STATUS_THINKING);
 		gpio_pin_set_dt(&led, 0);
 		audio_cycle_phase = 2U;
 		if (capture_error != 0) {
@@ -5152,6 +5225,8 @@ int main(void)
 			pendant_cloud_stream_abort();
 			recording_on_sd = false;
 			audio_cycle_result = capture_error;
+			pendant_status_set(PENDANT_STATUS_IDLE);
+			pendant_status_set(PENDANT_STATUS_FAILED);
 			flash_led(3U, 120, 120);
 			clear_button_events();
 			continue;
@@ -5215,6 +5290,10 @@ int main(void)
 						       "(upload=%d)\n",
 						       error);
 						audio_cycle_result = 0;
+						pendant_status_set(
+							PENDANT_STATUS_IDLE);
+						pendant_status_set(
+							PENDANT_STATUS_DONE);
 						flash_led(2U, 60, 90);
 						clear_button_events();
 						continue;
@@ -5256,6 +5335,8 @@ int main(void)
 			       pendant_cloud_dispatch_result,
 			       pendant_cloud_last_http_status);
 			audio_cycle_result = error;
+			pendant_status_set(PENDANT_STATUS_IDLE);
+			pendant_status_set(PENDANT_STATUS_FAILED);
 			flash_led(5U, 100, 100);
 			continue;
 		}
@@ -5270,6 +5351,8 @@ int main(void)
 reply_done:
 		audio_cycle_phase = 7U;
 		audio_cycle_result = 0;
+		pendant_status_set(PENDANT_STATUS_IDLE);
+		pendant_status_set(PENDANT_STATUS_DONE);
 		for (unsigned int flash = 0U; flash < 3U; ++flash) {
 			gpio_pin_set_dt(&led, 1);
 			k_msleep(180);

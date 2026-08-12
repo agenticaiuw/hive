@@ -150,4 +150,28 @@ config PENDANT_REFLEX_SELFTEST
 	  beyond the recipe table slot it borrows.  Leave off in production
 	  builds; enable via reflex-selftest.conf for hardware verification.
 
+config PENDANT_RGB_COMMON_ANODE
+	bool "RGB status LED is common-anode (common leg wired to 3V)"
+	default n
+	help
+	  A plain 4-leg RGB LED has three colour legs and one common leg, and
+	  the part number alone does not tell you which way the common leg
+	  goes.  This firmware assumes COMMON-CATHODE (the more usual hobby
+	  part): common leg to GND, each colour leg driven HIGH through its
+	  330 ohm resistor to light.  Turn this on for a COMMON-ANODE part:
+	  common leg to the 3 V rail, each colour leg pulled LOW to light.
+
+	  HOW TO TELL WITHOUT A DATASHEET.  The longest leg is the common one.
+	  Flash the firmware with this option OFF and cut the mic power to
+	  force the blue mute breath: a common-cathode part breathes blue on a
+	  dark LED, while a common-anode part sits bright and DIMS where it
+	  should brighten and shows the wrong colours everywhere else (the
+	  duty is inverted, so every channel reads as its complement).  If
+	  that is what you see, wire the common leg to 3V instead of GND, turn
+	  this on and reflash.
+
+	  Costs nothing either way: it selects one bit of the PWM duty word
+	  (bit 15 = polarity) at compile time, so both wirings run the exact
+	  same code at the exact same brightness.
+
 source "Kconfig.zephyr"

@@ -28,6 +28,10 @@ unchanged.
 | Speaker amp SD_MODE | MAX98357A SD pin | nRF9160 **P0.01** | — | HIGH = amp plays the LEFT I2S slot (SD_MODE > 1.4 V, datasheet Table 5), LOW = 0.6 µA shutdown. Boot default LOW (Bluetooth stays the sink). Optional ~1 kΩ in series is cheap insurance if the 3 V rail ever sags below the DK's I/O voltage. |
 | Speaker amp I2S | MAX98357A BCLK / LRC / DIN | nRF9160 **P0.18** / **P0.17** / **P0.19** | — | Parallel taps on the SAME wires the ESP32 listens to — the amp is a second listener, zero firmware audio-path changes. |
 | Speaker amp power | MAX98357A VIN / GND | 3V rail / GND | — | Breadboard: the 3 V rail (~0.55 W into 8 Ω at 3.0 V). Custom board: VIN can take VBAT directly (2.5–5.5 V range) for full loudness off the cell. |
+| Status LED red | RGB LED **R** leg | nRF9160 **P0.03** through **330 Ω** | LED R leg | PWM0 channel 0. P0.03 is the DK's LED2 pin; `led2_pin_routing` disabled in the board-controller overlay. |
+| Status LED green | RGB LED **G** leg | nRF9160 **P0.04** through **330 Ω** | LED G leg | PWM0 channel 1. P0.04 is the DK's LED3 pin; `led3_pin_routing` disabled. |
+| Status LED blue | RGB LED **B** leg | nRF9160 **P0.07** through **330 Ω** | LED B leg | PWM0 channel 2. P0.07 is the DK's **Button 2** pin; `button2_pin_routing` disabled. **The tradeoff: DK Button 2 is gone** — see "Why the RGB indicator costs Button 2". |
+| Status LED common | RGB LED **common** leg (the longest) | **GND rail** | — | Common-CATHODE assumed (firmware default). Common-anode part: common leg to the **3V rail** and rebuild with `CONFIG_PENDANT_RGB_COMMON_ANODE=y`. Never a single resistor on this leg — one per colour. |
 | Speaker | Mini oval 8 Ω 1 W | MAX98357A OUT+ / OUT− | — | Differential output: speaker **+ (red-dot/longer lead) → OUT+**, − → OUT−. With a single speaker a swap only inverts absolute phase — inaudible — but keep the convention so a future stereo/vibration pairing stays in phase. Never ground either OUT pin. |
 
 ## Why these choices
@@ -156,6 +160,44 @@ VCOM2 group and the DK's LED pins.
 - Two wires, no flow control: the traffic is short newline-delimited JSON,
   and no burst in that command set can outrun a 115200 receiver.
 
+**Why the RGB indicator costs Button 2 (P0.03 / P0.04 / P0.07).** Colour
+mixing needs three PWM outputs on one instance, and after the audio bus,
+the microSD SPI, I2C, the ADC, both UARTs and every control there were
+exactly three general-purpose pins left on this board: the DK's own
+LED2 (P0.03), LED3 (P0.04) and Button 2 (P0.07). The board-controller
+overlay opens all three analog switches, the same move it already made for
+LED4. LED2 and LED3 cost nothing — the firmware never drove them. **Button
+2 is a real loss and is stated as one**: every button this firmware reads
+is an external one (yellow P0.21, green P0.22, blue P0.23, encoder push
+P0.28), so no feature disappears, but a DK with the stock board-controller
+image would short a PWM output to GND every time someone pressed it. Flash
+the overlay before wiring the LED.
+
+**Which PWM instance, and why it could not be either of the other two.**
+PWM1 and PWM2 generate the microphone's BCLK and LRCLK and are phase-locked
+through a DPPI channel; stealing a channel from either would put a colour
+mixer inside the audio clock chain, and that chain is untouchable. **PWM0
+was genuinely free** — `CONFIG_PWM` is off in this build, so no Zephyr
+driver binds it — and `pendant_status.c` takes channels 0/1/2 through the
+raw nrfx HAL, exactly the way `main.c` already drives PWM1/PWM2. The
+devicetree `pwm0` node is disabled to say so out loud: a bound `pwm_nrfx`
+would apply `pwm0_default`, which puts PWM_OUT0 on P0.02 — the firmware's
+one on-board status LED.
+
+**How to tell common-anode from common-cathode without a datasheet.** The
+**longest leg is the common one**; that much is true of every 4-leg part.
+Which rail it wants is not printed on anything, so the firmware supports
+both and the test is empirical: build with the default
+(`CONFIG_PENDANT_RGB_COMMON_ANODE=n`, common leg → GND) and watch a state
+that breathes — cut mic power for the blue mute breath, or start an upload
+for the amber one. A correctly-wired common-cathode part breathes up from
+dark. A common-anode part on that build does the opposite: it sits bright,
+**dims where it should brighten**, and shows every colour as its
+complement. Move the common leg to the 3V rail, set
+`CONFIG_PENDANT_RGB_COMMON_ANODE=y`, reflash. It is one bit of the PWM duty
+word (bit 15, the polarity bit), so both wirings run the same code at the
+same brightness and neither can damage the part.
+
 **Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25,
 P0.27, P0.28) use the GPIO SENSE mechanism (`sense-edge-mask` in the
 overlay) rather than GPIOTE channels — the nRF9160 has only 8 GPIOTE
@@ -244,6 +286,44 @@ Event haptics run through a non-blocking work-queue engine
 from an ISR or mid-conversation without touching the I2S TX runway.
 Recipes gain the same three new preset names (`tick`/`click`/`strong`).
 
+## Status map — the LED and the motor are ONE system
+
+`src/pendant_status.c` owns both. One enum, one setter: there is no code
+path anywhere in the firmware that changes the light without deciding the
+buzz in the same transition. That is deliberate — two renderers of one
+truth eventually disagree, and a pendant that buzzes while its light says
+"idle" is a device contradicting itself on the only two channels it has.
+
+| State | LED | Haptic | Set from |
+| --- | --- | --- | --- |
+| idle | off | — | every terminal path in `main.c` |
+| recording | red solid | `tick` on entry **and** on exit | `record_microphone()` (memo, PTT and the legacy command capture all pass through it) and `run_conversation()` for duplex |
+| thinking / working | amber breathing, ~1.5 s | — | the moment the mic closes and the upload begins; held until the reply is played or the cycle fails |
+| needs approval | amber fast blink, ~4 Hz | `strong`, then `strong` again 250 ms later | the `approval_readback` frame handler on the WS RX thread |
+| done | green flash ~400 ms, then back to the prior state | `click` | reply played, memo landed, question delivered or held |
+| failed | red triple-blink, then back | `strong`, then `long` 180 ms later | capture error, upload error, conversation error |
+| mic muted | blue breathing, ~3 s | — (the muted-press `long` buzz is unchanged) | polled continuously from the P0.26 mic-power sense, not only at press time |
+
+**Precedence** when more than one could apply: `muted > needs-approval >
+recording > thinking > done/failed flash > idle`. Muted outranks everything
+because a physical switch already decided it. The transient flashes rank
+*below* the sticky states so a success flash can never blank out a live
+recording indicator — but the transient's **haptic still fires**: the buzz
+is the event, the light is the state, and suppressing the event because a
+state outranks it would be exactly the disagreement this design forbids.
+
+"needs approval" is a latch rather than a state slot, which is what makes
+that precedence real: the relay can announce an approval while the pendant
+is already recording, and the amber blink has to survive that. Any terminal
+transition — idle, done, failed — clears it.
+
+Cost: one `k_work_delayable`, an 8-byte PWM sequence buffer and a handful
+of scalars, **91 bytes of RAM total**. The work item ticks at 40 ms while
+something is animating and 250 ms when the display is static (only to keep
+the mute probe live), and every register write happens on the system
+workqueue — never on the audio path, never in an ISR, the same discipline
+`haptic.c` follows.
+
 ## Firmware/relay contract summary
 
 | Event | Wire | When |
@@ -259,7 +339,7 @@ Recipes gain the same three new preset names (`tick`/`click`/`strong`).
 | Volume knob move | `{"type":"volume","level":0.xx,"raw":N}` on the converse WS | on ≥2% change, ~20 Hz poll (5 Hz idle); gain applied on-device before the wire |
 | Accelerometer double-tap | identical to a yellow press (same semaphore) | always; mute suppression included |
 | Sink select (downlink) | `{"type":"audio_sink","sink":"speaker"\|"bluetooth"\|"both"}` parsed from the converse WS (mid-conversation or idle) | speaker/both = SD_MODE high; bluetooth = amp shutdown. Selecting bluetooth/both also asks the module to connect the preferred sink — a sink choice that left the module idle would route the next answer into silence. Boot default: bluetooth. **Relay-side sender: TODO** (cloud-relay is owned by another agent) |
-| Approval readback announce (downlink) | `{"type":"approval_readback"}` → strong haptic hit | device parses it today; **relay-side sender: TODO** (same reason) |
+| Approval readback announce (downlink) | `{"type":"approval_readback"}` → status goes to *needs approval*: amber 4 Hz blink + two strong hits | device parses it today; **relay-side sender: TODO** (same reason) |
 
 "Both" is one pin's truth, not two: SD_MODE high makes the amp a second
 listener on the same I2S wires the ESP32 taps — whether the ESP32 *also*

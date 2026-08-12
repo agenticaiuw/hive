@@ -83,7 +83,46 @@
 		};
 	};
 
+	/*
+	 * RGB status indicator (plain 4-leg part, one common leg + R/G/B,
+	 * each colour leg through ~330 ohm).  Driven by PWM0 channels 0-2
+	 * from src/pendant_status.c through the raw nrfx HAL, exactly the
+	 * way main.c drives PWM1/PWM2 for the microphone clocks — no Zephyr
+	 * PWM driver, no LED driver, no runtime device.
+	 *
+	 * These nodes exist so the PIN CLAIM is visible here with every other
+	 * claim on this board; the code reads them with DT_GPIO_PIN(), which
+	 * is a compile-time constant, so declaring them costs nothing.  The
+	 * ACTIVE_HIGH flags describe the common-cathode default; the
+	 * common-anode case is one inverted PWM duty bit and lives behind
+	 * CONFIG_PENDANT_RGB_COMMON_ANODE, not behind a devicetree edit.
+	 *
+	 * P0.03 and P0.04 are the DK's LED2 and LED3 pins and P0.07 is the
+	 * DK's Button 2 pin; boards/nrf9160dk_nrf52840.overlay opens all
+	 * three analog switches, the same move the Bluetooth UART made for
+	 * LED4.  THE TRADEOFF, stated: the DK's on-board Button 2 is gone.
+	 * Acceptable — this firmware's buttons are the external yellow,
+	 * green and blue ones on P0.21-P0.23, and Button 2's only firmware
+	 * job (the bookmark press) is reachable from those.
+	 */
+	pendant_status_rgb {
+		compatible = "gpio-leds";
+
+		rgb_red: rgb_red {
+			gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		};
+		rgb_green: rgb_green {
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		};
+		rgb_blue: rgb_blue {
+			gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
 	aliases {
+		rgb-red = &rgb_red;
+		rgb-green = &rgb_green;
+		rgb-blue = &rgb_blue;
 		ask-btn = &ask_button;
 		memo-btn = &memo_button;
 		ptt-btn = &ptt_button;
@@ -94,6 +133,46 @@
 		accel-int1 = &accel_int1;
 		amp-sd-mode = &amp_sd_mode;
 	};
+};
+
+/*
+ * The board nodes that used to own the three RGB pins, retired here so that
+ * no future CONFIG_LED / CONFIG_INPUT can quietly re-claim them behind the
+ * status subsystem's back.  Neither driver is enabled in this build today —
+ * this is the seatbelt, not the brake.
+ *
+ *   led1    P0.03 -> RGB red
+ *   led2    P0.04 -> RGB green
+ *   button1 P0.07 -> RGB blue  (the DK's Button 2)
+ */
+&led1 {
+	status = "disabled";
+};
+
+&led2 {
+	status = "disabled";
+};
+
+&button1 {
+	status = "disabled";
+};
+
+/*
+ * PWM0 belongs to src/pendant_status.c through the raw nrfx HAL, so its
+ * devicetree instance is disabled — the same arrangement PWM1/PWM2 already
+ * have for the microphone clocks (they are disabled in devicetree and driven
+ * by main.c).  Disabled here means "no Zephyr driver may bind", not "the
+ * peripheral is unused": a bound pwm_nrfx would apply pwm0_default, which
+ * puts PWM_OUT0 on P0.02 — this firmware's one on-board status LED.
+ *
+ * pwm_led0 goes with it: it is the board's demo node for that same channel.
+ */
+&pwm0 {
+	status = "disabled";
+};
+
+&pwm_led0 {
+	status = "disabled";
 };
 
 /*
