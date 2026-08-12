@@ -9,9 +9,11 @@
 | Usage tier | Desk worker | Average | Outdoorsy | Honest verdict |
 |---|---|---|---|---|
 | **(a) Pure watch** (time only) | breakeven summer; winter deficit ≈ 0.6 mWh/d → **2+ yr buffer** | surplus summer; ~3 yr winter buffer | surplus year-round | **Never charge** (Eco-Drive-class result) |
-| **(b) Light agent** (5 short exchanges + 2 timers/day) | −15.5 mWh/d → charge every **~30 d** | ~30–33 d | 56 d summer / 31 d winter | **Rarely ≈ monthly**, not never |
+| **(b) Light agent, duplex** (5 short exchanges + 2 timers/day) | −15.5 mWh/d → charge every **~30 d** | ~30–33 d | 56 d summer / 31 d winter | **Rarely ≈ monthly**, not never |
+| **(b′) Light agent, push-to-talk** (same 5 questions + 2 timers, PTT mode — §4.3) | −7.7 → **~61 d** | ~73 d | **759 d summer** (surplus at τ = 40 %) / 65 d winter | **~2 months; outdoorsy summer ≈ self-sustaining** |
 | **(c) + 10 min voice/day** | −76 mWh/d → charge every **~6 d** | ~6 d | ~7 d | **Regular charging**; solar covers 1–10 % |
-| Voice-minutes/day solar can carry | ~0 | 0.2 summer / 0 winter | 1.1 summer (1.9 if τ = 40 %) / ~0 winter | crossover ≈ **0–2 voice-min/day** |
+| Duplex voice-minutes/day solar can carry | ~0 | 0.2 summer / 0 winter | 1.1 summer (1.9 if τ = 40 %) / ~0 winter | crossover ≈ **0–2 voice-min/day** |
+| PTT questions/day solar can carry (§5.2) | ~0 | 1.0 summer / 0 winter | **7 summer (12 if τ = 40 %)** / 0.2 winter | crossover ≈ **0–7 questions/day** |
 
 And the owner's color objection dissolves: the blue cell is never visible in the architecture below — **gold dials over hidden cells are the standard Citizen Eco-Drive construction**, and "under the ticks" is exactly how they build it.
 
@@ -149,7 +151,7 @@ Two floors, because the LDO decides the pure-watch verdict (finding: `Watch_Vari
 
 | Event | Derivation | Energy |
 |---|---|---|
-| RRC connect + short agent exchange (~20 s active) | ~100 mA avg (modem connected: 45 mA RX floor + TX bursts @ 0–23 dBm [45–255 mA subframes, IRMC 105–140 mA at 23 dBm] + CPU/codec ~2–3 mA + mic 0.34 mA; per-session figure agrees with watch study §10's 45 s ≈ 1.25 mAh) | **≈ 2.1 mWh** |
+| RRC connect + short agent exchange (~20 s active, duplex) | ~100 mA avg (modem connected: 45 mA RX floor + TX bursts @ 0–23 dBm [45–255 mA subframes, IRMC 105–140 mA at 23 dBm] + CPU/codec ~2–3 mA + mic 0.34 mA; per-session figure agrees with watch study §10's 45 s ≈ 1.25 mAh). Full component derivation: §4.3 | **≈ 2.1–2.3 mWh** |
 | Spoken time-check (local audio, no radio) | 3 s playback ~50 mW | ~0.04 mWh |
 | Timer: voice set + haptic expiry | exchange + 1 s LRA (VLV101040A 6.0–7.5 Ω; ~1.5 Vrms → ~0.33 W) + DRV2605L active 0.5 mA | **≈ 2.5 mWh** |
 | GNSS fix (warm, 15–30 s @ 47 mA tracking) | datasheet §5.2.1.15 | 0.7–1.4 mWh; continuous 2-min single-shot mode = 1.3 mA avg = **115 mWh/day — incompatible with solar; keep GNSS off-by-default** |
@@ -157,13 +159,70 @@ Two floors, because the LDO decides the pure-watch verdict (finding: `Watch_Vari
 
 > **Uncertainty statement, voice:** TX power is set by the network per link budget; between a strong urban cell (0–10 dBm) and cell edge (23 dBm) the modem term alone swings ~3×. The 6 mWh/min nominal is a mid-suburban estimate consistent with the watch study's measured-style 100 mA session average; treat the band, not the point, as the spec — bench-measure with the PPK2 on the first prototype.
 
-### 4.3 Daily budgets (Floor B unless noted)
+### 4.3 Voice-tier energy — DUPLEX vs PUSH-TO-TALK vs MEMO, fully derived
+
+Every constant here is from the nRF9160 datasheet current tables (§5.2.1.14, typ. B13), this repo's firmware, or an explicitly flagged assumption with a band. Best/typ/worst = strong cell 0 dBm with release assistance / mid-suburban 10 dBm / cell-edge 23 dBm with coverage repetitions.
+
+**Shared building blocks:**
+
+| Block | Derivation | best / **typ** / worst |
+|---|---|---|
+| E_conn — one RRC connection (setup + release tail) | setup (RACH + RRC setup + security, mixed RX/TX): 1.5 s×60 / 2 s×80 / 3 s×150 mA; + connected C-DRX tail before release (network inactivity timer; RAI shortens): 3 / 10 / 20 s × ~15 mA (C-DRX average — Nordic OPP-class estimate, the softest constant here; bench-verify) | 0.14 / **0.32** / 0.77 mWh |
+| Connected-mode monitor floor (C-DRX off, streaming) | IRX = 45 mA (RX subframe, −90 dBm; PDCCH is decoded every subframe, so this is the floor whether or not DL data flows) | 45 mA |
+| TX subframe current | ITX_0DBM 60 / ITX_10DBM 90 / ITX_23DBM 300 mA (255–380 by band) | 60 / **90** / 300 mA |
+| Effective LTE-M uplink rate (Cat-M1 HD-FDD, peak ≈ 375 kbps) | assumption with band | 300 / **150** / 50 kbps |
+| Wrist antenna penalty on modem current | `Watch_Variant_Study.md` §10 | ×1.2 |
+| Capture path, radio OFF (record + encode) | CPU + Opus encode ≈ 2.5 mA (ICPU0 2.88 mA @ 64 MHz, partial load) + PDM/I²S + HFXO ≈ 1.1 mA + mic path 0.6 mA (T5837 0.34 mA typ, `Design_Package_v1.md` §2, + TXB0102 + PDM clock) | **4.2 mA ≈ 15.5 mW** |
+| Uplink Opus bitrate, streaming | `firmware/nrf9160/src/audio_opus.h`: `PENDANT_OPUS_BITRATE 16000U`; ducks to 8 k (`CONVO_UPLINK_DUCK_BPS`, main.c) | 16 kbps |
+| Clip bitrate, PTT/memo (one-shot clips can afford more) | assumption; at 16 kbps instead, upload terms scale ×0.67 | 24 kbps |
+| Protocol overhead | streaming (20 ms frames over TLS/WS/TCP): ×~2 → 32 kbps air; burst upload of a buffered clip: ×1.1 | — |
+
+**Mode 1 — DUPLEX** (current yellow-button conversation: RRC-connected throughout, continuous Opus both ways). Per minute, typ column derived:
+
+| Component | Derivation | mA |
+|---|---|---|
+| Monitor/RX floor | 45 mA × (1 − d_TX), d_TX = 32 kbps air / 150 kbps PUSCH = 0.20 (band 0.08–0.35) | 36.0 |
+| TX subframes | 90 mA × 0.20 | 18.0 |
+| Antenna penalty | (36 + 18) × 1.2 | → 64.8 |
+| CPU + Opus enc+dec | | 3.0 |
+| Mic path | | 0.6 |
+| Speaker, speech duty at wrist volume (FULL build) | 5 / 15 / 30 mA | 15.0 |
+| **Total** | | **≈ 83 mA → 5.1 mWh/min** |
+
+Band: **3.9 / 5.1 / 12.0 mWh/min**. The doc carries **6 mWh/min nominal** — between the 5.1 derivation and `Watch_Variant_Study.md` §10's 100 mA session convention — unchanged from §4.2. Cross-check: E_conn + 45 s × 6/60 = 4.8 mWh ≈ the watch study's 1.25 mAh (4.6 mWh) per 45 s session. A **short duplex exchange** (E_conn + ~20 s connected) ≈ **2.3 mWh**.
+
+**Mode 2 — PUSH-TO-TALK** (proposed blue-button remap: record with radio OFF → one RRC connection → burst-upload the question → receive + play a ~15 s Opus reply → release). Per 10 s question + 15 s reply:
+
+| Phase | Derivation (typ) | best / **typ** / worst (mWh) |
+|---|---|---|
+| Capture, radio off | 10 s × 4.2 mA | 0.04 / **0.04** / 0.04 |
+| RRC connect + release | E_conn | 0.14 / **0.32** / 0.77 |
+| Upload question | 24 kbps × 10 s × 1.1 = 264 kbit ÷ 150 kbps = 1.8 s × (0.8·ITX + 0.2·IRX) × 1.2 = 97 mA | 0.06 / **0.18** / 1.62 |
+| Agent latency idle | 2 / 4 / 8 s × 15 mA C-DRX | 0.03 / **0.06** / 0.12 |
+| Reply download | 1–3 s × 45 mA × 1.2 (DL PDSCH is fast; reply ≈ 16 kbps × 15 s = 240 kbit) | 0.06 / **0.08** / 0.17 |
+| Reply playback | 15 s × (speaker 8/16/26 + decode 1 mA) | 0.14 / **0.26** / 0.42 |
+| **Per PTT question** | | **0.47 / 0.94 / 3.1 mWh** |
+
+**≈ 1 mWh per question — 2.4× cheaper than the same question as a 20 s duplex exchange** (2.3 mWh), because the radio never idles connected while the human talks: capture costs 4.2 mA, not 65 mA.
+
+**Mode 3 — MEMO** (green button, dispatch = 0: record radio-off → burst upload → done, no reply):
+
+| Duration | capture + E_conn + upload (typ) | best / **typ** / worst (mWh) |
+|---|---|---|
+| 10 s | 0.04 + 0.32 + 0.18 | 0.24 / **0.54** / 1.9 |
+| 30 s | 0.13 + 0.32 + 0.53 | 0.45 / **0.98** / 5.8 |
+| 60 s | 0.26 + 0.32 + 1.06 | 0.66 / **1.63** / 10.5 |
+
+**The memo-vs-duplex ratio, computed** (replacing the 5–10× hand estimate): per minute of recorded audio, duplex (6 mWh) vs memo (1.63 mWh) = **3.7×**; at 30 s it's 3.4×, at 10 s only 2.5× (E_conn dominates short clips), asymptote ≈ 4× for long memos. **The honest number is 3–4×, not 5–10×** — the RRC connection tax (0.32 mWh) puts a floor under every radio touch, and duplex's economy is better than intuition because the modem's connected floor (45 mA) is already most of its streaming cost. Caveat: at cell edge the ordering can *invert* for long clips — a 30 s memo upload at 50 kbps with 23 dBm repetitions costs 5.8 mWh, duplex-class — bulk upload has no lever against bad links, streaming at least ducks to 8 kbps.
+
+### 4.4 Daily budgets (Floor B unless noted)
 
 | Tier | Composition | mWh/day |
 |---|---|---|
 | **(a) Pure watch** | Floor B, PSM (or modem off — same 0.7) | **0.71** — cf. Floor A: 5.5; 3-hand hack: 3.7 |
-| **(b) Light agent** | Floor B + eDRX 655 s (0.98) + 5 exchanges (10.3) + 2 timers (4.9) | **≈ 16.2** |
-| **(c) + 10 min voice/day** | (b) + 10 × 6 | **≈ 76** (band 51–116) |
+| **(b) Light agent, duplex** | Floor B + eDRX 655 s (0.98) + 5 exchanges (10.3) + 2 timers (4.9) | **≈ 16.2** |
+| **(b′) Light agent, PTT** | 0.98 + 5 PTT questions (4.7) + 2 PTT-set timers w/ haptic (2.7) | **≈ 8.4** — same interactions, half the energy |
+| **(c) + 10 min duplex voice/day** | (b) + 10 × 6 | **≈ 76** (band 51–116) |
 
 ---
 
@@ -173,27 +232,29 @@ Two floors, because the LDO decides the pure-watch verdict (finding: `Watch_Vari
 
 Usable battery = 85 % of rated (charge window + converter losses): LIR2450 120 mAh → 366 mWh, LP451528 150 mAh → 472 mWh, LP502030 250 mAh → 786 mWh.
 
-| Profile / season | (a) net | (b) net → days on 150 / 250 mAh | (c) net → days on 150 / 250 mAh |
-|---|---|---|---|
-| Desk S | **−0.1** (≈breakeven; 150 mAh buffer ≈ 22 yr) | −15.5 → **30 / 51 d** | −75.5 → **6 / 10 d** |
-| Desk W | −0.6 → buffer 2.2 yr | −16.0 → 29 / 49 d | −76.0 → 6 / 10 d |
-| Average S | **+1.2 surplus** | −14.2 → 33 / 55 d | −74.2 → 6 / 11 d |
-| Average W | −0.4 → buffer 3.2 yr | −15.9 → 30 / 50 d | −75.9 → 6 / 10 d |
-| Outdoorsy S | **+7.1 surplus** | −8.4 → **56 / 94 d** | −68.4 → 7 / 11 d |
-| Outdoorsy W | +0.5 surplus | −15.0 → 31 / 52 d | −75.0 → 6 / 10 d |
+| Profile / season | (a) net | (b) duplex net → days on 150 / 250 mAh | (b′) PTT net → days on 150 / 250 mAh | (c) net → days on 150 / 250 mAh |
+|---|---|---|---|---|
+| Desk S | **−0.1** (≈breakeven; 150 mAh buffer ≈ 22 yr) | −15.5 → **30 / 51 d** | −7.7 → **61 / 102 d** | −75.5 → **6 / 10 d** |
+| Desk W | −0.6 → buffer 2.2 yr | −16.0 → 29 / 49 d | −8.3 → 57 / 95 d | −76.0 → 6 / 10 d |
+| Average S | **+1.2 surplus** | −14.2 → 33 / 55 d | −6.4 → 73 / 123 d | −74.2 → 6 / 11 d |
+| Average W | −0.4 → buffer 3.2 yr | −15.9 → 30 / 50 d | −8.1 → 58 / 97 d | −75.9 → 6 / 10 d |
+| Outdoorsy S | **+7.1 surplus** | −8.4 → **56 / 94 d** | **−0.6 → 759 d (calendar-limited); surplus at τ = 40 %** | −68.4 → 7 / 11 d |
+| Outdoorsy W | +0.5 surplus | −15.0 → 31 / 52 d | −7.2 → 65 / 109 d | −75.0 → 6 / 10 d |
 
 With **Floor A (AP2112 still on the board)** the pure watch runs −3.6…−5.4 mWh/day for everyone but outdoorsy-summer → charging every ~3 months. **The nano-Iq LDO swap is what makes "never charge" true at all.**
 
-### 5.2 The crossover — voice minutes solar can carry
+### 5.2 The crossover — what interaction budget solar actually carries
 
-(harvest − reachability floor) / 6 mWh/min:
+Duplex: (harvest − reachability floor 0.98) / 6 mWh/min. PTT: same numerator / 0.94 mWh per question (§4.3):
 
 | τ | Desk | Average | Outdoorsy |
 |---|---|---|---|
-| 0.25 | 0 / 0 (S/W) | 0.2 / 0 | **1.1 / 0** |
-| 0.40 | 0 / 0 | 0.4 / 0 | **1.9 / 0.1** |
+| 0.25 — duplex min/day | 0 / 0 (S/W) | 0.2 / 0 | **1.1 / 0** |
+| 0.40 — duplex min/day | 0 / 0 | 0.4 / 0 | **1.9 / 0.1** |
+| 0.25 — **PTT questions/day** | 0 / 0 | **1.0 / 0** | **7.2 / 0.2** |
+| 0.40 — **PTT questions/day** | 0.1 / 0 | **2.3 / 0** | **12.1 / 0.9** |
 
-Solar meaningfully carries **conversation only for an outdoorsy user in summer, and only ~1–2 min/day**. Voice is a battery feature, full stop.
+Solar meaningfully carries **duplex conversation only for an outdoorsy user in summer, and only ~1–2 min/day** — voice-as-conversation is a battery feature, full stop. But recast the same lifestyle as **push-to-talk questions and the picture shifts a category**: an average user's summer harvest covers ~1–2 real agent questions per day, an outdoorsy user's covers **7–12/day** — a genuinely solar-sustained assistant. The desk-worker column stays ~0 under any mode: office light through a dial doesn't pay for radio, period (the under-crystal ring, §7, is what moves that column off zero).
 
 ### 5.3 Multi-week storage dynamics (why daily averages mislead)
 
@@ -204,7 +265,7 @@ Tier (b), 150 mAh starting full, desk-worker weekdays + outdoorsy weekends, τ =
 | Summer | 378 | 283 | 189 | 95 | **~week 5** |
 | Winter | 362 | 252 | 142 | 31 | **~week 4.3** |
 
-Sunny weekends claw back only ~8 mWh against a ~78 mWh weekday deficit — **they shift the charge date by days, not categories**. So tier (b)'s honest verdict is "charge monthly," not "rarely, thanks to weekends." Conversely for tier (a) the same dynamics work in reverse: summer surpluses top the cell up (charging clamps at full), and the multi-year winter buffers in §5.1 mean a pure watch **never sees a charger in practice** — identical to the Eco-Drive ownership experience, including its "low charge after a dark drawer year" failure mode.
+Sunny weekends claw back only ~8 mWh against a ~78 mWh weekday deficit — **they shift the charge date by days, not categories**. So tier (b)'s honest verdict is "charge monthly," not "rarely, thanks to weekends." (Tier (b′) PTT halves the weekday deficit → the same dynamics stretch to ~9 weeks; the categorical fix is the interaction mode, not the weather.) Conversely for tier (a) the same dynamics work in reverse: summer surpluses top the cell up (charging clamps at full), and the multi-year winter buffers in §5.1 mean a pure watch **never sees a charger in practice** — identical to the Eco-Drive ownership experience, including its "low charge after a dark drawer year" failure mode.
 
 ### 5.4 Seasonal statement
 
@@ -264,8 +325,10 @@ Citizen's 50 years of gold Eco-Drive dials are the existence proof that 25–40 
 ## 8. Bottom line
 
 - **Pure watch: yes — genuinely no charger**, but only after the TPS7A02-class LDO swap (with the current AP2112 the answer degrades to "charge quarterly") and with a 2-hand or properly-driven movement (the 30 ms GPIO Lavet hack at 1 Hz burns the entire solar budget by itself).
-- **Light agent use: solar pays the standby bill, not the talking bill** — it roughly doubles nothing: interactions are 95 % of tier (b), so the watch charges monthly with or without sun (except an outdoorsy summer, where it stretches to ~2 months).
-- **Daily voice: a battery product.** 10 min/day runs ~6 days on 150 mAh, ~10 on 250; solar contributes 1–10 %.
+- **Light agent use: solar pays the standby bill, not the talking bill** — interactions are 95 % of tier (b), so the duplex watch charges monthly with or without sun (except an outdoorsy summer, where it stretches to ~2 months).
+- **The blue-button → push-to-talk remap is worth ~2× on interaction cost and it's the only mode solar can actually fund.** A PTT question costs ≈ 0.94 mWh vs 2.3 mWh for the same exchange held duplex (§4.3) — because capture with the radio off costs 4.2 mA while duplex idles the modem at ~65 mA between words. Tier (b′) runs ~61–73 days per charge (vs ~30 duplex), and the solar crossover goes from 0–2 duplex-minutes to **0–12 PTT questions/day** (outdoorsy-summer τ = 40 % is net-positive). These are the numbers for the firmware task.
+- **Memo vs duplex, computed: 3–4×, not the hand-estimated 5–10×** — 1.63 vs 6 mWh per recorded minute (3.7× typ; 2.5× for 10 s clips where the 0.32 mWh RRC tax dominates). Cell-edge caveat: long memo uploads at 23 dBm repetitions lose the advantage entirely (§4.3).
+- **Daily duplex voice: a battery product.** 10 min/day runs ~6 days on 150 mAh, ~10 on 250; solar contributes 1–10 %.
 - **Cheapest wins in order:** nano-Iq LDO swap (×8 floor reduction, both variants), under-crystal ring (no styling cost, out-harvests the hidden disc), τ ≥ 25 % translucent gold dial, AEM10941 at 4.05 V float, GNSS off-by-default.
 
 ### Sources not already linked inline
