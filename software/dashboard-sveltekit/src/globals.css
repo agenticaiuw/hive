@@ -1664,48 +1664,10 @@ blockquote {
   font-weight: 650;
 }
 
-/* ---------- History panel ---------- */
-
-.history-search {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.history-search input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 10px 12px;
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.03);
-  outline: none;
-}
-
-.history-search input:focus {
-  border-color: rgba(112, 167, 255, 0.45);
-}
-
-.history-retention {
-  margin-bottom: 10px !important;
-}
-
-.history-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.history-list > li {
-  border-top: 1px solid var(--line);
-}
-
-.history-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-}
+/* ---------- Feed rows ----------
+   Named history-* from the panel era; the History panel itself is gone
+   (2026-08-12: "jobs, memory, and history are literally the same thing") and
+   these rows now belong to the Work panel's rail. */
 
 .history-main {
   flex: 1;
@@ -1741,261 +1703,10 @@ blockquote {
   font-size: 0.64rem;
 }
 
-.history-reply {
-  margin-top: 6px;
-  color: #c8d2e0;
-  font-size: 0.78rem;
-  line-height: 1.35;
-}
-
 .history-error {
   margin-top: 4px;
   color: var(--amber);
   font-size: 0.74rem;
-}
-
-.history-audio {
-  flex: 0 0 auto;
-  align-self: center;
-  width: 36px;
-  height: 36px;
-  border: 1px solid rgba(112, 167, 255, 0.28);
-  border-radius: 999px;
-  color: #cfe0ff;
-  background: rgba(112, 167, 255, 0.08);
-  cursor: pointer;
-}
-
-.history-audio:hover {
-  background: rgba(112, 167, 255, 0.16);
-}
-
-.history-more {
-  display: block;
-  margin: 12px auto 0;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 7px 13px;
-  color: #c8d2e0;
-  background: rgba(255, 255, 255, 0.03);
-  font-size: 0.7rem;
-  cursor: pointer;
-}
-
-.history-more:disabled {
-  cursor: wait;
-  opacity: 0.6;
-}
-
-.history-detail-state {
-  margin-top: 16px;
-}
-
-.history-detail {
-  margin-top: 18px;
-  border-top: 1px solid var(--line);
-  padding-top: 18px;
-}
-
-.history-detail-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.history-detail-head h3 {
-  margin: 0;
-  color: #edf3fb;
-  font-size: 1rem;
-}
-
-.history-detail-head > span {
-  border: 1px solid rgba(118, 230, 163, 0.22);
-  border-radius: 999px;
-  padding: 4px 8px;
-  color: #bff0d0;
-  font: 0.64rem var(--font-geist-mono), monospace;
-}
-
-.history-detail-meta {
-  margin-top: 10px;
-  color: var(--muted);
-  font: 0.66rem var(--font-geist-mono), monospace;
-}
-
-.history-detail-events {
-  display: grid;
-  gap: 0;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.history-detail-events li {
-  border-top: 1px solid var(--line);
-  padding: 10px 0;
-}
-
-.history-detail-events strong,
-.history-detail-events small {
-  display: block;
-}
-
-.history-detail-events strong {
-  color: #dce5f0;
-  font-size: 0.76rem;
-}
-
-.history-detail-events small {
-  margin-top: 2px;
-  color: var(--muted);
-  font: 0.62rem var(--font-geist-mono), monospace;
-}
-
-.history-detail-events p {
-  margin-top: 5px;
-  color: #aab5c4;
-  font-size: 0.72rem;
-  line-height: 1.4;
-}
-
-/* ---------- Data panel ---------- */
-
-.rev-badge {
-  display: inline-block;
-  border: 1px solid rgba(118, 230, 163, 0.22);
-  border-radius: 999px;
-  padding: 5px 10px;
-  color: #bff0d0;
-  background: rgba(118, 230, 163, 0.07);
-  font: 0.66rem var(--font-geist-mono), monospace;
-  white-space: nowrap;
-}
-
-.data-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 20px;
-  margin-top: 14px;
-}
-
-.micro-label {
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 0.64rem;
-  font-weight: 750;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.data-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.data-list li {
-  border-top: 1px solid var(--line);
-  padding: 9px 0;
-}
-
-.data-list li.active {
-  background: rgba(112, 167, 255, 0.05);
-}
-
-.data-session-button {
-  display: block;
-  width: 100%;
-  border: 0;
-  padding: 0;
-  color: inherit;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-
-.data-line {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.data-line strong {
-  overflow: hidden;
-  color: #e5ebf3;
-  font-size: 0.78rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.data-line span {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.64rem;
-}
-
-.data-list small {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.64rem;
-}
-
-.chat-transcript {
-  margin-top: 16px;
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
-}
-
-.chat-transcript > ol {
-  display: grid;
-  gap: 9px;
-  max-height: 360px;
-  margin: 0;
-  padding: 0 4px 0 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.chat-transcript > ol > li {
-  border: 1px solid rgba(112, 167, 255, 0.16);
-  border-radius: 12px;
-  padding: 9px 11px;
-  background: rgba(112, 167, 255, 0.05);
-}
-
-.chat-transcript > ol > li.assistant {
-  border-color: rgba(118, 230, 163, 0.14);
-  background: rgba(118, 230, 163, 0.04);
-}
-
-.chat-transcript li > div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.chat-transcript strong {
-  color: #dce5f0;
-  font-size: 0.68rem;
-}
-
-.chat-transcript time {
-  color: var(--muted);
-  font: 0.6rem var(--font-geist-mono), monospace;
-}
-
-.chat-transcript li > p {
-  margin-top: 5px;
-  color: #c5cfdd;
-  font-size: 0.75rem;
-  line-height: 1.45;
-  white-space: pre-wrap;
 }
 
 /* ---------- Breakpoints ---------- */
@@ -2021,10 +1732,6 @@ blockquote {
 
   .telemetry-grid {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .data-grid {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -2060,6 +1767,17 @@ blockquote {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 14px;
+  /* DESIGN.md: filters live on the right side of the page. One short row of
+     device chips (deduped per device, so it can no longer multiply per raw
+     source word) sitting over the detail pane, off the feed itself. */
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  /* Stacked layout: chips read left-to-right above the single column. */
+  .job-filters {
+    justify-content: flex-start;
+  }
 }
 
 .job-chip {

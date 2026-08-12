@@ -19,22 +19,30 @@
  *     `/plan`+`/execute`, which record them in jobTracker (`GET /jobs`) but
  *     never touch the relay — so `/v1/ops/history` (the shared record the
  *     dashboard reads) never saw them, exactly like browser tasks before #47.
- *     `macLocalHistoryEntries` folds that jobTracker view into the same history
+ *     `mergeHiveFeed` folds that jobTracker view into the same history
  *     shape so the two lists become one, without a second store: the data is
  *     already in jobTracker, this only surfaces it.
  *
  * DEDUPE IS STRUCTURAL, NOT HEURISTIC. Work the Mac ran on behalf of the relay
  * (pendant, iPhone, relay-typed dashboard) is executed by the bridge, which
  * stamps `source: "pendant"` on those local /plan+/execute calls — never
- * "floating-hud" or "dashboard". So the Mac-local sources this module folds in
+ * "floating-hud" or "dashboard". So the jobTracker sources this module folds in
  * are disjoint by construction from everything already in relay history; there
  * is no same-run double count to guess about. jobTracker ids (`local_…`) also
  * never collide with relay pipeline ids (`job_…`, `btask_…`).
  *
- * SCOPE-OUT. Development/orchestration work the agent starts for itself (recon,
- * harness, probes, measurement, tests, routines) is not a hive node answering
- * an owner task, so it is not folded into the owner feed — but it keeps an
- * honest label wherever it already shows (the Jobs panel), never a node word.
+ * ONE FEED, DEVICE-TAGGED. The owner, 2026-08-12: "jobs, memory, and history
+ * are literally the same thing, which is also repeated on the main dashboard
+ * as recent, which means it's fucking repeated 4 times … the device(s) should
+ * be the main tags … 'recent' shows cloud work only, which should be changed."
+ * So the fold is no longer limited to the owner's Mac-local sources: EVERY job
+ * the tracker knows — browser runs, probes, routines included — joins the one
+ * feed, each row tagged with the device(s) it travelled through
+ * (`deviceTagsFor`). Agent-started work is not hidden any more, but it is
+ * never dressed as a device either: it carries the one "Agent-initiated" tag.
+ * The only rows still excluded are the bridge's own copies of relay work
+ * (`source: "pendant"`), which the base feed already holds under their
+ * pipeline ids — the structural-dedupe rule above.
  *
  * Dependency-free on purpose (no $app, no fetch), so the node test suite can
  * import the exact code the components run — the same rule as transportRule.js.
@@ -63,10 +71,13 @@ const PENDANT = new Set([
 const IPHONE = new Set(["mobile", "ios", "iphone"]);
 
 /* Work that physically happened on this Mac and never left it: the floating
- * HUD, a direct local API caller, and the mac-bridge's own label. `dashboard`
- * and `local` are handled separately below because they are only "This Mac"
+ * HUD, a direct local API caller, the mac-bridge's own label, and the
+ * pipelineTrace default (`mac`) — without that last one the agent's own
+ * /pipeline rows grew a fifth near-duplicate tag "Mac" beside "This Mac",
+ * the exact duplication the 2026-08-12 ruling deletes. `dashboard` and
+ * `local` are handled separately below because they are only "This Mac"
  * when they arrive with no relay origin (i.e. as a jobTracker job). */
-const MAC_LOCAL = new Set(["floating-hud", "mac-local", "mac-bridge"]);
+const MAC_LOCAL = new Set(["floating-hud", "mac-local", "mac-bridge", "mac"]);
 
 const CLOUD = new Set(["cloudflare", "cloud", "cloud-relay"]);
 
@@ -209,37 +220,126 @@ export function hiveNodeFor(record = {}) {
   };
 }
 
-/* -------------------------------------------------------- Mac-local fold-in */
+/* ------------------------------------------------------------- device tags */
 
 /*
- * jobTracker sources the owner's own on-Mac work carries. These are exactly the
- * sources the relay never sees (the bridge stamps relay work "pendant"), so
- * folding them into relay history adds the missing rows and duplicates nothing.
+ * The one "not a device" tag. The owner's ruling keeps devices as the main
+ * tags, and probes/routines/harness runs are not devices — they get exactly
+ * one honest tag between them instead of a chip per internal source word
+ * (which is how the old tab row grew "Operator probe" next to "Routine").
  */
-const MAC_LOCAL_OWNER_SOURCES = new Set([
-  "floating-hud",
-  "dashboard",
-  "mac-local",
-  "local",
-]);
+export const AGENT_INITIATED = {
+  key: "agent-initiated",
+  label: "Agent-initiated",
+  hint: "Started by the agent itself — probes, routines, harness runs",
+};
+
+/*
+ * Source words that mean "the system started this", beyond the exact DEV keys:
+ * jobTracker's `source` is whatever the caller posted (`operator-probe`,
+ * `harness-task`, …), so membership has to read the words, not a fixed list.
+ */
+const AGENT_WORD = /(^|[-_ ])(probe|probes|recon|routine|routines|harness|measure|benchmark|test|tests)([-_ ]|$)/;
+
+/** @param {HiveNode} node */
+const foldToDeviceTag = (node) =>
+  DEV[node.key] || AGENT_WORD.test(node.key) ? AGENT_INITIATED : node;
+
+/* The named hive nodes — the only keys a SECONDARY reading may contribute.
+ * The primary reading keeps its honest fallback label for an unknown word,
+ * but a field read alone must not mint an extra tag out of one (a browser
+ * job's `source: "device-7"` is the same browser, not a second device). */
+const KNOWN_NODE_KEYS = new Set(Object.values(NODE).map((node) => node.key));
 
 /**
- * True for a jobTracker job that is the owner's own answered on-Mac task.
+ * Every node one record travelled through, deduped BY DEVICE — never by raw
+ * source word. The old Jobs tab row was keyed on raw sources, which is how the
+ * owner's screenshot showed "This Mac" twice (`floating-hud` and `dashboard`)
+ * and "Browser" twice: same device, different internal words. The ruling:
+ * "make sure to keep the ability to filter work or questions by nodes … one
+ * task may travel through multiple nodes as well, but the device(s) should be
+ * the main tags."
  *
- * `detailHref` must be absent: it is set only by `jobFromRelayHistory` (the
- * `/api/jobs` fallback the Worker serves when the Mac is asleep), whose rows
- * are relay history — and a relay-typed dashboard command arrives there with
- * `source: "dashboard"`, the very word on-Mac composer work also carries. The
- * guard keeps the fold to rows that genuinely came from the Mac agent
- * (`jobFromAgent`, which never sets `detailHref`), so relay history is never
- * relabelled "This Mac".
+ * Order is primary-first: `hiveNodeFor`'s strongest-signal reading leads, then
+ * each provenance field is classified alone so a run that was issued on one
+ * node and executed on another carries both. Cloud is dropped whenever a real
+ * device tag exists — the relay witnesses nearly everything, so "Cloud" next
+ * to "Pendant" is the exact noise the owner called out ("'recent' shows cloud
+ * work only"); it stays only when the cloud answered with no device involved.
  *
- * @param {any} job
+ * @param {{ origin?: unknown, source?: unknown, kind?: unknown,
+ *   executor?: unknown, events?: unknown }} record
+ * @returns {HiveNode[]}
  */
-export function isMacLocalOwnerJob(job) {
-  if (job?.detailHref) return false;
-  return MAC_LOCAL_OWNER_SOURCES.has(norm(job?.source));
+export function deviceTagsFor(record = {}) {
+  /** @type {HiveNode[]} */
+  const tags = [];
+  /**
+   * @param {HiveNode} node
+   * @param {boolean} [secondary]
+   */
+  const add = (node, secondary = false) => {
+    const tag = foldToDeviceTag(node);
+    if (secondary && tag !== AGENT_INITIATED && !KNOWN_NODE_KEYS.has(tag.key)) {
+      return;
+    }
+    if (!tags.some((existing) => existing.key === tag.key)) tags.push(tag);
+  };
+
+  add(hiveNodeFor(record));
+  if (norm(record.origin)) add(hiveNodeFor({ origin: record.origin }), true);
+  if (norm(record.source)) {
+    const viaSource = hiveNodeFor({ source: record.source });
+    /* `dashboard`/`local` read as "This Mac" only WITHOUT a relay origin
+     * (hiveNodeFor's own rule); with one present the source word must not
+     * smuggle a Mac tag onto a remote row. */
+    if (!(viaSource.key === "mac" && norm(record.origin))) {
+      add(viaSource, true);
+    }
+  }
+  /*
+   * The Mac agent's own /pipeline rows carry no origin at all — the bridge
+   * stamps their SOURCE 'cloudflare' and the issuing device survives only in
+   * the run's input telemetry (`storage: live_lte | microSD | …`). Without
+   * this read, the This Mac view's Recent called every pendant voice run
+   * "Cloud" — the same complaint the deployed dashboard drew.
+   */
+  const storage = storageOf(record);
+  if (storage) add(hiveNodeFor({ origin: storage }), true);
+
+  const devices = tags.filter((tag) => tag.key !== "cloud");
+  return devices.length ? devices : tags;
 }
+
+/**
+ * The first input-telemetry storage word a run's events recorded, if any.
+ * @param {{ events?: unknown }} [record]
+ */
+function storageOf(record) {
+  const events = Array.isArray(record?.events) ? record.events : [];
+  for (const event of events) {
+    const storage = norm(event?.meta?.inputTelemetry?.storage);
+    if (storage) return storage;
+  }
+  return "";
+}
+
+/** True when a record's work was started by the system, not any device. */
+export function isAgentInitiated(record = {}) {
+  return deviceTagsFor(record).some((tag) => tag.key === AGENT_INITIATED.key);
+}
+
+/* ------------------------------------------------------------ job fold-in */
+
+/*
+ * What relay history CAN represent under an id of its own: work routed through
+ * the relay, which the bridge executes locally under `source: "pendant"` (see
+ * the structural-dedupe note in the header). Everything else in jobTracker is
+ * invisible to the base feed and safe to fold. One definition, shared with
+ * dataSource's latch merge, so the fold and the latch can never disagree
+ * about which rows exist twice.
+ */
+export const RELAY_VISIBLE_SOURCES = new Set(["pendant"]);
 
 /**
  * One jobTracker job as a history entry, in the exact shape the history feed
@@ -248,17 +348,21 @@ export function isMacLocalOwnerJob(job) {
  * plan stays 'plan_ready'), and the feed's own statusLabel is what turns those
  * into honest words. Nothing here can promote a partial run to "Done".
  *
+ * `kind: "job"` marks the row as job-shaped rather than a voice pipeline run,
+ * so the page never renders a fabricated six-stage STT rail for it.
+ *
  * @param {any} [job]
  */
 export function jobToHistoryEntry(job = {}) {
   const id = String(job.id || job.jobId || "");
   return {
     pipelineId: id,
-    kind: "mac_local",
+    kind: "job",
     command: String(job.command || ""),
-    /* Left empty so hiveNodeFor reads the jobTracker `source` and returns
-     * "This Mac"; a non-empty origin would be read as a relay origin. */
-    origin: "",
+    /* A jobTracker row carries no origin, so hiveNodeFor reads `source` and
+     * says "This Mac"; a relay-fallback row (jobFromRelayHistory) keeps its
+     * issuing origin, so a remote dashboard run is never relabelled local. */
+    origin: String(job.origin || ""),
     source: String(job.source || "local"),
     inputMode: "typed",
     status: String(job.status || ""),
@@ -326,23 +430,29 @@ export function terminalPhaseFor(status) {
 }
 
 /**
- * Fold the owner's Mac-local jobs into a page of relay history: one list,
- * deduped by id, newest first. `base` (the relay/agent history) is trusted as
- * the record of record; a Mac-local job whose id already appears is dropped
- * rather than shown twice.
+ * Fold the job feed into a page of pipeline runs: ONE list, deduped by id,
+ * newest first. `base` (the relay/agent record) is trusted as the record of
+ * record; a job whose id already appears is dropped rather than shown twice.
  *
- * @param {any[]} base history entries already fetched
- * @param {any[]} jobs jobTracker jobs (JobView shape: id, source, …)
+ * Widened from the old Mac-local-owner-only fold on the owner's 2026-08-12
+ * ruling ("'recent' shows cloud work only, which should be changed"): every
+ * job now joins — browser runs, probes, routines, the lot — EXCEPT the
+ * bridge's own copies of relay-routed work (`source: "pendant"`), which the
+ * base already holds under their pipeline ids and would otherwise render
+ * twice under two different ids that no id-dedupe could catch.
+ *
+ * @param {any[]} base pipeline/history entries already fetched
+ * @param {any[]} jobs job rows (JobView shape: id, origin, source, …)
  * @returns {any[]}
  */
-export function mergeMacLocalHistory(base = [], jobs = []) {
+export function mergeHiveFeed(base = [], jobs = []) {
   const seen = new Set(
     (Array.isArray(base) ? base : [])
       .map((entry) => String(entry?.pipelineId || ""))
       .filter(Boolean),
   );
   const folded = (Array.isArray(jobs) ? jobs : [])
-    .filter(isMacLocalOwnerJob)
+    .filter((job) => !RELAY_VISIBLE_SOURCES.has(norm(job?.source)))
     .map(jobToHistoryEntry)
     .filter((entry) => entry.pipelineId && !seen.has(entry.pipelineId));
 
@@ -355,8 +465,8 @@ export function mergeMacLocalHistory(base = [], jobs = []) {
 
 /**
  * The newest entry worth headlining, from an already-merged newest-first feed
- * (`mergeMacLocalHistory` output: pipeline runs plus the owner's Mac-local
- * jobs). This is what makes the newest answered task from ANY node eligible to
+ * (`mergeHiveFeed` output: pipeline runs plus the folded job feed). This is
+ * what makes the newest answered task from ANY node eligible to
  * be the hero — before it, the hero read pipeline runs only, so a stale
  * pendant answer outlived a screenful of newer HUD work.
  *

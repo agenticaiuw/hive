@@ -5,7 +5,7 @@
     formatDuration,
     formatWhen,
     isRunningStatus,
-    sourceMeta,
+    nodeMeta,
     statusLabel,
     statusTone,
     summarizeTouches,
@@ -24,7 +24,8 @@
     onUndo: (jobId: string) => void;
   } = $props();
 
-  const source = $derived(sourceMeta(job.source));
+  // Origin-first, so a relay-routed row names its issuing device, not "Cloud".
+  const source = $derived(nodeMeta(job));
   const live = $derived(isRunningStatus(job.status));
   const steps = $derived(job.ran.length ? job.ran : job.planned);
   const succeeded = $derived(job.ran.filter((entry) => !entry.failed).length);

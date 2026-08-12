@@ -36,6 +36,15 @@ export type JobView = {
   id: string;
   type: string;
   command: string;
+  /**
+   * Where the owner issued the work — a relay history row's `origin`. Empty
+   * for jobTracker rows, which carry no origin. Kept SEPARATE from `source`
+   * rather than collapsed into it: the collapse is what made a relay-typed
+   * dashboard run indistinguishable from the on-Mac composer, which is how
+   * the old Jobs tab row grew two "This Mac" tabs (the owner's 2026-08-12
+   * screenshot). `nodeMeta`/`deviceTagsFor` read origin first, source second.
+   */
+  origin: string;
   source: string;
   status: string;
   createdAt: string | null;
@@ -81,20 +90,16 @@ export function isRunningStatus(status: unknown) {
 }
 
 /**
- * The node that answered a job, in plain words, from its `source` alone.
+ * The node that answered a record, in plain words.
  *
  * Every per-node label on the page comes from one classifier (`hiveNodeFor`)
- * so the Jobs panel, the answer card, and the history feed can never disagree
- * about what "This Mac" or "Pendant" means. `nodeMeta` is the same classifier
- * when more than the source is known (a history entry's `origin` is the
- * stronger signal — the relay stamps every run it saw with `source:
- * "cloudflare"`, so source alone would call a pendant run "Cloud").
+ * so the Jobs panel, the answer card, and the feed can never disagree about
+ * what "This Mac" or "Pendant" means. A record's `origin` is the stronger
+ * signal — the relay stamps every run it saw with `source: "cloudflare"`, so
+ * source alone would call a pendant run "Cloud". (The old source-only
+ * `sourceMeta` is gone for exactly that reason: every JobView now carries its
+ * origin, so there is no honest caller left for a source-only reading.)
  */
-export function sourceMeta(source: unknown) {
-  const { label, hint } = hiveNodeFor({ source });
-  return { label, hint };
-}
-
 export function nodeMeta(record: {
   origin?: unknown;
   source?: unknown;
@@ -287,6 +292,8 @@ export function jobFromAgent(raw: any): JobView {
     id: String(raw?.jobId || raw?.id || ""),
     type: String(raw?.type || "execute"),
     command: commandTitle(raw?.command),
+    // jobTracker records no origin; the classifiers read `source` alone here.
+    origin: "",
     source: String(raw?.source || "unknown"),
     status: String(raw?.status || ""),
     createdAt: raw?.createdAt ?? null,
@@ -313,7 +320,10 @@ export function jobFromRelayHistory(entry: any): JobView {
     id: String(entry?.pipelineId || ""),
     type: "execute",
     command: commandTitle(entry?.command),
-    source: String(entry?.origin || entry?.source || "cloudflare"),
+    /* origin and source stay separate — collapsing origin into source is what
+     * once let a relay-typed dashboard row read as the on-Mac composer. */
+    origin: String(entry?.origin || ""),
+    source: String(entry?.source || "cloudflare"),
     status,
     createdAt: entry?.createdAt ?? null,
     updatedAt: entry?.updatedAt ?? null,

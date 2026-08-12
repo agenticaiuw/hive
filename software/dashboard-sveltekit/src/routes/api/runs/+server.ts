@@ -18,6 +18,15 @@ function publicRun(value: unknown) {
     pipelineId: sanitizeText(run.pipelineId, 160),
     kind: sanitizeText(run.kind, 80),
     command: sanitizeText(run.command, 300),
+    /*
+     * `origin` is where the owner issued the run (live_lte, dashboard,
+     * browser-extension …); `source` is only the witnessing relay. This
+     * allowlist used to drop origin, so every Recent row on the deployed
+     * dashboard was tagged "Cloud" — the owner, 2026-08-12: "'recent' shows
+     * cloud work only, which should be changed." The relay has sent it all
+     * along (cloud-relay/history.js); it just never survived this sanitizer.
+     */
+    origin: sanitizeText(run.origin, 80),
     source: sanitizeText(run.source, 80),
     status: sanitizeText(run.status, 80),
     /*

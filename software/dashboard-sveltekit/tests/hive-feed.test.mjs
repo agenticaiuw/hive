@@ -3,10 +3,11 @@ import test from "node:test";
 
 import {
   commandTitle,
+  deviceTagsFor,
   hiveNodeFor,
-  isMacLocalOwnerJob,
+  isAgentInitiated,
   jobToHistoryEntry,
-  mergeMacLocalHistory,
+  mergeHiveFeed,
   pickHero,
   terminalPhaseFor,
 } from "../src/lib/hiveFeed.js";
@@ -62,22 +63,89 @@ test("keeps development work honestly labelled, never as a hive node", () => {
   }
 });
 
-test("isMacLocalOwnerJob folds only the owner's on-Mac work", () => {
-  assert.equal(isMacLocalOwnerJob({ source: "floating-hud" }), true);
-  assert.equal(isMacLocalOwnerJob({ source: "dashboard" }), true);
-  assert.equal(isMacLocalOwnerJob({ source: "local" }), true);
-  // Bridge-executed relay work is stamped 'pendant' and already lives in relay
-  // history — folding it would double-count, so it is excluded.
-  assert.equal(isMacLocalOwnerJob({ source: "pendant" }), false);
-  // Development work is scoped out.
-  assert.equal(isMacLocalOwnerJob({ source: "recon" }), false);
-  assert.equal(isMacLocalOwnerJob({ source: "harness-task" }), false);
-  // A relay-history row (the /api/jobs fallback when the Mac is asleep) can
-  // carry source 'dashboard' too, but it sets detailHref — it is relay history,
-  // not on-Mac work, and must not be relabelled "This Mac".
-  assert.equal(
-    isMacLocalOwnerJob({ source: "dashboard", detailHref: "/api/history/x" }),
-    false,
+/* ------------------------------------------------------------- device tags */
+
+test("device tags dedupe by device, never by raw source word", () => {
+  // `floating-hud` and `dashboard` were two tabs in the owner's screenshot;
+  // both are the same device, so both are exactly the one This Mac tag.
+  for (const source of ["floating-hud", "dashboard", "local", "mac"]) {
+    assert.deepEqual(
+      deviceTagsFor({ source }).map((tag) => tag.key),
+      ["mac"],
+    );
+  }
+  for (const record of [
+    { kind: "browser_task" },
+    { origin: "browser-extension", source: "cloudflare" },
+    { executor: "browser", source: "device-7" },
+  ]) {
+    assert.deepEqual(
+      deviceTagsFor(record).map((tag) => tag.key),
+      ["browser"],
+    );
+  }
+});
+
+test("a run that travelled through several nodes carries every device tag", () => {
+  // "one task may travel through multiple nodes as well" — issued on the
+  // pendant, executed by the browser extension: both tags, executor first.
+  assert.deepEqual(
+    deviceTagsFor({
+      origin: "live_lte",
+      executor: "browser",
+      source: "cloudflare",
+    }).map((tag) => tag.key),
+    ["browser", "pendant"],
+  );
+});
+
+test("Cloud never rides along as a second tag on a device's run", () => {
+  // "'recent' shows cloud work only, which should be changed" — the relay
+  // witnesses nearly everything, so Cloud tags only cloud-only work.
+  assert.deepEqual(
+    deviceTagsFor({ origin: "live_lte", source: "cloudflare" }).map(
+      (tag) => tag.key,
+    ),
+    ["pendant"],
+  );
+  assert.deepEqual(
+    deviceTagsFor({ source: "cloudflare" }).map((tag) => tag.key),
+    ["cloud"],
+  );
+});
+
+test("a remote dashboard row never smuggles a This Mac tag", () => {
+  // Relay-history fallback rows keep origin and source apart; the source word
+  // 'dashboard' alone must not read as the on-Mac composer.
+  assert.deepEqual(
+    deviceTagsFor({ origin: "dashboard", source: "cloudflare" }).map(
+      (tag) => tag.key,
+    ),
+    ["dashboard"],
+  );
+});
+
+test("probes and routines fold into the one Agent-initiated tag", () => {
+  for (const source of ["operator-probe", "routine", "recon", "harness-task"]) {
+    assert.deepEqual(
+      deviceTagsFor({ source }).map((tag) => tag.label),
+      ["Agent-initiated"],
+    );
+    assert.equal(isAgentInitiated({ source }), true);
+  }
+  assert.equal(isAgentInitiated({ source: "floating-hud" }), false);
+  assert.equal(isAgentInitiated({ origin: "live_lte", source: "cloudflare" }), false);
+});
+
+test("pendant identity survives when only input telemetry recorded it", () => {
+  // The Mac agent's own /pipeline rows carry no origin — the bridge stamps
+  // source 'cloudflare' and the device lives in the run's telemetry.
+  assert.deepEqual(
+    deviceTagsFor({
+      source: "cloudflare",
+      events: [{ meta: { inputTelemetry: { storage: "live_lte" } } }],
+    }).map((tag) => tag.key),
+    ["pendant"],
   );
 });
 
@@ -93,11 +161,22 @@ test("jobToHistoryEntry keeps the goal-grounded status verbatim", () => {
   assert.equal(entry.status, "incomplete");
   assert.equal(entry.jobStatus, "incomplete");
   assert.equal(entry.reply, "Moved 3 files; 2 could not be sorted.");
+  // A job-feed row, never a voice pipeline run (no fabricated STT rail).
+  assert.equal(entry.kind, "job");
   // Empty origin so the classifier reads `source` and returns This Mac.
   assert.equal(hiveNodeFor(entry).label, "This Mac");
+  // A relay-fallback row keeps its issuing origin through the fold.
+  const relayEntry = jobToHistoryEntry({
+    id: "job_remote",
+    origin: "dashboard",
+    source: "cloudflare",
+    command: "weather",
+    status: "completed",
+  });
+  assert.equal(hiveNodeFor(relayEntry).label, "Dashboard");
 });
 
-test("mergeMacLocalHistory folds owner Mac work in, deduped and newest-first", () => {
+test("mergeHiveFeed folds the job feed in, deduped and newest-first", () => {
   const base = [
     {
       pipelineId: "job_relay",
@@ -133,7 +212,7 @@ test("mergeMacLocalHistory folds owner Mac work in, deduped and newest-first", (
     },
   ];
 
-  const merged = mergeMacLocalHistory(base, jobs);
+  const merged = mergeHiveFeed(base, jobs);
   const ids = merged.map((entry) => entry.pipelineId);
   assert.deepEqual(ids, ["local_new", "job_relay"]);
   // The pendant-sourced job (already in relay history) was not folded.
@@ -142,10 +221,34 @@ test("mergeMacLocalHistory folds owner Mac work in, deduped and newest-first", (
   assert.equal(merged[0].pipelineId, "local_new");
 });
 
-test("mergeMacLocalHistory is a no-op when there is no Mac-local work", () => {
+test("mergeHiveFeed folds agent-initiated and browser work in, tagged", () => {
+  // Widened on the 2026-08-12 ruling: the feed shows EVERY node's work, so a
+  // probe or an agent-driven browser job is a row now — tagged honestly,
+  // never dressed as a device.
   const base = [{ pipelineId: "a", createdAt: "2026-08-09T00:00:00.000Z" }];
-  assert.deepEqual(mergeMacLocalHistory(base, []), base);
-  assert.deepEqual(mergeMacLocalHistory(base, [{ source: "recon", id: "r" }]), base);
+  const merged = mergeHiveFeed(base, [
+    { id: "local_probe", source: "operator-probe", command: "health check", status: "completed", createdAt: "2026-08-09T01:00:00.000Z" },
+    { id: "local_browser", source: "browser-inspect-act", command: "read the page", status: "completed", createdAt: "2026-08-09T02:00:00.000Z" },
+  ]);
+  assert.deepEqual(
+    merged.map((entry) => entry.pipelineId),
+    ["local_browser", "local_probe", "a"],
+  );
+  assert.deepEqual(
+    deviceTagsFor(merged[0]).map((tag) => tag.key),
+    ["browser"],
+  );
+  assert.deepEqual(
+    deviceTagsFor(merged[1]).map((tag) => tag.label),
+    ["Agent-initiated"],
+  );
+});
+
+test("mergeHiveFeed is a no-op when the job feed is empty", () => {
+  const base = [{ pipelineId: "a", createdAt: "2026-08-09T00:00:00.000Z" }];
+  assert.deepEqual(mergeHiveFeed(base, []), base);
+  // The bridge's copy of relay work is the ONE exclusion left.
+  assert.deepEqual(mergeHiveFeed(base, [{ source: "pendant", id: "p" }]), base);
 });
 
 /* --------------------------------------------- honest terminal verdicts */
@@ -221,12 +324,12 @@ test("hero candidates: the newest node wins, whichever node it is", () => {
 
   // Local job newer → the Mac-local task is the hero (the owner's complaint:
   // the hero sat on last night's pendant answer while newer HUD work piled up).
-  let merged = mergeMacLocalHistory([relayRun], [hudJob]);
+  let merged = mergeHiveFeed([relayRun], [hudJob]);
   assert.equal(pickHero(merged, answeredAlways).pipelineId, "local_hud");
 
   // Relay run newer → the pendant run stays the hero.
   const newerRelay = { ...relayRun, createdAt: "2026-08-09T10:00:00.000Z" };
-  merged = mergeMacLocalHistory([newerRelay], [hudJob]);
+  merged = mergeHiveFeed([newerRelay], [hudJob]);
   assert.equal(pickHero(merged, answeredAlways).pipelineId, "job_relay");
 });
 
@@ -236,7 +339,7 @@ test("hero candidates: a tie keeps the shared record first; no timestamp never c
   const tieJob = { id: "local_tie", source: "dashboard", command: "b", status: "completed", createdAt: at };
   const undatedJob = { id: "local_undated", source: "floating-hud", command: "c", status: "completed" };
 
-  const merged = mergeMacLocalHistory([relayRun], [tieJob, undatedJob]);
+  const merged = mergeHiveFeed([relayRun], [tieJob, undatedJob]);
   assert.deepEqual(
     merged.map((entry) => entry.pipelineId),
     ["job_tie", "local_tie", "local_undated"],
@@ -263,7 +366,7 @@ test("an incomplete local job that is newest heroes as Incomplete, never Answere
     createdAt: "2026-08-09T09:00:00.000Z",
   };
 
-  const merged = mergeMacLocalHistory([relayRun], [partial]);
+  const merged = mergeHiveFeed([relayRun], [partial]);
   const hero = pickHero(merged, stateLike);
   assert.equal(hero.pipelineId, "local_partial");
   // The honest summary survived the fold …
@@ -302,7 +405,7 @@ test("a relay row that also appears locally is one hero candidate, not two", () 
       createdAt: "2026-08-09T09:30:00.000Z",
     },
   ];
-  const merged = mergeMacLocalHistory([shared], jobs);
+  const merged = mergeHiveFeed([shared], jobs);
   assert.deepEqual(
     merged.map((entry) => entry.pipelineId),
     ["job_shared"],

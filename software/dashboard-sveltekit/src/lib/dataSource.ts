@@ -26,7 +26,7 @@ import {
   type JobView,
   type RoutineView,
 } from "$lib/jobs";
-import { mergeMacLocalHistory } from "$lib/hiveFeed.js";
+import { RELAY_VISIBLE_SOURCES } from "$lib/hiveFeed.js";
 
 export type Backend = "agent" | "relay";
 
@@ -221,86 +221,14 @@ export async function fetchLatestRun(): Promise<any> {
   return payload?.latest ?? null;
 }
 
-async function fetchHistoryBase(query: string, cursor: string) {
-  if (backend === "agent") {
-    const payload = await agentRequest("/pipeline");
-    const runs: any[] = Array.isArray(payload?.runs) ? payload.runs : [];
-    const needle = query.trim().toLowerCase();
-    return {
-      entries: runs
-        .filter(
-          (run) => !needle || String(run.command || "").toLowerCase().includes(needle),
-        )
-        .map((run) => ({
-          pipelineId: run.pipelineId,
-          command: run.command,
-          status: run.status,
-          origin: run.source,
-          createdAt: run.createdAt,
-          // The agent stores recordings per run, but only exposes them by
-          // direction on a separate route, so the row cannot promise one here.
-          audio: { available: false, replyAvailable: false },
-        })),
-      nextCursor: "",
-      hasMore: false,
-      retention: null,
-    };
-  }
-
-  const params = new URLSearchParams({ limit: "24" });
-  if (query.trim()) params.set("q", query.trim());
-  if (cursor) params.set("cursor", cursor);
-  return apiRequest(`/api/history?${params}`);
-}
-
-/**
- * History, with the owner's Mac-local work folded in.
- *
- * The base feed (relay `/v1/ops/history` off the Worker, the agent's own
- * `/pipeline` on the Mac) is the shared record — but neither ever saw the
- * floating HUD or the on-Mac dashboard composer, whose runs live only in
- * jobTracker (`GET /jobs`). So on the first page we also read `/jobs` and fold
- * the owner's Mac-local rows into one list (`mergeMacLocalHistory`, deduped by
- * id). Older pages skip it: the whole jobTracker window (≤120 rows) already
- * lands on page one, and re-folding it under every cursor would repeat it.
- *
- * Best-effort by design: if `/jobs` is unreachable the shared record still
- * renders exactly as before, rather than an error taking the whole feed down.
+/*
+ * fetchHistory / fetchHistoryDetail / fetchMemory are gone with the panels
+ * they fed. The owner, 2026-08-12: "jobs, memory, and history are literally
+ * the same thing … repeated 4 times." The one feed is `fetchJobs` +
+ * `fetchRuns`, merged by `mergeHiveFeed`; the server routes they called stay
+ * (run detail still lazy-loads through `/api/history/:id`, and `/api/memory`
+ * awaits the memory redesign).
  */
-export async function fetchHistory(query: string, cursor: string) {
-  const base = await fetchHistoryBase(query, cursor);
-  if (cursor) return base;
-  try {
-    const jobs = (await fetchJobs()).data;
-    const needle = query.trim().toLowerCase();
-    const scoped = needle
-      ? jobs.filter((job) =>
-          `${job.command} ${job.summary}`.toLowerCase().includes(needle),
-        )
-      : jobs;
-    return { ...base, entries: mergeMacLocalHistory(base.entries, scoped) };
-  } catch {
-    return base;
-  }
-}
-
-export async function fetchHistoryDetail(pipelineId: string) {
-  if (backend === "agent") {
-    const payload = await agentRequest("/pipeline");
-    const runs: any[] = Array.isArray(payload?.runs) ? payload.runs : [];
-    return runs.find((run) => run.pipelineId === pipelineId) ?? null;
-  }
-  const payload = await apiRequest(
-    `/api/history/${encodeURIComponent(pipelineId)}`,
-  );
-  return payload?.run ?? null;
-}
-
-/** Memory on the agent already rides along in the snapshot. */
-export async function fetchMemory() {
-  if (backend === "agent") return null;
-  return apiRequest("/api/memory");
-}
 
 export function audioHref(pipelineId: string, voice: "owner" | "reply") {
   if (backend === "agent") {
@@ -330,15 +258,15 @@ export function audioHref(pipelineId: string, voice: "owner" | "reply") {
 let latchedAgentJobs: JobView[] = [];
 
 /*
- * What relay history CAN represent: work that was routed through the relay,
- * which the bridge executes locally under `source: "pendant"` (see hiveFeed's
- * dedupe-is-structural note). A latched row with that source would show up
- * twice during a fallback poll — once under its relay pipeline id, once under
- * its local job id — so those are the rows the fallback is allowed to replace.
- * Everything else (parked plans, floating-hud, on-Mac composer, agent-initiated
- * work) is structurally invisible to relay history and must be carried over.
+ * `RELAY_VISIBLE_SOURCES` (imported from hiveFeed, one definition for the
+ * latch AND the feed fold): work routed through the relay is executed by the
+ * bridge under `source: "pendant"`. A latched row with that source would show
+ * up twice during a fallback poll — once under its relay pipeline id, once
+ * under its local job id — so those are the rows the fallback is allowed to
+ * replace. Everything else (parked plans, floating-hud, on-Mac composer,
+ * agent-initiated work) is structurally invisible to relay history and must
+ * be carried over.
  */
-const RELAY_VISIBLE_SOURCES = new Set(["pendant"]);
 
 export async function fetchJobs(): Promise<Fetched<JobView[]>> {
   if (backend === "agent") {
