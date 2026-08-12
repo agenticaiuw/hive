@@ -28,3 +28,31 @@
 &led4_pin_routing {
 	status = "disabled";
 };
+
+/*
+ * The RGB status indicator takes three more nRF9160 pins, and all three are
+ * routed to on-board DK parts by default. Left routed, each on-board part
+ * sits in parallel with the breadboard LED leg and steals its current — and
+ * P0.07 is worse than a nuisance: pressing the DK's Button 2 would short a
+ * PWM output straight to GND.
+ *
+ *   P0.03 -> RGB RED   (DK LED2)
+ *   P0.04 -> RGB GREEN (DK LED3)
+ *   P0.07 -> RGB BLUE  (DK Button 2)
+ *
+ * THE TRADEOFF, stated: DK LED2, LED3 and Button 2 are gone. The firmware
+ * already used none of them — LED1 (P0.02) is its only on-board indicator
+ * and every button it reads is an external one on P0.21-P0.23 — and the
+ * pendant it is becoming has no DK to press anyway.
+ */
+&led2_pin_routing {
+	status = "disabled";
+};
+
+&led3_pin_routing {
+	status = "disabled";
+};
+
+&button2_pin_routing {
+	status = "disabled";
+};
