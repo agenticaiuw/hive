@@ -90,8 +90,12 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     params: { command: 'the shell command line to run', cwd: 'optional absolute path', timeout: 'optional ms' },
   },
   run_applescript: {
-    description: 'Run AppleScript for deep macOS automation.',
-    params: { script: 'the AppleScript source to run' },
+    description:
+      'Run AppleScript for deep macOS automation. Bounded at 45 seconds and killed past it. NEVER loop over a large collection reading properties per item ("repeat with r in (every reminder ...)", "every message whose ...") — each read is a separate Apple Event round trip and the script hangs until it is killed. Read whole properties in one call ("name of (reminders of L whose completed is false)"), or better, use the dedicated tool: list_reminders, list_calendar_events, triage_inbox.',
+    params: {
+      script: 'the AppleScript source to run',
+      timeoutMs: 'optional ms ceiling, only ever lower than the 45s cap',
+    },
   },
   /*
    * Deferred work. These were dispatchable but absent from every schema, so
@@ -217,6 +221,37 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       due: 'optional natural date/time like "tonight at 9pm" or ISO string',
       notes: 'optional string',
       list: 'optional Reminders list name',
+    },
+  },
+  /*
+   * The other half of the reminder pair.
+   *
+   * create_reminder shipped with "never use raw AppleScript for reminders" and
+   * no read tool beside it, so "reminders brief" left the planner one legal
+   * move and one that worked — and it took the one that worked. The AppleScript
+   * it wrote looped `every reminder` and never returned (job
+   * local_bd15c683-ba80-4079-9498-925112883bcd). A prohibition with no
+   * alternative is not a rule, it is a trap; these two descriptions are the
+   * alternative.
+   */
+  list_reminders: {
+    description:
+      'Read open items from Apple Reminders — what is due, what is overdue, what is on a list. Use this for ANY reminders READ: "what are my reminders", "reminders brief", "what is due today", "anything on my grocery list". Never use run_shell or raw AppleScript to read reminders; a script that loops over every reminder does not return.',
+    params: {
+      list: 'optional Reminders list name to read instead of all of them',
+      dueWithinDays: 'optional number — only items due within that many days (overdue always included)',
+      limit: 'optional number, default 50',
+    },
+  },
+  list_calendar_events: {
+    description:
+      'Read events from the Mac calendars — what is on today, what is next, what a given day looks like. Use this for ANY calendar READ. Never use run_shell or raw AppleScript to read the calendar; asking Calendar.app to walk every event takes tens of seconds.',
+    params: {
+      days: 'optional number of days from now, default 1 (the rest of today)',
+      from: 'optional ISO start instead of days',
+      to: 'optional ISO end instead of days',
+      calendar: 'optional calendar name to read instead of all of them',
+      limit: 'optional number, default 50',
     },
   },
   show_screen_overlay: {
@@ -734,6 +769,8 @@ const BACKGROUND_ACTION_TYPES = [
   'copy_to_clipboard',
   'get_clipboard',
   'create_reminder',
+  'list_reminders',
+  'list_calendar_events',
   'set_volume',
   'get_volume',
   'set_mute',
@@ -999,8 +1036,15 @@ const FULL_CONTROL_RULES = [
   { text: '- Time / date / clock → get_time.', needs: ['get_time'] },
   { text: '- Translation → translate_text.', needs: ['translate_text'] },
   {
-    text: '- Reminders → create_reminder. Brightness/volume → set_brightness / set_volume / set_mute.',
-    needs: ['create_reminder', 'set_brightness', 'set_volume', 'set_mute'],
+    text: '- Reminders: making one → create_reminder; reading them → list_reminders. Calendar reads → list_calendar_events. Never AppleScript for either. Brightness/volume → set_brightness / set_volume / set_mute.',
+    needs: [
+      'create_reminder',
+      'list_reminders',
+      'list_calendar_events',
+      'set_brightness',
+      'set_volume',
+      'set_mute',
+    ],
   },
   {
     text: "- Brief me / prepare my workday / what did I miss in email / read my schedule / summarize today's notes into next actions → compose_briefing (one action, nothing else). It reads the sources and writes the note itself; do not add create_note or run_applescript alongside it. It never sends, which is what the owner asked for.",
@@ -1635,7 +1679,7 @@ export function applyDomainClarification(plan, command, facts = []) {
   if (!plan || plan.status !== 'ready' || !plan.actions?.length) return plan
   if (plan.requiresConfirmation) return plan
 
-  let clarify = null
+  let clarify
   try {
     clarify = clarifyDomainRequest({
       domains: domainsForActions(plan.actions),
