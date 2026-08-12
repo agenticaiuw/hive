@@ -11,17 +11,17 @@ Status legend: **[LIVE]** wired & firmware-verified · **[NOW]** wire it, firmwa
 
 ```mermaid
 graph LR
-  DK["nRF9160 DK\nbrain · LTE · GNSS"]
-  ESP["ESP32\n(= Bluetooth module)"]
-  MIC["SPH0645 mic"]
+  DK["main chip · nRF9160 DK\nbrain · LTE · GNSS"]
+  ESP["Bluetooth audio bridge\nESP32 (stand-in for BT module)"]
+  MIC["microphone · SPH0645"]
   SW["red switch\nmic power"]
   BTN["buttons Y·G·B"]
   ENC["rotary encoder"]
-  POT["volume pot"]
-  SDC["microSD"]
-  HAP["DRV2605L + LRA"]
+  POT["volume knob · potentiometer"]
+  SDC["storage · microSD card"]
+  HAP["vibration: haptic driver DRV2605L\n+ buzzer motor (LRA)"]
   
-  AMP["MAX98357A + speaker"]
+  AMP["audio amplifier MAX98357A\n+ wired speaker"]
   SND(("Bose / AirPods"))
 
   DK -- "I2S · BCLK P0.16→P0.18↔G27 · LRCLK P0.14→P0.17↔G33 · OUT P0.19↔G14" --> ESP
@@ -34,7 +34,7 @@ graph LR
   POT -- "middle → P0.15 · sides → 3V/GND" --> DK
   SDC -- "SPI P0.10–P0.13" --> DK
   HAP -- "I2C P0.30/P0.31 · 0x5A · 4.7k pull-ups" --> DK
-  ACC["LSM6DSOX accel"] -- "I2C 0x6A · INT1 → P0.27" --> DK
+  ACC["motion sensor: accelerometer\nLSM6DSOX"] -- "I2C 0x6A · INT1 → P0.27" --> DK
   AMP -- "taps I2S nets · SD_MODE → P0.01" --> DK
   ESP -- "A2DP" --> SND
   DK -.->|"UART to BT module (future · pins TBD)"| ESP
