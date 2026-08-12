@@ -699,6 +699,1611 @@
 			privacy
 		};
 	}
+	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
+	const RELAY_NODE_ADDRESS = "@relay";
+	/** Serialized envelope ceiling. See the SIZE note above. */
+	const MAX_ENVELOPE_BYTES = 64 * 1024;
+	const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/;
+	const RESERVED_ADDRESS_PATTERN = /^@[a-z][a-z0-9-]{1,30}$/;
+	const KIND_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9][a-z0-9_]*){0,5}$/;
+	const MESSAGE_ID_PATTERN = /^nmsg_[A-Za-z0-9_-]{8,64}$/;
+	/**
+	* A node address, or '' if it is not one. Accepts a registered device id or a
+	* reserved '@name' address; rejects everything else, including empty strings
+	* and the whitespace-padded near-misses a hand-typed config produces.
+	*/
+	function normalizeNodeAddress(value) {
+		const address = String(value ?? "").trim();
+		if (RESERVED_ADDRESS_PATTERN.test(address)) return address;
+		return DEVICE_ADDRESS_PATTERN.test(address) ? address : "";
+	}
+	/** A message kind, or '' if it is not one. Lowercase dotted verbs only. */
+	function normalizeNodeKind(value) {
+		const kind = String(value ?? "").trim();
+		return kind.length <= 64 && KIND_PATTERN.test(kind) ? kind : "";
+	}
+	/** True while the envelope is still deliverable. */
+	function envelopeIsLive(envelope, now = Date.now()) {
+		const expiresAt = Date.parse(envelope?.expiresAt || "");
+		return Number.isFinite(expiresAt) && expiresAt > now;
+	}
+	/**
+	* Parse one envelope off the wire. Returns null for anything that is not a
+	* well-formed envelope of a version we speak — a receiver must never have to
+	* guess whether `payload` exists.
+	*/
+	function parseNodeEnvelope(input) {
+		let candidate = input;
+		if (typeof input === "string") try {
+			candidate = JSON.parse(input);
+		} catch {
+			return null;
+		}
+		if (!candidate || typeof candidate !== "object") return null;
+		if (candidate.v !== 1) return null;
+		if (!MESSAGE_ID_PATTERN.test(String(candidate.id || ""))) return null;
+		if (!normalizeNodeAddress(candidate.from)) return null;
+		if (!normalizeNodeAddress(candidate.to)) return null;
+		if (!normalizeNodeKind(candidate.kind)) return null;
+		if (candidate.payload === null || typeof candidate.payload !== "object" || Array.isArray(candidate.payload)) return null;
+		return candidate;
+	}
+	//#endregion
+	//#region shared/bridgeSocketProtocol.js
+	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
+	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
+	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
+	const BRIDGE_PING_INTERVAL_MS = 55e3;
+	function parseBridgeFrame(data) {
+		if (typeof data !== "string") return null;
+		try {
+			const parsed = JSON.parse(data);
+			return parsed && typeof parsed.type === "string" ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+	//#endregion
+	//#region browser-extension/src/relay-peer.js
+	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
+		"https://ai-pendant-relay.your-subdomain.workers.dev",
+		"http://127.0.0.1:8787",
+		"http://localhost:8787"
+	]);
+	/**
+	* A usable relay origin, or ''.
+	*
+	* Deliberately NOT a widening of normalizeAgentUrl(). That function's output
+	* is the base URL background.js sends `Authorization: Bearer <agentToken>` to,
+	* and agentToken is the MAC's credential. One URL field covering two origins
+	* therefore means one field that can aim either credential at either host —
+	* and the failure is silent, because both hosts answer 401 the same way. Two
+	* fields, two allowlists, one credential bound to each: a misconfiguration
+	* then costs a failed request instead of a leaked token.
+	*/
+	function normalizeRelayUrl(value) {
+		const candidate = String(value ?? "").trim();
+		if (!candidate) return "";
+		let url;
+		try {
+			url = new URL(candidate);
+		} catch {
+			return "";
+		}
+		if (url.username || url.password || url.search || url.hash) return "";
+		if (url.pathname !== "/" && url.pathname !== "") return "";
+		return RELAY_ORIGIN_ALLOWLIST.includes(url.origin) ? url.origin : "";
+	}
+	const RELAY_STORAGE_KEYS = Object.freeze([
+		"relayEnabled",
+		"relayUrl",
+		"relayDeviceId",
+		"deviceToken",
+		"meshTrustedSenders"
+	]);
+	const DEFAULT_TRUSTED_SENDERS = Object.freeze([RELAY_NODE_ADDRESS]);
+	function normalizeTrustedSenders(value, extra = []) {
+		const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/).filter(Boolean);
+		const senders = new Set(DEFAULT_TRUSTED_SENDERS);
+		for (const candidate of [...raw, ...extra]) {
+			const address = normalizeNodeAddress(candidate);
+			if (address) senders.add(address);
+		}
+		return [...senders];
+	}
+	/**
+	* Refuses to report `ready` unless the origin, the address and the credential
+	* are all present and sane — the same discipline normalizeBrainConfig uses, so
+	* a half-configured relay peer behaves exactly like an absent one.
+	*/
+	function normalizeRelayConfig(values = {}) {
+		const relayEnabled = values.relayEnabled === true;
+		const relayUrl = normalizeRelayUrl(values.relayUrl) || null;
+		const relayDeviceId = normalizeNodeAddress(values.relayDeviceId) || null;
+		const deviceToken = String(values.deviceToken ?? "").trim() || null;
+		let reason = "";
+		if (!relayEnabled) reason = "The relay peer is switched off (relayEnabled is not true).";
+		else if (!relayUrl) reason = "No usable relayUrl is configured. It must be one of the allowlisted relay origins.";
+		else if (!relayDeviceId) reason = "No relayDeviceId is configured — that is the address the relay delivers this extension's mail to.";
+		else if (!deviceToken) reason = "No deviceToken is configured — pair this browser with `pendant-credentials.mjs pair --role browser_node`.";
+		return {
+			relayEnabled,
+			relayUrl,
+			relayDeviceId,
+			deviceToken,
+			trustedSenders: normalizeTrustedSenders(values.meshTrustedSenders),
+			ready: relayEnabled && Boolean(relayUrl) && Boolean(relayDeviceId) && Boolean(deviceToken),
+			reason
+		};
+	}
+	/**
+	* Descriptors rather than fetches, so every URL, method and body this module
+	* can produce is assertable in a unit test without a network or a mock.
+	* `auth: 'device'` is a marker: the caller supplies the token, this module
+	* never holds it and never puts it in a URL.
+	*/
+	function inboxRequest(config) {
+		return {
+			method: "GET",
+			path: `/v1/node/inbox?deviceId=${encodeURIComponent(config.relayDeviceId)}`,
+			auth: "device",
+			body: null
+		};
+	}
+	function ackRequest(config, messageIds) {
+		return {
+			method: "POST",
+			path: "/v1/node/inbox/ack",
+			auth: "device",
+			body: {
+				deviceId: config.relayDeviceId,
+				messageIds: [...messageIds]
+			}
+		};
+	}
+	function sendRequest(config, { to, kind, payload, correlationId = null, ttlMs }) {
+		return {
+			method: "POST",
+			path: "/v1/node/messages",
+			auth: "device",
+			body: {
+				to,
+				kind,
+				payload,
+				...correlationId ? { correlationId } : {},
+				...Number.isFinite(ttlMs) ? { ttlMs } : {}
+			}
+		};
+	}
+	/**
+	* Where the socket connects. The deviceId is a path parameter because it is
+	* not a secret; the CREDENTIAL is not here and must never be, because query
+	* strings are the part of a request that gets logged — by Cloudflare, by any
+	* proxy in between, and by the browser's own network panel.
+	*/
+	function socketUrl(config) {
+		const origin = normalizeRelayUrl(config?.relayUrl);
+		const address = normalizeNodeAddress(config?.relayDeviceId);
+		if (!origin || !address) return "";
+		return `${origin.replace(/^http/, "ws")}/v1/node/socket?deviceId=${encodeURIComponent(address)}`;
+	}
+	/**
+	* The two subprotocol offers, in order.
+	*
+	* Two rather than one because RFC 6455 makes the server echo a protocol the
+	* client offered, and a browser closes a socket whose selected protocol it did
+	* not offer. Offering the plain mesh name alongside the credential gives the
+	* server something safe to echo — measured: it selects "pendant.mesh.v1" and
+	* the token never appears in the response.
+	*/
+	function socketProtocols(config) {
+		const token = String(config?.deviceToken ?? "").trim();
+		if (!token) return [];
+		return [MESH_SUBPROTOCOL, `${BEARER_SUBPROTOCOL_PREFIX}${token}`];
+	}
+	/** True when the server picked the protocol we can live with. */
+	function socketProtocolAccepted(selected) {
+		return String(selected ?? "") === "pendant.mesh.v1" || String(selected ?? "") === "";
+	}
+	/**
+	* What one inbound frame means. Pure, so the frame table is a test rather than
+	* a switch buried in an event handler.
+	*/
+	function reactToFrame(raw) {
+		const frame = parseBridgeFrame(raw);
+		if (!frame) return {
+			drain: false,
+			kind: ""
+		};
+		return {
+			drain: frame.type === "mail" || frame.type === "work",
+			kind: frame.type
+		};
+	}
+	function createEnvelopeLedger(seen = {}) {
+		const entries = {};
+		for (const [id, expiresAt] of Object.entries(seen ?? {})) {
+			const at = Number(expiresAt);
+			if (Number.isFinite(at)) entries[id] = at;
+		}
+		return entries;
+	}
+	/** Forget ids whose envelopes could no longer be delivered anyway. */
+	function pruneEnvelopeLedger(ledger, now = Date.now(), max = 400) {
+		const live = Object.entries(ledger).filter(([, expiresAt]) => expiresAt > now);
+		live.sort((left, right) => left[1] - right[1]);
+		return Object.fromEntries(live.slice(Math.max(0, live.length - max)));
+	}
+	const MAX_MESH_COMMAND_AGE_MS = 10 * 6e4;
+	/** kind → what this extension does with it. */
+	const MESH_KINDS = Object.freeze({
+		"browser.command": "command",
+		"browser.ping": "ping",
+		"approval_request": "approval"
+	});
+	const MESH_RESULT_KIND = "browser.command.result";
+	const MESH_PONG_KIND = "browser.pong";
+	const MAX_RESULT_PAYLOAD_BYTES = MAX_ENVELOPE_BYTES - 2048;
+	const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
+	const byteLength = (value) => {
+		const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+		return encoder ? encoder.encode(text).length : text.length * 2;
+	};
+	function fitResultPayload(payload, max = MAX_RESULT_PAYLOAD_BYTES) {
+		if (byteLength(payload) <= max) return {
+			payload,
+			truncated: false
+		};
+		const trimmed = { ...payload };
+		const result = trimmed.result && typeof trimmed.result === "object" ? { ...trimmed.result } : null;
+		if (result && typeof result.content === "string") {
+			let content = result.content;
+			while (content.length > 64) {
+				content = content.slice(0, Math.floor(content.length / 2));
+				result.content = `${content}\n[truncated to fit the 64 KiB node-mesh envelope]`;
+				trimmed.result = result;
+				if (byteLength(trimmed) <= max) return {
+					payload: {
+						...trimmed,
+						truncated: true
+					},
+					truncated: true
+				};
+			}
+		}
+		return {
+			payload: {
+				ok: payload?.ok === true,
+				truncated: true,
+				error: "The result did not fit a 64 KiB node-mesh envelope and no text field could be trimmed. Screenshots and other large blobs cannot cross the mesh; ask the Mac peer for them, or ask for a narrower selector."
+			},
+			truncated: true
+		};
+	}
+	/**
+	* Sort one drained page into what to run, what to ignore, and what to ack.
+	*
+	* EVERYTHING drained is acked, including duplicates, expired mail and mail
+	* this node refuses to execute. An ack is "I have this", not "I did this" —
+	* leaving a message unacked because it was refused would guarantee it comes
+	* back every 60 s forever, and the inbox would fill until MAX_INBOX_DEPTH
+	* started rejecting the sends that mattered.
+	*/
+	function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.now() } = {}) {
+		const trusted = new Set(config?.trustedSenders ?? DEFAULT_TRUSTED_SENDERS);
+		const self = normalizeNodeAddress(config?.relayDeviceId);
+		const seen = { ...ledger };
+		const run = [];
+		const ignored = [];
+		const ackIds = [];
+		for (const raw of Array.isArray(rawMessages) ? rawMessages : []) {
+			const envelope = parseNodeEnvelope(raw);
+			if (!envelope) {
+				ignored.push({
+					envelope: null,
+					reason: "not a node-mesh envelope of a version we speak"
+				});
+				continue;
+			}
+			ackIds.push(envelope.id);
+			if (envelope.id in seen) {
+				ignored.push({
+					envelope,
+					reason: "already handled (at-least-once redelivery)"
+				});
+				continue;
+			}
+			seen[envelope.id] = Date.parse(envelope.expiresAt) || now + 6e5;
+			if (self && envelope.to !== self) {
+				ignored.push({
+					envelope,
+					reason: `addressed to ${envelope.to}, not to this node`
+				});
+				continue;
+			}
+			const handling = MESH_KINDS[envelope.kind];
+			if (!handling) {
+				ignored.push({
+					envelope,
+					reason: `no handler for kind "${envelope.kind}"`
+				});
+				continue;
+			}
+			if (handling !== "approval" && !envelopeIsLive(envelope, now)) {
+				ignored.push({
+					envelope,
+					reason: "expired before it was drained"
+				});
+				continue;
+			}
+			if (!trusted.has(envelope.from)) {
+				ignored.push({
+					envelope,
+					reason: `"${envelope.from}" is not a trusted sender for this browser. Add it to meshTrustedSenders to let it drive tabs.`
+				});
+				continue;
+			}
+			const age = now - (Date.parse(envelope.createdAt) || now);
+			if (handling !== "approval" && age > 6e5) {
+				ignored.push({
+					envelope,
+					reason: `queued ${Math.round(age / 1e3)}s ago; this node refuses mesh mail older than ${MAX_MESH_COMMAND_AGE_MS / 6e4} minutes`
+				});
+				continue;
+			}
+			run.push({
+				envelope,
+				handling
+			});
+		}
+		return {
+			run,
+			ignored,
+			ackIds,
+			ledger: seen
+		};
+	}
+	/**
+	* Is there mail left AFTER this page?
+	*
+	* `pending` counts the page it just leased you, not what remains beyond it —
+	* a drain returning one message comes back `pending: 1` and only reads 0 once
+	* the ack lands. Measured on the live relay: messages=1, pending=1, then
+	* pending=0 after the ack. So `while (pending > 0) drain()` never terminates;
+	* it re-leases nothing and spins. The only honest read is the comparison.
+	*/
+	function hasMoreMail(page) {
+		return Number(page?.pending || 0) > (Array.isArray(page?.messages) ? page.messages.length : 0);
+	}
+	/**
+	* Build the Error a failed relay response should throw. One place, because
+	* the wire contract has four parts that drift independently: the human
+	* message (`error` or `message`), the machine name (`code` — e.g. the
+	* ownership 403's `not_your_inbox` since relay 41dbc4b), the HTTP status, and
+	* `retryAfter`. describeRelayFailure keys on status first and uses code only to
+	* sharpen, so this must carry all of them — dropping `code` at this seam once
+	* left the not_your_inbox branch unreachable from live traffic.
+	*
+	* `retryAfter` is DEVICE-SCOPED and the relay documents it as a contract
+	* (cloud-relay/nodeInference.js): its presence means "this device should not
+	* ask this relay again before then", never "this request was unlucky". brain.js
+	* parks on the field rather than on a list of status codes, so a reason the
+	* relay adds later is honoured with no change here — which only works if the
+	* field survives this seam. It is read from the body first and the standard
+	* header second, because a proxy can strip a header and the body is ours.
+	*/
+	async function relayResponseError(response) {
+		let detail = "";
+		let code = "";
+		let retryAfter = 0;
+		try {
+			const payload = await response.json();
+			detail = payload.error || payload.message || "";
+			code = typeof payload.code === "string" ? payload.code : "";
+			retryAfter = Number(payload.retryAfter) || 0;
+		} catch {
+			detail = await response.text().catch(() => "");
+		}
+		if (!retryAfter) retryAfter = Number(response.headers?.get?.("Retry-After")) || 0;
+		const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
+		error.status = response.status;
+		if (code) error.code = code;
+		if (retryAfter > 0) error.retryAfter = retryAfter;
+		return error;
+	}
+	/**
+	* Why a relay request failed, in a form the UI can act on.
+	*
+	* `code` is present on the relay's refusals (`scope_denied`, `unknown_node`,
+	* `inbox_full`, `invalid_envelope`, `credential_predates_capability`) — and,
+	* since relay commit 41dbc4b, on the ownership 403 as well: both
+	* /v1/node/inbox and /v1/node/inbox/ack now send `not_your_inbox`
+	* (OWNERSHIP_DENIED_CODE in cloud-relay/nodeMailbox.js) beside their
+	* deliberately vague message. Status stays the primary signal and code only
+	* sharpens it, never the other way round: a relay predating that commit — or
+	* any future 403 shipped without a code — must still land on the precise
+	* generic fix, not "unknown". 401 and 403 are split because they need
+	* different fixes: 401 is a credential this relay does not accept, 403 is a
+	* credential that is fine but is not allowed to touch this deviceId — and
+	* when the relay names it `not_your_inbox`, that is stated outright: the
+	* token is valid but paired to a different deviceId than the inbox it
+	* requested.
+	*/
+	function describeRelayFailure(error) {
+		const status = Number(error?.status || 0);
+		const code = String(error?.code ?? "") || "";
+		if (status === 401) return {
+			state: "unauthorized",
+			code,
+			message: "The relay does not accept this browser's device token. Pair again and paste the new one."
+		};
+		if (status === 403) {
+			if (code === "not_your_inbox") return {
+				state: "unauthorized",
+				code,
+				message: "This token is valid but paired to a different device ID than the inbox it requested. Set the device ID to the one this token was paired with, or pair again to get a token for this one."
+			};
+			return {
+				state: "unauthorized",
+				code,
+				message: "This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with."
+			};
+		}
+		return {
+			state: "offline",
+			code,
+			message: "Cannot reach the relay."
+		};
+	}
+	/**
+	* A mesh envelope, shaped as the command the extension already knows how to
+	* validate and execute — so mesh-borne work goes through exactly the same
+	* validateCommand / sanitizeExtraction path as Mac-borne work, with no second
+	* executor to keep in sync and no shortcut past the privacy boundary.
+	*
+	* createdAt is stamped at DELIVERY, not copied from the envelope: acceptEnvelopes
+	* above has already applied the mesh's own freshness rules, and letting
+	* bridge-core's 90 s rule run a second time over the same field would refuse
+	* every message the durable queue held while the browser was closed.
+	*/
+	function envelopeToCommand(envelope, now = Date.now()) {
+		const payload = envelope?.payload ?? {};
+		const type = String(payload.type ?? "").trim();
+		if (!COMMAND_TYPES.has(type)) throw new Error(`"${type || "(none)"}" is not a browser command this extension can run.`);
+		return {
+			commandId: envelope.id,
+			idempotencyKey: String(payload.idempotencyKey ?? "").trim() || void 0,
+			createdAt: new Date(now).toISOString(),
+			source: "node-mesh",
+			from: envelope.from,
+			action: {
+				type,
+				params: payload.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {}
+			}
+		};
+	}
+	/** The answer to a `browser.command`, addressed back at whoever asked. */
+	function resultMessageFor(envelope, outcome, config) {
+		const { payload, truncated } = fitResultPayload({
+			ok: outcome?.ok === true,
+			...outcome?.ok === true ? { result: outcome.result } : { error: String(outcome?.error ?? "Command failed.") }
+		});
+		return {
+			...sendRequest(config, {
+				to: envelope.from,
+				kind: MESH_RESULT_KIND,
+				payload,
+				correlationId: envelope.id
+			}),
+			truncated
+		};
+	}
+	function pongMessageFor(envelope, presence, config) {
+		return sendRequest(config, {
+			to: envelope.from,
+			kind: MESH_PONG_KIND,
+			payload: {
+				...presence,
+				address: config.relayDeviceId
+			},
+			correlationId: envelope.id
+		});
+	}
+	const MAC_FRESH_MS = 4e4;
+	const RELAY_POLL_SOCKET_MS = 3e5;
+	const RELAY_POLL_IDLE_MS = 3e4;
+	const RELAY_POLL_ACTIVE_MS = 3e3;
+	/**
+	* The whole routing policy, as one pure function.
+	*
+	* Written this way on purpose. "Prefer the Mac, fall back to the relay" is the
+	* kind of rule that otherwise lives as an emergent property of two independent
+	* loops and their timeouts, where the only way to find out what it does is to
+	* unplug something and watch. Here it is a table a test can assert.
+	*
+	* The key decision: `inbound` lists BOTH peers whenever both are usable. A
+	* mesh message is durable and silent — nothing tells the extension it exists —
+	* so an extension that only drained its inbox while the Mac was down would
+	* leave relay mail unread for as long as the Mac stayed up. Preferring the Mac
+	* is a statement about where WORK GOES OUT, not about what is listened to.
+	*/
+	function choosePeer({ macConfigured = false, macLastOkAt = 0, relayReady = false, socketOpen = false, now = Date.now() } = {}) {
+		const macFresh = macConfigured && now - macLastOkAt <= 4e4;
+		const inbound = [];
+		if (macConfigured) inbound.push("mac");
+		if (relayReady) inbound.push("relay");
+		const outbound = macFresh ? "mac" : relayReady ? "relay" : macConfigured ? "mac" : null;
+		const relayTransport = !relayReady ? "none" : socketOpen ? "socket" : "poll";
+		const relayPollMs = !relayReady ? RELAY_POLL_ACTIVE_MS : socketOpen ? RELAY_POLL_SOCKET_MS : macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS;
+		let reason;
+		if (!macConfigured && !relayReady) reason = "Neither peer is configured; this extension is unreachable.";
+		else if (relayReady && socketOpen && macFresh) reason = "Both peers reachable: the relay pushes over its socket, results go to the Mac (loopback is faster).";
+		else if (relayReady && socketOpen) reason = "The relay is pushing over its socket; the Mac is not answering.";
+		else if (macFresh && relayReady) reason = "Both peers configured, but the relay socket is down — sweeping its inbox on the fallback cadence.";
+		else if (macFresh) reason = "Only the Mac is configured; the relay peer is off or unconfigured.";
+		else if (relayReady && macConfigured) reason = `The Mac has not answered in ${Math.round((now - macLastOkAt) / 1e3)}s; the relay is carrying this node.`;
+		else if (relayReady) reason = "Only the relay is configured; there is no Mac peer.";
+		else reason = "The Mac is configured but silent, and there is no relay peer to fall back to.";
+		return {
+			inbound,
+			outbound,
+			macFresh,
+			relayTransport,
+			relayPollMs,
+			reason
+		};
+	}
+	/** One line for the popup and the status store. Never names a credential. */
+	function describeRelayPeer(config, choice) {
+		if (!config.ready) return `Relay peer: off — ${config.reason}`;
+		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
+	}
+	//#endregion
+	//#region browser-extension/src/pairing.js
+	const PAIR_LIFETIMES = Object.freeze([
+		"session",
+		"7d",
+		"30d",
+		"forever"
+	]);
+	const DEFAULT_PAIR_LIFETIME = "forever";
+	const LIFETIME_TTL_MS = Object.freeze({
+		session: null,
+		"7d": 10080 * 60 * 1e3,
+		"30d": 720 * 60 * 60 * 1e3,
+		forever: null
+	});
+	/** Anything not canonical becomes the default — the UI only offers the four,
+	* so a stray value is corruption, not intent. */
+	function normalizePairLifetime(raw) {
+		const value = String(raw ?? "").trim();
+		return PAIR_LIFETIMES.includes(value) ? value : DEFAULT_PAIR_LIFETIME;
+	}
+	/** Relay-side TTL for a lifetime; null means "mint with no expiry". */
+	function lifetimeTtlMs(lifetime) {
+		return LIFETIME_TTL_MS[normalizePairLifetime(lifetime)] ?? null;
+	}
+	/**
+	* Reply → storage patch. Keys are the live contract: `agentToken` restarts
+	* the Mac poll loop, the RELAY_STORAGE_KEYS quartet restarts the mesh socket
+	* (background.js watches both). relayEnabled flips true ONLY when a token
+	* actually arrived — flipping it on a failed relay leg would aim the drain
+	* loop at a relay this browser cannot authenticate to, and the error state
+	* that follows looks like a bug rather than an unfinished setup.
+	*/
+	function pairStoragePatch(payload, { agentUrl, lifetime, now = Date.now() } = {}) {
+		if (!payload?.ok || !payload.agentToken) return {
+			ok: false,
+			error: String(payload?.error ?? "Pairing failed: the agent returned no token.")
+		};
+		const chosen = normalizePairLifetime(lifetime);
+		const ttl = lifetimeTtlMs(chosen);
+		const values = {
+			...agentUrl ? { agentUrl } : {},
+			agentToken: String(payload.agentToken),
+			pairLifetime: chosen,
+			pairExpiresAt: ttl ? new Date(now + ttl).toISOString() : null
+		};
+		if (payload.relay?.deviceToken) {
+			values.relayEnabled = true;
+			values.relayUrl = String(payload.relay.url ?? "");
+			values.relayDeviceId = String(payload.relay.deviceId ?? "");
+			values.deviceToken = String(payload.relay.deviceToken);
+			return {
+				ok: true,
+				values,
+				note: `Paired. This browser is ${values.relayDeviceId} on the relay — the brain is on.`
+			};
+		}
+		return {
+			ok: true,
+			values,
+			note: `Mac agent paired. Relay half failed: ${String(payload.relayError ?? "no credential returned")} — commands will use the Mac until you pair again.`
+		};
+	}
+	const PAIR_OUTCOME_KEY = "pairOutcome";
+	function pairOutcomeRecord(outcome, now = Date.now()) {
+		return outcome?.ok ? {
+			ok: true,
+			note: String(outcome.note ?? "Paired."),
+			at: now
+		} : {
+			ok: false,
+			error: String(outcome?.error ?? "Pairing failed."),
+			at: now
+		};
+	}
+	const PAIR_WIPE_KEYS = Object.freeze([
+		"agentToken",
+		"deviceToken",
+		"relayEnabled",
+		"pairLifetime",
+		"pairExpiresAt"
+	]);
+	function credentialExpiryCheck({ agentToken, pairLifetime, pairExpiresAt, sessionAlive, now = Date.now() } = {}) {
+		if (!agentToken) return { wipe: false };
+		const lifetime = normalizePairLifetime(pairLifetime);
+		if (lifetime === "session" && !sessionAlive) return {
+			wipe: true,
+			reason: "This pairing was for the browser session only, and the browser has been closed since."
+		};
+		const expiresAt = Date.parse(pairExpiresAt ?? "");
+		if (Number.isFinite(expiresAt) && expiresAt <= now) return {
+			wipe: true,
+			reason: `The ${lifetime === "7d" ? "7-day" : lifetime === "30d" ? "30-day" : "timed"} pairing has expired.`
+		};
+		return { wipe: false };
+	}
+	function shouldEscrow(lifetime) {
+		return normalizePairLifetime(lifetime) !== "session";
+	}
+	function escrowRestorePlan(values, now = Date.now()) {
+		if (!values || typeof values !== "object" || !values.agentToken) return {
+			restore: false,
+			reason: "nothing escrowed"
+		};
+		if (normalizePairLifetime(values.pairLifetime) === "session") return {
+			restore: false,
+			reason: "session-only pairings are never restored"
+		};
+		const verdict = credentialExpiryCheck({
+			agentToken: values.agentToken,
+			pairLifetime: values.pairLifetime,
+			pairExpiresAt: values.pairExpiresAt,
+			sessionAlive: false,
+			now
+		});
+		if (verdict.wipe) return {
+			restore: false,
+			reason: verdict.reason
+		};
+		return {
+			restore: true,
+			values
+		};
+	}
+	const APPROVAL_DECISION_KIND = "approval_decision";
+	const APPROVAL_DECISIONS = Object.freeze(["approve", "deny"]);
+	const SETTLED_PROMPT_TTL_MS = 10 * 6e4;
+	const clean = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+	/**
+	* One approval_request envelope, as the card a surface renders. Returns null
+	* for anything else — wrong kind, no approvalId — so a caller can feed it a
+	* whole drained page and keep only the questions.
+	*
+	* The texts are bounded here, once, because both surfaces put them straight
+	* into UI: a summary is a sentence, a detail is a paragraph, and a payload
+	* that claims otherwise gets trimmed rather than trusted with the layout.
+	*/
+	function approvalPromptFromEnvelope(envelope, { now = Date.now() } = {}) {
+		if (envelope?.kind !== "approval_request") return null;
+		const payload = envelope.payload ?? {};
+		const approvalId = clean(payload.approvalId, 80);
+		if (!approvalId || !envelope.id) return null;
+		const payloadExpiry = Date.parse(String(payload.expiresAt ?? ""));
+		const envelopeExpiry = Date.parse(String(envelope.expiresAt ?? ""));
+		const expiresAt = Number.isFinite(payloadExpiry) ? payloadExpiry : envelopeExpiry;
+		return {
+			approvalId,
+			summary: clean(payload.summary, 200) || "An action is waiting for your approval.",
+			detail: clean(payload.detail, 600),
+			risk: clean(payload.risk, 40),
+			expiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+			envelopeId: envelope.id,
+			from: envelope.from,
+			receivedAt: new Date(now).toISOString(),
+			decision: null,
+			decidedAt: null
+		};
+	}
+	/** Past the approval's own deadline. A prompt with no deadline never expires. */
+	function approvalIsExpired(prompt, now = Date.now()) {
+		const expiresAt = Date.parse(String(prompt?.expiresAt ?? ""));
+		return Number.isFinite(expiresAt) && expiresAt <= now;
+	}
+	/** May the owner still answer this? One predicate for every disabled button. */
+	function approvalIsAnswerable(prompt, now = Date.now()) {
+		return Boolean(prompt?.approvalId) && !prompt.decision && !approvalIsExpired(prompt, now);
+	}
+	/**
+	* Fold freshly drained envelopes into the held prompts. Pure; the caller owns
+	* where the list lives (React state on the phone, storage.local in the
+	* extension).
+	*
+	* Returns { prompts, changed } — and the SAME array when nothing changed, so
+	* a React setState or a storage write can be skipped instead of churned.
+	*/
+	function mergeApprovalPrompts(prompts, envelopes, { now = Date.now() } = {}) {
+		const held = Array.isArray(prompts) ? prompts : [];
+		let list = held;
+		let changed = false;
+		for (const envelope of Array.isArray(envelopes) ? envelopes : []) {
+			const prompt = approvalPromptFromEnvelope(envelope, { now });
+			if (!prompt) continue;
+			const index = list.findIndex((entry) => entry?.approvalId === prompt.approvalId);
+			if (index === -1) {
+				list = changed ? list : [...held];
+				list.push(prompt);
+				changed = true;
+				continue;
+			}
+			const current = list[index];
+			if (current.envelopeId === prompt.envelopeId && current.from === prompt.from) continue;
+			list = changed ? list : [...held];
+			list[index] = {
+				...current,
+				envelopeId: prompt.envelopeId,
+				from: prompt.from
+			};
+			changed = true;
+		}
+		if (!changed) return {
+			prompts: held,
+			changed: false
+		};
+		return {
+			prompts: pruneApprovalPrompts(list, now),
+			changed: true
+		};
+	}
+	/** Mark one prompt decided. Pure; answering is the caller's job, first. */
+	function settleApprovalPrompt(prompts, approvalId, decision, { now = Date.now() } = {}) {
+		return (Array.isArray(prompts) ? prompts : []).map((prompt) => prompt?.approvalId === approvalId ? {
+			...prompt,
+			decision,
+			decidedAt: new Date(now).toISOString()
+		} : prompt);
+	}
+	/** How many prompts still need the owner: live and undecided. */
+	function undecidedApprovalCount(prompts, now = Date.now()) {
+		return (Array.isArray(prompts) ? prompts : []).filter((prompt) => approvalIsAnswerable(prompt, now)).length;
+	}
+	/**
+	* Sweep receipts and enforce the cap. Settled and long-expired cards go
+	* first; a live question is the last thing this will ever drop, and dropping
+	* one at all means MAX_APPROVAL_PROMPTS questions are already unanswered.
+	*/
+	function pruneApprovalPrompts(prompts, now = Date.now(), max = 20) {
+		const list = (Array.isArray(prompts) ? prompts : []).filter((prompt) => {
+			if (!prompt?.approvalId) return false;
+			if (prompt.decidedAt && Date.parse(prompt.decidedAt) + 6e5 <= now) return false;
+			if (!prompt.decision && approvalIsExpired(prompt, now)) return Date.parse(prompt.expiresAt) + SETTLED_PROMPT_TTL_MS > now;
+			return true;
+		});
+		if (list.length <= max) return list;
+		const weight = (prompt) => prompt.decision ? 0 : approvalIsExpired(prompt, now) ? 1 : 2;
+		const drop = new Set([...list].sort((left, right) => weight(left) - weight(right) || String(left.receivedAt ?? "").localeCompare(String(right.receivedAt ?? ""))).slice(0, list.length - max).map((prompt) => prompt.approvalId));
+		return list.filter((prompt) => !drop.has(prompt.approvalId));
+	}
+	/**
+	* The answer, in the exact frozen shape. Returns the fields a sender hands to
+	* its own transport — mesh_send params on the phone, sendRequest() in the
+	* extension — so the payload and the corr cannot be assembled differently on
+	* different surfaces.
+	*/
+	function approvalDecisionBody(prompt, decision) {
+		if (!APPROVAL_DECISIONS.includes(decision)) throw new Error(`An approval decision is "approve" or "deny", not "${String(decision)}".`);
+		if (!prompt?.approvalId || !prompt?.envelopeId || !prompt?.from) throw new Error("A decision needs the prompt it answers: approvalId, envelopeId and from.");
+		return {
+			to: prompt.from,
+			kind: APPROVAL_DECISION_KIND,
+			payload: {
+				approvalId: prompt.approvalId,
+				decision
+			},
+			correlationId: prompt.envelopeId
+		};
+	}
+	//#endregion
+	//#region browser-extension/src/approvals.js
+	const APPROVALS_KEY = "pendingApprovals";
+	/**
+	* What the toolbar badge shows: the number of prompts still waiting on the
+	* owner, or null to fall back to the connection badge. A count outranks 'ON'
+	* because 'ON' is reassurance and a count is a request — amber, like every
+	* "parked, waiting for you" state in this extension's UI.
+	*/
+	function approvalBadge(prompts, now = Date.now()) {
+		const waiting = undecidedApprovalCount(prompts, now);
+		if (!waiting) return null;
+		return {
+			text: String(Math.min(waiting, 99)),
+			color: "#B07C1F"
+		};
+	}
+	/**
+	* Everything between "the owner pressed a button" and "background.js performs
+	* a fetch", as one pure step so the whole decision path is assertable:
+	*
+	*   { ok: true,  request, envelopeId, prompts }   — send `request`, and only
+	*     AFTER it succeeds persist `prompts` (the settled list) and ack
+	*     `envelopeId`. The settle rides in the return value rather than being
+	*     applied by the caller so the two can never disagree about what was
+	*     decided.
+	*   { ok: false, error, prompts }                 — nothing to send; `prompts`
+	*     is the input unchanged, because a refused decision must leave the card
+	*     exactly as pressable or as settled as it already was.
+	*
+	* Refusals mirror the phone's: a prompt this browser no longer holds, one
+	* already answered (an approval is answered once — the double-click and the
+	* stale popup land here), and one past its own deadline.
+	*/
+	function prepareApprovalDecision(prompts, approvalId, decision, { config, now = Date.now() } = {}) {
+		const list = Array.isArray(prompts) ? prompts : [];
+		const prompt = list.find((entry) => entry?.approvalId === approvalId);
+		if (!prompt) return {
+			ok: false,
+			error: "That approval is no longer held here — it may have been pruned or answered elsewhere.",
+			prompts: list
+		};
+		if (prompt.decision) return {
+			ok: false,
+			error: `Already answered: ${prompt.decision === "approve" ? "approved" : "denied"}${prompt.decidedAt ? ` at ${prompt.decidedAt}` : ""}. An approval is answered once.`,
+			prompts: list
+		};
+		if (approvalIsExpired(prompt, now)) return {
+			ok: false,
+			error: "This approval expired before it was answered. Whoever asked must send a fresh one.",
+			prompts: list
+		};
+		let request;
+		try {
+			request = sendRequest(config, approvalDecisionBody(prompt, decision));
+		} catch (error) {
+			return {
+				ok: false,
+				error: error?.message ?? String(error),
+				prompts: list
+			};
+		}
+		return {
+			ok: true,
+			request,
+			envelopeId: prompt.envelopeId,
+			prompts: settleApprovalPrompt(list, approvalId, decision, { now })
+		};
+	}
+	//#endregion
+	//#region browser-extension/src/executor.js
+	const api$2 = globalThis.browser ?? globalThis.chrome;
+	const FETCH_TIMEOUT_MS = 7e3;
+	const HEARTBEAT_INTERVAL_MS = 12e3;
+	const STATUS_KEY = "bridgeStatus";
+	const RELAY_STATUS_KEY = "relayStatus";
+	const CONFIG_KEYS = [
+		"agentUrl",
+		"agentToken",
+		"deviceName",
+		"targetMode",
+		"instanceId"
+	];
+	async function getConfig() {
+		const values = await api$2.storage.local.get(CONFIG_KEYS);
+		const config = normalizeConfig(values);
+		if (!values.instanceId) {
+			values.instanceId = crypto.randomUUID();
+			await api$2.storage.local.set({ instanceId: values.instanceId });
+		}
+		return {
+			...config,
+			instanceId: values.instanceId,
+			extensionId: `ai-pendant-${api$2.runtime.id}-${values.instanceId}`
+		};
+	}
+	async function request(config, path, options = {}) {
+		return fetch(`${config.agentUrl}${path}`, {
+			...options,
+			cache: "no-store",
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${config.agentToken}`,
+				...options.body ? { "Content-Type": "application/json" } : {},
+				...options.headers
+			},
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+		});
+	}
+	async function postJson(config, path, payload) {
+		const response = await request(config, path, {
+			method: "POST",
+			body: JSON.stringify(payload)
+		});
+		if (!response.ok) throw await responseError(response);
+		return response.status === 204 ? null : response.json();
+	}
+	async function responseError(response) {
+		let detail = "";
+		try {
+			const payload = await response.json();
+			detail = payload.error || payload.message || "";
+		} catch {
+			detail = await response.text().catch(() => "");
+		}
+		const error = new Error(detail || `Local agent returned HTTP ${response.status}.`);
+		error.status = response.status;
+		return error;
+	}
+	async function currentTabSummary() {
+		const [tab] = await api$2.tabs.query({
+			active: true,
+			lastFocusedWindow: true
+		});
+		const scriptable = (await api$2.tabs.query({}).catch(() => [])).filter((t) => isScriptableUrl(t?.url));
+		return tab ? {
+			tabId: tab.id ?? null,
+			windowId: tab.windowId ?? null,
+			tabUrl: isScriptableUrl(tab.url) ? new URL(tab.url).origin : "",
+			tabTitle: String(tab.title || "").slice(0, 80),
+			tabCount: scriptable.length
+		} : {
+			tabId: null,
+			windowId: null,
+			tabUrl: "",
+			tabTitle: "",
+			tabCount: scriptable.length
+		};
+	}
+	/**
+	* One heartbeat, from whichever engine is alive. The IDENTITY comes from
+	* config (stored instanceId → stable extensionId) so the fleet map lights up
+	* the same node either way; the INCARNATION comes from the caller (nonce +
+	* ledger), because "which evaluation of which context is holding the lease"
+	* is exactly what the agent uses the nonce to tell apart.
+	*/
+	async function heartbeat(config, { nonce, ledger }) {
+		const tab = await currentTabSummary();
+		await postJson(config, "/browser/heartbeat", {
+			extensionId: config.extensionId,
+			deviceName: config.deviceName || platformLabel(),
+			browserName: browserLabel(),
+			extensionVersion: api$2.runtime.getManifest().version,
+			userAgent: globalThis.navigator?.userAgent ?? "",
+			nonce,
+			capabilities: [
+				"idempotency-ledger",
+				"privacy-boundary",
+				"provenance"
+			],
+			ledger: ledger.stats(),
+			...tab
+		});
+	}
+	async function pollOnce(config, { ledger }) {
+		const response = await request(config, `/browser/poll?extensionId=${encodeURIComponent(config.extensionId)}`);
+		if (response.status === 204) return false;
+		if (!response.ok) throw await responseError(response);
+		const command = (await response.json())?.command;
+		const identity = commandIdentity(command);
+		let result;
+		const replayed = ledger.recall(identity);
+		if (replayed) {
+			await postResultWithRetry(config, command?.commandId, {
+				...replayed.result,
+				extensionId: config.extensionId,
+				replayed: true
+			});
+			return true;
+		}
+		try {
+			result = {
+				ok: true,
+				result: await executeCommand(command, config)
+			};
+		} catch (error) {
+			result = {
+				ok: false,
+				error: error?.message || String(error)
+			};
+		}
+		ledger.remember(identity, result);
+		await postResultWithRetry(config, command?.commandId, {
+			...result,
+			extensionId: config.extensionId
+		});
+		return true;
+	}
+	async function postResultWithRetry(config, commandId, result) {
+		if (!commandId) throw new Error("The browser command is missing its commandId.");
+		let lastError;
+		for (let attempt = 0; attempt < 3; attempt += 1) try {
+			await postJson(config, `/browser/result/${encodeURIComponent(commandId)}`, result);
+			return;
+		} catch (error) {
+			lastError = error;
+			if (attempt < 2) await delay(retryDelay(attempt, 300, 1200));
+		}
+		throw lastError;
+	}
+	/**
+	* One writer for bridgeStatus, shared by both engines. `engine` says which
+	* one wrote it — 'background' unless the patch claims otherwise — so a stale
+	* page-engine stamp cannot outlive the background taking back over.
+	*/
+	async function updateStatus(patch) {
+		const status = {
+			...(await api$2.storage.local.get("bridgeStatus"))["bridgeStatus"] ?? {},
+			...patch,
+			engine: patch.engine ?? "background",
+			extensionId: api$2.runtime.id,
+			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		await api$2.storage.local.set({ [STATUS_KEY]: status });
+		await refreshBadge(status);
+	}
+	async function updateRelayStatus(patch) {
+		const current = (await api$2.storage.local.get("relayStatus"))["relayStatus"] ?? {};
+		await api$2.storage.local.set({ [RELAY_STATUS_KEY]: {
+			...current,
+			...patch,
+			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+		} });
+	}
+	/**
+	* One writer for the toolbar badge, so its two claimants cannot fight.
+	*
+	* Approvals waiting on the owner outrank connection state: 'ON' is
+	* reassurance, a count is a request, and the poll loop repaints the badge
+	* often enough that the count falls away on its own once the last card is
+	* answered or expires. Everything that changes either input — a status
+	* update, a drained approval, a decision — lands here.
+	*/
+	async function refreshBadge(status = null) {
+		if (!api$2.action?.setBadgeText) return;
+		const stored = await api$2.storage.local.get([STATUS_KEY, APPROVALS_KEY]);
+		const current = status ?? stored["bridgeStatus"] ?? {};
+		const badge = approvalBadge(stored["pendingApprovals"] ?? []) ?? {
+			text: current.state === "connected" ? "ON" : current.state === "needs-setup" ? "SET" : "!",
+			color: current.state === "connected" ? "#078B70" : "#B54736"
+		};
+		await api$2.action.setBadgeText({ text: badge.text });
+		if (api$2.action.setBadgeBackgroundColor) await api$2.action.setBadgeBackgroundColor({ color: badge.color });
+	}
+	/**
+	* Run one command, then take everything it produced through the privacy
+	* boundary and stamp it with where it came from.
+	*
+	* The order is the whole point. sanitizeExtraction runs after execution and
+	* before the result is handed back to pollOnce, which is the last moment it is
+	* still inside Safari: past here it is in a different process with a log, a
+	* store and a cloud relay attached, and a credential that reaches the agent has
+	* effectively left the machine.
+	*/
+	async function executeCommand(command, config) {
+		const { type, params } = validateCommand({
+			...command,
+			action: {
+				...command?.action,
+				params: normalizeCommandParams(command?.action?.params)
+			}
+		});
+		const { result, tab } = await runCommand(type, params, config);
+		const clean = sanitizeExtraction(result);
+		return {
+			...clean.result,
+			provenance: provenanceFor({
+				command,
+				tab,
+				result: clean.result,
+				locator: params.ref || params.selector
+			})
+		};
+	}
+	async function runCommand(type, params, config) {
+		if (type === "navigate") return {
+			result: await navigate(params, config),
+			tab: null
+		};
+		if (type === "activate_tab") return {
+			result: await activateTab(params, config),
+			tab: null
+		};
+		if (type === "list_tabs") return {
+			result: await listTabs(params),
+			tab: null
+		};
+		const tab = await selectTargetTab(params, config.targetMode);
+		await assertPageAccess(tab);
+		if (type === "capture") return {
+			result: await captureTab(tab),
+			tab
+		};
+		if (type === "wait_for") return {
+			result: await waitForInTab(tab, params),
+			tab
+		};
+		const firstResult = (await api$2.scripting.executeScript({
+			target: {
+				tabId: tab.id,
+				frameIds: [0]
+			},
+			func: runInPage,
+			args: [type, params]
+		}))?.[0];
+		if (!firstResult) throw new Error("The browser returned no result from the active page.");
+		if (firstResult.error) throw new Error(firstResult.error.message || String(firstResult.error));
+		return {
+			result: {
+				...firstResult.result,
+				tabId: tab.id,
+				windowId: tab.windowId,
+				url: tab.url ?? "",
+				title: tab.title ?? firstResult.result?.title ?? ""
+			},
+			tab
+		};
+	}
+	async function waitForInTab(tab, params) {
+		const timeoutMs = Math.max(100, Math.min(Number(params.timeoutMs) || 1e4, 3e4));
+		const started = Date.now();
+		while (Date.now() - started < timeoutMs) {
+			if ((await api$2.scripting.executeScript({
+				target: {
+					tabId: tab.id,
+					frameIds: [0]
+				},
+				func: checkWaitCondition,
+				args: [params]
+			}))?.[0]?.result === true) return {
+				message: "wait_for satisfied",
+				waitedMs: Date.now() - started,
+				tabId: tab.id,
+				windowId: tab.windowId,
+				url: tab.url ?? ""
+			};
+			await delay(150);
+		}
+		throw new Error(`wait_for timed out after ${timeoutMs}ms`);
+	}
+	/** Injected: returns true if wait condition holds. */
+	function checkWaitCondition(params) {
+		const selector = String(params.selector || "").trim();
+		const textNeedle = String(params.textContains || params.text || "").trim().toLowerCase();
+		if (selector) try {
+			const el = document.querySelector(selector);
+			if (el) {
+				const style = window.getComputedStyle(el);
+				const rect = el.getBoundingClientRect();
+				if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0) return true;
+			}
+		} catch {
+			throw new Error(`Invalid CSS selector: ${selector}`);
+		}
+		if (textNeedle) {
+			if ((document.body?.innerText || "").toLowerCase().includes(textNeedle)) return true;
+		}
+		return false;
+	}
+	async function listTabs(params = {}) {
+		const max = Math.max(1, Math.min(Number(params.limit) || 30, 80));
+		const rows = (await api$2.tabs.query({})).filter((tab) => isScriptableUrl(tab?.url)).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).slice(0, max).map((tab) => ({
+			tabId: tab.id,
+			windowId: tab.windowId,
+			active: Boolean(tab.active),
+			title: String(tab.title || "").slice(0, 120),
+			url: tab.url || "",
+			origin: isScriptableUrl(tab.url) ? new URL(tab.url).origin : ""
+		}));
+		return {
+			message: `${rows.length} open web tab(s)`,
+			tabs: rows,
+			tabCount: rows.length
+		};
+	}
+	async function captureTab(tab) {
+		const windowId = tab.windowId;
+		if (tab.active === false) {
+			await api$2.tabs.update(tab.id, { active: true });
+			await delay(150);
+		}
+		const dataUrl = await api$2.tabs.captureVisibleTab(windowId, { format: "png" });
+		return {
+			message: "Captured visible tab",
+			tabId: tab.id,
+			windowId,
+			url: tab.url ?? "",
+			title: tab.title ?? "",
+			mimeType: "image/png",
+			imageDataUrl: dataUrl
+		};
+	}
+	async function navigate(params, config) {
+		const url = validateNavigationUrl(params.url);
+		const openNewTab = params.newTab === true || config.targetMode === "new-tab";
+		let tab;
+		if (openNewTab) tab = await api$2.tabs.create({
+			url,
+			active: params.active !== false,
+			...Number.isInteger(params.windowId) ? { windowId: params.windowId } : {}
+		});
+		else {
+			tab = await selectTargetTab(params, config.targetMode);
+			tab = await api$2.tabs.update(tab.id, {
+				url,
+				active: params.active !== false
+			});
+		}
+		if (params.waitForLoad !== false) tab = await waitForTabLoad(tab.id, 15e3);
+		return {
+			message: `Navigated to ${url}`,
+			tabId: tab.id,
+			windowId: tab.windowId,
+			url: tab.url || url
+		};
+	}
+	/**
+	* Find-or-open. Focuses the freshest existing tab matching `urlContains`
+	* (bringing its window forward), and only when nothing matches — and a `url`
+	* was given — opens a new tab. "Open ibkr" means the signed-in tab the owner
+	* already has, not a duplicate and not whatever the active tab was showing.
+	* Needs only the `tabs` permission (already in the manifest); windows.update
+	* requires none.
+	*/
+	async function activateTab(params, _config) {
+		const needle = String(params.urlContains ?? "").trim().toLowerCase();
+		const fallbackUrl = String(params.url ?? "").trim();
+		if (needle) {
+			const match = (await api$2.tabs.query({})).filter((tab) => Number.isInteger(tab?.id) && isScriptableUrl(tab.url) && String(tab.url).toLowerCase().includes(needle)).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+			if (match) {
+				const tab = await api$2.tabs.update(match.id, { active: true });
+				if (api$2.windows?.update && Number.isInteger(tab?.windowId)) await api$2.windows.update(tab.windowId, { focused: true }).catch(() => {});
+				return {
+					message: `Activated the existing tab matching "${needle}"`,
+					tabId: tab.id,
+					windowId: tab.windowId,
+					url: tab.url ?? match.url ?? "",
+					title: tab.title ?? match.title ?? "",
+					activatedExisting: true
+				};
+			}
+		}
+		if (!fallbackUrl) throw new Error(`No open tab matches "${needle}" and no url was given to open instead.`);
+		const url = validateNavigationUrl(fallbackUrl);
+		let tab = await api$2.tabs.create({
+			url,
+			active: true
+		});
+		if (params.waitForLoad !== false) tab = await waitForTabLoad(tab.id, 15e3);
+		return {
+			message: `No matching tab was open; opened ${url}`,
+			tabId: tab.id,
+			windowId: tab.windowId,
+			url: tab.url || url,
+			activatedExisting: false
+		};
+	}
+	async function selectTargetTab(params, targetMode) {
+		if (Number.isInteger(params.tabId)) return api$2.tabs.get(params.tabId);
+		let tabs;
+		if (Number.isInteger(params.windowId)) tabs = await api$2.tabs.query({ windowId: params.windowId });
+		else if (params.urlContains) tabs = await api$2.tabs.query({});
+		else if (targetMode === "current-active") tabs = await api$2.tabs.query({
+			active: true,
+			currentWindow: true
+		});
+		else tabs = await api$2.tabs.query({ active: true });
+		const tab = pickTargetTab(tabs, params, targetMode);
+		if (tab) return tab;
+		throw new Error("No matching browser tab is available. Open a web page or specify a valid tabId.");
+	}
+	async function assertPageAccess(tab) {
+		if (!tab?.id || !isScriptableUrl(tab.url)) throw new Error("This page cannot be controlled. Browser settings, extension pages, and local files are protected.");
+		const pattern = originPattern(tab.url);
+		if (!await api$2.permissions.contains({ origins: [pattern] })) throw new Error(`Website access is not granted for ${new URL(tab.url).origin}. Click “Allow this browser’s pages” in the extension popup.`);
+	}
+	function waitForTabLoad(tabId, timeoutMs) {
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(async () => {
+				cleanup();
+				try {
+					resolve(await api$2.tabs.get(tabId));
+				} catch {
+					reject(/* @__PURE__ */ new Error("The destination tab closed before it finished loading."));
+				}
+			}, timeoutMs);
+			const onUpdated = (updatedTabId, changeInfo, tab) => {
+				if (updatedTabId === tabId && changeInfo.status === "complete") {
+					cleanup();
+					resolve(tab);
+				}
+			};
+			const onRemoved = (removedTabId) => {
+				if (removedTabId === tabId) {
+					cleanup();
+					reject(/* @__PURE__ */ new Error("The destination tab closed before it finished loading."));
+				}
+			};
+			const cleanup = () => {
+				clearTimeout(timeout);
+				api$2.tabs.onUpdated.removeListener(onUpdated);
+				api$2.tabs.onRemoved.removeListener(onRemoved);
+			};
+			api$2.tabs.onUpdated.addListener(onUpdated);
+			api$2.tabs.onRemoved.addListener(onRemoved);
+		});
+	}
+	/**
+	* Injected into the page (isolated world). Keep pure-page; no chrome.* APIs.
+	*/
+	function runInPage(type, params) {
+		const ATTR = "data-pendant-ref";
+		const MAX_ELEMENTS = 80;
+		const cssPath = (el) => {
+			if (!(el instanceof Element)) return "";
+			if (el.id) {
+				const id = CSS.escape(el.id);
+				if (document.querySelectorAll(`#${id}`).length === 1) return `#${id}`;
+			}
+			const parts = [];
+			let node = el;
+			while (node && node.nodeType === 1 && parts.length < 6) {
+				let part = node.nodeName.toLowerCase();
+				if (node.id) {
+					parts.unshift(`#${CSS.escape(node.id)}`);
+					break;
+				}
+				const parent = node.parentElement;
+				if (parent) {
+					const siblings = [...parent.children].filter((c) => c.nodeName === node.nodeName);
+					if (siblings.length > 1) {
+						const index = siblings.indexOf(node) + 1;
+						part += `:nth-of-type(${index})`;
+					}
+				}
+				parts.unshift(part);
+				node = parent;
+			}
+			return parts.join(" > ");
+		};
+		const resolveElement = () => {
+			if (params.ref) {
+				const ref = String(params.ref).trim();
+				const byAttr = document.querySelector(`[${ATTR}="${ref.replace(/"/g, "")}"]`);
+				if (byAttr) return byAttr;
+				throw new Error(`Snapshot ref not found: ${ref}. Call snapshot again and use a fresh ref.`);
+			}
+			const selector = String(params.selector ?? "");
+			let element;
+			try {
+				element = document.querySelector(selector);
+			} catch {
+				throw new Error(`Invalid CSS selector: ${selector}`);
+			}
+			if (!element) throw new Error(`Element not found: ${selector}`);
+			return element;
+		};
+		const isVisible = (el) => {
+			if (!(el instanceof Element)) return false;
+			if (!el.checkVisibility({
+				opacityProperty: true,
+				visibilityProperty: true,
+				contentVisibilityAuto: true
+			})) return false;
+			const rect = el.getBoundingClientRect();
+			return rect.width > 0 && rect.height > 0;
+		};
+		const accessibleName = (el) => {
+			const aria = el.getAttribute("aria-label");
+			if (aria) return aria.trim().slice(0, 120);
+			const labelledBy = el.getAttribute("aria-labelledby");
+			if (labelledBy) {
+				const text = labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.innerText).filter(Boolean).join(" ").trim();
+				if (text) return text.slice(0, 120);
+			}
+			if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+				const lab = el.labels?.[0]?.innerText;
+				if (lab) return lab.trim().slice(0, 120);
+				if (el.placeholder) return el.placeholder.trim().slice(0, 120);
+				if (el.name) return el.name.slice(0, 120);
+			}
+			if (el instanceof HTMLSelectElement && el.name) return el.name.slice(0, 120);
+			return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120);
+		};
+		const roleOf = (el) => {
+			const explicit = el.getAttribute("role");
+			if (explicit) return explicit;
+			const tag = el.tagName.toLowerCase();
+			if (tag === "a" && el.hasAttribute("href")) return "link";
+			if (tag === "button") return "button";
+			if (tag === "select") return "combobox";
+			if (tag === "textarea") return "textbox";
+			if (tag === "input") {
+				const t = (el.type || "text").toLowerCase();
+				if (t === "checkbox") return "checkbox";
+				if (t === "radio") return "radio";
+				if (t === "submit" || t === "button") return "button";
+				return "textbox";
+			}
+			if (el.isContentEditable) return "textbox";
+			return tag;
+		};
+		if (type === "snapshot") {
+			const max = Math.max(1, Math.min(Number(params.maxElements) || MAX_ELEMENTS, MAX_ELEMENTS));
+			document.querySelectorAll(`[${ATTR}]`).forEach((el) => el.removeAttribute(ATTR));
+			const candidates = [...document.querySelectorAll("a[href], button, input, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"textbox\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"menuitem\"], [contenteditable=\"true\"]")].filter((el) => isVisible(el) && !el.closest("[aria-hidden=\"true\"]"));
+			const elements = [];
+			for (const el of candidates) {
+				if (elements.length >= max) break;
+				if (el instanceof HTMLInputElement && (el.type === "hidden" || el.type === "password") && params.includeSensitive !== true) {
+					if (el.type === "hidden") continue;
+				}
+				const ref = `e${elements.length}`;
+				el.setAttribute(ATTR, ref);
+				const rect = el.getBoundingClientRect();
+				elements.push({
+					ref,
+					role: roleOf(el),
+					name: accessibleName(el),
+					tag: el.tagName.toLowerCase(),
+					selector: cssPath(el),
+					disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
+					checked: el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio") ? Boolean(el.checked) : el.getAttribute("aria-checked") === "true" ? true : void 0,
+					href: el instanceof HTMLAnchorElement ? el.href?.slice(0, 300) : void 0,
+					inputType: el instanceof HTMLInputElement ? (el.type || "text").toLowerCase() : void 0,
+					fieldName: el.getAttribute?.("name") || void 0,
+					autocomplete: el.getAttribute?.("autocomplete") || void 0,
+					bounds: {
+						x: Math.round(rect.x),
+						y: Math.round(rect.y),
+						w: Math.round(rect.width),
+						h: Math.round(rect.height)
+					}
+				});
+			}
+			return {
+				message: `Snapshot: ${elements.length} interactive element(s)`,
+				title: document.title,
+				url: location.href,
+				elementCount: elements.length,
+				elements
+			};
+		}
+		if (type === "click") {
+			const element = resolveElement();
+			element.scrollIntoView({
+				block: "center",
+				inline: "center"
+			});
+			element.click();
+			return { message: `Clicked ${params.ref || params.selector}` };
+		}
+		if (type === "type") {
+			const element = resolveElement();
+			if (element instanceof HTMLInputElement && element.type === "password" && params.allowSensitiveInput !== true) throw new Error("Typing into password fields requires allowSensitiveInput=true.");
+			const text = String(params.text ?? "");
+			element.focus();
+			if (element instanceof HTMLInputElement) (Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set)?.call(element, text);
+			else if (element instanceof HTMLTextAreaElement) (Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set)?.call(element, text);
+			else if (element.isContentEditable) element.textContent = text;
+			else throw new Error("The selected element is not editable.");
+			element.dispatchEvent(new InputEvent("input", {
+				bubbles: true,
+				inputType: "insertText",
+				data: text
+			}));
+			element.dispatchEvent(new Event("change", { bubbles: true }));
+			if (params.submit) if (element.form?.requestSubmit) element.form.requestSubmit();
+			else element.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "Enter",
+				code: "Enter",
+				bubbles: true
+			}));
+			return { message: `Typed into ${params.ref || params.selector}` };
+		}
+		if (type === "select") {
+			const element = resolveElement();
+			if (!(element instanceof HTMLSelectElement)) throw new Error("select requires a <select> element.");
+			const value = String(params.value ?? "");
+			const label = String(params.label ?? "");
+			let matched = false;
+			for (const opt of element.options) if (value && opt.value === value || label && opt.textContent.trim() === label || label && opt.textContent.trim().includes(label)) {
+				element.value = opt.value;
+				matched = true;
+				break;
+			}
+			if (!matched) throw new Error("No matching option for select.");
+			element.dispatchEvent(new Event("input", { bubbles: true }));
+			element.dispatchEvent(new Event("change", { bubbles: true }));
+			return { message: `Selected option on ${params.ref || params.selector}` };
+		}
+		if (type === "scroll") {
+			if (params.selector || params.ref) {
+				resolveElement().scrollIntoView({
+					block: params.block || "center",
+					inline: "nearest",
+					behavior: "instant"
+				});
+				return { message: `Scrolled to ${params.ref || params.selector}` };
+			}
+			const dy = Number(params.dy) || 0;
+			const dx = Number(params.dx) || 0;
+			window.scrollBy(dx, dy);
+			return { message: `Scrolled by (${dx}, ${dy})` };
+		}
+		if (type === "press_key") {
+			const key = String(params.key || "");
+			const target = params.selector || params.ref ? resolveElement() : document.activeElement || document.body;
+			target.dispatchEvent(new KeyboardEvent("keydown", {
+				key,
+				code: key,
+				bubbles: true
+			}));
+			target.dispatchEvent(new KeyboardEvent("keyup", {
+				key,
+				code: key,
+				bubbles: true
+			}));
+			return { message: `Pressed ${key}` };
+		}
+		if (type === "read_page") {
+			const maximum = Math.max(1, Math.min(Number(params.maxChars) || 12e3, 5e4));
+			const mode = String(params.mode || "text");
+			if (params.selector || params.ref) {
+				const element = resolveElement();
+				const content = mode === "html" ? element.outerHTML : element.innerText || element.textContent || "";
+				return {
+					message: "Read selected content",
+					content: String(content ?? "").slice(0, maximum),
+					title: document.title,
+					mode
+				};
+			}
+			let content = "";
+			if (mode === "html") content = document.documentElement?.outerHTML || "";
+			else if (mode === "forms") content = [...document.querySelectorAll("form")].map((form, i) => {
+				return `form#${i}\n${[...form.querySelectorAll("input,select,textarea")].map((el) => {
+					const name = el.name || el.id || el.getAttribute("aria-label") || el.type;
+					return `  - ${el.tagName.toLowerCase()}${el.type ? `[${el.type}]` : ""} name=${name}`;
+				}).join("\n")}`;
+			}).join("\n\n");
+			else if (mode === "landmarks") content = [...document.querySelectorAll("main, nav, header, footer, [role=\"main\"], [role=\"navigation\"], h1, h2")].map((el) => {
+				return `${el.tagName.toLowerCase()}: ${(el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160)}`;
+			}).join("\n");
+			else if (mode === "main_text") content = (document.querySelector("main, [role=\"main\"], article") || document.body)?.innerText || "";
+			else content = document.body?.innerText || "";
+			return {
+				message: `Read page (${mode})`,
+				content: String(content ?? "").slice(0, maximum),
+				title: document.title,
+				mode
+			};
+		}
+		throw new Error(`Unsupported browser command: ${type}`);
+	}
+	function browserLabel() {
+		const userAgent = globalThis.navigator?.userAgent ?? "";
+		if (/Edg\//.test(userAgent)) return "Microsoft Edge";
+		if (/Firefox\//.test(userAgent)) return "Firefox";
+		if (/Chrome\//.test(userAgent)) return "Google Chrome";
+		if (/Safari\//.test(userAgent)) return "Safari";
+		return "Web Extension";
+	}
+	function platformLabel() {
+		const platform = globalThis.navigator?.platform || "Mac";
+		return `${browserLabel()} on ${platform}`;
+	}
+	function delay(ms) {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
 	//#endregion
 	//#region browser-extension/src/command-console.js
 	const CONSOLE_SOURCE = "browser-extension";
@@ -1680,565 +3285,6 @@ Answer with the JSON object only. No prose, no code fences.`;
 			}
 		};
 	}
-	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
-	const RELAY_NODE_ADDRESS = "@relay";
-	/** Serialized envelope ceiling. See the SIZE note above. */
-	const MAX_ENVELOPE_BYTES = 64 * 1024;
-	const DEVICE_ADDRESS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/;
-	const RESERVED_ADDRESS_PATTERN = /^@[a-z][a-z0-9-]{1,30}$/;
-	const KIND_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9][a-z0-9_]*){0,5}$/;
-	const MESSAGE_ID_PATTERN = /^nmsg_[A-Za-z0-9_-]{8,64}$/;
-	/**
-	* A node address, or '' if it is not one. Accepts a registered device id or a
-	* reserved '@name' address; rejects everything else, including empty strings
-	* and the whitespace-padded near-misses a hand-typed config produces.
-	*/
-	function normalizeNodeAddress(value) {
-		const address = String(value ?? "").trim();
-		if (RESERVED_ADDRESS_PATTERN.test(address)) return address;
-		return DEVICE_ADDRESS_PATTERN.test(address) ? address : "";
-	}
-	/** A message kind, or '' if it is not one. Lowercase dotted verbs only. */
-	function normalizeNodeKind(value) {
-		const kind = String(value ?? "").trim();
-		return kind.length <= 64 && KIND_PATTERN.test(kind) ? kind : "";
-	}
-	/** True while the envelope is still deliverable. */
-	function envelopeIsLive(envelope, now = Date.now()) {
-		const expiresAt = Date.parse(envelope?.expiresAt || "");
-		return Number.isFinite(expiresAt) && expiresAt > now;
-	}
-	/**
-	* Parse one envelope off the wire. Returns null for anything that is not a
-	* well-formed envelope of a version we speak — a receiver must never have to
-	* guess whether `payload` exists.
-	*/
-	function parseNodeEnvelope(input) {
-		let candidate = input;
-		if (typeof input === "string") try {
-			candidate = JSON.parse(input);
-		} catch {
-			return null;
-		}
-		if (!candidate || typeof candidate !== "object") return null;
-		if (candidate.v !== 1) return null;
-		if (!MESSAGE_ID_PATTERN.test(String(candidate.id || ""))) return null;
-		if (!normalizeNodeAddress(candidate.from)) return null;
-		if (!normalizeNodeAddress(candidate.to)) return null;
-		if (!normalizeNodeKind(candidate.kind)) return null;
-		if (candidate.payload === null || typeof candidate.payload !== "object" || Array.isArray(candidate.payload)) return null;
-		return candidate;
-	}
-	//#endregion
-	//#region shared/bridgeSocketProtocol.js
-	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
-	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
-	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
-	const BRIDGE_PING_INTERVAL_MS = 55e3;
-	function parseBridgeFrame(data) {
-		if (typeof data !== "string") return null;
-		try {
-			const parsed = JSON.parse(data);
-			return parsed && typeof parsed.type === "string" ? parsed : null;
-		} catch {
-			return null;
-		}
-	}
-	//#endregion
-	//#region browser-extension/src/relay-peer.js
-	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
-		"https://ai-pendant-relay.your-subdomain.workers.dev",
-		"http://127.0.0.1:8787",
-		"http://localhost:8787"
-	]);
-	/**
-	* A usable relay origin, or ''.
-	*
-	* Deliberately NOT a widening of normalizeAgentUrl(). That function's output
-	* is the base URL background.js sends `Authorization: Bearer <agentToken>` to,
-	* and agentToken is the MAC's credential. One URL field covering two origins
-	* therefore means one field that can aim either credential at either host —
-	* and the failure is silent, because both hosts answer 401 the same way. Two
-	* fields, two allowlists, one credential bound to each: a misconfiguration
-	* then costs a failed request instead of a leaked token.
-	*/
-	function normalizeRelayUrl(value) {
-		const candidate = String(value ?? "").trim();
-		if (!candidate) return "";
-		let url;
-		try {
-			url = new URL(candidate);
-		} catch {
-			return "";
-		}
-		if (url.username || url.password || url.search || url.hash) return "";
-		if (url.pathname !== "/" && url.pathname !== "") return "";
-		return RELAY_ORIGIN_ALLOWLIST.includes(url.origin) ? url.origin : "";
-	}
-	const RELAY_STORAGE_KEYS = Object.freeze([
-		"relayEnabled",
-		"relayUrl",
-		"relayDeviceId",
-		"deviceToken",
-		"meshTrustedSenders"
-	]);
-	const DEFAULT_TRUSTED_SENDERS = Object.freeze([RELAY_NODE_ADDRESS]);
-	function normalizeTrustedSenders(value, extra = []) {
-		const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/).filter(Boolean);
-		const senders = new Set(DEFAULT_TRUSTED_SENDERS);
-		for (const candidate of [...raw, ...extra]) {
-			const address = normalizeNodeAddress(candidate);
-			if (address) senders.add(address);
-		}
-		return [...senders];
-	}
-	/**
-	* Refuses to report `ready` unless the origin, the address and the credential
-	* are all present and sane — the same discipline normalizeBrainConfig uses, so
-	* a half-configured relay peer behaves exactly like an absent one.
-	*/
-	function normalizeRelayConfig(values = {}) {
-		const relayEnabled = values.relayEnabled === true;
-		const relayUrl = normalizeRelayUrl(values.relayUrl) || null;
-		const relayDeviceId = normalizeNodeAddress(values.relayDeviceId) || null;
-		const deviceToken = String(values.deviceToken ?? "").trim() || null;
-		let reason = "";
-		if (!relayEnabled) reason = "The relay peer is switched off (relayEnabled is not true).";
-		else if (!relayUrl) reason = "No usable relayUrl is configured. It must be one of the allowlisted relay origins.";
-		else if (!relayDeviceId) reason = "No relayDeviceId is configured — that is the address the relay delivers this extension's mail to.";
-		else if (!deviceToken) reason = "No deviceToken is configured — pair this browser with `pendant-credentials.mjs pair --role browser_node`.";
-		return {
-			relayEnabled,
-			relayUrl,
-			relayDeviceId,
-			deviceToken,
-			trustedSenders: normalizeTrustedSenders(values.meshTrustedSenders),
-			ready: relayEnabled && Boolean(relayUrl) && Boolean(relayDeviceId) && Boolean(deviceToken),
-			reason
-		};
-	}
-	/**
-	* Descriptors rather than fetches, so every URL, method and body this module
-	* can produce is assertable in a unit test without a network or a mock.
-	* `auth: 'device'` is a marker: the caller supplies the token, this module
-	* never holds it and never puts it in a URL.
-	*/
-	function inboxRequest(config) {
-		return {
-			method: "GET",
-			path: `/v1/node/inbox?deviceId=${encodeURIComponent(config.relayDeviceId)}`,
-			auth: "device",
-			body: null
-		};
-	}
-	function ackRequest(config, messageIds) {
-		return {
-			method: "POST",
-			path: "/v1/node/inbox/ack",
-			auth: "device",
-			body: {
-				deviceId: config.relayDeviceId,
-				messageIds: [...messageIds]
-			}
-		};
-	}
-	function sendRequest(config, { to, kind, payload, correlationId = null, ttlMs }) {
-		return {
-			method: "POST",
-			path: "/v1/node/messages",
-			auth: "device",
-			body: {
-				to,
-				kind,
-				payload,
-				...correlationId ? { correlationId } : {},
-				...Number.isFinite(ttlMs) ? { ttlMs } : {}
-			}
-		};
-	}
-	/**
-	* Where the socket connects. The deviceId is a path parameter because it is
-	* not a secret; the CREDENTIAL is not here and must never be, because query
-	* strings are the part of a request that gets logged — by Cloudflare, by any
-	* proxy in between, and by the browser's own network panel.
-	*/
-	function socketUrl(config) {
-		const origin = normalizeRelayUrl(config?.relayUrl);
-		const address = normalizeNodeAddress(config?.relayDeviceId);
-		if (!origin || !address) return "";
-		return `${origin.replace(/^http/, "ws")}/v1/node/socket?deviceId=${encodeURIComponent(address)}`;
-	}
-	/**
-	* The two subprotocol offers, in order.
-	*
-	* Two rather than one because RFC 6455 makes the server echo a protocol the
-	* client offered, and a browser closes a socket whose selected protocol it did
-	* not offer. Offering the plain mesh name alongside the credential gives the
-	* server something safe to echo — measured: it selects "pendant.mesh.v1" and
-	* the token never appears in the response.
-	*/
-	function socketProtocols(config) {
-		const token = String(config?.deviceToken ?? "").trim();
-		if (!token) return [];
-		return [MESH_SUBPROTOCOL, `${BEARER_SUBPROTOCOL_PREFIX}${token}`];
-	}
-	/** True when the server picked the protocol we can live with. */
-	function socketProtocolAccepted(selected) {
-		return String(selected ?? "") === "pendant.mesh.v1" || String(selected ?? "") === "";
-	}
-	/**
-	* What one inbound frame means. Pure, so the frame table is a test rather than
-	* a switch buried in an event handler.
-	*/
-	function reactToFrame(raw) {
-		const frame = parseBridgeFrame(raw);
-		if (!frame) return {
-			drain: false,
-			kind: ""
-		};
-		return {
-			drain: frame.type === "mail" || frame.type === "work",
-			kind: frame.type
-		};
-	}
-	function createEnvelopeLedger(seen = {}) {
-		const entries = {};
-		for (const [id, expiresAt] of Object.entries(seen ?? {})) {
-			const at = Number(expiresAt);
-			if (Number.isFinite(at)) entries[id] = at;
-		}
-		return entries;
-	}
-	/** Forget ids whose envelopes could no longer be delivered anyway. */
-	function pruneEnvelopeLedger(ledger, now = Date.now(), max = 400) {
-		const live = Object.entries(ledger).filter(([, expiresAt]) => expiresAt > now);
-		live.sort((left, right) => left[1] - right[1]);
-		return Object.fromEntries(live.slice(Math.max(0, live.length - max)));
-	}
-	const MAX_MESH_COMMAND_AGE_MS = 10 * 6e4;
-	/** kind → what this extension does with it. */
-	const MESH_KINDS = Object.freeze({
-		"browser.command": "command",
-		"browser.ping": "ping",
-		"approval_request": "approval"
-	});
-	const MESH_RESULT_KIND = "browser.command.result";
-	const MESH_PONG_KIND = "browser.pong";
-	const MAX_RESULT_PAYLOAD_BYTES = MAX_ENVELOPE_BYTES - 2048;
-	const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
-	const byteLength = (value) => {
-		const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
-		return encoder ? encoder.encode(text).length : text.length * 2;
-	};
-	function fitResultPayload(payload, max = MAX_RESULT_PAYLOAD_BYTES) {
-		if (byteLength(payload) <= max) return {
-			payload,
-			truncated: false
-		};
-		const trimmed = { ...payload };
-		const result = trimmed.result && typeof trimmed.result === "object" ? { ...trimmed.result } : null;
-		if (result && typeof result.content === "string") {
-			let content = result.content;
-			while (content.length > 64) {
-				content = content.slice(0, Math.floor(content.length / 2));
-				result.content = `${content}\n[truncated to fit the 64 KiB node-mesh envelope]`;
-				trimmed.result = result;
-				if (byteLength(trimmed) <= max) return {
-					payload: {
-						...trimmed,
-						truncated: true
-					},
-					truncated: true
-				};
-			}
-		}
-		return {
-			payload: {
-				ok: payload?.ok === true,
-				truncated: true,
-				error: "The result did not fit a 64 KiB node-mesh envelope and no text field could be trimmed. Screenshots and other large blobs cannot cross the mesh; ask the Mac peer for them, or ask for a narrower selector."
-			},
-			truncated: true
-		};
-	}
-	/**
-	* Sort one drained page into what to run, what to ignore, and what to ack.
-	*
-	* EVERYTHING drained is acked, including duplicates, expired mail and mail
-	* this node refuses to execute. An ack is "I have this", not "I did this" —
-	* leaving a message unacked because it was refused would guarantee it comes
-	* back every 60 s forever, and the inbox would fill until MAX_INBOX_DEPTH
-	* started rejecting the sends that mattered.
-	*/
-	function acceptEnvelopes(rawMessages, { ledger = {}, config, now = Date.now() } = {}) {
-		const trusted = new Set(config?.trustedSenders ?? DEFAULT_TRUSTED_SENDERS);
-		const self = normalizeNodeAddress(config?.relayDeviceId);
-		const seen = { ...ledger };
-		const run = [];
-		const ignored = [];
-		const ackIds = [];
-		for (const raw of Array.isArray(rawMessages) ? rawMessages : []) {
-			const envelope = parseNodeEnvelope(raw);
-			if (!envelope) {
-				ignored.push({
-					envelope: null,
-					reason: "not a node-mesh envelope of a version we speak"
-				});
-				continue;
-			}
-			ackIds.push(envelope.id);
-			if (envelope.id in seen) {
-				ignored.push({
-					envelope,
-					reason: "already handled (at-least-once redelivery)"
-				});
-				continue;
-			}
-			seen[envelope.id] = Date.parse(envelope.expiresAt) || now + 6e5;
-			if (self && envelope.to !== self) {
-				ignored.push({
-					envelope,
-					reason: `addressed to ${envelope.to}, not to this node`
-				});
-				continue;
-			}
-			const handling = MESH_KINDS[envelope.kind];
-			if (!handling) {
-				ignored.push({
-					envelope,
-					reason: `no handler for kind "${envelope.kind}"`
-				});
-				continue;
-			}
-			if (handling !== "approval" && !envelopeIsLive(envelope, now)) {
-				ignored.push({
-					envelope,
-					reason: "expired before it was drained"
-				});
-				continue;
-			}
-			if (!trusted.has(envelope.from)) {
-				ignored.push({
-					envelope,
-					reason: `"${envelope.from}" is not a trusted sender for this browser. Add it to meshTrustedSenders to let it drive tabs.`
-				});
-				continue;
-			}
-			const age = now - (Date.parse(envelope.createdAt) || now);
-			if (handling !== "approval" && age > 6e5) {
-				ignored.push({
-					envelope,
-					reason: `queued ${Math.round(age / 1e3)}s ago; this node refuses mesh mail older than ${MAX_MESH_COMMAND_AGE_MS / 6e4} minutes`
-				});
-				continue;
-			}
-			run.push({
-				envelope,
-				handling
-			});
-		}
-		return {
-			run,
-			ignored,
-			ackIds,
-			ledger: seen
-		};
-	}
-	/**
-	* Is there mail left AFTER this page?
-	*
-	* `pending` counts the page it just leased you, not what remains beyond it —
-	* a drain returning one message comes back `pending: 1` and only reads 0 once
-	* the ack lands. Measured on the live relay: messages=1, pending=1, then
-	* pending=0 after the ack. So `while (pending > 0) drain()` never terminates;
-	* it re-leases nothing and spins. The only honest read is the comparison.
-	*/
-	function hasMoreMail(page) {
-		return Number(page?.pending || 0) > (Array.isArray(page?.messages) ? page.messages.length : 0);
-	}
-	/**
-	* Build the Error a failed relay response should throw. One place, because
-	* the wire contract has four parts that drift independently: the human
-	* message (`error` or `message`), the machine name (`code` — e.g. the
-	* ownership 403's `not_your_inbox` since relay 41dbc4b), the HTTP status, and
-	* `retryAfter`. describeRelayFailure keys on status first and uses code only to
-	* sharpen, so this must carry all of them — dropping `code` at this seam once
-	* left the not_your_inbox branch unreachable from live traffic.
-	*
-	* `retryAfter` is DEVICE-SCOPED and the relay documents it as a contract
-	* (cloud-relay/nodeInference.js): its presence means "this device should not
-	* ask this relay again before then", never "this request was unlucky". brain.js
-	* parks on the field rather than on a list of status codes, so a reason the
-	* relay adds later is honoured with no change here — which only works if the
-	* field survives this seam. It is read from the body first and the standard
-	* header second, because a proxy can strip a header and the body is ours.
-	*/
-	async function relayResponseError(response) {
-		let detail = "";
-		let code = "";
-		let retryAfter = 0;
-		try {
-			const payload = await response.json();
-			detail = payload.error || payload.message || "";
-			code = typeof payload.code === "string" ? payload.code : "";
-			retryAfter = Number(payload.retryAfter) || 0;
-		} catch {
-			detail = await response.text().catch(() => "");
-		}
-		if (!retryAfter) retryAfter = Number(response.headers?.get?.("Retry-After")) || 0;
-		const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
-		error.status = response.status;
-		if (code) error.code = code;
-		if (retryAfter > 0) error.retryAfter = retryAfter;
-		return error;
-	}
-	/**
-	* Why a relay request failed, in a form the UI can act on.
-	*
-	* `code` is present on the relay's refusals (`scope_denied`, `unknown_node`,
-	* `inbox_full`, `invalid_envelope`, `credential_predates_capability`) — and,
-	* since relay commit 41dbc4b, on the ownership 403 as well: both
-	* /v1/node/inbox and /v1/node/inbox/ack now send `not_your_inbox`
-	* (OWNERSHIP_DENIED_CODE in cloud-relay/nodeMailbox.js) beside their
-	* deliberately vague message. Status stays the primary signal and code only
-	* sharpens it, never the other way round: a relay predating that commit — or
-	* any future 403 shipped without a code — must still land on the precise
-	* generic fix, not "unknown". 401 and 403 are split because they need
-	* different fixes: 401 is a credential this relay does not accept, 403 is a
-	* credential that is fine but is not allowed to touch this deviceId — and
-	* when the relay names it `not_your_inbox`, that is stated outright: the
-	* token is valid but paired to a different deviceId than the inbox it
-	* requested.
-	*/
-	function describeRelayFailure(error) {
-		const status = Number(error?.status || 0);
-		const code = String(error?.code ?? "") || "";
-		if (status === 401) return {
-			state: "unauthorized",
-			code,
-			message: "The relay does not accept this browser's device token. Pair again and paste the new one."
-		};
-		if (status === 403) {
-			if (code === "not_your_inbox") return {
-				state: "unauthorized",
-				code,
-				message: "This token is valid but paired to a different device ID than the inbox it requested. Set the device ID to the one this token was paired with, or pair again to get a token for this one."
-			};
-			return {
-				state: "unauthorized",
-				code,
-				message: "This token is valid but not for this device ID. Check that the device ID here matches the one it was paired with."
-			};
-		}
-		return {
-			state: "offline",
-			code,
-			message: "Cannot reach the relay."
-		};
-	}
-	/**
-	* A mesh envelope, shaped as the command the extension already knows how to
-	* validate and execute — so mesh-borne work goes through exactly the same
-	* validateCommand / sanitizeExtraction path as Mac-borne work, with no second
-	* executor to keep in sync and no shortcut past the privacy boundary.
-	*
-	* createdAt is stamped at DELIVERY, not copied from the envelope: acceptEnvelopes
-	* above has already applied the mesh's own freshness rules, and letting
-	* bridge-core's 90 s rule run a second time over the same field would refuse
-	* every message the durable queue held while the browser was closed.
-	*/
-	function envelopeToCommand(envelope, now = Date.now()) {
-		const payload = envelope?.payload ?? {};
-		const type = String(payload.type ?? "").trim();
-		if (!COMMAND_TYPES.has(type)) throw new Error(`"${type || "(none)"}" is not a browser command this extension can run.`);
-		return {
-			commandId: envelope.id,
-			idempotencyKey: String(payload.idempotencyKey ?? "").trim() || void 0,
-			createdAt: new Date(now).toISOString(),
-			source: "node-mesh",
-			from: envelope.from,
-			action: {
-				type,
-				params: payload.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {}
-			}
-		};
-	}
-	/** The answer to a `browser.command`, addressed back at whoever asked. */
-	function resultMessageFor(envelope, outcome, config) {
-		const { payload, truncated } = fitResultPayload({
-			ok: outcome?.ok === true,
-			...outcome?.ok === true ? { result: outcome.result } : { error: String(outcome?.error ?? "Command failed.") }
-		});
-		return {
-			...sendRequest(config, {
-				to: envelope.from,
-				kind: MESH_RESULT_KIND,
-				payload,
-				correlationId: envelope.id
-			}),
-			truncated
-		};
-	}
-	function pongMessageFor(envelope, presence, config) {
-		return sendRequest(config, {
-			to: envelope.from,
-			kind: MESH_PONG_KIND,
-			payload: {
-				...presence,
-				address: config.relayDeviceId
-			},
-			correlationId: envelope.id
-		});
-	}
-	const MAC_FRESH_MS = 4e4;
-	const RELAY_POLL_SOCKET_MS = 3e5;
-	const RELAY_POLL_IDLE_MS = 3e4;
-	const RELAY_POLL_ACTIVE_MS = 3e3;
-	/**
-	* The whole routing policy, as one pure function.
-	*
-	* Written this way on purpose. "Prefer the Mac, fall back to the relay" is the
-	* kind of rule that otherwise lives as an emergent property of two independent
-	* loops and their timeouts, where the only way to find out what it does is to
-	* unplug something and watch. Here it is a table a test can assert.
-	*
-	* The key decision: `inbound` lists BOTH peers whenever both are usable. A
-	* mesh message is durable and silent — nothing tells the extension it exists —
-	* so an extension that only drained its inbox while the Mac was down would
-	* leave relay mail unread for as long as the Mac stayed up. Preferring the Mac
-	* is a statement about where WORK GOES OUT, not about what is listened to.
-	*/
-	function choosePeer({ macConfigured = false, macLastOkAt = 0, relayReady = false, socketOpen = false, now = Date.now() } = {}) {
-		const macFresh = macConfigured && now - macLastOkAt <= 4e4;
-		const inbound = [];
-		if (macConfigured) inbound.push("mac");
-		if (relayReady) inbound.push("relay");
-		const outbound = macFresh ? "mac" : relayReady ? "relay" : macConfigured ? "mac" : null;
-		const relayTransport = !relayReady ? "none" : socketOpen ? "socket" : "poll";
-		const relayPollMs = !relayReady ? RELAY_POLL_ACTIVE_MS : socketOpen ? RELAY_POLL_SOCKET_MS : macFresh ? RELAY_POLL_IDLE_MS : RELAY_POLL_ACTIVE_MS;
-		let reason;
-		if (!macConfigured && !relayReady) reason = "Neither peer is configured; this extension is unreachable.";
-		else if (relayReady && socketOpen && macFresh) reason = "Both peers reachable: the relay pushes over its socket, results go to the Mac (loopback is faster).";
-		else if (relayReady && socketOpen) reason = "The relay is pushing over its socket; the Mac is not answering.";
-		else if (macFresh && relayReady) reason = "Both peers configured, but the relay socket is down — sweeping its inbox on the fallback cadence.";
-		else if (macFresh) reason = "Only the Mac is configured; the relay peer is off or unconfigured.";
-		else if (relayReady && macConfigured) reason = `The Mac has not answered in ${Math.round((now - macLastOkAt) / 1e3)}s; the relay is carrying this node.`;
-		else if (relayReady) reason = "Only the relay is configured; there is no Mac peer.";
-		else reason = "The Mac is configured but silent, and there is no relay peer to fall back to.";
-		return {
-			inbound,
-			outbound,
-			macFresh,
-			relayTransport,
-			relayPollMs,
-			reason
-		};
-	}
-	/** One line for the popup and the status store. Never names a credential. */
-	function describeRelayPeer(config, choice) {
-		if (!config.ready) return `Relay peer: off — ${config.reason}`;
-		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
-	}
 	//#endregion
 	//#region browser-extension/src/execution-status.js
 	const EXECUTION_STATUS_KEY = "localExecutionStatus";
@@ -2420,601 +3466,12 @@ Answer with the JSON object only. No prose, no code fences.`;
 			}
 		});
 	}
-	const APPROVAL_DECISION_KIND = "approval_decision";
-	const APPROVAL_DECISIONS = Object.freeze(["approve", "deny"]);
-	const SETTLED_PROMPT_TTL_MS = 10 * 6e4;
-	const clean = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
-	/**
-	* One approval_request envelope, as the card a surface renders. Returns null
-	* for anything else — wrong kind, no approvalId — so a caller can feed it a
-	* whole drained page and keep only the questions.
-	*
-	* The texts are bounded here, once, because both surfaces put them straight
-	* into UI: a summary is a sentence, a detail is a paragraph, and a payload
-	* that claims otherwise gets trimmed rather than trusted with the layout.
-	*/
-	function approvalPromptFromEnvelope(envelope, { now = Date.now() } = {}) {
-		if (envelope?.kind !== "approval_request") return null;
-		const payload = envelope.payload ?? {};
-		const approvalId = clean(payload.approvalId, 80);
-		if (!approvalId || !envelope.id) return null;
-		const payloadExpiry = Date.parse(String(payload.expiresAt ?? ""));
-		const envelopeExpiry = Date.parse(String(envelope.expiresAt ?? ""));
-		const expiresAt = Number.isFinite(payloadExpiry) ? payloadExpiry : envelopeExpiry;
-		return {
-			approvalId,
-			summary: clean(payload.summary, 200) || "An action is waiting for your approval.",
-			detail: clean(payload.detail, 600),
-			risk: clean(payload.risk, 40),
-			expiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
-			envelopeId: envelope.id,
-			from: envelope.from,
-			receivedAt: new Date(now).toISOString(),
-			decision: null,
-			decidedAt: null
-		};
-	}
-	/** Past the approval's own deadline. A prompt with no deadline never expires. */
-	function approvalIsExpired(prompt, now = Date.now()) {
-		const expiresAt = Date.parse(String(prompt?.expiresAt ?? ""));
-		return Number.isFinite(expiresAt) && expiresAt <= now;
-	}
-	/** May the owner still answer this? One predicate for every disabled button. */
-	function approvalIsAnswerable(prompt, now = Date.now()) {
-		return Boolean(prompt?.approvalId) && !prompt.decision && !approvalIsExpired(prompt, now);
-	}
-	/**
-	* Fold freshly drained envelopes into the held prompts. Pure; the caller owns
-	* where the list lives (React state on the phone, storage.local in the
-	* extension).
-	*
-	* Returns { prompts, changed } — and the SAME array when nothing changed, so
-	* a React setState or a storage write can be skipped instead of churned.
-	*/
-	function mergeApprovalPrompts(prompts, envelopes, { now = Date.now() } = {}) {
-		const held = Array.isArray(prompts) ? prompts : [];
-		let list = held;
-		let changed = false;
-		for (const envelope of Array.isArray(envelopes) ? envelopes : []) {
-			const prompt = approvalPromptFromEnvelope(envelope, { now });
-			if (!prompt) continue;
-			const index = list.findIndex((entry) => entry?.approvalId === prompt.approvalId);
-			if (index === -1) {
-				list = changed ? list : [...held];
-				list.push(prompt);
-				changed = true;
-				continue;
-			}
-			const current = list[index];
-			if (current.envelopeId === prompt.envelopeId && current.from === prompt.from) continue;
-			list = changed ? list : [...held];
-			list[index] = {
-				...current,
-				envelopeId: prompt.envelopeId,
-				from: prompt.from
-			};
-			changed = true;
-		}
-		if (!changed) return {
-			prompts: held,
-			changed: false
-		};
-		return {
-			prompts: pruneApprovalPrompts(list, now),
-			changed: true
-		};
-	}
-	/** Mark one prompt decided. Pure; answering is the caller's job, first. */
-	function settleApprovalPrompt(prompts, approvalId, decision, { now = Date.now() } = {}) {
-		return (Array.isArray(prompts) ? prompts : []).map((prompt) => prompt?.approvalId === approvalId ? {
-			...prompt,
-			decision,
-			decidedAt: new Date(now).toISOString()
-		} : prompt);
-	}
-	/** How many prompts still need the owner: live and undecided. */
-	function undecidedApprovalCount(prompts, now = Date.now()) {
-		return (Array.isArray(prompts) ? prompts : []).filter((prompt) => approvalIsAnswerable(prompt, now)).length;
-	}
-	/**
-	* Sweep receipts and enforce the cap. Settled and long-expired cards go
-	* first; a live question is the last thing this will ever drop, and dropping
-	* one at all means MAX_APPROVAL_PROMPTS questions are already unanswered.
-	*/
-	function pruneApprovalPrompts(prompts, now = Date.now(), max = 20) {
-		const list = (Array.isArray(prompts) ? prompts : []).filter((prompt) => {
-			if (!prompt?.approvalId) return false;
-			if (prompt.decidedAt && Date.parse(prompt.decidedAt) + 6e5 <= now) return false;
-			if (!prompt.decision && approvalIsExpired(prompt, now)) return Date.parse(prompt.expiresAt) + SETTLED_PROMPT_TTL_MS > now;
-			return true;
-		});
-		if (list.length <= max) return list;
-		const weight = (prompt) => prompt.decision ? 0 : approvalIsExpired(prompt, now) ? 1 : 2;
-		const drop = new Set([...list].sort((left, right) => weight(left) - weight(right) || String(left.receivedAt ?? "").localeCompare(String(right.receivedAt ?? ""))).slice(0, list.length - max).map((prompt) => prompt.approvalId));
-		return list.filter((prompt) => !drop.has(prompt.approvalId));
-	}
-	/**
-	* The answer, in the exact frozen shape. Returns the fields a sender hands to
-	* its own transport — mesh_send params on the phone, sendRequest() in the
-	* extension — so the payload and the corr cannot be assembled differently on
-	* different surfaces.
-	*/
-	function approvalDecisionBody(prompt, decision) {
-		if (!APPROVAL_DECISIONS.includes(decision)) throw new Error(`An approval decision is "approve" or "deny", not "${String(decision)}".`);
-		if (!prompt?.approvalId || !prompt?.envelopeId || !prompt?.from) throw new Error("A decision needs the prompt it answers: approvalId, envelopeId and from.");
-		return {
-			to: prompt.from,
-			kind: APPROVAL_DECISION_KIND,
-			payload: {
-				approvalId: prompt.approvalId,
-				decision
-			},
-			correlationId: prompt.envelopeId
-		};
-	}
 	//#endregion
-	//#region browser-extension/src/approvals.js
-	const APPROVALS_KEY = "pendingApprovals";
-	/**
-	* What the toolbar badge shows: the number of prompts still waiting on the
-	* owner, or null to fall back to the connection badge. A count outranks 'ON'
-	* because 'ON' is reassurance and a count is a request — amber, like every
-	* "parked, waiting for you" state in this extension's UI.
-	*/
-	function approvalBadge(prompts, now = Date.now()) {
-		const waiting = undecidedApprovalCount(prompts, now);
-		if (!waiting) return null;
-		return {
-			text: String(Math.min(waiting, 99)),
-			color: "#B07C1F"
-		};
-	}
-	/**
-	* Everything between "the owner pressed a button" and "background.js performs
-	* a fetch", as one pure step so the whole decision path is assertable:
-	*
-	*   { ok: true,  request, envelopeId, prompts }   — send `request`, and only
-	*     AFTER it succeeds persist `prompts` (the settled list) and ack
-	*     `envelopeId`. The settle rides in the return value rather than being
-	*     applied by the caller so the two can never disagree about what was
-	*     decided.
-	*   { ok: false, error, prompts }                 — nothing to send; `prompts`
-	*     is the input unchanged, because a refused decision must leave the card
-	*     exactly as pressable or as settled as it already was.
-	*
-	* Refusals mirror the phone's: a prompt this browser no longer holds, one
-	* already answered (an approval is answered once — the double-click and the
-	* stale popup land here), and one past its own deadline.
-	*/
-	function prepareApprovalDecision(prompts, approvalId, decision, { config, now = Date.now() } = {}) {
-		const list = Array.isArray(prompts) ? prompts : [];
-		const prompt = list.find((entry) => entry?.approvalId === approvalId);
-		if (!prompt) return {
-			ok: false,
-			error: "That approval is no longer held here — it may have been pruned or answered elsewhere.",
-			prompts: list
-		};
-		if (prompt.decision) return {
-			ok: false,
-			error: `Already answered: ${prompt.decision === "approve" ? "approved" : "denied"}${prompt.decidedAt ? ` at ${prompt.decidedAt}` : ""}. An approval is answered once.`,
-			prompts: list
-		};
-		if (approvalIsExpired(prompt, now)) return {
-			ok: false,
-			error: "This approval expired before it was answered. Whoever asked must send a fresh one.",
-			prompts: list
-		};
-		let request;
-		try {
-			request = sendRequest(config, approvalDecisionBody(prompt, decision));
-		} catch (error) {
-			return {
-				ok: false,
-				error: error?.message ?? String(error),
-				prompts: list
-			};
-		}
-		return {
-			ok: true,
-			request,
-			envelopeId: prompt.envelopeId,
-			prompts: settleApprovalPrompt(list, approvalId, decision, { now })
-		};
-	}
-	//#endregion
-	//#region browser-extension/src/pairing.js
-	const PAIR_LIFETIMES = Object.freeze([
-		"session",
-		"7d",
-		"30d",
-		"forever"
-	]);
-	const DEFAULT_PAIR_LIFETIME = "forever";
-	const LIFETIME_TTL_MS = Object.freeze({
-		session: null,
-		"7d": 10080 * 60 * 1e3,
-		"30d": 720 * 60 * 60 * 1e3,
-		forever: null
-	});
-	/** Anything not canonical becomes the default — the UI only offers the four,
-	* so a stray value is corruption, not intent. */
-	function normalizePairLifetime(raw) {
-		const value = String(raw ?? "").trim();
-		return PAIR_LIFETIMES.includes(value) ? value : DEFAULT_PAIR_LIFETIME;
-	}
-	/** Relay-side TTL for a lifetime; null means "mint with no expiry". */
-	function lifetimeTtlMs(lifetime) {
-		return LIFETIME_TTL_MS[normalizePairLifetime(lifetime)] ?? null;
-	}
-	/**
-	* Reply → storage patch. Keys are the live contract: `agentToken` restarts
-	* the Mac poll loop, the RELAY_STORAGE_KEYS quartet restarts the mesh socket
-	* (background.js watches both). relayEnabled flips true ONLY when a token
-	* actually arrived — flipping it on a failed relay leg would aim the drain
-	* loop at a relay this browser cannot authenticate to, and the error state
-	* that follows looks like a bug rather than an unfinished setup.
-	*/
-	function pairStoragePatch(payload, { agentUrl, lifetime, now = Date.now() } = {}) {
-		if (!payload?.ok || !payload.agentToken) return {
-			ok: false,
-			error: String(payload?.error ?? "Pairing failed: the agent returned no token.")
-		};
-		const chosen = normalizePairLifetime(lifetime);
-		const ttl = lifetimeTtlMs(chosen);
-		const values = {
-			...agentUrl ? { agentUrl } : {},
-			agentToken: String(payload.agentToken),
-			pairLifetime: chosen,
-			pairExpiresAt: ttl ? new Date(now + ttl).toISOString() : null
-		};
-		if (payload.relay?.deviceToken) {
-			values.relayEnabled = true;
-			values.relayUrl = String(payload.relay.url ?? "");
-			values.relayDeviceId = String(payload.relay.deviceId ?? "");
-			values.deviceToken = String(payload.relay.deviceToken);
-			return {
-				ok: true,
-				values,
-				note: `Paired. This browser is ${values.relayDeviceId} on the relay — the brain is on.`
-			};
-		}
-		return {
-			ok: true,
-			values,
-			note: `Mac agent paired. Relay half failed: ${String(payload.relayError ?? "no credential returned")} — commands will use the Mac until you pair again.`
-		};
-	}
-	const PAIR_OUTCOME_KEY = "pairOutcome";
-	function pairOutcomeRecord(outcome, now = Date.now()) {
-		return outcome?.ok ? {
-			ok: true,
-			note: String(outcome.note ?? "Paired."),
-			at: now
-		} : {
-			ok: false,
-			error: String(outcome?.error ?? "Pairing failed."),
-			at: now
-		};
-	}
-	const PAIR_WIPE_KEYS = Object.freeze([
-		"agentToken",
-		"deviceToken",
-		"relayEnabled",
-		"pairLifetime",
-		"pairExpiresAt"
-	]);
-	function credentialExpiryCheck({ agentToken, pairLifetime, pairExpiresAt, sessionAlive, now = Date.now() } = {}) {
-		if (!agentToken) return { wipe: false };
-		const lifetime = normalizePairLifetime(pairLifetime);
-		if (lifetime === "session" && !sessionAlive) return {
-			wipe: true,
-			reason: "This pairing was for the browser session only, and the browser has been closed since."
-		};
-		const expiresAt = Date.parse(pairExpiresAt ?? "");
-		if (Number.isFinite(expiresAt) && expiresAt <= now) return {
-			wipe: true,
-			reason: `The ${lifetime === "7d" ? "7-day" : lifetime === "30d" ? "30-day" : "timed"} pairing has expired.`
-		};
-		return { wipe: false };
-	}
-	function shouldEscrow(lifetime) {
-		return normalizePairLifetime(lifetime) !== "session";
-	}
-	function escrowRestorePlan(values, now = Date.now()) {
-		if (!values || typeof values !== "object" || !values.agentToken) return {
-			restore: false,
-			reason: "nothing escrowed"
-		};
-		if (normalizePairLifetime(values.pairLifetime) === "session") return {
-			restore: false,
-			reason: "session-only pairings are never restored"
-		};
-		const verdict = credentialExpiryCheck({
-			agentToken: values.agentToken,
-			pairLifetime: values.pairLifetime,
-			pairExpiresAt: values.pairExpiresAt,
-			sessionAlive: false,
-			now
-		});
-		if (verdict.wipe) return {
-			restore: false,
-			reason: verdict.reason
-		};
-		return {
-			restore: true,
-			values
-		};
-	}
-	//#endregion
-	//#region browser-extension/src/background.js
-	const api = globalThis.browser ?? globalThis.chrome;
-	const POLL_ALARM = "ai-pendant-poll";
-	const POLL_WINDOW_MS = 25e3;
-	const POLL_INTERVAL_MS = 750;
-	const HEARTBEAT_INTERVAL_MS = 12e3;
-	const FETCH_TIMEOUT_MS = 7e3;
-	const STATUS_KEY = "bridgeStatus";
-	const RELAY_STATUS_KEY = "relayStatus";
+	//#region browser-extension/src/console-engine.js
+	const api$1 = globalThis.browser ?? globalThis.chrome;
 	const RELAY_LEDGER_KEY = "relaySeenEnvelopes";
-	const CONFIG_KEYS = [
-		"agentUrl",
-		"agentToken",
-		"deviceName",
-		"targetMode",
-		"instanceId"
-	];
-	let activePoll = null;
-	let activeRelayDrain = null;
-	let configRevision = 0;
-	let meshSocket = null;
-	let meshSocketOpen = false;
-	let meshPingTimer = null;
-	let meshSocketRefused = false;
-	let macLastOkAt = 0;
-	const INCARNATION_NONCE = crypto.randomUUID();
-	const commandLedger = createCommandLedger();
-	async function migrateSyncedCredentials() {
-		if (!api.storage.sync) return;
-		const local = await api.storage.local.get(CONFIG_KEYS);
-		const synced = await api.storage.sync.get(["agentUrl", "agentToken"]);
-		const updates = {};
-		if (!local.agentUrl && synced.agentUrl) updates.agentUrl = synced.agentUrl;
-		if (!local.agentToken && synced.agentToken) updates.agentToken = synced.agentToken;
-		if (Object.keys(updates).length) await api.storage.local.set(updates);
-		if (synced.agentToken) await api.storage.sync.remove("agentToken");
-	}
-	async function getConfig() {
-		const values = await api.storage.local.get(CONFIG_KEYS);
-		const config = normalizeConfig(values);
-		if (!values.instanceId) {
-			values.instanceId = crypto.randomUUID();
-			await api.storage.local.set({ instanceId: values.instanceId });
-		}
-		return {
-			...config,
-			instanceId: values.instanceId,
-			extensionId: `ai-pendant-${api.runtime.id}-${values.instanceId}`
-		};
-	}
-	async function request(config, path, options = {}) {
-		return fetch(`${config.agentUrl}${path}`, {
-			...options,
-			cache: "no-store",
-			headers: {
-				Accept: "application/json",
-				Authorization: `Bearer ${config.agentToken}`,
-				...options.body ? { "Content-Type": "application/json" } : {},
-				...options.headers
-			},
-			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-		});
-	}
-	async function postJson(config, path, payload) {
-		const response = await request(config, path, {
-			method: "POST",
-			body: JSON.stringify(payload)
-		});
-		if (!response.ok) throw await responseError(response);
-		return response.status === 204 ? null : response.json();
-	}
-	async function responseError(response) {
-		let detail = "";
-		try {
-			const payload = await response.json();
-			detail = payload.error || payload.message || "";
-		} catch {
-			detail = await response.text().catch(() => "");
-		}
-		const error = new Error(detail || `Local agent returned HTTP ${response.status}.`);
-		error.status = response.status;
-		return error;
-	}
-	async function currentTabSummary() {
-		const [tab] = await api.tabs.query({
-			active: true,
-			lastFocusedWindow: true
-		});
-		const scriptable = (await api.tabs.query({}).catch(() => [])).filter((t) => isScriptableUrl(t?.url));
-		return tab ? {
-			tabId: tab.id ?? null,
-			windowId: tab.windowId ?? null,
-			tabUrl: isScriptableUrl(tab.url) ? new URL(tab.url).origin : "",
-			tabTitle: String(tab.title || "").slice(0, 80),
-			tabCount: scriptable.length
-		} : {
-			tabId: null,
-			windowId: null,
-			tabUrl: "",
-			tabTitle: "",
-			tabCount: scriptable.length
-		};
-	}
-	async function heartbeat(config) {
-		const tab = await currentTabSummary();
-		await postJson(config, "/browser/heartbeat", {
-			extensionId: config.extensionId,
-			deviceName: config.deviceName || platformLabel(),
-			browserName: browserLabel(),
-			extensionVersion: api.runtime.getManifest().version,
-			userAgent: globalThis.navigator?.userAgent ?? "",
-			nonce: INCARNATION_NONCE,
-			capabilities: [
-				"idempotency-ledger",
-				"privacy-boundary",
-				"provenance"
-			],
-			ledger: commandLedger.stats(),
-			...tab
-		});
-	}
-	async function pollOnce(config) {
-		const response = await request(config, `/browser/poll?extensionId=${encodeURIComponent(config.extensionId)}`);
-		if (response.status === 204) return false;
-		if (!response.ok) throw await responseError(response);
-		const command = (await response.json())?.command;
-		const identity = commandIdentity(command);
-		let result;
-		const replayed = commandLedger.recall(identity);
-		if (replayed) {
-			await postResultWithRetry(config, command?.commandId, {
-				...replayed.result,
-				extensionId: config.extensionId,
-				replayed: true
-			});
-			return true;
-		}
-		try {
-			result = {
-				ok: true,
-				result: await executeCommand(command, config)
-			};
-		} catch (error) {
-			result = {
-				ok: false,
-				error: error?.message || String(error)
-			};
-		}
-		commandLedger.remember(identity, result);
-		await postResultWithRetry(config, command?.commandId, {
-			...result,
-			extensionId: config.extensionId
-		});
-		return true;
-	}
-	async function postResultWithRetry(config, commandId, result) {
-		if (!commandId) throw new Error("The browser command is missing its commandId.");
-		let lastError;
-		for (let attempt = 0; attempt < 3; attempt += 1) try {
-			await postJson(config, `/browser/result/${encodeURIComponent(commandId)}`, result);
-			return;
-		} catch (error) {
-			lastError = error;
-			if (attempt < 2) await delay(retryDelay(attempt, 300, 1200));
-		}
-		throw lastError;
-	}
-	async function pollWindow(revision) {
-		const config = await getConfig();
-		if (!config.agentToken) {
-			await updateStatus({
-				state: "needs-setup",
-				connected: false,
-				message: "Paste the pairing code in the extension popup to connect."
-			});
-			return;
-		}
-		const deadline = Date.now() + POLL_WINDOW_MS;
-		let nextHeartbeatAt = 0;
-		let failures = 0;
-		while (Date.now() < deadline && revision === configRevision) try {
-			if (Date.now() >= nextHeartbeatAt) {
-				await heartbeat(config);
-				macLastOkAt = Date.now();
-				nextHeartbeatAt = Date.now() + HEARTBEAT_INTERVAL_MS;
-				await updateStatus({
-					state: "connected",
-					connected: true,
-					message: "Connected to the local Mac agent.",
-					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
-					error: ""
-				});
-			}
-			const handledCommand = await pollOnce(config);
-			failures = 0;
-			if (!handledCommand) await delay(POLL_INTERVAL_MS);
-		} catch (error) {
-			failures += 1;
-			await updateStatus({
-				state: error?.status === 401 ? "unauthorized" : "offline",
-				connected: false,
-				message: error?.status === 401 ? "The local agent rejected the token." : "Cannot reach the local Mac agent.",
-				error: error?.message || String(error),
-				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
-			});
-			await delay(retryDelay(failures - 1));
-		}
-	}
-	function startPolling() {
-		if (activePoll) return activePoll;
-		const revision = configRevision;
-		activePoll = pollWindow(revision).catch(async (error) => {
-			await updateStatus({
-				state: "error",
-				connected: false,
-				message: "Browser bridge stopped unexpectedly.",
-				error: error?.message || String(error),
-				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
-			});
-		}).finally(() => {
-			activePoll = null;
-			if (revision !== configRevision) startPolling();
-		});
-		return activePoll;
-	}
-	async function updateStatus(patch) {
-		const status = {
-			...(await api.storage.local.get(STATUS_KEY))[STATUS_KEY] ?? {},
-			...patch,
-			extensionId: api.runtime.id,
-			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-		};
-		await api.storage.local.set({ [STATUS_KEY]: status });
-		await refreshBadge(status);
-	}
-	/**
-	* One writer for the toolbar badge, so its two claimants cannot fight.
-	*
-	* Approvals waiting on the owner outrank connection state: 'ON' is
-	* reassurance, a count is a request, and the poll loop repaints the badge
-	* often enough that the count falls away on its own once the last card is
-	* answered or expires. Everything that changes either input — a status
-	* update, a drained approval, a decision — lands here.
-	*/
-	async function refreshBadge(status = null) {
-		if (!api.action?.setBadgeText) return;
-		const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY]);
-		const current = status ?? stored[STATUS_KEY] ?? {};
-		const badge = approvalBadge(stored["pendingApprovals"] ?? []) ?? {
-			text: current.state === "connected" ? "ON" : current.state === "needs-setup" ? "SET" : "!",
-			color: current.state === "connected" ? "#078B70" : "#B54736"
-		};
-		await api.action.setBadgeText({ text: badge.text });
-		if (api.action.setBadgeBackgroundColor) await api.action.setBadgeBackgroundColor({ color: badge.color });
-	}
-	let approvalWrites = Promise.resolve();
-	function withApprovals(mutate) {
-		const run = approvalWrites.then(async () => {
-			const next = await mutate((await api.storage.local.get("pendingApprovals"))["pendingApprovals"] ?? []);
-			if (next) await api.storage.local.set({ [APPROVALS_KEY]: next });
-			return next;
-		});
-		approvalWrites = run.then(() => {}, (error) => {
-			console.warn("approval store write failed:", error?.message || error);
-		});
-		return run;
-	}
 	async function getRelayConfig() {
-		return normalizeRelayConfig(await api.storage.local.get(RELAY_STORAGE_KEYS));
+		return normalizeRelayConfig(await api$1.storage.local.get(RELAY_STORAGE_KEYS));
 	}
 	async function relayFetch(relayConfig, descriptor, timeoutMs = FETCH_TIMEOUT_MS) {
 		const response = await fetch(`${relayConfig.relayUrl}${descriptor.path}`, {
@@ -3031,235 +3488,17 @@ Answer with the JSON object only. No prose, no code fences.`;
 		if (!response.ok) throw await relayResponseError(response);
 		return response.status === 204 ? null : await response.json();
 	}
-	function ensureMeshSocket(relayConfig, onMail) {
-		if (meshSocket || meshSocketRefused) return;
-		const url = socketUrl(relayConfig);
-		const protocols = socketProtocols(relayConfig);
-		if (!url || !protocols.length) return;
-		let socket;
-		try {
-			socket = new WebSocket(url, protocols);
-		} catch (error) {
-			console.warn(`mesh socket could not be created: ${error?.message || error}`);
-			return;
-		}
-		meshSocket = socket;
-		socket.addEventListener("open", () => {
-			if (!socketProtocolAccepted(socket.protocol)) {
-				console.warn("mesh socket selected an unexpected subprotocol; closing.");
-				try {
-					socket.close();
-				} catch {}
-				return;
-			}
-			meshSocketOpen = true;
-			updateRelayStatus({
-				state: "connected",
-				connected: true,
-				transport: "socket",
-				message: "The relay is pushing over its own socket.",
-				lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
-				error: ""
-			});
-			meshPingTimer = setInterval(() => {
-				try {
-					socket.send(BRIDGE_PING_FRAME);
-				} catch {}
-			}, BRIDGE_PING_INTERVAL_MS);
+	let approvalWrites = Promise.resolve();
+	function withApprovals(mutate) {
+		const run = approvalWrites.then(async () => {
+			const next = await mutate((await api$1.storage.local.get("pendingApprovals"))["pendingApprovals"] ?? []);
+			if (next) await api$1.storage.local.set({ [APPROVALS_KEY]: next });
+			return next;
 		});
-		socket.addEventListener("message", (event) => {
-			if (reactToFrame(event?.data).drain) onMail();
+		approvalWrites = run.then(() => {}, (error) => {
+			console.warn("approval store write failed:", error?.message || error);
 		});
-		socket.addEventListener("close", (event) => {
-			meshSocketOpen = false;
-			meshSocket = null;
-			if (meshPingTimer) {
-				clearInterval(meshPingTimer);
-				meshPingTimer = null;
-			}
-			if (event?.code === 1008 || event?.code === 4001 || event?.code === 4003) {
-				meshSocketRefused = true;
-				updateRelayStatus({
-					state: "unauthorized",
-					connected: false,
-					transport: "poll",
-					message: "The relay refused this browser's socket credential.",
-					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
-				});
-			}
-		});
-		socket.addEventListener("error", () => {
-			meshSocketOpen = false;
-		});
-	}
-	function closeMeshSocket() {
-		if (meshPingTimer) {
-			clearInterval(meshPingTimer);
-			meshPingTimer = null;
-		}
-		if (meshSocket) try {
-			meshSocket.close();
-		} catch {}
-		meshSocket = null;
-		meshSocketOpen = false;
-	}
-	async function runMeshEnvelope(envelope, handling, relayConfig, macConfig) {
-		if (handling === "approval") {
-			if (await withApprovals((stored) => {
-				const merged = mergeApprovalPrompts(stored, [envelope]);
-				return merged.changed ? merged.prompts : null;
-			})) await refreshBadge();
-			return;
-		}
-		if (handling === "ping") {
-			await relayFetch(relayConfig, pongMessageFor(envelope, {
-				browser: browserLabel(),
-				extensionVersion: api.runtime.getManifest().version,
-				macFresh: Date.now() - macLastOkAt <= MAC_FRESH_MS,
-				observedAt: (/* @__PURE__ */ new Date()).toISOString()
-			}, relayConfig));
-			return;
-		}
-		let outcome;
-		try {
-			const command = envelopeToCommand(envelope);
-			const identity = commandIdentity(command);
-			const replayed = commandLedger.recall(identity);
-			if (replayed) outcome = {
-				...replayed.result,
-				replayed: true
-			};
-			else {
-				try {
-					outcome = {
-						ok: true,
-						result: await executeCommand(command, macConfig)
-					};
-				} catch (error) {
-					outcome = {
-						ok: false,
-						error: error?.message || String(error)
-					};
-				}
-				commandLedger.remember(identity, outcome);
-			}
-		} catch (error) {
-			outcome = {
-				ok: false,
-				error: error?.message || String(error)
-			};
-		}
-		await relayFetch(relayConfig, resultMessageFor(envelope, outcome, relayConfig));
-	}
-	async function drainRelayOnce(relayConfig, macConfig) {
-		const page = await relayFetch(relayConfig, inboxRequest(relayConfig));
-		const stored = (await api.storage.local.get(RELAY_LEDGER_KEY))[RELAY_LEDGER_KEY] ?? {};
-		const accepted = acceptEnvelopes(page?.messages, {
-			ledger: createEnvelopeLedger(stored),
-			config: relayConfig
-		});
-		await api.storage.local.set({ [RELAY_LEDGER_KEY]: pruneEnvelopeLedger(accepted.ledger) });
-		if (accepted.ackIds.length) await relayFetch(relayConfig, ackRequest(relayConfig, accepted.ackIds));
-		for (const { envelope, handling } of accepted.run) try {
-			await runMeshEnvelope(envelope, handling, relayConfig, macConfig);
-		} catch (error) {
-			console.warn(`mesh ${envelope.kind} from ${envelope.from} failed: ${error?.message || error}`);
-		}
-		return {
-			drained: accepted.ackIds.length,
-			ran: accepted.run.length,
-			ignored: accepted.ignored.length,
-			more: hasMoreMail(page),
-			pending: Number(page?.pending || 0)
-		};
-	}
-	async function drainRelayUntilEmpty(relayConfig, macConfig, maxPages = 5) {
-		let report = await drainRelayOnce(relayConfig, macConfig);
-		let totals = {
-			...report,
-			pages: 1
-		};
-		for (let page = 1; page < maxPages && report.more; page += 1) {
-			report = await drainRelayOnce(relayConfig, macConfig);
-			totals = {
-				drained: totals.drained + report.drained,
-				ran: totals.ran + report.ran,
-				ignored: totals.ignored + report.ignored,
-				more: report.more,
-				pending: report.pending,
-				pages: page + 1
-			};
-		}
-		return totals;
-	}
-	async function relayWindow(revision) {
-		const relayConfig = await getRelayConfig();
-		if (!relayConfig.ready) {
-			await updateRelayStatus({
-				state: "off",
-				connected: false,
-				message: relayConfig.reason
-			});
-			return;
-		}
-		const macConfig = await getConfig();
-		const deadline = Date.now() + POLL_WINDOW_MS;
-		ensureMeshSocket(relayConfig, () => drainRelayUntilEmpty(relayConfig, macConfig).catch((error) => console.warn(`mesh doorbell drain failed: ${error?.message || error}`)));
-		while (Date.now() < deadline && revision === configRevision) {
-			const choice = choosePeer({
-				macConfigured: Boolean(macConfig.agentToken),
-				macLastOkAt,
-				relayReady: true,
-				socketOpen: meshSocketOpen
-			});
-			try {
-				const report = await drainRelayUntilEmpty(relayConfig, macConfig);
-				await updateRelayStatus({
-					state: "connected",
-					connected: true,
-					transport: choice.relayTransport,
-					message: describeRelayPeer(relayConfig, choice),
-					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
-					error: "",
-					...report
-				});
-			} catch (error) {
-				await updateRelayStatus({
-					...describeRelayFailure(error),
-					connected: false,
-					transport: meshSocketOpen ? "socket" : "poll",
-					error: error?.message || String(error),
-					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
-				});
-			}
-			if (Date.now() + choice.relayPollMs >= deadline) break;
-			await delay(choice.relayPollMs);
-		}
-	}
-	function startRelayDrain() {
-		if (activeRelayDrain) return activeRelayDrain;
-		const revision = configRevision;
-		activeRelayDrain = relayWindow(revision).catch(async (error) => {
-			await updateRelayStatus({
-				state: "error",
-				connected: false,
-				message: "The relay peer stopped unexpectedly.",
-				error: error?.message || String(error),
-				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
-			});
-		}).finally(() => {
-			activeRelayDrain = null;
-			if (revision !== configRevision) startRelayDrain();
-		});
-		return activeRelayDrain;
-	}
-	async function updateRelayStatus(patch) {
-		const current = (await api.storage.local.get(RELAY_STATUS_KEY))[RELAY_STATUS_KEY] ?? {};
-		await api.storage.local.set({ [RELAY_STATUS_KEY]: {
-			...current,
-			...patch,
-			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-		} });
+		return run;
 	}
 	/**
 	* The owner's answer to one approval card, from the popup.
@@ -3311,522 +3550,196 @@ Answer with the JSON object only. No prose, no code fences.`;
 		await refreshBadge();
 		return outcome;
 	}
-	/**
-	* Run one command, then take everything it produced through the privacy
-	* boundary and stamp it with where it came from.
-	*
-	* The order is the whole point. sanitizeExtraction runs after execution and
-	* before the result is handed back to pollOnce, which is the last moment it is
-	* still inside Safari: past here it is in a different process with a log, a
-	* store and a cloud relay attached, and a credential that reaches the agent has
-	* effectively left the machine.
-	*/
-	async function executeCommand(command, config) {
-		const { type, params } = validateCommand({
-			...command,
-			action: {
-				...command?.action,
-				params: normalizeCommandParams(command?.action?.params)
-			}
-		});
-		const { result, tab } = await runCommand(type, params, config);
-		const clean = sanitizeExtraction(result);
-		return {
-			...clean.result,
-			provenance: provenanceFor({
-				command,
-				tab,
-				result: clean.result,
-				locator: params.ref || params.selector
-			})
-		};
-	}
-	async function runCommand(type, params, config) {
-		if (type === "navigate") return {
-			result: await navigate(params, config),
-			tab: null
-		};
-		if (type === "activate_tab") return {
-			result: await activateTab(params, config),
-			tab: null
-		};
-		if (type === "list_tabs") return {
-			result: await listTabs(params),
-			tab: null
-		};
-		const tab = await selectTargetTab(params, config.targetMode);
-		await assertPageAccess(tab);
-		if (type === "capture") return {
-			result: await captureTab(tab),
-			tab
-		};
-		if (type === "wait_for") return {
-			result: await waitForInTab(tab, params),
-			tab
-		};
-		const firstResult = (await api.scripting.executeScript({
-			target: {
-				tabId: tab.id,
-				frameIds: [0]
-			},
-			func: runInPage,
-			args: [type, params]
-		}))?.[0];
-		if (!firstResult) throw new Error("The browser returned no result from the active page.");
-		if (firstResult.error) throw new Error(firstResult.error.message || String(firstResult.error));
-		return {
-			result: {
-				...firstResult.result,
-				tabId: tab.id,
-				windowId: tab.windowId,
-				url: tab.url ?? "",
-				title: tab.title ?? firstResult.result?.title ?? ""
-			},
-			tab
-		};
-	}
-	async function waitForInTab(tab, params) {
-		const timeoutMs = Math.max(100, Math.min(Number(params.timeoutMs) || 1e4, 3e4));
-		const started = Date.now();
-		while (Date.now() - started < timeoutMs) {
-			if ((await api.scripting.executeScript({
-				target: {
-					tabId: tab.id,
-					frameIds: [0]
-				},
-				func: checkWaitCondition,
-				args: [params]
-			}))?.[0]?.result === true) return {
-				message: "wait_for satisfied",
-				waitedMs: Date.now() - started,
-				tabId: tab.id,
-				windowId: tab.windowId,
-				url: tab.url ?? ""
+	async function runMeshEnvelope(envelope, handling, relayConfig, macConfig, ctx) {
+		if (handling === "approval") {
+			if (await withApprovals((stored) => {
+				const merged = mergeApprovalPrompts(stored, [envelope]);
+				return merged.changed ? merged.prompts : null;
+			})) await refreshBadge();
+			return;
+		}
+		if (handling === "ping") {
+			await relayFetch(relayConfig, pongMessageFor(envelope, {
+				browser: browserLabel(),
+				extensionVersion: api$1.runtime.getManifest().version,
+				macFresh: Boolean(ctx.macFresh?.()),
+				observedAt: (/* @__PURE__ */ new Date()).toISOString()
+			}, relayConfig));
+			return;
+		}
+		let outcome;
+		try {
+			const command = envelopeToCommand(envelope);
+			const identity = commandIdentity(command);
+			const replayed = ctx.ledger.recall(identity);
+			if (replayed) outcome = {
+				...replayed.result,
+				replayed: true
 			};
-			await delay(150);
-		}
-		throw new Error(`wait_for timed out after ${timeoutMs}ms`);
-	}
-	/** Injected: returns true if wait condition holds. */
-	function checkWaitCondition(params) {
-		const selector = String(params.selector || "").trim();
-		const textNeedle = String(params.textContains || params.text || "").trim().toLowerCase();
-		if (selector) try {
-			const el = document.querySelector(selector);
-			if (el) {
-				const style = window.getComputedStyle(el);
-				const rect = el.getBoundingClientRect();
-				if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0) return true;
-			}
-		} catch {
-			throw new Error(`Invalid CSS selector: ${selector}`);
-		}
-		if (textNeedle) {
-			if ((document.body?.innerText || "").toLowerCase().includes(textNeedle)) return true;
-		}
-		return false;
-	}
-	async function listTabs(params = {}) {
-		const max = Math.max(1, Math.min(Number(params.limit) || 30, 80));
-		const rows = (await api.tabs.query({})).filter((tab) => isScriptableUrl(tab?.url)).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).slice(0, max).map((tab) => ({
-			tabId: tab.id,
-			windowId: tab.windowId,
-			active: Boolean(tab.active),
-			title: String(tab.title || "").slice(0, 120),
-			url: tab.url || "",
-			origin: isScriptableUrl(tab.url) ? new URL(tab.url).origin : ""
-		}));
-		return {
-			message: `${rows.length} open web tab(s)`,
-			tabs: rows,
-			tabCount: rows.length
-		};
-	}
-	async function captureTab(tab) {
-		const windowId = tab.windowId;
-		if (tab.active === false) {
-			await api.tabs.update(tab.id, { active: true });
-			await delay(150);
-		}
-		const dataUrl = await api.tabs.captureVisibleTab(windowId, { format: "png" });
-		return {
-			message: "Captured visible tab",
-			tabId: tab.id,
-			windowId,
-			url: tab.url ?? "",
-			title: tab.title ?? "",
-			mimeType: "image/png",
-			imageDataUrl: dataUrl
-		};
-	}
-	async function navigate(params, config) {
-		const url = validateNavigationUrl(params.url);
-		const openNewTab = params.newTab === true || config.targetMode === "new-tab";
-		let tab;
-		if (openNewTab) tab = await api.tabs.create({
-			url,
-			active: params.active !== false,
-			...Number.isInteger(params.windowId) ? { windowId: params.windowId } : {}
-		});
-		else {
-			tab = await selectTargetTab(params, config.targetMode);
-			tab = await api.tabs.update(tab.id, {
-				url,
-				active: params.active !== false
-			});
-		}
-		if (params.waitForLoad !== false) tab = await waitForTabLoad(tab.id, 15e3);
-		return {
-			message: `Navigated to ${url}`,
-			tabId: tab.id,
-			windowId: tab.windowId,
-			url: tab.url || url
-		};
-	}
-	/**
-	* Find-or-open. Focuses the freshest existing tab matching `urlContains`
-	* (bringing its window forward), and only when nothing matches — and a `url`
-	* was given — opens a new tab. "Open ibkr" means the signed-in tab the owner
-	* already has, not a duplicate and not whatever the active tab was showing.
-	* Needs only the `tabs` permission (already in the manifest); windows.update
-	* requires none.
-	*/
-	async function activateTab(params, _config) {
-		const needle = String(params.urlContains ?? "").trim().toLowerCase();
-		const fallbackUrl = String(params.url ?? "").trim();
-		if (needle) {
-			const match = (await api.tabs.query({})).filter((tab) => Number.isInteger(tab?.id) && isScriptableUrl(tab.url) && String(tab.url).toLowerCase().includes(needle)).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
-			if (match) {
-				const tab = await api.tabs.update(match.id, { active: true });
-				if (api.windows?.update && Number.isInteger(tab?.windowId)) await api.windows.update(tab.windowId, { focused: true }).catch(() => {});
-				return {
-					message: `Activated the existing tab matching "${needle}"`,
-					tabId: tab.id,
-					windowId: tab.windowId,
-					url: tab.url ?? match.url ?? "",
-					title: tab.title ?? match.title ?? "",
-					activatedExisting: true
-				};
-			}
-		}
-		if (!fallbackUrl) throw new Error(`No open tab matches "${needle}" and no url was given to open instead.`);
-		const url = validateNavigationUrl(fallbackUrl);
-		let tab = await api.tabs.create({
-			url,
-			active: true
-		});
-		if (params.waitForLoad !== false) tab = await waitForTabLoad(tab.id, 15e3);
-		return {
-			message: `No matching tab was open; opened ${url}`,
-			tabId: tab.id,
-			windowId: tab.windowId,
-			url: tab.url || url,
-			activatedExisting: false
-		};
-	}
-	async function selectTargetTab(params, targetMode) {
-		if (Number.isInteger(params.tabId)) return api.tabs.get(params.tabId);
-		let tabs;
-		if (Number.isInteger(params.windowId)) tabs = await api.tabs.query({ windowId: params.windowId });
-		else if (params.urlContains) tabs = await api.tabs.query({});
-		else if (targetMode === "current-active") tabs = await api.tabs.query({
-			active: true,
-			currentWindow: true
-		});
-		else tabs = await api.tabs.query({ active: true });
-		const tab = pickTargetTab(tabs, params, targetMode);
-		if (tab) return tab;
-		throw new Error("No matching browser tab is available. Open a web page or specify a valid tabId.");
-	}
-	async function assertPageAccess(tab) {
-		if (!tab?.id || !isScriptableUrl(tab.url)) throw new Error("This page cannot be controlled. Browser settings, extension pages, and local files are protected.");
-		const pattern = originPattern(tab.url);
-		if (!await api.permissions.contains({ origins: [pattern] })) throw new Error(`Website access is not granted for ${new URL(tab.url).origin}. Click “Allow this browser’s pages” in the extension popup.`);
-	}
-	function waitForTabLoad(tabId, timeoutMs) {
-		return new Promise((resolve, reject) => {
-			const timeout = setTimeout(async () => {
-				cleanup();
+			else {
 				try {
-					resolve(await api.tabs.get(tabId));
-				} catch {
-					reject(/* @__PURE__ */ new Error("The destination tab closed before it finished loading."));
+					outcome = {
+						ok: true,
+						result: await executeCommand(command, macConfig)
+					};
+				} catch (error) {
+					outcome = {
+						ok: false,
+						error: error?.message || String(error)
+					};
 				}
-			}, timeoutMs);
-			const onUpdated = (updatedTabId, changeInfo, tab) => {
-				if (updatedTabId === tabId && changeInfo.status === "complete") {
-					cleanup();
-					resolve(tab);
-				}
+				ctx.ledger.remember(identity, outcome);
+			}
+		} catch (error) {
+			outcome = {
+				ok: false,
+				error: error?.message || String(error)
 			};
-			const onRemoved = (removedTabId) => {
-				if (removedTabId === tabId) {
-					cleanup();
-					reject(/* @__PURE__ */ new Error("The destination tab closed before it finished loading."));
-				}
-			};
-			const cleanup = () => {
-				clearTimeout(timeout);
-				api.tabs.onUpdated.removeListener(onUpdated);
-				api.tabs.onRemoved.removeListener(onRemoved);
-			};
-			api.tabs.onUpdated.addListener(onUpdated);
-			api.tabs.onRemoved.addListener(onRemoved);
+		}
+		await relayFetch(relayConfig, resultMessageFor(envelope, outcome, relayConfig));
+	}
+	async function drainRelayOnce(relayConfig, macConfig, ctx) {
+		const page = await relayFetch(relayConfig, inboxRequest(relayConfig));
+		const stored = (await api$1.storage.local.get("relaySeenEnvelopes"))["relaySeenEnvelopes"] ?? {};
+		const accepted = acceptEnvelopes(page?.messages, {
+			ledger: createEnvelopeLedger(stored),
+			config: relayConfig
 		});
+		await api$1.storage.local.set({ [RELAY_LEDGER_KEY]: pruneEnvelopeLedger(accepted.ledger) });
+		if (accepted.ackIds.length) await relayFetch(relayConfig, ackRequest(relayConfig, accepted.ackIds));
+		for (const { envelope, handling } of accepted.run) try {
+			await runMeshEnvelope(envelope, handling, relayConfig, macConfig, ctx);
+		} catch (error) {
+			console.warn(`mesh ${envelope.kind} from ${envelope.from} failed: ${error?.message || error}`);
+		}
+		return {
+			drained: accepted.ackIds.length,
+			ran: accepted.run.length,
+			ignored: accepted.ignored.length,
+			more: hasMoreMail(page),
+			pending: Number(page?.pending || 0)
+		};
+	}
+	async function drainRelayUntilEmpty(relayConfig, macConfig, ctx, maxPages = 5) {
+		let report = await drainRelayOnce(relayConfig, macConfig, ctx);
+		let totals = {
+			...report,
+			pages: 1
+		};
+		for (let page = 1; page < maxPages && report.more; page += 1) {
+			report = await drainRelayOnce(relayConfig, macConfig, ctx);
+			totals = {
+				drained: totals.drained + report.drained,
+				ran: totals.ran + report.ran,
+				ignored: totals.ignored + report.ignored,
+				more: report.more,
+				pending: report.pending,
+				pages: page + 1
+			};
+		}
+		return totals;
 	}
 	/**
-	* Injected into the page (isolated world). Keep pure-page; no chrome.* APIs.
+	* The mesh doorbell, as a controller each context holds for its own lifetime.
+	*
+	* Bodies verbatim from background.js's ensureMeshSocket/closeMeshSocket; the
+	* module-level socket globals became closure state so the background worker
+	* and a page engine can each hold their own doorbell without sharing wires.
+	* The refusal latch (1008/4001/4003) lives here too: a credential the relay
+	* will not accept must not be retried on every tick, and clearRefusal() is
+	* how a pasted re-pair lifts it.
 	*/
-	function runInPage(type, params) {
-		const ATTR = "data-pendant-ref";
-		const MAX_ELEMENTS = 80;
-		const cssPath = (el) => {
-			if (!(el instanceof Element)) return "";
-			if (el.id) {
-				const id = CSS.escape(el.id);
-				if (document.querySelectorAll(`#${id}`).length === 1) return `#${id}`;
+	function createMeshSocket() {
+		let socket = null;
+		let open = false;
+		let pingTimer = null;
+		let refused = false;
+		const close = () => {
+			if (pingTimer) {
+				clearInterval(pingTimer);
+				pingTimer = null;
 			}
-			const parts = [];
-			let node = el;
-			while (node && node.nodeType === 1 && parts.length < 6) {
-				let part = node.nodeName.toLowerCase();
-				if (node.id) {
-					parts.unshift(`#${CSS.escape(node.id)}`);
-					break;
+			if (socket) try {
+				socket.close();
+			} catch {}
+			socket = null;
+			open = false;
+		};
+		return {
+			isOpen: () => open,
+			isRefused: () => refused,
+			clearRefusal() {
+				refused = false;
+			},
+			close,
+			ensure(relayConfig, onMail) {
+				if (socket || refused) return;
+				const url = socketUrl(relayConfig);
+				const protocols = socketProtocols(relayConfig);
+				if (!url || !protocols.length) return;
+				let candidate;
+				try {
+					candidate = new WebSocket(url, protocols);
+				} catch (error) {
+					console.warn(`mesh socket could not be created: ${error?.message || error}`);
+					return;
 				}
-				const parent = node.parentElement;
-				if (parent) {
-					const siblings = [...parent.children].filter((c) => c.nodeName === node.nodeName);
-					if (siblings.length > 1) {
-						const index = siblings.indexOf(node) + 1;
-						part += `:nth-of-type(${index})`;
+				socket = candidate;
+				candidate.addEventListener("open", () => {
+					if (!socketProtocolAccepted(candidate.protocol)) {
+						console.warn("mesh socket selected an unexpected subprotocol; closing.");
+						try {
+							candidate.close();
+						} catch {}
+						return;
 					}
-				}
-				parts.unshift(part);
-				node = parent;
-			}
-			return parts.join(" > ");
-		};
-		const resolveElement = () => {
-			if (params.ref) {
-				const ref = String(params.ref).trim();
-				const byAttr = document.querySelector(`[${ATTR}="${ref.replace(/"/g, "")}"]`);
-				if (byAttr) return byAttr;
-				throw new Error(`Snapshot ref not found: ${ref}. Call snapshot again and use a fresh ref.`);
-			}
-			const selector = String(params.selector ?? "");
-			let element;
-			try {
-				element = document.querySelector(selector);
-			} catch {
-				throw new Error(`Invalid CSS selector: ${selector}`);
-			}
-			if (!element) throw new Error(`Element not found: ${selector}`);
-			return element;
-		};
-		const isVisible = (el) => {
-			if (!(el instanceof Element)) return false;
-			if (!el.checkVisibility({
-				opacityProperty: true,
-				visibilityProperty: true,
-				contentVisibilityAuto: true
-			})) return false;
-			const rect = el.getBoundingClientRect();
-			return rect.width > 0 && rect.height > 0;
-		};
-		const accessibleName = (el) => {
-			const aria = el.getAttribute("aria-label");
-			if (aria) return aria.trim().slice(0, 120);
-			const labelledBy = el.getAttribute("aria-labelledby");
-			if (labelledBy) {
-				const text = labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.innerText).filter(Boolean).join(" ").trim();
-				if (text) return text.slice(0, 120);
-			}
-			if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-				const lab = el.labels?.[0]?.innerText;
-				if (lab) return lab.trim().slice(0, 120);
-				if (el.placeholder) return el.placeholder.trim().slice(0, 120);
-				if (el.name) return el.name.slice(0, 120);
-			}
-			if (el instanceof HTMLSelectElement && el.name) return el.name.slice(0, 120);
-			return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120);
-		};
-		const roleOf = (el) => {
-			const explicit = el.getAttribute("role");
-			if (explicit) return explicit;
-			const tag = el.tagName.toLowerCase();
-			if (tag === "a" && el.hasAttribute("href")) return "link";
-			if (tag === "button") return "button";
-			if (tag === "select") return "combobox";
-			if (tag === "textarea") return "textbox";
-			if (tag === "input") {
-				const t = (el.type || "text").toLowerCase();
-				if (t === "checkbox") return "checkbox";
-				if (t === "radio") return "radio";
-				if (t === "submit" || t === "button") return "button";
-				return "textbox";
-			}
-			if (el.isContentEditable) return "textbox";
-			return tag;
-		};
-		if (type === "snapshot") {
-			const max = Math.max(1, Math.min(Number(params.maxElements) || MAX_ELEMENTS, MAX_ELEMENTS));
-			document.querySelectorAll(`[${ATTR}]`).forEach((el) => el.removeAttribute(ATTR));
-			const candidates = [...document.querySelectorAll("a[href], button, input, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"textbox\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"menuitem\"], [contenteditable=\"true\"]")].filter((el) => isVisible(el) && !el.closest("[aria-hidden=\"true\"]"));
-			const elements = [];
-			for (const el of candidates) {
-				if (elements.length >= max) break;
-				if (el instanceof HTMLInputElement && (el.type === "hidden" || el.type === "password") && params.includeSensitive !== true) {
-					if (el.type === "hidden") continue;
-				}
-				const ref = `e${elements.length}`;
-				el.setAttribute(ATTR, ref);
-				const rect = el.getBoundingClientRect();
-				elements.push({
-					ref,
-					role: roleOf(el),
-					name: accessibleName(el),
-					tag: el.tagName.toLowerCase(),
-					selector: cssPath(el),
-					disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
-					checked: el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio") ? Boolean(el.checked) : el.getAttribute("aria-checked") === "true" ? true : void 0,
-					href: el instanceof HTMLAnchorElement ? el.href?.slice(0, 300) : void 0,
-					inputType: el instanceof HTMLInputElement ? (el.type || "text").toLowerCase() : void 0,
-					fieldName: el.getAttribute?.("name") || void 0,
-					autocomplete: el.getAttribute?.("autocomplete") || void 0,
-					bounds: {
-						x: Math.round(rect.x),
-						y: Math.round(rect.y),
-						w: Math.round(rect.width),
-						h: Math.round(rect.height)
+					open = true;
+					updateRelayStatus({
+						state: "connected",
+						connected: true,
+						transport: "socket",
+						message: "The relay is pushing over its own socket.",
+						lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+						error: ""
+					});
+					pingTimer = setInterval(() => {
+						try {
+							candidate.send(BRIDGE_PING_FRAME);
+						} catch {}
+					}, BRIDGE_PING_INTERVAL_MS);
+				});
+				candidate.addEventListener("message", (event) => {
+					if (reactToFrame(event?.data).drain) onMail();
+				});
+				candidate.addEventListener("close", (event) => {
+					open = false;
+					socket = null;
+					if (pingTimer) {
+						clearInterval(pingTimer);
+						pingTimer = null;
+					}
+					if (event?.code === 1008 || event?.code === 4001 || event?.code === 4003) {
+						refused = true;
+						updateRelayStatus({
+							state: "unauthorized",
+							connected: false,
+							transport: "poll",
+							message: "The relay refused this browser's socket credential.",
+							lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+						});
 					}
 				});
-			}
-			return {
-				message: `Snapshot: ${elements.length} interactive element(s)`,
-				title: document.title,
-				url: location.href,
-				elementCount: elements.length,
-				elements
-			};
-		}
-		if (type === "click") {
-			const element = resolveElement();
-			element.scrollIntoView({
-				block: "center",
-				inline: "center"
-			});
-			element.click();
-			return { message: `Clicked ${params.ref || params.selector}` };
-		}
-		if (type === "type") {
-			const element = resolveElement();
-			if (element instanceof HTMLInputElement && element.type === "password" && params.allowSensitiveInput !== true) throw new Error("Typing into password fields requires allowSensitiveInput=true.");
-			const text = String(params.text ?? "");
-			element.focus();
-			if (element instanceof HTMLInputElement) (Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set)?.call(element, text);
-			else if (element instanceof HTMLTextAreaElement) (Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set)?.call(element, text);
-			else if (element.isContentEditable) element.textContent = text;
-			else throw new Error("The selected element is not editable.");
-			element.dispatchEvent(new InputEvent("input", {
-				bubbles: true,
-				inputType: "insertText",
-				data: text
-			}));
-			element.dispatchEvent(new Event("change", { bubbles: true }));
-			if (params.submit) if (element.form?.requestSubmit) element.form.requestSubmit();
-			else element.dispatchEvent(new KeyboardEvent("keydown", {
-				key: "Enter",
-				code: "Enter",
-				bubbles: true
-			}));
-			return { message: `Typed into ${params.ref || params.selector}` };
-		}
-		if (type === "select") {
-			const element = resolveElement();
-			if (!(element instanceof HTMLSelectElement)) throw new Error("select requires a <select> element.");
-			const value = String(params.value ?? "");
-			const label = String(params.label ?? "");
-			let matched = false;
-			for (const opt of element.options) if (value && opt.value === value || label && opt.textContent.trim() === label || label && opt.textContent.trim().includes(label)) {
-				element.value = opt.value;
-				matched = true;
-				break;
-			}
-			if (!matched) throw new Error("No matching option for select.");
-			element.dispatchEvent(new Event("input", { bubbles: true }));
-			element.dispatchEvent(new Event("change", { bubbles: true }));
-			return { message: `Selected option on ${params.ref || params.selector}` };
-		}
-		if (type === "scroll") {
-			if (params.selector || params.ref) {
-				resolveElement().scrollIntoView({
-					block: params.block || "center",
-					inline: "nearest",
-					behavior: "instant"
+				candidate.addEventListener("error", () => {
+					open = false;
 				});
-				return { message: `Scrolled to ${params.ref || params.selector}` };
 			}
-			const dy = Number(params.dy) || 0;
-			const dx = Number(params.dx) || 0;
-			window.scrollBy(dx, dy);
-			return { message: `Scrolled by (${dx}, ${dy})` };
-		}
-		if (type === "press_key") {
-			const key = String(params.key || "");
-			const target = params.selector || params.ref ? resolveElement() : document.activeElement || document.body;
-			target.dispatchEvent(new KeyboardEvent("keydown", {
-				key,
-				code: key,
-				bubbles: true
-			}));
-			target.dispatchEvent(new KeyboardEvent("keyup", {
-				key,
-				code: key,
-				bubbles: true
-			}));
-			return { message: `Pressed ${key}` };
-		}
-		if (type === "read_page") {
-			const maximum = Math.max(1, Math.min(Number(params.maxChars) || 12e3, 5e4));
-			const mode = String(params.mode || "text");
-			if (params.selector || params.ref) {
-				const element = resolveElement();
-				const content = mode === "html" ? element.outerHTML : element.innerText || element.textContent || "";
-				return {
-					message: "Read selected content",
-					content: String(content ?? "").slice(0, maximum),
-					title: document.title,
-					mode
-				};
-			}
-			let content = "";
-			if (mode === "html") content = document.documentElement?.outerHTML || "";
-			else if (mode === "forms") content = [...document.querySelectorAll("form")].map((form, i) => {
-				return `form#${i}\n${[...form.querySelectorAll("input,select,textarea")].map((el) => {
-					const name = el.name || el.id || el.getAttribute("aria-label") || el.type;
-					return `  - ${el.tagName.toLowerCase()}${el.type ? `[${el.type}]` : ""} name=${name}`;
-				}).join("\n")}`;
-			}).join("\n\n");
-			else if (mode === "landmarks") content = [...document.querySelectorAll("main, nav, header, footer, [role=\"main\"], [role=\"navigation\"], h1, h2")].map((el) => {
-				return `${el.tagName.toLowerCase()}: ${(el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160)}`;
-			}).join("\n");
-			else if (mode === "main_text") content = (document.querySelector("main, [role=\"main\"], article") || document.body)?.innerText || "";
-			else content = document.body?.innerText || "";
-			return {
-				message: `Read page (${mode})`,
-				content: String(content ?? "").slice(0, maximum),
-				title: document.title,
-				mode
-			};
-		}
-		throw new Error(`Unsupported browser command: ${type}`);
+		};
 	}
 	let historyWrites = Promise.resolve();
 	function withHistory(mutate) {
 		historyWrites = historyWrites.then(async () => {
-			const next = mutate((await api.storage.local.get("consoleHistory"))["consoleHistory"] ?? []);
-			await api.storage.local.set({ [HISTORY_KEY]: next });
+			const next = mutate((await api$1.storage.local.get("consoleHistory"))["consoleHistory"] ?? []);
+			await api$1.storage.local.set({ [HISTORY_KEY]: next });
 		}).catch((error) => {
 			console.warn("console history write failed:", error?.message || error);
 		});
@@ -3865,18 +3778,14 @@ Answer with the JSON object only. No prose, no code fences.`;
 	}
 	let journalInstance = null;
 	function executionJournal() {
-		if (!journalInstance) journalInstance = createExecutionJournal({ storage: api.storage.local });
+		if (!journalInstance) journalInstance = createExecutionJournal({ storage: api$1.storage.local });
 		return journalInstance;
 	}
 	/**
 	* Tell the hive about a locally executed run — the owner's rule: "it should
 	* stay in the browser extension but of course it can record the task to the
 	* hive." Sent as node-mesh mail addressed to '@relay', which the Mac agent
-	* can NEVER claim: cloud-relay/nodeMailbox.js lets only an inbox's owner
-	* drain it and only an admin principal owns '@relay'. A record, not a job.
-	*
-	* Best effort by design: an unconfigured or unreachable relay must not stop
-	* local execution, but the run's own status says whether the hive heard.
+	* can NEVER claim. A record, not a job. Best effort by design.
 	*/
 	async function recordRunToHive(runId, phase) {
 		const journal = executionJournal();
@@ -3959,7 +3868,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		}
 		const commandText = buildCommandText(command, page);
 		const context = commandContext(page);
-		const stored = await api.storage.local.get(SESSION_KEY);
+		const stored = await api$1.storage.local.get(SESSION_KEY);
 		const sessionId = String(stored["consoleSessionId"] ?? "").trim();
 		const planOutcome = await consolePost(config, "/plan", {
 			command: commandText,
@@ -3967,7 +3876,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 			...sessionId ? { sessionId } : {},
 			source: CONSOLE_SOURCE
 		}, PLAN_TIMEOUT_MS, interpretPlanResponse);
-		if (planOutcome.sessionId) await api.storage.local.set({ [SESSION_KEY]: planOutcome.sessionId });
+		if (planOutcome.sessionId) await api$1.storage.local.set({ [SESSION_KEY]: planOutcome.sessionId });
 		if (planOutcome.kind !== "execute") {
 			await patchEntry(id, outcomeToPatch(planOutcome));
 			return;
@@ -4270,7 +4179,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 	}
 	async function decidePlan({ id, decision }) {
 		const entryId = String(id ?? "");
-		const history = (await api.storage.local.get("consoleHistory"))["consoleHistory"] ?? [];
+		const history = (await api$1.storage.local.get("consoleHistory"))["consoleHistory"] ?? [];
 		const entry = (Array.isArray(history) ? history : []).find((candidate) => candidate?.id === entryId);
 		const preflight = planDecisionPreflight(entry);
 		if (!preflight.ok) return {
@@ -4313,8 +4222,6 @@ Answer with the JSON object only. No prose, no code fences.`;
 	/**
 	* Deny: the plan does not run, and the Mac's parked job is dismissed so the
 	* dashboard does not keep offering the same decision the owner just made.
-	* A dismissal that fails is reported on the entry rather than swallowed —
-	* "denied here, still parked there" is a state worth seeing.
 	*/
 	async function denyPlan(entry, pending) {
 		let note = "";
@@ -4419,7 +4326,6 @@ Answer with the JSON object only. No prose, no code fences.`;
 	* Only this call runs. The steps that would have followed it did not run and
 	* are not resumed — the run that parked has already reported what it did, and
 	* quietly continuing past the approval point would make that report a lie.
-	* The verdict says so out loud.
 	*/
 	async function runApprovedStep({ entry, pending, config }) {
 		const journal = executionJournal();
@@ -4469,26 +4375,167 @@ Answer with the JSON object only. No prose, no code fences.`;
 			});
 		}
 	}
-	function browserLabel() {
-		const userAgent = globalThis.navigator?.userAgent ?? "";
-		if (/Edg\//.test(userAgent)) return "Microsoft Edge";
-		if (/Firefox\//.test(userAgent)) return "Firefox";
-		if (/Chrome\//.test(userAgent)) return "Google Chrome";
-		if (/Safari\//.test(userAgent)) return "Safari";
-		return "Web Extension";
+	//#endregion
+	//#region browser-extension/src/page-engine.js
+	const ENGINE_LEASE_KEY = "engineLease";
+	const BACKGROUND_HOLDER = "background";
+	//#endregion
+	//#region browser-extension/src/background.js
+	const api = globalThis.browser ?? globalThis.chrome;
+	const POLL_ALARM = "ai-pendant-poll";
+	const POLL_WINDOW_MS = 25e3;
+	let activePoll = null;
+	let activeRelayDrain = null;
+	let configRevision = 0;
+	const mesh = createMeshSocket();
+	let macLastOkAt = 0;
+	const INCARNATION_NONCE = crypto.randomUUID();
+	const commandLedger = createCommandLedger();
+	const relayCtx = {
+		ledger: commandLedger,
+		macFresh: () => Date.now() - macLastOkAt <= MAC_FRESH_MS
+	};
+	async function migrateSyncedCredentials() {
+		if (!api.storage.sync) return;
+		const local = await api.storage.local.get(CONFIG_KEYS);
+		const synced = await api.storage.sync.get(["agentUrl", "agentToken"]);
+		const updates = {};
+		if (!local.agentUrl && synced.agentUrl) updates.agentUrl = synced.agentUrl;
+		if (!local.agentToken && synced.agentToken) updates.agentToken = synced.agentToken;
+		if (Object.keys(updates).length) await api.storage.local.set(updates);
+		if (synced.agentToken) await api.storage.sync.remove("agentToken");
 	}
-	function platformLabel() {
-		const platform = globalThis.navigator?.platform || "Mac";
-		return `${browserLabel()} on ${platform}`;
+	async function pollWindow(revision) {
+		const config = await getConfig();
+		if (!config.agentToken) {
+			await updateStatus({
+				state: "needs-setup",
+				connected: false,
+				message: "Paste the pairing code in the extension popup to connect."
+			});
+			return;
+		}
+		const deadline = Date.now() + POLL_WINDOW_MS;
+		let nextHeartbeatAt = 0;
+		let failures = 0;
+		while (Date.now() < deadline && revision === configRevision) try {
+			if (Date.now() >= nextHeartbeatAt) {
+				await heartbeat(config, {
+					nonce: INCARNATION_NONCE,
+					ledger: commandLedger
+				});
+				macLastOkAt = Date.now();
+				nextHeartbeatAt = Date.now() + HEARTBEAT_INTERVAL_MS;
+				await updateStatus({
+					state: "connected",
+					connected: true,
+					message: "Connected to the local Mac agent.",
+					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+					error: ""
+				});
+			}
+			const handledCommand = await pollOnce(config, { ledger: commandLedger });
+			failures = 0;
+			if (!handledCommand) await delay(750);
+		} catch (error) {
+			failures += 1;
+			await updateStatus({
+				state: error?.status === 401 ? "unauthorized" : "offline",
+				connected: false,
+				message: error?.status === 401 ? "The local agent rejected the token." : "Cannot reach the local Mac agent.",
+				error: error?.message || String(error),
+				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+			await delay(retryDelay(failures - 1));
+		}
 	}
-	function delay(ms) {
-		return new Promise((resolve) => setTimeout(resolve, ms));
+	function startPolling() {
+		if (activePoll) return activePoll;
+		const revision = configRevision;
+		activePoll = pollWindow(revision).catch(async (error) => {
+			await updateStatus({
+				state: "error",
+				connected: false,
+				message: "Browser bridge stopped unexpectedly.",
+				error: error?.message || String(error),
+				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+		}).finally(() => {
+			activePoll = null;
+			if (revision !== configRevision) startPolling();
+		});
+		return activePoll;
+	}
+	async function relayWindow(revision) {
+		const relayConfig = await getRelayConfig();
+		if (!relayConfig.ready) {
+			await updateRelayStatus({
+				state: "off",
+				connected: false,
+				message: relayConfig.reason
+			});
+			return;
+		}
+		const macConfig = await getConfig();
+		const deadline = Date.now() + POLL_WINDOW_MS;
+		mesh.ensure(relayConfig, () => drainRelayUntilEmpty(relayConfig, macConfig, relayCtx).catch((error) => console.warn(`mesh doorbell drain failed: ${error?.message || error}`)));
+		while (Date.now() < deadline && revision === configRevision) {
+			const choice = choosePeer({
+				macConfigured: Boolean(macConfig.agentToken),
+				macLastOkAt,
+				relayReady: true,
+				socketOpen: mesh.isOpen()
+			});
+			try {
+				const report = await drainRelayUntilEmpty(relayConfig, macConfig, relayCtx);
+				await updateRelayStatus({
+					state: "connected",
+					connected: true,
+					transport: choice.relayTransport,
+					message: describeRelayPeer(relayConfig, choice),
+					lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+					error: "",
+					...report
+				});
+			} catch (error) {
+				await updateRelayStatus({
+					...describeRelayFailure(error),
+					connected: false,
+					transport: mesh.isOpen() ? "socket" : "poll",
+					error: error?.message || String(error),
+					lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+			}
+			if (Date.now() + choice.relayPollMs >= deadline) break;
+			await delay(choice.relayPollMs);
+		}
+	}
+	function startRelayDrain() {
+		if (activeRelayDrain) return activeRelayDrain;
+		const revision = configRevision;
+		activeRelayDrain = relayWindow(revision).catch(async (error) => {
+			await updateRelayStatus({
+				state: "error",
+				connected: false,
+				message: "The relay peer stopped unexpectedly.",
+				error: error?.message || String(error),
+				lastErrorAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+		}).finally(() => {
+			activeRelayDrain = null;
+			if (revision !== configRevision) startRelayDrain();
+		});
+		return activeRelayDrain;
 	}
 	function startPeers() {
 		enforceCredentialLifetime().then(() => maybeRestorePairingFromEscrow()).catch(() => {}).finally(() => {
 			startPolling();
 			startRelayDrain();
 		});
+		api.storage.local.set({ [ENGINE_LEASE_KEY]: {
+			holder: BACKGROUND_HOLDER,
+			at: Date.now()
+		} }).catch(() => {});
 	}
 	let escrowUnavailable = false;
 	async function escrowSend(message) {
@@ -4569,8 +4616,8 @@ Answer with the JSON object only. No prose, no code fences.`;
 		}
 		if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
 			configRevision += 1;
-			meshSocketRefused = false;
-			closeMeshSocket();
+			mesh.clearRefusal();
+			mesh.close();
 			startRelayDrain();
 		}
 	});
@@ -4581,7 +4628,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 			return true;
 		}
 		if (message?.type === "bridge:get-status") {
-			api.storage.local.get(STATUS_KEY).then((values) => sendResponse(values[STATUS_KEY] ?? null));
+			api.storage.local.get(STATUS_KEY).then((values) => sendResponse(values["bridgeStatus"] ?? null));
 			return true;
 		}
 		if (message?.type === "peers:get-status") {
@@ -4590,13 +4637,13 @@ Answer with the JSON object only. No prose, no code fences.`;
 				getRelayConfig(),
 				getConfig()
 			]).then(([values, relayConfig, macConfig]) => sendResponse({
-				mac: values[STATUS_KEY] ?? null,
-				relay: values[RELAY_STATUS_KEY] ?? null,
+				mac: values["bridgeStatus"] ?? null,
+				relay: values["relayStatus"] ?? null,
 				choice: choosePeer({
 					macConfigured: Boolean(macConfig.agentToken),
 					macLastOkAt,
 					relayReady: relayConfig.ready,
-					socketOpen: meshSocketOpen
+					socketOpen: mesh.isOpen()
 				})
 			})).catch((error) => sendResponse({ error: error?.message || String(error) }));
 			return true;

@@ -2,8 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  BACKGROUND_HOLDER,
+  BACKGROUND_LEASE_STALE_MS,
+  PAGE_LEASE_STALE_MS,
   PAIR_REPLY_TIMEOUT_MS,
+  backgroundAliveVerdict,
   directOutcomeWritePlan,
+  leaseDecision,
   pairFallbackVerdict,
   runDirectPairing,
 } from '../src/page-engine.js'
@@ -301,4 +306,141 @@ test('an engine without storage.session or a native host still pairs', async () 
   assert.equal(record.ok, true)
   assert.equal(local.agentToken, 'agent-token-3')
   assert.equal(nativeMessages.length, 0)
+})
+
+/* ===================================================================== *
+ * backgroundAliveVerdict: is the background dead, from what the boot ping
+ * observed? Timestamps in, verdict out — no browser needed.
+ * ===================================================================== */
+
+const T0 = Date.parse('2026-08-12T22:00:00.000Z')
+
+test('an answered ping is proof of life on its own', () => {
+  const verdict = backgroundAliveVerdict({
+    pingReplied: true,
+    beforeUpdatedAt: '',
+    afterUpdatedAt: '',
+    now: T0,
+  })
+  assert.equal(verdict.dead, false)
+})
+
+test('a dropped reply with a FRESHENED bridgeStatus is a live worker', () => {
+  const verdict = backgroundAliveVerdict({
+    pingReplied: false,
+    beforeUpdatedAt: new Date(T0 - 60_000).toISOString(),
+    afterUpdatedAt: new Date(T0 - 500).toISOString(),
+    now: T0,
+  })
+  assert.equal(verdict.dead, false)
+  assert.match(verdict.why, /freshened/)
+})
+
+test('an unchanged but fresh bridgeStatus means an engine already runs — not dead', () => {
+  const at = new Date(T0 - 4_000).toISOString()
+  const verdict = backgroundAliveVerdict({
+    pingReplied: false,
+    beforeUpdatedAt: at,
+    afterUpdatedAt: at,
+    now: T0,
+  })
+  assert.equal(verdict.dead, false)
+})
+
+test('an unanswered ping over a stale, unmoved bridgeStatus is a dead background', () => {
+  const at = new Date(T0 - 3 * 60_000).toISOString()
+  const verdict = backgroundAliveVerdict({
+    pingReplied: false,
+    beforeUpdatedAt: at,
+    afterUpdatedAt: at,
+    now: T0,
+  })
+  assert.equal(verdict.dead, true)
+})
+
+test('no bridgeStatus at all (fresh install, dead background) is dead', () => {
+  const verdict = backgroundAliveVerdict({
+    pingReplied: false,
+    beforeUpdatedAt: '',
+    afterUpdatedAt: '',
+    now: T0,
+  })
+  assert.equal(verdict.dead, true)
+})
+
+/* ===================================================================== *
+ * leaseDecision: acquire / retain / steal / blocked.
+ * ===================================================================== */
+
+test('the background acquires unconditionally, even over a fresh page lease', () => {
+  const overPage = leaseDecision(
+    { holder: 'console-abc', at: T0 - 100 },
+    { holder: BACKGROUND_HOLDER, now: T0 },
+  )
+  assert.equal(overPage.action, 'acquire')
+
+  const own = leaseDecision(
+    { holder: BACKGROUND_HOLDER, at: T0 - 100 },
+    { holder: BACKGROUND_HOLDER, now: T0 },
+  )
+  assert.equal(own.action, 'retain')
+})
+
+test('a page acquires a free or malformed lease', () => {
+  assert.equal(leaseDecision(undefined, { holder: 'popover-1', now: T0 }).action, 'acquire')
+  assert.equal(leaseDecision(null, { holder: 'popover-1', now: T0 }).action, 'acquire')
+  assert.equal(
+    leaseDecision({ holder: '', at: T0 }, { holder: 'popover-1', now: T0 }).action,
+    'acquire',
+  )
+  assert.equal(
+    leaseDecision({ holder: 'console-2', at: 'soon' }, { holder: 'popover-1', now: T0 }).action,
+    'acquire',
+  )
+})
+
+test('a page retains its own lease and is blocked by another page\'s fresh one', () => {
+  assert.equal(
+    leaseDecision({ holder: 'console-2', at: T0 - 1_000 }, { holder: 'console-2', now: T0 }).action,
+    'retain',
+  )
+  const blocked = leaseDecision(
+    { holder: 'console-2', at: T0 - 1_000 },
+    { holder: 'popover-1', now: T0 },
+  )
+  assert.equal(blocked.action, 'blocked')
+  assert.match(blocked.reason, /console-2/)
+})
+
+test('a page steals another page\'s lease only once it is provably stale', () => {
+  const justInside = leaseDecision(
+    { holder: 'console-2', at: T0 - PAGE_LEASE_STALE_MS },
+    { holder: 'popover-1', now: T0 },
+  )
+  assert.equal(justInside.action, 'blocked')
+
+  const stale = leaseDecision(
+    { holder: 'console-2', at: T0 - PAGE_LEASE_STALE_MS - 1 },
+    { holder: 'popover-1', now: T0 },
+  )
+  assert.equal(stale.action, 'acquire')
+})
+
+test('the background\'s lease is measured against its own 30s alarm cadence', () => {
+  /* 30s old would be one missed alarm — never stealable. */
+  const oneAlarm = leaseDecision(
+    { holder: BACKGROUND_HOLDER, at: T0 - 30_000 },
+    { holder: 'console-2', now: T0 },
+  )
+  assert.equal(oneAlarm.action, 'blocked')
+
+  const abandoned = leaseDecision(
+    { holder: BACKGROUND_HOLDER, at: T0 - BACKGROUND_LEASE_STALE_MS - 1 },
+    { holder: 'console-2', now: T0 },
+  )
+  assert.equal(abandoned.action, 'acquire')
+
+  /* The asymmetry is the rule: a page lease this old fell long ago. */
+  assert.ok(BACKGROUND_LEASE_STALE_MS > PAGE_LEASE_STALE_MS)
+  assert.ok(BACKGROUND_LEASE_STALE_MS > 2 * 30_000, 'two whole alarm periods plus slack')
 })

@@ -28,7 +28,10 @@ import {
   normalizePairLifetime,
 } from './pairing.js'
 import {
+  BACKGROUND_CHECK_WAIT_MS,
   PAIR_REPLY_TIMEOUT_MS,
+  backgroundAliveVerdict,
+  createPageEngine,
   pairFallbackVerdict,
   runDirectPairing,
 } from './page-engine.js'
@@ -72,11 +75,13 @@ const elements = {
   history: document.getElementById('history'),
   openDashboard: document.getElementById('open-dashboard'),
   connectNow: document.getElementById('connect-now'),
+  engineNote: document.getElementById('engine-note'),
   setup: document.getElementById('setup'),
   pairCode: document.getElementById('pair-code'),
   pairLifetime: document.getElementById('pair-lifetime'),
   pairConnect: document.getElementById('pair-connect'),
   pairNotice: document.getElementById('pair-notice'),
+  setupRepair: document.getElementById('setup-repair'),
   grantPages: document.getElementById('grant-pages'),
 }
 
@@ -96,6 +101,40 @@ if (standalone) {
 }
 
 let dashboardUrl = dashboardUrlFor(DEFAULT_AGENT_URL)
+
+/* ===== The page engine (fallback bridge) =====
+ *
+ * Measured 2026-08-12 on the owner's Safari: the background never evaluates —
+ * not as service_worker, not as a background.scripts page — while this
+ * document always runs. So this popup carries a whole engine (page-engine.js,
+ * composing the SAME executor.js/console-engine.js the worker runs) and turns
+ * it on only when the boot check below proves the background dead AND the
+ * storage lease says no other document already carries it.
+ */
+const pageEngine = createPageEngine({
+  standalone,
+  onStopped: () => renderEngineNote(),
+})
+
+/* Requests route to whichever bridge is real: once the boot ping goes
+ * unanswered, every owner action is handled IN THIS DOCUMENT by the shared
+ * handlers, instead of being posted into a message channel proven silent. */
+let routeLocal = false
+
+async function sendToBridge(message) {
+  if (routeLocal) return pageEngine.handle(message)
+  return api.runtime.sendMessage(message)
+}
+
+function renderEngineNote() {
+  const active = pageEngine.active()
+  elements.engineNote.hidden = !active
+  elements.engineNote.textContent = !active
+    ? ''
+    : standalone
+      ? 'The background bridge is asleep — this console window is carrying the bridge. Keep it open.'
+      : 'The background bridge is asleep — this popover is carrying the bridge, and it stops when the popover closes. Pin the console window (↗) to keep the brain alive.'
+}
 
 /* ===== Approval cards ===== */
 
@@ -194,7 +233,7 @@ async function decide(prompt, decision) {
   renderApprovals(heldApprovals)
 
   try {
-    const reply = await api.runtime.sendMessage({
+    const reply = await sendToBridge({
       type: 'approval:decide',
       approvalId: prompt.approvalId,
       decision,
@@ -359,7 +398,7 @@ async function decidePlan(entry, decision) {
   renderHistory(lastHistory)
 
   try {
-    const reply = await api.runtime.sendMessage({
+    const reply = await sendToBridge({
       type: 'plan:decide',
       id: entry.id,
       decision,
@@ -641,7 +680,7 @@ elements.form.addEventListener('submit', async (event) => {
   elements.send.disabled = true
   try {
     const page = elements.includePage.checked ? await currentPage() : null
-    const reply = await api.runtime.sendMessage({
+    const reply = await sendToBridge({
       type: 'console:submit',
       command,
       page,
@@ -672,7 +711,7 @@ elements.openDashboard.addEventListener('click', () => {
 elements.connectNow.addEventListener('click', async () => {
   elements.statusTitle.textContent = 'Connecting…'
   try {
-    await api.runtime.sendMessage({ type: 'bridge:poll-now' })
+    await sendToBridge({ type: 'bridge:poll-now' })
   } catch {
     // The alarm will restart a suspended service worker.
   }
@@ -698,23 +737,45 @@ function setPairNotice(message, isError = false) {
   elements.pairNotice.className = `notice${isError ? ' error' : ''}`
 }
 
+/* The owner's escape hatch out of the compact card: a credential can be
+ * stored AND dead (relay says unauthorized), and then the fix really is a
+ * fresh code. Flipped by the "Enter a pairing code" link, cleared by the
+ * next successful pair. */
+let forceFullSetup = false
+
 function renderSetup({ agentConfigured, brainWorking }) {
   /*
-   * The card hides only when BOTH halves are actually working, and "working"
-   * for the brain half is describeBrainState's own verdict — the same one
-   * the chip prints. The first fix here gated on stored-credential PRESENCE
-   * (relayEnabled && deviceToken), and the owner immediately hit the hole in
-   * it: a stored-but-dead credential kept the card hidden while the chip
-   * said "No brain" and the footer said "paste the code in this popup".
-   * Presence is not health. One paste repairs both halves, so the card IS
-   * the repair path whenever the chip is not green.
+   * THREE STATES, not two — the owner hit the hole in two, live, twice:
+   *
+   *   pair     — no credentials at all (or the owner asked via the link):
+   *              the full card, code box and Connect.
+   *   starting — credentials stored but the brain not LIVE yet. Measured
+   *              2026-08-12 right after the first successful direct pair:
+   *              the old gate showed the FULL card here, asking for the code
+   *              again seconds after "Paired." — "not working yet" and
+   *              "never configured" rendered the same. Now this state shows
+   *              NO code box: a compact "Starting the brain…" line while the
+   *              page engine brings the socket up, self-resolving to hidden
+   *              within seconds. (The old hole stays covered the other way:
+   *              a stored-but-DEAD credential keeps the card visible — as
+   *              this compact line with a re-pair link — never invisible.)
+   *   hidden   — brain live (describeBrainState's own verdict, the same
+   *              source the chip renders from). Command box front and
+   *              center, minimal chrome — the owner: "after connecting it
+   *              should just hide that entire panel of pairing code and
+   *              leave only the textbox."
    */
   elements.setup.hidden = agentConfigured && brainWorking
+  const compact = agentConfigured && !brainWorking && !forceFullSetup
+  elements.setup.classList.toggle('setup-compact', compact)
+  if (elements.setupRepair) elements.setupRepair.hidden = !compact
   const title = elements.setup.querySelector('.setup-title')
   if (title) {
-    title.textContent = agentConfigured
-      ? 'Reconnect the brain'
-      : 'Connect this browser'
+    title.textContent = compact
+      ? 'Starting the brain…'
+      : agentConfigured
+        ? 'Reconnect the brain'
+        : 'Connect this browser'
   }
   /* One thing at a time in 400px: while the MAC half is unpaired, the
    * command box and its footer chrome would only be dead controls under the
@@ -725,6 +786,11 @@ function renderSetup({ agentConfigured, brainWorking }) {
   elements.openDashboard.parentElement.hidden = !agentConfigured
 }
 
+elements.setupRepair.addEventListener('click', () => {
+  forceFullSetup = true
+  void refresh().then(() => elements.pairCode.focus())
+})
+
 function renderPairOutcome(outcome) {
   /* Only narrate an outcome for a pairing THIS popup started: a record from
    * last week must not greet every fresh open with "Paired." */
@@ -733,6 +799,8 @@ function renderPairOutcome(outcome) {
   elements.pairConnect.disabled = false
   if (outcome.ok) {
     elements.pairCode.value = ''
+    /* The paste worked — the card owes the owner its compact form again. */
+    forceFullSetup = false
     setPairNotice(outcome.note || 'Paired.')
   } else {
     setPairNotice(outcome.error || 'Pairing failed.', true)
@@ -766,6 +834,15 @@ elements.pairConnect.addEventListener('click', async () => {
     deviceId,
     deviceName: stored.deviceName || 'Browser extension',
     lifetime: normalizePairLifetime(elements.pairLifetime.value),
+  }
+
+  /* The boot check already proved the worker silent — skip the reply window
+   * and run the exchange from this document at once. */
+  if (routeLocal) {
+    setPairNotice('Pairing directly from this window…')
+    const record = await runDirectPairing(api, { ...exchange, startedAt: pairStartedAt })
+    renderPairOutcome(record)
+    return
   }
 
   /*
@@ -866,6 +943,21 @@ elements.grantPages.addEventListener('click', async () => {
 function onStorageChanged(changes, areaName) {
   if (areaName !== 'local') return
   if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue)
+  /* A fresh pairing must reach a RUNNING page engine at once: its socket may
+   * be open under the old relayDeviceId or latched refused by the dead
+   * credential, and the owner is watching the brain chip. configChanged
+   * closes the socket, lifts the latch and wakes the relay loop to rebuild
+   * from the same storage keys the background reads. No-op while the loops
+   * are not running here. */
+  if (
+    changes.agentToken ||
+    changes.deviceToken ||
+    changes.relayEnabled ||
+    changes.relayUrl ||
+    changes.relayDeviceId
+  ) {
+    pageEngine.configChanged()
+  }
   /* The brain chip depends on two keys and a token, so a change in any of them
    * re-reads all of them rather than patching from one. agentToken also flips
    * the setup card, which refresh() repaints. */
@@ -891,6 +983,9 @@ window.addEventListener('pagehide', () => {
   } catch {
     /* A browser without removeListener is one that never kept it. */
   }
+  /* And the engine dies WITH its document: loops stopped, socket closed,
+   * lease released so the next surface can take over within one heartbeat. */
+  void pageEngine.stop('the window closed')
 })
 
 async function refresh() {
@@ -930,21 +1025,73 @@ void refresh().then(() => {
 })
 
 /*
- * WAKE THE WORKER. Safari does not reliably fire onStartup or persist
- * alarms for MV3 service workers, and this popup reads storage directly —
- * so before this ping existed, opening the popup showed whatever statuses
- * the worker last wrote before Safari put it down, hours or days stale
- * (measured 2026-08-12: bridgeStatus still carried settings-era wording
- * while the agent's heartbeat registry sat empty). A message is the one
- * thing that always evaluates the worker; bridge:poll-now then re-creates
- * the alarm and repolls, and the fresh statuses repaint this document
- * through storage.onChanged within a couple of seconds.
+ * WAKE THE WORKER — AND MEASURE WHETHER IT EXISTS AT ALL.
+ *
+ * Safari does not reliably fire onStartup or persist alarms for MV3 service
+ * workers, so this ping was always the one thing that evaluates a live
+ * worker. Since 2026-08-12 it is also the dead-background probe: on the
+ * owner's Safari the background never evaluates AT ALL, the ping resolves
+ * undefined, and bridgeStatus.updatedAt stands still through the wait. When
+ * backgroundAliveVerdict reads that as dead, this document tries to become
+ * the bridge itself — pageEngine.start() takes the storage lease (or defers
+ * to whichever window already holds it) and runs the same loops the worker
+ * would. Owner actions flip to local handling the moment the ping goes
+ * unanswered, whether or not this document wins the loops.
  */
-void (async () => {
+async function checkBackgroundAndMaybeStart() {
+  if (pageEngine.active()) return
+
+  const before =
+    (await api.storage.local.get('bridgeStatus'))?.bridgeStatus?.updatedAt ?? ''
+  let pingReplied = false
   try {
-    await api.runtime.sendMessage({ type: 'bridge:poll-now' })
+    const reply = await api.runtime.sendMessage({ type: 'bridge:poll-now' })
+    pingReplied = reply !== undefined && reply !== null
   } catch {
-    /* A dead message channel just means the worker will speak through
-     * storage when it wakes; nothing to show the owner here. */
+    /* A dead message channel is itself the answer: nothing is listening. */
   }
-})()
+
+  await new Promise((resolve) => setTimeout(resolve, BACKGROUND_CHECK_WAIT_MS))
+  const after =
+    (await api.storage.local.get('bridgeStatus'))?.bridgeStatus?.updatedAt ?? ''
+  const verdict = backgroundAliveVerdict({
+    pingReplied,
+    beforeUpdatedAt: before,
+    afterUpdatedAt: after,
+  })
+
+  routeLocal = !pingReplied
+
+  if (verdict.dead) {
+    await pageEngine.start()
+    renderEngineNote()
+  }
+}
+
+void checkBackgroundAndMaybeStart()
+
+/*
+ * THE CONSOLE WINDOW KEEPS WATCH. The boot check alone covers a popover —
+ * transient by nature — but the standalone console is the long-lived host,
+ * and the handoff the popover's own banner recommends ("pin the console
+ * window") ends with the popover CLOSING and its engine dying. A console that
+ * only checked at boot — back when the popover's engine made everything look
+ * alive — would then sit beside a dead background forever. So the console
+ * re-runs the same check on a timer; every pass either wakes a real worker
+ * (healthy browsers, and the verdict says alive) or takes over the lease the
+ * closed popover released. Cleared on pagehide with everything else.
+ */
+const ENGINE_WATCHDOG_MS = 20_000
+let engineWatchdog = null
+if (standalone) {
+  engineWatchdog = window.setInterval(() => {
+    void checkBackgroundAndMaybeStart().catch(() => {})
+  }, ENGINE_WATCHDOG_MS)
+}
+
+window.addEventListener('pagehide', () => {
+  if (engineWatchdog !== null) {
+    window.clearInterval(engineWatchdog)
+    engineWatchdog = null
+  }
+})

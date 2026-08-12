@@ -204,6 +204,157 @@ test('the worker enforces the credential lifetime on startup and alarms', () => 
   assert.match(text, /PAIR_WIPE_KEYS/, 'an expiry wipes exactly the shared key list')
 })
 
+/*
+ * STAGE 2 (1.7.6): THE PAGE ENGINE. When the background never evaluates, a
+ * popup document runs the bridge loops itself. The discipline that keeps that
+ * safe is asserted here, in the same source-shape style as the listener leak
+ * above — these are properties of REGISTRATION and TEARDOWN, not rendering.
+ */
+test('the page engine dies with its document and releases what it held', () => {
+  const popup = src('popup.js')
+  /* pagehide is the teardown event for popovers Safari suspends rather than
+   * destroys — the engine must stop there, beside the listener removal. */
+  const pagehideBlocks = popup
+    .split("addEventListener('pagehide'")
+    .slice(1)
+    .join('')
+  assert.ok(
+    pagehideBlocks.includes('pageEngine.stop'),
+    'the engine is stopped on pagehide',
+  )
+
+  const engine = src('page-engine.js')
+  const stopBlock = engine.slice(engine.indexOf('async function stop'))
+  assert.match(
+    stopBlock.slice(0, stopBlock.indexOf('/* The lease heartbeat')),
+    /clearInterval\(leaseTimer\)/,
+    'stop() drops the lease heartbeat timer',
+  )
+  assert.match(stopBlock, /mesh\.close\(\)/, 'stop() closes the doorbell socket')
+  assert.match(stopBlock, /releaseLease\(\)/, 'stop() releases the lease it held')
+  /* The lifecycle discipline extends to the engine module: no storage
+   * listeners at all — the lease heartbeat polls, it does not subscribe. */
+  assert.equal(/onChanged\.addListener/.test(engine), false)
+})
+
+test('the background always wins the engine lease', () => {
+  const background = src('background.js')
+  const startPeers = background.slice(background.indexOf('function startPeers'))
+  const body = startPeers.slice(0, startPeers.indexOf('/*\n * CREDENTIAL ESCROW'))
+  assert.match(
+    body,
+    /ENGINE_LEASE_KEY\]: \{ holder: BACKGROUND_HOLDER/,
+    'startPeers (evaluation + every alarm) claims the lease',
+  )
+
+  const engine = src('page-engine.js')
+  assert.match(
+    engine,
+    /the background always wins/,
+    'leaseDecision encodes the background-first rule',
+  )
+})
+
+test('one executor, one console: the engines share modules instead of forking', () => {
+  const background = src('background.js')
+  /* The executor left background.js whole — a copy left behind would be the
+   * fork this extraction exists to prevent. */
+  for (const marker of ['function runInPage', 'sanitizeExtraction', 'function executeCommand']) {
+    assert.equal(
+      background.includes(marker),
+      false,
+      `background.js must not keep its own "${marker}" — executor.js owns it`,
+    )
+  }
+  assert.match(background, /from '\.\/executor\.js'/)
+  assert.match(background, /from '\.\/console-engine\.js'/)
+
+  const engine = src('page-engine.js')
+  assert.match(engine, /from '\.\/executor\.js'/)
+  assert.match(engine, /from '\.\/console-engine\.js'/)
+})
+
+test('the page engine inherits identity from storage, never invents its own', () => {
+  /*
+   * The coordinator's parity requirement: the fleet map's Browser Extension
+   * node and the agent's /browser/status registry must light up identically
+   * whichever engine heartbeats. That holds because BOTH identities live in
+   * storage and are read through the same functions — extensionId via
+   * getConfig()'s stored instanceId, relay deviceId via getRelayConfig() —
+   * so the engine module must never assemble an identity of its own.
+   */
+  const engine = src('page-engine.js')
+  assert.match(engine, /getConfig\(\)/, 'agent identity comes from getConfig')
+  assert.match(engine, /getRelayConfig\(\)/, 'relay identity comes from getRelayConfig')
+  assert.equal(
+    engine.includes('ai-pendant-'),
+    false,
+    'the extensionId template lives in executor.js alone',
+  )
+
+  const executor = src('executor.js')
+  assert.match(
+    executor,
+    /ai-pendant-\$\{api\.runtime\.id\}-\$\{values\.instanceId\}/,
+    'executor.js builds the one extensionId both engines send',
+  )
+})
+
+/*
+ * LIVE FEEDBACK, 2026-08-12, minutes after the first successful direct pair
+ * ("Paired. This browser is browser-24bf5f on the relay"): the popup asked
+ * for the pairing code AGAIN, because "credentials stored, brain not live
+ * yet" rendered as the full pairing card. And the freshly minted identity
+ * has to reach a running engine's relay socket without waiting out a sweep.
+ */
+test('a stored credential is never re-asked for: the card has a compact state', () => {
+  const text = src('popup.js')
+  assert.match(
+    text,
+    /const compact = agentConfigured && !brainWorking && !forceFullSetup/,
+    'compact = paired but not live (unless the owner asked for the full card)',
+  )
+  assert.match(
+    text,
+    /classList\.toggle\('setup-compact', compact\)/,
+    'the compact state is a class the CSS collapses',
+  )
+  /* The collapse must actually collapse the code box. */
+  const css = src('ui.css')
+  const compactRule = css.slice(css.indexOf('.setup-compact'))
+  assert.match(
+    compactRule.slice(0, compactRule.indexOf('}')),
+    /display: none/,
+    'compact mode hides the code input and its row',
+  )
+  /* And the way back exists for the stored-but-dead credential. */
+  assert.match(text, /forceFullSetup = true/, 'the re-pair link restores the full card')
+})
+
+test('a fresh pairing reaches a running engine\'s relay peer immediately', () => {
+  const engine = src('page-engine.js')
+  const changed = engine.slice(engine.indexOf('configChanged() {'))
+  const body = changed.slice(0, changed.indexOf('},'))
+  assert.match(body, /mesh\.clearRefusal\(\)/, 'a dead credential\'s refusal latch lifts')
+  assert.match(body, /mesh\.close\(\)/, 'the socket under the old identity closes')
+  assert.match(body, /relayWake/, 'the relay loop wakes instead of sleeping out a sweep')
+
+  const popup = src('popup.js')
+  assert.match(
+    popup,
+    /pageEngine\.configChanged\(\)/,
+    'the popup\'s storage listener rings the engine on credential changes',
+  )
+  /* The relay loop runs in EVERY engine host — the owner who just pasted the
+   * code into the popover is watching the brain chip in that popover. */
+  const start = engine.slice(engine.indexOf('async start()'))
+  assert.match(
+    start.slice(0, start.indexOf('stop,')),
+    /void relayLoop\(\)/,
+    'start() launches the relay loop unconditionally',
+  )
+})
+
 test('the setup card hides only when the brain is actually working', () => {
   /*
    * 2026-08-12, twice in one night: first the card was gated on the agent

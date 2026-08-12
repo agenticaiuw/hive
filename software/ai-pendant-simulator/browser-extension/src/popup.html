@@ -48,6 +48,16 @@
       </div>
 
       <!--
+        THE PAGE-ENGINE BANNER. Hidden while the background bridge runs the
+        loops (every browser where the background evaluates). When the popup
+        measures the background dead (page-engine.js backgroundAliveVerdict)
+        and this document wins the engine lease, popup.js shows here WHICH
+        window is carrying the bridge — and, in the transient popover, that
+        pinning the console window is what keeps the brain alive.
+      -->
+      <p id="engine-note" class="engine-note" hidden></p>
+
+      <!--
         SETUP LIVES HERE NOW. The owner, 2026-08-12: "having a settings page
         is lowkey kind of weird. i should be able to paste my token directly
         to the extension window and then press connect. actually, delete the
@@ -81,6 +91,12 @@
           <button id="pair-connect" class="primary" type="button">Connect</button>
         </div>
         <p id="pair-notice" class="notice"></p>
+        <!-- Shown ONLY in the compact "Starting the brain…" state: the way
+             back to the full code box when the stored credential is the
+             problem (relay says unauthorized) rather than the connection. -->
+        <button id="setup-repair" class="setup-repair" type="button" hidden>
+          Enter a pairing code instead
+        </button>
       </section>
 
       <!-- The website-access grant used to live on the deleted settings page;
