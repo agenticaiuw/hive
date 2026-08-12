@@ -983,6 +983,18 @@ static void approve_button_pressed(const struct device *port,
 	k_sem_give(&approve_press_sem);
 }
 
+/*
+ * LSM6DSOX double-tap, delivered from the INT1 GPIO ISR (accel_tap.c).
+ * Give the SAME semaphore as button 1 and the yellow button and NOTHING
+ * else: every press semantic — start conversation, stop recording, end
+ * conversation, mute suppression — applies to a tap-tap on the pendant
+ * body with zero new states.
+ */
+static void accel_double_tap_isr(void)
+{
+	k_sem_give(&button_press_sem);
+}
+
 static bool take_memo_press(void)
 {
 	return k_sem_take(&memo_press_sem, K_NO_WAIT) == 0;
@@ -1072,6 +1084,8 @@ static void encoder_push_pressed(const struct device *port,
 	}
 	last_push_ms = now;
 	atomic_set(&menu_select_req, 1);
+	/* ISR-safe: schedules work, touches no bus here. */
+	haptic_trigger(HAPTIC_PATTERN_CLICK);
 }
 
 /*
@@ -1108,7 +1122,8 @@ static void volume_adc_init(void)
 		.acquisition_time =
 			ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10),
 		.channel_id = VOLUME_ADC_CHANNEL_ID,
-		.input_positive = NRF_SAADC_AIN2, /* P0.15, the last free AIN */
+		/* P0.15, the last free AIN */
+		.input_positive = NRF_SAADC_INPUT_AIN2,
 	};
 
 	if (!device_is_ready(volume_adc) ||
@@ -1615,6 +1630,7 @@ static void poll_approval_button(void)
 			clear_approve_events();
 			if (pendant_ws_connected()) {
 				atomic_set(&approval_decision_req, 1);
+				haptic_trigger(HAPTIC_PATTERN_DOUBLE);
 				printk("Approval button: APPROVE (quick tap)\n");
 			} else {
 				printk("Approval button: approve dropped "
@@ -1638,6 +1654,7 @@ static void poll_approval_button(void)
 			last_decision_ms = now;
 			if (pendant_ws_connected()) {
 				atomic_set(&approval_decision_req, 2);
+				haptic_trigger(HAPTIC_PATTERN_DOUBLE);
 				printk("Approval button: DENY (held %d ms)\n",
 				       (int)(now - pressed_at_ms));
 			} else {
@@ -1663,6 +1680,7 @@ static void poll_approval_button(void)
 	last_decision_ms = now;
 	if (pendant_ws_connected()) {
 		atomic_set(&approval_decision_req, 1);
+		haptic_trigger(HAPTIC_PATTERN_DOUBLE);
 		printk("Approval button: APPROVE (%d ms press)\n",
 		       (int)(now - pressed_at_ms));
 	} else {
@@ -2492,6 +2510,11 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
 			   (memo_capture_active && take_memo_press())) {
 			recording_stopped_by_button = true;
+			/* Stop acknowledged: memo closes on a tick, a
+			 * command capture on the button click. */
+			haptic_trigger(memo_capture_active
+					       ? HAPTIC_PATTERN_TICK
+					       : HAPTIC_PATTERN_CLICK);
 			break;
 		}
 	}
@@ -3365,6 +3388,21 @@ static void ws_io_drain_downlink(void)
 				    (const char *)ws_rx_buf)) {
 				continue;
 			}
+			if (audio_sink_offer_frame((const char *)ws_rx_buf)) {
+				continue;
+			}
+			/*
+			 * The relay announces an approval readback about to
+			 * play; the strong hit tells the thumb "the next
+			 * words want a decision" even in a loud room.
+			 * (Relay side of this frame is still TODO — the
+			 * parse is the device's half of the contract.)
+			 */
+			if (strstr((const char *)ws_rx_buf,
+				   "\"approval_readback\"") != NULL) {
+				haptic_trigger(HAPTIC_PATTERN_STRONG);
+				continue;
+			}
 			if (strstr((const char *)ws_rx_buf,
 				   "\"started\"") != NULL) {
 				atomic_set(&convo_started, 1);
@@ -3409,6 +3447,7 @@ static void ws_io_send_owner_controls(void)
 		atomic_set(&approval_decision_req, 0);
 		atomic_set(&menu_step_backlog, 0);
 		atomic_set(&menu_select_req, 0);
+		atomic_set(&volume_report, -1);
 		return;
 	}
 
@@ -3445,6 +3484,22 @@ static void ws_io_send_owner_controls(void)
 
 	if (atomic_cas(&menu_select_req, 1, 0)) {
 		(void)pendant_ws_send_text("{\"type\":\"menu_select\"}");
+	}
+
+	/* Knob position, latest state only (a twist mid-dead-zone already
+	 * cleared above): same wire shape the ESP32's serial channel used,
+	 * so the dashboard keys on nothing new. */
+	atomic_val_t vol = atomic_set(&volume_report, -1);
+
+	if (vol >= 0) {
+		char frame[64];
+		unsigned int hundredths = ((unsigned int)vol >> 16) & 0xFFFFU;
+
+		snprintf(frame, sizeof(frame),
+			 "{\"type\":\"volume\",\"level\":%u.%02u,\"raw\":%u}",
+			 hundredths / 100U, hundredths % 100U,
+			 (unsigned int)vol & 0xFFFFU);
+		(void)pendant_ws_send_text(frame);
 	}
 }
 
@@ -3496,8 +3551,16 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 					ws_rx_buf[MIN((size_t)drained,
 						      sizeof(ws_rx_buf) -
 							      1U)] = '\0';
-					(void)pendant_reflex_offer_frame(
-						(const char *)ws_rx_buf);
+					if (!pendant_reflex_offer_frame(
+						    (const char *)ws_rx_buf)) {
+						/* Sink switches work idle
+						 * too: the owner flips the
+						 * default from the dashboard
+						 * between conversations. */
+						(void)audio_sink_offer_frame(
+							(const char *)
+								ws_rx_buf);
+					}
 				}
 			}
 			k_mutex_unlock(&ws_lock);
@@ -3876,6 +3939,11 @@ static int run_conversation(const struct device *i2s)
 			next_led_toggle = k_uptime_get() + 250;
 		}
 
+		/* Knob at full rate exactly when it matters — while agent
+		 * audio is playing. Internally gated to 50 ms; the one-shot
+		 * SAADC read is microseconds against the TX runway. */
+		volume_poll();
+
 		if (k_uptime_get() - started_at >
 		    (int64_t)CONVO_MAX_SECONDS * 1000) {
 			printk("Conversation hit the %u s cap\n",
@@ -3895,6 +3963,7 @@ static int run_conversation(const struct device *i2s)
 			clear_button_events();
 		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
 			   take_remote_press()) {
+			haptic_trigger(HAPTIC_PATTERN_CLICK);
 			printk("Conversation ended by button\n");
 			break;
 		}
@@ -4181,6 +4250,22 @@ static void configure_control_inputs(void)
 		printk("Mic power sense (P0.26) not configured — assuming "
 		       "mic powered\n");
 	}
+
+	/* Speaker amp gate, driven to the boot default (bluetooth = low =
+	 * amp shutdown) before anything can play. Optional like the rest:
+	 * no pin, no speaker, everything else unaffected. */
+	if (gpio_is_ready_dt(&amp_sd_mode) &&
+	    gpio_pin_configure_dt(&amp_sd_mode, GPIO_OUTPUT_INACTIVE) == 0) {
+		amp_sd_mode_ready = true;
+	} else {
+		printk("Speaker amp gate (P0.01) not configured\n");
+	}
+	audio_sink_apply(AUDIO_SINK_BOOT_DEFAULT);
+
+	/* Volume knob (SAADC) and double-tap wake (I2C2): both probe-once,
+	 * both degrade to "feature absent" on a bare breadboard. */
+	volume_adc_init();
+	(void)accel_tap_init(accel_double_tap_isr);
 }
 
 /*
@@ -4194,6 +4279,9 @@ static void configure_control_inputs(void)
  */
 static void report_mic_muted_press(void)
 {
+	/* The long soft buzz is the haptic twin of the triple double-blink:
+	 * "heard you, but the red switch says no". */
+	haptic_trigger(HAPTIC_PATTERN_LONG);
 	printk("Capture press ignored: mic power is cut (red switch)\n");
 	if (pendant_ws_connected()) {
 		k_mutex_lock(&ws_lock, K_FOREVER);
@@ -4476,6 +4564,10 @@ int main(void)
 			}
 			/* Blue button: approve/deny the pending approval. */
 			poll_approval_button();
+			/* Knob while idle: 5 Hz (this loop's cadence) is
+			 * plenty for a level that only matters once audio
+			 * plays; the conversation loop polls at full rate. */
+			volume_poll();
 			/*
 			 * Button 2 needs no radio, no microphone and no
 			 * decision about whether the link is usable. It is
@@ -4586,6 +4678,9 @@ int main(void)
 
 		if (memo_requested) {
 			audio_cycle_phase = 1U;
+			/* Memo opens on a tick (and closes on one — see the
+			 * stop path in record_microphone). */
+			haptic_trigger(HAPTIC_PATTERN_TICK);
 			(void)run_memo_capture(i2s);
 			clear_memo_events();
 			clear_button_events();
@@ -4609,6 +4704,9 @@ int main(void)
 		 * (that path still journals to microSD when LTE is down).
 		 */
 		audio_cycle_phase = 1U;
+		/* Press acknowledged in the skin, before any radio work —
+		 * the LED's answer can be seconds away on a cold socket. */
+		haptic_trigger(HAPTIC_PATTERN_CLICK);
 		int64_t lat_press_started = k_uptime_get();
 
 		bool ws_ready = pendant_ws_connected();
