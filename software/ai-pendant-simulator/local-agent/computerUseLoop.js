@@ -90,12 +90,20 @@ const KEEP_IMAGES = 3
 // The human grabbing the mouse is an unambiguous "stop".
 const TAKEOVER_POINT_DELTA = 40
 
+/*
+ * Both flags default ON, and that default is a RECORD of the owner's standing
+ * choice, not a policy for strangers: they sat at =1 in this machine's .env
+ * from the day they existed, and the owner's env-reduction pass (2026-08-09)
+ * deleted every line that only restated a constant. '0' still turns either
+ * off — the flag survives, only the boilerplate went. A fresh checkout that
+ * needs opt-in semantics back should flip these defaults, not add env lines.
+ */
 export function computerUseEnabled() {
-  return process.env.PENDANT_COMPUTER_USE_ENABLED === '1'
+  return process.env.PENDANT_COMPUTER_USE_ENABLED !== '0'
 }
 
 export function visionUploadConsented() {
-  return process.env.PENDANT_VISION_UPLOAD_CONSENT === '1'
+  return process.env.PENDANT_VISION_UPLOAD_CONSENT !== '0'
 }
 
 export function buildSystemPrompt({ displays, goal, allowPixelFallback }) {

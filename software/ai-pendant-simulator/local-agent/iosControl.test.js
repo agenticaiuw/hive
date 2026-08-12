@@ -441,7 +441,7 @@ function stubPhone(t, scenario) {
   const run = (type, params) => {
     const programPath = path.join(root, `${type}.py`)
     fs.writeFileSync(programPath, buildProgram(type))
-    let stdout = ''
+    let stdout
     let status = 0
     try {
       stdout = execFileSync(PYTHON, [programPath], {

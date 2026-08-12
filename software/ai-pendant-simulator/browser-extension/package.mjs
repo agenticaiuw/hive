@@ -27,7 +27,6 @@ fs.cpSync(sourceDir, safariDir, { recursive: true })
 const entryPoints = [
   ['background.js', 'AIPendantBrowserBridge'],
   ['popup.js', 'AIPendantPopup'],
-  ['options.js', 'AIPendantOptions'],
 ]
 
 const entryNames = new Set(entryPoints.map(([entry]) => entry))
@@ -66,9 +65,6 @@ for (const platformDir of [chromeDir, safariDir]) {
   const manifestPath = path.join(platformDir, 'manifest.json')
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   delete manifest.background.type
-  if (platformDir === safariDir) {
-    delete manifest.options_ui.open_in_tab
-  }
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 

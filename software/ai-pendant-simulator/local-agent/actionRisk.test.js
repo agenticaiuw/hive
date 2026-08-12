@@ -5,6 +5,8 @@ import {
   classifyAction,
   classifyPlan,
   classifyPlanForRoutine,
+  classifyPlanForVoice,
+  effectTierFor,
   isStatusShellCommand,
 } from './actionRisk.js'
 
@@ -734,4 +736,105 @@ test('a routine still auto-runs its tier, and reads no longer show up as held', 
     classifyPlanForRoutine([{ type: 'send_email', params: {} }]).autoRun,
     false,
   )
+})
+
+/* ---- the voice venue: effect tiers and the owner's 2026-08-11 ruling -------
+ * "asking to read emails should not be something that needs permissions also i
+ * specifically asked the agent to do that." The plan that parked was open
+ * Outlook + a get-only AppleScript, held by the PLANNER's own ask; the floor
+ * and ceiling below are what that ruling turned into.
+ * ------------------------------------------------------------------------- */
+
+const OUTLOOK_READ_SCRIPT = `tell application "Microsoft Outlook"
+	set latestMessage to item 1 of (messages of inbox)
+	set theSubject to subject of latestMessage
+	set theSender to sender of latestMessage
+	return theSubject
+end tell`
+
+const OUTLOOK_SEND_SCRIPT = `tell application "Microsoft Outlook"
+	set newMsg to make new outgoing message with properties {subject:"hi"}
+	send newMsg
+end tell`
+
+const OUTLOOK_READ_PLAN = [
+  { type: 'open_app', params: { name: 'Microsoft Outlook' } },
+  { type: 'run_applescript', params: { script: OUTLOOK_READ_SCRIPT } },
+]
+
+test('effectTierFor sorts looks, local changes and outward reaches apart', () => {
+  // Reads: opening an app and get-only scripts included.
+  for (const action of [
+    { type: 'open_app', params: { name: 'Microsoft Outlook' } },
+    { type: 'screenshot', params: {} },
+    { type: 'list_directory', params: { path: '~' } },
+    { type: 'run_applescript', params: { script: OUTLOOK_READ_SCRIPT } },
+    { type: 'run_shell', params: { command: 'ls ~/Downloads' } },
+  ]) {
+    assert.equal(effectTierFor(action), 'read', `${action.type} only looks`)
+  }
+  // Acts: local, recoverable changes.
+  for (const action of [
+    { type: 'write_file', params: { path: '/tmp/x', content: 'y' } },
+    { type: 'ui_click', params: {} },
+    { type: 'set_volume', params: { level: 30 } },
+  ]) {
+    assert.equal(effectTierFor(action), 'act', `${action.type} changes something local`)
+  }
+  // Outward: another person, destruction, or the whole screen.
+  for (const action of [
+    { type: 'send_email', params: {} },
+    { type: 'send_message', params: {} },
+    { type: 'delete_path', params: { path: '/tmp/x' } },
+    { type: 'computer_use_task', params: {} },
+    { type: 'ios_tap_text', params: { query: 'Place Order' } },
+    { type: 'run_applescript', params: { script: OUTLOOK_SEND_SCRIPT } },
+  ]) {
+    assert.equal(effectTierFor(action), 'outward', `${action.type} reaches outward`)
+  }
+})
+
+test('a pure-read Outlook plan auto-runs even when the planner asked', () => {
+  const verdict = classifyPlanForVoice(OUTLOOK_READ_PLAN, {
+    model: { asked: true, reason: 'Opening Outlook goes beyond the request.' },
+  })
+  assert.equal(verdict.autoRun, true, 'a read never parks — the spoken request is the authorization')
+  assert.deepEqual(verdict.blocked, [])
+})
+
+test('an outward plan parks even when the planner waived confirmation', () => {
+  const verdict = classifyPlanForVoice(
+    [{ type: 'send_email', params: { to: 'x@example.com' } }],
+    { model: { asked: false, reason: '' } },
+  )
+  assert.equal(verdict.autoRun, false, 'the model cannot waive the outward floor')
+  assert.match(verdict.blocked[0].reason, /acts on your behalf/)
+
+  // Nor can a scripted send slip past as "just AppleScript".
+  const scripted = classifyPlanForVoice(
+    [{ type: 'run_applescript', params: { script: OUTLOOK_SEND_SCRIPT } }],
+    { model: { asked: false, reason: '' } },
+  )
+  assert.equal(scripted.autoRun, false)
+})
+
+test('act-tier plans still follow the model, with the type line as fallback', () => {
+  const writePlan = [{ type: 'write_file', params: { path: '/tmp/x', content: 'y' } }]
+  // The model's ask holds an act-tier plan, with the model's reason on the card.
+  const asked = classifyPlanForVoice(writePlan, {
+    model: { asked: true, reason: 'I also wanted to overwrite your notes file.' },
+  })
+  assert.equal(asked.autoRun, false)
+  assert.match(asked.blocked[0].reason, /notes file/)
+  // The model's waiver runs it.
+  assert.equal(
+    classifyPlanForVoice(writePlan, { model: { asked: false, reason: '' } }).autoRun,
+    true,
+  )
+  // No verdict at all falls back to the per-type hands-free line.
+  const fallback = classifyPlanForVoice(writePlan)
+  assert.equal(fallback.autoRun, false)
+  assert.match(fallback.blocked[0].reason, /changes what is on disk/)
+  // And an empty plan still answers the spoken-only case.
+  assert.equal(classifyPlanForVoice([]).reason, 'No actions to run.')
 })

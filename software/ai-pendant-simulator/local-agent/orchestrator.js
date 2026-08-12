@@ -3,6 +3,7 @@ import {
   describeAttachmentProblems,
   prepareAttachments,
 } from './attachments.js'
+import { prepareCallerContext } from './callerContext.js'
 import { buildConversationContext } from './conversationContext.js'
 import { estimateTokens, projectTurnContext } from './contextProjection.js'
 import { describeResume, resumeContext } from './contextResume.js'
@@ -60,9 +61,20 @@ export async function orchestratePlan({
    * model sees each path exactly once, in the attachments block.
    */
   attachments = null,
+  /*
+   * What the CALLER's surface was looking at: {page:{url,title}}. Distinct from
+   * `context` below, which is what this agent REMEMBERS (chat, facts, people) —
+   * one is the other end's screen, the other is our memory.
+   *
+   * Settled here as well as at the /plan boundary, and the settling is
+   * idempotent, so every entry point is correct on its own rather than each
+   * depending on the last to have cleaned up.
+   */
+  callerContext = null,
 }) {
   const { throwIfAborted } = await import('./jobControl.js')
-  const prepared = prepareAttachments({ command: rawCommand, attachments })
+  const caller = prepareCallerContext({ command: rawCommand, context: callerContext })
+  const prepared = prepareAttachments({ command: caller.command, attachments })
   const command = prepared.command
   const attachmentPaths = prepared.attachments.map((file) => file.path)
   let activeSessionId = sessionId
@@ -339,6 +351,30 @@ export async function orchestratePlan({
       ]
         .filter(Boolean)
         .join('\n\n')
+    }
+
+    /*
+     * The caller's page rides the same rail as attachments, for the same
+     * reasons and with the same ordering constraint: appended AFTER the
+     * projection swap, which replaces promptBlock wholesale.
+     *
+     * This is the payoff for the `context` field existing. The page used to
+     * reach the model as a bracketed trailer glued to the owner's sentence,
+     * where it read as part of the request; here it is a labelled block that
+     * says what it is and — the line that matters — that being on a page is
+     * not the same as the task being about it.
+     */
+    if (caller.promptBlock) {
+      context.promptBlock = [context.promptBlock, caller.promptBlock]
+        .filter(Boolean)
+        .join('\n\n')
+      addThinkingStep(trace.traceId, {
+        id: 'caller-context',
+        label: 'Noted what the sender was looking at',
+        detail: caller.context.page.url,
+        status: 'done',
+        meta: { page: caller.context.page, surface: caller.context.surface ?? null },
+      })
     }
 
     if (contextHandle) {

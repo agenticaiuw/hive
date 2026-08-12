@@ -524,6 +524,39 @@ test('relayResponseError carries all three wire parts onto the thrown error', as
   )
 })
 
+test('relayResponseError carries retryAfter, from the body or the header', async () => {
+  /* The brain parks on the PRESENCE of this field rather than on a list of
+   * status codes (the relay documents it as a device-scoped contract), so it
+   * has to survive this seam or the park never happens. */
+  const limited = await relayResponseError({
+    status: 429,
+    json: async () => ({
+      ok: false,
+      code: 'rate_limited',
+      error: 'This device has used its inference budget (120/hour).',
+      retryAfter: 1_800,
+    }),
+  })
+  assert.equal(limited.status, 429)
+  assert.equal(limited.retryAfter, 1_800)
+
+  /* A body without it falls back to the standard header a proxy may have set. */
+  const headerOnly = await relayResponseError({
+    status: 503,
+    headers: { get: (name) => (name === 'Retry-After' ? '300' : null) },
+    json: async () => ({ ok: false, code: 'not_configured', error: 'no key' }),
+  })
+  assert.equal(headerOnly.retryAfter, 300)
+
+  /* And a refusal that is NOT device-scoped must not grow the field, or a
+   * single unlucky call would park a working brain. */
+  const upstream = await relayResponseError({
+    status: 502,
+    json: async () => ({ ok: false, code: 'upstream_error', error: 'provider refused' }),
+  })
+  assert.equal('retryAfter' in upstream, false)
+})
+
 test('relayResponseError: no code set when absent or non-string; non-JSON bodies survive', async () => {
   const codeless = await relayResponseError({
     status: 403,

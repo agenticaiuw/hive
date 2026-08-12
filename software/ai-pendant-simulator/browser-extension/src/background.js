@@ -2,6 +2,7 @@ import {
   commandIdentity,
   createCommandLedger,
   isScriptableUrl,
+  normalizeCommandParams,
   normalizeConfig,
   originPattern,
   pickTargetTab,
@@ -19,19 +20,32 @@ import {
   SESSION_KEY,
   appendHistory,
   buildCommandText,
+  commandContext,
   interpretExecuteResponse,
   interpretPlanResponse,
+  localStepPending,
   newHistoryEntry,
   outcomeToPatch,
   patchHistory,
+  planDecisionPreflight,
   scrubPageContext,
 } from './command-console.js'
 import {
   CAPABILITY_BROWSER,
   EFFECT_OUTWARD,
+  createOutwardGuard,
   honestVerdict,
   routePlan,
 } from './affinity.js'
+import {
+  BRAIN_MAX_STEPS,
+  compactToolResult,
+  createBrainTranscript,
+  describeInferFailure,
+  inferRequest,
+  parseBrainReply,
+  readInferPayload,
+} from './brain.js'
 import {
   createExecutionJournal,
   hiveClaimRecordFor,
@@ -67,6 +81,16 @@ import {
   mergeApprovalPrompts,
   prepareApprovalDecision,
 } from './approvals.js'
+import {
+  PAIR_OUTCOME_KEY,
+  PAIR_WIPE_KEYS,
+  credentialExpiryCheck,
+  escrowRestorePlan,
+  normalizePairLifetime,
+  pairOutcomeRecord,
+  pairStoragePatch,
+  shouldEscrow,
+} from './pairing.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const POLL_ALARM = 'ai-pendant-poll'
@@ -322,7 +346,7 @@ async function pollWindow(revision) {
     await updateStatus({
       state: 'needs-setup',
       connected: false,
-      message: 'Open settings and save the local agent token.',
+      message: 'Paste the pairing code in the extension popup to connect.',
     })
     return
   }
@@ -901,7 +925,24 @@ async function decideApproval({ approvalId, decision }) {
  * effectively left the machine.
  */
 async function executeCommand(command, config) {
-  const { type, params } = validateCommand(command)
+  /*
+   * Normalized before the gate, for every source at once: the Mac's poll loop,
+   * mesh mail, an affinity-claimed plan step and the brain's own tool calls all
+   * arrive here. A command that came via the Mac was already filtered by
+   * browserSessions.toWireParams, so this is a no-op for it; the paths that
+   * skip the Mac entirely are the ones that need it, and putting it at the one
+   * seam they share is what stops the next path from forgetting.
+   *
+   * It only removes what cannot be honoured. validateCommand is still the gate
+   * and still refuses everything it refused before.
+   */
+  const { type, params } = validateCommand({
+    ...command,
+    action: {
+      ...command?.action,
+      params: normalizeCommandParams(command?.action?.params),
+    },
+  })
   const { result, tab } = await runCommand(type, params, config)
   const clean = sanitizeExtraction(result)
 
@@ -1197,7 +1238,7 @@ async function assertPageAccess(tab) {
   const granted = await api.permissions.contains({ origins: [pattern] })
   if (!granted) {
     throw new Error(
-      `Website access is not granted for ${new URL(tab.url).origin}. Open the extension settings and grant website access.`,
+      `Website access is not granted for ${new URL(tab.url).origin}. Click “Allow this browser’s pages” in the extension popup.`,
     )
   }
 }
@@ -1730,7 +1771,13 @@ async function handleConsoleSubmit({ command, page }) {
   if (!text) return { ok: false, error: 'Type a command first.' }
 
   const config = await getConfig()
-  if (!config.agentToken) return { ok: false, needsSetup: true }
+  /*
+   * A brain of its own is enough to accept a command. The Mac token used to be
+   * the only way in, so a browser with a relay credential and no agent token
+   * was told to go to settings for a peer it no longer needs.
+   */
+  const brain = await brainAvailability()
+  if (!config.agentToken && !brain.ok) return { ok: false, needsSetup: true }
 
   const id = crypto.randomUUID()
   const scrubbedPage = scrubPageContext(page)
@@ -1754,7 +1801,55 @@ async function handleConsoleSubmit({ command, page }) {
 }
 
 async function runConsoleCommand({ id, command, page, config }) {
+  /*
+   * THIS NODE THINKS FIRST.
+   *
+   * The affinity argument, one storey up from where affinity.js makes it: a
+   * command typed into a browser, about a page in that browser, has no reason
+   * to cross a room to be understood. The brain runs here, and the Mac is
+   * asked only when this node says it cannot do it — no relay credential, a
+   * relay that told this device to back off, or the model itself calling
+   * handoff because the task needs files, shell or another machine.
+   *
+   * A handoff is only clean while nothing has run. runBrainLocally enforces
+   * that: once it has touched a page it finishes and reports rather than
+   * letting the Mac replay the same steps.
+   */
+  const brain = await brainAvailability()
+  if (brain.ok) {
+    await patchEntry(id, { headline: 'Thinking in this browser…' })
+    const outcome = await runBrainLocally({
+      id,
+      command,
+      page,
+      config,
+      relayConfig: brain.relayConfig,
+    })
+    if (!outcome.handoff) return
+
+    if (!config.agentToken) {
+      await patchEntry(id, {
+        state: 'failed',
+        headline: `This browser could not do it and there is no Mac agent configured: ${outcome.reason}`,
+        finishedAt: new Date().toISOString(),
+      })
+      return
+    }
+    await patchEntry(id, { headline: `Handing this to the Mac — ${outcome.reason}` })
+  } else if (!config.agentToken) {
+    await patchEntry(id, {
+      state: 'failed',
+      headline: brain.reason,
+      finishedAt: new Date().toISOString(),
+    })
+    return
+  }
+
   const commandText = buildCommandText(command, page)
+  /* Both channels, deliberately: `context` for an agent that has the field,
+   * the trailer inside commandText for one that does not. An agent with both
+   * drops the trailer — see command-console.js buildCommandText. */
+  const context = commandContext(page)
   const stored = await api.storage.local.get(SESSION_KEY)
   const sessionId = String(stored[SESSION_KEY] ?? '').trim()
 
@@ -1763,6 +1858,7 @@ async function runConsoleCommand({ id, command, page, config }) {
     '/plan',
     {
       command: commandText,
+      ...(context ? { context } : {}),
       ...(sessionId ? { sessionId } : {}),
       source: CONSOLE_SOURCE,
     },
@@ -1812,6 +1908,7 @@ async function runConsoleCommand({ id, command, page, config }) {
     '/execute',
     {
       command: commandText,
+      ...(context ? { context } : {}),
       actions: planOutcome.actions,
       ...(planOutcome.sessionId ? { sessionId: planOutcome.sessionId } : {}),
       planMeta: { planner: planOutcome.planner ?? null, source: CONSOLE_SOURCE },
@@ -1922,15 +2019,535 @@ async function executePlanLocally({ id, command, steps, config }) {
       verdict.detail,
       ...(parked.length
         ? [
-            `The parked step (${parked[0].id}) was recorded and did not run. ` +
-              'Re-run the command when you want to do it yourself.',
+            `The parked step (${parked[0].id}) has not run. Approve below to run ` +
+              'exactly that step — nothing after it runs either way.',
           ]
         : []),
     ]
       .filter(Boolean)
       .join('\n'),
+    /* The parked step travels with the entry so Approve can run THAT call,
+     * not a re-plan of it. Only the first one: the run stopped there. */
+    pending: parked.length
+      ? localStepPending({
+          call: parked[0].call,
+          effect: parked[0].effect,
+          reason: parked[0].reason,
+          runId: id,
+          approvalId: parked[0].id,
+        })
+      : null,
     finishedAt: new Date().toISOString(),
   })
+}
+
+/* ===================================================================== *
+ * THE BRAIN LOOP.
+ *
+ * The owner: "it needs one." Until now every command in this popup went to the
+ * Mac's POST /plan to be thought about, so a browser that was awake, signed in
+ * and looking at the page still could not act unless a laptop was awake too.
+ * This is the loop that removes that: think on the relay (POST /v1/infer,
+ * whose `llm:infer` scope the browser_node credential already holds), act
+ * here, and never let the model be the one who says what happened.
+ *
+ * The pure half — tools, prompt, parsing, transcript bounds, how a relay
+ * refusal is read — is brain.js. This function is the effects: the fetch, the
+ * executor, the guard, the journal.
+ *
+ * FOUR THINGS THIS LOOP WILL NOT DO, in the order they would otherwise bite:
+ *
+ *   1. RUN A VERB THE EXECUTOR HAS NOT VETTED. Every call goes through the
+ *      same executeCommand → validateCommand → sanitizeExtraction path an
+ *      agent-issued command takes. A locally-thought step gets no shortcut
+ *      past the privacy boundary.
+ *   2. WALK PAST AN OUTWARD STEP. createOutwardGuard (affinity.js) watches
+ *      every snapshot go by so it knows what the PAGE calls each ref, then
+ *      assesses each call against the words the owner would have read. Outward
+ *      parks the run. This is that guard's first caller; it was written for
+ *      this loop.
+ *   3. LET THE MODEL GRADE ITSELF. honestVerdict computes the headline from
+ *      the ledger of executed steps. The model's `answer` survives as colour
+ *      inside it, never as the claim.
+ *   4. KEEP ASKING A RELAY THAT SAID STOP. A `retryAfter` on any refusal parks
+ *      the brain for that long — device-scoped, per the relay's own contract —
+ *      and the command hands off to the Mac instead of failing.
+ * ===================================================================== */
+
+/*
+ * When the brain may next be asked, as an epoch ms. Set from a relay refusal
+ * that carried `retryAfter`. In memory on purpose: a suspended worker forgets
+ * it and asks once more, which costs one refusal and cannot get stuck holding
+ * a cooldown that the relay has long since lifted.
+ */
+let brainParkedUntil = 0
+
+/** Can this node think for itself right now, and if not, why not? */
+async function brainAvailability(now = Date.now()) {
+  const relayConfig = await getRelayConfig()
+  if (!relayConfig.ready) {
+    return { ok: false, reason: 'No relay credential is configured, so this browser has no brain of its own.' }
+  }
+  if (brainParkedUntil > now) {
+    return {
+      ok: false,
+      reason: `The relay asked this device to stop calling its brain for another ${Math.ceil((brainParkedUntil - now) / 1000)}s.`,
+    }
+  }
+  return { ok: true, relayConfig }
+}
+
+/** One turn: ask the relay, and read the answer strictly. */
+async function brainTurn(relayConfig, transcript) {
+  let payload
+  try {
+    payload = await relayFetch(
+      relayConfig,
+      inferRequest(relayConfig, transcript.messages()),
+      /* A model turn is not a 7s poll. Under the relay's own 60s upstream
+       * timeout, so the relay's error arrives rather than this one. */
+      70_000,
+    )
+  } catch (error) {
+    const failure = describeInferFailure(error)
+    if (failure.parkBrain) brainParkedUntil = Date.now() + failure.retryAfter * 1_000
+    return { kind: 'unavailable', ...failure }
+  }
+
+  const read = readInferPayload(payload)
+  /* A truncated or filtered answer is the model's problem, not the relay's:
+   * tell the model and let it try again inside the step budget. */
+  if (!read.ok) return { kind: 'retry', error: read.error, raw: '' }
+
+  const reply = parseBrainReply(read.content)
+  if (reply.kind === 'error') return { kind: 'retry', error: reply.error, raw: read.content }
+  return { ...reply, raw: read.content }
+}
+
+/**
+ * Think and act in this browser until the task is done, parked, or out of
+ * steps. Writes the same journal and history a Mac-planned run writes, so
+ * nothing downstream has to know which brain produced it.
+ */
+async function runBrainLocally({ id, command, page, config, relayConfig }) {
+  const journal = executionJournal()
+  const guard = createOutwardGuard()
+  const transcript = createBrainTranscript({ command, page })
+
+  await journal.beginRun({ runId: id, command, route: 'local-brain', executor: 'browser-brain' })
+  await recordRunToHive(id, 'claim')
+
+  const parked = []
+  let answer = ''
+  let steps = 0
+
+  /*
+   * A handed-off run still has to be CLOSED here. beginRun above opened it as
+   * 'executing', and a run left in that state is a run the status pane shows
+   * spinning forever over work that has moved to another machine.
+   */
+  const handOff = async (reason) => {
+    await journal.finishRun(id, {
+      state: 'finished',
+      verdict: 'handed-off',
+      headline: `Handed to the Mac: ${reason}`,
+      detail: `This node ran ${steps} step(s) of thinking and executed nothing.`,
+    })
+    await recordRunToHive(id, 'verdict')
+    return { handoff: true, reason, steps }
+  }
+
+  while (steps < BRAIN_MAX_STEPS) {
+    const turn = await brainTurn(relayConfig, transcript)
+
+    /* The relay is unreachable or has told this device to back off. Nothing
+     * has been claimed that the Mac cannot also do, so hand the command back
+     * rather than failing it. */
+    if (turn.kind === 'unavailable') {
+      return await handOff(turn.message)
+    }
+
+    if (turn.kind === 'retry') {
+      /* Feed the complaint back as the "result" of the turn: the model is the
+       * one that can fix a malformed reply, and this costs one step. */
+      transcript.pushAssistant(turn.raw || '')
+      transcript.pushResult(`That reply could not be used: ${turn.error}`)
+      steps += 1
+      continue
+    }
+
+    transcript.pushAssistant(turn.raw)
+
+    if (turn.kind === 'handoff') {
+      /* Only a handoff BEFORE anything ran is a clean handoff. Once this
+       * browser has touched a page, sending the same command to the Mac would
+       * run those steps a second time. */
+      const ran = (await journal.getStatus()).runs.find((run) => run.runId === id)
+      if (!(ran?.steps ?? []).length) return await handOff(turn.reason)
+      answer = `Stopped: ${turn.reason}`
+      break
+    }
+
+    if (turn.kind === 'answer') {
+      answer = turn.answer
+      break
+    }
+
+    /* A tool call. The guard decides whether it may run unattended. */
+    const assessment = guard.assess(turn.call)
+    if (!assessment.allow) {
+      parked.push(
+        await journal.parkStep(id, {
+          call: turn.call,
+          effect: assessment.effect,
+          reason: assessment.reason,
+          targetName: assessment.targetName,
+        }),
+      )
+      break
+    }
+
+    try {
+      const result = await executeCommand(
+        {
+          commandId: `brain-${id}-${steps}`,
+          createdAt: new Date().toISOString(),
+          action: turn.call,
+        },
+        config,
+      )
+      /* The guard learns each ref's accessible name from snapshots going past,
+       * so a later {click, ref:"e4"} is judged on the words the OWNER would
+       * have read rather than on an opaque token. */
+      guard.observe(turn.call, result)
+      await journal.recordStep(id, {
+        tool: turn.call.type,
+        effect: assessment.effect,
+        ok: true,
+        summary: String(result?.message ?? turn.call.type).slice(0, 300),
+      })
+      transcript.pushResult(compactToolResult(turn.call.type, result))
+    } catch (error) {
+      const message = error?.message || String(error)
+      await journal.recordStep(id, {
+        tool: turn.call.type,
+        effect: assessment.effect,
+        ok: false,
+        summary: message.slice(0, 300),
+      })
+      /* A failed step is information, not the end: the model is told and gets
+       * to try something else inside the same budget. */
+      transcript.pushResult(`That step failed: ${message}`)
+    }
+
+    steps += 1
+  }
+
+  const runState = (await journal.getStatus()).runs.find((run) => run.runId === id)
+  const executed = runState?.steps ?? []
+
+  if (!executed.length && !parked.length && !answer) {
+    /* Nothing thought, nothing ran — the Mac can still have a go. */
+    return await handOff('this browser produced no usable step')
+  }
+
+  const exhausted = steps >= BRAIN_MAX_STEPS && !answer && !parked.length
+  const verdict = honestVerdict({
+    command,
+    steps: executed,
+    parked,
+    response: answer,
+  })
+
+  await journal.finishRun(id, {
+    state: parked.length ? 'parked' : 'finished',
+    ...verdict,
+  })
+  await recordRunToHive(id, 'verdict')
+
+  await patchEntry(id, {
+    state: parked.length
+      ? 'parked'
+      : verdict.verdict === 'incomplete' || exhausted
+        ? 'failed'
+        : 'executed',
+    headline: exhausted
+      ? `Stopped after ${BRAIN_MAX_STEPS} steps without finishing. ${verdict.headline}`
+      : verdict.headline,
+    detail: [
+      'Thought and run in this browser (brain: relay inference, execution: this node).',
+      verdict.detail,
+      ...(parked.length
+        ? [
+            'The parked step has not run. Approve below to run exactly that step — ' +
+              'nothing after it runs either way.',
+          ]
+        : []),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    pending: parked.length
+      ? localStepPending({
+          call: parked[0].call,
+          effect: parked[0].effect,
+          reason: parked[0].reason,
+          runId: id,
+          approvalId: parked[0].id,
+        })
+      : null,
+    finishedAt: new Date().toISOString(),
+  })
+
+  return { handoff: false, steps }
+}
+
+/* ===================================================================== *
+ * Deciding a parked plan FROM THE POPUP.
+ *
+ * The owner: "i shouldn't have to open up the dashboard to approve." So the
+ * popup's Approve/Deny lands here, and this is where the two things a button
+ * cannot know are checked:
+ *
+ *   1. IS IT STILL WAITING? For a Mac-planned park the agent holds the truth
+ *      as a `plan_ready` job, and both this popup and the dashboard can reach
+ *      it. Re-reading the job before executing is what stops the same plan
+ *      running twice — the first surface to approve moves the job off
+ *      `plan_ready`, and the second is told so in the agent's own words. This
+ *      is the same guard the dashboard's own approve path uses.
+ *   2. IS IT STILL FRESH? planDecisionPreflight, shared with the popup so a
+ *      pressable button is always a working button.
+ * ===================================================================== */
+
+async function decidePlan({ id, decision }) {
+  const entryId = String(id ?? '')
+  const history = (await api.storage.local.get(HISTORY_KEY))[HISTORY_KEY] ?? []
+  const entry = (Array.isArray(history) ? history : []).find(
+    (candidate) => candidate?.id === entryId,
+  )
+
+  const preflight = planDecisionPreflight(entry)
+  if (!preflight.ok) return { ok: false, error: preflight.error }
+  const { pending } = preflight
+
+  if (decision === 'deny') return denyPlan(entry, pending)
+  if (decision !== 'approve') {
+    return { ok: false, error: `Unknown decision "${decision}".` }
+  }
+
+  const config = await getConfig()
+  if (!config.agentToken) return { ok: false, needsSetup: true }
+
+  if (pending.kind === 'mac-plan') {
+    /* The agent is the arbiter. A plan the dashboard already approved is no
+     * longer plan_ready, and saying so is better than running it again. */
+    const stillWaiting = await confirmPlanStillWaiting(config, pending.jobId)
+    if (!stillWaiting.ok) return stillWaiting
+  }
+
+  /* Claimed: the entry goes back to 'working' before anything runs, so a
+   * second click (or a second popup) finds no parked plan to press. */
+  await patchEntry(entryId, {
+    state: 'working',
+    headline: 'Approved — running it…',
+    pending: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  })
+
+  void runApprovedPlan({ entry, pending, config }).catch((error) =>
+    patchEntry(entryId, {
+      state: 'failed',
+      headline: error?.message || String(error),
+      finishedAt: new Date().toISOString(),
+    }),
+  )
+
+  return { ok: true }
+}
+
+/**
+ * Deny: the plan does not run, and the Mac's parked job is dismissed so the
+ * dashboard does not keep offering the same decision the owner just made.
+ * A dismissal that fails is reported on the entry rather than swallowed —
+ * "denied here, still parked there" is a state worth seeing.
+ */
+async function denyPlan(entry, pending) {
+  let note = ''
+  if (pending.kind === 'mac-plan' && pending.jobId) {
+    const config = await getConfig()
+    try {
+      const response = await fetch(
+        `${config.agentUrl}/jobs/${encodeURIComponent(pending.jobId)}/dismiss`,
+        {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${config.agentToken}`,
+          },
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        },
+      )
+      if (!response.ok) {
+        note = `The Mac still lists this plan as parked (HTTP ${response.status}).`
+      }
+    } catch (error) {
+      note = `The Mac was not told (${error?.message || error}), so its dashboard may still offer this plan.`
+    }
+  }
+
+  await patchEntry(entry.id, {
+    state: 'denied',
+    headline: 'Denied — nothing ran.',
+    detail: [entry.detail, note].filter(Boolean).join('\n'),
+    pending: null,
+    finishedAt: new Date().toISOString(),
+  })
+  return { ok: true, note }
+}
+
+/** Is the Mac's parked job still waiting for a decision? */
+async function confirmPlanStillWaiting(config, jobId) {
+  /* A plan with no job id was never recorded on the Mac (an older agent, or a
+   * /plan that answered without one). There is nothing to race with. */
+  if (!jobId) return { ok: true }
+
+  try {
+    const response = await fetch(
+      `${config.agentUrl}/jobs/${encodeURIComponent(jobId)}`,
+      {
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${config.agentToken}`,
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      },
+    )
+    if (response.status === 404) return { ok: true }
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `The Mac would not confirm this plan is still waiting (HTTP ${response.status}).`,
+      }
+    }
+    const body = await response.json().catch(() => null)
+    const job = body?.job ?? body
+    const status = String(job?.status ?? '')
+    if (status && status !== 'plan_ready') {
+      return {
+        ok: false,
+        error: `This plan is no longer waiting: the Mac now reports "${status}". It may already have been approved on the dashboard.`,
+      }
+    }
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Could not reach the Mac to check this plan is still waiting (${error?.message || error}).`,
+    }
+  }
+}
+
+/** Run what was approved — the whole plan, or the single parked step. */
+async function runApprovedPlan({ entry, pending, config }) {
+  if (pending.kind === 'local-step') {
+    await runApprovedStep({ entry, pending, config })
+    return
+  }
+
+  /* Same affinity rule the first pass used: browser-only work runs here, in
+   * front of the owner's signed-in tabs, and anything else goes to the Mac. */
+  const affinity = routePlan(pending.actions)
+  if (affinity.route === CAPABILITY_BROWSER) {
+    await executePlanLocally({
+      id: entry.id,
+      command: entry.command,
+      steps: affinity.steps,
+      config,
+    })
+    return
+  }
+
+  /* Both channels here too — see buildCommandText on why the trailer stays. */
+  const approvedContext = commandContext(entry.page)
+  const outcome = await consolePost(
+    config,
+    '/execute',
+    {
+      command: buildCommandText(entry.command, entry.page),
+      ...(approvedContext ? { context: approvedContext } : {}),
+      actions: pending.actions,
+      ...(pending.sessionId ? { sessionId: pending.sessionId } : {}),
+      planMeta: { planner: pending.planner ?? null, source: CONSOLE_SOURCE },
+      source: CONSOLE_SOURCE,
+    },
+    EXECUTE_TIMEOUT_MS,
+    interpretExecuteResponse,
+  )
+  await patchEntry(entry.id, outcomeToPatch(outcome))
+}
+
+/**
+ * The approved outward step, run alone.
+ *
+ * Only this call runs. The steps that would have followed it did not run and
+ * are not resumed — the run that parked has already reported what it did, and
+ * quietly continuing past the approval point would make that report a lie.
+ * The verdict says so out loud.
+ */
+async function runApprovedStep({ entry, pending, config }) {
+  const journal = executionJournal()
+  const runId = pending.runId || entry.id
+
+  try {
+    const result = await executeCommand(
+      {
+        commandId: `approved-${runId}`,
+        createdAt: new Date().toISOString(),
+        action: pending.call,
+      },
+      config,
+    )
+    await journal.recordStep(runId, {
+      tool: pending.call.type,
+      effect: pending.effect,
+      ok: true,
+      summary: String(result?.message ?? 'Approved step ran.').slice(0, 300),
+    })
+    await journal.finishRun(runId, {
+      state: 'finished',
+      verdict: 'achieved',
+      headline: `Approved and ran: ${pending.call.type}.`,
+    })
+    await recordRunToHive(runId, 'verdict')
+    await patchEntry(entry.id, {
+      state: 'executed',
+      headline: `You approved it and it ran: ${result?.message || pending.call.type}.`,
+      detail:
+        'Only the approved step ran. Any later steps from the original plan did not — send the command again if more is left to do.',
+      finishedAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    const message = error?.message || String(error)
+    await journal.recordStep(runId, {
+      tool: pending.call.type,
+      effect: pending.effect,
+      ok: false,
+      summary: message.slice(0, 300),
+    })
+    await journal.finishRun(runId, {
+      state: 'failed',
+      verdict: 'failed',
+      headline: `The approved step failed: ${message}`,
+    })
+    await recordRunToHive(runId, 'verdict')
+    await patchEntry(entry.id, {
+      state: 'failed',
+      headline: `The approved step failed: ${message}`,
+      finishedAt: new Date().toISOString(),
+    })
+  }
 }
 
 function browserLabel() {
@@ -1957,14 +2574,131 @@ function delay(ms) {
  * is asleep is the case the relay peer exists for.
  */
 function startPeers() {
-  void startPolling()
-  void startRelayDrain()
+  /* The lifetime check runs FIRST so an expired credential is wiped before a
+   * poll window starts using it; the wipe's storage.onChanged then restarts
+   * the loops against the emptied config. The escrow restore runs SECOND so
+   * it only ever fills a hole the lifetime check agreed should stay empty of
+   * expired credentials — never the other way around. Failure of either must
+   * never stop the peers — a broken clock is not an excuse to go silent. */
+  void enforceCredentialLifetime()
+    .then(() => maybeRestorePairingFromEscrow())
+    .catch(() => {})
+    .finally(() => {
+      void startPolling()
+      void startRelayDrain()
+    })
 }
 
-api.runtime.onInstalled.addListener(async ({ reason }) => {
+/*
+ * CREDENTIAL ESCROW — the native round trips. Policy lives in pairing.js
+ * (shouldEscrow / escrowRestorePlan); this is only the plumbing to the Safari
+ * wrapper app's SafariWebExtensionHandler, which keeps a copy of the pairing
+ * in ITS UserDefaults — a store that survives the Safari extension-storage
+ * resets that wiped the owner's pairing on 2026-08-10 and 2026-08-12. The
+ * owner's instruction, 2026-08-12: "we likely gonna keep updating the
+ * extension, make sure this issue doesn't happen again."
+ */
+
+/*
+ * Chromium has no native host registered for this extension, so
+ * sendNativeMessage there rejects (or the API is missing entirely). One
+ * failed probe latches this flag for the worker's lifetime — escrow becomes
+ * a no-op instead of a rejection logged on every alarm tick. Safari resets
+ * the flag naturally on the next worker start.
+ */
+let escrowUnavailable = false
+
+async function escrowSend(message) {
+  if (escrowUnavailable) return null
+  if (typeof api?.runtime?.sendNativeMessage !== 'function') {
+    escrowUnavailable = true
+    return null
+  }
+  try {
+    /* Safari ignores the application-id argument and routes to the bundled
+     * app's handler; Chromium looks the id up, finds no host, and rejects —
+     * which the catch below converts into the latched no-op. */
+    return await api.runtime.sendNativeMessage('application.id', message)
+  } catch {
+    escrowUnavailable = true
+    return null
+  }
+}
+
+async function escrowStorePairing(values) {
+  await escrowSend({ type: 'escrow:store', values })
+}
+
+async function escrowClearPairing() {
+  await escrowSend({ type: 'escrow:clear' })
+}
+
+/*
+ * The restore: only when storage has NO agentToken (the needs-setup state an
+ * update-reset leaves behind), and only when the escrowed blob would survive
+ * the same expiry check the live credential faces. Session-only pairings are
+ * never escrowed in the first place (shouldEscrow) — restoring one across a
+ * browser restart would undo "forget right after this browser is closed".
+ */
+async function maybeRestorePairingFromEscrow() {
+  const { agentToken } = await api.storage.local.get('agentToken')
+  if (agentToken) return
+
+  const reply = await escrowSend({ type: 'escrow:fetch' })
+  const plan = escrowRestorePlan(reply?.values)
+  if (!plan.restore) return
+
+  await api.storage.local.set(plan.values)
+  /* Deliberately loud: this line in the worker console is the proof that an
+   * update reset storage and the escrow put the pairing back. */
+  console.log('[ai-pendant] Pairing restored from the app escrow after a storage reset.')
+}
+
+/*
+ * THE LIFETIME, ENFORCED. The owner chose how long a pairing lives (session /
+ * 7d / 30d / forever — see pairing.js); this is where the choice has teeth on
+ * this end. Runs on every worker start and every poll alarm, so an expiry is
+ * noticed within 30s even on a browser that never restarts. The relay
+ * enforces the 7d/30d expiresAt server-side regardless; this wipe is what
+ * turns the popup honest ("needs setup", not "bad token") and is the ONLY
+ * enforcement for session-only, which the relay cannot see.
+ */
+async function enforceCredentialLifetime() {
+  const values = await api.storage.local.get([
+    'agentToken',
+    'pairLifetime',
+    'pairExpiresAt',
+  ])
+  /* The sentinel lives in storage.session precisely BECAUSE the browser wipes
+   * that area on quit: sentinel gone = browser closed since pairing. A build
+   * without storage.session (very old engines) treats the session as alive
+   * rather than wiping on every worker restart. */
+  const sessionValues = api.storage.session
+    ? await api.storage.session.get('pairSessionAlive').catch(() => ({}))
+    : { pairSessionAlive: true }
+
+  const verdict = credentialExpiryCheck({
+    agentToken: values.agentToken,
+    pairLifetime: values.pairLifetime,
+    pairExpiresAt: values.pairExpiresAt,
+    sessionAlive: Boolean(sessionValues?.pairSessionAlive),
+  })
+  if (!verdict.wipe) return
+
+  await api.storage.local.remove([...PAIR_WIPE_KEYS])
+  await updateStatus({
+    state: 'needs-setup',
+    connected: false,
+    message: `${verdict.reason} Paste the pairing code in the popup to connect again.`,
+  })
+}
+
+api.runtime.onInstalled.addListener(async ({ reason: _reason }) => {
   await migrateSyncedCredentials()
   await api.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 })
-  if (reason === 'install') await api.runtime.openOptionsPage()
+  /* No options page to open any more (owner deleted it, 2026-08-12): the
+   * popup shows its setup card whenever no agentToken is stored, so a fresh
+   * install needs no hand-off — the first toolbar click IS setup. */
   startPeers()
 })
 
@@ -1980,6 +2714,18 @@ api.alarms.onAlarm.addListener((alarm) => {
 
 api.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return
+
+  /*
+   * Any path that REMOVES the agent token — the lifetime wipe above, or any
+   * future explicit unpair UI — must also empty the escrow, or the next
+   * worker start would quietly restore what the owner (or the expiry) just
+   * revoked. Hooking the storage transition instead of each caller means a
+   * disconnect button added later is covered on the day it ships. A restore
+   * or re-pair SETS the token, so newValue is present and this stays quiet.
+   */
+  if (changes.agentToken && changes.agentToken.newValue === undefined) {
+    void escrowClearPairing()
+  }
 
   if (
     ['agentUrl', 'agentToken', 'deviceName', 'targetMode'].some(
@@ -2054,6 +2800,114 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === 'console:submit') {
     void handleConsoleSubmit(message)
+      .then(sendResponse)
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      )
+    return true
+  }
+
+  /*
+   * One-paste pairing: fetched here AND stored here — both lessons were paid
+   * for live.
+   *
+   * FETCH HERE: the first build fetched from the settings page ("it stays
+   * alive for the whole round trip"), and in live Safari the request was
+   * DISPATCHED — the agent ran the route, the relay minted the credential —
+   * but the response never reached the page: "Pairing…" forever, credential
+   * orphaned. This worker is the one context PROVEN to fetch loopback in the
+   * owner's Safari (the bridge polls it all day).
+   *
+   * STORE HERE TOO: the second build fetched here but stored on the page, so
+   * the credential rode back over sendResponse — and Safari DROPS an async
+   * sendResponse when the round trip runs long (the agent's relay leg can
+   * take 15s). The page saw `undefined`, printed "the agent returned no
+   * token", and the minted credential evaporated. So the patch is applied
+   * HERE the instant the fetch completes, and the popup reads the OUTCOME
+   * from storage (PAIR_OUTCOME_KEY, via storage.onChanged) — a channel that
+   * cannot be lost with the token. sendResponse is best-effort narration.
+   */
+  if (message?.type === 'pair:run') {
+    void (async () => {
+      let outcome
+      try {
+        const origin = String(message.agentUrl ?? '').replace(/\/$/, '')
+        const lifetime = normalizePairLifetime(message.lifetime)
+        const response = await fetch(`${origin}/pair/browser`, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: String(message.code ?? ''),
+            deviceId: String(message.deviceId ?? ''),
+            deviceName: String(message.deviceName ?? ''),
+            lifetime,
+          }),
+          signal: AbortSignal.timeout(20_000),
+        })
+        const payload = await response.json().catch(() => null)
+        outcome = pairStoragePatch(
+          payload ?? {
+            ok: false,
+            error: `The agent returned HTTP ${response.status} with no body.`,
+          },
+          { agentUrl: origin, lifetime },
+        )
+
+        if (outcome.ok) {
+          /*
+           * Session-only pairing plants a sentinel in storage.session, which
+           * the browser wipes when it quits — its absence at the next worker
+           * start is how "forget right after this browser is closed" is
+           * detected (credentialExpiryCheck). Planted BEFORE the credentials
+           * land so there is no instant where a session credential exists
+           * that a worker crash would promote to forever.
+           */
+          if (lifetime === 'session' && api.storage.session) {
+            await api.storage.session.set({ pairSessionAlive: true })
+          }
+          await api.storage.local.set(outcome.values)
+          /* A synced copy of an old token must not outlive a re-pair. */
+          if (api.storage.sync) await api.storage.sync.remove('agentToken')
+          /*
+           * Escrow the fresh pairing (lifetime and expiry included) with the
+           * wrapper app, so the NEXT extension update cannot cost the owner
+           * this credential. Session-only pairings are deliberately excluded
+           * — see shouldEscrow in pairing.js. Best-effort by design: a
+           * failed escrow must never fail a successful pair.
+           */
+          if (shouldEscrow(lifetime)) {
+            await escrowStorePairing(outcome.values).catch(() => {})
+          }
+        }
+      } catch (error) {
+        outcome = {
+          ok: false,
+          error:
+            error?.name === 'TimeoutError'
+              ? 'The agent did not answer within 20s. Is it running on this Mac?'
+              : error?.message || String(error),
+        }
+      }
+
+      /* The outcome record is written even on failure, so the popup's one
+       * listener covers every ending. */
+      await api.storage.local
+        .set({ [PAIR_OUTCOME_KEY]: pairOutcomeRecord(outcome) })
+        .catch(() => {})
+      try {
+        sendResponse(outcome)
+      } catch {
+        /* Safari dropped the channel — the storage write above already told
+         * the popup everything. */
+      }
+    })()
+    return true
+  }
+
+  /* A parked plan, decided in the popup instead of on the dashboard. */
+  if (message?.type === 'plan:decide') {
+    void decidePlan(message)
       .then(sendResponse)
       .catch((error) =>
         sendResponse({ ok: false, error: error?.message || String(error) }),

@@ -577,6 +577,33 @@ body {
   color: var(--ink);
 }
 
+/*
+ * "No" beside "Approve and run". Outlined rather than filled: refusing is the
+ * safe answer and the safe answer does not need to compete with the primary
+ * button for the eye — but it is red-edged and red-lettered so it can never be
+ * misread as the quiet tertiary control next to it.
+ */
+.button-deny {
+  border: 1px solid rgba(255, 117, 111, 0.55);
+  border-radius: 10px;
+  padding: 9px 16px;
+  color: var(--red);
+  background: transparent;
+  font-size: var(--fs-small);
+  font-weight: var(--w-heavy);
+  cursor: pointer;
+}
+
+.button-deny:hover:not(:disabled) {
+  border-color: var(--red);
+  background: rgba(255, 117, 111, 0.12);
+}
+
+.button-deny:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 /* ---------- What needs you ---------- */
 
 .needs-you {

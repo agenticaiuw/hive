@@ -8,10 +8,14 @@ OUT="build/$APP"
 
 mkdir -p build
 
-# Regenerate the app icon when the generator changed (or icon is missing).
-if [ ! -f build/AppIcon.icns ] || [ Tools/make-icon.swift -nt build/AppIcon.icns ]; then
-  xcrun swift Tools/make-icon.swift build/AppIcon.icns
-fi
+# THE ONE PRODUCT ICON: builds consume the checked-in master
+# (assets/icon/pendant.icns at the git root, fanned out everywhere by
+# scripts/sync-icons.mjs). This block used to regenerate artwork per build via
+# Tools/make-icon.swift, which is exactly how the product ended up wearing
+# four different faces at once — the generator drifted from every other
+# surface. make-icon.swift remains as the DESIGN tool: run it to draw new
+# artwork INTO assets/icon (then sync-icons), never into a build.
+cp ../../assets/icon/pendant.icns build/AppIcon.icns
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"

@@ -28,9 +28,23 @@
  *     400/409 → {ok:false, error, cancelled?, logs?, jobId}
  *
  * The popup never invents its own risk policy. The Mac planner's own
- * `requiresConfirmation` is the only gate: false → execute, otherwise park and
- * point at the dashboard, exactly the split local-agent/bridge.js gives the
- * pendant (which parks with "Waiting for your approval on the dashboard").
+ * `requiresConfirmation` is the only gate: false → execute, otherwise the plan
+ * PARKS — and parking now means "decide it here", not "go somewhere else".
+ *
+ * WHY THE PARKED PLAN IS ANSWERABLE IN THE POPUP (owner, 2026-08-09: "i
+ * shouldn't have to open up the dashboard to approve"). A parked plan used to
+ * carry only a link to the dashboard, which is a second window, a second app
+ * and a second scroll away from the one place the owner already is. The plan's
+ * own `actions` are now kept on the history entry, so Approve runs exactly the
+ * steps that were shown and Deny drops them.
+ *
+ * THE DOUBLE-FIRE THAT MAKES THIS SAFE TO DO. Two approve buttons for one plan
+ * — one here, one on the dashboard — could each run the same actions once. The
+ * arbiter is the agent, not either button: the Mac recorded this plan as a
+ * `plan_ready` job, and approving re-reads that job first and refuses unless it
+ * is STILL `plan_ready` (background.js). Whichever surface gets there first
+ * moves the job off that status and the other one is told, in the agent's own
+ * words, that the plan is no longer waiting.
  */
 import {
   PRIVACY_RULES,
@@ -53,6 +67,15 @@ export const EXECUTE_TIMEOUT_MS = 180_000
  * owned the fetch is gone (Safari suspends them freely) and nothing will ever
  * finish it. Rendered as lost rather than left spinning forever. */
 export const WORKING_STALE_MS = 3 * 60_000
+/*
+ * How long a parked plan stays approvable FROM HERE. The same reasoning as
+ * execution-status.js's APPROVAL_TTL_MS: these steps act on live pages, and an
+ * "approve" pressed hours later lands on whatever is there now, which may be
+ * neither the page nor the state the plan was written against. Expiring only
+ * closes the popup's shortcut — the job itself is still on the Mac, and the
+ * card says so instead of going quiet.
+ */
+export const PLAN_APPROVAL_TTL_MS = 10 * 60_000
 
 const HEADLINE_MAX = 500
 const DETAIL_MAX = 2_000
@@ -83,15 +106,43 @@ export function scrubPageContext(page) {
 }
 
 /**
- * What actually goes in the /plan `command` field. The agent's contract has no
- * separate context parameter — the command text is the only channel — so the
- * page rides along as a clearly-labelled trailer the planner can use or ignore.
+ * What goes in the /plan `command` field.
+ *
+ * THE TRAILER IS STILL HERE ON PURPOSE, even though /plan now takes a
+ * first-class `context` (see commandContext below and local-agent/
+ * callerContext.js). It is the only channel an agent older than that field has,
+ * and an extension that dropped it would go silent about the page against every
+ * such agent — a regression paid by the owner, to tidy a wire format.
+ *
+ * A current agent strips it: receiving `context` means it has the page
+ * properly, so the redundant copy comes off the command before anything reads
+ * that command as a sentence. Belt and braces, and the braces cost nothing.
  */
 export function buildCommandText(command, page = null) {
   const text = clip(command, MAX_COMMAND_CHARS)
   if (!page) return text
   const label = page.title ? `"${page.title}" — ${page.url}` : page.url
   return `${text}\n\n[Sent from the browser extension. Active page: ${label}]`
+}
+
+/**
+ * The same page as a first-class `context` field, which is where an agent that
+ * understands it will read it from.
+ *
+ * Why this beats the trailer, from one live command on 2026-08-09: as text, the
+ * page became part of the owner's sentence. goalVerdict reads that sentence to
+ * decide whether the run did what was asked, took the words after "cancel",
+ * stopped at the first full stop — which "…browser extension." supplied — and
+ * told the owner "Cancelling all your recurring investments on ibkr [Sent is
+ * still to do." Every display that titles a job with its command showed the
+ * provenance instead of the ask, too.
+ */
+export function commandContext(page = null) {
+  if (!page?.url) return null
+  return {
+    surface: CONSOLE_SOURCE,
+    page: { url: page.url, ...(page.title ? { title: page.title } : {}) },
+  }
 }
 
 export function dashboardUrlFor(agentUrl) {
@@ -131,7 +182,7 @@ export function interpretPlanResponse({ status, payload }) {
       kind: 'error',
       unauthorized: true,
       message:
-        payload.error || 'The local agent rejected the token. Open settings.',
+        payload.error || 'The local agent rejected the token. Pair again from the popup.',
       ...common,
     }
   }
@@ -174,8 +225,11 @@ export function interpretPlanResponse({ status, payload }) {
       return { kind: 'execute', actions, message: planLine, ...common }
     }
 
+    /* `actions` rides along so the parked card can be decided in the popup
+     * rather than only described there. */
     return {
       kind: 'parked',
+      actions,
       message: planLine,
       detail: describePlanSteps(actions, payload.preview),
       safety: payload.safety || '',
@@ -279,9 +333,94 @@ export function newHistoryEntry({ id, command, page = null, now = Date.now() }) 
     jobId: null,
     sessionId: null,
     planner: null,
+    /* What Approve would run, once something parks. See PENDING SHAPES. */
+    pending: null,
     startedAt: new Date(now).toISOString(),
     finishedAt: null,
   }
+}
+
+/* ===================================================================== *
+ * PENDING SHAPES — what an entry's Approve button is holding.
+ *
+ * Two things park, and they park for different reasons, so they are two
+ * shapes rather than one loose bag:
+ *
+ *   {kind:'mac-plan',   actions, jobId, sessionId, planner, parkedAt}
+ *     The MAC PLANNER asked for a human before any of it runs. Approve runs
+ *     the whole plan — locally if every step is browser work, otherwise back
+ *     through the Mac's /execute — and the Mac's `plan_ready` job is the
+ *     arbiter between this button and the dashboard's.
+ *
+ *   {kind:'local-step', call, effect, reason, runId, approvalId, parkedAt}
+ *     A plan already RUNNING in this browser reached an outward step (see
+ *     affinity.js). Approve runs exactly that one call and nothing after it:
+ *     the steps behind it never ran, and pretending otherwise would be the
+ *     kind of "it said done" this whole path exists to prevent.
+ * ===================================================================== */
+
+export function macPlanPending({ actions, jobId = null, sessionId = null, planner = null }, now = Date.now()) {
+  const list = Array.isArray(actions) ? actions : []
+  if (!list.length) return null
+  return {
+    kind: 'mac-plan',
+    actions: list,
+    jobId,
+    sessionId,
+    planner,
+    parkedAt: new Date(now).toISOString(),
+  }
+}
+
+export function localStepPending({ call, effect, reason, runId, approvalId }, now = Date.now()) {
+  if (!call?.type) return null
+  return {
+    kind: 'local-step',
+    call: { type: String(call.type), params: call.params ?? {} },
+    effect: effect ?? 'outward',
+    reason: String(reason ?? ''),
+    runId: runId ?? null,
+    approvalId: approvalId ?? null,
+    parkedAt: new Date(now).toISOString(),
+  }
+}
+
+/**
+ * May this entry still be decided from the popup? Pure, and the SAME check
+ * the popup renders from and background.js gates on — a button that is
+ * pressable must be a button that works, and the only way to guarantee that
+ * is for both sides to ask one function.
+ *
+ * The agent's own `plan_ready` re-check happens on top of this, in
+ * background.js, because it needs the network. This covers everything
+ * knowable from the entry alone.
+ */
+export function planDecisionPreflight(entry, now = Date.now()) {
+  if (!entry) return { ok: false, error: 'That command is no longer in this list.' }
+  if (entry.state !== 'parked') {
+    return {
+      ok: false,
+      error: `That plan is no longer waiting — it is "${entry.state}".`,
+    }
+  }
+  const pending = entry.pending
+  if (!pending?.kind) {
+    return {
+      ok: false,
+      error:
+        'This plan parked before the popup could keep its steps, so it can only be approved on the dashboard.',
+    }
+  }
+  const parkedAt = Date.parse(pending.parkedAt ?? entry.finishedAt ?? '')
+  if (Number.isFinite(parkedAt) && now - parkedAt > PLAN_APPROVAL_TTL_MS) {
+    return {
+      ok: false,
+      expired: true,
+      error:
+        'This plan has been waiting too long to run from here — the pages it was written against have moved on. Send the command again.',
+    }
+  }
+  return { ok: true, pending }
 }
 
 export function appendHistory(history, entry) {
@@ -336,6 +475,15 @@ export function outcomeToPatch(outcome, now = Date.now()) {
         state: 'parked',
         headline: outcome.message,
         detail: [outcome.safety, outcome.detail].filter(Boolean).join('\n'),
+        pending: macPlanPending(
+          {
+            actions: outcome.actions,
+            jobId: outcome.jobId ?? null,
+            sessionId: outcome.sessionId ?? null,
+            planner: outcome.planner ?? null,
+          },
+          now,
+        ),
       }
     case 'refused':
       return { ...base, state: 'refused', headline: outcome.message }
@@ -346,6 +494,110 @@ export function outcomeToPatch(outcome, now = Date.now()) {
         headline: outcome.message || 'Something went wrong.',
       }
   }
+}
+
+/**
+ * The ordered ways a browser might agree to show the standalone console.
+ *
+ * THE BUG THIS SHAPE FIXES (owner, 2026-08-10: "after I first expand the
+ * pop-up and then collapse it, I'm not able to open the pop-up again"). The
+ * ladder used to be `if (await rung())` — treating a FALSY RETURN as "this
+ * rung declined, try the next one". But a browser that opens the window and
+ * returns nothing is indistinguishable from one that refused, so a successful
+ * `windows.create` fell through and also opened a pinned tab, then a plain
+ * tab, then another window. The right test is whether the METHOD EXISTS,
+ * decided here, before anything is called; the caller then treats "did not
+ * throw" as success and stops.
+ *
+ * @returns rung names in order, skipping any the browser cannot do at all.
+ */
+export function consoleWindowRungs({ hasWindowsCreate = false, hasTabsCreate = false } = {}) {
+  const rungs = []
+  /* A popup-type window first: no tab strip in Chrome, a plain window where
+   * the type is ignored. Persistence is the point, not chrome. */
+  if (hasWindowsCreate) rungs.push('popup-window')
+  /* Then a pinned tab, then a plain one — Safari has refused the pinned
+   * flavor before. Both still survive clicking elsewhere. */
+  if (hasTabsCreate) rungs.push('pinned-tab', 'tab')
+  /* Last: a plain window, for Safari running with NO window open, where the
+   * tab rungs have nowhere to put a tab. */
+  if (hasWindowsCreate) rungs.push('window')
+  return rungs
+}
+
+/**
+ * WHERE THE THINKING WILL HAPPEN, said out loud before a command is sent.
+ *
+ * THE DEFECT THIS FIXES, found 2026-08-09 by the owner asking why everything
+ * went to the Mac. Routing is brain-first (background.js runConsoleCommand),
+ * but the brain needs a relay credential, and with none paired
+ * `brainAvailability()` fails at its first line and EVERY command falls
+ * through to the Mac. That is the designed fallback working — and it was
+ * invisible: the popup went on saying "this browser thinks for itself", which
+ * for an unpaired browser is simply false.
+ *
+ * A capability that silently degrades to its fallback, under a UI that claims
+ * otherwise, is worse than one that is plainly missing: there is nothing to
+ * notice and nothing to fix. So the popup states which brain is about to be
+ * used, and when it is not this one, why, and what to do.
+ */
+export function describeBrainState({ relayStatus, agentConfigured = false } = {}) {
+  const state = String(relayStatus?.state ?? 'off')
+
+  if (state === 'connected' || state === 'degraded') {
+    return {
+      brain: 'local',
+      label: 'Thinks here',
+      tone: 'ok',
+      help:
+        'This browser thinks for itself and acts in your signed-in tabs. Anything it ' +
+        'cannot do here goes to the agent on your Mac. Nothing that submits, sends or ' +
+        'cancels runs until you approve it above.',
+    }
+  }
+
+  /* A credential this relay rejects is not the same as never having had one:
+   * the fix is a fresh token, not first-time setup. */
+  if (state === 'unauthorized') {
+    return {
+      brain: 'mac',
+      label: 'Bad token',
+      tone: 'error',
+      help:
+        'The relay rejected this browser’s credential, so it cannot think for itself ' +
+        'and every command is going to your Mac. Paste the pairing code in this popup ' +
+        'and press Connect — one paste replaces both credentials.',
+    }
+  }
+
+  return {
+    brain: 'mac',
+    label: 'No brain',
+    tone: 'warn',
+    /* The settings page is gone (owner, 2026-08-12); pairing lives in this
+     * popup, so the directions point at the box the reader is looking at. */
+    help: agentConfigured
+      ? 'This browser has no brain of its own yet, so every command goes to the agent ' +
+        'on your Mac and needs it awake. Paste the pairing code in this popup and press ' +
+        'Connect to let it think here instead.'
+      : 'This browser is not set up: paste the pairing code above (PAIRING_CODE in the ' +
+        'repo .env) and press Connect. One paste configures everything.',
+  }
+}
+
+/**
+ * THE ONE ENTRY THE POPUP SHOWS.
+ *
+ * The owner, 2026-08-09: "it should not show my past tasks in this popup, only
+ * the current task." The list itself is unchanged — the background still keeps
+ * the last HISTORY_LIMIT so a finished run is not lost, and the dashboard still
+ * has every one of them. This is only about what the popup paints: the command
+ * in flight, or if nothing is in flight, the last one's outcome, which is the
+ * answer the owner is standing there waiting for.
+ */
+export function currentEntry(history) {
+  const list = Array.isArray(history) ? history : []
+  return list[0] ?? null
 }
 
 /** How the popup should render one entry right now. Pure, so testable. */
@@ -362,13 +614,31 @@ export function describeEntry(entry, now = Date.now()) {
         label: 'Lost',
         headline:
           'The browser suspended the bridge before this finished. Check the dashboard for what actually happened.',
+        canDecide: false,
         showDashboardLink: true,
       }
     }
+    /*
+     * THE HEADLINE THE BACKGROUND WROTE, not a guess about where the work is.
+     *
+     * This used to return the fixed string 'Asking the Mac agent…' for every
+     * working entry, which was true when the Mac was the only place a command
+     * could go and became a lie the moment this node grew a brain. The owner
+     * saw it on the very first command after the brain shipped and asked why
+     * it said that immediately — it says it immediately because it was never
+     * looking at anything.
+     *
+     * background.js already narrates the route as it happens ('Thinking in
+     * this browser…', 'Handing this to the Mac — <reason>', 'Approved —
+     * running it…'), and every one of those was being thrown away here. So:
+     * show what was actually written, and fall back to a phrase that claims
+     * nothing about which machine is busy.
+     */
     return {
       state: 'working',
       label: 'Working…',
-      headline: 'Asking the Mac agent…',
+      headline: String(entry?.headline ?? '').trim() || 'Working on it…',
+      canDecide: false,
       showDashboardLink: false,
     }
   }
@@ -377,14 +647,24 @@ export function describeEntry(entry, now = Date.now()) {
     answered: 'Answered',
     executed: 'Done',
     parked: 'Parked for approval',
+    denied: 'Denied',
     refused: 'Refused',
     failed: 'Failed',
   }
+
+  /*
+   * A parked plan offers its own Approve/Deny when it still can, and points at
+   * the dashboard only when it cannot — expired, or parked by a build that did
+   * not keep the steps. The link is the fallback now, not the whole offer.
+   */
+  const decision = state === 'parked' ? planDecisionPreflight(entry, now) : { ok: false }
 
   return {
     state,
     label: labels[state] ?? state,
     headline: entry?.headline ?? '',
-    showDashboardLink: state === 'parked' || state === 'lost',
+    canDecide: decision.ok === true,
+    decisionNote: decision.ok ? '' : state === 'parked' ? decision.error : '',
+    showDashboardLink: (state === 'parked' && !decision.ok) || state === 'lost',
   }
 }

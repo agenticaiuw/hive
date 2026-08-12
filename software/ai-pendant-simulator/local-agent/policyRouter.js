@@ -1,6 +1,15 @@
 import fs from 'node:fs'
 
 import { matchBriefingCommand } from './briefing.js'
+/*
+ * Deterministic routing is a decision about the COMMAND, not the provenance a
+ * surface stapled to it — and normalize() collapses the blank line, so an
+ * unstripped trailer overruns MAX_DETERMINISTIC_CHARS and defeats every ^…$
+ * anchor. "what time is it" from the extension then paid for a planner turn to
+ * re-derive the clock. This module solved that first and privately; the strip
+ * now lives in callerContext.js because goalVerdict.js needed the same one.
+ */
+import { stripContextTrailer } from './callerContext.js'
 import { isSmallRequest } from './intentRouter.js'
 import { matchMailTriageCommand } from './mailTriage.js'
 import { matchMeetingFollowupCommand } from './meetingFollowup.js'
@@ -440,37 +449,6 @@ function normalize(command) {
     .trim()
     .replace(/\s+/g, ' ')
     .replace(/[.!]+$/, '')
-}
-
-/*
- * The command channel is the only one the /plan contract has, so a surface with
- * no context field appends the context to the text instead. The browser
- * extension's popup (browser-extension/src/command-console.js buildCommandText)
- * sends the active page as a blank-line-separated bracketed trailer:
- *
- *   what time is it
- *
- *   [Sent from the browser extension. Active page: "…" — https://…]
- *
- * Deterministic routing is a decision about the COMMAND, not the trailer — but
- * normalize() collapses the blank line into a space, so without this the
- * trailer becomes part of the string, overruns MAX_DETERMINISTIC_CHARS, and
- * defeats every ^…$ anchor. "what time is it" then pays a full planner turn to
- * re-derive the clock.
- *
- * Strip only a trailing bracket block that OPENS on its own line after a blank
- * line and CLOSES at end of input. Anchoring both ends this tightly is what
- * keeps a legitimate inline "[note]" mid-command — or a command that simply
- * ends in a bracket — from being touched: the trailer's defining shape is the
- * blank line before a leading "[", which normal prose does not produce. A
- * command that genuinely needs the page ("summarize this page") is unaffected —
- * it is not in the deterministic table with or without the trailer, so it still
- * reaches the model.
- */
-function stripContextTrailer(command) {
-  return String(command ?? '')
-    .replace(/\n\s*\n\[[\s\S]*\]\s*$/, '')
-    .trimEnd()
 }
 
 function existingPath(raw) {

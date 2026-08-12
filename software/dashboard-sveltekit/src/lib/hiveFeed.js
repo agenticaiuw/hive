@@ -110,6 +110,42 @@ const NODE = {
 };
 
 /**
+ * A command with a surface's provenance trailer taken off the end.
+ *
+ * A client with something to say about itself and only one field to say it in
+ * staples it to the command text. The browser extension does exactly that:
+ *
+ *   cancel all my recurring investments on ibkr
+ *
+ *   [Sent from the browser extension. Active page: "…" — https://…]
+ *
+ * Which is how, on 2026-08-09, the approval card's title, the RECENT list and
+ * the hero's "YOU ASKED" line all showed two lines of where-it-came-from where
+ * the ask should have been.
+ *
+ * The agent strips this at its own boundary now — `POST /plan` takes a
+ * first-class `context`, and local-agent/callerContext.js owns the same regex
+ * and the full reasoning for its shape. This deliberately does NOT rely on
+ * that: history already holds rows recorded before the field existed, the relay
+ * backend never went through /plan at all, and a display should not be the
+ * layer that assumes its input was tidied upstream. Duplicated rather than
+ * shared because these are two deployables; the two comments are how they stay
+ * in step.
+ *
+ * Strips only a bracket block that OPENS on its own line after a blank line and
+ * CLOSES at end of input: the blank line before "[" is the trailer's defining
+ * shape, and normal prose does not produce it. An inline "[note]" mid-command,
+ * or a command that merely ends in a bracket, is untouched.
+ *
+ * @param {unknown} raw
+ */
+export function commandTitle(raw) {
+  return String(raw ?? "")
+    .replace(/\n\s*\n\[[\s\S]*\]\s*$/, "")
+    .trimEnd();
+}
+
+/**
  * Title-case an unrecognised key so it is at least readable, never a lie.
  * @param {unknown} key
  */

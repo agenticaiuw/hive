@@ -50,7 +50,7 @@
  */
 
 import { hasUsefulTranscript, isTranscribing, type JsonRecord } from "$lib/pipeline";
-import { isAwaitingApproval, type JobView } from "$lib/jobs";
+import { commandTitle, isAwaitingApproval, type JobView } from "$lib/jobs";
 import { terminalPhaseFor } from "$lib/hiveFeed.js";
 
 type RunPhase =
@@ -139,7 +139,9 @@ function textOf(event: JsonRecord | null): string {
  * exists to kill, so it is rejected rather than shown as an answer.
  */
 function replyText(run: JsonRecord): string {
-  const question = String(run.command || "").trim();
+  /* Same reading as the displayed question, or the echo check compares a
+   * trailer-carrying command against a trailer-free reply and never matches. */
+  const question = commandTitle(run.command).trim();
   const candidates = [
     String(run.reply || ""),
     String(run.audio?.replyTranscript || ""),
@@ -193,7 +195,9 @@ function failureText(run: JsonRecord): string {
 export function runState(run: JsonRecord | null): RunState {
   if (!run) return EMPTY;
 
-  const question = String(run.command || "").trim();
+  /* The hero's "YOU ASKED" line. A pipeline run never went through /plan's
+   * context field, so this is where its surface's trailer comes off. */
+  const question = commandTitle(run.command).trim();
   const agentEvent = lastOfStage(run, "agent");
   const spokenReply = replyText(run);
   const delivery = deliveryLine(run);
@@ -361,6 +365,14 @@ export type PendingApproval = {
   at: string;
   /** Later parked copies of the same request, folded into this one. */
   duplicates: number;
+  /**
+   * Every job id folded into this card, newest first — `jobId` is the first.
+   *
+   * Approve runs the newest plan and only that one. Deny has to reach all of
+   * them: dismissing just the newest would hand the card straight back with
+   * the next copy behind it, which reads as a button that does nothing.
+   */
+  jobIds: string[];
 };
 
 /**
@@ -386,10 +398,12 @@ export function pendingApprovals(jobs: JobView[]): PendingApproval[] {
     const existing = byCommand.get(key);
     if (existing) {
       existing.duplicates += 1;
+      existing.jobIds.push(job.id);
       continue;
     }
     byCommand.set(key, {
       jobId: job.id,
+      jobIds: [job.id],
       command: job.command,
       steps: job.planned.map((action) => ({
         label: action.label,

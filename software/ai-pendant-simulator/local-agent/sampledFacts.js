@@ -80,7 +80,7 @@ export function needsRecheck(fact, { now = Date.now(), window = SAMPLE_RECHECK_M
 export function checkSample(fact, { observe, now = Date.now() } = {}) {
   if (!isSampled(fact)) return { status: 'not-sampled' }
 
-  let observed = null
+  let observed
   try {
     observed = observe ? observe(fact) : null
   } catch {

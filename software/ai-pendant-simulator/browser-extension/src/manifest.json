@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Pendant Browser Bridge",
-  "version": "1.5.1",
+  "version": "1.7.1",
   "description": "Lets your local AI Pendant agent control explicitly permitted browser tabs on this Mac.",
   "minimum_chrome_version": "121",
   "icons": {
@@ -11,7 +11,12 @@
     "128": "icons/icon-128.png",
     "512": "icons/icon-512.png"
   },
-  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
@@ -33,9 +38,5 @@
       "32": "icons/icon-32.png",
       "48": "icons/icon-48.png"
     }
-  },
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": true
   }
 }

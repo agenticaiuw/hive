@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  commandTitle,
   hiveNodeFor,
   isMacLocalOwnerJob,
   jobToHistoryEntry,
@@ -335,4 +336,37 @@ test("pickHero skips empty runs and already-carded approvals, with no fallback",
   // Nothing worth showing → null, never "show something anyway".
   assert.equal(pickHero([entries[0]], stateFor), null);
   assert.equal(pickHero([], stateFor), null);
+});
+
+test("a surface's provenance trailer is not the title of the ask", () => {
+  /*
+   * The exact string the browser extension sent on 2026-08-09. It reached the
+   * approval card, the RECENT list and the hero's "YOU ASKED" line whole, so
+   * two lines of where-it-came-from crowded out the request itself.
+   */
+  const sent =
+    "cancel all my recurring investments on ibkr\n\n" +
+    '[Sent from the browser extension. Active page: "evan1liu/agentic-gadget" — https://github.com/evan1liu/agentic-gadget/tree/main]';
+
+  assert.equal(
+    commandTitle(sent),
+    "cancel all my recurring investments on ibkr",
+  );
+});
+
+test("commandTitle leaves brackets that are not trailers alone", () => {
+  // The anchoring is the whole safety argument: a blank line before "[", and
+  // the block closing at end of input. These would each lose real command text
+  // to a looser regex.
+  assert.equal(
+    commandTitle("rename the file to [draft] and save it"),
+    "rename the file to [draft] and save it",
+  );
+  assert.equal(commandTitle("open the file [notes]"), "open the file [notes]");
+  assert.equal(
+    commandTitle("do the thing\n\n[note] and then stop"),
+    "do the thing\n\n[note] and then stop",
+  );
+  assert.equal(commandTitle(""), "");
+  assert.equal(commandTitle(null), "");
 });

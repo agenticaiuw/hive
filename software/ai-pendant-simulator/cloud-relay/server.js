@@ -374,6 +374,15 @@ app.post('/v1/devices/pair', async (request, response) => {
    * supply it and the credential keeps that ceiling and never re-widens.
    */
   const requestedScopes = request.body?.scopes
+  /*
+   * Optional credential lifetime, and like `scopes` it can only SUBTRACT: an
+   * absent ttlMs keeps the historical no-expiry mint, a present one gives the
+   * credential a hard expiresAt that verifyDeviceToken enforces on every
+   * request. The browser extension's 7d/30d pairing choices arrive here;
+   * validation (positive integer, ≤ a year) is normalizeCredentialTtlMs's,
+   * exercised inside createDeviceCredential — garbage is a 400, not a clamp.
+   */
+  const requestedTtlMs = request.body?.ttlMs
 
   if (!deviceId || !SUPPORTED_DEVICE_TYPES.includes(deviceType)) {
     response.status(400).json({
@@ -410,6 +419,9 @@ app.post('/v1/devices/pair', async (request, response) => {
       ...(requestedScopes === undefined || requestedScopes === null
         ? {}
         : { scopes: requestedScopes }),
+      ...(requestedTtlMs === undefined || requestedTtlMs === null
+        ? {}
+        : { ttlMs: requestedTtlMs }),
     })
   } catch (error) {
     response.status(400).json({

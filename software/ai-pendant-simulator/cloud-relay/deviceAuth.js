@@ -185,10 +185,40 @@ export function effectiveScopesForCredential(record) {
   return roleScopes.filter((scope) => ceiling.has(scope))
 }
 
+/*
+ * An optional caller-chosen lifetime for a minted credential, in ms.
+ *
+ * WHY THIS EXISTS (2026-08-12): the browser extension now offers the owner
+ * "7 days / 30 days / forever until revoked" at pairing time, and the 7d/30d
+ * choices must die SERVER-side — a laptop that never wakes again must not
+ * leave an immortal token behind. The extension's fourth choice, session-
+ * only, never reaches here: "this browser session" is observable only by the
+ * browser, so it is enforced client-side and minted with no expiry.
+ *
+ * Absent/null → no expiry (the historical behaviour, byte-for-byte). Anything
+ * present must be a positive integer within a year — a pre-auth route feeds
+ * this, so garbage is a refusal, never a clamp: a caller whose "30 days"
+ * arrived as NaN should hear about it at pairing time, not at the 401.
+ */
+export const MAX_CREDENTIAL_TTL_MS = 366 * 24 * 60 * 60 * 1_000
+
+export function normalizeCredentialTtlMs(raw) {
+  if (raw === undefined || raw === null) return { ok: true, ttlMs: null }
+  const ttlMs = typeof raw === 'number' ? raw : NaN
+  if (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > MAX_CREDENTIAL_TTL_MS) {
+    return {
+      ok: false,
+      error: `ttlMs must be a positive integer number of milliseconds, at most ${MAX_CREDENTIAL_TTL_MS}.`,
+    }
+  }
+  return { ok: true, ttlMs }
+}
+
 export function createDeviceCredential({
   deviceId,
   deviceType,
   scopes: requestedScopes,
+  ttlMs = null,
   now = new Date().toISOString(),
   randomBytes = crypto.randomBytes,
 } = {}) {
@@ -216,6 +246,9 @@ export function createDeviceCredential({
    * minted last month. Passing `scopes` is the deliberate act — it is the only
    * thing in the system that can set the flag, and it can only ever restrict.
    */
+  const lifetime = normalizeCredentialTtlMs(ttlMs)
+  if (!lifetime.ok) throw new TypeError(lifetime.error)
+
   const narrowing = requestedScopes !== undefined && requestedScopes !== null
   const record = {
     tokenId,
@@ -228,7 +261,11 @@ export function createDeviceCredential({
     ...(narrowing ? { narrowed: true } : {}),
     createdAt: now,
     lastUsedAt: null,
-    expiresAt: null,
+    /* auth (verifyDeviceToken below) already honors expiresAt on every
+     * request; setting it here is the entire server-side enforcement. */
+    expiresAt: lifetime.ttlMs
+      ? new Date(new Date(now).getTime() + lifetime.ttlMs).toISOString()
+      : null,
     revokedAt: null,
     updatedAt: now,
   }

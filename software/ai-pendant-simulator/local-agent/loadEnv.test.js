@@ -42,3 +42,39 @@ test('.env values never clobber explicit process env, but do fill empty and unse
     delete process.env[UNSET]
   }
 })
+
+test('derived secrets are labelled, stable, and never invented without a master', async () => {
+  const { deriveSecret } = await import('./loadEnv.js')
+
+  const agent = deriveSecret('master-code', 'agent-token')
+  const session = deriveSecret('master-code', 'session-secret')
+
+  /* Deterministic: every process that reads the code computes the same
+   * token — that is what lets the value leave .env entirely. */
+  assert.equal(agent, deriveSecret('master-code', 'agent-token'))
+  /* Labelled: the two derived secrets must never collide, or the session
+   * secret IS the bearer token. */
+  assert.notEqual(agent, session)
+  /* 64 hex chars — clears the dashboard's MIN_SESSION_SECRET_LENGTH of 32. */
+  assert.match(agent, /^[0-9a-f]{64}$/)
+  /* No master, no secret. Deriving from '' would mint the same "secret" on
+   * every unconfigured checkout in the world. */
+  assert.equal(deriveSecret('', 'agent-token'), '')
+  assert.equal(deriveSecret(null, 'agent-token'), '')
+})
+
+test('both loaders derive bit-identical secrets', async () => {
+  /*
+   * The derivation is deliberately duplicated in software/load-pendant-env.mjs
+   * (different packages, each must work with the other absent). This is the
+   * assertion that keeps the copies honest: if they drift, the agent and the
+   * scripts compute DIFFERENT agent tokens from the same pairing code, and
+   * every script gets 401s that look like a corrupted .env.
+   */
+  const local = (await import('./loadEnv.js')).deriveSecret
+  const shared = (await import('../../load-pendant-env.mjs')).deriveSecret
+
+  for (const label of ['agent-token', 'session-secret', 'future-label']) {
+    assert.equal(local('sample-master', label), shared('sample-master', label))
+  }
+})

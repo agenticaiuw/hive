@@ -1,9 +1,17 @@
 (function() {
-	//#region src/bridge-core.js
+	//#region browser-extension/src/bridge-core.js
 	const DEFAULT_AGENT_URL = "http://127.0.0.1:8000";
+	Object.freeze([
+		"session",
+		"sessionId",
+		"browserSession",
+		"sessionName",
+		"bootstrapUrl"
+	]);
+	Object.freeze(["tabId", "windowId"]);
 	new TextEncoder();
 	//#endregion
-	//#region src/command-console.js
+	//#region browser-extension/src/command-console.js
 	const HISTORY_KEY = "consoleHistory";
 	const INCLUDE_PAGE_KEY = "consoleIncludePage";
 	const MAX_COMMAND_CHARS = 2e3;
@@ -16,6 +24,113 @@
 			return "http://localhost:8000/dashboard";
 		}
 	}
+	/**
+	* May this entry still be decided from the popup? Pure, and the SAME check
+	* the popup renders from and background.js gates on — a button that is
+	* pressable must be a button that works, and the only way to guarantee that
+	* is for both sides to ask one function.
+	*
+	* The agent's own `plan_ready` re-check happens on top of this, in
+	* background.js, because it needs the network. This covers everything
+	* knowable from the entry alone.
+	*/
+	function planDecisionPreflight(entry, now = Date.now()) {
+		if (!entry) return {
+			ok: false,
+			error: "That command is no longer in this list."
+		};
+		if (entry.state !== "parked") return {
+			ok: false,
+			error: `That plan is no longer waiting — it is "${entry.state}".`
+		};
+		const pending = entry.pending;
+		if (!pending?.kind) return {
+			ok: false,
+			error: "This plan parked before the popup could keep its steps, so it can only be approved on the dashboard."
+		};
+		const parkedAt = Date.parse(pending.parkedAt ?? entry.finishedAt ?? "");
+		if (Number.isFinite(parkedAt) && now - parkedAt > 6e5) return {
+			ok: false,
+			expired: true,
+			error: "This plan has been waiting too long to run from here — the pages it was written against have moved on. Send the command again."
+		};
+		return {
+			ok: true,
+			pending
+		};
+	}
+	/**
+	* The ordered ways a browser might agree to show the standalone console.
+	*
+	* THE BUG THIS SHAPE FIXES (owner, 2026-08-10: "after I first expand the
+	* pop-up and then collapse it, I'm not able to open the pop-up again"). The
+	* ladder used to be `if (await rung())` — treating a FALSY RETURN as "this
+	* rung declined, try the next one". But a browser that opens the window and
+	* returns nothing is indistinguishable from one that refused, so a successful
+	* `windows.create` fell through and also opened a pinned tab, then a plain
+	* tab, then another window. The right test is whether the METHOD EXISTS,
+	* decided here, before anything is called; the caller then treats "did not
+	* throw" as success and stops.
+	*
+	* @returns rung names in order, skipping any the browser cannot do at all.
+	*/
+	function consoleWindowRungs({ hasWindowsCreate = false, hasTabsCreate = false } = {}) {
+		const rungs = [];
+		if (hasWindowsCreate) rungs.push("popup-window");
+		if (hasTabsCreate) rungs.push("pinned-tab", "tab");
+		if (hasWindowsCreate) rungs.push("window");
+		return rungs;
+	}
+	/**
+	* WHERE THE THINKING WILL HAPPEN, said out loud before a command is sent.
+	*
+	* THE DEFECT THIS FIXES, found 2026-08-09 by the owner asking why everything
+	* went to the Mac. Routing is brain-first (background.js runConsoleCommand),
+	* but the brain needs a relay credential, and with none paired
+	* `brainAvailability()` fails at its first line and EVERY command falls
+	* through to the Mac. That is the designed fallback working — and it was
+	* invisible: the popup went on saying "this browser thinks for itself", which
+	* for an unpaired browser is simply false.
+	*
+	* A capability that silently degrades to its fallback, under a UI that claims
+	* otherwise, is worse than one that is plainly missing: there is nothing to
+	* notice and nothing to fix. So the popup states which brain is about to be
+	* used, and when it is not this one, why, and what to do.
+	*/
+	function describeBrainState({ relayStatus, agentConfigured = false } = {}) {
+		const state = String(relayStatus?.state ?? "off");
+		if (state === "connected" || state === "degraded") return {
+			brain: "local",
+			label: "Thinks here",
+			tone: "ok",
+			help: "This browser thinks for itself and acts in your signed-in tabs. Anything it cannot do here goes to the agent on your Mac. Nothing that submits, sends or cancels runs until you approve it above."
+		};
+		if (state === "unauthorized") return {
+			brain: "mac",
+			label: "Bad token",
+			tone: "error",
+			help: "The relay rejected this browser’s credential, so it cannot think for itself and every command is going to your Mac. Paste the pairing code in this popup and press Connect — one paste replaces both credentials."
+		};
+		return {
+			brain: "mac",
+			label: "No brain",
+			tone: "warn",
+			help: agentConfigured ? "This browser has no brain of its own yet, so every command goes to the agent on your Mac and needs it awake. Paste the pairing code in this popup and press Connect to let it think here instead." : "This browser is not set up: paste the pairing code above (PAIRING_CODE in the repo .env) and press Connect. One paste configures everything."
+		};
+	}
+	/**
+	* THE ONE ENTRY THE POPUP SHOWS.
+	*
+	* The owner, 2026-08-09: "it should not show my past tasks in this popup, only
+	* the current task." The list itself is unchanged — the background still keeps
+	* the last HISTORY_LIMIT so a finished run is not lost, and the dashboard still
+	* has every one of them. This is only about what the popup paints: the command
+	* in flight, or if nothing is in flight, the last one's outcome, which is the
+	* answer the owner is standing there waiting for.
+	*/
+	function currentEntry(history) {
+		return (Array.isArray(history) ? history : [])[0] ?? null;
+	}
 	/** How the popup should render one entry right now. Pure, so testable. */
 	function describeEntry(entry, now = Date.now()) {
 		const state = entry?.state ?? "failed";
@@ -25,30 +140,71 @@
 				state: "lost",
 				label: "Lost",
 				headline: "The browser suspended the bridge before this finished. Check the dashboard for what actually happened.",
+				canDecide: false,
 				showDashboardLink: true
 			};
 			return {
 				state: "working",
 				label: "Working…",
-				headline: "Asking the Mac agent…",
+				headline: String(entry?.headline ?? "").trim() || "Working on it…",
+				canDecide: false,
 				showDashboardLink: false
 			};
 		}
+		const labels = {
+			answered: "Answered",
+			executed: "Done",
+			parked: "Parked for approval",
+			denied: "Denied",
+			refused: "Refused",
+			failed: "Failed"
+		};
+		const decision = state === "parked" ? planDecisionPreflight(entry, now) : { ok: false };
 		return {
 			state,
-			label: {
-				answered: "Answered",
-				executed: "Done",
-				parked: "Parked for approval",
-				refused: "Refused",
-				failed: "Failed"
-			}[state] ?? state,
+			label: labels[state] ?? state,
 			headline: entry?.headline ?? "",
-			showDashboardLink: state === "parked" || state === "lost"
+			canDecide: decision.ok === true,
+			decisionNote: decision.ok ? "" : state === "parked" ? decision.error : "",
+			showDashboardLink: state === "parked" && !decision.ok || state === "lost"
 		};
 	}
 	//#endregion
-	//#region ../shared/nodeMesh.js
+	//#region browser-extension/src/pairing.js
+	const PAIR_LIFETIMES = Object.freeze([
+		"session",
+		"7d",
+		"30d",
+		"forever"
+	]);
+	const DEFAULT_PAIR_LIFETIME = "forever";
+	Object.freeze({
+		session: null,
+		"7d": 10080 * 60 * 1e3,
+		"30d": 720 * 60 * 60 * 1e3,
+		forever: null
+	});
+	/** Anything not canonical becomes the default — the UI only offers the four,
+	* so a stray value is corruption, not intent. */
+	function normalizePairLifetime(raw) {
+		const value = String(raw ?? "").trim();
+		return PAIR_LIFETIMES.includes(value) ? value : DEFAULT_PAIR_LIFETIME;
+	}
+	function defaultPairDeviceId(storedId, randomHex) {
+		const existing = String(storedId ?? "").trim();
+		if (existing) return existing;
+		return `browser-${(String(randomHex ?? "").replace(/[^0-9a-f]/gi, "").slice(0, 6) || "000000").toLowerCase()}`;
+	}
+	const PAIR_OUTCOME_KEY = "pairOutcome";
+	Object.freeze([
+		"agentToken",
+		"deviceToken",
+		"relayEnabled",
+		"pairLifetime",
+		"pairExpiresAt"
+	]);
+	//#endregion
+	//#region shared/nodeMesh.js
 	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
 	const RELAY_NODE_ADDRESS = "@relay";
 	Object.freeze([
@@ -94,10 +250,10 @@
 		return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s left` : `${seconds}s left`;
 	}
 	//#endregion
-	//#region src/approvals.js
+	//#region browser-extension/src/approvals.js
 	const APPROVALS_KEY = "pendingApprovals";
 	//#endregion
-	//#region src/voice-input.js
+	//#region browser-extension/src/voice-input.js
 	/** The simulator's language rule: Korean keyboards get Korean STT. */
 	function speechLang(navigatorLanguage) {
 		return String(navigatorLanguage || "").toLowerCase().startsWith("ko") ? "ko-KR" : "en-US";
@@ -161,12 +317,16 @@
 		}
 	}
 	//#endregion
-	//#region src/popup.js
+	//#region browser-extension/src/popup.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const CONSOLE_PAGE = "popup.html?standalone=1";
+	const WEBSITE_ORIGINS = ["http://*/*", "https://*/*"];
 	const elements = {
 		statusDot: document.getElementById("status-dot"),
 		statusTitle: document.getElementById("status-title"),
+		brainDot: document.getElementById("brain-dot"),
+		brainTitle: document.getElementById("brain-title"),
+		brainHelp: document.getElementById("brain-help"),
 		approvals: document.getElementById("approvals"),
 		form: document.getElementById("command-form"),
 		input: document.getElementById("command-input"),
@@ -179,7 +339,12 @@
 		history: document.getElementById("history"),
 		openDashboard: document.getElementById("open-dashboard"),
 		connectNow: document.getElementById("connect-now"),
-		openSettings: document.getElementById("open-settings")
+		setup: document.getElementById("setup"),
+		pairCode: document.getElementById("pair-code"),
+		pairLifetime: document.getElementById("pair-lifetime"),
+		pairConnect: document.getElementById("pair-connect"),
+		pairNotice: document.getElementById("pair-notice"),
+		grantPages: document.getElementById("grant-pages")
 	};
 	const standalone = new URLSearchParams(location.search).get("standalone") === "1";
 	if (standalone) {
@@ -268,23 +433,42 @@
 		elements.statusDot.className = `dot ${state === "connected" ? "connected" : state === "offline" ? "error" : ""}`;
 		elements.statusTitle.textContent = state === "connected" ? "Connected" : state === "needs-setup" ? "Needs setup" : state === "unauthorized" ? "Bad token" : "Offline";
 	}
+	let planBusyId = null;
+	let lastHistory = [];
+	/**
+	* Which brain, and the footer that explains it. Both come from one pure
+	* function so the chip and the sentence can never disagree.
+	*/
+	function renderBrain({ relayStatus, agentConfigured }) {
+		const view = describeBrainState({
+			relayStatus,
+			agentConfigured
+		});
+		elements.brainDot.className = `dot ${view.tone === "ok" ? "connected" : view.tone === "error" ? "error" : ""}`;
+		elements.brainTitle.textContent = view.label;
+		elements.brainHelp.textContent = view.help;
+		elements.brainDot.parentElement.title = view.help;
+	}
 	function renderHistory(history) {
-		const list = Array.isArray(history) ? history : [];
-		elements.history.replaceChildren(...list.map((entry) => renderEntry(entry)));
-		elements.history.hidden = list.length === 0;
+		lastHistory = Array.isArray(history) ? history : [];
+		const entry = currentEntry(lastHistory);
+		elements.history.replaceChildren(...entry ? [renderEntry(entry)] : []);
+		elements.history.hidden = !entry;
 	}
 	function renderEntry(entry) {
 		const view = describeEntry(entry);
+		const busy = planBusyId === entry.id;
 		const item = document.createElement("article");
 		item.className = `entry entry-${view.state}`;
 		const command = document.createElement("p");
 		command.className = "entry-command";
-		command.textContent = entry.command;
-		item.append(command);
 		const chip = document.createElement("span");
 		chip.className = "entry-chip";
 		chip.textContent = view.label;
-		command.prepend(chip);
+		const commandText = document.createElement("span");
+		commandText.textContent = entry.command;
+		command.append(chip, " ", commandText);
+		item.append(command);
 		if (view.headline) {
 			const headline = document.createElement("p");
 			headline.className = "entry-headline";
@@ -297,6 +481,29 @@
 			detail.textContent = entry.detail;
 			item.append(detail);
 		}
+		if (view.canDecide) {
+			const row = document.createElement("div");
+			row.className = "entry-actions";
+			const approve = document.createElement("button");
+			approve.type = "button";
+			approve.className = "primary";
+			approve.textContent = busy ? "Running…" : "Approve and run";
+			approve.disabled = busy;
+			const deny = document.createElement("button");
+			deny.type = "button";
+			deny.className = "danger";
+			deny.textContent = "Deny";
+			deny.disabled = busy;
+			approve.addEventListener("click", () => void decidePlan(entry, "approve"));
+			deny.addEventListener("click", () => void decidePlan(entry, "deny"));
+			row.append(approve, deny);
+			item.append(row);
+		} else if (view.decisionNote) {
+			const note = document.createElement("p");
+			note.className = "entry-note";
+			note.textContent = view.decisionNote;
+			item.append(note);
+		}
 		if (view.showDashboardLink) {
 			const link = document.createElement("a");
 			link.className = "entry-link";
@@ -307,6 +514,26 @@
 			item.append(link);
 		}
 		return item;
+	}
+	async function decidePlan(entry, decision) {
+		if (planBusyId) return;
+		planBusyId = entry.id;
+		renderHistory(lastHistory);
+		try {
+			const reply = await api.runtime.sendMessage({
+				type: "plan:decide",
+				id: entry.id,
+				decision
+			});
+			if (reply?.ok) setNotice(decision === "approve" ? "Approved — running it…" : "Denied. Nothing ran.");
+			else if (reply?.needsSetup) setNotice("Connect this browser first — paste the pairing code above.", true);
+			else setNotice(reply?.error || "That decision could not be sent.", true);
+		} catch (error) {
+			setNotice(error?.message || "The bridge is not awake yet — try again.", true);
+		} finally {
+			planBusyId = null;
+			renderHistory(lastHistory);
+		}
 	}
 	function setNotice(message, isError = false) {
 		elements.notice.textContent = message;
@@ -418,6 +645,10 @@
 		try {
 			voice.recognition?.abort?.();
 		} catch {}
+		if (approvalTicker !== null) {
+			window.clearInterval(approvalTicker);
+			approvalTicker = null;
+		}
 	});
 	elements.popOut.addEventListener("click", async () => {
 		const url = api.runtime.getURL(CONSOLE_PAGE);
@@ -427,31 +658,39 @@
 			if (open) {
 				if (open.windowId !== void 0 && api.windows?.update) await api.windows.update(open.windowId, { focused: true });
 				await api.tabs.update(open.id, { active: true });
-				if (!standalone) window.close();
 				return;
 			}
 		} catch {}
-		if (api.windows?.create) try {
-			await api.windows.create({
+		const open = {
+			"popup-window": () => api.windows.create({
 				url,
 				type: "popup",
 				width: 420,
 				height: 680,
 				focused: true
-			});
-			if (!standalone) window.close();
-			return;
-		} catch {}
-		try {
-			await api.tabs.create({
+			}),
+			"pinned-tab": () => api.tabs.create({
 				url,
 				pinned: true,
 				active: true
-			});
-			if (!standalone) window.close();
+			}),
+			tab: () => api.tabs.create({
+				url,
+				active: true
+			}),
+			window: () => api.windows.create({
+				url,
+				focused: true
+			})
+		};
+		for (const rung of consoleWindowRungs({
+			hasWindowsCreate: Boolean(api.windows?.create),
+			hasTabsCreate: Boolean(api.tabs?.create)
+		})) try {
+			await open[rung]();
 			return;
 		} catch {}
-		setNotice("This browser refused to open the console window or a pinned tab.", true);
+		setNotice("This browser refused every way of opening the console (popup window, pinned tab, tab, window).", true);
 	});
 	elements.form.addEventListener("submit", async (event) => {
 		event.preventDefault();
@@ -467,7 +706,7 @@
 				page
 			});
 			if (reply?.ok) elements.input.value = "";
-			else if (reply?.needsSetup) setNotice("Save the agent token in settings first.", true);
+			else if (reply?.needsSetup) setNotice("Connect this browser first — paste the pairing code above.", true);
 			else setNotice(reply?.error || "The bridge did not accept the command.", true);
 		} catch (error) {
 			setNotice(error?.message || "The bridge is not awake yet — try again.", true);
@@ -489,30 +728,122 @@
 		} catch {}
 		await refresh();
 	});
-	elements.openSettings.addEventListener("click", () => {
-		api.runtime.openOptionsPage();
+	let pairStartedAt = 0;
+	function setPairNotice(message, isError = false) {
+		elements.pairNotice.textContent = message;
+		elements.pairNotice.className = `notice${isError ? " error" : ""}`;
+	}
+	function renderSetup({ agentConfigured }) {
+		elements.setup.hidden = agentConfigured;
+		elements.form.hidden = !agentConfigured;
+		elements.history.hidden = elements.history.hidden || !agentConfigured;
+		elements.openDashboard.parentElement.hidden = !agentConfigured;
+	}
+	function renderPairOutcome(outcome) {
+		if (!outcome || !pairStartedAt || (outcome.at ?? 0) < pairStartedAt) return;
+		pairStartedAt = 0;
+		elements.pairConnect.disabled = false;
+		if (outcome.ok) {
+			elements.pairCode.value = "";
+			setPairNotice(outcome.note || "Paired.");
+		} else setPairNotice(outcome.error || "Pairing failed.", true);
+	}
+	elements.pairConnect.addEventListener("click", async () => {
+		const code = elements.pairCode.value.trim();
+		if (!code) {
+			setPairNotice("Paste the pairing code first.", true);
+			return;
+		}
+		elements.pairConnect.disabled = true;
+		pairStartedAt = Date.now();
+		setPairNotice("Pairing…");
+		const stored = await api.storage.local.get([
+			"relayDeviceId",
+			"agentUrl",
+			"deviceName"
+		]);
+		const randomBytes = new Uint8Array(3);
+		crypto.getRandomValues(randomBytes);
+		const deviceId = defaultPairDeviceId(stored.relayDeviceId, [...randomBytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+		try {
+			const reply = await api.runtime.sendMessage({
+				type: "pair:run",
+				agentUrl: stored.agentUrl || "http://127.0.0.1:8000",
+				code,
+				deviceId,
+				deviceName: stored.deviceName || "Browser extension",
+				lifetime: normalizePairLifetime(elements.pairLifetime.value)
+			});
+			if (reply === void 0 || reply === null) setPairNotice("Still pairing — finishing in the background. This popup will update by itself.");
+			else if (!reply.ok) renderPairOutcome({
+				...reply,
+				at: Date.now()
+			});
+		} catch (error) {
+			pairStartedAt = 0;
+			elements.pairConnect.disabled = false;
+			setPairNotice(error?.message || "The bridge is not awake yet — try again.", true);
+		}
 	});
-	api.storage.onChanged.addListener((changes, areaName) => {
+	async function renderGrantPages({ agentConfigured }) {
+		let granted = true;
+		try {
+			granted = await api.permissions.contains({ origins: WEBSITE_ORIGINS });
+		} catch {}
+		elements.grantPages.hidden = !agentConfigured || granted;
+	}
+	elements.grantPages.addEventListener("click", async () => {
+		let granted = false;
+		try {
+			granted = await api.permissions.request({ origins: WEBSITE_ORIGINS });
+		} catch {
+			granted = false;
+		}
+		if (granted) {
+			elements.grantPages.hidden = true;
+			setNotice("Website access granted — this browser can now act in your tabs.");
+		} else setNotice("The browser did not grant website access.", true);
+	});
+	function onStorageChanged(changes, areaName) {
 		if (areaName !== "local") return;
 		if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue);
+		if (changes.relayStatus || changes.agentToken) refresh();
 		if (changes["consoleHistory"]) renderHistory(changes[HISTORY_KEY].newValue);
 		if (changes["pendingApprovals"]) renderApprovals(changes[APPROVALS_KEY].newValue);
+		if (changes["pairOutcome"]) renderPairOutcome(changes[PAIR_OUTCOME_KEY].newValue);
+	}
+	api.storage.onChanged.addListener(onStorageChanged);
+	window.addEventListener("pagehide", () => {
+		try {
+			api.storage.onChanged.removeListener(onStorageChanged);
+		} catch {}
 	});
 	async function refresh() {
 		const values = await api.storage.local.get([
 			"bridgeStatus",
+			"relayStatus",
 			"agentUrl",
+			"agentToken",
 			HISTORY_KEY,
 			INCLUDE_PAGE_KEY,
 			APPROVALS_KEY
 		]);
+		const agentConfigured = Boolean(values.agentToken);
 		dashboardUrl = dashboardUrlFor(values.agentUrl || "http://127.0.0.1:8000");
 		renderStatus(values.bridgeStatus);
+		renderBrain({
+			relayStatus: values.relayStatus,
+			agentConfigured
+		});
 		renderApprovals(values[APPROVALS_KEY]);
 		renderHistory(values[HISTORY_KEY]);
 		elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false;
 		refreshMicAvailability();
+		renderSetup({ agentConfigured });
+		renderGrantPages({ agentConfigured });
 	}
-	refresh().then(() => elements.input.focus());
+	refresh().then(() => {
+		(elements.setup.hidden ? elements.input : elements.pairCode).focus();
+	});
 	//#endregion
 })();

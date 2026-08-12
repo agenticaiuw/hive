@@ -78,11 +78,11 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   ...CAPABILITY_GAP_ACTIONS,
   run_shell: {
     description: 'Run any shell command on the Mac (zsh). Use for installs, git, npm, curl, etc.',
-    params: { command: 'string', cwd: 'optional absolute path', timeout: 'optional ms' },
+    params: { command: 'the shell command line to run', cwd: 'optional absolute path', timeout: 'optional ms' },
   },
   run_applescript: {
     description: 'Run AppleScript for deep macOS automation.',
-    params: { script: 'string' },
+    params: { script: 'the AppleScript source to run' },
   },
   /*
    * Deferred work. These were dispatchable but absent from every schema, so
@@ -94,7 +94,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'Research a topic on the web and leave a written brief plus an audio version the owner can play later from the pendant. Use when nobody is waiting for the answer now.',
     params: {
-      topic: 'string',
+      topic: 'what to research, in a sentence',
       mode: "optional 'brief' (default) or 'deep'",
       maxSources: 'optional number',
     },
@@ -113,11 +113,11 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   open_url: {
     description: 'Open any URL in the default browser (shopping, Gmail, docs, etc.).',
-    params: { url: 'string' },
+    params: { url: 'full URL including scheme' },
   },
   open_app: {
     description: 'Open any installed macOS application by name.',
-    params: { appName: 'string' },
+    params: { appName: 'name of the app to open, e.g. Safari' },
   },
   open_path: {
     description: 'Open any file or folder with the default app.',
@@ -125,7 +125,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   write_file: {
     description: 'Create or overwrite a file anywhere the user can write.',
-    params: { path: 'absolute path', content: 'string', append: 'optional boolean' },
+    params: { path: 'absolute path', content: 'the text to write into the file', append: 'optional boolean' },
   },
   read_file: {
     description: 'Read a text file from disk.',
@@ -150,7 +150,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   type_text: {
     description:
       'Type text into the frontmost application. Layout independent and unicode safe (emoji, CJK, newlines).',
-    params: { text: 'string', perCharDelayMs: 'optional pacing in ms' },
+    params: { text: 'the text to type', perCharDelayMs: 'optional pacing in ms' },
   },
   press_keys: {
     description:
@@ -180,7 +180,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   set_mute: {
     description: 'Mute or unmute Mac output volume.',
-    params: { muted: 'boolean' },
+    params: { muted: 'true to mute, false to unmute' },
   },
   /*
    * The executor and the pendant's hands-free allowlist have supported these
@@ -204,7 +204,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'Create an item in Apple Reminders. Use this for ANY reminder request. Never use run_shell or raw AppleScript for reminders.',
     params: {
-      title: 'string',
+      title: 'the title text',
       due: 'optional natural date/time like "tonight at 9pm" or ISO string',
       notes: 'optional string',
       list: 'optional Reminders list name',
@@ -225,8 +225,8 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Send or draft an email through Mail.app.',
     params: {
       to: 'email address',
-      subject: 'string',
-      body: 'string',
+      subject: 'the subject line',
+      body: 'the message body',
       send: 'boolean, default true',
     },
   },
@@ -256,12 +256,12 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   ui_find: {
     description: 'Find one named control in an app without acting on it.',
-    params: { app: 'optional', title: 'exact title', titleContains: 'substring', nth: 'optional index' },
+    params: { app: 'optional — name of the app to target', title: 'exact title', titleContains: 'substring', nth: 'optional index' },
   },
   ui_click: {
     description:
       'Press a named control via the accessibility API, falling back to a click at its centre. Preferred over mouse_click.',
-    params: { app: 'optional', ref: 'ref from ui_snapshot', title: 'or exact title', titleContains: 'or substring' },
+    params: { app: 'optional — name of the app to target', ref: 'ref from ui_snapshot', title: 'or exact title', titleContains: 'or substring' },
   },
   ui_menu: {
     description:
@@ -270,7 +270,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   ui_wait_for: {
     description: 'Poll until a named control appears. Use instead of sleeping.',
-    params: { app: 'optional', title: 'or titleContains', timeoutMs: 'optional, default 5000' },
+    params: { app: 'optional — name of the app to target', title: 'or titleContains', timeoutMs: 'optional, default 5000' },
   },
   ui_hit_test: {
     description: 'Report which named control is under a screen point.',
@@ -279,13 +279,13 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   // --- Pixel tier: only when the accessibility tree does not expose the control.
   mouse_move: {
     description: 'Move the pointer to a screen point (points, top-left origin).',
-    params: { x: 'number', y: 'number' },
+    params: { x: 'screen x coordinate in pixels', y: 'screen y coordinate in pixels' },
   },
   mouse_click: {
     description: 'Click at a screen point.',
     params: {
-      x: 'number',
-      y: 'number',
+      x: 'screen x coordinate in pixels',
+      y: 'screen y coordinate in pixels',
       button: 'optional left|right|middle',
       clicks: 'optional 1-3',
       modifiers: 'optional array like ["cmd","shift"]',
@@ -293,23 +293,23 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   mouse_double_click: {
     description: 'Double-click at a screen point.',
-    params: { x: 'number', y: 'number' },
+    params: { x: 'screen x coordinate in pixels', y: 'screen y coordinate in pixels' },
   },
   mouse_right_click: {
     description: 'Right-click at a screen point to open a context menu.',
-    params: { x: 'number', y: 'number' },
+    params: { x: 'screen x coordinate in pixels', y: 'screen y coordinate in pixels' },
   },
   mouse_drag: {
     description: 'Press, drag along an interpolated path, and release.',
-    params: { fromX: 'number', fromY: 'number', toX: 'number', toY: 'number', button: 'optional', steps: 'optional' },
+    params: { fromX: 'screen x coordinate to drag from, in pixels', fromY: 'screen y coordinate to drag from, in pixels', toX: 'screen x coordinate to drag to, in pixels', toY: 'screen y coordinate to drag to, in pixels', button: 'optional — which mouse button: left, right or middle', steps: 'optional — number of intermediate points in the drag' },
   },
   mouse_down: {
     description: 'Press and hold a mouse button at a point.',
-    params: { x: 'number', y: 'number', button: 'optional' },
+    params: { x: 'screen x coordinate in pixels', y: 'screen y coordinate in pixels', button: 'optional — which mouse button: left, right or middle' },
   },
   mouse_up: {
     description: 'Release a held mouse button at a point.',
-    params: { x: 'number', y: 'number', button: 'optional' },
+    params: { x: 'screen x coordinate in pixels', y: 'screen y coordinate in pixels', button: 'optional — which mouse button: left, right or middle' },
   },
   scroll: {
     description: 'Scroll the view under the pointer. Positive dy scrolls up.',
@@ -339,11 +339,11 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   copy_to_clipboard: {
     description: 'Copy text to the clipboard.',
-    params: { text: 'string' },
+    params: { text: 'the text to type' },
   },
   create_note: {
     description: 'Create a note file and open it.',
-    params: { filename: 'string', content: 'string', directory: 'optional path' },
+    params: { filename: 'the file name to write', content: 'the text to write', directory: 'optional path' },
   },
   compose_briefing: {
     description:
@@ -375,7 +375,7 @@ const FULL_CONTROL_ACTION_SCHEMA = {
   },
   search_file: {
     description: 'Search for files by name under a folder.',
-    params: { root: 'absolute path', query: 'string' },
+    params: { root: 'absolute path', query: 'what to search for' },
   },
   play_youtube: {
     description:
@@ -417,8 +417,8 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'Structured interactive-element snapshot of a tab (refs, roles, names, selectors). Prefer this over desktop screenshots for web work. Then click/type using ref or selector.',
     params: {
-      tabId: 'optional',
-      urlContains: 'optional',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
+      urlContains: 'optional — substring of the URL of the target tab',
       maxElements: 'optional number',
     },
   },
@@ -426,9 +426,9 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'Open a URL in the user browser via the extension (real cookies/session). Prefer over open_url when the extension is online.',
     params: {
-      url: 'string',
+      url: 'full URL including scheme',
       newTab: 'optional boolean',
-      tabId: 'optional',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
@@ -438,29 +438,29 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     params: {
       ref: 'optional snapshot ref e.g. e3',
       selector: 'optional CSS selector',
-      tabId: 'optional',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_type: {
     description: 'Type into an input in a browser tab (ref or selector).',
     params: {
-      ref: 'optional',
-      selector: 'optional',
-      text: 'string',
+      ref: 'optional — ref from a snapshot — give this or selector',
+      selector: 'optional — CSS selector — give this or ref',
+      text: 'the text to type',
       submit: 'optional boolean',
-      tabId: 'optional',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_select: {
     description: 'Choose an option in a <select> (ref or selector).',
     params: {
-      ref: 'optional',
-      selector: 'optional',
-      value: 'optional',
-      label: 'optional',
-      tabId: 'optional',
+      ref: 'optional — ref from a snapshot — give this or selector',
+      selector: 'optional — CSS selector — give this or ref',
+      value: 'optional — the value attribute of the option',
+      label: 'optional — the visible label of the option',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
@@ -469,41 +469,41 @@ const FULL_CONTROL_ACTION_SCHEMA = {
       'Read page content. Modes: text, main_text, forms, landmarks, html. Prefer main_text or forms over html.',
     params: {
       mode: 'text|main_text|forms|landmarks|html',
-      selector: 'optional',
-      ref: 'optional',
-      maxChars: 'optional',
-      tabId: 'optional',
+      selector: 'optional — CSS selector — give this or ref',
+      ref: 'optional — ref from a snapshot — give this or selector',
+      maxChars: 'optional — number — cap on returned characters',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_wait_for: {
     description: 'Wait until a selector is visible or text appears on the page.',
     params: {
-      selector: 'optional',
-      textContains: 'optional',
-      timeoutMs: 'optional',
-      tabId: 'optional',
+      selector: 'optional — CSS selector — give this or ref',
+      textContains: 'optional — text to wait for on the page',
+      timeoutMs: 'optional — number of milliseconds to wait',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_scroll: {
     description: 'Scroll to an element (ref/selector) or by dy/dx pixels.',
     params: {
-      ref: 'optional',
-      selector: 'optional',
-      dy: 'optional',
-      dx: 'optional',
-      tabId: 'optional',
+      ref: 'optional — ref from a snapshot — give this or selector',
+      selector: 'optional — CSS selector — give this or ref',
+      dy: 'optional — number of pixels to scroll vertically',
+      dx: 'optional — number of pixels to scroll horizontally',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_press_key: {
     description: 'Dispatch a key (e.g. Enter, Escape) on the focused element or a target.',
     params: {
-      key: 'string',
-      ref: 'optional',
-      selector: 'optional',
-      tabId: 'optional',
+      key: 'key name, e.g. Enter or Escape',
+      ref: 'optional — ref from a snapshot — give this or selector',
+      selector: 'optional — CSS selector — give this or ref',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
       session: 'optional session name to stay on the same tab',
     },
   },
@@ -511,18 +511,18 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'PNG of the visible browser tab only. Use only when structured snapshot is insufficient (canvas/charts). Do not send to cloud by default.',
     params: {
-      tabId: 'optional',
-      urlContains: 'optional',
+      tabId: 'optional — number — omit unless you hold a real tab id from browser_list_tabs',
+      urlContains: 'optional — substring of the URL of the target tab',
       session: 'optional session name to stay on the same tab',
     },
   },
   browser_open_session: {
     description:
-      'Claim a browser tab under a name you choose, opening one if nothing is open. Pass that same session on every later browser_* action to keep acting on the same page.',
+      'Claim a browser tab under a name you choose, opening one if nothing is open. Pass that same session on every later browser_* action to keep acting on the same page. When you know which site the task is on, always pass url as well as urlContains: urlContains alone only adopts a tab that is ALREADY open, and a task aimed at a site the owner has not opened yet needs the url to get there.',
     params: {
       session: 'name you pick, e.g. checkout',
-      url: 'optional URL to open',
-      urlContains: 'optional substring of an already-open tab to adopt',
+      url: 'the site to open when no matching tab exists — give it whenever you know the site',
+      urlContains: 'optional substring of an already-open tab to adopt first',
       tabId: 'optional, unreliable in Safari — prefer urlContains',
     },
   },
@@ -545,10 +545,10 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description:
       'Read a page and report what it says with quotes and citations, plus ONE proposed next step — without clicking or typing anything. Use when the owner wants to know what is on a page, or asked to see what you would do before you do it.',
     params: {
-      url: 'string',
+      url: 'full URL including scheme',
       goal: 'what the owner is trying to do, in their words — drives the proposed step',
       look: 'optional array of exact strings to find and quote',
-      maxChars: 'optional',
+      maxChars: 'optional — number — cap on returned characters',
     },
   },
   browser_inspect_act: {
@@ -1065,7 +1065,8 @@ Return ONLY valid JSON:
 }
 
 Available action types (this is the complete list you may use):
-${schema}${drillDown}
+${schema}
+In each "params" above, the value DESCRIBES the parameter — it is not a value to copy. Send real values, and leave an optional parameter out entirely rather than sending a word like "optional".${drillDown}
 
 ${machinePrompt}
 
@@ -1119,7 +1120,8 @@ Permission — you decide, not a rule table:
 - Everything you run is recorded and can be undone afterwards. That is what buys you the benefit of the doubt; do not spend it on steps nobody asked for.
 
 Available action types:
-${schema}${drillDown}
+${schema}
+In each "params" above, the value DESCRIBES the parameter — it is not a value to copy. Send real values, and leave an optional parameter out entirely rather than sending a word like "optional".${drillDown}
 
 ${machinePrompt}
 
@@ -1259,8 +1261,8 @@ async function planWithLlm(
     0,
   )
 
-  let systemPrompt = ''
-  let content = ''
+  let systemPrompt
+  let content
   let parsed = null
   let widened = false
 

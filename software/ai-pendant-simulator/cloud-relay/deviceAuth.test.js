@@ -75,6 +75,59 @@ test('creates an opaque credential and stores only its hash', () => {
   assert.equal(verifyDeviceToken(created.token, created.record), true)
 })
 
+/*
+ * The browser extension's 7d/30d pairing choices land here as ttlMs, and the
+ * expiry has to be REAL — stamped on the record that verifyDeviceToken
+ * already refuses past its expiresAt — so the credential dies server-side
+ * even if the browser that minted it never wakes again.
+ */
+test('an optional ttlMs stamps a hard expiresAt; garbage is refused, not clamped', () => {
+  const now = '2026-08-12T00:00:00.000Z'
+  const week = 7 * 24 * 60 * 60 * 1_000
+
+  const timed = createDeviceCredential({
+    deviceId: 'safari-evan-mac',
+    deviceType: 'browser_node',
+    ttlMs: week,
+    now,
+    randomBytes: deterministicRandom,
+  })
+  assert.equal(timed.record.expiresAt, '2026-08-19T00:00:00.000Z')
+  /* Alive the moment before, dead the moment after — through the same
+   * verifier every authenticated request already passes. */
+  const expiry = new Date(timed.record.expiresAt).getTime()
+  assert.equal(verifyDeviceToken(timed.token, timed.record, expiry - 1), true)
+  assert.equal(verifyDeviceToken(timed.token, timed.record, expiry), false)
+
+  /* No ttl (or explicit null) keeps the historical no-expiry mint. */
+  for (const ttlMs of [undefined, null]) {
+    const open = createDeviceCredential({
+      deviceId: 'safari-evan-mac',
+      deviceType: 'browser_node',
+      ttlMs,
+      now,
+      randomBytes: deterministicRandom,
+    })
+    assert.equal(open.record.expiresAt, null)
+  }
+
+  /* A pre-auth route feeds this, so a mangled lifetime must be an error the
+   * pairer hears about now — not a token that 401s later or lives forever. */
+  for (const ttlMs of [0, -1, 1.5, NaN, Infinity, '604800000', 400 * 24 * 60 * 60 * 1_000]) {
+    assert.throws(
+      () =>
+        createDeviceCredential({
+          deviceId: 'safari-evan-mac',
+          deviceType: 'browser_node',
+          ttlMs,
+          now,
+          randomBytes: deterministicRandom,
+        }),
+      TypeError,
+    )
+  }
+})
+
 test('rejects malformed, altered, expired, and revoked device tokens', () => {
   const created = createDeviceCredential({
     deviceId: 'nrf-001',
