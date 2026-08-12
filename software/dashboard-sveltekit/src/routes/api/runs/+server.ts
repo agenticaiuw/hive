@@ -20,6 +20,17 @@ function publicRun(value: unknown) {
     command: sanitizeText(run.command, 300),
     source: sanitizeText(run.source, 80),
     status: sanitizeText(run.status, 80),
+    /*
+     * Browser-executed runs joined /v1/ops/voice-runs on 2026-08-12 (the owner:
+     * "why didn't my question in the browser extension carried to the
+     * dashboard?"). Their honest verdict lives in `jobStatus` (read_only /
+     * incomplete / needs_approval — runState reads it before `status`) and
+     * their answer line in `reply` (the extension's ledger-derived headline,
+     * which replyText prefers). Dropping these two fields here is what would
+     * make an achieved browser run render as "No answer recorded".
+     */
+    jobStatus: sanitizeText(run.jobStatus, 80),
+    reply: sanitizeText(run.reply, 500),
     events: events.slice(0, 80).map((value) => {
       const event =
         value && typeof value === "object"

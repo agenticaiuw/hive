@@ -541,30 +541,49 @@ export function executionJournal() {
  * stay in the browser extension but of course it can record the task to the
  * hive." Sent as node-mesh mail addressed to '@relay', which the Mac agent
  * can NEVER claim. A record, not a job. Best effort by design.
+ *
+ * FIRE-AND-FORGET AT EVERY CALL SITE (2026-08-12). The owner asked "why
+ * didn't my question in the browser extension carried to the dashboard?" —
+ * the answer was a relay-side feed gap, but auditing the path surfaced this
+ * side's hazard: every settle path AWAITED this send, so a relay that was
+ * down cost the popup a full fetch timeout before the finished run appeared.
+ * The local history entry is the popup's source of truth; the hive record is
+ * a report about it. Reporting must therefore never block or fail the run it
+ * reports on — callers use `void recordRunToHive(...)`, and this function
+ * swallows every failure into the journal's hiveRecord field (or the console)
+ * rather than ever rejecting into an unhandled-promise warning. The relay's
+ * fold is idempotent on taskId and accepts claim/verdict in any order, so
+ * un-awaited records racing each other cannot corrupt the shared history.
  */
 export async function recordRunToHive(runId, phase) {
-  const journal = executionJournal()
-  const relayConfig = await getRelayConfig()
-  if (!relayConfig.ready) {
-    await journal.markHiveRecord(runId, 'unconfigured')
-    return
-  }
-
-  const run = (await journal.getStatus()).runs.find((entry) => entry.runId === runId)
-  if (!run) return
-
   try {
-    const descriptor =
-      phase === 'claim'
-        ? hiveClaimRecordFor(run, relayConfig)
-        : hiveVerdictRecordFor(run, relayConfig)
-    await relayFetch(relayConfig, descriptor)
-    await journal.markHiveRecord(
-      runId,
-      phase === 'claim' ? 'claimed-recorded' : 'recorded',
-    )
+    const journal = executionJournal()
+    const relayConfig = await getRelayConfig()
+    if (!relayConfig.ready) {
+      await journal.markHiveRecord(runId, 'unconfigured')
+      return
+    }
+
+    const run = (await journal.getStatus()).runs.find((entry) => entry.runId === runId)
+    if (!run) return
+
+    try {
+      const descriptor =
+        phase === 'claim'
+          ? hiveClaimRecordFor(run, relayConfig)
+          : hiveVerdictRecordFor(run, relayConfig)
+      await relayFetch(relayConfig, descriptor)
+      await journal.markHiveRecord(
+        runId,
+        phase === 'claim' ? 'claimed-recorded' : 'recorded',
+      )
+    } catch (error) {
+      await journal.markHiveRecord(runId, `failed: ${error?.message || error}`)
+    }
   } catch (error) {
-    await journal.markHiveRecord(runId, `failed: ${error?.message || error}`)
+    /* Even the journal write failing must not surface: the record is a
+     * best-effort report and the run it describes has already settled. */
+    console.warn(`hive record for ${runId} did not send: ${error?.message || error}`)
   }
 }
 
@@ -721,7 +740,7 @@ async function runConsoleCommand({ id, command, page, config }) {
 async function executePlanLocally({ id, command, steps, config }) {
   const journal = executionJournal()
   await journal.beginRun({ runId: id, command, route: 'local-plan' })
-  await recordRunToHive(id, 'claim')
+  void recordRunToHive(id, 'claim')
 
   const parked = []
   for (const step of steps) {
@@ -776,7 +795,7 @@ async function executePlanLocally({ id, command, steps, config }) {
         headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
         detail: verdict.detail,
       })
-      await recordRunToHive(id, 'verdict')
+      void recordRunToHive(id, 'verdict')
       await patchEntry(id, {
         state: 'failed',
         headline: `Stopped at step ${step.index + 1} (${step.label}): ${message}`,
@@ -793,7 +812,7 @@ async function executePlanLocally({ id, command, steps, config }) {
     state: parked.length ? 'parked' : 'finished',
     ...verdict,
   })
-  await recordRunToHive(id, 'verdict')
+  void recordRunToHive(id, 'verdict')
 
   await patchEntry(id, {
     state: parked.length
@@ -895,7 +914,7 @@ async function runBrainLocally({ id, command, page, config, relayConfig }) {
   const transcript = createBrainTranscript({ command, page })
 
   await journal.beginRun({ runId: id, command, route: 'local-brain', executor: 'browser-brain' })
-  await recordRunToHive(id, 'claim')
+  void recordRunToHive(id, 'claim')
 
   const parked = []
   let answer = ''
@@ -913,7 +932,7 @@ async function runBrainLocally({ id, command, page, config, relayConfig }) {
       headline: `Handed to the Mac: ${reason}`,
       detail: `This node ran ${steps} step(s) of thinking and executed nothing.`,
     })
-    await recordRunToHive(id, 'verdict')
+    void recordRunToHive(id, 'verdict')
     return { handoff: true, reason, steps }
   }
 
@@ -1023,7 +1042,7 @@ async function runBrainLocally({ id, command, page, config, relayConfig }) {
     state: parked.length ? 'parked' : 'finished',
     ...verdict,
   })
-  await recordRunToHive(id, 'verdict')
+  void recordRunToHive(id, 'verdict')
 
   await patchEntry(id, {
     state: parked.length
@@ -1265,7 +1284,7 @@ async function runApprovedStep({ entry, pending, config }) {
       verdict: 'achieved',
       headline: `Approved and ran: ${pending.call.type}.`,
     })
-    await recordRunToHive(runId, 'verdict')
+    void recordRunToHive(runId, 'verdict')
     await patchEntry(entry.id, {
       state: 'executed',
       headline: `You approved it and it ran: ${result?.message || pending.call.type}.`,
@@ -1286,7 +1305,7 @@ async function runApprovedStep({ entry, pending, config }) {
       verdict: 'failed',
       headline: `The approved step failed: ${message}`,
     })
-    await recordRunToHive(runId, 'verdict')
+    void recordRunToHive(runId, 'verdict')
     await patchEntry(entry.id, {
       state: 'failed',
       headline: `The approved step failed: ${message}`,

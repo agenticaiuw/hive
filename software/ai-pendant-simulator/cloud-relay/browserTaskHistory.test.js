@@ -25,7 +25,9 @@ import {
   browserTaskRunDetail,
   buildHistoryPage,
   historyEntryForBrowserTask,
+  operatorRunForRow,
 } from './history.js'
+import { voiceRunForJob } from './jobs.js'
 import { composeRelayMail, registerNodeMeshRoutes } from './nodeMailbox.js'
 import { consumeRelayApprovalMail } from './approvalDelivery.js'
 import { createNodeEnvelope } from '../shared/nodeMesh.js'
@@ -591,5 +593,76 @@ test('a record POSTed to the mesh is consumed in the send request itself', async
     assert.equal(await store.claimNextJob('mac-bridge-1'), null)
   } finally {
     await relay.close()
+  }
+})
+
+/* ------------------------------------- the operator feed (voice-runs) */
+
+/*
+ * The owner, 2026-08-12: "why didn't my question in the browser extension
+ * carried to the dashboard?" — a browser run correctly folded into
+ * relay_jobs was invisible in /v1/ops/voice-runs, the feed the dashboard's
+ * Recent/hero panel actually polls, because that route's membership was
+ * `type: 'plan'` only. operatorRunForRow is the one membership rule the
+ * route and its /latest probe now share; these tests pin it open.
+ */
+test('a folded browser run is a member of the operator feed', async () => {
+  const store = createMemoryStore()
+  await foldBrowserTaskRecord({
+    store,
+    envelope: verdictEnvelope({
+      verdict: 'recon-only',
+      headline: 'Your latest email is from Wells Fargo. (Read-only.)',
+    }),
+  })
+
+  const row = await store.getJob(browserTaskJobId(TASK_ID))
+  const run = operatorRunForRow(row)
+  assert.ok(run, 'the feed must see the row the history page already shows')
+  assert.equal(run.pipelineId, browserTaskJobId(TASK_ID))
+  assert.equal(run.kind, 'browser_task')
+  // The honest vocabulary survives into the feed: recon work never says Done.
+  assert.equal(run.status, 'read_only')
+  assert.equal(run.jobStatus, 'read_only')
+  // The answer line the dashboard hero renders.
+  assert.match(run.reply, /Wells Fargo/)
+  assert.equal(run.executedBy, BROWSER_DEVICE)
+  assert.equal(run.claimable, false)
+  assert.ok(Array.isArray(run.events) && run.events.length > 0)
+})
+
+test('plan rows keep their voice-run shape through the shared membership rule', () => {
+  const planJob = {
+    jobId: 'job_plan_feed',
+    type: 'plan',
+    status: 'completed',
+    command: 'what is the weather',
+    inputTelemetry: { storage: 'dashboard', inputMode: 'typed' },
+    deviceEvents: [],
+    result: { response: 'Sunny.', actions: [] },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  const viaMembership = operatorRunForRow(planJob)
+  const direct = voiceRunForJob(planJob)
+  assert.deepEqual(viaMembership, direct)
+
+  // Types neither branch owns stay out of the feed rather than crashing it.
+  assert.equal(operatorRunForRow({ type: 'audio_capture' }), null)
+  assert.equal(operatorRunForRow(null), null)
+})
+
+test('feed and history can never disagree about a browser row again', async () => {
+  const store = createMemoryStore()
+  await foldBrowserTaskRecord({ store, envelope: claimEnvelope() })
+  const jobs = await store.listJobs({ type: ['plan', BROWSER_TASK_JOB_TYPE] })
+
+  const page = buildHistoryPage({ jobs, captures: [] })
+  for (const entry of page.entries.filter((e) => e.kind === 'browser_task')) {
+    const row = jobs.find((job) => job.jobId === entry.pipelineId)
+    assert.ok(
+      operatorRunForRow(row),
+      `history lists ${entry.pipelineId} but the operator feed would drop it`,
+    )
   }
 })

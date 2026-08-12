@@ -401,6 +401,26 @@ export function browserTaskRunDetail(job) {
   }
 }
 
+/*
+ * The operator-feed run for one relay_jobs row, whatever node produced it.
+ *
+ * WHY THIS EXISTS (owner, 2026-08-12, verbatim): "why didn't my question in
+ * the browser extension carried to the dashboard?" The browser extension's
+ * local brain answered "what's my latest personal gmail" entirely in-page,
+ * recorded it here as a btask_ row — and the dashboard still showed nothing,
+ * because the Recent feed reads /v1/ops/voice-runs, whose membership was
+ * `type: 'plan'` only. The record had arrived; the feed never looked at it.
+ * This helper is the one membership rule both /v1/ops/voice-runs and its
+ * /latest freshness probe now share, so a row the history page shows can
+ * never be invisible to the feed the owner actually watches.
+ */
+export function operatorRunForRow(job, options) {
+  if (job?.type === BROWSER_TASK_JOB_TYPE) {
+    return browserTaskRunDetail(job)
+  }
+  return voiceRunForJob(job, options)
+}
+
 export function buildHistoryPage({
   jobs = [],
   captures = [],
