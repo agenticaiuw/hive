@@ -111,3 +111,111 @@ against the overlay and updates this table.
 - nRF DK ← Mac USB (J-Link flash + debug, serial 960036581)
 - ESP32 ← Mac USB (`/dev/cu.usbserial-0287A9CA`, serial JSON control)
 - ESP32 → Bose SLIII / AirPods over Bluetooth A2DP
+
+## Per-component pinout — every pin, where it goes
+
+Label names as printed on each breakout. "—" = leave unconnected.
+
+**microphone · SPH0645**
+| pin on part | connect to |
+| --- | --- |
+| 3V | red switch OUT (switched power) |
+| GND | GND rail |
+| BCLK | BCLK net (DK P0.18 node) |
+| LRCL | LRCLK net (DK P0.17 node) |
+| DOUT | DK P0.20 |
+| SEL | GND rail |
+
+**red latching switch** (2 terminals)
+| terminal | connect to |
+| --- | --- |
+| 1 | 3V rail |
+| 2 | mic 3V pin, AND 100k resistor → DK P0.26 |
+
+**buttons** (2 wires each)
+| button | wire 1 | wire 2 |
+| --- | --- | --- |
+| yellow | DK P0.21 | GND rail |
+| green | DK P0.22 | GND rail |
+| blue | DK P0.23 | GND rail |
+
+**rotary encoder** (3 pins one side, 2 the other)
+| pin on part | connect to |
+| --- | --- |
+| A (outer) | DK P0.24 |
+| C (middle) | GND rail |
+| B (outer) | DK P0.25 |
+| switch pin 1 | DK P0.28 |
+| switch pin 2 | GND rail |
+
+**volume knob · potentiometer** (3 legs)
+| leg | connect to |
+| --- | --- |
+| left | 3V rail |
+| middle | DK P0.15 |
+| right | GND rail |
+
+(volume backwards? swap left/right)
+
+**storage · microSD breakout**
+| pin on part | connect to |
+| --- | --- |
+| 3V | 3V rail |
+| GND | GND rail |
+| CLK | DK P0.13 |
+| DO | DK P0.12 |
+| DI | DK P0.11 |
+| CS | DK P0.10 |
+| 5V, CD | — |
+
+**vibration · DRV2605L haptic driver**
+| pin on part | connect to |
+| --- | --- |
+| VIN | 3V rail |
+| GND | GND rail |
+| SCL | DK P0.31 (+ 4.7k → 3V rail, once per bus) |
+| SDA | DK P0.30 (+ 4.7k → 3V rail, once per bus) |
+| OUT+ | buzzer motor wire 1 |
+| OUT− | buzzer motor wire 2 |
+| IN | — |
+
+**motion sensor · LSM6DSOX accelerometer**
+| pin on part | connect to |
+| --- | --- |
+| VIN | 3V rail |
+| GND | GND rail |
+| SCL | DK P0.31 (same bus wire as haptic) |
+| SDA | DK P0.30 (same bus wire as haptic) |
+| INT1 | DK P0.27 |
+| DO, CS, INT2, I1(3V3) | — (DO low = address 0x6A) |
+
+**audio amplifier · MAX98357A**
+| pin on part | connect to |
+| --- | --- |
+| VIN | 3V rail |
+| GND | GND rail |
+| BCLK | BCLK net (same wire as ESP32 GPIO27) |
+| LRC | LRCLK net (same wire as ESP32 GPIO33) |
+| DIN | audio-out net (same wire as ESP32 GPIO14) |
+| SD | DK P0.01 |
+| GAIN | — (open = 9 dB) |
+| + terminal | speaker + (marked/red wire) |
+| − terminal | speaker − |
+
+**Bluetooth bridge · ESP32 HUZZAH32**
+| pin on board | connect to |
+| --- | --- |
+| GPIO27 | BCLK net |
+| GPIO33 | LRCLK net |
+| GPIO14 | audio-out net |
+| GND | GND rail (the common-ground wire) |
+| micro-USB | Mac |
+
+**main chip · nRF9160 DK board itself**
+| pin | connect to |
+| --- | --- |
+| VDD | 3V (red) rail |
+| GND | GND (black) rail |
+| P0.16 → P0.18 | jumper on the DK (clock) |
+| P0.14 → P0.17 | jumper on the DK (clock) |
+| micro-USB | Mac (flash + debug) |
