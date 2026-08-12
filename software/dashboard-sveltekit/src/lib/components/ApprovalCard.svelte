@@ -16,11 +16,13 @@
    * verbatim, and the steps are the labels it wrote for its own plan.
    */
   import type { PendingApproval } from "$lib/runState";
+  import { formatWhen } from "$lib/jobs";
 
   let {
     approval,
     canApprove,
     compact = false,
+    stale = false,
     busy = false,
     denying = false,
     error = "",
@@ -32,6 +34,13 @@
     /** False on the deployed build, which has no approve route to the Mac. */
     canApprove: boolean;
     compact?: boolean;
+    /**
+     * A plan the owner has already slept on (see STALE_APPROVAL_AFTER_MS).
+     * Still a decision, no longer an interruption: grey instead of amber, a
+     * clock instead of a warning triangle, and Dismiss leads because clearing
+     * an expired ask is the likeliest right answer now.
+     */
+    stale?: boolean;
     busy?: boolean;
     denying?: boolean;
     error?: string;
@@ -51,27 +60,52 @@
 </script>
 
 <section
-  class="approval {compact ? 'compact' : ''}"
+  class="approval {compact ? 'compact' : ''} {stale ? 'stale' : ''}"
   aria-labelledby={`approval-${approval.jobId}`}
 >
   <p class="approval-flag">
-    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-      <path
-        d="M8 1.6 15 14H1z"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.4"
-        stroke-linejoin="round"
-      />
-      <path
-        d="M8 6v3.6"
-        stroke="currentColor"
-        stroke-width="1.6"
-        stroke-linecap="round"
-      />
-      <circle cx="8" cy="11.8" r="0.9" fill="currentColor" />
-    </svg>
-    <span id={`approval-${approval.jobId}`}>Needs your approval</span>
+    {#if stale}
+      <!-- A clock, not a siren: the state is "old", not "danger". -->
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <circle
+          cx="8"
+          cy="8"
+          r="6.3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+        />
+        <path
+          d="M8 4.6V8l2.4 1.7"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <span id={`approval-${approval.jobId}`}
+        >Still parked · since {formatWhen(approval.at) || "a while ago"}</span
+      >
+    {:else}
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <path
+          d="M8 1.6 15 14H1z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linejoin="round"
+        />
+        <path
+          d="M8 6v3.6"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+        />
+        <circle cx="8" cy="11.8" r="0.9" fill="currentColor" />
+      </svg>
+      <span id={`approval-${approval.jobId}`}>Needs your approval</span>
+    {/if}
   </p>
 
   <p class="approval-ask">{approval.command || "A prepared plan"}</p>
@@ -100,25 +134,48 @@
 
   <div class="approval-actions">
     {#if canApprove}
-      <button
-        type="button"
-        class="button-primary"
-        disabled={busy || denying}
-        onclick={() => onApprove(approval.jobId)}
-        >{busy ? "Running it…" : "Approve and run"}</button
-      >
-      <!--
-        The other half of a decision. A card that can only be approved is not a
-        question, it is a nag: "no" used to mean leaving it on screen forever.
-        Deny runs none of it and clears every copy this card folded in.
-      -->
-      <button
-        type="button"
-        class="button-deny"
-        disabled={busy || denying}
-        onclick={() => onDeny(approval.jobIds)}
-        >{denying ? "Dismissing…" : "Deny"}</button
-      >
+      {#if stale}
+        <!--
+          The decision has inverted with age: hours later, "clear this" is the
+          likely answer and "run a plan I parked before lunch" the risky one —
+          so Dismiss takes the lead slot and Approve steps down to the quiet
+          outline. Both still one click; only the emphasis moved.
+        -->
+        <button
+          type="button"
+          class="button-deny"
+          disabled={busy || denying}
+          onclick={() => onDeny(approval.jobIds)}
+          >{denying ? "Dismissing…" : "Dismiss"}</button
+        >
+        <button
+          type="button"
+          class="button-quiet"
+          disabled={busy || denying}
+          onclick={() => onApprove(approval.jobId)}
+          >{busy ? "Running it…" : "Approve and run"}</button
+        >
+      {:else}
+        <button
+          type="button"
+          class="button-primary"
+          disabled={busy || denying}
+          onclick={() => onApprove(approval.jobId)}
+          >{busy ? "Running it…" : "Approve and run"}</button
+        >
+        <!--
+          The other half of a decision. A card that can only be approved is not a
+          question, it is a nag: "no" used to mean leaving it on screen forever.
+          Deny runs none of it and clears every copy this card folded in.
+        -->
+        <button
+          type="button"
+          class="button-deny"
+          disabled={busy || denying}
+          onclick={() => onDeny(approval.jobIds)}
+          >{denying ? "Dismissing…" : "Deny"}</button
+        >
+      {/if}
     {:else if !compact}
       <p class="approval-remote">
         Approve this on the Mac dashboard — this page has no route to the Mac.

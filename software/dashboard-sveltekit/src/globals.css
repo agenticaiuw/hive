@@ -611,6 +611,14 @@ body {
   margin-bottom: var(--s5);
 }
 
+/* Fresh (announced) and stale (quiet) sub-groups keep the same rhythm the
+ * single list had, so splitting them cost no vertical language. */
+.needs-you-fresh,
+.needs-you-stale {
+  display: grid;
+  gap: var(--s3);
+}
+
 /*
  * The one card allowed to shout. Amber edge + tinted fill so it reads as a
  * different kind of thing at a glance, but no siren: salience comes from
@@ -713,6 +721,25 @@ body {
   margin-top: var(--s3);
   color: var(--muted);
   font-size: var(--fs-small);
+}
+
+/*
+ * A plan parked past STALE_APPROVAL_AFTER_MS (runState.ts). The amber suit
+ * comes off: ordinary panel edge and fill, muted flag, dimmed ask. The state
+ * is "old decision still open", and it must read as a different kind of thing
+ * from the fresh card above it — quiet by contrast, not by hiding.
+ */
+.approval.stale {
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+.approval.stale .approval-flag {
+  color: var(--muted);
+}
+
+.approval.stale .approval-ask {
+  color: var(--ink-2);
 }
 
 /*

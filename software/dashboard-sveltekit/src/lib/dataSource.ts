@@ -18,6 +18,7 @@
  */
 import { base } from "$app/paths";
 import {
+  isAwaitingApproval,
   jobFromAgent,
   jobFromRelayHistory,
   routineFromAgent,
@@ -312,8 +313,37 @@ export function audioHref(pipelineId: string, voice: "owner" | "reply") {
   }`;
 }
 
+/*
+ * The last job list a MAC-AGENT-origin poll returned, latched module-wide.
+ *
+ * The Worker's `/api/jobs` has two sources and switches between them silently:
+ * the Mac's own jobTracker via the relay ops proxy (a real round trip to the
+ * laptop that loses races whenever the bridge is mid-cycle), and the relay's
+ * durable history as the fallback. The fallback never saw the jobs the Mac
+ * parked locally — a `plan_ready` plan lives only in jobTracker — so every
+ * time one poll answered from the Mac and the next fell back, the parked rows
+ * blinked out of the list and the "Needs your approval" cards flashed on and
+ * off with them, seconds apart. That flapping is what this latch exists to
+ * stop: an answer from the degraded source may ADD what it knows, but it may
+ * never subtract rows a healthy poll just proved exist.
+ */
+let latchedAgentJobs: JobView[] = [];
+
+/*
+ * What relay history CAN represent: work that was routed through the relay,
+ * which the bridge executes locally under `source: "pendant"` (see hiveFeed's
+ * dedupe-is-structural note). A latched row with that source would show up
+ * twice during a fallback poll — once under its relay pipeline id, once under
+ * its local job id — so those are the rows the fallback is allowed to replace.
+ * Everything else (parked plans, floating-hud, on-Mac composer, agent-initiated
+ * work) is structurally invisible to relay history and must be carried over.
+ */
+const RELAY_VISIBLE_SOURCES = new Set(["pendant"]);
+
 export async function fetchJobs(): Promise<Fetched<JobView[]>> {
   if (backend === "agent") {
+    // One source on the Mac build; a failed poll throws and every caller keeps
+    // the list it already has, so there is nothing to latch here.
     const payload = await agentRequest("/jobs");
     return {
       data: (Array.isArray(payload?.jobs) ? payload.jobs : []).map(jobFromAgent),
@@ -322,14 +352,37 @@ export async function fetchJobs(): Promise<Fetched<JobView[]>> {
   }
 
   const payload = await apiRequest("/api/jobs");
+  const rows = Array.isArray(payload?.jobs) ? payload.jobs : [];
   // The server route says which of its two sources answered; pass it through
   // verbatim rather than guessing at the reason the list looks short.
-  return {
-    data: (Array.isArray(payload?.jobs) ? payload.jobs : []).map(
-      payload?.origin === "relay-history" ? jobFromRelayHistory : jobFromAgent,
-    ),
-    note: String(payload?.note || ""),
-  };
+  const note = String(payload?.note || "");
+
+  if (payload?.origin !== "relay-history") {
+    /*
+     * The authoritative answer. Replace the latch wholesale — this is the one
+     * moment a job is allowed to leave the screen, so an approved or dismissed
+     * plan really disappears instead of being resurrected from the latch.
+     */
+    latchedAgentJobs = rows.map(jobFromAgent);
+    return { data: latchedAgentJobs, note };
+  }
+
+  /*
+   * Degraded answer. Absence from relay history is ignorance, not completion:
+   * merge instead of replace, keeping every latched row the fallback cannot
+   * know about (parked plans above all — they are why the top-of-page cards
+   * were flickering). Relay-routed rows are dropped from the carry so the
+   * same run never renders twice under two ids.
+   */
+  const fallback: JobView[] = rows.map(jobFromRelayHistory);
+  const present = new Set(fallback.map((job) => job.id));
+  const carried = latchedAgentJobs.filter(
+    (job) =>
+      !present.has(job.id) &&
+      (isAwaitingApproval(job.status) ||
+        !RELAY_VISIBLE_SOURCES.has(job.source)),
+  );
+  return { data: [...fallback, ...carried], note };
 }
 
 export async function fetchRoutines(): Promise<Fetched<RoutineView[]>> {

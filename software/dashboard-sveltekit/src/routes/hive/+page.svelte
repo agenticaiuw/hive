@@ -216,6 +216,50 @@
     };
   });
 
+  /*
+   * The runtime ring draws INTENDED topology, with liveness painted on top —
+   * a down pendant still gets its grey Pendant—Relay edge. Since the brain
+   * work the extension is a relay mesh node in its own right (role
+   * `browser_node`, socket to /v1/node/socket), but the aggregator's static
+   * edge list predates that, so no feed — live or snapshot — carries EXT—RLY
+   * and the map showed the extension hanging off the Mac alone even while it
+   * held a live socket to the relay. The missing edge is synthesised here,
+   * where both feeds converge; if the aggregator ever learns it, the id check
+   * makes this a no-op instead of a double edge.
+   *
+   * Liveness follows the exact pattern the pendant/iOS heartbeats use above:
+   * the relay's own device rows. A `browser_node` row the relay calls online
+   * lights the edge (and its advancing lastSeenAt pulses it, like every other
+   * edge); absent or offline leaves lastActivityAt null, which HiveGraph
+   * draws as the same grey down edge the pendant gets.
+   */
+  const graphEdges = $derived.by<HiveEdge[]>(() => {
+    // No feed yet → no map; a lone invented edge on an empty ring would be
+    // fabricated data, the thing this dashboard exists not to show.
+    if (!edges.length) return edges;
+    if (edges.some((e) => e.id === "ext-relay")) return edges;
+    const browserRows = (src["relay.devices"]?.devices || []).filter(
+      (d: any) => String(d.deviceType) === "browser_node" && d.online,
+    );
+    const lastSeen = browserRows.reduce(
+      (newest: number | null, d: any) => {
+        const t = tsMs(d.lastSeenAt);
+        return t != null && (newest == null || t > newest) ? t : newest;
+      },
+      null as number | null,
+    );
+    return [
+      ...edges,
+      {
+        id: "ext-relay",
+        from: "extension",
+        to: "relay",
+        label: "mesh socket",
+        lastActivityAt: lastSeen,
+      },
+    ];
+  });
+
   const failingSources = $derived(
     Object.values(meta).filter((m) => m && !m.ok && !m.unsupported),
   );
@@ -326,7 +370,7 @@
     <section class="hv-graph-wrap">
       <HiveGraph
         {nodes}
-        {edges}
+        edges={graphEdges}
         {committeeAgents}
         orchestrator={src["committee.orchestrator"]}
         bulletin={src["committee.bulletin"]}
