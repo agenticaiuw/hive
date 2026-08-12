@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2s.h>
 #include <zephyr/fs/fs.h>
@@ -12,11 +13,13 @@
 #include <zephyr/sys/onoff.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_pwm.h>
+#include <hal/nrf_saadc.h>
 #include <hal/nrf_egu.h>
 #include <hal/nrf_dppi.h>
 #include <helpers/nrfx_gppi.h>
 #include <ff.h>
 
+#include "accel_tap.h"
 #include "audio_opus.h"
 #include "haptic.h"
 #include "pendant_cloud.h"
@@ -65,6 +68,21 @@
  *                              Low = the owner cut mic power with the
  *                              latching switch: capture must not start,
  *                              and must SAY so rather than record hiss.
+ *
+ * ---- Sensor/audio additions (same parts order) ----
+ *
+ *   P0.27         accel INT1 — LSM6DSOX double-tap = another body for
+ *                              button 1 (accel_tap.c gives the same
+ *                              semaphore, so mute/converse semantics
+ *                              apply unchanged).
+ *   P0.15 (AIN2)  volume pot — wiper of the knob, polled on the SAADC
+ *                              (the ESP32's GPIO34 job, moved here: the
+ *                              ESP32 stands in for a dumb BT module, so
+ *                              the knob must not live on it).
+ *   P0.01         amp SD     — MAX98357A SD_MODE gate. High = wired
+ *                              speaker plays the left I2S slot, low =
+ *                              amp shutdown. Owner-selected via
+ *                              {"type":"audio_sink"} control frames.
  */
 #define ASK_BUTTON_NODE DT_ALIAS(ask_btn)
 #define MEMO_BUTTON_NODE DT_ALIAS(memo_btn)
@@ -73,6 +91,7 @@
 #define ENCODER_B_NODE DT_ALIAS(encoder_b)
 #define ENCODER_PUSH_NODE DT_ALIAS(encoder_push)
 #define MIC_SENSE_NODE DT_ALIAS(mic_sense)
+#define AMP_SD_MODE_NODE DT_ALIAS(amp_sd_mode)
 
 /*
  * Adafruit SPH0645LM4H I2S microphone capture.
@@ -570,6 +589,71 @@ static atomic_t menu_select_req;
 #define ENCODER_PUSH_DEBOUNCE_MS 150
 
 /*
+ * ---- Wired speaker (MAX98357A) sink selection ----
+ *
+ * The amp taps the SAME I2S TX wires the ESP32 listens on (BCLK P0.18,
+ * LRCLK P0.17, DIN P0.19) — there is no second audio path in firmware,
+ * only the SD_MODE gate on P0.01.  Driven high the amp reproduces the
+ * left I2S slot (the only slot this firmware writes audio into; MAX98357A
+ * datasheet Table 5: V_SD_MODE > 1.4 V selects the left word), driven low
+ * it is in 0.6 uA shutdown.  The ESP32 cannot be gated from here, so the
+ * three sink states map to one pin:
+ *
+ *   bluetooth  SD_MODE low   (boot default — the proven path)
+ *   speaker    SD_MODE high  (ESP32 keeps hearing the wire; whether it
+ *   both       SD_MODE high   also PLAYS is the relay/ESP32's business)
+ *
+ * Selected over the converse socket by {"type":"audio_sink","sink":...},
+ * parsed on the WS I/O thread next to the other control frames.  The
+ * format on the wire needs no change for the amp: 24-bit words in 32-BCLK
+ * slots at 31250 frames/s — the MAX98357A DAI accepts 16/24/32-bit I2S at
+ * 8-96 kHz sample rates ("Digital Audio Interface Modes", datasheet
+ * p.16); 31250 Hz sits in the 30-50 kHz digital-filter bin (Table 4) and
+ * is within the frequency detector's 32 kHz class (-2.4 %, far inside
+ * the part's tolerance for LRCLK tracking).
+ */
+enum audio_sink_sel {
+	AUDIO_SINK_BLUETOOTH = 0,
+	AUDIO_SINK_SPEAKER,
+	AUDIO_SINK_BOTH,
+};
+#define AUDIO_SINK_BOOT_DEFAULT AUDIO_SINK_BLUETOOTH
+static const struct gpio_dt_spec amp_sd_mode =
+	GPIO_DT_SPEC_GET(AMP_SD_MODE_NODE, gpios);
+static bool amp_sd_mode_ready;
+static uint8_t audio_sink_current = AUDIO_SINK_BOOT_DEFAULT;
+
+/*
+ * ---- Volume knob (pot wiper on SAADC AIN2/P0.15) ----
+ *
+ * Moved from the ESP32 (GPIO34) by architecture ruling: the ESP32 is a
+ * stand-in for a dumb Bluetooth module, so the knob and its gain must
+ * live on the nRF9160 and the wire must carry pre-scaled PCM.  Constants
+ * are the ESP32 tuning carried over 1:1 (same 12-bit scale): ~20 Hz
+ * poll, 2 % hysteresis over the wiper noise, end-stop snap so true 0 and
+ * true unity are reachable, perceptual (squared) curve because loudness
+ * tracks power.  The knob is an ATTENUATOR, never an amplifier: unity is
+ * the ceiling, which is why the Q12 multiply in tx_apply_volume needs no
+ * saturation — nothing can exceed the already-clamped input sample.
+ */
+#define VOLUME_POLL_INTERVAL_MS 50
+#define VOLUME_HYSTERESIS_COUNTS 82
+#define VOLUME_SNAP_LOW 40
+#define VOLUME_SNAP_HIGH 4055
+#define VOLUME_RAW_MAX 4095
+#define VOLUME_GAIN_UNITY_Q12 4096
+/* Written by volume_poll (main thread), read per-sample by the audio
+ * thread: a plain aligned word, atomic on this core by construction. */
+static atomic_t volume_gain_q12 = ATOMIC_INIT(VOLUME_GAIN_UNITY_Q12);
+/* Pending {"type":"volume"} report for the WS I/O thread: -1 = nothing,
+ * else (hundredths << 16) | raw.  Same drop-when-closed contract as the
+ * other owner controls. */
+static atomic_t volume_report = ATOMIC_INIT(-1);
+static bool volume_adc_ready;
+static int volume_last_raw = -1;
+static int64_t volume_next_poll_ms;
+
+/*
  * Mic RX slab is dedicated. audio_workspace is the live PCM TX ring during
  * capture and the Opus decode workspace for reply playback.
  */
@@ -999,6 +1083,180 @@ static void encoder_push_pressed(const struct device *port,
 static bool mic_power_is_cut(void)
 {
 	return mic_sense_ready && gpio_pin_get_dt(&mic_sense) == 0;
+}
+
+/* ---- Volume knob: SAADC one-shot polling ---- */
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(adc), okay)
+static const struct device *const volume_adc =
+	DEVICE_DT_GET(DT_NODELABEL(adc));
+#define VOLUME_ADC_CHANNEL_ID 2
+
+static void volume_adc_init(void)
+{
+	/*
+	 * VDD/4 reference with 1/4 gain makes the conversion ratiometric to
+	 * the very rail the pot spans: full scale IS the rail, so a sagging
+	 * breadboard supply cancels out of the knob position entirely.
+	 * 10 us acquisition covers the wiper's worst-case source impedance
+	 * (a 50 k pot at mid-travel is 12.5 k; the SAADC spec allows up to
+	 * 40 k at 10 us).
+	 */
+	static const struct adc_channel_cfg cfg = {
+		.gain = ADC_GAIN_1_4,
+		.reference = ADC_REF_VDD_1_4,
+		.acquisition_time =
+			ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10),
+		.channel_id = VOLUME_ADC_CHANNEL_ID,
+		.input_positive = NRF_SAADC_AIN2, /* P0.15, the last free AIN */
+	};
+
+	if (!device_is_ready(volume_adc) ||
+	    adc_channel_setup(volume_adc, &cfg) != 0) {
+		printk("Volume knob (P0.15/AIN2) not configured — unity "
+		       "gain\n");
+		return;
+	}
+	volume_adc_ready = true;
+	printk("Volume knob ready (P0.15/AIN2, ratiometric, ~20 Hz poll)\n");
+}
+
+static int volume_adc_read_raw(void)
+{
+	int16_t sample;
+	struct adc_sequence sequence = {
+		.channels = BIT(VOLUME_ADC_CHANNEL_ID),
+		.buffer = &sample,
+		.buffer_size = sizeof(sample),
+		.resolution = 12,
+		/* 4x hardware oversample: the SAADC's flicker at this gain
+		 * is a couple of LSB; burst-averaging in silicon is cheaper
+		 * than the ESP32's median-of-five in code. */
+		.oversampling = 2U,
+	};
+
+	if (adc_read(volume_adc, &sequence) != 0) {
+		return -1;
+	}
+	/* Single-ended reads can dip a hair below zero near GND. */
+	return CLAMP((int)sample, 0, VOLUME_RAW_MAX);
+}
+#else
+static void volume_adc_init(void)
+{
+	printk("Volume knob: no ADC in devicetree — unity gain\n");
+}
+
+static int volume_adc_read_raw(void)
+{
+	return -1;
+}
+#endif /* adc */
+
+/*
+ * ~20 Hz knob poll, callable from any loop that turns often enough (the
+ * idle wait at 200 ms and the conversation loop at ~20 ms both call it;
+ * the interval gate makes extra calls free).  One blocking one-shot read
+ * costs tens of microseconds — noise against the 205 ms TX runway.
+ * Hysteresis (>=2 % movement) keeps a resting knob silent; the end-stop
+ * snap lets true 0 and true unity be reached, which hysteresis alone
+ * would forbid.  The curve is squared (perceived loudness tracks power),
+ * identical to the ESP32 implementation this replaces.
+ */
+static void volume_poll(void)
+{
+	int64_t now = k_uptime_get();
+	int raw;
+	uint32_t gain;
+	uint32_t hundredths;
+
+	if (!volume_adc_ready || now < volume_next_poll_ms) {
+		return;
+	}
+	volume_next_poll_ms = now + VOLUME_POLL_INTERVAL_MS;
+
+	raw = volume_adc_read_raw();
+	if (raw < 0) {
+		return;
+	}
+	if (raw <= VOLUME_SNAP_LOW) {
+		raw = 0;
+	} else if (raw >= VOLUME_SNAP_HIGH) {
+		raw = VOLUME_RAW_MAX;
+	}
+	if (volume_last_raw >= 0 &&
+	    (raw > volume_last_raw ? raw - volume_last_raw
+				   : volume_last_raw - raw) <
+		    VOLUME_HYSTERESIS_COUNTS &&
+	    raw != 0 && raw != VOLUME_RAW_MAX) {
+		return;
+	}
+	if (raw == volume_last_raw) {
+		return;
+	}
+	volume_last_raw = raw;
+
+	/* level = (raw/4095)^2, folded straight into Q12. */
+	gain = (uint32_t)(((uint64_t)raw * (uint64_t)raw *
+			   VOLUME_GAIN_UNITY_Q12 +
+			   ((uint64_t)VOLUME_RAW_MAX * VOLUME_RAW_MAX / 2U)) /
+			  ((uint64_t)VOLUME_RAW_MAX * VOLUME_RAW_MAX));
+	atomic_set(&volume_gain_q12, (atomic_val_t)gain);
+
+	hundredths = (gain * 100U + VOLUME_GAIN_UNITY_Q12 / 2U) /
+		     VOLUME_GAIN_UNITY_Q12;
+	atomic_set(&volume_report,
+		   (atomic_val_t)((hundredths << 16) | (uint32_t)raw));
+	printk("Volume: raw=%d level=%u.%02u\n", raw, hundredths / 100U,
+	       hundredths % 100U);
+}
+
+/* ---- Wired speaker sink gate ---- */
+
+static const char *audio_sink_name(uint8_t sink)
+{
+	switch (sink) {
+	case AUDIO_SINK_SPEAKER:
+		return "speaker";
+	case AUDIO_SINK_BOTH:
+		return "both";
+	default:
+		return "bluetooth";
+	}
+}
+
+/* Safe from any thread: one gpio_pin_set_dt on a pin only this touches. */
+static void audio_sink_apply(uint8_t sink)
+{
+	audio_sink_current = sink;
+	if (amp_sd_mode_ready) {
+		gpio_pin_set_dt(&amp_sd_mode, sink != AUDIO_SINK_BLUETOOTH);
+	}
+	printk("Audio sink: %s%s\n", audio_sink_name(sink),
+	       amp_sd_mode_ready ? "" : " (amp gate not configured)");
+}
+
+/*
+ * {"type":"audio_sink","sink":"speaker"|"bluetooth"|"both"} — parsed with
+ * the same bounded strstr discipline as the legacy control frames, AFTER
+ * the exact-match recipe check for the same reason they are.
+ */
+static bool audio_sink_offer_frame(const char *frame)
+{
+	if (strstr(frame, "\"audio_sink\"") == NULL) {
+		return false;
+	}
+	if (strstr(frame, "\"speaker\"") != NULL) {
+		audio_sink_apply(AUDIO_SINK_SPEAKER);
+	} else if (strstr(frame, "\"both\"") != NULL) {
+		audio_sink_apply(AUDIO_SINK_BOTH);
+	} else if (strstr(frame, "\"bluetooth\"") != NULL) {
+		audio_sink_apply(AUDIO_SINK_BLUETOOTH);
+	} else {
+		printk("Audio sink frame with unknown sink — kept %s\n",
+		       audio_sink_name(audio_sink_current));
+	}
+	return true;
 }
 
 #ifdef CONFIG_PENDANT_OFFLINE_STORE
@@ -2509,6 +2767,23 @@ static inline int32_t tx_fir_convolve(void)
 }
 
 /*
+ * Volume applies HERE, at the moment a sample becomes a wire word, and
+ * only to AUDIO words: the sync preamble (convo_queue_preamble) must reach
+ * the ESP32 bit-exact or it never locks.  Downstream of this multiply the
+ * wire itself carries pre-scaled PCM, so the ESP32 — and whatever dumb
+ * Bluetooth module replaces it — plays the right level with no knowledge
+ * of the knob; the MAX98357A tap gets the same scaling for free.
+ * convo_tx_peak is measured BEFORE this (in the callers, off the clean
+ * convolver output), so diagnostics keep seeing what the decoder produced.
+ * gain <= unity (Q12 attenuator), input already clamped to int16: the
+ * product cannot exceed full scale, hence no saturation step.
+ */
+static inline int32_t tx_apply_volume(int32_t sample)
+{
+	return (sample * (int32_t)atomic_get(&volume_gain_q12)) >> 12;
+}
+
+/*
  * Fill one TX block (640 words at 31250) from the 24 kHz jitter ring.
  * `*playing` implements the prebuffer/rebuffer gate; silence flows whenever
  * it is off so the duplex transfer never underruns. Filter state persists
@@ -2532,6 +2807,7 @@ static void convo_fill_tx_block(int32_t *words, bool *playing)
 			if (magnitude > convo_tx_peak) {
 				convo_tx_peak = magnitude;
 			}
+			value = tx_apply_volume(value);
 		}
 		words[frame] = value << 8;
 
@@ -2812,7 +3088,10 @@ static void chime_fill_tx_block(int32_t *words)
 		int32_t value = 0;
 
 		if (tx_fir_zero_run < TX_FIR_TAPS) {
-			value = tx_fir_convolve();
+			/* Chimes obey the knob too — on the ESP32 the gain sat
+			 * at the single wire consumer, so every sound scaled;
+			 * moving the knob here keeps that behavior. */
+			value = tx_apply_volume(tx_fir_convolve());
 		}
 		words[frame] = value << 8;
 

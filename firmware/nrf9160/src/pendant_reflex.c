@@ -148,11 +148,17 @@ static const char *const reflex_haptic_names[] = {
 	[HAPTIC_PATTERN_SINGLE] = "single",
 	[HAPTIC_PATTERN_DOUBLE] = "double",
 	[HAPTIC_PATTERN_LONG] = "long",
+	[HAPTIC_PATTERN_TICK] = "tick",
+	[HAPTIC_PATTERN_CLICK] = "click",
+	[HAPTIC_PATTERN_STRONG] = "strong",
 };
 static const uint8_t reflex_haptic_led_fallback[] = {
 	[HAPTIC_PATTERN_SINGLE] = REFLEX_LED_SINGLE,
 	[HAPTIC_PATTERN_DOUBLE] = REFLEX_LED_DOUBLE,
 	[HAPTIC_PATTERN_LONG] = REFLEX_LED_LONG,
+	[HAPTIC_PATTERN_TICK] = REFLEX_LED_SINGLE,
+	[HAPTIC_PATTERN_CLICK] = REFLEX_LED_SINGLE,
+	[HAPTIC_PATTERN_STRONG] = REFLEX_LED_LONG,
 };
 
 static uint32_t reflex_count(void)
