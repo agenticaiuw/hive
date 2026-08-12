@@ -403,6 +403,16 @@
 
   /* Plans the agent prepared and will not run until the owner says so. */
   const approvals = $derived(withBlockedReasons(pendingApprovals(jobs), runs));
+  /*
+   * Urgency is a function of age, not just of state. A plan parked moments ago
+   * is the page's one legitimate interruption; a plan the owner slept on (the
+   * split lives in pendingApprovals — see STALE_APPROVAL_AFTER_MS) is an open
+   * decision, and rendering it in the amber interruption suit forever is how
+   * the owner learns to stop believing the amber. Fresh cards keep the shout;
+   * stale ones drop to a quiet, dismiss-first row below them.
+   */
+  const freshApprovals = $derived(approvals.filter((entry) => !entry.stale));
+  const staleApprovals = $derived(approvals.filter((entry) => entry.stale));
   const approvedCommands = $derived(
     new Set(approvals.map((entry) => entry.command.trim().toLowerCase())),
   );
@@ -676,30 +686,59 @@
   <!-- 1 · WHAT NEEDS YOU. Above the answer, because it is the only thing on
        this page that cannot proceed without the owner. -->
   {#if approvals.length}
-    <!-- A live region so "needs your approval" is announced when it appears,
-         without stealing focus from whatever the owner is doing (WCAG 4.1.3). -->
-    <div
-      id="needs-you"
-      class="needs-you"
-      role="status"
-      aria-live="polite"
-      aria-label={`${approvals.length} ${approvals.length === 1 ? "plan needs" : "plans need"} your approval`}
-    >
-      <!-- One banner, one decision: the newest in full, the rest as compact
-           rows that still carry their own Approve button. -->
-      {#each approvals as approval, index (approval.jobId)}
-        <ApprovalCard
-          {approval}
-          canApprove={canApprovePlan}
-          compact={index > 0}
-          busy={approvingId === approval.jobId}
-          denying={denyingId === approval.jobId}
-          error={approvingId === approval.jobId ? "" : approvalError}
-          onApprove={handleApprove}
-          onDeny={handleDeny}
-          onSeePlan={showJobsPanel}
-        />
-      {/each}
+    <div id="needs-you" class="needs-you">
+      {#if freshApprovals.length}
+        <!-- A live region so "needs your approval" is announced when it appears,
+             without stealing focus from whatever the owner is doing (WCAG 4.1.3).
+             Only FRESH plans are announced: a stale park re-announced on every
+             visit is an alarm that has learned to cry wolf. -->
+        <div
+          class="needs-you-fresh"
+          role="status"
+          aria-live="polite"
+          aria-label={`${freshApprovals.length} ${freshApprovals.length === 1 ? "plan needs" : "plans need"} your approval`}
+        >
+          <!-- One banner, one decision: the newest in full, the rest as compact
+               rows that still carry their own Approve button. -->
+          {#each freshApprovals as approval, index (approval.jobId)}
+            <ApprovalCard
+              {approval}
+              canApprove={canApprovePlan}
+              compact={index > 0}
+              busy={approvingId === approval.jobId}
+              denying={denyingId === approval.jobId}
+              error={approvingId === approval.jobId ? "" : approvalError}
+              onApprove={handleApprove}
+              onDeny={handleDeny}
+              onSeePlan={showJobsPanel}
+            />
+          {/each}
+        </div>
+      {/if}
+      {#if staleApprovals.length}
+        <!-- Parked long enough that the moment has passed. Every one renders
+             compact and quiet — never the full amber banner — with Dismiss in
+             the lead slot. No live region: old news is not an announcement. -->
+        <section
+          class="needs-you-stale"
+          aria-label={`${staleApprovals.length} older ${staleApprovals.length === 1 ? "plan is" : "plans are"} still parked`}
+        >
+          {#each staleApprovals as approval (approval.jobId)}
+            <ApprovalCard
+              {approval}
+              canApprove={canApprovePlan}
+              compact
+              stale
+              busy={approvingId === approval.jobId}
+              denying={denyingId === approval.jobId}
+              error={approvingId === approval.jobId ? "" : approvalError}
+              onApprove={handleApprove}
+              onDeny={handleDeny}
+              onSeePlan={showJobsPanel}
+            />
+          {/each}
+        </section>
+      {/if}
     </div>
   {/if}
 
@@ -786,10 +825,12 @@
   <!-- 5 · THE MACHINE. Everything below here is diagnostics by design. -->
   <p class="section-label section-label-standalone">System</p>
   <div class="tile-strip">
+    <!-- Amber only for FRESH parks: the count still names every open decision,
+         but a plan the owner slept on no longer keeps the tile in alarm. -->
     <Tile
       id="jobs"
       label="Jobs"
-      tone={approvals.length ? "warn" : "ok"}
+      tone={freshApprovals.length ? "warn" : "ok"}
       dotText="Everything the agent has been asked to do"
       value={approvals.length ? `${approvals.length} need you` : "What ran"}
       open={openTile === "jobs"}

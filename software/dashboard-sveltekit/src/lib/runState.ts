@@ -355,6 +355,21 @@ export function runState(run: JsonRecord | null): RunState {
 
 /* --------------------------------------------------------------- approvals */
 
+/*
+ * When a parked plan stops being an interruption.
+ *
+ * A plan parked moments ago is a live question — the owner just asked, the
+ * agent is waiting, amber is honest. A plan that has sat parked for an hour is
+ * a different fact: the moment it was blocking has passed, and painting it as
+ * an urgent warning every time the page loads trains the owner to ignore the
+ * one card that is allowed to shout. Past this age the card goes quiet and
+ * leads with dismissal instead. One hour rather than minutes because approvals
+ * decay on a human timescale, not the pipeline's (STALE_AFTER_MS above is for
+ * spinners); anything the owner slept on — the 19-hour-old Outlook parks that
+ * motivated this — is unambiguously on the far side of it.
+ */
+export const STALE_APPROVAL_AFTER_MS = 60 * 60_000;
+
 export type PendingApproval = {
   jobId: string;
   command: string;
@@ -363,6 +378,8 @@ export type PendingApproval = {
   blocked: BlockedReason[];
   source: string;
   at: string;
+  /** True once even the NEWEST copy has waited past STALE_APPROVAL_AFTER_MS. */
+  stale: boolean;
   /** Later parked copies of the same request, folded into this one. */
   duplicates: number;
   /**
@@ -401,6 +418,7 @@ export function pendingApprovals(jobs: JobView[]): PendingApproval[] {
       existing.jobIds.push(job.id);
       continue;
     }
+    const atMs = Date.parse(String(job.updatedAt || job.createdAt || ""));
     byCommand.set(key, {
       jobId: job.id,
       jobIds: [job.id],
@@ -412,6 +430,11 @@ export function pendingApprovals(jobs: JobView[]): PendingApproval[] {
       blocked: [],
       source: job.source,
       at: String(job.updatedAt || job.createdAt || ""),
+      // The list is newest-first, so this entry's own age IS the freshest copy's
+      // age; a card is stale only when even that copy has aged out. An
+      // unparseable timestamp stays fresh — staleness must be proven, not guessed.
+      stale:
+        Number.isFinite(atMs) && Date.now() - atMs > STALE_APPROVAL_AFTER_MS,
       duplicates: 0,
     });
   }
