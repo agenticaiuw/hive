@@ -100,7 +100,22 @@ static void store_slot_path(const struct store_slot *slot, char *out,
 static bool store_kind_has_payload(uint8_t kind)
 {
 	return kind == PENDANT_STORE_KIND_VOICE ||
-	       kind == PENDANT_STORE_KIND_MEMO;
+	       kind == PENDANT_STORE_KIND_MEMO ||
+	       kind == PENDANT_STORE_KIND_QUESTION;
+}
+
+/* Human name for a kind, used everywhere a log line has to say what the
+ * owner actually did — three audio kinds that all look like "a PCM file". */
+static const char *store_kind_name(uint8_t kind)
+{
+	switch (kind) {
+	case PENDANT_STORE_KIND_MEMO:
+		return "record-only memo";
+	case PENDANT_STORE_KIND_QUESTION:
+		return "push-to-talk question";
+	default:
+		return "voice command";
+	}
 }
 
 static int store_save(void)
@@ -315,9 +330,8 @@ static int store_enqueue_journal(uint8_t kind, uint32_t pcm_bytes)
 	store_fill_when(slot);
 	++pendant_store_queued;
 	(void)store_save();
-	printk("%s held offline: seq=%u bytes=%u file=%s when=%s\n",
-	       kind == PENDANT_STORE_KIND_MEMO ? "Record-only memo"
-					       : "Voice memo",
+	printk("Held offline (%s): seq=%u bytes=%u file=%s when=%s\n",
+	       store_kind_name(kind),
 	       slot->seq, slot->bytes, path,
 	       slot->tag[0] != '\0' ? slot->tag : "(no NITZ clock)");
 	pendant_store_print_stats("voice_queued");
@@ -332,6 +346,11 @@ int pendant_store_enqueue_voice(uint32_t pcm_bytes)
 int pendant_store_enqueue_memo(uint32_t pcm_bytes)
 {
 	return store_enqueue_journal(PENDANT_STORE_KIND_MEMO, pcm_bytes);
+}
+
+int pendant_store_enqueue_question(uint32_t pcm_bytes)
+{
+	return store_enqueue_journal(PENDANT_STORE_KIND_QUESTION, pcm_bytes);
 }
 
 int pendant_store_enqueue_mark(bool link_up)
@@ -423,15 +442,26 @@ int pendant_store_drain_one(uint32_t voice_sample_rate)
 
 	switch (slot->kind) {
 	case PENDANT_STORE_KIND_VOICE:
+	case PENDANT_STORE_KIND_QUESTION:
 	case PENDANT_STORE_KIND_MEMO: {
 		char path[32];
 
 		store_slot_path(slot, path, sizeof(path));
 		printk("Forwarding held %s seq=%u (%u B) from %s\n",
-		       slot->kind == PENDANT_STORE_KIND_MEMO
-			       ? "record-only memo"
-			       : "voice memo",
-		       slot->seq, slot->bytes, path);
+		       store_kind_name(slot->kind), slot->seq, slot->bytes,
+		       path);
+		if (slot->kind == PENDANT_STORE_KIND_QUESTION) {
+			/*
+			 * Honest offline semantics, said out loud once per
+			 * delivery: the planner runs (this is a question, not
+			 * a memo), but the spoken answer has nowhere to go —
+			 * the socket the reply would have streamed down closed
+			 * with the press that made it. The answer lands in
+			 * history and the device stays quiet.
+			 */
+			printk("Held question: answer will land in history, "
+			       "not in the owner's ear\n");
+		}
 		/*
 		 * Streams straight off the card through the existing
 		 * single-shot reader — no staging buffer, so a 30 s memo

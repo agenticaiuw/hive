@@ -22,6 +22,7 @@
 #include "accel_tap.h"
 #include "audio_opus.h"
 #include "haptic.h"
+#include "pendant_bt.h"
 #include "pendant_cloud.h"
 #include "pendant_reflex.h"
 #include "pendant_store.h"
@@ -60,8 +61,12 @@
  *   P0.22 green   memo       — record-only capture: upload + transcript,
  *                              deliberately no agent planner (?dispatch=0
  *                              — see pendant_cloud_stream_set_memo).
- *   P0.23 blue    approve    — short press approves, ≥1.5 s hold denies
- *                              the pending approval readback.
+ *   P0.23 blue    push-to-talk — press = record a question with the radio
+ *                              OFF, press again = one chunked upload WITH
+ *                              the planner, and the short spoken reply
+ *                              plays back on the existing reply-speech
+ *                              path. See run_ptt_question() for the energy
+ *                              ruling that put it here.
  *   P0.24/25      encoder    — quadrature menu navigation.
  *   P0.28         enc. push  — menu select.
  *   P0.26         mic sense  — watches the SPH0645 VDD net through 100k.
@@ -86,7 +91,7 @@
  */
 #define ASK_BUTTON_NODE DT_ALIAS(ask_btn)
 #define MEMO_BUTTON_NODE DT_ALIAS(memo_btn)
-#define APPROVE_BUTTON_NODE DT_ALIAS(approve_btn)
+#define PTT_BUTTON_NODE DT_ALIAS(ptt_btn)
 #define ENCODER_A_NODE DT_ALIAS(encoder_a)
 #define ENCODER_B_NODE DT_ALIAS(encoder_b)
 #define ENCODER_PUSH_NODE DT_ALIAS(encoder_push)
@@ -545,9 +550,9 @@ static struct gpio_callback ask_button_callback;
 static const struct gpio_dt_spec memo_button =
 	GPIO_DT_SPEC_GET(MEMO_BUTTON_NODE, gpios);
 static struct gpio_callback memo_button_callback;
-static const struct gpio_dt_spec approve_button =
-	GPIO_DT_SPEC_GET(APPROVE_BUTTON_NODE, gpios);
-static struct gpio_callback approve_button_callback;
+static const struct gpio_dt_spec ptt_button =
+	GPIO_DT_SPEC_GET(PTT_BUTTON_NODE, gpios);
+static struct gpio_callback ptt_button_callback;
 static const struct gpio_dt_spec encoder_a =
 	GPIO_DT_SPEC_GET(ENCODER_A_NODE, gpios);
 static const struct gpio_dt_spec encoder_b =
@@ -566,9 +571,19 @@ static bool mic_sense_ready;
  * without the green button ever being able to cut a command capture short.
  * Main thread only. */
 static bool memo_capture_active;
+/* Same story for the BLUE button's push-to-talk capture: the button that
+ * started a recording is the button that stops it. Main thread only. */
+static bool ptt_capture_active;
+/*
+ * Force record_microphone to keep the modem out of it: no stream_ensure, no
+ * live uplink, journal straight to the card. This is the whole energy
+ * argument of push-to-talk (see run_ptt_question), expressed as one latch
+ * on the one line that would otherwise open a socket at press time.
+ */
+static bool capture_radio_off;
 
 K_SEM_DEFINE(memo_press_sem, 0, 1);
-K_SEM_DEFINE(approve_press_sem, 0, 1);
+K_SEM_DEFINE(ptt_press_sem, 0, 1);
 
 /*
  * Owner-decision control frames, produced on main/ISR and consumed by the
@@ -576,16 +591,13 @@ K_SEM_DEFINE(approve_press_sem, 0, 1);
  * modem send can never block a button ISR or the codec loop. Contract per
  * the wire spec: sent only while the converse socket is OPEN; a closed
  * socket drops them (a menu twist from a dead zone is stale the moment
- * the link returns, and a late approval decision is worse than none).
+ * the link returns).
  */
-static atomic_t approval_decision_req; /* 0 none, 1 approve, 2 deny */
 static atomic_t menu_step_backlog;     /* signed detents not yet sent */
 static atomic_t menu_select_req;
 /* Cap unsent detents: past this the owner is spinning against a dead
  * link and older steps carry no information a fresher one lacks. */
 #define MENU_STEP_BACKLOG_MAX 8
-#define APPROVE_LONG_PRESS_MS 1500
-#define APPROVE_MIN_PRESS_MS 30
 #define ENCODER_PUSH_DEBOUNCE_MS 150
 
 /*
@@ -973,14 +985,14 @@ static void memo_button_pressed(const struct device *port,
 	k_sem_give(&memo_press_sem);
 }
 
-static void approve_button_pressed(const struct device *port,
-				   struct gpio_callback *callback,
-				   gpio_port_pins_t pins)
+static void ptt_button_pressed(const struct device *port,
+			       struct gpio_callback *callback,
+			       gpio_port_pins_t pins)
 {
 	ARG_UNUSED(port);
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
-	k_sem_give(&approve_press_sem);
+	k_sem_give(&ptt_press_sem);
 }
 
 /*
@@ -1006,9 +1018,14 @@ static void clear_memo_events(void)
 	}
 }
 
-static void clear_approve_events(void)
+static bool take_ptt_press(void)
 {
-	while (k_sem_take(&approve_press_sem, K_NO_WAIT) == 0) {
+	return k_sem_take(&ptt_press_sem, K_NO_WAIT) == 0;
+}
+
+static void clear_ptt_events(void)
+{
+	while (k_sem_take(&ptt_press_sem, K_NO_WAIT) == 0) {
 	}
 }
 
@@ -1240,12 +1257,22 @@ static const char *audio_sink_name(uint8_t sink)
 	}
 }
 
-/* Safe from any thread: one gpio_pin_set_dt on a pin only this touches. */
+/* Safe from any thread: one gpio_pin_set_dt on a pin only this touches, plus
+ * a flag the idle loop acts on. */
 static void audio_sink_apply(uint8_t sink)
 {
 	audio_sink_current = sink;
 	if (amp_sd_mode_ready) {
 		gpio_pin_set_dt(&amp_sd_mode, sink != AUDIO_SINK_BLUETOOTH);
+	}
+	/*
+	 * Choosing Bluetooth as the sink is also an instruction to HAVE a
+	 * Bluetooth link: a sink selection that leaves the module idle would
+	 * route the next answer into silence. The request is only a flag —
+	 * pendant_bt_poll on main owns the UART.
+	 */
+	if (sink != AUDIO_SINK_SPEAKER && !pendant_bt_link_up()) {
+		pendant_bt_request_connect();
 	}
 	printk("Audio sink: %s%s\n", audio_sink_name(sink),
 	       amp_sd_mode_ready ? "" : " (amp gate not configured)");
@@ -1588,108 +1615,25 @@ static void flash_led(unsigned int count, int on_ms, int off_ms)
 }
 
 /*
- * Blue button state machine: press = approve, hold ≥1.5 s = deny. Polled,
- * never blocking, so the same function serves the idle wait (200 ms
- * cadence — a deny lands within ~1.7 s of the hold threshold) and the
- * conversation codec loop (~20 ms cadence, where the approval readback the
- * decision answers is actually playing). A deny fires the moment the hold
- * crosses the threshold rather than at release: the owner holding the
- * button deserves to see the LED answer while their thumb is still down.
+ * A blue press that arrives while a duplex conversation is OPEN is answered
+ * with a haptic tick and nothing else.
  *
- * The decision itself only ever sets an atomic; the WS I/O thread owns the
- * send (ws_io_send_owner_controls), so this can never stall an I2S loop.
+ * The two modes must not mix. A conversation already owns the microphone,
+ * the I2S transfer, the encoder, the decoder and the socket; starting a
+ * push-to-talk capture inside one would need a second of each. And the
+ * press is not meaningless to the owner, so it cannot be silently eaten —
+ * the tick says "heard you, not now". Approvals are still answerable during
+ * a conversation the way they always were best answered: out loud, or from
+ * the dashboard.
  */
-static void poll_approval_button(void)
+static void ptt_press_ignored_in_conversation(void)
 {
-	static bool tracking;
-	static bool fired_while_held;
-	static int64_t pressed_at_ms;
-	static int64_t last_decision_ms;
-	int64_t now = k_uptime_get();
-
-	if (!tracking) {
-		if (k_sem_take(&approve_press_sem, K_NO_WAIT) != 0) {
-			return;
-		}
-		/* Edges inside a beat of the last decision are that press's
-		 * release bounce, not a human pressing twice — humans repeat
-		 * in hundreds of ms, bounce in ones. */
-		if (now - last_decision_ms < 250) {
-			clear_approve_events();
-			return;
-		}
-		if (gpio_pin_get_dt(&approve_button) <= 0) {
-			/*
-			 * Press AND release both fit between two polls (the
-			 * idle loop turns at 200 ms). The edge was real — the
-			 * ISR only fires on the active edge — and a press
-			 * shorter than one poll period cannot have been the
-			 * 1.5 s hold, so it is an approve by definition.
-			 */
-			last_decision_ms = now;
-			clear_approve_events();
-			if (pendant_ws_connected()) {
-				atomic_set(&approval_decision_req, 1);
-				haptic_trigger(HAPTIC_PATTERN_DOUBLE);
-				printk("Approval button: APPROVE (quick tap)\n");
-			} else {
-				printk("Approval button: approve dropped "
-				       "(converse socket closed)\n");
-			}
-			if (!atomic_get(&convo_active)) {
-				flash_led(1U, 60, 60);
-			}
-			return;
-		}
-		tracking = true;
-		fired_while_held = false;
-		pressed_at_ms = now;
+	if (!take_ptt_press()) {
 		return;
 	}
-
-	if (gpio_pin_get_dt(&approve_button) > 0) {
-		if (!fired_while_held &&
-		    now - pressed_at_ms >= APPROVE_LONG_PRESS_MS) {
-			fired_while_held = true;
-			last_decision_ms = now;
-			if (pendant_ws_connected()) {
-				atomic_set(&approval_decision_req, 2);
-				haptic_trigger(HAPTIC_PATTERN_DOUBLE);
-				printk("Approval button: DENY (held %d ms)\n",
-				       (int)(now - pressed_at_ms));
-			} else {
-				printk("Approval button: deny dropped "
-				       "(converse socket closed)\n");
-			}
-			if (!atomic_get(&convo_active)) {
-				flash_led(2U, 60, 60);
-			}
-		}
-		return;
-	}
-
-	/* Released. */
-	tracking = false;
-	clear_approve_events();
-	if (fired_while_held) {
-		return; /* the hold already decided */
-	}
-	if (now - pressed_at_ms < APPROVE_MIN_PRESS_MS) {
-		return; /* contact scratch, not a human */
-	}
-	last_decision_ms = now;
-	if (pendant_ws_connected()) {
-		atomic_set(&approval_decision_req, 1);
-		haptic_trigger(HAPTIC_PATTERN_DOUBLE);
-		printk("Approval button: APPROVE (%d ms press)\n",
-		       (int)(now - pressed_at_ms));
-	} else {
-		printk("Approval button: approve dropped "
-		       "(converse socket closed)\n");
-	}
-	if (!atomic_get(&convo_active)) {
-		flash_led(1U, 60, 60);
-	}
+	clear_ptt_events();
+	haptic_trigger(HAPTIC_PATTERN_TICK);
+	printk("Blue press ignored: a conversation is already open\n");
 }
 
 /*
@@ -2161,8 +2105,17 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	if (sample_limit == 0U) {
 		return -ENODEV;
 	}
-	/* Re-validate/reopen idle prewarm before I2S (stale sockets → -104). */
-	if (pendant_cloud_stream_ensure(PENDANT_OPUS_SAMPLE_RATE) != 0) {
+	/*
+	 * Re-validate/reopen idle prewarm before I2S (stale sockets → -104) —
+	 * unless this capture is deliberately radio-off. A push-to-talk
+	 * question is captured with the modem untouched and uploaded once
+	 * afterwards; opening a TLS socket here would spend the RRC connection
+	 * this mode exists to avoid, seconds before there is anything to send.
+	 */
+	if (capture_radio_off) {
+		printk("Capture with the radio off (push-to-talk): journaling "
+		       "to microSD, one upload after the stop press\n");
+	} else if (pendant_cloud_stream_ensure(PENDANT_OPUS_SAMPLE_RATE) != 0) {
 		printk("Live stream ensure failed — recording to microSD "
 		       "(fallback single-shot after stop)\n");
 	}
@@ -2498,20 +2451,25 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 		/*
 		 * Ignore bounce / leftover edges from the start press for the
-		 * first second, then a second press stops recording. A memo
-		 * capture additionally answers to its own (green) button —
-		 * the button that started a recording should stop it.
+		 * first second, then a second press stops recording. A memo or
+		 * push-to-talk capture additionally answers to its OWN button
+		 * (green / blue) — the button that started a recording should
+		 * stop it — while neither can ever cut a command capture short.
 		 */
 		if (sample_index < MIC_MIN_RECORD_FRAMES) {
 			clear_button_events();
 			if (memo_capture_active) {
 				clear_memo_events();
 			}
+			if (ptt_capture_active) {
+				clear_ptt_events();
+			}
 		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
-			   (memo_capture_active && take_memo_press())) {
+			   (memo_capture_active && take_memo_press()) ||
+			   (ptt_capture_active && take_ptt_press())) {
 			recording_stopped_by_button = true;
 			/* Stop acknowledged: memo closes on a tick, a
-			 * command capture on the button click. */
+			 * command or question capture on the button click. */
 			haptic_trigger(memo_capture_active
 					       ? HAPTIC_PATTERN_TICK
 					       : HAPTIC_PATTERN_CLICK);
@@ -3391,12 +3349,21 @@ static void ws_io_drain_downlink(void)
 			if (audio_sink_offer_frame((const char *)ws_rx_buf)) {
 				continue;
 			}
+			/* Bluetooth device menu (bt_list / bt_select). Flags
+			 * only — the UART write and the sink table live on
+			 * main, never on this 2.5 KB socket stack. */
+			if (pendant_bt_offer_frame((const char *)ws_rx_buf)) {
+				continue;
+			}
 			/*
 			 * The relay announces an approval readback about to
-			 * play; the strong hit tells the thumb "the next
-			 * words want a decision" even in a loud room.
-			 * (Relay side of this frame is still TODO — the
-			 * parse is the device's half of the contract.)
+			 * play; the strong hit says "the next words want an
+			 * answer" even in a loud room. The answer itself is
+			 * now spoken, not pressed — the blue button became
+			 * push-to-talk on 2026-08-12 — so this haptic is the
+			 * whole device-side half of approvals, and it matters
+			 * more, not less, for being the only cue.
+			 * (Relay side of this frame is still TODO.)
 			 */
 			if (strstr((const char *)ws_rx_buf,
 				   "\"approval_readback\"") != NULL) {
@@ -3430,10 +3397,10 @@ static void ws_io_drain_downlink(void)
 }
 
 /*
- * Flush owner-decision control frames (approval decision, menu steps, menu
- * select) onto the converse socket. Runs ONLY on the WS I/O thread with
- * ws_lock held, both mid-conversation and idle, so a button never waits on
- * the modem and the socket is never touched from two threads.
+ * Flush owner control frames (menu steps, menu select, knob position) onto
+ * the converse socket. Runs ONLY on the WS I/O thread with ws_lock held,
+ * both mid-conversation and idle, so a button never waits on the modem and
+ * the socket is never touched from two threads.
  *
  * Drop-when-closed is the contract (see the atomics' declaration): a
  * closed socket clears the backlog instead of banking stale intent. A send
@@ -3444,22 +3411,10 @@ static void ws_io_drain_downlink(void)
 static void ws_io_send_owner_controls(void)
 {
 	if (!pendant_ws_connected()) {
-		atomic_set(&approval_decision_req, 0);
 		atomic_set(&menu_step_backlog, 0);
 		atomic_set(&menu_select_req, 0);
 		atomic_set(&volume_report, -1);
 		return;
-	}
-
-	atomic_val_t decision = atomic_set(&approval_decision_req, 0);
-
-	if (decision != 0) {
-		(void)pendant_ws_send_text(
-			decision == 2
-				? "{\"type\":\"approval_decision\","
-				  "\"decision\":\"deny\"}"
-				: "{\"type\":\"approval_decision\","
-				  "\"decision\":\"approve\"}");
 	}
 
 	/* One frame per detent, a few per pass: the relay's contract is
@@ -3552,12 +3507,19 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 						      sizeof(ws_rx_buf) -
 							      1U)] = '\0';
 					if (!pendant_reflex_offer_frame(
+						    (const char *)ws_rx_buf) &&
+					    /* Sink switches work idle
+					     * too: the owner flips the
+					     * default from the dashboard
+					     * between conversations. */
+					    !audio_sink_offer_frame(
 						    (const char *)ws_rx_buf)) {
-						/* Sink switches work idle
-						 * too: the owner flips the
-						 * default from the dashboard
-						 * between conversations. */
-						(void)audio_sink_offer_frame(
+						/* Bluetooth menu: the relay
+						 * asks for the device list and
+						 * sends the owner's pick. Only
+						 * flags are set here — the UART
+						 * and the card belong to main. */
+						(void)pendant_bt_offer_frame(
 							(const char *)
 								ws_rx_buf);
 					}
@@ -3565,10 +3527,9 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 			}
 			k_mutex_unlock(&ws_lock);
 		} else {
-			/* Drop-when-closed for the owner-decision frames: a
-			 * twist or a decision banked across a dead link
-			 * would replay as stale intent on reconnect. */
-			atomic_set(&approval_decision_req, 0);
+			/* Drop-when-closed for the owner control frames: a
+			 * twist banked across a dead link would replay as
+			 * stale intent on reconnect. */
 			atomic_set(&menu_step_backlog, 0);
 			atomic_set(&menu_select_req, 0);
 		}
@@ -3915,12 +3876,11 @@ static int run_conversation(const struct device *i2s)
 		convo_decode_downlink();
 
 		/*
-		 * Blue button, mid-conversation: this is the moment it exists
-		 * for — the relay just read an approval down this very call
-		 * and the owner answers with a thumb instead of a phrase.
-		 * Poll-only (~µs); the WS thread carries the decision.
+		 * Blue button, mid-conversation: push-to-talk does not nest
+		 * inside a call. Consume the press and tick, so it cannot fire
+		 * a surprise capture the moment this conversation ends.
 		 */
-		poll_approval_button();
+		ptt_press_ignored_in_conversation();
 
 		if (atomic_get(&convo_end_req)) {
 			/* Relay 'end' (mutual silence) or transport close —
@@ -4061,10 +4021,11 @@ teardown:
 	pendant_opus_stream_abort();
 	pendant_opus_reply_decoder_end();
 	clear_button_events();
-	/* A green press mid-conversation was not a memo request — it was a
-	 * mispress during a call. Consuming it here keeps it from firing a
-	 * surprise 30 s capture the moment the call ends. */
+	/* A green or blue press mid-conversation was not a capture request —
+	 * it was a mispress during a call. Consuming both here keeps them from
+	 * firing a surprise capture the moment the call ends. */
 	clear_memo_events();
+	clear_ptt_events();
 	if (result == 0 && error != 0) {
 		result = error;
 	}
@@ -4152,6 +4113,406 @@ static int run_memo_capture(const struct device *i2s)
 }
 
 /*
+ * ---- Blue button: PUSH-TO-TALK ----
+ *
+ * WHY THIS IS THE CHEAPEST WAY TO ASK A QUESTION (owner's ruling, and the
+ * arithmetic behind it — hardware/design/Solar_Feasibility.md §4.3):
+ *
+ *   A PTT question (10 s ask + 15 s reply) costs 0.94 mWh. The SAME
+ *   question asked as a short duplex exchange costs 2.3 mWh. 2.4x, and the
+ *   reason is not the codec or the speaker — it is WHEN the radio is on.
+ *   Capturing with the modem out of connected mode draws 4.2 mA; the
+ *   modem's connected floor is ~65 mA (45 mA RX monitor before any TX,
+ *   x1.2 wrist antenna penalty). Duplex pays that floor for every second
+ *   the human is talking and thinking. Push-to-talk pays 4.2 mA for those
+ *   seconds and touches the radio exactly once.
+ *
+ *   That once is not free either: every radio touch pays a ~0.32 mWh RRC
+ *   connection tax (setup + the C-DRX release tail). Which is precisely why
+ *   this is ONE connection — capture with the radio off, then a single
+ *   chunked upload that carries the question up and the spoken answer back
+ *   down the same socket, then idle. Splitting it into "upload now, fetch
+ *   the reply later" would double the tax and wipe out most of the win.
+ *
+ * The mechanism invents no transport. It is the proven non-duplex HTTP
+ * command shape: /v1/pendant/command with dispatch ON (this is a question —
+ * the planner is the point, unlike the green button's ?dispatch=0) and
+ * X-Reply-Stream: opus, so the relay streams the reply as length-prefixed
+ * Opus packets on the upload socket. Playback is the conversation's own
+ * downlink path — same decoder, same 24 kHz jitter ring, same 96/125 TX
+ * resampler, same sync preamble — so whatever the current sink is (the
+ * ESP32/Bluetooth or the MAX98357A speaker, per audio_sink) hears it with
+ * no new audio code at all.
+ */
+/* 45 s of reply at 20.48 ms per I2S block. A "short spoken answer" that
+ * outruns this is a bug upstream, and a runaway must not hold the mic. */
+#define PTT_REPLY_MAX_BLOCKS 2200U
+/* Blocks to keep playing after the stream ends: the TX runway (10) plus the
+ * FIR tail, so the last syllable leaves the wire before DROP discards it. */
+#define PTT_REPLY_TAIL_BLOCKS 14U
+
+/*
+ * Pull whatever the reply socket has ready and decode it into the jitter
+ * ring. Non-blocking by contract, and bounded exactly like the conversation
+ * downlink (CONVO_MAX_DECODES_PER_BLOCK) so one call can never overrun the
+ * I2S block it is riding between.
+ *
+ * dl_rx_frame is the reassembly buffer. It is the WS conversation's
+ * main-thread frame slot, idle by construction here (no conversation can be
+ * open during a PTT reply), so a 640 B staging area costs zero new RAM.
+ */
+static bool ptt_reply_pump(size_t *fill, bool *eof)
+{
+	unsigned int decodes = 0U;
+	size_t offset = 0U;
+	bool starved = false;
+	int received;
+
+	if (!*eof && *fill < sizeof(dl_rx_frame.data)) {
+		received = pendant_cloud_reply_read(dl_rx_frame.data + *fill,
+						    sizeof(dl_rx_frame.data) -
+							    *fill);
+		if (received > 0) {
+			*fill += (size_t)received;
+		} else if (received == 0) {
+			*eof = true; /* clean end of the reply body */
+		} else if (received != -EAGAIN) {
+			printk("PTT reply read failed: %d\n", received);
+			*eof = true;
+		}
+	}
+
+	while (offset + 2U <= *fill && decodes < CONVO_MAX_DECODES_PER_BLOCK) {
+		size_t packet_bytes = ((size_t)dl_rx_frame.data[offset] << 8) |
+				      dl_rx_frame.data[offset + 1U];
+
+		if (packet_bytes == 0U ||
+		    packet_bytes > sizeof(dl_rx_frame.data) - 2U) {
+			printk("PTT reply framing broken (len=%u)\n",
+			       (unsigned int)packet_bytes);
+			*eof = true;
+			*fill = 0U;
+			return true;
+		}
+		if (offset + 2U + packet_bytes > *fill) {
+			break; /* packet still arriving */
+		}
+		/* Receive gate: never decode into a ring that cannot hold the
+		 * result — the same rule the conversation downlink follows. */
+		if (DL_JITTER_SAMPLES - 1U - dl_jitter_fill() <
+		    DL_WORST_FRAME_SAMPLES) {
+			starved = true;
+			break;
+		}
+		int decoded = pendant_opus_reply_decode_packet(
+			dl_rx_frame.data + offset + 2U, packet_bytes,
+			dl_decode_buf, ARRAY_SIZE(dl_decode_buf));
+
+		if (decoded > 0) {
+			dl_jitter_put(dl_decode_buf, (size_t)decoded);
+		}
+		offset += 2U + packet_bytes;
+		++decodes;
+	}
+
+	if (offset > 0U) {
+		*fill -= offset;
+		memmove(dl_rx_frame.data, dl_rx_frame.data + offset, *fill);
+	}
+	/*
+	 * "Done" means the socket is finished AND nothing decodable is left.
+	 * The loop exits for three reasons and only one of them means empty:
+	 * it hit the per-block decode cap (more to come), the jitter ring was
+	 * full (more to come), or it ran out of bytes — which after EOF is the
+	 * end, including the case where the tail is an incomplete packet the
+	 * relay will never finish. Deciding on the socket alone would cut the
+	 * last packets; deciding on the buffer alone would spin on that
+	 * trailing fragment until the runaway cap, holding the microphone.
+	 */
+	return *eof && !starved && decodes < CONVO_MAX_DECODES_PER_BLOCK;
+}
+
+/*
+ * Play the inline reply through the current sink. Duplex I2S bring-up and
+ * teardown are copied from reflex_chime_play for the reason stated there:
+ * i2s_nrfx memcmps the two directions' configs and TX-only as a clock slave
+ * is an unproven path, so the mic runs and its blocks are discarded. The
+ * discarded RX read is also what paces this loop at one block per 20.48 ms.
+ */
+static int ptt_reply_play(const struct device *i2s)
+{
+	struct i2s_config config = {
+		.word_size = 24U,
+		.channels = 1U,
+		.format = I2S_FMT_DATA_FORMAT_I2S,
+		.options = I2S_OPT_BIT_CLK_TARGET | I2S_OPT_FRAME_CLK_TARGET,
+		.frame_clk_freq = MIC_FRAME_RATE,
+		.mem_slab = &mic_rx_slab,
+		.block_size = MIC_RX_BLOCK_SIZE,
+		.timeout = 1500,
+	};
+	struct i2s_config tx_config;
+	size_t fill = 0U;
+	uint32_t blocks = 0U;
+	uint32_t tail_blocks = 0U;
+	bool playing = false;
+	bool source_eof = false;
+	bool source_done = false;
+	bool i2s_running = false;
+	int error;
+
+	error = k_mem_slab_init(&mic_rx_slab, mic_rx_storage,
+				MIC_RX_BLOCK_SIZE, MIC_RX_BLOCK_COUNT);
+	if (error != 0) {
+		return error;
+	}
+	dl_jitter_reset();
+	tx_resample_reset();
+	convo_tx_peak = 0U;
+
+	/* The encoder is finished with the workspace; the decoder has its own
+	 * arena, so the two never contend here the way they do in a call. */
+	error = pendant_opus_reply_decoder_begin_rate(
+		opus_dec_arena, sizeof(opus_dec_arena),
+		PENDANT_OPUS_REPLY_SAMPLE_RATE);
+	if (error < 0) {
+		printk("PTT reply decoder init failed: %d\n", error);
+		return error;
+	}
+	(void)pendant_cloud_reply_set_nonblocking(true);
+
+	mic_clocks_start();
+	error = i2s_configure(i2s, I2S_DIR_RX, &config);
+	if (error == 0) {
+		tx_config = config;
+		tx_config.mem_slab = &convo_tx_slab;
+		tx_config.timeout = 0; /* never block the fill loop */
+		error = i2s_configure(i2s, I2S_DIR_TX, &tx_config);
+	}
+	/* The ESP32 re-hunts sync after every BCLK restart; without this the
+	 * front of the answer is eaten by its lock search. */
+	if (error == 0) {
+		error = convo_queue_preamble(i2s);
+	}
+	if (error == 0) {
+		k_msleep(MIC_POWERUP_BUDGET_MS);
+		error = i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_START);
+	}
+	if (error == 0) {
+		i2s_running = true;
+		gpio_pin_set_dt(&led, 1);
+		while (blocks < PTT_REPLY_MAX_BLOCKS) {
+			void *block;
+			size_t size;
+
+			if (i2s_read(i2s, &block, &size) != 0) {
+				printk("PTT reply I2S read failed\n");
+				break;
+			}
+			k_mem_slab_free(&mic_rx_slab, block);
+			++blocks;
+
+			if (!source_done) {
+				source_done = ptt_reply_pump(&fill,
+							     &source_eof);
+			}
+			error = convo_top_up_tx(i2s, &playing);
+			if (error != 0) {
+				printk("PTT reply I2S write failed: %d\n",
+				       error);
+				break;
+			}
+			if (source_done && dl_jitter_fill() == 0U) {
+				if (++tail_blocks >= PTT_REPLY_TAIL_BLOCKS) {
+					break;
+				}
+			} else {
+				tail_blocks = 0U;
+			}
+		}
+	}
+
+	if (i2s_running) {
+		/* DROP, never DRAIN — draining as a clock slave wedges
+		 * i2s_nrfx until a power cycle (same rule as every other
+		 * teardown in this file). */
+		(void)i2s_trigger(i2s, I2S_DIR_BOTH, I2S_TRIGGER_DROP);
+		k_msleep(MIC_STOP_SETTLE_MS);
+	}
+	mic_clocks_stop();
+	gpio_pin_set_dt(&led, 0);
+	pendant_opus_reply_decoder_end();
+	printk("PTT reply played: blocks=%u peak=%u sink=%s error=%d\n", blocks,
+	       convo_tx_peak, audio_sink_name(audio_sink_current), error);
+	return error;
+}
+
+/*
+ * Blue button, whole cycle: capture radio-off, upload once with the planner
+ * on, play the answer, radio back to idle.
+ *
+ * The upload reuses the live encoder + FIFO + chunked-POST machinery a
+ * yellow press uses, only fed from the microSD journal instead of the
+ * microphone: the FIFO holds ~7 KB (a few seconds of Opus) while a 30 s
+ * question is ~60 KB, so feed and pump have to interleave exactly as they
+ * do during a live capture. That is the same code path, not a parallel one.
+ */
+static int run_ptt_question(const struct device *i2s)
+{
+	int64_t ptt_started = k_uptime_get();
+	struct fs_file_t journal;
+	uint32_t pcm_bytes;
+	bool journal_open = false;
+	int error;
+
+	/* dispatch ON: a question wants the planner. The memo latch is the
+	 * only thing that could turn it off, so state it rather than assume
+	 * the last press left it clean. */
+	pendant_cloud_stream_set_memo(false);
+	capture_radio_off = true;
+	ptt_capture_active = true;
+	error = record_microphone(i2s, MAX_RECORD_SAMPLE_COUNT);
+	ptt_capture_active = false;
+	capture_radio_off = false;
+	gpio_pin_set_dt(&led, 0);
+	if (error != 0) {
+		printk("PTT capture failed: %d\n", error);
+		recording_on_sd = false;
+		flash_led(3U, 120, 120);
+		return error;
+	}
+
+	pcm_bytes = recorded_samples * (uint32_t)sizeof(int16_t);
+	if (pcm_bytes == 0U || !recording_on_sd) {
+		printk("PTT capture produced nothing to ask (%u B, sd=%d)\n",
+		       pcm_bytes, recording_on_sd ? 1 : 0);
+		flash_led(3U, 120, 120);
+		return -ENODATA;
+	}
+	printk("LAT ptt_capture_ms=%lld pcm_bytes=%u\n",
+	       k_uptime_get() - ptt_started, pcm_bytes);
+
+	/* THE radio touch. One socket, one RRC connection, question up and
+	 * answer down. */
+	error = pendant_cloud_stream_ensure(PENDANT_OPUS_SAMPLE_RATE);
+	if (error == 0) {
+		live_stream_failed = false;
+		live_tx_saturated = false;
+		live_fifo_reset();
+		error = pendant_opus_stream_begin_packets(
+			SAMPLE_RATE, audio_workspace, OPUS_TX_ARENA_BYTES,
+			live_opus_packet_sink);
+		if (error != 0) {
+			printk("PTT encoder init failed: %d\n", error);
+			pendant_cloud_stream_abort();
+		}
+	}
+	if (error == 0) {
+		fs_file_t_init(&journal);
+		error = fs_open(&journal, SD_RECORDING_PATH, FS_O_READ);
+		journal_open = error == 0;
+	}
+	while (error == 0 && journal_open) {
+		/* mic_stage_samples is the capture staging buffer, free the
+		 * moment the mic stops — reused here so the read costs no RAM. */
+		ssize_t got = fs_read(&journal, mic_stage_samples,
+				      MIC_STAGE_BYTES);
+
+		if (got < 0) {
+			error = (int)got;
+			break;
+		}
+		if (got == 0) {
+			break;
+		}
+		size_t frames = (size_t)got / sizeof(int16_t);
+
+		/* Pad a short final read: the encoder's stage contract is a
+		 * whole MIC_STAGE_FRAMES block. */
+		while (frames < MIC_STAGE_FRAMES) {
+			mic_stage_samples[frames++] = 0;
+		}
+		live_tx_offer_stage(mic_stage_samples, MIC_STAGE_FRAMES);
+		live_tx_pump(PCM_TX_PUMP_BUDGET_MS);
+		if (live_stream_failed) {
+			error = -EIO;
+		}
+	}
+	if (journal_open) {
+		(void)fs_close(&journal);
+	}
+	if (error == 0 && pendant_opus_stream_active()) {
+		error = pendant_opus_stream_end(NULL);
+	}
+	if (error == 0) {
+		/* Flush whatever the encoder's tail left in the FIFO: a
+		 * partial batch would otherwise sit below LIVE_TX_BATCH_BYTES
+		 * forever and truncate the question's last word. */
+		live_tx_flush = true;
+		for (unsigned int pass = 0U;
+		     pass < 200U && live_fifo_fill() > 0U && !live_stream_failed;
+		     ++pass) {
+			live_tx_pump(20U);
+		}
+		error = pendant_cloud_stream_end();
+		printk("LAT ptt_upload_ms=%lld pcm_bytes=%u result=%d\n",
+		       k_uptime_get() - ptt_started,
+		       pendant_cloud_uploaded_pcm_bytes, error);
+	}
+	pendant_opus_stream_abort();
+	/*
+	 * Any failure before stream_end left a chunked POST half-written on an
+	 * open TLS socket. Close it here or the next press inherits a stream
+	 * the relay is still waiting on — and the modem stays in connected
+	 * mode, which is the one thing this whole mode exists to avoid.
+	 */
+	if (error < 0 && pendant_cloud_stream_active()) {
+		pendant_cloud_stream_abort();
+	}
+
+	if (error == PENDANT_CLOUD_REPLY_INLINE) {
+		int play_error = ptt_reply_play(i2s);
+
+		pendant_cloud_reply_stream_close();
+		printk("LAT ptt_total_ms=%lld play=%d\n",
+		       k_uptime_get() - ptt_started, play_error);
+		flash_led(2U, 60, 90);
+		return play_error;
+	}
+
+	if (error < 0) {
+		/*
+		 * No usable link. The question parks in the outbox under its
+		 * own kind: it redelivers with the planner ON (it was a
+		 * question, not a memo), but the answer cannot be spoken later
+		 * — the socket that would have carried it is gone. It lands in
+		 * history instead, and pendant_store.h says so where the kind
+		 * is defined.
+		 */
+		int queue_error = pendant_store_enqueue_question(pcm_bytes);
+
+		if (queue_error == 0) {
+			printk("PTT question held offline (upload=%d); the "
+			       "answer will be in history, not in your ear\n",
+			       error);
+			flash_led(2U, 60, 90);
+			return 0;
+		}
+		printk("Could not hold PTT question: %d (upload=%d)\n",
+		       queue_error, error);
+		flash_led(5U, 100, 100);
+		return error;
+	}
+
+	/* 2xx with no inline reply: the relay took the question but had
+	 * nothing to say back. Two calm flashes, same as a memo. */
+	printk("PTT question delivered with no spoken reply (HTTP %d)\n",
+	       pendant_cloud_last_http_status);
+	flash_led(2U, 60, 90);
+	return 0;
+}
+
+/*
  * Configure every 2026-08-12 breadboard control. All best-effort, all
  * logged: the pattern is the bookmark button's ("losing bookmarks is bad;
  * refusing to boot a voice pendant over a spare button is worse"), applied
@@ -4189,19 +4550,18 @@ static void configure_control_inputs(void)
 		printk("Memo button (P0.22) not configured\n");
 	}
 
-	if (gpio_is_ready_dt(&approve_button) &&
-	    gpio_pin_configure_dt(&approve_button, GPIO_INPUT) == 0) {
-		gpio_init_callback(&approve_button_callback,
-				   approve_button_pressed,
-				   BIT(approve_button.pin));
-		if (gpio_add_callback(approve_button.port,
-				      &approve_button_callback) != 0 ||
+	if (gpio_is_ready_dt(&ptt_button) &&
+	    gpio_pin_configure_dt(&ptt_button, GPIO_INPUT) == 0) {
+		gpio_init_callback(&ptt_button_callback, ptt_button_pressed,
+				   BIT(ptt_button.pin));
+		if (gpio_add_callback(ptt_button.port, &ptt_button_callback) !=
+			    0 ||
 		    gpio_pin_interrupt_configure_dt(
-			    &approve_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
-			printk("Approve button (P0.23) unavailable\n");
+			    &ptt_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Push-to-talk button (P0.23) unavailable\n");
 		}
 	} else {
-		printk("Approve button (P0.23) not configured\n");
+		printk("Push-to-talk button (P0.23) not configured\n");
 	}
 
 	/* Encoder: both phases in ONE callback (same port), both edges —
@@ -4370,6 +4730,14 @@ int main(void)
 	 * depends on the network is not a recovery path.
 	 */
 	pendant_store_init();
+
+	/*
+	 * Bluetooth policy, also before LTE and for the same reason: the sink
+	 * table lives on the card, the module is on a UART, and neither needs
+	 * a network. A boot that never finds signal should still come up with
+	 * the owner's headphones connected.
+	 */
+	pendant_bt_init();
 
 	/*
 	 * Reflex layer, also before LTE for the same reason: a timer or a
@@ -4552,6 +4920,7 @@ int main(void)
 		 * alive (pings + stray drains); main only reconnects. */
 		bool marked = false;
 		bool memo_requested = false;
+		bool ptt_requested = false;
 
 		while (k_sem_take(&button_press_sem, K_MSEC(200)) != 0) {
 			if (take_remote_press()) {
@@ -4562,8 +4931,30 @@ int main(void)
 				memo_requested = true;
 				break;
 			}
-			/* Blue button: approve/deny the pending approval. */
-			poll_approval_button();
+			/* Blue button: push-to-talk question. */
+			if (take_ptt_press()) {
+				ptt_requested = true;
+				break;
+			}
+			/*
+			 * Bluetooth policy rides the idle wait, the one
+			 * context that owns the UART, the card and the socket
+			 * at the same time: consume module events, act on the
+			 * relay's menu requests, answer with the device list.
+			 */
+			pendant_bt_poll();
+			if (pendant_bt_list_requested()) {
+				char devices[320];
+				size_t length = pendant_bt_devices_frame(
+					devices, sizeof(devices));
+
+				if (length > 0U && pendant_ws_connected()) {
+					k_mutex_lock(&ws_lock, K_FOREVER);
+					(void)pendant_ws_send_text(devices);
+					k_mutex_unlock(&ws_lock);
+				}
+				pendant_bt_list_answered();
+			}
 			/* Knob while idle: 5 Hz (this loop's cadence) is
 			 * plenty for a level that only matters once audio
 			 * plays; the conversation loop polls at full rate. */
@@ -4672,6 +5063,7 @@ int main(void)
 		if (mic_power_is_cut()) {
 			report_mic_muted_press();
 			clear_memo_events();
+			clear_ptt_events();
 			clear_button_events();
 			continue;
 		}
@@ -4683,6 +5075,17 @@ int main(void)
 			haptic_trigger(HAPTIC_PATTERN_TICK);
 			(void)run_memo_capture(i2s);
 			clear_memo_events();
+			clear_button_events();
+			continue;
+		}
+
+		if (ptt_requested) {
+			audio_cycle_phase = 1U;
+			/* Same click a command press gets: the thumb is told
+			 * the microphone is live before any other work. */
+			haptic_trigger(HAPTIC_PATTERN_CLICK);
+			(void)run_ptt_question(i2s);
+			clear_ptt_events();
 			clear_button_events();
 			continue;
 		}

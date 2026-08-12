@@ -24,7 +24,14 @@
 		memo_button: memo_button {
 			gpios = <&gpio0 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
-		approve_button: approve_button {
+		/*
+		 * Blue button, remapped 2026-08-12 from approve/deny to
+		 * PUSH-TO-TALK (press = record a question with the radio off,
+		 * press again = upload it and play the spoken answer). The pin,
+		 * the pull policy and the sense-edge bit are unchanged — only
+		 * what the firmware does with the edge changed.
+		 */
+		ptt_button: ptt_button {
 			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
 		encoder_a: encoder_a {
@@ -79,7 +86,7 @@
 	aliases {
 		ask-btn = &ask_button;
 		memo-btn = &memo_button;
-		approve-btn = &approve_button;
+		ptt-btn = &ptt_button;
 		encoder-a = &encoder_a;
 		encoder-b = &encoder_b;
 		encoder-push = &encoder_push;
@@ -273,9 +280,87 @@
 	interrupts = <40 0>;
 };
 
-/* Keep the unused Arduino UART inactive. */
+/*
+ * ---- Bluetooth-module command link (uart1, 115200 8N1) ----
+ *
+ * The ESP32 stands in for a BM83-class Bluetooth audio module, and a module
+ * like that is commanded over exactly one thing: a UART. So the nRF9160 owns
+ * a UART to it, and the ESP32's USB port stays a debug console.
+ *
+ *   nRF P0.00 (TX) -> ESP32 GPIO16 (RX2)
+ *   nRF P0.05 (RX) <- ESP32 GPIO17 (TX2)
+ *
+ * PIN VERDICT, resolved honestly against everything already claimed here:
+ *
+ *   TX = P0.00. It is uart1's board-default RX pin and part of the DK's
+ *   VCOM2 group (P0.00/P0.01/P0.14/P0.15), where the interface MCU is the
+ *   driver — which would be a hard conflict with an output, EXCEPT that
+ *   this project already ships boards/nrf9160dk_nrf52840.overlay with
+ *   vcom2_pins_routing DISABLED, so the analog switch between the IMCU and
+ *   these four pins is open. P0.01 (the group's other line) has been
+ *   driving MAX98357A SD_MODE on that same basis for weeks. Flashing the
+ *   stock board-controller image would put the IMCU back on P0.00 and this
+ *   TX would fight it — the board-controller overlay is a hard dependency
+ *   of this pin, not a nicety.
+ *
+ *   RX = P0.05, the DK's LED4 pin. Every other candidate is taken:
+ *   P0.01 = SD_MODE, P0.29 = console TX, P0.26/27/28 = mic sense /
+ *   accelerometer INT1 / encoder push, P0.15 = the volume ADC, P0.10-13 =
+ *   microSD, P0.14/16-20 = the audio bus, P0.21-25 = buttons and encoder,
+ *   P0.30/31 = I2C. Of the four LED pins P0.02 is led0 (this firmware's
+ *   only status LED) and P0.03/P0.04 are the next two; taking the HIGHEST
+ *   unused one leaves the low LEDs available if a future build wants a
+ *   second indicator. The same board-controller overlay now also disables
+ *   led4_pin_routing, so the on-board LED4 is switched away from the pin
+ *   and P0.05 is a clean input.
+ *
+ *   THE TRADEOFF, stated: DK LED4 is gone. With the stock board-controller
+ *   image (LED4 still routed) the link still runs — 115200 has 8.7 us per
+ *   bit against an LED network that only loads the line by a few mA — but
+ *   LED4 glows on the idle-high line, and with the ESP32 unpowered the LED
+ *   string pulls RX low, which the UARTE reports as a break. No ESP32, no
+ *   commands: an honest failure.
+ *
+ * No hardware flow control: two wires, and the command set is short
+ * newline-delimited JSON with no burst that can outrun a 115200 receiver.
+ */
+&pinctrl {
+	uart1_bt_module: uart1_bt_module {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 0)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 5)>;
+			/*
+			 * Pull-up on RX only: with the module unpowered or its
+			 * wire off, an undriven RX floats and the UARTE turns
+			 * noise into framing errors forever. Idle-high is the
+			 * UART's own "nothing to say".
+			 */
+			bias-pull-up;
+		};
+	};
+
+	uart1_bt_module_sleep: uart1_bt_module_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 0)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 5)>;
+			bias-pull-up;
+			low-power-enable;
+		};
+	};
+};
+
 &uart1 {
-	status = "disabled";
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_bt_module>;
+	pinctrl-1 = <&uart1_bt_module_sleep>;
+	pinctrl-names = "default", "sleep";
 };
 
 /*

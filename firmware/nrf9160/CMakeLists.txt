@@ -95,6 +95,7 @@ target_link_libraries(opus PRIVATE zephyr_interface)
 target_sources(app PRIVATE
   src/main.c
   src/audio_opus.c
+  src/pendant_bt.c
   src/pendant_cloud.c
   src/pendant_ws.c
   src/pendant_store.c

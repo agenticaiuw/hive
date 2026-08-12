@@ -7,7 +7,24 @@
  *
  * Disable that analog-switch path so the external audio bus owns the pins.
  * This overlay is built into the board-controller image, not the nRF9160 app.
+ *
+ * P0.00 is now also the nRF's UART TX to the Bluetooth module (uart1, see
+ * the app overlay): with this switch closed the interface MCU would drive
+ * that same line and fight every start bit, so this is a hard dependency of
+ * the module link, not a convenience.
  */
 &vcom2_pins_routing {
+	status = "disabled";
+};
+
+/*
+ * LED4 is switched away from nRF9160 P0.05 because that pin is now the
+ * UART RX from the Bluetooth module. Left routed, the on-board LED and its
+ * series resistor hang on the receive line: it still receives at 115200,
+ * but LED4 glows on the idle-high line and an unpowered module lets the LED
+ * string pull RX low into a permanent break. The cost of this line is
+ * exactly one DK indicator — the firmware only ever uses LED1 (P0.02).
+ */
+&led4_pin_routing {
 	status = "disabled";
 };

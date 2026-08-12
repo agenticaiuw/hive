@@ -119,7 +119,21 @@ static void lte_attach_probe_fn(struct k_work *work)
 #define JOB_ID_SIZE 80U
 #define PENDANT_EVENT_BODY_SIZE 512U
 #define HTTP_STREAM_HEADER_SIZE 1536U
-#define HTTP_STREAM_READ_SIZE 1536U
+/*
+ * Socket staging for the byte-at-a-time body reader — a recv() batch size,
+ * nothing structural: no caller assumes a minimum, and buffer_length is
+ * always whatever recv returned.
+ *
+ * Trimmed 1536 -> 512 on 2026-08-12 when push-to-talk made this path LIVE.
+ * Until then main.c never called pendant_cloud_reply_read, so --gc-sections
+ * quietly deleted the reader and its buffer and the build's RAM figure had
+ * never paid for them; playing an inline reply brings all 1.5 kB back into
+ * a build with 7 kB of headroom. The cost of 512 is 3x the recv calls on a
+ * 30 kB reply — about 40 extra offloaded-socket reads spread over ~15 s,
+ * against ~1 kB of permanent RAM. That is the right side of the trade on
+ * this device.
+ */
+#define HTTP_STREAM_READ_SIZE 512U
 #define MAX_PCM_BYTES (8U * 1024U * 1024U)
 #define AGENT_REPLY_POLL_ATTEMPTS 30U
 

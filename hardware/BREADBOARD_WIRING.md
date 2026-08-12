@@ -37,7 +37,7 @@ graph LR
   ACC["motion sensor: accelerometer\nLSM6DSOX"] -- "I2C 0x6A · INT1 → P0.27" --> DK
   AMP -- "taps I2S nets · SD_MODE → P0.01" --> DK
   ESP -- "A2DP" --> SND
-  DK -.->|"UART to BT module (future · pins TBD)"| ESP
+  DK <-- "command UART · 115200 · TX P0.00→G16 · RX P0.05←G17" --> ESP
 ```
 
 ## Power and ground
@@ -66,7 +66,7 @@ graph LR
 | --- | --- | --- | --- |
 | Yellow button (talk) | nRF **P0.21** | GND | [NOW] |
 | Green button (memo) | nRF **P0.22** | GND | [NOW] |
-| Blue button (approve / hold=deny) | nRF **P0.23** | GND | [NOW] |
+| Blue button (push-to-talk: press=ask, press=send) | nRF **P0.23** | GND | [NOW] — remapped from approve/deny 2026-08-12 |
 | Encoder A / B | nRF **P0.24** / **P0.25** | encoder COMMON (middle) → GND | [NOW] |
 | Encoder push | nRF **P0.28** | GND | [NOW] |
 | Mic-power sense | mic-VDD node → **100k** → nRF **P0.26** | no pull | [NOW] |
@@ -100,11 +100,27 @@ Bus: **SDA P0.30 · SCL P0.31**, one **4.7k pull-up from each to the 3V rail** [
 | SD_MODE | nRF **P0.01** (speaker on/off gate; P0.29 became console TX) | [NOW] |
 | OUT+ / OUT− | wired speaker (+ → OUT+) | [NOW] |
 
-## Future: nRF commands the Bluetooth chip (task #22)
+## nRF commands the Bluetooth chip — TWO NEW JUMPER WIRES
 
-Pins TBD — P0.01 went to SD_MODE and P0.29 to the console TX. Candidates:
-P0.00 (TX) + a repurposed DK LED pin for RX; the task-22 agent resolves
-against the overlay and updates this table.
+The nRF9160 owns Bluetooth policy (which speaker, when); the ESP32 obeys, on
+the one interface a real Bluetooth module has. **115200 8N1, no flow
+control.** Add exactly these two wires:
+
+| Wire | From | To | Status |
+| --- | --- | --- | --- |
+| Command TX | nRF **P0.00** | ESP32 **GPIO16** (RX2) | [NOW] |
+| Command RX | ESP32 **GPIO17** (TX2) | nRF **P0.05** | [NOW] |
+
+Both ends already share the GND rail (the common-ground wire the I2S bus
+needs) — do **not** add a second ground.
+
+**Board-controller dependency.** Flash the DK's nRF52840 board controller
+with this repo's `firmware/nrf9160/boards/nrf9160dk_nrf52840.overlay`, which
+disables `vcom2_pins_routing` **and** `led4_pin_routing`. Without it the
+interface MCU drives P0.00 (fighting the nRF's TX on every start bit) and
+the on-board LED4 hangs on the RX line. **Cost of the RX pin: DK LED4 is no
+longer usable** — the firmware only ever drives LED1 (P0.02), and P0.03/P0.04
+stay free for a future second indicator.
 
 ## Off-board
 
@@ -135,9 +151,9 @@ Label names as printed on each breakout. "—" = leave unconnected.
 **buttons** (2 wires each)
 | button | wire 1 | wire 2 |
 | --- | --- | --- |
-| yellow | DK P0.21 | GND rail |
-| green | DK P0.22 | GND rail |
-| blue | DK P0.23 | GND rail |
+| yellow (talk) | DK P0.21 | GND rail |
+| green (memo) | DK P0.22 | GND rail |
+| blue (push-to-talk) | DK P0.23 | GND rail |
 
 **rotary encoder** (3 pins one side, 2 the other)
 | pin on part | connect to |
@@ -208,8 +224,10 @@ Label names as printed on each breakout. "—" = leave unconnected.
 | GPIO27 | BCLK net |
 | GPIO33 | LRCLK net |
 | GPIO14 | audio-out net |
+| GPIO16 (RX2) | DK P0.00 — command UART in |
+| GPIO17 (TX2) | DK P0.05 — command UART out |
 | GND | GND rail (the common-ground wire) |
-| micro-USB | Mac |
+| micro-USB | Mac (debug console only — same command set, nothing depends on it) |
 
 **main chip · nRF9160 DK board itself**
 | pin | connect to |
@@ -218,4 +236,6 @@ Label names as printed on each breakout. "—" = leave unconnected.
 | GND | GND (black) rail |
 | P0.16 → P0.18 | jumper on the DK (clock) |
 | P0.14 → P0.17 | jumper on the DK (clock) |
+| P0.00 | ESP32 GPIO16 — command UART TX (needs `vcom2_pins_routing` disabled) |
+| P0.05 | ESP32 GPIO17 — command UART RX (needs `led4_pin_routing` disabled; costs DK LED4) |
 | micro-USB | Mac (flash + debug) |
