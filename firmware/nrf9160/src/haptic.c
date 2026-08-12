@@ -11,6 +11,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
@@ -62,6 +63,9 @@ static const struct haptic_step haptic_presets[HAPTIC_PATTERN_COUNT][2] = {
 	[HAPTIC_PATTERN_SINGLE] = { { 0x70, 120U, 0U }, { 0U, 0U, 0U } },
 	[HAPTIC_PATTERN_DOUBLE] = { { 0x70, 90U, 70U }, { 0x70, 90U, 0U } },
 	[HAPTIC_PATTERN_LONG] = { { 0x50, 400U, 0U }, { 0U, 0U, 0U } },
+	[HAPTIC_PATTERN_TICK] = { { 0x58, 25U, 0U }, { 0U, 0U, 0U } },
+	[HAPTIC_PATTERN_CLICK] = { { 0x74, 60U, 0U }, { 0U, 0U, 0U } },
+	[HAPTIC_PATTERN_STRONG] = { { 0x7E, 150U, 0U }, { 0U, 0U, 0U } },
 };
 
 /* SWD-visible probe outcome: 1 = attached+configured, 0 = absent/failed. */
@@ -127,6 +131,87 @@ static void drv2605l_stop(void)
 				 DRV2605L_REG_RTP_INPUT, 0);
 	(void)i2c_reg_write_byte(haptic_i2c, DRV2605L_ADDRESS,
 				 DRV2605L_REG_MODE, DRV2605L_MODE_STANDBY);
+}
+
+/*
+ * One pattern owns the motor at a time, whether it came from the blocking
+ * reflex path or the async event path.  Overlap resolution is DROP, never
+ * queue: haptic feedback describes "now", and a click delivered after the
+ * next event is worse than no click.
+ */
+static atomic_t haptic_owned;
+
+/*
+ * Async event engine.  The state machine advances one pattern edge per
+ * work invocation — start driving, stop driving, next step — so the only
+ * work each invocation does on the system workqueue is a single 2-byte
+ * 100 kHz I2C write (~0.3 ms); the waits between edges are k_work
+ * reschedules, not sleeps.  Total extra RAM: this struct + the atomic.
+ */
+static struct {
+	struct k_work_delayable work;
+	uint8_t pattern;
+	uint8_t step;
+	bool driving;
+} haptic_async;
+
+static void haptic_async_advance(struct k_work *work)
+{
+	const struct haptic_step *pulse =
+		&haptic_presets[haptic_async.pattern][haptic_async.step];
+
+	ARG_UNUSED(work);
+
+	if (!haptic_async.driving) {
+		if (haptic_async.step == 0U &&
+		    i2c_reg_write_byte(haptic_i2c, DRV2605L_ADDRESS,
+				       DRV2605L_REG_MODE,
+				       DRV2605L_MODE_RTP) != 0) {
+			goto park;
+		}
+		if (i2c_reg_write_byte(haptic_i2c, DRV2605L_ADDRESS,
+				       DRV2605L_REG_RTP_INPUT,
+				       pulse->amplitude) != 0) {
+			goto park;
+		}
+		haptic_async.driving = true;
+		(void)k_work_schedule(&haptic_async.work,
+				      K_MSEC(pulse->on_ms));
+		return;
+	}
+
+	(void)i2c_reg_write_byte(haptic_i2c, DRV2605L_ADDRESS,
+				 DRV2605L_REG_RTP_INPUT, 0);
+	haptic_async.driving = false;
+	if (pulse->off_ms > 0U &&
+	    haptic_async.step + 1U <
+		    ARRAY_SIZE(haptic_presets[haptic_async.pattern]) &&
+	    haptic_presets[haptic_async.pattern][haptic_async.step + 1U]
+			    .on_ms > 0U) {
+		++haptic_async.step;
+		(void)k_work_schedule(&haptic_async.work,
+				      K_MSEC(pulse->off_ms));
+		return;
+	}
+
+park:
+	/* Always park the driver, even after a mid-pattern bus error. */
+	drv2605l_stop();
+	atomic_set(&haptic_owned, 0);
+}
+
+void haptic_trigger(enum haptic_pattern pattern)
+{
+	if (!haptic_ready || pattern >= HAPTIC_PATTERN_COUNT) {
+		return;
+	}
+	if (!atomic_cas(&haptic_owned, 0, 1)) {
+		return; /* motor busy: drop, never queue */
+	}
+	haptic_async.pattern = (uint8_t)pattern;
+	haptic_async.step = 0U;
+	haptic_async.driving = false;
+	(void)k_work_schedule(&haptic_async.work, K_NO_WAIT);
 }
 
 static int haptic_probe_and_configure(void)
@@ -201,6 +286,7 @@ int haptic_init(void)
 {
 	int error = haptic_probe_and_configure();
 
+	k_work_init_delayable(&haptic_async.work, haptic_async_advance);
 	haptic_probe_error = error;
 	haptic_probe_ok = error == 0 ? 1U : 0U;
 	haptic_ready = error == 0;
@@ -232,10 +318,16 @@ int haptic_play(enum haptic_pattern pattern)
 	if (pattern >= HAPTIC_PATTERN_COUNT) {
 		return -EINVAL;
 	}
+	if (!atomic_cas(&haptic_owned, 0, 1)) {
+		/* An async event pattern is mid-flight; the caller's LED
+		 * fallback answers instead. */
+		return -EBUSY;
+	}
 
 	error = i2c_reg_write_byte(haptic_i2c, DRV2605L_ADDRESS,
 				   DRV2605L_REG_MODE, DRV2605L_MODE_RTP);
 	if (error != 0) {
+		atomic_set(&haptic_owned, 0);
 		return error;
 	}
 	/* Standby-to-active wake is sub-millisecond; 2 ms is generous. */
@@ -268,6 +360,7 @@ int haptic_play(enum haptic_pattern pattern)
 
 	/* Always park the driver, even after a mid-pattern bus error. */
 	drv2605l_stop();
+	atomic_set(&haptic_owned, 0);
 	return error;
 }
 
@@ -295,6 +388,11 @@ int haptic_play(enum haptic_pattern pattern)
 {
 	ARG_UNUSED(pattern);
 	return -ENODEV;
+}
+
+void haptic_trigger(enum haptic_pattern pattern)
+{
+	ARG_UNUSED(pattern);
 }
 
 #endif /* DT_NODE_HAS_STATUS(i2c2, okay) */

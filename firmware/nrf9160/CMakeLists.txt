@@ -100,6 +100,7 @@ target_sources(app PRIVATE
   src/pendant_store.c
   src/pendant_reflex.c
   src/haptic.c
+  src/accel_tap.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

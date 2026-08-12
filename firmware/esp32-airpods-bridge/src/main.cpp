@@ -1,11 +1,41 @@
+/*
+ * ESP32 A2DP bridge — BLUETOOTH-MODULE PARITY ONLY.
+ *
+ * Owner's ruling (2026-08-12, verbatim): "the esp32 is just a chip that
+ * we'll eventually replace with the bluetooth module for the end product.
+ * so the volume control should be the main chip's job, not esp32's. also,
+ * if there's any other firmware that's running on esp32 besides this,
+ * delete those. the esp32 should only deal with things that a bluetooth
+ * module could do."
+ *
+ * Review test for every new feature: would a BM83-class Bluetooth audio
+ * module with a UART command set do this? If not, it is vetoed here and
+ * belongs on the nRF9160. In scope: I2S audio in (including the receiver
+ * resync/sync-lock machinery), A2DP source streaming out, pairing
+ * management over serial JSON (scan/connect/forget/status), the route
+ * on/off gate, auto-reconnect to the remembered sink, connection state
+ * events, a test tone, and a once-a-second link-health line. Volume
+ * control is the nRF's job — it pre-scales the PCM it sends; this chip
+ * plays what it is given. Bring-up instrumentation (pin probes, clock
+ * timing, raw slot captures, ring dumps) does not come back.
+ *
+ * Hard-won audio-path rules, kept from bring-up — violating any of these
+ * produced audible, hard-to-diagnose failures:
+ *  - The PCM ring is a lock-free SPSC ring: the I2S capture task is the
+ *    only producer and the A2DP callback the only consumer. No locks in
+ *    the audio path — no portMUX critical sections around sample work.
+ *  - The producer never moves ringRead; the consumer never moves ringWrite.
+ *  - Never trade DRAM for observability: a 44 KB diagnostic capture buffer
+ *    once starved Bluedroid's A2DP TX queue and silenced the sink entirely.
+ *  - Anything registered to run from an ISR must be IRAM_ATTR and must not
+ *    call into flash.
+ */
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BluetoothA2DPSource.h>
 #include <Preferences.h>
 #include <driver/i2s_std.h>
 #include <esp_gap_bt_api.h>
-#include <soc/gpio_struct.h>
-#include <xtensa/core-macros.h>
 
 namespace {
 
@@ -17,31 +47,6 @@ constexpr gpio_num_t I2S_BCLK_PIN = GPIO_NUM_27;
 constexpr gpio_num_t I2S_DATA_PIN = GPIO_NUM_14;
 constexpr uint32_t ESP32_MAX_CPU_CLOCK_MHZ = 240;
 i2s_chan_handle_t i2sInput = nullptr;
-
-/*
- * Volume potentiometer on GPIO34 = ADC1_CH6. ADC1 is the only usable ADC
- * here and that is not a preference: ADC2 shares hardware with the Wi-Fi/
- * Bluetooth radio, and with Bluedroid running every ADC2 read returns
- * garbage or ESP_ERR_TIMEOUT. GPIO34 is also input-only with no internal
- * pulls, which suits a pot wiper exactly (the pot itself defines the level).
- *
- * The knob is an ATTENUATOR, never an amplifier: 0..4095 maps to 0.0..1.0
- * and the curve is squared because perceived loudness tracks power, not
- * amplitude — a linear map crams all audible change into the last quarter
- * turn. Gain rides to the A2DP callback as one Q12 integer written by
- * loop() and read by the callback: single writer, single reader, no lock,
- * per the audio path's standing rule.
- */
-constexpr gpio_num_t VOLUME_POT_PIN = GPIO_NUM_34;
-constexpr uint32_t VOLUME_POLL_INTERVAL_MS = 50;  // ~20 Hz
-// 2% of full scale: below the pot's own wiper noise floor sits ~1%, so
-// this rejects jitter without making the knob feel notchy.
-constexpr int VOLUME_HYSTERESIS_COUNTS = 82;
-// Snap bands so the knob's mechanical stops actually mean silence / full.
-constexpr int VOLUME_SNAP_LOW = 40;
-constexpr int VOLUME_SNAP_HIGH = 4055;
-constexpr uint32_t VOLUME_GAIN_UNITY_Q12 = 4096;
-volatile uint32_t volumeGainQ12 = VOLUME_GAIN_UNITY_Q12;
 
 /*
  * No speaker is compiled in. The bridge remembers whatever it last connected
@@ -90,7 +95,6 @@ constexpr size_t RESAMPLE_TAPS = 12;  // input samples per output sample
  */
 constexpr size_t RESAMPLE_PHASES = 128;
 int16_t resampleCoeff[(RESAMPLE_PHASES + 1) * RESAMPLE_TAPS];
-constexpr size_t RAW_CAPTURE_FRAMES = 64;
 constexpr int16_t STREAM_SYNC_A = 0x2468;
 constexpr int16_t STREAM_SYNC_B = 0x5A5A;
 constexpr int16_t STREAM_SYNC_END = 0x6C6C;
@@ -117,46 +121,15 @@ bool haveKnownAddress = false;
 volatile esp_a2d_connection_state_t pendingConnectionState =
     ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile bool connectionStateChanged = false;
+// Link-health counters a module would report: input activity, input level,
+// and frames delivered to the Bluetooth stack. Nothing here is bring-up
+// instrumentation; it feeds the once-a-second diagnostic line only.
 volatile uint32_t i2sFramesReceived = 0;
-volatile uint32_t i2sReadErrors = 0;
 volatile uint16_t i2sPeakSinceReport = 0;
-volatile uint16_t i2sRawPeakSinceReport = 0;
-volatile uint32_t i2sReceiverResyncs = 0;
-volatile uint32_t i2sSyncLocks = 0;
 volatile uint32_t a2dpFramesRequested = 0;
-volatile uint32_t a2dpNonzeroFrames = 0;
-volatile uint32_t ringOverruns = 0;
-volatile uint32_t ringUnderruns = 0;
-/*
- * The RX DMA drops a whole descriptor silently when the capture task is late:
- * i2s_channel_read returns ESP_OK and simply never shows those frames. That
- * loss was invisible until now, and it is exactly what starves the resampler,
- * so count the driver's own overflow event and the worst read-to-read gap.
- */
-volatile uint32_t i2sRxOverflows = 0;
-volatile uint32_t i2sMaxReadGapUs = 0;
-// ESP_OK once the driver accepts the overflow hook; reported in the status.
-esp_err_t i2sOverflowCallbackStatus = ESP_FAIL;
-
-// Runs from the I2S ISR: must be in IRAM and must not call into flash.
-bool IRAM_ATTR onI2sRecvOverflow(i2s_chan_handle_t, i2s_event_data_t *,
-                                 void *) {
-  ++i2sRxOverflows;
-  return false;
-}
-volatile uint32_t resamplerStarts = 0;
-volatile uint32_t resamplerSlips = 0;
-volatile uint32_t a2dpCallCount = 0;
-volatile uint32_t a2dpCallMicros = 0;
-volatile uint32_t a2dpMaxFrameCount = 0;
 volatile uint32_t testToneFramesRemaining = 0;
 volatile uint32_t testTonePhase = 0;
 volatile bool i2sForwardingEnabled = true;
-volatile bool rawCaptureReady = false;
-volatile bool rawCaptureAwaitAudio = false;
-volatile bool clockCaptureRequested = false;
-volatile size_t rawCaptureFrames = 0;
-int32_t rawCapture[RAW_CAPTURE_FRAMES * 2];
 
 /*
  * There is deliberately no half-second PCM capture buffer here.
@@ -171,8 +144,7 @@ int32_t rawCapture[RAW_CAPTURE_FRAMES * 2];
  * rendered nothing at all.
  *
  * The audio path must not be traded for observability. Capture the wire
- * from the nRF side, which has memory to spare, or over the ring dump
- * below (64 frames) which costs nothing.
+ * from the nRF side, which has memory to spare.
  */
 
 /*
@@ -191,7 +163,6 @@ int16_t ringBuffer[RING_FRAMES];
 volatile size_t ringRead = 0;
 volatile size_t ringWrite = 0;
 volatile uint32_t audioStreamGeneration = 0;
-portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
 void emitEvent(const char *state, const String &message) {
   JsonDocument document;
@@ -238,7 +209,6 @@ void pushSample(int16_t sample) {
   const size_t next = (write + 1) % RING_FRAMES;
   if (next == ringRead) {
     // Full: drop the NEWEST sample. The producer must never move ringRead.
-    ++ringOverruns;
     return;
   }
   ringBuffer[write] = sample;
@@ -265,186 +235,6 @@ void clearAudioBuffer() {
   // Consumer-side catch-up: never move ringWrite here, only ringRead.
   ringRead = ringWrite;
   ++audioStreamGeneration;
-}
-
-/*
- * One knob sample: median of five raw reads. The ESP32's SAR ADC throws
- * occasional single-sample spikes (radio bursts couple into the reference),
- * and a median kills an outlier completely where an average only dilutes it.
- * Five reads cost ~0.5 ms once per 50 ms tick — invisible to the loop task.
- */
-uint16_t readVolumePotMedian5() {
-  uint16_t samples[5];
-  for (auto &sample : samples) {
-    sample = static_cast<uint16_t>(analogRead(VOLUME_POT_PIN));
-  }
-  // Insertion sort: five elements, no allocation, branch-predictable.
-  for (size_t i = 1; i < 5; ++i) {
-    const uint16_t key = samples[i];
-    size_t j = i;
-    for (; j > 0 && samples[j - 1] > key; --j) {
-      samples[j] = samples[j - 1];
-    }
-    samples[j] = key;
-  }
-  return samples[2];
-}
-
-/*
- * ~20 Hz knob poll from loop(). Hysteresis (≥2% movement) keeps the serial
- * channel and the gain word quiet while the knob is parked; the snap bands
- * let the end stops reach true 0 and true 4095, which hysteresis alone
- * would forever keep a few counts short of.
- */
-void pollVolumePot() {
-  static uint32_t lastPollAt = 0;
-  static int lastAppliedRaw = -1;
-
-  const uint32_t now = millis();
-  if (now - lastPollAt < VOLUME_POLL_INTERVAL_MS) {
-    return;
-  }
-  lastPollAt = now;
-
-  int raw = readVolumePotMedian5();
-  if (raw <= VOLUME_SNAP_LOW) {
-    raw = 0;
-  } else if (raw >= VOLUME_SNAP_HIGH) {
-    raw = 4095;
-  }
-  if (lastAppliedRaw >= 0 && abs(raw - lastAppliedRaw) < VOLUME_HYSTERESIS_COUNTS) {
-    return;
-  }
-  lastAppliedRaw = raw;
-
-  const float normalized = static_cast<float>(raw) / 4095.0f;
-  const float level = normalized * normalized;  // perceptual (power) curve
-  volumeGainQ12 = static_cast<uint32_t>(lroundf(level * VOLUME_GAIN_UNITY_Q12));
-
-  // Wire contract with the serial control page / orchestrator.
-  Serial.printf("{\"type\":\"volume\",\"level\":%.2f,\"raw\":%d}\n",
-                static_cast<double>(level), raw);
-}
-
-inline bool readGpioFast(gpio_num_t pin) {
-  const uint32_t number = static_cast<uint32_t>(pin);
-  return number < 32 ? ((GPIO.in >> number) & 1U)
-                     : ((GPIO.in1.data >> (number - 32)) & 1U);
-}
-
-bool probeOneLeftSlot(uint32_t &bits, uint8_t &edgeCount) {
-  const uint32_t deadline = micros() + 5000U;
-
-  // Synchronize to the high-to-low LRCK edge that begins the left slot.
-  while (!readGpioFast(I2S_LRC_PIN)) {
-    if (static_cast<int32_t>(micros() - deadline) >= 0) {
-      return false;
-    }
-  }
-  while (readGpioFast(I2S_LRC_PIN)) {
-    if (static_cast<int32_t>(micros() - deadline) >= 0) {
-      return false;
-    }
-  }
-
-  bits = 0;
-  edgeCount = 0;
-  bool previousClock = readGpioFast(I2S_BCLK_PIN);
-  const uint32_t cycleDeadline = XTHAL_GET_CCOUNT() + 1200000U;
-  while (!readGpioFast(I2S_LRC_PIN) && edgeCount < 24) {
-    const bool clock = readGpioFast(I2S_BCLK_PIN);
-    if (clock && !previousClock) {
-      bits = (bits << 1) | (readGpioFast(I2S_DATA_PIN) ? 1U : 0U);
-      ++edgeCount;
-    }
-    previousClock = clock;
-    if (static_cast<int32_t>(XTHAL_GET_CCOUNT() - cycleDeadline) >= 0) {
-      return false;
-    }
-  }
-  return edgeCount > 0;
-}
-
-void emitPinProbe() {
-  uint32_t words[16] = {};
-  uint8_t edges[16] = {};
-  size_t captured = 0;
-
-  for (size_t attempt = 0; attempt < 64 && captured < 16; ++attempt) {
-    uint32_t bits;
-    uint8_t edgeCount;
-    if (probeOneLeftSlot(bits, edgeCount)) {
-      words[captured] = bits;
-      edges[captured] = edgeCount;
-      ++captured;
-    }
-  }
-
-  Serial.print("{\"type\":\"pin_probe\",\"slots\":[");
-  for (size_t index = 0; index < captured; ++index) {
-    if (index != 0) {
-      Serial.print(',');
-    }
-    Serial.print("{\"edges\":");
-    Serial.print(edges[index]);
-    Serial.print(",\"bits\":");
-    Serial.print(words[index]);
-    Serial.print('}');
-  }
-  Serial.println("]}");
-}
-
-uint32_t measureRisingFrequency(gpio_num_t pin, uint32_t edgeTarget) {
-  const uint32_t cyclesPerSecond = ESP.getCpuFreqMHz() * 1000000U;
-  const uint32_t timeoutCycles = cyclesPerSecond / 20U;
-  uint32_t deadline = XTHAL_GET_CCOUNT() + timeoutCycles;
-
-  bool previous = readGpioFast(pin);
-  while (true) {
-    const bool current = readGpioFast(pin);
-    if (current && !previous) {
-      break;
-    }
-    previous = current;
-    if (static_cast<int32_t>(XTHAL_GET_CCOUNT() - deadline) >= 0) {
-      return 0;
-    }
-  }
-
-  const uint32_t firstEdgeAt = XTHAL_GET_CCOUNT();
-  uint32_t edges = 1;
-  deadline = firstEdgeAt + timeoutCycles;
-  previous = true;
-  while (edges < edgeTarget) {
-    const bool current = readGpioFast(pin);
-    if (current && !previous) {
-      ++edges;
-    }
-    previous = current;
-    if (static_cast<int32_t>(XTHAL_GET_CCOUNT() - deadline) >= 0) {
-      return 0;
-    }
-  }
-
-  const uint32_t elapsed = XTHAL_GET_CCOUNT() - firstEdgeAt;
-  return elapsed == 0
-             ? 0
-             : static_cast<uint32_t>(
-                   (static_cast<uint64_t>(edgeTarget - 1U) *
-                    cyclesPerSecond) /
-                   elapsed);
-}
-
-void emitClockTiming() {
-  const uint32_t bclk = measureRisingFrequency(I2S_BCLK_PIN, 512);
-  const uint32_t lrck = measureRisingFrequency(I2S_LRC_PIN, 32);
-  Serial.print("{\"type\":\"clock_timing\",\"bclk_hz\":");
-  Serial.print(bclk);
-  Serial.print(",\"lrck_hz\":");
-  Serial.print(lrck);
-  Serial.print(",\"bclk_per_frame\":");
-  Serial.print(lrck == 0 ? 0.0 : static_cast<double>(bclk) / lrck, 2);
-  Serial.println("}");
 }
 
 /*
@@ -478,29 +268,11 @@ void i2sCaptureTask(void *) {
     const esp_err_t result = i2s_channel_read(
         i2sInput, input, sizeof(input), &bytesRead, portMAX_DELAY);
     if (result != ESP_OK) {
-      ++i2sReadErrors;
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
     if (bytesRead == 0) {
       continue;
-    }
-
-    /*
-     * Time between successive completed reads. One 256-frame block is
-     * 8.192 ms at 31250 Hz and the DMA holds 8 of them (65.5 ms), so a gap
-     * approaching 65 ms means the driver had to overwrite undelivered audio.
-     */
-    {
-      static uint32_t lastReadAtUs = 0;
-      const uint32_t nowUs = micros();
-      if (lastReadAtUs != 0) {
-        const uint32_t gap = nowUs - lastReadAtUs;
-        if (gap > i2sMaxReadGapUs) {
-          i2sMaxReadGapUs = gap;
-        }
-      }
-      lastReadAtUs = nowUs;
     }
 
     const uint32_t receivedAt = millis();
@@ -511,16 +283,9 @@ void i2sCaptureTask(void *) {
        * Reset the RX state machine while BCLK/WS are active, discard the
        * first DMA block, and begin with the next complete stereo frame.
        */
-      const esp_err_t disableResult = i2s_channel_disable(i2sInput);
-      const esp_err_t enableResult = i2s_channel_enable(i2sInput);
-      if (disableResult != ESP_OK || enableResult != ESP_OK) {
-        ++i2sReadErrors;
-      }
-      ++i2sReceiverResyncs;
+      i2s_channel_disable(i2sInput);
+      i2s_channel_enable(i2sInput);
       clearAudioBuffer();
-      rawCaptureFrames = 0;
-      rawCaptureReady = false;
-      clockCaptureRequested = true;
       waitingForSync = true;
       syncLocked = false;
       repairOneBitShift = false;
@@ -538,24 +303,6 @@ void i2sCaptureTask(void *) {
     i2sFramesReceived += frames;
 
     for (size_t frame = 0; frame < frames; ++frame) {
-      if (rawCaptureAwaitAudio) {
-        // Wait for a LOUD sample: quiet words are ambiguous between slot
-        // alignments (256<<8 and 1<<16 are the same 32-bit value), so only
-        // a large magnitude can prove which one is real.
-        const int32_t probe = extractSlotSample(input[frame * 2]);
-        if (probe > 8000 || probe < -8000) {
-          rawCaptureAwaitAudio = false;
-        }
-      }
-      if (!rawCaptureAwaitAudio && rawCaptureFrames < RAW_CAPTURE_FRAMES) {
-        rawCapture[rawCaptureFrames * 2] = input[frame * 2];
-        rawCapture[rawCaptureFrames * 2 + 1] = input[frame * 2 + 1];
-        ++rawCaptureFrames;
-        if (rawCaptureFrames == RAW_CAPTURE_FRAMES) {
-          rawCaptureReady = true;
-        }
-      }
-
       const int32_t leftWord = input[frame * 2];
       const int16_t normalSample = extractSlotSample(leftWord);
       const int16_t shiftedSample = extractShiftedSlotSample(leftWord);
@@ -603,7 +350,6 @@ void i2sCaptureTask(void *) {
             repairOneBitShift =
                 shiftedSyncMatches > normalSyncMatches;
             syncLocked = true;
-            ++i2sSyncLocks;
           }
           continue;
         }
@@ -624,14 +370,6 @@ void i2sCaptureTask(void *) {
 
       const int16_t sample =
           repairOneBitShift ? shiftedSample : normalSample;
-
-      int32_t rawMagnitude = normalSample;
-      if (rawMagnitude < 0) {
-        rawMagnitude = -rawMagnitude;
-      }
-      if (rawMagnitude > i2sRawPeakSinceReport) {
-        i2sRawPeakSinceReport = static_cast<uint16_t>(rawMagnitude);
-      }
 
       int32_t cleanMagnitude = sample;
       if (cleanMagnitude < 0) {
@@ -691,18 +429,6 @@ void buildResampleFilter() {
 }
 
 int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
-  const uint32_t callStartedUs = micros();
-  struct CallTimer {
-    uint32_t started;
-    int32_t count;
-    ~CallTimer() {
-      a2dpCallMicros += micros() - started;
-      ++a2dpCallCount;
-      if (static_cast<uint32_t>(count) > a2dpMaxFrameCount) {
-        a2dpMaxFrameCount = static_cast<uint32_t>(count);
-      }
-    }
-  } callTimer{callStartedUs, frameCount};
   a2dpFramesRequested += frameCount;
 
   // Diagnostic path: generate a loud 440 Hz square wave directly on the
@@ -727,7 +453,6 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
           testTonePhase -= OUTPUT_RATE;
         }
         --testToneFramesRemaining;
-        ++a2dpNonzeroFrames;
       }
       frames[index].channel1 = sample;
       frames[index].channel2 = sample;
@@ -785,33 +510,19 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
     }
     phaseIndex = 0;
     primed = true;
-    ++resamplerStarts;
   }
 
   /*
    * The 625/882 ratio is exact, so the only correction ever needed is for
    * the genuine crystal difference between the nRF and the Bluetooth clock
    * — parts per million. Allow at most ONE slipped input sample per
-   * callback (about 0.9% of the wire rate at the observed call rate), and
-   * count every slip.
+   * callback (about 0.9% of the wire rate at the observed call rate).
    *
    * This deliberately cannot paper over a large rate mismatch. If the
    * Bluetooth stack pulls materially slower than 44100 frames/s, the ring
-   * climbs to the high-water mark and resampler_slips runs away — which is
-   * a fault to be reported, not something to hide by stretching pitch.
+   * climbs to the high-water mark and slips every callback — a fault to be
+   * fixed, not something to hide by stretching pitch.
    */
-  /*
-   * Volume applies HERE and only here, because this callback is the single
-   * owner of samples on their way out (the standing rule for the SPSC ring:
-   * gain lives where one owner touches samples, and no locks enter the
-   * audio path). One coherent read per callback: a knob move lands at the
-   * next 512-frame request (~12 ms) instead of tearing mid-buffer. Applied
-   * pre-constrain so the FIR's occasional overshoot saturates exactly once,
-   * after the attenuation. The ring keeps the clean samples, so diagnostics
-   * (i2s_peak) still describe the wire, not the knob.
-   */
-  const int32_t gainQ12 = static_cast<int32_t>(volumeGainQ12);
-
   const int32_t level = static_cast<int32_t>(bufferedSampleCount());
   bool holdOneInput = false;
   if (level > static_cast<int32_t>(RESAMPLER_HIGH_WATER_FRAMES)) {
@@ -821,12 +532,10 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
         history[k] = history[k - 1];
       }
       history[0] = extra;
-      ++resamplerSlips;
     }
   } else if (level < static_cast<int32_t>(RESAMPLER_LOW_WATER_FRAMES)) {
     holdOneInput = true;
   }
-  buffered = static_cast<size_t>(level);
 
   for (int32_t index = 0; index < frameCount; ++index) {
     /*
@@ -850,18 +559,16 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
       accumulator += static_cast<int64_t>(blended) * history[tap];
     }
     const int32_t scaled = static_cast<int32_t>((accumulator + 16384) >> 15);
-    // Attenuate, then saturate once. |scaled| stays under ~2x full scale
-    // (FIR overshoot) and gain tops out at 4096, so the product is well
-    // inside int32; the fade tail below inherits the leveled sample.
-    const int32_t leveled = (scaled * gainQ12) >> 12;
+    /*
+     * No gain stage here — module parity. Volume is the nRF9160's job: it
+     * pre-scales the PCM it sends, and this chip plays what it is given.
+     * The single constrain saturates the FIR's occasional overshoot.
+     */
     const int16_t sample = static_cast<int16_t>(
-        constrain(leveled, static_cast<int32_t>(INT16_MIN),
+        constrain(scaled, static_cast<int32_t>(INT16_MIN),
                   static_cast<int32_t>(INT16_MAX)));
     frames[index].channel1 = sample;
     frames[index].channel2 = sample;
-    if (sample != 0) {
-      ++a2dpNonzeroFrames;
-    }
 
     phaseIndex += RESAMPLE_M;
     if (phaseIndex >= RESAMPLE_L) {
@@ -869,12 +576,10 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
       if (holdOneInput) {
         // Repeat the current input sample once to let the buffer refill.
         holdOneInput = false;
-        ++resamplerSlips;
         continue;
       }
       int16_t incoming = 0;
       if (!popSample(incoming)) {
-        ++ringUnderruns;
         primed = false;
         /*
          * Fade the remainder of this callback instead of jumping abruptly
@@ -1106,40 +811,6 @@ void handleSerialCommand(const String &line) {
                   : "usb",
               i2sForwardingEnabled ? "nRF I2S forwarding enabled."
                                    : "nRF I2S forwarding muted.");
-  } else if (command == "capture") {
-    // Re-arm the raw 32-bit word capture so it lands on real audio
-    // rather than on the silence right after a resync. The bit pattern is
-    // what proves or disproves slot alignment.
-    rawCaptureFrames = 0;
-    rawCaptureReady = false;
-    rawCaptureAwaitAudio = true;
-    emitEvent(a2dp.get_connection_state() ==
-                      ESP_A2D_CONNECTION_STATE_CONNECTED
-                  ? "connected"
-                  : "usb",
-              "Armed A2DP capture; recording starts at the next audio.");
-  } else if (command == "dump") {
-    int16_t samples[64] = {};
-    size_t sampleCount = 0;
-    sampleCount = min(bufferedSampleCount(), static_cast<size_t>(64));
-    const size_t start =
-        (ringWrite + RING_FRAMES - sampleCount) % RING_FRAMES;
-    for (size_t index = 0; index < sampleCount; ++index) {
-      samples[index] = ringBuffer[(start + index) % RING_FRAMES];
-    }
-
-    Serial.print("{\"type\":\"i2s_dump\",\"samples\":[");
-    for (size_t index = 0; index < sampleCount; ++index) {
-      if (index != 0) {
-        Serial.print(',');
-      }
-      Serial.print(samples[index]);
-    }
-    Serial.println("]}");
-  } else if (command == "probe") {
-    emitPinProbe();
-  } else if (command == "timing") {
-    emitClockTiming();
   } else if (command == "forget") {
     if (a2dpStarted) {
       a2dp.end(false);
@@ -1207,20 +878,6 @@ void configureI2sInput() {
 
   ESP_ERROR_CHECK(i2s_new_channel(&channel, nullptr, &i2sInput));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2sInput, &standard));
-  /*
-   * Count silent DMA drops. Without this the only symptom of a late capture
-   * task is audio that quietly goes missing between the wire and the ring.
-   *
-   * This runs from the I2S ISR, so the handler must live in IRAM. Registration
-   * is best-effort on purpose: losing a diagnostic counter must never keep the
-   * bridge from booting and playing audio.
-   */
-  {
-    i2s_event_callbacks_t callbacks = {};
-    callbacks.on_recv_q_ovf = onI2sRecvOverflow;
-    i2sOverflowCallbackStatus =
-        i2s_channel_register_event_callback(i2sInput, &callbacks, nullptr);
-  }
   // A disconnected/cold DATA header joint must resolve to silence instead of
   // random full-scale samples. A valid nRF 3.3 V output overrides this pull.
   ESP_ERROR_CHECK(gpio_set_pull_mode(I2S_DATA_PIN, GPIO_PULLDOWN_ONLY));
@@ -1230,27 +887,13 @@ void configureI2sInput() {
 } // namespace
 
 void setup() {
-  const bool maximumCpuClockSelected =
-      setCpuFrequencyMhz(ESP32_MAX_CPU_CLOCK_MHZ);
+  // 240 MHz: the polyphase resampler plus SBC encode need the headroom.
+  setCpuFrequencyMhz(ESP32_MAX_CPU_CLOCK_MHZ);
   Serial.begin(115200);
   delay(400);
   Serial.setTimeout(40);
-  Serial.printf(
-      "{\"type\":\"max_clock_test\",\"requested_cpu_mhz\":%u,"
-      "\"actual_cpu_mhz\":%u,\"selected\":%s}\n",
-      ESP32_MAX_CPU_CLOCK_MHZ, ESP.getCpuFreqMHz(),
-      maximumCpuClockSelected ? "true" : "false");
 
   buildResampleFilter();
-
-  /*
-   * 11 dB attenuation spans the pot's whole 0..3.3 V swing (the default
-   * 0 dB clips at ~1.1 V, wasting two thirds of the knob's travel). The
-   * first poll below seeds the gain from the knob's actual position, so
-   * boot volume is where the owner left the knob, not a hardcoded unity.
-   */
-  analogSetPinAttenuation(VOLUME_POT_PIN, ADC_11db);
-  pollVolumePot();
 
   preferences.begin("airpods", false);
   haveKnownAddress =
@@ -1284,7 +927,6 @@ void setup() {
 void loop() {
   static String incoming;
   static uint32_t lastDiagnosticAt = 0;
-  static bool rawCapturePrinted = false;
   while (Serial.available()) {
     const char character = static_cast<char>(Serial.read());
     if (character == '\n') {
@@ -1329,63 +971,6 @@ void loop() {
     }
   }
 
-  if (clockCaptureRequested) {
-    clockCaptureRequested = false;
-    emitClockTiming();
-  }
-
-  if (rawCaptureReady && !rawCapturePrinted) {
-    rawCapturePrinted = true;
-    uint32_t rawPeak = 0;
-    uint32_t shiftedPeak = 0;
-    uint64_t rawAbsoluteSum = 0;
-    uint64_t shiftedAbsoluteSum = 0;
-
-    for (size_t frame = 0; frame < RAW_CAPTURE_FRAMES; ++frame) {
-      const int16_t raw = extractSlotSample(rawCapture[frame * 2]);
-      const int16_t shifted = extractShiftedSlotSample(rawCapture[frame * 2]);
-      int32_t rawAbsolute = raw;
-      int32_t shiftedAbsolute = shifted;
-      if (rawAbsolute < 0) {
-        rawAbsolute = -rawAbsolute;
-      }
-      if (shiftedAbsolute < 0) {
-        shiftedAbsolute = -shiftedAbsolute;
-      }
-      rawPeak = max(rawPeak, static_cast<uint32_t>(rawAbsolute));
-      shiftedPeak =
-          max(shiftedPeak, static_cast<uint32_t>(shiftedAbsolute));
-      rawAbsoluteSum += static_cast<uint32_t>(rawAbsolute);
-      shiftedAbsoluteSum += static_cast<uint32_t>(shiftedAbsolute);
-    }
-
-    Serial.print("{\"type\":\"raw_i2s_capture\",\"raw_peak\":");
-    Serial.print(rawPeak);
-    Serial.print(",\"raw_mean\":");
-    Serial.print(rawAbsoluteSum / RAW_CAPTURE_FRAMES);
-    Serial.print(",\"shift_left_1_peak\":");
-    Serial.print(shiftedPeak);
-    Serial.print(",\"shift_left_1_mean\":");
-    Serial.print(shiftedAbsoluteSum / RAW_CAPTURE_FRAMES);
-    Serial.print(",\"left\":[");
-    for (size_t frame = 0; frame < RAW_CAPTURE_FRAMES; ++frame) {
-      if (frame != 0) {
-        Serial.print(',');
-      }
-      Serial.print(rawCapture[frame * 2]);
-    }
-    Serial.print("],\"right\":[");
-    for (size_t frame = 0; frame < RAW_CAPTURE_FRAMES; ++frame) {
-      if (frame != 0) {
-        Serial.print(',');
-      }
-      Serial.print(rawCapture[frame * 2 + 1]);
-    }
-    Serial.println("]}");
-  } else if (!rawCaptureReady) {
-    rawCapturePrinted = false;
-  }
-
   /*
    * Keep paging the known address while the link is down. Headphones come
    * back on their own schedule — out of the case, released by a phone — and
@@ -1399,20 +984,17 @@ void loop() {
     forceKnownConnect();
   }
 
-  // ~20 Hz knob poll; emits {"type":"volume",...} on real movement only.
-  pollVolumePot();
-
+  /*
+   * Once-a-second link-health line: what a Bluetooth audio module would
+   * report over its UART — link state, remembered peer, whether audio is
+   * arriving on the I2S input, its level, and whether the A2DP stream is
+   * pulling frames. Internal ring/resampler counters are not link health
+   * and do not belong here.
+   */
   if (millis() - lastDiagnosticAt >= 1000) {
     lastDiagnosticAt = millis();
     const uint16_t peak = i2sPeakSinceReport;
-    const uint16_t rawPeak = i2sRawPeakSinceReport;
     i2sPeakSinceReport = 0;
-    i2sRawPeakSinceReport = 0;
-
-    size_t buffered;
-    portENTER_CRITICAL(&ringMux);
-    buffered = bufferedSampleCount();
-    portEXIT_CRITICAL(&ringMux);
 
     JsonDocument document;
     document["type"] = "diagnostic";
@@ -1421,21 +1003,9 @@ void loop() {
             ? "connected"
             : (a2dpStarted ? "searching" : "usb");
     document["target"] = targetName;
-    document["message"] =
-        "I2S frames=" + String(i2sFramesReceived) +
-        ", raw peak=" + String(rawPeak) +
-        ", output peak=" + String(peak) +
-        ", receiver resyncs=" + String(i2sReceiverResyncs) +
-        ", sync locks=" + String(i2sSyncLocks) +
-        ", buffered=" + String(buffered) +
-        "; A2DP frames=" + String(a2dpFramesRequested) +
-        ", nonzero=" + String(a2dpNonzeroFrames) +
-        ", read errors=" + String(i2sReadErrors) +
-        ", underruns=" + String(ringUnderruns) +
-        ", overruns=" + String(ringOverruns) +
-        ", starts=" + String(resamplerStarts) + ".";
-    document["i2s_frames"] = i2sFramesReceived;
-    {
+    document["message"] = "I2S frames=" + String(i2sFramesReceived) +
+                          ", peak=" + String(peak) +
+                          "; A2DP frames=" + String(a2dpFramesRequested) + ".";
     char addressText[18] = "";
     if (haveKnownAddress) {
       snprintf(addressText, sizeof(addressText),
@@ -1445,36 +1015,9 @@ void loop() {
     }
     document["known_addr"] = addressText;
     document["a2dp_state"] = static_cast<int>(a2dp.get_connection_state());
-  }
-  {
-    const uint32_t calls = a2dpCallCount;
-    document["a2dp_calls"] = calls;
-    document["a2dp_us_per_call"] = calls ? (a2dpCallMicros / calls) : 0;
-    document["a2dp_max_frames_per_call"] = a2dpMaxFrameCount;
-    a2dpCallCount = 0;
-    a2dpCallMicros = 0;
-    a2dpMaxFrameCount = 0;
-  }
-  document["i2s_raw_peak"] = rawPeak;
+    document["i2s_frames"] = i2sFramesReceived;
     document["i2s_peak"] = peak;
-    document["i2s_receiver_resyncs"] = i2sReceiverResyncs;
-    document["i2s_sync_locks"] = i2sSyncLocks;
-    document["buffered_frames"] = buffered;
     document["a2dp_frames"] = a2dpFramesRequested;
-    document["a2dp_nonzero_frames"] = a2dpNonzeroFrames;
-    document["i2s_read_errors"] = i2sReadErrors;
-    document["ring_underruns"] = ringUnderruns;
-    document["ring_overruns"] = ringOverruns;
-    document["resampler_starts"] = resamplerStarts;
-    document["resampler_slips"] = resamplerSlips;
-    document["i2s_rx_overflows"] = i2sRxOverflows;
-    document["i2s_overflow_hook"] =
-        i2sOverflowCallbackStatus == ESP_OK ? "ok" : "unavailable";
-    document["i2s_max_read_gap_us"] = i2sMaxReadGapUs;
-    // A knob at zero legitimately zeroes a2dp_nonzero_frames; report the
-    // gain so "silent output" and "broken path" stay distinguishable.
-    document["volume_gain_q12"] = volumeGainQ12;
-    i2sMaxReadGapUs = 0;
     serializeJson(document, Serial);
     Serial.println();
   }
