@@ -5,3 +5,4 @@ When you delegate subagents decide for each task which model to use. If it's a s
 Automatically store all coding sessions and tokens for all orchestrator agent and subagents.
 Make sure subagents do not interfere with each other's work.
 A subagent claims all the files that are relevant to its work.
+Safari extension updates: ship ONLY via scripts/ship-safari-extension.sh (never delete or re-register the installed app — that resets Safari's storage identity and wipes the owner's pairing), and after the required Safari relaunch remember Safari does NOT wake the MV3 background worker on its own — extension surfaces must runtime.sendMessage-ping it on open, so verify an update landed by live evidence (agent heartbeats, storage timestamps), never by what the popup displays.
