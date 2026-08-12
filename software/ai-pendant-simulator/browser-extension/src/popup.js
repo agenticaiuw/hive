@@ -28,6 +28,11 @@ import {
   normalizePairLifetime,
 } from './pairing.js'
 import {
+  PAIR_REPLY_TIMEOUT_MS,
+  pairFallbackVerdict,
+  runDirectPairing,
+} from './page-engine.js'
+import {
   APPROVALS_KEY,
   approvalCountdown,
   approvalIsAnswerable,
@@ -755,33 +760,63 @@ elements.pairConnect.addEventListener('click', async () => {
     [...randomBytes].map((byte) => byte.toString(16).padStart(2, '0')).join(''),
   )
 
-  try {
-    const reply = await api.runtime.sendMessage({
-      type: 'pair:run',
-      agentUrl: stored.agentUrl || DEFAULT_AGENT_URL,
-      code,
-      deviceId,
-      deviceName: stored.deviceName || 'Browser extension',
-      lifetime: normalizePairLifetime(elements.pairLifetime.value),
-    })
-    if (reply === undefined || reply === null) {
-      /*
-       * THE REPLY WAS DROPPED, NOT THE PAIRING. This exact shape — a healthy
-       * agent, a minted credential, and an undefined sendMessage resolution —
-       * is what used to print "Pairing failed: the agent returned no token."
-       * The worker owns the storage writes now, so the truthful message is
-       * that the outcome is still on its way via storage.onChanged.
-       */
-      setPairNotice('Still pairing — finishing in the background. This popup will update by itself.')
-    } else if (!reply.ok) {
-      renderPairOutcome({ ...reply, at: Date.now() })
-    }
-    /* On reply.ok: the storage write beat the reply here; onChanged narrates. */
-  } catch (error) {
-    pairStartedAt = 0
-    elements.pairConnect.disabled = false
-    setPairNotice(error?.message || 'The bridge is not awake yet — try again.', true)
+  const exchange = {
+    agentUrl: stored.agentUrl || DEFAULT_AGENT_URL,
+    code,
+    deviceId,
+    deviceName: stored.deviceName || 'Browser extension',
+    lifetime: normalizePairLifetime(elements.pairLifetime.value),
   }
+
+  /*
+   * THE WORKER GETS ONE BOUNDED CHANCE, THEN THIS PAGE PAIRS ON ITS OWN.
+   *
+   * Measured 2026-08-12 on the owner's Safari: the background never evaluates
+   * AT ALL — sendMessage resolves undefined without waking anything — while
+   * this popup document always runs and fetches loopback fine. So an
+   * unanswered 'pair:run' is no longer narrated as "still pairing"; after
+   * PAIR_REPLY_TIMEOUT_MS the popup performs the /pair/browser exchange
+   * itself (runDirectPairing, page-engine.js) under the worker's exact
+   * storage contract. pairFallbackVerdict is the tiebreaker for the OTHER
+   * undefined-reply case — a live worker whose async reply Safari dropped —
+   * by checking whether a fresh PAIR_OUTCOME_KEY landed first.
+   */
+  const REPLY_TIMED_OUT = Symbol('pair-reply-timeout')
+  let send
+  try {
+    const reply = await Promise.race([
+      api.runtime.sendMessage({ type: 'pair:run', ...exchange }),
+      new Promise((resolve) =>
+        setTimeout(() => resolve(REPLY_TIMED_OUT), PAIR_REPLY_TIMEOUT_MS),
+      ),
+    ])
+    send = reply === REPLY_TIMED_OUT ? { replied: false } : { replied: true, reply }
+  } catch (error) {
+    /* No receiver at all (Chromium wording). The direct path covers it. */
+    send = { failed: true, error }
+  }
+
+  if (send.replied && send.reply !== undefined && send.reply !== null) {
+    if (!send.reply.ok) renderPairOutcome({ ...send.reply, at: Date.now() })
+    /* On reply.ok: the storage write beat the reply here; onChanged narrates. */
+    return
+  }
+
+  const outcomeValues = await api.storage.local.get(PAIR_OUTCOME_KEY).catch(() => ({}))
+  const verdict = pairFallbackVerdict({
+    ...send,
+    outcome: outcomeValues?.[PAIR_OUTCOME_KEY],
+    startedAt: pairStartedAt,
+  })
+  /* The worker acted even though its reply was lost; onChanged narrates. */
+  if (!verdict.run) return
+
+  setPairNotice('The background bridge is not answering — pairing directly from this window…')
+  const record = await runDirectPairing(api, { ...exchange, startedAt: pairStartedAt })
+  /* onChanged usually narrated already (and reset pairStartedAt, making this
+   * a no-op); calling directly covers a kept-existing record that meant no
+   * storage write happened at all. */
+  renderPairOutcome(record)
 })
 
 /* ===== Website access =====

@@ -14,7 +14,8 @@
  *
  * Everything below is DERIVED and should never be edited by hand:
  *   - browser extension toolbar/store icons (16/32/48/128/512)
- *   - Safari Bridge app AppIcon.appiconset + LargeIcon + extension icons copy
+ *   - Safari Bridge app AppIcon.appiconset + LargeIcon + window Icon.png
+ *     + extension icons copy
  *   - iOS app AppIcon.appiconset
  *   - favicon.svg everywhere one is served (pendant sim public/ + dist/,
  *     iOS web bundle, dashboard static/) — an SVG wrapping the PNG, so the
@@ -65,6 +66,10 @@ for (const size of [16, 32, 128, 256, 512]) {
   resize(size * 2, path.join(appIconset, `mac-icon-${size}@2x.png`))
 }
 resize(512, path.join(bridge, 'Shared (App)/Assets.xcassets/LargeIcon.imageset/icon-512.png'))
+/* The app window's Main.html shows ../Icon.png directly — a loose resource
+ * outside the asset catalogs that the 2026-08-10 unification missed (it kept
+ * the old green "P" while every catalog got the pendant). */
+resize(512, path.join(bridge, 'Shared (App)/Resources/Icon.png'))
 
 /* --- iOS app --- */
 resize(1024, path.join(sim, 'ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png'))
