@@ -90,7 +90,7 @@ Do **not** reuse reserved pins **P0.12** (SIM select), **P0.28 / P0.29** (accele
 
 | Part | Purpose | Example MPN |
 |------|---------|-------------|
-| 3.3 V LDO | logic rail | AP2112K-3.3 |
+| 3.3 V LDO | logic rail | ~~AP2112K-3.3~~ **TPS7A02 (3.3 V)** — SWAPPED 2026-08-12: the AP2112's ~55 µA quiescent draw dwarfs the nRF9160's 2.7 µA PSM floor and single-handedly breaks the solar never-charge budget (Solar_Feasibility.md §floor, Watch_Variant_Study.md §10); the TPS7A02 idles at ~25 nA. |
 | 1.8 V LDO | mic rail | XC6206P182MR |
 | Level shifter (2-bit) | PDM 1.8 V ↔ 3.3 V | TXB0102DCUR |
 | Resistors | 2× 4.7 kΩ (I²C), 2× 5.1 kΩ (USB CC), 2 kΩ (PROG), 1× LED | 0402 |
