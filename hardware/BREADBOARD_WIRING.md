@@ -7,6 +7,39 @@ Any agent that changes a pin updates THIS file in the same commit.
 Status legend: **[LIVE]** wired & firmware-verified · **[NOW]** wire it, firmware flashed/landing ·
 **[PEND]** pin proposed, awaiting sensors-fw build confirmation · **[FUT]** planned (task #22).
 
+## Topology (renders on GitHub)
+
+```mermaid
+graph LR
+  DK["nRF9160 DK\nbrain · LTE · GNSS"]
+  ESP["ESP32\n(= Bluetooth module)"]
+  MIC["SPH0645 mic"]
+  SW["red switch\nmic power"]
+  BTN["buttons Y·G·B"]
+  ENC["rotary encoder"]
+  POT["volume pot"]
+  SDC["microSD"]
+  HAP["DRV2605L + LRA"]
+  ACC["accelerometer"]
+  AMP["MAX98357A + speaker"]
+  SND(("Bose / AirPods"))
+
+  DK -- "I2S · BCLK P0.16→P0.18↔G27 · LRCLK P0.14→P0.17↔G33 · OUT P0.19↔G14" --> ESP
+  DK -- "BCLK + WS taps" --> MIC
+  MIC -- "DOUT → P0.20" --> DK
+  SW -- "3V → mic VDD" --> MIC
+  SW -.->|"sense ·100k· → P0.26"| DK
+  BTN -- "P0.21 · P0.22 · P0.23 (→GND)" --> DK
+  ENC -- "A P0.24 · B P0.25 · push P0.28 (common→GND)" --> DK
+  POT -.->|"middle → P0.15 · sides → 3V/GND"| DK
+  SDC -- "SPI P0.10–P0.13" --> DK
+  HAP -.->|"I2C P0.30/P0.31 · addr 0x5A"| DK
+  ACC -.->|"I2C + INT1 → P0.27?"| DK
+  AMP -.->|"taps I2S nets · SD_MODE → P0.29?"| DK
+  ESP -- "A2DP" --> SND
+  DK -.->|"UART P0.00/P0.01 ↔ G16/G17 (future)"| ESP
+```
+
 ## Power and ground
 
 | Net | From | To | Status |
