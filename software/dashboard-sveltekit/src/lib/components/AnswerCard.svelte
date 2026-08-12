@@ -11,25 +11,31 @@
    * honest status word takes the display slot instead, and nothing stands in
    * for a result that does not exist.
    */
-  import { formatWhen, nodeMeta } from "$lib/jobs";
+  import { formatWhen } from "$lib/jobs";
+  import { deviceTagsFor } from "$lib/hiveFeed.js";
   import type { RunState } from "$lib/runState";
   import type { Snippet } from "svelte";
 
   let {
     state,
-    source = "",
-    origin = "",
+    run = null,
     ownAudio = "",
     replyAudio = "",
     onNeedsYou = null,
     details,
   }: {
     state: RunState;
-    source?: string;
-    /** The transport the run came in on (live_lte, dashboard, …). It names the
-     * node the owner would recognise; `source` alone is the relay's own word
-     * ("cloudflare") for everything it witnessed, so it is only the fallback. */
-    origin?: string;
+    /** The whole run record, so the badge reads the SAME classifier as the
+     * feed rows (`deviceTagsFor`: origin, source, markers, telemetry). Passing
+     * origin/source strings alone once made this badge say "Cloud" for the
+     * very run Recent tagged "Pendant" — one run, two names. */
+    run?: {
+      origin?: unknown;
+      source?: unknown;
+      kind?: unknown;
+      executor?: unknown;
+      events?: unknown;
+    } | null;
     ownAudio?: string;
     replyAudio?: string;
     /** Jumps to the approval card when this run is the parked one. */
@@ -38,7 +44,7 @@
     details?: Snippet;
   } = $props();
 
-  const node = $derived(nodeMeta({ origin, source }));
+  const nodeTags = $derived(run ? deviceTagsFor(run) : []);
 
   const answered = $derived(state.phase === "answered");
   /** The answer when there is one; otherwise the honest status word. */
@@ -62,8 +68,12 @@
     {#if state.at}
       <span class="answer-when">{formatWhen(state.at)}</span>
     {/if}
-    {#if source || origin}
-      <span class="answer-source" title={node.hint}>{node.label}</span>
+    {#if nodeTags.length}
+      <span
+        class="answer-source"
+        title={nodeTags.map((tag) => tag.hint).join(" · ")}
+        >{nodeTags.map((tag) => tag.label).join(" · ")}</span
+      >
     {/if}
   </div>
 

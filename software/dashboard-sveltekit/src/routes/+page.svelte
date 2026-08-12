@@ -83,11 +83,8 @@
     backend,
     canApprovePlan,
     dismissPlan,
-    fetchHistory,
-    fetchHistoryDetail,
     fetchJobs,
     fetchLatestRun,
-    fetchMemory,
     fetchRuns,
     fetchSnapshot,
   } from "$lib/dataSource";
@@ -100,15 +97,19 @@
   import Tile from "$lib/components/Tile.svelte";
   import {
     BAD_TRANSCRIPT_DIAGNOSIS,
-    bytes,
     clock,
     hasUsefulTranscript,
     isIdleRun,
     isTranscribing,
     type JsonRecord,
   } from "$lib/pipeline";
-  import { formatWhen, nodeMeta, statusLabel, type JobView } from "$lib/jobs";
-  import { mergeMacLocalHistory, pickHero } from "$lib/hiveFeed.js";
+  import { formatWhen, type JobView } from "$lib/jobs";
+  import {
+    deviceTagsFor,
+    isAgentInitiated,
+    mergeHiveFeed,
+    pickHero,
+  } from "$lib/hiveFeed.js";
   import {
     pendingApprovals,
     runState,
@@ -131,31 +132,23 @@
   let approvingId = $state("");
   let denyingId = $state("");
   let approvalError = $state("");
-  // Jobs answers "what is running and what did it just do", which is the
-  // question this page exists for, so it is the one panel open on arrival.
+  /*
+   * The Work panel answers "what is running and what did it just do", which is
+   * the question this page exists for, so it is the one panel open on arrival.
+   * It is also the ONLY feed panel: the owner, 2026-08-12 — "jobs, memory, and
+   * history are literally the same thing, which is also repeated on the main
+   * dashboard as recent, which means it's fucking repeated 4 times." The
+   * History and Memory tiles, their panels, and all their plumbing are gone;
+   * Recent below is a preview of this same feed, not a fourth copy.
+   */
   let openTile = $state("jobs");
   let jobsPanel = $state<{ refresh: () => Promise<void> } | null>(null);
-  let historyEntries = $state<JsonRecord[]>([]);
-  let historyQuery = $state("");
-  let historyLoading = $state(false);
-  let historyError = $state("");
-  let historyRetention = $state<JsonRecord | null>(null);
-  let historyNextCursor = $state("");
-  let historyHasMore = $state(false);
-  let historyDetail = $state<JsonRecord | null>(null);
-  let historyDetailLoading = $state(false);
-  let historyDetailError = $state("");
-  let memoryEntitiesFull = $state<JsonRecord[]>([]);
-  let memorySessions = $state<JsonRecord[]>([]);
-  let activeSessionId = $state("");
-  let playingId = $state("");
 
   // Re-entrancy guards and the freshness key stay plain bindings on purpose:
   // as reactive state they would retrigger the effects that read them.
   let snapshotRefreshPending = false;
   let runsRefreshPending = false;
   let jobsRefreshPending = false;
-  let historyRefreshPending = false;
   let latestRunKey = "";
 
   async function refresh() {
@@ -254,96 +247,10 @@
         void refresh();
         void refreshJobs();
         void jobsPanel?.refresh();
-        if (openTile === "history") void refreshHistory();
       }
     } catch {
       // Freshness probe is best-effort; the timed refreshes still run.
     }
-  }
-
-  async function refreshHistory(
-    q = historyQuery,
-    cursor = "",
-    append = false,
-  ) {
-    if (historyRefreshPending) return;
-    historyRefreshPending = true;
-    historyLoading = true;
-    try {
-      const payload = await fetchHistory(q, cursor);
-      const entries = Array.isArray(payload.entries) ? payload.entries : [];
-      historyEntries = append ? [...historyEntries, ...entries] : entries;
-      historyNextCursor = String(payload.nextCursor || "");
-      historyHasMore = Boolean(payload.hasMore && historyNextCursor);
-      historyRetention =
-        payload.retention && typeof payload.retention === "object"
-          ? payload.retention
-          : null;
-      historyError = "";
-    } catch (err) {
-      historyError =
-        err instanceof Error ? err.message : "History could not load.";
-    } finally {
-      historyRefreshPending = false;
-      historyLoading = false;
-    }
-  }
-
-  async function selectHistoryEntry(pipelineId: string) {
-    if (!pipelineId || historyDetailLoading) return;
-    historyDetailLoading = true;
-    historyDetailError = "";
-    try {
-      historyDetail = await fetchHistoryDetail(pipelineId);
-      if (!historyDetail) throw new Error("Run detail was empty.");
-    } catch (detailError) {
-      historyDetail = null;
-      historyDetailError =
-        detailError instanceof Error
-          ? detailError.message
-          : "Run detail could not load.";
-    } finally {
-      historyDetailLoading = false;
-    }
-  }
-
-  async function refreshMemory() {
-    try {
-      const payload = await fetchMemory();
-      if (!payload) return;
-      memoryEntitiesFull = Array.isArray(payload.memory?.entities)
-        ? payload.memory.entities
-        : [];
-      memorySessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-      if (
-        !activeSessionId ||
-        !memorySessions.some(
-          (session) => session.sessionId === activeSessionId,
-        )
-      ) {
-        activeSessionId = String(memorySessions[0]?.sessionId || "");
-      }
-    } catch {
-      // Data tile still shows snapshot memory if this fails.
-    }
-  }
-
-  function playRecording(pipelineId: string, voice: "owner" | "reply" = "owner") {
-    if (!pipelineId) return;
-    const playKey = voice === "reply" ? `${pipelineId}:reply` : pipelineId;
-    playingId = playKey;
-    const audio = new Audio(audioHref(pipelineId, voice));
-    audio.addEventListener("ended", () => {
-      if (playingId === playKey) playingId = "";
-    });
-    audio.addEventListener("error", () => {
-      if (playingId === playKey) playingId = "";
-      historyError = "Could not play this recording.";
-    });
-    void audio.play().catch(() => {
-      playingId = "";
-      historyError = "Browser blocked audio playback.";
-    });
   }
 
   onMount(() => {
@@ -389,17 +296,26 @@
   );
 
   /*
-   * The hero/Recent candidate set: every hive node's work in one list.
-   * Pipeline runs plus the owner's Mac-local jobs (the floating HUD and the
-   * on-Mac composer), which run through the agent's own /plan+/execute and
-   * never enter the pipeline — so the hero used to sit on a stale pendant run
-   * while newer Mac answers piled up unseen. Same fold History uses
-   * (mergeMacLocalHistory: owner sources only, deduped by id, newest first),
-   * fed from the `jobs` poll this page already runs for the approval cards —
-   * no second fetch. Bridge-executed relay work is stamped 'pendant' and is
-   * excluded by the fold, so a relay run can never appear twice.
+   * THE feed: every hive node's work in one device-tagged list. Pipeline runs
+   * plus the whole job feed (HUD, on-Mac composer, browser runs, probes,
+   * routines), deduped by id — the owner's 2026-08-12 ruling: "'recent' shows
+   * cloud work only, which should be changed … the device(s) should be the
+   * main tags." Fed from the `jobs` poll this page already runs for the
+   * approval cards — no second fetch. Bridge-executed relay work is stamped
+   * 'pendant' and is excluded by the fold, so a relay run can never appear
+   * twice under two ids.
    */
-  const feed = $derived<JsonRecord[]>(mergeMacLocalHistory(runs, jobs));
+  const feed = $derived<JsonRecord[]>(mergeHiveFeed(runs, jobs));
+
+  /*
+   * Hero candidates only: agent-initiated rows (probes, routines) stay out of
+   * the headline slot. They belong in the feed — the owner can see and filter
+   * them — but a probe's log must never occupy the answer card, which DESIGN.md
+   * reserves for the page's main feature: the owner's own latest answer.
+   */
+  const ownerFeed = $derived<JsonRecord[]>(
+    feed.filter((entry) => !isAgentInitiated(entry)),
+  );
 
   /* Plans the agent prepared and will not run until the owner says so. */
   const approvals = $derived(withBlockedReasons(pendingApprovals(jobs), runs));
@@ -429,10 +345,11 @@
   const heroRun = $derived.by<JsonRecord | null>(() => {
     if (!feed.length) return null;
     if (selectedId) {
+      // An explicit Recent pick may be ANY row, agent-initiated included.
       const picked = feed.find((run) => run.pipelineId === selectedId);
       if (picked && !isIdleRun(picked)) return picked;
     }
-    return pickHero(feed, runState, { approvedCommands });
+    return pickHero(ownerFeed, runState, { approvedCommands });
   });
 
   const selected = $derived<any>(heroRun);
@@ -472,26 +389,6 @@
   const requiredMissing = $derived<string[]>(
     Array.isArray(permissions.requiredMissing) ? permissions.requiredMissing : [],
   );
-  const sharedProduct = $derived<any>(snapshot?.product ?? {});
-  const sharedSessions = $derived<JsonRecord[]>(
-    Array.isArray(sharedProduct.sessions) ? sharedProduct.sessions : [],
-  );
-  const visibleSessions = $derived<JsonRecord[]>(
-    memorySessions.length ? memorySessions : sharedSessions,
-  );
-  const activeSession = $derived<JsonRecord | null>(
-    visibleSessions.find(
-      (session) => session.sessionId === activeSessionId,
-    ) ??
-      visibleSessions[0] ??
-      null,
-  );
-  const memoryEntities = $derived<JsonRecord[]>(
-    Array.isArray(sharedProduct.memory?.entities)
-      ? sharedProduct.memory.entities
-      : [],
-  );
-
   const storeLabel = $derived(cloud.store === "d1" ? "D1" : cloud.store || "—");
   const cloudUp = $derived(Boolean(cloud.ok));
   const bridgeUp = $derived(Boolean(cloud.macBridgeOnline));
@@ -578,15 +475,7 @@
   }
 
   function toggleTile(id: string) {
-    const next = openTile === id ? "" : id;
-    openTile = next;
-    if (next === "history") {
-      void refreshHistory();
-      void refreshMemory();
-    }
-    if (next === "data") {
-      void refreshMemory();
-    }
+    openTile = openTile === id ? "" : id;
   }
 </script>
 
@@ -760,18 +649,17 @@
   <!-- 2 · WHAT IT SAID. -->
   <AnswerCard
     state={hero}
-    source={String(selected?.source || "")}
-    origin={String(selected?.origin || "")}
+    run={selected}
     ownAudio={heroOwnAudio}
     replyAudio={heroReplyAudio}
     onNeedsYou={approvals.length ? scrollToApproval : null}
   >
     {#snippet details()}
-      <!-- A Mac-local job never had a voice pipeline; rendering the six-stage
-           STT rail as permanent "waiting" would be fabricated telemetry, so
-           the developer layer stays off for those. Their evidence (actions,
-           outputs) already lives in the Jobs panel. -->
-      {#if selected && selected.kind !== "mac_local"}
+      <!-- A job-feed row (kind "job") never had a voice pipeline; rendering
+           the six-stage STT rail as permanent "waiting" would be fabricated
+           telemetry, so the developer layer stays off for those. Their
+           evidence (actions, outputs) already lives in the Work panel. -->
+      {#if selected && selected.kind !== "job"}
         <TechnicalDetails
           run={selected}
           {telemetry}
@@ -788,14 +676,19 @@
     <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
   </section>
 
-  <!-- 4 · WHAT IT DID — the merged hive feed, not pipeline runs alone, so a
-       HUD or on-Mac composer task is as visible here as a pendant run. -->
+  <!-- 4 · WHAT IT DID — the one hive feed across EVERY node, each row wearing
+       its device tag(s). It used to render relay-witnessed runs plus Mac-local
+       folds only, with the issuing device dropped by the /api/runs sanitizer —
+       the owner: "'recent' shows cloud work only, which should be changed." -->
   {#if feed.length}
     <section class="recent" aria-label="Recent commands">
       <p class="section-label">Recent</p>
       <ul class="recent-list">
         {#each feed.slice(0, 8) as run (run.pipelineId)}
           {@const state = runState(run)}
+          {@const tags = deviceTagsFor(run)
+            .map((tag) => tag.label)
+            .join(" · ")}
           <li>
             <button
               class="recent-row {run.pipelineId === selected?.pipelineId
@@ -805,14 +698,14 @@
               aria-current={run.pipelineId === selected?.pipelineId
                 ? "true"
                 : undefined}
-              aria-label={`${state.question || "Untitled run"} · ${state.label} · ${clock(run.createdAt)}`}
+              aria-label={`${state.question || "Untitled run"} · ${tags} · ${state.label} · ${clock(run.createdAt)}`}
             >
               <span class="recent-text">
                 {state.answer || state.question || "Untitled run"}
               </span>
               <span class="recent-meta">
                 <i class="state-dot {state.tone}" aria-hidden="true"></i>
-                {nodeMeta({ origin: run.origin, source: run.source }).label} · {state.label}
+                {tags} · {state.label}
                 · {formatWhen(run.createdAt)}
               </span>
             </button>
@@ -822,17 +715,24 @@
     </section>
   {/if}
 
-  <!-- 5 · THE MACHINE. Everything below here is diagnostics by design. -->
+  <!-- 5 · THE MACHINE. Everything below here is diagnostics by design.
+       Four tiles, not six: History duplicated the feed and Memory's tile was
+       noise awaiting its own redesign — "jobs, memory, and history are
+       literally the same thing … repeated 4 times." Work IS the feed now. -->
   <p class="section-label section-label-standalone">System</p>
   <div class="tile-strip">
     <!-- Amber only for FRESH parks: the count still names every open decision,
          but a plan the owner slept on no longer keeps the tile in alarm. -->
     <Tile
       id="jobs"
-      label="Jobs"
+      label="Work"
       tone={freshApprovals.length ? "warn" : "ok"}
-      dotText="Everything the agent has been asked to do"
-      value={approvals.length ? `${approvals.length} need you` : "What ran"}
+      dotText="Every request from every device — the one feed"
+      value={approvals.length
+        ? `${approvals.length} need you`
+        : jobs.length
+          ? `${jobs.length} runs`
+          : "What ran"}
       open={openTile === "jobs"}
       onToggle={() => toggleTile("jobs")}
     />
@@ -870,28 +770,6 @@
       value={browserUp ? "Connected" : "Offline"}
       open={openTile === "browser"}
       onToggle={() => toggleTile("browser")}
-    />
-    <Tile
-      id="history"
-      label="History"
-      tone={historyEntries.length || feed.length ? "ok" : "off"}
-      dotText="Messages, recordings, spoken replies"
-      value={historyEntries.length
-        ? `${historyEntries.length} runs`
-        : feed.length
-          ? `${feed.length} recent`
-          : "—"}
-      open={openTile === "history"}
-      onToggle={() => toggleTile("history")}
-    />
-    <Tile
-      id="data"
-      label="Memory"
-      tone="ok"
-      dotText="What the agent remembers"
-      value={`${sharedSessions.length} chats · ${memoryEntities.length} mem`}
-      open={openTile === "data"}
-      onToggle={() => toggleTile("data")}
     />
   </div>
 
@@ -966,245 +844,4 @@
     <JobsPanel bind:this={jobsPanel} />
   {/if}
 
-  {#if openTile === "history"}
-    <section
-      id="tile-panel-history"
-      class="tile-panel"
-      aria-label="Command history and recordings"
-    >
-      <form
-        class="history-search"
-        onsubmit={(event) => {
-          event.preventDefault();
-          historyDetail = null;
-          historyDetailError = "";
-          void refreshHistory(historyQuery);
-        }}
-      >
-        <input
-          type="search"
-          placeholder="Search commands and replies"
-          bind:value={historyQuery}
-          aria-label="Search history"
-        />
-        <button type="submit" class="icon-button" disabled={historyLoading}
-          >{historyLoading ? "…" : "Go"}</button
-        >
-      </form>
-      {#if historyRetention}
-        {@const audioPolicy =
-          historyRetention.audio && typeof historyRetention.audio === "object"
-            ? historyRetention.audio
-            : {}}
-        <p class="panel-empty history-retention">
-          Runs kept ~{Math.round(
-            Number(historyRetention.runsTtlMs || 86400000) / 3600000,
-          )}h · audio ~{Math.round(
-            Number(audioPolicy.maxAgeMs || 2592000000) / 86400000,
-          )}d · transcript + recording when available
-        </p>
-      {/if}
-      {#if historyError}
-        <p class="panel-empty">{historyError}</p>
-      {/if}
-      {#if historyEntries.length}
-        <ol class="history-list">
-          {#each historyEntries as entry}
-            <li>
-              <div class="history-row">
-                <button
-                  class="history-main {historyDetail?.pipelineId ===
-                  entry.pipelineId
-                    ? 'selected'
-                    : ''}"
-                  onclick={() => {
-                    void selectHistoryEntry(String(entry.pipelineId || ""));
-                  }}
-                  aria-pressed={historyDetail?.pipelineId === entry.pipelineId}
-                >
-                  <strong>{entry.command || "(no transcript)"}</strong>
-                  <small
-                    >{nodeMeta({
-                      origin: entry.origin,
-                      source: entry.source,
-                      kind: entry.kind,
-                    }).label} · {statusLabel(entry.status)} · {clock(
-                      entry.createdAt,
-                    )}</small
-                  >
-                  {#if entry.reply}
-                    <p class="history-reply">{entry.reply}</p>
-                  {/if}
-                  {#if entry.error}
-                    <p class="history-error">{entry.error}</p>
-                  {/if}
-                </button>
-                {#if entry.audio?.available}
-                  <button
-                    class="history-audio"
-                    onclick={() => playRecording(String(entry.pipelineId))}
-                    aria-label={playingId === entry.pipelineId
-                      ? "Playing your recording"
-                      : "Play your recording"}
-                    title={entry.audio.audioBytes
-                      ? `Your voice · ${bytes(entry.audio.audioBytes)}`
-                      : "Play your recording"}
-                    >{playingId === entry.pipelineId ? "♪" : "▶"}</button
-                  >
-                {/if}
-                {#if entry.audio?.replyAvailable}
-                  <button
-                    class="history-audio history-audio-reply"
-                    onclick={() =>
-                      playRecording(String(entry.pipelineId), "reply")}
-                    aria-label={playingId === `${entry.pipelineId}:reply`
-                      ? "Playing agent reply"
-                      : "Play agent reply"}
-                    title="Agent's spoken reply"
-                    >{playingId === `${entry.pipelineId}:reply`
-                      ? "♪"
-                      : "🗣"}</button
-                  >
-                {/if}
-              </div>
-            </li>
-          {/each}
-        </ol>
-      {:else if !historyLoading}
-        <p class="panel-empty">No history yet — press the pendant or use the mic above.</p>
-      {/if}
-      {#if historyHasMore}
-        <button
-          class="history-more"
-          type="button"
-          disabled={historyLoading}
-          onclick={() => {
-            void refreshHistory(historyQuery, historyNextCursor, true);
-          }}
-          >{historyLoading ? "Loading…" : "Load older runs"}</button
-        >
-      {/if}
-      {#if historyDetailLoading}
-        <p class="panel-empty history-detail-state">Loading run detail…</p>
-      {:else if historyDetailError}
-        <p class="history-error history-detail-state">{historyDetailError}</p>
-      {:else if historyDetail}
-        <article class="history-detail" aria-label="Selected run detail">
-          <div class="history-detail-head">
-            <div>
-              <p class="micro-label">Selected run</p>
-              <h3>{historyDetail.command || "(no transcript)"}</h3>
-            </div>
-            <span>{statusLabel(historyDetail.status)}</span>
-          </div>
-          {#if historyDetail.reply}
-            <blockquote>{historyDetail.reply}</blockquote>
-          {/if}
-          <p class="history-detail-meta">
-            {nodeMeta({
-              origin: historyDetail.origin,
-              source: historyDetail.source,
-              kind: historyDetail.kind,
-            }).label} ·
-            {clock(historyDetail.createdAt)}
-            {#if historyDetail.sessionId}
-              · chat {historyDetail.sessionId.slice(0, 8)}
-            {/if}
-          </p>
-          {#if historyDetail.events?.length}
-            <ol class="history-detail-events">
-              {#each historyDetail.events as event}
-                <li>
-                  <strong>{event.label || event.stage || "Event"}</strong>
-                  <small>{event.status || "—"} · {clock(event.at)}</small>
-                  {#if event.detail}<p>{event.detail}</p>{/if}
-                  {#if event.text}<blockquote>{event.text}</blockquote>{/if}
-                </li>
-              {/each}
-            </ol>
-          {/if}
-        </article>
-      {/if}
-    </section>
-  {/if}
-
-  {#if openTile === "data"}
-    <section
-      id="tile-panel-data"
-      class="tile-panel"
-      aria-label="Shared cloud data detail"
-    >
-      <span class="rev-badge">rev {sharedProduct.revision ?? 0}</span>
-      <div class="data-grid">
-        <div>
-          <p class="micro-label">Chats</p>
-          {#if visibleSessions.length}
-            <ol class="data-list">
-              {#each visibleSessions.slice(0, 8) as session}
-                <li class:active={activeSession?.sessionId === session.sessionId}>
-                  <button
-                    type="button"
-                    class="data-session-button"
-                    aria-pressed={activeSession?.sessionId === session.sessionId}
-                    onclick={() => (activeSessionId = String(session.sessionId))}
-                  >
-                    <span class="data-line">
-                      <strong>{session.title || "Untitled session"}</strong>
-                      <span>{session.sessionId?.slice(0, 8)}</span>
-                    </span>
-                    <small
-                      >{session.turnCount ?? session.turns?.length ?? 0} turns · {clock(
-                        session.updatedAt,
-                      )}</small
-                    >
-                  </button>
-                </li>
-              {/each}
-            </ol>
-          {:else}
-            <p class="panel-empty">None</p>
-          {/if}
-          {#if activeSession}
-            <section class="chat-transcript" aria-label="Selected chat transcript">
-              <p class="micro-label">Transcript</p>
-              {#if activeSession.turns?.length}
-                <ol>
-                  {#each activeSession.turns as turn}
-                    <li class:assistant={turn.role !== "user"}>
-                      <div>
-                        <strong>{turn.role === "user" ? "You" : "Pendant"}</strong>
-                        <time>{clock(turn.createdAt)}</time>
-                      </div>
-                      <p>{turn.content}</p>
-                    </li>
-                  {/each}
-                </ol>
-              {:else}
-                <p class="panel-empty">No messages in this chat.</p>
-              {/if}
-            </section>
-          {/if}
-        </div>
-        <div>
-          <p class="micro-label">Memory</p>
-          {#if (memoryEntitiesFull.length ? memoryEntitiesFull : memoryEntities).length}
-            <ol class="data-list">
-              {#each (memoryEntitiesFull.length ? memoryEntitiesFull : memoryEntities).slice(0, 10) as entity}
-                <li>
-                  <div class="data-line">
-                    <strong>{entity.name || "Untitled memory"}</strong>
-                  </div>
-                  <small
-                    >{entity.type || "Memory"} · {clock(entity.updatedAt)}</small
-                  >
-                </li>
-              {/each}
-            </ol>
-          {:else}
-            <p class="panel-empty">None</p>
-          {/if}
-        </div>
-      </div>
-    </section>
-  {/if}
 </main>

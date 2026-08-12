@@ -173,10 +173,14 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.doesNotMatch(html, /Sample rate/);
   assert.doesNotMatch(html, />STT</);
 
-  // Jobs replaced Activity: same Mac actions, plus who asked, what each step
-  // touched, and what it returned.
-  for (const tile of ["Jobs", "System", "Mac", "Browser", "History", "Memory"]) {
+  // Four tiles, one feed. History and Memory are deleted, not hidden — the
+  // owner, 2026-08-12: "jobs, memory, and history are literally the same
+  // thing … repeated 4 times." Work (né Jobs) is the feed's entry point.
+  for (const tile of ["Work", "System", "Mac", "Browser"]) {
     assert.match(html, new RegExp(`>${tile}</span>`));
+  }
+  for (const gone of ["History", "Memory"]) {
+    assert.doesNotMatch(html, new RegExp(`>${gone}</span>`));
   }
 
   // ONE composer: mic + a single "Ask the hive" field + send. The old second

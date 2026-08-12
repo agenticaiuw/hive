@@ -13,13 +13,13 @@
     formatWhen,
     isAwaitingApproval,
     isRunningStatus,
-    sourceMeta,
     statusLabel,
     statusTone,
     truncate,
     type JobView,
     type RoutineView,
   } from "$lib/jobs";
+  import { deviceTagsFor } from "$lib/hiveFeed.js";
   import { undoJob } from "$lib/dataSource";
 
   let jobs = $state<JobView[]>([]);
@@ -28,7 +28,7 @@
   let routinesNote = $state("");
   let error = $state("");
   let loaded = $state(false);
-  let sourceFilter = $state("all");
+  let deviceFilter = $state("all");
   let selectedId = $state("");
   let detailLoading = $state(false);
   // Evidence fetched lazily per job (relay backend only), keyed by job id.
@@ -74,19 +74,41 @@
     Date.parse(String(b.updatedAt || b.createdAt || 0)) -
     Date.parse(String(a.updatedAt || a.createdAt || 0));
 
-  const sources = $derived.by(() => {
-    const counts = new Map<string, number>();
+  /*
+   * Filter chips are keyed per DEVICE, never per raw source word. The old row
+   * was keyed on `job.source`, so `floating-hud` and `dashboard` each grew a
+   * "This Mac" tab and two browser sources each grew a "Browser" tab — the
+   * duplicated tabs in the owner's 2026-08-12 screenshot ("delete the entire
+   * panel with 6 different tabs below and make sure to keep the ability to
+   * filter work or questions by nodes"). `deviceTagsFor` dedupes by device and
+   * folds every probe/routine source into one "Agent-initiated" chip.
+   */
+  const devices = $derived.by(() => {
+    const counts = new Map<
+      string,
+      { key: string; label: string; hint: string; count: number }
+    >();
     for (const job of jobs) {
-      const key = job.source || "unknown";
-      counts.set(key, (counts.get(key) ?? 0) + 1);
+      for (const tag of deviceTagsFor(job)) {
+        const entry = counts.get(tag.key) ?? { ...tag, count: 0 };
+        entry.count += 1;
+        counts.set(tag.key, entry);
+      }
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    return [...counts.values()].sort((a, b) => b.count - a.count);
   });
 
+  /*
+   * A job that travelled through several nodes matches ANY of its devices'
+   * chips ("one task may travel through multiple nodes as well"). Single-select
+   * with an All chip — the interaction the row already had.
+   */
   const visible = $derived(
-    sourceFilter === "all"
+    deviceFilter === "all"
       ? jobs
-      : jobs.filter((job) => job.source === sourceFilter),
+      : jobs.filter((job) =>
+          deviceTagsFor(job).some((tag) => tag.key === deviceFilter),
+        ),
   );
   /*
    * Sorted by who needs a human, not by recency: a plan the agent parked has
@@ -148,6 +170,13 @@
       });
   });
 
+  /* The row's device tag(s), joined — "the device(s) should be the main tags";
+   * a multi-node run names every node it touched. */
+  const deviceLabel = (job: JobView) =>
+    deviceTagsFor(job)
+      .map((tag) => tag.label)
+      .join(" · ");
+
   async function act(run: () => Promise<unknown>) {
     try {
       await run();
@@ -164,19 +193,22 @@
     <p class="history-error">{error}</p>
   {/if}
 
-  <div class="job-filters" role="group" aria-label="Filter by source">
+  <!-- Device chips, not source tabs: one chip per device the work travelled
+       through (This Mac, Browser, Pendant, iPhone …) plus one Agent-initiated
+       chip. Right-aligned per DESIGN.md: filters live on the right side. -->
+  <div class="job-filters" role="group" aria-label="Filter by device">
     <button
       type="button"
-      class="job-chip {sourceFilter === 'all' ? 'on' : ''}"
-      onclick={() => (sourceFilter = "all")}>All · {jobs.length}</button
+      class="job-chip {deviceFilter === 'all' ? 'on' : ''}"
+      onclick={() => (deviceFilter = "all")}>All · {jobs.length}</button
     >
-    {#each sources as [key, count]}
+    {#each devices as device (device.key)}
       <button
         type="button"
-        class="job-chip {sourceFilter === key ? 'on' : ''}"
-        title={sourceMeta(key).hint}
-        onclick={() => (sourceFilter = key)}
-        >{sourceMeta(key).label} · {count}</button
+        class="job-chip {deviceFilter === device.key ? 'on' : ''}"
+        title={device.hint}
+        onclick={() => (deviceFilter = device.key)}
+        >{device.label} · {device.count}</button
       >
     {/each}
   </div>
@@ -198,13 +230,12 @@
                 ? 'selected'
                 : ''}"
               onclick={() => (selectedId = `job:${job.id}`)}
-              aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
-                .label} · ${statusLabel(job.status)}`}
+              aria-label={`${job.command || "Job"} · ${deviceLabel(job)} · ${statusLabel(job.status)}`}
             >
               <strong>{truncate(job.command || "Job", 46)}</strong>
               <small
                 ><i class="run-dot {statusTone(job.status)}" aria-hidden="true"
-                ></i>{sourceMeta(job.source).label} · {statusLabel(job.status)} · {formatWhen(
+                ></i>{deviceLabel(job)} · {statusLabel(job.status)} · {formatWhen(
                   job.updatedAt || job.createdAt,
                 )}</small
               >
@@ -223,13 +254,12 @@
               ? 'selected'
               : ''}"
             onclick={() => (selectedId = `job:${job.id}`)}
-            aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
-              .label} · ${statusLabel(job.status)}`}
+            aria-label={`${job.command || "Job"} · ${deviceLabel(job)} · ${statusLabel(job.status)}`}
           >
             <strong>{truncate(job.command || "Job", 46)}</strong>
             <small
               ><i class="run-dot {statusTone(job.status)}" aria-hidden="true"
-              ></i>{sourceMeta(job.source).label} · {statusLabel(job.status)} · {formatWhen(
+              ></i>{deviceLabel(job)} · {statusLabel(job.status)} · {formatWhen(
                 job.updatedAt || job.createdAt,
               )}</small
             >
@@ -274,13 +304,12 @@
               ? 'selected'
               : ''}"
             onclick={() => (selectedId = `job:${job.id}`)}
-            aria-label={`${job.command || "Job"} · ${sourceMeta(job.source)
-              .label} · ${statusLabel(job.status)}`}
+            aria-label={`${job.command || "Job"} · ${deviceLabel(job)} · ${statusLabel(job.status)}`}
           >
             <strong>{truncate(job.command || "Job", 46)}</strong>
             <small
               ><i class="run-dot {statusTone(job.status)}" aria-hidden="true"
-              ></i>{sourceMeta(job.source).label} · {statusLabel(job.status)} · {formatWhen(
+              ></i>{deviceLabel(job)} · {statusLabel(job.status)} · {formatWhen(
                 job.updatedAt || job.createdAt,
               )}</small
             >
