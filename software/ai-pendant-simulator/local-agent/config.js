@@ -51,3 +51,25 @@ export const SHELL_TIMEOUT_MS =
   Number.isFinite(configuredShellTimeoutMs) && configuredShellTimeoutMs > 0
     ? configuredShellTimeoutMs
     : 120_000
+
+/*
+ * The wall-clock ceiling on one `run_applescript` child, which is TIGHTER than
+ * the shell one on purpose.
+ *
+ * A shell command that runs for two minutes is usually a build. An AppleScript
+ * that runs for two minutes is almost always the same bug: a `repeat` over
+ * `every reminder`/`every message`, where each property read inside the loop is
+ * its own Apple Event round trip into an iCloud-backed store. Job
+ * local_bd15c683-ba80-4079-9498-925112883bcd was exactly that, and it burned
+ * the full shell ceiling before anyone learned anything.
+ *
+ * 45s is above the slowest HONEST script measured on this Mac (~21s for the
+ * bulk-property form over Reminders) and far below the point where a waiting
+ * owner has given up. Past it, the answer is not "wait longer" — it is that the
+ * script is shaped wrong, and the failure says so.
+ */
+const configuredAppleScriptTimeoutMs = Number(process.env.APPLESCRIPT_TIMEOUT_MS)
+export const APPLESCRIPT_TIMEOUT_MS =
+  Number.isFinite(configuredAppleScriptTimeoutMs) && configuredAppleScriptTimeoutMs > 0
+    ? configuredAppleScriptTimeoutMs
+    : 45_000

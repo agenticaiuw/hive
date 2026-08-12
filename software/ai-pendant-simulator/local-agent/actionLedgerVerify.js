@@ -99,6 +99,10 @@ const IDEMPOTENT_TYPES = new Set([
   'tidy_downloads_preview',
   'preview_plan',
   'recall_capture',
+  /* Asking Reminders or Calendar the same question twice gets the same answer
+   * and leaves both stores exactly as they were. */
+  'list_reminders',
+  'list_calendar_events',
   // Absolute-value settings: the parameter is the end state, not a delta.
   'set_volume',
   'set_brightness',

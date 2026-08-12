@@ -85,6 +85,11 @@ const AUTO_SAFE_ACTIONS = new Set([
   'list_briefings',
   'search_file',
   'translate_text',
+  /* Reading the owner's own Reminders and Calendar, spoken back to the owner.
+   * There is nothing an approval prompt could protect here, and the pendant has
+   * no screen to prompt on — which is the same reasoning get_time already got. */
+  'list_reminders',
+  'list_calendar_events',
   // Browser extension (hands-free when extension is online).
   'browser_navigate',
   'browser_click',
@@ -533,6 +538,8 @@ const READ_TIER_ACTIONS = new Set([
   'get_weather',
   'get_input_source',
   'list_briefings',
+  'list_reminders',
+  'list_calendar_events',
   'translate_text',
   'recall_capture',
   'preview_plan',

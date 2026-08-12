@@ -81,7 +81,7 @@ test('the manifest names the registries that disagree instead of hiding them', (
   }
 })
 
-test('the relay tool list is the nine the Mac side expects', () => {
+test('the relay tool list is the ten the Mac side expects', () => {
   assert.deepEqual(
     REALTIME_TOOLS.map((tool) => tool.name),
     [
@@ -104,6 +104,12 @@ test('the relay tool list is the nine the Mac side expects', () => {
        * The voice loop answers them against the fleet hive block; the Mac
        * executor dispatches the same two names locally, so unlike the two
        * relay-only tools above these ARE checked by the drift tests. */
+      /* Relay-side only: the Timer app's verb. cloud-relay/timerStore.js holds
+       * the expiry and speaks the chime down the converse socket, so a timer
+       * set by voice and one set by the encoder's ring are the same record.
+       * Nothing is dispatched to this Mac, which is the point — a timer must
+       * still fire with this Mac asleep. */
+      'set_timer',
       'memory_lookup',
       'memory_save',
     ],

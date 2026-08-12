@@ -63,6 +63,10 @@ const READ_ONLY_TYPES = new Set([
   'browser_capture',
   'browser_wait_for',
   'browser_list_sessions',
+  /* Reading Reminders and Calendar. Both answer a question and write nothing —
+   * the write half of that pair is create_reminder, which is not here. */
+  'list_reminders',
+  'list_calendar_events',
   /* Looking at the owner's iPhone through the mirroring window. Without these
    * an OCR of the phone's screen is recorded as a write that "leaves no
    * reversible trace", which is not a hedge — it is wrong, and the undo surface

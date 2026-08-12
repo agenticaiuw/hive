@@ -105,6 +105,8 @@ const DOMAIN_RULES = [
     exact: [
       'create_reminder',
       'end_focus_session',
+      'list_calendar_events',
+      'list_reminders',
       'meeting_followup',
       'plan_my_day',
       'prepare_for_meeting',

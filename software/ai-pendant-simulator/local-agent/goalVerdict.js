@@ -368,6 +368,8 @@ const OBSERVE_TYPES = new Set([
   'cursor_position',
   'list_displays',
   'list_briefings',
+  'list_reminders',
+  'list_calendar_events',
   'translate_text',
   'preview_plan',
   'sweep_folder_preview',

@@ -10,7 +10,7 @@ import {
   resolveSessionRef,
   runBrowserSessionAction,
 } from './browserSessions.js'
-import { SHELL_TIMEOUT_MS, workspacePath } from './config.js'
+import { APPLESCRIPT_TIMEOUT_MS, SHELL_TIMEOUT_MS, workspacePath } from './config.js'
 import { mintCapsule } from './evidenceCapsules.js'
 import { currentCancellationSignal, throwIfAborted } from './jobControl.js'
 import { classifySensitivity, maskSecretValue } from './redaction.js'
@@ -24,6 +24,10 @@ import {
   setOutputVolume,
 } from './systemControls.js'
 import { createReminder } from './reminders.js'
+import {
+  listCalendarEventsAction,
+  listRemindersAction,
+} from './appleReadActions.js'
 import { childEnv } from './childEnv.js'
 import { runCapabilityGapAction } from './capabilityGapsActions.js'
 import { runIosAction } from './iosControl.js'
@@ -329,6 +333,14 @@ export async function executeComputerAction(action) {
       return setMute(action)
     case 'create_reminder':
       return addReminder(action)
+    /* The reads that were missing. Their absence is what made a planner told
+     * "never use raw AppleScript for reminders" write raw AppleScript for
+     * reminders — see appleReadActions.js and job
+     * local_bd15c683-ba80-4079-9498-925112883bcd. */
+    case 'list_reminders':
+      return listRemindersAction(action)
+    case 'list_calendar_events':
+      return listCalendarEventsAction(action)
     case 'remind_me':
       return scheduleReminderAction(action)
     case 'quick_capture':
@@ -1213,6 +1225,25 @@ function redactActionParams(params) {
   return out
 }
 
+/**
+ * What a caller is told when the ceiling fires.
+ *
+ * Exported because it is the only part of the timeout worth asserting on, and
+ * because the sentence has a job: `ETIMEDOUT` tells whoever reads the failed
+ * job that a clock ran out, and nothing about WHY this script was never going
+ * to finish. The diagnosis is almost always the same one, so it is written
+ * down once, with the way out named rather than implied.
+ */
+export function appleScriptTimeoutMessage(timeoutMs) {
+  return (
+    `AppleScript exceeded ${Math.round(timeoutMs / 1000)}s and was stopped. ` +
+    'This usually means a repeat loop or a whose-clause over a large collection ' +
+    '(every reminder, every message) — each property read inside it is a separate ' +
+    'Apple Event round trip and the script never returns. Use the dedicated tool ' +
+    'instead: list_reminders, list_calendar_events, triage_inbox.'
+  )
+}
+
 async function runAppleScript(action) {
   const script = String(action.params?.script ?? '').trim()
 
@@ -1220,10 +1251,39 @@ async function runAppleScript(action) {
     throw new Error('run_applescript requires a script.')
   }
 
-  const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], {
-    timeout: SHELL_TIMEOUT_MS,
-    maxBuffer: 5 * 1024 * 1024,
-  })
+  /*
+   * A caller may ask for LESS time than the ceiling, never more. Scripts that
+   * know they are quick can fail fast; nothing gets to opt out of the bound.
+   */
+  const requested = Number(action.params?.timeoutMs ?? action.params?.timeout)
+  const timeoutMs =
+    Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, APPLESCRIPT_TIMEOUT_MS)
+      : APPLESCRIPT_TIMEOUT_MS
+
+  let stdout
+  let stderr
+  try {
+    /*
+     * SIGKILL rather than the default SIGTERM. An osascript blocked inside an
+     * Apple Event round trip is waiting on the target app, not on its own run
+     * loop, and a signal it has to notice to act on is a signal it may not
+     * notice at all — which turns the ceiling into a suggestion. SIGKILL is
+     * not negotiable with, which is the entire point of a hard timeout.
+     */
+    ;({ stdout, stderr } = await execFileAsync('osascript', ['-e', script], {
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 5 * 1024 * 1024,
+    }))
+  } catch (error) {
+    /* execFile sets `killed` only when ITS timer fired, so this cannot be
+     * confused with a script that died of something else. */
+    if (error?.killed) {
+      throw new Error(appleScriptTimeoutMessage(timeoutMs), { cause: error })
+    }
+    throw error
+  }
 
   return success(action, trimOutput(stdout || stderr || 'AppleScript completed.'), {
     stdout: trimOutput(stdout),
