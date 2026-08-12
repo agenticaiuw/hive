@@ -200,6 +200,46 @@ button:disabled {
   color: #ff9d8d;
 }
 
+/*
+ * The setup card's COMPACT state: credentials stored, brain not live yet.
+ * The code box and its row disappear — the owner just pasted the code and
+ * must not be asked for it again (measured live 2026-08-12) — leaving the
+ * one-line "Starting the brain…" and, underneath, the escape hatch back to
+ * the full card for the stored-but-dead-credential case.
+ */
+.setup-compact input,
+.setup-compact .setup-row {
+  display: none;
+}
+
+.setup-repair {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #849992;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.setup-repair:hover {
+  color: #c8d9d4;
+}
+
+/* The page-engine banner: amber, like every "this needs your awareness"
+ * state — the bridge works, but it lives and dies with this document. */
+.engine-note {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(176, 124, 31, 0.55);
+  border-radius: 8px;
+  background: rgba(176, 124, 31, 0.14);
+  color: #e3b769;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 code {
   color: #b7eee0;
   overflow-wrap: anywhere;
