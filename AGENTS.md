@@ -5,4 +5,10 @@ When you delegate subagents decide for each task which model to use. If it's a s
 Automatically store all coding sessions and tokens for all orchestrator agent and subagents.
 Make sure subagents do not interfere with each other's work.
 A subagent claims all the files that are relevant to its work.
+Always read @DESIGN.md
+If you ever need to fetch the production data please directly use the .env file in the root folder. This file exists it's just not shown to you so you can definitely run the commands and it'd work. The only thing is to keep all the operations read only unless I specifically asked for to modify or delete. And I shouldn't have to ask you to read the database everytime. You should know when to read it to solve the tasks at hand.
+When I asked for fixes for certain major requirements or when you found out problems with some, from the backend configs or code to the frontend UI/UX, always investigate the same problems for all other majors as well.
+Always use the test accounts available for you and have subagents actually test out the app and take screenshots to test the UI and actually use the app by clicking, typing to test the UX against our DESIGN.md.
+Make sure to have long-term maintability in mind. Consider using the skills from this repo: https://github.com/dietrichgebert/ponytail
+As the subagents are using the actual app. Make sure they're testing in every screen size from PC to Tablet to Mobile and also including iOS as well as the chrome or safari extensions if needed. Have these testing subagents send text to YOUR (YOU, the CEO's) main context window so I can see what they're doing as well.
 Safari extension updates: ship ONLY via scripts/ship-safari-extension.sh (never delete or re-register the installed app — that resets Safari's storage identity and wipes the owner's pairing), and after the required Safari relaunch remember Safari does NOT wake the MV3 background worker on its own — extension surfaces must runtime.sendMessage-ping it on open, so verify an update landed by live evidence (agent heartbeats, storage timestamps), never by what the popup displays.
