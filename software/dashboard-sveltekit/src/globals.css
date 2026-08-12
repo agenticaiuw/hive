@@ -445,10 +445,6 @@ body {
   text-transform: uppercase;
 }
 
-.section-label-standalone {
-  margin-top: var(--s7);
-}
-
 /* ---------- State pill: colour AND icon AND word (WCAG 1.4.1) ---------- */
 
 .state-pill {
@@ -1519,87 +1515,11 @@ blockquote {
   background: var(--amber);
 }
 
-/* ---------- Tiles ---------- */
-
-.tile-strip {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
-  margin-top: 16px;
-}
-
-.tile {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 12px 14px;
-  color: inherit;
-  background: var(--panel);
-  text-align: left;
-  cursor: pointer;
-}
-
-.tile:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-}
-
-.tile.open {
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-.tile-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.7rem;
-  font-weight: 650;
-}
-
-.tile-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #5d6470;
-}
-
-.tile-dot.ok {
-  background: var(--green);
-}
-
-.tile-dot.warn {
-  background: var(--amber);
-}
-
-.tile-chevron {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.6rem;
-  font-style: normal;
-  opacity: 0;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.tile:hover .tile-chevron,
-.tile.open .tile-chevron {
-  opacity: 1;
-}
-
-.tile.open .tile-chevron {
-  transform: rotate(180deg);
-}
-
-.tile-value {
-  overflow: hidden;
-  color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.76rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* ---------- Panel shell ----------
+   Only the panel survives the tile era: the tile row that toggled it was
+   deleted at the owner's order (2026-08-12, "i told you to delete these 4
+   tabs in the system"). The Work feed keeps the .tile-panel shell and its
+   tile-panel-jobs id so approval cards can still scroll to it. */
 
 .tile-panel {
   margin-top: 10px;
@@ -1644,23 +1564,6 @@ blockquote {
   text-align: right;
   font-family: var(--font-geist-mono), monospace;
   font-size: 0.72rem;
-  font-weight: 650;
-}
-
-.perm-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 14px;
-}
-
-.perm-chip {
-  border: 1px solid rgba(255, 190, 104, 0.35);
-  border-radius: 999px;
-  padding: 4px 9px;
-  color: #ffd9a4;
-  background: rgba(255, 190, 104, 0.08);
-  font-size: 0.68rem;
   font-weight: 650;
 }
 
@@ -1724,10 +1627,6 @@ blockquote {
   .composer-field input {
     /* 16px keeps iOS Safari from zooming the viewport on focus. */
     font-size: 1rem;
-  }
-
-  .tile-strip {
-    grid-template-columns: repeat(2, 1fr);
   }
 
   .telemetry-grid {
