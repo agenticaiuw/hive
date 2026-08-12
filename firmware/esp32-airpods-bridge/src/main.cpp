@@ -19,6 +19,31 @@ constexpr uint32_t ESP32_MAX_CPU_CLOCK_MHZ = 240;
 i2s_chan_handle_t i2sInput = nullptr;
 
 /*
+ * Volume potentiometer on GPIO34 = ADC1_CH6. ADC1 is the only usable ADC
+ * here and that is not a preference: ADC2 shares hardware with the Wi-Fi/
+ * Bluetooth radio, and with Bluedroid running every ADC2 read returns
+ * garbage or ESP_ERR_TIMEOUT. GPIO34 is also input-only with no internal
+ * pulls, which suits a pot wiper exactly (the pot itself defines the level).
+ *
+ * The knob is an ATTENUATOR, never an amplifier: 0..4095 maps to 0.0..1.0
+ * and the curve is squared because perceived loudness tracks power, not
+ * amplitude — a linear map crams all audible change into the last quarter
+ * turn. Gain rides to the A2DP callback as one Q12 integer written by
+ * loop() and read by the callback: single writer, single reader, no lock,
+ * per the audio path's standing rule.
+ */
+constexpr gpio_num_t VOLUME_POT_PIN = GPIO_NUM_34;
+constexpr uint32_t VOLUME_POLL_INTERVAL_MS = 50;  // ~20 Hz
+// 2% of full scale: below the pot's own wiper noise floor sits ~1%, so
+// this rejects jitter without making the knob feel notchy.
+constexpr int VOLUME_HYSTERESIS_COUNTS = 82;
+// Snap bands so the knob's mechanical stops actually mean silence / full.
+constexpr int VOLUME_SNAP_LOW = 40;
+constexpr int VOLUME_SNAP_HIGH = 4055;
+constexpr uint32_t VOLUME_GAIN_UNITY_Q12 = 4096;
+volatile uint32_t volumeGainQ12 = VOLUME_GAIN_UNITY_Q12;
+
+/*
  * No speaker is compiled in. The bridge remembers whatever it last connected
  * to — name in NVS "target", address in NVS "addr" — and pages that address
  * on boot, which also covers a bonded device that is powered on but not
@@ -240,6 +265,65 @@ void clearAudioBuffer() {
   // Consumer-side catch-up: never move ringWrite here, only ringRead.
   ringRead = ringWrite;
   ++audioStreamGeneration;
+}
+
+/*
+ * One knob sample: median of five raw reads. The ESP32's SAR ADC throws
+ * occasional single-sample spikes (radio bursts couple into the reference),
+ * and a median kills an outlier completely where an average only dilutes it.
+ * Five reads cost ~0.5 ms once per 50 ms tick — invisible to the loop task.
+ */
+uint16_t readVolumePotMedian5() {
+  uint16_t samples[5];
+  for (auto &sample : samples) {
+    sample = static_cast<uint16_t>(analogRead(VOLUME_POT_PIN));
+  }
+  // Insertion sort: five elements, no allocation, branch-predictable.
+  for (size_t i = 1; i < 5; ++i) {
+    const uint16_t key = samples[i];
+    size_t j = i;
+    for (; j > 0 && samples[j - 1] > key; --j) {
+      samples[j] = samples[j - 1];
+    }
+    samples[j] = key;
+  }
+  return samples[2];
+}
+
+/*
+ * ~20 Hz knob poll from loop(). Hysteresis (≥2% movement) keeps the serial
+ * channel and the gain word quiet while the knob is parked; the snap bands
+ * let the end stops reach true 0 and true 4095, which hysteresis alone
+ * would forever keep a few counts short of.
+ */
+void pollVolumePot() {
+  static uint32_t lastPollAt = 0;
+  static int lastAppliedRaw = -1;
+
+  const uint32_t now = millis();
+  if (now - lastPollAt < VOLUME_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastPollAt = now;
+
+  int raw = readVolumePotMedian5();
+  if (raw <= VOLUME_SNAP_LOW) {
+    raw = 0;
+  } else if (raw >= VOLUME_SNAP_HIGH) {
+    raw = 4095;
+  }
+  if (lastAppliedRaw >= 0 && abs(raw - lastAppliedRaw) < VOLUME_HYSTERESIS_COUNTS) {
+    return;
+  }
+  lastAppliedRaw = raw;
+
+  const float normalized = static_cast<float>(raw) / 4095.0f;
+  const float level = normalized * normalized;  // perceptual (power) curve
+  volumeGainQ12 = static_cast<uint32_t>(lroundf(level * VOLUME_GAIN_UNITY_Q12));
+
+  // Wire contract with the serial control page / orchestrator.
+  Serial.printf("{\"type\":\"volume\",\"level\":%.2f,\"raw\":%d}\n",
+                static_cast<double>(level), raw);
 }
 
 inline bool readGpioFast(gpio_num_t pin) {
@@ -716,6 +800,18 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
    * climbs to the high-water mark and resampler_slips runs away — which is
    * a fault to be reported, not something to hide by stretching pitch.
    */
+  /*
+   * Volume applies HERE and only here, because this callback is the single
+   * owner of samples on their way out (the standing rule for the SPSC ring:
+   * gain lives where one owner touches samples, and no locks enter the
+   * audio path). One coherent read per callback: a knob move lands at the
+   * next 512-frame request (~12 ms) instead of tearing mid-buffer. Applied
+   * pre-constrain so the FIR's occasional overshoot saturates exactly once,
+   * after the attenuation. The ring keeps the clean samples, so diagnostics
+   * (i2s_peak) still describe the wire, not the knob.
+   */
+  const int32_t gainQ12 = static_cast<int32_t>(volumeGainQ12);
+
   const int32_t level = static_cast<int32_t>(bufferedSampleCount());
   bool holdOneInput = false;
   if (level > static_cast<int32_t>(RESAMPLER_HIGH_WATER_FRAMES)) {
@@ -754,8 +850,12 @@ int32_t provideA2dpFrames(Frame *frames, int32_t frameCount) {
       accumulator += static_cast<int64_t>(blended) * history[tap];
     }
     const int32_t scaled = static_cast<int32_t>((accumulator + 16384) >> 15);
+    // Attenuate, then saturate once. |scaled| stays under ~2x full scale
+    // (FIR overshoot) and gain tops out at 4096, so the product is well
+    // inside int32; the fade tail below inherits the leveled sample.
+    const int32_t leveled = (scaled * gainQ12) >> 12;
     const int16_t sample = static_cast<int16_t>(
-        constrain(scaled, static_cast<int32_t>(INT16_MIN),
+        constrain(leveled, static_cast<int32_t>(INT16_MIN),
                   static_cast<int32_t>(INT16_MAX)));
     frames[index].channel1 = sample;
     frames[index].channel2 = sample;
@@ -1143,6 +1243,15 @@ void setup() {
 
   buildResampleFilter();
 
+  /*
+   * 11 dB attenuation spans the pot's whole 0..3.3 V swing (the default
+   * 0 dB clips at ~1.1 V, wasting two thirds of the knob's travel). The
+   * first poll below seeds the gain from the knob's actual position, so
+   * boot volume is where the owner left the knob, not a hardcoded unity.
+   */
+  analogSetPinAttenuation(VOLUME_POT_PIN, ADC_11db);
+  pollVolumePot();
+
   preferences.begin("airpods", false);
   haveKnownAddress =
       preferences.getBytes("addr", knownAddress, ESP_BD_ADDR_LEN) ==
@@ -1290,6 +1399,9 @@ void loop() {
     forceKnownConnect();
   }
 
+  // ~20 Hz knob poll; emits {"type":"volume",...} on real movement only.
+  pollVolumePot();
+
   if (millis() - lastDiagnosticAt >= 1000) {
     lastDiagnosticAt = millis();
     const uint16_t peak = i2sPeakSinceReport;
@@ -1359,6 +1471,9 @@ void loop() {
     document["i2s_overflow_hook"] =
         i2sOverflowCallbackStatus == ESP_OK ? "ok" : "unavailable";
     document["i2s_max_read_gap_us"] = i2sMaxReadGapUs;
+    // A knob at zero legitimately zeroes a2dp_nonzero_frames; report the
+    // gain so "silent output" and "broken path" stay distinguishable.
+    document["volume_gain_q12"] = volumeGainQ12;
     i2sMaxReadGapUs = 0;
     serializeJson(document, Serial);
     Serial.println();
