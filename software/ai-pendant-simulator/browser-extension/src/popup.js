@@ -690,10 +690,26 @@ function setPairNotice(message, isError = false) {
   elements.pairNotice.className = `notice${isError ? ' error' : ''}`
 }
 
-function renderSetup({ agentConfigured }) {
-  elements.setup.hidden = agentConfigured
-  /* One thing at a time in 400px: while unpaired, the command box and its
-   * footer chrome would only be dead controls under the one live card. */
+function renderSetup({ agentConfigured, brainConfigured }) {
+  /*
+   * The card shows when EITHER credential is missing, not just the agent's.
+   * The owner hit the gap this closes (2026-08-12): agent token present,
+   * relay credential gone — the footer said "paste the pairing code in this
+   * popup" while this card, gated on agentConfigured alone, was hidden.
+   * There was no box anywhere to paste into. One paste fills both halves,
+   * so the card IS the repair path for a missing brain too.
+   */
+  elements.setup.hidden = agentConfigured && brainConfigured
+  const title = elements.setup.querySelector('.setup-title')
+  if (title) {
+    title.textContent = agentConfigured
+      ? 'Reconnect the brain'
+      : 'Connect this browser'
+  }
+  /* One thing at a time in 400px: while the MAC half is unpaired, the
+   * command box and its footer chrome would only be dead controls under the
+   * one live card. With the agent paired and only the brain missing, the
+   * command box still works (via the Mac), so both stay visible. */
   elements.form.hidden = !agentConfigured
   elements.history.hidden = elements.history.hidden || !agentConfigured
   elements.openDashboard.parentElement.hidden = !agentConfigured
@@ -813,7 +829,13 @@ function onStorageChanged(changes, areaName) {
   /* The brain chip depends on two keys and a token, so a change in any of them
    * re-reads all of them rather than patching from one. agentToken also flips
    * the setup card, which refresh() repaints. */
-  if (changes.relayStatus || changes.agentToken) void refresh()
+  if (
+    changes.relayStatus ||
+    changes.agentToken ||
+    changes.deviceToken ||
+    changes.relayEnabled
+  )
+    void refresh()
   if (changes[HISTORY_KEY]) renderHistory(changes[HISTORY_KEY].newValue)
   if (changes[APPROVALS_KEY]) renderApprovals(changes[APPROVALS_KEY].newValue)
   /* THE pairing result channel. The worker writes this record whether or not
@@ -837,11 +859,15 @@ async function refresh() {
     'relayStatus',
     'agentUrl',
     'agentToken',
+    'deviceToken',
+    'relayEnabled',
     HISTORY_KEY,
     INCLUDE_PAGE_KEY,
     APPROVALS_KEY,
   ])
   const agentConfigured = Boolean(values.agentToken)
+  /* The brain half: a relay credential that is present AND switched on. */
+  const brainConfigured = Boolean(values.relayEnabled && values.deviceToken)
   dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
   renderStatus(values.bridgeStatus)
   renderBrain({
@@ -854,7 +880,7 @@ async function refresh() {
   elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false
   refreshMicAvailability()
   /* Last, so the setup card's show/hide wins over renderHistory's. */
-  renderSetup({ agentConfigured })
+  renderSetup({ agentConfigured, brainConfigured })
   void renderGrantPages({ agentConfigured })
 }
 

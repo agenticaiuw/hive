@@ -733,8 +733,10 @@
 		elements.pairNotice.textContent = message;
 		elements.pairNotice.className = `notice${isError ? " error" : ""}`;
 	}
-	function renderSetup({ agentConfigured }) {
-		elements.setup.hidden = agentConfigured;
+	function renderSetup({ agentConfigured, brainConfigured }) {
+		elements.setup.hidden = agentConfigured && brainConfigured;
+		const title = elements.setup.querySelector(".setup-title");
+		if (title) title.textContent = agentConfigured ? "Reconnect the brain" : "Connect this browser";
 		elements.form.hidden = !agentConfigured;
 		elements.history.hidden = elements.history.hidden || !agentConfigured;
 		elements.openDashboard.parentElement.hidden = !agentConfigured;
@@ -807,7 +809,7 @@
 	function onStorageChanged(changes, areaName) {
 		if (areaName !== "local") return;
 		if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue);
-		if (changes.relayStatus || changes.agentToken) refresh();
+		if (changes.relayStatus || changes.agentToken || changes.deviceToken || changes.relayEnabled) refresh();
 		if (changes["consoleHistory"]) renderHistory(changes[HISTORY_KEY].newValue);
 		if (changes["pendingApprovals"]) renderApprovals(changes[APPROVALS_KEY].newValue);
 		if (changes["pairOutcome"]) renderPairOutcome(changes[PAIR_OUTCOME_KEY].newValue);
@@ -824,11 +826,14 @@
 			"relayStatus",
 			"agentUrl",
 			"agentToken",
+			"deviceToken",
+			"relayEnabled",
 			HISTORY_KEY,
 			INCLUDE_PAGE_KEY,
 			APPROVALS_KEY
 		]);
 		const agentConfigured = Boolean(values.agentToken);
+		const brainConfigured = Boolean(values.relayEnabled && values.deviceToken);
 		dashboardUrl = dashboardUrlFor(values.agentUrl || "http://127.0.0.1:8000");
 		renderStatus(values.bridgeStatus);
 		renderBrain({
@@ -839,7 +844,10 @@
 		renderHistory(values[HISTORY_KEY]);
 		elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false;
 		refreshMicAvailability();
-		renderSetup({ agentConfigured });
+		renderSetup({
+			agentConfigured,
+			brainConfigured
+		});
 		renderGrantPages({ agentConfigured });
 	}
 	refresh().then(() => {
