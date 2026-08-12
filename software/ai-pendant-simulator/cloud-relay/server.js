@@ -97,6 +97,7 @@ import {
   linkAudioCaptures,
   normalizeHistoryLimit,
   normalizeHistoryQuery,
+  operatorRunForRow,
   runDetailForJob,
 } from './history.js'
 import { parseByteRange, RANGE_UNSATISFIABLE } from './httpRange.js'
@@ -2057,12 +2058,23 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
     Math.max(Number(request.query?.limit || 12), 1),
     40,
   )
+  /*
+   * Browser-executed tasks are members of this feed, not just of /v1/ops/
+   * history. The owner, 2026-08-12: "why didn't my question in the browser
+   * extension carried to the dashboard?" — the extension had recorded its
+   * "what's my latest personal gmail" run to the hive (btask_930d46ec…, folded
+   * by browserTaskHistory.js), but this route listed `type: 'plan'` only, and
+   * the dashboard's Recent/hero feed is THIS route. A run the history page
+   * could show was invisible in the feed the owner actually watches. One
+   * membership rule (operatorRunForRow) now covers both row kinds here and in
+   * the /latest probe below, so they can never disagree again.
+   */
   const [jobs, captures] = await Promise.all([
-    store.listJobs({ type: 'plan', limit: 80 }),
+    store.listJobs({ type: ['plan', BROWSER_TASK_JOB_TYPE], limit: 80 }),
     store.listJobs({ type: 'audio_capture', limit: 40 }),
   ])
   const runs = [
-    ...jobs.map(voiceRunForJob),
+    ...jobs.map((job) => operatorRunForRow(job)),
     ...captures.map(voiceRunForCapture),
   ]
     .filter(Boolean)
@@ -2086,11 +2098,13 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
 app.get('/v1/ops/voice-runs/latest', async (_request, response) => {
   const store = await getStore()
   const [jobs, captures] = await Promise.all([
-    store.listJobs({ type: 'plan', limit: 8 }),
+    store.listJobs({ type: ['plan', BROWSER_TASK_JOB_TYPE], limit: 8 }),
     store.listJobs({ type: 'audio_capture', limit: 8 }),
   ])
   // Same membership rule as /v1/ops/voice-runs so the fast probe and the full
-  // list can never disagree about which run is newest.
+  // list can never disagree about which run is newest — including browser
+  // tasks, or a fresh browser answer would never trip the dashboard's
+  // cheap-poll refresh and would stay unseen until the next full poll.
   const job = [...jobs, ...captures]
     .sort(
       (left, right) =>
@@ -2098,7 +2112,7 @@ app.get('/v1/ops/voice-runs/latest', async (_request, response) => {
     )
     .find(
       (candidate) =>
-        Boolean(voiceRunForJob(candidate)) ||
+        Boolean(operatorRunForRow(candidate)) ||
         Boolean(voiceRunForCapture(candidate)),
     )
   response.set('Cache-Control', 'no-store, max-age=0')
