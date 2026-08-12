@@ -219,14 +219,37 @@ Label names as printed on each breakout. "—" = leave unconnected.
 | green (memo) | DK P0.22 | GND rail |
 | blue (push-to-talk) | DK P0.23 | GND rail |
 
-**rotary encoder** (3 pins one side, 2 the other)
+**rotary encoder** — the owner's part is an ILLUMINATED type: 3 pins one
+side, **5** the other, plus two flat mounting tabs (no wires). Its built-in
+RGB is UNUSED — a separate RGB LED does the status colours (below).
 | pin on part | connect to |
 | --- | --- |
-| A (outer) | DK P0.24 |
-| C (middle) | GND rail |
-| B (outer) | DK P0.25 |
-| switch pin 1 | DK P0.28 |
-| switch pin 2 | GND rail |
+| A (outer, 3-pin side) | DK P0.24 |
+| C (middle, 3-pin side) | GND rail |
+| B (outer, 3-pin side) | DK P0.25 |
+| switch pin 1 (of the 5) | DK P0.28 |
+| switch pin 2 (of the 5) | GND rail |
+| the other 3 of the 5 | — (built-in RGB, unused) |
+| mounting tabs | — |
+
+Identifying the two switch pins with no multimeter: C (middle of the 3-pin
+side) to GND, then touch 3V through 330 Ω to each of the five in turn. The
+three that GLOW are the built-in LED; the two that stay dark are the switch.
+(If none glow, the part is common-anode: put C on 3V and touch each of the
+five to GND instead — same conclusion, and it also tells you the LED
+polarity if the built-in one is ever used.)
+
+**RGB status LED** (separate 4-leg part)
+| leg | connect to |
+| --- | --- |
+| R | 330 Ω → DK P0.03 |
+| G | 330 Ω → DK P0.04 |
+| B | 330 Ω → DK P0.07 |
+| common (longest leg) | GND rail (common-cathode, the firmware default) |
+
+If the colours come out inverted — dark where they should be bright — the
+part is common-anode: move the common leg to the 3V rail and rebuild with
+CONFIG_PENDANT_RGB_COMMON_ANODE=y.
 
 **volume knob · potentiometer** (3 legs)
 | leg | connect to |
