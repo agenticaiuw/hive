@@ -178,7 +178,7 @@
 		"forever"
 	]);
 	const DEFAULT_PAIR_LIFETIME = "forever";
-	Object.freeze({
+	const LIFETIME_TTL_MS = Object.freeze({
 		session: null,
 		"7d": 10080 * 60 * 1e3,
 		"30d": 720 * 60 * 60 * 1e3,
@@ -190,12 +190,84 @@
 		const value = String(raw ?? "").trim();
 		return PAIR_LIFETIMES.includes(value) ? value : DEFAULT_PAIR_LIFETIME;
 	}
+	/** Relay-side TTL for a lifetime; null means "mint with no expiry". */
+	function lifetimeTtlMs(lifetime) {
+		return LIFETIME_TTL_MS[normalizePairLifetime(lifetime)] ?? null;
+	}
+	/** The request. Loopback only by construction: the URL is the agent's. */
+	function pairRequest(agentUrl, { code, deviceId, deviceName, lifetime }) {
+		const origin = String(agentUrl ?? "").replace(/\/$/, "");
+		if (!origin) return null;
+		return {
+			url: `${origin}/pair/browser`,
+			init: {
+				method: "POST",
+				cache: "no-store",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					code: String(code ?? ""),
+					deviceId: String(deviceId ?? ""),
+					deviceName: String(deviceName ?? ""),
+					lifetime: normalizePairLifetime(lifetime)
+				})
+			}
+		};
+	}
 	function defaultPairDeviceId(storedId, randomHex) {
 		const existing = String(storedId ?? "").trim();
 		if (existing) return existing;
 		return `browser-${(String(randomHex ?? "").replace(/[^0-9a-f]/gi, "").slice(0, 6) || "000000").toLowerCase()}`;
 	}
+	/**
+	* Reply → storage patch. Keys are the live contract: `agentToken` restarts
+	* the Mac poll loop, the RELAY_STORAGE_KEYS quartet restarts the mesh socket
+	* (background.js watches both). relayEnabled flips true ONLY when a token
+	* actually arrived — flipping it on a failed relay leg would aim the drain
+	* loop at a relay this browser cannot authenticate to, and the error state
+	* that follows looks like a bug rather than an unfinished setup.
+	*/
+	function pairStoragePatch(payload, { agentUrl, lifetime, now = Date.now() } = {}) {
+		if (!payload?.ok || !payload.agentToken) return {
+			ok: false,
+			error: String(payload?.error ?? "Pairing failed: the agent returned no token.")
+		};
+		const chosen = normalizePairLifetime(lifetime);
+		const ttl = lifetimeTtlMs(chosen);
+		const values = {
+			...agentUrl ? { agentUrl } : {},
+			agentToken: String(payload.agentToken),
+			pairLifetime: chosen,
+			pairExpiresAt: ttl ? new Date(now + ttl).toISOString() : null
+		};
+		if (payload.relay?.deviceToken) {
+			values.relayEnabled = true;
+			values.relayUrl = String(payload.relay.url ?? "");
+			values.relayDeviceId = String(payload.relay.deviceId ?? "");
+			values.deviceToken = String(payload.relay.deviceToken);
+			return {
+				ok: true,
+				values,
+				note: `Paired. This browser is ${values.relayDeviceId} on the relay — the brain is on.`
+			};
+		}
+		return {
+			ok: true,
+			values,
+			note: `Mac agent paired. Relay half failed: ${String(payload.relayError ?? "no credential returned")} — commands will use the Mac until you pair again.`
+		};
+	}
 	const PAIR_OUTCOME_KEY = "pairOutcome";
+	function pairOutcomeRecord(outcome, now = Date.now()) {
+		return outcome?.ok ? {
+			ok: true,
+			note: String(outcome.note ?? "Paired."),
+			at: now
+		} : {
+			ok: false,
+			error: String(outcome?.error ?? "Pairing failed."),
+			at: now
+		};
+	}
 	Object.freeze([
 		"agentToken",
 		"deviceToken",
@@ -203,6 +275,136 @@
 		"pairLifetime",
 		"pairExpiresAt"
 	]);
+	function shouldEscrow(lifetime) {
+		return normalizePairLifetime(lifetime) !== "session";
+	}
+	//#endregion
+	//#region browser-extension/src/page-engine.js
+	const PAIR_REPLY_TIMEOUT_MS = 2500;
+	/**
+	* Should the POPUP run the pairing exchange itself?
+	*
+	* Inputs are the three ways the 'pair:run' send can end plus what storage
+	* already says:
+	*   - `failed`: sendMessage threw (Chromium's "receiving end does not exist").
+	*   - `replied` with a real reply object: the worker is alive and answered —
+	*     its answer narrates, the page must NOT double-run.
+	*   - `replied` with undefined/null, or the wait timed out: EITHER the worker
+	*     never evaluated (tonight's Safari) OR it is alive and Safari dropped the
+	*     async reply (the 2026-08-12 war story). The tiebreaker is the outcome
+	*     record: a PAIR_OUTCOME_KEY stamped at/after this attempt started means
+	*     the worker acted, reply or no reply.
+	*
+	* Running direct when the worker is merely slow is deliberately accepted: the
+	* pairing code is a static owner secret (not single-use — the agent compares
+	* it timing-safe against PAIRING_CODE), so a second exchange just re-mints the
+	* same device's credential and the later storage write wins. The one hazard —
+	* a direct FAILURE overwriting the worker's later SUCCESS — is what
+	* directOutcomeWritePlan guards.
+	*/
+	function pairFallbackVerdict({ failed = false, replied = false, reply = null, outcome = null, startedAt = 0 } = {}) {
+		if (replied && reply !== void 0 && reply !== null) return {
+			run: false,
+			why: "worker-answered"
+		};
+		if (outcome && Number(outcome.at ?? 0) >= startedAt) return {
+			run: false,
+			why: "worker-outcome-landed"
+		};
+		return {
+			run: true,
+			why: failed ? "send-failed" : "no-reply"
+		};
+	}
+	/**
+	* May this direct outcome be written under PAIR_OUTCOME_KEY?
+	*
+	* One rule: a failure must never bury a success from the same attempt. If the
+	* worker (alive after all, reply dropped) already recorded a fresh success,
+	* the page's own failed fetch — most likely a second exchange racing it — is
+	* noise, and writing it would flip the popup from "Paired." to an error the
+	* owner has no reason to see. Everything else writes: the record is the one
+	* channel renderPairOutcome trusts.
+	*/
+	function directOutcomeWritePlan({ existing, startedAt, outcome, now = Date.now() } = {}) {
+		if (existing && existing.ok === true && Number(existing.at ?? 0) >= startedAt && !outcome?.ok) return {
+			write: false,
+			record: existing,
+			reason: "a fresher success already landed"
+		};
+		return {
+			write: true,
+			record: pairOutcomeRecord(outcome, now)
+		};
+	}
+	async function escrowStore(api, values) {
+		if (typeof api?.runtime?.sendNativeMessage !== "function") return;
+		try {
+			await api.runtime.sendNativeMessage("application.id", {
+				type: "escrow:store",
+				values
+			});
+		} catch {}
+	}
+	/**
+	* The pairing exchange, run from THIS document — the worker's 'pair:run' body
+	* under the identical storage contract, for the Safari where no worker runs.
+	*
+	* Order of writes mirrors background.js exactly:
+	*   1. session sentinel BEFORE the credentials (no instant where a session
+	*      credential exists that a crash would promote to forever),
+	*   2. the credential patch into storage.local (this is what restarts both
+	*      peers' loops whenever a worker IS alive to watch storage),
+	*   3. drop any synced copy of an old token,
+	*   4. escrow (never for session-only — shouldEscrow),
+	*   5. the outcome record, guarded by directOutcomeWritePlan.
+	*
+	* Returns the outcome record that now stands (written or kept), shaped for
+	* renderPairOutcome.
+	*/
+	async function runDirectPairing(api, { agentUrl, code, deviceId, deviceName, lifetime, startedAt = 0 }, fetchImpl = globalThis.fetch) {
+		const chosen = normalizePairLifetime(lifetime);
+		const request = pairRequest(agentUrl, {
+			code,
+			deviceId,
+			deviceName,
+			lifetime: chosen
+		});
+		const origin = request ? new URL(request.url).origin : "";
+		let outcome;
+		try {
+			if (!request) throw new Error("No agent URL to pair against.");
+			const response = await fetchImpl(request.url, {
+				...request.init,
+				signal: AbortSignal.timeout(2e4)
+			});
+			outcome = pairStoragePatch(await response.json().catch(() => null) ?? {
+				ok: false,
+				error: `The agent returned HTTP ${response.status} with no body.`
+			}, {
+				agentUrl: origin,
+				lifetime: chosen
+			});
+			if (outcome.ok) {
+				if (chosen === "session" && api.storage.session) await api.storage.session.set({ pairSessionAlive: true });
+				await api.storage.local.set(outcome.values);
+				if (api.storage.sync) await api.storage.sync.remove("agentToken").catch?.(() => {});
+				if (shouldEscrow(chosen)) await escrowStore(api, outcome.values);
+			}
+		} catch (error) {
+			outcome = {
+				ok: false,
+				error: error?.name === "TimeoutError" ? "The agent did not answer within 20s. Is it running on this Mac?" : error?.message || String(error)
+			};
+		}
+		const plan = directOutcomeWritePlan({
+			existing: (await api.storage.local.get(PAIR_OUTCOME_KEY).catch(() => ({})))?.[PAIR_OUTCOME_KEY],
+			startedAt,
+			outcome
+		});
+		if (plan.write) await api.storage.local.set({ [PAIR_OUTCOME_KEY]: plan.record }).catch(() => {});
+		return plan.record;
+	}
 	//#endregion
 	//#region shared/nodeMesh.js
 	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
@@ -767,25 +969,48 @@
 		const randomBytes = new Uint8Array(3);
 		crypto.getRandomValues(randomBytes);
 		const deviceId = defaultPairDeviceId(stored.relayDeviceId, [...randomBytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+		const exchange = {
+			agentUrl: stored.agentUrl || "http://127.0.0.1:8000",
+			code,
+			deviceId,
+			deviceName: stored.deviceName || "Browser extension",
+			lifetime: normalizePairLifetime(elements.pairLifetime.value)
+		};
+		const REPLY_TIMED_OUT = Symbol("pair-reply-timeout");
+		let send;
 		try {
-			const reply = await api.runtime.sendMessage({
+			const reply = await Promise.race([api.runtime.sendMessage({
 				type: "pair:run",
-				agentUrl: stored.agentUrl || "http://127.0.0.1:8000",
-				code,
-				deviceId,
-				deviceName: stored.deviceName || "Browser extension",
-				lifetime: normalizePairLifetime(elements.pairLifetime.value)
-			});
-			if (reply === void 0 || reply === null) setPairNotice("Still pairing — finishing in the background. This popup will update by itself.");
-			else if (!reply.ok) renderPairOutcome({
-				...reply,
+				...exchange
+			}), new Promise((resolve) => setTimeout(() => resolve(REPLY_TIMED_OUT), PAIR_REPLY_TIMEOUT_MS))]);
+			send = reply === REPLY_TIMED_OUT ? { replied: false } : {
+				replied: true,
+				reply
+			};
+		} catch (error) {
+			send = {
+				failed: true,
+				error
+			};
+		}
+		if (send.replied && send.reply !== void 0 && send.reply !== null) {
+			if (!send.reply.ok) renderPairOutcome({
+				...send.reply,
 				at: Date.now()
 			});
-		} catch (error) {
-			pairStartedAt = 0;
-			elements.pairConnect.disabled = false;
-			setPairNotice(error?.message || "The bridge is not awake yet — try again.", true);
+			return;
 		}
+		const outcomeValues = await api.storage.local.get(PAIR_OUTCOME_KEY).catch(() => ({}));
+		if (!pairFallbackVerdict({
+			...send,
+			outcome: outcomeValues?.["pairOutcome"],
+			startedAt: pairStartedAt
+		}).run) return;
+		setPairNotice("The background bridge is not answering — pairing directly from this window…");
+		renderPairOutcome(await runDirectPairing(api, {
+			...exchange,
+			startedAt: pairStartedAt
+		}));
 	});
 	async function renderGrantPages({ agentConfigured }) {
 		let granted = true;

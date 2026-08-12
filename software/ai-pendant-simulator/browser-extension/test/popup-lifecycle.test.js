@@ -130,14 +130,66 @@ test('the popup reads the pairing outcome from storage, not the reply', () => {
     /changes\[PAIR_OUTCOME_KEY\]/,
     'storage.onChanged carries the authoritative outcome',
   )
-  /* A dropped reply is narrated as "still finishing", never as failure. The
-   * phrase is allowed in comments (the war story lives there); stripping them
-   * checks the CODE cannot print it. */
-  assert.match(text, /Still pairing/, 'undefined reply means still-finishing, not no-token')
   assert.equal(
     text.replace(/\/\*[\s\S]*?\*\//g, '').includes('returned no token'),
     false,
     'the popup never prints the default no-token message on its own',
+  )
+})
+
+/*
+ * THE POPUP MUST BE ABLE TO PAIR WITH NO BACKGROUND AT ALL. Measured
+ * 2026-08-12 on the owner's Safari (macOS 26): the background never evaluates
+ * — not as service_worker, not as a background.scripts page — across
+ * relaunches, a cache reset and a full re-registration, while the popup
+ * document always runs and fetches loopback fine. So an unanswered 'pair:run'
+ * is no longer narrated as "still pairing" (a promise nobody is keeping): the
+ * popup waits one bounded window, consults pairFallbackVerdict, and then runs
+ * the exchange ITSELF via runDirectPairing (page-engine.js) under the
+ * worker's exact storage contract.
+ */
+test('the popup escalates a silent worker to the page-side pairing exchange', () => {
+  const text = src('popup.js')
+  assert.match(
+    text,
+    /PAIR_REPLY_TIMEOUT_MS/,
+    'the worker gets a bounded reply window, not forever',
+  )
+  assert.match(
+    text,
+    /pairFallbackVerdict\(/,
+    'the escalation decision is the pure verdict, not an inline guess',
+  )
+  assert.match(
+    text,
+    /runDirectPairing\(api,/,
+    'the popup runs the direct exchange when the verdict says to',
+  )
+  /* The old dead-end message must stay gone: with a background that never
+   * runs, "still pairing in the background" is a lie the owner waits on. */
+  assert.equal(
+    text.replace(/\/\*[\s\S]*?\*\//g, '').includes('Still pairing'),
+    false,
+    'no still-pairing narration — the popup acts instead of promising',
+  )
+})
+
+test('the page-side exchange honours the worker\'s pairing storage contract', () => {
+  const text = src('page-engine.js')
+  assert.match(text, /pairStoragePatch\(/, 'the same patch policy decides what to store')
+  assert.match(
+    text,
+    /storage\.local\.set\(\{ \[PAIR_OUTCOME_KEY\]/,
+    'the outcome record lands under PAIR_OUTCOME_KEY',
+  )
+  assert.match(text, /pairSessionAlive/, 'session pairing plants the sentinel')
+  assert.match(text, /shouldEscrow\(/, 'session-only pairings are never escrowed')
+  /* The lifecycle discipline extends to the new module: nothing here may
+   * register a storage listener it cannot hand back. */
+  assert.equal(
+    /onChanged\.addListener/.test(text),
+    false,
+    'page-engine.js registers no storage listeners at all',
   )
 })
 
