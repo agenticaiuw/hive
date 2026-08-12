@@ -20,7 +20,7 @@ graph LR
   POT["volume pot"]
   SDC["microSD"]
   HAP["DRV2605L + LRA"]
-  ACC["accelerometer"]
+  
   AMP["MAX98357A + speaker"]
   SND(("Bose / AirPods"))
 
@@ -31,13 +31,13 @@ graph LR
   SW -.->|"sense ·100k· → P0.26"| DK
   BTN -- "P0.21 · P0.22 · P0.23 (→GND)" --> DK
   ENC -- "A P0.24 · B P0.25 · push P0.28 (common→GND)" --> DK
-  POT -.->|"middle → P0.15 · sides → 3V/GND"| DK
+  POT -- "middle → P0.15 · sides → 3V/GND" --> DK
   SDC -- "SPI P0.10–P0.13" --> DK
-  HAP -.->|"I2C P0.30/P0.31 · addr 0x5A"| DK
-  ACC -.->|"I2C + INT1 → P0.27?"| DK
-  AMP -.->|"taps I2S nets · SD_MODE → P0.29?"| DK
+  HAP -- "I2C P0.30/P0.31 · 0x5A · 4.7k pull-ups" --> DK
+  ACC["LSM6DSOX accel"] -- "I2C 0x6A · INT1 → P0.27" --> DK
+  AMP -- "taps I2S nets · SD_MODE → P0.01" --> DK
   ESP -- "A2DP" --> SND
-  DK -.->|"UART P0.00/P0.01 ↔ G16/G17 (future)"| ESP
+  DK -.->|"UART to BT module (future · pins TBD)"| ESP
 ```
 
 ## Power and ground
@@ -70,7 +70,7 @@ graph LR
 | Encoder A / B | nRF **P0.24** / **P0.25** | encoder COMMON (middle) → GND | [NOW] |
 | Encoder push | nRF **P0.28** | GND | [NOW] |
 | Mic-power sense | mic-VDD node → **100k** → nRF **P0.26** | no pull | [NOW] |
-| Volume pot middle leg | nRF **P0.15** (AIN2) | side legs → 3V rail and GND | [PEND] — moved off ESP32 GPIO34 (module-parity ruling) |
+| Volume pot middle leg | nRF **P0.15** (AIN2) | side legs → 3V rail and GND | [NOW] — firmware flashed |
 
 ## microSD breakout (SPI) — existing
 
@@ -88,24 +88,23 @@ Bus: **SDA P0.30 · SCL P0.31**, one **4.7k pull-up from each to the 3V rail** [
 
 | Device | Connections | Status |
 | --- | --- | --- |
-| DRV2605L haptic (addr 0x5A) | VDD→3V, GND, SDA, SCL, OUT+/OUT− → LRA buzzer | [PEND] |
-| Accelerometer (LIS2DH12/LSM6DSO) | VDD→3V, GND, SDA, SCL, **INT1 → P0.27** | [PEND — pin unconfirmed] |
+| DRV2605L haptic (addr 0x5A) | VDD→3V, GND, SDA, SCL, OUT+/OUT− → LRA buzzer | [NOW] — firmware flashed |
+| Accelerometer **LSM6DSOX** (addr 0x6A) | VDD→3V, GND, SDA, SCL, **INT1 → P0.27** | [NOW] — firmware flashed |
 
 ## Speaker amp — incoming
 
 | MAX98357A pin | Goes to | Status |
 | --- | --- | --- |
-| VIN / GND | 3V rail / GND | [PEND] |
-| BCLK / LRC / DIN | the BCLK / LRCLK / Audio-out nets above (parallel taps) | [PEND] |
-| SD_MODE | nRF **P0.29** (speaker on/off gate) | [PEND — pin unconfirmed] |
-| OUT+ / OUT− | wired speaker | [PEND] |
+| VIN / GND | 3V rail / GND | [NOW] |
+| BCLK / LRC / DIN | the BCLK / LRCLK / Audio-out nets above (parallel taps) | [NOW] |
+| SD_MODE | nRF **P0.01** (speaker on/off gate; P0.29 became console TX) | [NOW] |
+| OUT+ / OUT− | wired speaker (+ → OUT+) | [NOW] |
 
 ## Future: nRF commands the Bluetooth chip (task #22)
 
-| Wire | From | To |
-| --- | --- | --- |
-| UART TX | nRF **P0.00** | ESP32 **GPIO16** (RX2) |
-| UART RX | nRF **P0.01** | ESP32 **GPIO17** (TX2) |
+Pins TBD — P0.01 went to SD_MODE and P0.29 to the console TX. Candidates:
+P0.00 (TX) + a repurposed DK LED pin for RX; the task-22 agent resolves
+against the overlay and updates this table.
 
 ## Off-board
 
