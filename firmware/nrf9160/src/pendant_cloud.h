@@ -53,6 +53,17 @@ void pendant_cloud_block_link(bool blocked);
 int pendant_cloud_stream_prewarm(uint32_t sample_rate);
 /* Re-validate/reopen prewarmed stream at button press (before I2S starts). */
 int pendant_cloud_stream_ensure(uint32_t sample_rate);
+/*
+ * Record-only memo mode for the NEXT stream open (green button). The relay
+ * already owns the distinction: ?dispatch=0 on /v1/pendant/command runs
+ * transcription and stores the capture but never queues a Mac planner job.
+ * Memo uploads also skip X-Reply-Stream (a memo wants no spoken answer) and
+ * carry X-Pendant-Mode: memo so the dashboard can label them. ensure/prewarm
+ * treat a mode mismatch like a stale socket and reopen, so a prewarmed
+ * dispatch stream can never swallow a memo press (or the reverse). Latched
+ * until cleared — set true before the memo capture, back to false after.
+ */
+void pendant_cloud_stream_set_memo(bool memo);
 int pendant_cloud_stream_write(const void *data, size_t length);
 int pendant_cloud_stream_pump(uint32_t budget_ms);
 int pendant_cloud_stream_end(void);

@@ -96,6 +96,13 @@ static void store_slot_path(const struct store_slot *slot, char *out,
 		       (unsigned int)(slot - store.slots));
 }
 
+/* Kinds whose slot owns a PCM payload file on the card. */
+static bool store_kind_has_payload(uint8_t kind)
+{
+	return kind == PENDANT_STORE_KIND_VOICE ||
+	       kind == PENDANT_STORE_KIND_MEMO;
+}
+
 static int store_save(void)
 {
 	struct fs_file_t file;
@@ -185,7 +192,7 @@ void pendant_store_init(void)
 		struct fs_dirent entry;
 		char path[32];
 
-		if (slot->seq == 0U || slot->kind != PENDANT_STORE_KIND_VOICE) {
+		if (slot->seq == 0U || !store_kind_has_payload(slot->kind)) {
 			continue;
 		}
 		store_slot_path(slot, path, sizeof(path));
@@ -246,7 +253,13 @@ static void store_fill_when(struct store_slot *slot)
 	slot->uptime_s = (uint32_t)(k_uptime_get() / 1000);
 }
 
-int pendant_store_enqueue_voice(uint32_t pcm_bytes)
+/*
+ * Take ownership of the mic journal for either audio kind. One body on
+ * purpose: a command and a memo differ ONLY in the kind byte the manifest
+ * remembers — the rename, the eviction policy and the crash safety are
+ * identical, and two copies would drift.
+ */
+static int store_enqueue_journal(uint8_t kind, uint32_t pcm_bytes)
 {
 	struct store_slot *slot;
 	struct fs_dirent entry;
@@ -295,18 +308,30 @@ int pendant_store_enqueue_voice(uint32_t pcm_bytes)
 	}
 
 	slot->seq = store.next_seq++;
-	slot->kind = PENDANT_STORE_KIND_VOICE;
+	slot->kind = kind;
 	slot->bytes = MIN(pcm_bytes, (uint32_t)entry.size);
 	slot->tries = 0U;
 	slot->link_up = 0U;
 	store_fill_when(slot);
 	++pendant_store_queued;
 	(void)store_save();
-	printk("Voice memo held offline: seq=%u bytes=%u file=%s when=%s\n",
+	printk("%s held offline: seq=%u bytes=%u file=%s when=%s\n",
+	       kind == PENDANT_STORE_KIND_MEMO ? "Record-only memo"
+					       : "Voice memo",
 	       slot->seq, slot->bytes, path,
 	       slot->tag[0] != '\0' ? slot->tag : "(no NITZ clock)");
 	pendant_store_print_stats("voice_queued");
 	return 0;
+}
+
+int pendant_store_enqueue_voice(uint32_t pcm_bytes)
+{
+	return store_enqueue_journal(PENDANT_STORE_KIND_VOICE, pcm_bytes);
+}
+
+int pendant_store_enqueue_memo(uint32_t pcm_bytes)
+{
+	return store_enqueue_journal(PENDANT_STORE_KIND_MEMO, pcm_bytes);
 }
 
 int pendant_store_enqueue_mark(bool link_up)
@@ -322,7 +347,7 @@ int pendant_store_enqueue_mark(bool link_up)
 		if (slot == NULL) {
 			return -ENOSPC;
 		}
-		if (slot->kind == PENDANT_STORE_KIND_VOICE) {
+		if (store_kind_has_payload(slot->kind)) {
 			char path[32];
 
 			store_slot_path(slot, path, sizeof(path));
@@ -374,7 +399,7 @@ static void store_release(struct store_slot *slot, const char *why)
 {
 	char path[32];
 
-	if (slot->kind == PENDANT_STORE_KIND_VOICE) {
+	if (store_kind_has_payload(slot->kind)) {
 		store_slot_path(slot, path, sizeof(path));
 		if (fs_unlink(path) != 0) {
 			printk("Outbox unlink %s failed\n", path);
@@ -397,19 +422,34 @@ int pendant_store_drain_one(uint32_t voice_sample_rate)
 	}
 
 	switch (slot->kind) {
-	case PENDANT_STORE_KIND_VOICE: {
+	case PENDANT_STORE_KIND_VOICE:
+	case PENDANT_STORE_KIND_MEMO: {
 		char path[32];
 
 		store_slot_path(slot, path, sizeof(path));
-		printk("Forwarding held voice memo seq=%u (%u B) from %s\n",
+		printk("Forwarding held %s seq=%u (%u B) from %s\n",
+		       slot->kind == PENDANT_STORE_KIND_MEMO
+			       ? "record-only memo"
+			       : "voice memo",
 		       slot->seq, slot->bytes, path);
 		/*
 		 * Streams straight off the card through the existing
 		 * single-shot reader — no staging buffer, so a 30 s memo
 		 * costs the same RAM as a 1 s one.
+		 *
+		 * The memo kind flips pendant_cloud's memo latch around the
+		 * upload so the relay sees ?dispatch=0: the manifest, not
+		 * whatever the latch happened to hold at drain time, is the
+		 * authority on whether the owner wanted a planner.
 		 */
+		if (slot->kind == PENDANT_STORE_KIND_MEMO) {
+			pendant_cloud_stream_set_memo(true);
+		}
 		error = pendant_cloud_upload_recording(path, slot->bytes,
 						      voice_sample_rate);
+		if (slot->kind == PENDANT_STORE_KIND_MEMO) {
+			pendant_cloud_stream_set_memo(false);
+		}
 		break;
 	}
 	case PENDANT_STORE_KIND_MARK:
@@ -454,7 +494,7 @@ int pendant_store_drain_one(uint32_t voice_sample_rate)
 	 * first would claim delivery the second never achieved.
 	 */
 	bool relay_has_it = error == 0 ||
-			    (slot->kind == PENDANT_STORE_KIND_VOICE &&
+			    (store_kind_has_payload(slot->kind) &&
 			     pendant_cloud_last_http_status >= 200 &&
 			     pendant_cloud_last_http_status < 300);
 

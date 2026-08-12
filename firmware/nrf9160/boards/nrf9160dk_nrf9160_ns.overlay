@@ -1,6 +1,67 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 #include <samples/cellular/nrf91_crypto_partitions.dtsi>
+
+/*
+ * Breadboard hardware controls (owner's 2026-08-12 parts order).
+ *
+ * All buttons and the encoder switch to GND and rely on the internal
+ * pull-ups declared here, so a wire that falls off the breadboard reads
+ * "not pressed" instead of chattering. The mic-power sense is the one
+ * deliberate exception: it watches the SPH0645's VDD net through 100k,
+ * so it must not fight that net with any pull at all — high means the
+ * red latching switch is feeding the mic, low means the owner cut its
+ * power (the only honest hardware mute a digital mic has).
+ */
+/ {
+	pendant_controls {
+		compatible = "gpio-keys";
+
+		ask_button: ask_button {
+			gpios = <&gpio0 21 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		memo_button: memo_button {
+			gpios = <&gpio0 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		approve_button: approve_button {
+			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		encoder_a: encoder_a {
+			gpios = <&gpio0 24 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		encoder_b: encoder_b {
+			gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		encoder_push: encoder_push {
+			gpios = <&gpio0 28 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		mic_power_sense: mic_power_sense {
+			gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	aliases {
+		ask-btn = &ask_button;
+		memo-btn = &memo_button;
+		approve-btn = &approve_button;
+		encoder-a = &encoder_a;
+		encoder-b = &encoder_b;
+		encoder-push = &encoder_push;
+		mic-sense = &mic_power_sense;
+	};
+};
+
+/*
+ * Edge interrupts for the new controls ride the GPIO SENSE mechanism
+ * (PORT event) instead of GPIOTE channels: the nRF9160 has only 8 GPIOTE
+ * channels and the DK's own buttons already use some. Encoder edges are
+ * hand-speed (worst observed ~2.5 ms apart on a fast spin) — µs-class
+ * PORT latency is irrelevant there. Bits: P0.21-25 and P0.28.
+ */
+&gpio0 {
+	sense-edge-mask = <0x13e00000>;
+};
 
 /*
  * SRAM partitions — same node structure as Nordic's
@@ -84,12 +145,24 @@
 	 * two breadboard jumpers feed them back into P0.18 and P0.17.
 	 * During playback the peripheral is master and drives the same pins.
 	 */
+	/*
+	 * SDIN sits in its own group so it can carry a pull-down: with the
+	 * red latching switch cutting the SPH0645's power, its DOUT floats,
+	 * and an undriven SDIN would feed the capture path random full-scale
+	 * garbage. The ~13k internal pull-down turns a depowered mic into
+	 * digital silence. While the mic IS powered it drives DOUT only in
+	 * the left slot and tri-states the rest of the frame — the pull-down
+	 * resolves those tri-stated cycles to 0, exactly as before.
+	 */
 	i2s0_default_agent_audio: i2s0_default_agent_audio {
 		group1 {
 			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
 				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
-				<NRF_PSEL(I2S_SDOUT, 0, 19)>,
-				<NRF_PSEL(I2S_SDIN, 0, 20)>;
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(I2S_SDIN, 0, 20)>;
+			bias-pull-down;
 		};
 	};
 
@@ -97,8 +170,12 @@
 		group1 {
 			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
 				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
-				<NRF_PSEL(I2S_SDOUT, 0, 19)>,
-				<NRF_PSEL(I2S_SDIN, 0, 20)>;
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>;
+			low-power-enable;
+		};
+		group2 {
+			psels = <NRF_PSEL(I2S_SDIN, 0, 20)>;
+			bias-pull-down;
 			low-power-enable;
 		};
 	};

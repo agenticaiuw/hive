@@ -40,6 +40,39 @@
  */
 #define MARK_BUTTON_NODE DT_ALIAS(sw1)
 #define I2S_NODE DT_NODELABEL(i2s0)
+/*
+ * ---- Breadboard hardware controls (parts arrived 2026-08-12) ----
+ *
+ * Every one of these is optional at boot, exactly like the bookmark
+ * button: a control that fails to configure logs once and disappears,
+ * because a loose jumper must never brick a voice pendant. Pin claims
+ * and pull policy live in the overlay's pendant_controls node; the
+ * split of duties here is:
+ *
+ *   P0.21 yellow  "ask"      — a second body for button 1. It gives the
+ *                              SAME semaphore, so every path that already
+ *                              understands button 1 (start conversation,
+ *                              stop recording, end conversation) hears
+ *                              it with zero new states.
+ *   P0.22 green   memo       — record-only capture: upload + transcript,
+ *                              deliberately no agent planner (?dispatch=0
+ *                              — see pendant_cloud_stream_set_memo).
+ *   P0.23 blue    approve    — short press approves, ≥1.5 s hold denies
+ *                              the pending approval readback.
+ *   P0.24/25      encoder    — quadrature menu navigation.
+ *   P0.28         enc. push  — menu select.
+ *   P0.26         mic sense  — watches the SPH0645 VDD net through 100k.
+ *                              Low = the owner cut mic power with the
+ *                              latching switch: capture must not start,
+ *                              and must SAY so rather than record hiss.
+ */
+#define ASK_BUTTON_NODE DT_ALIAS(ask_btn)
+#define MEMO_BUTTON_NODE DT_ALIAS(memo_btn)
+#define APPROVE_BUTTON_NODE DT_ALIAS(approve_btn)
+#define ENCODER_A_NODE DT_ALIAS(encoder_a)
+#define ENCODER_B_NODE DT_ALIAS(encoder_b)
+#define ENCODER_PUSH_NODE DT_ALIAS(encoder_push)
+#define MIC_SENSE_NODE DT_ALIAS(mic_sense)
 
 /*
  * Adafruit SPH0645LM4H I2S microphone capture.
@@ -486,6 +519,56 @@ K_SEM_DEFINE(button_press_sem, 0, 1);
 K_SEM_DEFINE(mark_press_sem, 0, 1);
 #endif
 
+/* ---- Hardware-control state (see the pin table at the top) ---- */
+static const struct gpio_dt_spec ask_button =
+	GPIO_DT_SPEC_GET(ASK_BUTTON_NODE, gpios);
+static struct gpio_callback ask_button_callback;
+static const struct gpio_dt_spec memo_button =
+	GPIO_DT_SPEC_GET(MEMO_BUTTON_NODE, gpios);
+static struct gpio_callback memo_button_callback;
+static const struct gpio_dt_spec approve_button =
+	GPIO_DT_SPEC_GET(APPROVE_BUTTON_NODE, gpios);
+static struct gpio_callback approve_button_callback;
+static const struct gpio_dt_spec encoder_a =
+	GPIO_DT_SPEC_GET(ENCODER_A_NODE, gpios);
+static const struct gpio_dt_spec encoder_b =
+	GPIO_DT_SPEC_GET(ENCODER_B_NODE, gpios);
+static struct gpio_callback encoder_callback;
+static const struct gpio_dt_spec encoder_push =
+	GPIO_DT_SPEC_GET(ENCODER_PUSH_NODE, gpios);
+static struct gpio_callback encoder_push_callback;
+static const struct gpio_dt_spec mic_sense =
+	GPIO_DT_SPEC_GET(MIC_SENSE_NODE, gpios);
+/* Sense pin configured OK? Without it, "muted" must never be inferred:
+ * a broken sense wire has to fail toward a working microphone. */
+static bool mic_sense_ready;
+/* True while record_microphone is running on the GREEN button's behalf, so
+ * a second green press stops a memo the way button 1 stops a command —
+ * without the green button ever being able to cut a command capture short.
+ * Main thread only. */
+static bool memo_capture_active;
+
+K_SEM_DEFINE(memo_press_sem, 0, 1);
+K_SEM_DEFINE(approve_press_sem, 0, 1);
+
+/*
+ * Owner-decision control frames, produced on main/ISR and consumed by the
+ * WS I/O thread — the one place allowed to touch the socket, so a stalled
+ * modem send can never block a button ISR or the codec loop. Contract per
+ * the wire spec: sent only while the converse socket is OPEN; a closed
+ * socket drops them (a menu twist from a dead zone is stale the moment
+ * the link returns, and a late approval decision is worse than none).
+ */
+static atomic_t approval_decision_req; /* 0 none, 1 approve, 2 deny */
+static atomic_t menu_step_backlog;     /* signed detents not yet sent */
+static atomic_t menu_select_req;
+/* Cap unsent detents: past this the owner is spinning against a dead
+ * link and older steps carry no information a fresher one lacks. */
+#define MENU_STEP_BACKLOG_MAX 8
+#define APPROVE_LONG_PRESS_MS 1500
+#define APPROVE_MIN_PRESS_MS 30
+#define ENCODER_PUSH_DEBOUNCE_MS 150
+
 /*
  * Mic RX slab is dedicated. audio_workspace is the live PCM TX ring during
  * capture and the Opus decode workspace for reply playback.
@@ -792,6 +875,130 @@ static bool take_remote_press(void)
 	}
 	pendant_remote_press = 0U;
 	return true;
+}
+
+/* ---- Hardware-control ISRs and pollers ---- */
+
+static void memo_button_pressed(const struct device *port,
+				struct gpio_callback *callback,
+				gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+	k_sem_give(&memo_press_sem);
+}
+
+static void approve_button_pressed(const struct device *port,
+				   struct gpio_callback *callback,
+				   gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+	k_sem_give(&approve_press_sem);
+}
+
+static bool take_memo_press(void)
+{
+	return k_sem_take(&memo_press_sem, K_NO_WAIT) == 0;
+}
+
+static void clear_memo_events(void)
+{
+	while (k_sem_take(&memo_press_sem, K_NO_WAIT) == 0) {
+	}
+}
+
+static void clear_approve_events(void)
+{
+	while (k_sem_take(&approve_press_sem, K_NO_WAIT) == 0) {
+	}
+}
+
+/*
+ * Quadrature decode, both edges of both phases, via the standard Gray-code
+ * transition table — NOT edge counting. Contact bounce only ever toggles
+ * between two ADJACENT states, so a bouncing contact contributes +1 -1 +1
+ * -1 ... which sums to nothing; an invalid two-bit jump (electrical noise)
+ * scores 0 outright. A mechanical detent is four valid transitions, so the
+ * accumulator emits one menu step per ±4 and the half-states a finger
+ * resting between detents produces are never heard upstream.
+ */
+static const int8_t encoder_quad_table[16] = {
+	0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0,
+};
+static uint8_t encoder_prev_state;
+static int8_t encoder_detent_accum;
+
+static uint8_t encoder_read_state(void)
+{
+	/* Raw levels, not logical: quadrature only cares about transitions,
+	 * and the raw read avoids two layered driver calls in an ISR. */
+	return (uint8_t)((nrf_gpio_pin_read(encoder_a.pin) << 1) |
+			 nrf_gpio_pin_read(encoder_b.pin));
+}
+
+static void encoder_edge_isr(const struct device *port,
+			     struct gpio_callback *callback,
+			     gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+
+	uint8_t state = encoder_read_state();
+	int8_t increment =
+		encoder_quad_table[(encoder_prev_state << 2) | state];
+
+	encoder_prev_state = state;
+	if (increment == 0) {
+		return;
+	}
+	encoder_detent_accum += increment;
+	if (encoder_detent_accum >= 4 || encoder_detent_accum <= -4) {
+		int step = encoder_detent_accum > 0 ? 1 : -1;
+		atomic_val_t backlog = atomic_get(&menu_step_backlog);
+
+		encoder_detent_accum = 0;
+		/* Single ISR producer, so this check-then-add cannot race
+		 * itself; the WS thread only ever moves the value toward
+		 * zero, which makes the cap conservative, never wrong. */
+		if (backlog < MENU_STEP_BACKLOG_MAX &&
+		    backlog > -MENU_STEP_BACKLOG_MAX) {
+			atomic_add(&menu_step_backlog, step);
+		}
+	}
+}
+
+static void encoder_push_pressed(const struct device *port,
+				 struct gpio_callback *callback,
+				 gpio_port_pins_t pins)
+{
+	/* One timestamp is the whole debounce: bounce arrives as a burst of
+	 * edges inside a few ms, a human repeat press takes hundreds. */
+	static int64_t last_push_ms;
+	int64_t now = k_uptime_get();
+
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+	if (now - last_push_ms < ENCODER_PUSH_DEBOUNCE_MS) {
+		return;
+	}
+	last_push_ms = now;
+	atomic_set(&menu_select_req, 1);
+}
+
+/*
+ * The mic-power sense reads the SPH0645 VDD net through 100k. Logical 0 =
+ * the latching switch has the mic dark. A sense pin that never configured
+ * reports "not muted": the failure mode of a missing wire must be a
+ * working microphone, not a pendant that silently refuses to listen.
+ */
+static bool mic_power_is_cut(void)
+{
+	return mic_sense_ready && gpio_pin_get_dt(&mic_sense) == 0;
 }
 
 #ifdef CONFIG_PENDANT_OFFLINE_STORE
@@ -1104,6 +1311,108 @@ static void flash_led(unsigned int count, int on_ms, int off_ms)
 		k_msleep(on_ms);
 		gpio_pin_set_dt(&led, 0);
 		k_msleep(off_ms);
+	}
+}
+
+/*
+ * Blue button state machine: press = approve, hold ≥1.5 s = deny. Polled,
+ * never blocking, so the same function serves the idle wait (200 ms
+ * cadence — a deny lands within ~1.7 s of the hold threshold) and the
+ * conversation codec loop (~20 ms cadence, where the approval readback the
+ * decision answers is actually playing). A deny fires the moment the hold
+ * crosses the threshold rather than at release: the owner holding the
+ * button deserves to see the LED answer while their thumb is still down.
+ *
+ * The decision itself only ever sets an atomic; the WS I/O thread owns the
+ * send (ws_io_send_owner_controls), so this can never stall an I2S loop.
+ */
+static void poll_approval_button(void)
+{
+	static bool tracking;
+	static bool fired_while_held;
+	static int64_t pressed_at_ms;
+	static int64_t last_decision_ms;
+	int64_t now = k_uptime_get();
+
+	if (!tracking) {
+		if (k_sem_take(&approve_press_sem, K_NO_WAIT) != 0) {
+			return;
+		}
+		/* Edges inside a beat of the last decision are that press's
+		 * release bounce, not a human pressing twice — humans repeat
+		 * in hundreds of ms, bounce in ones. */
+		if (now - last_decision_ms < 250) {
+			clear_approve_events();
+			return;
+		}
+		if (gpio_pin_get_dt(&approve_button) <= 0) {
+			/*
+			 * Press AND release both fit between two polls (the
+			 * idle loop turns at 200 ms). The edge was real — the
+			 * ISR only fires on the active edge — and a press
+			 * shorter than one poll period cannot have been the
+			 * 1.5 s hold, so it is an approve by definition.
+			 */
+			last_decision_ms = now;
+			clear_approve_events();
+			if (pendant_ws_connected()) {
+				atomic_set(&approval_decision_req, 1);
+				printk("Approval button: APPROVE (quick tap)\n");
+			} else {
+				printk("Approval button: approve dropped "
+				       "(converse socket closed)\n");
+			}
+			if (!atomic_get(&convo_active)) {
+				flash_led(1U, 60, 60);
+			}
+			return;
+		}
+		tracking = true;
+		fired_while_held = false;
+		pressed_at_ms = now;
+		return;
+	}
+
+	if (gpio_pin_get_dt(&approve_button) > 0) {
+		if (!fired_while_held &&
+		    now - pressed_at_ms >= APPROVE_LONG_PRESS_MS) {
+			fired_while_held = true;
+			last_decision_ms = now;
+			if (pendant_ws_connected()) {
+				atomic_set(&approval_decision_req, 2);
+				printk("Approval button: DENY (held %d ms)\n",
+				       (int)(now - pressed_at_ms));
+			} else {
+				printk("Approval button: deny dropped "
+				       "(converse socket closed)\n");
+			}
+			if (!atomic_get(&convo_active)) {
+				flash_led(2U, 60, 60);
+			}
+		}
+		return;
+	}
+
+	/* Released. */
+	tracking = false;
+	clear_approve_events();
+	if (fired_while_held) {
+		return; /* the hold already decided */
+	}
+	if (now - pressed_at_ms < APPROVE_MIN_PRESS_MS) {
+		return; /* contact scratch, not a human */
+	}
+	last_decision_ms = now;
+	if (pendant_ws_connected()) {
+		atomic_set(&approval_decision_req, 1);
+		printk("Approval button: APPROVE (%d ms press)\n",
+		       (int)(now - pressed_at_ms));
+	} else {
+		printk("Approval button: approve dropped "
+		       "(converse socket closed)\n");
+	}
+	if (!atomic_get(&convo_active)) {
+		flash_led(1U, 60, 60);
 	}
 }
 
@@ -1913,11 +2222,17 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 		/*
 		 * Ignore bounce / leftover edges from the start press for the
-		 * first second, then a second press stops recording.
+		 * first second, then a second press stops recording. A memo
+		 * capture additionally answers to its own (green) button —
+		 * the button that started a recording should stop it.
 		 */
 		if (sample_index < MIC_MIN_RECORD_FRAMES) {
 			clear_button_events();
-		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
+			if (memo_capture_active) {
+				clear_memo_events();
+			}
+		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
+			   (memo_capture_active && take_memo_press())) {
 			recording_stopped_by_button = true;
 			break;
 		}
@@ -2797,6 +3112,63 @@ static void ws_io_drain_downlink(void)
 	}
 }
 
+/*
+ * Flush owner-decision control frames (approval decision, menu steps, menu
+ * select) onto the converse socket. Runs ONLY on the WS I/O thread with
+ * ws_lock held, both mid-conversation and idle, so a button never waits on
+ * the modem and the socket is never touched from two threads.
+ *
+ * Drop-when-closed is the contract (see the atomics' declaration): a
+ * closed socket clears the backlog instead of banking stale intent. A send
+ * failure also just drops — if the transport actually died, the audio pump
+ * or the idle reconnect discovers it within milliseconds; a lost menu
+ * twist is not worth ending a conversation over.
+ */
+static void ws_io_send_owner_controls(void)
+{
+	if (!pendant_ws_connected()) {
+		atomic_set(&approval_decision_req, 0);
+		atomic_set(&menu_step_backlog, 0);
+		atomic_set(&menu_select_req, 0);
+		return;
+	}
+
+	atomic_val_t decision = atomic_set(&approval_decision_req, 0);
+
+	if (decision != 0) {
+		(void)pendant_ws_send_text(
+			decision == 2
+				? "{\"type\":\"approval_decision\","
+				  "\"decision\":\"deny\"}"
+				: "{\"type\":\"approval_decision\","
+				  "\"decision\":\"approve\"}");
+	}
+
+	/* One frame per detent, a few per pass: the relay's contract is
+	 * delta:±1, and bounding the burst keeps this thread honest about
+	 * its real job (audio) when the owner spins the knob. */
+	for (unsigned int sent = 0U; sent < 4U; ++sent) {
+		atomic_val_t backlog = atomic_get(&menu_step_backlog);
+
+		if (backlog == 0) {
+			break;
+		}
+		int step = backlog > 0 ? 1 : -1;
+
+		if (pendant_ws_send_text(
+			    step > 0 ? "{\"type\":\"menu\",\"delta\":1}"
+				     : "{\"type\":\"menu\",\"delta\":-1}") !=
+		    0) {
+			break;
+		}
+		atomic_sub(&menu_step_backlog, step);
+	}
+
+	if (atomic_cas(&menu_select_req, 1, 0)) {
+		(void)pendant_ws_send_text("{\"type\":\"menu_select\"}");
+	}
+}
+
 static void ws_io_thread_fn(void *a, void *b, void *c)
 {
 	int64_t next_idle_ping = 0;
@@ -2811,6 +3183,7 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 			if (pendant_ws_connected()) {
 				ws_io_pump_uplink();
 				ws_io_drain_downlink();
+				ws_io_send_owner_controls();
 			} else {
 				atomic_set(&convo_end_req, 1);
 			}
@@ -2825,6 +3198,7 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 				next_idle_ping = k_uptime_get() +
 						 WS_IDLE_PING_SECONDS * 1000;
 			}
+			ws_io_send_owner_controls();
 			/* Swallow pongs and the previous conversation's
 			 * trailing frames every tick, not just at ping
 			 * time, so none of it leads the next conversation.
@@ -2848,6 +3222,13 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 				}
 			}
 			k_mutex_unlock(&ws_lock);
+		} else {
+			/* Drop-when-closed for the owner-decision frames: a
+			 * twist or a decision banked across a dead link
+			 * would replay as stale intent on reconnect. */
+			atomic_set(&approval_decision_req, 0);
+			atomic_set(&menu_step_backlog, 0);
+			atomic_set(&menu_select_req, 0);
 		}
 		k_msleep(200);
 	}
@@ -3191,6 +3572,14 @@ static int run_conversation(const struct device *i2s)
 		 * audio thread owns playback state and barge-in flushes. */
 		convo_decode_downlink();
 
+		/*
+		 * Blue button, mid-conversation: this is the moment it exists
+		 * for — the relay just read an approval down this very call
+		 * and the owner answers with a thumb instead of a phrase.
+		 * Poll-only (~µs); the WS thread carries the decision.
+		 */
+		poll_approval_button();
+
 		if (atomic_get(&convo_end_req)) {
 			/* Relay 'end' (mutual silence) or transport close —
 			 * a normal conversation ending, not a failure. */
@@ -3324,10 +3713,218 @@ teardown:
 	pendant_opus_stream_abort();
 	pendant_opus_reply_decoder_end();
 	clear_button_events();
+	/* A green press mid-conversation was not a memo request — it was a
+	 * mispress during a call. Consuming it here keeps it from firing a
+	 * surprise 30 s capture the moment the call ends. */
+	clear_memo_events();
 	if (result == 0 && error != 0) {
 		result = error;
 	}
 	return result;
+}
+
+/*
+ * Green button: record-only memo. The same proven capture machinery as a
+ * voice command — record_microphone with the live chunked uplink and the
+ * SD journal fallback — with pendant_cloud's memo latch held for the whole
+ * cycle, so every request this press can possibly make (live stream, SD
+ * single-shot, offline hold) reaches the relay as ?dispatch=0: transcribed
+ * and stored, planner never woken. Runs regardless of whether the converse
+ * WebSocket is up; a memo never wants the duplex path because a memo wants
+ * no reply.
+ */
+static int run_memo_capture(const struct device *i2s)
+{
+	int64_t memo_started = k_uptime_get();
+	uint32_t pcm_bytes;
+	int error;
+
+	pendant_cloud_stream_set_memo(true);
+	memo_capture_active = true;
+	error = record_microphone(i2s, MAX_RECORD_SAMPLE_COUNT);
+	memo_capture_active = false;
+	gpio_pin_set_dt(&led, 0);
+	if (error != 0) {
+		printk("Memo recording failed: %d\n", error);
+		pendant_cloud_stream_abort();
+		recording_on_sd = false;
+		pendant_cloud_stream_set_memo(false);
+		flash_led(3U, 120, 120);
+		return error;
+	}
+
+	pcm_bytes = recorded_samples * (uint32_t)sizeof(int16_t);
+
+	bool live_ok = pendant_cloud_stream_active() && !live_stream_failed &&
+		       pendant_cloud_stream_bytes_sent() > 0U;
+
+	error = -EIO;
+	if (live_ok) {
+		error = pendant_cloud_stream_end();
+		printk("LAT memo_stream_end_ms=%lld pcm_bytes=%u result=%d\n",
+		       k_uptime_get() - memo_started,
+		       pendant_cloud_uploaded_pcm_bytes, error);
+	} else if (pendant_cloud_stream_active()) {
+		pendant_cloud_stream_abort();
+	}
+
+	if (error < 0 && recording_on_sd && pcm_bytes > 0U) {
+		printk("Memo fallback SD upload (%u bytes, live_result=%d)\n",
+		       pcm_bytes, error);
+		error = pendant_cloud_upload_recording(SD_RECORDING_PATH,
+						       pcm_bytes, SAMPLE_RATE);
+		if (error < 0) {
+			/* Same rename-into-the-outbox rescue as a failed
+			 * command, under the memo kind so redelivery keeps
+			 * the planner off (see pendant_store.h). */
+			int queue_error = pendant_store_enqueue_memo(pcm_bytes);
+
+			if (queue_error == 0) {
+				printk("Memo held for later delivery "
+				       "(upload=%d)\n",
+				       error);
+				pendant_cloud_stream_set_memo(false);
+				flash_led(2U, 60, 90);
+				return 0;
+			}
+			printk("Could not hold memo: %d\n", queue_error);
+		}
+	}
+	pendant_cloud_stream_set_memo(false);
+
+	printk("LAT memo_total_ms=%lld result=%d\n",
+	       k_uptime_get() - memo_started, error);
+	if (error < 0) {
+		flash_led(5U, 100, 100);
+		return error;
+	}
+	/* Two calm flashes: memo landed, nothing is going to talk back. */
+	flash_led(2U, 60, 90);
+	return 0;
+}
+
+/*
+ * Configure every 2026-08-12 breadboard control. All best-effort, all
+ * logged: the pattern is the bookmark button's ("losing bookmarks is bad;
+ * refusing to boot a voice pendant over a spare button is worse"), applied
+ * to five more inputs. A control that fails here simply never fires.
+ */
+static void configure_control_inputs(void)
+{
+	/* Yellow "ask": a second body for button 1, same ISR, same
+	 * semaphore, so every existing press path hears it unchanged. */
+	if (gpio_is_ready_dt(&ask_button) &&
+	    gpio_pin_configure_dt(&ask_button, GPIO_INPUT) == 0) {
+		gpio_init_callback(&ask_button_callback, button_pressed,
+				   BIT(ask_button.pin));
+		if (gpio_add_callback(ask_button.port, &ask_button_callback) !=
+			    0 ||
+		    gpio_pin_interrupt_configure_dt(
+			    &ask_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Ask button (P0.21) unavailable\n");
+		}
+	} else {
+		printk("Ask button (P0.21) not configured\n");
+	}
+
+	if (gpio_is_ready_dt(&memo_button) &&
+	    gpio_pin_configure_dt(&memo_button, GPIO_INPUT) == 0) {
+		gpio_init_callback(&memo_button_callback, memo_button_pressed,
+				   BIT(memo_button.pin));
+		if (gpio_add_callback(memo_button.port,
+				      &memo_button_callback) != 0 ||
+		    gpio_pin_interrupt_configure_dt(
+			    &memo_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Memo button (P0.22) unavailable\n");
+		}
+	} else {
+		printk("Memo button (P0.22) not configured\n");
+	}
+
+	if (gpio_is_ready_dt(&approve_button) &&
+	    gpio_pin_configure_dt(&approve_button, GPIO_INPUT) == 0) {
+		gpio_init_callback(&approve_button_callback,
+				   approve_button_pressed,
+				   BIT(approve_button.pin));
+		if (gpio_add_callback(approve_button.port,
+				      &approve_button_callback) != 0 ||
+		    gpio_pin_interrupt_configure_dt(
+			    &approve_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Approve button (P0.23) unavailable\n");
+		}
+	} else {
+		printk("Approve button (P0.23) not configured\n");
+	}
+
+	/* Encoder: both phases in ONE callback (same port), both edges —
+	 * the quadrature table needs every transition, not just presses. */
+	if (gpio_is_ready_dt(&encoder_a) && gpio_is_ready_dt(&encoder_b) &&
+	    gpio_pin_configure_dt(&encoder_a, GPIO_INPUT) == 0 &&
+	    gpio_pin_configure_dt(&encoder_b, GPIO_INPUT) == 0) {
+		encoder_prev_state = encoder_read_state();
+		gpio_init_callback(&encoder_callback, encoder_edge_isr,
+				   BIT(encoder_a.pin) | BIT(encoder_b.pin));
+		if (gpio_add_callback(encoder_a.port, &encoder_callback) !=
+			    0 ||
+		    gpio_pin_interrupt_configure_dt(&encoder_a,
+						    GPIO_INT_EDGE_BOTH) != 0 ||
+		    gpio_pin_interrupt_configure_dt(&encoder_b,
+						    GPIO_INT_EDGE_BOTH) != 0) {
+			printk("Encoder (P0.24/25) unavailable\n");
+		}
+	} else {
+		printk("Encoder (P0.24/25) not configured\n");
+	}
+
+	if (gpio_is_ready_dt(&encoder_push) &&
+	    gpio_pin_configure_dt(&encoder_push, GPIO_INPUT) == 0) {
+		gpio_init_callback(&encoder_push_callback,
+				   encoder_push_pressed,
+				   BIT(encoder_push.pin));
+		if (gpio_add_callback(encoder_push.port,
+				      &encoder_push_callback) != 0 ||
+		    gpio_pin_interrupt_configure_dt(
+			    &encoder_push, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			printk("Encoder push (P0.28) unavailable\n");
+		}
+	} else {
+		printk("Encoder push (P0.28) not configured\n");
+	}
+
+	/* Mic-power sense: polled, no interrupt, and NO PULL — it watches
+	 * the mic VDD net through 100k and must not bias it. */
+	if (gpio_is_ready_dt(&mic_sense) &&
+	    gpio_pin_configure_dt(&mic_sense, GPIO_INPUT) == 0) {
+		mic_sense_ready = true;
+		printk("Mic power sense ready (P0.26): mic is %s\n",
+		       mic_power_is_cut() ? "MUTED (power cut)" : "powered");
+	} else {
+		printk("Mic power sense (P0.26) not configured — assuming "
+		       "mic powered\n");
+	}
+}
+
+/*
+ * The owner hard-muted the mic and pressed a capture button anyway. Say so
+ * on every channel this device has: the control frame lets the relay (and
+ * eventually the agent) know the press happened and why nothing follows,
+ * and the LED pattern answers the thumb directly — three fast double-taps,
+ * used nowhere else. Capture is suppressed entirely: recording a powered-
+ * down mic would upload thirty seconds of pulldown silence as if the owner
+ * had spoken.
+ */
+static void report_mic_muted_press(void)
+{
+	printk("Capture press ignored: mic power is cut (red switch)\n");
+	if (pendant_ws_connected()) {
+		k_mutex_lock(&ws_lock, K_FOREVER);
+		(void)pendant_ws_send_text("{\"type\":\"mic_muted\"}");
+		k_mutex_unlock(&ws_lock);
+	}
+	for (unsigned int burst = 0U; burst < 3U; ++burst) {
+		flash_led(2U, 40, 40);
+		k_msleep(120);
+	}
 }
 
 int main(void)
@@ -3385,6 +3982,7 @@ int main(void)
 		printk("Bookmark button not present on this board\n");
 	}
 #endif
+	configure_control_inputs();
 	if (!device_is_ready(i2s)) {
 		audio_cycle_result = -ENODEV;
 		show_error();
@@ -3586,11 +4184,19 @@ int main(void)
 		/* Wait for a press. The WS I/O thread keeps the idle socket
 		 * alive (pings + stray drains); main only reconnects. */
 		bool marked = false;
+		bool memo_requested = false;
 
 		while (k_sem_take(&button_press_sem, K_MSEC(200)) != 0) {
 			if (take_remote_press()) {
 				break;
 			}
+			/* Green button: record-only memo, no planner. */
+			if (take_memo_press()) {
+				memo_requested = true;
+				break;
+			}
+			/* Blue button: approve/deny the pending approval. */
+			poll_approval_button();
 			/*
 			 * Button 2 needs no radio, no microphone and no
 			 * decision about whether the link is usable. It is
@@ -3682,6 +4288,28 @@ int main(void)
 				pendant_ws_connected());
 			/* One short flash: marked, nothing else happened. */
 			flash_led(1U, 60, 120);
+			continue;
+		}
+
+		/*
+		 * Every capture path defers to the red latching switch: with
+		 * mic power cut there is nothing to record, only a pulldown
+		 * hum to upload, so the press becomes a notification instead
+		 * of a capture. Checked before the WS/legacy split because
+		 * it outranks both.
+		 */
+		if (mic_power_is_cut()) {
+			report_mic_muted_press();
+			clear_memo_events();
+			clear_button_events();
+			continue;
+		}
+
+		if (memo_requested) {
+			audio_cycle_phase = 1U;
+			(void)run_memo_capture(i2s);
+			clear_memo_events();
+			clear_button_events();
 			continue;
 		}
 

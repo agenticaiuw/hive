@@ -161,6 +161,15 @@ static uint32_t stream_sample_rate;
 static uint32_t stream_bytes_sent;
 static int64_t stream_started_ms;
 /*
+ * Record-only memo mode (see pendant_cloud_stream_set_memo in the header).
+ * Two flags, not one: `pending` is what the caller wants NEXT, `open` is
+ * what the current socket's already-transmitted header actually said. An
+ * HTTP header cannot be amended after it is on the wire, so a mismatch
+ * between the two is grounds for a reopen, exactly like a stale socket.
+ */
+static bool stream_memo_pending;
+static bool stream_memo_open;
+/*
  * Half-open chunked POST (headers sent, body pending) dies after idle:
  * dual-capture saw Live TX pump failed: -104 (ECONNRESET) ~79s after
  * prewarm with live_sent=0. Refresh idle sockets and re-validate at press.
@@ -761,9 +770,16 @@ static int send_pendant_command_chunked_header(int fd, uint32_t sample_rate)
 	} else {
 		device_time_line[0] = '\0';
 	}
+	/*
+	 * Memo mode changes three things and nothing else: ?dispatch=0 (the
+	 * relay transcribes and stores the capture but queues no Mac planner
+	 * job), no X-Reply-Stream (a memo wants no spoken answer talking
+	 * back at the owner), and X-Pendant-Mode: memo so the dashboard can
+	 * label the capture. The audio wire format is identical.
+	 */
 	int length = snprintf(
 		header, sizeof(header),
-		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
+		"POST /v1/pendant/command?dispatch=%c HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"Authorization: Bearer %s\r\n"
 		/* Opus at ~16 kbps: measured real-world LTE-M here sustains
@@ -778,10 +794,13 @@ static int send_pendant_command_chunked_header(int fd, uint32_t sample_rate)
 		"%s"
 		/* Conversational reply: the relay transcodes the model's voice
 		 * to length-prefixed Opus packets down this same connection. */
-		"X-Reply-Stream: opus\r\n"
+		"%s"
 		"Connection: close\r\n\r\n",
+		stream_memo_pending ? '0' : '1',
 		RELAY_HOSTNAME, PENDANT_RELAY_BEARER,
-		PENDANT_DEVICE_ID, sample_rate, device_time_line);
+		PENDANT_DEVICE_ID, sample_rate, device_time_line,
+		stream_memo_pending ? "X-Pendant-Mode: memo\r\n"
+				    : "X-Reply-Stream: opus\r\n");
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
 		return -EOVERFLOW;
@@ -794,9 +813,11 @@ static int send_pendant_command_pcm_header(int fd, size_t content_length,
 					   uint32_t sample_rate)
 {
 	char header[HTTP_HEADER_SIZE + 128];
+	/* Honors memo mode too: the SD fallback for a green-button press must
+	 * not resurrect the planner the press deliberately bypassed. */
 	int length = snprintf(
 		header, sizeof(header),
-		"POST /v1/pendant/command?dispatch=1 HTTP/1.1\r\n"
+		"POST /v1/pendant/command?dispatch=%c HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"Authorization: Bearer %s\r\n"
 		"Content-Type: audio/pcm\r\n"
@@ -807,10 +828,13 @@ static int send_pendant_command_pcm_header(int fd, size_t content_length,
 		"X-Audio-Channels: 1\r\n"
 		"X-Audio-Bits: 16\r\n"
 		"X-Pcm-Bytes: %lu\r\n"
+		"%s"
 		"Connection: close\r\n\r\n",
+		stream_memo_pending ? '0' : '1',
 		RELAY_HOSTNAME, PENDANT_RELAY_BEARER,
 		(unsigned long)content_length, PENDANT_DEVICE_ID, sample_rate,
-		(unsigned long)content_length);
+		(unsigned long)content_length,
+		stream_memo_pending ? "X-Pendant-Mode: memo\r\n" : "");
 
 	if (length < 0 || (size_t)length >= sizeof(header)) {
 		return -EOVERFLOW;
@@ -923,6 +947,18 @@ static int finalize_command_response(void)
 	if (error != 0) {
 		pendant_cloud_transcribe_result = error;
 		return error;
+	}
+
+	/*
+	 * A memo upload (?dispatch=0) is DEFINED by no Mac job existing, so
+	 * the missing jobId that fails a command cycle is this cycle's
+	 * success. The transcript above is still required — it is the proof
+	 * the relay actually heard the memo, not merely accepted bytes.
+	 */
+	if (stream_memo_pending) {
+		pendant_cloud_dispatch_result = 0;
+		printk("Memo stored (transcribed, no Mac dispatch by design)\n");
+		return 0;
 	}
 
 	/* Prefer nested job.jobId from /v1/pendant/command; fall back to jobId. */
@@ -2026,14 +2062,22 @@ static int stream_open_chunked(uint32_t sample_rate)
 
 	stream_active = true;
 	stream_sample_rate = sample_rate;
+	/* The header just sent is the mode this socket is stuck with. */
+	stream_memo_open = stream_memo_pending;
 	stream_bytes_sent = 0U;
 	stream_pending_len = 0U;
 	stream_pending_off = 0U;
 	stream_chunks_completed = 0U;
 	/* stream_started_ms set above at open start — age for stale checks. */
-	printk("Live PCM stream open: sample_rate=%u header_ms=%lld\n",
-	       sample_rate, k_uptime_get() - stream_started_ms);
+	printk("Live PCM stream open: sample_rate=%u memo=%d header_ms=%lld\n",
+	       sample_rate, stream_memo_open ? 1 : 0,
+	       k_uptime_get() - stream_started_ms);
 	return 0;
+}
+
+void pendant_cloud_stream_set_memo(bool memo)
+{
+	stream_memo_pending = memo;
 }
 
 /*
@@ -2075,7 +2119,8 @@ int pendant_cloud_stream_prewarm(uint32_t sample_rate)
 {
 	int error;
 
-	if (stream_active && stream_sample_rate == sample_rate) {
+	if (stream_active && stream_sample_rate == sample_rate &&
+	    stream_memo_open == stream_memo_pending) {
 		int64_t age_ms = k_uptime_get() - stream_started_ms;
 		bool ok = stream_socket_ok();
 
@@ -2106,7 +2151,11 @@ int pendant_cloud_stream_ensure(uint32_t sample_rate)
 {
 	int error;
 
-	if (stream_active && stream_sample_rate == sample_rate) {
+	/* A mode mismatch (memo press against a prewarmed dispatch header, or
+	 * the reverse) reopens exactly like a stale socket: the header is
+	 * already on the wire and cannot be amended. */
+	if (stream_active && stream_sample_rate == sample_rate &&
+	    stream_memo_open == stream_memo_pending) {
 		int64_t age_ms = k_uptime_get() - stream_started_ms;
 		bool ok = stream_socket_ok();
 

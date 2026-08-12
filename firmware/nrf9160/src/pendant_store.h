@@ -59,7 +59,18 @@
  */
 
 /* Item kinds carried by the outbox. */
-#define PENDANT_STORE_KIND_VOICE 'V' /* deferred voice memo (PCM on SD)   */
+#define PENDANT_STORE_KIND_VOICE 'V' /* deferred voice command (PCM on SD) */
+/*
+ * 'T' for thought capture — the header above already observed that a
+ * thought capture is a voice memo with a different name on it; this is
+ * where the name matters. A memo is delivered with the planner
+ * deliberately switched off (?dispatch=0 via pendant_cloud's memo mode),
+ * and that intent must survive a power cycle with the audio it belongs
+ * to: a green-button memo held through a dead zone that redelivered as a
+ * KIND_VOICE would wake the Mac planner on words the owner explicitly
+ * asked nobody to act on.
+ */
+#define PENDANT_STORE_KIND_MEMO  'T' /* record-only memo (PCM, no planner) */
 #define PENDANT_STORE_KIND_MARK  'M' /* moment bookmark (no payload)      */
 #define PENDANT_STORE_KIND_ACK   'A' /* "N held alerts were surfaced"     */
 
@@ -77,6 +88,10 @@ void pendant_store_init(void);
  * for the next press afterwards.  Returns 0 when queued.
  */
 int pendant_store_enqueue_voice(uint32_t pcm_bytes);
+
+/* Same journal takeover for a record-only memo (green button): identical
+ * durability, delivered later with the planner off (KIND_MEMO above). */
+int pendant_store_enqueue_memo(uint32_t pcm_bytes);
 
 /*
  * Drop a moment bookmark: the timestamp the device has (modem NITZ clock
@@ -100,6 +115,11 @@ uint32_t pendant_store_pending(void);
 
 static inline void pendant_store_init(void) {}
 static inline int pendant_store_enqueue_voice(uint32_t pcm_bytes)
+{
+	ARG_UNUSED(pcm_bytes);
+	return -ENOTSUP;
+}
+static inline int pendant_store_enqueue_memo(uint32_t pcm_bytes)
 {
 	ARG_UNUSED(pcm_bytes);
 	return -ENOTSUP;
