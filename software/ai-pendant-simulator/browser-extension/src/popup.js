@@ -62,19 +62,15 @@ const elements = {
   statusTitle: document.getElementById('status-title'),
   brainDot: document.getElementById('brain-dot'),
   brainTitle: document.getElementById('brain-title'),
-  brainHelp: document.getElementById('brain-help'),
   approvals: document.getElementById('approvals'),
   form: document.getElementById('command-form'),
   input: document.getElementById('command-input'),
   send: document.getElementById('command-send'),
   mic: document.getElementById('command-mic'),
   popOut: document.getElementById('pop-out'),
-  includePage: document.getElementById('include-page'),
-  includePageLabel: document.querySelector('label[for="include-page"] span'),
   notice: document.getElementById('command-notice'),
   history: document.getElementById('history'),
   openDashboard: document.getElementById('open-dashboard'),
-  connectNow: document.getElementById('connect-now'),
   engineNote: document.getElementById('engine-note'),
   setup: document.getElementById('setup'),
   pairCode: document.getElementById('pair-code'),
@@ -94,13 +90,13 @@ if (standalone) {
   document.body.classList.add('standalone')
   document.title = 'AI Pendant Console'
   elements.popOut.hidden = true
-  if (elements.includePageLabel) {
-    elements.includePageLabel.textContent =
-      'Include the active browser tab (title and address) with the command'
-  }
 }
 
 let dashboardUrl = dashboardUrlFor(DEFAULT_AGENT_URL)
+
+/* Page context rides with commands by default; INCLUDE_PAGE_KEY can turn it
+ * off but no longer has a checkbox (owner, 2026-08-12: popup declutter). */
+let includePagePreferred = true
 
 /* ===== The page engine (fallback bridge) =====
  *
@@ -132,8 +128,11 @@ function renderEngineNote() {
   elements.engineNote.textContent = !active
     ? ''
     : standalone
-      ? 'The background bridge is asleep — this console window is carrying the bridge. Keep it open.'
-      : 'The background bridge is asleep — this popover is carrying the bridge, and it stops when the popover closes. Pin the console window (↗) to keep the brain alive.'
+      ? 'Keep this window open — it is running the brain.'
+      : /* One line, not a lecture (owner, 2026-08-12). The single fact that
+         * matters: closing this popover stops the brain unless the console
+         * window is pinned. */
+        'Brain runs in this window — pin the console (↗) to keep it on.'
 }
 
 /* ===== Approval cards ===== */
@@ -292,9 +291,9 @@ function renderBrain(view) {
     view.tone === 'ok' ? 'connected' : view.tone === 'error' ? 'error' : ''
   }`
   elements.brainTitle.textContent = view.label
-  elements.brainHelp.textContent = view.help
-  /* The chip is short by necessity; the reason lives in the tooltip too, so it
-   * survives the footer being scrolled past. */
+  /* The footer paragraph is deleted (owner: popup declutter); the chip's
+   * tooltip is now the one home of the explanation, still fed by
+   * describeBrainState so chip and reason can never disagree. */
   elements.brainDot.parentElement.title = view.help
 }
 
@@ -679,7 +678,7 @@ elements.form.addEventListener('submit', async (event) => {
   setNotice('')
   elements.send.disabled = true
   try {
-    const page = elements.includePage.checked ? await currentPage() : null
+    const page = includePagePreferred ? await currentPage() : null
     const reply = await sendToBridge({
       type: 'console:submit',
       command,
@@ -700,23 +699,15 @@ elements.form.addEventListener('submit', async (event) => {
   }
 })
 
-elements.includePage.addEventListener('change', () => {
-  void api.storage.local.set({ [INCLUDE_PAGE_KEY]: elements.includePage.checked })
-})
+/* The include-page checkbox is deleted (owner, 2026-08-12): page context
+ * rides along by default; the stored INCLUDE_PAGE_KEY still wins if false. */
 
 elements.openDashboard.addEventListener('click', () => {
   void api.tabs.create({ url: dashboardUrl })
 })
 
-elements.connectNow.addEventListener('click', async () => {
-  elements.statusTitle.textContent = 'Connecting…'
-  try {
-    await sendToBridge({ type: 'bridge:poll-now' })
-  } catch {
-    // The alarm will restart a suspended service worker.
-  }
-  await refresh()
-})
+/* "Connect now" is gone (owner, 2026-08-12): the page engine connects on
+ * its own the moment this document opens, and the chips report it. */
 
 /* ===== Setup (pairing) =====
  *
@@ -1011,8 +1002,8 @@ async function refresh() {
   renderBrain(brainView)
   renderApprovals(values[APPROVALS_KEY])
   renderHistory(values[HISTORY_KEY])
-  /* Default ON for convenience, but visible and remembered. */
-  elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false
+  /* Default ON; the checkbox is gone but a stored false still wins. */
+  includePagePreferred = values[INCLUDE_PAGE_KEY] !== false
   refreshMicAvailability()
   /* Last, so the setup card's show/hide wins over renderHistory's. */
   renderSetup({ agentConfigured, brainWorking: brainView.brain === 'local' })

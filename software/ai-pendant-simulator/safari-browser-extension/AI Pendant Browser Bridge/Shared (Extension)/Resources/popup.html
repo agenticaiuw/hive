@@ -141,10 +141,11 @@
           />
           <button id="command-send" class="primary" type="submit">Send</button>
         </div>
-        <label class="check-row" for="include-page">
-          <input id="include-page" type="checkbox" checked />
-          <span>Include this page (title and address) with the command</span>
-        </label>
+        <!-- The include-page CHECKBOX is gone (owner, 2026-08-12: popup
+             declutter). The behaviour it toggled stays on: commands carry the
+             active page's title and address, which is what makes "summarize
+             this" work. The stored INCLUDE_PAGE_KEY preference still wins if
+             an owner ever set it false. -->
         <p id="command-notice" class="notice"></p>
       </form>
 
@@ -152,9 +153,11 @@
 
       <!-- No Settings button: the settings page is deleted (owner, 2026-08-12)
            and everything it did that survived lives above. -->
+      <!-- "Connect now" is gone (owner: "that makes no sense since i'm
+           already connected") — the page engine connects on its own and the
+           chips say so. -->
       <div class="button-row">
         <button id="open-dashboard" type="button">Dashboard</button>
-        <button id="connect-now" type="button">Connect now</button>
       </div>
       <!--
         Say what actually happens, in order, and keep it true as the order
@@ -163,12 +166,9 @@
         (it no longer goes first). This node thinks for itself now — brain.js
         over the relay's /v1/infer — and the Mac is the fallback.
       -->
-      <!--
-        Written by popup.js from describeBrainState, never hard-coded. It has
-        been wrong twice by being a fixed sentence about a changing system;
-        the third time it claimed self-sufficiency this browser did not have.
-      -->
-      <p class="help" id="brain-help"></p>
+      <!-- The footer paragraph is gone (owner: popup declutter). The brain
+           explanation survives only as the chip's tooltip, still written from
+           describeBrainState so it can never drift from the chip. -->
     </main>
     <script type="module" src="popup.js"></script>
   </body>
