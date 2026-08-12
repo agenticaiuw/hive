@@ -14,7 +14,9 @@ unchanged.
 | Mic-power sense | 100k resistor | SPH0645 VDD node (switch side of the mic) | nRF9160 **P0.26** | Input, **no pull** in firmware — the 100k must not bias the mic's supply net. High = mic powered, low = owner muted. |
 | Ask (talk) button | Yellow momentary | nRF9160 **P0.21** | GND | Active-low, internal pull-up. Behaves exactly like DK Button 1: press = converse, press again = end. |
 | Memo button | Green momentary | nRF9160 **P0.22** | GND | Active-low, internal pull-up. Record-only memo: capture + upload + transcript, **no agent planner** (`?dispatch=0`). |
-| Approve button | Blue momentary | nRF9160 **P0.23** | GND | Active-low, internal pull-up. Press = approve, hold ≥ 1.5 s = deny the pending approval. |
+| Push-to-talk button | Blue momentary | nRF9160 **P0.23** | GND | Active-low, internal pull-up. Press = record a question with the **radio off**; press again = one chunked upload **with** the planner (`dispatch=1` + `X-Reply-Stream: opus`), and the spoken answer plays back on the current sink. Remapped from approve/deny on 2026-08-12 — see "Why the blue button is push-to-talk". |
+| BT module command TX | jumper | nRF9160 **P0.00** | ESP32 **GPIO16** (RX2) | 115200 8N1, no flow control. The nRF commands the Bluetooth module; this is the interface a BM83-class part actually has. **Requires** the board-controller image built with `vcom2_pins_routing` disabled (this repo's `boards/nrf9160dk_nrf52840.overlay`) — with the stock image the DK's interface MCU drives P0.00 and fights every start bit. |
+| BT module command RX | jumper | ESP32 **GPIO17** (TX2) | nRF9160 **P0.05** | Same line, other direction. P0.05 is the DK's LED4 pin; the same board-controller overlay disables `led4_pin_routing` so the LED is switched off the net. Internal pull-up on the nRF side, so an absent module reads as an idle line rather than noise. |
 | Rotary encoder A | Encoder phase A | nRF9160 **P0.24** | — | Encoder COMMON to GND; internal pull-ups on A/B. Quadrature-decoded (Gray-code table, ±4 transitions per detent), never edge-counted. |
 | Rotary encoder B | Encoder phase B | nRF9160 **P0.25** | — | (same) If detents step the menu the wrong way, swap the A and B wires. |
 | Encoder push | Encoder switch pin | nRF9160 **P0.28** | GND | Active-low, internal pull-up. Menu select. Debounced 150 ms in firmware. |
@@ -90,6 +92,70 @@ the host's VCOM2 port with hardware flow control on. P0.14 (also in the
 group) has carried the PWM LRCLK for weeks without interference — the
 IMCU treats it as an input.
 
+**Why the blue button is push-to-talk.** The owner's ruling, and the
+arithmetic is in `hardware/design/Solar_Feasibility.md` §4.3: a PTT
+question (10 s ask + 15 s reply) costs **0.94 mWh** against **2.3 mWh** for
+the same question as a short duplex exchange — **2.4× cheaper**. The reason
+is not the codec, it is when the radio is on. Capture with the modem out of
+connected mode draws **4.2 mA**; the modem's connected floor is ~65 mA
+(45 mA RX monitoring before a single byte is transmitted, ×1.2 for the wrist
+antenna). Duplex pays that floor for every second the human is talking and
+thinking; push-to-talk pays 4.2 mA for those seconds. And because every
+radio touch pays a **~0.32 mWh RRC connection tax** (setup plus the C-DRX
+release tail), the design is exactly ONE connection: capture radio-off, then
+a single chunked POST that carries the question up and the spoken answer
+back down the same socket, then idle. Splitting it into "upload now, fetch
+the reply later" would double the tax and erase most of the win.
+
+The transport is not new: it is the existing non-duplex
+`/v1/pendant/command` shape with `dispatch=1` (a question wants the planner
+— unlike the green button's `dispatch=0`) and `X-Reply-Stream: opus`.
+Playback reuses the conversation's own downlink path — same decoder, same
+24 kHz jitter ring, same 96/125 TX resampler, same sync preamble — so
+whichever sink `audio_sink` currently selects (Bluetooth through the ESP32,
+or the MAX98357A speaker) hears it with no new audio code.
+
+**Blue loses approve/deny entirely.** Approvals remain answerable out loud
+during the readback and from the dashboard/popup. A blue press while the mic
+is hard-muted is suppressed exactly like yellow and green (`{"type":"mic_muted"}`
++ the triple double-blink + the long buzz). A blue press during an OPEN
+duplex conversation is ignored with a haptic tick: a conversation already
+owns the microphone, the I2S transfer, both codecs and the socket, and the
+two modes must not mix.
+
+**Offline PTT is honest about the answer.** A completed question with no
+usable link parks in the outbox as kind `'Q'` — distinct from a memo's
+`'T'` — and redelivers with the planner ON. The spoken reply cannot play
+later: the socket that would have carried it closed with the press. The
+answer lands in history and the device stays quiet.
+
+**The Bluetooth module UART (P0.00 / P0.05).** Everything else was taken:
+P0.01 is the MAX98357A SD_MODE gate, P0.29 is the console TX, P0.26/27/28
+are the mic sense, the accelerometer INT1 and the encoder push, P0.15 is the
+volume ADC, P0.10–13 are the microSD SPI, P0.14/16–20 are the audio bus,
+P0.21–25 are the buttons and encoder, and P0.30/31 are I2C. That leaves the
+VCOM2 group and the DK's LED pins.
+
+- **TX on P0.00** is only legal because this repo already ships a
+  board-controller overlay with `vcom2_pins_routing` disabled — the analog
+  switch between the interface MCU and P0.00/P0.01/P0.14/P0.15 is open.
+  P0.01 has been driving SD_MODE on that same basis for weeks. Flash the
+  stock board-controller image and the IMCU drives P0.00 as its VCOM2 TX,
+  fighting this output on every start bit. That overlay is a hard
+  dependency of this pin, not a nicety.
+- **RX on P0.05** is the *highest unused LED pin*, and taking it is a
+  deliberate tradeoff: **DK LED4 is gone.** P0.02 is `led0`, the firmware's
+  only status LED; P0.03/P0.04 are left free so a future build can add a
+  second indicator. The board-controller overlay now also disables
+  `led4_pin_routing`, which switches the on-board LED off the net and makes
+  P0.05 a clean input. With the stock image instead, the link still runs
+  (115200 has 8.7 µs per bit against a network that loads the line by a few
+  mA) but LED4 glows on the idle-high line, and an unpowered ESP32 lets the
+  LED string pull RX low into a permanent break — no module, no commands,
+  which is an honest failure.
+- Two wires, no flow control: the traffic is short newline-delimited JSON,
+  and no burst in that command set can outrun a 115200 receiver.
+
 **Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25,
 P0.27, P0.28) use the GPIO SENSE mechanism (`sense-edge-mask` in the
 overlay) rather than GPIOTE channels — the nRF9160 has only 8 GPIOTE
@@ -124,13 +190,52 @@ ones alone is fine — just don't ADD more).
 Both parts are probe-once: a missing breakout costs one boot log line,
 haptics degrade to LED patterns, double-tap wake simply disappears.
 
+## Bluetooth module command link (uart1, 115200 8N1)
+
+The nRF9160 owns Bluetooth *policy*; the module owns *mechanism*. The wire
+between them is one UART carrying newline-delimited JSON, which is exactly
+the control surface a BM83-class module has — so replacing the ESP32 with a
+real module changes the command strings and nothing else. **The ESP32's USB
+port is debug only**: it accepts the identical command set and mirrors every
+event, but nothing in the product may depend on it.
+
+| Direction | Frame | Meaning |
+| --- | --- | --- |
+| nRF → module | `{"command":"scan"}` | run an inquiry; each hit comes back as a `discovery` event |
+| nRF → module | `{"command":"connect","target":"<name>"}` | connect (and remember) that sink |
+| nRF → module | `{"command":"status"}` | ask for the current link state |
+| module → nRF | `{"type":"discovery","state":…,"device":…,"address":…,…}` | a sink was seen |
+| module → nRF | `{"type":"bridge","state":"connected"\|"searching"\|"usb","target":…,…}` | link state changed |
+| module → nRF | `{"type":"diagnostic",…}` | once-a-second link health; **read and dropped** by the nRF |
+
+**Event field order is a contract.** The nRF receives into a fixed 128-byte
+line buffer, so every module event puts `type`, `state` and then the
+machine-readable fields (`device`+`address`, or `target`) *before* the
+human-readable `message`. The parser also refuses any value whose closing
+quote fell outside the buffer, so a truncated address is treated as absent
+rather than remembered wrong — half a Bluetooth address is worse than none.
+
+**The sink table.** Four entries (name + address), persisted to
+`/SD:/btsinks.idx` with a magic and a checksum — no settings subsystem, no
+NVS. Index 0 is the preferred sink; insertion is at the front and eviction
+from the back, which *is* the LRU policy (with four entries a shift costs
+four 42-byte copies, cheaper than carrying and sorting an age byte). Four is
+an owner's real device count: earbuds, desk speaker, car, one spare.
+
+Only a **connection** reorders the table — it is the only proof an entry is
+reachable. Discovery merely fills the menu. On boot, and whenever
+`audio_sink` selects bluetooth/both, the preferred sink is paged; with
+nothing remembered the module is asked to scan instead, which is also what
+populates the owner's menu. A 60 s backstop re-page covers a module that was
+reset, and stops entirely once a sink answers.
+
 ## Haptic effect map (DRV2605L, all open-loop RTP presets)
 
 | Event | Preset | Feel |
 | --- | --- | --- |
-| Press acknowledged (yellow/tap-tap/encoder push, capture stop) | `click` | one 60 ms crisp click |
-| Approval decision actually sent (blue press or hold) | `double` | two 90 ms buzzes |
+| Press acknowledged (yellow/tap-tap/encoder push, capture start/stop, blue PTT start/stop) | `click` | one 60 ms crisp click |
 | Memo start / memo stop (green) | `tick` | one 25 ms blip |
+| Blue press refused mid-conversation | `tick` | one 25 ms blip — "heard you, not now" |
 | Incoming approval readback (relay announce frame) | `strong` | one 150 ms full-drive hit |
 | Capture press while hard-muted | `long` | one 400 ms soft buzz |
 
@@ -145,12 +250,15 @@ Recipes gain the same three new preset names (`tick`/`click`/`strong`).
 | --- | --- | --- |
 | Yellow press | same as DK Button 1 (converse start/stop) | always |
 | Green press | chunked POST `/v1/pendant/command?dispatch=0` + `X-Pendant-Mode: memo`, no `X-Reply-Stream` | mic powered; SD fallback and offline outbox (kind `'T'`) keep `dispatch=0` on redelivery |
-| Blue press / hold | `{"type":"approval_decision","decision":"approve"\|"deny"}` on the converse WS | socket open, else dropped with a log |
+| Blue press (start) | nothing on the wire — capture runs with the radio untouched | mic powered; ignored with a tick while a conversation is open |
+| Blue press (stop) | chunked POST `/v1/pendant/command?dispatch=1` + `X-Reply-Stream: opus`; the reply streams back as 2-byte-BE length-prefixed Opus packets on the same socket and plays through the current sink | one RRC connection per question; no link → outbox kind `'Q'`, planner ON at redelivery, **answer lands in history, never in the ear** |
+| BT device list (downlink request) | `{"type":"bt_list"}` → device replies `{"type":"bt_devices","devices":[{"index":N,"name":…,"address":…,"preferred":bool}],"connected":bool}` | answered from main's idle loop; **relay-side sender: TODO** |
+| BT device pick (downlink) | `{"type":"bt_select","index":N}` → promotes entry N to preferred and commands the module to connect | N indexes the list above (0 = preferred); **relay-side sender: TODO** |
 | Encoder detent / push | `{"type":"menu","delta":±1}` / `{"type":"menu_select"}` on the converse WS | socket open, else dropped |
 | Capture press while muted | `{"type":"mic_muted"}` on the converse WS + LED pattern + long buzz, capture suppressed | socket open (LED/buzz regardless) |
 | Volume knob move | `{"type":"volume","level":0.xx,"raw":N}` on the converse WS | on ≥2% change, ~20 Hz poll (5 Hz idle); gain applied on-device before the wire |
 | Accelerometer double-tap | identical to a yellow press (same semaphore) | always; mute suppression included |
-| Sink select (downlink) | `{"type":"audio_sink","sink":"speaker"\|"bluetooth"\|"both"}` parsed from the converse WS (mid-conversation or idle) | speaker/both = SD_MODE high; bluetooth = amp shutdown. Boot default: bluetooth. **Relay-side sender: TODO** (cloud-relay was mid-edit by another agent) |
+| Sink select (downlink) | `{"type":"audio_sink","sink":"speaker"\|"bluetooth"\|"both"}` parsed from the converse WS (mid-conversation or idle) | speaker/both = SD_MODE high; bluetooth = amp shutdown. Selecting bluetooth/both also asks the module to connect the preferred sink — a sink choice that left the module idle would route the next answer into silence. Boot default: bluetooth. **Relay-side sender: TODO** (cloud-relay is owned by another agent) |
 | Approval readback announce (downlink) | `{"type":"approval_readback"}` → strong haptic hit | device parses it today; **relay-side sender: TODO** (same reason) |
 
 "Both" is one pin's truth, not two: SD_MODE high makes the amp a second

@@ -71,6 +71,21 @@
  * asked nobody to act on.
  */
 #define PENDANT_STORE_KIND_MEMO  'T' /* record-only memo (PCM, no planner) */
+/*
+ * 'Q' for question — the blue button's push-to-talk capture that finished
+ * with no usable link. It is NOT a memo: a memo asked for nobody to act on
+ * it, and a question asked for an answer, so this kind redelivers with the
+ * planner ON (?dispatch=1), exactly like a deferred voice command.
+ *
+ * It is also not KIND_VOICE, and the difference is honesty about what the
+ * owner gets back. The spoken reply to a PTT question is streamed on the
+ * upload socket at the moment of asking; a question delivered hours later
+ * has no socket to speak down and nothing on the device is waiting to play
+ * it. So the answer lands in the dashboard/history and the device stays
+ * quiet — the kind byte is what lets the log, and eventually the relay,
+ * say that instead of implying a voice answer that never comes.
+ */
+#define PENDANT_STORE_KIND_QUESTION 'Q' /* PTT question (PCM, planner on)  */
 #define PENDANT_STORE_KIND_MARK  'M' /* moment bookmark (no payload)      */
 #define PENDANT_STORE_KIND_ACK   'A' /* "N held alerts were surfaced"     */
 
@@ -92,6 +107,10 @@ int pendant_store_enqueue_voice(uint32_t pcm_bytes);
 /* Same journal takeover for a record-only memo (green button): identical
  * durability, delivered later with the planner off (KIND_MEMO above). */
 int pendant_store_enqueue_memo(uint32_t pcm_bytes);
+
+/* Same journal takeover for a push-to-talk question (blue button): planner
+ * ON at redelivery, and no voice reply afterwards (KIND_QUESTION above). */
+int pendant_store_enqueue_question(uint32_t pcm_bytes);
 
 /*
  * Drop a moment bookmark: the timestamp the device has (modem NITZ clock
@@ -120,6 +139,11 @@ static inline int pendant_store_enqueue_voice(uint32_t pcm_bytes)
 	return -ENOTSUP;
 }
 static inline int pendant_store_enqueue_memo(uint32_t pcm_bytes)
+{
+	ARG_UNUSED(pcm_bytes);
+	return -ENOTSUP;
+}
+static inline int pendant_store_enqueue_question(uint32_t pcm_bytes)
 {
 	ARG_UNUSED(pcm_bytes);
 	return -ENOTSUP;

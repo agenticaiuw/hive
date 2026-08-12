@@ -12,12 +12,29 @@
  * module with a UART command set do this? If not, it is vetoed here and
  * belongs on the nRF9160. In scope: I2S audio in (including the receiver
  * resync/sync-lock machinery), A2DP source streaming out, pairing
- * management over serial JSON (scan/connect/forget/status), the route
+ * management over JSON (scan/connect/forget/status), the route
  * on/off gate, auto-reconnect to the remembered sink, connection state
  * events, a test tone, and a once-a-second link-health line. Volume
  * control is the nRF's job — it pre-scales the PCM it sends; this chip
  * plays what it is given. Bring-up instrumentation (pin probes, clock
  * timing, raw slot captures, ring dumps) does not come back.
+ *
+ * TWO PORTS, ONE COMMAND SET (2026-08-12).
+ * ----------------------------------------
+ * The same newline-delimited JSON now arrives on UART2 (GPIO16 RX2 /
+ * GPIO17 TX2) as on USB, and every event is written to both. UART2 is the
+ * REAL interface: a BM83-class module has exactly one control surface and
+ * it is a UART, so this is the wire the nRF9160 commands the "module" over
+ * and the wire that survives the ESP32 being replaced by an actual module.
+ * USB is debug only — a human with a serial monitor, nothing the product
+ * depends on. That is also why the two are not allowed to diverge: a
+ * command that only works over USB would be a feature no module could have.
+ *
+ * Event field ORDER matters on UART2 and is deliberate: type, state, then
+ * the fields the main chip acts on (device/address, or target), then the
+ * human-readable message last. The nRF receives into a fixed line buffer
+ * and truncates anything longer, so the machine-readable fields must come
+ * before the prose, not after it.
  *
  * Hard-won audio-path rules, kept from bring-up — violating any of these
  * produced audible, hard-to-diagnose failures:
@@ -47,6 +64,39 @@ constexpr gpio_num_t I2S_BCLK_PIN = GPIO_NUM_27;
 constexpr gpio_num_t I2S_DATA_PIN = GPIO_NUM_14;
 constexpr uint32_t ESP32_MAX_CPU_CLOCK_MHZ = 240;
 i2s_chan_handle_t i2sInput = nullptr;
+
+/*
+ * Module command link to the nRF9160. UART2's default pins on the HUZZAH32
+ * are GPIO16 (RX2) and GPIO17 (TX2), and both are free here — the audio bus
+ * owns 27/33/14 and nothing else on this board is wired.
+ *
+ *   nRF P0.00 (TX) -> GPIO16 RX2
+ *   nRF P0.05 (RX) <- GPIO17 TX2
+ *
+ * 115200 8N1, no flow control: the traffic is short JSON lines, and a
+ * module's UART is a command channel, not an audio path.
+ */
+constexpr gpio_num_t MODULE_UART_RX_PIN = GPIO_NUM_16;
+constexpr gpio_num_t MODULE_UART_TX_PIN = GPIO_NUM_17;
+constexpr uint32_t MODULE_UART_BAUD = 115200;
+HardwareSerial &moduleSerial = Serial2;
+
+/*
+ * Every event goes to BOTH ports. USB is a human with a serial monitor;
+ * UART2 is the main chip. Writing to only one of them would create a
+ * behaviour the other cannot see, which is exactly the divergence the
+ * two-ports-one-command-set rule exists to prevent.
+ */
+void emitLine(const String &line) {
+  Serial.println(line);
+  moduleSerial.println(line);
+}
+
+void emitDocument(JsonDocument &document) {
+  String line;
+  serializeJson(document, line);
+  emitLine(line);
+}
 
 /*
  * No speaker is compiled in. The bridge remembers whatever it last connected
@@ -166,12 +216,13 @@ volatile uint32_t audioStreamGeneration = 0;
 
 void emitEvent(const char *state, const String &message) {
   JsonDocument document;
+  /* Machine-readable fields first, prose last — the nRF truncates at a
+   * fixed line length and must never lose `target` to a long message. */
   document["type"] = "bridge";
   document["state"] = state;
-  document["message"] = message;
   document["target"] = targetName;
-  serializeJson(document, Serial);
-  Serial.println();
+  document["message"] = message;
+  emitDocument(document);
 }
 
 void emitStatus() {
@@ -660,18 +711,23 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   }
 
   JsonDocument document;
+  /*
+   * Field order is the contract with the nRF's fixed-size line buffer:
+   * device and address are what the sink table is built from, so they come
+   * before rssi/target/flags and long before the human-readable message.
+   * Reordered 2026-08-12 when this frame gained a second reader.
+   */
   document["type"] = "discovery";
   document["state"] = "searching";
-  document["message"] =
-      "Found “" + found + "” (" + String(rssi) + " dBm).";
   document["device"] = found;
   document["address"] = addressText;
   document["rssi"] = rssi;
   document["target"] = targetName;
   document["matched"] = matches;
   document["duplicate_ignored"] = duplicateIgnored;
-  serializeJson(document, Serial);
-  Serial.println();
+  document["message"] =
+      "Found “" + found + "” (" + String(rssi) + " dBm).";
+  emitDocument(document);
 
   return matches;
 }
@@ -769,11 +825,16 @@ void removeAllBluetoothBonds() {
   free(devices);
 }
 
-void handleSerialCommand(const String &line) {
+/*
+ * ONE command handler for both ports. `origin` only colours the log line —
+ * a command must do exactly the same thing whichever wire carried it, or
+ * the UART stops being a faithful stand-in for a module's control surface.
+ */
+void handleCommand(const String &line, const char *origin) {
   JsonDocument document;
   const DeserializationError error = deserializeJson(document, line);
   if (error) {
-    emitEvent("usb", "Ignored an invalid USB command.");
+    emitEvent("usb", String("Ignored an invalid command on ") + origin + ".");
     return;
   }
 
@@ -826,7 +887,27 @@ void handleSerialCommand(const String &line) {
     clearAudioBuffer();
     emitEvent("usb", "Pairing and saved target cleared.");
   } else {
-    emitEvent("usb", "Unknown USB command: " + command);
+    emitEvent("usb", String("Unknown command on ") + origin + ": " + command);
+  }
+}
+
+/*
+ * Line assembly, one instance per port. Same 512-char cap and same
+ * newline framing on both, so a command that is accepted on USB is
+ * accepted byte-for-byte on UART2.
+ */
+void pumpCommandPort(Stream &port, String &buffer, const char *origin) {
+  while (port.available()) {
+    const char character = static_cast<char>(port.read());
+    if (character == '\n') {
+      buffer.trim();
+      if (!buffer.isEmpty()) {
+        handleCommand(buffer, origin);
+      }
+      buffer = "";
+    } else if (character != '\r' && buffer.length() < 512) {
+      buffer += character;
+    }
   }
 }
 
@@ -890,8 +971,11 @@ void setup() {
   // 240 MHz: the polyphase resampler plus SBC encode need the headroom.
   setCpuFrequencyMhz(ESP32_MAX_CPU_CLOCK_MHZ);
   Serial.begin(115200);
+  moduleSerial.begin(MODULE_UART_BAUD, SERIAL_8N1, MODULE_UART_RX_PIN,
+                     MODULE_UART_TX_PIN);
   delay(400);
   Serial.setTimeout(40);
+  moduleSerial.setTimeout(40);
 
   buildResampleFilter();
 
@@ -913,8 +997,8 @@ void setup() {
                          nullptr, 1);
 
   emitEvent("usb",
-            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, nRF I2S forwarding "
-            "on. A2DP target: " +
+            "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, cmd UART2 RX=16/TX=17, "
+            "nRF I2S forwarding on. A2DP target: " +
                 (targetName.isEmpty() ? String("none remembered — send scan/connect")
                                       : targetName) +
                 ".");
@@ -925,20 +1009,14 @@ void setup() {
 }
 
 void loop() {
-  static String incoming;
+  static String usbIncoming;
+  static String moduleIncoming;
   static uint32_t lastDiagnosticAt = 0;
-  while (Serial.available()) {
-    const char character = static_cast<char>(Serial.read());
-    if (character == '\n') {
-      incoming.trim();
-      if (!incoming.isEmpty()) {
-        handleSerialCommand(incoming);
-      }
-      incoming = "";
-    } else if (character != '\r' && incoming.length() < 512) {
-      incoming += character;
-    }
-  }
+
+  /* The module link first: it is the interface the product ships with, and
+   * USB is the debug console sitting beside it. */
+  pumpCommandPort(moduleSerial, moduleIncoming, "uart2");
+  pumpCommandPort(Serial, usbIncoming, "usb");
 
   if (connectionStateChanged) {
     connectionStateChanged = false;
@@ -1018,8 +1096,7 @@ void loop() {
     document["i2s_frames"] = i2sFramesReceived;
     document["i2s_peak"] = peak;
     document["a2dp_frames"] = a2dpFramesRequested;
-    serializeJson(document, Serial);
-    Serial.println();
+    emitDocument(document);
   }
 
   delay(5);
