@@ -39,7 +39,21 @@ import { APPROVALS_KEY, approvalBadge } from './approvals.js'
 const api = globalThis.browser ?? globalThis.chrome
 
 export const FETCH_TIMEOUT_MS = 7_000
+/*
+ * TWO CADENCES, AND THE SPLIT IS SAFARI'S BUG, NOT A STYLE CHOICE.
+ * Safari kills background content that is exercised more often than every
+ * ~4 s — a hidden ~30 s resource budget, documented by developers on
+ * Apple's forums (thread 756309: 1 s intervals die after 30 calls, 2 s
+ * after 15, 3 s after 10; "increasing to 4 seconds… never crashes"),
+ * acknowledged by Apple, and still regressing as of OS 26. Our original
+ * 750 ms background poll tripped exactly that budget, which is the best
+ * explanation on record for this machine's background never surviving.
+ * Visible documents (the page engine's popover/console hosts) are ordinary
+ * web pages with no such budget, so they keep the fast cadence commands
+ * deserve; the background, when Safari deigns to run it, must idle gently.
+ */
 export const POLL_INTERVAL_MS = 750
+export const BACKGROUND_POLL_INTERVAL_MS = 5_000
 export const HEARTBEAT_INTERVAL_MS = 12_000
 export const STATUS_KEY = 'bridgeStatus'
 export const RELAY_STATUS_KEY = 'relayStatus'
