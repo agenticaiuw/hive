@@ -10,7 +10,12 @@
  * (actions + spoken_reply). Transcript is optional history/debug only —
  * never required, never the critical hot path. Mac only executes.
  * Tools: get_mac_status, mac_run_actions, browser_run_actions, web_search,
- * mac_delegate, read_web_page, relay_job_status.
+ * mac_delegate, read_web_page, relay_job_status, memory_lookup, memory_save.
+ *
+ * Memory: "tools should be combined with memories" (the owner, 2026-08-12).
+ * When a tool from a capability domain is selected, that domain's remembered
+ * facts are fetched and attached to the tool's result — never spliced into
+ * the system prompt. memory_lookup/memory_save are the deliberate verbs.
  * Docs: https://developers.openai.com/api/docs/guides/realtime-websocket
  */
 
@@ -19,6 +24,13 @@ import {
   composeRealtimeInstructions,
   normalizeFleetSnapshot,
 } from './fleetContext.js'
+import {
+  clarifyDomainRequest,
+  domainsForActions,
+  MEMORY_DOMAINS,
+  MEMORY_TOOL_SPECS,
+  MEMORY_TOOL_TYPES,
+} from '../shared/domains/index.js'
 import { READ_WEB_PAGE_TOOL, runReadWebPage } from './serverBrowser.js'
 import { SPOKEN_MAX_CHARS } from './jobRecall.js'
 import { contextItemsFromRealtimeState } from '../shared/contextHandoff.js'
@@ -94,6 +106,40 @@ const ACTION_ITEM_SCHEMA = {
     },
   },
   required: ['type', 'params'],
+}
+
+/*
+ * Translate one shared MEMORY_TOOL_SPECS entry into an OpenAI function
+ * schema. The specs live in shared/domains/index.js so the three brains
+ * (Mac planner, browser brain, this voice loop) cannot drift on names or
+ * argument shapes; only the wire format is local. A param whose spec
+ * description starts with "optional" is the spec's own marking for
+ * non-required, and domain/scope get enums so the model cannot invent one.
+ */
+function memoryToolFromSpec(name) {
+  const spec = MEMORY_TOOL_SPECS[name]
+  const properties = {}
+  const required = []
+  for (const [param, description] of Object.entries(spec.params)) {
+    properties[param] = {
+      type: 'string',
+      description,
+      ...(param === 'domain' ? { enum: [...MEMORY_DOMAINS] } : {}),
+      ...(param === 'scope' ? { enum: ['hive', 'node'] } : {}),
+    }
+    if (!/^optional/i.test(description)) required.push(param)
+  }
+  properties.spoken_reply = {
+    type: 'string',
+    description:
+      'Short confirmation for the pendant speaker (preferred user-facing reply).',
+  }
+  return {
+    type: 'function',
+    name,
+    description: spec.description,
+    parameters: { type: 'object', properties, required },
+  }
 }
 
 /**
@@ -265,6 +311,14 @@ export const REALTIME_TOOLS = [
       required: [],
     },
   },
+  /*
+   * The deliberate memory verbs, from the shared domain registry. The
+   * automatic half — fetching a domain's facts when its tool is selected —
+   * lives in handleFunctionCall; these two are what let the model consult
+   * and write on purpose ("Add explicit memory tools … so the planner can
+   * consult/write deliberately").
+   */
+  ...MEMORY_TOOL_TYPES.map(memoryToolFromSpec),
 ]
 
 /** Status field → Mac executor action(s). get_mac_status expands into these. */
@@ -990,6 +1044,16 @@ export async function createStreamingRealtimeSession({
    * what lets the tool be tested without a relay.
    */
   lookupJobStatus = null,
+  /*
+   * Capability-domain memory access, as two closures (domainMemoryRelay.js):
+   *   { lookup: async ({domain, query}) => ({facts, lines}),
+   *     save:   async (facts) => stats }
+   * Injected rather than imported, same contract as lookupJobStatus: this
+   * module keeps knowing nothing about the store. Null-safe — a session
+   * opened without it reports "no memory access" from the memory tools and
+   * simply skips the fetch-on-tool-selection attach.
+   */
+  domainMemory = null,
   /* Raw X-Device-Time header (+CCLK) — the pendant's LTE network clock. */
   deviceTime = null,
   /*
@@ -1005,6 +1069,12 @@ export async function createStreamingRealtimeSession({
   /* Conversation mode: user started speaking (semantic VAD). The caller
    * decides whether device-side playback needs flushing (barge-in). */
   onUserSpeech = null,
+  /*
+   * Test seam: inject the WebSocket opener so tool handling can be exercised
+   * against a scripted fake socket (openaiRealtimeVoice.test.js). Production
+   * callers never pass this.
+   */
+  openSocket = openRealtimeSocket,
 } = {}) {
   const apiKey = openaiApiKey()
   if (!apiKey) {
@@ -1018,7 +1088,7 @@ export async function createStreamingRealtimeSession({
     : new StreamingPcmResampler(inputSampleRate, REALTIME_PCM_RATE)
   // μ-law rides through untouched (the model decodes it); PCM gets levelled so
   // a quiet pendant mic still clears the Realtime VAD's absolute gate.
-  const socket = await openRealtimeSocket(realtimeWsUrl(), apiKey)
+  const socket = await openSocket(realtimeWsUrl(), apiKey)
 
   const state = {
     transcript: '',
@@ -1164,6 +1234,54 @@ export async function createStreamingRealtimeSession({
     return plan
   }
 
+  /* Per-domain bound for the attach below: enough to carry every account and
+   * default a domain realistically holds, small enough that three domains in
+   * one plan cannot bloat a tool result. */
+  const MEMORY_FACTS_PER_DOMAIN = 8
+
+  /*
+   * Fetch-on-tool-selection — the owner's core ask: "tools should be combined
+   * with memories". The actions the model just planned name their capability
+   * domains (shared/domains/index.js), and each named domain's facts are
+   * fetched HERE, at the moment the tool is selected, to ride back inside the
+   * tool result — the one place the model is guaranteed to read before it
+   * speaks or the Mac executes. Best-effort: a memory read must never cost
+   * the action it decorates.
+   */
+  async function fetchDomainMemoryForActions(
+    actions,
+    { fallback = null, query = '' } = {},
+  ) {
+    const domains = domainsForActions(actions, fallback ? { fallback } : {})
+    const facts = []
+    const lines = []
+    if (!domains.length || typeof domainMemory?.lookup !== 'function') {
+      return { domains, facts, lines }
+    }
+    for (const domain of domains) {
+      try {
+        const found = (await domainMemory.lookup({ domain, query })) || {}
+        facts.push(
+          ...(Array.isArray(found.facts) ? found.facts : []).slice(
+            0,
+            MEMORY_FACTS_PER_DOMAIN,
+          ),
+        )
+        lines.push(
+          ...(Array.isArray(found.lines) ? found.lines : []).slice(
+            0,
+            MEMORY_FACTS_PER_DOMAIN,
+          ),
+        )
+      } catch (error) {
+        console.warn(
+          `[realtime] domain memory fetch (${domain}): ${error?.message || error}`,
+        )
+      }
+    }
+    return { domains, facts, lines }
+  }
+
   async function handleFunctionCall(name, callId, argsJson) {
     let args = {}
     try {
@@ -1288,6 +1406,80 @@ export async function createStreamingRealtimeSession({
       return
     }
 
+    /*
+     * The deliberate memory verbs. Answered inside the turn like web_search —
+     * the hive block lives in the relay's own fleet state, so no Mac round
+     * trip and no job. Null-safe: a session opened without the domainMemory
+     * option says so instead of pretending an empty hive, because "I don't
+     * know" and "I can't know" deserve different spoken answers.
+     */
+    if (name === 'memory_lookup' || name === 'memory_save') {
+      const spokenReply = String(args.spoken_reply || '').trim()
+      if (spokenReply) state.response = spokenReply
+
+      let output
+      try {
+        if (name === 'memory_lookup') {
+          if (typeof domainMemory?.lookup !== 'function') {
+            output = { ok: false, error: 'This session has no memory access.' }
+          } else {
+            const domain =
+              String(args.domain || '').trim().toLowerCase() || null
+            const found =
+              (await domainMemory.lookup({
+                domain,
+                query: String(args.query || '').trim(),
+              })) || {}
+            output = {
+              ok: true,
+              domain,
+              facts: Array.isArray(found.facts) ? found.facts : [],
+              lines: Array.isArray(found.lines) ? found.lines : [],
+            }
+          }
+        } else if (typeof domainMemory?.save !== 'function') {
+          output = { ok: false, error: 'This session has no memory access.' }
+        } else {
+          /* One spoken sentence, one fact. node:'voice' is attribution — the
+           * capturing body — not routing; scope is the routing decision and
+           * defaults to hive exactly as the shared spec says it does. */
+          const stats = await domainMemory.save([
+            {
+              domain: args.domain,
+              name: args.name,
+              value: args.value,
+              scope: String(args.scope || '').trim() || 'hive',
+              node: 'voice',
+            },
+          ])
+          output = { ok: true, ...stats }
+        }
+      } catch (error) {
+        output = {
+          ok: false,
+          error: String(error?.message || error).slice(0, 200),
+        }
+      }
+
+      send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify(output),
+        },
+      })
+      if (audioOut) {
+        requestSpokenReply()
+      } else {
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['text'] },
+        })
+      }
+      return
+    }
+
     // PROACTIVE status reads: dispatch to the Mac, then (audio mode) HOLD the
     // turn until the real result lands so the model speaks the actual answer
     // — never a "fetching…" filler followed by silence.
@@ -1297,6 +1489,18 @@ export async function createStreamingRealtimeSession({
       state.response =
         String(args.spoken_reply || args.response || '').trim() || 'Checking.'
       const actions = normalizeActions(mapGetMacStatusToActions(args.fields))
+
+      // BEFORE dispatch: the expanded status actions name their capability
+      // domains (get_volume → system, …), and those domains' remembered
+      // facts ride the tool result so the answer can honour the owner's
+      // standing levels and defaults.
+      const memory = await fetchDomainMemoryForActions(actions, {
+        query: optionalTranscript || state.transcript || '',
+      })
+      const memoryAttach = memory.lines.length
+        ? { domainMemory: memory.lines }
+        : {}
+
       state.actions = actions
       state.status = actions.length ? 'ready' : 'instant'
 
@@ -1309,6 +1513,7 @@ export async function createStreamingRealtimeSession({
         tool: 'get_mac_status',
         actionCount: state.actions.length,
         fields: Array.isArray(args.fields) ? args.fields : ['all'],
+        ...memoryAttach,
       }
       if (audioOut && job?.jobId && typeof waitForMacResult === 'function') {
         const result = await waitForMacResult(job.jobId).catch(() => null)
@@ -1319,6 +1524,7 @@ export async function createStreamingRealtimeSession({
               surface: 'mac',
               tool: 'get_mac_status',
               result,
+              ...memoryAttach,
             }
           : {
               ...output,
@@ -1358,6 +1564,57 @@ export async function createStreamingRealtimeSession({
           return action
         })
       }
+
+      /*
+       * BEFORE dispatch, the two memory moves. First the fetch: each domain
+       * this plan touches contributes its facts to the tool result (every
+       * browser verb is browser-domain work, hence the fallback). Then the
+       * gate — the owner's rule verbatim: "only when the prompt is ambiguous,
+       * then ask the users for clarifications." When the registry finds a
+       * real ambiguity (≥2 known candidates, no default, none named), the
+       * plan is NOT dispatched — state.actions stays empty for this call —
+       * and the question rides back as the tool result. Speech is the voice
+       * brain's ask channel, so the model asks the owner instead of guessing.
+       */
+      const memory = await fetchDomainMemoryForActions(actions, {
+        fallback: name === 'browser_run_actions' ? 'browser' : null,
+        query: optionalTranscript || state.transcript || '',
+      })
+      const clarification = clarifyDomainRequest({
+        domains: memory.domains,
+        request: `${optionalTranscript || state.transcript || ''} ${actions
+          .map((action) => JSON.stringify(action.params || {}))
+          .join(' ')}`,
+        facts: memory.facts,
+      })
+      if (clarification) {
+        // The question becomes the turn's spoken content, not the tool's
+        // premature confirmation.
+        state.response = clarification.question
+        send({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: callId,
+            output: JSON.stringify({
+              ok: false,
+              needs_clarification: true,
+              question: clarification.question,
+              options: clarification.options,
+            }),
+          },
+        })
+        if (audioOut) {
+          requestSpokenReply()
+        } else {
+          send({
+            type: 'response.create',
+            response: { output_modalities: ['text'] },
+          })
+        }
+        return
+      }
+
       state.actions = actions
       state.status = state.actions.length ? 'ready' : 'instant'
       send({
@@ -1370,6 +1627,9 @@ export async function createStreamingRealtimeSession({
             queued: true,
             surface: name === 'browser_run_actions' ? 'browser' : 'mac',
             actionCount: state.actions.length,
+            // The attach: this plan's domains, remembered. Lines, not raw
+            // facts — already rendered and secret-masked for a model reader.
+            ...(memory.lines.length ? { domainMemory: memory.lines } : {}),
           }),
         },
       })

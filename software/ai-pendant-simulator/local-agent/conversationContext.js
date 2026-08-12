@@ -1,12 +1,5 @@
-import {
-  formatLongTermMemoryForPrompt,
-  getLatestContext,
-  retrieveLongTermMemory,
-} from './contextGraph.js'
-import {
-  formatWorkingProjectForPrompt,
-  getActiveProject,
-} from './projectMemory.js'
+import { getLatestContext, retrieveLongTermMemory } from './contextGraph.js'
+import { getActiveProject } from './projectMemory.js'
 import { getRecentTurns } from './sessionStore.js'
 
 /**
@@ -64,6 +57,14 @@ export function buildConversationContext({ command, sessionId }) {
       result: turn.result ?? null,
     })),
     shortTerm,
+    /*
+     * Structured fields only, for the thinking trace and the follow-up
+     * resolver. Neither is spliced into the prompt any more: the owner's
+     * verdict on the generic memory sections was "not just generic memories
+     * that all get added to the system prompt" — what the model gets instead
+     * is domain memory, fetched in llmPlanner.js when a domain's tools are
+     * selected.
+     */
     workingProject: activeProject,
     longTerm,
     memory: needsMemory
@@ -85,8 +86,6 @@ export function buildConversationContext({ command, sessionId }) {
       resolvedCommand,
       recentTurns: needsMemory ? recentTurns : recentTurns.slice(-1),
       shortTerm: needsMemory ? shortTerm : { lastUserCommand: null },
-      activeProject,
-      longTerm,
       compact: !needsMemory,
     }),
   }
@@ -162,13 +161,21 @@ function resolveFollowUpReferences(
   return resolved
 }
 
+/*
+ * The prompt block is SESSION continuity only: the short-term turns and the
+ * resolver's rewrite. The '## Working project context' and '## Long-term
+ * personal memory' sections that used to follow are gone on purpose — they
+ * were the generic splice the owner called out ("Memories are not doing
+ * anything useful right now"), re-serialized on every memory-carrying turn
+ * whatever was asked. Conversation continuity is not "memories"; the owner's
+ * durable facts now travel as domain memory, attached in llmPlanner.js only
+ * when a matching domain's tools are selected.
+ */
 function formatPromptBlock({
   command,
   resolvedCommand,
   recentTurns,
   shortTerm,
-  activeProject,
-  longTerm,
   compact = false,
 }) {
   if (compact) {
@@ -202,12 +209,6 @@ function formatPromptBlock({
       lines.push(`  - ${turn.role}: ${truncate(turn.content, 180)}`)
     }
   }
-
-  lines.push('', '## Working project context')
-  lines.push(formatWorkingProjectForPrompt(activeProject, { maxThreads: 3 }))
-
-  lines.push('', '## Long-term personal memory')
-  lines.push(formatLongTermMemoryForPrompt(longTerm))
 
   lines.push('', `Current user request: ${command}`)
   if (resolvedCommand !== command) {

@@ -45,6 +45,7 @@ import {
 } from '../shared/approvalHandoff.js'
 import {
   answerApproval,
+  listApprovals,
   readApproval,
   saveApproval,
   settleStoredApproval,
@@ -318,6 +319,61 @@ export async function decideApproval({
     why: null,
     approval: presentApproval(outcome.approval),
   }
+}
+
+/**
+ * The pendant's hardware approval button (blue, P0.23): short press approves,
+ * long hold denies, arriving as {"type":"approval_decision"} on the converse
+ * socket. A thumb has no approvalId, so this resolves WHICH record the thumb
+ * meant before handing off to decideApproval — the same one-decision-path
+ * every other surface uses.
+ *
+ * Resolution order is deliberate:
+ *   1. An explicit approvalId (the conversation just read one back —
+ *      pendantConverse passes its pendingApprovalAnswer) wins outright.
+ *   2. Otherwise the oldest LIVE pendant-routed pending record — exactly the
+ *      record speakNextApproval would read next, so the thumb and the voice
+ *      always answer the same prompt.
+ *
+ * A button decision cannot satisfy the spoken path's confirm-word ritual, and
+ * it does not try to: decideApproval is the surface-tap path (a dashboard
+ * click never speaks a confirm word either). Records that REQUIRE the word
+ * are excluded from blind selection — a plan that demanded "approve sunset"
+ * must not be committed by a thumb that named nothing — but remain deniable,
+ * and remain decidable when explicitly identified by a readback.
+ */
+export async function decideNextPendingApproval({
+  store,
+  deviceId,
+  decision,
+  decidedBy = 'pendant-button',
+  approvalId = null,
+  now = Date.now(),
+} = {}) {
+  let target = String(approvalId ?? '').trim()
+  if (!target) {
+    const asked = String(decision ?? '').trim().toLowerCase()
+    const records = await listApprovals(store, deviceId, { now })
+    const candidates = records.filter(
+      (record) =>
+        isPendantRoutedApproval(record) &&
+        record.state === 'pending' &&
+        approvalIsLive(record, now) &&
+        (asked === 'deny' || !record.requiresConfirmWord),
+    )
+    if (!candidates.length) {
+      return {
+        ok: false,
+        code: 'nothing_pending',
+        state: null,
+        approvalId: null,
+        why: 'No live pendant-routed approval is waiting for a button decision.',
+      }
+    }
+    target = candidates[0].approvalId
+  }
+  const result = await decideApproval({ store, approvalId: target, decision, decidedBy, now })
+  return { ...result, approvalId: target }
 }
 
 /**

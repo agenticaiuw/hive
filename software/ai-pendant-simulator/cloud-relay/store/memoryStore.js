@@ -1,10 +1,5 @@
 import { JOB_TTL_MS } from '../config.js'
 import {
-  MAX_LOG_BYTES,
-  pruneFleetMemoryEvents,
-  takeWithinByteBudget,
-} from '../../shared/fleetMemory.js'
-import {
   mergeProductSync as mergeProductSyncDocuments,
   normalizeProductSync,
 } from '../../shared/productSync.js'
@@ -29,17 +24,15 @@ const AGENT_PROXY_MAX_AGE_MS = 10_000
  *
  *   - Any future relay that holds more than one store at once (a second
  *     account, a replay harness, a per-tenant isolate) would serve one
- *     owner's facts to another. The memory log is the worst table for that to
- *     happen to, because it is the one designed to be pasted into a prompt.
- *   - Tests. Two `createMemoryStore()` calls in one process shared a log, so a
- *     test could pass on rows another test wrote — and fleetMemory.test.js
- *     already carries a `freshMemoryStore()` helper whose whole job is to
- *     scrub the shared state before each case. That helper is the bug's
- *     receipt, not its fix.
+ *     owner's facts to another. The fleet state's domainMemory block is the
+ *     worst row for that to happen to, because it is the one designed to be
+ *     handed to a model.
+ *   - Tests. Two `createMemoryStore()` calls in one process shared state, so
+ *     a test could pass on rows another test wrote.
  *
  * Nothing else changes: every method below closes over these maps instead of
  * the module's, and none of them use `this`, so a detached method
- * (`{ listMemoryEvents: store.listMemoryEvents }`) still works.
+ * (`{ getState: store.getState }`) still works.
  */
 export function createMemoryStore() {
   const jobs = new Map()
@@ -52,7 +45,6 @@ export function createMemoryStore() {
   const routineLeases = new Map()
   const announcements = new Map()
   const contexts = new Map()
-  const memoryEvents = new Map()
   /* message_id → { envelope, leasedUntil, leaseToken, attempts } */
   const nodeMessages = new Map()
 
@@ -67,27 +59,6 @@ export function createMemoryStore() {
         jobs.delete(jobId)
       }
     }
-  }
-
-  /*
-   * One sweep for expiry, supersession and the byte ceiling, run on write and
-   * on read. Read-side too, for the same reason contexts are checked on read:
-   * it is what makes "expired" mean the same thing whether or not a write has
-   * happened since, and this store is the one that runs for days in local
-   * development without a single append.
-   */
-  function sweepMemoryEvents(now = Date.now(), maxBytes = MAX_LOG_BYTES) {
-    const { kept, stats } = pruneFleetMemoryEvents([...memoryEvents.values()], {
-      now,
-      maxBytes,
-    })
-
-    if (stats.removed) {
-      memoryEvents.clear()
-      for (const record of kept) memoryEvents.set(record.eventId, record)
-    }
-
-    return stats
   }
 
   /*
@@ -598,45 +569,11 @@ export function createMemoryStore() {
       return removed
     },
 
-    /* ---- cross-surface memory -------------------------------------------
-     * Same contract as d1Store so `npm run relay` locally exercises the real
-     * fold and the real byte budget rather than a stub that only works in
-     * production. The eviction ORDER matters as much as the totals here, and
-     * it is the thing a stub would get wrong: see fleetMemory.js.
-     * -------------------------------------------------------------------- */
-
     /*
-     * `now` is threaded here for the same reason every other method takes it,
-     * and its absence was a real bug: the post-append sweep ran on the wall
-     * clock while the events had been stamped with the caller's, so an event
-     * written with an explicit `now` more than one TTL behind real time was
-     * expired by the very call that created it. The append still reported
-     * `appended: 1` — the loss was silent, and only visible in the sweep
-     * report's `reasons: {expired: 1}`.
+     * No cross-surface memory-event log anymore. Domain memory lives in the
+     * fleet state's domainMemory hive block (shared/domainMemory.js) and
+     * rides the ordinary getState/saveState methods above, merged on write
+     * by the relay — see cloud-relay/domainMemoryRelay.js.
      */
-    async appendMemoryEvents(events, { now = Date.now() } = {}) {
-      for (const event of Array.isArray(events) ? events : []) {
-        // Appends are immutable, and a device on a flaky LTE link retries. A
-        // re-sent batch must be a no-op, not a second copy of the same fact.
-        if (!memoryEvents.has(event.eventId)) {
-          memoryEvents.set(event.eventId, { ...event })
-        }
-      }
-      return sweepMemoryEvents(now)
-    },
-
-    async listMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
-      sweepMemoryEvents(now, maxBytes)
-      // Bounded again on the way out. The sweep already fits the log to the
-      // budget, so this only binds when a caller asks for less than the store
-      // holds — which is what a small surface with a small prompt should do.
-      return takeWithinByteBudget([...memoryEvents.values()], maxBytes).map(
-        (record) => ({ ...record }),
-      )
-    },
-
-    async pruneMemoryEvents({ now = Date.now(), maxBytes = MAX_LOG_BYTES } = {}) {
-      return sweepMemoryEvents(now, maxBytes)
-    },
   }
 }

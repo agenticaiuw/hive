@@ -82,6 +82,20 @@ export function requiredScopesForRoute(rawMethod, rawPath) {
   if (method === 'PUT' && path.startsWith('/v1/state/')) {
     return ['state:write']
   }
+  /*
+   * Capability-domain memory (the hive block inside fleet state, served by
+   * server.js + domainMemoryRelay.js). Its own scopes rather than state:read /
+   * state:write on purpose: the fleet-state scopes hand out the Mac's whole
+   * world model, and a node that only needs the owner's remembered accounts
+   * and defaults must not need — or get — the rest of that key space to fetch
+   * them. Exact paths, so the generic /v1/state rules above never see them.
+   */
+  if (method === 'GET' && path === '/v1/memory/domains') {
+    return ['memory:domains:read']
+  }
+  if (method === 'POST' && path === '/v1/memory/domains') {
+    return ['memory:domains:write']
+  }
   if (method === 'POST' && path === '/v1/pendant/announce') {
     return ['pendant:announce']
   }

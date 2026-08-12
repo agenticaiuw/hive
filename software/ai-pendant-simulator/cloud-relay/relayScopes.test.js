@@ -469,6 +469,43 @@ test('every owner surface may list and decide approvals; only the Mac may write 
   }
 })
 
+/*
+ * Capability-domain memory. Hive means "shared through the relay so every
+ * node's brain can fetch it" — so every role WITH a brain gets both verbs,
+ * and the pendant (a microphone, not a reader) gets neither. The routes also
+ * must not be reachable through the blanket state scopes: they are their own
+ * privilege precisely so a node without the Mac's world model can still ask
+ * for the owner's accounts and defaults.
+ */
+test('every brain-holding node may read and write domain memory; the pendant may not', () => {
+  for (const role of ['mobile', 'mac_bridge', 'browser_node']) {
+    assert.equal(allows(role, 'GET', '/v1/memory/domains'), true, `${role} reads`)
+    assert.equal(allows(role, 'POST', '/v1/memory/domains'), true, `${role} writes`)
+  }
+  assert.equal(allows('nrf_pendant', 'GET', '/v1/memory/domains'), false)
+  assert.equal(allows('nrf_pendant', 'POST', '/v1/memory/domains'), false)
+})
+
+test('the memory routes carry their own scopes, not the state scopes', () => {
+  assert.deepEqual(requiredScopesForRoute('GET', '/v1/memory/domains'), [
+    'memory:domains:read',
+  ])
+  assert.deepEqual(requiredScopesForRoute('POST', '/v1/memory/domains'), [
+    'memory:domains:write',
+  ])
+  /* mobile holds state:read but that must not be what opens the memory read —
+   * a principal with ONLY the state scopes stays shut out. */
+  const stateOnly = { kind: 'device', role: 'mobile', scopes: ['state:read', 'state:write'] }
+  assert.equal(
+    principalHasScopes(stateOnly, ...requiredScopesForRoute('GET', '/v1/memory/domains')),
+    false,
+  )
+  assert.equal(
+    principalHasScopes(stateOnly, ...requiredScopesForRoute('POST', '/v1/memory/domains')),
+    false,
+  )
+})
+
 test('the pendant answers by voice on its socket, so its token holds no approval HTTP scope', () => {
   for (const [method, path] of [
     ['GET', '/v1/approvals'],

@@ -12,6 +12,15 @@ import { stripProtocolTerminators } from '../shared/protocolText.js'
 import { SUPPORTED_ACTION_TYPES } from './computerControl.js'
 import { CAPABILITY_GAP_ACTIONS } from './capabilityGapsActions.js'
 import { assessPlanCoverage } from './goalVerdict.js'
+/* The capability-domain registry: pure, shared by all three brains. It answers
+ * which domain a tool belongs to (the memory fetch key), defines the explicit
+ * memory tools once for everyone, and holds the clarify rules. */
+import {
+  MEMORY_TOOL_SPECS,
+  clarifyDomainRequest,
+  domainForTool,
+  domainsForActions,
+} from '../shared/domains/index.js'
 
 // Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
 // Cloudflare uses Realtime separately — this process never opens Realtime.
@@ -345,6 +354,13 @@ const FULL_CONTROL_ACTION_SCHEMA = {
     description: 'Create a note file and open it.',
     params: { filename: 'the file name to write', content: 'the text to write', directory: 'optional path' },
   },
+  /*
+   * The explicit domain-memory tools. Spread from the SHARED specs rather than
+   * restated, so this schema and the relay/extension brains can never drift on
+   * names or argument shapes — the specs are already schema-entry-shaped.
+   */
+  memory_lookup: { ...MEMORY_TOOL_SPECS.memory_lookup },
+  memory_save: { ...MEMORY_TOOL_SPECS.memory_save },
   compose_briefing: {
     description:
       "Read the owner's calendar, unread mail, recent files or notes and leave a short spoken brief plus a note on the Mac. Use for any 'brief me' / 'prepare my workday' / 'what did I miss in email' / 'read my schedule' / 'summarize today's notes into next actions' request. It composes and stores only — it never sends anything.",
@@ -1251,7 +1267,52 @@ async function planWithLlm(
     }
   }
 
-  const userContent = [context?.promptBlock, `Current request:\n${command}`]
+  /*
+   * DOMAIN MEMORY, FETCHED ON TOOL SELECTION.
+   *
+   * The owner, 2026-08-12: "Memories are not doing anything useful right now…
+   * not just generic memories that all get added to the system prompt", and
+   * "tools should be combined with memories — the tools for reading emails are
+   * in the same folder as the memories for email preferences." So the fetch
+   * key is the TOOLS this call was handed: the domains of the schemas in scope
+   * decide which facts ride, and a request scoped to `files` never pays for
+   * the owner's email accounts. This is attach-on-tool-selection, not global
+   * prompt stuffing — there is no memory splice anywhere else in this prompt.
+   *
+   * Never throws: a store read failure costs the block, not the plan. The same
+   * pool feeds the clarification check after the plan parses, so the store is
+   * read once per turn.
+   */
+  let domainFactsPool = []
+  let memoryBlock = ''
+  try {
+    const inScope = scoped?.toolNames ?? Object.keys(actionSchemaForTier(tier))
+    const memoryDomains = [
+      ...new Set(inScope.map((type) => domainForTool(type)).filter(Boolean)),
+    ]
+    if (memoryDomains.length) {
+      const { listDomainFacts } = await import('./memoryService.js')
+      const { lookupDomainFacts, renderDomainFactLines } = await import(
+        '../shared/domainMemory.js'
+      )
+      domainFactsPool = listDomainFacts({})
+      memoryBlock = renderDomainMemoryBlock({
+        domains: memoryDomains,
+        facts: domainFactsPool,
+        command,
+        lookupDomainFacts,
+        renderDomainFactLines,
+      })
+    }
+  } catch (error) {
+    console.warn(`[planner] domain memory unavailable: ${error.message}`)
+  }
+
+  const userContent = [
+    context?.promptBlock,
+    memoryBlock,
+    `Current request:\n${command}`,
+  ]
     .filter(Boolean)
     .join('\n\n')
 
@@ -1325,6 +1386,9 @@ async function planWithLlm(
        * part of: a prompt total that shrank because the machine inventory
        * shrank would look identical from the outside. */
       schemaChars: schemaText.length,
+      /* What the attach-on-selection block cost this call. Zero is the common
+       * case and the honest one — no facts in the selected domains, no block. */
+      domainMemoryChars: memoryBlock.length,
       toolCount: scoped
         ? scoped.toolNames.length
         : Object.keys(actionSchemaForTier(tier)).length,
@@ -1445,20 +1509,24 @@ async function planWithLlm(
     : ''
 
   if (parsed.status === 'instant' || (!actions.length && responseText)) {
-    return {
-      status: actions.length && !responseText ? 'ready' : 'instant',
+    return applyDomainClarification(
+      {
+        status: actions.length && !responseText ? 'ready' : 'instant',
+        command,
+        response: responseText || undefined,
+        summary: responseText || undefined,
+        actions,
+        requiresConfirmation,
+        ...(requiresConfirmation
+          ? { confirmReason, safety: safetyLine(confirmReason) }
+          : {}),
+        planner: 'llm',
+        fullControl: FULL_CONTROL_MODE,
+        usage: summarisedUsage,
+      },
       command,
-      response: responseText || undefined,
-      summary: responseText || undefined,
-      actions,
-      requiresConfirmation,
-      ...(requiresConfirmation
-        ? { confirmReason, safety: safetyLine(confirmReason) }
-        : {}),
-      planner: 'llm',
-      fullControl: FULL_CONTROL_MODE,
-      usage: summarisedUsage,
-    }
+      domainFactsPool,
+    )
   }
 
   /*
@@ -1473,29 +1541,120 @@ async function planWithLlm(
    */
   const coverage = assessPlanCoverage(command, actions)
 
-  return {
-    status: 'ready',
+  return applyDomainClarification(
+    {
+      status: 'ready',
+      command,
+      response: responseText || undefined,
+      actions,
+      requiresConfirmation,
+      ...(requiresConfirmation ? { confirmReason } : {}),
+      ...(coverage.reconnaissance
+        ? {
+            partial: {
+              reconnaissance: true,
+              note: coverage.note,
+              remainder: coverage.goal.gerundPhrase,
+            },
+          }
+        : {}),
+      safety:
+        coverage.reconnaissance && !requiresConfirmation
+          ? coverage.note
+          : safetyLine(confirmReason),
+      planner: 'llm',
+      fullControl: FULL_CONTROL_MODE,
+      usage: summarisedUsage,
+    },
     command,
-    response: responseText || undefined,
-    actions,
-    requiresConfirmation,
-    ...(requiresConfirmation ? { confirmReason } : {}),
-    ...(coverage.reconnaissance
-      ? {
-          partial: {
-            reconnaissance: true,
-            note: coverage.note,
-            remainder: coverage.goal.gerundPhrase,
-          },
-        }
-      : {}),
-    safety:
-      coverage.reconnaissance && !requiresConfirmation
-        ? coverage.note
-        : safetyLine(confirmReason),
-    planner: 'llm',
-    fullControl: FULL_CONTROL_MODE,
-    usage: summarisedUsage,
+    domainFactsPool,
+  )
+}
+
+/*
+ * How much of the fact store one planning call may carry, in characters. Small
+ * on purpose: this block is the replacement for prompt-stuffing, and a budget
+ * that grows with the store would quietly rebuild the thing being removed.
+ */
+const DOMAIN_MEMORY_MAX_CHARS = 700
+const DOMAIN_MEMORY_FACTS_PER_DOMAIN = 8
+
+/**
+ * The one compact block domain memory is allowed to occupy in userContent.
+ * Empty string when the selected domains hold no facts — no facts, no block,
+ * no tokens.
+ */
+function renderDomainMemoryBlock({
+  domains,
+  facts,
+  command,
+  lookupDomainFacts,
+  renderDomainFactLines,
+}) {
+  const lines = []
+  for (const domain of domains) {
+    const picked = lookupDomainFacts(facts, {
+      domain,
+      /* The request is the query: matching facts sort first, the domain's
+       * standing accounts and defaults fill behind them. */
+      query: command,
+      limit: DOMAIN_MEMORY_FACTS_PER_DOMAIN,
+    })
+    lines.push(...renderDomainFactLines(picked))
+  }
+  if (!lines.length) return ''
+
+  const header = `Domain memory (fetched for: ${domains.join(', ')}):`
+  const kept = []
+  let budget = DOMAIN_MEMORY_MAX_CHARS - header.length
+  for (const line of lines) {
+    if (line.length + 1 > budget) break
+    kept.push(line)
+    budget -= line.length + 1
+  }
+  if (!kept.length) return ''
+  return [header, ...kept].join('\n')
+}
+
+/**
+ * The clarification seam, pure and exported so it can be tested without a
+ * network: planWithLlm feeds it every ready plan plus the fact pool it already
+ * read.
+ *
+ * The owner's rule verbatim: "only when the prompt is ambiguous, then ask the
+ * users for clarifications." shared/domains decides WHETHER the request is
+ * ambiguous (≥2 known candidates, no default, none named); this function only
+ * routes the question through the ask channel the Mac already has —
+ * requiresConfirmation/confirmReason. No new plumbing: every surface that can
+ * park a plan can ask this question.
+ *
+ * A plan that already asks keeps its own reason — the model's judgement about
+ * scope outranks a template about ambiguity.
+ */
+export function applyDomainClarification(plan, command, facts = []) {
+  if (!plan || plan.status !== 'ready' || !plan.actions?.length) return plan
+  if (plan.requiresConfirmation) return plan
+
+  let clarify = null
+  try {
+    clarify = clarifyDomainRequest({
+      domains: domainsForActions(plan.actions),
+      request: command,
+      facts,
+    })
+  } catch {
+    /* Clarification is an optimisation on top of a working plan; a rule that
+     * throws must never cost the plan. */
+    return plan
+  }
+  if (!clarify) return plan
+
+  return {
+    ...plan,
+    requiresConfirmation: true,
+    confirmReason: clarify.question,
+    safety: safetyLine(clarify.question),
+    clarification: clarify,
   }
 }
 

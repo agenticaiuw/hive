@@ -57,8 +57,9 @@ export const CAPABILITY_REGISTRY_VERSION = 1
 /*
  * Bodies a capability can live on.
  *
- * The first four are MEMORY_SURFACES in shared/fleetMemory.js verbatim, in the
- * same order, so a fact and a capability name the same body the same way. Two
+ * The first four are the memory-wire surface vocabulary (voice, mac,
+ * browser, ios) verbatim, in the same order, so a fact and a capability name
+ * the same body the same way. Two
  * are added because a capability can live somewhere a prompt never goes:
  * 'relay' is a process with 41 routes and no prompt of its own, and 'pendant'
  * is firmware that offers capabilities (announce, audio upload) while reading
@@ -103,8 +104,8 @@ export const CAPABILITY_STATUSES = Object.freeze([
 /*
  * How long an observed success stays evidence.
  *
- * Six hours, the same as MEMORY_TTL_MS.event in shared/fleetMemory.js, and for
- * the same reason: this is one body's claim about a moment, not a standing
+ * Six hours, the event TTL the old fleet-memory wire used, kept for the
+ * same reason: this is one body's claim about a moment, not a standing
  * fact. Device tokens rotate, AGENT_TOKEN gets reconfigured, the Mac sleeps. A
  * 200 from last week is history; a 200 from an hour ago is the reason not to
  * re-probe. Past the TTL the observation is kept and reported as stale — "it

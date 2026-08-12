@@ -246,8 +246,9 @@ CREATE TABLE IF NOT EXISTS relay_contexts (
 CREATE INDEX IF NOT EXISTS relay_contexts_expiry
   ON relay_contexts(expires_at);
 
--- Cross-surface memory log (shared/fleetMemory.js). Every body appends typed
--- events; each surface reads a projection of the fold.
+-- Cross-surface memory log (RETIRED 2026-08-12 with shared/fleetMemory.js —
+-- capability-domain memory in shared/domainMemory.js rides the fleet-state
+-- channel instead; the table stays, empty, so old deploys keep booting).
 --
 -- See fleet-memory-migration.sql for why this is neither relay_state (one row
 -- per key, overwritten in place — which needs a writer that can read the

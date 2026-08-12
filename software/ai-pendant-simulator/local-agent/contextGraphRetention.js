@@ -14,8 +14,8 @@
  *
  * BYTES, NOT ROWS. This project has capped by item count before while the
  * items themselves grew, which is a cap that stops working exactly when it
- * starts mattering. shared/fleetMemory.js says the same thing at the top of
- * its budget block and reaches for the same units. Bytes here means bytes as
+ * starts mattering. shared/domainMemory.js budgets in the same units for the
+ * same reason. Bytes here means bytes as
  * writeGraph() will actually write them — pretty-printed with the trailing
  * newline — so a number in a report is a number you can check with `ls`.
  *

@@ -335,6 +335,14 @@ export async function executeComputerAction(action) {
       return quickCaptureAction(action)
     case 'recall_capture':
       return recallCaptureAction(action)
+    /* The explicit domain-memory verbs — deliberate reads and writes against
+     * the capability-domain fact store (shared/domains). The automatic path
+     * is run-settle capture in orchestrator.js; these are for the plan that
+     * should check which account the owner means, or save one they named. */
+    case 'memory_lookup':
+      return memoryLookupAction(action)
+    case 'memory_save':
+      return memorySaveAction(action)
     case 'tidy_downloads_preview':
       return tidyPreviewAction(action)
     case 'tidy_downloads_apply':
@@ -456,6 +464,43 @@ async function recallCaptureAction(action) {
       : 'Nothing saved that matches that.',
     { captures },
   )
+}
+
+/*
+ * Domain memory: the executor ends of memory_lookup / memory_save. The module
+ * answers ok:false for a wrong domain or an invalid fact rather than throwing,
+ * and that distinction is preserved here — a failed lookup is a failed STEP
+ * with the correction in its message, which is what the model reads next.
+ */
+async function memoryLookupAction(action) {
+  const { executeMemoryLookup } = await import('./domainMemoryActions.js')
+  const result = executeMemoryLookup({
+    domain: action.params?.domain,
+    query: action.params?.query || '',
+    limit: Number(action.params?.limit) || undefined,
+  })
+  if (!result.ok) {
+    return { action, ok: false, status: 'failed', message: result.message }
+  }
+  return success(action, result.message, {
+    domain: result.domain,
+    facts: result.facts,
+    lines: result.lines,
+  })
+}
+
+async function memorySaveAction(action) {
+  const { executeMemorySave } = await import('./domainMemoryActions.js')
+  const result = executeMemorySave({
+    domain: action.params?.domain,
+    name: action.params?.name,
+    value: action.params?.value,
+    scope: action.params?.scope,
+  })
+  if (!result.ok) {
+    return { action, ok: false, status: 'failed', message: result.message }
+  }
+  return success(action, result.message, { key: result.key, scope: result.scope })
 }
 
 async function scheduleReminderAction(action) {

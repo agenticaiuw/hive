@@ -1,4 +1,6 @@
--- Cross-surface memory log (shared/fleetMemory.js).
+-- Cross-surface memory log (RETIRED 2026-08-12 with shared/fleetMemory.js —
+-- capability-domain memory in shared/domainMemory.js rides the fleet-state
+-- channel instead; this table remains only as an empty historical artifact).
 --
 -- Every body appends typed events here; each surface reads a projection of the
 -- fold. Before this, exactly one body on the fleet could write memory — the Mac

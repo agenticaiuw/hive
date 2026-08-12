@@ -361,8 +361,8 @@ const ROUTE_NOTES = {
     'Remember one fact: store a value under a key, keeping the displaced value as its previous version. Use for "remember that", "note that", "keep in mind". It stores what it is given — it does not read free text and extract facts out of it.',
   'DELETE /memory/facts/:idOrKey':
     'Forget one remembered fact by id or key — delete it, drop it, "that is wrong". Removes the row outright; it does not redact or tombstone, and it deletes no file on disk.',
-  'GET /memory/projection':
-    'Build the prompt-sized block of remembered context for one surface and task inside a token budget — what the agent would tell a model about the owner right now. Read-mostly: it marks the facts it chose as used. It returns a selection, not the whole store, and it decides nothing.',
+  'GET /memory/domains':
+    'Read the remembered facts of one capability domain (email, calendar, files, music, system, browser) — accounts, defaults, contacts, sites, places — best match first with secrets masked; without a domain, list every domain fact. Look up, recall, consult, "which account". Read-only, and it decides nothing.',
   'POST /memory/prune':
     'Garbage-collect the memory store: drop expired facts, facts untouched for about a month, and per-kind overflow. Clean up, trim, shrink. Preferences and permissions are exempt and revocation tombstones are kept. It touches no file and no other store.',
   'POST /memory/sync-graph':

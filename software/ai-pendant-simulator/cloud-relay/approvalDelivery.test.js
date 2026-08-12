@@ -13,6 +13,7 @@ import {
   approvalPromptRoute,
   consumeRelayApprovalMail,
   decideApproval,
+  decideNextPendingApproval,
   isPendantRoutedApproval,
   registerApprovalDeliveryRoutes,
   routeApprovalPrompt,
@@ -539,4 +540,115 @@ test('the decision route: a device principal decides under its own name', async 
     relayPrincipal: { kind: 'admin' },
   })
   assert.equal(junk.statusCode, 400)
+})
+
+/* ------------------------------------------- the hardware button (P0.23) */
+
+/* A reversible-write-only plan: no WORD_REQUIRED tier, so the record does
+ * not demand its confirm word and a blind button press may commit it. */
+function writeOnlyRecord(space, overrides = {}) {
+  space.file('quiet.txt', 'the original body')
+  return prepareAction({
+    command: 'tidy the quiet notes',
+    actions: [
+      {
+        type: 'write_file',
+        label: 'update the quiet file',
+        params: { path: path.join(space.dir, 'quiet.txt'), content: 'tidied' },
+      },
+    ],
+    filePath: space.ledger,
+    now: NOW,
+    ...overrides,
+  }).approval
+}
+
+test('the blue button decides the oldest live pendant-routed approval, and only that', async (t) => {
+  const space = workspace(t)
+  /* Foreign origin first (oldest of all): must never be the button's target. */
+  const foreign = writeOnlyRecord(space, { origin: 'dashboard', now: NOW - 2000 })
+  await saveApproval(space.store, foreign, { now: NOW })
+  const older = writeOnlyRecord(space, { origin: 'nrf9160', now: NOW - 1000 })
+  await saveApproval(space.store, older, { now: NOW })
+  const newer = writeOnlyRecord(space, { origin: 'nrf9160', now: NOW })
+  await saveApproval(space.store, newer, { now: NOW })
+
+  const pressed = await decideNextPendingApproval({
+    store: space.store,
+    deviceId: older.deviceId,
+    decision: 'approve',
+    now: NOW + 1000,
+  })
+  assert.equal(pressed.ok, true)
+  assert.equal(pressed.code, 'settled')
+  assert.equal(pressed.state, 'granted')
+  assert.equal(pressed.approvalId, older.approvalId, 'oldest pendant record wins')
+
+  const stored = await readApproval(space.store, older.approvalId)
+  assert.equal(stored.state, 'granted')
+  assert.equal(stored.decidedBy, 'pendant-button')
+  assert.equal((await readApproval(space.store, newer.approvalId)).state, 'pending')
+  assert.equal(
+    (await readApproval(space.store, foreign.approvalId)).state,
+    'pending',
+    'a dashboard-routed prompt is never committed by the pendant button',
+  )
+})
+
+test('a blind button press cannot commit a plan that demands its confirm word — but a hold still denies it', async (t) => {
+  const space = workspace(t)
+  const record = await storedRecord(space, { origin: 'nrf9160' })
+  assert.equal(record.requiresConfirmWord, true, 'guard: this plan demands the word')
+
+  const approve = await decideNextPendingApproval({
+    store: space.store,
+    deviceId: record.deviceId,
+    decision: 'approve',
+    now: NOW + 1000,
+  })
+  assert.equal(approve.ok, false)
+  assert.equal(approve.code, 'nothing_pending')
+  assert.equal((await readApproval(space.store, record.approvalId)).state, 'pending')
+
+  const deny = await decideNextPendingApproval({
+    store: space.store,
+    deviceId: record.deviceId,
+    decision: 'deny',
+    now: NOW + 2000,
+  })
+  assert.equal(deny.ok, true)
+  assert.equal(deny.state, 'denied', 'a refusal never needs the ritual')
+  assert.equal(deny.approvalId, record.approvalId)
+})
+
+test('an explicit approvalId — the readback just spoken — is decided directly', async (t) => {
+  const space = workspace(t)
+  const record = await storedRecord(space, { origin: 'nrf9160' })
+  assert.equal(record.requiresConfirmWord, true)
+
+  /* The conversation identified the record by reading it back; the thumb
+   * answers THAT record, same trust level as a dashboard click on a row. */
+  const pressed = await decideNextPendingApproval({
+    store: space.store,
+    deviceId: record.deviceId,
+    approvalId: record.approvalId,
+    decision: 'approve',
+    now: NOW + 1000,
+  })
+  assert.equal(pressed.ok, true)
+  assert.equal(pressed.state, 'granted')
+  assert.equal((await readApproval(space.store, record.approvalId)).decidedBy, 'pendant-button')
+})
+
+test('a button press with nothing waiting answers nothing_pending, never a throw', async (t) => {
+  const space = workspace(t)
+  const outcome = await decideNextPendingApproval({
+    store: space.store,
+    deviceId: 'nrf9160-pendant',
+    decision: 'approve',
+    now: NOW,
+  })
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.code, 'nothing_pending')
+  assert.equal(outcome.approvalId, null)
 })

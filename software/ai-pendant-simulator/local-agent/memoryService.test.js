@@ -6,13 +6,16 @@ import test from 'node:test'
 
 import {
   forgetFact,
+  listDomainFacts,
   listFacts,
   pruneFacts,
   readFactStore,
   rememberBrowserFindings,
+  rememberDomainFact,
   rememberFact,
   touchFacts,
 } from './memoryService.js'
+import { normalizeDomainFact } from '../shared/domainMemory.js'
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -156,4 +159,89 @@ test('the store survives a truncated write', (t) => {
   fs.writeFileSync(at.filePath, '{"facts":[')
 
   assert.equal(listFacts({}, at)[0].value, 'VS Code')
+})
+
+test('scope rides on a fact, and anything unknown fails closed to node', (t) => {
+  const at = store(t)
+  const shared = rememberFact({ key: 'obs.shared', value: 'x', scope: 'hive' }, at)
+  const local = rememberFact({ key: 'obs.local', value: 'y' }, at)
+  const bogus = rememberFact({ key: 'obs.bogus', value: 'z', scope: 'everywhere' }, at)
+
+  assert.equal(shared.scope, 'hive')
+  assert.equal(local.scope, 'node', 'the default keeps a fact on this Mac')
+  assert.equal(bogus.scope, 'node', 'a scope the store does not know must not travel')
+})
+
+test('a key prefix reads one family without scanning it back out by hand', (t) => {
+  const at = store(t)
+  rememberFact({ key: 'dom.email.account.school', value: 'liu@uni.edu' }, at)
+  rememberFact({ key: 'web.united.com.fare', value: '$148' }, at)
+
+  assert.deepEqual(
+    listFacts({ keyPrefix: 'dom.' }, at).map((fact) => fact.key),
+    ['dom.email.account.school'],
+  )
+})
+
+test('a domain fact round-trips through the store in the shared shape', (t) => {
+  const at = store(t)
+  const now = Date.parse('2026-08-12T00:00:00.000Z')
+
+  const identity = normalizeDomainFact(
+    {
+      domain: 'email',
+      name: 'account.school',
+      value: 'liu@uni.edu',
+      scope: 'hive',
+      node: 'voice',
+      confidence: 0.95,
+    },
+    { now },
+  )
+  const connection = normalizeDomainFact(
+    { domain: 'browser', name: 'site.github.com', value: 'github.com', scope: 'node', node: 'mac' },
+    { now },
+  )
+
+  const storedIdentity = rememberDomainFact(identity, { origin: 'domain-tool', ...at })
+  rememberDomainFact(connection, at)
+
+  /* Identities pin like preferences; connections are entities with a lease. */
+  assert.equal(storedIdentity.kind, 'preference')
+  assert.equal(storedIdentity.source.origin, 'domain-tool')
+
+  const facts = listDomainFacts({}, at)
+  assert.equal(facts.length, 2)
+
+  const backIdentity = facts.find((fact) => fact.name === 'account.school')
+  assert.equal(backIdentity.domain, 'email')
+  assert.equal(backIdentity.value, 'liu@uni.edu')
+  assert.equal(backIdentity.scope, 'hive')
+  assert.equal(backIdentity.node, 'voice', 'the capturing body survives the round trip')
+  assert.equal(backIdentity.expiresAt, null)
+
+  const backConnection = facts.find((fact) => fact.name === 'site.github.com')
+  assert.equal(backConnection.scope, 'node')
+  assert.equal(backConnection.expiresAt, connection.expiresAt, 'the shared TTL is honoured, not re-derived')
+
+  /* The filters the planner and the bridge actually use. */
+  assert.deepEqual(listDomainFacts({ domain: 'email' }, at).map((fact) => fact.name), ['account.school'])
+  assert.deepEqual(listDomainFacts({ scope: 'hive' }, at).map((fact) => fact.name), ['account.school'])
+  assert.deepEqual(listDomainFacts({ scope: 'node' }, at).map((fact) => fact.name), ['site.github.com'])
+})
+
+test('a domain fact deduplicates on its key: saving again overwrites, not piles', (t) => {
+  const at = store(t)
+  rememberDomainFact(
+    normalizeDomainFact({ domain: 'email', name: 'account.school', value: 'old@uni.edu', node: 'mac' }),
+    at,
+  )
+  rememberDomainFact(
+    normalizeDomainFact({ domain: 'email', name: 'account.school', value: 'new@uni.edu', node: 'mac' }),
+    at,
+  )
+
+  const facts = listDomainFacts({ domain: 'email' }, at)
+  assert.equal(facts.length, 1)
+  assert.equal(facts[0].value, 'new@uni.edu')
 })

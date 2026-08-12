@@ -10,9 +10,9 @@
  *
  * The live store shows what that produces. preference.timezone holds
  * "America/Chicago" at confidence 0.99 with expiresAt null and a useCount over
- * five thousand, while this machine reports America/New_York. contextProjection
- * sorts ## Owner by confidence, so it sits at the head of every projection —
- * now reaching both the Realtime voice instructions and the local planner. On
+ * five thousand, while this machine reports America/New_York. The projection
+ * layer of the day sorted ## Owner by confidence, so it sat at the head of
+ * every projection, reaching voice instructions and the local planner. On
  * the background tier machineContext puts the true reading in the system
  * prompt, so one call carries both values, contradicting each other, with
  * nothing marking either as sampled.

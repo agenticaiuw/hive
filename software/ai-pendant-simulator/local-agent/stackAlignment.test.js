@@ -81,7 +81,7 @@ test('the manifest names the registries that disagree instead of hiding them', (
   }
 })
 
-test('the relay tool list is the seven the Mac side expects', () => {
+test('the relay tool list is the nine the Mac side expects', () => {
   assert.deepEqual(
     REALTIME_TOOLS.map((tool) => tool.name),
     [
@@ -100,6 +100,12 @@ test('the relay tool list is the seven the Mac side expects', () => {
        * nothing, which is the point — it answers "did that go through?" with
        * this Mac asleep. */
       'relay_job_status',
+      /* The explicit domain-memory verbs (shared/domains MEMORY_TOOL_TYPES).
+       * The voice loop answers them against the fleet hive block; the Mac
+       * executor dispatches the same two names locally, so unlike the two
+       * relay-only tools above these ARE checked by the drift tests. */
+      'memory_lookup',
+      'memory_save',
     ],
   )
 })

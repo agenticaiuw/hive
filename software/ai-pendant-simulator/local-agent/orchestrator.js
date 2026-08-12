@@ -5,12 +5,12 @@ import {
 } from './attachments.js'
 import { prepareCallerContext } from './callerContext.js'
 import { buildConversationContext } from './conversationContext.js'
-import { estimateTokens, projectTurnContext } from './contextProjection.js'
 import { describeResume, resumeContext } from './contextResume.js'
 import { recordGapSafely } from './capabilityGapInbox.js'
 import { applyGoalVerdict } from './goalVerdict.js'
 import { planCommand } from './llmPlanner.js'
-import { touchFacts } from './memoryService.js'
+import { rememberDomainFact } from './memoryService.js'
+import { extractDomainFacts } from '../shared/domainCapture.js'
 import {
   TIER_BACKGROUND,
   TIER_DETERMINISTIC,
@@ -281,68 +281,19 @@ export async function orchestratePlan({
       : null
 
     /*
-     * The prompt the model actually receives. Built here for the same reason
-     * `resumed` is: a request the deterministic path already answered never
-     * reaches a planner, so projecting for it would be a store read, a store
-     * write and a rebuilt block that nothing ever sends.
-     *
-     * Only the serialized block changes hands. Everything else on `context` —
-     * the structured fields the trace, the routing and the response read — is
-     * left exactly as conversationContext.js built it.
+     * No memory splice happens here any more. The projection swap that used to
+     * rewrite context.promptBlock is gone with the generic memory sections it
+     * projected — the owner's durable facts now ride as domain memory,
+     * fetched inside llmPlanner.js at the moment a domain's tools are
+     * selected. The prompt block that leaves this function is session
+     * continuity plus the request, exactly as conversationContext.js built it.
      */
-    const swapped = projectPromptBlock(context, {
-      command,
-      surface: surfaceForSource(source),
-    })
-    if (swapped) {
-      // Whole block against whole block. Comparing the projection alone to the
-      // old sections would flatter it by the session and request lines that
-      // both paths carry.
-      const promptTokensBefore = estimateTokens(context.promptBlock)
-      context.promptBlock = swapped.promptBlock
-      context.projection = {
-        ...swapped.projected.stats,
-        promptTokensBefore,
-        promptTokensAfter: estimateTokens(context.promptBlock),
-      }
-      /*
-       * Recording the read is what lets idle pruning tell a load-bearing fact
-       * from one nobody has looked at since it was written. The projection is
-       * pure and reports the ids precisely so the caller can do this. Best
-       * effort: a store that will not take a write is not a reason to fail a
-       * turn whose prompt is already built.
-       */
-      try {
-        touchFacts(swapped.projected.factIds)
-      } catch {
-        // Bookkeeping may miss; the turn may not.
-      }
-
-      addThinkingStep(trace.traceId, {
-        id: 'project',
-        label: 'Scoped memory to this request',
-        detail:
-          `${context.projection.included} of ${context.projection.considered} facts ` +
-          `· ~${context.projection.promptTokensAfter} tokens instead of ~${promptTokensBefore}`,
-        status: 'done',
-        meta: context.projection,
-        chunks: [
-          {
-            id: 'project_text',
-            phase: 'projection',
-            text: swapped.projected.text,
-            at: new Date().toISOString(),
-          },
-        ],
-      })
-    }
 
     /*
      * The attachments block travels exactly the way context does: appended to
      * context.promptBlock, which llmPlanner sends ahead of "Current request:"
      * and whose tail the tool-discovery pre-pass reads (so `files` gets
-     * picked). Appended AFTER the projection swap above — the swap REPLACES
-     * promptBlock wholesale, and a block appended before it would be lost.
+     * picked).
      */
     if (prepared.attachments.length) {
       context.promptBlock = [
@@ -355,8 +306,7 @@ export async function orchestratePlan({
 
     /*
      * The caller's page rides the same rail as attachments, for the same
-     * reasons and with the same ordering constraint: appended AFTER the
-     * projection swap, which replaces promptBlock wholesale.
+     * reasons.
      *
      * This is the payoff for the `context` field existing. The page used to
      * reach the model as a bracketed trailer glued to the owner's sentence,
@@ -914,6 +864,32 @@ export async function orchestrateExecute({
       results: persistableResults,
     })
 
+    /*
+     * SELECTIVE CAPTURE AT RUN-SETTLE. The owner's rule, verbatim: "when
+     * there's a likely chance that i'm gonna use this connection or the same
+     * tasks again, then it should save it." shared/domainCapture.js reads the
+     * settled run and lifts out only the reusable shapes — stated identities,
+     * connections actually used, repeated task shapes — deduped by key. NOT
+     * chat logs, not page contents. Wrapped whole: capture must never throw a
+     * settled run, whatever the store is doing.
+     */
+    let domainFactCount = 0
+    try {
+      const captured = extractDomainFacts({
+        command,
+        actions,
+        results: persistableResults,
+        ok: status === 'success',
+        node: 'mac',
+      })
+      for (const fact of captured) {
+        rememberDomainFact(fact, { origin: 'domain-capture' })
+      }
+      domainFactCount = captured.length
+    } catch (error) {
+      console.warn('domain capture skipped:', error?.message || error)
+    }
+
     let workingProject = null
     if (status === 'success') {
       const { refreshWorkingMemoryFromExecution } = await import(
@@ -929,7 +905,9 @@ export async function orchestrateExecute({
     addThinkingStep(trace.traceId, {
       id: 'memory',
       label: 'Memory updated',
-      detail: `${contextGraph.entities?.length ?? 0} remembered items`,
+      detail:
+        `${contextGraph.entities?.length ?? 0} remembered items` +
+        (domainFactCount ? ` · ${domainFactCount} domain facts` : ''),
       status: 'done',
     })
 
@@ -1172,77 +1150,6 @@ async function realizeInstantInfoPlan(plan, { traceId, command }) {
     sideResults: results,
     planner: plan.planner ?? 'llm',
   }
-}
-
-/*
- * Where the legacy prompt block stops being the session and starts being the
- * two memory sections the projection replaces. conversationContext.js joins its
- * sections with a blank line and this heading is the first thing after the
- * short-term block, which is the same seam scripts/measure-context-projection
- * .mjs cuts on to price the two paths against each other.
- */
-const MEMORY_SECTION_MARKER = '\n\n## Working project context'
-
-/* orchestratePlan's `source`, as a memory surface. Only the pendant is voice. */
-function surfaceForSource(source) {
-  return source === 'pendant' ? 'voice' : 'mac'
-}
-
-/**
- * Swap the two hand-written memory sections for one task-scoped projection.
- *
- * WHAT IS REPLACED: `## Working project context` (name, path, an auto-written
- * summary, goals, open threads) and `## Long-term personal memory` (the eight
- * highest-scoring graph entities). Both were re-serialized in full on every
- * turn regardless of what was asked, which is the bill this exists to cut.
- *
- * WHAT IS NOT: the short-term session block stays verbatim. The projection has
- * no notion of turns and cannot resolve "send it to him"; dropping it to save
- * 45 tokens would break follow-ups to save nothing worth having. The request
- * lines stay too, including the resolver's rewrite.
- *
- * WHAT IS GAINED: `## Owner` — the owner's standing preferences and standing
- * permissions. The local planner never saw them; only the relay's voice
- * instructions did. They are also the reason the order below is what it is:
- * sorted, slow-moving, byte-identical between turns, and therefore the only
- * part of this message a provider prefix cache can ever hold. Everything that
- * churns — the session, the request — goes after it.
- *
- * Returns null to mean "keep the legacy block", which is what happens on a
- * one-shot command (there is no memory in it to project) and on any store or
- * format surprise. A projection is an optimization; it never costs a turn.
- */
-export function projectPromptBlock(context, { command, surface, now = Date.now() }) {
-  // A compact one-shot block carries no memory at all — projecting onto it
-  // would ADD ~140 tokens to the cheapest path in the system, not save any.
-  if (!context.memoryIncluded) return null
-
-  const seam = context.promptBlock.indexOf(MEMORY_SECTION_MARKER)
-  if (seam < 0) return null
-
-  const projected = projectTurnContext({
-    surface,
-    task: context.resolvedCommand || command,
-    longTerm: context.longTerm,
-    now,
-  })
-  if (!projected.text) return null
-
-  // The resolver's rewrite can be wrong ("him" → the graph's last person, who
-  // on this machine is literally named Unknown), so both spellings ride and the
-  // model can see the difference — exactly as the legacy block did.
-  const request = [`Current user request: ${command}`]
-  if (context.resolvedCommand && context.resolvedCommand !== command) {
-    request.push(`Resolved request: ${context.resolvedCommand}`)
-  }
-
-  const promptBlock = [
-    projected.text,
-    context.promptBlock.slice(0, seam),
-    request.join('\n'),
-  ].join('\n\n')
-
-  return { promptBlock, projected }
 }
 
 function summarizeContext(context) {
