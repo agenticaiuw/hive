@@ -151,3 +151,23 @@ test('the worker enforces the credential lifetime on startup and alarms', () => 
   )
   assert.match(text, /PAIR_WIPE_KEYS/, 'an expiry wipes exactly the shared key list')
 })
+
+test('the setup card shows whenever EITHER credential half is missing', () => {
+  /*
+   * 2026-08-12: agent token present, relay credential gone — the footer said
+   * "paste the pairing code in this popup" while the card, gated on
+   * agentConfigured alone, was hidden. There was nowhere to paste. The gate
+   * must require BOTH halves before hiding the one repair path.
+   */
+  const text = src('popup.js')
+  assert.match(
+    text,
+    /elements\.setup\.hidden = agentConfigured && brainConfigured/,
+    'hiding the setup card requires both the agent token and the brain credential',
+  )
+  assert.match(
+    text,
+    /const brainConfigured = Boolean\(values\.relayEnabled && values\.deviceToken\)/,
+    'the brain half is judged by the stored relay credential, not the status chip',
+  )
+})
