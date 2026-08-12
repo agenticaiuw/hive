@@ -54,7 +54,10 @@
    * 6. SPEND THE TOP OF THE PAGE ON DECISIONS. NN/g eyetracking: content just
    *    above the fold is viewed ~102% more than just below it.
    *    → Order is: what needs you → what it said → ask it something → what it
-   *      did → system panels. Diagnostics never occupy that space again.
+   *      did → the Work feed. Diagnostics never occupy that space again — and
+   *      the System tile row that once closed the page is deleted outright
+   *      (owner, 2026-08-12: "i told you to delete these 4 tabs in the
+   *      system do that please").
    *      nngroup.com/articles/page-fold-manifesto/
    *
    * 7. STATUS IS NEVER COLOUR ALONE (WCAG 1.4.1), AND MUST BE READABLE
@@ -94,7 +97,6 @@
   import CommandBox from "$lib/components/CommandBox.svelte";
   import JobsPanel from "$lib/components/JobsPanel.svelte";
   import TechnicalDetails from "$lib/components/TechnicalDetails.svelte";
-  import Tile from "$lib/components/Tile.svelte";
   import {
     BAD_TRANSCRIPT_DIAGNOSIS,
     clock,
@@ -134,14 +136,17 @@
   let approvalError = $state("");
   /*
    * The Work panel answers "what is running and what did it just do", which is
-   * the question this page exists for, so it is the one panel open on arrival.
-   * It is also the ONLY feed panel: the owner, 2026-08-12 — "jobs, memory, and
-   * history are literally the same thing, which is also repeated on the main
-   * dashboard as recent, which means it's fucking repeated 4 times." The
-   * History and Memory tiles, their panels, and all their plumbing are gone;
-   * Recent below is a preview of this same feed, not a fourth copy.
+   * the question this page exists for, so it is ALWAYS on screen — there is no
+   * tile to toggle it. The whole System tile row (Work/System/Mac/Browser) is
+   * deleted, not hidden: the owner, 2026-08-12 — "i told you to delete these
+   * 4 tabs in the system do that please" — after the earlier consolidation
+   * ("jobs, memory, and history are literally the same thing … repeated 4
+   * times") had already cut six tiles to four. Everything load-bearing the
+   * tiles carried already lives elsewhere: relay/bridge/mic/browser health in
+   * the topbar dot cluster, missing Mac permissions in the alert strip, the
+   * needs-you count in the approval banner and the feed's "Needs you" group,
+   * per-node health on the Hive ring page.
    */
-  let openTile = $state("jobs");
   let jobsPanel = $state<{ refresh: () => Promise<void> } | null>(null);
 
   // Re-entrancy guards and the freshness key stay plain bindings on purpose:
@@ -380,22 +385,12 @@
   );
   const permissions = $derived<any>(agent.permissions ?? {});
   const browserExtension = $derived<any>(agent.browserExtension ?? {});
-  const automationEntries = $derived(
-    Object.entries(permissions.automation ?? {}) as [string, JsonRecord][],
-  );
-  const grantedAutomation = $derived(
-    automationEntries.filter(([, result]) => result.granted).length,
-  );
   const requiredMissing = $derived<string[]>(
     Array.isArray(permissions.requiredMissing) ? permissions.requiredMissing : [],
   );
-  const storeLabel = $derived(cloud.store === "d1" ? "D1" : cloud.store || "—");
   const cloudUp = $derived(Boolean(cloud.ok));
   const bridgeUp = $derived(Boolean(cloud.macBridgeOnline));
   const browserUp = $derived(Boolean(browserExtension.online));
-  const systemTone = $derived<"ok" | "warn" | "off">(
-    cloudUp && bridgeUp ? "ok" : cloudUp || bridgeUp ? "warn" : "off",
-  );
 
   /*
    * Audio for the hero. `audio.captureId` is the owner's voice and
@@ -458,24 +453,17 @@
     void jobsPanel?.refresh();
   }
 
-  /** Parked plans point here: open the Jobs panel and bring it on screen. */
+  /** Parked plans point here: bring the always-on Work feed on screen. */
   function showJobsPanel() {
-    openTile = "jobs";
-    window.setTimeout(() => {
-      document
-        .getElementById("tile-panel-jobs")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 50);
+    document
+      .getElementById("tile-panel-jobs")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function scrollToApproval() {
     document
       .getElementById("needs-you")
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
-  function toggleTile(id: string) {
-    openTile = openTile === id ? "" : id;
   }
 </script>
 
@@ -715,133 +703,14 @@
     </section>
   {/if}
 
-  <!-- 5 · THE MACHINE. Everything below here is diagnostics by design.
-       Four tiles, not six: History duplicated the feed and Memory's tile was
-       noise awaiting its own redesign — "jobs, memory, and history are
-       literally the same thing … repeated 4 times." Work IS the feed now. -->
-  <p class="section-label section-label-standalone">System</p>
-  <div class="tile-strip">
-    <!-- Amber only for FRESH parks: the count still names every open decision,
-         but a plan the owner slept on no longer keeps the tile in alarm. -->
-    <Tile
-      id="jobs"
-      label="Work"
-      tone={freshApprovals.length ? "warn" : "ok"}
-      dotText="Every request from every device — the one feed"
-      value={approvals.length
-        ? `${approvals.length} need you`
-        : jobs.length
-          ? `${jobs.length} runs`
-          : "What ran"}
-      open={openTile === "jobs"}
-      onToggle={() => toggleTile("jobs")}
-    />
-    <Tile
-      id="system"
-      label="System"
-      tone={systemTone}
-      dotText={`Relay ${cloudUp ? "online" : "offline"} · Bridge ${
-        bridgeUp ? "connected" : "disconnected"
-      }`}
-      value={cloudUp
-        ? `${storeLabel} · ${agent.ok ? `v${agent.version}` : "—"}`
-        : "Offline"}
-      open={openTile === "system"}
-      onToggle={() => toggleTile("system")}
-    />
-    <Tile
-      id="mac"
-      label="Mac"
-      tone={permissions.ready ? "ok" : "warn"}
-      dotText={permissions.ready
-        ? "Mac permissions ready"
-        : "Mac permissions incomplete"}
-      value={requiredMissing.length
-        ? `${requiredMissing.length} missing`
-        : "Ready"}
-      open={openTile === "mac"}
-      onToggle={() => toggleTile("mac")}
-    />
-    <Tile
-      id="browser"
-      label="Browser"
-      tone={browserUp ? "ok" : "off"}
-      dotText={`Browser extension ${browserUp ? "online" : "offline"}`}
-      value={browserUp ? "Connected" : "Offline"}
-      open={openTile === "browser"}
-      onToggle={() => toggleTile("browser")}
-    />
-  </div>
-
-  {#if openTile === "system"}
-    <section id="tile-panel-system" class="tile-panel" aria-label="System detail">
-      <dl class="system-list">
-        <div><dt>Relay</dt><dd>{cloudUp ? "Online" : "Offline"}</dd></div>
-        <div><dt>Queue</dt><dd>{storeLabel}</dd></div>
-        <div>
-          <dt>STT</dt><dd>{cloud.speechToTextConfigured
-              ? cloud.models?.speechToText || "Workers AI ready"
-              : "Off"}</dd>
-        </div>
-        <div>
-          <dt>TTS</dt><dd>{cloud.models?.textToSpeech || "macOS say · 24 kHz"}</dd>
-        </div>
-        <div><dt>Bridge</dt><dd>{bridgeUp ? "Connected" : "Disconnected"}</dd></div>
-        <div><dt>Agent</dt><dd>{agent.ok ? `v${agent.version}` : "Offline"}</dd></div>
-      </dl>
-    </section>
-  {/if}
-
-  {#if openTile === "mac"}
-    <section
-      id="tile-panel-mac"
-      class="tile-panel"
-      aria-label="Mac permissions detail"
-    >
-      <dl class="system-list">
-        <div>
-          <dt>Accessibility</dt><dd>{permissions.accessibility?.trusted ? "✓" : "—"}</dd>
-        </div>
-        <div>
-          <dt>Screen</dt><dd>{permissions.screenRecording?.granted ? "✓" : "—"}</dd>
-        </div>
-        <div>
-          <dt>Automation</dt><dd>{automationEntries.length
-              ? `${grantedAutomation}/${automationEntries.length}`
-              : "Not checked"}</dd>
-        </div>
-        <div><dt>Host</dt><dd>{agent.hostApp || "—"}</dd></div>
-      </dl>
-      {#if requiredMissing.length}
-        <div class="perm-chips">
-          {#each requiredMissing as name}
-            <span class="perm-chip">{name}</span>
-          {/each}
-        </div>
-      {/if}
-    </section>
-  {/if}
-
-  {#if openTile === "browser"}
-    <section
-      id="tile-panel-browser"
-      class="tile-panel"
-      aria-label="Browser bridge detail"
-    >
-      <dl class="system-list">
-        <div>
-          <dt>Devices</dt><dd>{String(browserExtension.connectedDevices ?? 0)}</dd>
-        </div>
-        <div>
-          <dt>Queued</dt><dd>{String(browserExtension.pendingCommands ?? 0)}</dd>
-        </div>
-        <div><dt>Seen</dt><dd>{clock(browserExtension.lastSeenAt)}</dd></div>
-      </dl>
-    </section>
-  {/if}
-
-  {#if openTile === "jobs"}
-    <JobsPanel bind:this={jobsPanel} />
-  {/if}
+  <!-- 5 · THE WORK FEED, always on. The System tile row that used to sit here
+       (Work/System/Mac/Browser and their detail panels) is deleted, not
+       hidden — the owner, 2026-08-12: "i told you to delete these 4 tabs in
+       the system do that please." Nothing load-bearing left with it: the
+       topbar dot cluster carries relay/bridge/mic/browser health, the alert
+       strip names missing Mac permissions, the needs-you count lives in the
+       approval banner and this feed's "Needs you" group, and per-node health
+       is the Hive ring page. -->
+  <JobsPanel bind:this={jobsPanel} />
 
 </main>

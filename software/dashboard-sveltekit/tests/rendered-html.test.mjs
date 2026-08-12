@@ -173,15 +173,19 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.doesNotMatch(html, /Sample rate/);
   assert.doesNotMatch(html, />STT</);
 
-  // Four tiles, one feed. History and Memory are deleted, not hidden — the
-  // owner, 2026-08-12: "jobs, memory, and history are literally the same
-  // thing … repeated 4 times." Work (né Jobs) is the feed's entry point.
-  for (const tile of ["Work", "System", "Mac", "Browser"]) {
-    assert.match(html, new RegExp(`>${tile}</span>`));
-  }
-  for (const gone of ["History", "Memory"]) {
+  // No tiles at all, one feed. The whole System row is deleted, not hidden —
+  // the owner, 2026-08-12: "i told you to delete these 4 tabs in the system
+  // do that please" (History and Memory fell in the earlier consolidation:
+  // "jobs, memory, and history are literally the same thing … repeated 4
+  // times"). What the tiles carried lives on elsewhere: subsystem health in
+  // the topbar dot cluster (asserted above), the needs-you count in the
+  // approval banner and the feed's "Needs you" group, node health on Hive.
+  assert.doesNotMatch(html, /class="tile-strip"/);
+  for (const gone of ["Work", "System", "Mac", "Browser", "History", "Memory"]) {
     assert.doesNotMatch(html, new RegExp(`>${gone}</span>`));
   }
+  // The Work feed itself is always on — no tile needed to reach it.
+  assert.match(html, /id="tile-panel-jobs"/);
 
   // ONE composer: mic + a single "Ask the hive" field + send. The old second
   // box ("Or speak from this browser" with its own field) is gone, not hidden.
