@@ -36,6 +36,11 @@ export const DEVICE_SCOPES = Object.freeze({
      * prepares plans or attests delivery. */
     'approval:read',
     'approval:decide',
+    /* Hive means "shared through the relay so every node's brain can fetch
+     * it" — the phone has a brain (llm:infer), so it reads and contributes
+     * domain facts. */
+    'memory:domains:read',
+    'memory:domains:write',
   ]),
   mac_bridge: Object.freeze([
     'device:heartbeat:self',
@@ -66,6 +71,11 @@ export const DEVICE_SCOPES = Object.freeze({
     'approval:read',
     'approval:write',
     'approval:decide',
+    /* The Mac planner is the heaviest memory consumer: it fetches a domain's
+     * facts whenever it selects that domain's tool, and its capture heuristics
+     * contribute most of them. */
+    'memory:domains:read',
+    'memory:domains:write',
   ]),
   /*
    * The browser extension, which until now had NO relay credential at all: it
@@ -89,6 +99,16 @@ export const DEVICE_SCOPES = Object.freeze({
      * cards must be able to list and answer them, and nothing more. */
     'approval:read',
     'approval:decide',
+    /*
+     * Hive means "shared through the relay so every node's brain can fetch
+     * it": mobile, mac_bridge and browser_node all have brains, so all three
+     * read and write domain facts. nrf_pendant deliberately gets NEITHER —
+     * the pendant is a microphone; the reading brain for its utterances is
+     * the relay's voice loop, which holds the admin principal, and a lost
+     * chest-worn device must not be able to enumerate the owner's accounts.
+     */
+    'memory:domains:read',
+    'memory:domains:write',
   ]),
   nrf_pendant: Object.freeze([
     'device:heartbeat:self',

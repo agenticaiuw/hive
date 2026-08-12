@@ -25,7 +25,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import './testWorkspace.js'
 
-const { buildPlannerSystemPrompt, planCommand } = await import('./llmPlanner.js')
+const { applyDomainClarification, buildPlannerSystemPrompt, planCommand } =
+  await import('./llmPlanner.js')
 
 /** The exact script the planner produced on 2026-08-09, tabs and all. */
 const READING_LIST_SCRIPT = `tell application "Safari"
@@ -270,4 +271,71 @@ test('the scope rule and the way to ask are both in the system prompt', () => {
   })
   assert.match(small, /The owner's request is your authorization/)
   assert.match(small, /"confirmReason"/)
+})
+
+/*
+ * Domain clarification rides the SAME ask channel the model's own judgement
+ * uses — requiresConfirmation/confirmReason — and fires only on the owner's
+ * rule: "only when the prompt is ambiguous, then ask the users for
+ * clarifications." Ambiguity is computable (shared/domains): ≥2 known
+ * candidates, no default, none named in the request. Tested against the pure
+ * seam, because planWithLlm is network-coupled.
+ */
+const EMAIL_ACCOUNTS = [
+  { domain: 'email', name: 'account.personal', value: 'owner@example.com', scope: 'hive' },
+  { domain: 'email', name: 'account.school', value: 'liu@uni.edu', scope: 'hive' },
+]
+
+const emailPlan = () => ({
+  status: 'ready',
+  actions: [{ type: 'triage_inbox', label: 'Triage the inbox', params: {} }],
+  requiresConfirmation: false,
+  safety: 'Running what you asked for.',
+})
+
+test('an ambiguous request against two known accounts asks through the ask channel', () => {
+  const plan = applyDomainClarification(emailPlan(), 'check my email', EMAIL_ACCOUNTS)
+
+  assert.equal(plan.requiresConfirmation, true)
+  assert.match(plan.confirmReason, /personal/)
+  assert.match(plan.confirmReason, /school/)
+  assert.match(plan.safety, /^Waiting on you: /)
+  assert.equal(plan.clarification.domain, 'email')
+  assert.deepEqual(plan.clarification.options.sort(), ['personal', 'school'])
+})
+
+test('naming a candidate is the owner disambiguating themselves — no question', () => {
+  const plan = applyDomainClarification(emailPlan(), 'check my school email', EMAIL_ACCOUNTS)
+  assert.equal(plan.requiresConfirmation, false)
+  assert.equal(plan.clarification, undefined)
+})
+
+test('a default settles it, and one account is ignorance rather than ambiguity', () => {
+  const withDefault = applyDomainClarification(emailPlan(), 'check my email', [
+    ...EMAIL_ACCOUNTS,
+    { domain: 'email', name: 'account.default', value: 'personal', scope: 'hive' },
+  ])
+  assert.equal(withDefault.requiresConfirmation, false)
+
+  const oneKnown = applyDomainClarification(emailPlan(), 'check my email', [EMAIL_ACCOUNTS[0]])
+  assert.equal(oneKnown.requiresConfirmation, false, 'a question with one option is worse than a guess')
+})
+
+test("a plan that already asks keeps the model's own reason", () => {
+  const asking = {
+    ...emailPlan(),
+    requiresConfirmation: true,
+    confirmReason: 'I also wanted to archive last year.',
+  }
+  const plan = applyDomainClarification(asking, 'check my email', EMAIL_ACCOUNTS)
+  assert.equal(plan.confirmReason, 'I also wanted to archive last year.')
+  assert.equal(plan.clarification, undefined)
+})
+
+test('clarification never touches instant answers or empty plans', () => {
+  const instant = { status: 'instant', response: 'Done.', actions: [], requiresConfirmation: false }
+  assert.equal(applyDomainClarification(instant, 'check my email', EMAIL_ACCOUNTS), instant)
+
+  const empty = { status: 'ready', actions: [], requiresConfirmation: false }
+  assert.equal(applyDomainClarification(empty, 'check my email', EMAIL_ACCOUNTS), empty)
 })

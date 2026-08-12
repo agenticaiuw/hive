@@ -9,6 +9,7 @@ import {
 } from './atomicJsonStore.js'
 import { classifySensitivity } from './redaction.js'
 import { readContextGraph } from './contextGraph.js'
+import { domainFactClass, parseDomainFactKey } from '../shared/domainMemory.js'
 
 /*
  * One scoped store for everything the model is told about the owner.
@@ -24,8 +25,9 @@ import { readContextGraph } from './contextGraph.js'
  * A fact here carries the metadata that makes a small prompt possible:
  * provenance (can it be trusted), confidence (how hard to lean on it),
  * sensitivity (does the value belong in an outbound prompt), expiry (when does
- * it stop being true), and lastUsedAt (is anyone reading it). contextProjection
- * .js spends that metadata; this module only keeps it honest.
+ * it stop being true), and lastUsedAt (is anyone reading it). The readers —
+ * today the domain-memory fetch in llmPlanner.js — spend that metadata; this
+ * module only keeps it honest.
  *
  * Sensitivity is NOT an access gate — the owner has full access to every fact
  * through the API. It selects what gets pasted into a third-party prompt.
@@ -111,6 +113,14 @@ export function rememberFact(
     source = null,
     confidence = 0.7,
     sensitivity = null,
+    /*
+     * Where the fact is allowed to travel. 'node' stays on this Mac; 'hive'
+     * rides the fleet-state channel to every body on the next bridge
+     * heartbeat. Defaulting to 'node' — and normalizing anything unknown to
+     * 'node' — is the same fail-closed choice shared/domainMemory.js makes:
+     * a fact that leaks is worse than a fact that stays home.
+     */
+    scope = 'node',
     expiresAt = undefined,
     ttlMs = undefined,
     now = Date.now(),
@@ -133,6 +143,7 @@ export function rememberFact(
     key: factKey,
     kind: factKind,
     value: text,
+    scope: scope === 'hive' ? 'hive' : 'node',
     surfaces: normalizeSurfaces(surfaces),
     source: normalizeSource(source, nowIso),
     confidence: clampConfidence(confidence),
@@ -174,6 +185,10 @@ export function listFacts(
   {
     kind = null,
     surface = null,
+    /* Key namespaces are how families share the store — domain facts all live
+     * under 'dom.', browser findings under 'web.' — so a prefix filter reads a
+     * whole family without scanning it back out by hand. */
+    keyPrefix = null,
     includeExpired = false,
     includeRevoked = false,
     now = Date.now(),
@@ -184,7 +199,96 @@ export function listFacts(
     .facts.filter((fact) => (includeRevoked ? true : !fact.revocation))
     .filter((fact) => (kind ? fact.kind === kind : true))
     .filter((fact) => (surface ? servesSurface(fact, surface) : true))
+    .filter((fact) =>
+      keyPrefix ? String(fact.key ?? '').startsWith(keyPrefix) : true,
+    )
     .filter((fact) => (includeExpired ? true : !isExpired(fact, now)))
+}
+
+/* ------------------------------------------------------------ domain facts */
+
+/*
+ * The capability-domain tier of this store.
+ *
+ * The owner, 2026-08-12: "tools should be combined with memories — the tools
+ * for reading emails are in the same folder as the memories for email
+ * preferences." shared/domainMemory.js owns the fact SHAPE (keys, scopes,
+ * TTLs) so every body agrees on it; these two helpers are the Mac's disk for
+ * that shape — a domain fact stored here is an ordinary row under the 'dom.'
+ * namespace, so pruning, revocation and /memory/facts all see it for free.
+ */
+
+const DOMAIN_KIND_BY_CLASS = {
+  /* Identities are standing owner choices — the same pin preferences get. */
+  identity: 'preference',
+  /* Connections and task shapes are durable named things, not choices. */
+  connection: 'entity',
+  task: 'entity',
+}
+
+/**
+ * Store one shared-shape domain fact (see shared/domainMemory.js
+ * normalizeDomainFact — pass its output, not raw input).
+ *
+ * @param fact   normalized domain fact {key, domain, name, value, scope, ...}
+ * @param origin 'domain-capture' (run-settle heuristic, hive mirror) or
+ *               'domain-tool' (an explicit memory_save)
+ */
+export function rememberDomainFact(
+  fact,
+  { origin = 'domain-capture', filePath = FACTS_PATH } = {},
+) {
+  return rememberFact(
+    {
+      key: fact.key,
+      kind: DOMAIN_KIND_BY_CLASS[domainFactClass(fact.name)] ?? 'entity',
+      value: fact.value,
+      scope: fact.scope,
+      confidence: fact.confidence,
+      sensitivity: fact.sensitivity ?? null,
+      source: { origin, node: fact.node, at: fact.at },
+      /* The shared module already applied the per-class TTL; honour it rather
+       * than layering this store's kind TTLs on top. */
+      expiresAt: fact.expiresAt ?? null,
+    },
+    { filePath },
+  )
+}
+
+/**
+ * Read domain facts back in the SHARED shape, so lookupDomainFacts,
+ * renderDomainFactLines and the fleet hive block can consume them directly.
+ *
+ * @returns [{domain, name, value, scope, node, confidence, at, expiresAt, sensitivity, key}]
+ */
+export function listDomainFacts(
+  { domain = null, scope = null } = {},
+  { filePath = FACTS_PATH } = {},
+) {
+  const wantedDomain = domain ? String(domain).trim().toLowerCase() : null
+  const wantedScope = scope ? String(scope).trim().toLowerCase() : null
+
+  const out = []
+  for (const fact of listFacts({ keyPrefix: 'dom.' }, { filePath })) {
+    const parsed = parseDomainFactKey(fact.key)
+    if (!parsed) continue
+    if (wantedDomain && parsed.domain !== wantedDomain) continue
+    const factScope = fact.scope === 'hive' ? 'hive' : 'node'
+    if (wantedScope && factScope !== wantedScope) continue
+    out.push({
+      key: fact.key,
+      domain: parsed.domain,
+      name: parsed.name,
+      value: fact.value,
+      scope: factScope,
+      node: fact.source?.node || 'mac',
+      confidence: fact.confidence,
+      at: fact.source?.at || fact.updatedAt || fact.createdAt || null,
+      expiresAt: fact.expiresAt ?? null,
+      sensitivity: fact.sensitivity ?? null,
+    })
+  }
+  return out
 }
 
 /* ------------------------------------------------- evidence → derived facts */
@@ -556,10 +660,9 @@ const GRAPH_KIND_BY_TYPE = {
 /**
  * The one place a graph entity becomes a prompt line.
  *
- * Two callers build this string — the importer below and factFromGraphEntity in
- * contextProjection.js, which mirrors it for entities the store has not seen
- * yet. They were separate copies, so they could drift, and a drifted copy means
- * the same entity reads differently depending on whether the sync had run.
+ * This string once had a second copy (in the retired projection layer), and
+ * the two drifted — the same entity read differently depending on whether the
+ * sync had run. One builder, whoever the caller is.
  *
  * It also collapses a detail that merely restates the name. `note` is the first
  * detail tried and quickCapture writes the idea text into BOTH fields, so a
@@ -698,6 +801,14 @@ function normalizeSource(source, nowIso) {
     host: source.host || hostOf(source.url),
     jobId: source.jobId || null,
     entityId: source.entityId || null,
+    /*
+     * Which body captured a domain fact ('mac', 'voice', a browser device id).
+     * Same lesson as capsuleIds and probe below, learned a third time before
+     * the field was added: this whitelist would have dropped it silently, and
+     * listDomainFacts could not have rebuilt the shared fact shape — every
+     * hive-mirrored fact would have re-claimed 'mac' as its origin node.
+     */
+    node: source.node || null,
     /*
      * The evidence this fact stands on.
      *

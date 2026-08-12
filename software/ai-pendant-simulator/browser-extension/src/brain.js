@@ -40,6 +40,11 @@
  *      believes about it.
  */
 import { COMMAND_TYPES } from './bridge-core.js'
+import {
+  MEMORY_TOOL_SPECS,
+  MEMORY_TOOL_TYPES,
+  isMemoryToolType,
+} from '../../shared/domains/index.js'
 
 /* ===================================================================== *
  * Bounds.
@@ -111,24 +116,71 @@ const TOOL_DESCRIPTIONS = Object.freeze({
   capture: 'Screenshot the visible tab. params: {}. Costly — prefer snapshot.',
 })
 
-/** The verbs offered to the model: exactly the ones the executor accepts. */
-export const BRAIN_TOOLS = Object.freeze(
-  [...COMMAND_TYPES].map((type) => ({
+/*
+ * The two memory verbs, described from the SAME shared specs the Mac planner
+ * and the relay's voice loop read (shared/domains/index.js), so the three
+ * brains cannot drift on names or argument shapes. These verbs run ON THE
+ * RELAY via the device credential, not in the page — the catalogue only tells
+ * the model what they are for; console-engine.js does the fetching.
+ *
+ * The param hint is DERIVED from the spec's params block rather than typed
+ * beside it, for the same reason BRAIN_TOOLS derives from COMMAND_TYPES:
+ * hand-maintained copies drift. A param whose spec description starts with
+ * "optional" gets the `?` suffix the executor descriptions use.
+ */
+function memoryParamHint(spec, { omit = [] } = {}) {
+  const keys = Object.keys(spec.params).filter((key) => !omit.includes(key))
+  return `params: {${keys
+    .map((key) => (/^optional/i.test(spec.params[key]) ? `${key}?` : key))
+    .join(', ')}}`
+}
+
+export const BRAIN_LOCAL_TOOLS = Object.freeze(
+  MEMORY_TOOL_TYPES.map((type) => {
+    const spec = MEMORY_TOOL_SPECS[type]
+    /* `scope` is omitted from memory_save's hint on purpose: this browser has
+     * no local durable store, so console-engine pins every save to scope
+     * 'hive' whatever the model asks for. Offering the knob would be a lie. */
+    const omit = type === 'memory_save' ? ['scope'] : []
+    const trailer =
+      type === 'memory_save'
+        ? ' On this node every save is shared with the hive — there is no browser-local store.'
+        : ''
+    return Object.freeze({
+      type,
+      description: `${spec.description} ${memoryParamHint(spec, { omit })}.${trailer}`,
+      /* The loop branches on this: a local:true call goes to the relay's
+       * memory routes, never to the page executor. */
+      local: true,
+    })
+  }),
+)
+
+/** The verbs offered to the model: the executor's own, plus the memory pair. */
+export const BRAIN_TOOLS = Object.freeze([
+  ...[...COMMAND_TYPES].map((type) => ({
     type,
     description: TOOL_DESCRIPTIONS[type] ?? '',
   })),
-)
+  ...BRAIN_LOCAL_TOOLS,
+])
 
 /**
  * Verbs the executor accepts that nobody described, and descriptions for verbs
  * that do not exist. Exported so a test asserts it is empty rather than a
- * reader having to notice.
+ * reader having to notice. Memory verbs are legitimate non-executor names, so
+ * `unknown` excuses exactly them and nothing else.
  */
 export function toolCatalogueDrift() {
-  const described = new Set(Object.keys(TOOL_DESCRIPTIONS))
+  const described = new Set([
+    ...Object.keys(TOOL_DESCRIPTIONS),
+    ...BRAIN_LOCAL_TOOLS.map((tool) => tool.type),
+  ])
   return {
     undescribed: [...COMMAND_TYPES].filter((type) => !described.has(type)),
-    unknown: [...described].filter((type) => !COMMAND_TYPES.has(type)),
+    unknown: [...described].filter(
+      (type) => !COMMAND_TYPES.has(type) && !isMemoryToolType(type),
+    ),
   }
 }
 
@@ -149,13 +201,14 @@ export function brainSystemPrompt() {
 
   return `You are the browser node of a personal agent. You act INSIDE the owner's own browser, in their existing signed-in tabs, on their behalf.
 
-Answer with ONE JSON object and nothing else. Exactly one of these three shapes:
+Answer with ONE JSON object and nothing else. Exactly one of these four shapes:
 
   {"thought": "<one short line>", "tool": "<name>", "params": { ... }}
   {"thought": "<one short line>", "answer": "<what you found or did, for the owner>"}
   {"thought": "<one short line>", "handoff": "<why this needs the Mac and not a browser>"}
+  {"thought": "<one short line>", "clarify": "<one question for the owner>"}
 
-EVERY reply must carry one of "tool", "answer" or "handoff". A reply with only
+EVERY reply must carry one of "tool", "answer", "handoff" or "clarify". A reply with only
 "thought" is not a reply — it does nothing, the task does not advance, and you
 will simply be asked again.
 
@@ -167,6 +220,18 @@ How to work:
 - Use activate_tab to reach a site. The owner is already signed in there; navigate replaces the page they were looking at.
 - One tool per reply. You will be given its result and asked again.
 - If a step fails twice the same way, stop and answer with what you learned.
+
+The owner's memory:
+- memory_lookup and memory_save run on the relay, not on the page. Use them for the owner's durable facts, never for page contents.
+- Consult memory_lookup BEFORE acting when the request depends on WHICH account, site or list the owner means — "check my email" with two known accounts is a lookup first, not a guess.
+- Save only durable identities and connections with memory_save — an account, a default list, a site the owner names as theirs. Never page contents, never chat.
+
+Use "clarify" ONLY when the request is genuinely ambiguous — the memories know
+several candidates, the request names none of them, and no remembered default
+settles it. One short question, then stop; the owner's reply arrives as a new
+command. If memory_lookup (or the memory shown to you) can settle it, act
+instead of asking. clarify is for ambiguity, never for permission — for outward
+steps the rule below applies.
 
 About steps that commit something outward — submit, buy, sell, cancel, send,
 delete, subscribe, sign:
@@ -207,6 +272,87 @@ export function inferRequest(config, messages, { maxTokens = BRAIN_OUTPUT_TOKENS
       responseFormat: 'json_object',
     },
   }
+}
+
+/* ===================================================================== *
+ * The memory requests.
+ *
+ * Pure descriptors in the same shape as inferRequest, carried by the caller's
+ * relayFetch so the device token never appears in this module. These target
+ * the relay's domain-memory routes (GET/POST /v1/memory/domains), which the
+ * browser_node role reaches with the memory:domains:read/write scopes it
+ * already holds.
+ * ===================================================================== */
+
+/** GET the owner's remembered facts — for one domain, or matched by query. */
+export function memoryLookupRequest({ domain = '', query = '', limit = 0 } = {}) {
+  const search = new URLSearchParams()
+  const domainName = String(domain ?? '').trim()
+  if (domainName) search.set('domain', domainName)
+  /* Queries are owner phrasing, not data: cap them so a long command pasted
+   * as a query cannot bloat the URL. Never the device token — auth rides the
+   * header, exactly like every other descriptor. */
+  const words = String(query ?? '').trim().slice(0, 200)
+  if (words) search.set('query', words)
+  const cap = Math.floor(Number(limit) || 0)
+  if (cap > 0) search.set('limit', String(cap))
+  const qs = search.toString()
+  return {
+    method: 'GET',
+    path: `/v1/memory/domains${qs ? `?${qs}` : ''}`,
+    auth: 'device',
+  }
+}
+
+/**
+ * POST one fact into the hive's domain memory.
+ *
+ * SCOPE IS PINNED TO 'hive', whatever the model asked for: this browser has no
+ * local durable store, so a node-scoped fact saved here would be a fact saved
+ * nowhere — and the hive rejects node-scoped facts anyway. `node` names the
+ * author for provenance, not the storage location.
+ */
+export function memorySaveRequest(node, { domain, name, value } = {}) {
+  return {
+    method: 'POST',
+    path: '/v1/memory/domains',
+    auth: 'device',
+    body: {
+      node: String(node ?? '').trim(),
+      facts: [
+        {
+          domain: String(domain ?? '').trim(),
+          name: String(name ?? '').trim(),
+          value: String(value ?? '').trim(),
+          scope: 'hive',
+        },
+      ],
+    },
+  }
+}
+
+/**
+ * What the model is shown of a memory tool's outcome — compact on purpose,
+ * like compactToolResult one section down: the transcript budget is for the
+ * task, not for echoing the relay's envelope back at the model.
+ */
+export function compactMemoryResult(type, params = {}, payload = null) {
+  if (type === 'memory_save') {
+    const accepted = Number(payload?.accepted) || 0
+    const rejected = Number(payload?.rejected) || 0
+    const key = `dom.${params?.domain ?? '?'}.${params?.name ?? '?'}`
+    if (accepted > 0) return `Saved ${key} (hive).`
+    return `The hive did not keep ${key}${rejected ? ` (${rejected} rejected)` : ''} — check the domain and the dotted name.`
+  }
+
+  const lines = Array.isArray(payload?.lines)
+    ? payload.lines.filter(Boolean).map((line) => String(line))
+    : []
+  if (!lines.length) {
+    const where = String(params?.domain ?? '').trim()
+    return `No remembered facts${where ? ` in ${where}` : ''} matched.`
+  }
+  return clip(`${lines.length} remembered fact(s):\n${lines.join('\n')}`)
 }
 
 /* ===================================================================== *
@@ -316,17 +462,31 @@ export function parseBrainReply(content) {
     return { kind: 'handoff', thought, reason: String(value.handoff).slice(0, 500) }
   }
 
+  /*
+   * The fourth shape: a question, used only when the request is genuinely
+   * ambiguous. Capped like a thought, not like an answer — a clarification
+   * that needs more than one line is the model narrating, not asking.
+   */
+  if (value.clarify != null) {
+    return { kind: 'clarify', thought, question: String(value.clarify).slice(0, 300) }
+  }
+
   if (value.tool != null) {
     const type = String(value.tool).trim()
-    if (!COMMAND_TYPES.has(type)) {
-      return {
-        kind: 'error',
-        error: `"${type}" is not a tool. Use one of: ${[...COMMAND_TYPES].join(', ')}.`,
-      }
-    }
     const params = value.params
     if (params != null && (typeof params !== 'object' || Array.isArray(params))) {
       return { kind: 'error', error: 'params must be a JSON object.' }
+    }
+    /* A memory verb is a valid call that must NOT reach the page executor:
+     * local:true tells the loop to run it against the relay instead. */
+    if (isMemoryToolType(type)) {
+      return { kind: 'call', thought, call: { type, params: params ?? {} }, local: true }
+    }
+    if (!COMMAND_TYPES.has(type)) {
+      return {
+        kind: 'error',
+        error: `"${type}" is not a tool. Use one of: ${[...COMMAND_TYPES, ...MEMORY_TOOL_TYPES].join(', ')}.`,
+      }
     }
     return { kind: 'call', thought, call: { type, params: params ?? {} } }
   }
@@ -337,7 +497,7 @@ export function parseBrainReply(content) {
 
   return {
     kind: 'error',
-    error: 'Your reply had none of "tool", "answer" or "handoff". Answer with one of the three shapes.',
+    error: 'Your reply had none of "tool", "answer", "handoff" or "clarify". Answer with one of the four shapes.',
   }
 }
 
@@ -420,7 +580,7 @@ function clip(text, max = MAX_RESULT_CHARS) {
  * oldest results fall out first, and the fact that they did is stated in the
  * transcript rather than left for the model to infer from a gap.
  */
-export function createBrainTranscript({ command, page = null, now = Date.now() } = {}) {
+export function createBrainTranscript({ command, page = null, memoryLines = [], now = Date.now() } = {}) {
   const system = { role: 'system', content: brainSystemPrompt() }
 
   /*
@@ -429,10 +589,25 @@ export function createBrainTranscript({ command, page = null, now = Date.now() }
    * and the command text is its only channel — and the cost of that shows up
    * downstream as trailers spliced into verdict sentences. Nothing forces it
    * here, so nothing does it here.
+   *
+   * The owner's domain memory rides the same way, and it is PINNED with the
+   * command rather than pushed as a sliding result: it is the task's
+   * grounding ("which account does 'my email' mean"), and grounding that
+   * falls out of the window mid-task is how a brain re-asks a question the
+   * owner already answered. Bounded at the source — the caller fetches with a
+   * small limit — and clipped here so a fat fact list can never eat the
+   * pinned budget the fit() loop cannot reclaim.
    */
+  const grounding = (Array.isArray(memoryLines) ? memoryLines : [])
+    .filter(Boolean)
+    .map((line) => String(line))
+    .slice(0, 12)
   const opening = [
     `The owner asked: ${String(command ?? '').trim()}`,
     page?.url ? `\nThey are currently looking at: ${page.title ? `"${page.title}" — ` : ''}${page.url}` : '',
+    grounding.length
+      ? `\nWhat the owner's memory says (domain memory):\n${clip(grounding.join('\n'))}`
+      : '',
     `\nStarted at ${new Date(now).toISOString()}.`,
   ]
     .filter(Boolean)

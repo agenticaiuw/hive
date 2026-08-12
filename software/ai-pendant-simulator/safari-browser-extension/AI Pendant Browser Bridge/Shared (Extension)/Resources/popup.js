@@ -3066,6 +3066,223 @@
 	function describeCounts(effects) {
 		return `${effects.read} read, ${effects.opened} page(s) opened, ${effects.act} page interaction(s), ${effects.outward} approved outward step(s), ${effects.failed} failed`;
 	}
+	//#endregion
+	//#region shared/domains/browser.js
+	var browser_default = Object.freeze({
+		name: "browser",
+		what: "Live web pages in the logged-in browser: tabs, forms, reads — and the sites the owner uses.",
+		tools: Object.freeze({
+			exact: Object.freeze([
+				"watch_page",
+				"activate_tab",
+				"navigate",
+				"snapshot",
+				"read_page",
+				"click",
+				"type",
+				"select",
+				"press_key",
+				"wait_for",
+				"list_tabs",
+				"capture"
+			]),
+			prefixes: Object.freeze(["browser_"])
+		}),
+		capture: Object.freeze([]),
+		clarify: Object.freeze([Object.freeze({
+			id: "browser.site",
+			trigger: /\b(order|checkout|log in|login|sign in|book|reserve)\b/i,
+			distinguisher: "site",
+			ask: (labels) => `On which site — ${labels.join(", ")}?`
+		})])
+	});
+	//#endregion
+	//#region shared/domains/calendar.js
+	var calendar_default = Object.freeze({
+		name: "calendar",
+		what: "Reminders, meetings, day plans, focus blocks, and which list or calendar they land on.",
+		tools: Object.freeze({
+			exact: Object.freeze([
+				"create_reminder",
+				"remind_me",
+				"plan_my_day",
+				"prepare_for_meeting",
+				"meeting_followup",
+				"schedule_routine",
+				"start_focus_session",
+				"end_focus_session"
+			]),
+			prefixes: Object.freeze([])
+		}),
+		capture: Object.freeze([Object.freeze({
+			id: "calendar.list-from-action",
+			action: "create_reminder",
+			param: "list",
+			name: (value) => `list.${value}`,
+			scope: "hive"
+		})]),
+		clarify: Object.freeze([Object.freeze({
+			id: "calendar.list",
+			trigger: /\b(remind(er)?s?|todo|to-do)\b/i,
+			distinguisher: "list",
+			ask: (labels) => `Which list should that go on — ${labels.join(", ")}?`
+		})])
+	});
+	//#endregion
+	//#region shared/domains/email.js
+	var email_default = Object.freeze({
+		name: "email",
+		what: "Send or draft email, triage the inbox, and the accounts and people mail goes to.",
+		tools: Object.freeze({
+			exact: Object.freeze([
+				"send_email",
+				"triage_inbox",
+				"triage_notifications"
+			]),
+			prefixes: Object.freeze([])
+		}),
+		capture: Object.freeze([Object.freeze({
+			id: "email.account-from-command",
+			pattern: /\bmy\s+(?<label>[\p{L}\p{N}-]{2,24})\s+(?:email|e-mail|mail|account)\s+(?:address\s+)?(?:is|=)\s+(?<value>[^\s@]+@[^\s@]+\.[\p{L}\p{N}-]+)/iu,
+			name: (groups) => `account.${groups.label.toLowerCase()}`,
+			value: (groups) => groups.value,
+			scope: "hive"
+		})]),
+		clarify: Object.freeze([Object.freeze({
+			id: "email.account",
+			trigger: /\b(email|e-mail|mail|inbox)\b/i,
+			distinguisher: "account",
+			ask: (labels) => `Which email account should I use — ${labels.join(", ")}?`
+		})])
+	});
+	//#endregion
+	//#region shared/domains/files.js
+	var files_default = Object.freeze({
+		name: "files",
+		what: "Files and folders: read, write, search, move, tidy — and where the owner keeps things.",
+		tools: Object.freeze({
+			exact: Object.freeze([
+				"read_file",
+				"write_file",
+				"list_directory",
+				"delete_path",
+				"copy_path",
+				"move_path",
+				"open_path",
+				"open_folder",
+				"create_note",
+				"search_file",
+				"run_project"
+			]),
+			prefixes: Object.freeze(["sweep_folder_", "tidy_downloads_"])
+		}),
+		capture: Object.freeze([Object.freeze({
+			id: "files.place-from-action",
+			action: "write_file",
+			param: "path",
+			name: (value) => `place.${String(value).split("/").slice(-2, -1)[0] || "root"}`,
+			value: (raw) => String(raw).split("/").slice(0, -1).join("/") || "/",
+			scope: "node"
+		})]),
+		clarify: Object.freeze([Object.freeze({
+			id: "files.place",
+			trigger: /\b(save|file|put|store)\b.*\b(note|file|document|doc)s?\b/i,
+			distinguisher: "place",
+			ask: (labels) => `Where should I put it — ${labels.join(", ")}?`
+		})])
+	});
+	//#endregion
+	//#region shared/domains/music.js
+	var music_default = Object.freeze({
+		name: "music",
+		what: "Music and audio playback, and the services and playlists the owner actually uses.",
+		tools: Object.freeze({
+			exact: Object.freeze(["play_youtube"]),
+			prefixes: Object.freeze(["music_"])
+		}),
+		capture: Object.freeze([Object.freeze({
+			id: "music.service-from-action",
+			action: "play_youtube",
+			param: null,
+			name: () => "service.default",
+			value: () => "youtube",
+			scope: "hive"
+		})]),
+		clarify: Object.freeze([Object.freeze({
+			id: "music.service",
+			trigger: /\b(play|music|song|album|playlist)\b/i,
+			distinguisher: "service",
+			ask: (labels) => `Play it where — ${labels.join(", ")}?`
+		})])
+	});
+	//#endregion
+	//#region shared/domains/system.js
+	var system_default = Object.freeze({
+		name: "system",
+		what: "Mac volume, brightness, battery, clipboard, keyboard language — and the owner’s standing levels.",
+		tools: Object.freeze({
+			exact: Object.freeze([
+				"set_volume",
+				"get_volume",
+				"set_mute",
+				"set_brightness",
+				"get_brightness",
+				"get_battery",
+				"get_mac_status",
+				"get_clipboard",
+				"copy_to_clipboard",
+				"set_clipboard",
+				"set_input_source",
+				"get_input_source",
+				"set_keyboard_language",
+				"open_app",
+				"open_url"
+			]),
+			prefixes: Object.freeze([])
+		}),
+		capture: Object.freeze([Object.freeze({
+			id: "system.input-language",
+			action: "set_input_source",
+			param: "language",
+			name: (value) => `language.${value}`,
+			scope: "node"
+		})]),
+		clarify: Object.freeze([])
+	});
+	//#endregion
+	//#region shared/domains/index.js
+	const DOMAIN_MODULES = Object.freeze([
+		email_default,
+		calendar_default,
+		files_default,
+		music_default,
+		system_default,
+		browser_default
+	]);
+	const MEMORY_DOMAINS = Object.freeze(DOMAIN_MODULES.map((mod) => mod.name));
+	new Map(DOMAIN_MODULES.map((mod) => [mod.name, mod]));
+	const MEMORY_TOOL_TYPES = Object.freeze(["memory_lookup", "memory_save"]);
+	const MEMORY_TOOL_SPECS = Object.freeze({
+		memory_lookup: Object.freeze({
+			description: `Look up the owner's remembered facts for one capability domain (${MEMORY_DOMAINS.join(", ")}): accounts, defaults, contacts, places, sites. Use before acting when the request depends on which account/list/site the owner means.`,
+			params: Object.freeze({
+				domain: `one of ${MEMORY_DOMAINS.join(" | ")}`,
+				query: "optional words to match against fact names and values"
+			})
+		}),
+		memory_save: Object.freeze({
+			description: "Save one durable fact about the owner into a capability domain (e.g. domain 'email', name 'account.school', value 'liu@uni.edu'). Only for identities, accounts, connections and defaults likely to be used again — never chat logs. scope 'hive' shares it with every node; 'node' keeps it on this one.",
+			params: Object.freeze({
+				domain: `one of ${MEMORY_DOMAINS.join(" | ")}`,
+				name: "dotted fact name inside the domain, e.g. 'account.personal' or 'list.default'",
+				value: "the fact itself, one short line",
+				scope: "optional 'hive' (default — every node) or 'node' (this node only)"
+			})
+		})
+	});
+	function isMemoryToolType(type) {
+		return MEMORY_TOOL_TYPES.includes(String(type ?? "").trim());
+	}
 	const MAX_RESULT_CHARS = 2e3;
 	const MAX_SNAPSHOT_ELEMENTS = 45;
 	const TOOL_DESCRIPTIONS = Object.freeze({
@@ -3082,11 +3299,24 @@
 		list_tabs: "List the open tabs and their URLs. params: {}.",
 		capture: "Screenshot the visible tab. params: {}. Costly — prefer snapshot."
 	});
-	/** The verbs offered to the model: exactly the ones the executor accepts. */
-	const BRAIN_TOOLS = Object.freeze([...COMMAND_TYPES].map((type) => ({
+	function memoryParamHint(spec, { omit = [] } = {}) {
+		return `params: {${Object.keys(spec.params).filter((key) => !omit.includes(key)).map((key) => /^optional/i.test(spec.params[key]) ? `${key}?` : key).join(", ")}}`;
+	}
+	const BRAIN_LOCAL_TOOLS = Object.freeze(MEMORY_TOOL_TYPES.map((type) => {
+		const spec = MEMORY_TOOL_SPECS[type];
+		const omit = type === "memory_save" ? ["scope"] : [];
+		const trailer = type === "memory_save" ? " On this node every save is shared with the hive — there is no browser-local store." : "";
+		return Object.freeze({
+			type,
+			description: `${spec.description} ${memoryParamHint(spec, { omit })}.${trailer}`,
+			local: true
+		});
+	}));
+	/** The verbs offered to the model: the executor's own, plus the memory pair. */
+	const BRAIN_TOOLS = Object.freeze([...[...COMMAND_TYPES].map((type) => ({
 		type,
 		description: TOOL_DESCRIPTIONS[type] ?? ""
-	})));
+	})), ...BRAIN_LOCAL_TOOLS]);
 	/**
 	* What the model is told it is.
 	*
@@ -3098,13 +3328,14 @@
 	function brainSystemPrompt() {
 		return `You are the browser node of a personal agent. You act INSIDE the owner's own browser, in their existing signed-in tabs, on their behalf.
 
-Answer with ONE JSON object and nothing else. Exactly one of these three shapes:
+Answer with ONE JSON object and nothing else. Exactly one of these four shapes:
 
   {"thought": "<one short line>", "tool": "<name>", "params": { ... }}
   {"thought": "<one short line>", "answer": "<what you found or did, for the owner>"}
   {"thought": "<one short line>", "handoff": "<why this needs the Mac and not a browser>"}
+  {"thought": "<one short line>", "clarify": "<one question for the owner>"}
 
-EVERY reply must carry one of "tool", "answer" or "handoff". A reply with only
+EVERY reply must carry one of "tool", "answer", "handoff" or "clarify". A reply with only
 "thought" is not a reply — it does nothing, the task does not advance, and you
 will simply be asked again.
 
@@ -3116,6 +3347,18 @@ How to work:
 - Use activate_tab to reach a site. The owner is already signed in there; navigate replaces the page they were looking at.
 - One tool per reply. You will be given its result and asked again.
 - If a step fails twice the same way, stop and answer with what you learned.
+
+The owner's memory:
+- memory_lookup and memory_save run on the relay, not on the page. Use them for the owner's durable facts, never for page contents.
+- Consult memory_lookup BEFORE acting when the request depends on WHICH account, site or list the owner means — "check my email" with two known accounts is a lookup first, not a guess.
+- Save only durable identities and connections with memory_save — an account, a default list, a site the owner names as theirs. Never page contents, never chat.
+
+Use "clarify" ONLY when the request is genuinely ambiguous — the memories know
+several candidates, the request names none of them, and no remembered default
+settles it. One short question, then stop; the owner's reply arrives as a new
+command. If memory_lookup (or the memory shown to you) can settle it, act
+instead of asking. clarify is for ambiguity, never for permission — for outward
+steps the rule below applies.
 
 About steps that commit something outward — submit, buy, sell, cancel, send,
 delete, subscribe, sign:
@@ -3149,6 +3392,66 @@ Answer with the JSON object only. No prose, no code fences.`;
 				responseFormat: "json_object"
 			}
 		};
+	}
+	/** GET the owner's remembered facts — for one domain, or matched by query. */
+	function memoryLookupRequest({ domain = "", query = "", limit = 0 } = {}) {
+		const search = new URLSearchParams();
+		const domainName = String(domain ?? "").trim();
+		if (domainName) search.set("domain", domainName);
+		const words = String(query ?? "").trim().slice(0, 200);
+		if (words) search.set("query", words);
+		const cap = Math.floor(Number(limit) || 0);
+		if (cap > 0) search.set("limit", String(cap));
+		const qs = search.toString();
+		return {
+			method: "GET",
+			path: `/v1/memory/domains${qs ? `?${qs}` : ""}`,
+			auth: "device"
+		};
+	}
+	/**
+	* POST one fact into the hive's domain memory.
+	*
+	* SCOPE IS PINNED TO 'hive', whatever the model asked for: this browser has no
+	* local durable store, so a node-scoped fact saved here would be a fact saved
+	* nowhere — and the hive rejects node-scoped facts anyway. `node` names the
+	* author for provenance, not the storage location.
+	*/
+	function memorySaveRequest(node, { domain, name, value } = {}) {
+		return {
+			method: "POST",
+			path: "/v1/memory/domains",
+			auth: "device",
+			body: {
+				node: String(node ?? "").trim(),
+				facts: [{
+					domain: String(domain ?? "").trim(),
+					name: String(name ?? "").trim(),
+					value: String(value ?? "").trim(),
+					scope: "hive"
+				}]
+			}
+		};
+	}
+	/**
+	* What the model is shown of a memory tool's outcome — compact on purpose,
+	* like compactToolResult one section down: the transcript budget is for the
+	* task, not for echoing the relay's envelope back at the model.
+	*/
+	function compactMemoryResult(type, params = {}, payload = null) {
+		if (type === "memory_save") {
+			const accepted = Number(payload?.accepted) || 0;
+			const rejected = Number(payload?.rejected) || 0;
+			const key = `dom.${params?.domain ?? "?"}.${params?.name ?? "?"}`;
+			if (accepted > 0) return `Saved ${key} (hive).`;
+			return `The hive did not keep ${key}${rejected ? ` (${rejected} rejected)` : ""} — check the domain and the dotted name.`;
+		}
+		const lines = Array.isArray(payload?.lines) ? payload.lines.filter(Boolean).map((line) => String(line)) : [];
+		if (!lines.length) {
+			const where = String(params?.domain ?? "").trim();
+			return `No remembered facts${where ? ` in ${where}` : ""} matched.`;
+		}
+		return clip(`${lines.length} remembered fact(s):\n${lines.join("\n")}`);
 	}
 	/**
 	* Why a /v1/infer call failed, and whether the brain should stop trying.
@@ -3253,16 +3556,30 @@ Answer with the JSON object only. No prose, no code fences.`;
 			thought,
 			reason: String(value.handoff).slice(0, 500)
 		};
+		if (value.clarify != null) return {
+			kind: "clarify",
+			thought,
+			question: String(value.clarify).slice(0, 300)
+		};
 		if (value.tool != null) {
 			const type = String(value.tool).trim();
-			if (!COMMAND_TYPES.has(type)) return {
-				kind: "error",
-				error: `"${type}" is not a tool. Use one of: ${[...COMMAND_TYPES].join(", ")}.`
-			};
 			const params = value.params;
 			if (params != null && (typeof params !== "object" || Array.isArray(params))) return {
 				kind: "error",
 				error: "params must be a JSON object."
+			};
+			if (isMemoryToolType(type)) return {
+				kind: "call",
+				thought,
+				call: {
+					type,
+					params: params ?? {}
+				},
+				local: true
+			};
+			if (!COMMAND_TYPES.has(type)) return {
+				kind: "error",
+				error: `"${type}" is not a tool. Use one of: ${[...COMMAND_TYPES, ...MEMORY_TOOL_TYPES].join(", ")}.`
 			};
 			return {
 				kind: "call",
@@ -3280,7 +3597,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		};
 		return {
 			kind: "error",
-			error: "Your reply had none of \"tool\", \"answer\" or \"handoff\". Answer with one of the three shapes."
+			error: "Your reply had none of \"tool\", \"answer\", \"handoff\" or \"clarify\". Answer with one of the four shapes."
 		};
 	}
 	/**
@@ -3333,16 +3650,18 @@ Answer with the JSON object only. No prose, no code fences.`;
 	* oldest results fall out first, and the fact that they did is stated in the
 	* transcript rather than left for the model to infer from a gap.
 	*/
-	function createBrainTranscript({ command, page = null, now = Date.now() } = {}) {
+	function createBrainTranscript({ command, page = null, memoryLines = [], now = Date.now() } = {}) {
 		const system = {
 			role: "system",
 			content: brainSystemPrompt()
 		};
+		const grounding = (Array.isArray(memoryLines) ? memoryLines : []).filter(Boolean).map((line) => String(line)).slice(0, 12);
 		const user = {
 			role: "user",
 			content: [
 				`The owner asked: ${String(command ?? "").trim()}`,
 				page?.url ? `\nThey are currently looking at: ${page.title ? `"${page.title}" — ` : ""}${page.url}` : "",
+				grounding.length ? `\nWhat the owner's memory says (domain memory):\n${clip(grounding.join("\n"))}` : "",
 				`\nStarted at ${new Date(now).toISOString()}.`
 			].filter(Boolean).join("")
 		};
@@ -4195,9 +4514,18 @@ Answer with the JSON object only. No prose, no code fences.`;
 	async function runBrainLocally({ id, command, page, config, relayConfig }) {
 		const journal = executionJournal();
 		const guard = createOutwardGuard();
+		let memoryLines = [];
+		try {
+			const remembered = await relayFetch(relayConfig, memoryLookupRequest({
+				query: command,
+				limit: 10
+			}));
+			if (Array.isArray(remembered?.lines)) memoryLines = remembered.lines;
+		} catch {}
 		const transcript = createBrainTranscript({
 			command,
-			page
+			page,
+			memoryLines
 		});
 		await journal.beginRun({
 			runId: id,
@@ -4208,6 +4536,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		recordRunToHive(id, "claim");
 		const parked = [];
 		let answer = "";
+		let clarifyQuestion = "";
 		let steps = 0;
 		const handOff = async (reason) => {
 			await journal.finishRun(id, {
@@ -4241,6 +4570,36 @@ Answer with the JSON object only. No prose, no code fences.`;
 			if (turn.kind === "answer") {
 				answer = turn.answer;
 				break;
+			}
+			if (turn.kind === "clarify") {
+				clarifyQuestion = turn.question || "Which one did you mean?";
+				answer = clarifyQuestion;
+				break;
+			}
+			if (turn.local) {
+				const call = turn.call;
+				try {
+					const payload = await relayFetch(relayConfig, call.type === "memory_save" ? memorySaveRequest(relayConfig.relayDeviceId, call.params) : memoryLookupRequest(call.params));
+					const compact = compactMemoryResult(call.type, call.params, payload);
+					await journal.recordStep(id, {
+						tool: call.type,
+						effect: EFFECT_READ,
+						ok: true,
+						summary: compact.slice(0, 300)
+					});
+					transcript.pushResult(compact);
+				} catch (error) {
+					const message = error?.message || String(error);
+					await journal.recordStep(id, {
+						tool: call.type,
+						effect: EFFECT_READ,
+						ok: false,
+						summary: message.slice(0, 300)
+					});
+					transcript.pushResult(`That step failed: ${message}`);
+				}
+				steps += 1;
+				continue;
 			}
 			const assessment = guard.assess(turn.call);
 			if (!assessment.allow) {
@@ -4281,7 +4640,11 @@ Answer with the JSON object only. No prose, no code fences.`;
 		const executed = (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [];
 		if (!executed.length && !parked.length && !answer) return await handOff("this browser produced no usable step");
 		const exhausted = steps >= 12 && !answer && !parked.length;
-		const verdict = honestVerdict({
+		const verdict = clarifyQuestion ? {
+			verdict: "needs-answer",
+			headline: clarifyQuestion,
+			detail: "Needs your answer — reply in the console. Nothing ran past this question."
+		} : honestVerdict({
 			command,
 			steps: executed,
 			parked,

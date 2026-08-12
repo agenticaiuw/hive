@@ -7,22 +7,50 @@ const {
   StreamingPcmResampler,
   REALTIME_TOOLS,
   buildPlanResult,
+  createStreamingRealtimeSession,
   historyLabelFromState,
   mapGetMacStatusToActions,
   looksLikeDeviceStateAnswer,
 } = await import('./openaiRealtimeVoice.js')
+const { MEMORY_DOMAINS, MEMORY_TOOL_SPECS } = await import(
+  '../shared/domains/index.js'
+)
 
-test('REALTIME_TOOLS expose status + control + search + browser + delegate + page read + job recall', () => {
+test('REALTIME_TOOLS expose status + control + search + browser + delegate + page read + job recall + memory', () => {
   const names = REALTIME_TOOLS.map((t) => t.name).sort()
   assert.deepEqual(names, [
     'browser_run_actions',
     'get_mac_status',
     'mac_delegate',
     'mac_run_actions',
+    'memory_lookup',
+    'memory_save',
     'read_web_page',
     'relay_job_status',
     'web_search',
   ])
+})
+
+test('the memory tools are built from the shared spec, with domain pinned to the registry', () => {
+  const byName = Object.fromEntries(REALTIME_TOOLS.map((t) => [t.name, t]))
+  const lookup = byName.memory_lookup
+  const save = byName.memory_save
+
+  for (const tool of [lookup, save]) {
+    assert.equal(tool.type, 'function')
+    /* The model must not be able to invent a domain. */
+    assert.deepEqual(tool.parameters.properties.domain.enum, [...MEMORY_DOMAINS])
+    /* Same spoken-confirmation channel as the sibling tools. */
+    assert.ok(tool.parameters.properties.spoken_reply)
+  }
+  /* Descriptions come from MEMORY_TOOL_SPECS verbatim — one source of truth
+   * for all three brains. */
+  assert.equal(lookup.description, MEMORY_TOOL_SPECS.memory_lookup.description)
+  assert.equal(save.description, MEMORY_TOOL_SPECS.memory_save.description)
+  /* Required derives from the spec's own "optional" markings. */
+  assert.deepEqual(lookup.parameters.required, ['domain'])
+  assert.deepEqual(save.parameters.required, ['domain', 'name', 'value'])
+  assert.deepEqual(save.parameters.properties.scope.enum, ['hive', 'node'])
 })
 
 test('relay_job_status takes a spoken reference and requires nothing', () => {
@@ -463,4 +491,358 @@ test('hedging on top of real sources is still a real answer', () => {
 
   assert.equal(outcome.ok, true)
   assert.equal(outcome.reason, 'grounded')
+})
+
+/*
+ * ---- session behaviour, over a fake Realtime socket -----------------------
+ *
+ * createStreamingRealtimeSession takes an `openSocket` seam so the tool loop
+ * can be driven without OpenAI: the fake records every event the session
+ * sends and lets a test inject server events (function calls, response.done)
+ * as raw JSON strings, exactly as the wire would.
+ */
+process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-key'
+
+function createFakeRealtimeSocket() {
+  const handlers = { message: [], error: [], close: [], open: [] }
+  const socket = {
+    OPEN: 1,
+    readyState: 1,
+    sent: [],
+    send(data) {
+      socket.sent.push(JSON.parse(data))
+    },
+    close() {
+      socket.readyState = 3
+    },
+    terminate() {},
+    on(event, handler) {
+      handlers[event]?.push(handler)
+    },
+    once(event, handler) {
+      handlers[event]?.push(handler)
+    },
+    receive(event) {
+      for (const handler of handlers.message) handler(JSON.stringify(event))
+    },
+  }
+  return socket
+}
+
+async function waitForToolOutput(socket, callId, tries = 50) {
+  for (let i = 0; i < tries; i++) {
+    const event = socket.sent.find(
+      (entry) =>
+        entry.type === 'conversation.item.create' &&
+        entry.item?.type === 'function_call_output' &&
+        entry.item.call_id === callId,
+    )
+    if (event) return JSON.parse(event.item.output)
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  throw new Error(`no function_call_output for ${callId}`)
+}
+
+function functionCall(socket, name, callId, args) {
+  socket.receive({
+    type: 'response.function_call_arguments.done',
+    name,
+    call_id: callId,
+    arguments: JSON.stringify(args),
+  })
+}
+
+async function openFakeSession(options = {}) {
+  const socket = createFakeRealtimeSocket()
+  const session = await createStreamingRealtimeSession({
+    openSocket: async () => socket,
+    ...options,
+  })
+  // Keep a rejected teardown from becoming an unhandled rejection.
+  session.done.catch(() => {})
+  return { socket, session }
+}
+
+const SCHOOL_FACT = {
+  domain: 'email',
+  name: 'account.school',
+  value: 'liu@uni.edu',
+  scope: 'hive',
+  node: 'mac',
+}
+const PERSONAL_FACT = {
+  domain: 'email',
+  name: 'account.personal',
+  value: 'owner@example.com',
+  scope: 'hive',
+  node: 'mac',
+}
+const lineFor = (fact) => `- ${fact.domain}/${fact.name}: ${fact.value}`
+
+test('memory_lookup answers inside the turn with facts and lines', async () => {
+  const lookups = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async ({ domain, query }) => {
+        lookups.push({ domain, query })
+        return { facts: [SCHOOL_FACT], lines: [lineFor(SCHOOL_FACT)] }
+      },
+      save: async () => ({}),
+    },
+  })
+
+  functionCall(socket, 'memory_lookup', 'call_lookup', {
+    domain: 'email',
+    query: 'school',
+    spoken_reply: 'Checking what I remember.',
+  })
+  const output = await waitForToolOutput(socket, 'call_lookup')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.domain, 'email')
+  assert.deepEqual(output.facts, [SCHOOL_FACT])
+  assert.deepEqual(output.lines, [lineFor(SCHOOL_FACT)])
+  assert.deepEqual(lookups, [{ domain: 'email', query: 'school' }])
+  /* Text mode answers like relay_job_status: request a text response so the
+   * model can speak from the facts. */
+  assert.ok(
+    socket.sent.some(
+      (entry) =>
+        entry.type === 'response.create' &&
+        entry.response?.output_modalities?.[0] === 'text',
+    ),
+  )
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('memory_save maps args to one voice-attributed fact and reports stats', async () => {
+  const saved = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async () => ({ facts: [], lines: [] }),
+      save: async (facts) => {
+        saved.push(...facts)
+        return { accepted: facts.length, rejected: [], kept: 1, bytes: 220, dropped: 0 }
+      },
+    },
+  })
+
+  functionCall(socket, 'memory_save', 'call_save', {
+    domain: 'email',
+    name: 'account.school',
+    value: 'liu@uni.edu',
+  })
+  const output = await waitForToolOutput(socket, 'call_save')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.accepted, 1)
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].node, 'voice')
+  /* scope defaults to hive — the shared spec's default, so an unstated save
+   * is shared with every node's brain. */
+  assert.equal(saved[0].scope, 'hive')
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('the memory tools are null-safe: no domainMemory option means no memory access', async () => {
+  const { socket, session } = await openFakeSession({})
+
+  functionCall(socket, 'memory_lookup', 'call_nolookup', { domain: 'email' })
+  const lookupOut = await waitForToolOutput(socket, 'call_nolookup')
+  functionCall(socket, 'memory_save', 'call_nosave', {
+    domain: 'email',
+    name: 'a.b',
+    value: 'c',
+  })
+  const saveOut = await waitForToolOutput(socket, 'call_nosave')
+
+  for (const output of [lookupOut, saveOut]) {
+    assert.equal(output.ok, false)
+    assert.match(output.error, /no memory access/i)
+  }
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('mac_run_actions fetches the selected domains and attaches their lines', async () => {
+  /* Fetch-on-tool-selection, the owner's core ask: the email action names the
+   * email domain, so the email facts ride the tool result. */
+  const lookups = []
+  const plans = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async ({ domain, query }) => {
+        lookups.push({ domain, query })
+        return {
+          facts: [SCHOOL_FACT],
+          lines: [lineFor(SCHOOL_FACT)],
+        }
+      },
+      save: async () => ({}),
+    },
+    onEarlyPlan: async (plan) => {
+      plans.push(plan)
+      return { jobId: 'job-1' }
+    },
+  })
+
+  functionCall(socket, 'mac_run_actions', 'call_send', {
+    actions: [
+      {
+        type: 'send_email',
+        params: { subject: 'hi', body: 'see attached', account: 'school' },
+      },
+    ],
+    spoken_reply: 'Sending it from your school account.',
+    transcript: 'email my professor from my school account',
+  })
+  const output = await waitForToolOutput(socket, 'call_send')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.queued, true)
+  assert.deepEqual(output.domainMemory, [lineFor(SCHOOL_FACT)])
+  /* The fetch was scoped to the plan's domain and carried the words. */
+  assert.deepEqual(lookups, [
+    { domain: 'email', query: 'email my professor from my school account' },
+  ])
+
+  const plan = await session.done
+  assert.equal(plan.actions.length, 1)
+  assert.equal(plans.length, 1)
+})
+
+test('an ambiguous request is refused with the clarifying question, not guessed at', async () => {
+  /* The owner: "only when the prompt is ambiguous, then ask the users for
+   * clarifications." Two known email accounts, no default, none named →
+   * the plan must NOT dispatch; the question is the product. */
+  const plans = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async () => ({
+        facts: [SCHOOL_FACT, PERSONAL_FACT],
+        lines: [lineFor(SCHOOL_FACT), lineFor(PERSONAL_FACT)],
+      }),
+      save: async () => ({}),
+    },
+    onEarlyPlan: async (plan) => {
+      plans.push(plan)
+      return { jobId: 'job-x' }
+    },
+  })
+
+  functionCall(socket, 'mac_run_actions', 'call_ambiguous', {
+    actions: [{ type: 'send_email', params: { subject: 'hello' } }],
+    spoken_reply: 'Sending the email.',
+    transcript: 'send an email saying hello',
+  })
+  const output = await waitForToolOutput(socket, 'call_ambiguous')
+
+  assert.equal(output.ok, false)
+  assert.equal(output.needs_clarification, true)
+  assert.match(output.question, /which email account/i)
+  assert.deepEqual(output.options.sort(), ['personal', 'school'])
+  /* Nothing dispatched: no early plan fired for this call. */
+  assert.equal(plans.length, 0)
+
+  /* The model then speaks the question; complete that turn and the session
+   * resolves an instant plan with EMPTY actions and the question as the
+   * reply — the ask channel is speech, not a queued Mac job. */
+  socket.receive({
+    type: 'response.done',
+    response: { status: 'completed', output: [] },
+  })
+  const plan = await session.done
+  assert.deepEqual(plan.actions, [])
+  assert.equal(plan.requireLocalPlanner, false)
+  assert.match(plan.response, /which email account/i)
+})
+
+test('a named account is not ambiguity: the plan dispatches with memory attached', async () => {
+  /* The counterweight — the request names "school", so the registry's
+   * named-candidate leg clears it and the action goes out. */
+  const plans = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async () => ({
+        facts: [SCHOOL_FACT, PERSONAL_FACT],
+        lines: [lineFor(SCHOOL_FACT), lineFor(PERSONAL_FACT)],
+      }),
+      save: async () => ({}),
+    },
+    onEarlyPlan: async (plan) => {
+      plans.push(plan)
+      return { jobId: 'job-2' }
+    },
+  })
+
+  functionCall(socket, 'mac_run_actions', 'call_named', {
+    actions: [{ type: 'send_email', params: { subject: 'hello' } }],
+    transcript: 'send an email from my school account',
+  })
+  const output = await waitForToolOutput(socket, 'call_named')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.needs_clarification, undefined)
+  assert.equal(output.domainMemory.length, 2)
+  assert.equal(plans.length, 1)
+  await session.done
+})
+
+test('browser_run_actions falls back to the browser domain for its verbs', async () => {
+  const lookups = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async ({ domain }) => {
+        lookups.push(domain)
+        return {
+          facts: [{ domain: 'browser', name: 'site.bank', value: 'chase.com' }],
+          lines: ['- browser/site.bank: chase.com'],
+        }
+      },
+      save: async () => ({}),
+    },
+    onEarlyPlan: async () => ({ jobId: 'job-3' }),
+  })
+
+  functionCall(socket, 'browser_run_actions', 'call_browser', {
+    actions: [{ type: 'browser_navigate', params: { url: 'https://chase.com' } }],
+    transcript: 'open my bank',
+  })
+  const output = await waitForToolOutput(socket, 'call_browser')
+
+  assert.deepEqual(lookups, ['browser'])
+  assert.deepEqual(output.domainMemory, ['- browser/site.bank: chase.com'])
+  await session.done
+})
+
+test('a failing memory fetch never costs the action it decorates', async () => {
+  const plans = []
+  const { socket, session } = await openFakeSession({
+    domainMemory: {
+      lookup: async () => {
+        throw new Error('D1 is down')
+      },
+      save: async () => ({}),
+    },
+    onEarlyPlan: async (plan) => {
+      plans.push(plan)
+      return { jobId: 'job-4' }
+    },
+  })
+
+  functionCall(socket, 'mac_run_actions', 'call_besteffort', {
+    actions: [{ type: 'send_email', params: { subject: 'hi' } }],
+    transcript: 'send the email to my school account',
+  })
+  const output = await waitForToolOutput(socket, 'call_besteffort')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.domainMemory, undefined)
+  assert.equal(plans.length, 1)
+  await session.done
 })

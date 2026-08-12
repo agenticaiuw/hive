@@ -36,16 +36,20 @@ import {
 import {
   CAPABILITY_BROWSER,
   EFFECT_OUTWARD,
+  EFFECT_READ,
   createOutwardGuard,
   honestVerdict,
   routePlan,
 } from './affinity.js'
 import {
   BRAIN_MAX_STEPS,
+  compactMemoryResult,
   compactToolResult,
   createBrainTranscript,
   describeInferFailure,
   inferRequest,
+  memoryLookupRequest,
+  memorySaveRequest,
   parseBrainReply,
   readInferPayload,
 } from './brain.js'
@@ -911,13 +915,34 @@ async function brainTurn(relayConfig, transcript) {
 async function runBrainLocally({ id, command, page, config, relayConfig }) {
   const journal = executionJournal()
   const guard = createOutwardGuard()
-  const transcript = createBrainTranscript({ command, page })
+
+  /*
+   * GROUND THE TASK IN THE OWNER'S MEMORY BEFORE THE FIRST THOUGHT. One query
+   * against the hive's domain memory, matched on the command's own words, so
+   * "check my email" arrives with "email/account.personal: …" already pinned
+   * beside it. Best-effort by design: a relay that cannot answer costs the
+   * lines, never the run — the model still holds memory_lookup and can ask
+   * again deliberately.
+   */
+  let memoryLines = []
+  try {
+    const remembered = await relayFetch(
+      relayConfig,
+      memoryLookupRequest({ query: command, limit: 10 }),
+    )
+    if (Array.isArray(remembered?.lines)) memoryLines = remembered.lines
+  } catch {
+    /* Grounding is optional; the run is not. */
+  }
+
+  const transcript = createBrainTranscript({ command, page, memoryLines })
 
   await journal.beginRun({ runId: id, command, route: 'local-brain', executor: 'browser-brain' })
   void recordRunToHive(id, 'claim')
 
   const parked = []
   let answer = ''
+  let clarifyQuestion = ''
   let steps = 0
 
   /*
@@ -970,6 +995,67 @@ async function runBrainLocally({ id, command, page, config, relayConfig }) {
     if (turn.kind === 'answer') {
       answer = turn.answer
       break
+    }
+
+    /*
+     * A clarification IS the run's answer — the owner's rule: "only when the
+     * prompt is ambiguous, then ask the users for clarifications." It rides
+     * the existing answer channel (headline = the question, the reply is the
+     * owner's next command in the console) rather than inventing a new
+     * approval type: an approval card is "may I run this step", and this is
+     * "which thing did you mean" — different question, different furniture.
+     */
+    if (turn.kind === 'clarify') {
+      clarifyQuestion = turn.question || 'Which one did you mean?'
+      answer = clarifyQuestion
+      break
+    }
+
+    /*
+     * A MEMORY CALL RUNS ON THE RELAY, NOT ON THE PAGE — so it goes to the
+     * hive's memory routes and never near the outward guard: consulting or
+     * saving a fact is not a page effect and must not park a run. It is still
+     * journaled (the run record should show the consult) and it still spends
+     * a step: a lookup is an inference turn like any other, and a model
+     * looping on memory reads should run out of patience like a model looping
+     * on a page.
+     */
+    if (turn.local) {
+      const call = turn.call
+      try {
+        const descriptor =
+          call.type === 'memory_save'
+            ? /* The node name is this device's relay address — the identity
+               * every other relay call already answers to. Saves are always
+               * scope 'hive' (pinned in memorySaveRequest): this browser has
+               * no local durable store, so a node-scoped fact saved here
+               * would be a fact saved nowhere. */
+              memorySaveRequest(relayConfig.relayDeviceId, call.params)
+            : memoryLookupRequest(call.params)
+        const payload = await relayFetch(relayConfig, descriptor)
+        const compact = compactMemoryResult(call.type, call.params, payload)
+        await journal.recordStep(id, {
+          tool: call.type,
+          /* EFFECT_READ on purpose, even for a save: the effect vocabulary
+           * grades what happened to PAGES, and honestVerdict must not count a
+           * remembered fact as a page interaction it can claim. */
+          effect: EFFECT_READ,
+          ok: true,
+          summary: compact.slice(0, 300),
+        })
+        transcript.pushResult(compact)
+      } catch (error) {
+        const message = error?.message || String(error)
+        await journal.recordStep(id, {
+          tool: call.type,
+          effect: EFFECT_READ,
+          ok: false,
+          summary: message.slice(0, 300),
+        })
+        transcript.pushResult(`That step failed: ${message}`)
+      }
+      steps += 1
+      continue
     }
 
     /* A tool call. The guard decides whether it may run unattended. */
@@ -1031,12 +1117,27 @@ async function runBrainLocally({ id, command, page, config, relayConfig }) {
   }
 
   const exhausted = steps >= BRAIN_MAX_STEPS && !answer && !parked.length
-  const verdict = honestVerdict({
-    command,
-    steps: executed,
-    parked,
-    response: answer,
-  })
+  /*
+   * A clarify run finishes AS THE QUESTION: the headline is what the model
+   * needs to know, verbatim, and the verdict names the state honestly —
+   * nothing was achieved and nothing failed; it is waiting on the owner. The
+   * honest-verdict machinery is skipped because it grades page effects, and
+   * "(Read-only: opened and read pages...)" spliced onto a question would
+   * bury the one line the owner must read.
+   */
+  const verdict = clarifyQuestion
+    ? {
+        verdict: 'needs-answer',
+        headline: clarifyQuestion,
+        detail:
+          'Needs your answer — reply in the console. Nothing ran past this question.',
+      }
+    : honestVerdict({
+        command,
+        steps: executed,
+        parked,
+        response: answer,
+      })
 
   await journal.finishRun(id, {
     state: parked.length ? 'parked' : 'finished',

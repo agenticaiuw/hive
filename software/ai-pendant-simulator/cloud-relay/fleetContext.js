@@ -10,28 +10,25 @@
  * OpenAI Realtime prompt caching: put unchanging text first; device state after.
  * Cached text input on gpt-realtime-2.1 is billed far below uncached rates.
  *
- * The memory section is no longer written here. It is a projection of the
- * cross-surface event log (shared/fleetMemory.js), scoped to the surface that
- * is asking and to what was actually asked. This file's job is to place that
- * block correctly in the prompt and to bound it; deciding what belongs in it is
- * not a relay concern, and when it was, only one body could contribute to it.
+ * There is NO memory section in the prompt anymore, and that is the design,
+ * not a gap. The owner, 2026-08-12: "Memories are not doing anything useful
+ * right now… not just generic memories that all get added to the system
+ * prompt." Remembered facts now live in the fleet document's `domainMemory`
+ * hive block (shared/domainMemory.js) and are fetched per capability domain
+ * AT TOOL-SELECTION TIME (openaiRealtimeVoice.js) — attached to that tool's
+ * result, never spliced into instructions. This file only normalizes the
+ * block so it rides the snapshot as data.
  */
-import { projectFleetMemory } from '../shared/fleetMemory.js'
+import {
+  DOMAIN_MEMORY_FIELD,
+  normalizeDomainMemoryBlock,
+} from '../shared/domainMemory.js'
 
 export const FLEET_STATE_KEY = 'fleet'
 export const MAX_APPLICATIONS_IN_PROMPT = 220
 export const MAX_SHORTCUTS_IN_PROMPT = 40
 export const MAX_CLI_TOOLS_IN_PROMPT = 180
 export const MAX_BROWSER_DEVICES = 6
-export const MAX_MEMORY_LINE = 160
-
-/*
- * Ceiling for the projected memory block the Mac sends in memory.text. The
- * projection budgets itself (200 tokens ≈ 800 chars), but that budget lives on
- * the Mac and this is the relay: a bridge running old or misconfigured code
- * must not be able to push an unbounded string into every voice turn's prompt.
- */
-export const MAX_MEMORY_TEXT_CHARS = 2000
 
 /**
  * Static system instructions (cacheable prefix).
@@ -179,8 +176,6 @@ export function normalizeFleetSnapshot(raw) {
   const pendant =
     data.pendant && typeof data.pendant === 'object' ? data.pendant : {}
   const cloud = data.cloud && typeof data.cloud === 'object' ? data.cloud : {}
-  const memory =
-    data.memory && typeof data.memory === 'object' ? data.memory : {}
 
   // Sort BEFORE capping: on a Mac with more than MAX_APPLICATIONS_IN_PROMPT
   // discovered apps, discovery-order slicing would change WHICH apps survive
@@ -271,32 +266,16 @@ export function normalizeFleetSnapshot(raw) {
         ? cloud.integrations.map((x) => String(x).trim()).filter(Boolean)
         : [],
     },
-    memory: {
-      /*
-       * A ready-made prompt block. Two things produce one: the cross-surface
-       * projection assembled in loadFleetFromStore(), and — until the bridge
-       * appends events instead — the Mac's own single-node projection arriving
-       * through fleet state. The relay does not know which facts exist or what
-       * they cost, so it does not summarize; it bounds and places.
-       */
-      text: clipText(memory.text, MAX_MEMORY_TEXT_CHARS),
-      /*
-       * Fallback for the agent-snapshot path in loadFleetFromStore(), which
-       * reads the raw context graph and has no projection to offer. Without
-       * these the voice agent would lose memory entirely whenever the
-       * dedicated fleet state is missing.
-       */
-      workingProject: memory.workingProject
-        ? String(
-            memory.workingProject.name ||
-              memory.workingProject.title ||
-              memory.workingProject,
-          ).slice(0, MAX_MEMORY_LINE)
-        : null,
-      latestPerson: clip(memory.latestPerson?.name || memory.latestPerson),
-      latestTask: clip(memory.latestTask?.name || memory.latestTask),
-      latestFile: clip(memory.latestFile?.name || memory.latestFile),
-    },
+    /*
+     * The hive block, normalized and carried as DATA for tool-time attach —
+     * never prompt stuffing. The owner: "tools should be combined with
+     * memories"; the voice brain fetches a domain's facts when it selects that
+     * domain's tool (openaiRealtimeVoice.js), so the facts ride the snapshot
+     * but stay OUT of formatFleetSnapshotForPrompt below.
+     */
+    [DOMAIN_MEMORY_FIELD]: normalizeDomainMemoryBlock(
+      data[DOMAIN_MEMORY_FIELD],
+    ),
   }
 }
 
@@ -314,16 +293,6 @@ export function fleetFromAgentSnapshot(agentSnapshot, { devices = [] } = {}) {
   const browser = status.browser || agentSnapshot?.browser || {}
   const agent = status.agent || agentSnapshot?.agent || {}
   const permissions = agent.permissions || status.permissions || {}
-  const memory =
-    status.memory ||
-    agentSnapshot?.context?.memory ||
-    agentSnapshot?.memory ||
-    {}
-  const workingProject =
-    status.workingProject ||
-    agentSnapshot?.context?.workingProject ||
-    agentSnapshot?.workingProject ||
-    null
 
   // Prefer full list if the Mac pushed it; else fall back to topApps.
   const applications = Array.isArray(machine.applications)
@@ -376,15 +345,10 @@ export function fleetFromAgentSnapshot(agentSnapshot, { devices = [] } = {}) {
       integrations: [],
       macBridgeLastSeen: macBridge?.lastSeenAt || null,
     },
-    memory: {
-      // Present only if the Mac put one in /ops/snapshot; this path normally
-      // has just the raw graph, which is why the latest* fallback survives.
-      text: memory.text || null,
-      workingProject,
-      latestPerson: memory.latestPerson,
-      latestTask: memory.latestTask,
-      latestFile: memory.latestFile,
-    },
+    // Present only if the Mac put a hive block in /ops/snapshot; normalize
+    // strips anything that is not a well-formed hive fact either way.
+    [DOMAIN_MEMORY_FIELD]:
+      status[DOMAIN_MEMORY_FIELD] || agentSnapshot?.[DOMAIN_MEMORY_FIELD] || null,
   })
 }
 
@@ -411,8 +375,8 @@ export function formatFleetSnapshotForPrompt(
    * Ordering is prompt-cache load-bearing: OpenAI caches the longest
    * byte-identical prefix (min 1024 tokens). Stable facts (surfaces, cloud,
    * sorted app inventory) come first so the cacheable prefix extends well past
-   * the minimum; anything that churns between presses (active tab, memory,
-   * as_of) sits at the very end. Do not add timestamps above the inventory.
+   * the minimum; anything that churns between presses (active tab, as_of)
+   * sits at the very end. Do not add timestamps above the inventory.
    */
   const lines = ['## Live environment']
 
@@ -506,22 +470,12 @@ export function formatFleetSnapshotForPrompt(
   }
 
   /*
-   * Projected memory sits ABOVE the volatile tail, unlike the `### Recent
-   * context` line it replaces. That line was correctly treated as volatile —
-   * it was rebuilt from whatever entity the graph touched last, so a single
-   * file open changed it. A projection is ordered stable-first by whichever
-   * body built it (fleetMemory.js and contextProjection.js apply the same rule:
-   * preferences first, sorted by key), so its head is byte-identical between
-   * turns and only earns its place in the cacheable prefix if it is emitted
-   * before the active tab and the clock.
-   *
-   * Headings are demoted one level: the projection is a standalone document
-   * with `##` headings, and pasting those in mid-section would orphan the
-   * environment blocks below it under `## Relevant`.
+   * NO memory section here, deliberately — the owner's verdict on the old
+   * splice: "not just generic memories that all get added to the system
+   * prompt." The hive block rides fleet.domainMemory as data; the voice brain
+   * attaches a domain's facts to a tool's result when it selects that
+   * domain's tool. The prompt carries environment facts only.
    */
-  if (fleet.memory.text) {
-    lines.push(fleet.memory.text.replace(/^## /gm, '### '))
-  }
 
   // ---- Volatile tail (changes between presses; kept below the cache line) ----
   if (fleet.browser.online && fleet.browser.devices.length) {
@@ -536,22 +490,6 @@ export function formatFleetSnapshotForPrompt(
         device.tabCount != null && `tabs=${device.tabCount}`,
       ].filter(Boolean)
       lines.push(`- ${bits.join(' · ')}`)
-    }
-  }
-
-  // Light memory — only when the Mac sent no projection (agent-snapshot
-  // fallback path). These are last-touched entity names with no provenance or
-  // expiry, so they stay in the volatile tail where they belong.
-  if (!fleet.memory.text) {
-    const memBits = [
-      fleet.memory.workingProject && `project=${fleet.memory.workingProject}`,
-      fleet.memory.latestPerson && `person=${fleet.memory.latestPerson}`,
-      fleet.memory.latestTask && `task=${fleet.memory.latestTask}`,
-      fleet.memory.latestFile && `file=${fleet.memory.latestFile}`,
-    ].filter(Boolean)
-    if (memBits.length) {
-      lines.push('### Recent context')
-      lines.push(memBits.join(' · '))
     }
   }
 
@@ -599,10 +537,11 @@ export function buildFleetPayloadFromLocal({
   machine = null,
   browser = null,
   permissions = null,
-  memory = null,
-  memoryText = null,
-  workingProject = null,
   speaker = null,
+  /* The Mac's hive facts: { facts: [...] } or a full block. Replaces the old
+   * memory/memoryText/workingProject trio — capability-domain facts are the
+   * only memory that crosses this wire now. */
+  domainMemory = null,
 } = {}) {
   const applications = Array.isArray(machine?.applications)
     ? machine.applications
@@ -657,39 +596,18 @@ export function buildFleetPayloadFromLocal({
       integrations: [],
     },
     /*
-     * With a projection in hand the entity objects are dead weight on the
-     * wire: normalizeFleetSnapshot() reduces each of them to a name anyway, so
-     * the bridge was PUTting a whole working-project record (open threads,
-     * notes, goals) per heartbeat to produce one short line of prompt. Send the
-     * projection alone; the fields below exist only for a bridge that has no
-     * projection to send.
+     * The hive block as data, shaped for the relay-side merge. The PUT
+     * handler (server.js) MERGES this into the stored block rather than
+     * trusting it wholesale, so a bridge restart carrying an empty list can
+     * never erase facts the voice loop saved. Facts are passed through, not
+     * normalized here — the merge rejects malformed or node-scoped entries
+     * and reports them, which beats dropping them silently on the Mac.
      */
-    memory: memoryText
-      ? { text: memoryText }
-      : {
-          workingProject: workingProject || null,
-          latestPerson: memory?.latestPerson || null,
-          latestTask: memory?.latestTask || null,
-          latestFile: memory?.latestFile || null,
-        },
+    [DOMAIN_MEMORY_FIELD]: {
+      version: 1,
+      facts: Array.isArray(domainMemory?.facts) ? domainMemory.facts : [],
+    },
   }
-}
-
-/* Multi-line prompt block: keep the newlines, drop the runaway length. */
-function clipText(value, maxChars) {
-  const text = String(value ?? '').trim()
-  if (!text) return null
-  return text.length > maxChars ? text.slice(0, maxChars).trimEnd() : text
-}
-
-function clip(value) {
-  if (value == null) return null
-  if (typeof value === 'object') {
-    const name = value.name || value.title || value.label
-    return name ? String(name).slice(0, MAX_MEMORY_LINE) : null
-  }
-  const text = String(value).trim()
-  return text ? text.slice(0, MAX_MEMORY_LINE) : null
 }
 
 function isRecent(iso, windowMs = 120_000) {
@@ -703,35 +621,14 @@ function isRecent(iso, windowMs = 120_000) {
  * Load fleet for a Realtime session from the relay store.
  * Prefers dedicated fleet state; falls back to agent-snapshot.
  *
- * `surface` and `task` are what turn this from a snapshot read into a
- * projection read. Existing callers pass neither and still get the cross-surface
- * memory they never had; a caller that knows what was said should pass it,
- * because relevance is the only thing that makes a memory block cheap and the
- * relay is the one body that has the words.
+ * No memory projection is folded in anymore — the snapshot carries the
+ * normalized domainMemory block as data, and the voice brain reads facts
+ * through its domainMemory session option (domainMemoryRelay.js) at
+ * tool-selection time instead.
  */
-export async function loadFleetFromStore(store, options = {}) {
+export async function loadFleetFromStore(store) {
   if (!store) return null
-
-  const fleet = await loadFleetSnapshot(store)
-  // Memory alone is not a fleet. Synthesizing a snapshot around it would report
-  // "mac: offline" from an absence of telemetry rather than from telemetry,
-  // which is a different and worse claim.
-  if (!fleet) return null
-
-  const projection = await projectFleetMemoryFromStore(store, {
-    ...options,
-    // Whatever the Mac pushed is merged INTO the projection under one budget,
-    // not emitted beside it. Two memory blocks in one prompt pay twice for one
-    // idea; this branch disappears when the bridge appends events instead.
-    inheritedText: fleet.memory.text,
-  })
-
-  if (projection?.text) {
-    fleet.memory = { ...fleet.memory, text: projection.text }
-    fleet.memoryProjection = projection.stats
-  }
-
-  return fleet
+  return loadFleetSnapshot(store)
 }
 
 async function loadFleetSnapshot(store) {
@@ -756,45 +653,4 @@ async function loadFleetSnapshot(store) {
   }
 
   return null
-}
-
-/**
- * Read the memory log and project it for one surface.
- *
- * Best-effort by design, like every other read in this file: a store with no
- * memory tables, or a store that throws, costs the voice agent the projection
- * and nothing else. Losing memory quality is survivable; losing the fleet
- * snapshot because a memory read failed is not.
- */
-export async function projectFleetMemoryFromStore(
-  store,
-  {
-    surface = 'voice',
-    task = '',
-    now = Date.now(),
-    // The relay already lets a projection this large into a prompt
-    // (MAX_MEMORY_TEXT_CHARS), so asking for it is not asking for anything new.
-    // It is a ceiling, not a target: the projection spends only what it has.
-    budgetBytes = MAX_MEMORY_TEXT_CHARS,
-    inheritedText = null,
-  } = {},
-) {
-  if (typeof store?.listMemoryEvents !== 'function') {
-    return inheritedText ? { text: inheritedText, eventIds: [], stats: null } : null
-  }
-
-  try {
-    const events = await store.listMemoryEvents({ now })
-    const projection = projectFleetMemory({
-      events,
-      surface,
-      task,
-      now,
-      budgetBytes,
-      inheritedText,
-    })
-    return projection.text ? projection : null
-  } catch {
-    return inheritedText ? { text: inheritedText, eventIds: [], stats: null } : null
-  }
 }

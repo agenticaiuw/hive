@@ -56,7 +56,12 @@ import {
   G711_SAMPLE_RATE,
   REALTIME_PCM_RATE,
 } from './openaiRealtimeVoice.js'
-import { loadFleetFromStore } from './fleetContext.js'
+import { FLEET_STATE_KEY, loadFleetFromStore } from './fleetContext.js'
+import {
+  DOMAIN_MEMORY_FIELD,
+  mergeDomainMemory,
+} from '../shared/domainMemory.js'
+import { createDomainMemoryRelay, readDomainMemory } from './domainMemoryRelay.js'
 import { requiredScopesForRequest } from './relayScopes.js'
 import { synthesizeSpeech } from './speak.js'
 import { getCloudflareBindings } from './cloudflareBindings.js'
@@ -799,10 +804,90 @@ app.put('/v1/state/:stateKey', async (request, response) => {
   }
 
   const store = await getStore()
-  const state = await store.saveState(stateKey, data, {
+
+  /*
+   * The fleet document has TWO writers that never coordinate: the Mac's
+   * heartbeat PUT and the voice loop's memory_save. A plain overwrite would
+   * let whichever wrote last clobber the other's hive facts, so the
+   * domainMemory block is MERGED here (union by key, newest wins, node-scoped
+   * rejected) instead of replaced — that merge is what makes the fleet-state
+   * channel safe for both bodies. Everything else in the document still
+   * belongs wholly to the writer. The merged block rides back in the response
+   * `state.data.domainMemory`, which is the Mac's write-back read.
+   */
+  let toSave = data
+  if (stateKey === FLEET_STATE_KEY) {
+    const current = await store.getState(FLEET_STATE_KEY).catch(() => null)
+    const merged = mergeDomainMemory(
+      current?.data?.[DOMAIN_MEMORY_FIELD],
+      data?.[DOMAIN_MEMORY_FIELD]?.facts ?? [],
+    )
+    toSave = { ...data, [DOMAIN_MEMORY_FIELD]: merged.block }
+  }
+
+  const state = await store.saveState(stateKey, toSave, {
     updatedBy: updatedBy || 'unknown',
   })
   response.status(201).json({ ok: true, state })
+})
+
+/*
+ * Capability-domain memory over the hive block inside fleet state.
+ *
+ * GET is the read every node's brain performs when a domain's tool is
+ * selected — "tools should be combined with memories" — and POST is how a
+ * node contributes facts it captured. Both operate on the ONE shared block,
+ * so a fact saved by voice is readable by the Mac planner and the browser
+ * brain on their next fetch.
+ */
+app.get('/v1/memory/domains', async (request, response) => {
+  const domain =
+    String(request.query.domain || '').trim().toLowerCase() || null
+  const query = String(request.query.query || '').trim()
+  const rawLimit = Number(request.query.limit)
+  const limit =
+    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 50) : 8
+
+  const store = await getStore()
+  const { facts, lines } = await readDomainMemory(store, {
+    domain,
+    query,
+    limit,
+  })
+  response.set('Cache-Control', 'private, no-store')
+  response.json({ ok: true, domain, facts, lines })
+})
+
+app.post('/v1/memory/domains', async (request, response) => {
+  const facts = request.body?.facts
+  if (!Array.isArray(facts) || facts.length === 0) {
+    response.status(400).json({
+      ok: false,
+      error: 'facts must be a non-empty array of {domain, name, value} facts.',
+    })
+    return
+  }
+
+  /*
+   * The node stamp is attribution, not routing: it records which body
+   * captured the fact. The caller's claim is preferred, the credential's
+   * deviceId is the fallback — an admin caller with no body of its own is
+   * stamped 'admin' rather than left 'unknown'.
+   */
+  const node =
+    String(request.body?.node || '').trim() ||
+    (request.relayPrincipal?.kind === 'device'
+      ? request.relayPrincipal.deviceId
+      : 'admin')
+
+  const store = await getStore()
+  const relay = createDomainMemoryRelay({
+    store,
+    node,
+    updatedBy: node,
+  })
+  const stats = await relay.save(facts.map((fact) => ({ ...fact, node })))
+  response.status(201).json({ ok: true, ...stats })
 })
 
 /*
@@ -1551,6 +1636,9 @@ app.post('/v1/pendant/command', async (request, response) => {
               onAudioDelta: wantsReplyStream ? onReplyDelta : null,
               inputFormat: ulawUpload ? 'pcmu' : 'pcm',
               outputFormat: replyIsUlaw ? 'pcmu' : 'pcm',
+              /* Same memory seam as the duplex socket: domain facts fetched
+               * at tool selection, deliberate saves via memory_save. */
+              domainMemory: createDomainMemoryRelay({ store }),
               deviceTime:
                 String(request.get('x-device-time') || '').trim() || null,
               onEarlyPlan: async (earlyPlan) => {

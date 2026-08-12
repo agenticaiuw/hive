@@ -36,6 +36,16 @@ import { synchronizeProductState } from './productSyncClient.js'
 import { classifyPlanForRoutine, classifyPlanForVoice } from './actionRisk.js'
 import { prepareAction } from './prepareApprove.js'
 import { stripImageBytes } from './redaction.js'
+/*
+ * The bridge runs ON the Mac, so it reads and writes the domain-fact store
+ * directly rather than over HTTP. (GET /memory/domains exists on the agent
+ * for readers that live out of process.)
+ */
+import { listDomainFacts, rememberDomainFact } from './memoryService.js'
+import {
+  DOMAIN_MEMORY_FIELD,
+  normalizeDomainFact,
+} from '../shared/domainMemory.js'
 import {
   createRateLimitedErrorReporter,
   createRetryBackoff,
@@ -904,38 +914,15 @@ async function syncAgentSnapshot() {
 }
 
 /**
- * Ask the Mac what the voice agent should know right now.
- *
- * The projection is task-scoped by design, but this is a heartbeat: nobody has
- * spoken yet, so there is no task to scope to and the query is deliberately
- * empty. What comes back is the surface-stable core — preferences, standing
- * permissions, open tasks — which is the part worth caching in the prompt
- * prefix anyway. Per-utterance scoping would have to happen in the relay, at
- * the point where the words actually exist.
- *
- * Returns null on any failure so the caller falls back to the legacy entity
- * fields: a projection outage should cost the voice agent context quality, not
- * its whole fleet snapshot.
- */
-async function fetchVoiceMemoryProjection() {
-  try {
-    const projected = await callLocalAgent(
-      '/memory/projection?surface=voice',
-      { method: 'GET' },
-    )
-    const text = String(projected?.text || '').trim()
-    return text || null
-  } catch (error) {
-    console.warn(
-      `[bridge] Memory projection unavailable, using entity fallback: ${error.message}`,
-    )
-    return null
-  }
-}
-
-/**
  * Push a cache-friendly fleet world-model to the relay for Realtime instructions.
  * Built from live Mac discovery — no hard-coded app or command lists.
+ *
+ * MEMORY ON THIS CHANNEL IS THE HIVE BLOCK, nothing else. The generic voice
+ * projection this heartbeat used to fetch is gone with the rest of the
+ * prompt-stuffed memory ("not just generic memories that all get added to the
+ * system prompt"): what travels now is the owner's hive-scoped domain facts,
+ * which the relay merges (mergeDomainMemory, newest-wins by key) so this PUT
+ * can never clobber what the voice loop saved. Node-scoped facts never board.
  */
 async function syncFleetContext(snapshot) {
   try {
@@ -947,10 +934,7 @@ async function syncFleetContext(snapshot) {
       machine: status.machine || null,
       browser: status.browser || null,
       permissions: status.agent?.permissions || status.permissions || null,
-      memory: status.memory || snapshot?.context?.memory || null,
-      memoryText: await fetchVoiceMemoryProjection(),
-      workingProject:
-        status.workingProject || snapshot?.context?.workingProject || null,
+      domainMemory: { facts: readHiveFacts() },
       speaker: process.env.PENDANT_SPEAKER_NAME || null,
     })
     const response = await fetch(`${RELAY_URL}/v1/state/fleet`, {
@@ -961,12 +945,55 @@ async function syncFleetContext(snapshot) {
         updatedBy: BRIDGE_DEVICE_ID,
       }),
     })
+    const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
       throw new Error(payload.error || `relay returned ${response.status}`)
     }
+    /*
+     * WRITE-BACK: the PUT answers with the MERGED hive block, which is how
+     * facts captured by the other bodies (voice, browser) reach the Mac
+     * planner without a second transport. Mirrored locally so the next
+     * planner turn can fetch them; best-effort — a bad fact or a wedged
+     * store must never fail the heartbeat.
+     */
+    mirrorHiveFacts(payload?.state?.data?.[DOMAIN_MEMORY_FIELD]?.facts)
   } catch (error) {
     console.warn(`[bridge] Fleet context sync failed: ${error.message}`)
+  }
+}
+
+/** The hive-scoped domain facts this Mac holds. Empty on any store trouble. */
+function readHiveFacts() {
+  try {
+    return listDomainFacts({ scope: 'hive' })
+  } catch (error) {
+    console.warn(`[bridge] Domain memory unavailable: ${error.message}`)
+    return []
+  }
+}
+
+/**
+ * Store the hive facts OTHER nodes captured. This bridge's own facts (node
+ * 'mac', or stamped with this bridge's device id) round-tripped through the
+ * merge and are already on disk — re-writing them would only churn updatedAt.
+ */
+function mirrorHiveFacts(facts) {
+  try {
+    for (const entry of Array.isArray(facts) ? facts : []) {
+      const node = String(entry?.node ?? '')
+      if (node === BRIDGE_DEVICE_ID || node === 'mac') continue
+      try {
+        /* Re-normalized on arrival: the relay is trusted, but a fact is model-
+         * written upstream and one bad row must not spoil the mirror. */
+        rememberDomainFact(normalizeDomainFact(entry), {
+          origin: 'domain-capture',
+        })
+      } catch {
+        continue
+      }
+    }
+  } catch (error) {
+    console.warn(`[bridge] Hive memory mirror failed: ${error.message}`)
   }
 }
 

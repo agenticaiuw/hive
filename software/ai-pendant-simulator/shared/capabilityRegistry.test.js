@@ -2,7 +2,7 @@
  * One file for the whole contract: naming, resolution, the verdict, evidence,
  * composition, and the Express adapter driving a real Express app.
  *
- * Together on purpose, in the style of shared/fleetMemory.test.js. The
+ * Together on purpose. The
  * interesting failures here are not inside any one layer, they are between
  * them: a normalizer that collapses two routes the resolver then reports as
  * ambiguous forever, an adapter that derives routes correctly but probes the
@@ -814,8 +814,7 @@ test('a snapshot from another version is refused rather than half-read', () => {
 })
 
 test('the surface vocabulary is shared with fleet memory', () => {
-  /* MEMORY_SURFACES in shared/fleetMemory.js, not imported: that module reaches
-   * into local-agent/redaction.js and belongs to another change in flight. The
+  /* The memory wire's surface vocabulary, not imported — pinned by value. The
    * four must stay a prefix of this list — a body named one way for facts and
    * another for capabilities is a body nothing can join on. */
   assert.deepEqual(CAPABILITY_SURFACES.slice(0, 4), ['voice', 'mac', 'browser', 'ios'])

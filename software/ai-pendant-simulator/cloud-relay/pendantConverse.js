@@ -32,7 +32,7 @@ import { createAudioCapture } from './jobs.js'
 import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
 import { getStore } from './store/index.js'
 import { loadFleetFromStore } from './fleetContext.js'
-import { createSpokenMemoryWriter } from '../shared/spokenMemory.js'
+import { createDomainMemoryRelay } from './domainMemoryRelay.js'
 import { persistAudioCapture } from './audioStorage.js'
 import { pcmS16leToWavBuffer } from './rawAudio.js'
 import {
@@ -54,6 +54,7 @@ import {
 import { speakNextApproval } from './approvalStore.js'
 import {
   answerSpokenApproval,
+  decideNextPendingApproval,
   isPendantRoutedApproval,
 } from './approvalDelivery.js'
 import { registerConverseSession } from './converseSessions.js'
@@ -297,21 +298,19 @@ export async function handlePendantConverse(request, context) {
       return job
     }
 
-    /*
-     * The write end of cross-surface memory, and until now there was none: the
-     * relay has been folding an empty log into every prompt while the only
-     * body that could write memory was the Mac, for utterances that reached
-     * the Mac. Scoped to one conversation so its byte budget cannot be spent
-     * by yesterday, and fire-and-forget below because a fact is worth less
-     * than the audio path it would otherwise be able to stall.
-     */
-    const spokenMemory = createSpokenMemoryWriter({ store })
-
     state.session = await createStreamingRealtimeSession({
       inputSampleRate: OPUS_WIRE_SAMPLE_RATE,
       fleet: loadFleetFromStore(store).catch(() => null),
       audioOut: true,
       conversation: true,
+      /*
+       * Capability-domain memory, replacing the generic spoken-memory tier
+       * the owner deleted ("delete all of these bullshits"): deliberate
+       * saves now go through the model's memory_save tool, and each domain's
+       * facts are fetched when that domain's tool is selected. The closures
+       * read and merge the hive block in fleet state (domainMemoryRelay.js).
+       */
+      domainMemory: createDomainMemoryRelay({ store }),
       deviceTime: String(startMsg.deviceTime || '').trim() || null,
       onAudioDelta: (pcm) => {
         state.lastActivityAt = Date.now()
@@ -371,26 +370,12 @@ export async function handlePendantConverse(request, context) {
             })
         }
         /*
-         * Only the owner's own words. The model's reply is the model agreeing
-         * with itself, and a log that remembers what it said last turn is how
-         * a memory system talks itself into a fact nobody stated.
+         * No automatic transcript capture here anymore. The generic
+         * spoken-memory tier scraped every utterance into an event log that
+         * fed the prompt; the owner's verdict was to delete it. A fact is
+         * remembered when the model calls memory_save on purpose — the
+         * deliberate verb — and read when a domain's tool is selected.
          */
-        if (turn.transcript) {
-          spokenMemory.remember(turn.transcript).then(
-            (result) => {
-              // Counts and keys only. A skipped-for-sensitivity result carries
-              // the subject and never the value, and this is where that matters.
-              if (result.appended) {
-                console.log(
-                  `[converse] memory: +${result.appended} event(s), ${result.bytes} B`,
-                )
-              } else if (result.error) {
-                console.warn(`[converse] memory write failed: ${result.error}`)
-              }
-            },
-            (error) => console.warn(`[converse] memory write: ${error?.message}`),
-          )
-        }
       },
       onUserSpeech: () => {
         state.lastActivityAt = Date.now()
@@ -918,6 +903,82 @@ export async function handlePendantConverse(request, context) {
       }
       if (msg?.type === 'stop') {
         void endConversation('stopped')
+        return
+      }
+      /*
+       * Hardware-control frames (firmware/CONTROLS_WIRING.md). These arrive
+       * on the idle socket as readily as mid-conversation — the firmware's
+       * WS I/O thread sends them whenever the socket is open — so none of
+       * them may assume `convo` exists.
+       */
+      if (msg?.type === 'approval_decision') {
+        // Blue button: press = approve, ≥1.5 s hold = deny. If this
+        // conversation just read an approval back, the thumb answers THAT
+        // record; otherwise the oldest live pendant-routed one.
+        const decision = String(msg.decision ?? '').trim().toLowerCase()
+        const state = convo
+        void (async () => {
+          const store = state?.store ?? (await getStore())
+          const result = await decideNextPendingApproval({
+            store,
+            deviceId: state?.deviceId ?? deviceIdHeader,
+            approvalId: state?.pendingApprovalAnswer ?? null,
+            decision,
+            decidedBy: 'pendant-button',
+          })
+          if (
+            state?.pendingApprovalAnswer &&
+            ['settled', 'already_settled', 'expired'].includes(result.code)
+          ) {
+            state.pendingApprovalAnswer = null
+          }
+          console.log(
+            `[converse] button approval ${decision}: ${result.code}` +
+              (result.approvalId ? ` id=${result.approvalId}` : '') +
+              (result.state ? ` state=${result.state}` : ''),
+          )
+          // Close the loop in the owner's ear when a conversation is live —
+          // a silent grant from a button feels identical to a dead button.
+          if (state && !state.ended && result.ok) {
+            await speakApprovalLine(
+              state,
+              decision === 'approve' ? 'Approved.' : 'Cancelled. Nothing will run.',
+            )
+          }
+        })().catch((error) => {
+          console.warn(`[converse] approval button: ${error?.message || error}`)
+        })
+        return
+      }
+      if (msg?.type === 'menu' || msg?.type === 'menu_select') {
+        /*
+         * Rotary encoder navigation. The relay has no menu model yet, so
+         * parsing-and-logging IS the current contract: the frames must not
+         * fall through as unknown text, and the log line is what hardware
+         * bring-up reads to prove the knob's detents arrive with the right
+         * sign and count.
+         */
+        const delta = Number(msg.delta)
+        console.log(
+          `[converse] menu control from ${deviceIdHeader}: ` +
+            (msg.type === 'menu' && Number.isFinite(delta)
+              ? `step ${delta > 0 ? '+1' : '-1'}`
+              : 'select'),
+        )
+        return
+      }
+      if (msg?.type === 'mic_muted') {
+        /*
+         * The owner pressed talk with the red switch holding mic power off.
+         * No conversation follows (the firmware refuses to record a dead
+         * mic), and today's firmware only plays audio inside a started
+         * conversation — so a spoken "your mic is muted" cannot reach the
+         * owner yet. The device's LED pattern carries the message locally;
+         * this log preserves the fact for the dashboard/ops trail.
+         */
+        console.log(
+          `[converse] ${deviceIdHeader} pressed talk while hard-muted (mic power cut)`,
+        )
         return
       }
       return

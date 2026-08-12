@@ -65,7 +65,7 @@ const DOMAIN_NOTES = {
   files: 'Read, write, search, move and tidy files and folders.',
   info: 'Weather, time, translation.',
   input: 'Click, type, menus and native Mac app windows.',
-  memory: 'Save and recall things the owner said.',
+  memory: 'Save and recall owner facts: accounts, lists, sites, places, things they said.',
   phone: "The owner's real iPhone.",
   screen: 'Capture and inspect the Mac screen.',
   shell: 'Shell commands and AppleScript.',
@@ -137,7 +137,10 @@ const DOMAIN_RULES = [
     domain: 'input',
     exact: ['computer_use_task', 'press_keys', 'scroll', 'type_text'],
   },
-  { domain: 'memory', exact: ['quick_capture', 'recall_capture'] },
+  {
+    domain: 'memory',
+    exact: ['memory_lookup', 'memory_save', 'quick_capture', 'recall_capture'],
+  },
   {
     domain: 'screen',
     exact: [

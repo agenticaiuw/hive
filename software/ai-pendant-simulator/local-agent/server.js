@@ -122,15 +122,15 @@ import {
 } from './projectMemory.js'
 import {
   forgetFact,
+  listDomainFacts,
   listFacts,
   memoryLocation,
   pruneFacts,
   rememberBrowserFindings,
   rememberFact,
   syncFactsFromContextGraph,
-  touchFacts,
 } from './memoryService.js'
-import { projectContext } from './contextProjection.js'
+import { executeMemoryLookup } from './domainMemoryActions.js'
 import {
   clearSessionTurns,
   createSession,
@@ -2337,8 +2337,8 @@ app.get('/forms/fills/:fillId', (request, response) => {
 })
 
 /*
- * Scoped memory: facts with provenance, and the projection that decides which
- * of them are worth a prompt. See memoryService.js / contextProjection.js.
+ * Scoped memory: facts with provenance, plus the capability-domain tier the
+ * planner fetches on tool selection. See memoryService.js / shared/domains.
  */
 app.get('/memory/facts', (request, response) => {
   response.json({
@@ -2390,20 +2390,26 @@ app.post('/memory/sync-graph', (request, response) => {
 })
 
 /*
- * The prompt-facing front door: a surface asks what it needs to know for one
- * task and gets back text, not the store. Reading marks the facts used, which
- * is what lets pruning tell a load-bearing fact from one nobody has read.
+ * Domain facts, for out-of-process readers — the dashboard, and any body that
+ * cannot import the store directly (the bridge imports it; others read here).
+ * With a domain it is exactly the planner's memory_lookup; without one it is
+ * the whole 'dom.' tier in the shared shape. Same auth as every /memory route.
  */
-app.get('/memory/projection', (request, response) => {
-  const projected = projectContext({
-    surface: String(request.query.surface || 'voice'),
-    task: String(request.query.task || ''),
-    budgetTokens: Number(request.query.budgetTokens) || undefined,
-    revealSensitive: request.query.revealSensitive === 'true',
-    includeWeb: request.query.includeWeb === 'true',
+app.get('/memory/domains', (request, response) => {
+  const domain = String(request.query.domain || '').trim()
+  if (!domain) {
+    response.json({ ok: true, facts: listDomainFacts({}) })
+    return
+  }
+  const result = executeMemoryLookup({
+    domain,
+    query: String(request.query.query || ''),
   })
-  touchFacts(projected.factIds)
-  response.json({ ok: true, ...projected })
+  if (!result.ok) {
+    response.status(404).json({ ok: false, error: result.message })
+    return
+  }
+  response.json({ ok: true, ...result })
 })
 
 if (hasSvelteDashboard) {
