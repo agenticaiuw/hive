@@ -312,6 +312,49 @@ export const REALTIME_TOOLS = [
     },
   },
   /*
+   * The timer, said out loud.
+   *
+   * VOICE PARITY IS THE POINT, not the feature. docs/Screenless_App_Grammar.md
+   * makes it a rule: "anything reachable by the knob must be reachable by
+   * saying it, and vice versa. The knob is for when speaking is awkward;
+   * speech is for when the knob's ring would be too long." This tool and the
+   * Timer app on the ring write to the SAME relay store (timerStore.js), are
+   * swept by the same interval and chime through the same speech path — so
+   * "set a timer for ten minutes" and turning the ring to 10 produce one
+   * timer system, not two that happen to agree today. The knob's ring is six
+   * presets; this is how the owner gets seventeen minutes.
+   *
+   * Answered inside the turn like web_search — the store is the relay's own,
+   * so no Mac job and no queue, and it works with the Mac shut.
+   */
+  {
+    type: 'function',
+    name: 'set_timer',
+    description:
+      "PROACTIVE. Start, cancel, or report the pendant's own countdown timers. Call immediately — no confirmation. Use when: the owner says set/start a timer, how long is left, cancel the timer, wake me in N minutes. Do NOT use when: they want a REMINDER at a wall-clock time or on a date (that is a Mac reminder — mac_run_actions with create_reminder), or they are asking the current time (answer from the clock in your context). The timer lives on the relay: it chimes into an open conversation, and otherwise chimes at the owner's next button press. Speak the returned `spoken` sentence essentially verbatim and never claim a timer was set that this tool did not set.",
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          description: 'What to do with the timers.',
+          enum: ['start', 'cancel', 'status'],
+        },
+        minutes: {
+          type: 'number',
+          description:
+            'How long the timer runs, in minutes. Required for start; fractions are fine ("ninety seconds" is 1.5). Max 1440.',
+        },
+        label: {
+          type: 'string',
+          description:
+            'Optional few words for what the timer is for ("the pasta"), only when the owner said it.',
+        },
+      },
+      required: ['action'],
+    },
+  },
+  /*
    * The deliberate memory verbs, from the shared domain registry. The
    * automatic half — fetching a domain's facts when its tool is selected —
    * lives in handleFunctionCall; these two are what let the model consult
@@ -1045,6 +1088,16 @@ export async function createStreamingRealtimeSession({
    */
   lookupJobStatus = null,
   /*
+   * set_timer backing: the { start, cancel, status } closure bag from
+   * cloud-relay/timerStore.js (createTimerControl), bound to this device.
+   * Injected on the same contract as lookupJobStatus so this module keeps
+   * knowing nothing about the store — and, more importantly, so the voice
+   * timer and the knob timer are the SAME store rather than two that agree.
+   * Null-safe: a session opened without it says it cannot set timers, which
+   * is a different sentence from "no timers are running".
+   */
+  timerControl = null,
+  /*
    * Capability-domain memory access, as two closures (domainMemoryRelay.js):
    *   { lookup: async ({domain, query}) => ({facts, lines}),
    *     save:   async (facts) => stats }
@@ -1397,6 +1450,66 @@ export async function createStreamingRealtimeSession({
         /* Text mode (batch planning): the spoken sentence IS the answer, so
          * carry it as the plan's response rather than leaving the turn to
          * produce a second, unverified paraphrase. */
+        state.response = String(output.spoken || '').trim() || state.response
+        send({
+          type: 'response.create',
+          response: { output_modalities: ['text'] },
+        })
+      }
+      return
+    }
+
+    /*
+     * The pendant's own timers. Answered inside the turn — the store is the
+     * relay's, so no Mac job, no queue, and it still works with the Mac shut,
+     * which matters because a kitchen timer that needs a laptop awake is not
+     * a kitchen timer. state.actions is never touched, so nothing dispatches.
+     */
+    if (name === 'set_timer') {
+      const action = String(args.action || '').trim().toLowerCase()
+      let output
+      if (!timerControl) {
+        output = {
+          ok: false,
+          /* "I can't" and "there are none" are different facts and get
+           * different sentences; collapsing them would have the pendant
+           * report an empty timer list every time the wiring broke. */
+          spoken: "I can't set timers in this session.",
+        }
+      } else {
+        try {
+          if (action === 'cancel') {
+            output = await timerControl.cancel({})
+          } else if (action === 'status') {
+            output = await timerControl.status()
+          } else {
+            const minutes = Number(args.minutes)
+            output = Number.isFinite(minutes) && minutes > 0
+              ? await timerControl.start({
+                  minutes,
+                  label: String(args.label || '').trim() || null,
+                })
+              : { ok: false, spoken: 'How long should the timer run?' }
+          }
+        } catch (error) {
+          output = {
+            ok: false,
+            spoken: String(error?.message || error).slice(0, SPOKEN_MAX_CHARS),
+          }
+        }
+      }
+
+      send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify(output),
+        },
+      })
+      if (audioOut) {
+        requestSpokenReply()
+      } else {
         state.response = String(output.spoken || '').trim() || state.response
         send({
           type: 'response.create',

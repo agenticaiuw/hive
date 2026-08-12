@@ -31,7 +31,37 @@ import {
 import { createAudioCapture } from './jobs.js'
 import { RECALL_JOB_LIMIT, recallJobStatus } from './jobRecall.js'
 import { getStore } from './store/index.js'
-import { loadFleetFromStore } from './fleetContext.js'
+import { loadFleetFromStore, parseDeviceTime } from './fleetContext.js'
+/*
+ * The screenless app framework (docs/Screenless_App_Grammar.md). The pendant
+ * is stateless — it sends {"type":"menu",delta:±1} per detent and
+ * {"type":"menu_select"} per push — so the ring, the mode and the presets all
+ * live HERE, in the conversation's own state. A menu exists only while this
+ * socket is open, which is the honest scope: today's firmware plays no audio
+ * outside a started conversation, and a menu you cannot hear is not a menu.
+ */
+import {
+  createMenuState,
+  currentRing,
+  menuWithAudioDevices,
+  reduceMenuFrame,
+} from './menuRing.js'
+import { renderEarconPcm, renderTimerChimePcm } from './pendantEarcon.js'
+import {
+  appBriefSpeech,
+  appFetchingSpeech,
+  appMacPlan,
+  macUnansweredSpeech,
+  timeSpeech,
+} from './pendantApps.js'
+import {
+  claimDueTimers,
+  createTimerControl,
+  settleClaimedTimer,
+  startTimer,
+  timerOverdueSpeech,
+  timerStartedSpeech,
+} from './timerStore.js'
 import { createDomainMemoryRelay } from './domainMemoryRelay.js'
 import { persistAudioCapture } from './audioStorage.js'
 import { pcmS16leToWavBuffer } from './rawAudio.js'
@@ -74,6 +104,26 @@ const MAX_DOWNLINK_FRAME_BYTES = 500
 /* End the conversation when neither side has said anything for this long. */
 const IDLE_END_MS = 30_000
 const IDLE_SWEEP_MS = 5_000
+/*
+ * How long the knob waits after the last detent before SAYING where it landed.
+ * The blip is instant; the name is not. Spinning through four apps must cost
+ * four blips and one sentence, not four sentences — see the earcon note in
+ * docs/Screenless_App_Grammar.md.
+ */
+const MENU_NAME_SETTLE_MS = 200
+/*
+ * How long an app brief waits on the Mac before it says so out loud.
+ *
+ * Measured, not chosen: the Reminders read takes ~16 s on the owner's Mac
+ * (2026-08-12, bulk-fetch form — the per-item loop never returned at all).
+ * The model's own 9 s status window would therefore make "Your Mac hasn't
+ * answered yet" the usual answer to a question the Mac was about to answer
+ * correctly. 26 s clears the measurement with margin for the bridge's claim
+ * poll, and stays under IDLE_END_MS so the brief still has a live
+ * conversation to land in — the "Checking your reminders." line spoken on
+ * entry refreshes the idle clock, so the window is a full 26 s from there.
+ */
+const APP_BRIEF_WAIT_MS = 26_000
 /* Capture caps mirror the HTTP path's diagnostic limits. */
 const CAPTURE_MAX_BYTES = 7_500_000
 
@@ -225,18 +275,42 @@ export async function handlePendantConverse(request, context) {
        */
       pendingApprovalAnswer: null,
       /*
-       * Approval readbacks run one at a time, in order, on this chain. The
-       * on-connect sweep and any mid-conversation nudge (an approval saved
-       * while this socket is open — converseSessions.js) both feed the same
-       * stateful Opus encoder, so two running concurrently would splice one
-       * prompt into the middle of another. `approvalRunQueued` collapses a
-       * burst of nudges into one pending run: the run reads the STORE when
-       * it starts, so whatever was saved by then gets spoken.
+       * EVERYTHING THE RELAY SAYS ON ITS OWN runs one at a time, in order, on
+       * this one chain: approval readbacks, the menu's earcons and names, an
+       * app's spoken surface, a timer chime. They all feed the same STATEFUL
+       * Opus encoder, so two running concurrently would splice one sound into
+       * the middle of another — a briefing through a readback, a blip through
+       * the word "Calendar". One chain is the only place that invariant can
+       * live. (It was `approvalRuns` when approvals were the only thing the
+       * relay said unprompted; the apps made it general.)
+       *
+       * `approvalRunQueued` still collapses a burst of approval nudges into
+       * one pending run: the run reads the STORE when it starts, so whatever
+       * was saved by then gets spoken.
        */
-      approvalRuns: Promise.resolve(),
+      relaySpeechRuns: Promise.resolve(),
       approvalRunQueued: false,
       /* Set at register time (initConversation); called by endConversation. */
       unregisterSession: null,
+      /*
+       * The app ring, held relay-side because the pendant is stateless. Closed
+       * at the start of every conversation and reset when it ends: the next
+       * press begins at the ring's home position, so the same gesture always
+       * means the same thing.
+       */
+      menu: createMenuState(),
+      /* The settle debounce for the spoken position name (MENU_NAME_SETTLE_MS). */
+      menuNameTimer: null,
+      /* Non-zero while a bt_list is outstanding. A bt_devices frame the owner
+       * did not ask for must not yank the ring out from under them. */
+      audioAskedAt: 0,
+      /* Timer verbs shared with the voice loop, so a knob-set and a voice-set
+       * timer are one system. Built in initConversation once the store exists. */
+      timerControl: null,
+      /* The owner's clock, for the Time app: the pendant's own LTE network
+       * time when it parses, the Mac's reported timezone otherwise. */
+      deviceTime: parseDeviceTime(startMsg.deviceTime, startedAt),
+      timezone: null,
     }
     convo = state
 
@@ -255,6 +329,17 @@ export async function handlePendantConverse(request, context) {
     const { deviceId, startedAt } = state
     const store = await getStore()
     state.store = store
+    /*
+     * One fleet read, two consumers: the model's instructions and the Time
+     * app's timezone. Read once because a second loadFleetFromStore is a
+     * second store round-trip for a string that cannot have changed in the
+     * milliseconds between them.
+     */
+    const fleetPromise = loadFleetFromStore(store).catch(() => null)
+    void fleetPromise.then((fleet) => {
+      state.timezone = fleet?.mac?.timezone || null
+    })
+    state.timerControl = createTimerControl({ store, deviceId })
     state.uploadDecoder = await createOpusUploadDecoder()
     for (const wire of state.pendingWire) {
       try {
@@ -293,6 +378,8 @@ export async function handlePendantConverse(request, context) {
         channels: 1,
         bitsPerSample: 16,
         transcriptionDurationMs: Date.now() - startedAt,
+        /* Yellow: this is the live conversation socket by definition. */
+        pendantMode: 'duplex',
       })
       if (job?.jobId) state.jobs.push(job.jobId)
       return job
@@ -300,7 +387,7 @@ export async function handlePendantConverse(request, context) {
 
     state.session = await createStreamingRealtimeSession({
       inputSampleRate: OPUS_WIRE_SAMPLE_RATE,
-      fleet: loadFleetFromStore(store).catch(() => null),
+      fleet: fleetPromise,
       audioOut: true,
       conversation: true,
       /*
@@ -359,7 +446,9 @@ export async function handlePendantConverse(request, context) {
                * still pending. */
               const retryable = ['confirm_word_alone', 'needs_confirm_word'].includes(outcome.code)
               if (!retryable) state.pendingApprovalAnswer = null
-              if (outcome.speak) void speakApprovalLine(state, outcome.speak)
+              if (outcome.speak) {
+                void queueRelaySpeech(state, () => speakRelayLine(state, outcome.speak))
+              }
               console.log(
                 `[converse] approval ${approvalId} answer: ${outcome.code}` +
                   (outcome.state ? ` state=${outcome.state}` : ''),
@@ -409,6 +498,15 @@ export async function handlePendantConverse(request, context) {
         }
         return null
       },
+      /*
+       * Voice parity, made structural. "Set a timer for ten minutes" and
+       * turning the ring to 10 both land in cloud-relay/timerStore.js, are
+       * both swept by the same interval below, and both chime through the
+       * same speech path. The owner must not be able to tell which hand set
+       * a timer, and the only way to guarantee that is for there to be one
+       * store rather than two implementations that agree today.
+       */
+      timerControl: state.timerControl,
       lookupJobStatus: async ({ reference, jobId }) =>
         recallJobStatus({
           jobs: await store.listJobs({ type: 'plan', limit: RECALL_JOB_LIMIT }),
@@ -448,6 +546,19 @@ export async function handlePendantConverse(request, context) {
     )
 
     state.idleTimer = setInterval(() => {
+      /*
+       * Timers are swept BEFORE the idle check, and on the same interval
+       * rather than a second one. Before, because a chime that comes due in
+       * the same tick that retires the conversation must not lose that race —
+       * the owner set it, it fired, they get told. On the same interval
+       * because the store sweep and the idle sweep want the same cadence and
+       * a worker with two timers is a worker with two things to leak.
+       * Speaking a chime refreshes lastActivityAt through the send callback,
+       * which is correct: the owner has just been handed something to react
+       * to, and cutting them off mid-reaction would be the wrong reading of
+       * "idle".
+       */
+      void sweepDueTimers(state)
       if (Date.now() - state.lastActivityAt > IDLE_END_MS) {
         void endConversation('idle')
       }
@@ -484,12 +595,271 @@ export async function handlePendantConverse(request, context) {
      * about to say — burying it under a briefing would ask them to answer a
      * question three paragraphs old.
      */
-    void queueApprovalReadback(state).then(() => {
-      if (!ANNOUNCE_ON_CONNECT || state.ended) return
-      return playPendingAnnouncements(state).catch((error) => {
-        console.warn(`[converse] announce: ${error?.message || error}`)
+    void queueApprovalReadback(state)
+      .then(() => {
+        /*
+         * Then any timer that fired while nobody was listening. The order is
+         * the doc's: after the approval readback (which ends with the confirm
+         * word the owner is about to say), before the briefings (which merely
+         * went stale). A chime is the one queued sound with a deadline
+         * attached — it already went off late, and burying it under a
+         * three-paragraph briefing makes it later.
+         */
+        return sweepDueTimers(state)
       })
+      .then(() => {
+        if (!ANNOUNCE_ON_CONNECT || state.ended) return
+        return playPendingAnnouncements(state).catch((error) => {
+          console.warn(`[converse] announce: ${error?.message || error}`)
+        })
+      })
+  }
+
+  /* ------------------------------------------------------------ the apps */
+
+  /**
+   * One queue for every sound the relay makes on its own.
+   *
+   * Menu blips, spoken positions, app surfaces, timer chimes and approval
+   * readbacks all encode through ONE stateful Opus encoder, so they must never
+   * overlap. Errors are swallowed into a warning so the chain itself can never
+   * go rejected and silently refuse everything queued after it.
+   */
+  function queueRelaySpeech(state, run) {
+    if (state.ended) return state.relaySpeechRuns
+    state.relaySpeechRuns = state.relaySpeechRuns.then(() => {
+      if (state.ended) return
+      return Promise.resolve()
+        .then(run)
+        .catch((error) => {
+          console.warn(`[converse] relay speech: ${error?.message || error}`)
+        })
     })
+    return state.relaySpeechRuns
+  }
+
+  /**
+   * Where the knob's detents actually go.
+   *
+   * The reducer (cloud-relay/menuRing.js) decides; this only performs. Note
+   * what is and is not queued: the earcon is queued immediately so the blip
+   * tracks the thumb, the NAME is debounced so a fast spin costs one sentence,
+   * and a Mac-backed brief is NOT queued at all — it is fetched off-chain and
+   * only its spoken result joins the queue, so the owner can keep scrolling
+   * while Reminders is still coming back.
+   */
+  function handleMenuFrame(state, frame) {
+    const reduced = reduceMenuFrame(state.menu, frame)
+    state.menu = reduced.state
+
+    for (const effect of reduced.effects) {
+      if (effect.kind === 'earcon') {
+        queueRelaySpeech(state, () => streamRelayPcm(state, renderEarconPcm(effect)))
+        continue
+      }
+      if (effect.kind === 'name') {
+        scheduleMenuName(state, effect.text)
+        continue
+      }
+      if (effect.kind === 'closed') {
+        /* A pending name from the detent that got you here would speak AFTER
+         * the falling earcon, announcing a position in a ring you just left. */
+        clearMenuName(state)
+        continue
+      }
+      if (effect.kind === 'app') {
+        void enterApp(state, effect.app)
+        continue
+      }
+      if (effect.kind === 'timer') {
+        queueRelaySpeech(state, () => startKnobTimer(state, effect.minutes))
+        continue
+      }
+      if (effect.kind === 'audio-select') {
+        /*
+         * Both frames, in this order. bt_select promotes the entry to
+         * preferred and commands the module to connect; audio_sink routes the
+         * next answer to Bluetooth. Sending only the first would connect a
+         * headphone the pendant then talks past.
+         */
+        sendJson({ type: 'bt_select', index: effect.index })
+        sendJson({ type: 'audio_sink', sink: 'bluetooth' })
+        console.log(`[converse] audio sink -> ${effect.name} (index ${effect.index})`)
+        queueRelaySpeech(state, () => speakRelayLine(state, `Connecting ${effect.name}.`))
+        continue
+      }
+      if (effect.kind === 'audio-sink') {
+        sendJson({ type: 'audio_sink', sink: effect.sink })
+        console.log(`[converse] audio sink -> ${effect.sink}`)
+        queueRelaySpeech(state, () => speakRelayLine(state, 'Using the pendant speaker.'))
+      }
+    }
+  }
+
+  function clearMenuName(state) {
+    if (state.menuNameTimer) clearTimeout(state.menuNameTimer)
+    state.menuNameTimer = null
+  }
+
+  /** Say the landed-on position, once the knob stops moving. */
+  function scheduleMenuName(state, text) {
+    clearMenuName(state)
+    state.menuNameTimer = setTimeout(() => {
+      state.menuNameTimer = null
+      queueRelaySpeech(state, () => speakRelayLine(state, text))
+    }, MENU_NAME_SETTLE_MS)
+  }
+
+  /**
+   * Entering an app speaks its surface. There is no silent landing anywhere.
+   *
+   * Time answers from the relay's own clock — instant, and correct with the
+   * Mac asleep. Reminders and Calendar go to the Mac on the same job path
+   * voice tool-calls ride, and they say so out loud when it does not answer,
+   * because on a screenless device silence is indistinguishable from
+   * breakage.
+   */
+  async function enterApp(state, app) {
+    if (app === 'time') {
+      const speech = timeSpeech({
+        now: Date.now(),
+        timezone: state.timezone,
+        deviceTime: state.deviceTime,
+      })
+      queueRelaySpeech(state, () => speakRelayLine(state, speech))
+      return
+    }
+
+    if (app === 'audio') {
+      /*
+       * The one ring the relay does not author. Ask the pendant what it
+       * remembers (up to four sinks on its SD card) and let the answer become
+       * the ring — see the bt_devices handler below. The request is fired and
+       * forgotten here on purpose: if the device never answers, that handler
+       * never runs, the owner stays on the app ring, and the line below is the
+       * only thing they heard. Silence would have been the alternative.
+       */
+      state.audioAskedAt = Date.now()
+      sendJson({ type: 'bt_list' })
+      queueRelaySpeech(state, () => speakRelayLine(state, 'Checking your audio devices.'))
+      return
+    }
+
+    const plan = appMacPlan(app)
+    if (!plan) return
+
+    /*
+     * Measured: the Reminders read takes ~16 s on the owner's Mac and the
+     * Calendar read is slower still. Sixteen seconds of silence on a device
+     * with no screen is indistinguishable from a dead knob, and the grammar's
+     * rule is that nothing lands silently — so the app says where it is
+     * looking, and the brief lands when the Mac answers.
+     */
+    queueRelaySpeech(state, () => speakRelayLine(state, appFetchingSpeech(app)))
+
+    let speech
+    try {
+      const job = await enqueueMacPlanJob({
+        store: state.store,
+        deviceId: state.deviceId,
+        sessionId: null,
+        plan,
+        rawAudioBytes: 0,
+        format: 'opus-frames',
+        sampleRate: OPUS_WIRE_SAMPLE_RATE,
+        channels: 1,
+        bitsPerSample: 16,
+        transcriptionDurationMs: 0,
+        /* Not a spoken question at all — a ring entry the owner pushed. */
+        pendantMode: 'knob',
+      })
+      if (job?.jobId) {
+        state.jobCount += 1
+        state.jobs.push(job.jobId)
+      }
+      speech = appBriefSpeech(app, await pollMacResult(state.store, job?.jobId, APP_BRIEF_WAIT_MS))
+    } catch (error) {
+      console.warn(`[converse] ${app} brief: ${error?.message || error}`)
+      speech = macUnansweredSpeech(app)
+    }
+    queueRelaySpeech(state, () => speakRelayLine(state, speech))
+  }
+
+  async function startKnobTimer(state, minutes) {
+    const record = await startTimer({
+      store: state.store,
+      deviceId: state.deviceId,
+      minutes,
+      setBy: 'knob',
+    })
+    console.log(`[converse] timer ${record.timerId} started by knob: ${record.durationMs}ms`)
+    await speakRelayLine(state, timerStartedSpeech(record))
+  }
+
+  /**
+   * Chime whatever came due.
+   *
+   * Claimed before it is spoken and settled after, so a reconnect racing a
+   * stale socket cannot chime the same timer twice, and a chime that died
+   * mid-stream goes back on the queue rather than being silently eaten — the
+   * timer is still overdue, so the next press picks it up.
+   */
+  async function sweepDueTimers(state) {
+    if (state.ended || !state.store) return
+    let due = []
+    try {
+      due = await claimDueTimers({ store: state.store, deviceId: state.deviceId })
+    } catch (error) {
+      console.warn(`[converse] timer sweep: ${error?.message || error}`)
+      return
+    }
+    if (!due.length) return
+
+    for (const record of due) {
+      /* Queued on the one chain, and AWAITED here, so two due timers chime one
+       * after the other instead of on top of each other. */
+      await queueRelaySpeech(state, async () => {
+        const chimed = await streamRelayPcm(state, renderTimerChimePcm())
+        /* One sentence for both callers. timerOverdueSpeech reads the clock
+         * itself and only adds "that was N ago" when the chime is genuinely
+         * late, so a live sweep and a next-press sweep need no flag to tell
+         * them apart — the lateness IS the difference. */
+        const spoke = await speakRelayLine(state, timerOverdueSpeech(record))
+        await settleClaimedTimer({
+          store: state.store,
+          timerId: record.timerId,
+          spoke: Boolean(chimed || spoke),
+        })
+      })
+    }
+  }
+
+  /**
+   * Poll a Mac job for its executed result, raw.
+   *
+   * Deliberately NOT trimMacResultForModel: that trims entries to 400 chars
+   * for a language model's context budget, and an app brief parses the
+   * AppleScript's actual stdout. Same polling contract as the model's status
+   * window otherwise, so there is one idea of "the Mac has answered".
+   */
+  async function pollMacResult(store, jobId, timeoutMs) {
+    if (!store || !jobId) return null
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const current = await store.getJob(jobId).catch(() => null)
+      const result = current?.result
+      if (
+        result &&
+        (result.phase === 'executed' ||
+          result.executed === true ||
+          result.executionError ||
+          current.status === 'completed')
+      ) {
+        return result
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+    return null
   }
 
   /**
@@ -505,16 +875,17 @@ export async function handlePendantConverse(request, context) {
    * and silently refuse every later readback.
    */
   function queueApprovalReadback(state) {
-    if (state.ended || state.approvalRunQueued) return state.approvalRuns
+    if (state.ended || state.approvalRunQueued) return state.relaySpeechRuns
     state.approvalRunQueued = true
-    state.approvalRuns = state.approvalRuns.then(() => {
+    /* Onto the SAME chain the menu and the timers use — see relaySpeechRuns.
+     * A readback and a menu blip on separate chains would both be correct in
+     * isolation and garbage together. */
+    return queueRelaySpeech(state, () => {
       state.approvalRunQueued = false
-      if (state.ended) return
       return speakQueuedApprovals(state).catch((error) => {
         console.warn(`[converse] approvals: ${error?.message || error}`)
       })
     })
-    return state.approvalRuns
   }
 
   /**
@@ -535,6 +906,17 @@ export async function handlePendantConverse(request, context) {
       deviceId: state.deviceId,
       eligible: isPendantRoutedApproval,
       speak: async ({ speech }) => {
+        /*
+         * The device's strong haptic, fired before the words.
+         *
+         * This became load-bearing on 2026-08-12: blue is push-to-talk now, so
+         * the pendant no longer has an approve button, and this hit is the ONLY
+         * device-side cue that the thing about to be read out is a decision
+         * rather than an answer. It is sent unconditionally and not awaited —
+         * the firmware parses it from the idle loop, and a missed buzz must
+         * cost the nudge, never the readback.
+         */
+        sendJson({ type: 'approval_readback' })
         const pcm = await renderAnnouncementPcm({
           speech,
           synthesize: synthesizeSpeech,
@@ -583,34 +965,52 @@ export async function handlePendantConverse(request, context) {
     }
   }
 
-  /** One short spoken line — "Approved." / the repair prompt — on the same
-   * paced path as everything else this relay says on its own. */
-  async function speakApprovalLine(state, text) {
-    if (state.ended || !state.replyEncoder || !text) return
+  /**
+   * Put a buffer of ready PCM down the socket, paced.
+   *
+   * The ONE place relay-composed audio reaches the wire. Everything the relay
+   * says on its own — an approval line, a menu blip, an app's answer, a timer
+   * chime — comes through here, so the barge-in rule ("the owner talking is
+   * the owner saying not now"), the activity stamps and the flow control are
+   * written once. Returns whether anything actually went out, because a timer
+   * chime has to know: bytes on a socket is not a hearing, but zero bytes is
+   * definitely not a delivery, and the record says so either way.
+   */
+  async function streamRelayPcm(state, pcm) {
+    if (state.ended || !state.replyEncoder || !pcm?.length) return false
+    state.announcing = true
+    const delivery = await streamAnnouncementPcm({
+      pcm,
+      sampleRate: REALTIME_PCM_RATE,
+      encode: (chunk) => state.replyEncoder.push(chunk),
+      split: (wire) => splitWireFrames(wire),
+      send: (frame) => {
+        state.lastActivityAt = Date.now()
+        state.lastDownlinkAt = Date.now()
+        try {
+          server.send(frame)
+        } catch {
+          state.announcing = false
+        }
+      },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      shouldStop: () => state.ended || !state.announcing,
+    })
+    state.announcing = false
+    return delivery.sentBytes > 0
+  }
+
+  /** One short spoken line — "Approved.", "Timer.", "No open reminders." — on
+   * the same paced path as everything else this relay says on its own. */
+  async function speakRelayLine(state, text) {
+    if (state.ended || !state.replyEncoder || !text) return false
     try {
       const pcm = await renderAnnouncementPcm({ speech: text, synthesize: synthesizeSpeech })
-      if (state.ended || !pcm.length) return
-      state.announcing = true
-      await streamAnnouncementPcm({
-        pcm,
-        sampleRate: REALTIME_PCM_RATE,
-        encode: (chunk) => state.replyEncoder.push(chunk),
-        split: (wire) => splitWireFrames(wire),
-        send: (frame) => {
-          state.lastActivityAt = Date.now()
-          state.lastDownlinkAt = Date.now()
-          try {
-            server.send(frame)
-          } catch {
-            state.announcing = false
-          }
-        },
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        shouldStop: () => state.ended || !state.announcing,
-      })
-      state.announcing = false
+      if (state.ended || !pcm.length) return false
+      return await streamRelayPcm(state, pcm)
     } catch (error) {
-      console.warn(`[converse] approval line: ${error?.message || error}`)
+      console.warn(`[converse] spoken line: ${error?.message || error}`)
+      return false
     }
   }
 
@@ -731,6 +1131,10 @@ export async function handlePendantConverse(request, context) {
     state.ended = true
     convo = null
     clearInterval(state.idleTimer)
+    /* A debounced position name outliving its conversation would speak into
+     * the next one, announcing a ring the owner is no longer standing in. */
+    if (state.menuNameTimer) clearTimeout(state.menuNameTimer)
+    state.menuNameTimer = null
     /* No longer nudgeable: from here the store-and-next-press path is the
      * only delivery again, which is correct — the firmware cannot be woken.
      * The unregister is identity-checked, so a restart that already
@@ -940,9 +1344,11 @@ export async function handlePendantConverse(request, context) {
           // Close the loop in the owner's ear when a conversation is live —
           // a silent grant from a button feels identical to a dead button.
           if (state && !state.ended && result.ok) {
-            await speakApprovalLine(
-              state,
-              decision === 'approve' ? 'Approved.' : 'Cancelled. Nothing will run.',
+            await queueRelaySpeech(state, () =>
+              speakRelayLine(
+                state,
+                decision === 'approve' ? 'Approved.' : 'Cancelled. Nothing will run.',
+              ),
             )
           }
         })().catch((error) => {
@@ -950,21 +1356,76 @@ export async function handlePendantConverse(request, context) {
         })
         return
       }
-      if (msg?.type === 'menu' || msg?.type === 'menu_select') {
+      if (
+        msg?.type === 'menu' ||
+        msg?.type === 'menu_select' ||
+        msg?.type === 'menu_back'
+      ) {
         /*
-         * Rotary encoder navigation. The relay has no menu model yet, so
-         * parsing-and-logging IS the current contract: the frames must not
-         * fall through as unknown text, and the log line is what hardware
-         * bring-up reads to prove the knob's detents arrive with the right
-         * sign and count.
+         * Rotary encoder navigation. The log line stays and stays FIRST: it is
+         * what hardware bring-up reads to prove the knob's detents arrive with
+         * the right sign and count, and that is still true now that the frames
+         * also drive something.
          */
         const delta = Number(msg.delta)
+        const state = convo
         console.log(
           `[converse] menu control from ${deviceIdHeader}: ` +
             (msg.type === 'menu' && Number.isFinite(delta)
               ? `step ${delta > 0 ? '+1' : '-1'}`
-              : 'select'),
+              : msg.type === 'menu_back'
+                ? 'back'
+                : 'select') +
+            (state && !state.ended ? ` mode=${state.menu.mode}` : ' (no conversation)'),
         )
+        /*
+         * Detents on an idle socket are logged and IGNORED, deliberately.
+         * Today's firmware plays no audio outside a started conversation, so a
+         * menu opened here would be a menu the owner cannot hear — and the
+         * frames are dropped by the firmware when the socket is closed, so a
+         * knob twist banked across a dead link can never replay as stale
+         * intent either. The yellow press is the one press; it opens the
+         * conversation, and the knob works from there.
+         */
+        if (!state || state.ended) return
+        handleMenuFrame(state, msg)
+        return
+      }
+      if (msg?.type === 'bt_devices') {
+        /*
+         * The pendant's answer to bt_list: its remembered Bluetooth sinks,
+         * newest-preferred first. This is the only ring in the grammar whose
+         * entries the relay does not author, so it arrives here and BECOMES
+         * the ring rather than being merged into anything.
+         */
+        const state = convo
+        const devices = Array.isArray(msg.devices) ? msg.devices : []
+        console.log(
+          `[converse] ${deviceIdHeader} remembers ${devices.length} audio device(s)` +
+            `${msg.connected ? ' (connected)' : ''}`,
+        )
+        if (!state || state.ended || !state.audioAskedAt) return
+        state.audioAskedAt = 0
+        if (!devices.length) {
+          /* An honest empty. "No remembered audio devices" is a complete
+           * answer; dropping the owner into an empty ring is not. */
+          void queueRelaySpeech(state, () =>
+            speakRelayLine(state, 'No remembered audio devices. Pair one from your phone first.'),
+          )
+          return
+        }
+        state.menu = { ...menuWithAudioDevices(state.menu, devices), mode: 'audio' }
+        const ring = currentRing(state.menu)
+        void queueRelaySpeech(state, async () => {
+          await streamRelayPcm(
+            state,
+            renderEarconPcm({ ring: 'audio', index: 0, size: ring.entries.length, motion: 'enter' }),
+          )
+          await speakRelayLine(
+            state,
+            `${devices.length} remembered. ${String(devices[0]?.name || 'The first one')}. Press to connect.`,
+          )
+        })
         return
       }
       if (msg?.type === 'mic_muted') {

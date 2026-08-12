@@ -27,8 +27,27 @@ test('REALTIME_TOOLS expose status + control + search + browser + delegate + pag
     'memory_save',
     'read_web_page',
     'relay_job_status',
+    'set_timer',
     'web_search',
   ])
+})
+
+/*
+ * The timer's schema carries the one routing decision that actually goes wrong
+ * in the field: "remind me at four" is a Mac reminder and "wake me in ten
+ * minutes" is a pendant timer, and a model that confuses them either sets a
+ * countdown the owner never hears or files a reminder for a pot on the stove.
+ */
+test('set_timer names the timer/reminder boundary and the store it writes to', () => {
+  const tool = REALTIME_TOOLS.find((entry) => entry.name === 'set_timer')
+  assert.deepEqual(tool.parameters.required, ['action'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['start', 'cancel', 'status'])
+  assert.match(tool.description, /PROACTIVE/)
+  assert.match(tool.description, /Do NOT use when/i)
+  assert.match(tool.description, /create_reminder/)
+  /* And it must state the honest delivery contract, so the model never
+   * promises a chime the relay cannot make while the socket is shut. */
+  assert.match(tool.description, /next button press/i)
 })
 
 test('the memory tools are built from the shared spec, with domain pinned to the registry', () => {
@@ -845,4 +864,118 @@ test('a failing memory fetch never costs the action it decorates', async () => {
   assert.equal(output.domainMemory, undefined)
   assert.equal(plans.length, 1)
   await session.done
+})
+
+/*
+ * ---- set_timer, against the real relay timer store ------------------------
+ *
+ * Not a stub. The claim voice parity makes is that the model's timer and the
+ * knob's timer are the SAME store — so the test drives the tool through the
+ * socket seam into createTimerControl over a real memory store, and then reads
+ * the result back through the knob path's own reader. A fake control here
+ * would prove the tool calls something, which is not the claim.
+ */
+const { createTimerControl, claimDueTimers, listTimers, selectRunningTimers } =
+  await import('./timerStore.js')
+const { createMemoryStore } = await import('./store/memoryStore.js')
+
+async function openTimerSession(clock) {
+  const store = createMemoryStore()
+  const opened = await openFakeSession({
+    timerControl: createTimerControl({ store, deviceId: 'nrf9160-pendant', now: () => clock.at }),
+  })
+  return { ...opened, store }
+}
+
+test('set_timer start writes a timer the knob path can see and sweep', async () => {
+  const clock = { at: Date.parse('2026-08-12T15:00:00.000Z') }
+  const { socket, session, store } = await openTimerSession(clock)
+
+  functionCall(socket, 'set_timer', 'call_timer_start', { action: 'start', minutes: 17 })
+  const output = await waitForToolOutput(socket, 'call_timer_start')
+
+  assert.equal(output.ok, true)
+  assert.equal(output.spoken, '17 minute timer started.')
+
+  const stored = await listTimers(store, 'nrf9160-pendant')
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].setBy, 'voice')
+  assert.equal(selectRunningTimers(stored, clock.at + 60_000).length, 1)
+
+  /* And it comes due on the same sweep the ring's timers come due on. */
+  clock.at += 18 * 60_000
+  const due = await claimDueTimers({ store, deviceId: 'nrf9160-pendant', now: clock.at })
+  assert.equal(due.length, 1)
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('set_timer asks for a duration instead of inventing one', async () => {
+  const clock = { at: Date.parse('2026-08-12T15:00:00.000Z') }
+  const { socket, session, store } = await openTimerSession(clock)
+
+  functionCall(socket, 'set_timer', 'call_timer_bad', { action: 'start' })
+  const output = await waitForToolOutput(socket, 'call_timer_bad')
+
+  assert.equal(output.ok, false)
+  assert.equal(output.spoken, 'How long should the timer run?')
+  assert.deepEqual(await listTimers(store, 'nrf9160-pendant'), [])
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('set_timer status and cancel read and clear the same rows', async () => {
+  const clock = { at: Date.parse('2026-08-12T15:00:00.000Z') }
+  const { socket, session, store } = await openTimerSession(clock)
+
+  functionCall(socket, 'set_timer', 'call_t1', { action: 'start', minutes: 10 })
+  await waitForToolOutput(socket, 'call_t1')
+
+  clock.at += 4 * 60_000
+  functionCall(socket, 'set_timer', 'call_t2', { action: 'status' })
+  assert.equal(
+    (await waitForToolOutput(socket, 'call_t2')).spoken,
+    '6 minutes left on your 10 minute timer.',
+  )
+
+  functionCall(socket, 'set_timer', 'call_t3', { action: 'cancel' })
+  assert.equal((await waitForToolOutput(socket, 'call_t3')).spoken, 'Cancelled your 10 minute timer.')
+
+  clock.at += 60 * 60_000
+  assert.deepEqual(await claimDueTimers({ store, deviceId: 'nrf9160-pendant', now: clock.at }), [])
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('a session with no timer wiring says it cannot, not that there are none', async () => {
+  const { socket, session } = await openFakeSession({})
+
+  functionCall(socket, 'set_timer', 'call_no_wiring', { action: 'status' })
+  const output = await waitForToolOutput(socket, 'call_no_wiring')
+
+  assert.equal(output.ok, false)
+  /* "I can't set timers" and "you have no timers running" are different facts;
+   * collapsing them would report an empty list every time the wiring broke. */
+  assert.match(output.spoken, /can't set timers/i)
+
+  session.abort()
+  await session.done.catch(() => {})
+})
+
+test('a timer refused by the store is spoken, not swallowed', async () => {
+  const clock = { at: Date.parse('2026-08-12T15:00:00.000Z') }
+  const { socket, session, store } = await openTimerSession(clock)
+
+  functionCall(socket, 'set_timer', 'call_too_long', { action: 'start', minutes: 60 * 48 })
+  const output = await waitForToolOutput(socket, 'call_too_long')
+
+  assert.equal(output.ok, false)
+  assert.match(output.spoken, /24 hours/)
+  assert.deepEqual(await listTimers(store, 'nrf9160-pendant'), [])
+
+  session.abort()
+  await session.done.catch(() => {})
 })

@@ -190,6 +190,22 @@ export function plannerHintFromPlan(plan) {
   }
 }
 
+/*
+ * The four ways work reaches this relay from the pendant, as a closed set.
+ *
+ *   ptt    — blue: recorded radio-off, burst-uploaded, spoken reply
+ *   duplex — yellow: the live conversation socket
+ *   memo   — green: record-only, no planner
+ *   knob   — the encoder ring's apps (no speech at all)
+ *
+ * Closed on purpose: the device supplies this over a header, and a device that
+ * invented a mode would write an arbitrary string into every history row that
+ * reads it. Unknown is recorded as null — never inferred from the transport,
+ * because which transport a button uses is a firmware build detail and a
+ * confidently wrong label is worse than an honest blank.
+ */
+export const PENDANT_MODES = Object.freeze(['ptt', 'duplex', 'memo', 'knob'])
+
 export async function enqueueMacPlanJob({
   store,
   deviceId,
@@ -201,9 +217,27 @@ export async function enqueueMacPlanJob({
   channels,
   bitsPerSample,
   transcriptionDurationMs,
+  /*
+   * Which button this came from: 'ptt' (blue push-to-talk — recorded
+   * radio-off, burst-uploaded), 'duplex' (yellow — the live conversation
+   * socket), 'memo' (green). Carried on the record because history otherwise
+   * cannot tell a blue question from a yellow one: both arrive as the same
+   * dispatch=1 command with the same audio format, and the difference is 2.4×
+   * the energy per question (hardware/design/Solar_Feasibility.md §4.3) — the
+   * exact number the owner will want to see attributed. Null when the device
+   * did not say, which is every pendant that has not taken the firmware's
+   * X-Pendant-Mode header yet; unknown is recorded as unknown rather than
+   * guessed from the transport, because the transport is a build detail and a
+   * wrong label is worse than none.
+   */
+  pendantMode = null,
 }) {
+  if (pendantMode && !PENDANT_MODES.includes(pendantMode)) {
+    throw new Error(`Unknown pendant mode "${pendantMode}".`)
+  }
   const inputTelemetry = {
     audioBytes: rawAudioBytes,
+    ...(pendantMode ? { pendantMode } : {}),
     format: isRawPcmFormat(format) ? 'pcm-s16le' : format,
     sampleRate,
     channels,
@@ -1308,6 +1342,17 @@ app.post('/v1/pendant/command', async (request, response) => {
     String(request.get('x-device-id') || 'nrf9160-pendant').trim() ||
     'nrf9160-pendant'
   const sessionId = String(request.get('x-session-id') || '').trim() || null
+  /*
+   * Which button. Blue push-to-talk questions ride this exact route with the
+   * exact same body a yellow-button command has, so nothing in the record can
+   * tell them apart — and they are the cheap ones (≈1 mWh against 2.3 mWh for
+   * the same question as a duplex exchange, Solar_Feasibility.md §4.3), which
+   * is precisely the attribution the owner will want. The header is accepted
+   * from an ALLOWLIST rather than passed through: a device that invents a mode
+   * would put an arbitrary string into every history row that reads this.
+   */
+  const modeHeader = String(request.get('x-pendant-mode') || '').trim().toLowerCase()
+  const pendantMode = PENDANT_MODES.includes(modeHeader) ? modeHeader : null
   const shouldDispatch = String(request.query?.dispatch ?? '1') !== '0'
 
   if (!principalOwnsDevice(request.relayPrincipal, deviceId)) {
@@ -1359,6 +1404,7 @@ app.post('/v1/pendant/command', async (request, response) => {
         channels,
         bitsPerSample,
         transcriptionDurationMs: plan.durationMs ?? Date.now() - startedAt,
+        pendantMode,
       })
       return job
     }
