@@ -34,7 +34,7 @@ import {
 import {
   CONFIG_KEYS,
   HEARTBEAT_INTERVAL_MS,
-  POLL_INTERVAL_MS,
+  BACKGROUND_POLL_INTERVAL_MS,
   RELAY_STATUS_KEY,
   STATUS_KEY,
   delay,
@@ -158,7 +158,10 @@ async function pollWindow(revision) {
 
       const handledCommand = await pollOnce(config, { ledger: commandLedger })
       failures = 0
-      if (!handledCommand) await delay(POLL_INTERVAL_MS)
+      /* Background-hosted loops idle at the Safari-safe cadence — see the
+       * BACKGROUND_POLL_INTERVAL_MS comment in executor.js. A handled
+       * command loops immediately; only idle waits are slow. */
+      if (!handledCommand) await delay(BACKGROUND_POLL_INTERVAL_MS)
     } catch (error) {
       failures += 1
       await updateStatus({

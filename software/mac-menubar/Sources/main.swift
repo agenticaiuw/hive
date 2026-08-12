@@ -5,14 +5,20 @@
 // kickstart the LaunchAgent. It never touches the agent's files, plist, or app
 // bundle.
 //
-// The window has two tabs:
-//   "Dashboard" — the SAME web app the browser and iPhone show, in a WKWebView
-//                 with the persistent default data store so the sign-in cookie
-//                 survives relaunches. No credential is ever embedded here.
-//   "This Mac"  — a native live view of what the local agent is doing right now.
+// The window has three tabs:
+//   "Dashboard"      — the SAME web app the browser and iPhone show, in a
+//                      WKWebView with the persistent default data store so the
+//                      sign-in cookie survives relaunches. No credential is
+//                      ever embedded here.
+//   "This Mac"       — a native live view of what the local agent is doing.
+//   "Browser Bridge" — the settings surface the extension popup used to carry
+//                      (owner, 2026-08-12: popup is chips + command box only):
+//                      paired browsers, pairing status, restart. Read-only
+//                      plus a couple of actions; never shows a secret.
 
 import AppKit
 import Carbon.HIToolbox
+import CryptoKit
 import ImageIO
 import WebKit
 import SwiftUI
@@ -48,16 +54,19 @@ enum AgentEnv {
             ?? "\(NSHomeDirectory())/agentic-gadget/.env"
     }
 
-    /// Reads AGENT_TOKEN from any known secrets file. Kept in memory only.
-    static func loadToken() -> String? {
+    /// Reads one KEY=value line from the first secrets file that defines it.
+    /// Same tolerant parse the old AGENT_TOKEN-only reader used: trimmed,
+    /// optional quotes, first non-empty hit wins.
+    private static func value(forKey key: String) -> String? {
+        let prefix = "\(key)="
         for path in candidateEnvPaths {
             guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
                 continue
             }
             for rawLine in content.split(separator: "\n") {
                 let line = rawLine.trimmingCharacters(in: .whitespaces)
-                guard line.hasPrefix("AGENT_TOKEN=") else { continue }
-                var value = String(line.dropFirst("AGENT_TOKEN=".count))
+                guard line.hasPrefix(prefix) else { continue }
+                var value = String(line.dropFirst(prefix.count))
                     .trimmingCharacters(in: .whitespaces)
                 value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                 if !value.isEmpty { return value }
@@ -65,6 +74,28 @@ enum AgentEnv {
         }
         return nil
     }
+
+    /// The bearer for every agent call. Kept in memory only.
+    ///
+    /// An explicit AGENT_TOKEN= line still wins (the escape hatch for anything
+    /// that stored the old value), but since 2026-08-09 the repo .env holds
+    /// only the one owner-minted secret — PAIRING_CODE — and AGENT_TOKEN is a
+    /// labelled HMAC of it. This derivation MUST stay bit-identical to
+    /// deriveSecret in software/load-pendant-env.mjs: HMAC-SHA256 keyed by the
+    /// pairing code over "aipendant:agent-token", lowercase hex digest.
+    static func loadToken() -> String? {
+        if let explicit = value(forKey: "AGENT_TOKEN") { return explicit }
+        guard let code = value(forKey: "PAIRING_CODE") else { return nil }
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: Data("aipendant:agent-token".utf8),
+            using: SymmetricKey(data: Data(code.utf8)))
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether a pairing code exists on disk at all — a Bool, never the value.
+    /// The Browser Bridge tab shows configured/missing; the code itself is
+    /// typed into the extension popup by the owner, never displayed here.
+    static var pairingCodeConfigured: Bool { value(forKey: "PAIRING_CODE") != nil }
 }
 
 // MARK: - Wire models (tolerant: everything optional except ids)
@@ -134,12 +165,37 @@ struct HealthPayload: Decodable {
 }
 
 struct OpsStatusResponse: Decodable {
+    struct Agent: Decodable { let tokenConfigured: Bool? }
     struct Relay: Decodable {
-        struct Payload: Decodable { let macBridgeOnline: Bool? }
+        struct Payload: Decodable {
+            let macBridgeOnline: Bool?
+            let pairingRequired: Bool?
+        }
         let reachable: Bool?
         let payload: Payload?
     }
+    let agent: Agent?
     let relay: Relay?
+}
+
+/// One paired browser from GET /browser/status — a heartbeat the extension
+/// refreshes every few seconds. extensionId doubles as the device id.
+struct BrowserDevice: Decodable, Identifiable {
+    let extensionId: String
+    let deviceName: String?
+    let browserName: String?
+    let extensionVersion: String?
+    let tabTitle: String?
+    let userAgent: String?
+    let lastSeenAt: String?
+    let online: Bool?
+    var id: String { extensionId }
+}
+
+struct BrowserStatusResponse: Decodable {
+    let online: Bool?
+    let devices: [BrowserDevice]?
+    let pendingCommands: Int?
 }
 
 // MARK: - Time helpers
@@ -284,6 +340,16 @@ final class AgentModel: ObservableObject {
     @Published var tokenAvailable = false
     @Published var streamLive = false
 
+    // Browser Bridge tab state — polled only while that tab is in front, the
+    // same discipline startLive/stopLive keeps for "This Mac".
+    @Published var browserOnline = false
+    @Published var browserDevices: [BrowserDevice] = []
+    @Published var pendingBrowserCommands = 0
+    @Published var pairingCodeOnDisk = false
+    @Published var agentTokenConfigured: Bool?  // nil until first /ops/status
+    @Published var relayReachable: Bool?
+    @Published var relayPairingRequired: Bool?
+
     var envPathDisplay: String { AgentEnv.envPath }
 
     private let base = URL(string: "http://localhost:8000")!
@@ -292,6 +358,8 @@ final class AgentModel: ObservableObject {
     private var healthTimer: Timer?
     private var liveTimer: Timer?
     private var liveTick = 0
+    private var bridgeTimer: Timer?
+    private var bridgeTick = 0
 
     private let http: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -355,6 +423,33 @@ final class AgentModel: ObservableObject {
         streamLive = false
     }
 
+    /// Browser Bridge tab: device heartbeats every 3s, the relay round-trip
+    /// (/ops/status calls out to Cloudflare) only every 9s.
+    func startBridge() {
+        stopBridge()
+        token = AgentEnv.loadToken()
+        tokenAvailable = token != nil
+        pairingCodeOnDisk = AgentEnv.pairingCodeConfigured
+        guard token != nil else { return }
+
+        fetchBrowserStatus()
+        fetchOpsStatus()
+        pollHealth()
+
+        bridgeTick = 0
+        bridgeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.bridgeTick += 1
+            self.fetchBrowserStatus()
+            if self.bridgeTick % 3 == 0 { self.fetchOpsStatus() }
+        }
+    }
+
+    func stopBridge() {
+        bridgeTimer?.invalidate()
+        bridgeTimer = nil
+    }
+
     func pollHealth() {
         get("health", auth: false, as: HealthPayload.self) { [weak self] payload in
             guard let self else { return }
@@ -390,7 +485,21 @@ final class AgentModel: ObservableObject {
             guard let self else { return }
             if let relay = payload?.relay {
                 self.bridgeOnline = (relay.reachable ?? false) && (relay.payload?.macBridgeOnline ?? false)
+                self.relayReachable = relay.reachable
+                self.relayPairingRequired = relay.payload?.pairingRequired
             }
+            if let agent = payload?.agent {
+                self.agentTokenConfigured = agent.tokenConfigured
+            }
+        }
+    }
+
+    private func fetchBrowserStatus() {
+        get("browser/status", as: BrowserStatusResponse.self) { [weak self] payload in
+            guard let self else { return }
+            self.browserOnline = payload?.online ?? false
+            self.browserDevices = payload?.devices ?? []
+            self.pendingBrowserCommands = payload?.pendingCommands ?? 0
         }
     }
 
@@ -740,6 +849,256 @@ struct ActivityView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Browser Bridge tab (settings moved here from the extension popup)
+
+/// The extension popup was deliberately stripped to chips + a command box
+/// (owner, 2026-08-12) — everything configurational lives on this tab instead.
+/// Read-only state plus a couple of actions; the panel never writes agent
+/// config and never shows a secret.
+struct DeviceRow: View {
+    let device: BrowserDevice
+
+    private var title: String {
+        if let name = device.deviceName, !name.isEmpty { return name }
+        if let browser = device.browserName, !browser.isEmpty { return browser }
+        return device.extensionId
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Group {
+                if device.online == true {
+                    PulsingDot(color: .green)
+                } else {
+                    Dot(color: Color.white.opacity(0.3), size: 7)
+                }
+            }
+            .frame(width: 10)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineLimit(1)
+                    if let version = device.extensionVersion, !version.isEmpty {
+                        Text("v\(version)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                    Text(device.online == true ? "online" : "offline")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(device.online == true ? Palette.accent : .white.opacity(0.4))
+                }
+                // The device id IS the extensionId — the heartbeat key the agent
+                // tracks. Middle-truncated: the interesting part is both ends.
+                Text(device.extensionId)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let tab = device.tabTitle, !tab.isEmpty {
+                    Text("tab: \(tab)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .lineLimit(1)
+                }
+            }
+            .help(device.userAgent ?? "")
+            Spacer(minLength: 12)
+            Text(device.lastSeenAt == nil ? "never seen"
+                                          : "seen \(When.relative(device.lastSeenAt))")
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.3))
+                .layoutPriority(1)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// One configured/missing line in the pairing card. `state` nil = still
+/// checking (first /ops/status hasn't answered yet).
+struct PairingStatusRow: View {
+    let label: String
+    let state: Bool?
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Dot(color: state == nil ? Color.white.opacity(0.3) : (state! ? .green : .orange), size: 6)
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.75))
+            Text(state == nil ? "checking…" : (state! ? detail : "missing"))
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.45))
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct BrowserBridgeView: View {
+    @ObservedObject var model: AgentModel
+    let onOpenDashboard: () -> Void
+    let onRestartAgent: () -> Void
+
+    var body: some View {
+        ZStack {
+            Palette.ink.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 22) {
+                header
+                if model.tokenAvailable {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            pairedBrowsers
+                            pairing
+                            actions
+                        }
+                    }
+                } else {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text("Can't derive AGENT_TOKEN — add PAIRING_CODE to \(model.envPathDisplay) (path overridable via `defaults write com.aipendant.menubar \(AgentEnv.envPathDefaultsKey)`), then reopen this window.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 560)
+                        Spacer()
+                    }
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 30)
+            .padding(.top, 22)
+            .padding(.bottom, 22)
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Dot(color: model.online ? .green : .red, glow: model.online)
+            Text("Browser Bridge")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+            Spacer()
+            if let relay = model.relayReachable {
+                Chip(label: "Relay", color: relay ? .green : .red)
+            }
+            Chip(label: "Extension", color: model.browserOnline ? .green : Color.white.opacity(0.3))
+            if model.pendingBrowserCommands > 0 {
+                Chip(label: "\(model.pendingBrowserCommands) queued", color: .cyan)
+            }
+        }
+    }
+
+    private var pairedBrowsers: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("PAIRED BROWSERS")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(2)
+                .foregroundStyle(.white.opacity(0.35))
+            if model.browserDevices.isEmpty {
+                Text("No browser has checked in yet — open the extension popup and pair with the pairing code.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.3))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.browserDevices) { device in
+                        DeviceRow(device: device)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.035)))
+    }
+
+    private var pairing: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("PAIRING")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(2)
+                .foregroundStyle(.white.opacity(0.35))
+            Text("Pairing happens in the extension popup: paste the pairing code from the repo .env there once. This panel only reports whether the pieces are configured — it never displays the code.")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.5))
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 7) {
+                PairingStatusRow(label: "Pairing code (.env)",
+                                 state: model.pairingCodeOnDisk,
+                                 detail: "configured")
+                PairingStatusRow(label: "Agent credentials",
+                                 state: model.agentTokenConfigured,
+                                 detail: "configured")
+                PairingStatusRow(label: "Relay pairing",
+                                 state: model.relayPairingRequired,
+                                 detail: "required")
+            }
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.035)))
+    }
+
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("ACTIONS")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(2)
+                .foregroundStyle(.white.opacity(0.35))
+            HStack(spacing: 10) {
+                Button(action: onOpenDashboard) {
+                    Text("Open Dashboard")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.black.opacity(0.82))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Palette.accent))
+                }
+                .buttonStyle(.plain)
+                .help("Open the shared web dashboard in the default browser")
+                Button(action: onRestartAgent) {
+                    Text("Restart Agent")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help("launchctl kickstart -k the com.aipendant.agent LaunchAgent")
+                Spacer()
+            }
+            // Deliberately disabled, not hidden: the agent exposes no
+            // revoke/unpair route yet (browser heartbeats only age out), and
+            // this app never invents agent endpoints. The row keeps the
+            // affordance visible so it's obvious where revocation will land.
+            HStack(spacing: 10) {
+                Button(action: {}) {
+                    Text("Revoke a paired browser")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.25))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(.white.opacity(0.04)))
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
+                Text("ships later — the agent has no revocation endpoint yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.3))
+                Spacer()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.035)))
     }
 }
 
@@ -1788,12 +2147,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private let agentBaseURL = URL(string: "http://127.0.0.1:8000")!
 
-    // Two-view shell: web dashboard (shared with browser + iPhone) and native local view.
+    // Three-view shell: web dashboard (shared with browser + iPhone), native
+    // local view, and the Browser Bridge settings tab (the extension popup's
+    // former settings, relocated here — owner, 2026-08-12).
     private var webPane: WebPane?
     private var nativePaneView: NSView?
+    private var bridgePaneView: NSView?
     private var tabControl: NSSegmentedControl?
-    /// Which tab is up (persisted): false = Dashboard, true = This Mac.
-    private var showingThisMac = false
+
+    /// Which tab is up. Raw values are the segmented-control indices.
+    private enum MainTab: Int { case dashboard = 0, thisMac = 1, browserBridge = 2 }
+    private var currentTab: MainTab = .dashboard
+    private static let tabSelectionKey = "MainTabSelection"
+    /// Legacy two-tab Bool, read once as the migration default so an existing
+    /// install lands on the tab it last showed.
     private static let thisMacTabKey = "ShowThisMacTab"
     private static let tabsItemIdentifier = NSToolbarItem.Identifier("tabs")
 
@@ -1889,6 +2256,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             native.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(native)
 
+            let bridge = NSHostingView(rootView: BrowserBridgeView(
+                model: model,
+                onOpenDashboard: { [weak self] in self?.openDashboard() },
+                onRestartAgent: { [weak self] in self?.restartAgent() }))
+            bridge.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(bridge)
+
             NSLayoutConstraint.activate([
                 pane.webView.topAnchor.constraint(equalTo: container.topAnchor),
                 pane.webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -1898,10 +2272,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 native.bottomAnchor.constraint(equalTo: container.bottomAnchor),
                 native.leadingAnchor.constraint(equalTo: container.leadingAnchor),
                 native.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                bridge.topAnchor.constraint(equalTo: container.topAnchor),
+                bridge.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                bridge.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                bridge.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             ])
 
             webPane = pane
             nativePaneView = native
+            bridgePaneView = bridge
             window.contentView = container
 
             let toolbar = NSToolbar(identifier: "AIPendantToolbar")
@@ -1916,10 +2295,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.center()
             mainWindow = window
 
-            // "Dashboard" unless the user last chose otherwise.
-            applyTab(showThisMac: UserDefaults.standard.bool(forKey: Self.thisMacTabKey))
+            // "Dashboard" unless the user last chose otherwise. New int key
+            // first; the pre-Bridge Bool key as the migration fallback.
+            let stored = UserDefaults.standard.object(forKey: Self.tabSelectionKey) as? Int
+            let initial = stored.flatMap(MainTab.init(rawValue:))
+                ?? (UserDefaults.standard.bool(forKey: Self.thisMacTabKey) ? .thisMac : .dashboard)
+            applyTab(initial)
         } else {
-            applyTab(showThisMac: showingThisMac)
+            applyTab(currentTab)
         }
         NSApp.setActivationPolicy(.regular) // Dock icon while the window is open
         NSApp.activate(ignoringOtherApps: true)
@@ -1936,29 +2319,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === mainWindow else { return }
         model.stopLive()
+        model.stopBridge()
         NSApp.setActivationPolicy(.accessory) // back to menu-bar-only
     }
 
     // MARK: Tabs
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        applyTab(showThisMac: sender.selectedSegment == 1)
+        applyTab(MainTab(rawValue: sender.selectedSegment) ?? .dashboard)
     }
 
-    private func applyTab(showThisMac: Bool) {
-        showingThisMac = showThisMac
-        UserDefaults.standard.set(showThisMac, forKey: Self.thisMacTabKey)
-        tabControl?.selectedSegment = showThisMac ? 1 : 0
+    private func applyTab(_ tab: MainTab) {
+        currentTab = tab
+        UserDefaults.standard.set(tab.rawValue, forKey: Self.tabSelectionKey)
+        tabControl?.selectedSegment = tab.rawValue
 
-        webPane?.webView.isHidden = showThisMac
-        nativePaneView?.isHidden = !showThisMac
+        webPane?.webView.isHidden = tab != .dashboard
+        nativePaneView?.isHidden = tab != .thisMac
+        bridgePaneView?.isHidden = tab != .browserBridge
 
-        if showThisMac {
-            model.startLive()
-        } else {
-            webPane?.loadIfNeeded()
-            model.stopLive()   // no double work while the web view is in front
-        }
+        // Only the pane in front does live work — no double polling.
+        if tab == .thisMac { model.startLive() } else { model.stopLive() }
+        if tab == .browserBridge { model.startBridge() } else { model.stopBridge() }
+        if tab == .dashboard { webPane?.loadIfNeeded() }
     }
 
     // MARK: Toolbar (segmented tab switcher)
@@ -1975,12 +2358,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                  itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         guard itemIdentifier == Self.tabsItemIdentifier else { return nil }
-        let segmented = NSSegmentedControl(labels: ["Dashboard", "This Mac"],
+        let segmented = NSSegmentedControl(labels: ["Dashboard", "This Mac", "Browser Bridge"],
                                            trackingMode: .selectOne,
                                            target: self,
                                            action: #selector(tabChanged(_:)))
         segmented.segmentStyle = .automatic
-        segmented.selectedSegment = showingThisMac ? 1 : 0
+        segmented.selectedSegment = currentTab.rawValue
         tabControl = segmented
 
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)

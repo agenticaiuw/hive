@@ -64,7 +64,6 @@ for (const platformDir of [chromeDir, safariDir]) {
 
   const manifestPath = path.join(platformDir, 'manifest.json')
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-  delete manifest.background.type
   if (platformDir === safariDir) {
     /*
      * Safari gets the background PAGE form, not a service worker. Measured
@@ -78,6 +77,13 @@ for (const platformDir of [chromeDir, safariDir]) {
      */
     delete manifest.background.service_worker
     manifest.background.scripts = ['background.js']
+    /*
+     * `type: "module"` stays for Safari — research 2026-08-12: a Sequoia-era
+     * reporter on Apple's forums (thread 758479) found scripts WITHOUT the
+     * module type still failed to surface background content, and
+     * scripts+module "works. Every time." The bundle is an IIFE, which is
+     * valid module code, so declaring module costs nothing on any engine.
+     */
   }
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }

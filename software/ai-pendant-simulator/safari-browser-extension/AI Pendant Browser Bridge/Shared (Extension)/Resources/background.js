@@ -1587,6 +1587,7 @@
 	//#region browser-extension/src/executor.js
 	const api$2 = globalThis.browser ?? globalThis.chrome;
 	const FETCH_TIMEOUT_MS = 7e3;
+	const BACKGROUND_POLL_INTERVAL_MS = 5e3;
 	const HEARTBEAT_INTERVAL_MS = 12e3;
 	const STATUS_KEY = "bridgeStatus";
 	const RELAY_STATUS_KEY = "relayStatus";
@@ -4436,7 +4437,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 			}
 			const handledCommand = await pollOnce(config, { ledger: commandLedger });
 			failures = 0;
-			if (!handledCommand) await delay(750);
+			if (!handledCommand) await delay(BACKGROUND_POLL_INTERVAL_MS);
 		} catch (error) {
 			failures += 1;
 			await updateStatus({
