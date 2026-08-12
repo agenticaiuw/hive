@@ -66,6 +66,51 @@
 		return `${url.protocol}//${url.host}/*`;
 	}
 	const MAX_COMMAND_AGE_MS = 9e4;
+	const HIVE_CONTROL_PARAMS = Object.freeze([
+		"session",
+		"sessionId",
+		"browserSession",
+		"sessionName",
+		"bootstrapUrl"
+	]);
+	const NUMERIC_PARAMS = Object.freeze(["tabId", "windowId"]);
+	/**
+	* Make a hive-issued action's params runnable HERE.
+	*
+	* THE FAILURE THIS EXISTS FOR, observed live on 2026-08-09. The owner asked
+	* the popup "what are the most worth watching movies here" on the United
+	* onboard portal. The Mac planner returned:
+	*
+	*   {type:"browser_read_page", params:{mode:"main_text", maxChars:12000, tabId:"optional"}}
+	*
+	* — it had copied the word "optional" out of its own tool schema, where
+	* `tabId: 'optional'` is a DESCRIPTION that reads exactly like a value. The
+	* whole plan was browser work, so affinity claimed it and ran it here, where
+	* validateCommand correctly refused: "tabId must be a non-negative integer."
+	* The run died at step 2.
+	*
+	* On the MAC that same plan works, because it never reaches the executor
+	* unfiltered: browserSessions.toWireParams strips the control params and does
+	* `Number(tabId)`, deleting anything that is not an integer. So the identical
+	* plan succeeded there and failed here — and "runs on the Mac, dies in the
+	* browser" is the one difference local execution must never introduce.
+	*
+	* This is that filter, on this side of the bridge. It only ever REMOVES what
+	* cannot be honoured; nothing is invented, and a param this extension does
+	* understand is passed through untouched.
+	*/
+	function normalizeCommandParams(params) {
+		if (!params || typeof params !== "object" || Array.isArray(params)) return {};
+		const clean = { ...params };
+		for (const key of HIVE_CONTROL_PARAMS) delete clean[key];
+		for (const key of NUMERIC_PARAMS) {
+			if (clean[key] === void 0) continue;
+			const value = Number(clean[key]);
+			if (Number.isInteger(value) && value >= 0) clean[key] = value;
+			else delete clean[key];
+		}
+		return clean;
+	}
 	function validateCommand(command, now = Date.now()) {
 		if (!command || typeof command !== "object") throw new Error("The local agent sent an invalid browser command.");
 		const queuedAt = Date.parse(command.createdAt ?? "");
@@ -655,7 +700,7 @@
 		};
 	}
 	//#endregion
-	//#region src/command-console.js
+	//#region browser-extension/src/command-console.js
 	const CONSOLE_SOURCE = "browser-extension";
 	const HISTORY_KEY = "consoleHistory";
 	const SESSION_KEY = "consoleSessionId";
@@ -664,7 +709,7 @@
 	const EXECUTE_TIMEOUT_MS = 18e4;
 	const HEADLINE_MAX = 500;
 	const DETAIL_MAX = 2e3;
-	const clip = (value, max) => {
+	const clip$1 = (value, max) => {
 		const text = String(value ?? "").trim();
 		return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 	};
@@ -681,7 +726,7 @@
 		const url = String(page?.url ?? "");
 		if (!isScriptableUrl(url)) return null;
 		return {
-			url: clip(withholdSecrets(url, {
+			url: clip$1(withholdSecrets(url, {
 				...PRIVACY_RULES,
 				secretLabelPatterns: []
 			}).text, 400),
@@ -689,14 +734,44 @@
 		};
 	}
 	/**
-	* What actually goes in the /plan `command` field. The agent's contract has no
-	* separate context parameter — the command text is the only channel — so the
-	* page rides along as a clearly-labelled trailer the planner can use or ignore.
+	* What goes in the /plan `command` field.
+	*
+	* THE TRAILER IS STILL HERE ON PURPOSE, even though /plan now takes a
+	* first-class `context` (see commandContext below and local-agent/
+	* callerContext.js). It is the only channel an agent older than that field has,
+	* and an extension that dropped it would go silent about the page against every
+	* such agent — a regression paid by the owner, to tidy a wire format.
+	*
+	* A current agent strips it: receiving `context` means it has the page
+	* properly, so the redundant copy comes off the command before anything reads
+	* that command as a sentence. Belt and braces, and the braces cost nothing.
 	*/
 	function buildCommandText(command, page = null) {
-		const text = clip(command, MAX_COMMAND_CHARS);
+		const text = clip$1(command, MAX_COMMAND_CHARS);
 		if (!page) return text;
 		return `${text}\n\n[Sent from the browser extension. Active page: ${page.title ? `"${page.title}" — ${page.url}` : page.url}]`;
+	}
+	/**
+	* The same page as a first-class `context` field, which is where an agent that
+	* understands it will read it from.
+	*
+	* Why this beats the trailer, from one live command on 2026-08-09: as text, the
+	* page became part of the owner's sentence. goalVerdict reads that sentence to
+	* decide whether the run did what was asked, took the words after "cancel",
+	* stopped at the first full stop — which "…browser extension." supplied — and
+	* told the owner "Cancelling all your recurring investments on ibkr [Sent is
+	* still to do." Every display that titles a job with its command showed the
+	* provenance instead of the ask, too.
+	*/
+	function commandContext(page = null) {
+		if (!page?.url) return null;
+		return {
+			surface: CONSOLE_SOURCE,
+			page: {
+				url: page.url,
+				...page.title ? { title: page.title } : {}
+			}
+		};
 	}
 	function interpretPlanResponse({ status, payload }) {
 		if (!payload || typeof payload !== "object") return {
@@ -711,7 +786,7 @@
 		if (status === 401) return {
 			kind: "error",
 			unauthorized: true,
-			message: payload.error || "The local agent rejected the token. Open settings.",
+			message: payload.error || "The local agent rejected the token. Pair again from the popup.",
 			...common
 		};
 		if (status === 422 || payload.status === "unsupported") return {
@@ -741,6 +816,7 @@
 			};
 			return {
 				kind: "parked",
+				actions,
 				message: planLine,
 				detail: describePlanSteps(actions, payload.preview),
 				safety: payload.safety || "",
@@ -788,24 +864,24 @@
 		return results.map((result) => {
 			const label = result?.action?.label || result?.action?.type || "step";
 			const text = result?.message || result?.error || "";
-			return clip(`${result?.ok ? "✓" : "✗"} ${label}${text ? ` — ${text}` : ""}`, 300);
+			return clip$1(`${result?.ok ? "✓" : "✗"} ${label}${text ? ` — ${text}` : ""}`, 300);
 		});
 	}
 	function describePlanSteps(actions, preview) {
-		const lines = actions.slice(0, 6).map((action, index) => `${index + 1}. ${clip(action?.label || action?.type || "step", 120)}`);
+		const lines = actions.slice(0, 6).map((action, index) => `${index + 1}. ${clip$1(action?.label || action?.type || "step", 120)}`);
 		if (actions.length > 6) lines.push(`… and ${actions.length - 6} more`);
 		const touched = [
 			...preview?.affected?.apps ?? [],
 			...preview?.affected?.urls ?? [],
 			...preview?.affected?.paths ?? []
 		];
-		if (touched.length) lines.push(`Touches: ${clip(touched.join(", "), 200)}`);
+		if (touched.length) lines.push(`Touches: ${clip$1(touched.join(", "), 200)}`);
 		return lines.join("\n");
 	}
 	function newHistoryEntry({ id, command, page = null, now = Date.now() }) {
 		return {
 			id,
-			command: clip(command, MAX_COMMAND_CHARS),
+			command: clip$1(command, MAX_COMMAND_CHARS),
 			page: page ? {
 				url: page.url,
 				title: page.title
@@ -816,8 +892,71 @@
 			jobId: null,
 			sessionId: null,
 			planner: null,
+			pending: null,
 			startedAt: new Date(now).toISOString(),
 			finishedAt: null
+		};
+	}
+	function macPlanPending({ actions, jobId = null, sessionId = null, planner = null }, now = Date.now()) {
+		const list = Array.isArray(actions) ? actions : [];
+		if (!list.length) return null;
+		return {
+			kind: "mac-plan",
+			actions: list,
+			jobId,
+			sessionId,
+			planner,
+			parkedAt: new Date(now).toISOString()
+		};
+	}
+	function localStepPending({ call, effect, reason, runId, approvalId }, now = Date.now()) {
+		if (!call?.type) return null;
+		return {
+			kind: "local-step",
+			call: {
+				type: String(call.type),
+				params: call.params ?? {}
+			},
+			effect: effect ?? "outward",
+			reason: String(reason ?? ""),
+			runId: runId ?? null,
+			approvalId: approvalId ?? null,
+			parkedAt: new Date(now).toISOString()
+		};
+	}
+	/**
+	* May this entry still be decided from the popup? Pure, and the SAME check
+	* the popup renders from and background.js gates on — a button that is
+	* pressable must be a button that works, and the only way to guarantee that
+	* is for both sides to ask one function.
+	*
+	* The agent's own `plan_ready` re-check happens on top of this, in
+	* background.js, because it needs the network. This covers everything
+	* knowable from the entry alone.
+	*/
+	function planDecisionPreflight(entry, now = Date.now()) {
+		if (!entry) return {
+			ok: false,
+			error: "That command is no longer in this list."
+		};
+		if (entry.state !== "parked") return {
+			ok: false,
+			error: `That plan is no longer waiting — it is "${entry.state}".`
+		};
+		const pending = entry.pending;
+		if (!pending?.kind) return {
+			ok: false,
+			error: "This plan parked before the popup could keep its steps, so it can only be approved on the dashboard."
+		};
+		const parkedAt = Date.parse(pending.parkedAt ?? entry.finishedAt ?? "");
+		if (Number.isFinite(parkedAt) && now - parkedAt > 6e5) return {
+			ok: false,
+			expired: true,
+			error: "This plan has been waiting too long to run from here — the pages it was written against have moved on. Send the command again."
+		};
+		return {
+			ok: true,
+			pending
 		};
 	}
 	function appendHistory(history, entry) {
@@ -827,8 +966,8 @@
 		return (Array.isArray(history) ? history : []).map((entry) => entry?.id === id ? {
 			...entry,
 			...patch,
-			headline: clip(patch.headline ?? entry.headline, HEADLINE_MAX),
-			detail: clip(patch.detail ?? entry.detail, DETAIL_MAX)
+			headline: clip$1(patch.headline ?? entry.headline, HEADLINE_MAX),
+			detail: clip$1(patch.detail ?? entry.detail, DETAIL_MAX)
 		} : entry);
 	}
 	/** Outcome (from the interpreters above) → history entry patch. */
@@ -861,7 +1000,13 @@
 				...base,
 				state: "parked",
 				headline: outcome.message,
-				detail: [outcome.safety, outcome.detail].filter(Boolean).join("\n")
+				detail: [outcome.safety, outcome.detail].filter(Boolean).join("\n"),
+				pending: macPlanPending({
+					actions: outcome.actions,
+					jobId: outcome.jobId ?? null,
+					sessionId: outcome.sessionId ?? null,
+					planner: outcome.planner ?? null
+				}, now)
 			};
 			case "refused": return {
 				...base,
@@ -876,7 +1021,7 @@
 		}
 	}
 	//#endregion
-	//#region src/affinity.js
+	//#region browser-extension/src/affinity.js
 	const CAPABILITY_BROWSER = "browser";
 	const CAPABILITY_HIVE = "hive";
 	const EFFECT_READ = "read";
@@ -899,7 +1044,7 @@
 	/** The local command a hive plan step becomes, or null when it cannot. */
 	function localCallFor(action) {
 		const hiveType = String(action?.type ?? "").trim();
-		const params = action?.params && typeof action.params === "object" && !Array.isArray(action.params) ? { ...action.params } : {};
+		const params = normalizeCommandParams(action?.params);
 		if (COMMAND_TYPES.has(hiveType)) return {
 			type: hiveType,
 			params
@@ -1082,6 +1227,57 @@
 			reason: `All ${steps.length} step(s) are browser work; this node runs them itself.`
 		};
 	}
+	/**
+	* A stateful wrapper around classifyEffect for tool-by-tool execution.
+	*
+	* The brain clicks by ref, and a ref means nothing outside the snapshot that
+	* minted it. The guard watches snapshot results go past and remembers each
+	* ref's accessible name, so when the model later says {click, ref:"e4"} the
+	* classifier sees "Confirm cancellation" — the words the OWNER would have
+	* read — and not an opaque token. A ref the guard never saw snapshotted is
+	* unclassifiable and therefore parks (classifyEffect's fail-closed rule).
+	*/
+	function createOutwardGuard() {
+		const names = /* @__PURE__ */ new Map();
+		return {
+			/** Feed every successful tool result through here. */
+			observe(call, result) {
+				if (String(call?.type) !== "snapshot") return;
+				for (const element of result?.elements ?? []) {
+					const ref = String(element?.ref ?? "").trim();
+					if (!ref) continue;
+					names.set(ref, {
+						name: String(element?.name ?? ""),
+						role: String(element?.role ?? "")
+					});
+				}
+			},
+			/** What the last snapshot called this ref, if anything. */
+			describeRef(ref) {
+				return names.get(String(ref ?? "").trim()) ?? null;
+			},
+			/**
+			* May this call run unattended? {allow, effect, reason, targetName}.
+			* Read and act steps pass; outward steps do not — deciding what happens
+			* to a parked call is the caller's business, not the guard's.
+			*/
+			assess(call) {
+				const known = names.get(String(call?.params?.ref ?? "").trim());
+				const targetName = known ? [known.name, known.role && `(${known.role})`].filter(Boolean).join(" ") : "";
+				const { effect, reason } = classifyEffect({
+					type: call?.type,
+					params: call?.params ?? {},
+					targetName
+				});
+				return {
+					allow: effect !== EFFECT_OUTWARD,
+					effect,
+					reason,
+					targetName
+				};
+			}
+		};
+	}
 	const NAVIGATION_COMMANDS = new Set(["navigate", "activate_tab"]);
 	/** What a finished run actually did, counted from its steps. */
 	function summarizeEffects(steps = []) {
@@ -1145,6 +1341,345 @@
 	function describeCounts(effects) {
 		return `${effects.read} read, ${effects.opened} page(s) opened, ${effects.act} page interaction(s), ${effects.outward} approved outward step(s), ${effects.failed} failed`;
 	}
+	const MAX_RESULT_CHARS = 2e3;
+	const MAX_SNAPSHOT_ELEMENTS = 45;
+	const TOOL_DESCRIPTIONS = Object.freeze({
+		activate_tab: "Focus the tab already showing a site, opening it only if none is open. params: {urlContains?, url?}. USE THIS to reach a site rather than navigate — it keeps the owner's signed-in session and does not clobber the page they were on.",
+		navigate: "Point the current tab at a URL, replacing what it was showing. params: {url, newTab?}.",
+		snapshot: "List the interactive elements on the page with a `ref` for each. params: {maxElements?}. Call this before any click/type/select: refs come from here and are the only reliable way to address an element.",
+		read_page: "Read the page text. params: {mode?: \"text\"|\"main_text\"|\"html\"|\"forms\"|\"landmarks\", maxChars?}.",
+		click: "Click one element. params: {ref} from a snapshot, or {selector}.",
+		type: "Type into a field. params: {ref|selector, text, submit?}. submit:true files the form in the same breath — do not set it unless the owner asked to submit.",
+		select: "Choose an option in a <select>. params: {ref|selector, value|label}.",
+		scroll: "Scroll the page or an element. params: {ref|selector?, direction?, amount?}.",
+		press_key: "Press one key. params: {key}. Enter submits whatever form has focus.",
+		wait_for: "Wait for something to appear before continuing. params: {selector?, textContains?, timeoutMs?}.",
+		list_tabs: "List the open tabs and their URLs. params: {}.",
+		capture: "Screenshot the visible tab. params: {}. Costly — prefer snapshot."
+	});
+	/** The verbs offered to the model: exactly the ones the executor accepts. */
+	const BRAIN_TOOLS = Object.freeze([...COMMAND_TYPES].map((type) => ({
+		type,
+		description: TOOL_DESCRIPTIONS[type] ?? ""
+	})));
+	/**
+	* What the model is told it is.
+	*
+	* Written to be read alongside affinity.js, because the two halves have to
+	* agree: the guard will park an outward step whatever the prompt says, so a
+	* prompt that promised the model it could submit orders would only produce
+	* confused models and wasted inferences. It is told the rule up front instead.
+	*/
+	function brainSystemPrompt() {
+		return `You are the browser node of a personal agent. You act INSIDE the owner's own browser, in their existing signed-in tabs, on their behalf.
+
+Answer with ONE JSON object and nothing else. Exactly one of these three shapes:
+
+  {"thought": "<one short line>", "tool": "<name>", "params": { ... }}
+  {"thought": "<one short line>", "answer": "<what you found or did, for the owner>"}
+  {"thought": "<one short line>", "handoff": "<why this needs the Mac and not a browser>"}
+
+EVERY reply must carry one of "tool", "answer" or "handoff". A reply with only
+"thought" is not a reply — it does nothing, the task does not advance, and you
+will simply be asked again.
+
+Tools:
+${BRAIN_TOOLS.map((tool) => `- ${tool.type}: ${tool.description}`).join("\n")}
+
+How to work:
+- Look before you act. snapshot gives you refs; click/type/select need one.
+- Use activate_tab to reach a site. The owner is already signed in there; navigate replaces the page they were looking at.
+- One tool per reply. You will be given its result and asked again.
+- If a step fails twice the same way, stop and answer with what you learned.
+
+About steps that commit something outward — submit, buy, sell, cancel, send,
+delete, subscribe, sign:
+- KEEP GOING AND CALL THE TOOL ANYWAY when you reach one. The system stops it
+  for you and asks the owner to approve it. That is the design, and it is not
+  your job to do it instead.
+- So do not stop early to describe what you would have done, and do not ask the
+  owner for permission yourself — that is what stopping early looks like from
+  here, and it leaves the task neither done nor asked.
+- Never disguise such a step as a different one to get past the check.
+
+What you must not do:
+- Do not claim you did something you did not do. If you only opened and read pages, say exactly that. The system computes what actually happened from a ledger of executed steps and will contradict you.
+- If the task needs anything outside a browser — files, shell, native apps, other machines — use handoff and say so. Do not improvise.
+
+Answer with the JSON object only. No prose, no code fences.`;
+	}
+	/**
+	* A /v1/infer descriptor, in the same shape relay-peer.js builds for every
+	* other relay call, so background.js's relayFetch carries it and the token
+	* still never appears in this module.
+	*/
+	function inferRequest(config, messages, { maxTokens = 900 } = {}) {
+		return {
+			method: "POST",
+			path: "/v1/infer",
+			auth: "device",
+			body: {
+				messages,
+				maxTokens,
+				responseFormat: "json_object"
+			}
+		};
+	}
+	/**
+	* Why a /v1/infer call failed, and whether the brain should stop trying.
+	*
+	* KEYED ON THE PRESENCE OF `retryAfter`, NOT ON STATUS CODES. The relay states
+	* this as a contract in nodeInference.js: `retryAfter` is DEVICE-SCOPED and
+	* means "this device should not ask this relay again before then" — never
+	* "this request was unlucky". So a reason the relay adds later (a third one
+	* beyond rate_limited and not_configured) is honoured here with no change,
+	* which is the whole point of reading the field instead of the number.
+	*
+	* `fatal` is different: a request this device must not repeat AS WRITTEN
+	* (a bad model name, an over-budget prompt). Retrying is pointless but the
+	* brain is not broken, so the command hands off rather than the peer parking.
+	*/
+	function describeInferFailure(error) {
+		const status = Number(error?.status) || 0;
+		const code = String(error?.code || "");
+		const retryAfter = Number(error?.retryAfter) || 0;
+		const message = error?.message || String(error ?? "The relay refused the request.");
+		if (retryAfter > 0) return {
+			message,
+			code,
+			status,
+			retryAfter,
+			parkBrain: true,
+			fatal: false
+		};
+		return {
+			message,
+			code,
+			status,
+			retryAfter: 0,
+			parkBrain: false,
+			fatal: status === 400 || [
+				"invalid_request",
+				"invalid_messages",
+				"prompt_too_large",
+				"model_not_allowed"
+			].includes(code)
+		};
+	}
+	/**
+	* Is this a usable answer at all?
+	*
+	* `complete` is a TRI-STATE and null means the provider said nothing about how
+	* it stopped — which is not the same as "it stopped badly", so null passes. A
+	* caller that checked only `truncated` would read a content-filtered
+	* non-answer (short content, truncated:false) as a real one; that is the same
+	* bug one field over, which is why `complete` exists and is checked here.
+	*/
+	function readInferPayload(payload) {
+		if (payload?.refusal) return {
+			ok: false,
+			error: `The model declined: ${String(payload.refusal).slice(0, 300)}`
+		};
+		if (payload?.truncated) return {
+			ok: false,
+			error: "The model ran out of output budget mid-answer, so its reply is not valid JSON. The step was not run."
+		};
+		if (payload?.complete === false) return {
+			ok: false,
+			error: `The model stopped abnormally (${String(payload?.finishReason || "unknown")}), so its reply cannot be trusted.`
+		};
+		const content = String(payload?.content ?? "").trim();
+		if (!content) return {
+			ok: false,
+			error: "The model returned an empty reply."
+		};
+		return {
+			ok: true,
+			content
+		};
+	}
+	/**
+	* The model's JSON turn, read into something the loop can act on.
+	*
+	* Tolerant of exactly one thing — a fenced code block — because models emit
+	* them under json_object often enough that refusing would cost a step for no
+	* safety gain. Everything else is strict: an unknown tool, a missing params
+	* object or a shapeless reply is an error the loop feeds BACK to the model, so
+	* it corrects rather than the command dying on a typo.
+	*/
+	function parseBrainReply(content) {
+		const text = String(content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+		let value;
+		try {
+			value = JSON.parse(text);
+		} catch {
+			return {
+				kind: "error",
+				error: "Your reply was not valid JSON. Answer with one JSON object."
+			};
+		}
+		if (!value || typeof value !== "object" || Array.isArray(value)) return {
+			kind: "error",
+			error: "Your reply must be a single JSON object."
+		};
+		const thought = String(value.thought ?? "").slice(0, 300);
+		if (value.handoff) return {
+			kind: "handoff",
+			thought,
+			reason: String(value.handoff).slice(0, 500)
+		};
+		if (value.tool != null) {
+			const type = String(value.tool).trim();
+			if (!COMMAND_TYPES.has(type)) return {
+				kind: "error",
+				error: `"${type}" is not a tool. Use one of: ${[...COMMAND_TYPES].join(", ")}.`
+			};
+			const params = value.params;
+			if (params != null && (typeof params !== "object" || Array.isArray(params))) return {
+				kind: "error",
+				error: "params must be a JSON object."
+			};
+			return {
+				kind: "call",
+				thought,
+				call: {
+					type,
+					params: params ?? {}
+				}
+			};
+		}
+		if (value.answer != null) return {
+			kind: "answer",
+			thought,
+			answer: String(value.answer).slice(0, 2e3)
+		};
+		return {
+			kind: "error",
+			error: "Your reply had none of \"tool\", \"answer\" or \"handoff\". Answer with one of the three shapes."
+		};
+	}
+	/**
+	* One executed step, compacted for the transcript.
+	*
+	* Two jobs. The obvious one is size: a raw snapshot of a real page is 80
+	* elements of bounds, selectors, hrefs and tags — most of the prompt budget
+	* for three fields the model actually addresses elements by. The other is
+	* FIDELITY: what goes in here is the post-sanitizeExtraction result, the same
+	* text that would have crossed to the Mac, so a password field arrives as a
+	* withheld field rather than as its contents. This function only shortens; it
+	* is never the thing that makes a result safe.
+	*/
+	function compactToolResult(type, result) {
+		if (!result || typeof result !== "object") return String(result ?? "done");
+		if (Array.isArray(result.elements)) {
+			const total = result.elements.length;
+			const shown = result.elements.slice(0, MAX_SNAPSHOT_ELEMENTS).map((element) => {
+				return [
+					`${element?.ref ?? "?"}`,
+					element?.role ? `<${element.role}>` : "",
+					element?.name ? `"${String(element.name).slice(0, 80)}"` : "",
+					element?.sensitivity && element.sensitivity !== "normal" ? `[${element.sensitivity} — contents withheld]` : "",
+					element?.disabled ? "[disabled]" : ""
+				].filter(Boolean).join(" ");
+			});
+			const header = `${result.title ? `${result.title} — ` : ""}${result.url ?? ""}`.trim();
+			const more = total > shown.length ? `\n… ${total - shown.length} more element(s) not shown` : "";
+			return clip(`${header}\n${total} interactive element(s):\n${shown.join("\n")}${more}`);
+		}
+		if (Array.isArray(result.tabs)) return clip(`${result.tabs.length} tab(s):\n${result.tabs.map((tab) => `- ${truncate(tab?.title, 60)} — ${truncate(tab?.url, 120)}`).join("\n")}`);
+		if (typeof result.content === "string" && result.content) return clip(`${`${result.title ? `${result.title} — ` : ""}${result.url ?? ""}`.trim()}\n${result.content}`);
+		return clip(`${String(result.message ?? "done")}${result.url ? ` (${truncate(result.url, 120)})` : ""}`);
+	}
+	function truncate(value, max) {
+		const text = String(value ?? "").replace(/\s+/g, " ").trim();
+		return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+	}
+	function clip(text, max = MAX_RESULT_CHARS) {
+		const value = String(text ?? "").trim();
+		if (value.length <= max) return value;
+		return `${value.slice(0, max - 1)}…\n[trimmed — ask for a narrower read if you need more]`;
+	}
+	/**
+	* The conversation, kept inside the relay's ceilings BY CONSTRUCTION.
+	*
+	* The system message and the owner's original ask are pinned: they are the
+	* task, and a transcript that drops them to fit is a loop that forgets what it
+	* was doing. Everything else is a sliding window over the tool exchange —
+	* oldest results fall out first, and the fact that they did is stated in the
+	* transcript rather than left for the model to infer from a gap.
+	*/
+	function createBrainTranscript({ command, page = null, now = Date.now() } = {}) {
+		const system = {
+			role: "system",
+			content: brainSystemPrompt()
+		};
+		const user = {
+			role: "user",
+			content: [
+				`The owner asked: ${String(command ?? "").trim()}`,
+				page?.url ? `\nThey are currently looking at: ${page.title ? `"${page.title}" — ` : ""}${page.url}` : "",
+				`\nStarted at ${new Date(now).toISOString()}.`
+			].filter(Boolean).join("")
+		};
+		let turns = [];
+		let dropped = 0;
+		const fit = () => {
+			for (;;) {
+				const messages = [
+					system,
+					user,
+					...turns
+				];
+				const chars = messages.reduce((total, message) => total + message.content.length, 0);
+				if (messages.length <= 30 && chars <= 17e3) return;
+				if (!turns.length) return;
+				turns = turns.slice(2);
+				dropped += 1;
+			}
+		};
+		return {
+			/** What to send now. */
+			messages() {
+				fit();
+				return [
+					system,
+					user,
+					...dropped ? [{
+						role: "user",
+						content: `[${dropped} earlier step(s) were dropped from this transcript to stay within limits. Do not assume they succeeded — if you need something from them, look again.]`
+					}] : [],
+					...turns
+				];
+			},
+			/** The model's own turn, verbatim, so it can see what it said. */
+			pushAssistant(content) {
+				turns.push({
+					role: "assistant",
+					content: String(content ?? "")
+				});
+			},
+			/** What running its tool produced — or why nothing ran. */
+			pushResult(text) {
+				turns.push({
+					role: "user",
+					content: String(text ?? "")
+				});
+			},
+			/** Diagnostics for the run record, not for the model. */
+			stats() {
+				const messages = [
+					system,
+					user,
+					...turns
+				];
+				return {
+					messages: messages.length,
+					chars: messages.reduce((total, message) => total + message.content.length, 0),
+					dropped
+				};
+			}
+		};
+	}
 	/** The relay brain's own mailbox. '@' can never appear in a deviceId. */
 	const RELAY_NODE_ADDRESS = "@relay";
 	/** Serialized envelope ceiling. See the SIZE note above. */
@@ -1195,7 +1730,7 @@
 		return candidate;
 	}
 	//#endregion
-	//#region ../shared/bridgeSocketProtocol.js
+	//#region shared/bridgeSocketProtocol.js
 	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
 	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
 	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
@@ -1210,7 +1745,7 @@
 		}
 	}
 	//#endregion
-	//#region src/relay-peer.js
+	//#region browser-extension/src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://ai-pendant-relay.your-subdomain.workers.dev",
 		"http://127.0.0.1:8787",
@@ -1523,26 +2058,38 @@
 	}
 	/**
 	* Build the Error a failed relay response should throw. One place, because
-	* the wire contract has three parts that drift independently: the human
+	* the wire contract has four parts that drift independently: the human
 	* message (`error` or `message`), the machine name (`code` — e.g. the
-	* ownership 403's `not_your_inbox` since relay 41dbc4b), and the HTTP
-	* status. describeRelayFailure keys on status first and uses code only to
-	* sharpen, so this must carry all three — dropping `code` at this seam once
+	* ownership 403's `not_your_inbox` since relay 41dbc4b), the HTTP status, and
+	* `retryAfter`. describeRelayFailure keys on status first and uses code only to
+	* sharpen, so this must carry all of them — dropping `code` at this seam once
 	* left the not_your_inbox branch unreachable from live traffic.
+	*
+	* `retryAfter` is DEVICE-SCOPED and the relay documents it as a contract
+	* (cloud-relay/nodeInference.js): its presence means "this device should not
+	* ask this relay again before then", never "this request was unlucky". brain.js
+	* parks on the field rather than on a list of status codes, so a reason the
+	* relay adds later is honoured with no change here — which only works if the
+	* field survives this seam. It is read from the body first and the standard
+	* header second, because a proxy can strip a header and the body is ours.
 	*/
 	async function relayResponseError(response) {
 		let detail = "";
 		let code = "";
+		let retryAfter = 0;
 		try {
 			const payload = await response.json();
 			detail = payload.error || payload.message || "";
 			code = typeof payload.code === "string" ? payload.code : "";
+			retryAfter = Number(payload.retryAfter) || 0;
 		} catch {
 			detail = await response.text().catch(() => "");
 		}
+		if (!retryAfter) retryAfter = Number(response.headers?.get?.("Retry-After")) || 0;
 		const error = new Error(detail || `The relay returned HTTP ${response.status}.`);
 		error.status = response.status;
 		if (code) error.code = code;
+		if (retryAfter > 0) error.retryAfter = retryAfter;
 		return error;
 	}
 	/**
@@ -1693,7 +2240,7 @@
 		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
 	}
 	//#endregion
-	//#region src/execution-status.js
+	//#region browser-extension/src/execution-status.js
 	const EXECUTION_STATUS_KEY = "localExecutionStatus";
 	const PENDING_APPROVALS_KEY = "localPendingApprovals";
 	const APPROVAL_TTL_MS = 10 * 6e4;
@@ -2006,7 +2553,7 @@
 		};
 	}
 	//#endregion
-	//#region src/approvals.js
+	//#region browser-extension/src/approvals.js
 	const APPROVALS_KEY = "pendingApprovals";
 	/**
 	* What the toolbar badge shows: the number of prompts still waiting on the
@@ -2075,7 +2622,131 @@
 		};
 	}
 	//#endregion
-	//#region src/background.js
+	//#region browser-extension/src/pairing.js
+	const PAIR_LIFETIMES = Object.freeze([
+		"session",
+		"7d",
+		"30d",
+		"forever"
+	]);
+	const DEFAULT_PAIR_LIFETIME = "forever";
+	const LIFETIME_TTL_MS = Object.freeze({
+		session: null,
+		"7d": 10080 * 60 * 1e3,
+		"30d": 720 * 60 * 60 * 1e3,
+		forever: null
+	});
+	/** Anything not canonical becomes the default — the UI only offers the four,
+	* so a stray value is corruption, not intent. */
+	function normalizePairLifetime(raw) {
+		const value = String(raw ?? "").trim();
+		return PAIR_LIFETIMES.includes(value) ? value : DEFAULT_PAIR_LIFETIME;
+	}
+	/** Relay-side TTL for a lifetime; null means "mint with no expiry". */
+	function lifetimeTtlMs(lifetime) {
+		return LIFETIME_TTL_MS[normalizePairLifetime(lifetime)] ?? null;
+	}
+	/**
+	* Reply → storage patch. Keys are the live contract: `agentToken` restarts
+	* the Mac poll loop, the RELAY_STORAGE_KEYS quartet restarts the mesh socket
+	* (background.js watches both). relayEnabled flips true ONLY when a token
+	* actually arrived — flipping it on a failed relay leg would aim the drain
+	* loop at a relay this browser cannot authenticate to, and the error state
+	* that follows looks like a bug rather than an unfinished setup.
+	*/
+	function pairStoragePatch(payload, { agentUrl, lifetime, now = Date.now() } = {}) {
+		if (!payload?.ok || !payload.agentToken) return {
+			ok: false,
+			error: String(payload?.error ?? "Pairing failed: the agent returned no token.")
+		};
+		const chosen = normalizePairLifetime(lifetime);
+		const ttl = lifetimeTtlMs(chosen);
+		const values = {
+			...agentUrl ? { agentUrl } : {},
+			agentToken: String(payload.agentToken),
+			pairLifetime: chosen,
+			pairExpiresAt: ttl ? new Date(now + ttl).toISOString() : null
+		};
+		if (payload.relay?.deviceToken) {
+			values.relayEnabled = true;
+			values.relayUrl = String(payload.relay.url ?? "");
+			values.relayDeviceId = String(payload.relay.deviceId ?? "");
+			values.deviceToken = String(payload.relay.deviceToken);
+			return {
+				ok: true,
+				values,
+				note: `Paired. This browser is ${values.relayDeviceId} on the relay — the brain is on.`
+			};
+		}
+		return {
+			ok: true,
+			values,
+			note: `Mac agent paired. Relay half failed: ${String(payload.relayError ?? "no credential returned")} — commands will use the Mac until you pair again.`
+		};
+	}
+	const PAIR_OUTCOME_KEY = "pairOutcome";
+	function pairOutcomeRecord(outcome, now = Date.now()) {
+		return outcome?.ok ? {
+			ok: true,
+			note: String(outcome.note ?? "Paired."),
+			at: now
+		} : {
+			ok: false,
+			error: String(outcome?.error ?? "Pairing failed."),
+			at: now
+		};
+	}
+	const PAIR_WIPE_KEYS = Object.freeze([
+		"agentToken",
+		"deviceToken",
+		"relayEnabled",
+		"pairLifetime",
+		"pairExpiresAt"
+	]);
+	function credentialExpiryCheck({ agentToken, pairLifetime, pairExpiresAt, sessionAlive, now = Date.now() } = {}) {
+		if (!agentToken) return { wipe: false };
+		const lifetime = normalizePairLifetime(pairLifetime);
+		if (lifetime === "session" && !sessionAlive) return {
+			wipe: true,
+			reason: "This pairing was for the browser session only, and the browser has been closed since."
+		};
+		const expiresAt = Date.parse(pairExpiresAt ?? "");
+		if (Number.isFinite(expiresAt) && expiresAt <= now) return {
+			wipe: true,
+			reason: `The ${lifetime === "7d" ? "7-day" : lifetime === "30d" ? "30-day" : "timed"} pairing has expired.`
+		};
+		return { wipe: false };
+	}
+	function shouldEscrow(lifetime) {
+		return normalizePairLifetime(lifetime) !== "session";
+	}
+	function escrowRestorePlan(values, now = Date.now()) {
+		if (!values || typeof values !== "object" || !values.agentToken) return {
+			restore: false,
+			reason: "nothing escrowed"
+		};
+		if (normalizePairLifetime(values.pairLifetime) === "session") return {
+			restore: false,
+			reason: "session-only pairings are never restored"
+		};
+		const verdict = credentialExpiryCheck({
+			agentToken: values.agentToken,
+			pairLifetime: values.pairLifetime,
+			pairExpiresAt: values.pairExpiresAt,
+			sessionAlive: false,
+			now
+		});
+		if (verdict.wipe) return {
+			restore: false,
+			reason: verdict.reason
+		};
+		return {
+			restore: true,
+			values
+		};
+	}
+	//#endregion
+	//#region browser-extension/src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const POLL_ALARM = "ai-pendant-poll";
 	const POLL_WINDOW_MS = 25e3;
@@ -2248,7 +2919,7 @@
 			await updateStatus({
 				state: "needs-setup",
 				connected: false,
-				message: "Open settings and save the local agent token."
+				message: "Paste the pairing code in the extension popup to connect."
 			});
 			return;
 		}
@@ -2651,7 +3322,13 @@
 	* effectively left the machine.
 	*/
 	async function executeCommand(command, config) {
-		const { type, params } = validateCommand(command);
+		const { type, params } = validateCommand({
+			...command,
+			action: {
+				...command?.action,
+				params: normalizeCommandParams(command?.action?.params)
+			}
+		});
 		const { result, tab } = await runCommand(type, params, config);
 		const clean = sanitizeExtraction(result);
 		return {
@@ -2864,7 +3541,7 @@
 	async function assertPageAccess(tab) {
 		if (!tab?.id || !isScriptableUrl(tab.url)) throw new Error("This page cannot be controlled. Browser settings, extension pages, and local files are protected.");
 		const pattern = originPattern(tab.url);
-		if (!await api.permissions.contains({ origins: [pattern] })) throw new Error(`Website access is not granted for ${new URL(tab.url).origin}. Open the extension settings and grant website access.`);
+		if (!await api.permissions.contains({ origins: [pattern] })) throw new Error(`Website access is not granted for ${new URL(tab.url).origin}. Click “Allow this browser’s pages” in the extension popup.`);
 	}
 	function waitForTabLoad(tabId, timeoutMs) {
 		return new Promise((resolve, reject) => {
@@ -3224,7 +3901,8 @@
 			error: "Type a command first."
 		};
 		const config = await getConfig();
-		if (!config.agentToken) return {
+		const brain = await brainAvailability();
+		if (!config.agentToken && !brain.ok) return {
 			ok: false,
 			needsSetup: true
 		};
@@ -3251,11 +3929,41 @@
 		};
 	}
 	async function runConsoleCommand({ id, command, page, config }) {
+		const brain = await brainAvailability();
+		if (brain.ok) {
+			await patchEntry(id, { headline: "Thinking in this browser…" });
+			const outcome = await runBrainLocally({
+				id,
+				command,
+				page,
+				config,
+				relayConfig: brain.relayConfig
+			});
+			if (!outcome.handoff) return;
+			if (!config.agentToken) {
+				await patchEntry(id, {
+					state: "failed",
+					headline: `This browser could not do it and there is no Mac agent configured: ${outcome.reason}`,
+					finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+				});
+				return;
+			}
+			await patchEntry(id, { headline: `Handing this to the Mac — ${outcome.reason}` });
+		} else if (!config.agentToken) {
+			await patchEntry(id, {
+				state: "failed",
+				headline: brain.reason,
+				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+			return;
+		}
 		const commandText = buildCommandText(command, page);
+		const context = commandContext(page);
 		const stored = await api.storage.local.get(SESSION_KEY);
 		const sessionId = String(stored["consoleSessionId"] ?? "").trim();
 		const planOutcome = await consolePost(config, "/plan", {
 			command: commandText,
+			...context ? { context } : {},
 			...sessionId ? { sessionId } : {},
 			source: CONSOLE_SOURCE
 		}, PLAN_TIMEOUT_MS, interpretPlanResponse);
@@ -3278,6 +3986,7 @@
 		await patchEntry(id, { headline: "Plan ready — executing…" });
 		await patchEntry(id, outcomeToPatch(await consolePost(config, "/execute", {
 			command: commandText,
+			...context ? { context } : {},
 			actions: planOutcome.actions,
 			...planOutcome.sessionId ? { sessionId: planOutcome.sessionId } : {},
 			planMeta: {
@@ -3373,10 +4082,392 @@
 			detail: [
 				`Ran in this browser (affinity: all steps browser-capable).`,
 				verdict.detail,
-				...parked.length ? [`The parked step (${parked[0].id}) was recorded and did not run. Re-run the command when you want to do it yourself.`] : []
+				...parked.length ? [`The parked step (${parked[0].id}) has not run. Approve below to run exactly that step — nothing after it runs either way.`] : []
 			].filter(Boolean).join("\n"),
+			pending: parked.length ? localStepPending({
+				call: parked[0].call,
+				effect: parked[0].effect,
+				reason: parked[0].reason,
+				runId: id,
+				approvalId: parked[0].id
+			}) : null,
 			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
 		});
+	}
+	let brainParkedUntil = 0;
+	/** Can this node think for itself right now, and if not, why not? */
+	async function brainAvailability(now = Date.now()) {
+		const relayConfig = await getRelayConfig();
+		if (!relayConfig.ready) return {
+			ok: false,
+			reason: "No relay credential is configured, so this browser has no brain of its own."
+		};
+		if (brainParkedUntil > now) return {
+			ok: false,
+			reason: `The relay asked this device to stop calling its brain for another ${Math.ceil((brainParkedUntil - now) / 1e3)}s.`
+		};
+		return {
+			ok: true,
+			relayConfig
+		};
+	}
+	/** One turn: ask the relay, and read the answer strictly. */
+	async function brainTurn(relayConfig, transcript) {
+		let payload;
+		try {
+			payload = await relayFetch(relayConfig, inferRequest(relayConfig, transcript.messages()), 7e4);
+		} catch (error) {
+			const failure = describeInferFailure(error);
+			if (failure.parkBrain) brainParkedUntil = Date.now() + failure.retryAfter * 1e3;
+			return {
+				kind: "unavailable",
+				...failure
+			};
+		}
+		const read = readInferPayload(payload);
+		if (!read.ok) return {
+			kind: "retry",
+			error: read.error,
+			raw: ""
+		};
+		const reply = parseBrainReply(read.content);
+		if (reply.kind === "error") return {
+			kind: "retry",
+			error: reply.error,
+			raw: read.content
+		};
+		return {
+			...reply,
+			raw: read.content
+		};
+	}
+	/**
+	* Think and act in this browser until the task is done, parked, or out of
+	* steps. Writes the same journal and history a Mac-planned run writes, so
+	* nothing downstream has to know which brain produced it.
+	*/
+	async function runBrainLocally({ id, command, page, config, relayConfig }) {
+		const journal = executionJournal();
+		const guard = createOutwardGuard();
+		const transcript = createBrainTranscript({
+			command,
+			page
+		});
+		await journal.beginRun({
+			runId: id,
+			command,
+			route: "local-brain",
+			executor: "browser-brain"
+		});
+		await recordRunToHive(id, "claim");
+		const parked = [];
+		let answer = "";
+		let steps = 0;
+		const handOff = async (reason) => {
+			await journal.finishRun(id, {
+				state: "finished",
+				verdict: "handed-off",
+				headline: `Handed to the Mac: ${reason}`,
+				detail: `This node ran ${steps} step(s) of thinking and executed nothing.`
+			});
+			await recordRunToHive(id, "verdict");
+			return {
+				handoff: true,
+				reason,
+				steps
+			};
+		};
+		while (steps < 12) {
+			const turn = await brainTurn(relayConfig, transcript);
+			if (turn.kind === "unavailable") return await handOff(turn.message);
+			if (turn.kind === "retry") {
+				transcript.pushAssistant(turn.raw || "");
+				transcript.pushResult(`That reply could not be used: ${turn.error}`);
+				steps += 1;
+				continue;
+			}
+			transcript.pushAssistant(turn.raw);
+			if (turn.kind === "handoff") {
+				if (!((await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? []).length) return await handOff(turn.reason);
+				answer = `Stopped: ${turn.reason}`;
+				break;
+			}
+			if (turn.kind === "answer") {
+				answer = turn.answer;
+				break;
+			}
+			const assessment = guard.assess(turn.call);
+			if (!assessment.allow) {
+				parked.push(await journal.parkStep(id, {
+					call: turn.call,
+					effect: assessment.effect,
+					reason: assessment.reason,
+					targetName: assessment.targetName
+				}));
+				break;
+			}
+			try {
+				const result = await executeCommand({
+					commandId: `brain-${id}-${steps}`,
+					createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+					action: turn.call
+				}, config);
+				guard.observe(turn.call, result);
+				await journal.recordStep(id, {
+					tool: turn.call.type,
+					effect: assessment.effect,
+					ok: true,
+					summary: String(result?.message ?? turn.call.type).slice(0, 300)
+				});
+				transcript.pushResult(compactToolResult(turn.call.type, result));
+			} catch (error) {
+				const message = error?.message || String(error);
+				await journal.recordStep(id, {
+					tool: turn.call.type,
+					effect: assessment.effect,
+					ok: false,
+					summary: message.slice(0, 300)
+				});
+				transcript.pushResult(`That step failed: ${message}`);
+			}
+			steps += 1;
+		}
+		const executed = (await journal.getStatus()).runs.find((run) => run.runId === id)?.steps ?? [];
+		if (!executed.length && !parked.length && !answer) return await handOff("this browser produced no usable step");
+		const exhausted = steps >= 12 && !answer && !parked.length;
+		const verdict = honestVerdict({
+			command,
+			steps: executed,
+			parked,
+			response: answer
+		});
+		await journal.finishRun(id, {
+			state: parked.length ? "parked" : "finished",
+			...verdict
+		});
+		await recordRunToHive(id, "verdict");
+		await patchEntry(id, {
+			state: parked.length ? "parked" : verdict.verdict === "incomplete" || exhausted ? "failed" : "executed",
+			headline: exhausted ? `Stopped after 12 steps without finishing. ${verdict.headline}` : verdict.headline,
+			detail: [
+				"Thought and run in this browser (brain: relay inference, execution: this node).",
+				verdict.detail,
+				...parked.length ? ["The parked step has not run. Approve below to run exactly that step — nothing after it runs either way."] : []
+			].filter(Boolean).join("\n"),
+			pending: parked.length ? localStepPending({
+				call: parked[0].call,
+				effect: parked[0].effect,
+				reason: parked[0].reason,
+				runId: id,
+				approvalId: parked[0].id
+			}) : null,
+			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
+		return {
+			handoff: false,
+			steps
+		};
+	}
+	async function decidePlan({ id, decision }) {
+		const entryId = String(id ?? "");
+		const history = (await api.storage.local.get("consoleHistory"))["consoleHistory"] ?? [];
+		const entry = (Array.isArray(history) ? history : []).find((candidate) => candidate?.id === entryId);
+		const preflight = planDecisionPreflight(entry);
+		if (!preflight.ok) return {
+			ok: false,
+			error: preflight.error
+		};
+		const { pending } = preflight;
+		if (decision === "deny") return denyPlan(entry, pending);
+		if (decision !== "approve") return {
+			ok: false,
+			error: `Unknown decision "${decision}".`
+		};
+		const config = await getConfig();
+		if (!config.agentToken) return {
+			ok: false,
+			needsSetup: true
+		};
+		if (pending.kind === "mac-plan") {
+			const stillWaiting = await confirmPlanStillWaiting(config, pending.jobId);
+			if (!stillWaiting.ok) return stillWaiting;
+		}
+		await patchEntry(entryId, {
+			state: "working",
+			headline: "Approved — running it…",
+			pending: null,
+			startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+			finishedAt: null
+		});
+		runApprovedPlan({
+			entry,
+			pending,
+			config
+		}).catch((error) => patchEntry(entryId, {
+			state: "failed",
+			headline: error?.message || String(error),
+			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+		}));
+		return { ok: true };
+	}
+	/**
+	* Deny: the plan does not run, and the Mac's parked job is dismissed so the
+	* dashboard does not keep offering the same decision the owner just made.
+	* A dismissal that fails is reported on the entry rather than swallowed —
+	* "denied here, still parked there" is a state worth seeing.
+	*/
+	async function denyPlan(entry, pending) {
+		let note = "";
+		if (pending.kind === "mac-plan" && pending.jobId) {
+			const config = await getConfig();
+			try {
+				const response = await fetch(`${config.agentUrl}/jobs/${encodeURIComponent(pending.jobId)}/dismiss`, {
+					method: "POST",
+					cache: "no-store",
+					headers: {
+						Accept: "application/json",
+						Authorization: `Bearer ${config.agentToken}`
+					},
+					signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+				});
+				if (!response.ok) note = `The Mac still lists this plan as parked (HTTP ${response.status}).`;
+			} catch (error) {
+				note = `The Mac was not told (${error?.message || error}), so its dashboard may still offer this plan.`;
+			}
+		}
+		await patchEntry(entry.id, {
+			state: "denied",
+			headline: "Denied — nothing ran.",
+			detail: [entry.detail, note].filter(Boolean).join("\n"),
+			pending: null,
+			finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+		});
+		return {
+			ok: true,
+			note
+		};
+	}
+	/** Is the Mac's parked job still waiting for a decision? */
+	async function confirmPlanStillWaiting(config, jobId) {
+		if (!jobId) return { ok: true };
+		try {
+			const response = await fetch(`${config.agentUrl}/jobs/${encodeURIComponent(jobId)}`, {
+				cache: "no-store",
+				headers: {
+					Accept: "application/json",
+					Authorization: `Bearer ${config.agentToken}`
+				},
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+			});
+			if (response.status === 404) return { ok: true };
+			if (!response.ok) return {
+				ok: false,
+				error: `The Mac would not confirm this plan is still waiting (HTTP ${response.status}).`
+			};
+			const body = await response.json().catch(() => null);
+			const job = body?.job ?? body;
+			const status = String(job?.status ?? "");
+			if (status && status !== "plan_ready") return {
+				ok: false,
+				error: `This plan is no longer waiting: the Mac now reports "${status}". It may already have been approved on the dashboard.`
+			};
+			return { ok: true };
+		} catch (error) {
+			return {
+				ok: false,
+				error: `Could not reach the Mac to check this plan is still waiting (${error?.message || error}).`
+			};
+		}
+	}
+	/** Run what was approved — the whole plan, or the single parked step. */
+	async function runApprovedPlan({ entry, pending, config }) {
+		if (pending.kind === "local-step") {
+			await runApprovedStep({
+				entry,
+				pending,
+				config
+			});
+			return;
+		}
+		const affinity = routePlan(pending.actions);
+		if (affinity.route === "browser") {
+			await executePlanLocally({
+				id: entry.id,
+				command: entry.command,
+				steps: affinity.steps,
+				config
+			});
+			return;
+		}
+		const approvedContext = commandContext(entry.page);
+		const outcome = await consolePost(config, "/execute", {
+			command: buildCommandText(entry.command, entry.page),
+			...approvedContext ? { context: approvedContext } : {},
+			actions: pending.actions,
+			...pending.sessionId ? { sessionId: pending.sessionId } : {},
+			planMeta: {
+				planner: pending.planner ?? null,
+				source: CONSOLE_SOURCE
+			},
+			source: CONSOLE_SOURCE
+		}, EXECUTE_TIMEOUT_MS, interpretExecuteResponse);
+		await patchEntry(entry.id, outcomeToPatch(outcome));
+	}
+	/**
+	* The approved outward step, run alone.
+	*
+	* Only this call runs. The steps that would have followed it did not run and
+	* are not resumed — the run that parked has already reported what it did, and
+	* quietly continuing past the approval point would make that report a lie.
+	* The verdict says so out loud.
+	*/
+	async function runApprovedStep({ entry, pending, config }) {
+		const journal = executionJournal();
+		const runId = pending.runId || entry.id;
+		try {
+			const result = await executeCommand({
+				commandId: `approved-${runId}`,
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				action: pending.call
+			}, config);
+			await journal.recordStep(runId, {
+				tool: pending.call.type,
+				effect: pending.effect,
+				ok: true,
+				summary: String(result?.message ?? "Approved step ran.").slice(0, 300)
+			});
+			await journal.finishRun(runId, {
+				state: "finished",
+				verdict: "achieved",
+				headline: `Approved and ran: ${pending.call.type}.`
+			});
+			await recordRunToHive(runId, "verdict");
+			await patchEntry(entry.id, {
+				state: "executed",
+				headline: `You approved it and it ran: ${result?.message || pending.call.type}.`,
+				detail: "Only the approved step ran. Any later steps from the original plan did not — send the command again if more is left to do.",
+				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+		} catch (error) {
+			const message = error?.message || String(error);
+			await journal.recordStep(runId, {
+				tool: pending.call.type,
+				effect: pending.effect,
+				ok: false,
+				summary: message.slice(0, 300)
+			});
+			await journal.finishRun(runId, {
+				state: "failed",
+				verdict: "failed",
+				headline: `The approved step failed: ${message}`
+			});
+			await recordRunToHive(runId, "verdict");
+			await patchEntry(entry.id, {
+				state: "failed",
+				headline: `The approved step failed: ${message}`,
+				finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+			});
+		}
 	}
 	function browserLabel() {
 		const userAgent = globalThis.navigator?.userAgent ?? "";
@@ -3394,13 +4485,66 @@
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 	function startPeers() {
-		startPolling();
-		startRelayDrain();
+		enforceCredentialLifetime().then(() => maybeRestorePairingFromEscrow()).catch(() => {}).finally(() => {
+			startPolling();
+			startRelayDrain();
+		});
 	}
-	api.runtime.onInstalled.addListener(async ({ reason }) => {
+	let escrowUnavailable = false;
+	async function escrowSend(message) {
+		if (escrowUnavailable) return null;
+		if (typeof api?.runtime?.sendNativeMessage !== "function") {
+			escrowUnavailable = true;
+			return null;
+		}
+		try {
+			return await api.runtime.sendNativeMessage("application.id", message);
+		} catch {
+			escrowUnavailable = true;
+			return null;
+		}
+	}
+	async function escrowStorePairing(values) {
+		await escrowSend({
+			type: "escrow:store",
+			values
+		});
+	}
+	async function escrowClearPairing() {
+		await escrowSend({ type: "escrow:clear" });
+	}
+	async function maybeRestorePairingFromEscrow() {
+		const { agentToken } = await api.storage.local.get("agentToken");
+		if (agentToken) return;
+		const plan = escrowRestorePlan((await escrowSend({ type: "escrow:fetch" }))?.values);
+		if (!plan.restore) return;
+		await api.storage.local.set(plan.values);
+		console.log("[ai-pendant] Pairing restored from the app escrow after a storage reset.");
+	}
+	async function enforceCredentialLifetime() {
+		const values = await api.storage.local.get([
+			"agentToken",
+			"pairLifetime",
+			"pairExpiresAt"
+		]);
+		const sessionValues = api.storage.session ? await api.storage.session.get("pairSessionAlive").catch(() => ({})) : { pairSessionAlive: true };
+		const verdict = credentialExpiryCheck({
+			agentToken: values.agentToken,
+			pairLifetime: values.pairLifetime,
+			pairExpiresAt: values.pairExpiresAt,
+			sessionAlive: Boolean(sessionValues?.pairSessionAlive)
+		});
+		if (!verdict.wipe) return;
+		await api.storage.local.remove([...PAIR_WIPE_KEYS]);
+		await updateStatus({
+			state: "needs-setup",
+			connected: false,
+			message: `${verdict.reason} Paste the pairing code in the popup to connect again.`
+		});
+	}
+	api.runtime.onInstalled.addListener(async ({ reason: _reason }) => {
 		await migrateSyncedCredentials();
 		await api.alarms.create(POLL_ALARM, { periodInMinutes: .5 });
-		if (reason === "install") await api.runtime.openOptionsPage();
 		startPeers();
 	});
 	api.runtime.onStartup.addListener(async () => {
@@ -3413,6 +4557,7 @@
 	});
 	api.storage.onChanged.addListener((changes, areaName) => {
 		if (areaName !== "local") return;
+		if (changes.agentToken && changes.agentToken.newValue === void 0) escrowClearPairing();
 		if ([
 			"agentUrl",
 			"agentToken",
@@ -3469,6 +4614,57 @@
 		}
 		if (message?.type === "console:submit") {
 			handleConsoleSubmit(message).then(sendResponse).catch((error) => sendResponse({
+				ok: false,
+				error: error?.message || String(error)
+			}));
+			return true;
+		}
+		if (message?.type === "pair:run") {
+			(async () => {
+				let outcome;
+				try {
+					const origin = String(message.agentUrl ?? "").replace(/\/$/, "");
+					const lifetime = normalizePairLifetime(message.lifetime);
+					const response = await fetch(`${origin}/pair/browser`, {
+						method: "POST",
+						cache: "no-store",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							code: String(message.code ?? ""),
+							deviceId: String(message.deviceId ?? ""),
+							deviceName: String(message.deviceName ?? ""),
+							lifetime
+						}),
+						signal: AbortSignal.timeout(2e4)
+					});
+					outcome = pairStoragePatch(await response.json().catch(() => null) ?? {
+						ok: false,
+						error: `The agent returned HTTP ${response.status} with no body.`
+					}, {
+						agentUrl: origin,
+						lifetime
+					});
+					if (outcome.ok) {
+						if (lifetime === "session" && api.storage.session) await api.storage.session.set({ pairSessionAlive: true });
+						await api.storage.local.set(outcome.values);
+						if (api.storage.sync) await api.storage.sync.remove("agentToken");
+						if (shouldEscrow(lifetime)) await escrowStorePairing(outcome.values).catch(() => {});
+					}
+				} catch (error) {
+					outcome = {
+						ok: false,
+						error: error?.name === "TimeoutError" ? "The agent did not answer within 20s. Is it running on this Mac?" : error?.message || String(error)
+					};
+				}
+				await api.storage.local.set({ [PAIR_OUTCOME_KEY]: pairOutcomeRecord(outcome) }).catch(() => {});
+				try {
+					sendResponse(outcome);
+				} catch {}
+			})();
+			return true;
+		}
+		if (message?.type === "plan:decide") {
+			decidePlan(message).then(sendResponse).catch((error) => sendResponse({
 				ok: false,
 				error: error?.message || String(error)
 			}));

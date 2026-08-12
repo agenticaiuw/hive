@@ -204,3 +204,50 @@ test('a domain selection resolves to its tools, and the rest are namable', () =>
   assert.ok(!rest.includes('system'))
   assert.equal(rest.length + 2, listDomains().domains.length)
 })
+
+test('no rendered param description is mistakable for a value', () => {
+  /*
+   * THE FAILURE THIS GUARDS, live on 2026-08-09. renderToolSchemas emits one
+   * JSON object per tool, so `params` reaches the model shaped exactly like an
+   * example params object: {"tabId":"optional","mode":"..."}. Where the
+   * description was the bare word "optional" it read as a legal value, and the
+   * planner sent {"mode":"main_text","maxChars":12000,"tabId":"optional"}.
+   * The extension's executor refused it — "tabId must be a non-negative
+   * integer" — and the run died at step 2.
+   *
+   * A description must therefore never be a plausible value. The bare words
+   * below are the ones that are: they name no type and read as an answer.
+   */
+  const MISTAKABLE = new Set([
+    'optional',
+    'required',
+    'string',
+    'number',
+    'boolean',
+    'true',
+    'false',
+    'null',
+  ])
+
+  /* Every tool in the catalogue, not a sample: the one that bit was tabId on
+   * browser_read_page, and a sample is how the next one gets missed. */
+  const everyTool = listDomains().domains.flatMap((entry) =>
+    listTools(entry.domain).tools.map((tool) => tool.name),
+  )
+  const rendered = renderToolSchemas(everyTool)
+  const offenders = []
+  for (const line of rendered.split('\n')) {
+    const tool = JSON.parse(line)
+    for (const [param, description] of Object.entries(tool.params ?? {})) {
+      if (MISTAKABLE.has(String(description).trim().toLowerCase())) {
+        offenders.push(`${tool.type}.${param} = "${description}"`)
+      }
+    }
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these descriptions would be copied into params as values:\n${offenders.join('\n')}`,
+  )
+})

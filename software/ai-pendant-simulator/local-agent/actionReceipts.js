@@ -402,7 +402,8 @@ function describeEvidence(action, result) {
    * copy_to_clipboard came back `result+declared` with nothing on the browser
    * side at all. Dropping the echo is what keeps `source` worth reading.
    */
-  const { action: _echoed, ...observed } = result ?? {}
+  const observed = { ...(result ?? {}) }
+  delete observed.action
   const fromResult = linkedCapsuleIds(observed)
   const declared = linkedCapsuleIds({
     capsuleIds: action?.capsuleIds,

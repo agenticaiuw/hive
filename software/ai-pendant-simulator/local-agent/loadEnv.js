@@ -2,6 +2,7 @@
  * Load repo .env into process.env before other local-agent modules read keys.
  * LaunchAgent does not inject secrets — only PATH — so this is required.
  */
+import { createHmac } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -60,6 +61,64 @@ for (const candidate of CANDIDATES) {
 export function envLoadedFrom() {
   return loadedFrom
 }
+
+/* ===================================================================== *
+ * Derived secrets: PAIRING_CODE is the one owner-minted secret.
+ *
+ * The .env used to carry three independent random values that all proved the
+ * same thing — "this is the owner's machine": PAIRING_CODE, AGENT_TOKEN and
+ * SESSION_SECRET. Three values in ONE file is not three secrets; whoever
+ * reads the file has all of them, so the extra two bought no isolation, only
+ * bookkeeping. The owner's verdict (2026-08-09): "we must reduce the number
+ * of env variables as much as possible."
+ *
+ * So the other two are now derived from PAIRING_CODE with labelled HMACs.
+ * Deterministic and stateless: every process that can read the code computes
+ * the same tokens, nothing new is stored, and rotating the code rotates
+ * everything below it in one edit.
+ *
+ * Precedence is applyParsedEnv's, unchanged: an explicit AGENT_TOKEN or
+ * SESSION_SECRET in the environment or the file still wins, which is both
+ * the migration path and the escape hatch (the Mac menubar HUD, if it holds
+ * the old token value somewhere of its own, is fixed by putting the old
+ * AGENT_TOKEN line back).
+ *
+ * Going through applyParsedEnv rather than assigning process.env directly is
+ * load-bearing: it records the keys, and childEnv.js strips recorded keys
+ * from every child the agent spawns. A derived credential that skipped the
+ * record would ride into run_shell children — the exact leak childEnv
+ * exists to prevent.
+ *
+ * The same derivation exists in software/load-pendant-env.mjs for scripts
+ * and the dashboards. Duplicated, not imported — the loaders belong to
+ * different packages and each must work with the other absent — and
+ * loadEnv.test.js asserts the two stay bit-identical.
+ * ===================================================================== */
+
+export function deriveSecret(masterSecret, label) {
+  const master = String(masterSecret ?? '')
+  if (!master) return ''
+  return createHmac('sha256', master).update(`aipendant:${label}`).digest('hex')
+}
+
+if (process.env.PAIRING_CODE) {
+  applyParsedEnv({
+    AGENT_TOKEN: deriveSecret(process.env.PAIRING_CODE, 'agent-token'),
+    SESSION_SECRET: deriveSecret(process.env.PAIRING_CODE, 'session-secret'),
+  })
+}
+
+/*
+ * The production relay, as the default. The localhost:8787 fallback in
+ * bridgeConfig.js dated from before the worker was deployed; on this machine
+ * RELAY_URL has pointed at the worker ever since, so the env line was
+ * restating a constant. The extension already ships this origin in its
+ * RELAY_ORIGIN_ALLOWLIST — it is config, not a secret. `npm run relay` local
+ * development sets RELAY_URL=http://localhost:8787 explicitly.
+ */
+applyParsedEnv({
+  RELAY_URL: 'https://ai-pendant-relay.your-subdomain.workers.dev',
+})
 
 /**
  * The keys this file put into process.env, so callers can take them back out.

@@ -1,9 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Job records cross two backends and are schemaless at this display boundary. */
 
-import { hiveNodeFor, humanizeKey, terminalPhaseFor } from "$lib/hiveFeed.js";
+import {
+  commandTitle,
+  hiveNodeFor,
+  humanizeKey,
+  terminalPhaseFor,
+} from "$lib/hiveFeed.js";
 
 /* One definition, in the dependency-free module the node tests import. */
-export { humanizeKey };
+export { commandTitle, humanizeKey };
 
 /**
  * One job shape for both backends.
@@ -281,7 +286,7 @@ export function jobFromAgent(raw: any): JobView {
   return {
     id: String(raw?.jobId || raw?.id || ""),
     type: String(raw?.type || "execute"),
-    command: String(raw?.command || ""),
+    command: commandTitle(raw?.command),
     source: String(raw?.source || "unknown"),
     status: String(raw?.status || ""),
     createdAt: raw?.createdAt ?? null,
@@ -307,7 +312,7 @@ export function jobFromRelayHistory(entry: any): JobView {
   return {
     id: String(entry?.pipelineId || ""),
     type: "execute",
-    command: String(entry?.command || ""),
+    command: commandTitle(entry?.command),
     source: String(entry?.origin || entry?.source || "cloudflare"),
     status,
     createdAt: entry?.createdAt ?? null,

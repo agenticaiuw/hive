@@ -136,6 +136,69 @@ export function originPattern(value) {
  */
 export const MAX_COMMAND_AGE_MS = 90_000
 
+/*
+ * Params the HIVE's vocabulary carries that this extension has no idea about.
+ * They address a named tab on the Mac's side of the bridge (browserSessions.js
+ * resolves them into a real tabId) and are meaningless once the step is running
+ * here, where the session IS this browser.
+ *
+ * Kept in step with local-agent/browserSessions.js CONTROL_PARAM_KEYS.
+ */
+const HIVE_CONTROL_PARAMS = Object.freeze([
+  'session',
+  'sessionId',
+  'browserSession',
+  'sessionName',
+  'bootstrapUrl',
+])
+
+/* Params that must be a real tab/window number or must not be there at all. */
+const NUMERIC_PARAMS = Object.freeze(['tabId', 'windowId'])
+
+/**
+ * Make a hive-issued action's params runnable HERE.
+ *
+ * THE FAILURE THIS EXISTS FOR, observed live on 2026-08-09. The owner asked
+ * the popup "what are the most worth watching movies here" on the United
+ * onboard portal. The Mac planner returned:
+ *
+ *   {type:"browser_read_page", params:{mode:"main_text", maxChars:12000, tabId:"optional"}}
+ *
+ * — it had copied the word "optional" out of its own tool schema, where
+ * `tabId: 'optional'` is a DESCRIPTION that reads exactly like a value. The
+ * whole plan was browser work, so affinity claimed it and ran it here, where
+ * validateCommand correctly refused: "tabId must be a non-negative integer."
+ * The run died at step 2.
+ *
+ * On the MAC that same plan works, because it never reaches the executor
+ * unfiltered: browserSessions.toWireParams strips the control params and does
+ * `Number(tabId)`, deleting anything that is not an integer. So the identical
+ * plan succeeded there and failed here — and "runs on the Mac, dies in the
+ * browser" is the one difference local execution must never introduce.
+ *
+ * This is that filter, on this side of the bridge. It only ever REMOVES what
+ * cannot be honoured; nothing is invented, and a param this extension does
+ * understand is passed through untouched.
+ */
+export function normalizeCommandParams(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return {}
+  const clean = { ...params }
+
+  for (const key of HIVE_CONTROL_PARAMS) delete clean[key]
+
+  for (const key of NUMERIC_PARAMS) {
+    if (clean[key] === undefined) continue
+    /* Numeric text is a real answer badly typed (the Mac coerces it for the
+     * same reason); anything else is not an id and pretending otherwise would
+     * hit whatever tab that number happened to name. */
+    const value = Number(clean[key])
+    if (Number.isInteger(value) && value >= 0) clean[key] = value
+    else delete clean[key]
+  }
+
+  return clean
+}
+
 export function validateCommand(command, now = Date.now()) {
   if (!command || typeof command !== 'object') {
     throw new Error('The local agent sent an invalid browser command.')

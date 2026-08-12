@@ -16,6 +16,7 @@ import {
   resolveSessionRef,
   runBrowserSessionAction,
   tabNeedle,
+  urlFromNeedle,
 } from './browserSessions.js'
 
 function withTemporaryStore(t) {
@@ -328,6 +329,83 @@ test('open_session opens a tab when the browser has none', async (t) => {
   assert.equal(opened.origin, 'opened')
   assert.equal(opened.tabId, 99)
   assert.equal(listBrowserSessions({ filePath }).length, 1)
+})
+
+test('open_session opens the named site instead of adopting an unrelated tab', async (t) => {
+  const filePath = withTemporaryStore(t)
+  const { dispatch, calls } = fakeExtension({
+    /* Exactly the live 2026-08-09 state: the owner is on GitHub and has no
+     * broker tab open at all. */
+    list_tabs: () => ({
+      tabs: [
+        {
+          tabId: 1335677,
+          windowId: 1698,
+          url: 'https://github.com/evan1liu/agentic-gadget/tree/main',
+          title: 'evan1liu/agentic-gadget',
+        },
+      ],
+    }),
+    navigate: (params) => ({
+      message: 'Navigated',
+      tabId: 77,
+      windowId: 1698,
+      url: params.url,
+    }),
+  })
+
+  const opened = await openBrowserSession(
+    { session: 'ibkr', urlContains: 'interactivebrokers.com' },
+    { dispatch, filePath },
+  )
+
+  assert.equal(opened.origin, 'opened')
+  assert.equal(
+    calls.find((call) => call.type === 'navigate')?.params.url,
+    'https://interactivebrokers.com/',
+  )
+  /* The regression itself: the session must never come back pointing at the
+   * tab that merely happened to be in front. */
+  assert.equal(
+    getBrowserSession('ibkr', { filePath }).url.includes('github.com'),
+    false,
+  )
+})
+
+test('open_session refuses a needle that names no site rather than grabbing a tab', async (t) => {
+  const filePath = withTemporaryStore(t)
+  const { dispatch, calls } = fakeExtension({
+    list_tabs: () => ({
+      tabs: [{ tabId: 3, windowId: 1, url: 'https://github.com/', title: 'GitHub' }],
+    }),
+  })
+
+  await assert.rejects(
+    openBrowserSession(
+      { session: 'orders', urlContains: 'my orders page' },
+      { dispatch, filePath },
+    ),
+    (error) => error instanceof BrowserTabMissingError,
+  )
+  assert.equal(
+    calls.some((call) => call.type === 'navigate'),
+    false,
+  )
+  assert.equal(getBrowserSession('orders', { filePath }), null)
+})
+
+test('urlFromNeedle turns a host into an address and refuses everything else', () => {
+  assert.equal(urlFromNeedle('interactivebrokers.com'), 'https://interactivebrokers.com/')
+  assert.equal(
+    urlFromNeedle('mail.google.com/u/0'),
+    'https://mail.google.com/u/0',
+  )
+  assert.equal(urlFromNeedle('https://a.example/x'), 'https://a.example/x')
+  assert.equal(urlFromNeedle('inbox'), '')
+  assert.equal(urlFromNeedle('/orders'), '')
+  assert.equal(urlFromNeedle('recurring investments'), '')
+  assert.equal(urlFromNeedle(''), '')
+  assert.equal(urlFromNeedle(null), '')
 })
 
 test('open_session refuses to invent a tab id that is not open', async (t) => {

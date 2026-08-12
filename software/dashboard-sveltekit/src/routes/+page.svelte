@@ -82,6 +82,7 @@
     audioHref,
     backend,
     canApprovePlan,
+    dismissPlan,
     fetchHistory,
     fetchHistoryDetail,
     fetchJobs,
@@ -128,6 +129,7 @@
   let error = $state("");
   let refreshing = $state(false);
   let approvingId = $state("");
+  let denyingId = $state("");
   let approvalError = $state("");
   // Jobs answers "what is running and what did it just do", which is the
   // question this page exists for, so it is the one panel open on arrival.
@@ -521,6 +523,27 @@
     }
   }
 
+  /**
+   * "No." Every job the card folded in is dismissed, so the decision the owner
+   * just made does not come straight back wearing the next duplicate.
+   */
+  async function handleDeny(jobIds: string[]) {
+    denyingId = jobIds[0] ?? "";
+    approvalError = "";
+    try {
+      const outcome = await dismissPlan(jobIds);
+      // A partial dismissal is said out loud rather than looking clean.
+      if (outcome?.note) approvalError = outcome.note;
+    } catch (failure) {
+      approvalError =
+        failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      denyingId = "";
+      await Promise.all([refreshJobs(), refreshRuns(), refresh()]);
+      void jobsPanel?.refresh();
+    }
+  }
+
   function handleCommandQueued() {
     void refreshRuns();
     void refresh();
@@ -560,7 +583,8 @@
 <main class="dashboard-shell">
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark" title="AI Pendant Dashboard">P</span>
+      <!-- The product icon, from assets/icon via scripts/sync-icons.mjs — this used to be a green letter "P" that matched nothing else the product wears. -->
+      <img class="brand-mark" src="{base}/pendant-logo.png" alt="AI Pendant" title="AI Pendant Dashboard" />
       <h1>Dashboard</h1>
     </div>
     <div class="top-actions">
@@ -669,8 +693,10 @@
           canApprove={canApprovePlan}
           compact={index > 0}
           busy={approvingId === approval.jobId}
+          denying={denyingId === approval.jobId}
           error={approvingId === approval.jobId ? "" : approvalError}
           onApprove={handleApprove}
+          onDeny={handleDeny}
           onSeePlan={showJobsPanel}
         />
       {/each}

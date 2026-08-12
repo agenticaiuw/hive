@@ -22,8 +22,10 @@
     canApprove,
     compact = false,
     busy = false,
+    denying = false,
     error = "",
     onApprove,
+    onDeny,
     onSeePlan,
   }: {
     approval: PendingApproval;
@@ -31,8 +33,11 @@
     canApprove: boolean;
     compact?: boolean;
     busy?: boolean;
+    denying?: boolean;
     error?: string;
     onApprove: (jobId: string) => void;
+    /** Every id the card folded in — see PendingApproval.jobIds. */
+    onDeny: (jobIds: string[]) => void;
     onSeePlan: () => void;
   } = $props();
 
@@ -98,9 +103,21 @@
       <button
         type="button"
         class="button-primary"
-        disabled={busy}
+        disabled={busy || denying}
         onclick={() => onApprove(approval.jobId)}
         >{busy ? "Running it…" : "Approve and run"}</button
+      >
+      <!--
+        The other half of a decision. A card that can only be approved is not a
+        question, it is a nag: "no" used to mean leaving it on screen forever.
+        Deny runs none of it and clears every copy this card folded in.
+      -->
+      <button
+        type="button"
+        class="button-deny"
+        disabled={busy || denying}
+        onclick={() => onDeny(approval.jobIds)}
+        >{denying ? "Dismissing…" : "Deny"}</button
       >
     {:else if !compact}
       <p class="approval-remote">

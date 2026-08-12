@@ -49,19 +49,31 @@ you.** A one-message drain reports `pending: 1` and only reads `0` after the
 ack, so `while (pending > 0)` never terminates. Use `hasMoreMail()`, which
 compares `pending` against the page length.
 
-### Setting up the relay peer
+### Setting up both peers: one paste
+
+Open **Settings → Pair this browser**, paste the repo's `PAIRING_CODE`, click
+**Pair**. The agent's loopback `POST /pair/browser` route (guarded by socket
+address + a timing-safe code match — `local-agent/pairBrowser.js`) returns the
+agent bearer and commissions this browser's own `browser_node` relay
+credential in the same call. The code is spent, never stored; the two wire
+credentials stay per-host, the human just stops carrying them. Re-pairing
+with the same device ID rotates the credential — but does **not** revoke the
+old one; kill strays with `pendant-credentials.mjs revoke --token-id <id>`.
+
+The manual path still works for unusual topologies (pairing a browser on a
+different machine than the agent, narrowing scopes):
 
 ```bash
 node scripts/pendant-credentials.mjs pair \
-  --device-id <this-browser> --role browser_node --name "Safari on Evan's Mac"
+  --device-id <this-browser> --role browser_node --name "Safari on the MacBook"
 ```
 
 Paste the printed token into **Settings → Relay peer** along with the same
-`--device-id`, tick the box, and save. `@relay` is trusted by default; any
-other node must be named under *Extra trusted senders* before it may drive
-tabs — the relay lets any paired node address this one, so that allowlist is
-the only thing standing between a second `browser_node` credential and the
-owner's Safari.
+`--device-id`, tick the box, and save. Either way, `@relay` is trusted by
+default; any other node must be named under *Extra trusted senders* before it
+may drive tabs — the relay lets any paired node address this one, so that
+allowlist is the only thing standing between a second `browser_node`
+credential and the owner's Safari.
 
 ## Security model
 
@@ -94,29 +106,61 @@ After website access is granted it can:
 
 Install it only in a browser profile you want AI Pendant to control.
 
+## The brain: this node thinks for itself
+
+A command typed into the popup is reasoned about **here**, not on the Mac.
+`src/brain.js` is the pure half — the tool catalogue, the prompt, the reply
+parser, the transcript and its bounds — and `runBrainLocally()` in
+`background.js` is the loop: ask, act, feed the result back, repeat.
+
+The thinking happens over `POST /v1/infer` on the relay
+(`cloud-relay/nodeInference.js`), never against a key this extension holds. The
+`browser_node` role already grants `llm:infer` (`cloud-relay/deviceAuth.js`), so
+**no new scope and no re-pair** — it is a capability the credential has been
+carrying unused. Configure the relay peer and the brain is on; without it every
+command still needs the Mac awake.
+
+| | |
+| --- | --- |
+| Tools offered | derived from `COMMAND_TYPES`, so the model can only ask for verbs `validateCommand` accepts (`toolCatalogueDrift()` is asserted empty) |
+| Step budget | `BRAIN_MAX_STEPS` tool calls per command |
+| Prompt budget | under every relay ceiling, never equal to it — `normalizeInferMessages` *rejects* an over-budget prompt rather than trimming it |
+| Output budget | asked for explicitly: the relay defaults to 512, and 512 + `json_object` is the documented way to get JSON that stops mid-brace |
+| Backing off | parks on the **presence** of `retryAfter`, which the relay documents as device-scoped — so a reason it adds later is honoured with no change here |
+
+The Mac is the fallback, reached when there is no relay credential, when the
+relay has told this device to back off, or when the model itself answers
+`handoff` because the task needs files, a shell or another machine. A handoff is
+only clean while nothing has run: once the loop has touched a page it finishes
+and reports, rather than letting the Mac replay the same steps.
+
 ## Affinity: browser work runs in the browser
 
-A command typed into the popup used to go to the Mac wholesale — which is how
-"open ibkr" once opened interactivebrokers.com in the *Mac's* browser session
-instead of the owner's. Now every step of a Mac-planned auto-approved plan is
-capability-tagged (`src/affinity.js`): a plan that is entirely browser work
-(the `browser_*` family, plus `open_url`, which becomes `activate_tab` here)
-executes **in this extension**, through the same validated executor and
-privacy boundary as agent-issued commands. One non-browser step (shell,
-files, other devices) and the whole plan forwards to the hive as before.
+The Mac fallback path keeps the rule that made it safe. "Open ibkr" once opened
+interactivebrokers.com in the *Mac's* browser session instead of the owner's, so
+every step of a Mac-planned auto-approved plan is capability-tagged
+(`src/affinity.js`): a plan that is entirely browser work (the `browser_*`
+family, plus `open_url`, which becomes `activate_tab` here) executes **in this
+extension**, through the same validated executor and privacy boundary as
+agent-issued commands. One non-browser step (shell, files, other devices) and
+the whole plan forwards to the hive as before.
 
-Three rules ride along, all unit-tested:
+Three rules ride along, all unit-tested, and they bind the brain loop and the
+Mac-planned path alike:
 
 - **Outward steps never auto-run.** A click or keystroke that reads as a
   commit point — submit, place order, cancel a subscription/investment, send —
-  parks in a local approval queue (`src/execution-status.js`,
-  `localPendingApprovals` in `storage.local`) and waits for the owner. The
-  popup pane for it is a later pass; the background already answers
-  `affinity:list-pending` / `affinity:resolve-approval`.
+  stops the run and waits for the owner. In the brain loop the gate is
+  `createOutwardGuard()`, which watches every snapshot go past so it knows what
+  the *page* calls each ref and can judge `{click, ref:"e4"}` on the words the
+  owner would have read. The decision is made **in the popup** (Approve / Deny
+  on the parked card, `plan:decide` to the background); the dashboard is the
+  fallback, not the destination.
 - **Completion is honest.** The verdict comes from the ledger of executed
   steps, never from model prose: a run that only opened and read pages says
   "changed nothing", and a command that asked for a cancellation that never
-  ran is reported NOT done.
+  ran is reported NOT done. The model's own answer survives as colour inside
+  the headline, never as the claim.
 - **Local is not invisible.** Each locally claimed run is recorded to the hive
   as node-mesh mail to `@relay` (`browser.task.record`, marked
   claimed/executed by this node from creation). Only an admin principal can

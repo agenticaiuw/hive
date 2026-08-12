@@ -197,7 +197,7 @@ test('an ask with no reason is still an ask, and says so plainly', async (t) => 
   assert.match(plan.confirmReason, /without saying why/)
 })
 
-test('only a literal true asks — a chatty model cannot park a plan by accident', async (t) => {
+test('only a literal true asks — a chatty model cannot park a plan by accident', async () => {
   for (const value of ['true', 1, 'yes', {}, null]) {
     const restore = stubModel(
       planOf({

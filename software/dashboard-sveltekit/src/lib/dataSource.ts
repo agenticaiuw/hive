@@ -426,6 +426,51 @@ export async function approvePlan(jobId: string) {
   });
 }
 
+/**
+ * Saying no to a parked plan.
+ *
+ * The counterpart to `approvePlan`, and the reason it exists: until now the
+ * card could only be approved or left alone, so "no" meant leaving a decision
+ * on screen forever. `POST /jobs/:jobId/dismiss` marks the plan declined on
+ * the Mac and runs none of it.
+ *
+ * Every id folded into the card is dismissed, not just the newest: repeat asks
+ * each park their own job and the card collapses them, so dismissing one would
+ * simply reveal the next. Failures are collected rather than thrown at the
+ * first one — a partial dismissal the owner is told about beats a silent one.
+ */
+export const canDismissPlan = backend === "agent";
+
+export async function dismissPlan(jobIds: string[]) {
+  if (!canDismissPlan) {
+    throw new Error(
+      "This page has no route to the Mac, so it cannot dismiss a parked plan.",
+    );
+  }
+  const ids = jobIds.filter(Boolean);
+  if (!ids.length) throw new Error("This card carries no job to dismiss.");
+
+  const failures: string[] = [];
+  for (const jobId of ids) {
+    try {
+      await agentRequest(`/jobs/${encodeURIComponent(jobId)}/dismiss`, {
+        method: "POST",
+      });
+    } catch (failure) {
+      failures.push(
+        failure instanceof Error ? failure.message : String(failure),
+      );
+    }
+  }
+  /* All of them failing is a failure; some of them failing still cleared the
+   * card the owner pressed, and the rest are named. */
+  if (failures.length === ids.length) throw new Error(failures[0]);
+  if (failures.length) {
+    return { ok: true, note: `${failures.length} older copy/copies could not be dismissed: ${failures[0]}` };
+  }
+  return { ok: true };
+}
+
 /** Routines live only on the Mac; see `runRoutineSupported`. */
 export const runRoutineSupported = backend === "agent";
 

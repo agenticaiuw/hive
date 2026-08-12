@@ -33,7 +33,7 @@ import {
   telemetryForWire,
 } from './pendantSpeech.js'
 import { synchronizeProductState } from './productSyncClient.js'
-import { classifyPlan, classifyPlanForRoutine } from './actionRisk.js'
+import { classifyPlanForRoutine, classifyPlanForVoice } from './actionRisk.js'
 import { prepareAction } from './prepareApprove.js'
 import { stripImageBytes } from './redaction.js'
 import {
@@ -379,7 +379,7 @@ export async function handleWork(work) {
           command: work.command,
           response: spokenResponse || undefined,
           actions: hintActions,
-          // Hands-free pendant: classifyPlan decides auto-run vs approval.
+          // Hands-free pendant: classifyPlanForVoice decides auto-run vs approval.
           requiresConfirmation: false,
           planner:
             hint.planner === 'audio-native-realtime'
@@ -462,50 +462,37 @@ export async function handleWork(work) {
       // outward/irreversible deny-list — those still park, and the relay is
       // told so loudly rather than being handed a fake failure to retry.
       //
-      // THE MODEL'S JUDGEMENT WINS, when it made one. The owner's ruling is
-      // that a spoken request IS the authorization, and that the model — not a
-      // table of action types — decides when something goes beyond what was
-      // asked and deserves a question. llmPlanner now returns
-      // requiresConfirmation false by default and raises it with a reason when
-      // the model wants to ask.
+      // The voice venue's whole decision — the model's verdict, the read-tier
+      // ceiling and the outward floor — lives in actionRisk.classifyPlanForVoice
+      // now, next to the taxonomy it applies. The short version of the owner's
+      // 2026-08-11 ruling ("asking to read emails should not be something that
+      // needs permissions also i specifically asked the agent to do that"):
       //
-      // This gate used to ignore that field entirely and re-decide from the
-      // action types, which broke the intent in both directions: a plan the
-      // model chose to ask about ran anyway if its actions happened to be
-      // allowlisted, and an in-scope plan parked because they were not. The
-      // pendant is the device the owner actually uses, so the override landed
-      // exactly where it hurt most.
+      //   outward present  → park, whatever the model said;
+      //   every step reads → run, whatever the model said — the planner's own
+      //                      ask parked "what's the latest email in my Outlook
+      //                      account?" as TWO approval cards, opener included;
+      //   otherwise        → the model's judgement when it made one, else the
+      //                      per-type hands-free line, both unchanged.
       //
-      // classifyPlan remains the fallback for plans that carry no verdict at
-      // all — the audio-native branch above hardcodes false, and a routine is
-      // still its own venue with its own deny-list.
-      // A spoken-only reply carries no actions, and "run it" is meaningless
-      // there — classifyPlan already answers that case correctly ("No actions
-      // to run"), so the model's verdict only applies when there is something
-      // to execute.
+      // The audio-native branch above hardcodes requiresConfirmation false, so
+      // its plans ride the model-waived path for act-tier steps and the same
+      // floor/ceiling as everything else. A spoken-only reply carries no
+      // actions, and classifyPlanForVoice already answers that case correctly
+      // ("No actions to run").
       const routineJob = isRoutineWork(work)
       const hasActions = Array.isArray(plan.actions) && plan.actions.length > 0
-      const askedByModel = plan.requiresConfirmation === true
-      const modelReason =
-        plan.confirmReason || 'The planner asked for your approval on this step.'
-      const modelVerdict =
-        hasActions && !routineJob && typeof plan.requiresConfirmation === 'boolean'
-          ? {
-              autoRun: !askedByModel,
-              blocked: askedByModel
-                ? plan.actions.map((action) => ({
-                    type: action?.type ?? 'unknown',
-                    reason: modelReason,
-                  }))
-                : [],
-              reason: askedByModel ? modelReason : '',
-            }
-          : null
-      const verdict =
-        modelVerdict ??
-        (routineJob
-          ? classifyPlanForRoutine(plan.actions)
-          : classifyPlan(plan.actions))
+      const verdict = routineJob
+        ? classifyPlanForRoutine(plan.actions)
+        : classifyPlanForVoice(plan.actions, {
+            model:
+              hasActions && typeof plan.requiresConfirmation === 'boolean'
+                ? {
+                    asked: plan.requiresConfirmation === true,
+                    reason: plan.confirmReason ?? '',
+                  }
+                : null,
+          })
       let parkedForApproval = false
       let parkedApproval = null
       if (verdict.autoRun) {
@@ -830,6 +817,22 @@ export async function handleWork(work) {
       error: `Unsupported work type: ${work.type}`,
     })
   } catch (error) {
+    /*
+     * If what we caught is the REPORTING of a result failing (completeWork
+     * exhausted its retries), the work itself already finished — the answer is
+     * sitting on this machine and only the upload was lost. Posting a
+     * follow-up "the job failed" over the same broken channel is exactly how a
+     * completed job once got recorded as FAILED with a Cloudflare HTML page as
+     * its error, so here we log loudly and stop instead of overwriting a real
+     * outcome with a transport hiccup.
+     */
+    if (error instanceof WorkResultReportError) {
+      console.error(
+        `[bridge] Job ${work.jobId}: work finished but its result could not be ` +
+          `delivered to the relay — NOT reporting the job as failed. ${error.message}`,
+      )
+      return
+    }
     if (observablePipeline) {
       await reportPipelineEvent(work, {
         stage: 'error',
@@ -838,10 +841,20 @@ export async function handleWork(work) {
         detail: error.message,
       })
     }
-    await completeWork(work.jobId, {
-      ok: false,
-      error: error.message,
-    })
+    try {
+      await completeWork(work.jobId, {
+        ok: false,
+        error: error.message,
+      })
+    } catch (reportError) {
+      // The failure report itself could not be delivered. Nothing left to
+      // send it over — log both errors and let the relay's own job timeout
+      // surface the loss.
+      console.error(
+        `[bridge] Job ${work.jobId}: failed (${error.message}) and the failure ` +
+          `report could not be delivered either: ${reportError.message}`,
+      )
+    }
   } finally {
     await syncProductState()
     await syncAgentSnapshot()
@@ -1174,47 +1187,132 @@ async function createParkedApproval({ work, plan, sessionId, routineJob }) {
   }
 }
 
+/*
+ * A failure to DELIVER a finished result, as opposed to a failure of the work
+ * itself. handleWork's catch block must tell these apart: when this is what it
+ * caught, the answer already exists on this machine and only the report was
+ * lost, so posting a second "the job failed" report over the same broken
+ * channel would replace a real result with a bogus failure record. (That
+ * exact sequence is how job_6b8b350f… ended up FAILED with a Cloudflare HTML
+ * page in its error field.)
+ */
+class WorkResultReportError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'WorkResultReportError'
+  }
+}
+
+/*
+ * Cloudflare answers an intermittent edge 503 with a full HTML error page.
+ * Echoing that page into an Error message puts markup soup in the dashboard's
+ * error column, so collapse anything that looks like HTML to a short label and
+ * clamp whatever plain text remains.
+ */
+function summarizeNonJsonBody(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return 'empty response body'
+  if (text.startsWith('<')) return 'Cloudflare/HTML error page'
+  return text.replace(/\s+/g, ' ').slice(0, 120)
+}
+
+const RESULT_POST_ATTEMPTS = 3
+const RESULT_POST_BACKOFF_MS = [1_000, 3_000]
+
 async function completeWork(
   jobId,
   { ok, result, error, partial = false, parked = false },
 ) {
-  const response = await fetch(`${RELAY_URL}/v1/bridge/work/${jobId}/result`, {
-    method: 'POST',
-    headers: relayHeaders,
-    // The relay stores this body verbatim in D1 and hands it back to every API
-    // consumer, so this is the last place to catch image bytes before they
-    // leave the owner's machine for good. `callLocalAgent` already stripped
-    // them; this is the belt to that suspenders, and it covers every work type
-    // including agent_proxy, whose result shape is whatever path was proxied.
-    body: JSON.stringify({
-      ok,
-      result: stripImageBytes(result),
-      error,
-      partial: Boolean(partial),
-      // Distinct outcome for a plan held for approval. Relays deployed before
-      // this field ignore it and record plan_ready, which neither fails nor
-      // retries the job — the degradation this report shape was chosen for.
-      ...(parked ? { parked: true } : {}),
-    }),
+  // The relay stores this body verbatim in D1 and hands it back to every API
+  // consumer, so this is the last place to catch image bytes before they
+  // leave the owner's machine for good. `callLocalAgent` already stripped
+  // them; this is the belt to that suspenders, and it covers every work type
+  // including agent_proxy, whose result shape is whatever path was proxied.
+  const body = JSON.stringify({
+    ok,
+    result: stripImageBytes(result),
+    error,
+    partial: Boolean(partial),
+    // Distinct outcome for a plan held for approval. Relays deployed before
+    // this field ignore it and record plan_ready, which neither fails nor
+    // retries the job — the degradation this report shape was chosen for.
+    ...(parked ? { parked: true } : {}),
   })
-  const raw = await response.text()
-  let payload
-  try {
-    payload = JSON.parse(raw)
-  } catch {
-    throw new Error(
-      `Failed to report bridge work result (${response.status}): ${raw.slice(0, 160)}`,
+
+  /*
+   * The result POST retries on transient edge trouble — a rejected fetch, or
+   * any 5xx (Cloudflare's HTML 503 included) — because by this point the work
+   * is done and the only thing at risk is delivering it. Anything the relay
+   * itself said on purpose (a 4xx, or a JSON error payload) is a real answer,
+   * not weather, and throws immediately as before. Retries are bounded and
+   * short: the pendant is waiting on this upload, so we would rather fail in
+   * ~4s than hold the session hostage to a long backoff.
+   */
+  let lastFailure = 'no attempt made'
+  for (let attempt = 1; attempt <= RESULT_POST_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      await sleep(RESULT_POST_BACKOFF_MS[attempt - 2] ?? 3_000)
+    }
+
+    let response
+    let raw
+    try {
+      response = await fetch(`${RELAY_URL}/v1/bridge/work/${jobId}/result`, {
+        method: 'POST',
+        headers: relayHeaders,
+        body,
+      })
+      raw = await response.text()
+    } catch (fetchError) {
+      lastFailure = `network error: ${fetchError.message}`
+      console.warn(
+        `[bridge] Result POST for job ${jobId} attempt ${attempt}/${RESULT_POST_ATTEMPTS} failed (${lastFailure})`,
+      )
+      continue
+    }
+
+    let payload
+    try {
+      payload = JSON.parse(raw)
+    } catch {
+      payload = undefined
+    }
+
+    if (response.ok && payload !== undefined) {
+      console.log(
+        `[bridge] ${partial ? 'Progress' : 'Completed'} job ${jobId} (${payload.job?.status}${
+          parked ? ', parked for approval' : ''
+        })`,
+      )
+      return
+    }
+
+    if (response.status >= 500) {
+      lastFailure = `(${response.status}): ${
+        payload !== undefined
+          ? payload.error ?? 'relay 5xx with no detail'
+          : summarizeNonJsonBody(raw)
+      }`
+      console.warn(
+        `[bridge] Result POST for job ${jobId} attempt ${attempt}/${RESULT_POST_ATTEMPTS} failed ${lastFailure}`,
+      )
+      continue
+    }
+
+    // Deliberate refusal — the relay parsed us and said no. Retrying would
+    // just repeat the same rejected request.
+    if (payload !== undefined) {
+      throw new WorkResultReportError(
+        payload.error ?? 'Failed to report bridge work result.',
+      )
+    }
+    throw new WorkResultReportError(
+      `Failed to report bridge work result (${response.status}): ${summarizeNonJsonBody(raw)}`,
     )
   }
 
-  if (!response.ok) {
-    throw new Error(payload.error ?? 'Failed to report bridge work result.')
-  }
-
-  console.log(
-    `[bridge] ${partial ? 'Progress' : 'Completed'} job ${jobId} (${payload.job?.status}${
-      parked ? ', parked for approval' : ''
-    })`,
+  throw new WorkResultReportError(
+    `Failed to report bridge work result after ${RESULT_POST_ATTEMPTS} attempts ${lastFailure}`,
   )
 }
 

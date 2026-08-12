@@ -279,6 +279,57 @@ hr {
   color: #79dac0;
 }
 
+/* ===== Setup card =====
+ * The deleted settings page, reduced to its one real act: code in, Connect.
+ * Sized for the 400px popover — the lifetime select and the button share a
+ * row so the card stays three lines tall. */
+
+.setup {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #1c3932;
+  border-radius: 12px;
+  background: #0a1815;
+}
+
+.setup-title {
+  margin: 0;
+  color: #effaf7;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.setup-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.setup-lifetime {
+  flex: 1;
+  margin-top: 0;
+  font-size: 12px;
+}
+
+.setup-lifetime select {
+  margin-top: 6px;
+}
+
+.setup-row button {
+  flex: 0 0 auto;
+}
+
+.setup .notice {
+  margin-top: 8px;
+  min-height: 0;
+}
+
+.grant-pages {
+  width: 100%;
+  margin-top: 12px;
+}
+
 .command-form {
   margin-top: 16px;
 }
@@ -406,6 +457,7 @@ hr {
 
 .entry-failed .entry-chip,
 .entry-refused .entry-chip,
+.entry-denied .entry-chip,
 .entry-lost .entry-chip {
   border-color: #663a33;
   color: #ff9d8d;
@@ -443,6 +495,34 @@ hr {
   color: #79dac0;
   font-size: 12px;
   font-weight: 650;
+}
+
+/*
+ * The parked plan's own Approve/Deny. Same shape as .approval-actions on
+ * purpose: this is the same question in the same popup, and there is no reason
+ * for the owner to learn two layouts for "decide this".
+ */
+.entry-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.entry-actions button {
+  flex: 1;
+  min-height: 34px;
+}
+
+.entry-actions button:disabled {
+  cursor: not-allowed;
+}
+
+/* Why this one cannot be decided here — expired, or parked without its steps. */
+.entry-note {
+  margin: 8px 0 0;
+  color: #ffd98d;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* ===== Approval cards =====
@@ -552,4 +632,23 @@ hr {
   flex: 1 1 auto;
   max-height: none;
   min-height: 60px;
+}
+
+/*
+ * Two status chips now share the header (bridge + brain), and at popover width
+ * that was enough to wrap "Browser Bridge" onto two lines. The chips shrink and
+ * the title does not: which brain is in use is a glance, the product name is a
+ * heading, and a heading that reflows every time a peer changes state reads as
+ * the layout breaking.
+ */
+.popup-header .eyebrow,
+.popup-header h2 {
+  white-space: nowrap;
+}
+
+#brain-mini small {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

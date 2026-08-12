@@ -160,7 +160,6 @@ export function projectContext({
   const emittedNormals = []
   let used = 0
   let droppedForBudget = 0
-  let droppedAsRestatement = 0
 
   const emit = (line, fact) => {
     if (emitted.has(line)) return false
@@ -187,10 +186,7 @@ export function projectContext({
         if (!longer.includes(shorter)) return false
         return longer.length - shorter.length <= Math.max(12, shorter.length * 0.25)
       })
-      if (restates) {
-        droppedAsRestatement += 1
-        return false
-      }
+      if (restates) return false
     }
     if (used + line.length + 1 > budgetChars) {
       droppedForBudget += 1

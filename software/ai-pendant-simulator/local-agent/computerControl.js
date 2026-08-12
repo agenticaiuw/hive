@@ -1399,7 +1399,7 @@ async function runComputerUseTaskAction(action) {
 
   if (!computerUseEnabled()) {
     throw new Error(
-      'The computer-use loop is disabled. Set PENDANT_COMPUTER_USE_ENABLED=1 to allow the agent to drive the screen.',
+      'The computer-use loop is disabled: PENDANT_COMPUTER_USE_ENABLED=0 is set. Remove that line to allow the agent to drive the screen.',
     )
   }
 
@@ -1527,10 +1527,14 @@ async function playBriefing(action) {
 async function listBriefingsAction(action) {
   const briefings = listBriefings({
     limit: Number(action.params?.limit) || 20,
-  }).map(({ spoken, sources, ...rest }) => ({
-    ...rest,
-    sourceCount: sources?.length ?? 0,
-  }))
+  }).map((briefing) => {
+    /* The spoken-audio blob stays out of the listing; sources collapse to a count. */
+    const rest = { ...briefing }
+    const sources = rest.sources
+    delete rest.spoken
+    delete rest.sources
+    return { ...rest, sourceCount: sources?.length ?? 0 }
+  })
   const pending = briefings.filter((briefing) => !briefing.played).length
   return success(
     action,

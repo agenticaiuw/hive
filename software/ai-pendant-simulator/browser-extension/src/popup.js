@@ -15,10 +15,18 @@ import {
   HISTORY_KEY,
   INCLUDE_PAGE_KEY,
   MAX_COMMAND_CHARS,
+  consoleWindowRungs,
+  currentEntry,
   dashboardUrlFor,
+  describeBrainState,
   describeEntry,
 } from './command-console.js'
 import { DEFAULT_AGENT_URL } from './bridge-core.js'
+import {
+  PAIR_OUTCOME_KEY,
+  defaultPairDeviceId,
+  normalizePairLifetime,
+} from './pairing.js'
 import {
   APPROVALS_KEY,
   approvalCountdown,
@@ -37,9 +45,16 @@ const api = globalThis.browser ?? globalThis.chrome
 /* The standalone console is this same page under ?standalone=1. */
 const CONSOLE_PAGE = 'popup.html?standalone=1'
 
+/* The optional grant the local brain needs to act in tabs. Lived on the
+ * deleted settings page ("Website access"); the popup owns it now. */
+const WEBSITE_ORIGINS = ['http://*/*', 'https://*/*']
+
 const elements = {
   statusDot: document.getElementById('status-dot'),
   statusTitle: document.getElementById('status-title'),
+  brainDot: document.getElementById('brain-dot'),
+  brainTitle: document.getElementById('brain-title'),
+  brainHelp: document.getElementById('brain-help'),
   approvals: document.getElementById('approvals'),
   form: document.getElementById('command-form'),
   input: document.getElementById('command-input'),
@@ -52,7 +67,12 @@ const elements = {
   history: document.getElementById('history'),
   openDashboard: document.getElementById('open-dashboard'),
   connectNow: document.getElementById('connect-now'),
-  openSettings: document.getElementById('open-settings'),
+  setup: document.getElementById('setup'),
+  pairCode: document.getElementById('pair-code'),
+  pairLifetime: document.getElementById('pair-lifetime'),
+  pairConnect: document.getElementById('pair-connect'),
+  pairNotice: document.getElementById('pair-notice'),
+  grantPages: document.getElementById('grant-pages'),
 }
 
 /* Which surface this document is. The standalone console hides the pop-out
@@ -203,28 +223,67 @@ function renderStatus(status) {
           : 'Offline'
 }
 
+/*
+ * ONE ENTRY, NOT A LOG. The owner: "it should not show my past tasks in this
+ * popup, only the current task." The history list is untouched in storage —
+ * this is a 400px popover, and the thing worth its whole height is the command
+ * in flight (or the last one's answer), not a scrollback the dashboard already
+ * keeps better. Which entry that is, is currentEntry's decision, so the rule
+ * is stated once and tested.
+ */
+/* One decision in flight at a time, for the same reason approvals have one. */
+let planBusyId = null
+let lastHistory = []
+
+/**
+ * Which brain, and the footer that explains it. Both come from one pure
+ * function so the chip and the sentence can never disagree.
+ */
+function renderBrain({ relayStatus, agentConfigured }) {
+  const view = describeBrainState({ relayStatus, agentConfigured })
+  elements.brainDot.className = `dot ${
+    view.tone === 'ok' ? 'connected' : view.tone === 'error' ? 'error' : ''
+  }`
+  elements.brainTitle.textContent = view.label
+  elements.brainHelp.textContent = view.help
+  /* The chip is short by necessity; the reason lives in the tooltip too, so it
+   * survives the footer being scrolled past. */
+  elements.brainDot.parentElement.title = view.help
+}
+
 function renderHistory(history) {
-  const list = Array.isArray(history) ? history : []
-  elements.history.replaceChildren(
-    ...list.map((entry) => renderEntry(entry)),
-  )
-  elements.history.hidden = list.length === 0
+  lastHistory = Array.isArray(history) ? history : []
+  const entry = currentEntry(lastHistory)
+  elements.history.replaceChildren(...(entry ? [renderEntry(entry)] : []))
+  elements.history.hidden = !entry
 }
 
 function renderEntry(entry) {
   const view = describeEntry(entry)
+  const busy = planBusyId === entry.id
   const item = document.createElement('article')
   item.className = `entry entry-${view.state}`
 
+  /*
+   * The chip lives INSIDE this paragraph so it flows with the first line, and
+   * a margin — not a space — separated it from the command. That is a visual
+   * separation only: the paragraph's text content read
+   * "Failedwhat are the most worth watching movies here", which is what a
+   * screen reader announces, what a copy lands, and what the owner saw and
+   * reported. An explicit space costs nothing and makes the text true.
+   */
   const command = document.createElement('p')
   command.className = 'entry-command'
-  command.textContent = entry.command
-  item.append(command)
 
   const chip = document.createElement('span')
   chip.className = 'entry-chip'
   chip.textContent = view.label
-  command.prepend(chip)
+
+  const commandText = document.createElement('span')
+  commandText.textContent = entry.command
+
+  command.append(chip, ' ', commandText)
+  item.append(command)
 
   if (view.headline) {
     const headline = document.createElement('p')
@@ -240,6 +299,39 @@ function renderEntry(entry) {
     item.append(detail)
   }
 
+  /*
+   * The decision, HERE. A parked plan used to offer only a link to another
+   * window; now Approve runs exactly the steps listed above it and Deny drops
+   * them. background.js re-checks with the Mac before anything runs, so these
+   * buttons cannot double-fire against the dashboard's.
+   */
+  if (view.canDecide) {
+    const row = document.createElement('div')
+    row.className = 'entry-actions'
+
+    const approve = document.createElement('button')
+    approve.type = 'button'
+    approve.className = 'primary'
+    approve.textContent = busy ? 'Running…' : 'Approve and run'
+    approve.disabled = busy
+
+    const deny = document.createElement('button')
+    deny.type = 'button'
+    deny.className = 'danger'
+    deny.textContent = 'Deny'
+    deny.disabled = busy
+
+    approve.addEventListener('click', () => void decidePlan(entry, 'approve'))
+    deny.addEventListener('click', () => void decidePlan(entry, 'deny'))
+    row.append(approve, deny)
+    item.append(row)
+  } else if (view.decisionNote) {
+    const note = document.createElement('p')
+    note.className = 'entry-note'
+    note.textContent = view.decisionNote
+    item.append(note)
+  }
+
   if (view.showDashboardLink) {
     const link = document.createElement('a')
     link.className = 'entry-link'
@@ -251,6 +343,35 @@ function renderEntry(entry) {
   }
 
   return item
+}
+
+async function decidePlan(entry, decision) {
+  if (planBusyId) return
+  planBusyId = entry.id
+  renderHistory(lastHistory)
+
+  try {
+    const reply = await api.runtime.sendMessage({
+      type: 'plan:decide',
+      id: entry.id,
+      decision,
+    })
+    if (reply?.ok) {
+      setNotice(
+        decision === 'approve' ? 'Approved — running it…' : 'Denied. Nothing ran.',
+      )
+      /* The outcome arrives through storage.onChanged, same as a command. */
+    } else if (reply?.needsSetup) {
+      setNotice('Connect this browser first — paste the pairing code above.', true)
+    } else {
+      setNotice(reply?.error || 'That decision could not be sent.', true)
+    }
+  } catch (error) {
+    setNotice(error?.message || 'The bridge is not awake yet — try again.', true)
+  } finally {
+    planBusyId = null
+    renderHistory(lastHistory)
+  }
 }
 
 function setNotice(message, isError = false) {
@@ -410,6 +531,17 @@ window.addEventListener('pagehide', () => {
   } catch {
     /* already stopped */
   }
+  /*
+   * And drop the approval countdown's 1 Hz timer. Safari SUSPENDS a popover's
+   * page rather than always destroying it, so a repainting interval left
+   * running against a hidden document is work nobody sees and a second way to
+   * wedge the view that the next click has to reuse. renderApprovals starts a
+   * fresh one whenever a live card is on screen again.
+   */
+  if (approvalTicker !== null) {
+    window.clearInterval(approvalTicker)
+    approvalTicker = null
+  }
 })
 
 /* ===== Pop-out =====
@@ -442,7 +574,6 @@ elements.popOut.addEventListener('click', async () => {
         await api.windows.update(open.windowId, { focused: true })
       }
       await api.tabs.update(open.id, { active: true })
-      if (!standalone) window.close()
       return
     }
   } catch {
@@ -450,27 +581,47 @@ elements.popOut.addEventListener('click', async () => {
      * opening a fresh console is the acceptable cost. */
   }
 
-  /* Rung 1: a popup-type window (no tab strip in Chrome; a plain window in
-   * browsers that ignore the type — persistence is the point, not chrome).
-   * Rung 2: a pinned tab, the honest last resort when every window shape is
-   * refused — still a page that survives clicking elsewhere. */
-  if (api.windows?.create) {
+  /*
+   * The ladder, ordered by consoleWindowRungs (command-console.js — which is
+   * also where the "falsy return is not a refusal" bug is written up). Which
+   * rungs a given Safari actually honors is not knowable from feature
+   * detection, so anything that THROWS falls through to the next one.
+   */
+  const open = {
+    'popup-window': () =>
+      api.windows.create({ url, type: 'popup', width: 420, height: 680, focused: true }),
+    'pinned-tab': () => api.tabs.create({ url, pinned: true, active: true }),
+    tab: () => api.tabs.create({ url, active: true }),
+    window: () => api.windows.create({ url, focused: true }),
+  }
+
+  for (const rung of consoleWindowRungs({
+    hasWindowsCreate: Boolean(api.windows?.create),
+    hasTabsCreate: Boolean(api.tabs?.create),
+  })) {
     try {
-      await api.windows.create({ url, type: 'popup', width: 420, height: 680, focused: true })
-      if (!standalone) window.close()
+      await open[rung]()
+      /*
+       * NOTHING CLOSES THE POPOVER HERE, and that is the fix for "expand it,
+       * collapse it, and it never opens again."
+       *
+       * This line used to be `if (!standalone) window.close()`. Calling
+       * window.close() on a Safari POPOVER does not merely dismiss it —
+       * Safari keeps one web view for the toolbar popover and reuses it, and
+       * closing it from script leaves that view dead. Every later click on
+       * the toolbar button then rendered nothing at all, with no error to
+       * see, until the whole browser was relaunched.
+       *
+       * It is also unnecessary: the new window takes focus, and a popover
+       * that loses focus is dismissed by the browser itself — which is the
+       * very behaviour this pop-out exists to escape.
+       */
       return
     } catch {
-      /* Refused at runtime — fall through to the pinned tab. */
+      /* Refused at runtime — next rung. */
     }
   }
-  try {
-    await api.tabs.create({ url, pinned: true, active: true })
-    if (!standalone) window.close()
-    return
-  } catch {
-    /* Refused too. */
-  }
-  setNotice('This browser refused to open the console window or a pinned tab.', true)
+  setNotice('This browser refused every way of opening the console (popup window, pinned tab, tab, window).', true)
 })
 
 elements.form.addEventListener('submit', async (event) => {
@@ -490,7 +641,7 @@ elements.form.addEventListener('submit', async (event) => {
     if (reply?.ok) {
       elements.input.value = ''
     } else if (reply?.needsSetup) {
-      setNotice('Save the agent token in settings first.', true)
+      setNotice('Connect this browser first — paste the pairing code above.', true)
     } else {
       setNotice(reply?.error || 'The bridge did not accept the command.', true)
     }
@@ -520,32 +671,194 @@ elements.connectNow.addEventListener('click', async () => {
   await refresh()
 })
 
-elements.openSettings.addEventListener('click', () => {
-  void api.runtime.openOptionsPage()
+/* ===== Setup (pairing) =====
+ *
+ * The whole settings page, reduced to what the owner actually did on it:
+ * paste the code, press Connect. The popup COLLECTS and the worker does
+ * everything else — fetch AND storage writes both live in background.js
+ * ('pair:run'), because Safari has dropped this page's async sendMessage
+ * reply when the agent's relay leg ran long, and a reply that carries the
+ * credential loses the credential with it. The authoritative outcome
+ * arrives through storage.onChanged (PAIR_OUTCOME_KEY); the reply below is
+ * only used for wording when it happens to survive.
+ */
+
+let pairStartedAt = 0
+
+function setPairNotice(message, isError = false) {
+  elements.pairNotice.textContent = message
+  elements.pairNotice.className = `notice${isError ? ' error' : ''}`
+}
+
+function renderSetup({ agentConfigured }) {
+  elements.setup.hidden = agentConfigured
+  /* One thing at a time in 400px: while unpaired, the command box and its
+   * footer chrome would only be dead controls under the one live card. */
+  elements.form.hidden = !agentConfigured
+  elements.history.hidden = elements.history.hidden || !agentConfigured
+  elements.openDashboard.parentElement.hidden = !agentConfigured
+}
+
+function renderPairOutcome(outcome) {
+  /* Only narrate an outcome for a pairing THIS popup started: a record from
+   * last week must not greet every fresh open with "Paired." */
+  if (!outcome || !pairStartedAt || (outcome.at ?? 0) < pairStartedAt) return
+  pairStartedAt = 0
+  elements.pairConnect.disabled = false
+  if (outcome.ok) {
+    elements.pairCode.value = ''
+    setPairNotice(outcome.note || 'Paired.')
+  } else {
+    setPairNotice(outcome.error || 'Pairing failed.', true)
+  }
+}
+
+elements.pairConnect.addEventListener('click', async () => {
+  const code = elements.pairCode.value.trim()
+  if (!code) {
+    setPairNotice('Paste the pairing code first.', true)
+    return
+  }
+
+  elements.pairConnect.disabled = true
+  pairStartedAt = Date.now()
+  setPairNotice('Pairing…')
+
+  /* A stored device id wins so re-pairing rotates the same device; a stored
+   * agentUrl override keeps working even though the URL field is gone. */
+  const stored = await api.storage.local.get(['relayDeviceId', 'agentUrl', 'deviceName'])
+  const randomBytes = new Uint8Array(3)
+  crypto.getRandomValues(randomBytes)
+  const deviceId = defaultPairDeviceId(
+    stored.relayDeviceId,
+    [...randomBytes].map((byte) => byte.toString(16).padStart(2, '0')).join(''),
+  )
+
+  try {
+    const reply = await api.runtime.sendMessage({
+      type: 'pair:run',
+      agentUrl: stored.agentUrl || DEFAULT_AGENT_URL,
+      code,
+      deviceId,
+      deviceName: stored.deviceName || 'Browser extension',
+      lifetime: normalizePairLifetime(elements.pairLifetime.value),
+    })
+    if (reply === undefined || reply === null) {
+      /*
+       * THE REPLY WAS DROPPED, NOT THE PAIRING. This exact shape — a healthy
+       * agent, a minted credential, and an undefined sendMessage resolution —
+       * is what used to print "Pairing failed: the agent returned no token."
+       * The worker owns the storage writes now, so the truthful message is
+       * that the outcome is still on its way via storage.onChanged.
+       */
+      setPairNotice('Still pairing — finishing in the background. This popup will update by itself.')
+    } else if (!reply.ok) {
+      renderPairOutcome({ ...reply, at: Date.now() })
+    }
+    /* On reply.ok: the storage write beat the reply here; onChanged narrates. */
+  } catch (error) {
+    pairStartedAt = 0
+    elements.pairConnect.disabled = false
+    setPairNotice(error?.message || 'The bridge is not awake yet — try again.', true)
+  }
 })
 
-api.storage.onChanged.addListener((changes, areaName) => {
+/* ===== Website access =====
+ *
+ * permissions.request MUST be called inside the click handler — browsers
+ * refuse the prompt without a user gesture, which is why this cannot be done
+ * for the owner after pairing succeeds. */
+async function renderGrantPages({ agentConfigured }) {
+  let granted = true
+  try {
+    granted = await api.permissions.contains({ origins: WEBSITE_ORIGINS })
+  } catch {
+    /* An engine that cannot answer is not offered a button that cannot work. */
+  }
+  elements.grantPages.hidden = !agentConfigured || granted
+}
+
+elements.grantPages.addEventListener('click', async () => {
+  let granted = false
+  try {
+    granted = await api.permissions.request({ origins: WEBSITE_ORIGINS })
+  } catch {
+    granted = false
+  }
+  if (granted) {
+    elements.grantPages.hidden = true
+    setNotice('Website access granted — this browser can now act in your tabs.')
+  } else {
+    setNotice('The browser did not grant website access.', true)
+  }
+})
+
+/*
+ * THE LISTENER MUST BE REMOVED WHEN THIS DOCUMENT DIES.
+ *
+ * storage.onChanged lives on the EXTENSION's context, which outlives any one
+ * popover document — but this callback closes over `elements`, which belongs
+ * to the document. Registering without removing meant every open/close cycle
+ * left another listener behind, each one pinning a dead document and each one
+ * still called on every storage write the worker makes. Measured 2026-08-10
+ * by cycling the real built popup through five open/close rounds against one
+ * shared context: 1, 2, 3, 4, 5 listeners, none released. Exactly the shape of
+ * "it works the first time and then stops."
+ *
+ * Named, not inline, so pagehide can hand back the same reference.
+ */
+function onStorageChanged(changes, areaName) {
   if (areaName !== 'local') return
   if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue)
+  /* The brain chip depends on two keys and a token, so a change in any of them
+   * re-reads all of them rather than patching from one. agentToken also flips
+   * the setup card, which refresh() repaints. */
+  if (changes.relayStatus || changes.agentToken) void refresh()
   if (changes[HISTORY_KEY]) renderHistory(changes[HISTORY_KEY].newValue)
   if (changes[APPROVALS_KEY]) renderApprovals(changes[APPROVALS_KEY].newValue)
+  /* THE pairing result channel. The worker writes this record whether or not
+   * its sendMessage reply survives Safari, so a dropped reply costs nothing. */
+  if (changes[PAIR_OUTCOME_KEY]) renderPairOutcome(changes[PAIR_OUTCOME_KEY].newValue)
+}
+
+api.storage.onChanged.addListener(onStorageChanged)
+
+window.addEventListener('pagehide', () => {
+  try {
+    api.storage.onChanged.removeListener(onStorageChanged)
+  } catch {
+    /* A browser without removeListener is one that never kept it. */
+  }
 })
 
 async function refresh() {
   const values = await api.storage.local.get([
     'bridgeStatus',
+    'relayStatus',
     'agentUrl',
+    'agentToken',
     HISTORY_KEY,
     INCLUDE_PAGE_KEY,
     APPROVALS_KEY,
   ])
+  const agentConfigured = Boolean(values.agentToken)
   dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
   renderStatus(values.bridgeStatus)
+  renderBrain({
+    relayStatus: values.relayStatus,
+    agentConfigured,
+  })
   renderApprovals(values[APPROVALS_KEY])
   renderHistory(values[HISTORY_KEY])
   /* Default ON for convenience, but visible and remembered. */
   elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false
   refreshMicAvailability()
+  /* Last, so the setup card's show/hide wins over renderHistory's. */
+  renderSetup({ agentConfigured })
+  void renderGrantPages({ agentConfigured })
 }
 
-void refresh().then(() => elements.input.focus())
+void refresh().then(() => {
+  /* Focus goes to whichever box is the one thing to do. */
+  ;(elements.setup.hidden ? elements.input : elements.pairCode).focus()
+})

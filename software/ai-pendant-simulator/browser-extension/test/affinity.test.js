@@ -30,7 +30,7 @@ import {
   tagPlanStep,
   textLooksOutward,
 } from '../src/affinity.js'
-import { COMMAND_TYPES } from '../src/bridge-core.js'
+import { COMMAND_TYPES, validateCommand } from '../src/bridge-core.js'
 
 /* ------------------------------------------------------------------ *
  * Capability tags: a closed table, not a vibe.
@@ -330,4 +330,80 @@ test('the shipped manifest already grants what the local tools need', () => {
     )
   }
   assert.ok(manifest.optional_host_permissions.includes('https://*/*'))
+})
+
+test('THE LIVE PLAN: hive params are made runnable before they are judged or run', () => {
+  /*
+   * The exact plan the Mac planner returned on 2026-08-09 for "what are the
+   * most worth watching movies here" on the United onboard portal, copied from
+   * job local_6e6d7d53. `tabId:"optional"` is the planner having copied the
+   * word out of its own tool schema, where the description reads like a value.
+   *
+   * The whole plan is browser work, so affinity claims it and it runs HERE —
+   * where validateCommand refused it: "tabId must be a non-negative integer",
+   * dead at step 2. On the Mac the same plan works, because browserSessions
+   * .toWireParams deletes a non-numeric tabId before the executor ever sees
+   * it. "Runs on the Mac, dies in the browser" is the one difference local
+   * execution must not introduce.
+   */
+  const plan = [
+    { type: 'browser_list_tabs', label: 'browser_list_tabs', params: { limit: 10 } },
+    {
+      type: 'browser_read_page',
+      label: 'Read the movie titles and details from the United Wi‑Fi watch collection',
+      params: { mode: 'main_text', maxChars: 12000, tabId: 'optional' },
+    },
+  ]
+
+  const routed = routePlan(plan)
+  assert.equal(routed.route, CAPABILITY_BROWSER)
+
+  const readStep = routed.steps[1]
+  assert.equal(readStep.localCall.type, 'read_page')
+  /* The junk is gone... */
+  assert.equal('tabId' in readStep.localCall.params, false)
+  /* ...and everything the extension DOES understand is untouched. */
+  assert.equal(readStep.localCall.params.mode, 'main_text')
+  assert.equal(readStep.localCall.params.maxChars, 12000)
+
+  /* Which is the whole point: it now passes the gate that killed the run. */
+  assert.doesNotThrow(() =>
+    validateCommand({
+      commandId: 'c1',
+      createdAt: new Date().toISOString(),
+      action: readStep.localCall,
+    }),
+  )
+})
+
+test('a session name means nothing here, and a real tabId survives', () => {
+  /* `session` addresses a named tab on the MAC's side of the bridge; once the
+   * step is running here, this browser IS the session. */
+  const call = localCallFor({
+    type: 'browser_click',
+    params: { session: 'united', ref: 'e4', tabId: '21923086' },
+  })
+  assert.equal('session' in call.params, false)
+  /* Numeric text is a real answer badly typed — the Mac coerces it too. */
+  assert.equal(call.params.tabId, 21923086)
+  assert.equal(call.params.ref, 'e4')
+
+  const negative = localCallFor({ type: 'browser_read_page', params: { tabId: -1 } })
+  assert.equal('tabId' in negative.params, false)
+})
+
+test('normalization runs before effect classification, not after', () => {
+  /*
+   * classifyEffect reads params to decide whether a step is outward, so the
+   * params it judges must be the params that will run. Judging one set and
+   * running another is how a gate gets quietly bypassed.
+   */
+  const step = tagPlanStep({
+    type: 'browser_type',
+    label: 'Fill the search box',
+    params: { session: 'united', selector: '#q', text: 'star wars', tabId: 'optional' },
+  })
+  assert.equal('tabId' in step.localCall.params, false)
+  assert.equal('session' in step.localCall.params, false)
+  assert.equal(step.effect, EFFECT_ACT)
 })

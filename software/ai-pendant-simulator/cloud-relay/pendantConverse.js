@@ -56,6 +56,7 @@ import {
   answerSpokenApproval,
   isPendantRoutedApproval,
 } from './approvalDelivery.js'
+import { registerConverseSession } from './converseSessions.js'
 import { synthesizeSpeech } from './speak.js'
 import {
   enqueueMacPlanJob,
@@ -222,6 +223,19 @@ export async function handlePendantConverse(request, context) {
        * press). Null means no readback is awaiting an answer.
        */
       pendingApprovalAnswer: null,
+      /*
+       * Approval readbacks run one at a time, in order, on this chain. The
+       * on-connect sweep and any mid-conversation nudge (an approval saved
+       * while this socket is open — converseSessions.js) both feed the same
+       * stateful Opus encoder, so two running concurrently would splice one
+       * prompt into the middle of another. `approvalRunQueued` collapses a
+       * burst of nudges into one pending run: the run reads the STORE when
+       * it starts, so whatever was saved by then gets spoken.
+       */
+      approvalRuns: Promise.resolve(),
+      approvalRunQueued: false,
+      /* Set at register time (initConversation); called by endConversation. */
+      unregisterSession: null,
     }
     convo = state
 
@@ -458,6 +472,20 @@ export async function handlePendantConverse(request, context) {
     console.log(`[converse] conversation started device=${deviceId}`)
 
     /*
+     * The conversation can now play audio, so it becomes findable: an
+     * approval saved WHILE this socket is open (the owner asked by voice, the
+     * plan parked on the Mac seconds later) gets spoken into this very
+     * conversation instead of waiting mute for the next button press — which
+     * is exactly the silence the owner complained about. The nudge lands on
+     * the same serialised readback the on-connect sweep uses, so it can never
+     * splice into other relay speech. Registered here, after the session and
+     * encoder exist, and torn down in endConversation.
+     */
+    state.unregisterSession = registerConverseSession(deviceId, {
+      speakApprovals: () => queueApprovalReadback(state),
+    })
+
+    /*
      * The pendant is now in a state where it will PLAY what arrives, so this
      * is the first moment anything the relay composed on its own can reach
      * the owner's ear. Not awaited: a queued briefing must never delay the
@@ -471,16 +499,37 @@ export async function handlePendantConverse(request, context) {
      * about to say — burying it under a briefing would ask them to answer a
      * question three paragraphs old.
      */
-    void speakQueuedApprovals(state)
-      .catch((error) => {
+    void queueApprovalReadback(state).then(() => {
+      if (!ANNOUNCE_ON_CONNECT || state.ended) return
+      return playPendingAnnouncements(state).catch((error) => {
+        console.warn(`[converse] announce: ${error?.message || error}`)
+      })
+    })
+  }
+
+  /**
+   * One approval readback at a time, always reading the store fresh.
+   *
+   * Every caller — the on-connect sweep above, a mid-conversation nudge from
+   * converseSessions.js — goes through here, so the invariant that relay
+   * speech never interleaves lives in one place. A nudge that arrives while a
+   * readback is queued is absorbed rather than stacked: the queued run will
+   * read the store after the triggering save (saveApproval completed before
+   * routeApprovalPrompt ran), so it speaks the new record too. Errors are
+   * swallowed into a warning here so the chain itself can never go rejected
+   * and silently refuse every later readback.
+   */
+  function queueApprovalReadback(state) {
+    if (state.ended || state.approvalRunQueued) return state.approvalRuns
+    state.approvalRunQueued = true
+    state.approvalRuns = state.approvalRuns.then(() => {
+      state.approvalRunQueued = false
+      if (state.ended) return
+      return speakQueuedApprovals(state).catch((error) => {
         console.warn(`[converse] approvals: ${error?.message || error}`)
       })
-      .then(() => {
-        if (!ANNOUNCE_ON_CONNECT || state.ended) return
-        return playPendingAnnouncements(state).catch((error) => {
-          console.warn(`[converse] announce: ${error?.message || error}`)
-        })
-      })
+    })
+    return state.approvalRuns
   }
 
   /**
@@ -697,6 +746,15 @@ export async function handlePendantConverse(request, context) {
     state.ended = true
     convo = null
     clearInterval(state.idleTimer)
+    /* No longer nudgeable: from here the store-and-next-press path is the
+     * only delivery again, which is correct — the firmware cannot be woken.
+     * The unregister is identity-checked, so a restart that already
+     * registered the successor session is not clobbered by this teardown. */
+    try {
+      state.unregisterSession?.()
+    } catch {
+      /* registry teardown must never block the conversation teardown */
+    }
 
     let plan = null
     try {

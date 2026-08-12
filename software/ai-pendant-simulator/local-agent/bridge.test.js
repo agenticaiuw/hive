@@ -37,7 +37,12 @@ function installFetchStub(routes) {
     })
 
     const route = routes[pathname]
-    if (typeof route === 'function') return jsonResponse(route())
+    if (typeof route === 'function') {
+      const value = route()
+      // A route may hand back a finished Response (to fake a Cloudflare HTML
+      // 503 or other non-JSON edge answer); anything else is JSON-wrapped.
+      return value instanceof Response ? value : jsonResponse(value)
+    }
     if (route) return jsonResponse(route)
     return jsonResponse({ ok: true })
   }
@@ -699,4 +704,239 @@ test('approvalOriginForWork reads transport first, then the creating principal',
   assert.equal(approvalOriginForWork({ createdBy: 'nrf9160-pendant' }), 'nrf9160')
   assert.equal(approvalOriginForWork({ createdBy: 'ios-phone-1' }), 'ios-phone-1')
   assert.equal(approvalOriginForWork({}), 'dashboard', 'no evidence lands on the surface that always worked')
+})
+
+/*
+ * The result POST is the last hop of a job that already finished. Cloudflare
+ * intermittently answers it with an HTML 503 error page (live incident:
+ * job_6b8b350f-ad9c-4aca-9610-a99816c98dda), which used to (a) fail the
+ * completed job and (b) get RE-reported as ok:false over the same broken
+ * channel, recording a bogus failure with raw HTML in the error field. These
+ * tests pin the repaired behavior: retry the transient edge error, never
+ * convert a reporting failure into a job failure, and never echo HTML.
+ */
+const CLOUDFLARE_503 = () =>
+  new Response(
+    '<!DOCTYPE html><html><head><title>503 Service Temporarily Unavailable</title></head>' +
+      '<body>cloudflare</body></html>',
+    { status: 503, headers: { 'content-type': 'text/html' } },
+  )
+
+test('a transient Cloudflare 503 on the result POST is retried and the result lands', async (t) => {
+  let resultPosts = 0
+  const stub = installFetchStub({
+    '/v1/bridge/work/job-edge-503/result': () => {
+      resultPosts += 1
+      if (resultPosts === 1) return CLOUDFLARE_503()
+      return { ok: true, job: { status: 'succeeded' } }
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'agent_proxy',
+    jobId: 'job-edge-503',
+    method: 'GET',
+    path: '/status',
+  })
+
+  assert.equal(resultPosts, 2, 'the POST should retry once past the edge error')
+  const posts = stub.calls.filter((call) =>
+    call.pathname.endsWith('/job-edge-503/result'),
+  )
+  for (const post of posts) {
+    assert.equal(
+      JSON.parse(post.body).ok,
+      true,
+      'no failure report should ever be generated for a transient edge error',
+    )
+  }
+})
+
+test('exhausted result-POST retries are not converted into a job failure report', async (t) => {
+  let resultPosts = 0
+  const stub = installFetchStub({
+    '/v1/bridge/work/job-edge-dead/result': () => {
+      resultPosts += 1
+      return CLOUDFLARE_503()
+    },
+  })
+  t.after(() => stub.restore())
+
+  const errors = []
+  const originalError = console.error
+  console.error = (...args) => errors.push(args.join(' '))
+  t.after(() => {
+    console.error = originalError
+  })
+
+  await handleWork({
+    type: 'agent_proxy',
+    jobId: 'job-edge-dead',
+    method: 'GET',
+    path: '/status',
+  })
+
+  assert.equal(resultPosts, 3, 'three bounded attempts, then give up')
+  const failureReports = stub.calls.filter(
+    (call) =>
+      call.pathname.endsWith('/job-edge-dead/result') &&
+      JSON.parse(call.body).ok === false,
+  )
+  assert.equal(
+    failureReports.length,
+    0,
+    'a result-reporting failure must never be re-reported as a job failure',
+  )
+  const loud = errors.find((line) => line.includes('job-edge-dead'))
+  assert.ok(loud, 'the lost delivery should be logged loudly')
+  assert.ok(
+    loud.includes('Cloudflare/HTML error page'),
+    'the log names the edge error page instead of echoing it',
+  )
+  assert.ok(
+    !loud.includes('<!DOCTYPE'),
+    'raw HTML must never leak into the error text',
+  )
+})
+
+test('a deliberate JSON refusal of the result POST is not retried', async (t) => {
+  let resultPosts = 0
+  const stub = installFetchStub({
+    '/v1/bridge/work/job-refused/result': () => {
+      resultPosts += 1
+      return new Response(
+        JSON.stringify({ ok: false, error: 'device token revoked' }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      )
+    },
+  })
+  t.after(() => stub.restore())
+
+  const originalError = console.error
+  console.error = () => {}
+  t.after(() => {
+    console.error = originalError
+  })
+
+  await handleWork({
+    type: 'agent_proxy',
+    jobId: 'job-refused',
+    method: 'GET',
+    path: '/status',
+  })
+
+  assert.equal(resultPosts, 1, 'a 4xx JSON refusal is an answer, not weather')
+})
+
+/* ---- the owner's 2026-08-11 ruling, at the venue that broke it ------------
+ * "what's the latest email in my Outlook account?" parked TWO approval cards
+ * — the opener and the get-only read — because the planner asked and this
+ * gate honoured the ask over the taxonomy for every step. Reads now run
+ * whatever the model said; outward still parks whatever the model said.
+ * ------------------------------------------------------------------------- */
+
+test('a spoken pure-read Outlook plan auto-runs even when the planner asked', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      response: 'Checking your latest Outlook email.',
+      requiresConfirmation: true,
+      confirmReason: 'Opening Outlook goes beyond the request.',
+      actions: [
+        {
+          type: 'open_app',
+          label: 'Open Outlook on my MacBook',
+          params: { name: 'Microsoft Outlook' },
+        },
+        {
+          type: 'run_applescript',
+          label: 'Read the newest message',
+          params: {
+            script:
+              'tell application "Microsoft Outlook"\n\tset latestMessage to item 1 of (messages of inbox)\n\tset theSubject to subject of latestMessage\n\treturn theSubject\nend tell',
+          },
+        },
+      ],
+    },
+    '/execute': {
+      ok: true,
+      status: 'success',
+      results: [
+        { ok: true, message: 'Microsoft Outlook opened' },
+        { ok: true, message: 'Quarterly numbers — from Dana' },
+      ],
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-outlook-read',
+    command: "what's the latest email in my Outlook account?",
+    sessionId: 'session-outlook',
+  })
+
+  const executed = stub.calls.some(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.equal(executed, true, 'a read-only plan must run hands-free')
+
+  const completion = stub.calls
+    .filter((call) => call.toRelay && call.pathname.endsWith('/job-outlook-read/result'))
+    .at(-1)
+  assert.ok(completion, 'the job result should have been posted')
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.ok, true)
+  assert.notEqual(posted.parked, true, 'a read must not park for approval')
+  assert.equal(posted.result.executed, true)
+})
+
+test('a spoken send-email plan parks even when the planner waived confirmation', async (t) => {
+  const stub = installFetchStub({
+    '/plan': {
+      status: 'ready',
+      planner: 'llm',
+      response: 'Sending that email.',
+      requiresConfirmation: false,
+      actions: [
+        {
+          type: 'send_email',
+          label: 'Email Dana back',
+          params: { to: 'dana@example.com', subject: 'Re: numbers', body: 'On it.' },
+        },
+      ],
+    },
+    '/execute': () => {
+      throw new Error('/execute must never be reached for an outward action the model waived')
+    },
+  })
+  t.after(() => stub.restore())
+
+  await handleWork({
+    type: 'plan',
+    jobId: 'job-outlook-send',
+    command: 'reply to dana saying on it',
+    sessionId: 'session-outlook-send',
+  })
+
+  const executed = stub.calls.some(
+    (call) => call.toAgent && call.pathname === '/execute',
+  )
+  assert.equal(executed, false, 'the model cannot waive the outward floor')
+
+  const completion = stub.calls.find((call) =>
+    call.toRelay && call.pathname.endsWith('/job-outlook-send/result'),
+  )
+  assert.ok(completion, 'the job result should have been posted')
+  const posted = JSON.parse(completion.body)
+  assert.equal(posted.ok, true, 'parked is not failed')
+  assert.equal(posted.parked, true)
+  assert.equal(posted.result.phase, 'parked_for_approval')
+  assert.deepEqual(
+    posted.result.awaitingApproval.map((entry) => entry.type),
+    ['send_email'],
+  )
+  assert.match(posted.result.awaitingApproval[0].reason, /acts on your behalf/)
 })

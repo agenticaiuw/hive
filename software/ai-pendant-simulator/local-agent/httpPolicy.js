@@ -12,6 +12,15 @@ export function publicHealthPayload() {
 
 export function isPublicPath(requestPath) {
   if (requestPath === '/health') return true
+  /*
+   * The route that EXISTS to serve callers with no bearer yet: the browser
+   * extension's one-paste pairing. "Public" here means only "not gated by the
+   * bearer this route is how you obtain" — the handler enforces its own two
+   * gates, loopback socket address and a timing-safe pairing-code match
+   * (pairBrowser.js), which is the same trust the relay's own pre-auth
+   * /v1/devices/pair route runs on.
+   */
+  if (requestPath === '/pair/browser') return true
   if (requestPath === '/dashboard' || requestPath.startsWith('/dashboard/')) {
     return true
   }

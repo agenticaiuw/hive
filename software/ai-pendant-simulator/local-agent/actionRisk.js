@@ -466,3 +466,191 @@ export function classifyPlanForRoutine(actions) {
   }
   return { autoRun: true, blocked: voice.blocked, denied: [], reason: '' }
 }
+
+/*
+ * THE EFFECT TIER — read / act / outward — and the owner's ruling of 2026-08-11.
+ *
+ * The incident: the owner asked, by voice, "what's the latest email in my
+ * Outlook account?" The plan was two steps — open Outlook, run an AppleScript
+ * that only `get`s the newest message's subject and sender — and BOTH parked as
+ * approval cards. Not because this file held them: classifyPlan clears that
+ * exact plan. They parked because the PLANNER asked ("requiresConfirmation":
+ * true), and the bridge honoured the model's ask over the taxonomy for every
+ * step in the plan, harmless opener included. The owner's verbatim ruling:
+ * "asking to read emails should not be something that needs permissions also i
+ * specifically asked the agent to do that."
+ *
+ * So the model's caution needed a floor AND a ceiling, and both are stated in
+ * the browser extension's vocabulary (browser-extension/src/affinity.js tags
+ * every call read/act/outward) so the two halves of this product draw the same
+ * line:
+ *
+ *   read    — looks at something and changes nothing: reading state, listing,
+ *             screenshots of the owner's own screen, and — per the owner —
+ *             opening an app or a page, which shows what was already there.
+ *             A spoken request IS the authorization for a read. NOTHING may
+ *             park a pure-read plan, not even the model's own ask: the ask
+ *             lands on a device with no screen, and the request dies.
+ *   act     — changes something local and recoverable: writes, moves, UI
+ *             clicks, settings, scripts that do more than look. The model's
+ *             judgement decides here, exactly as before; the per-type
+ *             allowlist is the fallback when the model gave no verdict.
+ *   outward — reaches another person, spends, destroys, or hands over the
+ *             screen: send_email, send_message, delete_path,
+ *             computer_use_task, a phone tap aimed at "Place Order", an
+ *             AppleScript that sends/deletes rather than gets. These park
+ *             ALWAYS. The owner asking out loud does not clear them, and
+ *             neither does the model deciding not to ask — explicit-ask bias
+ *             is a read-tier privilege only.
+ */
+
+/* Members of the hands-free allowlist that are also pure LOOKS. open_* is here
+ * on the owner's say-so and on affinity.js's own reasoning ("a page named
+ * /cancel-subscription has cancelled nothing by being looked at"). */
+const READ_TIER_ACTIONS = new Set([
+  'open_app',
+  'open_url',
+  'open_path',
+  'open_folder',
+  'read_file',
+  'list_directory',
+  'search_file',
+  'screenshot',
+  'zoom',
+  'ui_snapshot',
+  'ui_find',
+  'ui_wait_for',
+  'ui_hit_test',
+  'cursor_position',
+  'list_displays',
+  'check_input_permissions',
+  'get_clipboard',
+  'get_brightness',
+  'get_volume',
+  'get_mac_status',
+  'get_battery',
+  'get_time',
+  'get_weather',
+  'get_input_source',
+  'list_briefings',
+  'translate_text',
+  'recall_capture',
+  'preview_plan',
+  'sweep_folder_preview',
+  'tidy_downloads_preview',
+  'browser_read_page',
+  'browser_snapshot',
+  'browser_wait_for',
+  'browser_list_tabs',
+  'browser_capture',
+  'browser_list_sessions',
+  'browser_inspect',
+  'ios_status',
+  'ios_ocr',
+  'ios_screenshot',
+  'ios_open_app',
+])
+
+/*
+ * The heuristic for a script that is not a read: does its body reach for an
+ * outward verb? `send`, `make new outgoing message`, `delete` are how Mail and
+ * Outlook scripts commit; a non-read script WITHOUT one of these is an 'act'
+ * (it changes something, locally) rather than an 'outward'. Matched against
+ * the raw body, strings included — a false positive parks a plan, a false
+ * negative sends an email, and only one of those can be taken back.
+ */
+const OUTWARD_SCRIPT_VERB =
+  /\b(send|post|reply|forward|share|publish|submit|delete|remove|erase|empty|unsubscribe|purchase|pay|order)\b/i
+
+/**
+ * Which tier one action sits in. The outward checks come first so nothing on
+ * an allowlist can shadow them (same ordering classifyAction uses for the
+ * phone's confirm targets).
+ */
+export function effectTierFor(action) {
+  const type = String(action?.type || '')
+  if (ROUTINE_DENY_ACTIONS.has(type)) return 'outward'
+  if (iosConfirmReason(action)) return 'outward'
+  if (type === 'run_shell') {
+    const command = action?.params?.command ?? action?.command
+    if (isStatusShellCommand(command)) return 'read'
+    return analyzeShellCommand(command).read ? 'read' : 'act'
+  }
+  if (type === 'run_applescript') {
+    const script = action?.params?.script ?? action?.script
+    if (analyzeAppleScript(script).read) return 'read'
+    return OUTWARD_SCRIPT_VERB.test(String(script ?? '')) ? 'outward' : 'act'
+  }
+  return READ_TIER_ACTIONS.has(type) ? 'read' : 'act'
+}
+
+/** Why this outward action is held — reusing the sentences a card already
+ * prints, with the script heuristic's own sentence for the scripted case. */
+function outwardReasonFor(action) {
+  const type = String(action?.type || '')
+  return (
+    CONFIRM_REASONS.get(type) ??
+    iosConfirmReason(action) ??
+    (type === 'run_applescript'
+      ? 'That script sends, deletes or posts rather than only reading, so it needs your approval.'
+      : `${type} acts outward on your behalf, so it needs your approval.`)
+  )
+}
+
+/**
+ * The VOICE venue's whole decision, model verdict included.
+ *
+ * The bridge used to hold this logic itself ("THE MODEL'S JUDGEMENT WINS") and
+ * the model's ask parked the Outlook read above. The precedence is now:
+ *
+ *   1. outward present  → park, whatever the model said (floor);
+ *   2. every step reads → run, whatever the model said (ceiling — the owner's
+ *                         spoken command is the explicit ask, and a read has
+ *                         nothing an approval could protect);
+ *   3. otherwise        → the model's verdict when it made one, else the
+ *                         per-type hands-free line (classifyPlan), unchanged.
+ *
+ * `model` is { asked: boolean, reason: string } or null when the plan carried
+ * no verdict at all.
+ */
+export function classifyPlanForVoice(actions, { model = null } = {}) {
+  const list = Array.isArray(actions) ? actions : []
+  if (!list.length) {
+    return { autoRun: false, blocked: [], reason: 'No actions to run.' }
+  }
+
+  const outward = list
+    .filter((action) => effectTierFor(action) === 'outward')
+    .map((action) => ({
+      type: action?.type ?? 'unknown',
+      reason: outwardReasonFor(action),
+    }))
+  if (outward.length) {
+    return {
+      autoRun: false,
+      blocked: outward,
+      reason: outward.map((entry) => entry.reason).join(' '),
+    }
+  }
+
+  if (list.every((action) => effectTierFor(action) === 'read')) {
+    return { autoRun: true, blocked: [], reason: '' }
+  }
+
+  if (model && typeof model.asked === 'boolean') {
+    if (!model.asked) return { autoRun: true, blocked: [], reason: '' }
+    const reason =
+      String(model.reason || '').trim() ||
+      'The planner asked for your approval on this step.'
+    return {
+      autoRun: false,
+      blocked: list.map((action) => ({
+        type: action?.type ?? 'unknown',
+        reason,
+      })),
+      reason,
+    }
+  }
+
+  return classifyPlan(list)
+}

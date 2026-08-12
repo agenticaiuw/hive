@@ -50,6 +50,7 @@ import {
   settleStoredApproval,
 } from './approvalStore.js'
 import { sendNodeMessage } from './nodeMailbox.js'
+import { nudgeConverseSession } from './converseSessions.js'
 import { RELAY_NODE_ADDRESS, MAX_TTL_MS } from '../shared/nodeMesh.js'
 
 /*
@@ -149,6 +150,22 @@ export async function routeApprovalPrompt({ store, record, now = Date.now(), sen
   try {
     const route = await approvalPromptRoute({ store, record })
     if (route.channel !== 'mesh') {
+      /*
+       * 'pendant-speech' used to end here with "the next press will read it",
+       * which was true and useless when the owner's conversation was OPEN at
+       * that very moment — the plan they had just asked for by voice parked
+       * in silence. So the queue is still the delivery (the record is durable
+       * and the next press still speaks it), but if this device holds a live
+       * converse socket in THIS isolate, nudge it to read the store now. Not
+       * awaited past scheduling: the nudge hands the work to the session's
+       * own serialised readback and returns, because a stored approval's 201
+       * must not wait out seconds of paced audio. See converseSessions.js for
+       * why a different isolate honestly reports no-live-session.
+       */
+      const live =
+        route.channel === 'pendant-speech'
+          ? nudgeConverseSession(route.to ?? record?.deviceId)
+          : null
       return {
         channel: route.channel,
         to: route.to,
@@ -157,6 +174,8 @@ export async function routeApprovalPrompt({ store, record, now = Date.now(), sen
          * another write": the pendant speaks the store, the Mac surface polls
          * it. Only a mesh push has a separate act that can fail. */
         queued: true,
+        /* Whether an open conversation was told to speak it immediately. */
+        nudged: live?.nudged === true,
         why: route.why,
       }
     }

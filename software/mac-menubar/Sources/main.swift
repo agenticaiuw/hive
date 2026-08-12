@@ -2083,13 +2083,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func setIcon(online: Bool) {
-        let color: NSColor = online ? .systemGreen : .systemRed
-        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-            .applying(.init(paletteColors: [color]))
-        let image = NSImage(systemSymbolName: "waveform.circle.fill",
-                            accessibilityDescription: "AI Pendant")?
-            .withSymbolConfiguration(config)
-        image?.isTemplate = false
+        // The product icon, not a loose SF Symbol — one face on every surface
+        // (owner, 2026-08-10: the green circle up here matched nothing else).
+        // The information the old green/red glyph carried is NOT dropped: it
+        // survives as a small status dot on the icon's corner, because
+        // "online at a glance" is the entire reason this item exists.
+        let side: CGFloat = 18
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            // The bundle's AppIcon.icns — the same master every surface uses.
+            NSApp.applicationIconImage.draw(in: rect, from: .zero,
+                                            operation: .sourceOver, fraction: 1.0)
+            let dot: CGFloat = 7
+            let dotRect = NSRect(x: rect.maxX - dot, y: 0, width: dot, height: dot)
+            (online ? NSColor.systemGreen : NSColor.systemRed).setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+            // A hairline keeps the dot legible on both menu bar appearances.
+            NSColor.black.withAlphaComponent(0.55).setStroke()
+            let ring = NSBezierPath(ovalIn: dotRect.insetBy(dx: 0.5, dy: 0.5))
+            ring.lineWidth = 1
+            ring.stroke()
+            return true
+        }
+        image.isTemplate = false
         statusItem.button?.image = image
     }
 

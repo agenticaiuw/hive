@@ -424,12 +424,62 @@ export async function openBrowserSession(
     return finishOpen(sessionId, opened, 'opened', filePath)
   }
 
-  /* No usable target: reuse whatever is already open before making noise. */
+  /*
+   * A NAMED TARGET THAT IS NOT OPEN IS A MISS, NOT A FREE CHOICE.
+   *
+   * Observed live on 2026-08-09: the planner asked for
+   * {session:"ibkr", urlContains:"interactivebrokers.com"} with no `url`.
+   * Nothing matched, and the fallback below adopted the ACTIVE tab — GitHub.
+   * The session then answered to the name "ibkr" while pointing at
+   * github.com, so every later step in the plan snapshotted GitHub and the
+   * run reported "adopted … looked at the page — nothing was cancelled".
+   * Nothing was wrong with any single step; the session was bound to the
+   * wrong page before step two ever ran.
+   *
+   * So when the caller named a page: open THAT page if the needle says which
+   * one (a host is a URL missing only its scheme), and otherwise refuse.
+   * Adopting an unrelated tab under the requested name is the one outcome
+   * that cannot be recovered from downstream, because every later step
+   * believes it is somewhere it is not.
+   */
+  if (urlContains) {
+    const target = urlFromNeedle(urlContains)
+    if (target) {
+      const opened = await openTab(target, dispatch)
+      return finishOpen(sessionId, opened, 'opened', filePath)
+    }
+    throw new BrowserTabMissingError(
+      `No open tab matches "${urlContains}", and it does not name a site this can open ` +
+        '(pass url to open one). Refusing to bind the session to an unrelated tab.',
+    )
+  }
+
+  /* No target named at all: reuse whatever is already open before making noise. */
   const active = await adoptExistingTab(() => true, dispatch)
   if (active) return finishOpen(sessionId, active, 'adopted', filePath)
 
   const opened = await openTab(HOME_URL, dispatch)
   return finishOpen(sessionId, opened, 'opened', filePath)
+}
+
+/*
+ * A tab needle is written to be matched against `tab.url`, so the useful ones
+ * are already most of an address: "interactivebrokers.com",
+ * "mail.google.com/u/0". Only a needle that resolves to a real host becomes a
+ * URL — a bare word ("inbox"), a path fragment ("/orders") or anything with
+ * whitespace names no site, and guessing one from it would open a page the
+ * owner never asked for.
+ */
+const HOST_SHAPED = /^(?:https?:\/\/)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+(?::\d+)?(?:[/?#]\S*)?$/i
+
+export function urlFromNeedle(needle) {
+  const text = String(needle ?? '').trim()
+  if (!text || !HOST_SHAPED.test(text)) return ''
+  try {
+    return new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`).toString()
+  } catch {
+    return ''
+  }
 }
 
 async function adoptExistingTab(predicate, dispatch) {

@@ -38,7 +38,7 @@
  * whole policy is unit-testable in plain node, the same split relay-peer.js
  * uses. background.js supplies the impure edges.
  */
-import { COMMAND_TYPES } from './bridge-core.js'
+import { COMMAND_TYPES, normalizeCommandParams } from './bridge-core.js'
 
 export const CAPABILITY_BROWSER = 'browser'
 export const CAPABILITY_HIVE = 'hive'
@@ -81,10 +81,16 @@ export const LOCAL_CLAIMABLE_ACTIONS = Object.freeze({
 /** The local command a hive plan step becomes, or null when it cannot. */
 export function localCallFor(action) {
   const hiveType = String(action?.type ?? '').trim()
-  const params =
-    action?.params && typeof action.params === 'object' && !Array.isArray(action.params)
-      ? { ...action.params }
-      : {}
+  /*
+   * Normalized HERE, not at the executor, for two reasons. The obvious one is
+   * that the step has to be runnable at all — see bridge-core's
+   * normalizeCommandParams for the live plan that died on `tabId:"optional"`.
+   * The other is that classifyEffect below reads these params to decide
+   * whether a step is outward, so the params it judges must be the params that
+   * will actually run. Judging one set and running another is how a gate gets
+   * quietly bypassed.
+   */
+  const params = normalizeCommandParams(action?.params)
 
   /* A step already in the extension's own vocabulary needs no translation —
    * mesh mail and future callers may hand plans over pre-translated. */

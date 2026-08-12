@@ -558,28 +558,41 @@ export function hasMoreMail(page) {
 
 /**
  * Build the Error a failed relay response should throw. One place, because
- * the wire contract has three parts that drift independently: the human
+ * the wire contract has four parts that drift independently: the human
  * message (`error` or `message`), the machine name (`code` — e.g. the
- * ownership 403's `not_your_inbox` since relay 41dbc4b), and the HTTP
- * status. describeRelayFailure keys on status first and uses code only to
- * sharpen, so this must carry all three — dropping `code` at this seam once
+ * ownership 403's `not_your_inbox` since relay 41dbc4b), the HTTP status, and
+ * `retryAfter`. describeRelayFailure keys on status first and uses code only to
+ * sharpen, so this must carry all of them — dropping `code` at this seam once
  * left the not_your_inbox branch unreachable from live traffic.
+ *
+ * `retryAfter` is DEVICE-SCOPED and the relay documents it as a contract
+ * (cloud-relay/nodeInference.js): its presence means "this device should not
+ * ask this relay again before then", never "this request was unlucky". brain.js
+ * parks on the field rather than on a list of status codes, so a reason the
+ * relay adds later is honoured with no change here — which only works if the
+ * field survives this seam. It is read from the body first and the standard
+ * header second, because a proxy can strip a header and the body is ours.
  */
 export async function relayResponseError(response) {
   let detail = ''
   let code = ''
+  let retryAfter = 0
   try {
     const payload = await response.json()
     detail = payload.error || payload.message || ''
     code = typeof payload.code === 'string' ? payload.code : ''
+    retryAfter = Number(payload.retryAfter) || 0
   } catch {
     detail = await response.text().catch(() => '')
   }
+  if (!retryAfter) retryAfter = Number(response.headers?.get?.('Retry-After')) || 0
+
   const error = new Error(
     detail || `The relay returned HTTP ${response.status}.`,
   )
   error.status = response.status
   if (code) error.code = code
+  if (retryAfter > 0) error.retryAfter = retryAfter
   return error
 }
 

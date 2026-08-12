@@ -38,6 +38,7 @@
  * process stands on.
  */
 
+import { stripContextTrailer } from './callerContext.js'
 import { NEEDS_APPROVAL_STATUS } from './pipelineTrace.js'
 import { analyzeAppleScript, analyzeShellCommand } from './scriptEffects.js'
 
@@ -233,7 +234,22 @@ const OBJECT_STOPWORDS = new Set([
  * }}
  */
 export function describeGoal(command) {
-  const text = String(command ?? '').trim()
+  /*
+   * STRIPPED FIRST, ALWAYS. Everything below reads the command as a SENTENCE —
+   * objectAfter() takes the words after the verb, stops at the first clause
+   * boundary and keeps seven — so a surface's provenance trailer is not extra
+   * noise here, it is grammar. Observed live 2026-08-09: the extension's
+   * "[Sent from the browser extension. Active page: …]" supplied the boundary
+   * with "extension.", and the owner was told "Cancelling all your recurring
+   * investments on ibkr [Sent is still to do."
+   *
+   * Unconditional even though /plan now takes a first-class `context` and
+   * strips the trailer on the way in, because this function is also called on
+   * jobs recorded BEFORE that existed, and by callers that never went through
+   * /plan at all. A sentence-reader that trusts its input to be clean is the
+   * bug; this is the fix.
+   */
+  const text = stripContextTrailer(command).trim()
   const none = {
     text,
     wantsChange: false,
@@ -439,7 +455,7 @@ function carriesGoal(goal, action) {
   const type = String(action?.type || '')
   if (TYPE_PERFORMS.get(type) === goal.group.id) return true
 
-  let paramsText = ''
+  let paramsText
   try {
     paramsText = JSON.stringify(action?.params ?? {})
   } catch {

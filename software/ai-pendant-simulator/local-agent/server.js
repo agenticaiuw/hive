@@ -53,20 +53,21 @@ import {
   sweepCapsules,
 } from './evidenceCapsules.js'
 import { fillForm, formFillLocation, getFill, listFills } from './formFill.js'
+import { prepareCallerContext } from './callerContext.js'
+import {
+  isLoopbackAddress,
+  normalizeDeviceId,
+  pairLifetimeTtl,
+  pairResponseBody,
+  pairingCodeMatches,
+  relayPairRequest,
+} from './pairBrowser.js'
 import { orchestrateExecute, orchestratePlan } from './orchestrator.js'
 import { readOrigins, relayBudgetRemainingMs } from './originFanOut.js'
-import {
-  acknowledgeReports,
-  checkWatch,
-  createWatch,
-  deleteWatch,
-  getWatch,
-  listWatches,
-  pageWatchLocation,
-  pendingReports,
-  startPageWatchScheduler,
-  updateWatch,
-} from './pageWatch.js'
+/* The watch/report HTTP surface was deliberately deleted (the meta-test
+ * flagged it as phantom); the scheduler is the one survivor this server
+ * still starts. */
+import { startPageWatchScheduler } from './pageWatch.js'
 import {
   createRoutine,
   deleteRoutine,
@@ -187,7 +188,7 @@ import {
   readPipelineAudio,
   savePipelineAudio,
 } from './pipelineAudio.js'
-import { RELAY_API_KEY, RELAY_URL } from './bridgeConfig.js'
+import { PAIRING_CODE, RELAY_API_KEY, RELAY_URL } from './bridgeConfig.js'
 import { startBridge } from './bridge.js'
 import {
   ensurePermissions,
@@ -365,6 +366,93 @@ app.use((request, response, next) => {
  * `openSettings` defaults false for the same reason: the dialog is one
  * interruption, and a Settings pane opening behind it is a second.
  */
+/*
+ * One-paste pairing for the browser extension: pairBrowser.js is the policy,
+ * this is the plumbing. The ONE pre-auth route on this server, which is why
+ * it carries its own two gates: the caller must be on loopback (the server
+ * binds 0.0.0.0 for the pendant, so the socket address is checked — headers
+ * are not consulted), and the body must carry the pairing code, compared
+ * timing-safe. The code is the same proof-of-owner the relay's own pair
+ * route accepts; a caller holding it could mint credentials with the
+ * standalone script anyway. This route just removes the terminal.
+ *
+ * Returns the agent bearer and a freshly minted browser_node relay
+ * credential. The relay leg is best-effort: agentToken alone is still a
+ * working Mac bridge, and the body says which half failed.
+ */
+app.post('/pair/browser', async (request, response) => {
+  if (!isLoopbackAddress(request.socket?.remoteAddress)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Pairing is loopback-only: run it from the machine the agent is on.',
+    })
+    return
+  }
+  if (!pairingCodeMatches(request.body?.code, PAIRING_CODE)) {
+    response.status(403).json({
+      ok: false,
+      error: 'Wrong or missing pairing code (PAIRING_CODE in the repo .env).',
+    })
+    return
+  }
+  const deviceId = normalizeDeviceId(request.body?.deviceId)
+  if (!deviceId) {
+    response.status(400).json({
+      ok: false,
+      error:
+        'deviceId must be 3-64 chars of lowercase letters, digits, dot, dash or underscore.',
+    })
+    return
+  }
+
+  /* The owner's credential-lifetime choice (session/7d/30d/forever). Only the
+   * four canonical values pass; the mapping to a relay TTL — including why
+   * 'session' maps to none — lives in pairBrowser.js. */
+  const lifetime = pairLifetimeTtl(request.body?.lifetime)
+  if (!lifetime.ok) {
+    response.status(400).json({ ok: false, error: lifetime.error })
+    return
+  }
+
+  let relayPayload = null
+  let relayError = null
+  const pairRequest = relayPairRequest({
+    relayUrl: RELAY_URL,
+    pairingCode: String(request.body?.code ?? ''),
+    deviceId,
+    deviceName: request.body?.deviceName,
+    ttlMs: lifetime.ttlMs,
+  })
+  if (pairRequest) {
+    try {
+      const relayResponse = await fetch(pairRequest.url, {
+        ...pairRequest.init,
+        signal: AbortSignal.timeout(15_000),
+      })
+      relayPayload = await relayResponse.json().catch(() => null)
+      if (!relayResponse.ok || !relayPayload?.ok) {
+        relayError =
+          relayPayload?.error || `The relay refused pairing (HTTP ${relayResponse.status}).`
+        relayPayload = null
+      }
+    } catch (error) {
+      relayError = `The relay could not be reached: ${error?.message || error}`
+    }
+  } else {
+    relayError = 'No relay URL is configured on this agent.'
+  }
+
+  response.json(
+    pairResponseBody({
+      agentToken: AGENT_TOKEN,
+      relayUrl: RELAY_URL,
+      deviceId,
+      relayPayload,
+      relayError,
+    }),
+  )
+})
+
 app.post('/permissions/request', async (request, response) => {
   const openSettings = ['1', 'true', 'yes'].includes(
     String(request.body?.openSettings ?? '').toLowerCase(),
@@ -415,7 +503,18 @@ app.get('/capabilities', async (_request, response) => {
 })
 
 app.post('/plan', async (request, response) => {
-  const command = String(request.body?.command ?? '')
+  /*
+   * `context` is settled BEFORE the job is recorded, because the job's
+   * `command` is what every display titles the row with. A caller that sends
+   * the page first-class gets its provenance trailer removed here, so the
+   * dashboard's approval card reads "cancel all my recurring investments on
+   * ibkr" instead of that plus two lines of where it came from.
+   */
+  const caller = prepareCallerContext({
+    command: request.body?.command,
+    context: request.body?.context,
+  })
+  const command = caller.command
   const sessionId = String(request.body?.sessionId ?? '').trim() || null
   // The HUD's attachment paths (mac-menubar 06171f1). Echoed on the job row
   // as paths, vetted and put to work by the orchestrator (attachments.js).
@@ -440,6 +539,13 @@ app.post('/plan', async (request, response) => {
       signal: abortController.signal,
       contextHandle: request.body?.contextHandle ?? null,
       attachments,
+      /*
+       * What the CALLER was looking at — {page:{url,title}} — as its own field
+       * rather than smuggled into the command text. See callerContext.js for
+       * what the smuggling cost. Already normalized above; null when the caller
+       * sent nothing usable.
+       */
+      callerContext: caller.context,
     })
 
     if (plan.status === 'unsupported') {
@@ -502,7 +608,16 @@ app.post('/execute', async (request, response) => {
   const actions = Array.isArray(request.body?.actions)
     ? request.body.actions
     : []
-  const command = String(request.body?.command ?? '')
+  /*
+   * Same settling as /plan. It matters just as much here: goalVerdict reads
+   * this command as a sentence to decide whether the run did what was asked,
+   * and the job row this creates is what history titles the run with.
+   */
+  const caller = prepareCallerContext({
+    command: request.body?.command,
+    context: request.body?.context,
+  })
+  const command = caller.command
   const sessionId = String(request.body?.sessionId ?? '').trim() || null
   const planMeta = request.body?.planMeta ?? null
   const tracked = recordJobStart({
@@ -818,6 +933,50 @@ app.post('/jobs/:jobId/cancel', (request, response) => {
     jobId,
     message: 'Cancel signal sent. The running step will stop before the next one.',
   })
+})
+
+/*
+ * Say no to a parked plan.
+ *
+ * /cancel above stops work that is RUNNING, and refuses anything else — which
+ * left a plan_ready job with no "no" at all. Every surface could approve it
+ * (dashboard, extension popup) and none could decline it, so declining meant
+ * leaving the card sitting there forever. This is that missing half: the plan
+ * is not run, the job stops asking, and the plan it was holding stays on the
+ * record so the history still shows what was turned down.
+ *
+ * Deliberately narrow: only a job that is WAITING ON A HUMAN can be dismissed.
+ * A running job is /cancel's business and a finished one is nobody's.
+ */
+app.post('/jobs/:jobId/dismiss', (request, response) => {
+  const jobId = String(request.params.jobId || '')
+  const job = getJob(jobId)
+  if (!job) {
+    response.status(404).json({ ok: false, error: 'Job not found.' })
+    return
+  }
+
+  if (job.status !== 'plan_ready') {
+    response.status(409).json({
+      ok: false,
+      error: `Only a plan waiting for approval can be dismissed (status: ${job.status}).`,
+      job,
+    })
+    return
+  }
+
+  const reason = String(request.body?.reason || '').trim()
+  const dismissed = recordJobFinish(jobId, {
+    status: 'cancelled',
+    /* The plan itself survives the refusal: `result` holds the actions, and a
+     * dismissed plan the owner cannot look at afterwards is a decision with no
+     * record of what was decided. */
+    result: job.result ?? null,
+    thinking: job.thinking ?? null,
+    error: reason || 'Declined by the owner — the plan was not run.',
+  })
+
+  response.json({ ok: true, dismissed: true, job: dismissed })
 })
 
 app.post('/jobs/:jobId/undo', async (request, response) => {
@@ -1659,7 +1818,12 @@ app.get('/research/briefings', (request, response) => {
     ok: true,
     location: briefingsLocation(),
     briefings: listBriefings({ limit: Number(request.query?.limit) || 20 }).map(
-      ({ spoken, ...rest }) => rest,
+      (briefing) => {
+        /* The spoken-audio blob stays out of the listing payload. */
+        const rest = { ...briefing }
+        delete rest.spoken
+        return rest
+      },
     ),
   })
 })

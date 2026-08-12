@@ -614,13 +614,6 @@ export function syncFactsFromContextGraph({ now = Date.now() } = {}, { filePath 
     const kind = GRAPH_KIND_BY_TYPE[entity.type]
     if (!kind) continue
 
-    const detail =
-      entity.attributes?.note ||
-      entity.attributes?.subject ||
-      entity.attributes?.path ||
-      entity.attributes?.due ||
-      ''
-
     imported.push(
       rememberFact(
         {

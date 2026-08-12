@@ -90,18 +90,37 @@ test('mouse actions reject malformed parameters before posting any event', async
   }
 })
 
-test('the computer-use loop is off unless it is explicitly enabled', async () => {
+test('the computer-use loop is on by default and off only by explicit 0', async () => {
+  /*
+   * The default flipped with the env-reduction pass (2026-08-09): the flag
+   * sat at =1 in this machine's .env from the day it existed, and the owner
+   * deleted every line that only restated a constant. The old opt-in default
+   * survives as the '0' kill switch — which is the branch that still needs a
+   * guarantee, because a kill switch that silently stopped killing is the
+   * worst version of this bug.
+   */
   const previous = process.env.PENDANT_COMPUTER_USE_ENABLED
-  delete process.env.PENDANT_COMPUTER_USE_ENABLED
-
   try {
+    process.env.PENDANT_COMPUTER_USE_ENABLED = '0'
     await assert.rejects(
       () => executeComputerAction({ type: 'computer_use_task', params: { goal: 'do a thing' } }),
-      /PENDANT_COMPUTER_USE_ENABLED/,
+      /PENDANT_COMPUTER_USE_ENABLED=0/,
     )
+
+    /* Unset = enabled — asserted on the PURE gate, not by calling
+     * executeComputerAction: on a machine with a vision model configured that
+     * call sails past every gate and starts driving the actual screen, which
+     * a unit test must never do (it did, once, for 1.8 seconds). */
+    delete process.env.PENDANT_COMPUTER_USE_ENABLED
+    const { computerUseEnabled } = await import('./computerUseLoop.js')
+    assert.equal(computerUseEnabled(), true)
+    process.env.PENDANT_COMPUTER_USE_ENABLED = '0'
+    assert.equal(computerUseEnabled(), false)
   } finally {
     if (previous !== undefined) {
       process.env.PENDANT_COMPUTER_USE_ENABLED = previous
+    } else {
+      delete process.env.PENDANT_COMPUTER_USE_ENABLED
     }
   }
 })

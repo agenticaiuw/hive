@@ -18,6 +18,17 @@
             <span id="status-dot" class="dot"></span>
             <small id="status-title">Checking…</small>
           </div>
+          <!--
+            WHICH BRAIN is about to be used. Separate from the bridge dot above,
+            which only ever spoke for the Mac: a browser with no relay
+            credential shows "Connected" there while every command silently
+            leaves the machine. Routing is brain-first; this says whether that
+            first choice is actually available.
+          -->
+          <div class="status-mini" id="brain-mini">
+            <span id="brain-dot" class="dot"></span>
+            <small id="brain-title">…</small>
+          </div>
           <!-- Safari closes this popover on any outside click; the pin opens
                the same console as a window (or pinned tab) that stays put. -->
           <button
@@ -35,6 +46,50 @@
           </button>
         </div>
       </div>
+
+      <!--
+        SETUP LIVES HERE NOW. The owner, 2026-08-12: "having a settings page
+        is lowkey kind of weird. i should be able to paste my token directly
+        to the extension window and then press connect. actually, delete the
+        entire settings page." One code box, one lifetime choice, one button —
+        shown only while no agent token is stored, rendered by popup.js.
+        The agent URL is not a field: 127.0.0.1:8000 unless a stored override
+        already exists, because this popover is 400px and the URL was never
+        the thing the owner typed.
+      -->
+      <section id="setup" class="setup" hidden>
+        <p class="setup-title">Connect this browser</p>
+        <input
+          id="pair-code"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Pairing code (PAIRING_CODE in the repo .env)"
+        />
+        <div class="setup-row">
+          <label class="setup-lifetime" for="pair-lifetime">
+            <span>Stay connected</span>
+            <!-- The four canonical lifetimes, owner's default last-forever.
+                 pairing.js normalizes; the agent refuses anything else. -->
+            <select id="pair-lifetime">
+              <option value="session">Until this browser closes</option>
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+              <option value="forever" selected>Forever, until revoked</option>
+            </select>
+          </label>
+          <button id="pair-connect" class="primary" type="button">Connect</button>
+        </div>
+        <p id="pair-notice" class="notice"></p>
+      </section>
+
+      <!-- The website-access grant used to live on the deleted settings page;
+           the local brain cannot act in tabs without it, so the popup owns it
+           now. Shown only when paired and the grant is missing. permissions
+           .request must run inside the click handler (user gesture). -->
+      <button id="grant-pages" class="grant-pages" type="button" hidden>
+        Allow this browser’s pages
+      </button>
 
       <!-- Approval requests other nodes put to this browser. Rendered by
            popup.js from storage; empty and hidden until one arrives. -->
@@ -79,15 +134,25 @@
 
       <section id="history" class="history" aria-live="polite"></section>
 
+      <!-- No Settings button: the settings page is deleted (owner, 2026-08-12)
+           and everything it did that survived lives above. -->
       <div class="button-row">
         <button id="open-dashboard" type="button">Dashboard</button>
         <button id="connect-now" type="button">Connect now</button>
-        <button id="open-settings" type="button">Settings</button>
       </div>
-      <p class="help">
-        Commands go only to the authenticated agent on this Mac. Anything that
-        needs approval waits for you on the dashboard.
-      </p>
+      <!--
+        Say what actually happens, in order, and keep it true as the order
+        changes. It has been wrong twice: it once claimed every approval waited
+        on the dashboard (it does not), and then that the Mac did the thinking
+        (it no longer goes first). This node thinks for itself now — brain.js
+        over the relay's /v1/infer — and the Mac is the fallback.
+      -->
+      <!--
+        Written by popup.js from describeBrainState, never hard-coded. It has
+        been wrong twice by being a fixed sentence about a changing system;
+        the third time it claimed self-sufficiency this browser did not have.
+      -->
+      <p class="help" id="brain-help"></p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

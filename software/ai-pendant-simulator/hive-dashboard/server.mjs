@@ -14,6 +14,11 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { stat, open, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
+// Shared repo loader: parses <repo>/.env into process.env and DERIVES
+// AGENT_TOKEN / SESSION_SECRET from PAIRING_CODE (labelled HMAC). Since
+// 2026-08-09 those tokens are no longer stored in .env at all.
+import '../../load-pendant-env.mjs';
 
 const REPO_ROOT = '/Users/you/agentic-gadget';
 const ENV_PATH = path.join(REPO_ROOT, '.env');
@@ -23,31 +28,31 @@ const STARTED_AT = Date.now();
 
 // ---------------------------------------------------------------- env / secrets
 
-function parseEnvFile(p) {
-  const out = {};
-  let raw = '';
-  try { raw = readFileSync(p, 'utf8'); } catch (e) {
-    console.error(`[hive] cannot read ${p}: ${e.message}`);
-    return out;
-  }
-  for (const line of raw.split(/\r?\n/)) {
-    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
-    if (!m) continue;
-    let v = m[2];
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    out[m[1]] = v;
-  }
-  return out;
-}
-
-const ENV = parseEnvFile(ENV_PATH);
-const AGENT_TOKEN = ENV.AGENT_TOKEN || '';
-const RELAY_API_KEY = ENV.RELAY_API_KEY || '';
-const RELAY_BASE = (ENV.RELAY_URL || 'https://ai-pendant-relay.your-subdomain.workers.dev').replace(/\/+$/, '');
+// The shared loader (imported above) is the single source of truth; this file
+// only reads process.env. It has already applied precedence and derivation.
+const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
+const RELAY_API_KEY = process.env.RELAY_API_KEY || '';
+const RELAY_BASE = (process.env.RELAY_URL || 'https://ai-pendant-relay.your-subdomain.workers.dev').replace(/\/+$/, '');
 const AGENT_BASE = 'http://127.0.0.1:8000';
 
-// Every value from .env is treated as a secret and scrubbed from every outbound byte.
-const SECRET_VALUES = Object.values(ENV).filter((v) => typeof v === 'string' && v.length >= 8);
+// Every value from .env is treated as a secret and scrubbed from every outbound
+// byte — PLUS the loader's derived/aliased secrets, which never appear in the
+// file at all. Losing a derived token from this list would leak it in a push.
+function readEnvFileValues(p) {
+  try { return Object.values(parseEnv(readFileSync(p, 'utf8'))); } catch (e) {
+    console.error(`[hive] cannot read ${p}: ${e.message}`);
+    return [];
+  }
+}
+const DERIVED_SECRET_KEYS = [
+  'AGENT_TOKEN', 'SESSION_SECRET', 'DASHBOARD_SESSION_SECRET',
+  'PAIRING_CODE', 'DASHBOARD_ACCESS_KEY', 'RELAY_API_KEY',
+  'OPENAI_API_KEY', 'LLM_API_KEY',
+];
+const SECRET_VALUES = [...new Set(
+  [...readEnvFileValues(ENV_PATH), ...DERIVED_SECRET_KEYS.map((k) => process.env[k])]
+    .filter((v) => typeof v === 'string' && v.length >= 8),
+)];
 function scrub(str) {
   let s = str;
   for (const v of SECRET_VALUES) s = s.split(v).join('«masked»');
@@ -97,7 +102,7 @@ async function fetchJson(url, { headers = {}, method = 'GET', timeoutMs = 8000 }
 }
 
 function agentGet(p, timeoutMs = 8000) {
-  if (!AGENT_TOKEN) return Promise.resolve({ ok: false, error: 'AGENT_TOKEN missing from .env' });
+  if (!AGENT_TOKEN) return Promise.resolve({ ok: false, error: 'AGENT_TOKEN missing (no PAIRING_CODE in .env to derive it from)' });
   return fetchJson(AGENT_BASE + p, { headers: { Authorization: `Bearer ${AGENT_TOKEN}` }, timeoutMs });
 }
 function relayGet(p, timeoutMs = 10000) {
@@ -762,8 +767,13 @@ async function tick(p) {
       noteFailure(p, r);
     }
   } catch (e) {
-    setSource(p.key, { key: p.key, label: p.label, family: p.family, intervalMs: p.every, ok: false, at: now(), ms: now() - t0, error: errStr(e), parseError: false, data: state[p.key]?.data ?? null });
-    noteFailure(p, { error: errStr(e) });
+    // Committee files were deliberately deleted when the harness was retired
+    // (2026-08-09). An ENOENT there is absence, not failure — mark it
+    // `unsupported` (same flag the relay 404s use) so it doesn't render red.
+    const retired = p.family === 'committee' && e?.code === 'ENOENT';
+    const err = retired ? 'retired — committee harness retired 2026-08-09, file absent' : errStr(e);
+    setSource(p.key, { key: p.key, label: p.label, family: p.family, intervalMs: p.every, ok: false, at: now(), ms: now() - t0, error: err, parseError: false, unsupported: retired, data: state[p.key]?.data ?? null });
+    if (!retired) noteFailure(p, { error: err });
   } finally {
     running.delete(p.key);
   }
@@ -883,8 +893,11 @@ function computeNodes() {
     let status = 'unknown', reason = 'orchestrator.json not read yet';
     const orch = state['committee.orchestrator'];
     const com = state['committee.commons'];
-    const fileErrs = ['committee.bulletin', 'committee.commons', 'committee.orchestrator', 'committee.ledger'].filter((k) => state[k] && !state[k].ok);
+    const COMMITTEE_KEYS = ['committee.bulletin', 'committee.commons', 'committee.orchestrator', 'committee.ledger'];
+    const fileErrs = COMMITTEE_KEYS.filter((k) => state[k] && !state[k].ok && !state[k].unsupported);
+    const retired = COMMITTEE_KEYS.filter((k) => state[k]?.unsupported);
     if (fileErrs.length) { status = 'down'; reason = fileErrs.map((k) => `${state[k].label}: ${state[k].error}`).join(' | '); }
+    else if (retired.length === COMMITTEE_KEYS.length) { status = 'idle'; reason = 'retired — committee harness retired 2026-08-09, files absent'; }
     else if (orch?.ok) {
       let newest = 0;
       for (const a of Object.values(orch.data.agents)) newest = Math.max(newest, tsMs(a.lastRunAt, 0));
@@ -1439,7 +1452,7 @@ function listen(idx = 0) {
   server.listen(port, '127.0.0.1', () => {
     boundPort = port;
     console.log(`[hive] Hive dashboard on http://127.0.0.1:${port}  (agent: ${AGENT_BASE}, relay: ${RELAY_BASE})`);
-    console.log(`[hive] AGENT_TOKEN ${AGENT_TOKEN ? 'loaded' : 'MISSING'}, RELAY_API_KEY ${RELAY_API_KEY ? 'loaded' : 'MISSING'} from ${ENV_PATH}`);
+    console.log(`[hive] AGENT_TOKEN ${AGENT_TOKEN ? 'loaded (derived from PAIRING_CODE)' : 'MISSING'}, RELAY_API_KEY ${RELAY_API_KEY ? 'loaded' : 'MISSING'} via shared loader from ${ENV_PATH}`);
     startPollers();
     startPusher();
   });

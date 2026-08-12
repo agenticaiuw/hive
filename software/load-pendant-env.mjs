@@ -10,6 +10,7 @@
  * cannot express that rule (it never touches an existing key, empty or not),
  * which is why this stays a manual loop over util.parseEnv output.
  */
+import { createHmac } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +28,36 @@ try {
   }
 } catch {
   // Workers / restricted runtimes, or no repo .env: skip quietly.
+}
+
+// --- derived secrets: PAIRING_CODE is the one owner-minted secret ---
+// AGENT_TOKEN and SESSION_SECRET are labelled HMACs of the pairing code, not
+// independent values: three random strings in one .env file were one secret
+// wearing three names. Explicit env still wins (fill-if-absent, same as the
+// file load above), which is also the escape hatch for anything that stored
+// the old values. MUST stay bit-identical to local-agent/loadEnv.js
+// deriveSecret — duplicated because the two loaders serve different packages;
+// loadEnv.test.js asserts parity.
+export function deriveSecret(masterSecret, label) {
+  const master = String(masterSecret ?? '')
+  if (!master) return ''
+  return createHmac('sha256', master).update(`aipendant:${label}`).digest('hex')
+}
+
+if (process.env.PAIRING_CODE) {
+  if (!process.env.AGENT_TOKEN) {
+    process.env.AGENT_TOKEN = deriveSecret(process.env.PAIRING_CODE, 'agent-token')
+  }
+  if (!process.env.SESSION_SECRET) {
+    process.env.SESSION_SECRET = deriveSecret(process.env.PAIRING_CODE, 'session-secret')
+  }
+}
+
+// The deployed relay as default; local relay dev overrides with an explicit
+// RELAY_URL=http://localhost:8787. Config, not a secret — the extension ships
+// this origin in its allowlist already.
+if (!process.env.RELAY_URL) {
+  process.env.RELAY_URL = 'https://ai-pendant-relay.your-subdomain.workers.dev'
 }
 
 // --- aliases (old names → short set) ---
