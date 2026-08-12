@@ -1076,7 +1076,7 @@
 			brain: "local",
 			label: "Thinks here",
 			tone: "ok",
-			help: "This browser thinks for itself and acts in your signed-in tabs. Anything it cannot do here goes to the agent on your Mac. Nothing that submits, sends or cancels runs until you approve it above."
+			help: "Thinks and acts in your signed-in tabs; anything that submits or sends waits for your approval."
 		};
 		if (state === "unauthorized") return {
 			brain: "mac",
@@ -4990,19 +4990,15 @@ Answer with the JSON object only. No prose, no code fences.`;
 		statusTitle: document.getElementById("status-title"),
 		brainDot: document.getElementById("brain-dot"),
 		brainTitle: document.getElementById("brain-title"),
-		brainHelp: document.getElementById("brain-help"),
 		approvals: document.getElementById("approvals"),
 		form: document.getElementById("command-form"),
 		input: document.getElementById("command-input"),
 		send: document.getElementById("command-send"),
 		mic: document.getElementById("command-mic"),
 		popOut: document.getElementById("pop-out"),
-		includePage: document.getElementById("include-page"),
-		includePageLabel: document.querySelector("label[for=\"include-page\"] span"),
 		notice: document.getElementById("command-notice"),
 		history: document.getElementById("history"),
 		openDashboard: document.getElementById("open-dashboard"),
-		connectNow: document.getElementById("connect-now"),
 		engineNote: document.getElementById("engine-note"),
 		setup: document.getElementById("setup"),
 		pairCode: document.getElementById("pair-code"),
@@ -5017,9 +5013,9 @@ Answer with the JSON object only. No prose, no code fences.`;
 		document.body.classList.add("standalone");
 		document.title = "AI Pendant Console";
 		elements.popOut.hidden = true;
-		if (elements.includePageLabel) elements.includePageLabel.textContent = "Include the active browser tab (title and address) with the command";
 	}
 	let dashboardUrl = dashboardUrlFor(DEFAULT_AGENT_URL);
+	let includePagePreferred = true;
 	const pageEngine = createPageEngine({
 		standalone,
 		onStopped: () => renderEngineNote()
@@ -5032,7 +5028,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 	function renderEngineNote() {
 		const active = pageEngine.active();
 		elements.engineNote.hidden = !active;
-		elements.engineNote.textContent = !active ? "" : standalone ? "The background bridge is asleep — this console window is carrying the bridge. Keep it open." : "The background bridge is asleep — this popover is carrying the bridge, and it stops when the popover closes. Pin the console window (↗) to keep the brain alive.";
+		elements.engineNote.textContent = !active ? "" : standalone ? "Keep this window open — it is running the brain." : "Brain runs in this window — pin the console (↗) to keep it on.";
 	}
 	let heldApprovals = [];
 	let approvalTicker = null;
@@ -5126,7 +5122,6 @@ Answer with the JSON object only. No prose, no code fences.`;
 	function renderBrain(view) {
 		elements.brainDot.className = `dot ${view.tone === "ok" ? "connected" : view.tone === "error" ? "error" : ""}`;
 		elements.brainTitle.textContent = view.label;
-		elements.brainHelp.textContent = view.help;
 		elements.brainDot.parentElement.title = view.help;
 	}
 	function renderHistory(history) {
@@ -5382,7 +5377,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 			const reply = await sendToBridge({
 				type: "console:submit",
 				command,
-				page: elements.includePage.checked ? await currentPage() : null
+				page: includePagePreferred ? await currentPage() : null
 			});
 			if (reply?.ok) elements.input.value = "";
 			else if (reply?.needsSetup) setNotice("Connect this browser first — paste the pairing code above.", true);
@@ -5394,18 +5389,8 @@ Answer with the JSON object only. No prose, no code fences.`;
 			elements.input.focus();
 		}
 	});
-	elements.includePage.addEventListener("change", () => {
-		api.storage.local.set({ [INCLUDE_PAGE_KEY]: elements.includePage.checked });
-	});
 	elements.openDashboard.addEventListener("click", () => {
 		api.tabs.create({ url: dashboardUrl });
-	});
-	elements.connectNow.addEventListener("click", async () => {
-		elements.statusTitle.textContent = "Connecting…";
-		try {
-			await sendToBridge({ type: "bridge:poll-now" });
-		} catch {}
-		await refresh();
 	});
 	let pairStartedAt = 0;
 	function setPairNotice(message, isError = false) {
@@ -5563,7 +5548,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		renderBrain(brainView);
 		renderApprovals(values[APPROVALS_KEY]);
 		renderHistory(values[HISTORY_KEY]);
-		elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false;
+		includePagePreferred = values[INCLUDE_PAGE_KEY] !== false;
 		refreshMicAvailability();
 		renderSetup({
 			agentConfigured,

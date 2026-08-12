@@ -407,7 +407,10 @@ test('the popup says which brain it will use, and never overclaims', () => {
    */
   const paired = describeBrainState({ relayStatus: { state: 'connected' }, agentConfigured: true })
   assert.equal(paired.brain, 'local')
-  assert.match(paired.help, /thinks for itself/)
+  /* Wording shortened 2026-08-12 (owner: no long paragraphs in the popup);
+   * the claim it guards is the same — local thinking is only stated when
+   * the relay leg is genuinely connected. */
+  assert.match(paired.help, /Thinks and acts in your signed-in tabs/)
 
   /* Unpaired: the claim must be gone, and the fix named. */
   const unpaired = describeBrainState({ relayStatus: { state: 'off' }, agentConfigured: true })

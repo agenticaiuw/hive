@@ -549,10 +549,11 @@ export function describeBrainState({ relayStatus, agentConfigured = false } = {}
       brain: 'local',
       label: 'Thinks here',
       tone: 'ok',
+      /* One sentence (owner: no long paragraphs in the popup). The full
+       * explanation lives in the chip tooltip via this same string. */
       help:
-        'This browser thinks for itself and acts in your signed-in tabs. Anything it ' +
-        'cannot do here goes to the agent on your Mac. Nothing that submits, sends or ' +
-        'cancels runs until you approve it above.',
+        'Thinks and acts in your signed-in tabs; anything that submits or sends ' +
+        'waits for your approval.',
     }
   }
 
