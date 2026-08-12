@@ -152,22 +152,28 @@ test('the worker enforces the credential lifetime on startup and alarms', () => 
   assert.match(text, /PAIR_WIPE_KEYS/, 'an expiry wipes exactly the shared key list')
 })
 
-test('the setup card shows whenever EITHER credential half is missing', () => {
+test('the setup card hides only when the brain is actually working', () => {
   /*
-   * 2026-08-12: agent token present, relay credential gone — the footer said
-   * "paste the pairing code in this popup" while the card, gated on
-   * agentConfigured alone, was hidden. There was nowhere to paste. The gate
-   * must require BOTH halves before hiding the one repair path.
+   * 2026-08-12, twice in one night: first the card was gated on the agent
+   * token alone; then on stored-credential presence — and a stored-but-dead
+   * relay credential kept it hidden while the chip said "No brain". The gate
+   * must use describeBrainState's verdict, the same function the chip
+   * renders from, so the two surfaces cannot disagree.
    */
   const text = src('popup.js')
   assert.match(
     text,
-    /elements\.setup\.hidden = agentConfigured && brainConfigured/,
-    'hiding the setup card requires both the agent token and the brain credential',
+    /elements\.setup\.hidden = agentConfigured && brainWorking/,
+    'hiding the setup card requires a WORKING brain, not a merely stored credential',
   )
   assert.match(
     text,
-    /const brainConfigured = Boolean\(values\.relayEnabled && values\.deviceToken\)/,
-    'the brain half is judged by the stored relay credential, not the status chip',
+    /brainWorking: brainView\.brain === 'local'/,
+    'the gate derives from describeBrainState, the same source as the chip',
+  )
+  assert.match(
+    text,
+    /type: 'bridge:poll-now' \}\)/,
+    'the popup wakes the worker on open — Safari fires neither onStartup nor stale alarms reliably',
   )
 })

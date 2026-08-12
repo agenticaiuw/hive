@@ -437,13 +437,13 @@
 	let lastHistory = [];
 	/**
 	* Which brain, and the footer that explains it. Both come from one pure
-	* function so the chip and the sentence can never disagree.
+	* function so the chip and the sentence can never disagree — and since
+	* 2026-08-12 the setup card is gated on the SAME view, because gating it on
+	* stored-credential presence let the chip say "No brain" while the card (and
+	* its pairing box) stayed hidden. The owner stared at instructions to paste
+	* a code with nowhere to paste it. One function, three surfaces, no votes.
 	*/
-	function renderBrain({ relayStatus, agentConfigured }) {
-		const view = describeBrainState({
-			relayStatus,
-			agentConfigured
-		});
+	function renderBrain(view) {
 		elements.brainDot.className = `dot ${view.tone === "ok" ? "connected" : view.tone === "error" ? "error" : ""}`;
 		elements.brainTitle.textContent = view.label;
 		elements.brainHelp.textContent = view.help;
@@ -733,8 +733,8 @@
 		elements.pairNotice.textContent = message;
 		elements.pairNotice.className = `notice${isError ? " error" : ""}`;
 	}
-	function renderSetup({ agentConfigured, brainConfigured }) {
-		elements.setup.hidden = agentConfigured && brainConfigured;
+	function renderSetup({ agentConfigured, brainWorking }) {
+		elements.setup.hidden = agentConfigured && brainWorking;
 		const title = elements.setup.querySelector(".setup-title");
 		if (title) title.textContent = agentConfigured ? "Reconnect the brain" : "Connect this browser";
 		elements.form.hidden = !agentConfigured;
@@ -833,25 +833,30 @@
 			APPROVALS_KEY
 		]);
 		const agentConfigured = Boolean(values.agentToken);
-		const brainConfigured = Boolean(values.relayEnabled && values.deviceToken);
-		dashboardUrl = dashboardUrlFor(values.agentUrl || "http://127.0.0.1:8000");
-		renderStatus(values.bridgeStatus);
-		renderBrain({
+		const brainView = describeBrainState({
 			relayStatus: values.relayStatus,
 			agentConfigured
 		});
+		dashboardUrl = dashboardUrlFor(values.agentUrl || "http://127.0.0.1:8000");
+		renderStatus(values.bridgeStatus);
+		renderBrain(brainView);
 		renderApprovals(values[APPROVALS_KEY]);
 		renderHistory(values[HISTORY_KEY]);
 		elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false;
 		refreshMicAvailability();
 		renderSetup({
 			agentConfigured,
-			brainConfigured
+			brainWorking: brainView.brain === "local"
 		});
 		renderGrantPages({ agentConfigured });
 	}
 	refresh().then(() => {
 		(elements.setup.hidden ? elements.input : elements.pairCode).focus();
 	});
+	(async () => {
+		try {
+			await api.runtime.sendMessage({ type: "bridge:poll-now" });
+		} catch {}
+	})();
 	//#endregion
 })();

@@ -237,10 +237,13 @@ let lastHistory = []
 
 /**
  * Which brain, and the footer that explains it. Both come from one pure
- * function so the chip and the sentence can never disagree.
+ * function so the chip and the sentence can never disagree — and since
+ * 2026-08-12 the setup card is gated on the SAME view, because gating it on
+ * stored-credential presence let the chip say "No brain" while the card (and
+ * its pairing box) stayed hidden. The owner stared at instructions to paste
+ * a code with nowhere to paste it. One function, three surfaces, no votes.
  */
-function renderBrain({ relayStatus, agentConfigured }) {
-  const view = describeBrainState({ relayStatus, agentConfigured })
+function renderBrain(view) {
   elements.brainDot.className = `dot ${
     view.tone === 'ok' ? 'connected' : view.tone === 'error' ? 'error' : ''
   }`
@@ -690,16 +693,18 @@ function setPairNotice(message, isError = false) {
   elements.pairNotice.className = `notice${isError ? ' error' : ''}`
 }
 
-function renderSetup({ agentConfigured, brainConfigured }) {
+function renderSetup({ agentConfigured, brainWorking }) {
   /*
-   * The card shows when EITHER credential is missing, not just the agent's.
-   * The owner hit the gap this closes (2026-08-12): agent token present,
-   * relay credential gone — the footer said "paste the pairing code in this
-   * popup" while this card, gated on agentConfigured alone, was hidden.
-   * There was no box anywhere to paste into. One paste fills both halves,
-   * so the card IS the repair path for a missing brain too.
+   * The card hides only when BOTH halves are actually working, and "working"
+   * for the brain half is describeBrainState's own verdict — the same one
+   * the chip prints. The first fix here gated on stored-credential PRESENCE
+   * (relayEnabled && deviceToken), and the owner immediately hit the hole in
+   * it: a stored-but-dead credential kept the card hidden while the chip
+   * said "No brain" and the footer said "paste the code in this popup".
+   * Presence is not health. One paste repairs both halves, so the card IS
+   * the repair path whenever the chip is not green.
    */
-  elements.setup.hidden = agentConfigured && brainConfigured
+  elements.setup.hidden = agentConfigured && brainWorking
   const title = elements.setup.querySelector('.setup-title')
   if (title) {
     title.textContent = agentConfigured
@@ -866,21 +871,21 @@ async function refresh() {
     APPROVALS_KEY,
   ])
   const agentConfigured = Boolean(values.agentToken)
-  /* The brain half: a relay credential that is present AND switched on. */
-  const brainConfigured = Boolean(values.relayEnabled && values.deviceToken)
-  dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
-  renderStatus(values.bridgeStatus)
-  renderBrain({
+  /* One verdict for chip, footer AND setup card — see renderBrain. */
+  const brainView = describeBrainState({
     relayStatus: values.relayStatus,
     agentConfigured,
   })
+  dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
+  renderStatus(values.bridgeStatus)
+  renderBrain(brainView)
   renderApprovals(values[APPROVALS_KEY])
   renderHistory(values[HISTORY_KEY])
   /* Default ON for convenience, but visible and remembered. */
   elements.includePage.checked = values[INCLUDE_PAGE_KEY] !== false
   refreshMicAvailability()
   /* Last, so the setup card's show/hide wins over renderHistory's. */
-  renderSetup({ agentConfigured, brainConfigured })
+  renderSetup({ agentConfigured, brainWorking: brainView.brain === 'local' })
   void renderGrantPages({ agentConfigured })
 }
 
@@ -888,3 +893,23 @@ void refresh().then(() => {
   /* Focus goes to whichever box is the one thing to do. */
   ;(elements.setup.hidden ? elements.input : elements.pairCode).focus()
 })
+
+/*
+ * WAKE THE WORKER. Safari does not reliably fire onStartup or persist
+ * alarms for MV3 service workers, and this popup reads storage directly —
+ * so before this ping existed, opening the popup showed whatever statuses
+ * the worker last wrote before Safari put it down, hours or days stale
+ * (measured 2026-08-12: bridgeStatus still carried settings-era wording
+ * while the agent's heartbeat registry sat empty). A message is the one
+ * thing that always evaluates the worker; bridge:poll-now then re-creates
+ * the alarm and repolls, and the fresh statuses repaint this document
+ * through storage.onChanged within a couple of seconds.
+ */
+void (async () => {
+  try {
+    await api.runtime.sendMessage({ type: 'bridge:poll-now' })
+  } catch {
+    /* A dead message channel just means the worker will speak through
+     * storage when it wakes; nothing to show the owner here. */
+  }
+})()
