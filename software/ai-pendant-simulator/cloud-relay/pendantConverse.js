@@ -564,8 +564,17 @@ export async function handlePendantConverse(request, context) {
       () => {
         if (!state.ended) void endConversation('agent-done')
       },
-      () => {
-        if (!state.ended) void endConversation('agent-error')
+      (error) => {
+        // The real reason the Realtime session died, kept for the run record
+        // (jobs.js voiceRunForCapture) instead of the generic 'agent-error'
+        // tag alone — a genuine STT/agent failure should say why, the same
+        // way every other failure in this codebase does.
+        if (!state.ended) {
+          state.endError = String(
+            error?.message || error || 'The realtime voice session failed.',
+          )
+          void endConversation('agent-error')
+        }
       },
     )
 
@@ -1330,7 +1339,7 @@ export async function handlePendantConverse(request, context) {
       `[converse] conversation ended reason=${reason} turns=${state.turns.length} jobs=${state.jobCount} userPcm=${state.userPcmBytes} replyPcm=${state.replyPcmBytes}`,
     )
 
-    const work = storeConversationCapture(state, plan).catch((error) => {
+    const work = storeConversationCapture(state, plan, reason).catch((error) => {
       console.warn(
         `[converse] capture not stored: ${error?.message || error}`,
       )
@@ -1343,7 +1352,7 @@ export async function handlePendantConverse(request, context) {
     await work
   }
 
-  async function storeConversationCapture(state, plan) {
+  async function storeConversationCapture(state, plan, endReason) {
     if (state.userPcmBytes === 0 || !state.store) return
     console.log(
       `[converse] storing capture: user=${state.userPcmBytes}B reply=${state.replyPcmBytes}B turns=${state.turns.length}`,
@@ -1388,7 +1397,21 @@ export async function handlePendantConverse(request, context) {
       allowD1Fallback: userWav.length <= 1024 * 1024,
     })
     if (persisted.audioStorage === 'unavailable') return
-    capture = { ...capture, ...persisted }
+    capture = {
+      ...capture,
+      ...persisted,
+      /*
+       * The one moment this fact is knowable: WHY the conversation ended.
+       * jobs.js voiceRunForCapture reads this — not the transcript, not a
+       * rendered label — to tell "nobody spoke" apart from "speech-to-text
+       * broke" when it later decides whether this press is a failure.
+       * `endError`, when this ending came from a real fault (see the
+       * assignments above), rides along so the failure the owner sees names
+       * what actually went wrong instead of a generic "no reply".
+       */
+      endReason,
+      ...(state.endError ? { endError: state.endError } : {}),
+    }
     await store.createJob(capture)
 
     if (state.replyPcmBytes > 0) {
@@ -1676,6 +1699,9 @@ export async function handlePendantConverse(request, context) {
       pcm = state.uploadDecoder.push(buf)
     } catch (error) {
       console.warn(`[converse] uplink decode: ${error?.message || error}`)
+      state.endError = `The uplink recording could not be decoded: ${
+        error?.message || error
+      }`
       void endConversation('bad-audio')
       return
     }
@@ -1695,7 +1721,16 @@ export async function handlePendantConverse(request, context) {
   server.addEventListener('close', () => {
     void endConversation('socket-closed')
   })
-  server.addEventListener('error', () => {
+  server.addEventListener('error', (event) => {
+    // A transport error mid-conversation can truncate whatever audio was
+    // mid-flight — the "network error" / "truncated upload" case a genuine
+    // failure has to stay visible for, not the ordinary hangup 'socket-
+    // closed' already covers.
+    if (convo) {
+      convo.endError =
+        String(event?.message || '') ||
+        'The connection to the pendant broke while the conversation was live.'
+    }
     void endConversation('socket-error')
   })
 
