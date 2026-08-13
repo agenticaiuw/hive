@@ -971,6 +971,9 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
       consoleOpen: link?.consoleOpen ?? null,
       missing: link?.missing ?? [],
       watchers: link?.watchers ?? 0,
+      /* Raw-line-tap consumers. Same reason as `watchers`: it answers "why is
+       * the port still held" without anyone having to guess. */
+      tapWatchers: link?.tapWatchers ?? 0,
       bytes: link?.bytes ?? 0,
       parsed: link?.parsed ?? 0,
     },

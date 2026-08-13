@@ -6,7 +6,7 @@
  * records nobody reads aloud, or nowhere. This resolves a vague spoken
  * reference against the relay's recent jobs and produces ONE short sentence.
  *
- * Two rules run through every function here.
+ * Three rules run through every function here.
  *
  * 1. The sentence must be speakable. Everything is budgeted in characters, not
  *    fields: a spoken answer that runs past ~180 characters has stopped being
@@ -17,7 +17,19 @@
  *    to hardcode 'done' for a run that produced nothing, and the dashboard
  *    looked healthy while the pendant played silence. So a terminal job with no
  *    result, or with `executed: false`, reports as NOT done — never as done.
+ *
+ * 3. Absence of evidence is also never failure. A job stuck at 'transcribed'
+ *    with no useful command is speech-to-text that genuinely heard nothing —
+ *    a non-event, not "your Mac hasn't picked it up." This is the ONE surface
+ *    where getting that distinction wrong costs the most: a misleading row on
+ *    the dashboard sits next to its own evidence (the transcript, the event
+ *    trail) for the owner to notice; a misleading sentence in his ear, on a
+ *    screenless device, is the only thing he gets — there is nothing to check
+ *    it against. planJobCapturedNothing (jobs.js) is the one place this leaf
+ *    check lives, shared with voiceRunForJob, so the dashboard feed and this
+ *    spoken answer can never describe the same job two different ways.
  */
+import { planJobCapturedNothing } from './jobs.js'
 
 /* How many recent relay jobs a reference is resolved against. The store keeps
  * far more; this is the window in which "that" can plausibly mean something. */
@@ -118,6 +130,17 @@ export function describeJobOutcome(job, { now = Date.now() } = {}) {
       state: 'failed',
       reason: 'the recording never finished transcribing',
     }
+  }
+
+  /*
+   * Checked BEFORE the generic PRE_DISPATCH_STATUSES bucket below, which
+   * would otherwise call this job 'queued' and, once STALE_QUEUE_MS passed,
+   * speak it as "your Mac hasn't picked it up" — a real thing to worry about
+   * that this job gives no reason to worry about, since nothing was ever
+   * asked. See planJobCapturedNothing for what makes this reading safe.
+   */
+  if (planJobCapturedNothing(job)) {
+    return { ...base, state: 'no_speech', reason: null }
   }
 
   if (PRE_DISPATCH_STATUSES.has(status)) {
@@ -326,6 +349,14 @@ export function speakJobStatus(job, outcome) {
             )} — your Mac hasn't picked it up.`
           : `${label} is queued; your Mac hasn't started it yet.`,
       )
+    /*
+     * Same shape as 'done', deliberately — this is the other honest terminal
+     * outcome for a press, not a lesser cousin of 'failed' or 'queued'. It
+     * never says "hasn't picked it up" (nothing was ever handed to the Mac)
+     * and never says "failed" (nothing actually broke).
+     */
+    case 'no_speech':
+      return clipSpoken(`${label} — nothing was said${ago ? `, ${ago}` : ''}.`)
     case 'awaiting_approval':
       return clipSpoken(`${label} is waiting for your approval on the dashboard.`)
     case 'cancelled':

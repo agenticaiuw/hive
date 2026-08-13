@@ -28,6 +28,37 @@ import { benchLink } from './benchLink.js'
 const MAX_PUSH_HZ = 20
 const HEARTBEAT_MS = 2000
 
+/*
+ * THE RAW LINE TAP — why it replaces the stand-down file.
+ *
+ * Until now an agent that needed the console made this reader let go of the
+ * tty (a stand-down file), read the port itself, and released it. That blanked
+ * the owner's bench twice in fifteen minutes, and it was never necessary: a
+ * flash and every JLinkExe measurement go over SWD through the J-Link's own
+ * USB interface, which is a different channel from the console. Reading text
+ * was the only thing that ever needed the tty, and this process is already
+ * doing that continuously.
+ *
+ * So the bench owns the ports permanently and everyone else subscribes:
+ *
+ *   GET /bench/lines            server-sent events, one raw console line per
+ *                               message, in arrival order, tagged with the port
+ *                               it came from
+ *   GET /bench/lines?after=N    the backlog since sequence N, as JSON
+ *   GET /bench/lines?format=text  the backlog as newline-delimited text, for
+ *                               a consumer that just wants to grep
+ *
+ * Raw, not parsed, because consumers grep for printk text this parser has no
+ * rule for ("Injected frame:", "microSD unavailable (mount=0 write=-2)"). Every
+ * SSE message also replays the backlog first, so an agent attaching a second
+ * after pressing reset still catches the boot banner.
+ *
+ * THE ONE EXCEPTION, and it is an exception rather than a second path: if this
+ * agent process is not running, there is no tap, and an agent that needs the
+ * console must open the tty directly — otherwise a broken dashboard would mean
+ * no firmware diagnosis at all. Check `curl -sf localhost:8000/health` first;
+ * if it answers, use the tap and do not touch the port.
+ */
 export function registerBenchRoutes(app, { basePath = '' } = {}) {
   const route = (suffix) => `${basePath}${suffix}`
 
@@ -35,6 +66,59 @@ export function registerBenchRoutes(app, { basePath = '' } = {}) {
     const link = benchLink()
     link.touch()
     response.json({ ok: true, bench: link.snapshot() })
+  })
+
+  app.get(route('/bench/lines'), (request, response) => {
+    const link = benchLink()
+    link.touch()
+    const after = Number(request.query.after) || 0
+
+    /*
+     * A plain GET returns the backlog and ends. Only `stream=1` (or an SSE
+     * Accept header) holds the connection open — a caller that just wants the
+     * last few hundred lines should not have to learn EventSource, and a
+     * one-shot curl must not hang.
+     */
+    const wantsStream =
+      request.query.stream === '1' ||
+      String(request.get('accept') || '').includes('text/event-stream')
+
+    if (!wantsStream) {
+      const lines = link.backlog(after)
+      if (request.query.format === 'text') {
+        response.type('text/plain')
+        response.send(lines.map((line) => `${line.port} ${line.text}`).join('\n') + '\n')
+        return
+      }
+      response.json({ ok: true, lines, seq: link.lineSeq })
+      return
+    }
+
+    response.setHeader('Content-Type', 'text/event-stream')
+    response.setHeader('Cache-Control', 'no-cache, no-transform')
+    response.setHeader('Connection', 'keep-alive')
+    response.setHeader('X-Accel-Buffering', 'no')
+    response.flushHeaders?.()
+
+    const write = (line) => {
+      response.write(`id: ${line.seq}\ndata: ${JSON.stringify(line)}\n\n`)
+    }
+
+    /*
+     * The backlog goes out before any live line. An agent that attaches a
+     * second after a reset is exactly the caller this endpoint exists for, and
+     * without this it would miss the boot banner it came to read.
+     */
+    for (const line of link.backlog(after)) write(line)
+
+    const unsubscribe = link.subscribeLines(write)
+    const heartbeat = setInterval(() => response.write(': ping\n\n'), 15000)
+
+    request.on('close', () => {
+      clearInterval(heartbeat)
+      unsubscribe()
+      response.end()
+    })
   })
 
   app.get(route('/bench/stream'), (request, response) => {
