@@ -259,6 +259,7 @@ import { registerHandleThisRoutes } from './handleThisRoutes.js'
 import { registerBrowserJobRoutes } from './browserJobRunner.js'
 import { registerCrossCheckRoutes } from './crossCheck.js'
 import { registerBrowserProvenanceRoutes } from './browserProvenance.js'
+import { registerBenchRoutes } from './benchRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -1676,6 +1677,12 @@ registerCrossCheckRoutes(app)
 /* Where every extracted claim and every filled field came from, so a wrong
  * briefing can be traced to the page rather than argued about. */
 registerBrowserProvenanceRoutes(app)
+
+/* Live levels off the nRF9160 on this Mac's USB, for the owner wiring the
+ * breadboard. Opens the DK's console only while somebody is watching the /bench
+ * page — two readers on one tty split the bytes, and another agent's flash log
+ * has as much right to it as this does. */
+registerBenchRoutes(app)
 
 /* Optional segment in Express 5 / path-to-regexp v8 syntax. The old
  * `/:commandId?` throws at registration, which took the whole agent down. */

@@ -1287,8 +1287,13 @@ body {
 
 /* ---------- Ask ---------- */
 
+/* The composer moved from below the answer card to the top of the page, so its
+ * separating margin moved with it: the gap now belongs BELOW the box (before
+ * the approvals or the answer), and the header's own 18px keeps the rhythm
+ * above it. Leaving the old margin-top behind is exactly how a move ends up
+ * with a gap at the top and none in the middle. */
 .ask {
-  margin-top: var(--s5);
+  margin-bottom: var(--s5);
 }
 
 /* ---------- Recent ---------- */
