@@ -591,6 +591,19 @@ K_SEM_DEFINE(ptt_press_sem, 0, 1);
  */
 static atomic_t menu_step_backlog;     /* signed detents not yet sent */
 static atomic_t menu_select_req;       /* set by the dwell timer, not a push */
+/*
+ * The microSD did not come up, so the outbox, the alert inbox and the
+ * offline capture journal are gone for this boot. Everything else works.
+ *
+ * NOT drop-when-closed, unlike every other frame in this group, and the
+ * difference is the whole point. A menu twist banked across a dead link is
+ * stale intent; "your storage is gone" is still true an hour later, and the
+ * owner has no other way to learn it — this device can only speak inside a
+ * started conversation, so the first socket that opens is the first chance
+ * it has to say a sentence at all. Sent once per boot, then latched off.
+ */
+static bool storage_degraded;
+static atomic_t storage_notice_req;
 /* Cap unsent detents: past this the owner is spinning against a dead
  * link and older steps carry no information a fresher one lacks. */
 #define MENU_STEP_BACKLOG_MAX 8
@@ -987,6 +1000,16 @@ static void button_pressed(const struct device *port,
  * Polled wherever the firmware waits on the button.
  */
 volatile uint32_t pendant_remote_press;
+
+/*
+ * Bench probe mode: while non-zero, a button press is observed and reported
+ * but performs no action. See the idle loop for the full reasoning and the
+ * J-Link incantation; it lives here beside pendant_remote_press because it is
+ * the same kind of hook — a plain volatile a debugger writes, no protocol on
+ * the target — and because the two are each other's opposite: one fakes a
+ * press that never happened, the other swallows a press that did.
+ */
+volatile uint32_t pendant_bench_probe;
 
 static bool take_remote_press(void)
 {
@@ -3526,7 +3549,24 @@ static void ws_io_send_owner_controls(void)
 		atomic_set(&menu_step_backlog, 0);
 		atomic_set(&menu_select_req, 0);
 		atomic_set(&volume_report, -1);
+		/* storage_notice_req is deliberately NOT cleared here — see
+		 * its declaration. A closed socket is why it has not been
+		 * delivered, not a reason to stop trying. */
 		return;
+	}
+
+	/*
+	 * First, ahead of the owner's own controls: this is a fact about what
+	 * the device can no longer do, and the relay needs it before it
+	 * answers anything the owner asks. Cleared only on a successful send.
+	 */
+	if (atomic_get(&storage_notice_req)) {
+		if (pendant_ws_send_text(
+			    "{\"type\":\"device_degraded\",\"subsystem\":\"storage\","
+			    "\"lost\":[\"upload_journal\",\"outbox\",\"alert_inbox\"]}") ==
+		    0) {
+			atomic_set(&storage_notice_req, 0);
+		}
 	}
 
 	/* One frame per detent, a few per pass: the relay's contract is
@@ -4884,7 +4924,27 @@ int main(void)
 	 * configure, log it and keep going. Losing bookmarks is bad; refusing
 	 * to boot a voice pendant over a spare button is worse.
 	 */
-	if (gpio_is_ready_dt(&mark_button) &&
+	/*
+	 * DT_NODE_HAS_STATUS, not gpio_is_ready_dt, and the difference is a bug
+	 * that was live on this board.
+	 *
+	 * gpio_is_ready_dt() checks the PORT device, never the node's status.
+	 * The DK's Button 2 node (sw1) is `status = "disabled"` in the overlay
+	 * because its pin was handed to the RGB status LED — but the macro
+	 * still resolves to gpio0 pin 7, gpio0 is perfectly ready, and this
+	 * branch therefore configured an EDGE_TO_ACTIVE interrupt on the pin
+	 * that pendant_status.c drives as the BLUE channel through PWM0.
+	 *
+	 * The symptom, measured 2026-08-13: the mic reads muted on this board,
+	 * muted breathes blue, and every PWM edge on P0.07 fired the bookmark
+	 * ISR. The console showed bursts of "Bookmark dropped" and then
+	 * "Outbox full — evicting" with 34 phantom marks queued — the device
+	 * filling its own durable outbox with events the owner never caused,
+	 * and evicting real ones to make room. A disabled node must be gone,
+	 * not merely unwired.
+	 */
+	if (DT_NODE_HAS_STATUS(MARK_BUTTON_NODE, okay) &&
+	    gpio_is_ready_dt(&mark_button) &&
 	    gpio_pin_configure_dt(&mark_button, GPIO_INPUT) == 0) {
 		gpio_init_callback(&mark_button_callback, mark_button_pressed,
 				   BIT(mark_button.pin));
@@ -4948,9 +5008,65 @@ int main(void)
 	 */
 	pendant_bench_note_sd(sd_ready);
 	if (!sd_ready) {
-		printk("microSD is required for Internet voice upload\n");
-		audio_cycle_result = sd_mount_result;
-		show_error();
+		/*
+		 * A BAD CARD COSTS THE CARD'S FEATURES AND NOTHING ELSE.
+		 *
+		 * This used to be show_error(), which never returns. One
+		 * optional peripheral therefore took down LTE, the WebSocket,
+		 * Bluetooth, every button, the status vocabulary and the menu
+		 * grammar — a fault-coupling bug in the most literal sense.
+		 * Measured 2026-08-13: the pendant had been halting here on
+		 * every boot, and because the device has no screen the symptom
+		 * was indistinguishable from a flat battery or an unflashed
+		 * chip. Nobody noticed for a day.
+		 *
+		 * What is actually lost without the card is narrow and worth
+		 * naming precisely: the offline outbox, the alert inbox, and
+		 * the journal that record_microphone() falls back to when
+		 * there is NO live uplink at press time. With a live uplink —
+		 * the normal case — recording and conversation do not touch
+		 * the card at all (see the live_encoder_ok branch in
+		 * record_microphone: the SD write is deliberately kept out of
+		 * the hot loop). So the pendant still listens, still talks,
+		 * still answers; it just cannot remember through a dead zone.
+		 *
+		 * It must SAY that, because a screenless device that degrades
+		 * silently is a device that lies by omission. Three channels,
+		 * in the order they can reach the owner:
+		 */
+		storage_degraded = true;
+		atomic_set(&storage_notice_req, 1);
+		/*
+		 * Both codes, because they answer different questions and the
+		 * first draft of this line printed only the mount result — "(0)",
+		 * i.e. "unavailable, and the mount was fine", which tells the
+		 * reader nothing about which half failed. mount=0 write=-2 says
+		 * exactly what happened: the card is present and the volume
+		 * mounted; it was the write test that did not pass.
+		 */
+		printk("microSD unavailable (mount=%d write=%d) — voice upload "
+		       "journal, offline outbox and alert inbox are OFF for "
+		       "this boot; conversation, buttons, LTE and Bluetooth "
+		       "are unaffected\n",
+		       sd_mount_result, sd_test_write_result);
+		audio_cycle_result = sd_mount_result != 0 ? sd_mount_result
+							 : sd_test_write_result;
+		/*
+		 * 1. Immediately, locally, with no network: the OS's existing
+		 *    "that did not work" signature — three red blinks and a
+		 *    two-part buzz. It is the same vocabulary the owner
+		 *    already knows from a failed action, which is the point:
+		 *    a new signal nobody has been taught is not a signal.
+		 */
+		pendant_status_set(PENDANT_STATUS_FAILED);
+		/*
+		 * 2. Spoken, at the first opportunity the device HAS to
+		 *    speak. This firmware plays audio only inside a started
+		 *    conversation, so there is no honest way to say a sentence
+		 *    at boot; the notice is queued and rides the converse
+		 *    socket instead (see storage_degraded's declaration).
+		 * 3. And on the bench console/dashboard, already sent above.
+		 */
 	}
 
 	/*
@@ -4983,12 +5099,20 @@ int main(void)
 	}
 #endif
 
-	/* Boot card check: two slow flashes means the required SD card mounted. */
-	for (unsigned int flash = 0U; flash < 2U; ++flash) {
-		gpio_pin_set_dt(&led, 1);
-		k_msleep(160);
-		gpio_pin_set_dt(&led, 0);
-		k_msleep(160);
+	/*
+	 * Boot card check: two slow flashes means the card mounted. Gated on
+	 * sd_ready now that a bad card no longer halts the boot — flashing
+	 * "card OK" unconditionally would have been the one moment the device
+	 * actively told the owner something false, and the degraded path has
+	 * already said its piece on the status LED above.
+	 */
+	if (sd_ready) {
+		for (unsigned int flash = 0U; flash < 2U; ++flash) {
+			gpio_pin_set_dt(&led, 1);
+			k_msleep(160);
+			gpio_pin_set_dt(&led, 0);
+			k_msleep(160);
+		}
 	}
 
 #if PENDANT_BOOT_AUTORECORD_TEST
@@ -5281,6 +5405,41 @@ int main(void)
 		}
 		/* Latency-first: act on the active edge, never the release. */
 		clear_button_events();
+
+		/*
+		 * BENCH PROBE MODE — press the buttons without speaking to the
+		 * cloud.
+		 *
+		 * Testing a button used to cost the owner a real cloud
+		 * conversation, and on this board every one of them captured
+		 * silence (the mic reads unpowered) and landed in his feed as
+		 * "Untitled run — Didn't catch that", plus the spend. A test
+		 * that costs the owner junk in his own history is a test
+		 * nobody runs enough.
+		 *
+		 * Armed over SWD like every other debug hook here, so it needs
+		 * no reflash and cannot be left on by a build:
+		 *
+		 *   w4 <&pendant_bench_probe> 1    arm
+		 *   w4 <&pendant_bench_probe> 0    disarm
+		 *
+		 * While armed, a press is fully OBSERVED and fully INERT: the
+		 * ISR has already latched the edge and the BENCH line reports
+		 * the raw level either way, so the wire question is answered
+		 * exactly as well as before — only the conversation, the memo,
+		 * the push-to-talk and the bookmark are withheld. It is
+		 * deliberately placed after clear_button_events() so a probe
+		 * press cannot be banked and replayed the moment it disarms.
+		 */
+		if (pendant_bench_probe != 0U) {
+			clear_memo_events();
+			clear_ptt_events();
+			printk("Bench probe: press observed, no action taken "
+			       "(yellow=%d green=%d blue=%d mark=%d)\n",
+			       !memo_requested && !ptt_requested && !marked,
+			       memo_requested, ptt_requested, marked);
+			continue;
+		}
 
 		if (marked) {
 			(void)pendant_store_enqueue_mark(

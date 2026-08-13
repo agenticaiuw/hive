@@ -334,3 +334,50 @@ changes every time a channel switches on.
 | P0.04 | 330 Ω → RGB LED **G** leg (needs `led3_pin_routing` disabled; costs DK LED3) |
 | P0.07 | 330 Ω → RGB LED **B** leg (needs `button2_pin_routing` disabled; costs DK Button 2) |
 | micro-USB | Mac (flash + debug) |
+
+---
+
+## Reading the nRF9160 console on this Mac
+
+The console is `/dev/cu.usbmodem0009600365811` (VCOM0) at 115200 8N1.
+
+**Hold the fd open FIRST, then set the line.** macOS resets a `cu.*` device's
+termios when the *first* reader opens it, so the conventional
+`stty …` **then** `cat` order sets 115200 on a port that is about to be
+reverted to 9600 underneath you. The result is zero bytes, or a short burst of
+garbage that looks exactly like a dead board or a shredded stream — this cost
+one agent hours under a wrong diagnosis on 2026-08-12 and nearly cost another
+the same day.
+
+```sh
+exec 3</dev/cu.usbmodem0009600365811
+/bin/stty -f /dev/cu.usbmodem0009600365811 115200 raw -echo cs8 -parenb -cstopb clocal
+/bin/cat <&3 > capture.txt &
+```
+
+**Only one reader at a time.** Two processes on one macOS tty do not each get a
+copy — they *split* the byte stream and both get half-lines. The Mac agent's
+bench dashboard holds all three VCOMs whenever anyone is watching `/bench`,
+including the desktop app's own WebView, so closing a browser tab does not free
+them. Ask it to stand down instead, and give the port back when you are done:
+
+```sh
+touch /tmp/pendant-bench-standdown   # all three VCOMs free within ~5 s
+rm    /tmp/pendant-bench-standdown   # it takes them back on its own
+```
+
+**A silent port is not a silent board.** Before concluding the firmware is
+dead, read a known global over SWD (`arm-zephyr-eabi-nm` for the address, then
+`JLinkExe … mem32`). That is how the 2026-08-13 boot halt was found: the
+telemetry emitter's last-emit timestamp sat at 285 ms forever, which said
+"main() stopped", not "the console is broken".
+
+## Long filenames on the microSD are REQUIRED
+
+`CONFIG_FS_FATFS_LFN=y` is in `prj.conf` and is not optional. Without it FatFs
+enforces 8.3 and returns `FR_INVALID_NAME`, which Zephyr maps to `-ENOENT` —
+the same errno as a genuinely missing file. Six of the firmware's paths are
+longer than 8.3 (`power_test.bin`, `recipes.json`, `latest.opus`,
+`selftest.opus`, `agent_reply.audio`, `agent_reply.pcm`), and with LFN off they
+all fail with "no such file" on CREATE. That halted the pendant at boot for a
+day and made a healthy card look absent.
