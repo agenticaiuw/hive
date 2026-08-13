@@ -92,15 +92,18 @@ Honest statement: **11–12 mm is reachable only with the donut-nesting trick an
 
 ## 4. Control mapping — same firmware events, different actuators
 
-The firmware event layer does not change. Ground truth for today's breadboard is `nrf9160dk_nrf9160_ns.overlay` (`pendant_controls` node) and the map in `src/main.c`: three buttons (P0.21 ask / P0.22 memo / P0.23 push-to-talk), quadrature encoder (P0.24/25 — **rotation only; the owner's knob has no wired push, so selection is a 1.5 s dwell and P0.28 is free**), and the mic-power sense (P0.26) watching the red latching switch. The watch variant just gives those events watch-shaped bodies:
+The firmware event layer does not change. Ground truth for today's breadboard is `nrf9160dk_nrf9160_ns.overlay` (`pendant_controls` node) and the map in `src/main.c`: **two** working buttons (P0.21 yellow / P0.23 blue — the green button on P0.22 is not wired), quadrature encoder (P0.24/25 — **rotation only; the owner's knob has no wired push, so P0.28 is free**), and the mic-power sense (P0.26) watching the red latching switch.
+
+**The buttons are context-sensitive** (owner's ruling, 2026-08-13 — see `docs/Screenless_App_Grammar.md`). With two buttons, no encoder switch and two global verbs nobody will give up, context is the only way to get a confirm gesture: what a button does depends on whether the app ring is open, and the relay pushes that bit down as `{"type":"menu_context","active":bool}`.
 
 | Firmware event (unchanged) | Breadboard / pendant actuator | Watch actuator |
 |---|---|---|
-| ask / talk (button-1 semantics) | yellow button, P0.21 | **2 o'clock pusher** |
-| memo (record-only, `?dispatch=0`) | green button, P0.22 | **4 o'clock pusher** |
-| push-to-talk (radio-off capture → one burst → spoken reply) | blue button, P0.23 | **4 o'clock pusher long-press**, or its own pusher if the case affords three. Blue stopped being the approval button on 2026-08-12; approvals are answered by voice during the readback |
+| ask / talk — **ring closed** | yellow short press, P0.21 | **2 o'clock pusher** |
+| push-to-talk (radio-off capture → one burst → spoken reply) — **ring closed** | yellow **long** press, P0.21 | **2 o'clock pusher long-press**. Blue stopped being the approval button on 2026-08-12 and stopped being PTT on 2026-08-13; approvals are answered by voice during the readback |
+| memo (record-only, `?dispatch=0`) — **ring closed** | blue button, P0.23 | **4 o'clock pusher** |
 | menu scroll | encoder A/B, P0.24/25 | **crown turn** (quadrature or magnetic angle, §6) |
-| menu select | **dwell** — stop turning for 1.5 s (no push wired) | **crown press** (short) — the watch keeps a real press, and dwell stays as the fallback both bodies share |
+| menu **select / confirm** — **ring open** | yellow button, P0.21 → `{"type":"menu_select"}` | **crown press** (short). The watch has a real crown switch, so it can carry select without borrowing a pusher — but the pusher mapping must still work, because the two bodies share one firmware |
+| menu **back** — **ring open** | blue button, P0.23 → `{"type":"menu_back"}` | **4 o'clock pusher** |
 | hardware mic mute / DND | red latching switch → `mic_power_sense` P0.26 | **crown pulled out** — the stem's second detent position mechanically opens the mic's 1.8 V rail; the same P0.26 sense reads it. The pendant's "only honest hardware mute a digital mic has" becomes a watch gesture that already means "I'm adjusting, leave me alone" |
 | volume (breadboard pot — not yet in the overlay) | potentiometer | no dedicated actuator; crown turn during playback adjusts volume in software. FULL only; THIN has no speaker |
 
