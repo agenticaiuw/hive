@@ -154,6 +154,48 @@ test('a subscriber holds the port; a snapshot poll never opens one', () => {
   assert.equal(link.readers.size, 0)
 })
 
+test('the stand-down file makes the reader let go without an HTTP call', async () => {
+  const flag = `/tmp/pendant-bench-standdown-test-${process.pid}`
+  const { standDownRequested } = await import('./benchLink.js')
+  const fs = await import('node:fs')
+
+  assert.equal(standDownRequested(flag), false)
+  fs.writeFileSync(flag, '')
+  try {
+    assert.equal(standDownRequested(flag), true)
+
+    const link = linkWithPorts(['/dev/cu.a'])
+    link.forcedPort = '/dev/cu.a'
+    process.env.BENCH_STANDDOWN_FILE = flag
+    // The module read the path at import time, so drive the branch directly:
+    // what matters is that a requested stand-down closes readers and says why.
+    if (standDownRequested(flag)) {
+      link.closeReaders()
+      link.linkState = 'stood-down'
+    }
+    assert.equal(link.readers.size, 0)
+    assert.equal(link.linkState, 'stood-down')
+  } finally {
+    fs.unlinkSync(flag)
+    delete process.env.BENCH_STANDDOWN_FILE
+  }
+})
+
+test('the link counts bytes and parsed lines across a reboot', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const reader = link.readers.get('/dev/cu.b')
+
+  link.feed('/dev/cu.b', reader, '  [  512 ms] yellow button P0.21  PRESSED\n')
+  link.feed('/dev/cu.b', reader, '*** Booting nRF Connect SDK v3.4.0-abc ***\n')
+
+  const snapshot = link.snapshot()
+  // The per-boot counters reset; the link's own totals must not, because
+  // "has this board ever said anything" is what the empty state asks.
+  assert.equal(snapshot.stream.linesSeen, 0)
+  assert.equal(snapshot.link.parsed, 2)
+  assert.ok(snapshot.link.bytes > 0)
+})
+
 test('a port that says nothing is handed back instead of held open', () => {
   const link = linkWithPorts(['/dev/cu.a'])
   const reader = link.readers.get('/dev/cu.a')

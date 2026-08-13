@@ -64,13 +64,22 @@ export const BENCH_LINE_PREFIX = 'BENCH '
 const HISTORY_LIMIT = 120
 
 /*
- * The board's controls, named once. Pin numbers are the contract with
- * hardware/BREADBOARD_WIRING.md; the roles are what the owner calls them.
+ * The board's controls, named once, and the ONLY place this dashboard learns
+ * what a button is for. Pin numbers are the contract with
+ * hardware/BREADBOARD_WIRING.md; the roles are the owner's ruling of
+ * 2026-08-13: "no, i said yellow combine both and blue is for memo".
+ *
+ * Yellow therefore carries talk AND push-to-talk, blue is the memo, and green
+ * owns nothing — its wires came off the board and cannot be reattached today.
+ * `unwired` is not cosmetic: a disconnected pin floats HIGH against its
+ * internal pull-up, which is bit-for-bit what an untouched button reads, so
+ * green's tile can never prove anything either way and must say so instead of
+ * implying it is under test.
  */
 export const BUTTONS = [
-  { key: 'p21', pin: 21, colour: 'yellow', role: 'Talk' },
-  { key: 'p22', pin: 22, colour: 'green', role: 'Memo' },
-  { key: 'p23', pin: 23, colour: 'blue', role: 'Push-to-talk' },
+  { key: 'p21', pin: 21, colour: 'yellow', role: 'Talk + push-to-talk', unwired: false },
+  { key: 'p22', pin: 22, colour: 'green', role: null, unwired: true },
+  { key: 'p23', pin: 23, colour: 'blue', role: 'Memo', unwired: false },
 ]
 
 const BUTTON_BY_COLOUR = new Map(BUTTONS.map((button) => [button.colour, button]))
@@ -770,6 +779,15 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
       stub: Boolean(link?.stub),
       attempts: link?.attempts ?? 0,
       openedAt: link?.openedAt ?? null,
+      /*
+       * Whole-life totals for this link, deliberately NOT the per-boot counts
+       * in `stream` below. "Ports open but the board has never said anything"
+       * and "the board is connected and momentarily quiet" are different facts,
+       * and only these survive a reset to tell them apart.
+       */
+      ports: link?.ports ?? 0,
+      bytes: link?.bytes ?? 0,
+      parsed: link?.parsed ?? 0,
     },
     stream: {
       connected: streaming,
@@ -794,6 +812,7 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
         pin: button.pin,
         colour: button.colour,
         role: button.role,
+        unwired: button.unwired,
         level: button.level,
         pressed: button.level === null ? null : button.level === 0,
         presses: button.presses,
