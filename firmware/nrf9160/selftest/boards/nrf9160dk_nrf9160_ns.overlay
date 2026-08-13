@@ -1,0 +1,349 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+/*
+ * Bench self-test pin map.
+ *
+ * Every claim here is a deliberate COPY of the application overlay
+ * (../boards/nrf9160dk_nrf9160_ns.overlay), not an include of it, and the
+ * copy is the point: if this file and the app file ever disagree, the
+ * self-test is measuring a board the app does not drive, and its PASS is
+ * worth nothing. Keep them in step — an agent that repins the app repins
+ * this too, in the same commit.
+ *
+ * What is deliberately ABSENT versus the app overlay:
+ *   - the modem shared-memory sub-nodes (this app never starts the modem)
+ *   - the RGB LED nodes (P0.03/04/07): the owner has not wired that LED,
+ *     and this app must not claim pins it cannot report on
+ *   - sense-edge-mask: this app POLLS every input. Polling is what lets it
+ *     report a resting level honestly, and it means a floating unwired pin
+ *     costs a printed line rather than an interrupt storm.
+ */
+/*
+ * SECURE/NON-SECURE RAM BOUNDARY — must match the application overlay.
+ *
+ * This is not a tuning knob, it is the reason this app boots at all. The
+ * board's stock ns split (secure 0x0-0x20000) is NOT the split TF-M is built
+ * against here: leaving it at the default made TF-M take a SecureFault inside
+ * its own image and spin in tfm_core_panic BEFORE it ever branched to the
+ * non-secure app. Measured, not guessed — a breakpoint on the NS reset
+ * handler (0x00052118) was never reached, while the core sat at PC=0x240A
+ * with IPSR=7 (SecureFault) and PRIMASK_S=1. The console was silent because
+ * nothing non-secure had run yet.
+ *
+ * The application overlay carves secure down to 32 kB and the pendant app
+ * boots on this exact board, so this app uses the same boundary. What it does
+ * NOT copy is the modem shared area inside the NS region: no modem is ever
+ * started here, so the whole 224 kB is ordinary application RAM.
+ *
+ *   0x2000_0000  Secure RAM (TF-M minimal)   ( 32 kB)
+ *   0x2000_8000  Non-secure RAM              (224 kB)
+ */
+/delete-node/ &sram0_s;
+/delete-node/ &sram0_ns;
+
+&sram0 {
+	sram0_s: sram@0 {
+		reg = <0x0 0x8000>;
+	};
+
+	sram0_ns: sram@8000 {
+		reg = <0x8000 0x38000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x8000 0x38000>;
+
+		/*
+		 * The modem shared area is carved out even though this app
+		 * never starts the modem, and that is on purpose: this whole
+		 * block is a byte-for-byte copy of the application overlay,
+		 * and the application overlay is the only memory map proven to
+		 * boot on this board. Deviating from it is what cost this
+		 * app two flash cycles — first a SecureFault inside TF-M, then
+		 * an NS lockup at 0xEFFFFFFE. Copy it, do not improve it.
+		 */
+		sram0_ns_modem: sram0_ns@0 {
+			reg = <0x0 0x4568>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x0 0x4568>;
+
+			cpuapp_cpucell_ipc_shm_ctrl: sram0_ns_modem@0 {
+				reg = <0x0 0x4e8>;
+			};
+
+			cpuapp_cpucell_ipc_shm_heap: sram0_ns_modem@4e8 {
+				reg = <0x4e8 0x2080>;
+			};
+
+			cpucell_cpuapp_ipc_shm_heap: sram0_ns_modem@2568 {
+				reg = <0x2568 0x2000>;
+			};
+		};
+
+		/* The board's /chosen zephyr,sram points at this label. */
+		sram0_ns_app: sram0_ns@4568 {
+			reg = <0x4568 0x33a98>;
+		};
+	};
+};
+
+/ {
+	pendant_controls {
+		compatible = "gpio-keys";
+
+		/*
+		 * All three buttons switch to GND against these internal
+		 * pull-ups, so unpressed reads HIGH and a wire that has
+		 * fallen off ALSO reads HIGH. That ambiguity is exactly what
+		 * the interactive phase resolves: a pin that never moves
+		 * while the owner presses it is the disconnected one.
+		 *
+		 * The green button on P0.22 is declared even though its wires
+		 * are off the board — reporting "declared, armed, never
+		 * moved" is a stronger statement than not looking at all.
+		 */
+		ask_button: ask_button {
+			gpios = <&gpio0 21 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		memo_button: memo_button {
+			gpios = <&gpio0 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		ptt_button: ptt_button {
+			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+
+		/* Encoder: A -> P0.24, B -> P0.25, common -> GND. Three
+		 * wires. P0.28 (the part's push switch) is NOT wired and is
+		 * not declared — an undeclared pin cannot be misread as a
+		 * dead control.
+		 */
+		encoder_a: encoder_a {
+			gpios = <&gpio0 24 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+		encoder_b: encoder_b {
+			gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+
+		/*
+		 * Mic-power sense watches the SPH0645's VDD net through 100k.
+		 * NO pull of any kind: a pull here would fight the net and
+		 * turn the answer into the answer the firmware wanted.
+		 */
+		mic_power_sense: mic_power_sense {
+			gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	pendant_outputs {
+		compatible = "gpio-leds";
+
+		/* MAX98357A SD_MODE. */
+		amp_sd_mode: amp_sd_mode {
+			gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	aliases {
+		ask-btn = &ask_button;
+		memo-btn = &memo_button;
+		ptt-btn = &ptt_button;
+		encoder-a = &encoder_a;
+		encoder-b = &encoder_b;
+		mic-sense = &mic_power_sense;
+		amp-sd-mode = &amp_sd_mode;
+	};
+};
+
+/*
+ * Console TX-only on P0.29 -> DK VCOM0, matching the application exactly.
+ *
+ * The board's stock uart0_default also claims P0.26 as CTS *with a
+ * bias-pull-up* — which would quietly defeat the no-pull contract on the
+ * mic sense above and make test 6 report whatever the pull-up wanted. It
+ * also claims P0.28 as RX. Dropping both from the pinctrl is what makes
+ * the mic-sense reading real.
+ */
+&pinctrl {
+	uart0_console_txonly: uart0_console_txonly {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 29)>;
+		};
+	};
+
+	uart0_sleep_txonly: uart0_sleep_txonly {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 29)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart0 {
+	pinctrl-0 = <&uart0_console_txonly>;
+	pinctrl-1 = <&uart0_sleep_txonly>;
+	disable-rx;
+};
+
+/* ---- ESP32 command link: uart1, TX P0.00 / RX P0.05, 115200 8N1 ---- */
+&pinctrl {
+	uart1_bt_module: uart1_bt_module {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 0)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 5)>;
+			/*
+			 * Pull-up on RX only. With the ESP32 unpowered or its
+			 * wire off, an undriven RX floats and the UARTE turns
+			 * noise into an endless framing error — which reads
+			 * like a talkative peer rather than a missing one.
+			 */
+			bias-pull-up;
+		};
+	};
+
+	uart1_bt_module_sleep: uart1_bt_module_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 0)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 5)>;
+			bias-pull-up;
+			low-power-enable;
+		};
+	};
+};
+
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_bt_module>;
+	pinctrl-1 = <&uart1_bt_module_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* Volume pot wiper -> P0.15 = AIN2. Channel config lives in src/main.c. */
+&adc {
+	status = "okay";
+};
+
+/*
+ * I2C2: SDA -> P0.30, SCL -> P0.31. The DK routes NO pull-ups to these
+ * pins; the bus depends on external 4.7k resistors to 3V on the breadboard.
+ * If the scan finds nothing at all, missing pull-ups is the first suspect —
+ * the self-test says so in as many words rather than leaving it implied.
+ *
+ * 100 kHz, for the same reason the SD bus runs slow: loose breadboard wiring.
+ */
+&i2c2 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+/*
+ * SPH0645 microphone on the I2S bus, slave RX. The clocks are jumpered in
+ * from PWM outputs (P0.16 -> P0.18 BCLK, P0.14 -> P0.17 LRCLK) because the
+ * SPH0645 needs 64 BCLK per stereo frame and this I2S peripheral cannot
+ * generate that as master (24-bit max word = 48 BCLK).
+ *
+ * SDIN carries a pull-down in its own group: with the red latching switch
+ * cutting the mic's power its DOUT floats, and an undriven SDIN would feed
+ * the capture path random full-scale garbage — i.e. a depowered mic would
+ * report a LOUDER level than a working one. The pull-down makes an
+ * unpowered mic read as digital silence, which is the honest answer.
+ */
+&pinctrl {
+	i2s0_default_selftest: i2s0_default_selftest {
+		group1 {
+			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
+				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(I2S_SDIN, 0, 20)>;
+			bias-pull-down;
+		};
+	};
+
+	i2s0_sleep_selftest: i2s0_sleep_selftest {
+		group1 {
+			psels = <NRF_PSEL(I2S_LRCK_M, 0, 17)>,
+				<NRF_PSEL(I2S_SCK_M, 0, 18)>,
+				<NRF_PSEL(I2S_SDOUT, 0, 19)>;
+			low-power-enable;
+		};
+		group2 {
+			psels = <NRF_PSEL(I2S_SDIN, 0, 20)>;
+			bias-pull-down;
+			low-power-enable;
+		};
+	};
+};
+
+&i2s0 {
+	status = "okay";
+	pinctrl-0 = <&i2s0_default_selftest>;
+	pinctrl-1 = <&i2s0_sleep_selftest>;
+	pinctrl-names = "default", "sleep";
+	clock-source = "PCLK32M";
+};
+
+/*
+ * PWM1/PWM2 generate the microphone clocks through the raw nrfx HAL (see
+ * mic_clocks_start in src/main.c). Disabled here means "no Zephyr driver may
+ * bind and apply its pinctrl", not "unused" — the same arrangement the
+ * pendant app uses.
+ */
+&pwm1 {
+	status = "disabled";
+};
+
+&pwm2 {
+	status = "disabled";
+};
+
+/*
+ * PWM0 and the board's pwm_led0 demo node are disabled for the same reason,
+ * and forgetting them here cost a flash cycle: the board enables pwm0 by
+ * default, so leaving it alone let pwm_nrfx bind it during driver init and
+ * apply pwm0_default, which claims P0.02. That happens BEFORE main() prints
+ * anything, and the app died there — a hard fault into CPU lockup
+ * (PC=0xEFFFFFFE) with a completely silent console, which reads exactly like
+ * a dead board.
+ *
+ * The application overlay disables both. This app does the same. A self-test
+ * must not claim a pin it does not test, and P0.02 is not on the bench.
+ */
+&pwm0 {
+	status = "disabled";
+};
+
+&pwm_led0 {
+	status = "disabled";
+};
+
+/*
+ * Adafruit microSD breakout #254 on the Arduino SPI header:
+ *   CLK -> D13 / P0.13, DO -> D12 / P0.12, DI -> D11 / P0.11, CS -> D10 / P0.10
+ */
+&arduino_spi {
+	status = "okay";
+
+	sd_slot: sdhc@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = <0>;
+		/* Conservative speed for loose breadboard wiring. */
+		spi-max-frequency = <2000000>;
+		status = "okay";
+
+		sdmmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
