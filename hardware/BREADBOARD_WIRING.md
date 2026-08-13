@@ -420,6 +420,22 @@ Alive and correctly-wired are different claims, the same way "both encoder
 phases are alive" and "the decode is right in both directions" are different
 claims. One observation rarely settles two.
 
+**A frozen value is the failure that looks most like success.** A number that
+does not move is not a measurement, and a stale one presented live is worse
+than an absent one because it looks like data. On 2026-08-13 a frozen mic
+peak/rms sat on the dashboard while the owner rewired the microphone by hand;
+it had been sampled once and republished ever since. The general defence is not
+care, it is FRESHNESS — every reported value carries a timestamp and vanishes
+when nothing refreshes it. That is absent-is-not-zero applied to time.
+
+**Do not let one broken input veto the diagnosis of another.** The same probe
+was gated on the mic-power sense pin, and that pin was itself the faulty one —
+so the microphone could never be measured no matter how many other wires were
+fixed. Gather facts independently and report them side by side; that is what
+lets them disagree usefully. Here "sense says cut" plus "the level is live and
+varying" is what proved the SENSE WIRE was lying about a perfectly good
+microphone, and it saved the owner from pulling apart working hardware.
+
 **A flash does not need the tty.** `west flash` and every JLinkExe measurement
 (halting, reading globals, driving pins) go over SWD through the J-Link's own
 USB interface, a completely separate channel. Reading console text was always
