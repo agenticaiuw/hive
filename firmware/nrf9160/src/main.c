@@ -54,25 +54,34 @@
  * and pull policy live in the overlay's pendant_controls node; the
  * split of duties here is:
  *
- *   P0.21 yellow  "ask"      — a second body for button 1. It gives the
- *                              SAME semaphore, so every path that already
- *                              understands button 1 (start conversation,
- *                              stop recording, end conversation) hears
- *                              it with zero new states.
- *   P0.22 green   memo       — record-only capture: upload + transcript,
- *                              deliberately no agent planner (?dispatch=0
- *                              — see pendant_cloud_stream_set_memo).
- *   P0.23 blue    push-to-talk — press = record a question with the radio
- *                              OFF, press again = one chunked upload WITH
- *                              the planner, and the short spoken reply
- *                              plays back on the existing reply-speech
- *                              path. See run_ptt_question() for the energy
- *                              ruling that put it here.
- *   P0.24/25      encoder    — quadrature menu navigation AND, through the
- *                              dwell timer, menu select: the owner's knob
- *                              has no switch (three wires: A, C=GND, B), so
- *                              resting on an entry for MENU_DWELL_MS IS the
- *                              press. P0.28 is unwired and unclaimed.
+ * WHAT EACH BUTTON MEANS DEPENDS ON WHETHER A RING IS OPEN. The relay owns
+ * the ring and tells the device with {"type":"menu_context","active":bool};
+ * with no such frame the device uses the GLOBAL column, always. See
+ * menu_context_active and docs/Screenless_App_Grammar.md.
+ *
+ *                      ring CLOSED (global)          ring OPEN
+ *   P0.21 yellow       short: start/stop the         menu_select
+ *                      conversation                  (commit the entry)
+ *                      long (600 ms): push-to-talk
+ *   P0.22 green        nothing — wires are off       nothing
+ *   P0.23 blue         memo (record-only, no         menu_back
+ *                      planner, ?dispatch=0)         (one level up)
+ *
+ *   P0.21 yellow  — also a second body for the DK's button 1: it gives the
+ *                   SAME semaphore, so every path that already understands
+ *                   button 1 hears it with zero new states.
+ *   P0.22 green   — DEAD. The owner's wires came off and cannot be refitted,
+ *                   so it is assigned nothing that matters. Presses are
+ *                   drained so none can be banked and replayed.
+ *   P0.23 blue    — memo when no ring is open. Push-to-talk moved OFF this
+ *                   button to a long yellow hold on 2026-08-13; the energy
+ *                   ruling that gave PTT its own gesture is unchanged (2.4x
+ *                   cheaper than a duplex exchange), only which gesture.
+ *   P0.24/25      — quadrature menu navigation, one detent = exactly one
+ *                   unit, no acceleration. Turning is ALL it does: the
+ *                   owner's knob has no switch wired (three wires: A,
+ *                   C=GND, B) and the buttons do the selecting, so P0.28 is
+ *                   unwired and unclaimed and dwell-to-select is gone.
  *   P0.26         mic sense  — watches the SPH0645 VDD net through 100k.
  *                              Low = the owner cut mic power with the
  *                              latching switch: capture must not start,
@@ -546,12 +555,12 @@ K_SEM_DEFINE(mark_press_sem, 0, 1);
 static const struct gpio_dt_spec ask_button =
 	GPIO_DT_SPEC_GET(ASK_BUTTON_NODE, gpios);
 static struct gpio_callback ask_button_callback;
-static const struct gpio_dt_spec memo_button =
+static const struct gpio_dt_spec green_button =
 	GPIO_DT_SPEC_GET(MEMO_BUTTON_NODE, gpios);
-static struct gpio_callback memo_button_callback;
-static const struct gpio_dt_spec ptt_button =
+static struct gpio_callback green_button_callback;
+static const struct gpio_dt_spec blue_button =
 	GPIO_DT_SPEC_GET(PTT_BUTTON_NODE, gpios);
-static struct gpio_callback ptt_button_callback;
+static struct gpio_callback blue_button_callback;
 static const struct gpio_dt_spec encoder_a =
 	GPIO_DT_SPEC_GET(ENCODER_A_NODE, gpios);
 static const struct gpio_dt_spec encoder_b =
@@ -562,6 +571,10 @@ static const struct gpio_dt_spec mic_sense =
 /* Sense pin configured OK? Without it, "muted" must never be inferred:
  * a broken sense wire has to fail toward a working microphone. */
 static bool mic_sense_ready;
+/* Yellow's pad is readable, so a held press can be told from a tap. Without
+ * it every yellow press is classified SHORT — losing push-to-talk, never the
+ * conversation, which is the right way round to fail. */
+static bool ask_button_ready;
 /* True while record_microphone is running on the GREEN button's behalf, so
  * a second green press stops a memo the way button 1 stops a command —
  * without the green button ever being able to cut a command capture short.
@@ -578,8 +591,8 @@ static bool ptt_capture_active;
  */
 static bool capture_radio_off;
 
-K_SEM_DEFINE(memo_press_sem, 0, 1);
-K_SEM_DEFINE(ptt_press_sem, 0, 1);
+K_SEM_DEFINE(green_press_sem, 0, 1);
+K_SEM_DEFINE(blue_press_sem, 0, 1);
 
 /*
  * Owner-decision control frames, produced on main/ISR/workqueue and consumed
@@ -590,7 +603,97 @@ K_SEM_DEFINE(ptt_press_sem, 0, 1);
  * the link returns).
  */
 static atomic_t menu_step_backlog;     /* signed detents not yet sent */
-static atomic_t menu_select_req;       /* set by the dwell timer, not a push */
+static atomic_t menu_select_req;       /* yellow, pressed while the ring is open */
+static atomic_t menu_back_req;         /* blue, pressed while the ring is open */
+/*
+ * WHICH VERBS THE TWO BUTTONS CURRENTLY CARRY — and it is not the device's
+ * opinion.
+ *
+ * The ring lives on the relay (docs/Screenless_App_Grammar.md), so the device
+ * genuinely cannot work out which context it is in; the relay tells it with
+ * {"type":"menu_context","active":bool} on every ring open, every ring close
+ * and every conversation teardown, sent AHEAD of the earcon that announces the
+ * same transition and never awaited.
+ *
+ *   active = 0  yellow = talk (short) / push-to-talk (long),  blue = memo
+ *   active = 1  yellow = select,                              blue = back
+ *
+ * THE FAILURE MODE IS ASYMMETRIC AND THIS DEFAULT IS THE WHOLE POINT. Zero at
+ * boot, zero whenever the socket is not up, zero the moment a conversation
+ * ends. If the frame is lost, late, or never arrives, the buttons fall back to
+ * the GLOBAL verbs — a dropped frame then costs the owner a stray memo, which
+ * is recoverable and audible the instant it happens. Defaulting the other way
+ * would cost them a push-to-talk that silently did nothing, on the one device
+ * that cannot show them why.
+ */
+static atomic_t menu_context_active;
+
+static inline bool menu_context_is_active(void)
+{
+	return atomic_get(&menu_context_active) != 0;
+}
+
+/*
+ * Fail-safe, called from every path that ends or loses a conversation.
+ * A ring cannot outlive the socket that owns it, so the device drops back to
+ * the global verbs itself rather than waiting to be told — the relay's
+ * teardown frame is best-effort by design and a socket that died has no way
+ * to send it at all.
+ */
+static void menu_context_clear(const char *why)
+{
+	if (atomic_set(&menu_context_active, 0) != 0) {
+		printk("Menu context -> global (%s): yellow=talk, blue=memo\n",
+		       why);
+	}
+	atomic_set(&menu_select_req, 0);
+	atomic_set(&menu_back_req, 0);
+}
+
+/*
+ * {"type":"menu_context","active":true|false}
+ *
+ * Offered FIRST of all the downlink frames, ahead of even the recipe matcher.
+ * Every other frame can afford to be handled a tick later; this one decides
+ * what the owner's very next press means, and the relay deliberately sends it
+ * ahead of the sound that announces the transition precisely so a press landing
+ * during the earcon still fires the right verb.
+ *
+ * The value is read by scanning past "active" rather than matching
+ * "\"active\":true" literally: a stray space after the colon would otherwise
+ * read as false, and silently reverting to global verbs is the one failure this
+ * whole mechanism exists to make loud. A frame with no "active" key at all is
+ * still treated as false — that is the safe direction.
+ */
+static bool menu_context_offer_frame(const char *frame)
+{
+	const char *cursor = strstr(frame, "\"menu_context\"");
+	bool active = false;
+
+	if (cursor == NULL) {
+		return false;
+	}
+	cursor = strstr(frame, "\"active\"");
+	if (cursor != NULL) {
+		cursor += sizeof("\"active\"") - 1U;
+		while (*cursor == ':' || *cursor == ' ') {
+			++cursor;
+		}
+		active = *cursor == 't';
+	}
+	if (atomic_set(&menu_context_active, active ? 1 : 0) !=
+	    (active ? 1 : 0)) {
+		printk("Menu context -> %s\n",
+		       active ? "ring (yellow=select, blue=back)"
+			      : "global (yellow=talk, blue=memo)");
+	}
+	if (!active) {
+		/* Nothing half-sent may survive the ring it belonged to. */
+		atomic_set(&menu_select_req, 0);
+		atomic_set(&menu_back_req, 0);
+	}
+	return true;
+}
 /*
  * The microSD did not come up, so the outbox, the alert inbox and the
  * offline capture journal are gone for this boot. Everything else works.
@@ -608,22 +711,32 @@ static atomic_t storage_notice_req;
  * link and older steps carry no information a fresher one lacks. */
 #define MENU_STEP_BACKLOG_MAX 8
 /*
- * DWELL — the select gesture, because there is no button to press.
+ * THE ENCODER TURNS AND NOTHING ELSE — and dwell-to-select is GONE.
  *
- * Owner's ruling, 2026-08-12: "we're not going to use the button on the
- * rotary encoder." Their encoder is the illuminated type; only the three
- * rotation pins are wired (A -> P0.24, C -> GND, B -> P0.25), so P0.28 is
- * unwired and its handler is gone. Without a press there is no select and
- * no escape, and the owner could scroll the app ring forever without ever
- * entering anything — so RESTING is the press: MENU_DWELL_MS after the last
- * detent the firmware emits {"type":"menu_select"} once.
+ * The knob is the illuminated type and only its three rotation pins are wired
+ * (A -> P0.24, C -> GND, B -> P0.25); P0.28 is unwired and has no handler.
+ * That left no press on the knob, and for a day the answer was DWELL: resting
+ * for 1500 ms after the last detent counted as the select.
  *
- * 1500 ms is the tuned middle. Shorter and the ring fires while the owner is
- * still hunting between entries (a 300 ms pause between detents is normal
- * hand speed); much longer and the device reads as broken, because on a
- * screenless ring nothing on earth tells you a selection is coming.
+ * The owner overruled it, 2026-08-13, verbatim: "remember we can use the
+ * fucking buttons bro, right now it seems like you're using stopping the
+ * turning as confirmation for selecting but we should just use a button. only
+ * when no [app] is selected those buttons are reserved for the llm talk and
+ * the memo."
+ *
+ * So selection is a YELLOW PRESS and escape is a BLUE PRESS, and which verb
+ * each button carries depends on menu_context_active above. Dwell had to be
+ * deleted rather than merely unused: the relay stopped expecting it (a rested
+ * knob is no longer a commit anywhere in menuRing.js), so a timer still firing
+ * here would commit ring entries the owner never chose — the worst possible
+ * residue on a device with no screen to show what just got selected.
+ *
+ * One detent is exactly one unit, at any speed. No acceleration: an earlier
+ * version had it and the owner rejected it.
+ *
+ * The ~200 ms settle survives, but it lives on the RELAY and was never a
+ * selection mechanism — it only decides when the ring is allowed to speak.
  */
-#define MENU_DWELL_MS 1500
 
 /*
  * ---- Wired speaker (MAX98357A) sink selection ----
@@ -1011,6 +1124,29 @@ volatile uint32_t pendant_remote_press;
  */
 volatile uint32_t pendant_bench_probe;
 
+/*
+ * RELAY FRAME INJECTION — test the parser, not a flag that resembles it.
+ *
+ * Verifying menu_context by writing menu_context_active over SWD proves the
+ * button mapping and nothing about the thing most likely to be wrong: whether
+ * the device recognises the relay's actual bytes. A frame that arrives and is
+ * silently unmatched is indistinguishable, from the outside, from a frame that
+ * arrived and worked — and it fails toward the global verbs, which is the safe
+ * direction and therefore the SILENT one.
+ *
+ * So: write the JSON here, set _ready, and the idle loop hands it to the exact
+ * same dispatch chain a socket frame goes through. Not a second code path — the
+ * same one.
+ *
+ *   w4 <&pendant_remote_frame>[..] = the bytes
+ *   w4 <&pendant_remote_frame_ready> 1
+ *
+ * Diagnostic only, and it cannot fabricate anything a real relay could not
+ * send: every frame still has to survive the same matchers.
+ */
+volatile char pendant_remote_frame[96];
+volatile uint32_t pendant_remote_frame_ready;
+
 static bool take_remote_press(void)
 {
 	if (pendant_remote_press == 0U) {
@@ -1022,7 +1158,7 @@ static bool take_remote_press(void)
 
 /* ---- Hardware-control ISRs and pollers ---- */
 
-static void memo_button_pressed(const struct device *port,
+static void green_button_pressed(const struct device *port,
 				struct gpio_callback *callback,
 				gpio_port_pins_t pins)
 {
@@ -1030,10 +1166,10 @@ static void memo_button_pressed(const struct device *port,
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 	pendant_bench_note_button(PENDANT_BENCH_GREEN);
-	k_sem_give(&memo_press_sem);
+	k_sem_give(&green_press_sem);
 }
 
-static void ptt_button_pressed(const struct device *port,
+static void blue_button_pressed(const struct device *port,
 			       struct gpio_callback *callback,
 			       gpio_port_pins_t pins)
 {
@@ -1041,28 +1177,28 @@ static void ptt_button_pressed(const struct device *port,
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 	pendant_bench_note_button(PENDANT_BENCH_BLUE);
-	k_sem_give(&ptt_press_sem);
+	k_sem_give(&blue_press_sem);
 }
 
-static bool take_memo_press(void)
+static bool take_green_press(void)
 {
-	return k_sem_take(&memo_press_sem, K_NO_WAIT) == 0;
+	return k_sem_take(&green_press_sem, K_NO_WAIT) == 0;
 }
 
-static void clear_memo_events(void)
+static void clear_green_events(void)
 {
-	while (k_sem_take(&memo_press_sem, K_NO_WAIT) == 0) {
+	while (k_sem_take(&green_press_sem, K_NO_WAIT) == 0) {
 	}
 }
 
-static bool take_ptt_press(void)
+static bool take_blue_press(void)
 {
-	return k_sem_take(&ptt_press_sem, K_NO_WAIT) == 0;
+	return k_sem_take(&blue_press_sem, K_NO_WAIT) == 0;
 }
 
-static void clear_ptt_events(void)
+static void clear_blue_events(void)
 {
-	while (k_sem_take(&ptt_press_sem, K_NO_WAIT) == 0) {
+	while (k_sem_take(&blue_press_sem, K_NO_WAIT) == 0) {
 	}
 }
 
@@ -1080,45 +1216,6 @@ static const int8_t encoder_quad_table[16] = {
 };
 static uint8_t encoder_prev_state;
 static int8_t encoder_detent_accum;
-
-/*
- * The dwell timer: the whole select gesture, and deliberately NOT in the ISR.
- *
- * The ISR's only new job is one k_work_reschedule() per detent (ISR-safe, and
- * a reschedule is a cancel+arm, which is exactly "any new detent restarts the
- * countdown"). The commit itself runs on the system workqueue — it touches an
- * atomic and asks for a haptic, the same two things the old push handler did —
- * and the WS I/O thread still owns the socket. Nothing about the
- * ISR -> atomics -> WS-thread path changed; a timer was inserted in front of
- * the atomic.
- *
- * NO REPEAT FIRE. The work item is one-shot and only a detent ever arms it, so
- * a knob left resting on an entry selects exactly once. That is the property
- * that makes dwell safe to use as the only select verb: a pendant swinging on
- * its lanyard against a still ring cannot start a timer every 1.5 s.
- */
-static struct k_work_delayable menu_dwell_work;
-
-static void menu_dwell_expired(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	/*
-	 * Same drop-when-closed contract the detents themselves have: if the
-	 * scrolls never reached the relay there is no ring position to commit,
-	 * and a tick on a resting knob with no conversation open would be the
-	 * device claiming a selection it did not make. Silence is correct here.
-	 */
-	if (!pendant_ws_connected()) {
-		return;
-	}
-	atomic_set(&menu_select_req, 1);
-	/* The buzz fires at the COMMIT, not at the send: dwell has no press to
-	 * acknowledge, so this tick is the owner's only evidence that the ring
-	 * just took their entry. Non-blocking (work-queue engine), so asking for
-	 * it from a work handler costs nothing. */
-	haptic_trigger(HAPTIC_PATTERN_TICK);
-}
 
 static uint8_t encoder_read_state(void)
 {
@@ -1166,12 +1263,11 @@ static void encoder_edge_isr(const struct device *port,
 			atomic_add(&menu_step_backlog, step);
 		}
 		/*
-		 * Restart the dwell on every detent — including one the backlog
-		 * cap just dropped. The cap is about what is worth sending; the
-		 * dwell is about whether the owner's hand is still moving, and
-		 * a hand that is moving has not chosen anything yet.
+		 * And that is the entire ISR now. It used to also restart a
+		 * dwell timer, because resting the knob was the select; the
+		 * owner replaced that with a yellow press, so a detent means
+		 * exactly one thing again — scroll by one.
 		 */
-		(void)k_work_reschedule(&menu_dwell_work, K_MSEC(MENU_DWELL_MS));
 	}
 }
 
@@ -1184,6 +1280,63 @@ static void encoder_edge_isr(const struct device *port,
 static bool mic_power_is_cut(void)
 {
 	return mic_sense_ready && gpio_pin_get_dt(&mic_sense) == 0;
+}
+
+/*
+ * Yellow carries BOTH talk verbs now, separated by how long it is held.
+ * Owner's ruling, 2026-08-13: "yellow combine both and blue is for memo."
+ *
+ * 600 ms. Short enough that nobody holds it by accident, long enough that a
+ * decisive tap never trips it.
+ *
+ * THE OLD OBJECTION, AND WHY IT NO LONGER WINS. The comment on MARK_BUTTON_NODE
+ * argues hard against gestures on button 1: acting on the ACTIVE EDGE means the
+ * microphone is powering up before the owner's finger comes back off, and a
+ * gesture costs several hundred ms on EVERY press to serve the rarer action. It
+ * was right — while a second physical button was available to take the rarer
+ * verb. Blue is memo now and green's wires are off, so there is no second button
+ * left to give push-to-talk, and the choice is a gesture or losing the 2.4x
+ * cheaper question entirely (hardware/design/Solar_Feasibility.md §4.3).
+ *
+ * The cost is smaller than the old objection assumed, because this polls at
+ * 10 ms and returns THE INSTANT the button comes up. A normal tap resolves in
+ * its own 80-150 ms, not in 600: the conversation is delayed by exactly as long
+ * as the owner's own press, which is unavoidable and imperceptible. Only a real
+ * long press pays the full 600 ms, and it is supposed to.
+ *
+ * The strong haptic fires AT the threshold, not after the capture starts, so the
+ * thumb learns which verb it just bought while it is still holding the button —
+ * the only feedback a screenless device can give about a gesture in progress.
+ */
+#define YELLOW_LONG_PRESS_MS 600
+
+static bool yellow_held_long(void)
+{
+	int64_t deadline;
+
+	/*
+	 * The DK's own button 1 shares this semaphore, and a press that came
+	 * from there leaves P0.21 resting high — so it reads as short and
+	 * takes the conversation path, which is what it has always done.
+	 * Same for the SWD remote-press hook.
+	 */
+	if (!ask_button_ready) {
+		return false;
+	}
+	deadline = k_uptime_get() + YELLOW_LONG_PRESS_MS;
+	while (k_uptime_get() < deadline) {
+		/* Logical, not raw: gpio_pin_get_dt applies GPIO_ACTIVE_LOW,
+		 * so 1 means "still pressed" on this board. */
+		if (gpio_pin_get_dt(&ask_button) != 1) {
+			return false;
+		}
+		k_msleep(10);
+		/* The bench keeps watching through the hold, so the owner can
+		 * see the pad stay low for the whole gesture. */
+		pendant_bench_tick();
+	}
+	haptic_trigger(HAPTIC_PATTERN_STRONG);
+	return true;
 }
 
 /* ---- Volume knob: SAADC one-shot polling ---- */
@@ -1703,12 +1856,22 @@ static void flash_led(unsigned int count, int on_ms, int off_ms)
  * a conversation the way they always were best answered: out loud, or from
  * the dashboard.
  */
-static void ptt_press_ignored_in_conversation(void)
+static void blue_press_in_conversation(void)
 {
-	if (!take_ptt_press()) {
+	if (!take_blue_press()) {
 		return;
 	}
-	clear_ptt_events();
+	clear_blue_events();
+	/*
+	 * A ring can be open INSIDE a live conversation — that is the normal
+	 * case, since the ring only exists while this socket does. So blue
+	 * here is "back", not "a memo you cannot have".
+	 */
+	if (menu_context_is_active()) {
+		atomic_set(&menu_back_req, 1);
+		haptic_trigger(HAPTIC_PATTERN_TICK);
+		return;
+	}
 	haptic_trigger(HAPTIC_PATTERN_TICK);
 	printk("Blue press ignored: a conversation is already open\n");
 }
@@ -2533,22 +2696,25 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 		/*
 		 * Ignore bounce / leftover edges from the start press for the
-		 * first second, then a second press stops recording. A memo or
-		 * push-to-talk capture additionally answers to its OWN button
-		 * (green / blue) — the button that started a recording should
-		 * stop it — while neither can ever cut a command capture short.
+		 * first second, then a second press stops recording.
+		 *
+		 * The button that STARTED a recording is the one that stops it,
+		 * and after the 2026-08-13 remap that is a different button
+		 * than it used to be: a memo now starts on BLUE (it was green),
+		 * and a push-to-talk question now starts on a long YELLOW hold
+		 * (it was blue). Yellow already stops everything through
+		 * button_press_sem, so push-to-talk needs no clause of its own
+		 * — it inherits the general one. Blue keeps its clause so a
+		 * memo answers to the button the owner actually pressed, and
+		 * still can never cut a command capture short.
 		 */
 		if (sample_index < MIC_MIN_RECORD_FRAMES) {
 			clear_button_events();
 			if (memo_capture_active) {
-				clear_memo_events();
-			}
-			if (ptt_capture_active) {
-				clear_ptt_events();
+				clear_blue_events();
 			}
 		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
-			   (memo_capture_active && take_memo_press()) ||
-			   (ptt_capture_active && take_ptt_press())) {
+			   (memo_capture_active && take_blue_press())) {
 			recording_stopped_by_button = true;
 			/*
 			 * Acknowledge on the EDGE, not after teardown: the
@@ -3470,6 +3636,15 @@ static void ws_io_drain_downlink(void)
 			 * The legacy started/flush/end behavior itself is
 			 * deliberately unchanged.
 			 */
+			/*
+			 * Context FIRST — ahead of even the recipe matcher.
+			 * Every other frame can afford to be handled a tick
+			 * later; this one decides what the owner's very next
+			 * press means.
+			 */
+			if (menu_context_offer_frame((const char *)ws_rx_buf)) {
+				continue;
+			}
 			if (pendant_reflex_offer_frame(
 				    (const char *)ws_rx_buf)) {
 				continue;
@@ -3547,8 +3722,11 @@ static void ws_io_send_owner_controls(void)
 {
 	if (!pendant_ws_connected()) {
 		atomic_set(&menu_step_backlog, 0);
-		atomic_set(&menu_select_req, 0);
 		atomic_set(&volume_report, -1);
+		/* A ring cannot outlive its socket, so the verbs go global
+		 * here rather than waiting for a teardown frame the dead
+		 * socket cannot deliver. This also clears select/back. */
+		menu_context_clear("socket closed");
 		/* storage_notice_req is deliberately NOT cleared here — see
 		 * its declaration. A closed socket is why it has not been
 		 * delivered, not a reason to stop trying. */
@@ -3589,13 +3767,28 @@ static void ws_io_send_owner_controls(void)
 		atomic_sub(&menu_step_backlog, step);
 	}
 
-	/* AFTER the detents above, always: the dwell fires 1.5 s behind the
-	 * last detent, so the scroll that chose the entry is already on the
-	 * wire and the relay's 200 ms name settle has long since spoken it.
-	 * A select that overtook its own detent would commit the entry before
-	 * it. */
+	/*
+	 * AFTER the detents above, always. The owner scrolls to an entry and
+	 * then presses, so the scroll that chose it must already be on the
+	 * wire: a select that overtook its own detent would commit the entry
+	 * before the one the owner was actually standing on.
+	 */
+	/*
+	 * Logged, unlike the detents beside them. A detent is one of forty in a
+	 * spin and logging each would drown the console; a select or a back is
+	 * a deliberate, rare act, and "did my press actually leave the device"
+	 * is the exact question that cannot be answered from the outside — the
+	 * relay ignores both frames when no conversation is live, so a press
+	 * that never went out and a press that went out and was dropped look
+	 * identical everywhere else.
+	 */
 	if (atomic_cas(&menu_select_req, 1, 0)) {
-		(void)pendant_ws_send_text("{\"type\":\"menu_select\"}");
+		printk("-> menu_select (%d)\n",
+		       pendant_ws_send_text("{\"type\":\"menu_select\"}"));
+	}
+	if (atomic_cas(&menu_back_req, 1, 0)) {
+		printk("-> menu_back (%d)\n",
+		       pendant_ws_send_text("{\"type\":\"menu_back\"}"));
 	}
 
 	/* Knob position, latest state only (a twist mid-dead-zone already
@@ -3663,7 +3856,9 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 					ws_rx_buf[MIN((size_t)drained,
 						      sizeof(ws_rx_buf) -
 							      1U)] = '\0';
-					if (!pendant_reflex_offer_frame(
+					if (!menu_context_offer_frame(
+						    (const char *)ws_rx_buf) &&
+					    !pendant_reflex_offer_frame(
 						    (const char *)ws_rx_buf) &&
 					    /* Sink switches work idle
 					     * too: the owner flips the
@@ -3686,9 +3881,10 @@ static void ws_io_thread_fn(void *a, void *b, void *c)
 		} else {
 			/* Drop-when-closed for the owner control frames: a
 			 * twist banked across a dead link would replay as
-			 * stale intent on reconnect. */
+			 * stale intent on reconnect. The context goes with
+			 * them — no socket, no ring, global verbs. */
 			atomic_set(&menu_step_backlog, 0);
-			atomic_set(&menu_select_req, 0);
+			menu_context_clear("socket closed");
 		}
 		k_msleep(200);
 	}
@@ -4040,7 +4236,7 @@ static int run_conversation(const struct device *i2s)
 		 * inside a call. Consume the press and tick, so it cannot fire
 		 * a surprise capture the moment this conversation ends.
 		 */
-		ptt_press_ignored_in_conversation();
+		blue_press_in_conversation();
 
 		if (atomic_get(&convo_end_req)) {
 			/* Relay 'end' (mutual silence) or transport close —
@@ -4087,14 +4283,29 @@ static int run_conversation(const struct device *i2s)
 		}
 #endif
 		/* Bounce/release edges from the starting press for the first
-		 * second; after that a press ends the conversation. */
+		 * second; after that yellow acts. */
 		if (k_uptime_get() - started_at < 1000) {
 			clear_button_events();
 		} else if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0 ||
 			   take_remote_press()) {
-			haptic_trigger(HAPTIC_PATTERN_CLICK);
-			printk("Conversation ended by button\n");
-			break;
+			/*
+			 * WITH A RING OPEN, YELLOW SELECTS — IT MUST NOT HANG
+			 * UP. The ring lives inside this very conversation, so
+			 * the press that commits an entry and the press that
+			 * ends the call are the same physical button separated
+			 * only by context. Getting this backwards would drop
+			 * the owner's call every time they tried to choose
+			 * something, which on a screenless device looks exactly
+			 * like a crash.
+			 */
+			if (menu_context_is_active()) {
+				atomic_set(&menu_select_req, 1);
+				haptic_trigger(HAPTIC_PATTERN_TICK);
+			} else {
+				haptic_trigger(HAPTIC_PATTERN_CLICK);
+				printk("Conversation ended by button\n");
+				break;
+			}
 		}
 
 		/* Loop time is the whole ballgame: exceed the TX runway and
@@ -4193,8 +4404,8 @@ teardown:
 	/* A green or blue press mid-conversation was not a capture request —
 	 * it was a mispress during a call. Consuming both here keeps them from
 	 * firing a surprise capture the moment the call ends. */
-	clear_memo_events();
-	clear_ptt_events();
+	clear_green_events();
+	clear_blue_events();
 	if (result == 0 && error != 0) {
 		result = error;
 	}
@@ -4739,6 +4950,7 @@ static void configure_control_inputs(void)
 	 * semaphore, so every existing press path hears it unchanged. */
 	if (gpio_is_ready_dt(&ask_button) &&
 	    gpio_pin_configure_dt(&ask_button, GPIO_INPUT) == 0) {
+		ask_button_ready = true;
 		bench.button_pin[PENDANT_BENCH_YELLOW] = (int8_t)ask_button.pin;
 		bench.button_active_level[PENDANT_BENCH_YELLOW] =
 			(ask_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
@@ -4754,34 +4966,34 @@ static void configure_control_inputs(void)
 		printk("Ask button (P0.21) not configured\n");
 	}
 
-	if (gpio_is_ready_dt(&memo_button) &&
-	    gpio_pin_configure_dt(&memo_button, GPIO_INPUT) == 0) {
-		bench.button_pin[PENDANT_BENCH_GREEN] = (int8_t)memo_button.pin;
+	if (gpio_is_ready_dt(&green_button) &&
+	    gpio_pin_configure_dt(&green_button, GPIO_INPUT) == 0) {
+		bench.button_pin[PENDANT_BENCH_GREEN] = (int8_t)green_button.pin;
 		bench.button_active_level[PENDANT_BENCH_GREEN] =
-			(memo_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
-		gpio_init_callback(&memo_button_callback, memo_button_pressed,
-				   BIT(memo_button.pin));
-		if (gpio_add_callback(memo_button.port,
-				      &memo_button_callback) != 0 ||
+			(green_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
+		gpio_init_callback(&green_button_callback, green_button_pressed,
+				   BIT(green_button.pin));
+		if (gpio_add_callback(green_button.port,
+				      &green_button_callback) != 0 ||
 		    gpio_pin_interrupt_configure_dt(
-			    &memo_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			    &green_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
 			printk("Memo button (P0.22) unavailable\n");
 		}
 	} else {
 		printk("Memo button (P0.22) not configured\n");
 	}
 
-	if (gpio_is_ready_dt(&ptt_button) &&
-	    gpio_pin_configure_dt(&ptt_button, GPIO_INPUT) == 0) {
-		bench.button_pin[PENDANT_BENCH_BLUE] = (int8_t)ptt_button.pin;
+	if (gpio_is_ready_dt(&blue_button) &&
+	    gpio_pin_configure_dt(&blue_button, GPIO_INPUT) == 0) {
+		bench.button_pin[PENDANT_BENCH_BLUE] = (int8_t)blue_button.pin;
 		bench.button_active_level[PENDANT_BENCH_BLUE] =
-			(ptt_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
-		gpio_init_callback(&ptt_button_callback, ptt_button_pressed,
-				   BIT(ptt_button.pin));
-		if (gpio_add_callback(ptt_button.port, &ptt_button_callback) !=
+			(blue_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
+		gpio_init_callback(&blue_button_callback, blue_button_pressed,
+				   BIT(blue_button.pin));
+		if (gpio_add_callback(blue_button.port, &blue_button_callback) !=
 			    0 ||
 		    gpio_pin_interrupt_configure_dt(
-			    &ptt_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
+			    &blue_button, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
 			printk("Push-to-talk button (P0.23) unavailable\n");
 		}
 	} else {
@@ -4789,11 +5001,7 @@ static void configure_control_inputs(void)
 	}
 
 	/* Encoder: both phases in ONE callback (same port), both edges —
-	 * the quadrature table needs every transition, not just presses.
-	 * The dwell work item is initialised BEFORE the interrupts are armed:
-	 * the first detent reschedules it, and rescheduling an uninitialised
-	 * work item from an ISR is not a race worth having. */
-	k_work_init_delayable(&menu_dwell_work, menu_dwell_expired);
+	 * the quadrature table needs every transition, not just presses. */
 	if (gpio_is_ready_dt(&encoder_a) && gpio_is_ready_dt(&encoder_b) &&
 	    gpio_pin_configure_dt(&encoder_a, GPIO_INPUT) == 0 &&
 	    gpio_pin_configure_dt(&encoder_b, GPIO_INPUT) == 0) {
@@ -5272,21 +5480,32 @@ int main(void)
 		/* Wait for a press. The WS I/O thread keeps the idle socket
 		 * alive (pings + stray drains); main only reconnects. */
 		bool marked = false;
-		bool memo_requested = false;
-		bool ptt_requested = false;
+		bool blue_pressed = false;
 
 		while (k_sem_take(&button_press_sem, K_MSEC(200)) != 0) {
 			if (take_remote_press()) {
 				break;
 			}
-			/* Green button: record-only memo, no planner. */
-			if (take_memo_press()) {
-				memo_requested = true;
-				break;
+			/*
+			 * GREEN IS DEAD, AND THAT IS THE ASSIGNMENT.
+			 *
+			 * Its wires came off the breadboard and the owner
+			 * cannot refit them, so it must own nothing that
+			 * matters. Its presses are still DRAINED rather than
+			 * left to accumulate: an unconsumed semaphore would
+			 * bank a phantom press and fire it the moment green is
+			 * ever given a verb again. Drained and logged, so a
+			 * green button that comes back to life announces
+			 * itself on the console instead of doing something.
+			 */
+			if (take_green_press()) {
+				clear_green_events();
+				printk("Green press (P0.22): unassigned — the "
+				       "owner's wires are off this button\n");
+				continue;
 			}
-			/* Blue button: push-to-talk question. */
-			if (take_ptt_press()) {
-				ptt_requested = true;
+			if (take_blue_press()) {
+				blue_pressed = true;
 				break;
 			}
 			/*
@@ -5320,6 +5539,25 @@ int main(void)
 			 * this call drains it (see bench.h).
 			 */
 			pendant_bench_tick();
+			/*
+			 * An injected relay frame, if a debugger left one.
+			 * Runs on main so it can reach the reflex layer's card
+			 * writes exactly like a real downlink frame does.
+			 */
+			if (pendant_remote_frame_ready != 0U) {
+				char frame[sizeof(pendant_remote_frame)];
+
+				pendant_remote_frame_ready = 0U;
+				memcpy(frame, (const void *)pendant_remote_frame,
+				       sizeof(frame));
+				frame[sizeof(frame) - 1U] = '\0';
+				printk("Injected frame: %s\n", frame);
+				if (!menu_context_offer_frame(frame) &&
+				    !audio_sink_offer_frame(frame) &&
+				    !pendant_reflex_offer_frame(frame)) {
+					(void)pendant_bt_offer_frame(frame);
+				}
+			}
 			/*
 			 * Button 2 needs no radio, no microphone and no
 			 * decision about whether the link is usable. It is
@@ -5431,13 +5669,65 @@ int main(void)
 		 * deliberately placed after clear_button_events() so a probe
 		 * press cannot be banked and replayed the moment it disarms.
 		 */
+		/*
+		 * ---- ONE PLACE DECIDES WHAT THE PRESS MEANT ----
+		 *
+		 * Resolved before anything acts on it, so the decision can be
+		 * logged, withheld by the probe, or executed — all from the
+		 * same answer. Two verbs cannot disagree about one press.
+		 *
+		 * Context first. With a ring open the buttons belong to the
+		 * ring, and that outranks even the mic-power gate below:
+		 * choosing a menu entry needs no microphone, and a device that
+		 * refused to navigate its own menus because the owner had muted
+		 * the mic would be applying a capture rule to a menu.
+		 *
+		 * If the relay never told us, or the frame was lost, or the
+		 * socket dropped, menu_context_is_active() is false and every
+		 * press runs its GLOBAL verb. That default is the whole safety
+		 * property — see menu_context_active's declaration.
+		 */
+		const bool ring_open = menu_context_is_active() && !marked;
+		bool ptt_requested = false;
+
+		if (!ring_open && !blue_pressed && !marked) {
+			ptt_requested = yellow_held_long();
+		}
+
+		const char *verb =
+			marked            ? "bookmark"
+			: ring_open       ? (blue_pressed ? "menu_back"
+							  : "menu_select")
+			: blue_pressed    ? "memo"
+			: ptt_requested   ? "push-to-talk question"
+					  : "conversation";
+
+		printk("%s press -> %s\n",
+		       marked ? "Mark" : blue_pressed ? "Blue (P0.23)"
+						      : "Yellow (P0.21)",
+		       verb);
+
 		if (pendant_bench_probe != 0U) {
-			clear_memo_events();
-			clear_ptt_events();
-			printk("Bench probe: press observed, no action taken "
-			       "(yellow=%d green=%d blue=%d mark=%d)\n",
-			       !memo_requested && !ptt_requested && !marked,
-			       memo_requested, ptt_requested, marked);
+			clear_green_events();
+			clear_blue_events();
+			printk("Bench probe: withheld '%s' — press observed, "
+			       "nothing run\n",
+			       verb);
+			continue;
+		}
+
+		if (ring_open) {
+			atomic_set(blue_pressed ? &menu_back_req
+						: &menu_select_req,
+				   1);
+			/* The tick is the owner's only acknowledgement that
+			 * the ring took the press: the spoken result comes
+			 * from the relay a beat later, and on a screenless
+			 * device a gesture with no immediate answer reads as
+			 * a dead button. */
+			haptic_trigger(HAPTIC_PATTERN_TICK);
+			clear_green_events();
+			clear_blue_events();
 			continue;
 		}
 
@@ -5458,19 +5748,20 @@ int main(void)
 		 */
 		if (mic_power_is_cut()) {
 			report_mic_muted_press();
-			clear_memo_events();
-			clear_ptt_events();
+			clear_green_events();
+			clear_blue_events();
 			clear_button_events();
 			continue;
 		}
 
-		if (memo_requested) {
+		/* Blue, ring closed: the memo. Record-only, no planner. */
+		if (blue_pressed) {
 			audio_cycle_phase = 1U;
 			/* Memo opens on a tick (and closes on one — see the
 			 * stop path in record_microphone). */
 			haptic_trigger(HAPTIC_PATTERN_TICK);
 			(void)run_memo_capture(i2s);
-			clear_memo_events();
+			clear_blue_events();
 			clear_button_events();
 			continue;
 		}
@@ -5481,7 +5772,7 @@ int main(void)
 			 * the microphone is live before any other work. */
 			haptic_trigger(HAPTIC_PATTERN_CLICK);
 			(void)run_ptt_question(i2s);
-			clear_ptt_events();
+			clear_blue_events();
 			clear_button_events();
 			continue;
 		}
