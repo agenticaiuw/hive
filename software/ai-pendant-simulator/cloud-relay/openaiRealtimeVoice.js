@@ -2277,13 +2277,46 @@ export async function planUtteranceWithRealtime({
   fleet = null,
   onEarlyPlan = null,
 } = {}) {
+  const startedAt = Date.now()
   const { pcm: rawPcm, sampleRate: wavRate } = extractPcmFromWavOrPcm(
     audioBuffer,
     format,
   )
   const sourceRate = wavRate || sampleRate || 16000
+  /*
+   * A container with a valid header and zero DECODED samples — a WAV whose
+   * data chunk is empty, or is nothing but the 44-byte header — is silence,
+   * not a failure. Checked here against the decoded PCM length, never the
+   * base64/container byte size the callers of this function gate on: a bare
+   * RIFF header is dozens of bytes and clears any container-size check while
+   * carrying no audio at all.
+   *
+   * This used to throw a generic Error that /v1/transcribe's catch-all could
+   * not tell apart from a real OpenAI outage — both landed the job as
+   * status:'failed', the one bucket, and the owner's dashboard could not
+   * tell "nobody spoke" from "the STT service is down" (or from the flood of
+   * identical rows either reading would collapse into). Returning an honest,
+   * empty-transcript result INSTEAD OF THROWING — no Realtime session is
+   * even opened for zero audio — lets this flow through the exact path a
+   * live session takes when it genuinely hears nothing, which
+   * jobs.js's planJobCapturedNothing() already renders as 'recorded', not
+   * 'failed'. `source: 'no_audio'` records the more specific fact (there was
+   * literally no decoded audio, not just an unrecognized utterance) so it
+   * survives on the job's inputTelemetry.transcriptionSource distinctly from
+   * "Realtime ran and heard silence" — worth keeping even though both read
+   * as the same honest non-failure today.
+   */
   if (!rawPcm.length) {
-    throw new Error('Audio buffer is empty.')
+    return {
+      text: '',
+      transcript: undefined,
+      model: null,
+      language,
+      durationMs: Date.now() - startedAt,
+      source: 'no_audio',
+      toolsUsed: [],
+      plannerHint: undefined,
+    }
   }
 
   const session = await createStreamingRealtimeSession({

@@ -36,6 +36,7 @@ import {
   publicContext,
   verifyContextHandle,
 } from '../shared/contextHandoff.js'
+import { normalizePipelineStatus } from '../shared/audioDelivery.js'
 import { getStore } from './store/index.js'
 import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
@@ -3447,14 +3448,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Pendant Cloud Relay listening on http://0.0.0.0:${PORT}`)
   console.log('[relay] Store mode: Cloudflare D1 in Workers, memory locally')
 })
-
-function normalizePipelineStatus(value) {
-  const status = String(value || '').trim().toLowerCase()
-  if (status === 'active' || status === 'processing') return 'active'
-  if (status === 'failed' || status === 'error') return 'failed'
-  if (status === 'waiting' || status === 'queued') return 'waiting'
-  return 'done'
-}
 
 function sanitizeTelemetryMeta(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
