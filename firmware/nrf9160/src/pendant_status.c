@@ -43,13 +43,41 @@
 #define RGB_COUNTERTOP 256U
 
 /*
- * BRIGHTNESS CAP — the one constant to turn down if this ever reads as a
- * flashlight instead of an indicator.  A 330 ohm leg on a 3 V rail is
- * roughly 5 mA continuous; at 25 % duty each channel averages ~1.2 mA, which
- * is plainly visible on a wearable at arm's length and does not blind anyone
- * reading the pendant in a dark room.  Full duty is never used anywhere.
+ * PER-CHANNEL BRIGHTNESS CEILING — the three constants to turn if a colour
+ * reads wrong.  These are a CALIBRATION, not a style choice, and the reason
+ * is physics rather than taste.
+ *
+ * The three dies in a 4-leg RGB part are not the same diode.  Red is GaAsP
+ * with a forward voltage near 2.0 V; green and blue are InGaN and sit at
+ * 3.0-3.2 V.  This board's I/O rail is 3.0 V, so on an identical 330 ohm
+ * leg the red channel gets ~1.0 V of headroom (~3 mA) while green and blue
+ * get somewhere between 0.1 V and NOTHING (0-0.3 mA).  Feed all three the
+ * same duty and the part is a red LED with two decorative legs: every mix
+ * collapses toward red, and "amber" — red plus a splash of green — is
+ * indistinguishable from the recording red it is supposed to contrast with.
+ *
+ * So each channel gets its own ceiling, expressed as a PWM compare value out
+ * of RGB_COUNTERTOP.  Red keeps the modest 64/256 = 25 % that made it an
+ * indicator instead of a flashlight; green and blue are opened most of the
+ * way, because on this rail their duty is the only knob left that costs
+ * nothing.  Duty cannot conjure headroom that is not there — see the
+ * resistor note below — but it is worth roughly 3.5x on the two channels
+ * that need it, and it is what makes the amber mix actually read amber.
+ *
+ * RETUNING, in the order the knobs matter:
+ *   - Green/blue still dark with the routing switches open?  That is the
+ *     330 ohm leg, not this file.  100 ohm on the green and blue legs is
+ *     the fix (still under 5 mA even if the die turns out to be a cheap
+ *     2.6 V green, and far under the pin's 15 mA limit).
+ *   - Went to 100 ohm on all three?  Bring RGB_DUTY_CEIL_RED down to ~32 to
+ *     keep red from dominating again.  Nothing here can be unsafe: 3.0 V
+ *     across 100 ohm with the diode shorted is 30 mA of PEAK current at a
+ *     25 % duty, and the diode is never shorted.
+ *   - Whole indicator too bright?  Scale all three down together.
  */
-#define RGB_DUTY_CAP 64U
+#define RGB_DUTY_CEIL_RED 64U
+#define RGB_DUTY_CEIL_GREEN 224U
+#define RGB_DUTY_CEIL_BLUE 224U
 
 /*
  * ONE bit is the entire common-anode/common-cathode difference.
@@ -108,8 +136,14 @@ struct status_rgb {
 	uint8_t b;
 };
 
-/* Amber is red with a splash of green — the green die is the efficient one
- * on every common RGB part, so a little goes a long way. */
+/*
+ * Amber is red with a splash of green.  These mixes are written in the
+ * CALIBRATED space: the per-channel ceilings above already correct for the
+ * fact that this rail starves the green and blue dies, so a mix here means
+ * the colour a balanced part would show, not a raw duty ratio.  Retune the
+ * ceilings, not the mixes — a mix changed to compensate for one channel's
+ * weakness silently breaks every other mix that uses that channel.
+ */
 static const struct status_rgb rgb_red = { 255U, 0U, 0U };
 static const struct status_rgb rgb_amber = { 255U, 70U, 0U };
 static const struct status_rgb rgb_green = { 0U, 255U, 0U };
@@ -124,6 +158,15 @@ static bool rgb_running;
 
 static struct k_work_delayable status_work;
 static bool (*status_mic_muted_probe)(void);
+/*
+ * Set once pendant_status_init() has run.  It exists because the callers
+ * that matter most are the EARLIEST ones: main()'s fatal-error path fires
+ * before some of the boot has happened, and a pendant_status_set() that
+ * reached k_work_reschedule() on an uninitialised work item would turn a
+ * reportable boot failure into a kernel assert — losing exactly the signal
+ * this module exists to deliver.  Before init the setter is a no-op.
+ */
+static bool status_ready;
 
 /*
  * Cross-thread request slots, both holding state+1 so that zero can mean
@@ -159,6 +202,29 @@ static int64_t status_haptic_due;
 volatile uint8_t pendant_status_current;
 
 /* ---- PWM plumbing ---- */
+
+/*
+ * HIGH DRIVE, and it is not a micro-optimisation on this rail.
+ *
+ * nrf_gpio_cfg_output() leaves the pad in standard drive (S0S1), which the
+ * nRF9160 datasheet specifies at VOH >= VDD - 0.3 V for 0.5 mA of source
+ * current — meaning the pad itself eats a few hundred millivolts as soon as
+ * an LED asks for real current.  Red does not care: it has a whole volt of
+ * headroom.  Green and blue have at most a couple hundred millivolts, so a
+ * standard-drive pad can swallow their ENTIRE operating margin and the two
+ * channels simply never conduct.  H0H1 is specified to 0.4 V of droop at
+ * 5 mA — an order of magnitude more current for the same sag — and buys
+ * back the headroom that decides whether those dies light at all.
+ *
+ * Costs nothing but a slightly faster edge on three pins that switch at
+ * 488 Hz, nowhere near anything that would care about the extra di/dt.
+ */
+static void rgb_pin_cfg_output(uint32_t pin)
+{
+	nrf_gpio_cfg(pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
+		     NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1,
+		     NRF_GPIO_PIN_NOSENSE);
+}
 
 static void rgb_pins_park(void)
 {
@@ -237,11 +303,14 @@ static void rgb_park(void)
  * blink) and simply means zero duty on all three channels. */
 static void rgb_apply(const struct status_rgb *colour)
 {
-	rgb_seq[0] = (uint16_t)(((uint32_t)colour->r * RGB_DUTY_CAP) / 255U) |
+	rgb_seq[0] = (uint16_t)(((uint32_t)colour->r * RGB_DUTY_CEIL_RED) /
+				255U) |
 		     RGB_POLARITY_BIT;
-	rgb_seq[1] = (uint16_t)(((uint32_t)colour->g * RGB_DUTY_CAP) / 255U) |
+	rgb_seq[1] = (uint16_t)(((uint32_t)colour->g * RGB_DUTY_CEIL_GREEN) /
+				255U) |
 		     RGB_POLARITY_BIT;
-	rgb_seq[2] = (uint16_t)(((uint32_t)colour->b * RGB_DUTY_CAP) / 255U) |
+	rgb_seq[2] = (uint16_t)(((uint32_t)colour->b * RGB_DUTY_CEIL_BLUE) /
+				255U) |
 		     RGB_POLARITY_BIT;
 	rgb_seq[3] = RGB_POLARITY_BIT;
 
@@ -462,12 +531,13 @@ void pendant_status_init(bool (*mic_muted_probe)(void))
 	/* Dark BEFORE the pads become outputs, so boot never flashes a
 	 * colour the device does not mean. */
 	rgb_pins_park();
-	nrf_gpio_cfg_output(RGB_RED_PIN);
-	nrf_gpio_cfg_output(RGB_GREEN_PIN);
-	nrf_gpio_cfg_output(RGB_BLUE_PIN);
+	rgb_pin_cfg_output(RGB_RED_PIN);
+	rgb_pin_cfg_output(RGB_GREEN_PIN);
+	rgb_pin_cfg_output(RGB_BLUE_PIN);
 	rgb_pins_park();
 
 	k_work_init_delayable(&status_work, status_tick);
+	status_ready = true;
 	(void)k_work_reschedule(&status_work, K_NO_WAIT);
 	printk("Status LED ready: R=P0.%02u G=P0.%02u B=P0.%02u (%s)\n",
 	       RGB_RED_PIN, RGB_GREEN_PIN, RGB_BLUE_PIN,
@@ -477,6 +547,10 @@ void pendant_status_init(bool (*mic_muted_probe)(void))
 
 void pendant_status_set(enum pendant_status state)
 {
+	if (!status_ready) {
+		return;
+	}
+
 	switch (state) {
 	case PENDANT_STATUS_DONE:
 	case PENDANT_STATUS_FAILED:

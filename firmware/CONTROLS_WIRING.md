@@ -22,9 +22,8 @@ unchanged.
 | ~~Encoder push~~ | *not wired* | — | — | **Removed 2026-08-12 by owner ruling.** The switch pins of the illuminated encoder are left unconnected and the firmware handler is gone. **P0.28 is FREE** — first claim on the next feature that needs a GPIO. |
 | Volume pot ends | Potentiometer (linear, ~5k–50k) | DK VDD and GND | — | Outer legs across the **nRF9160 DK's** VDD/GND rail (moved off the ESP32 — see below). |
 | Volume pot wiper | Potentiometer wiper | nRF9160 **P0.15** (AIN2) | — | SAADC, ratiometric VDD/4 reference so rail sag cancels. The only free analog pin — AIN0–7 are fixed to P0.13–P0.20 in silicon and every other one is taken. ~20 Hz poll, 2 % hysteresis, end-stop snap, squared (perceptual) curve — the ESP32 tuning carried over 1:1. |
-| Haptic driver | DRV2605L breakout (I2C **0x5A**) | nRF9160 **P0.30** (SDA) / **P0.31** (SCL) | 3V rail + GND | Shares I2C2 with the accelerometer. VIN → 3V, GND → GND; LRA (VLV101040A) across the driver's OUT+/OUT−. See the I2C section for pull-ups. |
-| Accelerometer | LSM6DSOX breakout (I2C **0x6A**) | nRF9160 **P0.30** (SDA) / **P0.31** (SCL) | 3V rail + GND | Same I2C2 bus. 0x6B if the breakout's DO/SDO jumper is tied high. |
-| Accelerometer INT1 | LSM6DSOX INT1 pin | nRF9160 **P0.27** | — | Push-pull active-high from the sensor; nRF-side pull-down so a fallen jumper reads "no tap". Double-tap = the yellow button. |
+| Haptic driver | DRV2605L breakout (I2C **0x5A**) | nRF9160 **P0.30** (SDA) / **P0.31** (SCL) | 3V rail + GND | Sole device on I2C2. VIN → 3V, GND → GND; LRA (VLV101040A) across the driver's OUT+/OUT−. See the I2C section for pull-ups. |
+| ~~Accelerometer~~ | *not used* | — | — | **Removed 2026-08-13 by owner ruling** ("we're not using the accelerometer anymore"). The LSM6DSOX breakout, its I2C2 wiring and its INT1 wire are gone; the firmware's double-tap wake is gone with it. **P0.27 is FREE** — first claim on the next feature that needs a GPIO. I2C2 keeps the haptic driver as its only device. |
 | Speaker amp SD_MODE | MAX98357A SD pin | nRF9160 **P0.01** | — | HIGH = amp plays the LEFT I2S slot (SD_MODE > 1.4 V, datasheet Table 5), LOW = 0.6 µA shutdown. Boot default LOW (Bluetooth stays the sink). Optional ~1 kΩ in series is cheap insurance if the 3 V rail ever sags below the DK's I/O voltage. |
 | Speaker amp I2S | MAX98357A BCLK / LRC / DIN | nRF9160 **P0.18** / **P0.17** / **P0.19** | — | Parallel taps on the SAME wires the ESP32 listens to — the amp is a second listener, zero firmware audio-path changes. |
 | Speaker amp power | MAX98357A VIN / GND | 3V rail / GND | — | Breadboard: the 3 V rail (~0.55 W into 8 Ω at 3.0 V). Custom board: VIN can take VBAT directly (2.5–5.5 V range) for full loudness off the cell. |
@@ -162,9 +161,10 @@ later: the socket that would have carried it closed with the press. The
 answer lands in history and the device stays quiet.
 
 **The Bluetooth module UART (P0.00 / P0.05).** Everything else was taken:
-P0.01 is the MAX98357A SD_MODE gate, P0.29 is the console TX, P0.26/27 are
-the mic sense and the accelerometer INT1 (P0.28 held the encoder push when
-this was chosen and is free now), P0.15 is the
+P0.01 is the MAX98357A SD_MODE gate, P0.29 is the console TX, P0.26 is the
+mic sense (P0.27 held the accelerometer's INT1 when this was chosen and is
+free now, P0.28 held the encoder push when this was chosen and is free
+now), P0.15 is the
 volume ADC, P0.10–13 are the microSD SPI, P0.14/16–20 are the audio bus,
 P0.21–25 are the buttons and encoder, and P0.30/31 are I2C. That leaves the
 VCOM2 group and the DK's LED pins.
@@ -228,13 +228,13 @@ complement. Move the common leg to the 3V rail, set
 word (bit 15, the polarity bit), so both wirings run the same code at the
 same brightness and neither can damage the part.
 
-**Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25 and
-P0.27 — P0.28 left the mask with the encoder push) use the GPIO SENSE
-mechanism (`sense-edge-mask` in the
+**Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25 —
+P0.27 left the mask with the accelerometer and P0.28 left it with the
+encoder push) use the GPIO SENSE mechanism (`sense-edge-mask` in the
 overlay) rather than GPIOTE channels — the nRF9160 has only 8 GPIOTE
 channels and the DK's own buttons already claim some. Hand-speed controls
-(and a double-tap, slower still) do not need GPIOTE latency. P0.26 is
-polled and uses no interrupt at all; P0.15 is analog.
+do not need GPIOTE latency. P0.26 is polled and uses no interrupt at all;
+P0.15 is analog.
 
 **Console is TX-only now.** The DK's default `uart0` pinctrl claimed
 P0.26 (CTS, **with a pull-up — directly against the mic-sense no-pull
@@ -242,27 +242,26 @@ contract**), P0.27 (RTS) and P0.28 (RX) alongside the P0.29 TX the
 console actually uses. Flow control was never on and console input does
 not exist in this firmware, so the overlay repins uart0 to TX-only on
 P0.29 (`disable-rx`), freeing P0.26/27/28 honestly — and it is what keeps
-P0.28 genuinely claimable now that nothing else wants it. printk/VCOM0
-output is unchanged.
+P0.27 and P0.28 genuinely claimable now that nothing else wants them.
+printk/VCOM0 output is unchanged.
 
 ## I2C bus (I2C2: SDA P0.30, SCL P0.31, 100 kHz)
 
 | Device | Address | Interrupt | Notes |
 | --- | --- | --- | --- |
 | DRV2605L haptic driver | 0x5A | none | LRA open-loop RTP; VLV101040A calibration measured on this exact breakout (169.27 Hz, 2.50 Vrms clamp). |
-| LSM6DSOX accelerometer | 0x6A (0x6B if DO high) | INT1 → P0.27 | Double-tap only, 104 Hz low-power (~26 µA), gyro in power-down, I3C disabled. Nothing is streamed — the INT edge is the event. |
 
-**Pull-ups are external and mandatory: 4.7 kΩ from SDA→3V and SCL→3V.**
-The DK routes no pull-ups to P0.30/P0.31, and the internal ~13 k pulls
-are both too weak for reliable 100 kHz edges on breadboard capacitance
-and not applied by the i2c pinctrl anyway. One pair serves the whole
-bus — do NOT also solder/enable pull-ups on both breakouts (the Adafruit
-boards each carry 10 k; two breakouts in parallel with 4.7 k externals
-lands at ~2.4 k effective, still legal at 3 V, so leaving the onboard
-ones alone is fine — just don't ADD more).
+**Pull-up is external and mandatory: 4.7 kΩ from SDA→3V and SCL→3V.**
+The DK routes no pull-ups to P0.30/P0.31, and the internal ~13 k pull is
+too weak for reliable 100 kHz edges on breadboard capacitance and not
+applied by the i2c pinctrl anyway. The external pair is all the bus
+needs — do NOT also enable the haptic breakout's onboard pull-ups (the
+Adafruit board carries 10 k; in parallel with the 4.7 k externals that is
+still legal at 3 V, so leaving the onboard ones alone is fine — just
+don't ADD more).
 
-Both parts are probe-once: a missing breakout costs one boot log line,
-haptics degrade to LED patterns, double-tap wake simply disappears.
+The haptic driver is probe-once: a missing breakout costs one boot log
+line and haptics degrade to LED patterns.
 
 ## Bluetooth module command link (uart1, 115200 8N1)
 
@@ -307,7 +306,7 @@ reset, and stops entirely once a sink answers.
 
 | Event | Preset | Feel |
 | --- | --- | --- |
-| Press acknowledged (yellow/tap-tap, capture start/stop, blue PTT start/stop) | `click` | one 60 ms crisp click |
+| Press acknowledged (yellow, capture start/stop, blue PTT start/stop) | `click` | one 60 ms crisp click |
 | Memo start / memo stop (green) | `tick` | one 25 ms blip |
 | **Menu dwell commits** (1500 ms after the last detent) | `tick` | one 25 ms blip — the only evidence a selection happened, since the owner did nothing to cause it |
 | Blue press refused mid-conversation | `tick` | one 25 ms blip — "heard you, not now" |
@@ -371,7 +370,6 @@ workqueue — never on the audio path, never in an ISR, the same discipline
 | Encoder **dwell** (no detent for **1500 ms**) | `{"type":"menu_select"}` on the converse WS + `tick` haptic at the commit | socket open, else neither. Restarted by any detent; never repeats until a new detent arrives. There is no push frame and no `menu_back` frame — escape is the `Back` entry on every ring |
 | Capture press while muted | `{"type":"mic_muted"}` on the converse WS + LED pattern + long buzz, capture suppressed | socket open (LED/buzz regardless) |
 | Volume knob move | `{"type":"volume","level":0.xx,"raw":N}` on the converse WS | on ≥2% change, ~20 Hz poll (5 Hz idle); gain applied on-device before the wire |
-| Accelerometer double-tap | identical to a yellow press (same semaphore) | always; mute suppression included |
 | Sink select (downlink) | `{"type":"audio_sink","sink":"speaker"\|"bluetooth"\|"both"}` parsed from the converse WS (mid-conversation or idle) | speaker/both = SD_MODE high; bluetooth = amp shutdown. Selecting bluetooth/both also asks the module to connect the preferred sink — a sink choice that left the module idle would route the next answer into silence. Boot default: bluetooth. **Relay-side sender: TODO** (cloud-relay is owned by another agent) |
 | Approval readback announce (downlink) | `{"type":"approval_readback"}` → status goes to *needs approval*: amber 4 Hz blink + two strong hits | device parses it today; **relay-side sender: TODO** (same reason) |
 
