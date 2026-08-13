@@ -316,6 +316,59 @@ test('a working haptic and a real capture come through the application console',
   assert.equal(snapshot.controls.micLevel.band, 'sound')
 })
 
+test('the real emitter\'s first two lines, byte for byte off the wire', () => {
+  /*
+   * Captured from the board on 2026-08-13 by nrf-bench-buttons and pasted here
+   * unedited. The slow line carries the facts that do not move; the fast line
+   * carries the pads. Note `pot` is absent from the slow line and `esp` from
+   * both — absent is enforced at the source as "not configured / not probed",
+   * never as a zero, and this test exists to keep that distinction alive.
+   */
+  const state = createBenchState(0)
+  feed(state, [
+    'BENCH {"v":1,"up":10486,"fw":"pendant app","i2c":[],"sd":{"mounted":false}}',
+    'BENCH {"v":1,"up":11091,"btn":{"p21":1,"p22":1,"p23":1},"enc":{"a":1,"b":1,"pos":0,"det":0,"cw":0,"ccw":0},"pot":{"raw":0},"mic":{"sense":0},"amp":0}',
+  ])
+
+  const snapshot = benchSnapshot(state, { now: 2_000 })
+  assert.equal(snapshot.stream.source, 'bench-json')
+  assert.equal(snapshot.firmware.name, 'pendant app')
+  assert.equal(snapshot.firmware.uptimeMs, 11091)
+  assert.deepEqual(
+    snapshot.controls.buttons.map((button) => button.pressed),
+    [false, false, false],
+  )
+  assert.equal(snapshot.controls.pot.raw, 0)
+  assert.equal(snapshot.controls.micPower.live, false)
+  assert.equal(snapshot.controls.amp.enabled, false)
+
+  // An empty i2c list is a reading, and it is never a verdict on the bus.
+  assert.equal(snapshot.controls.i2c.answered, 0)
+  assert.match(snapshot.controls.i2c.note, /about the part/)
+  assert.doesNotMatch(snapshot.controls.i2c.note, /pull-up/)
+
+  // mounted:false is the firmware's write test, not an absent card.
+  assert.equal(snapshot.controls.sd.mounted, false)
+  assert.match(snapshot.controls.sd.note, /the card answers/)
+
+  // Never probed: absent must not read as a failure.
+  assert.equal(snapshot.controls.esp32.state, null)
+  assert.equal(snapshot.controls.micLevel.rms, null)
+})
+
+test('an i2c device that answered once and stopped is called intermittent', () => {
+  const state = createBenchState(0)
+  feed(state, ['BENCH {"v":1,"up":10,"i2c":[90]}'])
+  assert.equal(benchSnapshot(state, { now: 100 }).controls.i2c.note, null)
+
+  // A reboot in between: the DRV2605L attached on one boot and refused on the
+  // next, and the wording has to survive the reset to say so.
+  feed(state, ['*** Booting nRF Connect SDK v3.4.0-abc ***', 'BENCH {"v":1,"up":10,"i2c":[]}'], 200)
+  const after = benchSnapshot(state, { now: 400 })
+  assert.equal(after.controls.i2c.answered, 0)
+  assert.match(after.controls.i2c.note, /intermittent/)
+})
+
 test('the machine contract fills every control from one line', () => {
   const state = createBenchState(0)
   applyLine(

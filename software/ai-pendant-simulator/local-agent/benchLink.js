@@ -113,12 +113,37 @@ function listCandidatePorts(forced) {
     .map((name) => `/dev/${name}`)
 }
 
-function configurePort(port) {
-  return new Promise((resolve) => {
-    execFile('/bin/stty', ['-f', port, BAUD, 'raw', '-echo'], { timeout: 2000 }, (error) => {
-      resolve(!error)
-    })
-  })
+/*
+ * A device path this module is willing to hand to a shell.
+ *
+ * The reader below runs `sh -c`, because the open and the line settings have to
+ * happen in one process in a specific order (see `readerScript`). Every path
+ * comes from our own /dev scan or BENCH_SERIAL_PORT, but "it cannot be hostile
+ * today" is not a reason to build a shell string that would be if it were.
+ */
+const SAFE_PORT = /^\/dev\/cu\.[A-Za-z0-9._-]+$/
+
+/**
+ * Open the fd FIRST, then set the line discipline, then read.
+ *
+ * The obvious order — `stty` and then `cat` — is wrong on macOS and wrong in a
+ * way that looks exactly like a dead board. A `cu.*` device's termios is reset
+ * when the FIRST reader opens it, so an `stty` run before the open is undone by
+ * the open: `cat` then reads a port that has quietly reverted to 9600 and the
+ * console arrives as nothing, or as a few dozen bytes of garbage. nrf-bench-buttons
+ * lost three captures to this and measured it with lsof, ruling out contention.
+ *
+ * Holding the fd open across the `stty` is what makes the setting stick: the
+ * shell's fd 3 keeps the device open, so the `stty` is not the first open and
+ * survives, and `cat` inherits that same already-configured fd.
+ */
+function readerScript(port) {
+  const quoted = `'${port}'`
+  return [
+    `exec 3<${quoted}`,
+    `/bin/stty -f ${quoted} ${BAUD} raw -echo cs8 -parenb -cstopb clocal`,
+    'exec /bin/cat <&3',
+  ].join('; ')
 }
 
 /**
@@ -160,6 +185,14 @@ export class BenchLink {
   constructor(options = {}) {
     this.transport = options.transport || process.env.BENCH_TRANSPORT || 'auto'
     this.forcedPort = options.port || process.env.BENCH_SERIAL_PORT || ''
+    /*
+     * Per-instance, not a module constant read at call time: a test that shares
+     * the real /tmp path with the running bench passes or fails depending on
+     * whether another agent happens to hold the console right now, which is the
+     * definition of a flaky test. This one caught it honestly — the firmware
+     * agent had the file in place mid-run.
+     */
+    this.standDownFile = options.standDownFile || STAND_DOWN_FILE
     this.state = createBenchState()
     this.listeners = new Set()
     this.readers = new Map()
@@ -366,11 +399,11 @@ export class BenchLink {
    * before, and a wrong guess looks exactly like a dead board.
    */
   async scanSerial() {
-    if (standDownRequested()) {
+    if (standDownRequested(this.standDownFile)) {
       this.closeReaders()
       this.winner = null
       this.linkState = 'stood-down'
-      this.detail = `another tool asked for the console (${STAND_DOWN_FILE})`
+      this.detail = `another tool asked for the console (${this.standDownFile})`
       return
     }
     if (this.winner && this.readers.has(this.winner)) return
@@ -395,9 +428,6 @@ export class BenchLink {
       }
       if (this.readers.has(port)) continue
       this.attempts += 1
-      // eslint-disable-next-line no-await-in-loop -- three ports, once each.
-      const configured = await configurePort(port)
-      if (!configured) continue
       this.openReader(port)
     }
 
@@ -415,16 +445,20 @@ export class BenchLink {
   }
 
   /**
-   * One `cat` per candidate port.
+   * One reader shell per candidate port.
    *
    * The child does the blocking open and the blocking reads; this process only
    * ever reads its pipe. See the header for why that distinction is the whole
-   * reason this feature is allowed near the agent.
+   * reason this feature is allowed near the agent, and `readerScript` for why
+   * the open has to come before the `stty`.
    */
   openReader(port) {
+    if (!SAFE_PORT.test(port)) return
     let child
     try {
-      child = spawn('/bin/cat', [port], { stdio: ['ignore', 'pipe', 'ignore'] })
+      child = spawn('/bin/sh', ['-c', readerScript(port)], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
     } catch {
       return
     }
@@ -442,6 +476,19 @@ export class BenchLink {
         this.winner = null
         this.linkState = 'absent'
         this.detail = 'the port went away mid-stream — DK unplugged?'
+        this.emit()
+        return
+      }
+      /*
+       * The reader shell exits when the device cannot be opened at all, which
+       * is what an unplugged DK looks like now that the open is attempted
+       * optimistically rather than pre-checked with stty. Once the last one is
+       * gone the link is not "probing" any more, and leaving it saying so is
+       * the same lie the header rewrite was about.
+       */
+      if (!this.readers.size && !this.winner && this.linkState === 'probing') {
+        this.linkState = 'absent'
+        this.detail = 'no port would open — the DK is unplugged'
         this.emit()
       }
     }

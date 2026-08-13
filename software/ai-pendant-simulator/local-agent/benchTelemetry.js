@@ -126,7 +126,7 @@ function fresh(now) {
     pot: { raw: null, at: null, min: null, max: null, history: [] },
     micPower: { level: null, at: null, changes: 0 },
     micLevel: { peak: null, rms: null, at: null, history: [] },
-    i2c: { addresses: [], answered: null, at: null, note: null },
+    i2c: { addresses: [], answered: null, at: null, note: null, everAnswered: false },
     sd: {
       present: null,
       sectors: null,
@@ -153,8 +153,19 @@ export function createBenchState(now = Date.now()) {
  */
 function resetForBoot(state, now) {
   const carried = { startedAt: state.startedAt }
+  /*
+   * One fact deliberately survives the wipe: whether this device has EVER
+   * answered on this link. The DRV2605L was measured attaching on one boot
+   * (status=0xe4) and refusing on the very next (-116), and "it answered
+   * earlier and has stopped" is a different diagnosis from "it has never
+   * answered" — the first is intermittent, which is a solder joint or a
+   * marginal pull-up, the second is a part that is not there. Resetting it
+   * with the boot would erase the only evidence that distinguishes them.
+   */
+  const everAnswered = state.i2c.everAnswered
   const next = fresh(now)
   Object.assign(state, next, carried)
+  state.i2c.everAnswered = everAnswered
   state.firmware.phase = 'boot'
   state.firmware.phaseAt = now
 }
@@ -219,6 +230,20 @@ function noteI2c(state, addresses, now) {
   state.i2c.addresses = addresses
   state.i2c.answered = addresses.length
   state.i2c.at = now
+  if (addresses.length) {
+    state.i2c.everAnswered = true
+    state.i2c.note = null
+    return
+  }
+  /*
+   * Never a verdict on the bus. hw-selftest measured P0.30/31 over SWD and both
+   * hold high against an internal pull-down, so the external 4.7k parts are
+   * fitted and their rail is alive; blaming them here sends the owner after the
+   * wrong wire.
+   */
+  state.i2c.note = state.i2c.everAnswered
+    ? 'intermittent — it answered earlier on this board, then stopped'
+    : 'nothing answered — the bus itself reads healthy, so this is about the part'
 }
 
 /* ------------------------------------------------------------------ */
@@ -303,7 +328,18 @@ function applyBenchJson(state, payload, now) {
     if (typeof payload.sd.present === 'boolean') state.sd.present = payload.sd.present
     if (Number.isFinite(payload.sd.bytes)) state.sd.bytes = payload.sd.bytes
     if (Number.isFinite(payload.sd.sectors)) state.sd.sectors = payload.sd.sectors
-    if (typeof payload.sd.mounted === 'boolean') state.sd.mounted = payload.sd.mounted
+    if (typeof payload.sd.mounted === 'boolean') {
+      state.sd.mounted = payload.sd.mounted
+      /*
+       * `mounted:false` is the firmware's verdict AFTER its own write test, not
+       * "no card". On this board the card answers and mounts and the
+       * persistence file will not create (-2). Reporting that as an absent or
+       * unwired card would send the owner to re-seat four good jumpers.
+       */
+      state.sd.note = payload.sd.mounted
+        ? null
+        : 'the card answers — the firmware\'s own write test is what did not pass'
+    }
     state.sd.at = now
   }
 
