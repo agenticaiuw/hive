@@ -138,8 +138,54 @@ function fresh(now) {
     },
     amp: { level: null, at: null, toggles: 0 },
     esp32: { state: null, at: null },
+    /*
+     * The links. Everything below is "is this thing talking to anything",
+     * as opposed to the pins above, and every field starts null rather than
+     * at a plausible-looking zero: a radio that has never been sampled and a
+     * radio that has failed to register are different facts, and rendering
+     * them the same is how a bench instrument starts lying.
+     */
+    lte: {
+      reg: null,
+      operator: null,
+      rsrpDbm: null,
+      rsrqDb: null,
+      band: null,
+      mode: null,
+      cell: null,
+      at: null,
+    },
+    socket: { up: null, idleMs: null, at: null },
+    bt: { connected: null, name: null, address: null, note: null, at: null },
   }
 }
+
+/*
+ * +CEREG <stat>, 3GPP 27.007 §7.2 plus Nordic's UICC extension. These are the
+ * modem's own words for where it is, and they are worth keeping distinct:
+ * "searching" is a radio doing its job, "denied" is a SIM/subscription
+ * problem, and only "not-registered" after a long search is a fault.
+ */
+const LTE_REG = new Map([
+  [0, 'not-registered'],
+  [1, 'home'],
+  [2, 'searching'],
+  [3, 'denied'],
+  [4, 'unknown'],
+  [5, 'roaming'],
+  [90, 'uicc-fail'],
+])
+
+/** Human words for the tile, so the UI never has to interpret the token. */
+export const LTE_REG_WORD = new Map([
+  ['not-registered', 'NOT ON'],
+  ['home', 'ON NET'],
+  ['searching', 'SEARCHING'],
+  ['denied', 'DENIED'],
+  ['unknown', 'UNKNOWN'],
+  ['roaming', 'ROAMING'],
+  ['uicc-fail', 'NO SIM'],
+])
 
 /** A clean slate. Call once per link; `applyLine` does the rest. */
 export function createBenchState(now = Date.now()) {
@@ -352,6 +398,31 @@ function applyBenchJson(state, payload, now) {
   if (typeof payload.esp === 'string') {
     state.esp32.state = payload.esp
     state.esp32.at = now
+  }
+
+  if (payload.lte && typeof payload.lte === 'object') {
+    const lte = payload.lte
+    if (typeof lte.reg === 'string') state.lte.reg = lte.reg
+    if (typeof lte.op === 'string') state.lte.operator = lte.op
+    if (Number.isFinite(lte.rsrp)) state.lte.rsrpDbm = lte.rsrp
+    if (Number.isFinite(lte.rsrq)) state.lte.rsrqDb = lte.rsrq
+    if (Number.isFinite(lte.band)) state.lte.band = lte.band
+    if (typeof lte.mode === 'string') state.lte.mode = lte.mode
+    if (typeof lte.cell === 'string') state.lte.cell = lte.cell
+    state.lte.at = now
+  }
+
+  if (payload.sock && typeof payload.sock === 'object') {
+    if (typeof payload.sock.up === 'boolean') state.socket.up = payload.sock.up
+    if (Number.isFinite(payload.sock.idle)) state.socket.idleMs = payload.sock.idle
+    state.socket.at = now
+  }
+
+  if (payload.bt && typeof payload.bt === 'object') {
+    if (typeof payload.bt.conn === 'boolean') state.bt.connected = payload.bt.conn
+    if (typeof payload.bt.name === 'string') state.bt.name = payload.bt.name
+    if (typeof payload.bt.addr === 'string') state.bt.address = payload.bt.addr
+    state.bt.at = now
   }
 
   state.source = 'bench-json'
@@ -696,6 +767,80 @@ const TEXT_RULES = [
       noteMicLevel(state, Number(match[1]), Number(match[2]), now)
     },
   },
+
+  /*
+   * ---- the links, from the app's existing AT probes ----
+   *
+   * pendant_cloud.c prints the modem's raw answers ("LTE probe reg: %s"), so
+   * the registration state and the signal are already on the console today.
+   * Parsing +CEREG and +CESQ is parsing 3GPP 27.007, which is a far more
+   * stable contract than any wording we would ask the firmware to invent.
+   */
+
+  // "LTE probe reg: +CEREG: 2,1,\"1A2B\",\"01A2B3C4\",7"
+  {
+    re: /\+CEREG:\s*\d+,(\d+)(?:,"?([0-9A-Fa-f]*)"?,"?([0-9A-Fa-f]*)"?)?/,
+    apply: (state, match, now) => {
+      state.lte.reg = LTE_REG.get(Number(match[1])) ?? 'unknown'
+      if (match[3]) state.lte.cell = match[3]
+      state.lte.at = now
+    },
+  },
+  // "LTE probe signal: +CESQ: 99,99,255,255,20,45"
+  //   ...,<rsrq_index>,<rsrp_index>; 255 means "the modem does not know",
+  //   which must stay null rather than becoming a very bad signal reading.
+  {
+    re: /\+CESQ:\s*\d+,\d+,\d+,\d+,(\d+),(\d+)/,
+    apply: (state, match, now) => {
+      const rsrq = Number(match[1])
+      const rsrp = Number(match[2])
+      state.lte.rsrqDb = rsrq === 255 ? null : rsrq / 2 - 19.5
+      state.lte.rsrpDbm = rsrp === 255 ? null : rsrp - 140
+      state.lte.at = now
+    },
+  },
+  // "LTE not registered (status=0); reconnecting for relay DNS"
+  {
+    re: /LTE not registered \(status=(\d+)\)/,
+    apply: (state, match, now) => {
+      state.lte.reg = LTE_REG.get(Number(match[1])) ?? 'not-registered'
+      state.lte.at = now
+    },
+  },
+  // "BT module: sink connected"
+  {
+    re: /^BT module: sink connected/,
+    apply: (state, _match, now) => {
+      state.bt.connected = true
+      state.bt.note = null
+      state.bt.at = now
+    },
+  },
+  /*
+   * "BT sink remembered: SoundCore 2 [AA:BB:CC:DD:EE:FF] (1 known)"
+   *
+   * Remembered is NOT connected — this line is the pendant writing a speaker
+   * into its own list, which it does whether or not the speaker is powered on
+   * right now. It fills in the name and address and deliberately leaves the
+   * connected flag alone.
+   */
+  {
+    re: /^BT sink remembered: (.+?) \[([0-9A-Fa-f:]+)\]/,
+    apply: (state, match, now) => {
+      state.bt.name = match[1]
+      state.bt.address = match[2]
+      state.bt.at = now
+    },
+  },
+  // "BT module UART (P0.00/P0.05) not ready — Bluetooth ..."
+  {
+    re: /BT module UART .* not ready/,
+    apply: (state, _match, now) => {
+      state.bt.connected = false
+      state.bt.note = 'the ESP32 module\'s UART is not up, so no sink can connect'
+      state.bt.at = now
+    },
+  },
 ]
 
 /**
@@ -926,6 +1071,44 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
       esp32: {
         state: state.esp32.state,
         ageMs: age(state.esp32.at, now),
+      },
+    },
+    /*
+     * `reported` is the whole point of this block. Every link here is sampled
+     * by the firmware, not by this Mac, and on day one most of it will not be
+     * sampled at all — so the UI needs to distinguish "the modem says it is not
+     * registered" from "nothing has ever told us about the modem". Without this
+     * flag the second renders as the first, and the owner goes looking for a
+     * radio fault that no one has measured.
+     */
+    links: {
+      lte: {
+        reported: state.lte.at !== null,
+        reg: state.lte.reg,
+        word: state.lte.reg ? (LTE_REG_WORD.get(state.lte.reg) ?? null) : null,
+        operator: state.lte.operator,
+        rsrpDbm: state.lte.rsrpDbm,
+        rsrqDb: state.lte.rsrqDb,
+        band: state.lte.band,
+        mode: state.lte.mode,
+        cell: state.lte.cell,
+        /* Registered on the home network or roaming both count as "on". */
+        on: state.lte.reg === null ? null : state.lte.reg === 'home' || state.lte.reg === 'roaming',
+        ageMs: age(state.lte.at, now),
+      },
+      socket: {
+        reported: state.socket.at !== null,
+        up: state.socket.up,
+        idleMs: state.socket.idleMs,
+        ageMs: age(state.socket.at, now),
+      },
+      bt: {
+        reported: state.bt.at !== null,
+        connected: state.bt.connected,
+        name: state.bt.name,
+        address: state.bt.address,
+        note: state.bt.note,
+        ageMs: age(state.bt.at, now),
       },
     },
   }
