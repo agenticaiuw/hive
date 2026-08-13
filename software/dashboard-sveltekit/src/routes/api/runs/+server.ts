@@ -11,7 +11,9 @@ export const prerender = false;
 
 function publicRun(value: unknown) {
   const run =
-    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
   const events = Array.isArray(run.events) ? run.events : [];
 
   return {
@@ -40,6 +42,23 @@ function publicRun(value: unknown) {
      */
     jobStatus: sanitizeText(run.jobStatus, 80),
     reply: sanitizeText(run.reply, 500),
+    /*
+     * The relay folds consecutive identical failures from one device into a
+     * single row carrying this count (cloud-relay `collapseRepeatRuns`). This
+     * allowlist is exactly the kind of place that silently ate `origin` until
+     * every Recent row read "Cloud": a field the relay sends faithfully,
+     * dropped one layer before the screen. Without it a fold of eight renders
+     * as one row claiming one occurrence — under-reporting a repeating fault,
+     * which is worse than the eight rows the fold replaced.
+     *
+     * The relay also appends a sentence about the fold to `error`, which this
+     * sanitizer does not carry and should not: that prose is written for an
+     * ops audit and would add a second line to a list row. The number is the
+     * part the row needs; the wording is the dashboard's own.
+     */
+    repeatCount: Number.isFinite(Number(run.repeatCount))
+      ? Number(run.repeatCount)
+      : null,
     events: events.slice(0, 80).map((value) => {
       const event =
         value && typeof value === "object"

@@ -9,12 +9,16 @@ import {
   jobToHistoryEntry,
   mergeHiveFeed,
   pickHero,
+  repeatSummary,
   terminalPhaseFor,
 } from "../src/lib/hiveFeed.js";
 
 test("names the pendant from either its transport or its source", () => {
   for (const origin of ["live_lte", "microSD", "pendant_upload"]) {
-    assert.equal(hiveNodeFor({ origin, source: "cloudflare" }).label, "Pendant");
+    assert.equal(
+      hiveNodeFor({ origin, source: "cloudflare" }).label,
+      "Pendant",
+    );
   }
   assert.equal(hiveNodeFor({ source: "pendant" }).label, "Pendant");
 });
@@ -134,7 +138,10 @@ test("probes and routines fold into the one Agent-initiated tag", () => {
     assert.equal(isAgentInitiated({ source }), true);
   }
   assert.equal(isAgentInitiated({ source: "floating-hud" }), false);
-  assert.equal(isAgentInitiated({ origin: "live_lte", source: "cloudflare" }), false);
+  assert.equal(
+    isAgentInitiated({ origin: "live_lte", source: "cloudflare" }),
+    false,
+  );
 });
 
 test("pendant identity survives when only input telemetry recorded it", () => {
@@ -227,8 +234,20 @@ test("mergeHiveFeed folds agent-initiated and browser work in, tagged", () => {
   // never dressed as a device.
   const base = [{ pipelineId: "a", createdAt: "2026-08-09T00:00:00.000Z" }];
   const merged = mergeHiveFeed(base, [
-    { id: "local_probe", source: "operator-probe", command: "health check", status: "completed", createdAt: "2026-08-09T01:00:00.000Z" },
-    { id: "local_browser", source: "browser-inspect-act", command: "read the page", status: "completed", createdAt: "2026-08-09T02:00:00.000Z" },
+    {
+      id: "local_probe",
+      source: "operator-probe",
+      command: "health check",
+      status: "completed",
+      createdAt: "2026-08-09T01:00:00.000Z",
+    },
+    {
+      id: "local_browser",
+      source: "browser-inspect-act",
+      command: "read the page",
+      status: "completed",
+      createdAt: "2026-08-09T02:00:00.000Z",
+    },
   ]);
   assert.deepEqual(
     merged.map((entry) => entry.pipelineId),
@@ -298,8 +317,9 @@ test("terminalPhaseFor keeps goal-grounded verdicts out of Answered", () => {
  * promote a goal-not-met run to Answered.
  */
 const stateLike = (entry) =>
-  terminalPhaseFor(entry.jobStatus || entry.status) ??
-  { phase: entry.reply ? "answered" : "nothing-yet" };
+  terminalPhaseFor(entry.jobStatus || entry.status) ?? {
+    phase: entry.reply ? "answered" : "nothing-yet",
+  };
 
 const answeredAlways = () => ({ phase: "answered" });
 
@@ -335,9 +355,25 @@ test("hero candidates: the newest node wins, whichever node it is", () => {
 
 test("hero candidates: a tie keeps the shared record first; no timestamp never claims newest", () => {
   const at = "2026-08-09T09:00:00.000Z";
-  const relayRun = { pipelineId: "job_tie", command: "a", status: "completed", createdAt: at };
-  const tieJob = { id: "local_tie", source: "dashboard", command: "b", status: "completed", createdAt: at };
-  const undatedJob = { id: "local_undated", source: "floating-hud", command: "c", status: "completed" };
+  const relayRun = {
+    pipelineId: "job_tie",
+    command: "a",
+    status: "completed",
+    createdAt: at,
+  };
+  const tieJob = {
+    id: "local_tie",
+    source: "dashboard",
+    command: "b",
+    status: "completed",
+    createdAt: at,
+  };
+  const undatedJob = {
+    id: "local_undated",
+    source: "floating-hud",
+    command: "c",
+    status: "completed",
+  };
 
   const merged = mergeHiveFeed([relayRun], [tieJob, undatedJob]);
   assert.deepEqual(
@@ -472,4 +508,19 @@ test("commandTitle leaves brackets that are not trailers alone", () => {
   );
   assert.equal(commandTitle(""), "");
   assert.equal(commandTitle(null), "");
+});
+
+test("a folded row says how many times, and an unfolded one says nothing", () => {
+  // The 99% case: no fold, no extra text anywhere in the row.
+  assert.equal(repeatSummary({}), "");
+  assert.equal(repeatSummary({ repeatCount: 1 }), "");
+  assert.equal(repeatSummary(null), "");
+
+  // A fold must never render as a single occurrence.
+  assert.equal(repeatSummary({ repeatCount: 2 }), "2 times in a row");
+  assert.equal(repeatSummary({ repeatCount: 12 }), "12 times in a row");
+
+  // Garbage on the wire is not a count.
+  assert.equal(repeatSummary({ repeatCount: "lots" }), "");
+  assert.equal(repeatSummary({ repeatCount: Number.NaN }), "");
 });
