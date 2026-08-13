@@ -124,12 +124,111 @@ test('the pot reports raw, percent, volts and the span it has swept', () => {
   assert.deepEqual(pot.history, [0, 2048, 4090])
 })
 
+test('a pot that tracks the hand but never reaches the rail is not "working"', () => {
+  /*
+   * The owner's actual board, measured by hw-selftest across a full turn:
+   * raw 164..266 of 4095. That is 2.5% of a rail the SAADC reads at full
+   * scale (gain 1/4 against a VDD/4 reference), and it cleared the old
+   * >= 100 "moved" threshold by two counts — so a mis-wired pot rendered as
+   * swept and fine.
+   */
+  const state = createBenchState(0)
+  // A hand on the knob: many distinct readings, all inside a narrow band.
+  const sweep = []
+  for (let raw = 164; raw <= 266; raw += 2) sweep.push(`Volume: raw=${raw} level=0.00`)
+  feed(state, sweep)
+
+  const pot = benchSnapshot(state, { now: 2_000 }).controls.pot
+  assert.equal(pot.swept, true, 'distinct readings prove the knob is being turned')
+  assert.equal(pot.span, 102)
+  assert.equal(pot.spanPercent, 2.5)
+  assert.equal(pot.narrow, true, 'and it is nowhere near the rail')
+
+  /*
+   * The same pot one count short of the old >= 100 threshold must read the
+   * same way. That single count used to flip the tile from "swept" to "barely
+   * moved" — the threshold lying in both directions, one count apart.
+   */
+  const shy = createBenchState(0)
+  const nearly = []
+  for (let raw = 166; raw <= 265; raw += 2) nearly.push(`Volume: raw=${raw} level=0.00`)
+  feed(shy, nearly)
+  const shyPot = benchSnapshot(shy, { now: 2_000 }).controls.pot
+  assert.equal(shyPot.span, 98, 'under the old >= 100 threshold')
+  assert.equal(shyPot.swept, true)
+  assert.equal(shyPot.narrow, true)
+
+  // A pot wired correctly sweeps the rail and raises no question.
+  const good = createBenchState(0)
+  feed(good, ['Volume: raw=8 level=0.00', 'Volume: raw=4050 level=0.00'])
+  const healthy = benchSnapshot(good, { now: 2_000 }).controls.pot
+  assert.equal(healthy.narrow, false, 'two readings are not evidence of turning')
+  assert.equal(healthy.spanPercent, 98.7)
+})
+
+test('a boot-time zero moves the live value but never the span', () => {
+  /*
+   * The owner's real trace: runs of 0 interleaved with steady ~170s, with no
+   * gradual approach on either side. A SAADC that has not been configured
+   * reports 0, and folding that into `min` made his mis-wired pot look more
+   * than twice as good as it is.
+   */
+  const state = createBenchState(0)
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":300,"pot":{"raw":0}}`, 1_000)
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":900,"pot":{"raw":0}}`, 1_100)
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":4000,"pot":{"raw":175}}`, 1_200)
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":5000,"pot":{"raw":264}}`, 1_300)
+
+  const pot = benchSnapshot(state, { now: 1_400 }).controls.pot
+  assert.equal(pot.raw, 264)
+  assert.equal(pot.min, 175, 'the pre-init zeros are not measurements')
+  assert.equal(pot.max, 264)
+  assert.equal(pot.span, 89)
+
+  // A zero AFTER the board has settled is a real knob position and counts.
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":9000,"pot":{"raw":0}}`, 1_500)
+  assert.equal(benchSnapshot(state, { now: 1_600 }).controls.pot.min, 0)
+})
+
+test('uptime going backwards restarts the statistics', () => {
+  const state = createBenchState(0)
+  feed(state, [
+    '  [  512 ms] yellow button P0.21  PRESSED',
+    `${BENCH_LINE_PREFIX}{"v":1,"up":90000,"pot":{"raw":4000}}`,
+  ])
+  assert.equal(benchSnapshot(state, { now: 2_000 }).controls.pot.max, 4000)
+
+  // A reflash we never saw a banner for: the board comes back with a low
+  // uptime, and the old board's extremes must not describe the new one.
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":2000,"pot":{"raw":170}}`, 3_000)
+  const after = benchSnapshot(state, { now: 3_100 })
+  assert.equal(after.controls.pot.max, 170)
+  assert.equal(after.controls.pot.min, 170)
+  assert.equal(after.controls.buttons[0].presses, 0, 'counters restart with the board')
+})
+
+test('a long gap in the stream starts a fresh window', () => {
+  const state = createBenchState(0)
+  feed(state, [`${BENCH_LINE_PREFIX}{"v":1,"up":90000,"pot":{"raw":4000}}`])
+  assert.equal(benchSnapshot(state, { now: 1_100 }).controls.pot.max, 4000)
+
+  // He rewires while we are not looking; the old sweep describes a circuit
+  // that may no longer exist.
+  applyLine(state, `${BENCH_LINE_PREFIX}{"v":1,"up":120000,"pot":{"raw":180}}`, 60_000)
+  const after = benchSnapshot(state, { now: 60_100 })
+  assert.equal(after.controls.pot.max, 180)
+  assert.ok(after.stream.continuityGapMs >= 30_000)
+})
+
 test('a pot that never moved is reported as not moved, not as broken', () => {
   const state = createBenchState(0)
   feed(state, ['    raw=2048   50.0%  ~1.500 V (assuming VDD=3.0 V)'])
   const pot = benchSnapshot(state, { now: 2_000 }).controls.pot
   assert.equal(pot.span, 0)
   assert.equal(pot.moved, false)
+  // Untouched is not a wiring verdict either way.
+  assert.equal(pot.narrow, false)
+  assert.equal(pot.swept, false)
 })
 
 test('the red switch flips the mic power word', () => {
@@ -159,6 +258,46 @@ test('mic levels band the same way the console does', () => {
   assert.equal(micBand(45), 'silent')
   assert.equal(micBand(500), 'faint')
   assert.equal(micBand(501), 'sound')
+})
+
+test('a mic level that never moves a single count is stuck, not quiet', () => {
+  /*
+   * The pot's lesson generalised: a band word is a label for a number, not a
+   * verdict on the part. A constant 600 would read "SOUND" forever.
+   */
+  const stuck = createBenchState(0)
+  for (let index = 0; index < 10; index += 1) {
+    applyLine(stuck, `${BENCH_LINE_PREFIX}{"v":1,"up":${index},"mic":{"rms":600,"peak":9000}}`, index)
+  }
+  const flat = benchSnapshot(stuck, { now: 20 }).controls.micLevel
+  assert.equal(flat.band, 'sound', 'the label still describes the number honestly')
+  assert.equal(flat.flat, true, 'but the number has not moved once')
+
+  // A live mic jitters, so ordinary quiet is NOT flagged.
+  const live = createBenchState(0)
+  for (let index = 0; index < 10; index += 1) {
+    applyLine(
+      live,
+      `${BENCH_LINE_PREFIX}{"v":1,"up":${index},"mic":{"rms":${40 + (index % 3)},"peak":900}}`,
+      index,
+    )
+  }
+  const moving = benchSnapshot(live, { now: 20 }).controls.micLevel
+  assert.equal(moving.band, 'silent')
+  assert.equal(moving.flat, false)
+
+  // Peak sitting exactly on the 16-bit ceiling is a pinned input, not a room.
+  const pinned = createBenchState(0)
+  applyLine(pinned, `${BENCH_LINE_PREFIX}{"v":1,"up":9,"mic":{"rms":29250,"peak":32767}}`, 1)
+  assert.equal(benchSnapshot(pinned, { now: 2 }).controls.micLevel.saturated, true)
+  const normal = createBenchState(0)
+  applyLine(normal, `${BENCH_LINE_PREFIX}{"v":1,"up":9,"mic":{"rms":600,"peak":9000}}`, 1)
+  assert.equal(benchSnapshot(normal, { now: 2 }).controls.micLevel.saturated, false)
+
+  // Too few samples is not evidence of anything.
+  const early = createBenchState(0)
+  applyLine(early, `${BENCH_LINE_PREFIX}{"v":1,"up":1,"mic":{"rms":600}}`, 1)
+  assert.equal(benchSnapshot(early, { now: 2 }).controls.micLevel.flat, false)
 })
 
 test('the i2c scan collects addresses once each and names the expected one', () => {

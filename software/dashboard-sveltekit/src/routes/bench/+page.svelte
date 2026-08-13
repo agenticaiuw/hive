@@ -59,6 +59,7 @@
       ageMs: number | null;
       linesSeen: number;
       linesParsed: number;
+      continuityGapMs: number | null;
     };
     firmware: {
       name: string | null;
@@ -106,7 +107,13 @@
         raw: number | null;
         percent: number | null;
         volts: number | null;
+        min: number | null;
+        max: number | null;
         span: number | null;
+        /* The span as a share of full scale — the ratio IS the wiring fault. */
+        spanPercent: number | null;
+        swept: boolean;
+        narrow: boolean;
         ageMs: number | null;
         watched: boolean;
         moved: boolean;
@@ -122,6 +129,8 @@
         peak: number | null;
         rms: number | null;
         band: string | null;
+        flat: boolean;
+        saturated: boolean;
         ageMs: number | null;
         watched: boolean;
         history: number[];
@@ -361,6 +370,11 @@
   /* Powered has never been observed — not once, at any switch position. */
   const neverPowered = $derived(
     snapshot?.controls.micPower.level === 0 && snapshot?.controls.micPower.changes === 0,
+  );
+
+  /* Pinned or unvarying: either way the number is not measuring anything. */
+  const micStuck = $derived(
+    !!snapshot?.controls.micLevel.flat || !!snapshot?.controls.micLevel.saturated,
   );
 
   const micMeter = $derived(
@@ -701,13 +715,35 @@
           <polyline points={spark(snapshot?.controls.pot.history ?? [])} />
         </svg>
       {/if}
+      <!--
+        THE SPAN IS THE DIAGNOSTIC, NOT THE POSITION.
+
+        This tile used to read "4% · swept 102 counts" and call that moved,
+        because `moved` was gated on span >= 100 and the owner's mis-wired pot
+        clears it by two counts. The page actively reassured him that a proven
+        fault was fine — worse than any "not seen yet", because those at least
+        ask a question.
+
+        Two claims live here and one boolean could not carry both: the wiper
+        responds monotonically and repeatably (proving the middle leg, its row,
+        AIN2 and the SAADC), and the track covers 2.5% of a rail the ADC reads
+        at full scale (proving it is not reaching that rail). Both are printed.
+        WHICH outer leg, and how, is the owner's check order to run — the page
+        reports the ratio and stops there.
+      -->
       <p class="bn-foot">
-        P0.15 · raw {snapshot?.controls.pot.raw ?? "—"} · {snapshot?.controls.pot.volts?.toFixed(2) ??
-          "—"} V ·
-        {#if snapshot?.controls.pot.moved}
-          swept {snapshot.controls.pot.span} counts
+        P0.15 · raw {snapshot?.controls.pot.raw ?? "—"} ·
+        {#if snapshot?.controls.pot.span != null}
+          <!-- The numbers are shown unconditionally; no threshold decides
+               whether the owner is allowed to see the span. The only thing
+               `narrow` decides is whether to add the sentence. -->
+          seen {snapshot.controls.pot.min}–{snapshot.controls.pot.max} of 4095 ·
+          {snapshot.controls.pot.spanPercent}% of range
+          {#if snapshot.controls.pot.narrow}
+            <span class="bn-waiting">— wiper responds, track not spanning the rail</span>
+          {/if}
         {:else}
-          <span class="bn-waiting">barely moved</span>
+          <span class="bn-waiting">not read yet</span>
         {/if}
       </p>
     </article>
@@ -740,8 +776,23 @@
 
     <article class="bn-tile bn-wide">
       <p class="bn-label">mic level (i2s)</p>
-      <p class="bn-value" class:muted={snapshot?.controls.micLevel.band == null}>
-        {(snapshot?.controls.micLevel.band ?? "—").toUpperCase()}
+      <!--
+        A band word is a label for a number, never a verdict on the microphone.
+        On this board the level arrived as rms 29250 on all 43 samples with peak
+        pinned exactly on the 16-bit ceiling, and the tile said LOUD — a pinned,
+        unvarying reading rendering as a healthy one, which is the pot's
+        threshold bug wearing different clothes. A number that never moves is
+        not a level, so it does not get to wear the level's word.
+      -->
+      <p
+        class="bn-value"
+        class:muted={snapshot?.controls.micLevel.band == null || micStuck}
+      >
+        {#if micStuck}
+          STUCK
+        {:else}
+          {(snapshot?.controls.micLevel.band ?? "—").toUpperCase()}
+        {/if}
       </p>
       <div class="bn-bar"><span style="width: {micMeter}%"></span></div>
       {#if (snapshot?.controls.micLevel.history.length ?? 0) > 1}
@@ -751,7 +802,14 @@
       {/if}
       <p class="bn-foot">
         SPH0645 · P0.20 ·
-        {#if snapshot?.controls.micLevel.rms == null}
+        {#if micStuck}
+          <span class="bn-waiting"
+            >rms {snapshot?.controls.micLevel.rms} not moving{snapshot?.controls.micLevel
+              .saturated
+              ? ", peak pinned at full scale"
+              : ""} — not a level</span
+          >
+        {:else if snapshot?.controls.micLevel.rms == null}
           <!-- "Muted" and "powered but hearing nothing" are different problems
                with different fixes. Until the firmware reports a live level the
                page can only answer the first, and it says so rather than
@@ -991,6 +1049,12 @@
         : "no source yet"}
     · {snapshot?.stream.linesParsed ?? 0} of {snapshot?.stream.linesSeen ?? 0} lines read
     {#if snapshot?.firmware.phase}· phase {snapshot.firmware.phase}{/if}
+    <!-- Counts and spans are per-window, and a gap ends the window: the owner
+         rewires while he watches, so evidence from before a gap may describe a
+         circuit that no longer exists. Saying so beats letting the numbers read
+         as the whole session. -->
+    {#if snapshot?.stream.continuityGapMs}· counts restarted after a
+      {Math.round(snapshot.stream.continuityGapMs / 1000)}s gap{/if}
   </p>
   {/if}
 </main>
