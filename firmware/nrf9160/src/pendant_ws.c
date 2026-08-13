@@ -119,6 +119,21 @@ bool pendant_ws_connected(void)
 	return ws_fd >= 0;
 }
 
+/*
+ * Bench diagnostics only: when this socket last carried a byte, either way.
+ *
+ * "Up" and "carrying traffic" are different questions and the owner's dashboard
+ * needs both — a socket that is open but has said nothing for 40 s is the state
+ * that looks healthy from every other angle and is not. Recorded on SUCCESSFUL
+ * transfers only, so a failing send does not read as liveness.
+ */
+static int64_t ws_last_activity_ms = -1;
+
+int64_t pendant_ws_last_activity(void)
+{
+	return ws_last_activity_ms;
+}
+
 static int ws_send(const uint8_t *data, size_t length,
 		   enum websocket_opcode opcode)
 {
@@ -141,6 +156,7 @@ static int ws_send(const uint8_t *data, size_t length,
 		pendant_ws_close();
 		return -EIO;
 	}
+	ws_last_activity_ms = k_uptime_get();
 	return 0;
 }
 
@@ -207,6 +223,10 @@ int pendant_ws_recv(uint8_t *buffer, size_t capacity, bool *is_text)
 			pendant_ws_close();
 			return received;
 		}
+		/* Bytes arrived and were understood — liveness, counted before
+		 * the ping/pong filters below so a keepalive still proves the
+		 * pipe is carrying. */
+		ws_last_activity_ms = k_uptime_get();
 		if (offset == 0U && deadline == 0) {
 			deadline = k_uptime_get() + WS_MESSAGE_DEADLINE_MS;
 			text_flag = (message_type & WEBSOCKET_FLAG_TEXT) != 0U;

@@ -95,6 +95,31 @@ void pendant_bench_note_i2c(bool haptic_answered);
 void pendant_bench_note_sd(bool mounted);
 
 /*
+ * The modem is up, so the LTE and socket questions have answers worth asking.
+ * Before this, "not registered" would describe a radio nobody switched on.
+ */
+void pendant_bench_note_lte_ready(bool ready);
+
+/*
+ * An audio path owns the I2S deadlines — hold the status line.
+ *
+ * The slow line runs blocking AT commands, and the duplex transfer has a
+ * ~205 ms TX runway the driver errors the whole transfer over. Status is the
+ * one thing here that can wait; the fast pad line keeps flowing throughout, so
+ * no wire goes dark while this is set.
+ */
+void pendant_bench_set_busy(bool busy);
+
+/*
+ * The live microphone level. Separate from mic.sense on purpose: sense says
+ * whether the switch is feeding it power, level says whether it hears
+ * anything, and those are different faults with different fixes. Pass only
+ * values actually measured — never call this with zeros to "fill in" a mic
+ * that was never sampled.
+ */
+void pendant_bench_note_mic_level(int32_t peak, int32_t rms);
+
+/*
  * Sample and, if anything moved (or the heartbeat is due), emit. Cheap enough
  * to call from any loop that turns; internally rate-limited, so calling it
  * more often than it can emit costs a handful of register reads.
@@ -131,6 +156,22 @@ static inline void pendant_bench_note_i2c(bool haptic_answered)
 static inline void pendant_bench_note_sd(bool mounted)
 {
 	ARG_UNUSED(mounted);
+}
+
+static inline void pendant_bench_note_lte_ready(bool ready)
+{
+	ARG_UNUSED(ready);
+}
+
+static inline void pendant_bench_set_busy(bool busy)
+{
+	ARG_UNUSED(busy);
+}
+
+static inline void pendant_bench_note_mic_level(int32_t peak, int32_t rms)
+{
+	ARG_UNUSED(peak);
+	ARG_UNUSED(rms);
 }
 
 static inline void pendant_bench_tick(void)
