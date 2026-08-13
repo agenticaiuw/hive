@@ -64,6 +64,30 @@ export const BENCH_LINE_PREFIX = 'BENCH '
 const HISTORY_LIMIT = 120
 
 /*
+ * Lose the stream for this long and every per-board statistic starts over.
+ *
+ * A gap means we stopped observing, and the owner is REWIRING while he watches
+ * this page — so evidence gathered before a gap may describe a circuit that no
+ * longer exists. "3 presses" carried across a rewire says a button works when
+ * what it really says is that it worked before he moved the wire. Under-
+ * reporting after a gap is safe; over-reporting is the failure this instrument
+ * exists to prevent. Comfortably longer than the link's own 10 s idle release,
+ * so a page reload does not wipe his counts.
+ */
+const CONTINUITY_GAP_MS = 30_000
+
+/*
+ * The app is still bringing peripherals up for the first stretch after boot,
+ * and a SAADC that has not been configured reports 0. Those zeros arrive in
+ * runs, interleaved with normal readings, with no gradual approach on either
+ * side — a knob turned to its end slides monotonically. Folding them into the
+ * extremes made the owner's mis-wired pot look more than twice as good as it
+ * is. A reading taken before the thing that takes readings exists is not a
+ * measurement, so it moves the live value and nothing else.
+ */
+const BOOT_SETTLE_MS = 1500
+
+/*
  * The board's controls, named once, and the ONLY place this dashboard learns
  * what a button is for. Pin numbers are the contract with
  * hardware/BREADBOARD_WIRING.md; the roles are the owner's ruling of
@@ -100,6 +124,8 @@ function ring(list, value) {
 function fresh(now) {
   return {
     startedAt: now,
+    /* Set when a stream gap forced the statistics to start over. */
+    continuityGapMs: null,
     lastLineAt: null,
     lastParsedAt: null,
     linesSeen: 0,
@@ -206,7 +232,7 @@ export function createBenchState(now = Date.now()) {
  * claiming a button works after the wire has been pulled out.
  */
 function resetForBoot(state, now) {
-  const carried = { startedAt: state.startedAt }
+  const carried = { startedAt: state.startedAt, continuityGapMs: state.continuityGapMs }
   /*
    * One fact deliberately survives the wipe: whether this device has EVER
    * answered on this link. The DRV2605L was measured attaching on one boot
@@ -265,13 +291,19 @@ function noteEncoderDetent(state, direction, cw, ccw, now) {
   state.encoder.at = now
 }
 
-function notePot(state, raw, now) {
+function notePot(state, raw, now, { measured = true } = {}) {
   if (!Number.isFinite(raw) || raw < 0) return
   state.pot.raw = raw
   state.pot.at = now
+  ring(state.pot.history, { at: now, raw })
+  /*
+   * Extremes are a claim about the TRACK; the live value is only a claim about
+   * this instant. A sample taken while the board was still initialising is a
+   * fine thing to display and a terrible thing to fold into a span.
+   */
+  if (!measured) return
   state.pot.min = state.pot.min === null ? raw : Math.min(state.pot.min, raw)
   state.pot.max = state.pot.max === null ? raw : Math.max(state.pot.max, raw)
-  ring(state.pot.history, { at: now, raw })
 }
 
 function noteMicPower(state, level, now) {
@@ -317,6 +349,22 @@ function applyBenchJson(state, payload, now) {
   if (!payload || typeof payload !== 'object') return false
 
   if (typeof payload.fw === 'string') state.firmware.name = payload.fw
+  /*
+   * Uptime going BACKWARDS is the board telling us it restarted, and it is a
+   * marker the firmware already sends on every line — no new contract needed.
+   * A reset seen only as a boot banner is a reset we miss whenever the reader
+   * was detached for it (a reflash, a stand-down, a power cycle), and the
+   * statistics then run straight across a board that is no longer the same
+   * board. This catches those.
+   */
+  if (
+    Number.isFinite(payload.up) &&
+    Number.isFinite(state.firmware.uptimeMs) &&
+    payload.up < state.firmware.uptimeMs
+  ) {
+    resetForBoot(state, now)
+    state.firmware.name = typeof payload.fw === 'string' ? payload.fw : state.firmware.name
+  }
   if (Number.isFinite(payload.up)) state.firmware.uptimeMs = payload.up
   if (typeof payload.phase === 'string') {
     state.firmware.phase = payload.phase
@@ -355,7 +403,8 @@ function applyBenchJson(state, payload, now) {
   }
 
   if (payload.pot && Number.isFinite(payload.pot.raw)) {
-    notePot(state, payload.pot.raw, now)
+    const booting = Number.isFinite(payload.up) && payload.up < BOOT_SETTLE_MS
+    notePot(state, payload.pot.raw, now, { measured: !booting })
   }
 
   if (payload.mic && typeof payload.mic === 'object') {
@@ -873,6 +922,25 @@ export function applyLine(state, rawLine, now = Date.now()) {
   const line = rawLine.replace(/\r/g, '')
   if (!line.trim()) return false
 
+  /*
+   * A gap in the stream ends the window. See CONTINUITY_GAP_MS: the owner is
+   * rewiring while he watches, so statistics gathered before a gap may
+   * describe a circuit that no longer exists, and we cannot know whether the
+   * board reset while we were not looking.
+   *
+   * Deliberately uniform across every per-board statistic — pot extremes,
+   * press counts, encoder detents, mic-power flips, amp toggles — rather than
+   * per-field. The one exception is documented at `resetForBoot`: whether an
+   * I2C device has EVER answered survives, because intermittent-versus-absent
+   * is precisely a cross-boot question.
+   */
+  if (state.lastParsedAt !== null && now - state.lastParsedAt > CONTINUITY_GAP_MS) {
+    const gapMs = now - state.lastParsedAt
+    resetForBoot(state, now)
+    state.firmware.phase = null
+    state.continuityGapMs = gapMs
+  }
+
   state.linesSeen += 1
   state.lastLineAt = now
 
@@ -1002,6 +1070,12 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
       ageMs: lastAge,
       linesSeen: state.linesSeen,
       linesParsed: state.linesParsed,
+      /*
+       * Non-null when a gap ended the previous window, so the UI can say the
+       * counts below are "since we started watching again" rather than letting
+       * them read as the whole session.
+       */
+      continuityGapMs: state.continuityGapMs,
     },
     firmware: {
       name: state.firmware.name,
@@ -1055,7 +1129,47 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
         span: state.pot.min === null ? null : state.pot.max - state.pot.min,
         ageMs: age(state.pot.at, now),
         watched: look.controls,
+        /*
+         * TWO CLAIMS, KEPT APART — this tile got them confused and said a
+         * mis-wired pot was fine.
+         *
+         * `moved` means the wiper responds: the reading tracks the owner's
+         * hand, which proves the middle leg, its row, AIN2 and the SAADC. It
+         * does NOT mean the control is correct.
+         *
+         * `narrow` is the wiring question. The SAADC runs gain 1/4 against a
+         * VDD/4 reference, so full scale IS the rail and 4095 counts is 3 V
+         * with no scaling artefact: a correctly wired pot sweeps nearly 0 to
+         * nearly 4095. This board spans 102 counts — 75 mV, 2.5% — which
+         * cleared the old `>= 100` threshold by two counts and rendered as
+         * "swept 102 counts", i.e. as success. The threshold was written to
+         * answer "did he turn it at all", and it got read as "is it wired
+         * right". Measurement by hw-selftest across 364 samples of a full
+         * end-to-end turn.
+         */
         moved: state.pot.min !== null && state.pot.max - state.pot.min >= 100,
+        spanPercent:
+          state.pot.min === null
+            ? null
+            : Math.round(((state.pot.max - state.pot.min) / POT_RAW_MAX) * 1000) / 10,
+        /*
+         * "Has he been turning it" and "how far does the track go" are separate
+         * questions, and answering the first with the second is what put this
+         * tile wrong twice. A span of 102 counts read as a healthy sweep; the
+         * same pot at 99 counts then read as "barely moved", i.e. as if he had
+         * not touched it — the same threshold lying in both directions, one
+         * count apart.
+         *
+         * Turning is evidenced by the number of DISTINCT readings, which is
+         * independent of how far the track actually goes: a hand on the knob
+         * produces a stream of different values whether the track spans the
+         * rail or 2% of it. A still knob produces one value repeated.
+         */
+        swept: new Set(state.pot.history.map((sample) => sample.raw)).size >= 20,
+        narrow:
+          state.pot.min !== null &&
+          new Set(state.pot.history.map((sample) => sample.raw)).size >= 20 &&
+          (state.pot.max - state.pot.min) / POT_RAW_MAX < 0.25,
         history: state.pot.history.map((sample) => sample.raw),
       },
       micPower: {
@@ -1069,6 +1183,27 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
         peak: state.micLevel.peak,
         rms: state.micLevel.rms,
         band: micBand(state.micLevel.rms),
+        /*
+         * Same class of trap as the pot, caught in the audit that followed it.
+         * `band` is a LABEL for a number, not a verdict on the microphone: a
+         * stuck bit, a DC offset or a dead channel reporting a constant 600
+         * would render "SOUND" forever and read as a working mic. A live mic's
+         * RMS always jitters, so an rms that has not moved by a single count
+         * across eight samples is a stuck reading — and that needs no
+         * tolerance constant to assert, only equality, which is why it is
+         * expressed that way rather than as another "good enough" threshold.
+         */
+        flat:
+          state.micLevel.history.length >= 8 &&
+          state.micLevel.history.every((sample) => sample.rms === state.micLevel.history[0].rms),
+        /*
+         * Peak sitting exactly on the 16-bit maximum is not a loud room, it is
+         * a pinned input — a saturated stage, a floating SDIN, or a stuck bit.
+         * Constant-free by construction: 32767 is the format's own ceiling, not
+         * a "good enough" threshold somebody picked, so this cannot drift out
+         * of calibration the way `span >= 100` did.
+         */
+        saturated: state.micLevel.peak === 32767,
         ageMs: age(state.micLevel.at, now),
         watched: look.mic,
         history: state.micLevel.history.map((sample) => sample.rms),
