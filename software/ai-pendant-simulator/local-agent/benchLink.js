@@ -77,6 +77,28 @@ const IDLE_RELEASE_MS = 10000
 /** A silent port is dropped rather than held open against the next reader. */
 const SILENT_PORT_MS = 20000
 
+/*
+ * The documented stand-down lever.
+ *
+ * Another tool that needs the console — a flasher, a capture script — can
+ * create this file and this reader lets go within one scan, no HTTP call and
+ * no token needed. The lsof guard already steps off a port somebody else holds,
+ * but that leaves a two-second window where both readers are on the tty and the
+ * first seconds of their capture come back shredded. This closes it: touch the
+ * file, wait a beat, then open the port.
+ */
+const STAND_DOWN_FILE =
+  process.env.BENCH_STANDDOWN_FILE || '/tmp/pendant-bench-standdown'
+
+/** Cheap enough to check every scan, and it is a stat on a local path. */
+export function standDownRequested(file = STAND_DOWN_FILE) {
+  try {
+    return fs.existsSync(file)
+  } catch {
+    return false
+  }
+}
+
 function listCandidatePorts(forced) {
   if (forced) return [forced]
   let entries = []
@@ -153,6 +175,8 @@ export class BenchLink {
     this.rttFollow = null
     this.lastWantedAt = 0
     this.started = false
+    this.everBytes = 0
+    this.everParsed = 0
   }
 
   /**
@@ -247,6 +271,9 @@ export class BenchLink {
         stub: this.stub,
         attempts: this.attempts,
         openedAt: this.openedAt,
+        ports: this.readers.size,
+        bytes: this.everBytes,
+        parsed: this.everParsed,
       },
     })
   }
@@ -331,6 +358,13 @@ export class BenchLink {
    * before, and a wrong guess looks exactly like a dead board.
    */
   async scanSerial() {
+    if (standDownRequested()) {
+      this.closeReaders()
+      this.winner = null
+      this.linkState = 'stood-down'
+      this.detail = `another tool asked for the console (${STAND_DOWN_FILE})`
+      return
+    }
     if (this.winner && this.readers.has(this.winner)) return
     const ports = listCandidatePorts(this.forcedPort)
     if (!ports.length) {
@@ -434,6 +468,7 @@ export class BenchLink {
   }
 
   feed(port, reader, text) {
+    this.everBytes += text.length
     reader.buffer += text
     const lines = reader.buffer.split('\n')
     reader.buffer = lines.pop() ?? ''
@@ -442,7 +477,10 @@ export class BenchLink {
 
     let parsedAny = false
     for (const line of lines) {
-      if (applyLine(this.state, line)) parsedAny = true
+      if (applyLine(this.state, line)) {
+        parsedAny = true
+        this.everParsed += 1
+      }
     }
     if (!parsedAny) {
       if (this.winner === null && Date.now() - (this.openedAt || 0) > PROBE_GRACE_MS) {

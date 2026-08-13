@@ -23,7 +23,8 @@
     key: string;
     pin: number;
     colour: string;
-    role: string;
+    role: string | null;
+    unwired: boolean;
     level: number | null;
     pressed: boolean | null;
     presses: number;
@@ -42,6 +43,10 @@
       state: string;
       detail: string | null;
       stub: boolean;
+      ports: number;
+      bytes: number;
+      parsed: number;
+      openedAt: number | null;
     };
     stream: {
       connected: boolean;
@@ -167,15 +172,98 @@
       .join(" ");
   }
 
-  const stateWord = $derived.by(() => {
-    if (LOCAL_ONLY) return "LOCAL ONLY";
-    if (!snapshot) return "OPENING";
-    if (snapshot.link.stub) return "BENCH STUB";
-    if (live) return "nRF CONNECTED";
-    if (snapshot.link.state === "streaming" || snapshot.link.state === "probing")
-      return "LISTENING";
-    if (snapshot.link.state === "disabled") return "READER OFF";
-    return "nRF NOT CONNECTED";
+  /*
+   * The five things that can actually be true, kept apart.
+   *
+   * The first version of this page collapsed them into "LISTENING", and the
+   * owner read eleven grey dashes under it as wires he had broken. He had
+   * broken nothing: the ports were open and healthy and the board had simply
+   * never spoken, because no flashed image emits these values yet. "Ports open"
+   * and "board talking" are different facts and a status line that renders them
+   * identically is lying by omission — which is the one thing this page exists
+   * not to do.
+   *
+   * `link.bytes` / `link.parsed` count the whole life of the link, not the
+   * current boot: the per-boot counters reset on a reset, and "has this board
+   * EVER said anything" is precisely the question here.
+   */
+  type Situation =
+    | "local-only"
+    | "opening"
+    | "stub"
+    | "live"
+    | "idle"
+    | "unparsed"
+    | "silent"
+    | "stood-down"
+    | "busy"
+    | "off"
+    | "unplugged";
+
+  const OPEN_GRACE_MS = 6000;
+
+  const situation = $derived.by<Situation>(() => {
+    if (LOCAL_ONLY) return "local-only";
+    if (!snapshot) return "opening";
+    if (snapshot.link.stub) return "stub";
+    if (live) return "live";
+
+    const link = snapshot.link;
+    if (link.state === "disabled") return "off";
+    if (link.state === "busy") return "busy";
+    if (link.state === "stood-down") return "stood-down";
+
+    // Something arrived once. Silence after that is the console being idle —
+    // the application only prints when a value moves — not a dead link.
+    if (link.parsed > 0) return "idle";
+    /*
+     * A handful of bytes is not "the board is talking". An idle VCOM emits the
+     * odd stray byte — the DK's interface MCU puts one on the line at open —
+     * and calling that a format mismatch would send someone hunting a parser
+     * bug that does not exist. One console line is the threshold.
+     */
+    if (link.bytes > 40) return "unparsed";
+
+    if (link.ports > 0) {
+      const openFor = link.openedAt ? Date.now() - link.openedAt : 0;
+      return openFor > OPEN_GRACE_MS ? "silent" : "opening";
+    }
+    return "unplugged";
+  });
+
+  const STATE_WORD: Record<Situation, string> = {
+    "local-only": "LOCAL ONLY",
+    opening: "OPENING",
+    stub: "BENCH STUB",
+    live: "nRF CONNECTED",
+    idle: "BOARD IDLE",
+    unparsed: "UNRECOGNISED OUTPUT",
+    silent: "NO DATA YET",
+    "stood-down": "STOOD DOWN",
+    busy: "PORT BUSY",
+    off: "READER OFF",
+    unplugged: "nRF NOT CONNECTED",
+  };
+
+  const stateWord = $derived(STATE_WORD[situation]);
+
+  /* Plain words for the same thing, and never the word "error". */
+  const stateNote = $derived.by(() => {
+    switch (situation) {
+      case "silent":
+        return `Serial ports are open (${snapshot?.link.ports ?? 0}) and healthy, but the board has sent nothing at all. The firmware that reports these values is not flashed yet — this is not a wiring fault.`;
+      case "unparsed":
+        return "The board is talking, but none of it matches a line this page knows how to read. That is a format mismatch, not a broken wire.";
+      case "idle":
+        return "The board is connected and quiet. Its console only prints when a value moves, so silence here is normal — turn the knob or press a button.";
+      case "busy":
+      case "stood-down":
+        return snapshot?.link.detail ?? "Another tool is using the console.";
+      case "unplugged":
+        return "No /dev/cu.usbmodem* — the DK is unplugged.";
+      default:
+        return snapshot?.link.detail ?? error;
+    }
   });
 
   const micMeter = $derived(
@@ -338,12 +426,8 @@
       Synthetic data — <code>BENCH_TRANSPORT=stub</code> is set on the agent. Nothing
       below comes from a board.
     </p>
-  {:else if !live}
-    <p class="bn-note">
-      {snapshot?.link.detail ??
-        error ??
-        "Nothing is arriving from the DK. Values below are the last ones seen, not live."}
-    </p>
+  {:else if situation !== "live" && situation !== "opening"}
+    <p class="bn-note">{stateNote}</p>
   {:else if snapshot && !snapshot.firmware.watching.controls}
     <p class="bn-note">
       The self-test is in its microphone window — the buttons, knob and pot are not
@@ -360,7 +444,9 @@
   <section class="bn-grid" class:standby={!live}>
     {#each snapshot?.controls.buttons ?? [] as button (button.key)}
       <article class="bn-tile" class:hot={button.pressed && !dim(button.ageMs, 60_000)}>
-        <p class="bn-label">{button.colour} · {button.role}</p>
+        <p class="bn-label">
+          {button.colour}{button.role ? ` · ${button.role}` : " · unused"}
+        </p>
         <p class="bn-value" class:muted={button.pressed == null || !button.moved}>
           {button.pressed == null ? "—" : button.pressed ? "PRESSED" : "up"}
         </p>
@@ -368,6 +454,12 @@
           P0.{button.pin} ·
           {#if button.moved}
             {button.presses} press{button.presses === 1 ? "" : "es"}
+          {:else if button.unwired}
+            <!-- A pin with its wires off floats HIGH against the internal
+                 pull-up, which is exactly what an unpressed button reads. This
+                 tile cannot answer either way, and saying "not seen yet" here
+                 would imply it is being tested. -->
+            <span class="bn-waiting">wires off — reads the same either way</span>
           {:else}
             <span class="bn-waiting">not seen yet</span>
           {/if}

@@ -27,6 +27,19 @@ function feed(state, lines, at = 1_000) {
   return clock
 }
 
+test('the button roles are the owner\'s ruling, and green claims none', () => {
+  const snapshot = benchSnapshot(createBenchState(0), { now: 1_000 })
+  assert.deepEqual(
+    snapshot.controls.buttons.map((button) => [button.pin, button.role, button.unwired]),
+    [
+      [21, 'Talk + push-to-talk', false],
+      // Green's wires are off the board; it owns no function until they are back.
+      [22, null, true],
+      [23, 'Memo', false],
+    ],
+  )
+})
+
 test('a button press and release moves the level, the count, and nothing else', () => {
   const state = createBenchState(0)
   feed(state, [
