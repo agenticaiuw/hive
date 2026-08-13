@@ -79,6 +79,18 @@ static size_t bt_line_length;
 static volatile bool bt_line_ready;
 static bool bt_line_overflow;
 static uint32_t bt_lines_dropped;
+/*
+ * Liveness, for the bench dashboard only — never for policy.
+ *
+ * "Is the ESP32 talking?" is one of the wires the owner cannot see, and it has
+ * three genuinely different answers that a single boolean would flatten: a
+ * whole line came back (the pair of wires and the module's firmware both
+ * work), bytes came back but never a newline (a baud mismatch or a half-wired
+ * link), or nothing at all. Counted in the ISR because that is the only place
+ * that sees the bytes the line filter throws away.
+ */
+static volatile uint32_t bt_bytes_seen;
+static volatile uint32_t bt_lines_seen;
 
 static atomic_t bt_connect_req;
 static atomic_t bt_scan_req;
@@ -243,6 +255,13 @@ static void bt_uart_isr(const struct device *dev, void *user_data)
 		if (uart_fifo_read(dev, &byte, 1) != 1) {
 			break;
 		}
+		/*
+		 * Counted before every filter below, including the
+		 * drop-the-bytes path: this is the bench's evidence that the
+		 * module's TX wire reaches this chip at all, which is a
+		 * different question from whether anything it said was wanted.
+		 */
+		++bt_bytes_seen;
 		if (bt_line_ready) {
 			/* Main still owns the buffer. Keep draining the FIFO
 			 * (an unread UARTE re-interrupts forever) but throw
@@ -261,6 +280,7 @@ static void bt_uart_isr(const struct device *dev, void *user_data)
 			continue;
 		}
 		bt_line[bt_line_length] = '\0';
+		++bt_lines_seen;
 		/*
 		 * Type filter, in the ISR because it decides whether the one
 		 * slot is spent. Only frames that change policy are latched:
@@ -468,6 +488,20 @@ bool pendant_bt_work_pending(void)
 bool pendant_bt_link_up(void)
 {
 	return atomic_get(&bt_connected) != 0;
+}
+
+const char *pendant_bt_module_state(void)
+{
+	if (!bt_uart_ready) {
+		return NULL;
+	}
+	if (bt_lines_seen > 0U) {
+		return "ok";
+	}
+	if (bt_bytes_seen > 0U) {
+		return "partial";
+	}
+	return "silent";
 }
 
 bool pendant_bt_list_requested(void)
