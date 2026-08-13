@@ -244,8 +244,17 @@ test('a clear day is still read from the script, not from the app-launch receipt
  * a dead knob, and the grammar's rule is that nothing lands silently.
  */
 test('entering a Mac-backed app says where it is looking before it waits', () => {
-  assert.equal(appFetchingSpeech('reminders'), 'Checking your reminders.')
-  assert.equal(appFetchingSpeech('calendar'), 'Checking your calendar.')
+  /*
+   * "Checking your Mac", not "Checking your reminders" (2026-08-13). The ring
+   * now speaks the app's name and its how-to on entry — "Reminders. Yellow to
+   * check again." — so naming the app again here made it the third mention in
+   * four seconds. What this line has to add is the part the owner cannot
+   * guess: the wait belongs to ANOTHER MACHINE, and the pendant has not
+   * frozen. Both apps say the same thing for the same reason, which is why
+   * they are asserted equal rather than separately.
+   */
+  assert.equal(appFetchingSpeech('reminders'), 'Checking your Mac.')
+  assert.equal(appFetchingSpeech('calendar'), 'Checking your Mac.')
 })
 
 test('the reminders script bulk-fetches instead of looping over app objects', () => {

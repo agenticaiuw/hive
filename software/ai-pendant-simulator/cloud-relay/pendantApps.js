@@ -132,7 +132,16 @@ export function appMacPlan(app) {
  * the whole fix, and it is also honest about where the answer is coming from.
  */
 export function appFetchingSpeech(app) {
-  return app === 'calendar' ? 'Checking your calendar.' : 'Checking your reminders.'
+  /*
+   * "Checking your Mac", not "Checking your reminders". The ring has just
+   * spoken the app's name and its how-to ("Reminders. Yellow to check
+   * again."), so naming the app a third time in four seconds is the device
+   * filling airtime. What this sentence has to add is the thing the owner
+   * cannot guess — that the delay they are about to sit through belongs to
+   * another machine, and that the pendant has not frozen.
+   */
+  void app
+  return 'Checking your Mac.'
 }
 
 /* ---------------------------------------------------------------- Time */

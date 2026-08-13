@@ -5,6 +5,9 @@ import {
   MAX_TIMER_MS,
   cancelTimers,
   claimDueTimers,
+  msUntilClock,
+  startAlarm,
+  timerSetSpeech,
   createTimerControl,
   createTimerRecord,
   describeDuration,
@@ -284,4 +287,92 @@ test('timers are per device — one pendant cannot chime another', async () => {
   await startTimer({ store, deviceId: DEVICE, minutes: 10, now: T0 })
   assert.deepEqual(await listTimers(store, 'other-pendant'), [])
   assert.deepEqual(await claimDueTimers({ store, deviceId: 'other-pendant', now: T0 + 99 * MIN }), [])
+})
+
+/* ------------------------------------------------------------- alarms */
+
+test('msUntilClock always finds the NEXT occurrence, never one in the past', () => {
+  /* Local noon, expressed in UTC ms with a zero offset for legibility. */
+  const noon = Date.UTC(2026, 7, 13, 12, 0, 0)
+
+  /* Later today. */
+  assert.equal(msUntilClock(14, 30, { now: noon, offsetMinutes: 0 }), 2.5 * 60 * 60_000)
+  /* Earlier today means tomorrow — the only reading a person ever intends
+   * when they set a 7 AM alarm at 8 AM. */
+  assert.equal(msUntilClock(7, 0, { now: noon, offsetMinutes: 0 }), 19 * 60 * 60_000)
+  /* Exactly now rolls a full day rather than firing instantly: an alarm that
+   * goes off as you set it is indistinguishable from a misheard number. */
+  assert.equal(msUntilClock(12, 0, { now: noon, offsetMinutes: 0 }), 24 * 60 * 60_000)
+})
+
+test('msUntilClock reads the clock in the OWNER’s timezone, not the relay’s', () => {
+  /*
+   * 12:00 UTC is 05:00 in a -7h zone. A 7 AM alarm is therefore two hours
+   * away for the owner standing in that zone, and nineteen hours away for the
+   * relay — a worn device that got this wrong would wake somebody in the
+   * middle of the night.
+   */
+  const noonUtc = Date.UTC(2026, 7, 13, 12, 0, 0)
+  assert.equal(msUntilClock(7, 0, { now: noonUtc, offsetMinutes: -420 }), 2 * 60 * 60_000)
+  /* And it survives the date boundary the offset creates. */
+  assert.equal(msUntilClock(4, 0, { now: noonUtc, offsetMinutes: -420 }), 23 * 60 * 60_000)
+})
+
+test('an alarm is a timer, in the same store and the same due queue', async () => {
+  const store = createMemoryStore()
+  const record = await startAlarm({
+    store,
+    deviceId: DEVICE,
+    hour: 14,
+    minute: 30,
+    alarmAt: '2:30 PM',
+    offsetMinutes: 0,
+    now: Date.UTC(2026, 7, 13, 12, 0, 0),
+  })
+  assert.equal(record.kind, 'alarm')
+  assert.equal(record.alarmAt, '2:30 PM')
+
+  /* The whole point of reusing the store: no second sweep, no second claim
+   * protocol, no second way for a chime to go missing. */
+  const due = await claimDueTimers({
+    store,
+    deviceId: DEVICE,
+    now: Date.UTC(2026, 7, 13, 14, 31, 0),
+  })
+  assert.equal(due.length, 1)
+  assert.equal(due[0].timerId, record.timerId)
+})
+
+test('an alarm names the TIME; a timer names the duration', () => {
+  const alarm = createTimerRecord({
+    deviceId: DEVICE,
+    durationMs: 3 * 60 * 60_000,
+    kind: 'alarm',
+    alarmAt: '7:30 AM',
+    now: T0,
+  })
+  assert.equal(timerSetSpeech(alarm), 'Alarm set for 7:30 AM.')
+  assert.equal(timerDoneSpeech(alarm), "Alarm. It's 7:30 AM.")
+  /* Never "your 3 hour timer is done" — the owner set a clock face, and the
+   * duration is an implementation detail they never chose. */
+  assert.doesNotMatch(timerDoneSpeech(alarm), /hour|timer/i)
+})
+
+test('the knob confirmation repeats the value WITH units, once', () => {
+  /*
+   * Coming off a numeric field the owner has heard nothing but bare numbers —
+   * "seven.", "eight." — so this is the first and only place the unit is
+   * spoken. Owner's phrasing, 2026-08-13.
+   */
+  const record = createTimerRecord({ deviceId: DEVICE, minutes: 7, now: T0 })
+  assert.equal(timerSetSpeech(record), 'Timer set for 7 minutes.')
+  assert.equal(timerSetSpeech(createTimerRecord({ deviceId: DEVICE, minutes: 1, now: T0 })), 'Timer set for 1 minute.')
+  assert.equal(timerSetSpeech(createTimerRecord({ deviceId: DEVICE, minutes: 90, now: T0 })), 'Timer set for 1 hour 30 minutes.')
+})
+
+test('a plain timer is unchanged by the alarm fields', () => {
+  const record = createTimerRecord({ deviceId: DEVICE, minutes: 10, now: T0 })
+  assert.equal(record.kind, 'timer')
+  assert.equal(record.alarmAt, null)
+  assert.equal(timerStartedSpeech(record), '10 minute timer started.')
 })
