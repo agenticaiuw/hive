@@ -102,6 +102,7 @@ target_sources(app PRIVATE
   src/pendant_reflex.c
   src/haptic.c
   src/pendant_status.c
+  src/bench.c
 )
 target_compile_options(app PRIVATE -fstack-usage)
 

@@ -20,6 +20,7 @@
 #include <ff.h>
 
 #include "audio_opus.h"
+#include "bench.h"
 #include "haptic.h"
 #include "pendant_bt.h"
 #include "pendant_cloud.h"
@@ -962,7 +963,19 @@ static void button_pressed(const struct device *port,
 {
 	ARG_UNUSED(port);
 	ARG_UNUSED(callback);
-	ARG_UNUSED(pins);
+
+	/*
+	 * The DK's own button 1 and the external yellow button share this
+	 * handler and this semaphore on purpose (see ASK_BUTTON_NODE), so the
+	 * bench has to be told which one actually moved — a telemetry line
+	 * claiming P0.21 fired because someone pressed the board's button
+	 * would be worse than no line at all. Zephyr hands the callback the
+	 * real fired-pin mask, so the discrimination is exact rather than
+	 * inferred.
+	 */
+	if (pins & BIT(ask_button.pin)) {
+		pendant_bench_note_button(PENDANT_BENCH_YELLOW);
+	}
 	k_sem_give(&button_press_sem);
 }
 
@@ -993,6 +1006,7 @@ static void memo_button_pressed(const struct device *port,
 	ARG_UNUSED(port);
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
+	pendant_bench_note_button(PENDANT_BENCH_GREEN);
 	k_sem_give(&memo_press_sem);
 }
 
@@ -1003,6 +1017,7 @@ static void ptt_button_pressed(const struct device *port,
 	ARG_UNUSED(port);
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
+	pendant_bench_note_button(PENDANT_BENCH_BLUE);
 	k_sem_give(&ptt_press_sem);
 }
 
@@ -1112,6 +1127,14 @@ static void encoder_edge_isr(const struct device *port,
 		atomic_val_t backlog = atomic_get(&menu_step_backlog);
 
 		encoder_detent_accum = 0;
+		/*
+		 * Counted here rather than off the backlog: the backlog is
+		 * capped and cleared when the link is down, so counting it
+		 * would make the bench report "the knob stopped working" for
+		 * what is really "the socket is closed". The detent happened
+		 * either way, and that is the wire question.
+		 */
+		pendant_bench_note_detent(step);
 		/* Single ISR producer, so this check-then-add cannot race
 		 * itself; the WS thread only ever moves the value toward
 		 * zero, which makes the cap conservative, never wrong. */
@@ -1235,6 +1258,13 @@ static void volume_poll(void)
 	if (raw < 0) {
 		return;
 	}
+	/*
+	 * The bench sees the count BEFORE the end-stop snap and the 2 %
+	 * hysteresis below. Those exist so a resting knob does not retrigger
+	 * the volume path; a bench that inherited them would tell the owner
+	 * their pot is dead through the first 80 counts of travel.
+	 */
+	pendant_bench_note_pot(raw);
 	if (raw <= VOLUME_SNAP_LOW) {
 		raw = 0;
 	} else if (raw >= VOLUME_SNAP_HIGH) {
@@ -1684,6 +1714,7 @@ static int mount_sd_card(void)
 	}
 	sd_mount_result = error;
 	sd_ready = error == 0;
+	pendant_bench_note_sd(sd_ready);
 	return error;
 }
 
@@ -2639,6 +2670,27 @@ static void show_error(void)
 	pendant_status_set(PENDANT_STATUS_FAILED);
 	while (true) {
 		gpio_pin_toggle_dt(&led);
+		/*
+		 * THE BENCH KEEPS REPORTING FROM INSIDE A DEAD BOOT.
+		 *
+		 * This is the loop a pendant with no usable microSD actually
+		 * sits in, and it is the exact state in which the owner most
+		 * needs to see their wires: a board that failed to boot is a
+		 * board somebody is about to go poking at. Measured on this
+		 * bench 2026-08-13 — the app reached here 320 ms after reset
+		 * and stayed, so every control tile on the dashboard had one
+		 * boot sample and then aged out forever, which reads as "the
+		 * board went away" rather than "the board is parked".
+		 *
+		 * Both calls are safe here by construction: volume_poll is one
+		 * bounded SAADC read whose only side effects are a gain word
+		 * and a report atomic that nothing is consuming yet (the WS
+		 * thread is not created until after this function's callers),
+		 * and pendant_bench_tick only reads pads and prints. Neither
+		 * can resurrect the boot, and neither is supposed to.
+		 */
+		volume_poll();
+		pendant_bench_tick();
 		k_msleep(100);
 	}
 }
@@ -3971,6 +4023,15 @@ static int run_conversation(const struct device *i2s)
 		 * audio is playing. Internally gated to 50 ms; the one-shot
 		 * SAADC read is microseconds against the TX runway. */
 		volume_poll();
+		/*
+		 * The bench keeps watching mid-conversation. A diagnostic that
+		 * goes blind during its own audio window is the failure this
+		 * replaces: the owner presses a button BECAUSE audio is
+		 * playing, so that is precisely when the dashboard must not
+		 * stop reporting. Rate-limited inside (150 ms floor,
+		 * change-driven), so a quiet call here is a few register reads.
+		 */
+		pendant_bench_tick();
 
 		if (k_uptime_get() - started_at >
 		    (int64_t)CONVO_MAX_SECONDS * 1000) {
@@ -4618,10 +4679,29 @@ static int run_ptt_question(const struct device *i2s)
  */
 static void configure_control_inputs(void)
 {
+	/*
+	 * What actually came up, for the bench telemetry at the end of this
+	 * function. A control that failed above has its key OMITTED from every
+	 * telemetry line rather than reported as a level of 0 — see bench.h,
+	 * rule 2. These are the only honest source for that: the pad of an
+	 * unconfigured pin reads a number, and the number means nothing.
+	 */
+	struct pendant_bench_config bench = {
+		.button_pin = { -1, -1, -1 },
+		.encoder_a_pin = -1,
+		.encoder_b_pin = -1,
+		.mic_sense_pin = -1,
+		.amp_pin = -1,
+		.firmware = "pendant app",
+	};
+
 	/* Yellow "ask": a second body for button 1, same ISR, same
 	 * semaphore, so every existing press path hears it unchanged. */
 	if (gpio_is_ready_dt(&ask_button) &&
 	    gpio_pin_configure_dt(&ask_button, GPIO_INPUT) == 0) {
+		bench.button_pin[PENDANT_BENCH_YELLOW] = (int8_t)ask_button.pin;
+		bench.button_active_level[PENDANT_BENCH_YELLOW] =
+			(ask_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
 		gpio_init_callback(&ask_button_callback, button_pressed,
 				   BIT(ask_button.pin));
 		if (gpio_add_callback(ask_button.port, &ask_button_callback) !=
@@ -4636,6 +4716,9 @@ static void configure_control_inputs(void)
 
 	if (gpio_is_ready_dt(&memo_button) &&
 	    gpio_pin_configure_dt(&memo_button, GPIO_INPUT) == 0) {
+		bench.button_pin[PENDANT_BENCH_GREEN] = (int8_t)memo_button.pin;
+		bench.button_active_level[PENDANT_BENCH_GREEN] =
+			(memo_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
 		gpio_init_callback(&memo_button_callback, memo_button_pressed,
 				   BIT(memo_button.pin));
 		if (gpio_add_callback(memo_button.port,
@@ -4650,6 +4733,9 @@ static void configure_control_inputs(void)
 
 	if (gpio_is_ready_dt(&ptt_button) &&
 	    gpio_pin_configure_dt(&ptt_button, GPIO_INPUT) == 0) {
+		bench.button_pin[PENDANT_BENCH_BLUE] = (int8_t)ptt_button.pin;
+		bench.button_active_level[PENDANT_BENCH_BLUE] =
+			(ptt_button.dt_flags & GPIO_ACTIVE_LOW) ? 0U : 1U;
 		gpio_init_callback(&ptt_button_callback, ptt_button_pressed,
 				   BIT(ptt_button.pin));
 		if (gpio_add_callback(ptt_button.port, &ptt_button_callback) !=
@@ -4671,6 +4757,8 @@ static void configure_control_inputs(void)
 	if (gpio_is_ready_dt(&encoder_a) && gpio_is_ready_dt(&encoder_b) &&
 	    gpio_pin_configure_dt(&encoder_a, GPIO_INPUT) == 0 &&
 	    gpio_pin_configure_dt(&encoder_b, GPIO_INPUT) == 0) {
+		bench.encoder_a_pin = (int8_t)encoder_a.pin;
+		bench.encoder_b_pin = (int8_t)encoder_b.pin;
 		encoder_prev_state = encoder_read_state();
 		gpio_init_callback(&encoder_callback, encoder_edge_isr,
 				   BIT(encoder_a.pin) | BIT(encoder_b.pin));
@@ -4696,6 +4784,7 @@ static void configure_control_inputs(void)
 	if (gpio_is_ready_dt(&mic_sense) &&
 	    gpio_pin_configure_dt(&mic_sense, GPIO_INPUT) == 0) {
 		mic_sense_ready = true;
+		bench.mic_sense_pin = (int8_t)mic_sense.pin;
 		printk("Mic power sense ready (P0.26): mic is %s\n",
 		       mic_power_is_cut() ? "MUTED (power cut)" : "powered");
 	} else {
@@ -4709,6 +4798,7 @@ static void configure_control_inputs(void)
 	if (gpio_is_ready_dt(&amp_sd_mode) &&
 	    gpio_pin_configure_dt(&amp_sd_mode, GPIO_OUTPUT_INACTIVE) == 0) {
 		amp_sd_mode_ready = true;
+		bench.amp_pin = (int8_t)amp_sd_mode.pin;
 	} else {
 		printk("Speaker amp gate (P0.01) not configured\n");
 	}
@@ -4717,6 +4807,15 @@ static void configure_control_inputs(void)
 	/* Volume knob (SAADC): probe-once, degrades to "feature absent" on a
 	 * bare breadboard. */
 	volume_adc_init();
+
+	/*
+	 * Last, so it inherits the true outcome of every probe above. The
+	 * emitter is read-only from here on — it samples pads and counters and
+	 * prints; it never drives a pin, never takes a lock and never touches
+	 * a semaphore, so no control's behaviour depends on whether it is
+	 * compiled in.
+	 */
+	pendant_bench_init(&bench);
 }
 
 /*
@@ -4820,6 +4919,15 @@ int main(void)
 	 * already set that pin up — this ordering is belt and braces.
 	 */
 	(void)haptic_init();
+	/*
+	 * The one and only I2C probe this firmware performs, so it is the only
+	 * honest source for the bench's bus tile. Reported as an ADDRESS LIST
+	 * (empty when the part stayed silent), never as "the bus is broken":
+	 * the external 4.7k pull-ups and their 3 V rail were measured healthy
+	 * over SWD on 2026-08-13, so silence here is a question about the
+	 * DRV2605L's own power or its SDA/SCL leg.
+	 */
+	pendant_bench_note_i2c(haptic_available());
 	pendant_status_init(mic_power_is_cut);
 
 	if (!device_is_ready(i2s)) {
@@ -4830,6 +4938,15 @@ int main(void)
 	if (mount_sd_card() == 0 && test_sd_persistence() != 0) {
 		sd_ready = false;
 	}
+	/*
+	 * Re-stated AFTER the persistence test, not just inside mount_sd_card:
+	 * a card that mounts and then cannot be written to is the failure this
+	 * board actually has, and reporting the mount alone told the dashboard
+	 * "sd mounted: true" about a card the firmware had already given up on.
+	 * The bench must agree with the firmware's own verdict or it is not an
+	 * instrument, it is a second opinion nobody asked for.
+	 */
+	pendant_bench_note_sd(sd_ready);
 	if (!sd_ready) {
 		printk("microSD is required for Internet voice upload\n");
 		audio_cycle_result = sd_mount_result;
@@ -5071,6 +5188,14 @@ int main(void)
 			 * plenty for a level that only matters once audio
 			 * plays; the conversation loop polls at full rate. */
 			volume_poll();
+			/*
+			 * The bench, on the loop the owner is actually looking
+			 * at: this is where the pendant sits while a wire is
+			 * being wiggled. A press shorter than this loop's 200 ms
+			 * turn is still caught — the ISR latches the edge and
+			 * this call drains it (see bench.h).
+			 */
+			pendant_bench_tick();
 			/*
 			 * Button 2 needs no radio, no microphone and no
 			 * decision about whether the link is usable. It is

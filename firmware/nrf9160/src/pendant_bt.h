@@ -95,4 +95,17 @@ void pendant_bt_list_answered(void);
 /* Module reports an A2DP sink connected. */
 bool pendant_bt_link_up(void);
 
+/*
+ * Bench telemetry: has the module's TX wire ever produced anything?
+ *
+ *   "ok"      a whole line arrived — wires, baud and module firmware all work
+ *   "partial" bytes arrived but never a newline — half a link, not none
+ *   "silent"  uart1 is up and the module has said nothing
+ *   NULL      no uart1 at all, so there is nothing to have an opinion about
+ *
+ * Diagnostic only. Nothing in the Bluetooth policy reads this: a module that
+ * has gone quiet is handled by the reconnect timer, not by a health string.
+ */
+const char *pendant_bt_module_state(void);
+
 #endif /* PENDANT_BT_H_ */

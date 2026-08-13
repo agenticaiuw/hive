@@ -174,4 +174,35 @@ config PENDANT_RGB_COMMON_ANODE
 	  (bit 15 = polarity) at compile time, so both wirings run the exact
 	  same code at the exact same brightness.
 
+config PENDANT_BENCH_TELEMETRY
+	bool "Emit BENCH {json} control telemetry on the console"
+	default y
+	help
+	  Print one machine-readable line per control change so the bench
+	  dashboard on the Mac can show every button, the encoder, the volume
+	  pot and the mic-power sense as live numbers while the owner wiggles
+	  the wire they are unsure about.
+
+	  WHY THIS IS IN THE PRODUCT AND NOT IN A SELF-TEST IMAGE. A separate
+	  diagnostic firmware was the first plan and it answers the wrong
+	  question: it can only tell you a wire works while the product is NOT
+	  running. It also has to be flashed, which on this bench means the
+	  owner loses the pendant for a minute every time they want to check a
+	  jumper. Emitting from the shipping app makes the instrument agree
+	  with reality by construction.
+
+	  WHAT IT COSTS WITH NOBODY WATCHING. Change-driven with a 5 s
+	  heartbeat and a 150 ms floor between lines. A still bench is one
+	  ~180 byte line every five seconds — about 1.6 ms of UART — plus a
+	  handful of GPIO register reads on loops that already turn. No
+	  thread, no timer, no buffers; roughly 60 B of RAM in counters. The
+	  emitter never allocates and never blocks on anything but the console
+	  it is already sharing with printk.
+
+	  Turn it off for a battery build where the console is unused, or when
+	  the console is needed for something that cannot tolerate interleaved
+	  lines. Everything else in the firmware behaves identically either
+	  way: the emitter only ever reads pads and counters, and the call
+	  sites compile to nothing when this is n.
+
 source "Kconfig.zephyr"
