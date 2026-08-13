@@ -560,8 +560,26 @@
     <div class="error-banner">{error}</div>
   {/if}
 
-  <!-- 1 · WHAT NEEDS YOU. Above the answer, because it is the only thing on
-       this page that cannot proceed without the owner. -->
+  <!-- 1 · ASK IT SOMETHING. One box for voice and text — the transport is
+       chosen per submission and each submission's card says which path carried
+       it (via this Mac / via relay).
+
+       It used to sit BELOW the answer card, which is where DESIGN.md says it
+       must not be: "the main feature of any page should always occupy the most
+       visual field", and "are the most common user actions accessible on the
+       first level". Asking is the action the owner takes most; the answer card
+       above it is a variable-height block that, on a long answer at 375px,
+       pushed the composer off the screen entirely — so the one control the page
+       exists for could only be found by scrolling past the last reply. One row
+       at the top costs the answer card almost nothing and costs the ask
+       nothing. -->
+  <section class="ask" aria-label="Ask the hive">
+    <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
+  </section>
+
+  <!-- 2 · WHAT NEEDS YOU. Still above the answer, because it is the only thing
+       on this page that cannot proceed without the owner — and still within a
+       screen of the top, since the composer above it is a single row. -->
   {#if approvals.length}
     <div id="needs-you" class="needs-you">
       {#if freshApprovals.length}
@@ -634,7 +652,7 @@
     </div>
   {/if}
 
-  <!-- 2 · WHAT IT SAID. -->
+  <!-- 3 · WHAT IT SAID. -->
   <AnswerCard
     state={hero}
     run={selected}
@@ -656,13 +674,6 @@
       {/if}
     {/snippet}
   </AnswerCard>
-
-  <!-- 3 · ASK IT SOMETHING. One box for voice and text — the transport is
-       chosen per submission and each submission's card says which path
-       carried it (via this Mac / via relay). -->
-  <section class="ask" aria-label="Ask the hive">
-    <CommandBox onQueued={handleCommandQueued} onOpenJobs={showJobsPanel} />
-  </section>
 
   <!-- 4 · WHAT IT DID — the one hive feed across EVERY node, each row wearing
        its device tag(s). It used to render relay-witnessed runs plus Mac-local
