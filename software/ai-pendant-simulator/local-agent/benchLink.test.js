@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { BenchLink, foreignHolders, standDownRequested } from './benchLink.js'
+import {
+  BenchLink,
+  consolePortOf,
+  foreignHolders,
+  standDownRequested,
+} from './benchLink.js'
 
 function fakeReader() {
   const reader = { buffer: '', bytes: 0, openedAt: Date.now(), killed: false }
@@ -237,4 +242,77 @@ test('registering the routes performs no I/O and opens no port', async () => {
   assert.equal(link.readers.size, 0)
   assert.equal(link.snapshot().link.state, 'absent')
   resetBenchLink()
+})
+
+/*
+ * The bug the owner hit: the bench held two silent ports, never opened VCOM0,
+ * and called itself "streaming" while he pressed a button and watched nothing.
+ */
+test('VCOM0 is the console, and it is the lowest-numbered port', () => {
+  assert.equal(
+    consolePortOf([
+      '/dev/cu.usbmodem0009600365813',
+      '/dev/cu.usbmodem0009600365815',
+      '/dev/cu.usbmodem0009600365811',
+    ]),
+    '/dev/cu.usbmodem0009600365811',
+  )
+  assert.equal(consolePortOf([]), null)
+})
+
+test('a stray byte on VCOM1 cannot elect itself the console', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  link.candidates = ['/dev/cu.a', '/dev/cu.b']
+
+  // VCOM1 parses something first and may hold the slot provisionally...
+  link.feed('/dev/cu.b', link.readers.get('/dev/cu.b'), 'STATUS mic MUTED\n')
+  assert.equal(link.winner, '/dev/cu.b')
+  // ...but the console is not open, so this is NOT a healthy link.
+  assert.equal(link.linkState, 'console-missing')
+  assert.match(link.detail, /VCOM0/)
+
+  // The console speaks: it takes the slot back and the others are released.
+  link.readers.set('/dev/cu.a', fakeReader())
+  const consoleReader = link.readers.get('/dev/cu.a')
+  link.feed('/dev/cu.a', consoleReader, 'BENCH {"v":1,"up":10,"pot":{"raw":194}}\n')
+  assert.equal(link.winner, '/dev/cu.a')
+  assert.equal(link.linkState, 'streaming')
+  assert.deepEqual([...link.readers.keys()], ['/dev/cu.a'])
+  assert.equal(link.snapshot().controls.pot.raw, 194)
+})
+
+test('a console that was busy is retried on every scan, not latched out', async () => {
+  const link = new BenchLink({ transport: 'off', standDownFile: NO_STANDDOWN })
+  link.candidates = ['/dev/cu.a', '/dev/cu.b']
+  link.readers.set('/dev/cu.b', fakeReader())
+  link.holders.set('/dev/cu.a', [4242])
+  link.missing = ['/dev/cu.a']
+
+  // Winning on a non-console port must NOT stop the scan: the old code
+  // returned early forever once any port won, so a console held for a moment
+  // by the firmware agent was never opened again.
+  link.winner = '/dev/cu.b'
+  link.describeState()
+  assert.equal(link.linkState, 'console-missing')
+  assert.match(link.detail, /held by pid 4242/)
+
+  // Once it frees up, the very next scan opens it.
+  link.holders.delete('/dev/cu.a')
+  link.readers.set('/dev/cu.a', fakeReader())
+  link.missing = []
+  link.winner = '/dev/cu.a'
+  link.describeState()
+  assert.equal(link.linkState, 'streaming')
+})
+
+test('the console is never reaped for being quiet', () => {
+  const link = linkWithPorts(['/dev/cu.a', '/dev/cu.b'])
+  link.candidates = ['/dev/cu.a', '/dev/cu.b']
+  for (const reader of link.readers.values()) {
+    reader.openedAt = Date.now() - 60_000
+  }
+  link.reapSilentReaders()
+  // An idle or mid-flash board says nothing for far longer than the window;
+  // dropping VCOM0 on that basis is how this failure started.
+  assert.deepEqual([...link.readers.keys()], ['/dev/cu.a'])
 })

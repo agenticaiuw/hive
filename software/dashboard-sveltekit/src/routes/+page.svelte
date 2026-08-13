@@ -111,7 +111,8 @@
     isAgentInitiated,
     mergeHiveFeed,
     pickHero,
-  } from "$lib/hiveFeed.js";
+    repeatSummary,
+} from "$lib/hiveFeed.js";
   import {
     pendingApprovals,
     runState,
@@ -688,6 +689,9 @@
           {@const tags = deviceTagsFor(run)
             .map((tag) => tag.label)
             .join(" · ")}
+          <!-- Empty for every row the relay did not fold, so a row with
+               nothing to repeat gains no text. -->
+          {@const repeats = repeatSummary(run)}
           <li>
             <button
               class="recent-row {run.pipelineId === selected?.pipelineId
@@ -697,14 +701,14 @@
               aria-current={run.pipelineId === selected?.pipelineId
                 ? "true"
                 : undefined}
-              aria-label={`${state.question || "Untitled run"} · ${tags} · ${state.label} · ${clock(run.createdAt)}`}
+              aria-label={`${state.question || "Untitled run"} · ${tags} · ${state.label}${repeats ? ` ${repeats}` : ""} · ${clock(run.createdAt)}`}
             >
               <span class="recent-text">
                 {state.answer || state.question || "Untitled run"}
               </span>
               <span class="recent-meta">
                 <i class="state-dot {state.tone}" aria-hidden="true"></i>
-                {tags} · {state.label}
+                {tags} · {state.label}{repeats ? ` ${repeats}` : ""}
                 · {formatWhen(run.createdAt)}
               </span>
             </button>

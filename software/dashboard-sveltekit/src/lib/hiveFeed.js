@@ -51,7 +51,10 @@
 /** @typedef {{ key: string, label: string, hint: string }} HiveNode */
 
 /** @param {unknown} value */
-const norm = (value) => String(value ?? "").trim().toLowerCase();
+const norm = (value) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase();
 
 /* Pendant transports. `inputTelemetry.storage` is one of the first three;
  * `microSD` normalises to `microsd`. `pendant`/`nrf9160` are the source names
@@ -85,13 +88,37 @@ const CLOUD = new Set(["cloudflare", "cloud", "cloud-relay"]);
  * word, and excluded from the owner feed fold. */
 /** @type {Record<string, HiveNode>} */
 const DEV = {
-  routine: { key: "routine", label: "Routine", hint: "Fired on a schedule, not by you" },
-  recon: { key: "recon", label: "Recon", hint: "The agent started this on its own" },
-  "harness-task": { key: "harness-task", label: "Harness", hint: "Automated harness run" },
-  "mac-planner": { key: "mac-planner", label: "Planner", hint: "Planned on this Mac" },
-  measure: { key: "measure", label: "Measure", hint: "Benchmark / measurement run" },
+  routine: {
+    key: "routine",
+    label: "Routine",
+    hint: "Fired on a schedule, not by you",
+  },
+  recon: {
+    key: "recon",
+    label: "Recon",
+    hint: "The agent started this on its own",
+  },
+  "harness-task": {
+    key: "harness-task",
+    label: "Harness",
+    hint: "Automated harness run",
+  },
+  "mac-planner": {
+    key: "mac-planner",
+    label: "Planner",
+    hint: "Planned on this Mac",
+  },
+  measure: {
+    key: "measure",
+    label: "Measure",
+    hint: "Benchmark / measurement run",
+  },
   probe: { key: "probe", label: "Probe", hint: "Health probe" },
-  "user-test": { key: "user-test", label: "Manual", hint: "Hand-run test from the owner" },
+  "user-test": {
+    key: "user-test",
+    label: "Manual",
+    hint: "Hand-run test from the owner",
+  },
   test: { key: "test", label: "Test", hint: "Automated test run" },
 };
 
@@ -204,7 +231,8 @@ export function hiveNodeFor(record = {}) {
    * relay history ORIGIN is a dashboard on some other device, routed through
    * the relay — a different node, named honestly rather than claimed as local.
    */
-  if (!origin && (source === "dashboard" || source === "local")) return NODE.mac;
+  if (!origin && (source === "dashboard" || source === "local"))
+    return NODE.mac;
   if (origin === "dashboard" || origin === "local") return NODE.dashboard;
 
   if (CLOUD.has(origin) || CLOUD.has(source)) return NODE.cloud;
@@ -239,7 +267,8 @@ export const AGENT_INITIATED = {
  * jobTracker's `source` is whatever the caller posted (`operator-probe`,
  * `harness-task`, …), so membership has to read the words, not a fixed list.
  */
-const AGENT_WORD = /(^|[-_ ])(probe|probes|recon|routine|routines|harness|measure|benchmark|test|tests)([-_ ]|$)/;
+const AGENT_WORD =
+  /(^|[-_ ])(probe|probes|recon|routine|routines|harness|measure|benchmark|test|tests)([-_ ]|$)/;
 
 /** @param {HiveNode} node */
 const foldToDeviceTag = (node) =>
@@ -494,11 +523,45 @@ export function pickHero(entries, stateFor, { approvedCommands } = {}) {
     if (state.phase === "nothing-yet") continue;
     if (
       state.phase === "needs-approval" &&
-      carded.has(String(state.question || "").trim().toLowerCase())
+      carded.has(
+        String(state.question || "")
+          .trim()
+          .toLowerCase(),
+      )
     ) {
       continue;
     }
     return entry;
   }
   return null;
+}
+
+/**
+ * How a folded Recent row says it stands for more than one occurrence.
+ *
+ * The relay folds CONSECUTIVE identical failures from one device inside a
+ * ten-minute window into a single row carrying `repeatCount`
+ * (cloud-relay/jobs.js `collapseRepeatRuns`). Without a slot for that number
+ * the fold under-reports: eight identical faults render as one row saying it
+ * happened once, which is a worse lie than the eight rows the fold replaced.
+ *
+ * The wording is deliberate. "×3" is what the handoff proposed and it is
+ * ambiguous — three attempts, three devices, or a multiplier on something
+ * else? "3 times in a row" says the two things that are actually true and
+ * were actually measured: how many occurrences, and that they were
+ * consecutive. It rides the existing meta line rather than adding a second
+ * line, and it returns "" below 2, so the 99% of rows with nothing to fold
+ * gain no text at all — DESIGN.md's rule about text that adds no value binds
+ * hardest on the common case.
+ *
+ * Not styled red anywhere: a repeat is a fact about a failure, not a second
+ * failure.
+ *
+ * @param {Record<string, any> | null | undefined} run
+ * @returns {string}
+ */
+export function repeatSummary(run) {
+  const count = Number(run?.repeatCount ?? 0);
+  if (!Number.isFinite(count) || count < 2) return "";
+  return `${count} times in a row`;
 }

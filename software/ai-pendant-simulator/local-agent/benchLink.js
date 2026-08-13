@@ -99,6 +99,21 @@ export function standDownRequested(file = STAND_DOWN_FILE) {
   }
 }
 
+/**
+ * Which of the DK's three VCOMs is the console.
+ *
+ * The J-Link enumerates one device per VCOM, suffixed in order: for serial
+ * 000960036581 they are ...811, ...813, ...815, and VCOM0 — the one uart0
+ * prints to — is the LOWEST. Treating all three as interchangeable is what
+ * broke this: a stray byte on VCOM1 elected it the winner, the scan latched,
+ * and the bench reported "streaming" while the only port carrying telemetry
+ * was never opened at all. Knowing which port is supposed to carry the console
+ * turns that from a two-out-of-three shrug into a named failure.
+ */
+export function consolePortOf(ports) {
+  return ports.length ? [...ports].sort()[0] : null
+}
+
 function listCandidatePorts(forced) {
   if (forced) return [forced]
   let entries = []
@@ -210,6 +225,9 @@ export class BenchLink {
     this.started = false
     this.everBytes = 0
     this.everParsed = 0
+    this.candidates = []
+    this.missing = []
+    this.holders = new Map()
   }
 
   /**
@@ -305,6 +323,12 @@ export class BenchLink {
         attempts: this.attempts,
         openedAt: this.openedAt,
         ports: this.readers.size,
+        console: consolePortOf(this.candidates),
+        consoleOpen: (() => {
+          const consolePort = consolePortOf(this.candidates)
+          return consolePort === null ? null : this.readers.has(consolePort)
+        })(),
+        missing: this.missing.map((port) => this.reasonFor(port)),
         /*
          * How many /bench/stream clients are holding the console open. This is
          * the answer to "why is the port still busy when I closed the page" —
@@ -406,42 +430,95 @@ export class BenchLink {
       this.detail = `another tool asked for the console (${this.standDownFile})`
       return
     }
-    if (this.winner && this.readers.has(this.winner)) return
+
     const ports = listCandidatePorts(this.forcedPort)
+    this.candidates = ports
     if (!ports.length) {
       this.linkState = 'absent'
       this.detail = 'no /dev/cu.usbmodem* — the DK is unplugged'
       this.closeReaders()
       this.winner = null
+      this.missing = []
       return
     }
 
-    const busy = []
+    /*
+     * Every closed port is retried on EVERY scan. There used to be a
+     * short-circuit here — `if (this.winner && this.readers.has(this.winner))
+     * return` — which stopped all scanning the moment any port produced a
+     * parseable line. A port that was busy at that instant (the firmware agent
+     * holding the console, which is now a routine part of their workflow) was
+     * therefore never tried again: not after they released it, not after the
+     * stand-down file was removed, not until the agent restarted. The bench sat
+     * on two silent ports calling itself "streaming" while the owner pressed a
+     * button and watched nothing move. Recovery has to be automatic because
+     * the thing it recovers from is normal.
+     */
+    this.holders = new Map()
     for (const port of ports) {
+      if (this.readers.has(port)) continue
       // eslint-disable-next-line no-await-in-loop -- three ports, once each.
       const holders = await foreignHolders(port, execFile, this.ourPids())
       if (holders.length) {
-        busy.push(`${port.replace('/dev/', '')} (pid ${holders.join(', ')})`)
-        // Someone else is mid-capture. Let go of it rather than split it.
-        this.closeReader(port)
+        this.holders.set(port, holders)
         continue
       }
-      if (this.readers.has(port)) continue
       this.attempts += 1
       this.openReader(port)
     }
 
-    if (this.readers.size && this.linkState !== 'streaming') {
-      this.linkState = 'probing'
-      this.detail = `listening on ${[...this.readers.keys()].join(', ')}`
-      if (!this.openedAt) this.openedAt = Date.now()
+    this.missing = ports.filter((port) => !this.readers.has(port))
+    if (!this.openedAt && this.readers.size) this.openedAt = Date.now()
+    this.describeState()
+  }
+
+  /** Why the port is not open, in the words the header will print. */
+  reasonFor(port) {
+    const holders = this.holders.get(port)
+    const name = port.replace('/dev/', '')
+    return holders?.length
+      ? `${name} is held by pid ${holders.join(', ')}`
+      : `${name} would not open`
+  }
+
+  /*
+   * The state, and the one rule it exists to enforce: never say "streaming"
+   * while the console is not being read. That is the exact lie this page was
+   * built to stop telling — a confident green header over silence — and it
+   * cost the owner two sessions of pressing a button that was working.
+   */
+  describeState() {
+    const console_ = consolePortOf(this.candidates)
+    const consoleOpen = console_ === null || this.readers.has(console_)
+
+    if (!consoleOpen) {
+      this.linkState = this.readers.size ? 'console-missing' : 'busy'
+      this.detail =
+        `${this.reasonFor(console_)} — that is VCOM0, the console this board ` +
+        `prints to, so nothing it says is being read`
       return
     }
 
-    if (!this.readers.size && busy.length) {
-      this.linkState = 'busy'
-      this.detail = `another process is reading ${busy.join(' and ')} — standing off until it lets go`
+    if (this.winner) {
+      this.linkState = 'streaming'
+      this.detail = this.missing.length
+        ? `reading ${this.winner.replace('/dev/', '')}; ${this.missing
+            .map((port) => this.reasonFor(port))
+            .join(', ')}`
+        : null
+      return
     }
+
+    if (this.readers.size) {
+      this.linkState = 'probing'
+      this.detail = `listening on ${[...this.readers.keys()].join(', ')}`
+      return
+    }
+
+    this.linkState = 'busy'
+    this.detail = `no port could be opened — ${this.missing
+      .map((port) => this.reasonFor(port))
+      .join(', ')}`
   }
 
   /**
@@ -515,7 +592,15 @@ export class BenchLink {
    */
   reapSilentReaders() {
     if (this.winner) return
+    /*
+     * The console is never reaped for being quiet. A board that is idle, or
+     * mid-flash, says nothing for far longer than this window, and dropping
+     * VCOM0 on that basis is how the reader ends up holding only the two ports
+     * that never carry anything.
+     */
+    const consolePort = consolePortOf(this.candidates)
     for (const [port, reader] of this.readers) {
+      if (port === consolePort) continue
       if (reader.bytes === 0 && Date.now() - reader.openedAt > SILENT_PORT_MS) {
         this.closeReader(port)
       }
@@ -545,15 +630,30 @@ export class BenchLink {
       return
     }
 
-    if (this.winner !== port) {
+    /*
+     * The console outranks whatever spoke first.
+     *
+     * "First port to parse wins, close the rest" is how a stray byte on VCOM1
+     * elected itself the console, closed the real one, and left the bench
+     * confidently reading silence. A non-console port may hold the slot only
+     * while VCOM0 has said nothing; the moment VCOM0 parses, it takes it back.
+     * The others are only released once the console itself is the winner —
+     * before that they are the fallback, and closing them would be throwing
+     * away the only data we have.
+     */
+    const consolePort = consolePortOf(this.candidates)
+    const isConsole = consolePort === null || port === consolePort
+
+    if (this.winner !== port && (isConsole || this.winner === null)) {
       this.winner = port
-      // Everything else was noise; hand those ports straight back.
-      for (const other of [...this.readers.keys()]) {
-        if (other !== port) this.closeReader(other)
+      if (isConsole) {
+        for (const other of [...this.readers.keys()]) {
+          if (other !== port) this.closeReader(other)
+        }
+        this.missing = this.candidates.filter((candidate) => !this.readers.has(candidate))
       }
     }
-    this.linkState = 'streaming'
-    this.detail = null
+    this.describeState()
     this.emit()
   }
 

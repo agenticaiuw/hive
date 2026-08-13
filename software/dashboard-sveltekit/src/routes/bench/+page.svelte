@@ -44,6 +44,9 @@
       detail: string | null;
       stub: boolean;
       ports: number;
+      console: string | null;
+      consoleOpen: boolean | null;
+      missing: string[];
       bytes: number;
       parsed: number;
       openedAt: number | null;
@@ -217,6 +220,7 @@
     | "unparsed"
     | "silent"
     | "stood-down"
+    | "console-missing"
     | "busy"
     | "off"
     | "unplugged";
@@ -227,12 +231,20 @@
     if (LOCAL_ONLY) return "local-only";
     if (!snapshot) return "opening";
     if (snapshot.link.stub) return "stub";
-    if (live) return "live";
+    if (live && snapshot.link.consoleOpen !== false) return "live";
 
     const link = snapshot.link;
     if (link.state === "disabled") return "off";
     if (link.state === "busy") return "busy";
     if (link.state === "stood-down") return "stood-down";
+    /*
+     * Checked BEFORE anything that could read as healthy. The bench once
+     * reported "streaming" while holding two silent ports and never opening
+     * VCOM0 — the only one the board prints to — so the owner pressed a button,
+     * watched nothing move, and was told the link was fine. A green header over
+     * an unread console is the precise failure this page exists to prevent.
+     */
+    if (link.state === "console-missing") return "console-missing";
 
     // Something arrived once. Silence after that is the console being idle —
     // the application only prints when a value moves — not a dead link.
@@ -261,6 +273,7 @@
     unparsed: "UNRECOGNISED OUTPUT",
     silent: "NO DATA YET",
     "stood-down": "STOOD DOWN",
+    "console-missing": "CONSOLE NOT OPEN",
     busy: "PORT BUSY",
     off: "READER OFF",
     unplugged: "nRF NOT CONNECTED",
@@ -277,6 +290,11 @@
         return "The board is talking, but none of it matches a line this page knows how to read. That is a format mismatch, not a broken wire.";
       case "idle":
         return "The board is connected and quiet. Its console only prints when a value moves, so silence here is normal — turn the knob or press a button.";
+      case "console-missing":
+        return (
+          snapshot?.link.detail ??
+          "The console port is not open, so nothing the board says is being read."
+        );
       case "busy":
       case "stood-down":
         return snapshot?.link.detail ?? "Another tool is using the console.";
