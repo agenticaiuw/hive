@@ -213,6 +213,47 @@ export const HEARD_UNKNOWN = 'unknown'
 export const HEARD_NO_AUDIO = 'no-audio'
 
 /**
+ * What a per-stage pipeline event's raw, device- or bridge-reported status
+ * means, normalized to the small vocabulary the rest of this pipeline reads.
+ *
+ * THE BUG THIS FIXES. This used to default anything it did not recognize —
+ * including a missing status field entirely — to 'done'. That is invisible
+ * for most stages, but `played?.status === 'done'` (gradeAudioDelivery,
+ * below) is the ONE comparison in this whole file that sets `provesPlayback:
+ * true` / `heard: 'yes'` — the single claim this file exists to keep honest
+ * ("Nothing rounds up," this file's own rule, above). A firmware typo, a
+ * status field an older firmware build omits, or a proxy that drops an
+ * unrecognized field would all have been laundered into "the pendant said it
+ * played this," with nothing anywhere disagreeing. It was dormant only
+ * because nothing calls the reporters that would ever send a device_playback
+ * event at all (PLAYBACK_REPORT_CONTRACT) — the moment that ships, this
+ * default activates with zero other code change.
+ *
+ * THE FIX. Unknown must map to unknown, never to success — the same rule
+ * this file applies to a MISSING event; a malformed one deserves no more
+ * trust than an absent one. Every OTHER stage this feeds (composed/held/
+ * downlink/received, not only played) shares the same fix for the same
+ * reason: `latestDone()` below requires an exact 'done' match for all of
+ * them, so the old default silently forged a "done" for whichever of those
+ * stages happened to carry a bad status too.
+ *
+ * Every consumer of this value compares it against a specific known string
+ * ('done'/'active'/'failed') rather than switching on it or indexing a table
+ * with it, so PIPELINE_STATUS_UNKNOWN reaching any of them is a non-match,
+ * never a crash — checked at every call site as this function moved here.
+ */
+export const PIPELINE_STATUS_UNKNOWN = 'unknown'
+
+export function normalizePipelineStatus(value) {
+  const status = String(value || '').trim().toLowerCase()
+  if (status === 'active' || status === 'processing') return 'active'
+  if (status === 'failed' || status === 'error') return 'failed'
+  if (status === 'waiting' || status === 'queued') return 'waiting'
+  if (status === 'done') return 'done'
+  return PIPELINE_STATUS_UNKNOWN
+}
+
+/**
  * Run status for work that is finished everywhere the Mac and relay can see,
  * and whose last mile nothing witnessed.
  *

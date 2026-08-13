@@ -11,6 +11,7 @@ const {
   historyLabelFromState,
   mapGetMacStatusToActions,
   looksLikeDeviceStateAnswer,
+  planUtteranceWithRealtime,
 } = await import('./openaiRealtimeVoice.js')
 const { MEMORY_DOMAINS, MEMORY_TOOL_SPECS } = await import(
   '../shared/domains/index.js'
@@ -320,6 +321,82 @@ test('extractPcmFromWavOrPcm strips RIFF header', () => {
   const extracted = extractPcmFromWavOrPcm(wav, 'wav')
   assert.equal(extracted.sampleRate, 16000)
   assert.deepEqual(extracted.pcm, pcm)
+})
+
+/*
+ * A valid RIFF/WAV header with a zero-length (or absent) data chunk decodes
+ * to zero PCM samples — a container-size check upstream sees a real
+ * multi-byte body and lets it through; only the DECODED length reveals
+ * there is no audio at all. This used to throw a generic Error caught
+ * indistinguishably from a real OpenAI outage.
+ */
+function emptyWavHeader({ dataBytes = 0 } = {}) {
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + dataBytes, 4)
+  header.write('WAVE', 8)
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16)
+  header.writeUInt16LE(1, 20)
+  header.writeUInt16LE(1, 22)
+  header.writeUInt32LE(16000, 24)
+  header.writeUInt32LE(32000, 28)
+  header.writeUInt16LE(2, 32)
+  header.writeUInt16LE(16, 34)
+  header.write('data', 36)
+  header.writeUInt32LE(dataBytes, 40)
+  return header
+}
+
+test('planUtteranceWithRealtime never throws on a zero-length WAV data chunk', async () => {
+  const result = await planUtteranceWithRealtime({
+    audioBuffer: emptyWavHeader(),
+    format: 'wav',
+  })
+  assert.equal(result.text, '')
+  assert.equal(result.transcript, undefined)
+  assert.equal(result.model, null)
+  // The distinguishing fact, recorded rather than reconstructed later:
+  // there was literally no decoded audio, not merely an unrecognised
+  // utterance a real Realtime session ran and heard nothing from.
+  assert.equal(result.source, 'no_audio')
+})
+
+test('a WAV that is nothing but the bare 44-byte header is also empty, not a failure', async () => {
+  // No data chunk marker at all — extractPcmFromWavOrPcm falls back to
+  // dataOffset=44, which is the whole buffer: zero decoded bytes.
+  const bareHeader = Buffer.alloc(44)
+  bareHeader.write('RIFF', 0)
+  bareHeader.write('WAVE', 8)
+  const result = await planUtteranceWithRealtime({
+    audioBuffer: bareHeader,
+    format: 'wav',
+  })
+  assert.equal(result.text, '')
+  assert.equal(result.source, 'no_audio')
+})
+
+test('the no-audio result carries nothing server.js\'s plannerHintFromPlan would read as plan-worthy', async () => {
+  /*
+   * server.js's plannerHintFromPlan(plan) hands the Mac a hint whenever
+   * plan.planner/source is audio-native, plan.actions is non-empty,
+   * plan.status or plan.response is truthy, or plan.requireLocalPlanner is
+   * set. (Not imported here — server.js binds a real port at module load,
+   * which a test file must never trigger.) A no_audio result must fail
+   * every one of those checks, or an empty press would dispatch a phantom
+   * Mac job.
+   */
+  const result = await planUtteranceWithRealtime({
+    audioBuffer: emptyWavHeader(),
+    format: 'wav',
+  })
+  assert.notEqual(result.source, 'audio-native-realtime')
+  assert.notEqual(result.source, 'audio-native')
+  assert.ok(!result.planner)
+  assert.ok(!Array.isArray(result.actions) || result.actions.length === 0)
+  assert.ok(!result.status)
+  assert.ok(!result.response)
+  assert.ok(!result.requireLocalPlanner)
 })
 
 test('resamplePcmS16le identity when rates match', () => {

@@ -5,10 +5,12 @@ import {
   AUDIO_DELIVERY_STATES,
   DELIVERY_STAGES,
   HEARD_UNKNOWN,
+  PIPELINE_STATUS_UNKNOWN,
   PLAYBACK_REPORT_CONTRACT,
   PLAYBACK_UNKNOWN_STATUS,
   deliveryRunStatus,
   gradeAudioDelivery,
+  normalizePipelineStatus,
   runAwaitsDevice,
   stageIsReportable,
 } from './audioDelivery.js'
@@ -103,6 +105,78 @@ test('playback still running keeps the run in progress', () => {
 
   assert.equal(delivery.playbackActive, true)
   assert.equal(deliveryRunStatus(delivery, { macDone: true }), 'processing')
+})
+
+/*
+ * normalizePipelineStatus: the ingestion-side fix. A firmware typo, an
+ * omitted status field, or any other malformed report used to default to
+ * 'done' — the one value that, once it reaches gradeAudioDelivery's PLAYED
+ * check below, forges a claim nothing actually witnessed.
+ */
+test('normalizePipelineStatus recognizes exactly its known vocabulary', () => {
+  assert.equal(normalizePipelineStatus('active'), 'active')
+  assert.equal(normalizePipelineStatus('processing'), 'active')
+  assert.equal(normalizePipelineStatus('failed'), 'failed')
+  assert.equal(normalizePipelineStatus('error'), 'failed')
+  assert.equal(normalizePipelineStatus('waiting'), 'waiting')
+  assert.equal(normalizePipelineStatus('queued'), 'waiting')
+  assert.equal(normalizePipelineStatus('done'), 'done')
+  // Case/whitespace tolerated the same way the recognized words are.
+  assert.equal(normalizePipelineStatus('  DONE '), 'done')
+})
+
+test('normalizePipelineStatus defaults anything unrecognized to unknown, never done', () => {
+  assert.equal(normalizePipelineStatus(undefined), PIPELINE_STATUS_UNKNOWN)
+  assert.equal(normalizePipelineStatus(null), PIPELINE_STATUS_UNKNOWN)
+  assert.equal(normalizePipelineStatus(''), PIPELINE_STATUS_UNKNOWN)
+  assert.equal(normalizePipelineStatus('   '), PIPELINE_STATUS_UNKNOWN)
+  // A plausible-looking typo of the one word that must never be guessed at.
+  assert.equal(normalizePipelineStatus('donee'), PIPELINE_STATUS_UNKNOWN)
+  assert.equal(normalizePipelineStatus('complete'), PIPELINE_STATUS_UNKNOWN)
+  assert.equal(normalizePipelineStatus('ok'), PIPELINE_STATUS_UNKNOWN)
+  assert.notEqual(PIPELINE_STATUS_UNKNOWN, 'done')
+})
+
+/*
+ * The scenario the fix exists for, run end to end through gradeAudioDelivery:
+ * a malformed/missing device_playback status must NEVER reach the one
+ * comparison that sets provesPlayback/heard:'yes'.
+ */
+test('a malformed playback report normalizes to unknown, never forges heard:yes', () => {
+  const delivery = gradeAudioDelivery(
+    pendantEvents({
+      downlink: downlinkDone(),
+      playback: {
+        stage: DELIVERY_STAGES.PLAYED,
+        status: normalizePipelineStatus(undefined),
+        at,
+      },
+    }),
+  )
+
+  assert.notEqual(delivery.state, 'played_by_device')
+  assert.equal(delivery.provesPlayback, false)
+  assert.notEqual(delivery.heard, 'yes')
+  assert.equal(delivery.heard, HEARD_UNKNOWN)
+  assert.notEqual(deliveryRunStatus(delivery, { macDone: true }), 'completed')
+})
+
+test('an unknown status on any other device-witnessed stage is also refused, not laundered to done', () => {
+  // Same bug, same fix, different rung: RECEIVED also requires an exact
+  // 'done' match (latestDone), so the old default forged this rung too.
+  const delivery = gradeAudioDelivery(
+    pendantEvents({
+      downlink: downlinkDone(),
+      received: {
+        stage: DELIVERY_STAGES.RECEIVED,
+        status: normalizePipelineStatus('garbage'),
+        at,
+      },
+    }),
+  )
+
+  assert.notEqual(delivery.state, 'received_by_device')
+  assert.equal(delivery.state, 'requested_by_device')
 })
 
 test('a relay still holding the audio is in flight, not unknown', () => {
