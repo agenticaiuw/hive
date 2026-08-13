@@ -92,15 +92,15 @@ Honest statement: **11–12 mm is reachable only with the donut-nesting trick an
 
 ## 4. Control mapping — same firmware events, different actuators
 
-The firmware event layer does not change. Ground truth for today's breadboard is `nrf9160dk_nrf9160_ns.overlay` (`pendant_controls` node) and the map in `src/main.c`: three buttons (P0.21 ask / P0.22 memo / P0.23 approve), quadrature encoder (P0.24/25) + push (P0.28), and the mic-power sense (P0.26) watching the red latching switch. The watch variant just gives those events watch-shaped bodies:
+The firmware event layer does not change. Ground truth for today's breadboard is `nrf9160dk_nrf9160_ns.overlay` (`pendant_controls` node) and the map in `src/main.c`: three buttons (P0.21 ask / P0.22 memo / P0.23 push-to-talk), quadrature encoder (P0.24/25 — **rotation only; the owner's knob has no wired push, so selection is a 1.5 s dwell and P0.28 is free**), and the mic-power sense (P0.26) watching the red latching switch. The watch variant just gives those events watch-shaped bodies:
 
 | Firmware event (unchanged) | Breadboard / pendant actuator | Watch actuator |
 |---|---|---|
 | ask / talk (button-1 semantics) | yellow button, P0.21 | **2 o'clock pusher** |
 | memo (record-only, `?dispatch=0`) | green button, P0.22 | **4 o'clock pusher** |
-| approve readback (short = approve, ≥1.5 s = deny) | blue button, P0.23 | **crown long-press** opens the readback; within it, crown press = approve, crown hold = deny *(proposal — flag for owner sign-off, it splits the blue button's one-body gesture across two)* |
+| push-to-talk (radio-off capture → one burst → spoken reply) | blue button, P0.23 | **4 o'clock pusher long-press**, or its own pusher if the case affords three. Blue stopped being the approval button on 2026-08-12; approvals are answered by voice during the readback |
 | menu scroll | encoder A/B, P0.24/25 | **crown turn** (quadrature or magnetic angle, §6) |
-| menu select | encoder push, P0.28 | **crown press** (short) |
+| menu select | **dwell** — stop turning for 1.5 s (no push wired) | **crown press** (short) — the watch keeps a real press, and dwell stays as the fallback both bodies share |
 | hardware mic mute / DND | red latching switch → `mic_power_sense` P0.26 | **crown pulled out** — the stem's second detent position mechanically opens the mic's 1.8 V rail; the same P0.26 sense reads it. The pendant's "only honest hardware mute a digital mic has" becomes a watch gesture that already means "I'm adjusting, leave me alone" |
 | volume (breadboard pot — not yet in the overlay) | potentiometer | no dedicated actuator; crown turn during playback adjusts volume in software. FULL only; THIN has no speaker |
 
