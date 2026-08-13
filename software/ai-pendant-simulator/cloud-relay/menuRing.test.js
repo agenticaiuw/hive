@@ -20,7 +20,18 @@ import {
 
 /* A detent, as the firmware sends it. */
 const turn = (state, delta) => reduceMenuFrame(state, { type: 'menu', delta })
-const push = (state) => reduceMenuFrame(state, { type: 'menu_select' })
+/*
+ * The select, as the firmware sends it: NOT a push. The owner's encoder has no
+ * switch wired (ruling, 2026-08-12: "we're not going to use the button on the
+ * rotary encoder"), so the firmware fires {"type":"menu_select"} 1.5 s after
+ * the last detent and never again until a new detent arrives. Almost every
+ * dwell() below is preceded by a turn for exactly that reason — a select with
+ * no detent in front of it is a frame this hardware cannot produce, and the
+ * two places that do it anyway are testing that the reducer survives it.
+ */
+const dwell = (state) => reduceMenuFrame(state, { type: 'menu_select' })
+/* {"type":"menu_back"}: still handled, no longer emitted by anything — the
+ * long-hold it was built for needs a button the knob does not have. */
 const hold = (state) => reduceMenuFrame(state, { type: 'menu_back' })
 
 const kinds = (result) => result.effects.map((effect) => effect.kind)
@@ -49,8 +60,11 @@ test('opening backwards still opens at home, never on the word for leaving', () 
   assert.notEqual(currentEntry(opened.state), 'back')
 })
 
-test('a push on a closed menu opens it too, rather than feeling dead', () => {
-  const opened = push(createMenuState())
+test('a select on a closed menu opens it too, rather than feeling dead', () => {
+  /* The pendant cannot send this — a dwell needs a detent to arm it, and that
+   * detent would have opened the ring — but the dashboard can, and a frame
+   * that did nothing would be a silent knob. */
+  const opened = dwell(createMenuState())
   assert.equal(opened.state.mode, 'apps')
   assert.deepEqual(spoken(opened), ['Time.'])
 })
@@ -72,8 +86,8 @@ test('scrolling walks the apps in order and wraps both ways', () => {
   assert.deepEqual(heard, ['Time.', 'Timer.', 'Reminders.', 'Calendar.', 'Audio devices.', 'Back.'])
 
   /* One more forward wraps to the top; one back from the top wraps to the end.
-   * Wrap-around is an escape hatch of its own until the firmware emits the
-   * long-hold, so it is not decoration. */
+   * Wrap-around is an escape hatch of its own — there is no long-hold coming,
+   * so it is not decoration. */
   const wrapped = turn(state, 1)
   assert.equal(currentEntry(wrapped.state), 'time')
   assert.equal(currentEntry(turn(wrapped.state, -1).state), 'back')
@@ -95,7 +109,7 @@ test('a detent blips at a position that rises through the ring', () => {
 
 test('Time speaks and leaves you on the ring — a one-shot surface', () => {
   const state = turn(createMenuState(), 1).state
-  const entered = push(state)
+  const entered = dwell(state)
   assert.equal(entered.state.mode, 'apps')
   assert.equal(currentEntry(entered.state), 'time')
   assert.deepEqual(
@@ -109,14 +123,14 @@ test('Reminders and Calendar are one-shot surfaces too', () => {
   state = turn(state, 1).state
   state = turn(state, 1).state
   assert.equal(currentEntry(state), 'reminders')
-  const reminders = push(state)
+  const reminders = dwell(state)
   assert.equal(reminders.state.mode, 'apps')
   assert.deepEqual(
     reminders.effects.filter((effect) => effect.kind === 'app'),
     [{ kind: 'app', app: 'reminders' }],
   )
 
-  const calendar = push(turn(state, 1).state)
+  const calendar = dwell(turn(state, 1).state)
   assert.deepEqual(
     calendar.effects.filter((effect) => effect.kind === 'app'),
     [{ kind: 'app', app: 'calendar' }],
@@ -126,15 +140,19 @@ test('Reminders and Calendar are one-shot surfaces too', () => {
 test('entering Timer speaks the highlighted duration and the one hint', () => {
   const state = turn(turn(createMenuState(), 1).state, 1).state
   assert.equal(currentEntry(state), 'timer')
-  const entered = push(state)
+  const entered = dwell(state)
   assert.equal(entered.state.mode, 'timer')
-  assert.deepEqual(spoken(entered), ['1 minute. Press to start.'])
+  /* The hint names the gesture the owner HAS. "Press to start." was the old
+   * wording and it is now a lie about the hardware — and it asks for the turn
+   * first, because the preset you land on cannot be dwelled into until a
+   * detent re-arms the firmware's timer. */
+  assert.deepEqual(spoken(entered), ['1 minute. Turn, then pause to start.'])
   /* A different base pitch, so "which ring am I in" is audible before a word. */
   assert.equal(entered.effects.find((effect) => effect.kind === 'earcon').ring, 'timer')
 })
 
 test('the hint is spoken on entry only, never again while scrolling', () => {
-  const timerRing = push(turn(turn(createMenuState(), 1).state, 1).state).state
+  const timerRing = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
   const scrolled = turn(timerRing, 1)
   assert.deepEqual(spoken(scrolled), ['5 minutes.'])
 })
@@ -145,13 +163,13 @@ test('the preset ring carries exactly the documented durations', () => {
   assert.equal(minutesLabel(60), '1 hour')
 })
 
-test('pushing a preset starts it and returns to the app ring, standing on Timer', () => {
-  let state = push(turn(turn(createMenuState(), 1).state, 1).state).state
+test('stopping on a preset starts it and returns to the app ring, standing on Timer', () => {
+  let state = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
   state = turn(state, 1).state
   state = turn(state, 1).state
   assert.equal(currentEntry(state), 'timer:10')
 
-  const started = push(state)
+  const started = dwell(state)
   assert.deepEqual(
     started.effects.filter((effect) => effect.kind === 'timer'),
     [{ kind: 'timer', minutes: 10 }],
@@ -165,20 +183,21 @@ test('pushing a preset starts it and returns to the app ring, standing on Timer'
 })
 
 test('a started timer does not re-arm: re-entering Timer starts at the first preset', () => {
-  let state = push(turn(turn(createMenuState(), 1).state, 1).state).state
+  let state = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
   state = turn(state, 1).state
-  state = push(state).state
-  assert.equal(currentEntry(push(state).state), 'timer:1')
+  state = dwell(state).state
+  assert.equal(currentEntry(dwell(state).state), 'timer:1')
 })
 
 /*
- * THE UNIVERSAL ESCAPE. Two ways in, because the controls firmware does not
- * emit the long-hold frame yet: {"type":"menu_back"} is handled today, and the
- * "Back" ring entry is what an owner can reach with the hardware that exists.
- * Both must land in the same place or the escape is not universal.
+ * THE UNIVERSAL ESCAPE, and on this hardware there is only ONE way in: the
+ * "Back" entry at the end of every ring, reached by turning and stopping. The
+ * {"type":"menu_back"} frame stays handled (dashboard, tests) but no gesture
+ * produces it — the knob has no switch to hold. Both paths must still land in
+ * the same place, because the Back entry is now carrying the whole contract.
  */
-test('long-hold and the Back entry are the same escape, one level at a time', () => {
-  const inTimer = push(turn(turn(createMenuState(), 1).state, 1).state).state
+test('the Back entry and the menu_back frame are the same escape, one level at a time', () => {
+  const inTimer = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
 
   const held = hold(inTimer)
   assert.equal(held.state.mode, 'apps')
@@ -187,9 +206,80 @@ test('long-hold and the Back entry are the same escape, one level at a time', ()
   let onBack = inTimer
   for (let i = 0; i < TIMER_RING.length - 1; i += 1) onBack = turn(onBack, 1).state
   assert.equal(currentEntry(onBack), 'back')
-  const selected = push(onBack)
+  const selected = dwell(onBack)
   assert.equal(selected.state.mode, 'apps')
   assert.deepEqual(spoken(selected), spoken(held))
+})
+
+/*
+ * ---- DWELL: what the reducer must be true of when there is no push ---------
+ *
+ * These four are the ones that would have been someone else's problem while a
+ * button existed. With select = "stop turning", the ring has to be walkable,
+ * committable and escapable with ONE verb, and the commit has to stay quiet
+ * about a name the scroll already said 1.3 s earlier (the firmware dwells
+ * 1500 ms; pendantConverse speaks the position on a 200 ms settle).
+ */
+test('no ring can trap the owner: every ring ends in Back', () => {
+  assert.equal(APP_RING[APP_RING.length - 1], 'back')
+  assert.equal(TIMER_RING[TIMER_RING.length - 1], 'back')
+  for (const devices of [[{ name: 'AirPods Pro' }], []]) {
+    const ring = audioRing(devices)
+    assert.equal(ring[ring.length - 1], 'back')
+  }
+})
+
+test('turn-and-stop alone gets in and back out — no push frame anywhere', () => {
+  /* The whole grammar exercised with the only two gestures the hardware has:
+   * a detent, and 1.5 s of stillness. If this can be done, nothing the owner
+   * can reach needs a button. */
+  let state = turn(createMenuState(), 1).state /* opens on Time */
+  while (currentEntry(state) !== 'timer') state = turn(state, 1).state
+  state = dwell(state).state
+  assert.equal(state.mode, 'timer')
+
+  while (currentEntry(state) !== 'back') state = turn(state, 1).state
+  state = dwell(state).state
+  assert.equal(state.mode, 'apps')
+
+  while (currentEntry(state) !== 'back') state = turn(state, 1).state
+  const closed = dwell(state)
+  assert.equal(closed.state.mode, 'closed')
+  assert.deepEqual(kinds(closed), ['earcon', 'closed'])
+})
+
+test('a commit never re-speaks the name the detent already spoke', () => {
+  /* The one-shot surfaces answer with the APP's words (or nothing, for Back);
+   * none of them repeat the position. A commit that re-said "Reminders." would
+   * land ~1.3 s after the settle spoke it, which on a screenless device reads
+   * as a stutter, not as confirmation. */
+  for (const app of ['time', 'reminders', 'calendar', 'audio', 'back']) {
+    let state = turn(createMenuState(), 1).state
+    while (currentEntry(state) !== app) state = turn(state, 1).state
+    assert.deepEqual(spoken(dwell(state)), [], `${app} re-spoke its own name on commit`)
+  }
+  /* Timer is the single exception and it is not a repeat: what it says is the
+   * FIRST entry of the ring it just opened, plus the hint. */
+  let onTimer = turn(createMenuState(), 1).state
+  while (currentEntry(onTimer) !== 'timer') onTimer = turn(onTimer, 1).state
+  assert.deepEqual(spoken(dwell(onTimer)), ['1 minute. Turn, then pause to start.'])
+})
+
+test('no-repeat-fire is the FIRMWARE guarantee — the reducer stays stateless about it', () => {
+  /*
+   * Deliberate, and written down so nobody "fixes" it here: the reducer has no
+   * memory of having just committed, because the device does. main.c arms the
+   * dwell work item only from a detent, so a knob left resting selects exactly
+   * once. If that guard ever moved into this file it would also have to know
+   * about detents, and the reducer would stop being a pure function of frames.
+   */
+  let state = turn(createMenuState(), 1).state
+  assert.equal(currentEntry(state), 'time')
+  const first = dwell(state)
+  const second = dwell(first.state)
+  assert.equal(second.state.mode, 'apps')
+  assert.equal(currentEntry(second.state), 'time')
+  assert.deepEqual(kinds(second), kinds(first))
 })
 
 test('escaping from the app ring closes the menu with a falling blip and NO words', () => {
@@ -204,7 +294,7 @@ test('escaping from the app ring closes the menu with a falling blip and NO word
 })
 
 test('two escapes always get you out, from anywhere in the grammar', () => {
-  const deepest = push(turn(turn(createMenuState(), 1).state, 1).state).state
+  const deepest = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
   const out = hold(hold(deepest).state)
   assert.equal(out.state.mode, 'closed')
   /* And a third does nothing rather than throwing or reopening. */
@@ -290,14 +380,14 @@ test('device names are sanitised and capped — a ring is not a place for wire s
 
 test('picking a headphone emits BOTH frames — connect it and route to it', () => {
   const ring = withSinks()
-  const picked = push(ring)
+  const picked = dwell(ring)
   assert.deepEqual(picked.effects, [{ kind: 'audio-select', index: 0, name: 'AirPods Pro' }])
   /* And it leaves you back on the app ring, like every other one-shot pick. */
   assert.equal(picked.state.mode, 'apps')
 })
 
 test('the second entry selects by its own index, not the first', () => {
-  const picked = push(turn(withSinks(), 1).state)
+  const picked = dwell(turn(withSinks(), 1).state)
   assert.deepEqual(picked.effects, [{ kind: 'audio-select', index: 1, name: 'Kitchen speaker' }])
 })
 
@@ -306,7 +396,7 @@ test('the pendant speaker is always reachable, so audio cannot be stranded in a 
   state = turn(state, 1).state
   state = turn(state, 1).state
   assert.equal(currentEntry(state), AUDIO_SPEAKER_ENTRY)
-  const picked = push(state)
+  const picked = dwell(state)
   assert.deepEqual(picked.effects, [{ kind: 'audio-sink', sink: 'speaker' }])
   assert.equal(picked.state.mode, 'apps')
 })
@@ -319,7 +409,7 @@ test('the audio ring escapes like every other inner ring', () => {
   let onBack = withSinks()
   for (let i = 0; i < audioRing(SINKS).length - 1; i += 1) onBack = turn(onBack, 1).state
   assert.equal(currentEntry(onBack), 'back')
-  assert.equal(push(onBack).state.mode, 'apps')
+  assert.equal(dwell(onBack).state.mode, 'apps')
 })
 
 test('the audio ring blips in the inner register, like the timer ring', () => {

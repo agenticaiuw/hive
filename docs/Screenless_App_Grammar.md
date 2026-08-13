@@ -12,9 +12,8 @@ where the user knows how to operate."*
 
 **No flow may require two presses to initiate.** The yellow press that opens
 the conversation is the one press. Everything after it is the knob: turn to
-scroll, push to enter, long-hold to escape. There is no "press to open the
-menu, press again to pick" anywhere in this grammar, and nothing added later
-may introduce one.
+scroll, **stop to select**. There is no "press to open the menu, press again to
+pick" anywhere in this grammar, and nothing added later may introduce one.
 
 ## The verbs (frozen)
 
@@ -27,12 +26,37 @@ forever**. An app that wants to remap them is a design bug:
 | Green press | memo capture | record-only, no planner |
 | Blue press | **push-to-talk** — record a question radio-off, burst-upload it, hear the answer | works mid-app |
 | Encoder turn | scroll the current ring | app ring, or a ring inside an app |
-| Encoder push | enter / select what the ring is pointing at | |
-| Encoder long-hold | **back / home** — the one universal escape | one level up; from the app ring it closes the menu |
+| Encoder **dwell** (rest 1.5 s) | enter / select what the ring is pointing at | the ONLY select verb — the knob has no button |
+| Turn to "Back", then dwell | **back / home** — the one universal escape | one level up; from the app ring it closes the menu |
 
-Because the escape is always the same gesture, the owner can never be lost in
-a way one long-hold (or two) does not fix. That is the screenless equivalent
-of the iPhone's home button, and it is the whole navigation contract.
+**The knob has no button, and that is why select is a dwell.** Owner's ruling,
+2026-08-12: *"we're not going to use the button on the rotary encoder."* The
+part is the illuminated type — three rotation pins plus five carrying a switch
+and a built-in LED — and only the three rotation wires are connected (A →
+P0.24, C → GND, B → P0.25). **P0.28 is unwired and free.** Push and long-hold
+were the first draft's select and escape; with no switch, both would have left
+the owner able to browse the ring forever and enter nothing. So the firmware
+times the silence instead: `MENU_DWELL_MS` = **1500 ms** after the last detent,
+one `{"type":"menu_select"}`, one haptic tick at the instant it commits, and
+nothing more until a new detent arrives (`firmware/nrf9160/src/main.c`).
+
+1500 ms is the tuned middle: a pause between detents while the owner is still
+hunting runs ~300 ms, so a shorter dwell fires on hesitation; much longer and
+the ring reads as broken, because nothing on a screenless device announces that
+a selection is coming.
+
+Two consequences worth stating rather than discovering:
+
+- **The escape is a ring entry, permanently.** Every ring ends in `Back`; turn
+  to it and stop. There is no long-hold coming — a knob with no switch cannot
+  hold — so the wrap-around and the yellow button (end conversation = close
+  everything) are the other two ways out. The owner can never be lost in a way
+  one or two dwells does not fix, which is this grammar's home button.
+- **The entry you land on when a sub-ring opens needs one turn first.** The
+  dwell only re-arms on a detent, so a resting knob never fires twice — the
+  price of that safety is that the preset under you when Timer opens is not
+  selectable until you turn. Timer's spoken hint says so out loud ("Turn, then
+  pause to start."), and the ring wraps, so the cost is one detent.
 
 **Blue was approve/deny in this document's first draft; the owner remapped it
 to push-to-talk on 2026-08-12.** The reason is energy, and it is decisive: a
@@ -85,14 +109,22 @@ Every ring position has two cues, always in the same order:
    settles (~200 ms), so spinning the ring costs a blip per detent and one
    name, not four sentences.
 
+That 200 ms is also what makes the dwell a decision rather than a surprise:
+the name lands **1.3 s before** the select that commits it, and the commit
+never repeats the name — it answers with the app's own words. (The two numbers
+are a pair. Retuning either has to keep the name in front of the commit.)
+
 Entering an app **speaks its surface immediately** — there is no silent
 landing anywhere:
 
 - **Time** speaks the time and leaves you on the ring (a one-shot surface,
   nothing to be inside of).
 - **Timer** speaks the highlighted duration and the one hint that matters:
-  "press to start." Turning scrolls the preset ring (1, 5, 10, 15, 30, 60
-  minutes); pushing starts that timer and returns you to the app ring.
+  "Turn, then pause to start." Turning scrolls the preset ring (1, 5, 10, 15,
+  30, 60 minutes); stopping on one starts that timer and returns you to the app
+  ring — a preset ring that stayed open would let a stray knock cost you a
+  second timer, and under dwell a knock is exactly what a swinging pendant
+  produces.
 - **Reminders** and **Calendar** speak a short brief (today's reminders /
   today's schedule) fetched live from the Mac, with honest spoken empties —
   "No open reminders." — and honest spoken failures. You stay on the ring
@@ -113,8 +145,8 @@ landing anywhere:
   sitting in a drawer. An empty list says so — "No remembered audio devices.
   Pair one from your phone first." — rather than opening an empty ring.
 
-Closing the menu (long-hold from the app ring) plays a falling earcon and no
-words: silence plus a downward blip is "you are back in the plain
+Closing the menu (dwelling on `Back` from the app ring) plays a falling earcon
+and no words: silence plus a downward blip is "you are back in the plain
 conversation", and adding a sentence there would say nothing the blip does
 not.
 
@@ -122,7 +154,7 @@ not.
 
 **All menu state lives relay-side, inside the converse session.** The pendant
 is stateless by design: the firmware's whole contribution is
-`{"type":"menu","delta":±1}` per detent and `{"type":"menu_select"}` per push
+`{"type":"menu","delta":±1}` per detent and `{"type":"menu_select"}` per dwell
 on the converse WebSocket (see `firmware/CONTROLS_WIRING.md` — frames are
 dropped when the socket is closed, so a knob twist banked across a dead link
 can never replay as stale intent). The relay holds the ring position, the
@@ -138,14 +170,15 @@ mode, and the timer presets in the conversation's own state
 - The conversation ending resets the menu to closed. Next press starts at the
   ring's home position — predictable beats persistent for a ring this short.
 
-The long-hold escape arrives as `{"type":"menu_back"}`. The relay handles it
-today; emitting it on encoder long-hold is the firmware half (controls
-firmware, Phase 2). **Until it ships, every ring ends in a `Back` entry** —
-one detent past the last app, one past the last preset — which selects as the
-same escape and lands in exactly the same place (`menuRing.test.js` asserts
-the two paths are indistinguishable). The Back entry is not scaffolding to be
-deleted when the long-hold arrives: it costs one detent, and it is the only
-escape a first-time owner can *discover* by turning the knob. The ring's
+`{"type":"menu_back"}` is still handled by the relay and **nothing emits it**:
+it was the long-hold's frame, and the long-hold needs a switch this knob does
+not have. The escape is the `Back` entry at the end of every ring — one detent
+past the last app, one past the last preset — dwelled on like anything else,
+landing in exactly the same place the frame would (`menuRing.test.js` asserts
+the two paths are indistinguishable, and that turn-and-stop alone gets in and
+back out with no other frame). The Back entry was written as scaffolding for a
+long-hold that is now cancelled; it is the load-bearing escape, and it is the
+only one a first-time owner can *discover* by turning the knob. The ring's
 wrap-around and the yellow button (end conversation = close everything) remain
 escapes too.
 

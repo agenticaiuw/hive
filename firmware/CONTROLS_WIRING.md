@@ -17,9 +17,9 @@ unchanged.
 | Push-to-talk button | Blue momentary | nRF9160 **P0.23** | GND | Active-low, internal pull-up. Press = record a question with the **radio off**; press again = one chunked upload **with** the planner (`dispatch=1` + `X-Reply-Stream: opus`), and the spoken answer plays back on the current sink. Remapped from approve/deny on 2026-08-12 — see "Why the blue button is push-to-talk". |
 | BT module command TX | jumper | nRF9160 **P0.00** | ESP32 **GPIO16** (RX2) | 115200 8N1, no flow control. The nRF commands the Bluetooth module; this is the interface a BM83-class part actually has. **Requires** the board-controller image built with `vcom2_pins_routing` disabled (this repo's `boards/nrf9160dk_nrf52840.overlay`) — with the stock image the DK's interface MCU drives P0.00 and fights every start bit. |
 | BT module command RX | jumper | ESP32 **GPIO17** (TX2) | nRF9160 **P0.05** | Same line, other direction. P0.05 is the DK's LED4 pin; the same board-controller overlay disables `led4_pin_routing` so the LED is switched off the net. Internal pull-up on the nRF side, so an absent module reads as an idle line rather than noise. |
-| Rotary encoder A | Encoder phase A | nRF9160 **P0.24** | — | Encoder COMMON to GND; internal pull-ups on A/B. Quadrature-decoded (Gray-code table, ±4 transitions per detent), never edge-counted. |
+| Rotary encoder A | Encoder phase A | nRF9160 **P0.24** | — | Encoder COMMON (C) to GND; internal pull-ups on A/B. Quadrature-decoded (Gray-code table, ±4 transitions per detent), never edge-counted. **Three wires total** — see "Why the encoder is three wires and select is a dwell". |
 | Rotary encoder B | Encoder phase B | nRF9160 **P0.25** | — | (same) If detents step the menu the wrong way, swap the A and B wires. |
-| Encoder push | Encoder switch pin | nRF9160 **P0.28** | GND | Active-low, internal pull-up. Menu select. Debounced 150 ms in firmware. |
+| ~~Encoder push~~ | *not wired* | — | — | **Removed 2026-08-12 by owner ruling.** The switch pins of the illuminated encoder are left unconnected and the firmware handler is gone. **P0.28 is FREE** — first claim on the next feature that needs a GPIO. |
 | Volume pot ends | Potentiometer (linear, ~5k–50k) | DK VDD and GND | — | Outer legs across the **nRF9160 DK's** VDD/GND rail (moved off the ESP32 — see below). |
 | Volume pot wiper | Potentiometer wiper | nRF9160 **P0.15** (AIN2) | — | SAADC, ratiometric VDD/4 reference so rail sag cancels. The only free analog pin — AIN0–7 are fixed to P0.13–P0.20 in silicon and every other one is taken. ~20 Hz poll, 2 % hysteresis, end-stop snap, squared (perceptual) curve — the ESP32 tuning carried over 1:1. |
 | Haptic driver | DRV2605L breakout (I2C **0x5A**) | nRF9160 **P0.30** (SDA) / **P0.31** (SCL) | 3V rail + GND | Shares I2C2 with the accelerometer. VIN → 3V, GND → GND; LRA (VLV101040A) across the driver's OUT+/OUT−. See the I2C section for pull-ups. |
@@ -36,11 +36,36 @@ unchanged.
 
 ## Why these choices
 
-**Active-low with internal pull-ups.** Every button and the encoder switch
-to GND and lean on the nRF9160's internal pull-ups (declared in the
-devicetree overlay, not ad hoc in code). On a breadboard the common failure
+**Active-low with internal pull-ups.** Every button and the encoder's two
+phases switch to GND and lean on the nRF9160's internal pull-ups (declared in
+the devicetree overlay, not ad hoc in code). On a breadboard the common failure
 is a wire falling out; with pull-ups that failure reads as "not pressed"
 forever instead of a floating pin chattering interrupts.
+
+**Why the encoder is three wires and select is a dwell.** Owner's ruling,
+2026-08-12: *"we're not going to use the button on the rotary encoder."* The
+part is the illuminated type — three rotation pins, plus five carrying a
+switch and an unused built-in LED — and only rotation is wired: **A → P0.24,
+C → GND, B → P0.25.** With no switch there is no push and no long-hold, which
+would have left the owner able to browse the app ring forever and enter
+nothing. So resting IS the press: **1500 ms** with no new detent and the
+firmware sends one `{"type":"menu_select"}` and fires the `tick` haptic at the
+instant it commits. Any detent inside the window restarts the countdown, and
+after a dwell fires nothing fires again until a *new* detent arrives — a
+pendant hanging still on its lanyard cannot start a timer every 1.5 s. The
+timer is a `k_work_delayable` armed from the encoder ISR (a reschedule is
+ISR-safe and is exactly "cancel and restart"); the commit runs on the system
+workqueue and the WS I/O thread still owns the socket, so the
+ISR → atomics → WS-thread path is unchanged. 1500 ms is the tuned middle:
+hunting pauses between detents run ~300 ms, and much longer reads as broken
+because nothing announces a coming selection on a screenless device.
+
+**P0.28 is genuinely free, not merely unused.** Its handler, its devicetree
+node and its alias are gone, and its bit is out of the GPIO sense-edge mask
+(`0x1be00000` → `0x0be00000`). An unwired pin left armed as a wake source is a
+floating input that wakes the CPU on breadboard-coupled noise — a battery leak
+that presents as a firmware bug. The console repin (below) already keeps the
+UART off P0.28, so the pin is available with no further work.
 
 **Mute is a power cut, not a data cut.** The SPH0645 is a *digital* I2S
 microphone — there is no analog point to break, and grounding or gating its
@@ -68,7 +93,10 @@ transition table; illegal two-bit jumps score zero outright. One menu step
 is emitted per full detent (±4 valid transitions). Firmware emits
 `{"type":"menu","delta":±1}` / `{"type":"menu_select"}` on the converse
 socket when it is open and drops them when it is closed — a knob twist
-banked across a dead link would replay as stale intent.
+banked across a dead link would replay as stale intent. **The dwell obeys the
+same drop rule**: if the socket is shut when the timer expires, the select is
+not queued and the tick does not fire. A buzz claiming a selection the relay
+never heard would be the device lying about the only feedback dwell has.
 
 **The knob lives on the nRF9160 now (was: ESP32 GPIO34).** Architecture
 ruling: the ESP32 is a stand-in for a dumb Bluetooth module in the end
@@ -134,8 +162,9 @@ later: the socket that would have carried it closed with the press. The
 answer lands in history and the device stays quiet.
 
 **The Bluetooth module UART (P0.00 / P0.05).** Everything else was taken:
-P0.01 is the MAX98357A SD_MODE gate, P0.29 is the console TX, P0.26/27/28
-are the mic sense, the accelerometer INT1 and the encoder push, P0.15 is the
+P0.01 is the MAX98357A SD_MODE gate, P0.29 is the console TX, P0.26/27 are
+the mic sense and the accelerometer INT1 (P0.28 held the encoder push when
+this was chosen and is free now), P0.15 is the
 volume ADC, P0.10–13 are the microSD SPI, P0.14/16–20 are the audio bus,
 P0.21–25 are the buttons and encoder, and P0.30/31 are I2C. That leaves the
 VCOM2 group and the DK's LED pins.
@@ -168,8 +197,9 @@ LED2 (P0.03), LED3 (P0.04) and Button 2 (P0.07). The board-controller
 overlay opens all three analog switches, the same move it already made for
 LED4. LED2 and LED3 cost nothing — the firmware never drove them. **Button
 2 is a real loss and is stated as one**: every button this firmware reads
-is an external one (yellow P0.21, green P0.22, blue P0.23, encoder push
-P0.28), so no feature disappears, but a DK with the stock board-controller
+is an external one (yellow P0.21, green P0.22, blue P0.23 — and the knob's
+select is a dwell, not a button at all), so no feature disappears, but a DK
+with the stock board-controller
 image would short a PWM output to GND every time someone pressed it. Flash
 the overlay before wiring the LED.
 
@@ -198,8 +228,9 @@ complement. Move the common leg to the 3V rail, set
 word (bit 15, the polarity bit), so both wirings run the same code at the
 same brightness and neither can damage the part.
 
-**Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25,
-P0.27, P0.28) use the GPIO SENSE mechanism (`sense-edge-mask` in the
+**Interrupt budget.** The edge-interrupt inputs (P0.21–23, P0.24/25 and
+P0.27 — P0.28 left the mask with the encoder push) use the GPIO SENSE
+mechanism (`sense-edge-mask` in the
 overlay) rather than GPIOTE channels — the nRF9160 has only 8 GPIOTE
 channels and the DK's own buttons already claim some. Hand-speed controls
 (and a double-tap, slower still) do not need GPIOTE latency. P0.26 is
@@ -210,8 +241,9 @@ P0.26 (CTS, **with a pull-up — directly against the mic-sense no-pull
 contract**), P0.27 (RTS) and P0.28 (RX) alongside the P0.29 TX the
 console actually uses. Flow control was never on and console input does
 not exist in this firmware, so the overlay repins uart0 to TX-only on
-P0.29 (`disable-rx`), freeing P0.26/27/28 honestly. printk/VCOM0 output
-is unchanged.
+P0.29 (`disable-rx`), freeing P0.26/27/28 honestly — and it is what keeps
+P0.28 genuinely claimable now that nothing else wants it. printk/VCOM0
+output is unchanged.
 
 ## I2C bus (I2C2: SDA P0.30, SCL P0.31, 100 kHz)
 
@@ -275,8 +307,9 @@ reset, and stops entirely once a sink answers.
 
 | Event | Preset | Feel |
 | --- | --- | --- |
-| Press acknowledged (yellow/tap-tap/encoder push, capture start/stop, blue PTT start/stop) | `click` | one 60 ms crisp click |
+| Press acknowledged (yellow/tap-tap, capture start/stop, blue PTT start/stop) | `click` | one 60 ms crisp click |
 | Memo start / memo stop (green) | `tick` | one 25 ms blip |
+| **Menu dwell commits** (1500 ms after the last detent) | `tick` | one 25 ms blip — the only evidence a selection happened, since the owner did nothing to cause it |
 | Blue press refused mid-conversation | `tick` | one 25 ms blip — "heard you, not now" |
 | Incoming approval readback (relay announce frame) | `strong` | one 150 ms full-drive hit |
 | Capture press while hard-muted | `long` | one 400 ms soft buzz |
@@ -334,7 +367,8 @@ workqueue — never on the audio path, never in an ISR, the same discipline
 | Blue press (stop) | chunked POST `/v1/pendant/command?dispatch=1` + `X-Reply-Stream: opus`; the reply streams back as 2-byte-BE length-prefixed Opus packets on the same socket and plays through the current sink | one RRC connection per question; no link → outbox kind `'Q'`, planner ON at redelivery, **answer lands in history, never in the ear** |
 | BT device list (downlink request) | `{"type":"bt_list"}` → device replies `{"type":"bt_devices","devices":[{"index":N,"name":…,"address":…,"preferred":bool}],"connected":bool}` | answered from main's idle loop; **relay-side sender: TODO** |
 | BT device pick (downlink) | `{"type":"bt_select","index":N}` → promotes entry N to preferred and commands the module to connect | N indexes the list above (0 = preferred); **relay-side sender: TODO** |
-| Encoder detent / push | `{"type":"menu","delta":±1}` / `{"type":"menu_select"}` on the converse WS | socket open, else dropped |
+| Encoder detent | `{"type":"menu","delta":±1}` on the converse WS | socket open, else dropped |
+| Encoder **dwell** (no detent for **1500 ms**) | `{"type":"menu_select"}` on the converse WS + `tick` haptic at the commit | socket open, else neither. Restarted by any detent; never repeats until a new detent arrives. There is no push frame and no `menu_back` frame — escape is the `Back` entry on every ring |
 | Capture press while muted | `{"type":"mic_muted"}` on the converse WS + LED pattern + long buzz, capture suppressed | socket open (LED/buzz regardless) |
 | Volume knob move | `{"type":"volume","level":0.xx,"raw":N}` on the converse WS | on ≥2% change, ~20 Hz poll (5 Hz idle); gain applied on-device before the wire |
 | Accelerometer double-tap | identical to a yellow press (same semaphore) | always; mute suppression included |

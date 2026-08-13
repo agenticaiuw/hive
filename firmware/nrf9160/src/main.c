@@ -68,8 +68,11 @@
  *                              plays back on the existing reply-speech
  *                              path. See run_ptt_question() for the energy
  *                              ruling that put it here.
- *   P0.24/25      encoder    — quadrature menu navigation.
- *   P0.28         enc. push  — menu select.
+ *   P0.24/25      encoder    — quadrature menu navigation AND, through the
+ *                              dwell timer, menu select: the owner's knob
+ *                              has no switch (three wires: A, C=GND, B), so
+ *                              resting on an entry for MENU_DWELL_MS IS the
+ *                              press. P0.28 is unwired and unclaimed.
  *   P0.26         mic sense  — watches the SPH0645 VDD net through 100k.
  *                              Low = the owner cut mic power with the
  *                              latching switch: capture must not start,
@@ -95,7 +98,6 @@
 #define PTT_BUTTON_NODE DT_ALIAS(ptt_btn)
 #define ENCODER_A_NODE DT_ALIAS(encoder_a)
 #define ENCODER_B_NODE DT_ALIAS(encoder_b)
-#define ENCODER_PUSH_NODE DT_ALIAS(encoder_push)
 #define MIC_SENSE_NODE DT_ALIAS(mic_sense)
 #define AMP_SD_MODE_NODE DT_ALIAS(amp_sd_mode)
 
@@ -559,9 +561,6 @@ static const struct gpio_dt_spec encoder_a =
 static const struct gpio_dt_spec encoder_b =
 	GPIO_DT_SPEC_GET(ENCODER_B_NODE, gpios);
 static struct gpio_callback encoder_callback;
-static const struct gpio_dt_spec encoder_push =
-	GPIO_DT_SPEC_GET(ENCODER_PUSH_NODE, gpios);
-static struct gpio_callback encoder_push_callback;
 static const struct gpio_dt_spec mic_sense =
 	GPIO_DT_SPEC_GET(MIC_SENSE_NODE, gpios);
 /* Sense pin configured OK? Without it, "muted" must never be inferred:
@@ -587,19 +586,35 @@ K_SEM_DEFINE(memo_press_sem, 0, 1);
 K_SEM_DEFINE(ptt_press_sem, 0, 1);
 
 /*
- * Owner-decision control frames, produced on main/ISR and consumed by the
- * WS I/O thread — the one place allowed to touch the socket, so a stalled
- * modem send can never block a button ISR or the codec loop. Contract per
- * the wire spec: sent only while the converse socket is OPEN; a closed
+ * Owner-decision control frames, produced on main/ISR/workqueue and consumed
+ * by the WS I/O thread — the one place allowed to touch the socket, so a
+ * stalled modem send can never block a button ISR or the codec loop. Contract
+ * per the wire spec: sent only while the converse socket is OPEN; a closed
  * socket drops them (a menu twist from a dead zone is stale the moment
  * the link returns).
  */
 static atomic_t menu_step_backlog;     /* signed detents not yet sent */
-static atomic_t menu_select_req;
+static atomic_t menu_select_req;       /* set by the dwell timer, not a push */
 /* Cap unsent detents: past this the owner is spinning against a dead
  * link and older steps carry no information a fresher one lacks. */
 #define MENU_STEP_BACKLOG_MAX 8
-#define ENCODER_PUSH_DEBOUNCE_MS 150
+/*
+ * DWELL — the select gesture, because there is no button to press.
+ *
+ * Owner's ruling, 2026-08-12: "we're not going to use the button on the
+ * rotary encoder." Their encoder is the illuminated type; only the three
+ * rotation pins are wired (A -> P0.24, C -> GND, B -> P0.25), so P0.28 is
+ * unwired and its handler is gone. Without a press there is no select and
+ * no escape, and the owner could scroll the app ring forever without ever
+ * entering anything — so RESTING is the press: MENU_DWELL_MS after the last
+ * detent the firmware emits {"type":"menu_select"} once.
+ *
+ * 1500 ms is the tuned middle. Shorter and the ring fires while the owner is
+ * still hunting between entries (a 300 ms pause between detents is normal
+ * hand speed); much longer and the device reads as broken, because on a
+ * screenless ring nothing on earth tells you a selection is coming.
+ */
+#define MENU_DWELL_MS 1500
 
 /*
  * ---- Wired speaker (MAX98357A) sink selection ----
@@ -1045,6 +1060,45 @@ static const int8_t encoder_quad_table[16] = {
 static uint8_t encoder_prev_state;
 static int8_t encoder_detent_accum;
 
+/*
+ * The dwell timer: the whole select gesture, and deliberately NOT in the ISR.
+ *
+ * The ISR's only new job is one k_work_reschedule() per detent (ISR-safe, and
+ * a reschedule is a cancel+arm, which is exactly "any new detent restarts the
+ * countdown"). The commit itself runs on the system workqueue — it touches an
+ * atomic and asks for a haptic, the same two things the old push handler did —
+ * and the WS I/O thread still owns the socket. Nothing about the
+ * ISR -> atomics -> WS-thread path changed; a timer was inserted in front of
+ * the atomic.
+ *
+ * NO REPEAT FIRE. The work item is one-shot and only a detent ever arms it, so
+ * a knob left resting on an entry selects exactly once. That is the property
+ * that makes dwell safe to use as the only select verb: a pendant swinging on
+ * its lanyard against a still ring cannot start a timer every 1.5 s.
+ */
+static struct k_work_delayable menu_dwell_work;
+
+static void menu_dwell_expired(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/*
+	 * Same drop-when-closed contract the detents themselves have: if the
+	 * scrolls never reached the relay there is no ring position to commit,
+	 * and a tick on a resting knob with no conversation open would be the
+	 * device claiming a selection it did not make. Silence is correct here.
+	 */
+	if (!pendant_ws_connected()) {
+		return;
+	}
+	atomic_set(&menu_select_req, 1);
+	/* The buzz fires at the COMMIT, not at the send: dwell has no press to
+	 * acknowledge, so this tick is the owner's only evidence that the ring
+	 * just took their entry. Non-blocking (work-queue engine), so asking for
+	 * it from a work handler costs nothing. */
+	haptic_trigger(HAPTIC_PATTERN_TICK);
+}
+
 static uint8_t encoder_read_state(void)
 {
 	/* Raw levels, not logical: quadrature only cares about transitions,
@@ -1082,28 +1136,14 @@ static void encoder_edge_isr(const struct device *port,
 		    backlog > -MENU_STEP_BACKLOG_MAX) {
 			atomic_add(&menu_step_backlog, step);
 		}
+		/*
+		 * Restart the dwell on every detent — including one the backlog
+		 * cap just dropped. The cap is about what is worth sending; the
+		 * dwell is about whether the owner's hand is still moving, and
+		 * a hand that is moving has not chosen anything yet.
+		 */
+		(void)k_work_reschedule(&menu_dwell_work, K_MSEC(MENU_DWELL_MS));
 	}
-}
-
-static void encoder_push_pressed(const struct device *port,
-				 struct gpio_callback *callback,
-				 gpio_port_pins_t pins)
-{
-	/* One timestamp is the whole debounce: bounce arrives as a burst of
-	 * edges inside a few ms, a human repeat press takes hundreds. */
-	static int64_t last_push_ms;
-	int64_t now = k_uptime_get();
-
-	ARG_UNUSED(port);
-	ARG_UNUSED(callback);
-	ARG_UNUSED(pins);
-	if (now - last_push_ms < ENCODER_PUSH_DEBOUNCE_MS) {
-		return;
-	}
-	last_push_ms = now;
-	atomic_set(&menu_select_req, 1);
-	/* ISR-safe: schedules work, touches no bus here. */
-	haptic_trigger(HAPTIC_PATTERN_CLICK);
 }
 
 /*
@@ -3458,6 +3498,11 @@ static void ws_io_send_owner_controls(void)
 		atomic_sub(&menu_step_backlog, step);
 	}
 
+	/* AFTER the detents above, always: the dwell fires 1.5 s behind the
+	 * last detent, so the scroll that chose the entry is already on the
+	 * wire and the relay's 200 ms name settle has long since spoken it.
+	 * A select that overtook its own detent would commit the entry before
+	 * it. */
 	if (atomic_cas(&menu_select_req, 1, 0)) {
 		(void)pendant_ws_send_text("{\"type\":\"menu_select\"}");
 	}
@@ -4619,7 +4664,11 @@ static void configure_control_inputs(void)
 	}
 
 	/* Encoder: both phases in ONE callback (same port), both edges —
-	 * the quadrature table needs every transition, not just presses. */
+	 * the quadrature table needs every transition, not just presses.
+	 * The dwell work item is initialised BEFORE the interrupts are armed:
+	 * the first detent reschedules it, and rescheduling an uninitialised
+	 * work item from an ISR is not a race worth having. */
+	k_work_init_delayable(&menu_dwell_work, menu_dwell_expired);
 	if (gpio_is_ready_dt(&encoder_a) && gpio_is_ready_dt(&encoder_b) &&
 	    gpio_pin_configure_dt(&encoder_a, GPIO_INPUT) == 0 &&
 	    gpio_pin_configure_dt(&encoder_b, GPIO_INPUT) == 0) {
@@ -4638,20 +4687,10 @@ static void configure_control_inputs(void)
 		printk("Encoder (P0.24/25) not configured\n");
 	}
 
-	if (gpio_is_ready_dt(&encoder_push) &&
-	    gpio_pin_configure_dt(&encoder_push, GPIO_INPUT) == 0) {
-		gpio_init_callback(&encoder_push_callback,
-				   encoder_push_pressed,
-				   BIT(encoder_push.pin));
-		if (gpio_add_callback(encoder_push.port,
-				      &encoder_push_callback) != 0 ||
-		    gpio_pin_interrupt_configure_dt(
-			    &encoder_push, GPIO_INT_EDGE_TO_ACTIVE) != 0) {
-			printk("Encoder push (P0.28) unavailable\n");
-		}
-	} else {
-		printk("Encoder push (P0.28) not configured\n");
-	}
+	/* No encoder-push block, and that is the design: the owner's knob has
+	 * no switch wired (P0.28 free). Select is the dwell above. Configuring
+	 * an unwired pin as an interrupt source would be a floating input
+	 * waking the CPU on breadboard noise. */
 
 	/* Mic-power sense: polled, no interrupt, and NO PULL — it watches
 	 * the mic VDD net through 100k and must not bias it. */

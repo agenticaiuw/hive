@@ -34,14 +34,22 @@
 		ptt_button: ptt_button {
 			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
+		/*
+		 * THREE WIRES, NOT FIVE. Owner's ruling 2026-08-12: "we're not
+		 * going to use the button on the rotary encoder." Their part is
+		 * the illuminated type (3 rotation pins + 5 pins carrying a
+		 * switch and a built-in LED); only rotation is wired — A -> P0.24,
+		 * C -> GND, B -> P0.25. There is no encoder_push node because
+		 * P0.28 IS NOT CONNECTED: declaring it would arm an interrupt on
+		 * a floating pin. Select is now the firmware's dwell timer
+		 * (MENU_DWELL_MS in src/main.c). **P0.28 is free** — first claim
+		 * on the next feature that needs a GPIO.
+		 */
 		encoder_a: encoder_a {
 			gpios = <&gpio0 24 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
 		encoder_b: encoder_b {
 			gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
-		};
-		encoder_push: encoder_push {
-			gpios = <&gpio0 28 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		};
 		mic_power_sense: mic_power_sense {
 			gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
@@ -128,7 +136,6 @@
 		ptt-btn = &ptt_button;
 		encoder-a = &encoder_a;
 		encoder-b = &encoder_b;
-		encoder-push = &encoder_push;
 		mic-sense = &mic_power_sense;
 		accel-int1 = &accel_int1;
 		amp-sd-mode = &amp_sd_mode;
@@ -180,11 +187,16 @@
  * (PORT event) instead of GPIOTE channels: the nRF9160 has only 8 GPIOTE
  * channels and the DK's own buttons already use some. Encoder edges are
  * hand-speed (worst observed ~2.5 ms apart on a fast spin) — µs-class
- * PORT latency is irrelevant there. Bits: P0.21-25, P0.27 (accelerometer
- * INT1 — a double-tap is even slower than a hand on a knob) and P0.28.
+ * PORT latency is irrelevant there. Bits: P0.21-25 and P0.27 (accelerometer
+ * INT1 — a double-tap is even slower than a hand on a knob).
+ *
+ * P0.28's bit is GONE (0x1be00000 -> 0x0be00000) with the encoder push: an
+ * unwired pin left in the sense mask is a floating input free to wake the
+ * CPU on every breadboard-coupled edge, which is a battery leak that looks
+ * like a firmware bug.
  */
 &gpio0 {
-	sense-edge-mask = <0x1be00000>;
+	sense-edge-mask = <0x0be00000>;
 };
 
 /*
@@ -193,11 +205,12 @@
  * The board's uart0_default pinctrl also claimed P0.26 (CTS, with a
  * bias-pull-up — directly against the mic-sense contract above, which
  * requires NO pull on that net), P0.27 (RTS — now the accelerometer's
- * INT1) and P0.28 (RX — the encoder push button). Nothing ever used
- * them: flow control was never enabled and console input is not a thing
- * this firmware has. Dropping them from the pinctrl frees all three
- * pins honestly instead of leaning on "the UARTE probably won't drive
- * them".
+ * INT1) and P0.28 (RX — once the encoder push, now unclaimed by anything).
+ * Nothing ever used them: flow control was never enabled and console input
+ * is not a thing this firmware has. Dropping them from the pinctrl frees all
+ * three pins honestly instead of leaning on "the UARTE probably won't drive
+ * them" — and P0.28 stays free, so this repin is what keeps it genuinely
+ * available rather than merely unused.
  */
 &pinctrl {
 	uart0_console_txonly: uart0_console_txonly {
@@ -382,9 +395,10 @@
  *   TX would fight it — the board-controller overlay is a hard dependency
  *   of this pin, not a nicety.
  *
- *   RX = P0.05, the DK's LED4 pin. Every other candidate is taken:
- *   P0.01 = SD_MODE, P0.29 = console TX, P0.26/27/28 = mic sense /
- *   accelerometer INT1 / encoder push, P0.15 = the volume ADC, P0.10-13 =
+ *   RX = P0.05, the DK's LED4 pin. Every other candidate was taken when this
+ *   was chosen: P0.01 = SD_MODE, P0.29 = console TX, P0.26/27 = mic sense /
+ *   accelerometer INT1 (P0.28 held the encoder push then and is free now —
+ *   see the encoder node), P0.15 = the volume ADC, P0.10-13 =
  *   microSD, P0.14/16-20 = the audio bus, P0.21-25 = buttons and encoder,
  *   P0.30/31 = I2C. Of the four LED pins P0.02 is led0 (this firmware's
  *   only status LED) and P0.03/P0.04 are the next two; taking the HIGHEST
