@@ -48,6 +48,12 @@
  * drift is never hidden — only un-emitted between beats.
  */
 #define BENCH_POT_EPSILON 16
+/*
+ * Three probe cycles (the probe runs every 15 s). One missed cycle is a busy
+ * audio path and not news; three means the probe has stopped producing, and at
+ * that point the last value is history rather than a reading.
+ */
+#define MIC_LEVEL_STALE_MS 45000
 
 #define BENCH_LEVEL_UNSEEN (-1)
 
@@ -93,6 +99,22 @@ static bool bench_busy;
  */
 static int32_t mic_peak = BENCH_LEVEL_UNSEEN;
 static int32_t mic_rms = BENCH_LEVEL_UNSEEN;
+/*
+ * WHEN the level was measured, and it is not optional bookkeeping.
+ *
+ * Without it these two words were sticky forever: measured once, then emitted
+ * on every line for the rest of the boot. The owner watched a frozen peak/rms
+ * pair sit on his dashboard while he rewired the microphone with his hands,
+ * and it read as a live measurement of the thing he was touching. It was a
+ * value from minutes earlier that nothing had refreshed.
+ *
+ * A number that does not move is not a measurement, and a frozen number is
+ * WORSE than an absent one because it looks like data. So the level now ages
+ * out: three missed probe cycles and the key disappears, which is the same
+ * absent-is-not-zero rule the rest of this file already obeys, applied to time
+ * instead of to zero.
+ */
+static int64_t mic_level_at = -1;
 
 /* What the last fast line actually said, so "changed" is a real comparison. */
 static int8_t last_button[PENDANT_BENCH_BUTTON_COUNT];
@@ -203,6 +225,7 @@ void pendant_bench_note_mic_level(int32_t peak, int32_t rms)
 	if (peak >= 0 && rms >= 0) {
 		mic_peak = peak;
 		mic_rms = rms;
+		mic_level_at = k_uptime_get();
 	}
 }
 
@@ -641,9 +664,17 @@ void pendant_bench_tick(void)
 		 * The level rides the fast line beside its own sense pin, so
 		 * the two facts about the microphone are never a merge apart:
 		 * "powered and deaf" is only visible when both are current.
-		 * Absent until something has actually measured it.
+		 *
+		 * FRESHNESS IS PART OF THE VALUE. Absent until something has
+		 * measured it, and absent AGAIN once that measurement is older
+		 * than three probe cycles. The alternative — what this shipped
+		 * with for one afternoon — is a pair of words that latch on the
+		 * first successful probe and are then republished forever,
+		 * which is indistinguishable on the wire from a microphone
+		 * sitting at a rock-steady level.
 		 */
-		if (mic_peak >= 0 && mic_rms >= 0) {
+		if (mic_peak >= 0 && mic_rms >= 0 && mic_level_at >= 0 &&
+		    now - mic_level_at < MIC_LEVEL_STALE_MS) {
 			used = bench_append(line, sizeof(line), used,
 					    ",\"peak\":%d,\"rms\":%d",
 					    (int)mic_peak, (int)mic_rms);

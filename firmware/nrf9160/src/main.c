@@ -1336,6 +1336,7 @@ static void mic_level_probe(const struct device *i2s)
 	int64_t now = k_uptime_get();
 	uint32_t block_index = 0U;
 	uint64_t square_sum = 0U;
+	int64_t sum = 0;
 	uint32_t counted = 0U;
 	int32_t peak = 0;
 
@@ -1344,9 +1345,35 @@ static void mic_level_probe(const struct device *i2s)
 		return;
 	}
 	mic_probe_next_ms = now + MIC_PROBE_INTERVAL_MS;
-	if (mic_power_is_cut()) {
-		return;
-	}
+	/*
+	 * NO mic_power_is_cut() GATE HERE, and removing it was a bug fix.
+	 *
+	 * It read well — "you cannot measure a dark microphone" — and it was
+	 * wrong for two reasons, both found by measurement on 2026-08-13.
+	 *
+	 * First, it made the level STICKY. The probe returned early at this
+	 * gate every 15 s while the last successful reading kept being
+	 * published, so the owner watched a frozen peak/rms pair while
+	 * rewiring the microphone by hand. (The freshness stamp in bench.c is
+	 * the real fix for that; this is the other half.)
+	 *
+	 * Second and worse, it let ONE broken wire veto the diagnosis of
+	 * ANOTHER. P0.26 is tied low — proven, it cannot be lifted by the nRF
+	 * driving it — so this gate can never open on this board, and the
+	 * microphone could never be measured no matter how many mic wires the
+	 * owner fixed. A diagnostic must not take its own inputs on trust,
+	 * least of all from a pin already known to be lying.
+	 *
+	 * So the two facts are now gathered INDEPENDENTLY and reported side by
+	 * side, which is what makes them able to disagree usefully:
+	 *   sense low  + a real varying level   -> the SENSE wire is lying
+	 *   sense low  + saturated/frozen level -> the mic really is not there
+	 * A gate here would have collapsed both cases into one silence.
+	 *
+	 * The CAPTURE path keeps its mute gate untouched — refusing to record
+	 * a mic the owner has switched off is product behaviour, and this is a
+	 * diagnostic that uploads nothing.
+	 */
 	if (k_mem_slab_init(&mic_rx_slab, mic_rx_storage, MIC_RX_BLOCK_SIZE,
 			    MIC_RX_BLOCK_COUNT) != 0) {
 		return;
@@ -1394,6 +1421,7 @@ static void mic_level_probe(const struct device *i2s)
 			if (absolute > peak) {
 				peak = absolute;
 			}
+			sum += sample;
 			square_sum += (uint64_t)((int64_t)sample * sample);
 			++counted;
 		}
@@ -1412,8 +1440,35 @@ static void mic_level_probe(const struct device *i2s)
 	if (counted == 0U) {
 		return;
 	}
+	/*
+	 * RMS OF THE AC CONTENT, with the DC term removed — and that removal
+	 * is the difference between a diagnostic and a decoration.
+	 *
+	 * The first version of this reported the raw RMS on the reasoning that
+	 * a bench should see the microphone "as it is". Measured on the board,
+	 * that made the field unable to answer its own question: the SPH0645
+	 * carries a large DC offset (the capture path runs a DC blocker for
+	 * exactly this reason), so raw RMS is dominated by DC and lands right
+	 * next to peak — rms/peak came back at 0.86. A stuck or floating data
+	 * line ALSO gives rms/peak near 1. Two opposite diagnoses, identical
+	 * number.
+	 *
+	 * Variance strips the DC: E[x^2] - E[x]^2 is the signal's own
+	 * movement, which is precisely what "is this microphone hearing
+	 * anything" means. A quiet working mic now reads a small non-zero rms
+	 * that JUMPS when the owner taps it; a dead or undriven line reads
+	 * flat whatever the room does. Peak stays absolute, so the DC offset
+	 * is still visible in it — the two numbers together separate "no
+	 * signal" from "no movement".
+	 */
+	int64_t mean = sum / (int64_t)counted;
+	int64_t variance = (int64_t)(square_sum / counted) - (mean * mean);
+
+	if (variance < 0) {
+		variance = 0;
+	}
 	pendant_bench_note_mic_level(
-		peak, (int32_t)integer_square_root(square_sum / counted));
+		peak, (int32_t)integer_square_root((uint64_t)variance));
 }
 
 /*
