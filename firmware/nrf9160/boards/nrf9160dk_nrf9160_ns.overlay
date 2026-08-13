@@ -54,15 +54,6 @@
 		mic_power_sense: mic_power_sense {
 			gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
 		};
-		/*
-		 * LSM6DSOX INT1 (double-tap wake). The IMU drives this push-pull
-		 * active-high; the internal pull-down only defines the level when
-		 * the breadboard wire falls out, so a missing wire reads "no tap"
-		 * forever instead of floating into phantom conversations.
-		 */
-		accel_int1: accel_int1 {
-			gpios = <&gpio0 27 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
-		};
 	};
 
 	/*
@@ -137,7 +128,6 @@
 		encoder-a = &encoder_a;
 		encoder-b = &encoder_b;
 		mic-sense = &mic_power_sense;
-		accel-int1 = &accel_int1;
 		amp-sd-mode = &amp_sd_mode;
 	};
 };
@@ -187,16 +177,19 @@
  * (PORT event) instead of GPIOTE channels: the nRF9160 has only 8 GPIOTE
  * channels and the DK's own buttons already use some. Encoder edges are
  * hand-speed (worst observed ~2.5 ms apart on a fast spin) — µs-class
- * PORT latency is irrelevant there. Bits: P0.21-25 and P0.27 (accelerometer
- * INT1 — a double-tap is even slower than a hand on a knob).
+ * PORT latency is irrelevant there. Bits: P0.21-25.
  *
  * P0.28's bit is GONE (0x1be00000 -> 0x0be00000) with the encoder push: an
  * unwired pin left in the sense mask is a floating input free to wake the
  * CPU on every breadboard-coupled edge, which is a battery leak that looks
  * like a firmware bug.
+ *
+ * P0.27's bit is GONE too (0x0be00000 -> 0x03e00000) with the accelerometer:
+ * the owner is not using it anymore, so the pin is unclaimed and, same rule
+ * as P0.28, must not be left armed in the sense mask.
  */
 &gpio0 {
-	sense-edge-mask = <0x0be00000>;
+	sense-edge-mask = <0x03e00000>;
 };
 
 /*
@@ -204,13 +197,14 @@
  *
  * The board's uart0_default pinctrl also claimed P0.26 (CTS, with a
  * bias-pull-up — directly against the mic-sense contract above, which
- * requires NO pull on that net), P0.27 (RTS — now the accelerometer's
- * INT1) and P0.28 (RX — once the encoder push, now unclaimed by anything).
- * Nothing ever used them: flow control was never enabled and console input
- * is not a thing this firmware has. Dropping them from the pinctrl frees all
- * three pins honestly instead of leaning on "the UARTE probably won't drive
- * them" — and P0.28 stays free, so this repin is what keeps it genuinely
- * available rather than merely unused.
+ * requires NO pull on that net), P0.27 (RTS — held the accelerometer's
+ * INT1, now unclaimed by anything) and P0.28 (RX — once the encoder push,
+ * likewise unclaimed). Nothing ever used them: flow control was never
+ * enabled and console input is not a thing this firmware has. Dropping
+ * them from the pinctrl frees all three pins honestly instead of leaning
+ * on "the UARTE probably won't drive them" — and P0.27/P0.28 stay free,
+ * so this repin is what keeps them genuinely available rather than
+ * merely unused.
  */
 &pinctrl {
 	uart0_console_txonly: uart0_console_txonly {
@@ -396,9 +390,10 @@
  *   of this pin, not a nicety.
  *
  *   RX = P0.05, the DK's LED4 pin. Every other candidate was taken when this
- *   was chosen: P0.01 = SD_MODE, P0.29 = console TX, P0.26/27 = mic sense /
- *   accelerometer INT1 (P0.28 held the encoder push then and is free now —
- *   see the encoder node), P0.15 = the volume ADC, P0.10-13 =
+ *   was chosen: P0.01 = SD_MODE, P0.29 = console TX, P0.26 = mic sense
+ *   (P0.27 held the accelerometer's INT1 then and is free now; P0.28 held
+ *   the encoder push then and is free now — see the encoder node),
+ *   P0.15 = the volume ADC, P0.10-13 =
  *   microSD, P0.14/16-20 = the audio bus, P0.21-25 = buttons and encoder,
  *   P0.30/31 = I2C. Of the four LED pins P0.02 is led0 (this firmware's
  *   only status LED) and P0.03/P0.04 are the next two; taking the HIGHEST
@@ -482,20 +477,16 @@
  * pins — the bus needs external 4.7 k resistors to 3V on the breadboard
  * (see firmware/CONTROLS_WIRING.md).
  *
- * Two breakouts share the bus, both probed raw (no child nodes, no
- * Zephyr sensor drivers — the register recipes are a handful of writes
- * and the sensor subsystem would cost kilobytes this build does not
- * have):
+ * One breakout lives on the bus, probed raw (no child node, no Zephyr
+ * sensor driver — the register recipe is a handful of writes and the
+ * sensor subsystem would cost kilobytes this build does not have):
  *
  *   0x5A  DRV2605L haptic driver (LRA)  — haptic.c
- *   0x6A  LSM6DSOX accelerometer        — accel_tap.c (0x6B if the
- *         breakout's DO/SDO jumper is high)
  *
- * Either breakout may be physically absent; each module probes its
- * address exactly once at boot and degrades (haptics -> LED patterns,
- * double-tap wake -> buttons only), so an absent part costs one boot
- * log line.  100 kHz for the same reason the SD bus runs slow: loose
- * breadboard wiring.
+ * The breakout may be physically absent; it probes its address exactly
+ * once at boot and degrades (haptics -> LED patterns), so an absent
+ * part costs one boot log line.  100 kHz for the same reason the SD
+ * bus runs slow: loose breadboard wiring.
  */
 &i2c2 {
 	status = "okay";

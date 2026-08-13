@@ -19,7 +19,6 @@
 #include <helpers/nrfx_gppi.h>
 #include <ff.h>
 
-#include "accel_tap.h"
 #include "audio_opus.h"
 #include "haptic.h"
 #include "pendant_bt.h"
@@ -80,10 +79,6 @@
  *
  * ---- Sensor/audio additions (same parts order) ----
  *
- *   P0.27         accel INT1 — LSM6DSOX double-tap = another body for
- *                              button 1 (accel_tap.c gives the same
- *                              semaphore, so mute/converse semantics
- *                              apply unchanged).
  *   P0.15 (AIN2)  volume pot — wiper of the knob, polled on the SAADC
  *                              (the ESP32's GPIO34 job, moved here: the
  *                              ESP32 stands in for a dumb BT module, so
@@ -1009,18 +1004,6 @@ static void ptt_button_pressed(const struct device *port,
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 	k_sem_give(&ptt_press_sem);
-}
-
-/*
- * LSM6DSOX double-tap, delivered from the INT1 GPIO ISR (accel_tap.c).
- * Give the SAME semaphore as button 1 and the yellow button and NOTHING
- * else: every press semantic — start conversation, stop recording, end
- * conversation, mute suppression — applies to a tap-tap on the pendant
- * body with zero new states.
- */
-static void accel_double_tap_isr(void)
-{
-	k_sem_give(&button_press_sem);
 }
 
 static bool take_memo_press(void)
@@ -2638,6 +2621,22 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 
 static void show_error(void)
 {
+	/*
+	 * Say it on the colour channel too, when there is one.  This call is
+	 * a no-op until pendant_status_init() has run (see status_ready in
+	 * pendant_status.c), which is why that init was moved above every
+	 * fatal path that can be reached on a working board: an SD card that
+	 * will not mount is the failure this device actually hits, and before
+	 * that move it produced a pendant whose status LED was never
+	 * initialised at all — indistinguishable, to the owner, from a
+	 * miswired LED.
+	 *
+	 * Asserted ONCE, not in the loop: FAILED is three red blinks plus a
+	 * two-part buzz, and a wearable that buzzes every second forever on a
+	 * bench is worse than one that says it clearly once.  The 100 ms LED1
+	 * blink below remains the permanent "this boot is dead" marker.
+	 */
+	pendant_status_set(PENDANT_STATUS_FAILED);
 	while (true) {
 		gpio_pin_toggle_dt(&led);
 		k_msleep(100);
@@ -4715,10 +4714,9 @@ static void configure_control_inputs(void)
 	}
 	audio_sink_apply(AUDIO_SINK_BOOT_DEFAULT);
 
-	/* Volume knob (SAADC) and double-tap wake (I2C2): both probe-once,
-	 * both degrade to "feature absent" on a bare breadboard. */
+	/* Volume knob (SAADC): probe-once, degrades to "feature absent" on a
+	 * bare breadboard. */
 	volume_adc_init();
-	(void)accel_tap_init(accel_double_tap_isr);
 }
 
 /*
@@ -4803,6 +4801,27 @@ int main(void)
 	}
 #endif
 	configure_control_inputs();
+
+	/*
+	 * FEEDBACK BEFORE FALLIBILITY.  Everything from here down can fail
+	 * fatally — the I2S device, the microSD mount, the modem — and every
+	 * one of those failures ends in show_error(), which never returns.
+	 * So the two channels that tell the owner what happened have to be
+	 * alive BEFORE the first of them, or a boot that dies on a missing
+	 * card leaves the status LED unconfigured and the pendant simply dark:
+	 * the exact symptom that reads as "the LED is broken".
+	 *
+	 * Both are safe this early.  haptic_init() is a single I2C probe and
+	 * degrades to "no motor" on a bare breadboard.  pendant_status_init()
+	 * configures three pads and schedules one work item; the mic-mute
+	 * probe it is handed is guarded by mic_sense_ready, so calling it
+	 * before the sense pin exists reports "not muted" rather than reading
+	 * an unconfigured pad.  configure_control_inputs() above has in fact
+	 * already set that pin up — this ordering is belt and braces.
+	 */
+	(void)haptic_init();
+	pendant_status_init(mic_power_is_cut);
+
 	if (!device_is_ready(i2s)) {
 		audio_cycle_result = -ENODEV;
 		show_error();
@@ -4835,21 +4854,10 @@ int main(void)
 	/*
 	 * Reflex layer, also before LTE for the same reason: a timer or a
 	 * daily nudge that only exists once the network is up is not a
-	 * reflex.  Haptic first — its single boot probe decides whether
-	 * every haptic action runs the motor or degrades to LED.
+	 * reflex.  The motor and the status subsystem it depends on came up
+	 * earlier, above the first fatal path — see "FEEDBACK BEFORE
+	 * FALLIBILITY" there for why that ordering is not negotiable.
 	 */
-	(void)haptic_init();
-	/*
-	 * The status subsystem comes straight after the motor and before
-	 * anything that can succeed or fail, so that the very first
-	 * transition already has both channels: light and buzz go live
-	 * together or the device can contradict itself during boot.
-	 *
-	 * mic_power_is_cut is handed over as a probe rather than pushed:
-	 * the mute indicator has to be continuously true, not only true at
-	 * the instant a capture button is pressed.
-	 */
-	pendant_status_init(mic_power_is_cut);
 	pendant_reflex_init(&reflex_ops_impl);
 
 #if PENDANT_BOOT_DUMP_PCM_HEX

@@ -36,7 +36,6 @@ graph LR
   SDC -- "SPI P0.10–P0.13" --> DK
   HAP -- "I2C P0.30/P0.31 · 0x5A · 4.7k pull-ups" --> DK
   RGB -- "R P0.03 · G P0.04 · B P0.07 (each ·330R·) · common → GND" --> DK
-  ACC["motion sensor: accelerometer\nLSM6DSOX"] -- "I2C 0x6A · INT1 → P0.27" --> DK
   AMP -- "taps I2S nets · SD_MODE → P0.01" --> DK
   ESP -- "A2DP" --> SND
   DK <-- "command UART · 115200 · TX P0.00→G16 · RX P0.05←G17" --> ESP
@@ -151,7 +150,7 @@ Bus: **SDA P0.30 · SCL P0.31**, one **4.7k pull-up from each to the 3V rail** [
 | Device | Connections | Status |
 | --- | --- | --- |
 | DRV2605L haptic (addr 0x5A) | VDD→3V, GND, SDA, SCL, OUT+/OUT− → LRA buzzer | [NOW] — firmware flashed |
-| Accelerometer **LSM6DSOX** (addr 0x6A) | VDD→3V, GND, SDA, SCL, **INT1 → P0.27** | [NOW] — firmware flashed |
+| ~~Accelerometer **LSM6DSOX**~~ | — | **REMOVED** 2026-08-13 — owner ruling ("we're not using the accelerometer anymore"). Bus now carries only the haptic driver. **P0.27 is free.** |
 
 ## Speaker amp — incoming
 
@@ -297,16 +296,6 @@ order — trust the length.
 Three resistors, one per colour — never a single resistor on the common
 leg: shared, the three dice fight for the same current and the colour
 changes every time a channel switches on.
-
-**motion sensor · LSM6DSOX accelerometer**
-| pin on part | connect to |
-| --- | --- |
-| VIN | 3V rail |
-| GND | GND rail |
-| SCL | DK P0.31 (same bus wire as haptic) |
-| SDA | DK P0.30 (same bus wire as haptic) |
-| INT1 | DK P0.27 |
-| DO, CS, INT2, I1(3V3) | — (DO low = address 0x6A) |
 
 **audio amplifier · MAX98357A**
 | pin on part | connect to |
