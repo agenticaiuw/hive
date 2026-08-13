@@ -20,6 +20,7 @@ import {
 } from './config.js'
 import {
   voiceRunForCapture,
+  collapseRepeatRuns,
   createAudioCapture,
   createAgentProxyJob,
   createExecuteJob,
@@ -2207,16 +2208,29 @@ app.get('/v1/ops/voice-runs', async (request, response) => {
     store.listJobs({ type: ['plan', BROWSER_TASK_JOB_TYPE], limit: 80 }),
     store.listJobs({ type: 'audio_capture', limit: 40 }),
   ])
-  const runs = [
-    ...jobs.map((job) => operatorRunForRow(job)),
-    ...captures.map(voiceRunForCapture),
-  ]
-    .filter(Boolean)
-    .sort(
-      (left, right) =>
-        new Date(right.createdAt || 0) - new Date(left.createdAt || 0),
-    )
-    .slice(0, requestedLimit)
+  /*
+   * `feed: true` is the Recent-list membership rule: a press that captured
+   * nothing and ended for an ordinary reason (nobody spoke — a pocket, a
+   * bag, a firmware test with the mic unpowered) is a non-event, not a
+   * failure, and must not cost this list one of its (dashboard-fixed) 8
+   * slots. voiceRunForCapture / voiceRunForJob still return a real,
+   * honestly-labelled 'recorded' run for every other caller — this route is
+   * the only one that excludes it. collapseRepeatRuns then folds any
+   * remaining consecutive, identical, genuine failures from the same device
+   * into one row, because DESIGN.md's "no repeating text" applies to those
+   * too.
+   */
+  const runs = collapseRepeatRuns(
+    [
+      ...jobs.map((job) => operatorRunForRow(job, { feed: true })),
+      ...captures.map((capture) => voiceRunForCapture(capture, { feed: true })),
+    ]
+      .filter(Boolean)
+      .sort(
+        (left, right) =>
+          new Date(right.createdAt || 0) - new Date(left.createdAt || 0),
+      ),
+  ).slice(0, requestedLimit)
 
   response.set('Cache-Control', 'no-store, max-age=0')
   response.json({
@@ -2246,8 +2260,11 @@ app.get('/v1/ops/voice-runs/latest', async (_request, response) => {
     )
     .find(
       (candidate) =>
-        Boolean(operatorRunForRow(candidate)) ||
-        Boolean(voiceRunForCapture(candidate)),
+        // Same `feed: true` membership as /v1/ops/voice-runs, so a benign
+        // silent press can never trip this probe into telling the dashboard
+        // to refetch a list it would then be excluded from anyway.
+        Boolean(operatorRunForRow(candidate, { feed: true })) ||
+        Boolean(voiceRunForCapture(candidate, { feed: true })),
     )
   response.set('Cache-Control', 'no-store, max-age=0')
   response.json({

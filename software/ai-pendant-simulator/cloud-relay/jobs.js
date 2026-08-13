@@ -181,11 +181,48 @@ const VOICE_RUN_ORIGINS = new Set([
 ])
 
 /*
+ * Reasons pendantConverse.js's endConversation(reason) can close a duplex
+ * conversation that captured audio but never recognised a word — the only
+ * ambiguous case here, since "audio arrived AND a reply happened" is already
+ * unambiguous (`answered`, below). Membership here means "this ending is
+ * ordinary": the idle timer fired, the model settled the session on its own,
+ * the pendant sent an explicit stop, a fresh press superseded this one, or
+ * the socket closed the way it always does when a call is over. None of
+ * those imply anything went wrong — a healthy press that heard silence is
+ * not a failure.
+ *
+ * Deliberately NOT in this set: 'agent-error' (the Realtime session itself
+ * errored), 'bad-audio' (the uplink Opus stream failed to decode) and
+ * 'socket-error' (the transport broke while a conversation was live) — real
+ * failures, and 'socket-error' covers the "truncated mid-upload" case this
+ * fix is required to keep visible. An `endReason` that is absent entirely —
+ * every capture written before this field existed — is ALSO not in this set
+ * on purpose: a capture this code cannot explain stays a visible failure
+ * rather than being reclassified on a guess. That is why the flood already
+ * on the owner's dashboard renders exactly as it does today; only presses
+ * from here forward get the honest read.
+ */
+const BENIGN_SILENCE_REASONS = new Set([
+  'idle',
+  'agent-done',
+  'stopped',
+  'restarted',
+  'socket-closed',
+])
+
+/*
  * Conversational-only presses (the model answered by voice; no Mac job) leave
  * only an audio_capture behind. Surface those as first-class runs so chat
  * questions don't vanish from the dashboard.
+ *
+ * `feed: true` is the Recent-list membership rule (server.js /v1/ops/voice-
+ * runs and its /latest probe): a benign silent press returns null there, so
+ * it never occupies one of the feed's slots. Every other caller (the full
+ * /v1/ops/history page, a direct run-detail lookup) keeps the default and
+ * still gets a real run back — nothing here is ever deleted, only excluded
+ * from the glanceable list.
  */
-export function voiceRunForCapture(capture) {
+export function voiceRunForCapture(capture, { feed = false } = {}) {
   if (!capture || capture.type !== 'audio_capture') return null
   if (capture.planJobId) return null // its plan job already owns the run
   if (capture.role === 'reply') return null // agent-voice sidecar, not a run
@@ -200,6 +237,18 @@ export function voiceRunForCapture(capture) {
    */
   const replyTranscript = String(capture.replyTranscript || '').trim()
   const answered = Boolean(capture.replyCaptureId) || Boolean(replyTranscript)
+
+  /*
+   * "Nobody spoke" and "speech-to-text broke" look identical from the
+   * transcript alone — both are empty. `endReason`, stamped by
+   * pendantConverse.js at the moment the conversation actually ended, is the
+   * one place that distinction is still known; see BENIGN_SILENCE_REASONS.
+   */
+  const noSpeech = !transcript && !answered
+  const benignSilence =
+    noSpeech && BENIGN_SILENCE_REASONS.has(String(capture.endReason || ''))
+
+  if (benignSilence && feed) return null
 
   /*
    * A reply capture is built from the very same PCM buffer that the duplex
@@ -226,13 +275,18 @@ export function voiceRunForCapture(capture) {
       {
         eventId: `cloud-${capture.jobId}-agent`,
         stage: 'agent',
-        status: answered ? 'done' : 'failed',
+        status: answered ? 'done' : benignSilence ? 'skipped' : 'failed',
         label: answered
           ? 'Answered by voice (no Mac action)'
-          : 'The agent produced no reply',
+          : benignSilence
+            ? 'Nothing to answer — no speech reached the agent'
+            : 'The agent produced no reply',
         detail: answered
           ? 'The cloud agent spoke its reply down the pendant stream; the Mac was not involved.'
-          : 'Speech reached the relay and was stored, but no reply audio or text came back. The pendant played silence.',
+          : benignSilence
+            ? 'The press opened a conversation and it ended without anyone speaking. Nothing was asked, so there is nothing to answer.'
+            : capture.endError ||
+              'Speech reached the relay and was stored, but no reply audio or text came back. The pendant played silence.',
         text: replyTranscript,
         source: 'cloudflare',
         meta: null,
@@ -272,13 +326,20 @@ export function voiceRunForCapture(capture) {
      * `status` still answers "did the agent produce a reply", which is the
      * question jobsVoiceRun.test.js locked down. `delivery` answers the separate
      * question of whether the reply ever became sound, and on this path the
-     * honest answer stops at "the relay wrote bytes at the device".
+     * honest answer stops at "the relay wrote bytes at the device". A benign
+     * silent press is neither — 'recorded' is the same terminal vocabulary
+     * browserTaskHistory.js falls back to for "ended honestly, no verdict
+     * either way," which the dashboard already renders as a neutral, non-red
+     * "Recorded" rather than a failure.
      */
-    status: answered ? 'completed' : 'failed',
+    status: answered ? 'completed' : benignSilence ? 'recorded' : 'failed',
     delivery: gradeAudioDelivery(events, { origin: 'live_lte' }),
     error: answered
       ? null
-      : 'The pendant uploaded audio but the agent produced no reply.',
+      : benignSilence
+        ? null
+        : capture.endError ||
+          'The pendant uploaded audio but the agent produced no reply.',
     events,
     createdAt: capture.createdAt,
     updatedAt: capture.updatedAt || capture.createdAt,
@@ -290,7 +351,7 @@ export function voiceRunForCapture(capture) {
   }
 }
 
-export function voiceRunForJob(job, { now = Date.now() } = {}) {
+export function voiceRunForJob(job, { now = Date.now(), feed = false } = {}) {
   if (!job || job.type !== 'plan') return null
   const telemetry = job.inputTelemetry
   const origin = String(telemetry?.storage || '').toLowerCase()
@@ -537,22 +598,48 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
           /executed|Plan executed/i.test(String(event.label || ''))),
     )
 
-  const status =
+  /*
+   * A job that reached 'transcribed' and stopped there, with no error and no
+   * useful words, is the /v1/transcribe sibling of the duplex-conversation
+   * silence bug (voiceRunForCapture, above) — same product, same mistake:
+   * speech-to-text ran and genuinely heard nothing, which is not a failure.
+   * This is safe to call "genuinely nothing happened" rather than "we don't
+   * know why it failed": a real STT error already sets job.status to
+   * 'failed' with the real message at write time (server.js /v1/transcribe's
+   * catch block) or leaves it 'transcribing' past STALE_TRANSCRIBE_MS —
+   * BOTH of which the first branch below already claims as 'failed' before
+   * this one is ever reached. `typed` is excluded on purpose — an empty
+   * *typed* command would be a different, stranger bug, not silence.
+   */
+  const genuinelyFailed =
     ['failed', 'cancelled'].includes(job.status) || transcriptionStale
-      ? 'failed'
-      : transcriptionPending
-        ? 'processing'
-        : macDone || delivery.rank > 0
-          ? /*
-             * Browser-originated runs have no speaker waiting, so the Mac's
-             * answer really is their finish line and deliveryRunStatus() says
-             * so. Pendant runs get PLAYBACK_UNKNOWN_STATUS instead of
-             * 'completed': the audio left the relay and nothing on this system
-             * can say whether it was ever played.
-             */
-            deliveryRunStatus(delivery, { macDone })
-          : hasTranscript || result
-            ? 'processing'
+  const recordedSilently =
+    !genuinelyFailed &&
+    !transcriptionPending &&
+    !typed &&
+    !(macDone || delivery.rank > 0) &&
+    !hasTranscript &&
+    !result
+
+  if (recordedSilently && feed) return null
+
+  const status = genuinelyFailed
+    ? 'failed'
+    : transcriptionPending
+      ? 'processing'
+      : macDone || delivery.rank > 0
+        ? /*
+           * Browser-originated runs have no speaker waiting, so the Mac's
+           * answer really is their finish line and deliveryRunStatus() says
+           * so. Pendant runs get PLAYBACK_UNKNOWN_STATUS instead of
+           * 'completed': the audio left the relay and nothing on this system
+           * can say whether it was ever played.
+           */
+          deliveryRunStatus(delivery, { macDone })
+        : hasTranscript || result
+          ? 'processing'
+          : recordedSilently
+            ? 'recorded'
             : 'failed'
 
   return {
@@ -571,5 +658,72 @@ export function voiceRunForJob(job, { now = Date.now() } = {}) {
       replyCaptureId: null,
       replyTranscript: String(result?.response || '').trim() || null,
     },
+  }
+}
+
+/*
+ * Consecutive failures wider apart than this read as a recurring problem
+ * worth seeing separately (the owner hit the same bug this morning and
+ * again tonight), not one burst. The flood this fix responds to was eight
+ * presses inside two minutes, so ten minutes is generous headroom for "one
+ * burst" without being wide enough to hide a real intermittent pattern.
+ */
+const REPEAT_FOLD_WINDOW_MS = 10 * 60_000
+
+/*
+ * Fold consecutive, indistinguishable failures into one row with a count.
+ *
+ * A repeated identical failure is still real and must stay visible — the
+ * whole point of BENIGN_SILENCE_REASONS above is that a non-event gets
+ * filtered out well before this runs, so anything reaching here that is
+ * `status: 'failed'` genuinely happened. But DESIGN.md's "no repeating text"
+ * rule does not carve out an exception for real failures: if a device hits
+ * the same error press after press (a dead network, a broken Realtime
+ * session), eight identical rows are exactly as unreadable as eight
+ * identical silences were. Only ever folds ADJACENT entries in an
+ * already-newest-first list that share a device, a non-empty identical error
+ * string, AND fall within REPEAT_FOLD_WINDOW_MS of each other — two
+ * different failures, the same failure hours apart, or one separated by
+ * something else that happened in between, are never merged. `completed`
+ * and `recorded` runs are never touched: two genuinely repeated actions (the
+ * owner asked twice) are two real events, not noise.
+ */
+export function collapseRepeatRuns(runs) {
+  const list = Array.isArray(runs) ? runs : []
+  const collapsed = []
+
+  for (const run of list) {
+    const previous = collapsed[collapsed.length - 1]
+    if (previous && isRepeatFailure(previous, run)) {
+      previous.repeatCount = (previous.repeatCount || 1) + 1
+      previous.repeatFirstAt = run.createdAt || previous.repeatFirstAt
+      continue
+    }
+    collapsed.push({ ...run })
+  }
+
+  return collapsed.map((run) =>
+    run.repeatCount > 1 ? withRepeatNote(run) : run,
+  )
+}
+
+function isRepeatFailure(a, b) {
+  if (a.status !== 'failed' || b.status !== 'failed') return false
+  if (!a.error || String(a.error).trim() !== String(b.error || '').trim()) {
+    return false
+  }
+  if (String(a.origin || '') !== String(b.origin || '')) return false
+  const gapMs = Math.abs(
+    new Date(a.repeatFirstAt || a.createdAt || 0).getTime() -
+      new Date(b.createdAt || 0).getTime(),
+  )
+  return Number.isFinite(gapMs) && gapMs <= REPEAT_FOLD_WINDOW_MS
+}
+
+function withRepeatNote(run) {
+  const note = `This exact failure repeated ${run.repeatCount} times in a row (most recently just now); the earlier ones are folded into this row to keep the list readable.`
+  return {
+    ...run,
+    error: `${run.error} ${note}`,
   }
 }
