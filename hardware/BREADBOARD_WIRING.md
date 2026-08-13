@@ -399,6 +399,27 @@ Properties worth knowing before you write a grep against it:
   mid-transmission and its first bytes are the tail of a line that began
   earlier.
 
+**Verify the chain from the far end, not each half from its own side.**
+On 2026-08-13 the dashboard showed nothing while the firmware was demonstrably
+emitting. Two independent bugs caused it: a macOS termios ordering fault in the
+capture recipe, and a port-election short-circuit in the bench's reader. Each
+agent found one, and each fix *fully explained the symptom* — which is exactly
+why neither of us kept looking. The firmware side verified "my emitter produces
+lines"; the bench side verified "my reader consumes lines"; nobody verified
+that the two ends were connected to each other until the owner's page stayed
+dark. A full explanation feels like a complete one. Close the loop from the far
+end — compare the board's raw bytes against what the owner is actually looking
+at — before calling any pipeline fixed.
+
+The same trap has a second face: **"the value changes" is not "the value is
+correct."** The volume pot was called good because its reading tracked the
+owner's hand. It does track — and it also only spans 2.5% of its range, because
+the track is mis-wired. A moving number proves the wiper and the ADC input are
+alive; it says nothing about whether the ends of the track reach the rails.
+Alive and correctly-wired are different claims, the same way "both encoder
+phases are alive" and "the decode is right in both directions" are different
+claims. One observation rarely settles two.
+
 **A flash does not need the tty.** `west flash` and every JLinkExe measurement
 (halting, reading globals, driving pins) go over SWD through the J-Link's own
 USB interface, a completely separate channel. Reading console text was always
