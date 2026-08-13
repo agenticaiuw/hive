@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { BenchLink, foreignHolders } from './benchLink.js'
+import { BenchLink, foreignHolders, standDownRequested } from './benchLink.js'
 
 function fakeReader() {
   const reader = { buffer: '', bytes: 0, openedAt: Date.now(), killed: false }
@@ -14,8 +14,11 @@ function fakeReader() {
   return reader
 }
 
+/** Never the real stand-down path: another agent may hold it mid-run. */
+const NO_STANDDOWN = `/tmp/pendant-bench-standdown-absent-${process.pid}`
+
 function linkWithPorts(ports) {
-  const link = new BenchLink({ transport: 'off' })
+  const link = new BenchLink({ transport: 'off', standDownFile: NO_STANDDOWN })
   link.openedAt = Date.now()
   for (const port of ports) {
     link.readers.set(port, fakeReader())
@@ -93,9 +96,14 @@ test('the bench stub streams, and never pretends to be a board', async () => {
 })
 
 test('an unplugged DK is reported as unplugged rather than as a crash', async () => {
-  const link = new BenchLink({ transport: 'serial', port: '/dev/cu.no-such-port' })
+  const link = new BenchLink({
+    transport: 'serial',
+    port: '/dev/cu.no-such-port',
+    standDownFile: NO_STANDDOWN,
+  })
   link.subscribe(() => {})
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  // Long enough for the reader shell to try the open and exit.
+  await new Promise((resolve) => setTimeout(resolve, 700))
   const snapshot = link.snapshot()
   link.stop()
 
@@ -136,7 +144,11 @@ test('the link lets go of the tty once nobody is watching', () => {
 })
 
 test('a subscriber holds the port; a snapshot poll never opens one', () => {
-  const link = new BenchLink({ transport: 'serial', port: '/dev/cu.no-such-port' })
+  const link = new BenchLink({
+    transport: 'serial',
+    port: '/dev/cu.no-such-port',
+    standDownFile: NO_STANDDOWN,
+  })
 
   // `touch` is what /bench/snapshot calls. It must not start anything.
   link.touch()
@@ -156,28 +168,22 @@ test('a subscriber holds the port; a snapshot poll never opens one', () => {
 
 test('the stand-down file makes the reader let go without an HTTP call', async () => {
   const flag = `/tmp/pendant-bench-standdown-test-${process.pid}`
-  const { standDownRequested } = await import('./benchLink.js')
   const fs = await import('node:fs')
 
   assert.equal(standDownRequested(flag), false)
+  const link = linkWithPorts(['/dev/cu.a'])
+  link.standDownFile = flag
+  link.forcedPort = '/dev/cu.a'
+
   fs.writeFileSync(flag, '')
   try {
     assert.equal(standDownRequested(flag), true)
-
-    const link = linkWithPorts(['/dev/cu.a'])
-    link.forcedPort = '/dev/cu.a'
-    process.env.BENCH_STANDDOWN_FILE = flag
-    // The module read the path at import time, so drive the branch directly:
-    // what matters is that a requested stand-down closes readers and says why.
-    if (standDownRequested(flag)) {
-      link.closeReaders()
-      link.linkState = 'stood-down'
-    }
-    assert.equal(link.readers.size, 0)
+    await link.scanSerial()
+    assert.equal(link.readers.size, 0, 'every reader is released')
     assert.equal(link.linkState, 'stood-down')
+    assert.match(link.snapshot().link.detail, /another tool asked for the console/)
   } finally {
     fs.unlinkSync(flag)
-    delete process.env.BENCH_STANDDOWN_FILE
   }
 })
 

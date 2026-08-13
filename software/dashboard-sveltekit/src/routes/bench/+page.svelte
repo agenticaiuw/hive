@@ -615,7 +615,18 @@
           ? "LINKED"
           : (snapshot?.controls.esp32.state ?? "—").toUpperCase()}
       </p>
-      <p class="bn-foot">P0.00 tx / P0.05 rx · uart1</p>
+      <p class="bn-foot">
+        P0.00 tx / P0.05 rx ·
+        {#if snapshot?.controls.esp32.state}
+          uart1
+        {:else}
+          <!-- Absent means the firmware never got as far as probing it — right
+               now it halts in show_error() before pendant_bt_init(). "Not
+               probed" and "probed and silent" are different facts and only one
+               of them is about a wire. -->
+          <span class="bn-waiting">not probed yet</span>
+        {/if}
+      </p>
     </article>
   </section>
   {/if}
