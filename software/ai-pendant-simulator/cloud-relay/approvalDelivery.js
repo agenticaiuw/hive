@@ -322,9 +322,16 @@ export async function decideApproval({
 }
 
 /**
- * The pendant's hardware approval button (blue, P0.23): short press approves,
- * long hold denies, arriving as {"type":"approval_decision"} on the converse
- * socket. A thumb has no approvalId, so this resolves WHICH record the thumb
+ * A hands-free approval decision arriving as {"type":"approval_decision"} on
+ * the converse socket.
+ *
+ * This WAS the blue button (P0.23, short press approve / long hold deny) until
+ * the owner remapped blue to push-to-talk on 2026-08-12 — the energy tier, not
+ * the approval one. No hardware control emits this frame today; the route is
+ * kept because the decision semantics below (which record a thumb meant, and
+ * the refusal to blind-approve a confirm-word record) are the same ones any
+ * future physical decision control must inherit, and because a voice answer
+ * during a readback settles through the same path. A thumb has no approvalId, so this resolves WHICH record the thumb
  * meant before handing off to decideApproval — the same one-decision-path
  * every other surface uses.
  *
