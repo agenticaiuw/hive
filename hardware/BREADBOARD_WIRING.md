@@ -31,7 +31,7 @@ graph LR
   SW -- "3V → mic VDD" --> MIC
   SW -.->|"sense ·100k· → P0.26"| DK
   BTN -- "P0.21 · P0.22 · P0.23 (→GND)" --> DK
-  ENC -- "A P0.24 · B P0.25 · push P0.28 (common→GND)" --> DK
+  ENC -- "A P0.24 · C→GND · B P0.25 (3 wires, no switch)" --> DK
   POT -- "middle → P0.15 · sides → 3V/GND" --> DK
   SDC -- "SPI P0.10–P0.13" --> DK
   HAP -- "I2C P0.30/P0.31 · 0x5A · 4.7k pull-ups" --> DK
@@ -69,8 +69,8 @@ graph LR
 | Yellow button (talk) | nRF **P0.21** | GND | [NOW] |
 | Green button (memo) | nRF **P0.22** | GND | [NOW] |
 | Blue button (push-to-talk: press=ask, press=send) | nRF **P0.23** | GND | [NOW] — remapped from approve/deny 2026-08-12 |
-| Encoder A / B | nRF **P0.24** / **P0.25** | encoder COMMON (middle) → GND | [NOW] |
-| Encoder push | nRF **P0.28** | GND | [NOW] |
+| Encoder A / B | nRF **P0.24** / **P0.25** | encoder COMMON (middle, C) → GND | [NOW] — **three wires, that is all** |
+| ~~Encoder push~~ | — | — | **NOT WIRED** (owner's ruling 2026-08-12: "we're not going to use the button on the rotary encoder"). Select is the **dwell**: stop turning for **1500 ms** and the firmware commits the ring entry with a haptic tick. **P0.28 is free.** |
 | Mic-power sense | mic-VDD node → **100k** → nRF **P0.26** | no pull | [NOW] |
 | Volume pot middle leg | nRF **P0.15** (AIN2) | side legs → 3V rail and GND | [NOW] — firmware flashed |
 
@@ -227,17 +227,16 @@ RGB is UNUSED — a separate RGB LED does the status colours (below).
 | A (outer, 3-pin side) | DK P0.24 |
 | C (middle, 3-pin side) | GND rail |
 | B (outer, 3-pin side) | DK P0.25 |
-| switch pin 1 (of the 5) | DK P0.28 |
-| switch pin 2 (of the 5) | GND rail |
-| the other 3 of the 5 | — (built-in RGB, unused) |
+| **all 5 pins on the other side** | — **leave every one unconnected** (2 are the switch, 3 are the built-in RGB) |
 | mounting tabs | — |
 
-Identifying the two switch pins with no multimeter: C (middle of the 3-pin
-side) to GND, then touch 3V through 330 Ω to each of the five in turn. The
-three that GLOW are the built-in LED; the two that stay dark are the switch.
-(If none glow, the part is common-anode: put C on 3V and touch each of the
-five to GND instead — same conclusion, and it also tells you the LED
-polarity if the built-in one is ever used.)
+**Three wires and no more.** The owner's ruling (2026-08-12) retired the push,
+so nothing needs identifying on the 5-pin side and P0.28 stays free for the
+next feature. Selecting a ring entry is now **dwell**: turn to it, stop, and
+1500 ms later the pendant ticks and commits (`MENU_DWELL_MS` in
+`firmware/nrf9160/src/main.c`; the grammar is in
+`docs/Screenless_App_Grammar.md`). Escape is the same verb — every ring ends in
+a **Back** entry, so turn to Back and stop.
 
 **RGB status LED** (separate 4-leg part)
 | leg | connect to |

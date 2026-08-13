@@ -35,7 +35,8 @@ import { loadFleetFromStore, parseDeviceTime } from './fleetContext.js'
 /*
  * The screenless app framework (docs/Screenless_App_Grammar.md). The pendant
  * is stateless — it sends {"type":"menu",delta:±1} per detent and
- * {"type":"menu_select"} per push — so the ring, the mode and the presets all
+ * {"type":"menu_select"} once the knob has RESTED 1.5 s (the owner's encoder
+ * has no switch; dwell is the select) — so the ring, the mode and presets all
  * live HERE, in the conversation's own state. A menu exists only while this
  * socket is open, which is the honest scope: today's firmware plays no audio
  * outside a started conversation, and a menu you cannot hear is not a menu.
@@ -109,6 +110,12 @@ const IDLE_SWEEP_MS = 5_000
  * The blip is instant; the name is not. Spinning through four apps must cost
  * four blips and one sentence, not four sentences — see the earcon note in
  * docs/Screenless_App_Grammar.md.
+ *
+ * It also has to stay WELL under the firmware's 1.5 s dwell, and 200 ms is:
+ * the owner hears the entry's name a full 1.3 s before the select that commits
+ * it lands, which is what makes dwell a decision rather than a surprise. Any
+ * future retune of either number has to preserve that order — a name spoken
+ * after its own commit would be the device narrating the past.
  */
 const MENU_NAME_SETTLE_MS = 200
 /*
@@ -647,6 +654,13 @@ export async function handlePendantConverse(request, context) {
    * and a Mac-backed brief is NOT queued at all — it is fetched off-chain and
    * only its spoken result joins the queue, so the owner can keep scrolling
    * while Reminders is still coming back.
+   *
+   * The select frame is a DWELL, so it arrives 1.5 s behind the detent that
+   * chose the entry and the name has already been spoken off the 200 ms
+   * settle. Nothing here needs to re-say it and nothing here does: this
+   * handler queues only what the reducer returns, and the reducer returns no
+   * 'name' effect on a commit. One chain keeps the order honest even if a fast
+   * spin backed the queue up — name first, then the app's own answer.
    */
   function handleMenuFrame(state, frame) {
     const reduced = reduceMenuFrame(state.menu, frame)
@@ -770,7 +784,7 @@ export async function handlePendantConverse(request, context) {
         channels: 1,
         bitsPerSample: 16,
         transcriptionDurationMs: 0,
-        /* Not a spoken question at all — a ring entry the owner pushed. */
+        /* Not a spoken question at all — a ring entry the owner stopped on. */
         pendantMode: 'knob',
       })
       if (job?.jobId) {
@@ -1375,7 +1389,7 @@ export async function handlePendantConverse(request, context) {
               ? `step ${delta > 0 ? '+1' : '-1'}`
               : msg.type === 'menu_back'
                 ? 'back'
-                : 'select') +
+                : 'select (dwell)') +
             (state && !state.ended ? ` mode=${state.menu.mode}` : ' (no conversation)'),
         )
         /*

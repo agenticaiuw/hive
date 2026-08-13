@@ -11,16 +11,30 @@
  *
  * THE ONE HARD RULE IT ENFORCES: no flow may require two presses to initiate.
  * The yellow press that opens the conversation is the one press. Everything
- * here is driven by the knob — turn to scroll, push to enter, long-hold to
- * escape — and nothing in this reducer can ever return a state that needs a
- * second press before a detent means something. That is why the FIRST detent
- * on a closed menu opens the ring AND lands on its home entry: an opening
- * detent that merely "unlocked" the ring would be exactly the second gesture
- * the grammar forbids.
+ * here is driven by the knob — turn to scroll, REST to select — and nothing in
+ * this reducer can ever return a state that needs a second press before a
+ * detent means something. That is why the FIRST detent on a closed menu opens
+ * the ring AND lands on its home entry: an opening detent that merely
+ * "unlocked" the ring would be exactly the second gesture the grammar forbids.
+ *
+ * THERE IS NO PUSH. Owner's ruling, 2026-08-12: "we're not going to use the
+ * button on the rotary encoder" — their knob is wired with three rotation
+ * wires and no switch. So select is DWELL: the firmware waits 1.5 s after the
+ * last detent and sends {"type":"menu_select"} once, with a haptic tick at the
+ * moment it commits. Nothing in this file changed shape for that, because the
+ * frame did not change — but two things follow and are load-bearing here:
+ *
+ *   1. Every entry is reachable AND every entry is committable by stopping, so
+ *      'back' as the last ring entry is the whole escape story (there is no
+ *      long-hold to add later; a knob with no switch cannot hold).
+ *   2. The entry the ring LANDS on when you enter a sub-ring cannot be dwelled
+ *      into without turning first — the timer is only re-armed by a detent, so
+ *      a resting knob never fires twice. That is why entering Timer says
+ *      "Turn, then pause to start." rather than naming a gesture nobody has.
  *
  * PURE ON PURPOSE. The relay holds the menu (the pendant is stateless — the
  * firmware's whole contribution is {"type":"menu",delta:±1} per detent and
- * {"type":"menu_select"} per push), but holding it and DECIDING it are
+ * {"type":"menu_select"} per dwell), but holding it and DECIDING it are
  * different jobs. Everything that can be decided without a socket, a store or
  * a clock lives here and is tested here; pendantConverse.js does the speaking.
  */
@@ -31,13 +45,13 @@
  * surface at the home position means the most common interaction is
  * turn-once-and-push rather than turn-three-times-and-push.
  *
- * 'back' is the last entry and it is a FALLBACK, not a design goal: the
- * universal escape is the encoder long-hold ({"type":"menu_back"}), which the
- * controls firmware does not emit yet. Until it does, a ring entry the owner
- * can select is the difference between "one long-hold gets you out" and "you
- * are stuck until you end the conversation". When the long-hold lands, this
- * entry stays — it costs one detent and it is the only escape a first-time
- * owner can DISCOVER by turning the knob.
+ * 'back' is the last entry and it is now THE escape, not a fallback. The
+ * long-hold this comment used to promise is never coming: the owner's encoder
+ * has no switch to hold (2026-08-12 ruling), so the only gestures that exist
+ * are turn and rest. Turning to "Back" and stopping is one level up, and it is
+ * the only escape a first-time owner can DISCOVER by turning the knob.
+ * {"type":"menu_back"} stays handled below for the dashboard and the tests —
+ * nothing on the wire was removed — but no hardware emits it.
  */
 export const APP_RING = Object.freeze([
   'time',
@@ -235,18 +249,27 @@ export function menuScroll(state, delta) {
 }
 
 /**
- * One push.
+ * One select — which, on this hardware, is 1.5 s of stillness after a detent.
  *
  * Entering an app SPEAKS ITS SURFACE — there is no silent landing anywhere in
  * this grammar, because on a screenless device silence and breakage sound
- * identical.
+ * identical. That matters more under dwell than it did under a push: the owner
+ * did not DO anything at the moment of commit, so the spoken surface (and the
+ * firmware's haptic tick) is the entire evidence that the ring took their
+ * entry.
+ *
+ * Note what is deliberately absent: no branch here re-speaks the position name
+ * the detent already said 1.3 s earlier. The name belongs to the scroll; the
+ * commit answers with the app's own words.
  */
 export function menuSelect(state) {
   if (state.mode === 'closed') {
     /*
-     * A push with no ring open is the same as the first detent: it opens at
-     * home and says where you are. Treating it as nothing would make the knob
-     * feel dead on the one gesture a first-time owner is most likely to try.
+     * Unreachable from the pendant now and kept anyway: a dwell can only be
+     * armed by a detent, and a detent on a closed menu opens the ring, so the
+     * firmware cannot deliver a select here. Other senders (the dashboard, a
+     * test) can, and opening at home is still the right answer — a select that
+     * did nothing would make the knob feel dead.
      */
     const opened = { ...state, mode: 'apps', appIndex: 0 }
     return { state: opened, effects: [earcon(opened, 'forward'), ...named(opened)] }
@@ -260,8 +283,10 @@ export function menuSelect(state) {
     /*
      * Start it and RETURN TO THE APP RING, standing on Timer. The owner's next
      * detent should scroll apps, not offer to start a second timer they did
-     * not ask for — a preset ring that stays open after a push is a ring where
-     * a stray knock costs you a timer.
+     * not ask for — a preset ring that stays open after a commit is a ring
+     * where a stray knock costs you a timer. Under dwell that knock is the
+     * likelier accident, not the rarer one: a bumped pendant emits a detent,
+     * and 1.5 s of hanging still afterwards is the pendant's resting state.
      */
     const next = { ...state, mode: 'apps', timerIndex: 0 }
     return {
@@ -296,9 +321,14 @@ export function menuSelect(state) {
       state: next,
       effects: [
         earcon(next, 'enter'),
-        /* The one hint that matters, spoken once on entry and never again while
-         * scrolling: the ring itself teaches the rest. */
-        ...named(next, { hint: 'Press to start.' }),
+        /*
+         * The one hint that matters, spoken once on entry and never again
+         * while scrolling: the ring itself teaches the rest. It names the
+         * gesture the owner ACTUALLY has — there is no button, and it asks for
+         * a turn first because the preset you land on cannot be dwelled into
+         * until a detent re-arms the timer.
+         */
+        ...named(next, { hint: 'Turn, then pause to start.' }),
       ],
     }
   }
@@ -310,7 +340,8 @@ export function menuSelect(state) {
 }
 
 /**
- * The universal escape: one level up, always the same gesture.
+ * The universal escape: one level up, always the same gesture — turn to
+ * "Back" and stop.
  *
  * Closing the menu plays a falling earcon and NO WORDS. Silence plus a
  * downward blip is "you are back in the plain conversation"; a sentence there
@@ -342,6 +373,8 @@ export function menuBack(state) {
 export function reduceMenuFrame(state, frame) {
   const type = String(frame?.type ?? '')
   if (type === 'menu') return menuScroll(state, frame?.delta)
+  /* Emitted by the firmware's dwell timer, not by a button. Same frame, same
+   * meaning: commit whatever the ring is pointing at. */
   if (type === 'menu_select') return menuSelect(state)
   if (type === 'menu_back') return menuBack(state)
   return { state, effects: [] }
