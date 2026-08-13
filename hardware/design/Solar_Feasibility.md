@@ -191,7 +191,7 @@ Every constant here is from the nRF9160 datasheet current tables (§5.2.1.14, ty
 
 Band: **3.9 / 5.1 / 12.0 mWh/min**. The doc carries **6 mWh/min nominal** — between the 5.1 derivation and `Watch_Variant_Study.md` §10's 100 mA session convention — unchanged from §4.2. Cross-check: E_conn + 45 s × 6/60 = 4.8 mWh ≈ the watch study's 1.25 mAh (4.6 mWh) per 45 s session. A **short duplex exchange** (E_conn + ~20 s connected) ≈ **2.3 mWh**.
 
-**Mode 2 — PUSH-TO-TALK** (proposed blue-button remap: record with radio OFF → one RRC connection → burst-upload the question → receive + play a ~15 s Opus reply → release). Per 10 s question + 15 s reply:
+**Mode 2 — PUSH-TO-TALK** (a **long yellow press** with the app ring closed: record with radio OFF → one RRC connection → burst-upload the question → receive + play a ~15 s Opus reply → release. This rode the blue button between 2026-08-12 and 2026-08-13 and now shares yellow with the duplex conversation — a long press of the talk button is the one mapping nobody has to be taught. The energy case below is about the RADIO, so it is untouched by which button starts it):
 
 | Phase | Derivation (typ) | best / **typ** / worst (mWh) |
 |---|---|---|
@@ -205,7 +205,7 @@ Band: **3.9 / 5.1 / 12.0 mWh/min**. The doc carries **6 mWh/min nominal** — be
 
 **≈ 1 mWh per question — 2.4× cheaper than the same question as a 20 s duplex exchange** (2.3 mWh), because the radio never idles connected while the human talks: capture costs 4.2 mA, not 65 mA.
 
-**Mode 3 — MEMO** (green button, dispatch = 0: record radio-off → burst upload → done, no reply):
+**Mode 3 — MEMO** (blue button with the app ring closed, dispatch = 0: record radio-off → burst upload → done, no reply. Memo moved off the green button on 2026-08-13 — that button is not wired — and the energy figures below are unchanged by which finger presses it):
 
 | Duration | capture + E_conn + upload (typ) | best / **typ** / worst (mWh) |
 |---|---|---|
