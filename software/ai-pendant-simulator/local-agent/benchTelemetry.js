@@ -786,6 +786,7 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
        * and only these survive a reset to tell them apart.
        */
       ports: link?.ports ?? 0,
+      watchers: link?.watchers ?? 0,
       bytes: link?.bytes ?? 0,
       parsed: link?.parsed ?? 0,
     },

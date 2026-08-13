@@ -272,6 +272,14 @@ export class BenchLink {
         attempts: this.attempts,
         openedAt: this.openedAt,
         ports: this.readers.size,
+        /*
+         * How many /bench/stream clients are holding the console open. This is
+         * the answer to "why is the port still busy when I closed the page" —
+         * the Mac desktop app's WKWebView keeps its own viewer, and an
+         * EventSource reconnects by itself across an agent restart, so the
+         * count is the only way to tell a live watcher from a leaked one.
+         */
+        watchers: this.listeners.size,
         bytes: this.everBytes,
         parsed: this.everParsed,
       },
