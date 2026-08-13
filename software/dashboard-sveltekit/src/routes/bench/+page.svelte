@@ -30,6 +30,8 @@
     presses: number;
     edges: number;
     ageMs: number | null;
+    pressedAgoMs: number | null;
+    edgeAgoMs: number | null;
     watched: boolean;
     moved: boolean;
   };
@@ -110,7 +112,12 @@
         moved: boolean;
         history: number[];
       };
-      micPower: { live: boolean | null; changes: number; ageMs: number | null };
+      micPower: {
+        live: boolean | null;
+        level: number | null;
+        changes: number;
+        ageMs: number | null;
+      };
       micLevel: {
         peak: number | null;
         rms: number | null;
@@ -305,6 +312,57 @@
     }
   });
 
+  /*
+   * A press is 120 ms long and the owner is looking at his hands, not at the
+   * screen. His words: "when i pressed there should be like a flash and shows
+   * when this button was pressed, like 2 seconds ago." So the tile has to carry
+   * the press FORWARD in time — a flash for the instant it happens, and a
+   * recency line that survives it. Watching the live level was only ever useful
+   * to someone already staring at the right tile.
+   */
+  let flashUntil = $state<Record<string, number>>({});
+  let seenPresses: Record<string, number> = {};
+
+  $effect(() => {
+    for (const button of snapshot?.controls.buttons ?? []) {
+      const previous = seenPresses[button.key];
+      if (previous !== undefined && button.presses > previous) {
+        flashUntil[button.key] = Date.now() + 900;
+      }
+      seenPresses[button.key] = button.presses;
+    }
+  });
+
+  function flashing(key: string): boolean {
+    return (flashUntil[key] ?? 0) > tick;
+  }
+
+  /** "2s ago" — what the owner asked for, in his words. */
+  function pressAgo(button: Button): string {
+    const ms = ageOf(button.pressedAgoMs);
+    if (ms == null) return "";
+    if (ms < 1500) return "just now";
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+    if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+    return `${Math.round(ms / 3_600_000)}h ago`;
+  }
+
+  /*
+   * One direction has decoded detents and the other has none. Both counters are
+   * running totals since boot, so this is "never seen", not "not seen lately" —
+   * and it is a question for the owner, not a verdict from us: he may simply
+   * have spun it one way.
+   */
+  const oneWayOnly = $derived(
+    !!snapshot?.controls.encoder.moved &&
+      (snapshot.controls.encoder.cw === 0) !== (snapshot.controls.encoder.ccw === 0),
+  );
+
+  /* Powered has never been observed — not once, at any switch position. */
+  const neverPowered = $derived(
+    snapshot?.controls.micPower.level === 0 && snapshot?.controls.micPower.changes === 0,
+  );
+
   const micMeter = $derived(
     Math.max(0, Math.min(100, ((snapshot?.controls.micLevel.rms ?? 0) / 3000) * 100)),
   );
@@ -487,7 +545,13 @@
     if (!LOCAL_ONLY) void prime();
     void loadRuns();
     void loadHealth();
-    const ticker = setInterval(() => (tick = Date.now()), 250);
+    /*
+     * One tick a second. Every age on this page is rendered in whole seconds,
+     * so a 250 ms clock re-evaluated every age, every dim() and every class
+     * binding four times per second to produce identical text — pure churn
+     * under the owner's hands while he tried to watch one value.
+     */
+    const ticker = setInterval(() => (tick = Date.now()), 1000);
     // Slow on purpose: a new reply is a human-paced event, not a wire.
     const reload = setInterval(() => {
       void loadRuns();
@@ -548,17 +612,36 @@
   {#if !LOCAL_ONLY}
   <section class="bn-grid" class:standby={!live}>
     {#each snapshot?.controls.buttons ?? [] as button (button.key)}
-      <article class="bn-tile" class:hot={button.pressed && !dim(button.ageMs, 60_000)}>
+      <article
+        class="bn-tile"
+        class:hot={button.pressed}
+        class:flash={flashing(button.key)}
+      >
         <p class="bn-label">
           {button.colour}{button.role ? ` · ${button.role}` : " · unused"}
         </p>
-        <p class="bn-value" class:muted={button.pressed == null || !button.moved}>
-          {button.pressed == null ? "—" : button.pressed ? "PRESSED" : "up"}
+        <!--
+          The big number is the LAST PRESS, not the resting level. A pin sitting
+          high is the least interesting fact on this tile — it reads the same
+          whether the button is wired, unwired, or simply untouched — while
+          "when did this last do something" is the question he is actually
+          asking when he looks up.
+        -->
+        <p class="bn-value" class:muted={!button.moved}>
+          {#if button.pressed}
+            PRESSED
+          {:else if button.moved}
+            {pressAgo(button)}
+          {:else}
+            —
+          {/if}
         </p>
         <p class="bn-foot">
           P0.{button.pin} ·
           {#if button.moved}
-            {button.presses} press{button.presses === 1 ? "" : "es"}
+            {button.presses} press{button.presses === 1 ? "" : "es"} · now {button.pressed
+              ? "down"
+              : "up"}
           {:else if button.unwired}
             <!-- A pin with its wires off floats HIGH against the internal
                  pull-up, which is exactly what an unpressed button reads. This
@@ -592,6 +675,13 @@
         P0.24/25 ·
         {#if snapshot?.controls.encoder.moved}
           {snapshot.controls.encoder.cw} cw / {snapshot.controls.encoder.ccw} ccw
+          <!-- The counters are independent totals, not a net, so a zero on one
+               side means that direction has NEVER decoded. That is either "he
+               only spun it one way" or a real finding, and the page must not
+               pick: asking settles it in two seconds. -->
+          {#if oneWayOnly}
+            <span class="bn-waiting">· turn it the other way to check</span>
+          {/if}
         {:else}
           <span class="bn-waiting">no detent yet</span>
         {/if}
@@ -632,14 +722,24 @@
             : "MUTED"}
       </p>
       <p class="bn-foot">
-        P0.26 · red switch{(snapshot?.controls.micPower.changes ?? 0) > 0
-          ? ` · ${snapshot?.controls.micPower.changes} flips`
-          : ""}
+        P0.26 ·
+        {#if neverPowered}
+          <!-- Naming the switch names a cause we have not established: a pin
+               that has never once read high is equally consistent with the
+               switch being off and with the sense wire being shorted to ground,
+               and hardware has since proven the latter on this board. Naming
+               both stops him flipping a switch that cannot move this reading. -->
+          <span class="bn-waiting">never read high — the switch or the wire</span>
+        {:else}
+          SPH0645 rail · red switch{(snapshot?.controls.micPower.changes ?? 0) > 0
+            ? ` · ${snapshot?.controls.micPower.changes} flips`
+            : ""}
+        {/if}
       </p>
     </article>
 
     <article class="bn-tile bn-wide">
-      <p class="bn-label">mic level</p>
+      <p class="bn-label">mic level (i2s)</p>
       <p class="bn-value" class:muted={snapshot?.controls.micLevel.band == null}>
         {(snapshot?.controls.micLevel.band ?? "—").toUpperCase()}
       </p>
@@ -650,7 +750,7 @@
         </svg>
       {/if}
       <p class="bn-foot">
-        P0.20 ·
+        SPH0645 · P0.20 ·
         {#if snapshot?.controls.micLevel.rms == null}
           <!-- "Muted" and "powered but hearing nothing" are different problems
                with different fixes. Until the firmware reports a live level the
@@ -664,7 +764,11 @@
     </article>
 
     <article class="bn-tile">
-      <p class="bn-label">i2c bus</p>
+      <!-- Was "I2C BUS", which the owner read as I2S — the audio bus he cares
+           about, one letter away. A tile named after a bus asks him to recall
+           the topology; a tile named after the part he physically installed
+           does not. Same reasoning for the amplifier and the mic below. -->
+      <p class="bn-label">haptic (i2c)</p>
       <p class="bn-value" class:muted={!snapshot?.controls.i2c.answered}>
         {snapshot?.controls.i2c.answered
           ? snapshot.controls.i2c.addresses
@@ -675,7 +779,7 @@
             : "—"}
       </p>
       <p class="bn-foot">
-        P0.30/31 ·
+        DRV2605L · P0.30/31 ·
         {#if snapshot?.controls.i2c.note}
           <span class="bn-waiting">{snapshot.controls.i2c.note}</span>
         {:else if snapshot?.controls.i2c.addresses.length}
@@ -708,7 +812,7 @@
     </article>
 
     <article class="bn-tile">
-      <p class="bn-label">amp gate</p>
+      <p class="bn-label">speaker amp</p>
       <p class="bn-value" class:muted={snapshot?.controls.amp.enabled == null}>
         {snapshot?.controls.amp.enabled == null
           ? "—"
@@ -717,7 +821,9 @@
             : "OFF"}
       </p>
       <p class="bn-foot">
-        P0.01 · SD_MODE {snapshot?.controls.amp.enabled ? "high" : "low = shutdown"}
+        MAX98357A · P0.01 SD_MODE {snapshot?.controls.amp.enabled
+          ? "high"
+          : "low = shutdown"}
       </p>
     </article>
 
@@ -984,9 +1090,14 @@
        is two columns and a wide tile can never share a row. Dense packing pulls
        a later tile into the hole instead. DESIGN.md: no awkward empty spaces. */
     grid-auto-flow: dense;
-    transition: opacity 180ms ease;
   }
 
+  /*
+   * No transition. This animated the ENTIRE grid whenever `live` flipped, and
+   * `live` flips on a threshold the sample jitter crosses — so the whole page
+   * breathed while he turned the knob. A standby grid is dimmer; it does not
+   * need to animate its way there.
+   */
   .bn-grid.standby {
     opacity: 0.42;
   }
@@ -1006,6 +1117,33 @@
     grid-column: span 2;
   }
 
+  /*
+   * The flash he asked for. A 120 ms press is invisible if the tile only shows
+   * a live level, so the edge itself gets a short, unmissable pulse — and the
+   * recency line in the tile carries it afterwards.
+   */
+  .bn-tile.flash {
+    animation: bn-press 900ms ease-out;
+  }
+
+  @keyframes bn-press {
+    0% {
+      background: color-mix(in srgb, var(--green) 42%, var(--panel));
+      border-color: var(--green);
+    }
+    100% {
+      background: var(--panel);
+      border-color: var(--line);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bn-tile.flash {
+      animation: none;
+      border-color: color-mix(in srgb, var(--green) 55%, transparent);
+    }
+  }
+
   .bn-tile.hot {
     border-color: color-mix(in srgb, var(--green) 55%, transparent);
     background: color-mix(in srgb, var(--green) 9%, var(--panel));
@@ -1021,6 +1159,9 @@
 
   .bn-value {
     font-size: var(--fs-display);
+    /* Proportional digits change width as values change, which resizes the
+       tile, which reflows the grid — the "whole page moves" he reported. */
+    font-variant-numeric: tabular-nums;
     font-weight: var(--w-heavy);
     line-height: 1.05;
     letter-spacing: -0.01em;
@@ -1046,6 +1187,13 @@
     font-family: var(--font-geist-mono);
     font-size: var(--fs-small);
     color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+    /*
+     * Two lines' worth, always. The foot is the text most likely to wrap from
+     * one line to two as a value changes ("raw 171" -> "raw 1710"), and on a
+     * dense auto-fit grid one tile growing a line shoves every tile after it.
+     */
+    min-height: 2.6em;
   }
 
   /* Amber, never red: an unwired pin is a question, not a failure. */
@@ -1148,6 +1296,7 @@
 
   .bn-linkvalue {
     font-size: var(--fs-headline);
+    font-variant-numeric: tabular-nums;
     font-weight: var(--w-heavy);
     line-height: 1.1;
   }
