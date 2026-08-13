@@ -36,4 +36,15 @@ int pendant_ws_recv(uint8_t *buffer, size_t capacity, bool *is_text);
 /* Keepalive for the idle (non-conversing) socket. */
 int pendant_ws_ping(void);
 
+/*
+ * Bench diagnostics: k_uptime_get() ms when this socket last successfully
+ * carried a byte in EITHER direction, or -1 if it never has.
+ *
+ * "Open" and "carrying traffic" are different questions. A socket that is up
+ * and has said nothing for 40 s looks healthy from every other angle and is
+ * not, which is precisely the state the owner's dashboard could not show.
+ * Never read by any policy here — only reported.
+ */
+int64_t pendant_ws_last_activity(void);
+
 #endif /* PENDANT_WS_H_ */

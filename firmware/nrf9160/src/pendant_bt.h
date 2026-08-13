@@ -96,6 +96,19 @@ void pendant_bt_list_answered(void);
 bool pendant_bt_link_up(void);
 
 /*
+ * Bench telemetry: the sink, and whether it is actually connected RIGHT NOW.
+ *
+ * Returns the module's own connection state — never "we have one in the
+ * table". A remembered speaker is one the owner once used; it says nothing
+ * about whether anything is paged and streaming, and reporting the two the
+ * same way would show a connected speaker to an owner holding a silent
+ * pendant. `name`/`addr` are filled with the most-recently-used entry (empty
+ * when the table is), so a disconnected sink can still be NAMED.
+ */
+bool pendant_bt_current_sink(char *name, size_t name_size, char *addr,
+			     size_t addr_size);
+
+/*
  * Bench telemetry: has the module's TX wire ever produced anything?
  *
  *   "ok"      a whole line arrived — wires, baud and module firmware all work

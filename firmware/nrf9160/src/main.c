@@ -1283,6 +1283,140 @@ static bool mic_power_is_cut(void)
 }
 
 /*
+ * ---- Periodic microphone LEVEL, measured without recording anything ----
+ *
+ * `mic.sense` answers "is the switch feeding it power". It cannot answer "is
+ * it hearing anything", and those are two different faults with two different
+ * fixes — a cut switch versus a dead SPH0645, a bad 100k sense wire versus a
+ * bad I2S data line. The owner has spent a day unable to tell them apart.
+ *
+ * Until now the only source of a level was a capture, which needs a button
+ * press and a cloud round trip. So the owner flips the red switch, watches
+ * `sense` go 0 -> 1, and still does not know whether the microphone works.
+ * This closes that: a short RX window on the idle loop, every 15 s, that
+ * produces peak/rms and uploads nothing.
+ *
+ * THREE THINGS THAT KEEP IT FROM COSTING ANYTHING:
+ *   - It never runs while a conversation is active (that owns the I2S) and
+ *     never from any audio path — only from the idle wait.
+ *   - It never runs while the mic is unpowered. You cannot measure a dark
+ *     microphone, and a confident 0 would be exactly the "powered and stone
+ *     deaf" reading this whole field exists to distinguish. The bench key
+ *     stays ABSENT instead.
+ *   - It reuses the capture path's own slab and scaling, so the numbers are
+ *     comparable with the "I2S mic capture totals" line and with the
+ *     self-test's bands. A second, differently-scaled level would be worse
+ *     than none.
+ */
+/* Defined further down with the capture path they belong to; the probe sits up
+ * here beside the other control-surface code it is read with. */
+static uint32_t integer_square_root(uint64_t value);
+static void mic_clocks_start(void);
+static void mic_clocks_stop(void);
+
+#define MIC_PROBE_INTERVAL_MS 15000
+/* One block is discarded for slave-sync artifacts, exactly as the capture
+ * path does; two more are ~41 ms of audio, enough for a stable RMS. */
+#define MIC_PROBE_BLOCKS (MIC_STARTUP_SKIP_BLOCKS + 2U)
+
+static int64_t mic_probe_next_ms;
+
+static void mic_level_probe(const struct device *i2s)
+{
+	struct i2s_config config = {
+		.word_size = 24U,
+		.channels = 1U,
+		.format = I2S_FMT_DATA_FORMAT_I2S,
+		.options = I2S_OPT_BIT_CLK_TARGET | I2S_OPT_FRAME_CLK_TARGET,
+		.frame_clk_freq = MIC_FRAME_RATE,
+		.mem_slab = &mic_rx_slab,
+		.block_size = MIC_RX_BLOCK_SIZE,
+		.timeout = 1500,
+	};
+	int64_t now = k_uptime_get();
+	uint32_t block_index = 0U;
+	uint64_t square_sum = 0U;
+	uint32_t counted = 0U;
+	int32_t peak = 0;
+
+	if (i2s == NULL || atomic_get(&convo_active) != 0 ||
+	    now < mic_probe_next_ms) {
+		return;
+	}
+	mic_probe_next_ms = now + MIC_PROBE_INTERVAL_MS;
+	if (mic_power_is_cut()) {
+		return;
+	}
+	if (k_mem_slab_init(&mic_rx_slab, mic_rx_storage, MIC_RX_BLOCK_SIZE,
+			    MIC_RX_BLOCK_COUNT) != 0) {
+		return;
+	}
+	mic_clocks_start();
+	if (i2s_configure(i2s, I2S_DIR_RX, &config) != 0) {
+		mic_clocks_stop();
+		return;
+	}
+	/* The SPH0645 needs its power-up window once BCLK runs, same as a
+	 * capture; skipping it measures the settling, not the room. */
+	k_msleep(MIC_POWERUP_BUDGET_MS);
+	if (i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_START) != 0) {
+		mic_clocks_stop();
+		return;
+	}
+
+	while (block_index < MIC_PROBE_BLOCKS) {
+		void *block = NULL;
+		size_t size = 0U;
+
+		if (i2s_read(i2s, &block, &size) != 0) {
+			break;
+		}
+		if (block_index++ < MIC_STARTUP_SKIP_BLOCKS) {
+			k_mem_slab_free(&mic_rx_slab, block);
+			continue;
+		}
+		const int32_t *raw = block;
+
+		for (size_t frame = 0U; frame < size / sizeof(int32_t);
+		     ++frame) {
+			/* The capture path's scaling, minus its filters: a
+			 * 24-bit right-aligned word down to 16-bit, then the
+			 * same digital gain. No DC blocker, so this reports
+			 * the microphone AS IT IS rather than as the uploader
+			 * would clean it up. */
+			int32_t sample =
+				((raw[frame] >> MIC_SAMPLE_SHIFT) >> 8) *
+				MIC_GAIN;
+			int32_t absolute;
+
+			sample = CLAMP(sample, INT16_MIN, INT16_MAX);
+			absolute = sample < 0 ? -sample : sample;
+			if (absolute > peak) {
+				peak = absolute;
+			}
+			square_sum += (uint64_t)((int64_t)sample * sample);
+			++counted;
+		}
+		k_mem_slab_free(&mic_rx_slab, block);
+	}
+
+	(void)i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
+	k_msleep(MIC_STOP_SETTLE_MS);
+	mic_clocks_stop();
+
+	/*
+	 * Nothing arrived — the clocks ran and the bus said nothing. Report
+	 * NOTHING rather than a zero: "no blocks came back" is a broken data
+	 * line, and "peak=0 rms=0" would claim a working mic hearing silence.
+	 */
+	if (counted == 0U) {
+		return;
+	}
+	pendant_bench_note_mic_level(
+		peak, (int32_t)integer_square_root(square_sum / counted));
+}
+
+/*
  * Yellow carries BOTH talk verbs now, separated by how long it is held.
  * Owner's ruling, 2026-08-13: "yellow combine both and blue is for memo."
  *
@@ -2306,6 +2440,16 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 		.block_size = MIC_RX_BLOCK_SIZE,
 		.timeout = 1500,
 	};
+	/*
+	 * Hold the bench's status line for the duration. Cleared by the IDLE
+	 * LOOP rather than by a matching call here, on purpose: this function
+	 * has a dozen early returns and a flag that has to be un-set on every
+	 * one of them is a flag that eventually stays set. Every one of those
+	 * returns lands back in the idle wait, which clears it — so the failure
+	 * mode of a missed path is "status resumes a moment later", not "status
+	 * never comes back".
+	 */
+	pendant_bench_set_busy(true);
 	const size_t effective_sample_limit = sample_limit;
 	size_t sample_index = 0U;
 	size_t stage_frames = 0U;
@@ -2835,6 +2979,17 @@ static int record_microphone(const struct device *i2s, size_t sample_limit)
 	       pendant_cloud_stream_bytes_sent(),
 	       (uint32_t)live_fifo_fill(), live_tx_saturated ? 1 : 0,
 	       live_stream_failed ? 1 : 0);
+	/*
+	 * The bench gets the same two numbers the line above already carries.
+	 * Only reported when the capture actually produced samples: a run that
+	 * failed before the first block has no level, and zeros here would be
+	 * indistinguishable from a microphone that is powered and stone deaf —
+	 * the exact confusion this field exists to resolve.
+	 */
+	if (recorded_samples > 0U) {
+		pendant_bench_note_mic_level((int32_t)recorded_peak,
+					     (int32_t)rms);
+	}
 	return error;
 }
 
@@ -4134,6 +4289,9 @@ static int run_conversation(const struct device *i2s)
 	/* Hand the I2S deadlines to the audio thread from here on. */
 	audio_i2s_dev = i2s;
 	atomic_set(&convo_active, 1);
+	/* And hold the bench's status line, which would otherwise run blocking
+	 * AT commands straight through the TX runway. Pads keep reporting. */
+	pendant_bench_set_busy(true);
 
 	while (true) {
 		void *block;
@@ -4319,6 +4477,7 @@ static int run_conversation(const struct device *i2s)
 
 	/* Stop the audio thread before touching I2S or the slabs. */
 	atomic_set(&convo_active, 0);
+	pendant_bench_set_busy(false);
 	/* Never leave the legacy record path gated by a conversation's hold. */
 	convo_uplink_holding = false;
 #ifdef CONFIG_PENDANT_MIC_INJECT
@@ -5359,6 +5518,9 @@ int main(void)
 		show_error();
 	}
 	printk("LTE OK — ready for button (press = record + live upload)\n");
+	/* From here the LTE and socket questions have real answers; before it
+	 * they would have described a radio nobody had switched on. */
+	pendant_bench_note_lte_ready(true);
 
 	/* Socket I/O lives on its own thread from here on: audio deadlines
 	 * on main can never be blocked by a stalled modem send. */
@@ -5537,7 +5699,22 @@ int main(void)
 			 * being wiggled. A press shorter than this loop's 200 ms
 			 * turn is still caught — the ISR latches the edge and
 			 * this call drains it (see bench.h).
+			 *
+			 * Reaching this loop IS the proof that no audio path
+			 * owns the I2S deadlines, so it is also where the
+			 * status-line hold is released — see the comment at
+			 * the top of record_microphone for why that is done
+			 * here and not on each of its dozen exits.
 			 */
+			pendant_bench_set_busy(false);
+			/*
+			 * A level for the microphone, taken here and nowhere
+			 * else: this loop is the only context where the I2S,
+			 * the slab and the codec scratch are all guaranteed
+			 * unowned. Internally gated to 15 s and skipped
+			 * entirely while the mic is unpowered.
+			 */
+			mic_level_probe(i2s);
 			pendant_bench_tick();
 			/*
 			 * An injected relay frame, if a debugger left one.

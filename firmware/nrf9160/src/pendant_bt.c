@@ -490,6 +490,35 @@ bool pendant_bt_link_up(void)
 	return atomic_get(&bt_connected) != 0;
 }
 
+bool pendant_bt_current_sink(char *name, size_t name_size, char *addr,
+			     size_t addr_size)
+{
+	/*
+	 * CONNECTED is the module's own event, never "we have a sink in the
+	 * table". A remembered speaker is one the owner once used; it says
+	 * nothing about whether anything is paged and streaming right now, and
+	 * a dashboard that conflated the two would show a connected speaker to
+	 * an owner holding a silent pendant.
+	 */
+	bool connected = atomic_get(&bt_connected) != 0;
+
+	if (name != NULL && name_size > 0U) {
+		name[0] = '\0';
+		if (bt_sink_count > 0U) {
+			strncpy(name, bt_sinks[0].name, name_size - 1U);
+			name[name_size - 1U] = '\0';
+		}
+	}
+	if (addr != NULL && addr_size > 0U) {
+		addr[0] = '\0';
+		if (bt_sink_count > 0U) {
+			strncpy(addr, bt_sinks[0].addr, addr_size - 1U);
+			addr[addr_size - 1U] = '\0';
+		}
+	}
+	return connected;
+}
+
 const char *pendant_bt_module_state(void)
 {
 	if (!bt_uart_ready) {
