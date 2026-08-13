@@ -355,15 +355,61 @@ exec 3</dev/cu.usbmodem0009600365811
 /bin/cat <&3 > capture.txt &
 ```
 
-**Only one reader at a time.** Two processes on one macOS tty do not each get a
-copy — they *split* the byte stream and both get half-lines. The Mac agent's
-bench dashboard holds all three VCOMs whenever anyone is watching `/bench`,
-including the desktop app's own WebView, so closing a browser tab does not free
-them. Ask it to stand down instead, and give the port back when you are done:
+**Do not open the port at all. Subscribe to the tap.**
+
+The Mac agent holds all three VCOMs permanently and re-publishes every console
+line. Two processes on one macOS tty do not each get a copy — they *split* the
+byte stream and both get half-lines — so the port is not shared, it is served.
+The old `/tmp/pendant-bench-standdown` handshake is RETIRED: every stand-down
+blanked the owner's dashboard while he was watching it.
 
 ```sh
-touch /tmp/pendant-bench-standdown   # all three VCOMs free within ~5 s
-rm    /tmp/pendant-bench-standdown   # it takes them back on its own
+# live, one raw line per SSE message, in arrival order
+curl -sN -H "Authorization: Bearer $AGENT_TOKEN" \
+  "http://127.0.0.1:8000/bench/lines?stream=1"
+
+# recent backlog, newline-delimited, straight into grep
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
+  "http://127.0.0.1:8000/bench/lines?format=text" | grep "microSD unavailable"
+
+# only what you missed since sequence N (JSON)
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" "http://127.0.0.1:8000/bench/lines?after=412"
+```
+
+`AGENT_TOKEN` is derived, not stored — it is not a line in `.env`:
+
+```sh
+AGENT_TOKEN=$(node -e 'const {createHmac}=require("crypto"),fs=require("fs");
+const m=(fs.readFileSync(".env","utf8").match(/^PAIRING_CODE=(.*)$/m)||[])[1];
+process.stdout.write(createHmac("sha256",m.trim()).update("aipendant:agent-token").digest("hex"))')
+```
+
+Properties worth knowing before you write a grep against it:
+
+- **Every line is prefixed with its originating port**, e.g.
+  `cu.usbmodem0009600365811 BENCH {...}`. A pattern anchored with `^BENCH`
+  matches nothing. Anchor on the port or do not anchor at all.
+- **Raw, not parsed** — text the bench's own parser has no rule for still
+  reaches you verbatim.
+- **Backlog first**, 500 lines, replayed before any live line, so attaching a
+  second after a reset still catches the boot banner.
+- **A plain GET ends by itself**; only `stream=1` holds the connection open, so
+  a one-shot curl in a script cannot hang.
+- The first fragment after attaching is dropped on purpose — a reader opens
+  mid-transmission and its first bytes are the tail of a line that began
+  earlier.
+
+**A flash does not need the tty.** `west flash` and every JLinkExe measurement
+(halting, reading globals, driving pins) go over SWD through the J-Link's own
+USB interface, a completely separate channel. Reading console text was always
+the *only* thing that needed the port.
+
+**The one exception:** if the agent is down there is no tap, and a broken
+dashboard must not mean no firmware diagnosis. Check first, and only then open
+the port directly with the recipe above:
+
+```sh
+curl -sf localhost:8000/health >/dev/null && echo "use the tap" || echo "fall back to the tty"
 ```
 
 **A silent port is not a silent board.** Before concluding the firmware is
