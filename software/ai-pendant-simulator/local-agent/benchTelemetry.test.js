@@ -53,6 +53,11 @@ test('a button press and release moves the level, the count, and nothing else', 
 
   assert.equal(yellow.pressed, false)
   assert.equal(yellow.presses, 1)
+  // The press is 1.0 s old while the pin was last sampled 0.99 s ago on the
+  // release: the owner presses, then looks up, so the press time is the one
+  // worth showing and the sample time says nothing at 10 Hz.
+  assert.equal(yellow.pressedAgoMs, 1_000)
+  assert.equal(yellow.ageMs, 990)
   // Press and release are both edges, exactly as the self-test counts them.
   assert.equal(yellow.edges, 2)
   assert.equal(yellow.moved, true)

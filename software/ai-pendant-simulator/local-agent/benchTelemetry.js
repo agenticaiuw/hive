@@ -109,7 +109,15 @@ function fresh(now) {
     buttons: new Map(
       BUTTONS.map((button) => [
         button.key,
-        { ...button, level: null, at: null, presses: 0, edges: 0, lastEdgeAt: null },
+        {
+          ...button,
+          level: null,
+          at: null,
+          presses: 0,
+          edges: 0,
+          lastEdgeAt: null,
+          lastPressAt: null,
+        },
       ]),
     ),
     encoder: {
@@ -233,7 +241,16 @@ function noteButtonLevel(state, button, level, now, { edge = false } = {}) {
   if (moved) {
     entry.edges += 1
     entry.lastEdgeAt = now
-    if (level === 0) entry.presses += 1
+    if (level === 0) {
+      entry.presses += 1
+      /*
+       * When the button was last PUSHED, as distinct from when this pin was
+       * last sampled. At 10 Hz the sample time is always "now" and says
+       * nothing; the owner presses a button and then looks up, so the only
+       * useful recency is the press itself.
+       */
+      entry.lastPressAt = now
+    }
   }
   entry.level = level
   entry.at = now
@@ -1006,6 +1023,9 @@ export function benchSnapshot(state, { now = Date.now(), link = null, monitor = 
         presses: button.presses,
         edges: button.edges,
         ageMs: age(button.at, now),
+        /* Time since the last push and the last edge of any kind. */
+        pressedAgoMs: age(button.lastPressAt, now),
+        edgeAgoMs: age(button.lastEdgeAt, now),
         watched: look.controls,
         /*
          * "seen" is the only honest verdict a bench can reach on its own: a
