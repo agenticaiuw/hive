@@ -5,6 +5,7 @@ import {
   NO_CONTENT_WINDOW_MS,
   SPOKEN_MAX_CHARS,
   STALE_QUEUE_MS,
+  STALE_TRANSCRIBE_MS,
   describeJobOutcome,
   jobLabel,
   recallJobStatus,
@@ -73,6 +74,74 @@ test('completed status with executed:false is a failure', () => {
   const outcome = describeJobOutcome(job, { now: NOW })
   assert.equal(outcome.state, 'failed')
   assert.equal(outcome.reason, 'Outlook is not installed')
+})
+
+/*
+ * The follow-up to the voiceRunForCapture/voiceRunForJob fix: a job stuck at
+ * 'transcribed' with no useful command is speech-to-text that genuinely
+ * heard nothing — not "your Mac hasn't picked it up" (nothing was ever
+ * queued for the Mac at all). This is the screenless surface, so getting it
+ * wrong is worse here than on the dashboard: there is no evidence next to
+ * the spoken sentence for the owner to check it against.
+ */
+test('a silent press (transcribed, no words) is spoken as nothing said, not queued', () => {
+  const job = planJob({
+    status: 'transcribed',
+    command: '',
+    result: null,
+    inputTelemetry: { storage: 'live_lte' },
+    createdAt: at(STALE_QUEUE_MS + 30_000),
+  })
+  const outcome = describeJobOutcome(job, { now: NOW })
+  assert.equal(outcome.state, 'no_speech')
+  const spoken = speakJobStatus(job, outcome)
+  assert.match(spoken, /nothing was said/)
+  assert.doesNotMatch(spoken, /hasn't picked it up/)
+  assert.doesNotMatch(spoken, /\bfailed\b/)
+  assert.doesNotMatch(spoken, /\bqueued\b/)
+})
+
+test('a real STT failure on the same job shape still says failed, with the real reason', () => {
+  const job = planJob({
+    status: 'failed',
+    command: '',
+    result: null,
+    error: 'OpenAI STT request timed out.',
+  })
+  const outcome = describeJobOutcome(job, { now: NOW })
+  assert.equal(outcome.state, 'failed')
+  assert.match(outcome.reason, /timed out/)
+  assert.match(speakJobStatus(job, outcome), /failed/)
+})
+
+test('a stalled transcription (never left transcribing) still says failed, not no_speech', () => {
+  const job = planJob({
+    status: 'transcribing',
+    command: '',
+    result: null,
+    createdAt: at(STALE_TRANSCRIBE_MS + 30_000),
+  })
+  const outcome = describeJobOutcome(job, { now: NOW })
+  assert.equal(outcome.state, 'failed')
+})
+
+test('an empty TYPED command is not read as silence — it is still queued/pending', () => {
+  const job = planJob({
+    status: 'transcribed',
+    command: '',
+    result: null,
+    inputTelemetry: { storage: 'dashboard', inputMode: 'typed' },
+  })
+  const outcome = describeJobOutcome(job, { now: NOW })
+  assert.equal(outcome.state, 'queued')
+})
+
+test('a genuinely queued job with real content is unaffected by the silence check', () => {
+  const outcome = describeJobOutcome(
+    planJob({ status: 'queued', command: 'open Outlook', result: null }),
+    { now: NOW },
+  )
+  assert.equal(outcome.state, 'queued')
 })
 
 test('a queued job past the claim window says the Mac never picked it up', () => {

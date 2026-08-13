@@ -87,6 +87,12 @@ const SILENT_PORT_MS = 20000
  * first seconds of their capture come back shredded. This closes it: touch the
  * file, wait a beat, then open the port.
  */
+/*
+ * Enough console to cover a reset and the boot banner that follows it, which
+ * is what a consumer attaching just after a flash actually needs.
+ */
+const LINE_BACKLOG = 500
+
 const STAND_DOWN_FILE =
   process.env.BENCH_STANDDOWN_FILE || '/tmp/pendant-bench-standdown'
 
@@ -228,6 +234,27 @@ export class BenchLink {
     this.candidates = []
     this.missing = []
     this.holders = new Map()
+    /*
+     * THE RAW LINE TAP.
+     *
+     * Every console line, in arrival order, kept for a short while and echoed
+     * to anyone listening. This exists because the alternative — agents seizing
+     * the tty and this reader standing down — blanked the owner's bench twice
+     * in fifteen minutes, and it was never necessary: a flash goes over SWD
+     * through the J-Link's own USB interface, a separate channel from the
+     * console. The ONLY thing another agent ever needed the tty for was reading
+     * text, which this process is already doing continuously.
+     *
+     * Raw rather than parsed, because consumers grep for printk text this
+     * parser has no rule for ("Injected frame:", "microSD unavailable
+     * (mount=0 write=-2)"). A snapshot cannot answer those; a line can.
+     *
+     * The backlog is what makes a reset survivable: an agent that attaches a
+     * second after pressing reset still gets the boot banner it came for.
+     */
+    this.lines = []
+    this.lineSeq = 0
+    this.lineListeners = new Set()
   }
 
   /**
@@ -262,6 +289,50 @@ export class BenchLink {
   onUpdate(listener) {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  /** Record one raw line and hand it to every tap subscriber. */
+  tap(port, raw) {
+    const text = raw.replace(/\r/g, '')
+    if (!text.trim()) return
+    const line = {
+      seq: ++this.lineSeq,
+      at: new Date().toISOString(),
+      port: port.replace('/dev/', ''),
+      text,
+    }
+    this.lines.push(line)
+    if (this.lines.length > LINE_BACKLOG) {
+      this.lines.splice(0, this.lines.length - LINE_BACKLOG)
+    }
+    for (const listener of this.lineListeners) {
+      try {
+        listener(line)
+      } catch {
+        // One broken tap client must not stop the others, or the parser.
+      }
+    }
+  }
+
+  /**
+   * Subscribe to raw lines. Like `subscribe`, this opens the ports if they are
+   * closed — a tap client is a reader, and the whole point is that it never has
+   * to touch the tty itself.
+   */
+  subscribeLines(listener) {
+    this.lineListeners.add(listener)
+    this.lastWantedAt = Date.now()
+    if (!this.started) this.start()
+    return () => {
+      this.lineListeners.delete(listener)
+      this.lastWantedAt = Date.now()
+    }
+  }
+
+  /** The recent backlog, oldest first, optionally only what a caller has missed. */
+  backlog(afterSeq = 0) {
+    const after = Number(afterSeq) || 0
+    return this.lines.filter((line) => line.seq > after)
   }
 
   emit() {
@@ -337,6 +408,7 @@ export class BenchLink {
          * count is the only way to tell a live watcher from a leaked one.
          */
         watchers: this.listeners.size,
+        tapWatchers: this.lineListeners.size,
         bytes: this.everBytes,
         parsed: this.everParsed,
       },
@@ -391,7 +463,8 @@ export class BenchLink {
   }
 
   reapIdle() {
-    if (this.listeners.size || Date.now() - this.lastWantedAt <= IDLE_RELEASE_MS) {
+    const watching = this.listeners.size + this.lineListeners.size
+    if (watching || Date.now() - this.lastWantedAt <= IDLE_RELEASE_MS) {
       return false
     }
     this.stop()
@@ -539,7 +612,7 @@ export class BenchLink {
     } catch {
       return
     }
-    const reader = { child, buffer: '', openedAt: Date.now(), bytes: 0 }
+    const reader = { child, buffer: '', openedAt: Date.now(), bytes: 0, synced: false }
     this.readers.set(port, reader)
 
     child.stdout?.on('data', (chunk) => {
@@ -610,6 +683,28 @@ export class BenchLink {
   feed(port, reader, text) {
     this.everBytes += text.length
     reader.buffer += text
+
+    /*
+     * Discard whatever precedes the first newline after attaching.
+     *
+     * A reader opens mid-transmission, so its first fragment is the tail of a
+     * line that started before we were listening. Emitting it produces exactly
+     * the corruption seen on the first real capture — `..."pot":{"raw":166`
+     * glued to `STATUS mic MUTED` — which is worse than dropping it: the parser
+     * shrugs at it, but a consumer grepping the tap would read a line the board
+     * never printed. One truncated line at attach is a known cost of tailing a
+     * live stream; a fabricated one is not.
+     */
+    if (!reader.synced) {
+      const boundary = reader.buffer.indexOf('\n')
+      if (boundary < 0) {
+        if (reader.buffer.length > 8192) reader.buffer = reader.buffer.slice(-1024)
+        return
+      }
+      reader.buffer = reader.buffer.slice(boundary + 1)
+      reader.synced = true
+    }
+
     const lines = reader.buffer.split('\n')
     reader.buffer = lines.pop() ?? ''
     // A console that never sends a newline must not grow a buffer forever.
@@ -617,6 +712,7 @@ export class BenchLink {
 
     let parsedAny = false
     for (const line of lines) {
+      this.tap(port, line)
       if (applyLine(this.state, line)) {
         parsedAny = true
         this.everParsed += 1

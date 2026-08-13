@@ -351,6 +351,34 @@ export function voiceRunForCapture(capture, { feed = false } = {}) {
   }
 }
 
+/*
+ * One answer to "did this /v1/transcribe-originated plan job genuinely hear
+ * nothing", shared by voiceRunForJob (below — the dashboard feed) and
+ * jobRecall.js's spoken "what happened with that" (describeJobOutcome), so a
+ * job the feed calls a healthy silent press can never be the job the pendant
+ * speaks back as "your Mac hasn't picked it up yet." That inversion is worse
+ * on the spoken surface than on the dashboard: a misleading dashboard row
+ * sits next to its own evidence (the transcript, the event trail) for the
+ * owner to notice; a misleading sentence in his ear is the ONLY thing he
+ * gets — there is nothing to check it against.
+ *
+ * A job only reaches 'transcribed' after speech-to-text has already run to
+ * completion. A real STT error moves status straight to 'failed' at write
+ * time (server.js /v1/transcribe's catch block) before this job would ever
+ * sit at 'transcribed' — so 'transcribed' + no useful command + no result IS
+ * the silence, not a guess about it. `received`/`transcribing`/`queued` are
+ * deliberately excluded: the first two are still in flight, and a `queued`
+ * plan job always carries real text (/v1/mac/plan 400s on an empty command).
+ */
+export function planJobCapturedNothing(job) {
+  if (!job || job.type !== 'plan') return false
+  if (job.status !== 'transcribed') return false
+  const typed = String(job.inputTelemetry?.inputMode || '') === 'typed'
+  if (typed) return false
+  if (/[\p{L}\p{N}]/u.test(String(job.command || ''))) return false
+  return !(job.result && typeof job.result === 'object')
+}
+
 export function voiceRunForJob(job, { now = Date.now(), feed = false } = {}) {
   if (!job || job.type !== 'plan') return null
   const telemetry = job.inputTelemetry
@@ -603,23 +631,20 @@ export function voiceRunForJob(job, { now = Date.now(), feed = false } = {}) {
    * useful words, is the /v1/transcribe sibling of the duplex-conversation
    * silence bug (voiceRunForCapture, above) — same product, same mistake:
    * speech-to-text ran and genuinely heard nothing, which is not a failure.
-   * This is safe to call "genuinely nothing happened" rather than "we don't
-   * know why it failed": a real STT error already sets job.status to
-   * 'failed' with the real message at write time (server.js /v1/transcribe's
-   * catch block) or leaves it 'transcribing' past STALE_TRANSCRIBE_MS —
-   * BOTH of which the first branch below already claims as 'failed' before
-   * this one is ever reached. `typed` is excluded on purpose — an empty
-   * *typed* command would be a different, stranger bug, not silence.
+   * planJobCapturedNothing() is the ONE place that leaf check lives, shared
+   * with jobRecall.js, so the feed and the spoken "what happened" answer can
+   * never disagree about the same job. The extra guards here
+   * (macDone/delivery.rank, transcriptionPending) are this function's own —
+   * a job at 'transcribed' should never carry a Mac result or playback
+   * evidence in practice, but this stays defensive rather than assuming it.
    */
   const genuinelyFailed =
     ['failed', 'cancelled'].includes(job.status) || transcriptionStale
   const recordedSilently =
     !genuinelyFailed &&
     !transcriptionPending &&
-    !typed &&
     !(macDone || delivery.rank > 0) &&
-    !hasTranscript &&
-    !result
+    planJobCapturedNothing(job)
 
   if (recordedSilently && feed) return null
 

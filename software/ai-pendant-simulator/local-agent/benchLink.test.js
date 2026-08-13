@@ -9,7 +9,9 @@ import {
 } from './benchLink.js'
 
 function fakeReader() {
-  const reader = { buffer: '', bytes: 0, openedAt: Date.now(), killed: false }
+  // `synced: true` = already past the first newline. The attach-time truncation
+  // has its own test below.
+  const reader = { buffer: '', bytes: 0, openedAt: Date.now(), killed: false, synced: true }
   reader.child = {
     pid: 4000 + Math.floor(Math.random() * 1000),
     kill() {
@@ -234,7 +236,7 @@ test('registering the routes performs no I/O and opens no port', async () => {
 
   resetBenchLink()
   registerBenchRoutes(app)
-  assert.deepEqual(routes, ['/bench/snapshot', '/bench/stream'])
+  assert.deepEqual(routes, ['/bench/snapshot', '/bench/lines', '/bench/stream'])
 
   // Registration must not even construct the link, let alone open a tty.
   const link = benchLink()
@@ -315,4 +317,97 @@ test('the console is never reaped for being quiet', () => {
   // An idle or mid-flash board says nothing for far longer than the window;
   // dropping VCOM0 on that basis is how this failure started.
   assert.deepEqual([...link.readers.keys()], ['/dev/cu.a'])
+})
+
+/*
+ * The tap exists so no other agent ever has to take the tty away from the
+ * owner's page. These pin the properties consumers depend on.
+ */
+test('the tap records every raw line in order, with its port', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const reader = link.readers.get('/dev/cu.b')
+
+  link.feed('/dev/cu.b', reader, 'Injected frame: 3\nmicroSD unavailable (mount=0 write=-2)\n')
+
+  const lines = link.backlog()
+  assert.equal(lines.length, 2)
+  assert.deepEqual(
+    lines.map((line) => line.text),
+    ['Injected frame: 3', 'microSD unavailable (mount=0 write=-2)'],
+  )
+  // Text this parser has no rule for is exactly what consumers grep for.
+  assert.equal(link.snapshot().stream.linesParsed, 0)
+  assert.equal(lines[0].port, 'cu.b')
+  assert.equal(lines[0].seq, 1)
+  assert.equal(lines[1].seq, 2)
+})
+
+test('the backlog survives a reset so a late subscriber still sees the boot', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const reader = link.readers.get('/dev/cu.b')
+  link.feed('/dev/cu.b', reader, '*** Booting nRF Connect SDK v3.4.0-abc ***\nSTATUS mic MUTED\n')
+
+  // Attaching AFTER the boot still gets it: that is the whole point.
+  const seen = link.backlog(0).map((line) => line.text)
+  assert.match(seen[0], /Booting nRF Connect SDK/)
+
+  // And `after` lets a reconnecting client ask only for what it missed.
+  assert.deepEqual(
+    link.backlog(1).map((line) => line.text),
+    ['STATUS mic MUTED'],
+  )
+})
+
+test('the tap is bounded and drops the oldest lines, never the newest', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const reader = link.readers.get('/dev/cu.b')
+  for (let index = 0; index < 700; index += 1) {
+    link.feed('/dev/cu.b', reader, `line ${index}\n`)
+  }
+  const lines = link.backlog()
+  assert.ok(lines.length <= 500)
+  assert.equal(lines.at(-1).text, 'line 699')
+})
+
+test('a tap subscriber holds the ports open, like any other watcher', () => {
+  const link = new BenchLink({ transport: 'off', standDownFile: NO_STANDDOWN })
+  link.touch()
+  assert.equal(link.started, false, 'a poll still opens nothing')
+
+  const release = link.subscribeLines(() => {})
+  assert.equal(link.started, true)
+  assert.equal(link.snapshot().link.tapWatchers, 1)
+
+  // ...and releases them when the last consumer leaves.
+  release()
+  link.lastWantedAt = Date.now() - 60_000
+  assert.equal(link.reapIdle(), true)
+})
+
+test('a broken tap client cannot stop the parser or the other clients', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const got = []
+  link.subscribeLines(() => {
+    throw new Error('this consumer is broken')
+  })
+  link.subscribeLines((line) => got.push(line.text))
+
+  link.feed('/dev/cu.b', link.readers.get('/dev/cu.b'), 'BENCH {"v":1,"up":9,"pot":{"raw":42}}\n')
+  assert.deepEqual(got.length, 1)
+  assert.equal(link.snapshot().controls.pot.raw, 42, 'the parser still ran')
+})
+
+test('the fragment a reader attaches mid-line is dropped, not published', () => {
+  const link = linkWithPorts(['/dev/cu.b'])
+  const reader = link.readers.get('/dev/cu.b')
+  reader.synced = false
+
+  // Exactly the shape of the first real capture: we attach mid-BENCH-line.
+  link.feed('/dev/cu.b', reader, '"pot":{"raw":166\nSTATUS mic MUTED\n')
+
+  assert.deepEqual(
+    link.backlog().map((line) => line.text),
+    ['STATUS mic MUTED'],
+    'the half line we joined late is never handed to a consumer',
+  )
 })
