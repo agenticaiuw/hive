@@ -463,6 +463,104 @@ test('with no board at all the snapshot is all nulls and says so', () => {
   assert.equal(snapshot.controls.i2c.answered, null)
 })
 
+test('links are "not reported" until something reports them', () => {
+  const snapshot = benchSnapshot(createBenchState(0), { now: 5_000 })
+  for (const link of ['lte', 'socket', 'bt']) {
+    assert.equal(snapshot.links[link].reported, false, `${link} starts unreported`)
+    assert.equal(snapshot.links[link].ageMs, null)
+  }
+  // Never-sampled must not read as a measured failure.
+  assert.equal(snapshot.links.lte.on, null)
+  assert.equal(snapshot.links.socket.up, null)
+  assert.equal(snapshot.links.bt.connected, null)
+})
+
+test('the slow line carries the whole link picture', () => {
+  const state = createBenchState(0)
+  applyLine(
+    state,
+    `${BENCH_LINE_PREFIX}${JSON.stringify({
+      v: 1,
+      up: 60000,
+      lte: { reg: 'home', op: 'AT&T', rsrp: -95, rsrq: -9.5, band: 12, mode: 'ltem' },
+      sock: { up: true, idle: 1450 },
+      bt: { conn: true, name: 'SoundCore 2', addr: 'AA:BB:CC:DD:EE:FF' },
+      mic: { sense: 1, peak: 91234, rms: 560 },
+    })}`,
+    1_000,
+  )
+
+  const { links, controls } = benchSnapshot(state, { now: 1_000 })
+  assert.equal(links.lte.reported, true)
+  assert.equal(links.lte.on, true)
+  assert.equal(links.lte.word, 'ON NET')
+  assert.equal(links.lte.operator, 'AT&T')
+  assert.equal(links.lte.rsrpDbm, -95)
+  assert.equal(links.socket.up, true)
+  assert.equal(links.socket.idleMs, 1450)
+  assert.equal(links.bt.connected, true)
+  assert.equal(links.bt.name, 'SoundCore 2')
+  // The mic's two facts stay separate: powered, and actually hearing something.
+  assert.equal(controls.micPower.live, true)
+  assert.equal(controls.micLevel.rms, 560)
+  assert.equal(controls.micLevel.band, 'sound')
+})
+
+test('searching and denied are distinct from not-registered, and none is a fault', () => {
+  for (const [stat, reg, word] of [
+    [0, 'not-registered', 'NOT ON'],
+    [1, 'home', 'ON NET'],
+    [2, 'searching', 'SEARCHING'],
+    [3, 'denied', 'DENIED'],
+    [5, 'roaming', 'ROAMING'],
+    [90, 'uicc-fail', 'NO SIM'],
+  ]) {
+    const state = createBenchState(0)
+    applyLine(state, `LTE probe reg: +CEREG: 2,${stat}`, 1_000)
+    const lte = benchSnapshot(state, { now: 1_000 }).links.lte
+    assert.equal(lte.reg, reg)
+    assert.equal(lte.word, word)
+    assert.equal(lte.on, reg === 'home' || reg === 'roaming')
+  }
+})
+
+test('the modem\'s own signal probe is read as dBm, and 255 stays unknown', () => {
+  const known = createBenchState(0)
+  applyLine(known, 'LTE probe signal: +CESQ: 99,99,255,255,20,45', 1_000)
+  const good = benchSnapshot(known, { now: 1_000 }).links.lte
+  assert.equal(good.rsrpDbm, -95)
+  assert.equal(good.rsrqDb, -9.5)
+
+  // 255 is "the modem does not know" and must not become a very bad reading.
+  const unknown = createBenchState(0)
+  applyLine(unknown, 'LTE probe signal: +CESQ: 99,99,255,255,255,255', 1_000)
+  const none = benchSnapshot(unknown, { now: 1_000 }).links.lte
+  assert.equal(none.rsrpDbm, null)
+  assert.equal(none.rsrqDb, null)
+  assert.equal(none.reported, true, 'the probe happened even though it knew nothing')
+})
+
+test('a remembered bluetooth sink is not a connected one', () => {
+  const state = createBenchState(0)
+  applyLine(state, 'BT sink remembered: SoundCore 2 [AA:BB:CC:DD:EE:FF] (1 known)', 1_000)
+
+  const remembered = benchSnapshot(state, { now: 1_000 }).links.bt
+  assert.equal(remembered.name, 'SoundCore 2')
+  assert.equal(remembered.address, 'AA:BB:CC:DD:EE:FF')
+  assert.equal(remembered.connected, null, 'remembering a speaker is not reaching it')
+
+  applyLine(state, 'BT module: sink connected', 2_000)
+  assert.equal(benchSnapshot(state, { now: 2_000 }).links.bt.connected, true)
+})
+
+test('a dead BT module UART is reported as the reason, not as a missing speaker', () => {
+  const state = createBenchState(0)
+  applyLine(state, 'BT module UART (P0.00/P0.05) not ready — Bluetooth unavailable', 1_000)
+  const bt = benchSnapshot(state, { now: 1_000 }).links.bt
+  assert.equal(bt.connected, false)
+  assert.match(bt.note, /UART is not up/)
+})
+
 test('pot conversions match the console arithmetic', () => {
   assert.equal(potPercent(0), 0)
   assert.equal(potPercent(4095), 100)

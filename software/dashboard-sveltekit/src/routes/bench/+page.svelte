@@ -16,7 +16,7 @@
    *    and when the stream stops the whole grid visibly stands down.
    */
   import { onMount } from "svelte";
-  import { agentRequest, audioHref, backend, fetchRuns } from "$lib/dataSource";
+  import { agentRequest, audioHref, backend, fetchRuns, fetchSnapshot } from "$lib/dataSource";
   import { stageState, type JsonRecord } from "$lib/pipeline";
 
   type Button = {
@@ -61,6 +61,27 @@
       round: number | null;
       phase: string | null;
       watching: { controls: boolean; mic: boolean };
+    };
+    links: {
+      lte: {
+        reported: boolean;
+        word: string | null;
+        on: boolean | null;
+        operator: string | null;
+        rsrpDbm: number | null;
+        band: number | null;
+        mode: string | null;
+        ageMs: number | null;
+      };
+      socket: { reported: boolean; up: boolean | null; idleMs: number | null; ageMs: number | null };
+      bt: {
+        reported: boolean;
+        connected: boolean | null;
+        name: string | null;
+        address: string | null;
+        note: string | null;
+        ageMs: number | null;
+      };
     };
     controls: {
       buttons: Button[];
@@ -297,6 +318,68 @@
   let runs = $state<JsonRecord[]>([]);
   let runsError = $state("");
 
+  /*
+   * The remote agents come from the SAME snapshot the rest of the dashboard
+   * reads (`fetchSnapshot` → the agent's /ops/snapshot). Deliberately not a
+   * second source: two probes of the same three things drift, and then the
+   * bench and the home page disagree about whether the bridge is up, which
+   * makes both untrustworthy rather than one of them wrong.
+   */
+  let health = $state<JsonRecord | null>(null);
+
+  type Remote = { key: string; label: string; up: boolean | null; detail: string };
+
+  const remotes = $derived.by<Remote[]>(() => {
+    if (!health) return [];
+    const cloud = health.cloud ?? {};
+    const extension = health.status?.agent?.browserExtension ?? {};
+    const devices = Number(extension.connectedDevices || 0);
+    return [
+      {
+        key: "bridge",
+        label: "mac bridge",
+        up: Boolean(cloud.macBridgeOnline),
+        detail: cloud.macBridgeOnline ? "claiming work" : "not seen by the relay",
+      },
+      {
+        key: "relay",
+        label: "relay",
+        up: Boolean(cloud.ok),
+        // The store name alone ("d1") reads as noise on a bench page; what the
+        // owner is asking is whether the cloud answered.
+        detail: cloud.ok ? "reachable" : "unreachable",
+      },
+      {
+        key: "extension",
+        label: "browser ext",
+        up: Boolean(extension.online),
+        detail: extension.online
+          ? `${devices} device${devices === 1 ? "" : "s"}`
+          : "no socket",
+      },
+    ];
+  });
+
+  async function loadHealth() {
+    try {
+      health = await fetchSnapshot();
+    } catch {
+      // The links strip degrades to "not reported"; the controls are unaffected.
+      health = null;
+    }
+  }
+
+  function dbm(value: number | null): string {
+    return value == null ? "—" : `${Math.round(value)} dBm`;
+  }
+
+  function idle(ms: number | null): string {
+    if (ms == null) return "";
+    if (ms < 1000) return `${ms} ms idle`;
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s idle`;
+    return `${Math.round(ms / 60_000)}m idle`;
+  }
+
   const playable = $derived<Playable[]>(
     runs
       .filter((run) => run?.audio?.replyCaptureId && run?.pipelineId)
@@ -385,9 +468,13 @@
   onMount(() => {
     if (!LOCAL_ONLY) void prime();
     void loadRuns();
+    void loadHealth();
     const ticker = setInterval(() => (tick = Date.now()), 250);
     // Slow on purpose: a new reply is a human-paced event, not a wire.
-    const reload = setInterval(() => void loadRuns(), 15_000);
+    const reload = setInterval(() => {
+      void loadRuns();
+      void loadHealth();
+    }, 15_000);
     return () => {
       clearInterval(ticker);
       clearInterval(reload);
@@ -545,8 +632,16 @@
         </svg>
       {/if}
       <p class="bn-foot">
-        P0.20 · rms {snapshot?.controls.micLevel.rms ?? "—"} · peak {snapshot?.controls.micLevel
-          .peak ?? "—"}
+        P0.20 ·
+        {#if snapshot?.controls.micLevel.rms == null}
+          <!-- "Muted" and "powered but hearing nothing" are different problems
+               with different fixes. Until the firmware reports a live level the
+               page can only answer the first, and it says so rather than
+               leaving an empty dash to be read as silence. -->
+          <span class="bn-waiting">level not reported yet</span>
+        {:else}
+          rms {snapshot.controls.micLevel.rms} · peak {snapshot.controls.micLevel.peak}
+        {/if}
       </p>
     </article>
 
@@ -629,6 +724,100 @@
       </p>
     </article>
   </section>
+  {/if}
+
+  <!--
+    THE LINKS — "is this thing talking to anything", below the controls.
+
+    Placement is a DESIGN.md call, not an accident. The controls are the main
+    feature and must hold the most visual field: the owner reads them while
+    looking up from a breadboard with a wire in his hand, several times a
+    minute. Connectivity gets checked when something is wrong, which is far
+    rarer, so a wall of status text above the tiles would invert the hierarchy
+    for the sake of the less-used answer. Smaller type here says the same thing
+    a second way — this row is secondary, and it reads as one glance rather
+    than eleven.
+
+    The mic is deliberately NOT repeated here even though it is a "status": it
+    already owns the two largest tiles above (the sense pin and the level), and
+    DESIGN.md is explicit about not repeating what adds no value.
+  -->
+  {#if !LOCAL_ONLY}
+    <section class="bn-links" aria-label="Links and remote agents">
+      <p class="bn-label">links</p>
+      <div class="bn-linkgrid">
+        <article class="bn-link" class:up={snapshot?.links.lte.on}>
+          <p class="bn-linklabel">lte</p>
+          <p class="bn-linkvalue" class:muted={!snapshot?.links.lte.reported}>
+            {snapshot?.links.lte.reported ? (snapshot.links.lte.word ?? "—") : "—"}
+          </p>
+          <p class="bn-linkfoot">
+            {#if !snapshot?.links.lte.reported}
+              <span class="bn-waiting">not reported yet</span>
+            {:else}
+              {snapshot.links.lte.operator ?? "no operator"}
+              {#if snapshot.links.lte.rsrpDbm != null}· {dbm(snapshot.links.lte.rsrpDbm)}{/if}
+              {#if snapshot.links.lte.band != null}· b{snapshot.links.lte.band}{/if}
+            {/if}
+          </p>
+        </article>
+
+        <article class="bn-link" class:up={snapshot?.links.socket.up}>
+          <p class="bn-linklabel">relay socket</p>
+          <p class="bn-linkvalue" class:muted={!snapshot?.links.socket.reported}>
+            {#if !snapshot?.links.socket.reported}
+              —
+            {:else}
+              {snapshot.links.socket.up ? "UP" : "DOWN"}
+            {/if}
+          </p>
+          <p class="bn-linkfoot">
+            {#if !snapshot?.links.socket.reported}
+              <span class="bn-waiting">not reported yet</span>
+            {:else}
+              {idle(snapshot.links.socket.idleMs) || "on the pendant"}
+            {/if}
+          </p>
+        </article>
+
+        <article class="bn-link" class:up={snapshot?.links.bt.connected}>
+          <p class="bn-linklabel">bluetooth sink</p>
+          <p class="bn-linkvalue" class:muted={!snapshot?.links.bt.reported}>
+            {#if !snapshot?.links.bt.reported}
+              —
+            {:else if snapshot.links.bt.connected}
+              PAIRED
+            {:else if snapshot.links.bt.name}
+              KNOWN
+            {:else}
+              NONE
+            {/if}
+          </p>
+          <p class="bn-linkfoot">
+            {#if !snapshot?.links.bt.reported}
+              <span class="bn-waiting">not reported yet</span>
+            {:else if snapshot.links.bt.note}
+              <span class="bn-waiting">{snapshot.links.bt.note}</span>
+            {:else if snapshot.links.bt.name}
+              <!-- Remembered is not connected, and the wording keeps them apart. -->
+              {snapshot.links.bt.name}{snapshot.links.bt.connected ? "" : " · remembered, not reached"}
+            {:else}
+              no sink remembered
+            {/if}
+          </p>
+        </article>
+
+        {#each remotes as remote (remote.key)}
+          <article class="bn-link" class:up={remote.up}>
+            <p class="bn-linklabel">{remote.label}</p>
+            <p class="bn-linkvalue" class:muted={remote.up == null}>
+              {remote.up == null ? "—" : remote.up ? "UP" : "DOWN"}
+            </p>
+            <p class="bn-linkfoot">{remote.detail}</p>
+          </article>
+        {/each}
+      </div>
+    </section>
   {/if}
 
   <!-- Same job as the tiles above: is the thing that should have happened
@@ -898,6 +1087,66 @@
     stroke-linecap: round;
     transform-origin: 36px 36px;
     transition: transform 120ms ease-out;
+  }
+
+  /* Secondary by design: smaller type and a tighter tile than the controls
+     above, so the hierarchy is visible before any of it is read. */
+  .bn-links {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    border-top: 1px solid var(--line);
+    padding-top: var(--s4);
+  }
+
+  .bn-linkgrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    gap: var(--s3);
+  }
+
+  .bn-link {
+    background: var(--raise-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: var(--s3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    min-width: 0;
+  }
+
+  .bn-link.up {
+    border-color: color-mix(in srgb, var(--green) 40%, transparent);
+  }
+
+  .bn-linklabel {
+    font-family: var(--font-geist-mono);
+    font-size: var(--fs-micro);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .bn-linkvalue {
+    font-size: var(--fs-headline);
+    font-weight: var(--w-heavy);
+    line-height: 1.1;
+  }
+
+  .bn-link.up .bn-linkvalue {
+    color: var(--green);
+  }
+
+  .bn-linkvalue.muted {
+    color: var(--muted);
+  }
+
+  .bn-linkfoot {
+    font-family: var(--font-geist-mono);
+    font-size: var(--fs-small);
+    color: var(--ink-2);
+    overflow-wrap: break-word;
   }
 
   .bn-heard {
