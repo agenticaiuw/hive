@@ -31,6 +31,13 @@ const RING_BASE_HZ = Object.freeze({
   /* Same register as the timer ring: both are "a ring inside an app", and the
    * distinction the ear needs is depth, not which app. */
   audio: 784.0,
+  /* A numeric field is a ring inside an app too, so it shares that register —
+   * but its "size" is the whole range (1..180 minutes), which makes the pitch
+   * step per detent tiny and turns a long spin into a slow audible sweep. That
+   * is the intended effect, not a degradation: the ear learns "high in the
+   * range" before the number is spoken, which is the only positional cue a
+   * spinner can offer between settles. */
+  number: 784.0,
   closed: 523.25,
 })
 
@@ -93,6 +100,12 @@ export function earconFrequency({ ring = 'apps', index = 0, size = 1 } = {}) {
  *   forward/back — a single blip at the position's pitch
  *   enter        — the position's pitch plus a fifth above it: "you went in"
  *   escape       — a falling pair: "you came out". The doc's close earcon.
+ *   edge         — the knob turned and the value did NOT move: a numeric field
+ *                  hit a stop. Two clipped blips at the same pitch, a muted
+ *                  stutter rather than a new note, because the message is
+ *                  precisely "nothing changed". A silent refusal here is
+ *                  indistinguishable from a dead knob, and the owner's next
+ *                  move would be to keep turning into a wall they cannot see.
  */
 export function renderEarconPcm({
   ring = 'apps',
@@ -103,6 +116,14 @@ export function renderEarconPcm({
 } = {}) {
   const frequency = earconFrequency({ ring, index, size })
 
+  if (motion === 'edge') {
+    const clipped = BLIP_MS * 0.4
+    return toPcm([
+      toneSamples({ frequency, ms: clipped, sampleRate, peak: PEAK * 0.7 }),
+      toneSamples({ frequency: 0, ms: clipped * 0.5, sampleRate, peak: 0 }),
+      toneSamples({ frequency, ms: clipped, sampleRate, peak: PEAK * 0.7 }),
+    ])
+  }
   if (motion === 'escape') {
     return toPcm([
       toneSamples({ frequency, ms: BLIP_MS, sampleRate }),

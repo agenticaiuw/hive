@@ -34,19 +34,32 @@ import { getStore } from './store/index.js'
 import { loadFleetFromStore, parseDeviceTime } from './fleetContext.js'
 /*
  * The screenless app framework (docs/Screenless_App_Grammar.md). The pendant
- * is stateless — it sends {"type":"menu",delta:±1} per detent and
- * {"type":"menu_select"} once the knob has RESTED 1.5 s (the owner's encoder
- * has no switch; dwell is the select) — so the ring, the mode and presets all
- * live HERE, in the conversation's own state. A menu exists only while this
- * socket is open, which is the honest scope: today's firmware plays no audio
- * outside a started conversation, and a menu you cannot hear is not a menu.
+ * is stateless — it sends {"type":"menu",delta:±1} per detent,
+ * {"type":"menu_select"} per YELLOW press while the ring is open and
+ * {"type":"menu_back"} per BLUE press — so the ring, the mode and the presets
+ * all live HERE, in the conversation's own state. A menu exists only while
+ * this socket is open, which is the honest scope: today's firmware plays no
+ * audio outside a started conversation, and a menu you cannot hear is not a
+ * menu.
+ *
+ * BECAUSE THE RING LIVES HERE, THE DEVICE MUST BE TOLD WHEN IT OPENS. The same
+ * two buttons carry global verbs (talk, memo) when the ring is closed and ring
+ * verbs (select, back) when it is open, and the device cannot work out which
+ * state it is in — this socket is the only thing that knows. Every transition
+ * therefore sends {"type":"menu_context","active":bool} AHEAD of the sound
+ * that announces it. See handleMenuFrame's 'context' effect.
  */
 import {
   createMenuState,
+  clockLabel,
   currentRing,
+  menuContextFrame,
+  menuIsOpen,
   menuWithAudioDevices,
   reduceMenuFrame,
 } from './menuRing.js'
+import { createSettle, SETTLE_MS } from './menuSettle.js'
+import { renderNumberPcm } from './spokenNumbers.js'
 import { renderEarconPcm, renderTimerChimePcm } from './pendantEarcon.js'
 import {
   appBriefSpeech,
@@ -59,9 +72,10 @@ import {
   claimDueTimers,
   createTimerControl,
   settleClaimedTimer,
+  startAlarm,
   startTimer,
   timerOverdueSpeech,
-  timerStartedSpeech,
+  timerSetSpeech,
 } from './timerStore.js'
 import { createDomainMemoryRelay } from './domainMemoryRelay.js'
 import { persistAudioCapture } from './audioStorage.js'
@@ -108,16 +122,17 @@ const IDLE_SWEEP_MS = 5_000
 /*
  * How long the knob waits after the last detent before SAYING where it landed.
  * The blip is instant; the name is not. Spinning through four apps must cost
- * four blips and one sentence, not four sentences — see the earcon note in
- * docs/Screenless_App_Grammar.md.
+ * four blips and one sentence, not four sentences.
  *
- * It also has to stay WELL under the firmware's 1.5 s dwell, and 200 ms is:
- * the owner hears the entry's name a full 1.3 s before the select that commits
- * it lands, which is what makes dwell a decision rather than a surprise. Any
- * future retune of either number has to preserve that order — a name spoken
- * after its own commit would be the device narrating the past.
+ * It lives in cloud-relay/menuSettle.js now, with an injectable clock, because
+ * numeric entry made "exactly one utterance per burst" a promise worth testing
+ * rather than asserting: a forty-detent spin from ten minutes to fifty must
+ * speak ONE number. It is also no longer coupled to a commit — the old dwell
+ * needed the name to land 1.3 s before the selection it caused, and with a
+ * button doing the committing that ordering constraint is simply gone. This
+ * number is now free to be tuned for feel alone.
  */
-const MENU_NAME_SETTLE_MS = 200
+const MENU_NAME_SETTLE_MS = SETTLE_MS
 /*
  * How long an app brief waits on the Mac before it says so out loud.
  *
@@ -306,8 +321,10 @@ export async function handlePendantConverse(request, context) {
        * means the same thing.
        */
       menu: createMenuState(),
-      /* The settle debounce for the spoken position name (MENU_NAME_SETTLE_MS). */
-      menuNameTimer: null,
+      /* The settle debounce (cloud-relay/menuSettle.js), built on first use
+       * because it closes over this state. One utterance per burst, whether
+       * that utterance is a ring position or a bare number. */
+      menuSettle: null,
       /* Non-zero while a bt_list is outstanding. A bt_devices frame the owner
        * did not ask for must not yank the ring out from under them. */
       audioAskedAt: 0,
@@ -655,24 +672,49 @@ export async function handlePendantConverse(request, context) {
    * only its spoken result joins the queue, so the owner can keep scrolling
    * while Reminders is still coming back.
    *
-   * The select frame is a DWELL, so it arrives 1.5 s behind the detent that
-   * chose the entry and the name has already been spoken off the 200 ms
-   * settle. Nothing here needs to re-say it and nothing here does: this
-   * handler queues only what the reducer returns, and the reducer returns no
-   * 'name' effect on a commit. One chain keeps the order honest even if a fast
-   * spin backed the queue up — name first, then the app's own answer.
+   * The select frame is a YELLOW PRESS, so it arrives the instant the owner
+   * decides rather than 1.5 s after they stop moving. Nothing here re-says the
+   * position name the settle already spoke: this handler queues only what the
+   * reducer returns, and the reducer returns no 'name' effect on a commit. One
+   * chain keeps the order honest even if a fast spin backed the queue up.
    */
   function handleMenuFrame(state, frame) {
     const reduced = reduceMenuFrame(state.menu, frame)
     state.menu = reduced.state
 
     for (const effect of reduced.effects) {
+      if (effect.kind === 'context') {
+        /*
+         * Sent BEFORE any sound, and never awaited. The owner's next press can
+         * land during the earcon that announces this very transition, and a
+         * device still holding the old meaning would fire the wrong verb —
+         * a memo instead of a select, or worse, nothing at all.
+         */
+        sendJson(menuContextFrame(state.menu))
+        console.log(`[converse] menu context -> ${effect.active ? 'ring' : 'global'}`)
+        continue
+      }
       if (effect.kind === 'earcon') {
         queueRelaySpeech(state, () => streamRelayPcm(state, renderEarconPcm(effect)))
         continue
       }
       if (effect.kind === 'name') {
-        scheduleMenuName(state, effect.text)
+        menuSettleFor(state).offer(effect)
+        continue
+      }
+      if (effect.kind === 'number') {
+        /*
+         * A bare number, rendered LOCALLY. This is the whole reason numeric
+         * entry is possible at all: TTS is a network round trip, and one per
+         * settle would put the number a second behind the thumb.
+         */
+        menuSettleFor(state).offer(effect)
+        continue
+      }
+      if (effect.kind === 'speak') {
+        /* An announcement or a confirmation, caused by a PRESS. A press has
+         * already proven the hand stopped, so this never waits on a settle. */
+        queueRelaySpeech(state, () => speakRelayLine(state, effect.text))
         continue
       }
       if (effect.kind === 'closed') {
@@ -689,16 +731,50 @@ export async function handlePendantConverse(request, context) {
         queueRelaySpeech(state, () => startKnobTimer(state, effect.minutes))
         continue
       }
+      if (effect.kind === 'alarm') {
+        queueRelaySpeech(state, () => startKnobAlarm(state, effect.hour, effect.minute))
+        continue
+      }
+      if (effect.kind === 'bt-list') {
+        /* The remembered sinks, which make the ring usable the instant it
+         * opens — they come from the device's own table and cost no radio. */
+        state.audioAskedAt = Date.now()
+        sendJson({ type: 'bt_list' })
+        continue
+      }
+      if (effect.kind === 'bt-scan') {
+        /* Discovery, which does cost radio time and arrives seconds later. It
+         * is fired alongside bt_list rather than after it so the two overlap:
+         * the owner is already scrolling remembered devices while this runs. */
+        sendJson({ type: 'bt_scan', action: 'start' })
+        continue
+      }
       if (effect.kind === 'audio-select') {
         /*
-         * Both frames, in this order. bt_select promotes the entry to
-         * preferred and commands the module to connect; audio_sink routes the
-         * next answer to Bluetooth. Sending only the first would connect a
-         * headphone the pendant then talks past.
+         * Both frames, in this order. The first commands the module to
+         * connect; audio_sink routes the next answer to Bluetooth. Sending
+         * only the first would connect a headphone the pendant then talks past
+         * — choosing where sound goes and connecting the thing it goes to are
+         * one intention.
+         *
+         * REMEMBERED and NEW take different frames, because they are different
+         * questions. A remembered sink is addressed by its INDEX in the
+         * device's own table (bt_select, which also promotes it to
+         * most-recent), and the relay must not pretend to know that table's
+         * shape. A device the scan just found has no index at all — it exists
+         * only as a name in a result the relay is holding — so it goes by name
+         * and the device decides where it lands in its table.
          */
-        sendJson({ type: 'bt_select', index: effect.index })
+        if (effect.remembered) {
+          sendJson({ type: 'bt_select', index: effect.index })
+        } else {
+          sendJson({ type: 'bt_connect', name: effect.name })
+        }
         sendJson({ type: 'audio_sink', sink: 'bluetooth' })
-        console.log(`[converse] audio sink -> ${effect.name} (index ${effect.index})`)
+        console.log(
+          `[converse] audio sink -> ${effect.name}` +
+            (effect.remembered ? ` (remembered, index ${effect.index})` : ' (newly discovered)'),
+        )
         queueRelaySpeech(state, () => speakRelayLine(state, `Connecting ${effect.name}.`))
         continue
       }
@@ -711,17 +787,31 @@ export async function handlePendantConverse(request, context) {
   }
 
   function clearMenuName(state) {
-    if (state.menuNameTimer) clearTimeout(state.menuNameTimer)
-    state.menuNameTimer = null
+    state.menuSettle?.cancel()
   }
 
-  /** Say the landed-on position, once the knob stops moving. */
-  function scheduleMenuName(state, text) {
-    clearMenuName(state)
-    state.menuNameTimer = setTimeout(() => {
-      state.menuNameTimer = null
-      queueRelaySpeech(state, () => speakRelayLine(state, text))
-    }, MENU_NAME_SETTLE_MS)
+  /**
+   * The settle, built on first use because it closes over this conversation.
+   *
+   * Both utterance kinds go through the SAME debouncer, which is the point: a
+   * ring name and a bare number are the same event ("the hand stopped, say
+   * where it is") and only differ in how they are rendered. Splitting them into
+   * two timers would let a name and a number both fire from one burst.
+   */
+  function menuSettleFor(state) {
+    if (!state.menuSettle) {
+      state.menuSettle = createSettle({
+        delayMs: MENU_NAME_SETTLE_MS,
+        speak: (utterance) => {
+          queueRelaySpeech(state, () =>
+            utterance.kind === 'number'
+              ? streamRelayPcm(state, renderNumberPcm(utterance.value))
+              : speakRelayLine(state, utterance.text),
+          )
+        },
+      })
+    }
+    return state.menuSettle
   }
 
   /**
@@ -744,20 +834,9 @@ export async function handlePendantConverse(request, context) {
       return
     }
 
-    if (app === 'audio') {
-      /*
-       * The one ring the relay does not author. Ask the pendant what it
-       * remembers (up to four sinks on its SD card) and let the answer become
-       * the ring — see the bt_devices handler below. The request is fired and
-       * forgotten here on purpose: if the device never answers, that handler
-       * never runs, the owner stays on the app ring, and the line below is the
-       * only thing they heard. Silence would have been the alternative.
-       */
-      state.audioAskedAt = Date.now()
-      sendJson({ type: 'bt_list' })
-      queueRelaySpeech(state, () => speakRelayLine(state, 'Checking your audio devices.'))
-      return
-    }
+    /* Audio no longer reaches here: the reducer emits bt-list and bt-scan as
+     * effects of its own, because the ring's ORDER (remembered first, then
+     * discovered) is a decision about the ring and belongs beside it. */
 
     const plan = appMacPlan(app)
     if (!plan) return
@@ -807,7 +886,62 @@ export async function handlePendantConverse(request, context) {
       setBy: 'knob',
     })
     console.log(`[converse] timer ${record.timerId} started by knob: ${record.durationMs}ms`)
-    await speakRelayLine(state, timerStartedSpeech(record))
+    /*
+     * timerSetSpeech, not timerStartedSpeech. Coming off a numeric field the
+     * owner has heard nothing but bare numbers — "seven.", "eight." — with no
+     * unit attached, so this confirmation is the first and only place the unit
+     * is said: "Timer set for 7 minutes." A preset commit lands here too, and
+     * gets the same sentence, because two phrasings for one outcome is how an
+     * owner starts wondering whether they did something different.
+     */
+    await speakRelayLine(state, timerSetSpeech(record))
+  }
+
+  /**
+   * An alarm, which is a timer whose duration came off a clock face.
+   *
+   * The offset is the pendant's own LTE network clock when it has one — the
+   * same source the Time app trusts, and for the same reason: a worn device
+   * must set 7 AM in the timezone the owner is STANDING in, not the one their
+   * Mac is sleeping in. With no device clock the Mac's offset is the fallback
+   * and UTC is the fallback's fallback, which is stated out loud rather than
+   * silently assumed, because an alarm in the wrong timezone is the single
+   * worst failure this app has.
+   */
+  async function startKnobAlarm(state, hour, minute) {
+    const offsetMinutes = Number.isFinite(state.deviceTime?.offsetMinutes)
+      ? state.deviceTime.offsetMinutes
+      : macOffsetMinutes(state.timezone)
+    const record = await startAlarm({
+      store: state.store,
+      deviceId: state.deviceId,
+      hour,
+      minute,
+      alarmAt: clockLabel(hour, minute),
+      offsetMinutes,
+      setBy: 'knob',
+    })
+    console.log(
+      `[converse] alarm ${record.timerId} set by knob for ${record.alarmAt} ` +
+        `(offset ${offsetMinutes}m, fires in ${record.durationMs}ms)`,
+    )
+    await speakRelayLine(state, timerSetSpeech(record))
+  }
+
+  /** The Mac's timezone as a UTC offset in minutes, or 0 if it cannot be read.
+   * Derived by formatting "now" in that zone rather than by a table, so a zone
+   * this relay has never heard of still works if the platform knows it. */
+  function macOffsetMinutes(timezone) {
+    const zone = String(timezone || '').trim()
+    if (!zone) return 0
+    try {
+      const now = new Date()
+      const local = new Date(now.toLocaleString('en-US', { timeZone: zone }))
+      const utc = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }))
+      return Math.round((local.getTime() - utc.getTime()) / 60_000)
+    } catch {
+      return 0
+    }
   }
 
   /**
@@ -1147,8 +1281,26 @@ export async function handlePendantConverse(request, context) {
     clearInterval(state.idleTimer)
     /* A debounced position name outliving its conversation would speak into
      * the next one, announcing a ring the owner is no longer standing in. */
-    if (state.menuNameTimer) clearTimeout(state.menuNameTimer)
-    state.menuNameTimer = null
+    state.menuSettle?.cancel()
+    /*
+     * Hand the buttons back. The conversation ending closes the ring, so the
+     * device must be told its buttons mean talk and memo again — otherwise the
+     * owner's next yellow press is a select against a ring that no longer
+     * exists, and they get silence from the one control that is supposed to
+     * always work. Sent unconditionally rather than only when the ring
+     * happened to be open: the cost is one small frame, and the cost of
+     * skipping it is a pendant that appears dead.
+     */
+    if (menuIsOpen(state.menu)) {
+      console.log('[converse] menu context -> global (conversation ended)')
+    }
+    try {
+      sendJson({ type: 'menu_context', active: false })
+    } catch {
+      /* The socket is usually already gone by here; that is fine. A device
+       * whose socket closed has no ring either, and the firmware's own rule is
+       * to fall back to the global verbs when it has no context. */
+    }
     /* No longer nudgeable: from here the store-and-next-press path is the
      * only delivery again, which is correct — the firmware cannot be woken.
      * The unregister is identity-checked, so a restart that already
@@ -1388,8 +1540,8 @@ export async function handlePendantConverse(request, context) {
             (msg.type === 'menu' && Number.isFinite(delta)
               ? `step ${delta > 0 ? '+1' : '-1'}`
               : msg.type === 'menu_back'
-                ? 'back'
-                : 'select (dwell)') +
+                ? 'back (blue)'
+                : 'select (yellow)') +
             (state && !state.ended ? ` mode=${state.menu.mode}` : ' (no conversation)'),
         )
         /*
@@ -1400,6 +1552,14 @@ export async function handlePendantConverse(request, context) {
          * knob twist banked across a dead link can never replay as stale
          * intent either. The yellow press is the one press; it opens the
          * conversation, and the knob works from there.
+         *
+         * A menu_select or menu_back arriving with no conversation is the same
+         * story from the other end: with the ring closed the device should be
+         * sending its buttons to their GLOBAL jobs (talk, memo) and not to
+         * this handler at all, so one landing here means the device is holding
+         * a stale context. Ignoring it is right — endConversation has already
+         * sent {"active":false}, and acting on it would commit against a ring
+         * that no longer exists.
          */
         if (!state || state.ended) return
         handleMenuFrame(state, msg)
@@ -1407,10 +1567,11 @@ export async function handlePendantConverse(request, context) {
       }
       if (msg?.type === 'bt_devices') {
         /*
-         * The pendant's answer to bt_list: its remembered Bluetooth sinks,
-         * newest-preferred first. This is the only ring in the grammar whose
-         * entries the relay does not author, so it arrives here and BECOMES
-         * the ring rather than being merged into anything.
+         * The pendant's answer to bt_list: its remembered Bluetooth sinks, in
+         * ITS most-recently-used order. The relay does not re-sort them — the
+         * device knows when it last connected to each and the relay does not —
+         * and it does not author them either. It only decides where they sit
+         * relative to whatever the scan turns up, which is: first.
          */
         const state = convo
         const devices = Array.isArray(msg.devices) ? msg.devices : []
@@ -1420,14 +1581,6 @@ export async function handlePendantConverse(request, context) {
         )
         if (!state || state.ended || !state.audioAskedAt) return
         state.audioAskedAt = 0
-        if (!devices.length) {
-          /* An honest empty. "No remembered audio devices" is a complete
-           * answer; dropping the owner into an empty ring is not. */
-          void queueRelaySpeech(state, () =>
-            speakRelayLine(state, 'No remembered audio devices. Pair one from your phone first.'),
-          )
-          return
-        }
         state.menu = { ...menuWithAudioDevices(state.menu, devices), mode: 'audio' }
         const ring = currentRing(state.menu)
         void queueRelaySpeech(state, async () => {
@@ -1435,11 +1588,57 @@ export async function handlePendantConverse(request, context) {
             state,
             renderEarconPcm({ ring: 'audio', index: 0, size: ring.entries.length, motion: 'enter' }),
           )
+          /*
+           * The empty case is no longer a dead end, because a scan is running
+           * behind it. It says what is true right now and leaves the ring open
+           * so results can land in it — the old copy ("Pair one from your
+           * phone first") sent the owner to another device to solve a problem
+           * this one was already working on.
+           *
+           * No gesture is named here: entering the app already spoke the
+           * how-to, and this is a status line, not a lesson.
+           */
           await speakRelayLine(
             state,
-            `${devices.length} remembered. ${String(devices[0]?.name || 'The first one')}. Press to connect.`,
+            devices.length
+              ? `${devices.length} remembered. ${String(devices[0]?.name || 'The first one')}.`
+              : 'Nothing remembered yet. Still searching.',
           )
         })
+        return
+      }
+      if (msg?.type === 'bt_scan_result') {
+        /*
+         * Devices the radio just found, folded in BEHIND the remembered ones.
+         *
+         * Two rules make this safe to do while the owner is already scrolling:
+         * the discovered half is appended after the remembered half (so the
+         * entries they are aiming at never move), and menuWithAudioDevices
+         * re-finds the entry the cursor is standing ON rather than keeping a
+         * numeric index (so even the entries after the insertion point stay
+         * under the thumb). Without the second rule, every speaker that
+         * answered would slide "Pendant speaker" one step further away.
+         */
+        const state = convo
+        const found = Array.isArray(msg.devices) ? msg.devices : []
+        const scanning = msg.done !== true
+        console.log(
+          `[converse] ${deviceIdHeader} scan: ${found.length} nearby` +
+            `${scanning ? ' (still scanning)' : ' (complete)'}`,
+        )
+        if (!state || state.ended || state.menu.mode !== 'audio') return
+        state.menu = menuWithAudioDevices(state.menu, undefined, {
+          discovered: found,
+          scanning,
+        })
+        /*
+         * Deliberately SILENT. The owner is mid-scroll; announcing every
+         * speaker that answers would talk over the ring they are listening to.
+         * The honest signal is positional instead — the "Still searching."
+         * entry sits at the end of the list while this is true, so an owner who
+         * scrolls to the bottom is told, and an owner who does not is left
+         * alone.
+         */
         return
       }
       if (msg?.type === 'mic_muted') {

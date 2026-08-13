@@ -3,418 +3,558 @@ import test from 'node:test'
 
 import {
   APP_RING,
+  AUDIO_SCANNING_ENTRY,
   AUDIO_SPEAKER_ENTRY,
-  audioRing,
-  menuWithAudioDevices,
+  TIMER_CUSTOM_ENTRY,
   TIMER_PRESET_MINUTES,
   TIMER_RING,
+  audioRing,
+  clockLabel,
   createMenuState,
   currentEntry,
+  currentNumberField,
+  currentNumberValue,
   entryName,
   menuBack,
+  menuContextFrame,
+  menuIsOpen,
   menuScroll,
   menuSelect,
+  menuWithAudioDevices,
   minutesLabel,
+  numberFields,
   reduceMenuFrame,
+  stepFieldValue,
 } from './menuRing.js'
 
 /* A detent, as the firmware sends it. */
 const turn = (state, delta) => reduceMenuFrame(state, { type: 'menu', delta })
 /*
- * The select, as the firmware sends it: NOT a push. The owner's encoder has no
- * switch wired (ruling, 2026-08-12: "we're not going to use the button on the
- * rotary encoder"), so the firmware fires {"type":"menu_select"} 1.5 s after
- * the last detent and never again until a new detent arrives. Almost every
- * dwell() below is preceded by a turn for exactly that reason — a select with
- * no detent in front of it is a frame this hardware cannot produce, and the
- * two places that do it anyway are testing that the reducer survives it.
+ * THE YELLOW BUTTON, as the firmware sends it while the ring is open.
+ *
+ * This used to be `dwell()` and it used to arrive 1.5 s after the last detent
+ * — the owner's encoder has no switch, so stopping the knob was the commit.
+ * The owner killed that on 2026-08-13 ("we should just use a button"), and the
+ * tests below are written the way the hardware now behaves: a select lands the
+ * instant the owner decides, with no detent required in front of it. Several
+ * tests below select twice in a row, which the dwell era could not express at
+ * all.
  */
-const dwell = (state) => reduceMenuFrame(state, { type: 'menu_select' })
-/* {"type":"menu_back"}: still handled, no longer emitted by anything — the
- * long-hold it was built for needs a button the knob does not have. */
-const hold = (state) => reduceMenuFrame(state, { type: 'menu_back' })
+const yellow = (state) => reduceMenuFrame(state, { type: 'menu_select' })
+/* THE BLUE BUTTON: one level up. Also reachable by turning to the `Back` entry
+ * and pressing yellow — the two paths are asserted identical below. */
+const blue = (state) => reduceMenuFrame(state, { type: 'menu_back' })
 
 const kinds = (result) => result.effects.map((effect) => effect.kind)
+const of = (result, kind) => result.effects.filter((effect) => effect.kind === kind)
 const spoken = (result) =>
-  result.effects.filter((effect) => effect.kind === 'name').map((effect) => effect.text)
+  result.effects
+    .filter((effect) => effect.kind === 'name' || effect.kind === 'speak')
+    .map((effect) => effect.text)
 
-/*
- * THE ONE HARD RULE, as a test. docs/Screenless_App_Grammar.md: "No flow may
- * require two presses to initiate." The yellow press that opened the
- * conversation is the one press, so the very first detent must already MOVE
- * something and say where it landed. A first detent that only "woke" the ring
- * would be the second gesture the grammar forbids, and nothing below would
- * catch it — the ring would still work, it would just cost one more turn
- * forever.
- */
-test('the first detent opens the ring AND lands on a named position', () => {
-  const opened = turn(createMenuState(), 1)
-  assert.equal(opened.state.mode, 'apps')
-  assert.equal(currentEntry(opened.state), 'time')
-  assert.deepEqual(spoken(opened), ['Time.'])
-})
-
-test('opening backwards still opens at home, never on the word for leaving', () => {
-  const opened = turn(createMenuState(), -1)
-  assert.equal(currentEntry(opened.state), 'time')
-  assert.notEqual(currentEntry(opened.state), 'back')
-})
-
-test('a select on a closed menu opens it too, rather than feeling dead', () => {
-  /* The pendant cannot send this — a dwell needs a detent to arm it, and that
-   * detent would have opened the ring — but the dashboard can, and a frame
-   * that did nothing would be a silent knob. */
-  const opened = dwell(createMenuState())
-  assert.equal(opened.state.mode, 'apps')
-  assert.deepEqual(spoken(opened), ['Time.'])
-})
-
-test('every ring entry has a name — a silent position is an invisible one', () => {
-  for (const entry of [...APP_RING, ...TIMER_RING]) {
-    assert.ok(entryName(entry).trim().length > 0, `${entry} has no spoken name`)
-  }
-})
-
-test('scrolling walks the apps in order and wraps both ways', () => {
+/** Open the ring and land on `entry`. */
+function ringAt(entry) {
   let state = turn(createMenuState(), 1).state
-  const heard = ['Time.']
-  for (let i = 0; i < APP_RING.length - 1; i += 1) {
-    const stepped = turn(state, 1)
-    state = stepped.state
-    heard.push(...spoken(stepped))
-  }
-  assert.deepEqual(heard, ['Time.', 'Timer.', 'Reminders.', 'Calendar.', 'Audio devices.', 'Back.'])
+  while (currentEntry(state) !== entry) state = turn(state, 1).state
+  return state
+}
 
-  /* One more forward wraps to the top; one back from the top wraps to the end.
-   * Wrap-around is an escape hatch of its own — there is no long-hold coming,
-   * so it is not decoration. */
-  const wrapped = turn(state, 1)
-  assert.equal(currentEntry(wrapped.state), 'time')
-  assert.equal(currentEntry(turn(wrapped.state, -1).state), 'back')
+/* ------------------------------------------------- the buttons and context */
+
+test('the first detent opens the ring, and the ring announces its own controls', () => {
+  const result = turn(createMenuState(), 1)
+  assert.equal(result.state.mode, 'apps')
+  assert.equal(currentEntry(result.state), 'time')
+  /* Context FIRST, before any sound: the owner's next press can land during
+   * the earcon, and a device holding the old meaning fires the wrong verb. */
+  assert.deepEqual(kinds(result), ['context', 'earcon', 'name'])
+  assert.deepEqual(of(result, 'context')[0], { kind: 'context', active: true })
+  assert.match(spoken(result)[0], /^Time\./)
+  /* The one sentence that teaches selection. Dwell was the last gesture an
+   * owner could stumble into; this line is now the whole discovery path. */
+  assert.match(spoken(result)[0], /yellow to open/i)
+  assert.match(spoken(result)[0], /blue to leave/i)
 })
 
-test('a detent blips at a position that rises through the ring', () => {
-  let state = createMenuState()
-  const positions = []
-  for (let i = 0; i < APP_RING.length; i += 1) {
-    const stepped = turn(state, 1)
-    state = stepped.state
-    const earcon = stepped.effects.find((effect) => effect.kind === 'earcon')
-    positions.push(earcon.index)
-    assert.equal(earcon.ring, 'apps')
-    assert.equal(earcon.size, APP_RING.length)
-  }
-  assert.deepEqual(positions, APP_RING.map((_, index) => index))
+test('opening backwards still lands on the ring home, not on Back', () => {
+  assert.equal(currentEntry(turn(createMenuState(), -1).state), 'time')
 })
 
-test('Time speaks and leaves you on the ring — a one-shot surface', () => {
-  const state = turn(createMenuState(), 1).state
-  const entered = dwell(state)
-  assert.equal(entered.state.mode, 'apps')
-  assert.equal(currentEntry(entered.state), 'time')
-  assert.deepEqual(
-    entered.effects.filter((effect) => effect.kind === 'app'),
-    [{ kind: 'app', app: 'time' }],
-  )
-})
-
-test('Reminders and Calendar are one-shot surfaces too', () => {
-  let state = turn(createMenuState(), 1).state
-  state = turn(state, 1).state
-  state = turn(state, 1).state
-  assert.equal(currentEntry(state), 'reminders')
-  const reminders = dwell(state)
-  assert.equal(reminders.state.mode, 'apps')
-  assert.deepEqual(
-    reminders.effects.filter((effect) => effect.kind === 'app'),
-    [{ kind: 'app', app: 'reminders' }],
-  )
-
-  const calendar = dwell(turn(state, 1).state)
-  assert.deepEqual(
-    calendar.effects.filter((effect) => effect.kind === 'app'),
-    [{ kind: 'app', app: 'calendar' }],
-  )
-})
-
-test('entering Timer speaks the highlighted duration and the one hint', () => {
-  const state = turn(turn(createMenuState(), 1).state, 1).state
-  assert.equal(currentEntry(state), 'timer')
-  const entered = dwell(state)
-  assert.equal(entered.state.mode, 'timer')
-  /* The hint names the gesture the owner HAS. "Press to start." was the old
-   * wording and it is now a lie about the hardware — and it asks for the turn
-   * first, because the preset you land on cannot be dwelled into until a
-   * detent re-arms the firmware's timer. */
-  assert.deepEqual(spoken(entered), ['1 minute. Turn, then pause to start.'])
-  /* A different base pitch, so "which ring am I in" is audible before a word. */
-  assert.equal(entered.effects.find((effect) => effect.kind === 'earcon').ring, 'timer')
-})
-
-test('the hint is spoken on entry only, never again while scrolling', () => {
-  const timerRing = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
-  const scrolled = turn(timerRing, 1)
-  assert.deepEqual(spoken(scrolled), ['5 minutes.'])
-})
-
-test('the preset ring carries exactly the documented durations', () => {
-  assert.deepEqual([...TIMER_PRESET_MINUTES], [1, 5, 10, 15, 30, 60])
-  assert.equal(minutesLabel(1), '1 minute')
-  assert.equal(minutesLabel(60), '1 hour')
-})
-
-test('stopping on a preset starts it and returns to the app ring, standing on Timer', () => {
-  let state = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
-  state = turn(state, 1).state
-  state = turn(state, 1).state
-  assert.equal(currentEntry(state), 'timer:10')
-
-  const started = dwell(state)
-  assert.deepEqual(
-    started.effects.filter((effect) => effect.kind === 'timer'),
-    [{ kind: 'timer', minutes: 10 }],
-  )
+test('yellow selects — no detent required in front of it', () => {
   /*
-   * Back on the app ring afterwards. A preset ring that stayed open would make
-   * a stray knock cost the owner a second timer they never asked for.
+   * The regression that matters most. Under dwell a commit could only be armed
+   * by a detent, so "select twice without turning" was unreachable. With a
+   * button it is one press, and it must work.
    */
-  assert.equal(started.state.mode, 'apps')
-  assert.equal(currentEntry(started.state), 'timer')
+  const timer = yellow(ringAt('timer'))
+  assert.equal(timer.state.mode, 'timer')
+  const again = yellow(timer.state)
+  assert.equal(again.state.mode, 'apps', 'yellow on the first preset starts it immediately')
+  assert.deepEqual(of(again, 'timer'), [{ kind: 'timer', minutes: TIMER_PRESET_MINUTES[0] }])
 })
 
-test('a started timer does not re-arm: re-entering Timer starts at the first preset', () => {
-  let state = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
-  state = turn(state, 1).state
-  state = dwell(state).state
-  assert.equal(currentEntry(dwell(state).state), 'timer:1')
-})
-
-/*
- * THE UNIVERSAL ESCAPE, and on this hardware there is only ONE way in: the
- * "Back" entry at the end of every ring, reached by turning and stopping. The
- * {"type":"menu_back"} frame stays handled (dashboard, tests) but no gesture
- * produces it — the knob has no switch to hold. Both paths must still land in
- * the same place, because the Back entry is now carrying the whole contract.
- */
-test('the Back entry and the menu_back frame are the same escape, one level at a time', () => {
-  const inTimer = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
-
-  const held = hold(inTimer)
-  assert.equal(held.state.mode, 'apps')
-  assert.deepEqual(spoken(held), ['Timer.'])
-
-  let onBack = inTimer
-  for (let i = 0; i < TIMER_RING.length - 1; i += 1) onBack = turn(onBack, 1).state
-  assert.equal(currentEntry(onBack), 'back')
-  const selected = dwell(onBack)
-  assert.equal(selected.state.mode, 'apps')
-  assert.deepEqual(spoken(selected), spoken(held))
-})
-
-/*
- * ---- DWELL: what the reducer must be true of when there is no push ---------
- *
- * These four are the ones that would have been someone else's problem while a
- * button existed. With select = "stop turning", the ring has to be walkable,
- * committable and escapable with ONE verb, and the commit has to stay quiet
- * about a name the scroll already said 1.3 s earlier (the firmware dwells
- * 1500 ms; pendantConverse speaks the position on a 200 ms settle).
- */
-test('no ring can trap the owner: every ring ends in Back', () => {
-  assert.equal(APP_RING[APP_RING.length - 1], 'back')
-  assert.equal(TIMER_RING[TIMER_RING.length - 1], 'back')
-  for (const devices of [[{ name: 'AirPods Pro' }], []]) {
-    const ring = audioRing(devices)
-    assert.equal(ring[ring.length - 1], 'back')
-  }
-})
-
-test('turn-and-stop alone gets in and back out — no push frame anywhere', () => {
-  /* The whole grammar exercised with the only two gestures the hardware has:
-   * a detent, and 1.5 s of stillness. If this can be done, nothing the owner
-   * can reach needs a button. */
-  let state = turn(createMenuState(), 1).state /* opens on Time */
-  while (currentEntry(state) !== 'timer') state = turn(state, 1).state
-  state = dwell(state).state
-  assert.equal(state.mode, 'timer')
-
-  while (currentEntry(state) !== 'back') state = turn(state, 1).state
-  state = dwell(state).state
-  assert.equal(state.mode, 'apps')
-
-  while (currentEntry(state) !== 'back') state = turn(state, 1).state
-  const closed = dwell(state)
-  assert.equal(closed.state.mode, 'closed')
-  assert.deepEqual(kinds(closed), ['earcon', 'closed'])
-})
-
-test('a commit never re-speaks the name the detent already spoke', () => {
-  /* The one-shot surfaces answer with the APP's words (or nothing, for Back);
-   * none of them repeat the position. A commit that re-said "Reminders." would
-   * land ~1.3 s after the settle spoke it, which on a screenless device reads
-   * as a stutter, not as confirmation. */
-  for (const app of ['time', 'reminders', 'calendar', 'audio', 'back']) {
-    let state = turn(createMenuState(), 1).state
-    while (currentEntry(state) !== app) state = turn(state, 1).state
-    assert.deepEqual(spoken(dwell(state)), [], `${app} re-spoke its own name on commit`)
-  }
-  /* Timer is the single exception and it is not a repeat: what it says is the
-   * FIRST entry of the ring it just opened, plus the hint. */
-  let onTimer = turn(createMenuState(), 1).state
-  while (currentEntry(onTimer) !== 'timer') onTimer = turn(onTimer, 1).state
-  assert.deepEqual(spoken(dwell(onTimer)), ['1 minute. Turn, then pause to start.'])
-})
-
-test('no-repeat-fire is the FIRMWARE guarantee — the reducer stays stateless about it', () => {
+test('resting the knob commits NOTHING — dwell is gone', () => {
   /*
-   * Deliberate, and written down so nobody "fixes" it here: the reducer has no
-   * memory of having just committed, because the device does. main.c arms the
-   * dwell work item only from a detent, so a knob left resting selects exactly
-   * once. If that guard ever moved into this file it would also have to know
-   * about detents, and the reducer would stop being a pure function of frames.
+   * There is no frame for "the knob stopped" any more, and there must not be.
+   * The reducer's only inputs are a detent and the two buttons; anything else
+   * is ignored, which is what proves stillness cannot start a timer.
    */
-  let state = turn(createMenuState(), 1).state
-  assert.equal(currentEntry(state), 'time')
-  const first = dwell(state)
-  const second = dwell(first.state)
-  assert.equal(second.state.mode, 'apps')
-  assert.equal(currentEntry(second.state), 'time')
-  assert.deepEqual(kinds(second), kinds(first))
+  const state = ringAt('timer')
+  for (const type of ['menu_dwell', 'menu_settle', 'dwell', 'settle']) {
+    const result = reduceMenuFrame(state, { type })
+    assert.deepEqual(result.effects, [], `${type} must do nothing`)
+    assert.equal(result.state, state)
+  }
 })
 
-test('escaping from the app ring closes the menu with a falling blip and NO words', () => {
-  const state = turn(createMenuState(), 1).state
-  const closed = hold(state)
+test('blue is back, and from the app ring it closes the ring and hands the buttons back', () => {
+  const inTimer = yellow(ringAt('timer')).state
+  const out = blue(inTimer)
+  assert.equal(out.state.mode, 'apps')
+  /* Not a context change: the ring is still open, so the buttons keep their
+   * ring meanings and no frame is sent. */
+  assert.deepEqual(of(out, 'context'), [])
+
+  const closed = blue(out.state)
   assert.equal(closed.state.mode, 'closed')
-  assert.deepEqual(kinds(closed), ['earcon', 'closed'])
-  assert.equal(closed.effects[0].motion, 'escape')
-  /* Silence plus a downward blip IS the message; a sentence there would say
-   * nothing the blip does not. */
+  assert.deepEqual(of(closed, 'context')[0], { kind: 'context', active: false })
+  /* Closing says nothing. A falling blip plus silence IS the message. */
   assert.deepEqual(spoken(closed), [])
 })
 
-test('two escapes always get you out, from anywhere in the grammar', () => {
-  const deepest = dwell(turn(turn(createMenuState(), 1).state, 1).state).state
-  const out = hold(hold(deepest).state)
-  assert.equal(out.state.mode, 'closed')
-  /* And a third does nothing rather than throwing or reopening. */
-  assert.deepEqual(hold(out.state).effects, [])
+test('blue and the Back entry land in exactly the same place', () => {
+  const start = ringAt('audio')
+  const viaButton = blue(yellow(start).state)
+  let viaEntry = yellow(start).state
+  while (currentEntry(viaEntry) !== 'back') viaEntry = turn(viaEntry, 1).state
+  const committed = yellow(viaEntry)
+  assert.equal(viaButton.state.mode, committed.state.mode)
+  assert.equal(currentEntry(viaButton.state), currentEntry(committed.state))
 })
 
-test('a closed menu reopens at home — predictable beats persistent', () => {
-  let state = turn(createMenuState(), 1).state
+test('menuIsOpen and menuContextFrame agree with the ring, always', () => {
+  let state = createMenuState()
+  assert.equal(menuIsOpen(state), false)
+  assert.deepEqual(menuContextFrame(state), { type: 'menu_context', active: false })
   state = turn(state, 1).state
-  state = turn(state, 1).state
-  assert.equal(currentEntry(state), 'reminders')
-  const closed = hold(state).state
-  assert.equal(currentEntry(turn(closed, 1).state), 'time')
+  assert.equal(menuIsOpen(state), true)
+  assert.deepEqual(menuContextFrame(state), { type: 'menu_context', active: true })
 })
 
-test('unknown frames and zero deltas change nothing', () => {
-  const state = turn(createMenuState(), 1).state
-  assert.deepEqual(reduceMenuFrame(state, { type: 'ping' }).effects, [])
-  assert.equal(reduceMenuFrame(state, { type: 'ping' }).state, state)
-  assert.deepEqual(menuScroll(state, 0).effects, [])
-  assert.equal(menuScroll(state, 0).state, state)
+test('a context frame is emitted on every open/close transition and never in between', () => {
+  /*
+   * Walked as a whole session rather than asserted per-branch: the guarantee is
+   * that the device's belief can never drift from the relay's state, and only
+   * a walk can catch a branch that forgot.
+   */
+  let state = createMenuState()
+  let believedOpen = false
+  const steps = [
+    (s) => turn(s, 1),
+    (s) => turn(s, 1),
+    (s) => yellow(s),
+    (s) => turn(s, 1),
+    (s) => yellow(s),
+    (s) => blue(s),
+    (s) => blue(s),
+    (s) => turn(s, 1),
+    (s) => blue(s),
+  ]
+  for (const step of steps) {
+    const result = step(state)
+    state = result.state
+    for (const effect of of(result, 'context')) believedOpen = effect.active
+    assert.equal(
+      believedOpen,
+      menuIsOpen(state),
+      'the device would disagree with the relay about who owns the buttons',
+    )
+  }
 })
 
-test('a corrupt index is clamped rather than crashing the knob', () => {
-  const wild = { mode: 'apps', appIndex: 999, timerIndex: -42 }
-  assert.ok(APP_RING.includes(currentEntry(wild)))
-  assert.equal(menuSelect(wild).state.mode !== undefined, true)
-  assert.equal(menuBack({ mode: 'closed' }).effects.length, 0)
+/* ------------------------------------------------------------ the app ring */
+
+test('every ring ends in Back', () => {
+  assert.equal(APP_RING[APP_RING.length - 1], 'back')
+  assert.equal(TIMER_RING[TIMER_RING.length - 1], 'back')
+  assert.equal(audioRing([])[audioRing([]).length - 1], 'back')
+  assert.equal(audioRing([{ name: 'Bose' }]).at(-1), 'back')
 })
 
-/*
- * ---- Audio devices: the one ring the relay does not author -----------------
- *
- * The pendant remembers up to four Bluetooth sinks on its SD card and answers
- * {"type":"bt_list"} with them, so this ring's contents arrive over the wire.
- * That makes it the only place in the grammar where an outside string becomes
- * a ring entry, which is exactly why the sanitising below is tested rather
- * than trusted.
- */
-const SINKS = [
-  { index: 0, name: 'AirPods Pro', address: 'aa:bb', preferred: true },
-  { index: 1, name: 'Kitchen speaker', address: 'cc:dd', preferred: false },
-]
+test('every app on the ring has a name and a how-to naming a real control', () => {
+  for (const entry of APP_RING) {
+    if (entry === 'back') continue
+    const result = yellow(ringAt(entry))
+    const said = spoken(result).join(' ')
+    assert.ok(said.length, `${entry} landed silently`)
+    assert.ok(
+      said.startsWith(entryName(entry)),
+      `${entry} must say its name first, said: ${said}`,
+    )
+    /* The hint half. Composed from controlVocabulary.js, so this asserts the
+     * wiring exists — controlVocabulary.test.js is what polices the words. */
+    assert.match(said, /\b(yellow|turn)\b/i, `${entry} named no control: ${said}`)
+  }
+})
 
-/* Standing on the Audio devices entry, then the device's answer becomes the
- * ring — exactly what pendantConverse does when bt_devices lands. */
-const withSinks = (devices = SINKS) => {
-  let state = turn(createMenuState(), 1).state
-  while (currentEntry(state) !== 'audio') state = turn(state, 1).state
-  return { ...menuWithAudioDevices(state, devices), mode: 'audio' }
-}
+test('one-shot surfaces answer without moving the cursor', () => {
+  for (const entry of ['time', 'reminders', 'calendar']) {
+    const before = ringAt(entry)
+    const result = yellow(before)
+    assert.equal(currentEntry(result.state), entry, `${entry} moved the cursor`)
+    assert.deepEqual(of(result, 'app'), [{ kind: 'app', app: entry }])
+  }
+})
 
-test('the audio ring is whatever the pendant remembers, plus a way back to the speaker', () => {
-  const ring = audioRing(SINKS)
+test('a commit never re-speaks the position name the settle already said', () => {
+  for (const entry of APP_RING) {
+    const result = yellow(ringAt(entry))
+    assert.deepEqual(
+      of(result, 'name'),
+      [],
+      `${entry} re-announced its own position on commit`,
+    )
+  }
+})
+
+/* -------------------------------------------------------------- the timer */
+
+test('Timer offers presets first, then Custom', () => {
+  const ring = yellow(ringAt('timer')).state
   assert.deepEqual(
-    [...ring],
-    ['audio:dev:AirPods Pro', 'audio:dev:Kitchen speaker', AUDIO_SPEAKER_ENTRY, 'back'],
+    TIMER_RING.slice(0, TIMER_PRESET_MINUTES.length),
+    TIMER_PRESET_MINUTES.map((m) => `timer:${m}`),
   )
-  assert.equal(entryName('audio:dev:AirPods Pro'), 'AirPods Pro.')
+  assert.equal(TIMER_RING[TIMER_PRESET_MINUTES.length], TIMER_CUSTOM_ENTRY)
+  assert.equal(currentEntry(ring), `timer:${TIMER_PRESET_MINUTES[0]}`)
+  assert.equal(entryName(TIMER_CUSTOM_ENTRY), 'Custom.')
+})
+
+test('a preset starts a timer and returns to the app ring', () => {
+  const ring = yellow(ringAt('timer')).state
+  const result = yellow(turn(ring, 1).state)
+  assert.deepEqual(of(result, 'timer'), [{ kind: 'timer', minutes: TIMER_PRESET_MINUTES[1] }])
+  assert.equal(result.state.mode, 'apps')
+})
+
+/* ------------------------------------------------------- numeric entry */
+
+test('ONE DETENT IS ONE UNIT, at any speed', () => {
+  /*
+   * The owner's rule, verbatim: "ONE detent = ONE unit, at any speed. NO
+   * acceleration, no coarse steps." Forty detents in a burst and forty spread
+   * over a minute must land on the same number, so the reducer is asked for
+   * both and compared. Nothing here consults a clock, which is the structural
+   * reason acceleration cannot creep back in.
+   */
+  let state = customMinutes()
+  const start = currentNumberValue(state)
+  for (let i = 0; i < 40; i += 1) state = turn(state, 1).state
+  assert.equal(currentNumberValue(state), start + 40)
+
+  let back = state
+  for (let i = 0; i < 40; i += 1) back = turn(back, -1).state
+  assert.equal(currentNumberValue(back), start)
+})
+
+test('stepFieldValue never moves by more than one, over the whole range', () => {
+  const field = numberFields('timer')[0]
+  for (let value = field.min; value <= field.max; value += 1) {
+    for (const step of [1, -1, 7, -7, 100]) {
+      const next = stepFieldValue(field, value, step)
+      assert.ok(
+        Math.abs(next.value - value) <= 1,
+        `step ${step} from ${value} moved to ${next.value}`,
+      )
+    }
+  }
+})
+
+test('a numeric field announces itself ONCE, then speaks bare numbers only', () => {
+  const entered = yellowInto(customEntry())
+  /* The announcement, with the how-to attached because this is the owner's
+   * first moment inside a numeric field. */
+  const announced = spoken(entered)
+  assert.equal(announced.length, 1)
+  assert.match(announced[0], /^Setting minutes\./)
+  assert.match(announced[0], /yellow to confirm/i)
+  /* And the starting value, so the owner is not turning blind. */
+  assert.deepEqual(of(entered, 'number'), [{ kind: 'number', value: 10 }])
+
+  /* Every settle after that is a NUMBER and nothing else — no units, no
+   * sentences, no repetition of the field name. */
+  let state = entered.state
+  for (let i = 0; i < 12; i += 1) {
+    const result = turn(state, 1)
+    state = result.state
+    assert.deepEqual(spoken(result), [], 'a scroll spoke a sentence')
+    assert.deepEqual(kinds(result), ['earcon', 'number'])
+    assert.equal(of(result, 'number')[0].value, 11 + i)
+  }
+})
+
+test('the number effect carries a bare value — no units are ever attached', () => {
+  let state = customMinutes()
+  for (let i = 0; i < 5; i += 1) {
+    const result = turn(state, 1)
+    state = result.state
+    const effect = of(result, 'number')[0]
+    assert.equal(typeof effect.value, 'number')
+    assert.deepEqual(Object.keys(effect).sort(), ['kind', 'value'])
+  }
+})
+
+test('a duration STOPS at its ends, and says so audibly', () => {
+  const field = numberFields('timer')[0]
+  let state = customMinutes()
+  /* Drive to the top and keep going. */
+  for (let i = 0; i < field.max + 10; i += 1) state = turn(state, 1).state
+  assert.equal(currentNumberValue(state), field.max)
+
+  const refused = turn(state, 1)
+  assert.equal(currentNumberValue(refused.state), field.max, 'a duration must not wrap')
+  /* A silent refusal is indistinguishable from a dead knob, so the earcon
+   * changes AND the unchanged number is re-spoken. */
+  assert.equal(of(refused, 'earcon')[0].motion, 'edge')
+  assert.deepEqual(of(refused, 'number'), [{ kind: 'number', value: field.max }])
+
+  let low = customMinutes()
+  for (let i = 0; i < field.min + 40; i += 1) low = turn(low, -1).state
+  assert.equal(currentNumberValue(low), field.min)
+  assert.equal(of(turn(low, -1), 'earcon')[0].motion, 'edge')
+})
+
+test('clock fields WRAP, because a clock is a circle', () => {
+  const [hour, minute] = numberFields('alarm')
+  assert.deepEqual(stepFieldValue(hour, 23, 1), { value: 0, atEdge: false })
+  assert.deepEqual(stepFieldValue(hour, 0, -1), { value: 23, atEdge: false })
+  assert.deepEqual(stepFieldValue(minute, 59, 1), { value: 0, atEdge: false })
+  assert.deepEqual(stepFieldValue(minute, 0, -1), { value: 59, atEdge: false })
+})
+
+test('Alarm walks hour then minute, announcing the second field without repeating the lesson', () => {
+  const entered = yellow(ringAt('alarm'))
+  assert.equal(entered.state.mode, 'number')
+  assert.equal(currentNumberField(entered.state).key, 'hour')
+  /* The app's own hint IS the field announcement here — "Turn to set the
+   * hour" — so no separate "Setting the hour." is spoken on top of it. */
+  assert.equal(spoken(entered).length, 1)
+  assert.match(spoken(entered)[0], /^Alarm\./)
+  assert.match(spoken(entered)[0], /set the hour/i)
+
+  let state = entered.state
+  for (let i = 0; i < 7; i += 1) state = turn(state, 1).state
+  assert.equal(currentNumberValue(state), 14)
+
+  const toMinutes = yellow(state)
+  assert.equal(currentNumberField(toMinutes.state).key, 'minute')
+  assert.deepEqual(spoken(toMinutes), ['Setting minutes.'])
+  /* No how-to this time: the owner just used the gesture successfully, and
+   * explaining a thing you watched somebody do is how a device gets ignored. */
+  assert.doesNotMatch(spoken(toMinutes)[0], /yellow/i)
+
+  let minutes = toMinutes.state
+  for (let i = 0; i < 30; i += 1) minutes = turn(minutes, 1).state
+  const done = yellow(minutes)
+  assert.deepEqual(of(done, 'alarm'), [{ kind: 'alarm', hour: 14, minute: 30 }])
+  assert.equal(done.state.mode, 'apps')
+  assert.equal(done.state.number, null)
+})
+
+test('clockLabel converts the 24-hour field back into the way people speak', () => {
+  assert.equal(clockLabel(14, 30), '2:30 PM')
+  assert.equal(clockLabel(0, 0), '12:00 AM')
+  assert.equal(clockLabel(12, 5), '12:05 PM')
+  assert.equal(clockLabel(7, 0), '7:00 AM')
+  assert.equal(clockLabel(23, 59), '11:59 PM')
+})
+
+test('blue abandons a numeric field and starts NOTHING', () => {
+  let state = customMinutes()
+  for (let i = 0; i < 20; i += 1) state = turn(state, 1).state
+  const out = blue(state)
+  assert.equal(out.state.mode, 'apps')
+  assert.equal(out.state.number, null)
+  assert.deepEqual(of(out, 'timer'), [], 'backing out of a field must not start a timer')
+  assert.deepEqual(of(out, 'alarm'), [])
+})
+
+test('a custom timer commits the value the owner actually landed on', () => {
+  let state = customMinutes()
+  for (let i = 0; i < 15; i += 1) state = turn(state, 1).state
+  const done = yellow(state)
+  assert.deepEqual(of(done, 'timer'), [{ kind: 'timer', minutes: 25 }])
+  assert.equal(done.state.mode, 'apps')
+})
+
+/* ------------------------------------------------------------ audio ring */
+
+test('remembered devices come FIRST, then newly discovered ones', () => {
+  const ring = audioRing([{ name: 'Bose' }, { name: 'AirPods' }], {
+    discovered: [{ name: 'Kitchen Echo' }, { name: 'JBL Flip' }],
+  })
+  assert.deepEqual(ring, [
+    'audio:dev:Bose',
+    'audio:dev:AirPods',
+    'audio:new:Kitchen Echo',
+    'audio:new:JBL Flip',
+    AUDIO_SPEAKER_ENTRY,
+    'back',
+  ])
+})
+
+test('the device order is preserved exactly — the relay does not re-sort', () => {
+  /* The pendant's table is already most-recently-used and only the device
+   * knows when each was last connected. Re-sorting here would be the relay
+   * inventing a recency it cannot observe. */
+  const names = ['Fourth', 'Third', 'Second', 'First']
+  const ring = audioRing(names.map((name) => ({ name })))
+  assert.deepEqual(
+    ring.slice(0, 4),
+    names.map((name) => `audio:dev:${name}`),
+  )
+})
+
+test('a discovered device that is already remembered is not offered twice', () => {
+  const ring = audioRing([{ name: 'Bose' }], { discovered: [{ name: 'bose' }, { name: 'New' }] })
+  assert.deepEqual(ring, ['audio:dev:Bose', 'audio:new:New', AUDIO_SPEAKER_ENTRY, 'back'])
+})
+
+test('while a scan runs, the end of the list says so', () => {
+  const ring = audioRing([{ name: 'Bose' }], { scanning: true })
+  assert.deepEqual(ring, [
+    'audio:dev:Bose',
+    AUDIO_SCANNING_ENTRY,
+    AUDIO_SPEAKER_ENTRY,
+    'back',
+  ])
+  assert.equal(entryName(AUDIO_SCANNING_ENTRY), 'Still searching.')
+})
+
+test('the searching marker is a sign, not a door', () => {
+  let state = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [], {
+    scanning: true,
+  })
+  while (currentEntry(state) !== AUDIO_SCANNING_ENTRY) state = turn(state, 1).state
+  const result = yellow(state)
+  assert.equal(result.state.mode, 'audio', 'selecting it must not leave the ring')
+  assert.deepEqual(spoken(result), ['Still searching.'])
+  assert.deepEqual(of(result, 'audio-select'), [])
+})
+
+test('the ring opens ON the most recently used device, not past it', () => {
+  /*
+   * REGRESSION (caught by this suite, 2026-08-13). Cursor preservation was
+   * applied to the ring's FIRST fill too: before any device answered, the
+   * placeholder ring is [Pendant speaker, Back], so index 0 read as "Pendant
+   * speaker" and the arriving list "restored" the owner onto the speaker —
+   * scrolling straight past the headphones they use most. The whole point of
+   * remembered-first ordering is that the top entry is the one they want, so
+   * landing below it defeated the feature entirely.
+   */
+  const state = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [
+    { name: 'AirPods' },
+    { name: 'Bose' },
+  ])
+  assert.equal(currentEntry(state), 'audio:dev:AirPods')
+})
+
+test('scan results arriving mid-scroll do not move the cursor', () => {
+  /*
+   * The failure this prevents: the owner is aiming at "Pendant speaker", a
+   * speaker answers the inquiry, the ring grows by one, and their press lands
+   * on the new device instead. Following the ENTRY rather than the index is
+   * what makes a live-updating ring safe to scroll.
+   */
+  let state = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [{ name: 'Bose' }], {
+    scanning: true,
+  })
+  while (currentEntry(state) !== AUDIO_SPEAKER_ENTRY) state = turn(state, 1).state
+
+  const grown = menuWithAudioDevices(state, undefined, {
+    discovered: [{ name: 'Kitchen Echo' }, { name: 'JBL Flip' }],
+    scanning: true,
+  })
+  assert.equal(currentEntry(grown), AUDIO_SPEAKER_ENTRY, 'the ring slid under the thumb')
+})
+
+test('a finished scan drops the searching marker without disturbing the cursor', () => {
+  let state = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [{ name: 'Bose' }], {
+    scanning: true,
+  })
+  while (currentEntry(state) !== 'back') state = turn(state, 1).state
+  const done = menuWithAudioDevices(state, undefined, { discovered: [], scanning: false })
+  assert.ok(!done.audioDevices.includes(AUDIO_SCANNING_ENTRY))
+  assert.equal(currentEntry(done), 'back')
+})
+
+test('picking a remembered sink goes by index; picking a new one goes by name', () => {
+  const base = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [{ name: 'Bose' }], {
+    discovered: [{ name: 'Kitchen Echo' }],
+  })
+  const remembered = yellow(base)
+  assert.deepEqual(of(remembered, 'audio-select'), [
+    { kind: 'audio-select', index: 0, name: 'Bose', remembered: true },
+  ])
+
+  const fresh = yellow(turn(base, 1).state)
+  assert.deepEqual(of(fresh, 'audio-select'), [
+    { kind: 'audio-select', index: 1, name: 'Kitchen Echo', remembered: false },
+  ])
+})
+
+test('the pendant speaker is always reachable, so audio cannot be stranded', () => {
+  for (const devices of [[], [{ name: 'A' }], [{ name: 'A' }, { name: 'B' }]]) {
+    assert.ok(audioRing(devices).includes(AUDIO_SPEAKER_ENTRY))
+  }
+  let state = menuWithAudioDevices({ ...createMenuState(), mode: 'audio' }, [{ name: 'A' }])
+  while (currentEntry(state) !== AUDIO_SPEAKER_ENTRY) state = turn(state, 1).state
+  assert.deepEqual(of(yellow(state), 'audio-sink'), [{ kind: 'audio-sink', sink: 'speaker' }])
+})
+
+test('a device name cannot forge another ring entry', () => {
+  const ring = audioRing([{ name: 'audio:speaker' }, { name: 'evil|back' }])
+  assert.ok(ring.every((entry, index) => index < 2 || !entry.startsWith('audio:dev:')))
+  assert.ok(!ring.includes(AUDIO_SPEAKER_ENTRY.replace('audio:', 'audio:dev:')))
+  assert.equal(ring.filter((entry) => entry === 'back').length, 1)
+})
+
+test('entering Audio asks for BOTH the remembered list and a scan', () => {
+  const result = yellow(ringAt('audio'))
+  assert.deepEqual(kinds(result), ['earcon', 'speak', 'bt-list', 'bt-scan'])
+  assert.equal(result.state.audioScanning, true)
+})
+
+/* --------------------------------------------------------------- the words */
+
+test('minutesLabel and entryName stay spoken, not printed', () => {
+  assert.equal(minutesLabel(1), '1 minute')
+  assert.equal(minutesLabel(60), '1 hour')
+  assert.equal(entryName('timer:5'), '5 minutes.')
+  assert.equal(entryName('audio:dev:Bose'), 'Bose.')
+  assert.equal(entryName('audio:new:JBL'), 'JBL. New.')
   assert.equal(entryName(AUDIO_SPEAKER_ENTRY), 'Pendant speaker.')
 })
 
-test('a pendant that remembers nothing still offers its own speaker and an escape', () => {
-  assert.deepEqual([...audioRing([])], [AUDIO_SPEAKER_ENTRY, 'back'])
-  assert.deepEqual([...audioRing(null)], [AUDIO_SPEAKER_ENTRY, 'back'])
+test('an unknown frame changes nothing', () => {
+  const state = ringAt('timer')
+  const result = reduceMenuFrame(state, { type: 'nonsense' })
+  assert.equal(result.state, state)
+  assert.deepEqual(result.effects, [])
 })
 
-test('device names are sanitised and capped — a ring is not a place for wire strings', () => {
-  const hostile = audioRing([
-    { name: 'evil:dev:back' },
-    { name: 'a|b' },
-    { name: '' },
-    { name: 'x'.repeat(90) },
-    { name: 'fifth' },
-    { name: 'sixth' },
-  ])
-  /* No entry may forge another entry's id by carrying a separator... */
-  assert.ok(!hostile.some((entry) => entry.split(':').length > 3))
-  /* ...and the ring stays walkable: four sinks max, per the firmware's own cap. */
-  assert.ok(hostile.filter((entry) => entry.startsWith('audio:dev:')).length <= 4)
-  assert.ok(hostile.every((entry) => entry.length <= 60))
-})
+/* ------------------------------------------------------------- helpers */
 
-test('picking a headphone emits BOTH frames — connect it and route to it', () => {
-  const ring = withSinks()
-  const picked = dwell(ring)
-  assert.deepEqual(picked.effects, [{ kind: 'audio-select', index: 0, name: 'AirPods Pro' }])
-  /* And it leaves you back on the app ring, like every other one-shot pick. */
-  assert.equal(picked.state.mode, 'apps')
-})
+/** The app ring, standing on Timer's Custom entry. */
+function customEntry() {
+  let state = yellow(ringAt('timer')).state
+  while (currentEntry(state) !== TIMER_CUSTOM_ENTRY) state = turn(state, 1).state
+  return state
+}
 
-test('the second entry selects by its own index, not the first', () => {
-  const picked = dwell(turn(withSinks(), 1).state)
-  assert.deepEqual(picked.effects, [{ kind: 'audio-select', index: 1, name: 'Kitchen speaker' }])
-})
+const yellowInto = (state) => yellow(state)
 
-test('the pendant speaker is always reachable, so audio cannot be stranded in a drawer', () => {
-  let state = withSinks()
-  state = turn(state, 1).state
-  state = turn(state, 1).state
-  assert.equal(currentEntry(state), AUDIO_SPEAKER_ENTRY)
-  const picked = dwell(state)
-  assert.deepEqual(picked.effects, [{ kind: 'audio-sink', sink: 'speaker' }])
-  assert.equal(picked.state.mode, 'apps')
-})
-
-test('the audio ring escapes like every other inner ring', () => {
-  const held = hold(withSinks())
-  assert.equal(held.state.mode, 'apps')
-  assert.deepEqual(spoken(held), ['Audio devices.'])
-
-  let onBack = withSinks()
-  for (let i = 0; i < audioRing(SINKS).length - 1; i += 1) onBack = turn(onBack, 1).state
-  assert.equal(currentEntry(onBack), 'back')
-  assert.equal(dwell(onBack).state.mode, 'apps')
-})
-
-test('the audio ring blips in the inner register, like the timer ring', () => {
-  const scrolled = turn(withSinks(), 1)
-  const blip = scrolled.effects.find((effect) => effect.kind === 'earcon')
-  assert.equal(blip.ring, 'audio')
-  assert.deepEqual(spoken(scrolled), ['Kitchen speaker.'])
-})
+/** Inside the custom-minutes field, at its starting value. */
+function customMinutes() {
+  return yellow(customEntry()).state
+}

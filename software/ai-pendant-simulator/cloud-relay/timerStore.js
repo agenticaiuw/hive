@@ -90,12 +90,31 @@ export function describeDurationShort(ms) {
   return `${minutes} minute`
 }
 
+/*
+ * ALARMS RIDE THE TIMER STORE (2026-08-13), and that is the point.
+ *
+ * An alarm is a timer whose duration was computed from a clock face instead of
+ * typed in. Everything downstream — the store rows, the index and its eviction
+ * rules, the expiry sweep, the claim/settle pair that stops two sockets chiming
+ * the same thing twice, the queue that speaks an overdue chime on the next
+ * press — is identical, and re-implementing that machinery for alarms would
+ * have meant two sweeps, two claim protocols and two ways for a chime to go
+ * missing. So the ONLY thing an alarm adds to a record is what it should SAY
+ * when it fires: `kind` and the clock face it was set for.
+ *
+ * What this deliberately does not buy: recurrence. "Every weekday at seven" is
+ * a routine (cloud-relay/routines.js) and belongs there — a one-shot store with
+ * a repeat flag bolted on is how a device ends up with two schedulers that
+ * disagree about daylight saving.
+ */
 export function createTimerRecord({
   deviceId,
   durationMs,
   minutes = null,
   setBy = 'knob',
   label = null,
+  kind = 'timer',
+  alarmAt = null,
   now = Date.now(),
   timerId = null,
 } = {}) {
@@ -123,6 +142,12 @@ export function createTimerRecord({
     deviceId: String(deviceId ?? '').trim() || 'nrf9160-pendant',
     durationMs: ms,
     label: label ? String(label).slice(0, 80) : null,
+    kind: kind === 'alarm' ? 'alarm' : 'timer',
+    /* The clock face the owner actually chose ("7:30 AM"). Stored rather than
+     * derived from expiresAt at chime time, because deriving it needs the
+     * device's timezone and the chime may well be spoken by a socket that has
+     * not been told one. The words the owner set are the words they hear. */
+    alarmAt: kind === 'alarm' && alarmAt ? String(alarmAt).slice(0, 24) : null,
     setBy: setBy === 'voice' ? 'voice' : 'knob',
     state: 'running',
     startedAt: new Date(now).toISOString(),
@@ -161,19 +186,90 @@ export function selectDueTimers(records = [], now = Date.now()) {
 /* --------------------------------------------------------- what is said */
 
 export function timerStartedSpeech(record) {
+  if (record?.kind === 'alarm') return alarmSetSpeech(record)
   const duration = describeDurationShort(record?.durationMs)
   return record?.label
     ? `${duration} timer set for ${record.label}.`
     : `${duration} timer started.`
 }
 
+/**
+ * The confirmation a KNOB commit speaks, which is a different sentence from the
+ * one the voice path speaks and deliberately so.
+ *
+ * The owner set this value by turning, hearing only bare numbers — "seven.",
+ * "eight." — with no unit attached, because a unit repeated per detent is a
+ * device talking over its own owner. That makes the commit the FIRST and ONLY
+ * place the unit is ever said, so it leads with the value and the unit
+ * together: "Timer set for 7 minutes." (Owner's phrasing, 2026-08-13.) The
+ * voice path's "7 minute timer started." is fine where it is — there the owner
+ * spoke the unit themselves and is hearing it read back.
+ */
+export function timerSetSpeech(record) {
+  if (record?.kind === 'alarm') return alarmSetSpeech(record)
+  return `Timer set for ${describeDuration(record?.durationMs)}.`
+}
+
+function alarmSetSpeech(record) {
+  return record?.alarmAt ? `Alarm set for ${record.alarmAt}.` : 'Alarm set.'
+}
+
 /** The line the chime carries. Names the duration, because by the time it
- * fires the owner has usually forgotten which timer this was. */
+ * fires the owner has usually forgotten which timer this was — and for an
+ * alarm names the TIME, which is the same fact in the form that was chosen. */
 export function timerDoneSpeech(record) {
+  if (record?.kind === 'alarm') {
+    return record?.alarmAt ? `Alarm. It's ${record.alarmAt}.` : 'Alarm.'
+  }
   const duration = describeDurationShort(record?.durationMs)
   return record?.label
     ? `Your ${duration} timer for ${record.label} is done.`
     : `Your ${duration} timer is done.`
+}
+
+/**
+ * How long until the next time the clock reads hour:minute, in the owner's
+ * local frame.
+ *
+ * `offsetMinutes` is the device's UTC offset — the pendant's own LTE network
+ * clock supplies it (fleetContext.js), and it is passed in rather than looked
+ * up because this function must stay pure and testable across a date boundary.
+ *
+ * ALWAYS THE NEXT OCCURRENCE, never today's if today's has passed: setting a
+ * 7:00 alarm at 8am means tomorrow morning, which is the only reading a person
+ * ever intends. The exactly-now case rolls forward a full day too — an alarm
+ * that fires the instant you set it is a bug the owner cannot distinguish from
+ * a misheard number.
+ */
+export function msUntilClock(hour, minute, { now = Date.now(), offsetMinutes = 0 } = {}) {
+  const target = ((Math.trunc(hour) % 24) + 24) % 24 * 3_600_000 + ((Math.trunc(minute) % 60) + 60) % 60 * 60_000
+  const localNow = now + offsetMinutes * 60_000
+  const sinceLocalMidnight = ((localNow % 86_400_000) + 86_400_000) % 86_400_000
+  const delta = target - sinceLocalMidnight
+  return delta > 0 ? delta : delta + 86_400_000
+}
+
+export async function startAlarm({
+  store,
+  deviceId,
+  hour,
+  minute,
+  alarmAt,
+  offsetMinutes = 0,
+  setBy = 'knob',
+  now = Date.now(),
+} = {}) {
+  const durationMs = msUntilClock(hour, minute, { now, offsetMinutes })
+  const record = createTimerRecord({
+    deviceId,
+    durationMs,
+    setBy,
+    kind: 'alarm',
+    alarmAt,
+    now,
+  })
+  await saveTimer(store, record, { now })
+  return record
 }
 
 /** An overdue chime spoken at the next press instead of at expiry says so.

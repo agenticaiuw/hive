@@ -13,11 +13,34 @@
  * belongs on the nRF9160. In scope: I2S audio in (including the receiver
  * resync/sync-lock machinery), A2DP source streaming out, pairing
  * management over JSON (scan/connect/forget/status), the route
- * on/off gate, auto-reconnect to the remembered sink, connection state
- * events, a test tone, and a once-a-second link-health line. Volume
- * control is the nRF's job — it pre-scales the PCM it sends; this chip
- * plays what it is given. Bring-up instrumentation (pin probes, clock
- * timing, raw slot captures, ring dumps) does not come back.
+ * on/off gate, connection state events, a test tone, and a once-a-second
+ * link-health line. Volume control is the nRF's job — it pre-scales the
+ * PCM it sends; this chip plays what it is given. Bring-up
+ * instrumentation (pin probes, clock timing, raw slot captures, ring
+ * dumps) does not come back.
+ *
+ * WHICH DEVICE TO CONNECT IS THE nRF's DECISION, NOT THIS CHIP'S
+ * (2026-08-12).
+ * ------------------------------------------------------------------
+ * The owner, watching the pendant hunt for one particular speaker:
+ * "why is it hunting for my bluetooth speaker specifically? shouldn't it
+ * discover the bluetooth devices and prioritize those that were connected
+ * before?" It was hunting because TWO components each held an opinion
+ * about which sink to use — the nRF9160's 4-entry LRU table (the one the
+ * owner actually scrolls, `firmware/nrf9160/src/pendant_bt.c`) and this
+ * chip's own boot auto-reconnect. Two opinions is one too many, and the
+ * one the owner can see and change is the nRF's.
+ *
+ * So this chip has NO preferred device. It boots IDLE — no NVS target
+ * read, no inquiry, no paging — and waits for `scan` or `connect`. What
+ * survives a reboot is one CACHE, not a policy: the address of the last
+ * sink that answered plus the name that address belonged to, consulted
+ * only when a connect command names that same device (see the note on
+ * cachedAddress). The nRF commands connections by NAME, and a name
+ * inquiry never finds bonded-but-idle earbuds, so deleting the cache
+ * would cost every reconnect a trip through pairing mode. Retrying while
+ * a COMMANDED link is down stays here — that is link maintenance for the
+ * device the main chip chose, not a choice of its own.
  *
  * TWO PORTS, ONE COMMAND SET (2026-08-12).
  * ----------------------------------------
@@ -99,13 +122,13 @@ void emitDocument(JsonDocument &document) {
 }
 
 /*
- * No speaker is compiled in. The bridge remembers whatever it last connected
- * to — name in NVS "target", address in NVS "addr" — and pages that address
- * on boot, which also covers a bonded device that is powered on but not
- * discoverable. With nothing remembered it waits for a `connect` or `scan`
- * command rather than guessing at a device the owner may not even own.
+ * No speaker is compiled in and none is remembered as a preference. The
+ * bridge connects to exactly what it was last COMMANDED to connect to, and
+ * only after being commanded.
  */
-// How often to re-page the known address while the link is down.
+// How often to re-page the commanded target while its link is down. This is
+// retry, not selection: it only ever pages the device the nRF asked for in
+// this session, and it stops when a `scan` or `forget` clears that.
 constexpr uint32_t RECONNECT_INTERVAL_MS = 30000;
 
 // The nRF9160 duplex I2S TX shares the mic clock: LRCK 31250 Hz and BCLK
@@ -152,22 +175,70 @@ constexpr uint8_t STREAM_SYNC_MATCHES_REQUIRED = 8;
 
 BluetoothA2DPSource a2dp;
 Preferences preferences;
+/* The device the nRF commanded, this session. Empty until a `connect`
+ * arrives, and emptied again by `scan`/`forget`: an empty target means this
+ * chip has no opinion about where audio should go, which is its resting
+ * state now that the LRU table lives on the main chip. */
 String targetName;
+/* True only between a `connect` command and the next `scan`/`forget`. Gates
+ * the retry loop, so a chip sitting idle after boot never pages anything. */
+bool connectCommanded = false;
 bool a2dpStarted = false;
-bool discoveryOnly = false;
 volatile bool targetSelectionPending = false;
 /*
- * The BD_ADDR of the last device we actually connected to, persisted.
+ * ADDRESS CACHE — the one thing that survives a reboot, and deliberately not
+ * a preference.
  *
  * Discovery by NAME only finds a device that is currently discoverable, and
  * headphones are discoverable only in pairing mode — AirPods sitting in your
  * ears or in the case never answer an inquiry, so a name scan searches
  * forever. Paging a known address works on any bonded device that is simply
- * powered on. This is why an address-first reconnect works for any bonded
- * sink, while a name-only search only ever found discoverable ones.
+ * powered on. The nRF commands connections by name
+ * ({"command":"connect","target":"..."}), so this cache is what turns that
+ * name into a page instead of an inquiry.
+ *
+ * It stores the name it belongs to alongside the address (NVS "addr" /
+ * "addrname") and is consulted ONLY when the commanded target is that same
+ * name. Consequences worth stating: nothing reads it at boot, it can never
+ * select a device, and a connect to a DIFFERENT device does not erase it —
+ * the entry stays valid for the day the owner turns back to that sink, and a
+ * successful connection to the new one overwrites it anyway.
  */
-esp_bd_addr_t knownAddress = {0, 0, 0, 0, 0, 0};
-bool haveKnownAddress = false;
+esp_bd_addr_t cachedAddress = {0, 0, 0, 0, 0, 0};
+bool haveCachedAddress = false;
+String cachedAddressName;
+
+/*
+ * An all-zero BD_ADDR is not an address, and treating it as one is a live
+ * hole rather than a theoretical one.
+ *
+ * `set_auto_reconnect(addr, n)` stores the address we hand it in the library's
+ * `last_connection`. If that address is all zeros the library decides it has
+ * NO last connection, falls back to reading its OWN NVS namespace
+ * ("connected_bda"), and pages whichever peer IT last saw — which is exactly
+ * the second device-selection opinion this whole change exists to delete. The
+ * way zeros get in: an INBOUND connection from a bonded speaker during the
+ * ~10 s the stack is still connectable fires CONNECTED with `last_connection`
+ * never populated, and the cache write below would happily store it.
+ *
+ * So zero is rejected at both ends — never cached, and never trusted if some
+ * older build cached it.
+ */
+bool addressIsSet(const esp_bd_addr_t address) {
+  for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
+    if (address[i] != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* The cached address may be used only for the device it was cached for. */
+bool addressFastPathReady() {
+  return haveCachedAddress && addressIsSet(cachedAddress) &&
+         !targetName.isEmpty() &&
+         cachedAddressName.equalsIgnoreCase(targetName);
+}
 volatile esp_a2d_connection_state_t pendingConnectionState =
     ESP_A2D_CONNECTION_STATE_DISCONNECTED;
 volatile bool connectionStateChanged = false;
@@ -229,7 +300,9 @@ void emitStatus() {
   const esp_a2d_connection_state_t state = a2dp.get_connection_state();
   switch (state) {
   case ESP_A2D_CONNECTION_STATE_CONNECTED:
-    emitEvent("connected", "AirPods A2DP link is connected.");
+    /* Not "AirPods": no speaker is compiled in and none is preferred, so the
+     * status line must not name a device class the owner may not own. */
+    emitEvent("connected", "A2DP link is connected.");
     break;
   case ESP_A2D_CONNECTION_STATE_CONNECTING:
     emitEvent("searching", "Bluetooth is connecting to the selected target.");
@@ -238,9 +311,14 @@ void emitStatus() {
     emitEvent("usb", "Bluetooth link is disconnecting.");
     break;
   default:
+    /* Two different states wear the same "not connected" hat: an inquiry with
+     * no target (a `scan`) and a hunt for a commanded one. The nRF reads this
+     * line to decide whether its menu is still filling, so it must say which. */
     emitEvent(a2dpStarted ? "searching" : "usb",
-              a2dpStarted ? "Bluetooth is scanning for the selected target."
-                          : "USB ready; no Bluetooth search is active.");
+              !a2dpStarted ? "USB ready; no Bluetooth search is active."
+              : connectCommanded
+                  ? "Bluetooth is looking for the commanded target."
+                  : "Bluetooth is scanning for nearby devices.");
     break;
   }
 }
@@ -684,17 +762,24 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   normalizedTarget.toLowerCase();
 
   /*
-   * An empty target is scan-only mode. Do not also gate on discoveryOnly:
-   * the Bluetooth callback runs on another task and can otherwise observe
-   * that old flag after a scan-to-connect transition.
+   * An empty target IS scan-only mode, and it is the only signal used. There
+   * used to be a separate `discoveryOnly` flag as well; it was write-only and
+   * deleted (2026-08-13), which is the correct outcome rather than a loss —
+   * this callback runs on the Bluetooth task and could observe a stale copy of
+   * that flag across a scan-to-connect transition, matching a device during
+   * what the owner still thought was a scan. `targetName` is the single fact,
+   * set before the search starts.
    */
   bool nameOrAddressMatches =
       !normalizedTarget.isEmpty() &&
       normalizedFound.indexOf(normalizedTarget) >= 0;
-  if (!nameOrAddressMatches && haveKnownAddress) {
-    // A remembered device that reports a different or empty name still counts.
+  if (!nameOrAddressMatches && addressFastPathReady()) {
+    /* The COMMANDED device reporting a different or empty name still counts —
+     * but only because the cached address belongs to that same name. Matching
+     * a cached address against a target it was never paired with is how this
+     * chip used to connect to a speaker nobody asked for. */
     nameOrAddressMatches =
-        memcmp(address, knownAddress, ESP_BD_ADDR_LEN) == 0;
+        memcmp(address, cachedAddress, ESP_BD_ADDR_LEN) == 0;
   }
 
   /*
@@ -732,14 +817,12 @@ bool targetMatches(const char *deviceName, esp_bd_addr_t address, int rssi) {
   return matches;
 }
 
-// True once we have somewhere to reconnect to without a fresh inquiry.
-bool haveRememberedTarget() { return haveKnownAddress; }
-
 /*
- * Page a known address directly. Works for a bonded device that is powered
- * on but not discoverable — the case a name scan can never handle.
+ * Page the cached address of the COMMANDED device directly. Works for a
+ * bonded device that is powered on but not discoverable — the case a name
+ * scan can never handle.
  */
-void forceKnownConnect() {
+void pageCachedAddress() {
   if (!a2dpStarted) {
     return;
   }
@@ -748,10 +831,10 @@ void forceKnownConnect() {
     return;
   }
 
-  if (!haveKnownAddress) {
+  if (!addressFastPathReady()) {
     return;
   }
-  esp_bd_addr_t *target = &knownAddress;
+  esp_bd_addr_t *target = &cachedAddress;
 
   char addressText[18];
   const uint8_t *a = *target;
@@ -765,9 +848,12 @@ void forceKnownConnect() {
 }
 
 void startBluetoothSearch(bool scanOnly = false) {
-  if (!scanOnly && targetName.isEmpty() && !haveKnownAddress) {
+  if (!scanOnly && targetName.isEmpty()) {
+    /* No target and no fallback to one: with the LRU table on the nRF, a
+     * connect this chip was not given a name for is a command it cannot
+     * honestly satisfy. Saying so beats guessing. */
     emitEvent("usb",
-              "No Bluetooth target remembered. Send {\"command\":\"scan\"} to "
+              "No Bluetooth target commanded. Send {\"command\":\"scan\"} to "
               "list devices, then {\"command\":\"connect\",\"target\":\"...\"}.");
     return;
   }
@@ -778,16 +864,22 @@ void startBluetoothSearch(bool scanOnly = false) {
   }
 
   clearAudioBuffer();
-  discoveryOnly = scanOnly;
   targetSelectionPending = false;
   a2dp.set_data_callback_in_frames(provideA2dpFrames);
   a2dp.set_ssid_callback(targetMatches);
   a2dp.set_on_connection_state_changed(onConnectionState);
-  if (!scanOnly && haveKnownAddress) {
-    // Address-first reconnect for whatever we last connected to.
-    a2dp.set_auto_reconnect(knownAddress, 12);
+  if (!scanOnly && addressFastPathReady()) {
+    // Address-first: the library retries THIS address, which belongs to the
+    // name we were just commanded to connect to.
+    a2dp.set_auto_reconnect(cachedAddress, 12);
   } else {
-    a2dp.set_auto_reconnect(!scanOnly, 5);
+    /*
+     * Never `set_auto_reconnect(true)`: the library would reconnect to ITS
+     * last peer, which is a device-selection opinion of its own and exactly
+     * the split brain the owner heard. With no cached address for this
+     * target, the name inquiry is the only honest route.
+     */
+    a2dp.set_auto_reconnect(false, 0);
   }
   /* Legacy speakers that still demand a fixed PIN accept the usual one. */
   a2dp.set_pin_code("0000", ESP_BT_PIN_TYPE_FIXED);
@@ -799,9 +891,9 @@ void startBluetoothSearch(bool scanOnly = false) {
                      : "Connecting to “" + targetName +
                            "”. Put the device in pairing mode if it does "
                            "not answer.");
-  if (!scanOnly && haveRememberedTarget()) {
+  if (!scanOnly && addressFastPathReady()) {
     delay(500);
-    forceKnownConnect();
+    pageCachedAddress();
   }
 }
 
@@ -840,21 +932,33 @@ void handleCommand(const String &line, const char *origin) {
 
   const String command = document["command"] | "";
   if (command == "scan") {
+    /* A scan is a question, not a connection: it drops the commanded target
+     * so the retry loop below stops paging while the inquiry runs. */
     targetName = "";
+    connectCommanded = false;
     startBluetoothSearch(true);
   } else if (command == "connect") {
-    targetName = String(document["target"] | "");
-    targetName.trim();
-    if (targetName.isEmpty()) {
+    /*
+     * Parsed into a TEMPORARY and only committed once it is valid. Assigning
+     * straight into `targetName` meant a malformed connect blanked the name of
+     * a link that was up and working: the retry loop then went permanently
+     * quiet for a device the nRF still wanted, and every later event reported
+     * an empty target. A bad command must cost nothing but the command.
+     */
+    String requested = String(document["target"] | "");
+    requested.trim();
+    if (requested.isEmpty()) {
       emitEvent("usb", "The Bluetooth target name cannot be empty.");
       return;
     }
-    if (!targetName.equalsIgnoreCase(preferences.getString("target", ""))) {
-      // Switching devices: the remembered address belongs to the old one.
-      haveKnownAddress = false;
-      preferences.remove("addr");
-    }
-    preferences.putString("target", targetName);
+    targetName = requested;
+    /*
+     * No NVS write here. Which device the pendant prefers is the nRF's table
+     * to keep; this chip only needs to know what it was told THIS time. The
+     * address cache is written when a connection actually succeeds, because a
+     * connection is the only proof an address is reachable.
+     */
+    connectCommanded = true;
     startBluetoothSearch(false);
   } else if (command == "status") {
     emitStatus();
@@ -879,11 +983,15 @@ void handleCommand(const String &line, const char *origin) {
       delay(150);
     }
     removeAllBluetoothBonds();
+    /* "target" is a key this chip no longer writes; removed here so a bridge
+     * flashed over an older build does not leave a stale preference behind. */
     preferences.remove("target");
     preferences.remove("addr");
-    haveKnownAddress = false;
+    preferences.remove("addrname");
+    haveCachedAddress = false;
+    cachedAddressName = "";
     targetName = "";
-    discoveryOnly = false;
+    connectCommanded = false;
     clearAudioBuffer();
     emitEvent("usb", "Pairing and saved target cleared.");
   } else {
@@ -980,10 +1088,18 @@ void setup() {
   buildResampleFilter();
 
   preferences.begin("airpods", false);
-  haveKnownAddress =
-      preferences.getBytes("addr", knownAddress, ESP_BD_ADDR_LEN) ==
+  /* The cache, loaded but NOT acted on: it only becomes useful if a connect
+   * command names the device it belongs to. */
+  haveCachedAddress =
+      preferences.getBytes("addr", cachedAddress, ESP_BD_ADDR_LEN) ==
       ESP_BD_ADDR_LEN;
-  targetName = preferences.getString("target", "");
+  cachedAddressName = preferences.getString("addrname", "");
+  if (cachedAddressName.isEmpty()) {
+    /* An address with no name attached cannot be matched to a command, so it
+     * is dead weight — a bridge upgraded from the build that stored the pair
+     * under "target" starts the cache over on its next successful connect. */
+    haveCachedAddress = false;
+  }
 
   configureI2sInput();
   /*
@@ -998,14 +1114,18 @@ void setup() {
 
   emitEvent("usb",
             "HUZZAH32 ready: LRC=33, BCLK=27, DATA=14, cmd UART2 RX=16/TX=17, "
-            "nRF I2S forwarding on. A2DP target: " +
-                (targetName.isEmpty() ? String("none remembered — send scan/connect")
-                                      : targetName) +
+            "nRF I2S forwarding on. Idle — waiting for scan/connect" +
+                (haveCachedAddress ? " (address cached for “" +
+                                         cachedAddressName + "”)"
+                                   : "") +
                 ".");
-  // Reconnect to the remembered sink on boot; otherwise wait for a command.
-  if (haveKnownAddress || !targetName.isEmpty()) {
-    startBluetoothSearch(false);
-  }
+  /*
+   * Nothing else happens at boot. No inquiry, no page, no target: the nRF
+   * decides which sink the pendant wants and commands it (owner, 2026-08-12
+   * — "shouldn't it discover the bluetooth devices and prioritize those that
+   * were connected before?"). A chip that reconnected on its own would be
+   * the second opinion that made the pendant hunt for one speaker.
+   */
 }
 
 void loop() {
@@ -1022,16 +1142,21 @@ void loop() {
     connectionStateChanged = false;
     switch (pendingConnectionState) {
     case ESP_A2D_CONNECTION_STATE_CONNECTED: {
-      // Remember who answered, so the next reconnect can page instead of
-      // scan. Only a real connection proves the address is reachable.
+      // Cache who answered, WITH the name it answered to, so the next
+      // commanded connect to this same device can page instead of inquire.
+      // Only a real connection proves the address is reachable.
       esp_bd_addr_t *peer = a2dp.get_last_peer_address();
-      if (peer != nullptr) {
-        memcpy(knownAddress, *peer, ESP_BD_ADDR_LEN);
-        haveKnownAddress = true;
-        preferences.putBytes("addr", knownAddress, ESP_BD_ADDR_LEN);
+      /* Zeros mean the library never learned who this is — an inbound link, or
+       * a state it cleaned. Caching that would arm the library's own NVS
+       * fallback on the next connect. See addressIsSet(). */
+      if (peer != nullptr && addressIsSet(*peer) && !targetName.isEmpty()) {
+        memcpy(cachedAddress, *peer, ESP_BD_ADDR_LEN);
+        haveCachedAddress = true;
+        cachedAddressName = targetName;
+        preferences.putBytes("addr", cachedAddress, ESP_BD_ADDR_LEN);
+        preferences.putString("addrname", cachedAddressName);
       }
-      emitEvent("connected",
-                "Bluetooth speaker connected. A2DP is streaming at 50%.");
+      emitEvent("connected", "Bluetooth speaker connected. A2DP is streaming.");
       break;
     }
     case ESP_A2D_CONNECTION_STATE_CONNECTING:
@@ -1039,9 +1164,18 @@ void loop() {
                 "Bluetooth target found; opening the A2DP link.");
       break;
     case ESP_A2D_CONNECTION_STATE_DISCONNECTED:
-      emitEvent(a2dpStarted ? "searching" : "usb",
-                a2dpStarted ? "Bluetooth disconnected; scanning will resume."
-                            : "Bluetooth disconnected.");
+      /*
+       * Honest about WHO retries. The library's own reconnect is off
+       * (set_auto_reconnect(false, 0)) precisely so it cannot pick a peer of
+       * its own, which means nothing resumes on its own — the 30 s page in
+       * loop() is the entire recovery path, and it only runs for a target
+       * commanded this session. Saying "scanning will resume" promised the
+       * nRF, and anyone watching USB, a behaviour that no longer exists.
+       */
+      emitEvent(a2dpStarted && connectCommanded ? "searching" : "usb",
+                a2dpStarted && connectCommanded
+                    ? "Bluetooth disconnected; retrying the commanded target."
+                    : "Bluetooth disconnected.");
       break;
     default:
       emitEvent("usb", "Bluetooth link is disconnecting.");
@@ -1050,16 +1184,20 @@ void loop() {
   }
 
   /*
-   * Keep paging the known address while the link is down. Headphones come
+   * Keep paging the COMMANDED device while its link is down. Headphones come
    * back on their own schedule — out of the case, released by a phone — and
    * they will never page US, so retrying is the only way the link returns
-   * without a human issuing a command.
+   * without another command.
+   *
+   * Gated on connectCommanded, so this cannot resurrect a device the owner
+   * never asked for in this session: after boot, after a `scan`, and after a
+   * `forget` there is nothing to retry and this loop does nothing at all.
    */
   static uint32_t lastReconnectAttemptAt = 0;
-  if (a2dpStarted && haveRememberedTarget() &&
+  if (a2dpStarted && connectCommanded && addressFastPathReady() &&
       millis() - lastReconnectAttemptAt >= RECONNECT_INTERVAL_MS) {
     lastReconnectAttemptAt = millis();
-    forceKnownConnect();
+    pageCachedAddress();
   }
 
   /*
@@ -1085,12 +1223,14 @@ void loop() {
                           ", peak=" + String(peak) +
                           "; A2DP frames=" + String(a2dpFramesRequested) + ".";
     char addressText[18] = "";
-    if (haveKnownAddress) {
+    if (haveCachedAddress) {
       snprintf(addressText, sizeof(addressText),
-               "%02x:%02x:%02x:%02x:%02x:%02x", knownAddress[0],
-               knownAddress[1], knownAddress[2], knownAddress[3],
-               knownAddress[4], knownAddress[5]);
+               "%02x:%02x:%02x:%02x:%02x:%02x", cachedAddress[0],
+               cachedAddress[1], cachedAddress[2], cachedAddress[3],
+               cachedAddress[4], cachedAddress[5]);
     }
+    /* Field name kept: it is the address this chip knows, and the bench
+     * scripts that read this line should not have to change for a rename. */
     document["known_addr"] = addressText;
     document["a2dp_state"] = static_cast<int>(a2dp.get_connection_state());
     document["i2s_frames"] = i2sFramesReceived;
