@@ -148,7 +148,8 @@ class LiveAgentTest(unittest.TestCase):
     def start_agent(self, **env):
         env = {**os.environ, "AGENT_ENV_FILE": os.devnull, "OPENAI_API_KEY": "sk-test", "LIVE_URL": self.live.url,
                "LIVE_AUDIO": "none", "LIVE_IDLE_SECONDS": "1.5", "AGENT_VHID_SOCKET": self.helper.socket,
-               "CODEX_BIN": FAKE_CODEX, "FAKE_CODEX_LOG": self.codex_log, "PYTHONUNBUFFERED": "1", **env}
+               "CODEX_BIN": FAKE_CODEX, "FAKE_CODEX_LOG": self.codex_log, "PYTHONUNBUFFERED": "1",
+               "LIVE_LOG": os.path.join(self.dir, "live.log"), **env}
         self.agent = subprocess.Popen([sys.executable, LIVE_AGENT], env=env, text=True,
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         threading.Thread(target=lambda: [self.output.append(l.rstrip()) for l in self.agent.stdout], daemon=True).start()
