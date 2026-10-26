@@ -3,7 +3,9 @@
 Talk to your Mac and it talks back. It's always listening: say what you want, in
 any window, and a computer agent does the work on screen with a real-looking
 keyboard and mouse, then tells you out loud what it did. It hands control back to you the
-instant you touch anything, like Tesla's Autopilot.
+instant you touch anything, like Tesla's Autopilot. Captions at the bottom of the screen show
+what it says and what it's doing, and "... on my phone" has it use your iPhone instead,
+at the same time as the Mac.
 
 ```bash
 git submodule update --init   # once, after cloning: Karabiner's client headers
@@ -64,7 +66,8 @@ comes back to you.
 | Talk while it's talking | It goes quiet at once and listens |
 | Say more within a few seconds | It's added to what you just asked |
 | Say something new while it works | It drops the old task and does the new one, knowing what it was doing |
-| Say "stop" | Stops the computer agent |
+| Say "... on my phone" / "on my iPhone" | It does that on your iPhone, alongside whatever it's doing on the Mac |
+| Say "stop" | Stops the computer agent (on the Mac and the phone) |
 | Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
 | Double-tap Right Option | It carries on from where things are now |
 
@@ -94,10 +97,10 @@ Codex):
   and the canceller subtracts it from the microphone. Leftover echo is much quieter
   than you talking at the computer, so while the Mac plays something, only sound
   about as loud as you usually are counts as you (it learns how loud that is).
-- **The worker: your Codex model**, e.g. **gpt-6-astra**, at your Codex config's
-  reasoning effort (high, unless you set `AGENT_EFFORT`). Nothing about it is
-  scaled down for voice: it gets what you said word for word, uses your config's
-  model and effort, and keeps web search.
+- **The worker: your Codex model**, e.g. **gpt-6-astra**, at low reasoning effort
+  (set `AGENT_EFFORT` for more). Each step is a look and a click, and more thinking
+  mostly adds seconds to every one of them. It gets what you said word for word,
+  uses your config's model, and keeps web search.
 - **The voice: Kokoro** ([Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M),
   Apache 2.0) in `python/speech.py`, through ONNX Runtime at full precision. It
   speaks a sentence at a time, so it starts before the whole reply is made, and
@@ -117,7 +120,10 @@ Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your
 | `TTS_SPEED` | `1.0` is normal; `1.1` is a little quicker |
 | `STT_MODEL` | Empty for Parakeet v2 (English); `mlx-community/parakeet-tdt-0.6b-v3` also knows 24 other European languages |
 | `LISTEN_PAUSE` | Seconds of quiet that end what you're saying; `1.2` by default |
-| `AGENT_MODEL`, `AGENT_EFFORT` | Override the computer agent's model and effort; empty means your Codex config's |
+| `AGENT_MODEL` | Override the computer agent's model; empty means your Codex config's |
+| `AGENT_EFFORT` | Its reasoning effort: `low` (default), `medium`, `high`, ... |
+| `CAPTIONS` | `0` turns the on-screen captions off |
+| `PHONE_RELAY` | The phone relay's folder (see [Your iPhone](#your-iphone)); empty means no phone |
 
 To hear a voice before you pick it, or check what it hears:
 
@@ -139,20 +145,60 @@ you.
 
 ### The computer agent
 
-- **Codex** runs as `codex exec` with only one set of tools, `python/mac_mcp.py`
-  (an MCP server: screenshot, click, type_text, press_key, scroll, drag,
-  open_app, find_text, read_screen, wait_for_control, ...). Your Codex
-  connectors, plugins and other MCP servers are switched off for these runs
-  through `-c` overrides; your config file isn't changed. The shell is read-only.
-  It uses the Codex inside ChatGPT.app when present (newer than the npm one);
+- **Codex** runs as one `codex app-server` (`python/codex_app.py`), started with
+  `./voice.sh` and kept for the whole session. It's the server the Codex app and
+  its IDE extensions use, signed in with your ChatGPT account, so the agent runs
+  on your Codex subscription; no API key. Each task is a new thread on it.
+- **Only our tools and instructions:** `python/instructions.md` (a few lines)
+  replaces Codex's coding-agent system prompt, and the model gets one set of
+  tools, the Mac's from `python/mac_mcp.py` (screenshot, click, type_text,
+  press_key, scroll, drag, open_app, find_text, read_screen, wait_for_control,
+  batch, ...) or the iPhone's from `python/phone_mcp.py`. They run in the voice
+  agent's own process: Codex calls back into it. Codex's own tools (shell, file
+  edits, sub-agents, browser, image generation, ...), your connectors, plugins,
+  hooks, skills and MCP servers are switched off for it with `-c` overrides; your
+  config file isn't changed. Web search stays.
+- **Kept quick:** your models are set to call tools directly instead of through
+  Codex's "code mode", where every tool sits behind a JavaScript `exec` tool that
+  the model first has to search for and then unpack screenshots from (a copy of
+  Codex's model list, `$TMPDIR/agent-vhid-models.json`). That roughly halves what
+  the model reads before its first step, and it stays cached from task to task. A
+  screenshot taken as you finish talking comes with the task, every action returns
+  a fresh screenshot, and `batch` does several actions in one call, so most steps
+  are a single round trip to the model, about 1.5–2 s. Replies are short, and it says
+  "done" as soon as the model finishes. Each step's timing is in the log.
+- It uses the Codex inside ChatGPT.app when present (newer than the npm one);
   set `CODEX_BIN`, `AGENT_MODEL` or `AGENT_EFFORT` to change that.
+- **Captions:** `build/agent-vhid-captions` (`tools/captions.swift`) shows what it
+  says and, under that, what it's doing ("Thinking", "Typing “weather”"), at the
+  bottom of the screen over every app. Clicks go through them and its screenshots
+  leave them out. `CAPTIONS=0` turns them off.
 - Questions that don't need the screen are answered directly, without screenshots.
 - The prompt (in `python/agent.py`) has it stop before buying, sending, deleting,
   changing settings or typing passwords unless you asked for exactly that.
 
 Typing a task instead: `python3 python/agent.py "open Calculator and work out 12% of 340"`
-(double-tap Right Option to hand over). Codex's output goes to `/tmp/agent-vhid-codex.log`,
-the helper's to `/tmp/agent-vhid-helper.log`.
+(double-tap Right Option to hand over), or add `--phone` for the iPhone. What Codex does,
+step by step with timings, goes to `agent-vhid-codex.log` in your temp folder (`$TMPDIR`),
+the helper's output to `/tmp/agent-vhid-helper.log`.
+
+### Your iPhone
+
+It uses the relay from the Phone Control Automation project: the iPhone runs
+WebDriverAgent inside its controller app, which keeps a connection open to a
+Cloudflare Worker, so it works over Wi-Fi or cellular with no cable. Set
+`PHONE_RELAY` in `.env` to that project's `work/phone-relay` folder (it reads the
+address from `endpoint.txt` and the token from `private/secrets.json`, and never
+prints the token). To connect the phone, unlock it and run the **Pocket Connect**
+Shortcut, then check:
+
+```bash
+.venv/bin/python python/phone.py
+```
+
+On the phone it looks with screenshots, taps, swipes, types, opens apps by bundle
+id and reads the accessibility tree for exact labels. If the phone isn't
+connected it says so and tells you to run Pocket Connect.
 
 ## One-time setup
 
@@ -246,20 +292,26 @@ python3 python/agent_vhid.py status
 python3 tests/test_dry_run.py
 .venv/bin/python tests/test_voice.py
 .venv/bin/python tests/test_speech.py
+.venv/bin/python tests/test_tools.py
 ```
 
 The first runs the real helper with `--dry-run` (no root, no virtual devices) and
 checks the HID reports it would send, the hand-over rules (including the talk-hold
 grant and `--hands-free`), release-on-disconnect, and the wrapper. The second runs
-the voice agent against that helper and a fake Codex (`tests/fake_codex.py`), with
+the voice agent against that helper and a fake `codex app-server` (`tests/fake_codex.py`), with
 speech made by `say` in place of the microphone and Parakeet really transcribing
 it: words show up as you talk, short pauses and trailing "and" don't cut you off,
 more said right after is added, the task reaches Codex and its reply is spoken
 once, "stop" stops it, noise does nothing, talking over it stops its voice, and,
 through a simulated room, the echo canceller hears you and not its own voice.
 The third makes speech with Kokoro without playing it: sentence splitting,
-stopping, waiting for you to finish, and falling back to the Mac's voice. None of
-them play anything aloud.
+stopping, waiting for you to finish, and falling back to the Mac's voice. The
+fourth checks `batch` against the dry-run helper, the iPhone tools against a
+stand-in for the relay (taps, typing, element labels, hidden passwords and tokens,
+the "not connected" message), a task's trip through the fake app-server (our
+instructions and tools, the call back into our tools, one server for every task,
+stopping), and draws the captions into a PNG. None of them play anything aloud or
+touch your phone.
 
 ## Things to know
 

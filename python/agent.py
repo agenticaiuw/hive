@@ -1,62 +1,65 @@
 """Give your Mac a task in plain English; Codex does it with the real mouse and keyboard.
 
     python3 python/agent.py "make a new note in Notes that says buy milk"
+    python3 python/agent.py --phone "open Safari on my phone"     # the iPhone (python/phone.py)
 
-Codex looks at the screen and acts through mac_mcp.py (agent-vhid). Touch any key, the
-trackpad or the mouse to take over; double-tap Right Option to let it continue.
+Codex looks at the screen and acts with mac_mcp.py's tools (agent-vhid), or phone_mcp.py's on the
+iPhone. It runs on `codex app-server` (python/codex_app.py), so on your Codex subscription, with
+our instructions (instructions.md) in place of Codex's own. Touch any key, the trackpad or the
+mouse to take over; double-tap Right Option to let it continue.
 
 Environment (or .env):
   CODEX_BIN     codex executable (default: the one inside ChatGPT.app, else `codex` on PATH)
   AGENT_MODEL   model (default: your Codex config's model)
-  AGENT_EFFORT  reasoning effort: low, medium, high (default: your Codex config's; lower is faster)
+  AGENT_EFFORT  reasoning effort for each step: low (default, quickest), medium, high. Higher
+                thinks longer before every click, which makes the agent several times slower
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import settings  # noqa: E402
 from agent_vhid import AgentVHID, AgentVHIDError  # noqa: E402
+from codex_app import AppServer, CodexError  # noqa: E402
 
 BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
 LOG = os.path.join(tempfile.gettempdir(), "agent-vhid-codex.log")
+EFFORT = "low"  # each step is a look and a click; more thinking mostly adds seconds to every one
+INSTRUCTIONS = os.path.join(HERE, "instructions.md")
 
 PROMPT = """\
-You are operating the user's Mac for them through the `mac` tools: you see the screen with \
-screenshots and act with the real mouse and keyboard, exactly like a person at the computer. \
-The user just asked (by voice, so words may be mis-transcribed; use the sensible meaning):
+{intro} The user just asked (by voice, so words may be mis-transcribed; use the sensible meaning):
 
     "{task}"
 {previous}{conversation}
 How to work
-- If the request is only a question that needs neither the screen nor the computer, answer it \
+- If the request is only a question that needs neither the screen nor the {device}, answer it \
 directly without any tools.
-- Otherwise start with a screenshot. Each action returns a fresh screenshot; check it before the \
-next step.
-- Coordinates are pixels in the latest screenshot. Use find_text to get exact positions of small \
-buttons, menu items and links.
-- Prefer keyboard shortcuts and open_app (Spotlight) when they are quicker than clicking.
-- Use only the mac tools to see and control the computer. Don't use shell commands, scripts, \
-file edits, cua_repl, node_repl or sub-agents: the user wants to watch it happen on screen. Web \
-search, when you have it, is fine for looking things up.
+- Be quick: the user is waiting, and every call to a tool or the model costs seconds. Don't write \
+anything before or between actions (no plans, no progress notes); your only message is the final \
+reply.
+- Look before you act: use the screenshot attached to this request if there is one, otherwise take \
+one. Every action returns a screenshot taken just after it, so don't call screenshot again after \
+an action; check that one before the next step.
+- When you already know the next few steps, do them in one batch call rather than one call each.
+{how}
 - Finish the whole task, then reply in short spoken-style sentences (it is read aloud): what you \
 did, or the answer. One or two sentences unless the question needs more. If you couldn't finish, \
 say what is left.
 
 The user is in charge
-- They can take over at any moment by touching the keyboard, trackpad or mouse. When a tool says \
-they took control, stop, call wait_for_control, and look at the new screenshot before going on. \
-If they don't hand control back, stop and say where you got to.
+{in_charge}
 
 Never do these unless the request clearly asks for that exact thing:
 - buy anything, pay, or move money
@@ -68,6 +71,39 @@ If the task needs one of these, get everything ready, stop before the final step
 left for the user to confirm.
 """
 
+DEVICES = {
+    "mac": {
+        "device": "computer",
+        "intro": "You are operating the user's Mac for them through the `mac` tools: you see the screen with "
+                 "screenshots and act with the real mouse and keyboard, exactly like a person at the computer.",
+        "how": """\
+- Coordinates are pixels in the latest screenshot. Use find_text to get exact positions of small \
+buttons, menu items and links.
+- Prefer keyboard shortcuts and open_app (Spotlight) when they are quicker than clicking.
+- Use only the mac tools to see and control the computer: the user wants to watch it happen on \
+screen. Web search, when you have it, is fine for looking things up.""",
+        "in_charge": """\
+- They can take over at any moment by touching the keyboard, trackpad or mouse. When a tool says \
+they took control, stop, call wait_for_control, and look at the new screenshot before going on. \
+If they don't hand control back, stop and say where you got to.""",
+    },
+    "phone": {
+        "device": "phone",
+        "intro": "You are operating the user's iPhone for them through the `phone` tools: you see its screen "
+                 "with screenshots and act with taps, swipes and typing, like a person holding it. The user "
+                 "may be using their Mac meanwhile; leave the Mac alone.",
+        "how": """\
+- Coordinates are points in the latest phone screenshot. Use elements for the exact positions and \
+labels of small buttons, and tap_element to tap one by its label.
+- open_app opens an app by bundle id; press_home goes to the home screen.
+- Use only the phone tools. Web search, when you have it, is fine for looking things up.
+- If a tool says the phone isn't connected, stop and pass on what it said.""",
+        "in_charge": """\
+- They may pick the phone up and use it at any time. If the screen changes in a way you didn't \
+cause, look again before going on; if they seem to be using it, stop and say where you got to.""",
+    },
+}
+
 
 def find_codex() -> str:
     for candidate in (os.environ.get("CODEX_BIN"), BUNDLED_CODEX, shutil.which("codex")):
@@ -76,34 +112,125 @@ def find_codex() -> str:
     raise SystemExit("Codex CLI not found. Install it (npm i -g @openai/codex) or set CODEX_BIN.")
 
 
-def codex_command(prompt: str, last_message_path: str) -> list[str]:
-    server = os.path.join(HERE, "mac_mcp.py")
+# Codex's own tools and extras the agent doesn't use. Each is more for the model to read on every
+# request, and some (sub-agents, the JavaScript `exec` tool) cost it extra steps.
+FEATURES_OFF = [
+    "shell_tool", "unified_exec", "shell_snapshot", "apps", "plugins", "remote_plugin", "memories", "hooks",
+    "multi_agent", "multi_agent_v2", "image_generation", "goals", "tool_suggest", "skill_search",
+    "skill_mcp_dependency_install", "computer_use", "browser_use", "browser_use_external", "in_app_browser",
+    "sleep_tool", "view_image", "workspace_dependencies",
+]
+
+
+def app_server_command() -> list[str]:
     overrides = [
-        # Our tools only: no connectors (email etc.), plugins or other MCP servers from your config.
-        "notify=[]", "features.apps=false",
-        'mcp_servers.mac.command="python3"',
-        f"mcp_servers.mac.args={json.dumps([server])}",
-        'mcp_servers.mac.default_tools_approval_mode="approve"',
-        "mcp_servers.mac.tool_timeout_sec=900",
+        "notify=[]",  # no sounds or notifications when a task ends
+        # Quick steps and short replies: it's read aloud, and nobody reads the reasoning summaries.
+        f'model_reasoning_effort="{effort()}"', 'model_verbosity="low"', 'model_reasoning_summary="none"',
+        "skills.include_instructions=false", "tools.update_plan.enabled=false",
+        "tools.experimental_request_user_input.enabled=false",
+        # Our tools go straight to the model instead of through code mode's JavaScript `exec` tool, which
+        # would have it look the tools up first and unpack every screenshot by hand.
+        f"features.code_mode.direct_only_tool_namespaces={json.dumps(list(DEVICES))}",
     ]
-    if os.environ.get("AGENT_EFFORT"):  # otherwise your config's, e.g. high
-        overrides.append(f'model_reasoning_effort="{os.environ["AGENT_EFFORT"]}"')
-    if os.environ.get("AGENT_VHID_SOCKET"):  # Codex doesn't pass our environment to MCP servers
-        overrides.append(f"mcp_servers.mac.env={{AGENT_VHID_SOCKET={json.dumps(os.environ['AGENT_VHID_SOCKET'])}}}")
-    overrides += [f'plugins."{p}@openai-bundled".enabled=false' for p in
-                  ("computer-use", "unified-computer-use", "browser", "chrome", "codex-app-tools")]
-    overrides += [f"mcp_servers.{name}.enabled=false" for name in configured_mcp_servers() if name != "mac"]
-    cmd = [find_codex(), "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only",
-           "-o", last_message_path]
-    if os.environ.get("AGENT_MODEL"):
-        cmd += ["-m", os.environ["AGENT_MODEL"]]
+    overrides += [f"features.{name}=false" for name in FEATURES_OFF]
+    overrides += [f"mcp_servers.{name}.enabled=false" for name in configured_mcp_servers()]
+    catalog = direct_tools_catalog()
+    if catalog:
+        overrides.append(f"model_catalog_json={json.dumps(catalog)}")
+    cmd = [find_codex(), "app-server"]
     for o in overrides:
         cmd += ["-c", o]
-    return cmd + [prompt]
+    return cmd
+
+
+def direct_tools_catalog() -> str | None:
+    """Codex's list of models (its cache of what your account offers), with each one set to call
+    tools directly rather than in code mode, without sub-agents or the file-patching tool. That
+    halves what the model reads on each request. None if Codex hasn't cached the list."""
+    try:
+        with open(os.path.join(codex_home(), "models_cache.json")) as f:
+            models = json.load(f)["models"]
+        for m in models:
+            m["tool_mode"] = "direct"
+            m.pop("multi_agent_version", None)
+            m.pop("apply_patch_tool_type", None)
+        path = os.path.join(tempfile.gettempdir(), "agent-vhid-models.json")
+        with open(path, "w") as f:
+            json.dump({"models": models}, f)
+        return path
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+_server: AppServer | None = None
+_server_lock = threading.Lock()
+
+
+def codex_server() -> AppServer:
+    """The app-server every task shares, started (or restarted) when needed."""
+    global _server
+    with _server_lock:
+        if _server is None or not _server.alive:
+            workdir = os.path.join(tempfile.gettempdir(), "agent-vhid-work")
+            os.makedirs(workdir, exist_ok=True)
+            log = open(LOG, "a", buffering=1)
+            _server = AppServer(app_server_command(), stderr=log, cwd=workdir)
+            log.close()  # the server has its own copy
+        return _server
+
+
+def warm_up():
+    """Starts Codex now, so the first task doesn't wait for it."""
+    try:
+        codex_server()
+    except (CodexError, OSError, SystemExit):
+        pass  # the first task reports it
+
+
+@atexit.register
+def stop_server():
+    global _server
+    with _server_lock:
+        if _server is not None:
+            _server.close()
+            _server = None
+
+
+def device_tools(device: str):
+    if device == "phone":
+        from phone_mcp import PhoneTools
+        return PhoneTools()
+    from mac_mcp import MacTools
+    return MacTools()
+
+
+def tool_specs(device: str) -> list[dict]:
+    """The device's tools, as Codex's dynamic tools: the model calls them as `mac.click` etc."""
+    if device == "phone":
+        from phone_mcp import TOOLS
+        about = "The user's iPhone: see its screen and tap, swipe and type."
+    else:
+        from mac_mcp import TOOLS
+        about = "The user's Mac: see the screen and use the real mouse and keyboard."
+    return [{"type": "namespace", "name": device, "description": about,
+             "tools": [{"type": "function", "name": t["name"], "description": t["description"],
+                        "inputSchema": t["inputSchema"]} for t in TOOLS]}]
+
+
+def tool_reply(res: dict) -> dict:
+    """An MCP-style tool result (what mac_mcp/phone_mcp return) as Codex's dynamic tool reply."""
+    items = []
+    for c in res.get("content", []):
+        if c.get("type") == "image":
+            items.append({"type": "inputImage", "imageUrl": f"data:{c['mimeType']};base64,{c['data']}"})
+        elif c.get("type") == "text":
+            items.append({"type": "inputText", "text": c["text"]})
+    return {"success": not res.get("isError"), "contentItems": items}
 
 
 def codex_config() -> dict:
-    path = os.path.join(os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex")), "config.toml")
+    path = os.path.join(codex_home(), "config.toml")
     try:
         import tomllib
         with open(path, "rb") as f:
@@ -112,17 +239,23 @@ def codex_config() -> dict:
         return {}
 
 
+def codex_home() -> str:
+    return os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+
+
 def configured_mcp_servers() -> list[str]:
     """Names of the MCP servers in ~/.codex/config.toml, so they can be switched off for this run."""
     return list(codex_config().get("mcp_servers", {}))
 
 
+def effort() -> str:
+    return os.environ.get("AGENT_EFFORT") or EFFORT
+
+
 def describe_model() -> str:
-    """The model and effort the computer agent runs with, e.g. 'gpt-6-astra, high effort'."""
-    config = codex_config()
-    model = os.environ.get("AGENT_MODEL") or config.get("model") or "Codex's default model"
-    effort = os.environ.get("AGENT_EFFORT") or config.get("model_reasoning_effort")
-    return f"{model}, {effort} effort" if effort else model
+    """The model and effort the computer agent runs with, e.g. 'gpt-6-astra, low effort'."""
+    model = os.environ.get("AGENT_MODEL") or codex_config().get("model") or "Codex's default model"
+    return f"{model}, {effort()} effort"
 
 
 def describe_call(item: dict) -> str:
@@ -131,22 +264,54 @@ def describe_call(item: dict) -> str:
     return f"{item.get('tool')}({shown})"
 
 
+def first_look(tools) -> tuple[str, str] | None:
+    """A screenshot of the device right now, for Codex's first step, so it can act straight away
+    instead of spending a step (seconds) asking to look. Returns (the image as a data: URL, what the
+    tools say about it), or None if it can't be taken."""
+    try:
+        res = tools.look()
+        if res.get("isError"):
+            return None
+        image = next(c for c in res["content"] if c.get("type") == "image")
+        about = " ".join(c["text"] for c in res["content"] if c.get("type") == "text")
+        return f"data:{image['mimeType']};base64,{image['data']}", about
+    except Exception:  # can't see the screen or reach the phone: Codex takes its own screenshot
+        return None
+
+
+def doing(item: dict) -> str:
+    """What a tool call does, said simply: 'Opening Safari', 'Typing "weather"'."""
+    a = item.get("arguments") or {}
+    quoted = lambda key: "“" + str(a.get(key, ""))[:40].strip() + "”"
+    phrases = {
+        "screenshot": "Looking at the screen", "click": "Clicking", "move_mouse": "Moving the mouse",
+        "drag": "Dragging", "scroll": "Scrolling", "type_text": f"Typing {quoted('text')}",
+        "press_key": f"Pressing {a.get('keys', '')}", "open_app": f"Opening {a.get('name', '')}",
+        "find_text": f"Looking for {quoted('text')}", "read_screen": "Reading the screen",
+        "wait": "Waiting", "wait_for_control": "Waiting for you to hand back control",
+        "read_clipboard": "Reading the clipboard",
+    }
+    if item.get("tool") == "click" and int(a.get("clicks", 1) or 1) == 2:
+        return "Double-clicking"
+    return phrases.get(item.get("tool"), str(item.get("tool", "Working")).replace("_", " ").capitalize())
+
+
 def tool_error(item: dict) -> str | None:
-    if item.get("error"):
-        return item["error"].get("message", "failed")
-    res = item.get("result") or {}
-    if res.get("isError") or res.get("is_error"):
-        texts = [c.get("text", "") for c in res.get("content", []) if c.get("type") == "text"]
+    if item.get("success") is False:
+        texts = [c.get("text", "") for c in item.get("contentItems") or [] if c.get("type") == "inputText"]
         return " ".join(texts) or "failed"
     return None
 
 
 class CodexTask:
-    """One Codex run in the background. Events go to on_event(kind, text), where kind is
-    'action', 'error', 'say', 'think', 'done' or 'failed'."""
+    """One task, run on the shared app-server in the background. Events go to on_event(kind, text),
+    where kind is 'action', 'doing' (what it's doing in plain words, or 'Thinking'), 'error', 'say',
+    'think', 'done' or 'failed'. Each event is also written to LOG with the seconds since the start."""
 
-    def __init__(self, task: str, previous: str | None = None, conversation: str | None = None, on_event=None):
+    def __init__(self, task: str, previous: str | None = None, conversation: str | None = None, on_event=None,
+                 device: str = "mac"):
         self.task = task
+        self.device = device
         self.on_event = on_event or (lambda kind, text: None)
         prev = convo = ""
         if previous:
@@ -154,90 +319,159 @@ class CodexTask:
                     "screen shows how far it got. The new request takes priority.\n")
         if conversation:
             convo = f"\nThe conversation before this request, for context:\n{conversation}\n"
-        self.prompt = PROMPT.format(task=task.replace('"', "'"), previous=prev, conversation=convo)
+        self.prompt = PROMPT.format(task=task.replace('"', "'"), previous=prev, conversation=convo,
+                                    **DEVICES[device])
         self.final: str | None = None
-        self.proc: subprocess.Popen | None = None
-        self._stopped = False
+        self.started_at = 0.0  # time.time()
+        self.elapsed = 0.0  # seconds it took
+        self.tools = None  # MacTools or PhoneTools, which Codex's tool calls come back to
+        self._server: AppServer | None = None
+        self._thread = self._turn = None  # Codex's ids for this task
+        self._log = None
+        self._started = self._stopped = False
+        self._lock = threading.Lock()
         self._done = threading.Event()
 
-    def start(self):
-        fd, self._last = tempfile.mkstemp(prefix="agent-last-", suffix=".txt")
-        os.close(fd)
-        workdir = os.path.join(tempfile.gettempdir(), "agent-vhid-work")
-        os.makedirs(workdir, exist_ok=True)
-        log = open(LOG, "a")
-        log.write(f"\n=== {self.task}\n")
-        log.flush()
-        self.proc = subprocess.Popen(codex_command(self.prompt, self._last), cwd=workdir, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True)
-        log.close()
-        threading.Thread(target=self._read, daemon=True).start()
+    def start(self, look: bool = True):
+        """look: attach a screenshot taken now (first_look) to the request."""
+        self._began, self.started_at = time.monotonic(), time.time()
+        self._started = True
+        threading.Thread(target=self._run, args=(look,), daemon=True).start()
         return self
 
-    def _read(self):
-        last_message = None
-        for line in self.proc.stdout:
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            kind, item = event.get("type"), event.get("item") or {}
-            itype = item.get("type")
-            if kind == "item.started" and itype == "mcp_tool_call":
-                self.on_event("action", describe_call(item))
-            elif kind == "item.completed" and itype == "mcp_tool_call":
-                err = tool_error(item)
-                if err:
-                    self.on_event("error", err)
-            elif kind == "item.completed" and itype == "agent_message":
-                last_message = item.get("text", "").strip()
-                self.on_event("say", last_message)
-            elif kind == "item.completed" and itype == "reasoning" and item.get("text"):
-                self.on_event("think", item["text"].strip().splitlines()[0])
-            elif kind == "item.started" and itype == "command_execution":
-                self.on_event("action", f"$ {item.get('command')}")
-            elif kind in ("turn.failed", "error"):
-                msg = event.get("error", {}).get("message") if kind == "turn.failed" else event.get("message")
-                self.on_event("error", str(msg)[:300])
-        self.proc.stdout.close()
-        self.proc.wait()
+    def _run(self, look: bool):
+        self._log = open(LOG, "a", buffering=1)
+        self._log.write(f"\n=== {self.device}: {self.task}  ({describe_model()})\n")
         try:
-            with open(self._last) as f:
-                self.final = f.read().strip() or last_message
-            os.unlink(self._last)
-        except OSError:
-            self.final = last_message
+            self._converse(look)
+            self._done.wait()
+        except (CodexError, OSError) as e:
+            self._finish("failed", f"Codex: {e} (see {LOG})")
+        except SystemExit as e:  # Codex isn't installed
+            self._finish("failed", str(e))
+        finally:
+            if self._server and self._thread:
+                self._server.detach(self._thread)
+            if self.device == "mac" and self.tools:
+                self.tools.mac.close()
+            log, self._log = self._log, None
+            log.close()
+
+    def _converse(self, look: bool):
+        self.tools = device_tools(self.device)
+        prompt, image = self.prompt, None
+        seen = first_look(self.tools) if look else None
+        if seen:
+            image, about = seen
+            prompt += (f"\nAttached: a screenshot taken as they asked, in the same coordinates as the tools. "
+                       f"{about}\n")
+            self._event("action", "screenshot (attached to the request)")
         if self._stopped:
-            self.on_event("failed", "stopped")
-        elif self.proc.returncode == 0:
-            self.on_event("done", self.final or "Done.")
-        else:
-            self.on_event("failed", f"codex exited with {self.proc.returncode}; see {LOG}")
-        self._done.set()
+            return self._finish("failed", "stopped")
+        self._server = codex_server()
+        params = {"baseInstructions": instructions(), "dynamicTools": tool_specs(self.device), "ephemeral": True,
+                  "sandbox": "read-only", "approvalPolicy": "never",
+                  "cwd": os.path.join(tempfile.gettempdir(), "agent-vhid-work")}
+        if os.environ.get("AGENT_MODEL"):
+            params["model"] = os.environ["AGENT_MODEL"]
+        self._thread = self._server.request("thread/start", params)["thread"]["id"]
+        self._server.attach(self._thread, self._on_message, self._call_tool)
+        inputs = [{"type": "text", "text": prompt}] + ([{"type": "image", "url": image}] if image else [])
+        turn = self._server.request("turn/start", {"threadId": self._thread, "input": inputs, "effort": effort(),
+                                                   "summary": "none"})["turn"]["id"]
+        with self._lock:
+            self._turn = turn
+            stopped = self._stopped
+        if stopped:  # stop() came while the turn was starting
+            self._interrupt()
+
+    def _event(self, kind: str, text: str):
+        if self._log:
+            self._log.write(f"{time.monotonic() - self._began:6.1f}s  {kind}: {text}\n")
+        self.on_event(kind, text)
+
+    def _finish(self, kind: str, text: str):
+        """Reports the end, once."""
+        with self._lock:
+            if self._done.is_set():
+                return
+            self.elapsed = time.monotonic() - self._began if self._started else 0.0
+            self._done.set()
+        self._event(kind, text)
+
+    def _on_message(self, method: str, params: dict):
+        item = params.get("item") or {}
+        itype = item.get("type")
+        if method == "turn/started":
+            self._event("doing", "Thinking")
+        elif method == "item/started" and itype == "dynamicToolCall":
+            self._event("action", describe_call(item))
+            self._event("doing", doing(item))
+        elif method == "item/completed" and itype == "dynamicToolCall":
+            err = tool_error(item)
+            if err:
+                self._event("error", err)
+            self._event("doing", "Thinking")
+        elif method == "item/started" and itype == "webSearch":
+            self._event("action", f"web search: {item.get('query') or ''}")
+            self._event("doing", "Searching the web")
+        elif method == "item/completed" and itype == "agentMessage" and item.get("text", "").strip():
+            self.final = item["text"].strip()
+            self._event("say", self.final)
+        elif method == "item/completed" and itype == "reasoning" and item.get("summary"):
+            self._event("think", item["summary"][0].strip().splitlines()[0])
+        elif method == "error" and not params.get("willRetry"):
+            self._event("error", str((params.get("error") or {}).get("message"))[:300])
+        elif method == "turn/completed":
+            turn = params.get("turn") or {}
+            if self._stopped or turn.get("status") == "interrupted":
+                self._finish("failed", "stopped")
+            elif turn.get("status") == "failed":
+                self._finish("failed", str((turn.get("error") or {}).get("message") or "Codex failed")[:300])
+            else:
+                self._finish("done", self.final or "Done.")
+        elif method == "exited":
+            self._finish("failed", f"Codex stopped unexpectedly (exit code {params.get('code')}); see {LOG}")
+
+    def _call_tool(self, params: dict) -> dict:
+        if self._stopped:
+            return {"success": False, "contentItems": [{"type": "inputText", "text": "Stopped by the user."}]}
+        return tool_reply(self.tools.call(params["tool"], params.get("arguments") or {}))
+
+    def _interrupt(self):
+        try:
+            self._server.request("turn/interrupt", {"threadId": self._thread, "turnId": self._turn}, timeout=10)
+        except CodexError:
+            pass
 
     @property
     def running(self) -> bool:
-        return self.proc is not None and not self._done.is_set()
+        return self._started and not self._done.is_set()
 
     def wait(self) -> str | None:
         self._done.wait()
         return self.final
 
     def stop(self):
-        """Stops Codex and the tool server it started."""
-        self._stopped = True
-        if self.proc and self.proc.poll() is None:
-            try:
-                os.killpg(self.proc.pid, signal.SIGTERM)
-                self.proc.wait(3)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        """Stops Codex's turn. (An action already under way on the Mac stops when control is handed
+        back: the helper refuses the rest of it.)"""
+        with self._lock:
+            self._stopped = True
+            turn = self._turn
+        if turn:
+            threading.Thread(target=self._interrupt, daemon=True).start()
+        self.final = None
+        self._finish("failed", "stopped")
+
+
+def instructions() -> str:
+    with open(INSTRUCTIONS) as f:
+        return f.read()
 
 
 def print_event(kind: str, text: str):
+    if kind == "doing":
+        return  # the actions are shown as they start
     if kind == "done":
         text = "done"  # the final message was already shown as it arrived
     marks = {"action": "  →", "error": "  ✗", "say": "  💬", "think": "  …", "done": "✅", "failed": "❌"}
@@ -249,6 +483,14 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 0
     settings.load()
+    if argv[0] == "--phone":
+        run = CodexTask(" ".join(argv[1:]), on_event=print_event, device="phone").start()
+        try:
+            run.wait()
+        except KeyboardInterrupt:
+            run.stop()
+            return 130
+        return 0 if run.final is not None else 1
     task = " ".join(argv)
     mac = AgentVHID()
     try:

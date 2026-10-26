@@ -10,6 +10,11 @@ python/speech.py). Touch anything to take over. Listening and speaking run on th
   say "stop"               cancel the running task
   talk during a task       interrupts it and continues with the new instruction
   touch keys / trackpad    take over; double-tap Right Option to let it continue
+  "... on my phone"        does it on your iPhone instead (python/phone.py, PHONE_RELAY), while
+                           a task on the Mac carries on
+
+What it says, and what it's doing, show as captions at the bottom of the screen (CAPTIONS=0 hides
+them).
 
 It keeps listening while it talks: whatever the Mac plays (its own voice, a video) is taken back
 out of what the microphone hears (python/mic.py), so only you are heard. It waits for you to
@@ -38,13 +43,17 @@ import audio  # noqa: E402
 import listen  # noqa: E402
 import settings  # noqa: E402
 import speech  # noqa: E402
-from agent import CodexTask, describe_model, find_codex  # noqa: E402
+from agent import CodexTask, describe_model, find_codex, warm_up  # noqa: E402
+from captions import Captions  # noqa: E402
+from phone import Phone, PhoneError  # noqa: E402
 from agent_vhid import AgentVHID, AgentVHIDError, NotAllowed  # noqa: E402
 
 CANCEL = {"stop", "cancel", "never mind", "nevermind", "abort", "stop it", "stop that", "quit"}
 FILLERS = {"yeah", "okay", "oh", "uh", "um", "hmm", "mm", "mmhmm", "mm-hmm", "uh-huh", "ah"}  # nothing to do
 HUMAN = {"keyboard", "trackpad", "mouse", "mouse_button"}
 FOLLOW_UP = 8  # seconds: saying more this soon after a request adds to it rather than replacing it
+# "on my phone", "open Maps on the iPhone"; not "my phone number"
+PHONE = re.compile(r"\biphone\b|\b(?:my|the|on|from|with|using) phone\b(?! numbers?\b)")
 CANT_HEAR_THE_MAC = ("   It can't hear what the Mac is playing ({}), so it stops listening while it talks, and a video "
                      "playing out loud could be taken for you. Allow the app you run ./voice.sh in under System "
                      "Settings › Privacy & Security › Screen & System Audio Recording, then restart ./voice.sh.")
@@ -64,14 +73,16 @@ def spoken(text: str) -> str:
 
 
 class VoiceAgent:
-    def __init__(self, speak: bool = True, mac: AgentVHID | None = None, ears: listen.Ears | None = None):
-        self.voice = speech.Voice(may_speak=self.may_speak) if speak else None
+    def __init__(self, speak: bool = True, mac: AgentVHID | None = None, ears: listen.Ears | None = None,
+                 captions: Captions | None = None):
+        self.captions = captions or Captions(show=False)
+        self.voice = speech.Voice(may_speak=self.may_speak, on_play=self.captions.say) if speak else None
         self.mac = mac or AgentVHID()
         self.events: queue.Queue = queue.Queue()
         self.ears = ears or listen.Ears(self.heard, deaf=self.deaf)
         self.ears.on_text, self.ears.deaf, self.ears.on_speech = self.heard, self.deaf, self.cut_in
-        self.task: CodexTask | None = None
-        self.task_started = 0.0
+        self.tasks: dict[str, CodexTask | None] = {"mac": None, "phone": None}  # one per device, at the same time
+        self.doing: dict[str, str] = {}  # device: what its task is doing, for the captions
         self.started = time.time()
         self.warned_about_mic = False
         self.unheard_since = 0.0  # its voice has been playing without the echo canceller hearing it
@@ -80,10 +91,18 @@ class VoiceAgent:
         self.live = sys.stdout.isatty()  # the words you're saying, rewritten in place on one line
         self.paused_since = 0.0  # when you took over a running task; 0 when not paused
         self.pause_announced = False
-        self.task_seq = 0
-        self.last_said = ""
+        self.last_said: dict[str | None, str] = {}  # device: the last thing its task said
         self.said: list[tuple[float, str]] = []  # (when, text): what it has said lately
         self.stopped = threading.Event()
+
+    @property
+    def task(self) -> CodexTask | None:
+        """The task on the Mac."""
+        return self.tasks["mac"]
+
+    @task.setter
+    def task(self, task: CodexTask | None):
+        self.tasks["mac"] = task
 
     def heard(self, text: str, final: bool):
         """From the listener's thread: what you've said so far, or (final) all of it."""
@@ -102,6 +121,7 @@ class VoiceAgent:
         self.over_its_voice = bool(self.voice and self.voice.audible())
         if self.over_its_voice:
             self.voice.stop()
+            self.captions.say("")
 
     def its_own_words(self, words: str) -> bool:
         """What it heard over its voice was mostly what it was saying: echo that got through."""
@@ -195,61 +215,81 @@ class VoiceAgent:
 
         if self.voice:
             self.voice.stop()  # whatever it was saying is old news
+        self.captions.say("")
         if words in CANCEL:
-            if self.task and self.task.running:
-                self.task.stop()
-                self.task = None
-                self.hand_back()
+            running = [device for device, task in self.tasks.items() if task and task.running]
+            for device in running:
+                self.tasks[device].stop()
+                self.tasks[device] = None
+                self.doing.pop(device, None)
+            if running:
+                if "mac" in running:
+                    self.hand_back()
+                self.show_doing()
                 self.say("Stopped.")
             return
 
-        previous = None
-        if self.task and self.task.running:
-            self.task.stop()
-            if time.time() - self.task_started < FOLLOW_UP:  # you paused, then carried on
-                text = f"{self.task.task} {text}"
+        device = "phone" if PHONE.search(words) else "mac"
+        previous, task = None, self.tasks[device]
+        if task and task.running:  # a new request for the same device replaces the old one
+            task.stop()
+            if time.time() - task.started_at < FOLLOW_UP:  # you paused, then carried on
+                text = f"{task.task} {text}"
                 print("   (adding that to what you just asked)", flush=True)
             else:
-                previous = self.task.task
+                previous = task.task
                 print("   (interrupted the previous task)", flush=True)
-        self.paused_since, self.pause_announced = 0.0, False
-        self.task_started = time.time()
-        self.task_seq += 1
-        self.last_said = ""
-        self.task = CodexTask(text, previous=previous,
-                              on_event=lambda kind, t, seq=self.task_seq: self.events.put(("task", (seq, kind, t))))
+        if device == "mac":
+            self.paused_since, self.pause_announced = 0.0, False
+        self.last_said[device] = ""
+        task = self.tasks[device] = CodexTask(text, previous=previous, device=device)
+        task.on_event = lambda kind, t, task=task: self.events.put(("task", (task, kind, t)))
         notify(text, "On it")
-        self.task.start()
-        try:
-            self.mac.engage_by_voice()  # the helper still waits for your hands to be off
-        except NotAllowed:
-            print("   Double-tap Right Option to hand over the mouse and keyboard.", flush=True)
-        except AgentVHIDError as e:
-            print(f"   couldn't take control: {e}", flush=True)
+        task.start()
+        if device == "mac":
+            try:
+                self.mac.engage_by_voice()  # the helper still waits for your hands to be off
+            except NotAllowed:
+                print("   Double-tap Right Option to hand over the mouse and keyboard.", flush=True)
+            except AgentVHIDError as e:
+                print(f"   couldn't take control: {e}", flush=True)
 
-    def on_task_event(self, seq: int, kind: str, text: str):
-        if seq != self.task_seq:
+    def on_task_event(self, task: CodexTask, kind: str, text: str):
+        device = task.device
+        if self.tasks[device] is not task:
             return  # from a task that was interrupted
-        if kind == "action":
-            print(f"   → {text}", flush=True)
+        mark = "📱 " if device == "phone" else ""
+        if kind == "doing":
+            self.doing[device] = text
+            self.show_doing()
+        elif kind == "action":
+            print(f"   → {mark}{text}", flush=True)
         elif kind == "error":
-            print(f"   ✗ {text}", flush=True)
-        elif kind == "say":  # what it's doing, as it goes; its last one is the final report
-            print(f"   💬 {text}", flush=True)
-            self.say(text)
-        elif kind == "done":
-            print("✅ done\n", flush=True)
-            self.hand_back()
-            notify(text, "Done")
-            if text.strip() != self.last_said:
-                self.say(text)
-            self.task = None
-        elif kind == "failed":
-            if text != "stopped":
-                print(f"❌ {text}\n", flush=True)
-                self.hand_back()
+            print(f"   ✗ {mark}{text}", flush=True)
+        elif kind == "say":  # its final report (and anything it says on the way)
+            print(f"   💬 {mark}{text}", flush=True)
+            self.say(text, device)
+        elif kind in ("done", "failed"):
+            self.tasks[device] = None
+            self.doing.pop(device, None)
+            self.show_doing()
+            if kind == "done":
+                print(f"✅ {mark}done in {task.elapsed:.0f} s\n", flush=True)
+                if device == "mac":
+                    self.hand_back()
+                notify(text, "Done")
+                if text.strip() != self.last_said.get(device):
+                    self.say(text, device)
+            elif text != "stopped":
+                print(f"❌ {mark}{text}\n", flush=True)
+                if device == "mac":
+                    self.hand_back()
                 self.say("Sorry, that didn't work.")
-            self.task = None
+
+    def show_doing(self):
+        """The captions' small line: what each running task is doing ("Thinking", "Typing ...")."""
+        self.captions.doing("   ·   ".join(("📱 " if device == "phone" else "") + text
+                                           for device, text in self.doing.items() if text))
 
     def hand_back(self):
         try:
@@ -258,19 +298,32 @@ class VoiceAgent:
         except AgentVHIDError:
             pass
 
-    def say(self, text: str):
-        self.last_said = text.strip()
-        if self.voice and text:
+    def say(self, text: str, device: str | None = None):
+        self.last_said[device] = text.strip()
+        if not text:
+            return
+        if self.voice:
             self.said = [(when, t) for when, t in self.said if time.time() - when < 30] + [(time.time(), text)]
-            self.voice.say(spoken(text))
+            self.voice.say(spoken(text))  # the captions show each sentence as it's spoken
+        else:
+            self.captions.say(spoken(text))
 
     def shutdown(self):
         self.stopped.set()
-        if self.task and self.task.running:
-            self.task.stop()
+        for task in self.tasks.values():
+            if task and task.running:
+                task.stop()
         if self.voice:
             self.voice.stop()
         self.hand_back()
+        self.captions.close()
+
+
+def describe_phone() -> str:
+    try:
+        return "connected" if Phone().connected() else "not connected (run “Pocket Connect” on it)"
+    except PhoneError as e:
+        return "off" if not os.environ.get("PHONE_RELAY") else f"unreachable ({e})"
 
 
 def interrupt(*_):
@@ -308,8 +361,9 @@ def main(argv: list[str]) -> int:
     settings.load()
     settings.fix_newlines()
     find_codex()
+    threading.Thread(target=warm_up, daemon=True).start()  # Codex is ready by the time you've said something
 
-    agent = VoiceAgent(speak="--no-speak" not in argv)
+    agent = VoiceAgent(speak="--no-speak" not in argv, captions=Captions())
     if not wait_for_helper(agent.mac):
         return 1
     hearing = agent.ears.describe()
@@ -319,7 +373,8 @@ def main(argv: list[str]) -> int:
     time.sleep(0.5)  # the microphone and the tap are opening
     print(f"Listening all the time: {hearing}, microphone: {agent.ears.mic_name or agent.ears.mic_error or 'opening'}, "
           f"echo cancellation: {agent.ears.microphone.describe()}.\n"
-          f"Voice: {agent.voice.describe() if agent.voice else 'off'}. Computer agent: {describe_model()}.", flush=True)
+          f"Voice: {agent.voice.describe() if agent.voice else 'off'}. Computer agent: {describe_model()}. "
+          f"Phone: {describe_phone()}.", flush=True)
 
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)  # a script may start us with Ctrl-C ignored
