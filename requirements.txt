@@ -1,3 +1,5 @@
-# Only for the talking voice (python/live_agent.py); ./voice.sh installs these into .venv.
-websockets>=14
+# For the voice agent; ./voice.sh installs these into .venv. The rest of the project needs only
+# the standard library.
+kokoro-onnx>=0.4.7  # the agent's voice (python/speech.py); the model itself goes in models/
 sounddevice>=0.5
+websockets>=14      # only for ./voice.sh --live (GPT-Live)
