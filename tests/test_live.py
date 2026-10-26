@@ -39,6 +39,7 @@ class FakeLive:
     def __init__(self):
         self.received: list[dict] = []
         self.audio_bytes = 0
+        self.sound_bytes = 0  # audio that isn't silence
         self.auth = None
         self.conn = None
         self.loop = asyncio.new_event_loop()
@@ -59,7 +60,9 @@ class FakeLive:
             async for raw in conn:
                 event = json.loads(raw)
                 if event["type"] == "session.input_audio.append":
-                    self.audio_bytes += len(base64.b64decode(event["audio"]))
+                    pcm = base64.b64decode(event["audio"])
+                    self.audio_bytes += len(pcm)
+                    self.sound_bytes += len(pcm) if pcm.strip(b"\0") else 0
                     continue
                 self.received.append(event)
                 if event["type"] == "session.start":
@@ -206,6 +209,31 @@ class LiveAgentTest(unittest.TestCase):
                                       "content": [{"type": "input_text", "text": "Open Calculator and work out 12 times 34."}]})
         self.assertEqual(history[1]["role"], "assistant")
         self.assertEqual(history[1]["content"][0], {"type": "output_text", "text": "On it."})
+
+    def test_the_microphone_is_only_sent_while_you_hold_the_key(self):
+        self.start_agent(LIVE_AUDIO="tone", LIVE_IDLE_SECONDS="30")
+        time.sleep(1)  # the microphone is open and hearing the tone, but there's no conversation yet
+        self.assertEqual(self.live.audio_bytes, 0)
+
+        self.helper.raw("talk down")
+        self.live.wait_for("session.start")
+        time.sleep(0.5)
+        self.helper.raw("talk up")
+        time.sleep(1)  # 0.4 s for the end of the last word, then silence
+        sent = self.live.sound_bytes
+        # 0.3 s from before the key went down, the hold (0.5 s plus connecting), and 0.4 s after.
+        self.assertGreater(sent, 2 * 24000 * 1.1)
+        self.assertLess(sent, 2 * 24000 * 3)
+        total = self.live.audio_bytes
+        time.sleep(1)
+        self.assertEqual(self.live.sound_bytes, sent)  # nothing more from the microphone...
+        self.assertGreater(self.live.audio_bytes, total)  # ...only silence, so GPT-Live hears the pause
+
+        self.helper.raw("talk down")  # a second hold in the same conversation goes through at once
+        time.sleep(0.3)
+        self.helper.raw("talk up")
+        time.sleep(1)
+        self.assertGreater(self.live.sound_bytes - sent, 2 * 24000 * 0.8)
 
     def test_saying_stop_stops_the_computer_agent(self):
         self.start_agent(FAKE_CODEX_SECONDS="60", LIVE_IDLE_SECONDS="30")

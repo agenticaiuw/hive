@@ -38,5 +38,6 @@ fi
 sudo -v  # ask for the password before anything starts printing
 "${agent[@]}" ${args[@]+"${args[@]}"} &
 agent_pid=$!
-trap 'kill $agent_pid 2>/dev/null || true; wait $agent_pid 2>/dev/null || true' EXIT
+# A second Ctrl-C shouldn't cut the agent's goodbye short (it closes the conversation and hands back control).
+trap 'trap "" INT; kill $agent_pid 2>/dev/null || true; wait $agent_pid 2>/dev/null || true' EXIT
 ./run.sh >>/tmp/agent-vhid-helper.log 2>&1  # helper log: /tmp/agent-vhid-helper.log

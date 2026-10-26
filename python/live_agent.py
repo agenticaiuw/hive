@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import re
@@ -50,7 +51,7 @@ URL = os.environ.get("LIVE_URL", "wss://api.openai.com/v1/live/sessions")
 MODEL = os.environ.get("LIVE_MODEL") or "gpt-live-1"
 VOICE = os.environ.get("LIVE_VOICE") or "marin"
 IDLE_SECONDS = float(os.environ.get("LIVE_IDLE_SECONDS") or 45)
-AUDIO_OFF = os.environ.get("LIVE_AUDIO") == "none"  # tests
+AUDIO_OFF = os.environ.get("LIVE_AUDIO") in ("none", "tone")  # tests
 PRICE_PER_MINUTE = 0.05
 RATE = 24000       # GPT-Live's default format, both ways: 24 kHz mono 16-bit PCM
 MAX_APPEND = 1500  # characters; GPT-Live takes up to 500 tokens per context append
@@ -83,6 +84,10 @@ Stop speaking when the user interrupts. Listen to what they say.
 Backchannel policy
 Use few backchannels; the user speaks in short push-to-talk turns.
 """
+
+
+MIC_SILENT = ("   The microphone only gives silence. Allow microphone access for the app you run ./voice.sh in "
+              "(System Settings › Privacy & Security › Microphone), then restart ./voice.sh.")
 
 
 def is_cancel(text: str) -> bool:
@@ -159,30 +164,41 @@ class Speaker:
 
 
 class Microphone:
-    """Records only while you hold Right Option (and a moment after, for the end of the last word)."""
+    """Stays open while the agent runs. A Mac can take seconds to open its microphone after it has
+    been idle, and push-to-talk has to catch your first word. What it hears is only sent while you
+    hold Right Option (see LiveAgent._on_mic)."""
 
     def __init__(self, on_audio):
         self.on_audio = on_audio
         self._stream = None
+        self.last_audio = 0.0
 
-    @property
-    def on(self) -> bool:
-        return self._stream is not None
-
-    def start(self):
-        if self._stream:
-            return
+    def open(self):  # blocking: call it off the event loop
         import sounddevice
-        self._stream = sounddevice.RawInputStream(
-            samplerate=RATE, channels=1, dtype="int16", blocksize=RATE // 50,
-            callback=lambda data, _frames, _time, _status: self.on_audio(bytes(data)))
+        self.close()
+        self._stream = sounddevice.RawInputStream(samplerate=RATE, channels=1, dtype="int16",
+                                                  blocksize=RATE // 50, callback=self._callback)
+        self.last_audio = time.time()
         self._stream.start()
 
-    def stop(self):
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+    def _callback(self, data, _frames, _time, _status):
+        self.last_audio = time.time()
+        self.on_audio(bytes(data))
+
+    @property
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+    @property
+    def stalled(self) -> bool:
+        """Open but no audio for a while: the device went away (AirPods, iPhone mic, ...)."""
+        return self._stream is not None and time.time() - self.last_audio > 2
+
+    def close(self):
+        stream, self._stream = self._stream, None
+        if stream:
+            stream.stop()
+            stream.close()
 
 
 class NoSpeaker(Speaker):
@@ -197,11 +213,27 @@ class NoSpeaker(Speaker):
 
 
 class NoMicrophone(Microphone):
-    def start(self):
+    def open(self):
         self._stream = True
 
-    def stop(self):
+    @property
+    def stalled(self) -> bool:
+        return False
+
+    def close(self):
         self._stream = None
+
+
+class ToneMicrophone(NoMicrophone):
+    """Tests: hears a steady tone, so they can check what gets sent and when."""
+
+    def open(self):
+        super().open()
+        def hum():
+            while self._stream:
+                self.on_audio(b"\x10\x01" * (RATE // 50))
+                time.sleep(0.02)
+        threading.Thread(target=hum, daemon=True).start()
 
 
 class LiveAgent:
@@ -209,14 +241,20 @@ class LiveAgent:
         self.loop = asyncio.get_running_loop()
         self.background: set[asyncio.Task] = set()
         self.mac = AgentVHID()
-        self.mic = (NoMicrophone if AUDIO_OFF else Microphone)(self._heard)
+        mic = {"none": NoMicrophone, "tone": ToneMicrophone}.get(os.environ.get("LIVE_AUDIO", ""), Microphone)
+        self.mic = mic(self._heard)
         self.speaker: Speaker | None = None
+        self.audio_lock = asyncio.Lock()  # opening devices and restarting PortAudio take turns
         self.mic_audio: asyncio.Queue[bytes] = asyncio.Queue()
+        self.sending = False  # the microphone goes to GPT-Live: while you hold Right Option, and a moment after
+        self.preroll: collections.deque[bytes] = collections.deque(maxlen=15)  # the 0.3 s before you pressed
+        self.mic_alive = False  # it has delivered something other than zeros
         self.mic_heard_something = False
         self.warned_about_mic = False
         self.ws = None
         self.connecting: asyncio.Future | None = None
         self.closing = False
+        self.stopping = False  # shutting down
         self.closed = asyncio.Event()
         self.close_reason: str | None = None
         self.usage = 0.0
@@ -271,9 +309,50 @@ class LiveAgent:
             pass
 
     def _heard(self, pcm: bytes):  # audio thread
-        if pcm.strip(b"\0"):
-            self.mic_heard_something = True
-        self.from_thread(self.mic_audio.put_nowait, pcm)
+        self.from_thread(self._on_mic, pcm)
+
+    def _on_mic(self, pcm: bytes):
+        if has_sound(pcm):
+            self.mic_alive = True
+        if self.sending:
+            self.mic_heard_something = self.mic_heard_something or has_sound(pcm)
+            self.mic_audio.put_nowait(pcm)
+        else:
+            self.preroll.append(pcm)  # kept on this Mac, and only the last 0.3 s
+
+    # -- audio devices --
+
+    async def open_audio(self):
+        try:
+            async with self.audio_lock:
+                await self.loop.run_in_executor(None, self.mic.open)
+        except Exception as e:  # PortAudio's device list is stale, or there's no microphone
+            self.say_line(f"   (microphone: {e}; trying again)")
+            await self.reset_audio()
+
+    async def reset_audio(self):
+        """Restarts PortAudio and reopens the microphone (and the speaker, mid-conversation) on the
+        Mac's current default devices. PortAudio only looks for devices when it starts, so one that
+        came or went since (AirPods, an iPhone, a Zoom or Teams virtual device) needs a restart."""
+        if AUDIO_OFF or self.audio_lock.locked():
+            return
+        async with self.audio_lock:
+            had_speaker, self.speaker = self.speaker, None
+            try:
+                await self.loop.run_in_executor(None, self._restart_portaudio, had_speaker)
+                if had_speaker and self.ws:
+                    self.speaker = await self.loop.run_in_executor(None, Speaker)
+            except Exception as e:
+                self.say_line(f"   ✗ microphone: {e}")
+
+    def _restart_portaudio(self, speaker: Speaker | None):  # executor thread
+        import sounddevice
+        self.mic.close()
+        if speaker:
+            speaker.close()
+        sounddevice._terminate()
+        sounddevice._initialize()
+        self.mic.open()
 
     def watch_helper(self):
         while True:
@@ -293,7 +372,7 @@ class LiveAgent:
         elif talk == "up" and self.listening:
             self.listening = False
             self.last_activity = time.time()
-            self.loop.call_later(0.3, self.stop_mic)
+            self.loop.call_later(0.4, self.stop_sending)  # the end of your last word
         elif event.get("state") == "engaged" and self.task_running():
             if self.pause_announced:
                 self.say_line("▶️  continuing")
@@ -304,29 +383,29 @@ class LiveAgent:
             self.paused_since = time.time()
 
     def start_listening(self):
-        try:
-            self.mic.start()
-        except Exception as e:  # no input device, or it failed to open
-            self.say_line(f"   ✗ microphone: {e}")
-            return
         self.listening = True
         self.new_user_turn = True
         self.mic_heard_something = False
+        if not self.sending:
+            self.sending = True
+            while self.preroll:
+                self.mic_audio.put_nowait(self.preroll.popleft())
         if self.speaker:
             self.speaker.stop()  # you're talking over it
         cue()
         self.say_line("🎙  listening...")
+        if not self.mic.is_open or self.mic.stalled:
+            self.spawn(self.reset_audio())
         if not self.ws and not self.connecting:
             self.connecting = self.spawn(self.open_session())
 
-    def stop_mic(self):
+    def stop_sending(self):
         if self.listening:
             return  # you started talking again
-        self.mic.stop()
+        self.sending = False
         if not AUDIO_OFF and not self.mic_heard_something and not self.warned_about_mic:
             self.warned_about_mic = True
-            self.say_line("   The microphone only gave silence. Allow microphone access for this terminal app in "
-                          "System Settings › Privacy & Security › Microphone, then restart ./voice.sh.")
+            self.say_line(MIC_SILENT)
 
     # -- the GPT-Live session --
 
@@ -360,7 +439,8 @@ class LiveAgent:
                 ws = await self.connect(with_history=False)
             self.ws, self.usage, self.close_reason = ws, 0.0, None
             self.closed.clear()
-            self.speaker = (NoSpeaker if AUDIO_OFF else Speaker)()
+            async with self.audio_lock:
+                self.speaker = NoSpeaker() if AUDIO_OFF else await self.loop.run_in_executor(None, Speaker)
             self.spawn(self.read(ws))
             self.spawn(self.stream_audio(ws))
         except Exception as e:
@@ -374,7 +454,7 @@ class LiveAgent:
 
     async def connect(self, with_history: bool):
         ws = await websockets.connect(URL, additional_headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
-                                      max_size=None, open_timeout=10)
+                                      max_size=None, open_timeout=10, close_timeout=2)
         try:
             await ws.send(json.dumps({"type": "session.start", "session": self.session_config(with_history)}))
             async with asyncio.timeout(10):
@@ -398,7 +478,7 @@ class LiveAgent:
             while not self.mic_audio.empty():
                 chunks.append(self.mic_audio.get_nowait())
             pcm = b"".join(chunks)
-            if pcm or self.mic.on:
+            if pcm or self.sending:
                 silence_start = None
             else:
                 now = time.monotonic()
@@ -500,7 +580,7 @@ class LiveAgent:
         self.closing = True
         try:
             await ws.send(json.dumps({"type": "session.close"}))
-            await asyncio.wait_for(self.closed.wait(), 5)  # its final usage comes with session.closed
+            await asyncio.wait_for(self.closed.wait(), 2)  # its final usage comes with session.closed
         except (websockets.ConnectionClosed, asyncio.TimeoutError):
             pass
         await ws.close()
@@ -517,6 +597,8 @@ class LiveAgent:
                       f"${self.usage / 60 * PRICE_PER_MINUTE:.2f}. Hold Right Option to talk again.)")
         if self.listening and not self.connecting:
             self.connecting = self.spawn(self.open_session())
+        elif not self.stopping:
+            self.spawn(self.reset_audio())  # picks up any audio device that came or went, for next time
 
     # -- the computer agent --
 
@@ -636,10 +718,18 @@ class LiveAgent:
     # -- the main loop --
 
     async def run(self):
+        await self.open_audio()
         threading.Thread(target=self.watch_helper, daemon=True).start()
+        print("Ready. Hold Right Option and talk. Ctrl-C to quit.\n", flush=True)
+        started = time.time()
         while True:
             await asyncio.sleep(0.25)
             now = time.time()
+            if not AUDIO_OFF and not self.mic_alive and not self.warned_about_mic and now - started > 2:
+                self.warned_about_mic = True
+                self.say_line(MIC_SILENT)
+            if self.mic.stalled:
+                await self.reset_audio()
             if self.paused_since and not self.pause_announced and not self.listening \
                     and now - self.paused_since > 1.0 and self.task_running():
                 self.pause_announced = True  # after a moment, so holding Right Option to talk doesn't print it
@@ -652,22 +742,29 @@ class LiveAgent:
                 self.thinking("Computer agent progress: " + "; ".join(self.progress))
                 self.progress = []
             self.check_for_stop(now)
-            if self.ws and not self.listening and not self.mic.on and not self.task_running() \
+            if self.ws and not self.listening and not self.sending and not self.task_running() \
                     and not (self.speaker and self.speaker.playing) and now - self.last_activity > IDLE_SECONDS:
                 await self.close_session()
 
     async def shutdown(self):
+        self.stopping = True
         await self.stop_task(quiet=True)
         self.hand_back()
-        self.mic.stop()
+        self.mic.close()
         await self.close_session()
 
 
 async def run_until_stopped() -> int:
     agent = LiveAgent()
     main_task = asyncio.current_task()
+
+    def stop():  # Ctrl-C reaches us and ./voice.sh, which then sends SIGTERM: the first one counts
+        if not agent.stopping:
+            agent.stopping = True
+            main_task.cancel()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        agent.loop.add_signal_handler(sig, main_task.cancel)
+        agent.loop.add_signal_handler(sig, stop)
     try:
         await agent.run()
     except asyncio.CancelledError:
@@ -689,8 +786,7 @@ def main(argv: list[str]) -> int:
     if not wait_for_helper(AgentVHID()):
         return 1
     key_from = ".env" if "OPENAI_API_KEY" in settings.from_file else "your shell environment"
-    print(f"Voice: {MODEL} ({VOICE}), OpenAI key from {key_from}. Computer agent: {describe_model()}.")
-    print("Ready. Hold Right Option and talk. Ctrl-C to quit.\n", flush=True)
+    print(f"Voice: {MODEL} ({VOICE}), OpenAI key from {key_from}. Computer agent: {describe_model()}.", flush=True)
     return asyncio.run(run_until_stopped())
 
 
