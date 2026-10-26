@@ -90,10 +90,15 @@ close prints the seconds used and the cost. A new conversation is given the last
 few turns, so it carries on where you left off. A quick question and answer is
 about a cent.
 
-**Microphone:** the microphone is only open while you hold Right Option (plus
-0.3 s for the end of your last word); the rest of the time GPT-Live gets silence.
-macOS asks for microphone access for your terminal app the first time. If
-it prints "The microphone only gave silence", allow it in System Settings ›
+**Microphone:** it opens when `./voice.sh` starts and stays open, so macOS shows
+the orange microphone dot while it runs. A Mac can take seconds to wake its
+microphone after it has been idle, and push-to-talk has to catch your first word.
+What it hears is only sent while you hold Right Option: from 0.3 s before you
+press until 0.4 s after you let go. The rest of the time GPT-Live gets silence.
+After each conversation it rescans the audio devices, and if the microphone goes
+quiet (AirPods, an iPhone, a Zoom or Teams device coming or going) it reopens it.
+macOS asks for microphone access for the app you run it in the first time. If
+it prints "The microphone only gives silence", allow it in System Settings ›
 Privacy & Security › Microphone and restart `./voice.sh`.
 
 The first run sets up `.venv` with `websockets` and `sounddevice`
