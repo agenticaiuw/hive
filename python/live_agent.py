@@ -18,6 +18,7 @@ Right Option again opens a new one that remembers what was said.
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import collections
@@ -88,6 +89,24 @@ Use few backchannels; the user speaks in short push-to-talk turns.
 
 MIC_SILENT = ("   The microphone only gives silence. Allow microphone access for the app you run ./voice.sh in "
               "(System Settings › Privacy & Security › Microphone), then restart ./voice.sh.")
+SPEECH_PEAK = 1500  # a quiet room peaks in the hundreds on a MacBook mic; talking, in the thousands
+LOG = os.environ.get("LIVE_LOG", "/tmp/personal-agent-live.log")
+
+
+def peak(pcm: bytes) -> int:
+    samples = array.array("h", pcm[:len(pcm) // 2 * 2])
+    return max(max(samples, default=0), -min(samples, default=0))
+
+
+def log(message: str):
+    """What happened, for working out what went wrong: key presses, how loud each hold was and
+    GPT-Live's events (no audio, no key)."""
+    try:
+        fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {message[:400]}\n")
+    except OSError:
+        pass
 
 
 def is_cancel(text: str) -> bool:
@@ -230,9 +249,12 @@ class ToneMicrophone(NoMicrophone):
     def open(self):
         super().open()
         def hum():
+            start, blocks = time.monotonic(), 0
             while self._stream:
-                self.on_audio(b"\x10\x01" * (RATE // 50))
-                time.sleep(0.02)
+                while blocks < (time.monotonic() - start) * 50:  # in real time, like a microphone
+                    self.on_audio(b"\x10\x01" * (RATE // 50))
+                    blocks += 1
+                time.sleep(0.01)
         threading.Thread(target=hum, daemon=True).start()
 
 
@@ -249,6 +271,8 @@ class LiveAgent:
         self.sending = False  # the microphone goes to GPT-Live: while you hold Right Option, and a moment after
         self.preroll: collections.deque[bytes] = collections.deque(maxlen=15)  # the 0.3 s before you pressed
         self.mic_alive = False  # it has delivered something other than zeros
+        self.hold_started = 0.0
+        self.hold_peak = 0  # loudest sample sent since you pressed Right Option
         self.mic_heard_something = False
         self.warned_about_mic = False
         self.ws = None
@@ -316,6 +340,7 @@ class LiveAgent:
             self.mic_alive = True
         if self.sending:
             self.mic_heard_something = self.mic_heard_something or has_sound(pcm)
+            self.hold_peak = max(self.hold_peak, peak(pcm))
             self.mic_audio.put_nowait(pcm)
         else:
             self.preroll.append(pcm)  # kept on this Mac, and only the last 0.3 s
@@ -326,6 +351,10 @@ class LiveAgent:
         try:
             async with self.audio_lock:
                 await self.loop.run_in_executor(None, self.mic.open)
+            if not AUDIO_OFF:
+                import sounddevice
+                log(f"audio opened: microphone {sounddevice.query_devices(kind='input')['name']}, "
+                    f"speaker {sounddevice.query_devices(kind='output')['name']}")
         except Exception as e:  # PortAudio's device list is stale, or there's no microphone
             self.say_line(f"   (microphone: {e}; trying again)")
             await self.reset_audio()
@@ -353,6 +382,8 @@ class LiveAgent:
         sounddevice._terminate()
         sounddevice._initialize()
         self.mic.open()
+        log(f"audio restarted: microphone {sounddevice.query_devices(kind='input')['name']}, "
+            f"speaker {sounddevice.query_devices(kind='output')['name']}")
 
     def watch_helper(self):
         while True:
@@ -366,6 +397,7 @@ class LiveAgent:
     # -- your side: Right Option and the helper --
 
     def on_helper(self, event: dict):
+        log(f"helper {event}")
         talk = event.get("talk")
         if talk == "down" and not self.listening:
             self.start_listening()
@@ -388,6 +420,7 @@ class LiveAgent:
         self.mic_heard_something = False
         if not self.sending:
             self.sending = True
+            self.hold_started, self.hold_peak = time.time(), 0
             while self.preroll:
                 self.mic_audio.put_nowait(self.preroll.popleft())
         if self.speaker:
@@ -403,9 +436,18 @@ class LiveAgent:
         if self.listening:
             return  # you started talking again
         self.sending = False
-        if not AUDIO_OFF and not self.mic_heard_something and not self.warned_about_mic:
-            self.warned_about_mic = True
+        held = time.time() - self.hold_started
+        log(f"sent {held:.1f} s of microphone, loudest {self.hold_peak}, mic open {self.mic.is_open}, "
+            f"conversation open {self.ws is not None}")
+        if AUDIO_OFF:
+            return
+        if not self.mic_heard_something:
             self.say_line(MIC_SILENT)
+        elif self.hold_peak < SPEECH_PEAK:
+            self.say_line(f"   (only quiet sound in those {held:.1f} s. Keep holding Right Option the whole time "
+                          "you talk, and speak toward the Mac.)")
+        else:
+            self.say_line(f"   ✓ sent {held:.1f} s")
 
     # -- the GPT-Live session --
 
@@ -446,6 +488,7 @@ class LiveAgent:
         except Exception as e:
             if isinstance(e, InvalidStatus):
                 e = f"HTTP {e.response.status_code} {e.response.body.decode(errors='replace')[:300]}"
+            log(f"couldn't open a conversation: {e!r}")
             self.say_line(f"   ✗ couldn't reach GPT-Live: {e}")
             while not self.mic_audio.empty():
                 self.mic_audio.get_nowait()
@@ -456,11 +499,14 @@ class LiveAgent:
         ws = await websockets.connect(URL, additional_headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
                                       max_size=None, open_timeout=10, close_timeout=2)
         try:
-            await ws.send(json.dumps({"type": "session.start", "session": self.session_config(with_history)}))
+            config = self.session_config(with_history)
+            log(f">> session.start with {len(config.get('input', []))} earlier turns")
+            await ws.send(json.dumps({"type": "session.start", "session": config}))
             async with asyncio.timeout(10):
                 while True:
                     event = json.loads(await ws.recv())
                     if event.get("type") == "session.started":
+                        log("<< session.started")
                         return ws
                     if event.get("type") == "error":
                         raise LiveError(describe_error(event))
@@ -509,6 +555,8 @@ class LiveAgent:
 
     def on_event(self, event: dict):
         kind = event.get("type")
+        if kind != "session.output_audio.delta":
+            log(f"<< {json.dumps({k: v for k, v in event.items() if k != 'session'})}")
         if kind == "session.output_audio.delta":
             pcm = base64.b64decode(event["delta"])
             if self.speaker and not self.listening:
@@ -555,6 +603,7 @@ class LiveAgent:
             return False
         self.event_seq += 1
         event["event_id"] = f"agent_{self.event_seq}"
+        log(f">> {json.dumps(event)}")
         try:
             await self.ws.send(json.dumps(event))
             return True
