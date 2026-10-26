@@ -1,18 +1,18 @@
 #!/bin/bash
 # Talk to your Mac. Starts the helper (one password prompt) and the voice agent.
-# Then, in any window: hold Right Option, say what you want, let go. Ctrl-C stops everything.
+# Then, in any window, just say what you want; it's always listening. Ctrl-C stops everything.
 #
-# Superwhisper listens, the computer agent does it, and Kokoro (an open-source voice that runs
-# on this Mac) tells you what happened (python/voice_agent.py). With --live, GPT-Live holds a
-# spoken conversation instead (python/live_agent.py; needs OPENAI_API_KEY in .env).
+# Parakeet writes down what you say as you say it, the computer agent does it, and Kokoro tells
+# you what it's doing (python/voice_agent.py). The models are open source and run on this Mac;
+# what the Mac plays is taken back out of what the microphone hears (python/mic.py).
 #
-#   ./voice.sh [--live] [--no-speak]
+#   ./voice.sh [--no-speak]
 set -euo pipefail
 cd "$(dirname "$0")"
 
 make -s
 
-# First run only: the Python packages and the voice model.
+# First run only: the Python packages and the models (Parakeet 2.4 GB, Kokoro 350 MB, Silero VAD 2 MB).
 if [ ! -x .venv/bin/python ] || [ requirements.txt -nt .venv/.installed ]; then
   echo "Setting up .venv..."
   [ -x .venv/bin/python ] || python3 -m venv .venv
@@ -32,22 +32,17 @@ for f in kokoro-v1.0.onnx voices-v1.0.bin; do
   fi
 done
 
+.venv/bin/python python/listen.py --download  # Parakeet and Silero VAD, once
+
 agent=(.venv/bin/python python/voice_agent.py)
-args=()
-for a in "$@"; do
-  case "$a" in
-    --live) agent=(.venv/bin/python python/live_agent.py) ;;
-    --superwhisper) ;;  # the default now
-    *) args+=("$a") ;;
-  esac
-done
+args=("$@")
 
 status=$(python3 python/agent_vhid.py status 2>/dev/null || true)
 if [ -n "$status" ]; then
-  if grep -q '^talk=1' <<<"$status"; then
+  if grep -q '^hands_free=1' <<<"$status"; then
     exec "${agent[@]}" ${args[@]+"${args[@]}"}  # the helper is already running
   fi
-  echo "An older agent-vhid-helper is running. Press Ctrl-C in its window; this carries on once it stops."
+  echo "An agent-vhid-helper without --hands-free is running. Press Ctrl-C in its window; this carries on once it stops."
   while python3 python/agent_vhid.py status >/dev/null 2>&1; do sleep 1; done
   sleep 2  # its run.sh stops the daemon it started; let that finish first
 fi
@@ -57,4 +52,4 @@ sudo -v  # ask for the password before anything starts printing
 agent_pid=$!
 # A second Ctrl-C shouldn't cut the agent's goodbye short (it stops the task and hands back control).
 trap 'trap "" INT; kill $agent_pid 2>/dev/null || true; wait $agent_pid 2>/dev/null || true' EXIT
-./run.sh >>/tmp/agent-vhid-helper.log 2>&1  # helper log: /tmp/agent-vhid-helper.log
+./run.sh --hands-free >>/tmp/agent-vhid-helper.log 2>&1  # helper log: /tmp/agent-vhid-helper.log

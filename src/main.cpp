@@ -25,6 +25,7 @@ struct options {
   bool start_engaged = false;
   bool sound = true;
   bool verbose = false;
+  bool hands_free = false;
   int quiet_ms = 400;
 };
 
@@ -33,6 +34,9 @@ void usage() {
                "  --socket PATH     socket the agent connects to (default /tmp/agent-vhid.sock)\n"
                "  --start-engaged   start with the agent in control instead of waiting for the gesture\n"
                "  --quiet-ms N      how long your hands must be off before the agent takes over (default 400)\n"
+               "  --hands-free      the voice agent listens all the time: let it take control for a\n"
+               "                    task it heard, without a Right Option hold (touching anything still\n"
+               "                    takes control back)\n"
                "  --no-sound        no chime on engage/disengage\n"
                "  --verbose         log every physical input event\n"
                "  --dry-run         no root, no virtual devices: log reports instead (for testing)\n"
@@ -56,6 +60,8 @@ bool parse(int argc, char** argv, options& o) {
       o.sound = false;
     } else if (a == "--verbose") {
       o.verbose = true;
+    } else if (a == "--hands-free") {
+      o.hands_free = true;
     } else {
       return false;
     }
@@ -137,6 +143,7 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
             play("Funk");
           }
         });
+    g.set_hands_free(o.hands_free);
 
     watcher w(
         [&g](const std::string& source) { g.human_input(source); },
@@ -169,7 +176,8 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
               << "Karabiner client protocol " << pqrs::karabiner::driverkit::client_protocol_version::embedded_client_protocol_version
               << "\n\n"
               << "  Double-tap Right Option to hand control to the agent.\n"
-              << "  Hold Right Option and speak to give the voice agent a task.\n"
+              << (o.hands_free ? "  Talk to the voice agent any time; it takes control for a task it hears.\n"
+                               : "  Hold Right Option and speak to give the voice agent a task.\n")
               << "  Touch any key, the trackpad, or the mouse to take it back.\n"
               << "  Ctrl-C to quit.\n"
               << std::endl;

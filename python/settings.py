@@ -3,7 +3,7 @@
 A value set in .env wins over the same variable in your shell, so the key you put there is the
 one used; empty values are skipped. AGENT_ENV_FILE points somewhere else (the tests use it).
 
-    python3 python/settings.py has OPENAI_API_KEY     exit status 0 when it's set
+    python3 python/settings.py has TTS_VOICE     exit status 0 when it's set
 """
 
 from __future__ import annotations

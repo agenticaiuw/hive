@@ -1,13 +1,16 @@
 """Checks python/speech.py: splitting text, making audio with Kokoro (when models/ has it),
-stopping mid-sentence, and falling back to the Mac's voice. Nothing is played aloud.
+stopping mid-sentence, waiting for you to finish talking, and falling back to the Mac's voice. Nothing is
+played aloud.
 
     .venv/bin/python tests/test_speech.py
 """
 
 import os
+import subprocess
 import sys
 import time
 import unittest
+import wave
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,20 +26,19 @@ except ImportError:
 
 
 class Silent(speech.Voice):
-    """Records what it would play instead of playing it."""
+    """Records what it would play, and spends as long on each sentence as playing it would take."""
 
-    def __init__(self):
-        self.played = []
-        super().__init__()
+    def __init__(self, **kwargs):
+        self.played: list[float] = []  # seconds of each sentence
+        super().__init__(**kwargs)
 
-    def _play(self):
-        while True:
-            generation, samples = self._audio.get()
-            if samples is None:
-                self._done()
-            elif generation == self._generation:
-                self.played.append(samples)
-                time.sleep(len(samples) / 24000)  # as long as it takes to hear
+    def _start(self, command):
+        seconds = 1.0
+        if command[0] == "afplay":
+            with wave.open(command[1]) as w:
+                seconds = w.getnframes() / w.getframerate()
+        self.played.append(seconds)
+        return subprocess.Popen(["sleep", str(seconds)])
 
 
 class SpeechTest(unittest.TestCase):
@@ -58,9 +60,8 @@ class SpeechTest(unittest.TestCase):
         voice.say("Done. I opened Calculator and worked it out. Twelve times thirty-four is four hundred and eight.")
         self.assertTrue(voice.wait(60))
         self.assertEqual(len(voice.played), 2)
-        seconds = sum(len(s) for s in voice.played) / 24000
-        self.assertGreater(seconds, 3)
-        self.assertLess(seconds, 12)
+        self.assertGreater(sum(voice.played), 3)
+        self.assertLess(sum(voice.played), 12)
 
     @unittest.skipUnless(HAVE_KOKORO, "needs .venv and the model in models/ (./voice.sh sets both up)")
     def test_stop_drops_the_rest(self):
@@ -77,6 +78,33 @@ class SpeechTest(unittest.TestCase):
         voice.say("Talking again works.")  # a new generation
         self.assertTrue(voice.wait(30))
         self.assertEqual(len(voice.played), 2)
+
+    @unittest.skipUnless(HAVE_KOKORO, "needs .venv and the model in models/ (./voice.sh sets both up)")
+    def test_it_waits_for_you_to_finish_talking(self):
+        you_talking = [True]
+        voice = Silent(may_speak=lambda: not you_talking[0])
+        voice.describe()
+        voice.say("Something to say once you're done.")
+        self.assertFalse(voice.wait(2))
+        self.assertEqual(voice.played, [])
+        you_talking[0] = False
+        self.assertTrue(voice.wait(30))
+        self.assertEqual(len(voice.played), 1)
+
+    @unittest.skipUnless(HAVE_KOKORO, "needs .venv and the model in models/ (./voice.sh sets both up)")
+    def test_audible_while_playing_and_a_moment_after(self):
+        voice = Silent()
+        voice.describe()
+        self.assertFalse(voice.audible())
+        voice.say("Short and sweet.")
+        deadline = time.time() + 30
+        while not voice.played and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(voice.audible())
+        self.assertTrue(voice.wait(30))
+        self.assertTrue(voice.audible())  # the room is still echoing
+        time.sleep(speech.ECHO + 0.1)
+        self.assertFalse(voice.audible())
 
     def test_falls_back_to_the_macs_voice(self):
         with mock.patch.object(speech, "MODEL", "/nonexistent/kokoro.onnx"):

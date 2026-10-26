@@ -200,6 +200,25 @@ class DryRunTest(unittest.TestCase):
         with self.assertRaises(NotAllowed):
             self.mac.engage_after_talk()  # one grant per hold
 
+    def test_engage_by_voice_needs_hands_free(self):
+        self.helper.raw("human keyboard")
+        self.assertEqual(self.mac.status()["hands_free"], "0")
+        with self.assertRaises(NotAllowed):
+            self.mac.engage_by_voice()
+
+        hands_free = Helper("--hands-free")
+        self.addCleanup(hands_free.stop)
+        mac = AgentVHID(hands_free.socket, human=False)
+        self.addCleanup(mac.close)
+        self.assertEqual(mac.status()["hands_free"], "1")
+        mac.engage_by_voice()  # no talk hold needed
+        self.assertEqual(mac.status()["state"], "arming")
+        self.assertTrue(mac.wait_engaged(2, announce=False))
+        self.assertEqual(mac.status()["reason"], "engaged_by_voice")
+        hands_free.raw("human trackpad")  # touching anything still takes it back
+        status = mac.status()
+        self.assertEqual((status["state"], status["reason"]), ("disengaged", "trackpad"))
+
     def test_watch_streams_talk_holds(self):
         events = []
         def collect():
