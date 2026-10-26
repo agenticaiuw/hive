@@ -199,6 +199,7 @@ class CodexTask:
             elif kind in ("turn.failed", "error"):
                 msg = event.get("error", {}).get("message") if kind == "turn.failed" else event.get("message")
                 self.on_event("error", str(msg)[:300])
+        self.proc.stdout.close()
         self.proc.wait()
         try:
             with open(self._last) as f:

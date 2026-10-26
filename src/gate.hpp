@@ -4,12 +4,16 @@
 //
 //   disengaged --(double-tap Right Option)--> arming --(hands off for quiet_period)--> engaged
 //   disengaged --(agent asks, within talk_grant of a talk hold)--> arming
+//   disengaged --(agent asks, with --hands-free: the voice agent heard a spoken task)--> arming
 //   engaged    --(any real key, touch, click, or mouse motion)--> disengaged
 //   engaged    --(agent says it is done)--> disengaged
 //   arming     --(any real input before the quiet period ends)--> disengaged
 //
 // The agent can never move itself out of `disengaged` on its own: it needs either the
 // double-tap or, for a spoken task, the human having just held the talk key (one grant per hold).
+// With --hands-free the voice agent listens all the time, so there is no hold: started that way,
+// the helper lets it ask for control when it hears a task. Either way, control only passes once
+// the human's hands have been off for the quiet period, and any touch takes it back.
 
 #include <chrono>
 #include <functional>
@@ -93,6 +97,22 @@ public:
     }
     talk_grant_until_ = {};
     return begin_arming_locked("engage_requested_by_voice");
+  }
+
+  // With --hands-free: the voice agent heard a spoken task and asks for control. False otherwise.
+  bool engage_by_voice() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hands_free_ && begin_arming_locked("engage_requested_by_voice");
+  }
+
+  void set_hands_free(bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hands_free_ = on;
+  }
+
+  bool hands_free() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hands_free_;
   }
 
   // The agent finished and hands control back.
@@ -185,6 +205,7 @@ private:
   std::function<void()> on_disengage_;
   std::function<void(state)> on_change_;
   bool watcher_healthy_ = true;
+  bool hands_free_ = false;
   clock::time_point arming_started_;
   clock::time_point talk_grant_until_;
   std::map<int, listener> listeners_;

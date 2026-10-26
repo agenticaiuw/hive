@@ -11,6 +11,7 @@
 //   release                    -> let go of every key and button (always allowed)
 //   disengage                  -> the agent is done: hand control back (always allowed)
 //   engage_after_talk          -> start handing control over, allowed once per talk hold (hold Right Option)
+//   engage_by_voice            -> start handing control over for a spoken task; only with --hands-free
 //   watch                      -> stream "event state=... reason=..." and "event talk=down|up" lines
 //                                 until the client closes
 //
@@ -217,7 +218,7 @@ private:
     }
     if (command == "status") {
       return "ok " + gate_.describe() + " " + injector_.describe() + " " + watch_status_() +
-             " dry_run=" + (dry_run_ ? "1" : "0") + " talk=1";
+             " dry_run=" + (dry_run_ ? "1" : "0") + " talk=1 hands_free=" + (gate_.hands_free() ? "1" : "0");
     }
     if (command == "release") {
       injector_.release_all();
@@ -231,6 +232,14 @@ private:
       if (!gate_.engage_after_talk()) {
         return "err forbidden no talk hold in the last " + std::to_string(gate::talk_grant.count()) +
                " s; double-tap Right Option instead";
+      }
+      return "ok";
+    }
+    if (command == "engage_by_voice") {
+      if (!gate_.engage_by_voice()) {
+        return std::string("err forbidden ") + (gate_.hands_free() ? "the safety watcher isn't working"
+                                                                   : "the helper wasn't started with --hands-free") +
+               "; double-tap Right Option instead";
       }
       return "ok";
     }

@@ -1,5 +1,6 @@
 """The agent's voice: Kokoro-82M, an open-source text-to-speech model that runs on this Mac.
 Natural and calm, and quick: it starts speaking while it's still working on the next sentence.
+Each sentence plays through afplay, so it comes out of whatever the sound output is right now.
 
     .venv/bin/python python/speech.py "Hello, I'm your Mac."        # try it
     TTS_VOICE=am_michael .venv/bin/python python/speech.py "Hello."  # try another voice
@@ -19,15 +20,18 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MODEL = os.path.join(ROOT, "models", "kokoro-v1.0.onnx")
 VOICES = os.path.join(ROOT, "models", "voices-v1.0.bin")
 LANGS = {"a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi", "i": "it", "p": "pt-br"}
-CHUNK = 2400  # frames written at a time (0.1 s), so stop() takes effect quickly
+RATE = 24000
+ECHO = 0.3  # seconds the room keeps echoing after a sentence (for when the listener can't cancel it)
 
 
 def sentences(text: str) -> list[str]:
@@ -43,7 +47,10 @@ def sentences(text: str) -> list[str]:
 
 
 class Voice:
-    def __init__(self):
+    """may_speak() is asked before each sentence; it waits while that's false (you're talking)."""
+
+    def __init__(self, may_speak=lambda: True):
+        self.may_speak = may_speak
         self.voice = os.environ.get("TTS_VOICE") or "af_heart"
         self.speed = float(os.environ.get("TTS_SPEED") or 1.0)
         self.error: str | None = None
@@ -54,7 +61,9 @@ class Voice:
         self._generation = 0  # stop() moves on to a new one; anything from an older one is dropped
         self._pending = 0     # things said that haven't finished playing
         self._idle = threading.Condition()
-        self._say: subprocess.Popen | None = None
+        self._player: subprocess.Popen | None = None
+        self._quiet_since = 0.0  # when the last sentence finished playing
+        self._dir = tempfile.mkdtemp(prefix="agent-voice-")
         if self.voice == "say":
             self._ready.set()
         else:
@@ -91,8 +100,17 @@ class Voice:
     def stop(self):
         """Stops talking at once and forgets anything it was about to say."""
         self._generation += 1
-        if self._say and self._say.poll() is None:
-            self._say.terminate()
+        player = self._player
+        if player and player.poll() is None:
+            try:
+                player.terminate()
+            except ProcessLookupError:
+                pass
+
+    def audible(self) -> bool:
+        """Speaking, or just finished and the room is still echoing."""
+        player = self._player
+        return (player is not None and player.poll() is None) or time.monotonic() < self._quiet_since + ECHO
 
     def wait(self, timeout: float | None = None) -> bool:
         with self._idle:
@@ -117,58 +135,58 @@ class Voice:
                 if generation != self._generation:
                     continue
                 if not self._kokoro:
-                    self._say = subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    self._say.wait()
+                    self._audio.put((generation, ["say", text]))
                     continue
                 for sentence in sentences(text):
                     if generation != self._generation:
                         break
-                    self._audio.put((generation, self.render(sentence)))
+                    self._audio.put((generation, ["afplay", self._wav(self.render(sentence))]))
             except Exception as e:
                 print(f"   ✗ voice: {e}", flush=True)
             finally:
                 self._audio.put((generation, None))  # this text is done: _play calls _done
 
+    def _wav(self, samples) -> str:
+        import numpy as np
+        fd, path = tempfile.mkstemp(suffix=".wav", dir=self._dir)
+        with os.fdopen(fd, "wb") as f, wave.open(f) as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+        return path
+
+    def _start(self, command: list[str]) -> subprocess.Popen:
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def _play(self):
-        try:
-            import sounddevice
-        except ImportError:  # no .venv: only the Mac's `say` is used, which plays itself
-            return
-        stream = None
         while True:
-            try:
-                generation, samples = self._audio.get(timeout=0.5 if stream else None)
-            except queue.Empty:  # nothing more to say for now: let the speakers go
-                stream.close()
-                stream = None
-                continue
-            if samples is None:
+            generation, command = self._audio.get()
+            if command is None:
                 self._done()
                 continue
-            if generation != self._generation:
-                continue
             try:
-                if stream is None:
-                    # PortAudio only looks for devices when it starts: restart it so the voice
-                    # comes out of whatever is the output now (AirPods, speakers, ...).
-                    sounddevice._terminate()
-                    sounddevice._initialize()
-                    stream = sounddevice.OutputStream(samplerate=24000, channels=1, dtype="float32")
-                    stream.start()
-                for i in range(0, len(samples), CHUNK):
-                    if generation != self._generation:
-                        break
-                    stream.write(samples[i:i + CHUNK].reshape(-1, 1))
+                while not self.may_speak() and generation == self._generation:
+                    time.sleep(0.05)
+                if generation == self._generation:
+                    self._player = self._start(command)
+                    self._player.wait()
+                    self._quiet_since = time.monotonic()
             except Exception as e:
                 print(f"   ✗ voice: {e}", flush=True)
-                stream = None
+            finally:
+                if command[0] == "afplay":
+                    try:
+                        os.unlink(command[1])
+                    except OSError:
+                        pass
 
 
 def main(argv: list[str]) -> int:
     sys.path.insert(0, HERE)
     import settings
     settings.load()
-    text = " ".join(argv) or "Hi! I'm the voice of your computer agent. Hold Right Option and tell me what to do."
+    text = " ".join(argv) or "Hi! I'm the voice of your computer agent. Just tell me what to do."
     voice = Voice()
     print(f"Speaking with {voice.describe()}.")
     voice.say(text)

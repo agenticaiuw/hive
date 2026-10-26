@@ -389,6 +389,11 @@ class AgentVHID:
         within 30 s; raises NotAllowed otherwise. The helper still waits for their hands to be off."""
         self._send("engage_after_talk")
 
+    def engage_by_voice(self):
+        """Starts taking control for a task the voice agent heard. Only allowed when the helper runs
+        with --hands-free (raises NotAllowed otherwise). It still waits for the human's hands to be off."""
+        self._send("engage_by_voice")
+
     def disengage(self):
         """Hands control back to the human, e.g. when a task is done."""
         self._send("disengage")
