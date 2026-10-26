@@ -1,5 +1,7 @@
-"""MCP server that lets an AI agent (Codex, Claude Code, ...) use this Mac the way a person does:
-screenshots to see, and the real mouse and keyboard (through agent-vhid-helper) to act.
+"""Tools that let an AI agent use this Mac the way a person does: screenshots to see, and the
+real mouse and keyboard (through agent-vhid-helper) to act. agent.py hands them (MacTools, TOOLS)
+straight to Codex; run as a script, this is an MCP server for any other agent (Codex, Claude
+Code, ...):
 
     codex exec -c mcp_servers.mac.command=python3 \\
                -c 'mcp_servers.mac.args=["/path/to/mac_mcp.py"]' "open Calculator"
@@ -31,7 +33,7 @@ from agent_vhid import (  # noqa: E402
 
 PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 MAX_WIDTH = 1440  # one image pixel per screen point on most Mac displays
-SETTLE = 0.6  # seconds the screen gets to catch up before the screenshot that follows an action
+SETTLE = 0.3  # seconds the screen gets to catch up before the screenshot that follows an action
 HUMAN_SOURCES = {"keyboard", "trackpad", "mouse", "mouse_button"}
 
 LOOK = {"type": "boolean", "default": True,
@@ -149,6 +151,49 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
+BATCHABLE = ["click", "move_mouse", "drag", "scroll", "type_text", "press_key", "open_app", "wait"]
+
+
+def batch_tool(batchable: list[str], example: str) -> dict:
+    return {
+        "name": "batch",
+        "description": "Do several actions in a row and get one screenshot at the end. Use it whenever you "
+                       "already know the next steps; each separate call costs the user seconds. Each step is "
+                       f"{{\"tool\": name, ...that tool's arguments}}, the tool being one of {', '.join(batchable)}. "
+                       f"For example: {example}. Stops at the first step that fails.",
+        "inputSchema": {"type": "object", "properties": {
+            "steps": {"type": "array", "minItems": 1, "maxItems": 20, "items": {
+                "type": "object", "properties": {"tool": {"type": "string", "enum": batchable}},
+                "required": ["tool"]}},
+            "screenshot": LOOK,
+        }, "required": ["steps"]},
+    }
+
+
+TOOLS.append(batch_tool(BATCHABLE, '[{"tool": "press_key", "keys": "cmd+l"}, '
+                                   '{"tool": "type_text", "text": "weather in Paris\\n"}]'))
+
+
+def run_batch(tools, args: dict, batchable: list[str]) -> dict:
+    """Runs args["steps"] through tools.call without screenshots, then looks once."""
+    done = []
+    for i, step in enumerate(args.get("steps") or [], 1):
+        step = dict(step)
+        name = step.pop("tool", "")
+        if name not in batchable:
+            return result(text(f"Step {i}: {name!r} can't go in a batch (use one of {', '.join(batchable)})."),
+                          error=True)
+        res = tools.call(name, {**step, "screenshot": False})
+        if res.get("isError"):
+            why = " ".join(c.get("text", "") for c in res["content"] if c.get("type") == "text")
+            before = f" after {', '.join(done)}" if done else ""
+            return result(text(f"Step {i} ({name}) failed{before}: {why}"), error=True)
+        done.append(name)
+    note = f"Did {len(done)} steps: {', '.join(done)}."
+    if args.get("screenshot", True):
+        time.sleep(SETTLE)
+        return tools.look(note)
+    return result(text(note))
 
 
 def geometry() -> Screenshot:
@@ -184,7 +229,7 @@ def result(*content: dict, error: bool = False) -> dict:
 
 class MacTools:
     def __init__(self):
-        self.mac = AgentVHID(speed=1.3)
+        self.mac = AgentVHID(speed=2)  # still a person's curved moves and typing, just a quick one
 
     # -- seeing --
 
@@ -277,11 +322,11 @@ class MacTools:
         if name == "open_app":
             def spotlight():
                 self.mac.key("cmd+space")
-                time.sleep(0.7)
+                time.sleep(0.4)
                 self.mac.type_text(a["name"])
-                time.sleep(1.0)
+                time.sleep(0.6)  # Spotlight's top hit settles
                 self.mac.key("return")
-                time.sleep(1.2)
+                time.sleep(0.5)  # the app starts coming up; the screenshot after shows how far
             return self.act(a, spotlight, f"Opened {a['name']!r} from Spotlight.")
         if name == "wait":
             time.sleep(min(30.0, float(a["seconds"])))
@@ -299,6 +344,8 @@ class MacTools:
             return self.find_text(a["text"])
         if name == "read_screen":
             return self.read_screen()
+        if name == "batch":
+            return run_batch(self, a, BATCHABLE)
         if name == "read_clipboard":
             clip = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
             return result(text(clip[:8000] if clip else "(the clipboard has no text)"))
@@ -347,9 +394,16 @@ class MacTools:
         return result(text("\n".join(out[:400])))
 
 
+INSTRUCTIONS = ("Use this Mac like a person: look with screenshot, act with click, type_text and press_key "
+                "(or several at once with batch). Coordinates are screenshot pixels. If a tool says the user "
+                "took over, call wait_for_control.")
+
+
 class Server:
-    def __init__(self):
-        self.tools = MacTools()
+    def __init__(self, tools=None, tool_list: list[dict] = TOOLS, name: str = "agent-vhid-mac",
+                 instructions: str = INSTRUCTIONS):
+        self.tools = tools or MacTools()
+        self.tool_list, self.name, self.instructions = tool_list, name, instructions
 
     def handle(self, msg: dict) -> dict | None:
         method, msg_id = msg.get("method"), msg.get("id")
@@ -361,15 +415,13 @@ class Server:
                 return self.reply(msg_id, {
                     "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "agent-vhid-mac", "version": "1.0"},
-                    "instructions": "Use this Mac like a person: look with screenshot, act with click, "
-                                    "type_text and press_key. Coordinates are screenshot pixels. If a tool "
-                                    "says the user took over, call wait_for_control.",
+                    "serverInfo": {"name": self.name, "version": "1.0"},
+                    "instructions": self.instructions,
                 })
             if method == "ping":
                 return self.reply(msg_id, {})
             if method == "tools/list":
-                return self.reply(msg_id, {"tools": TOOLS})
+                return self.reply(msg_id, {"tools": self.tool_list})
             if method == "tools/call":
                 params = msg.get("params", {})
                 try:
@@ -387,8 +439,8 @@ class Server:
         return {"jsonrpc": "2.0", "id": msg_id, "result": res}
 
 
-def main():
-    server = Server()
+def main(server: Server | None = None):
+    server = server or Server()
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:

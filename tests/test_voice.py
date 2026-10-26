@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(ROOT, "python"))
 
 from test_dry_run import Helper  # noqa: E402
 from agent_vhid import AgentVHID, AgentVHIDError  # noqa: E402
+import agent  # noqa: E402
 import listen  # noqa: E402
 import mic  # noqa: E402
 import voice_agent  # noqa: E402
@@ -96,6 +97,23 @@ class Voice:
         return self.playing
 
 
+class Captions:
+    """Stands in for the on-screen captions: writes down what they'd show."""
+
+    def __init__(self):
+        self.words: list[str] = []
+        self.doings: list[str] = []
+
+    def say(self, words):
+        self.words.append(words)
+
+    def doing(self, text):
+        self.doings.append(text)
+
+    def close(self):
+        pass
+
+
 class VoiceAgentTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -107,7 +125,14 @@ class VoiceAgentTest(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="voice-")
         self.codex_log = os.path.join(self.dir, "codex.jsonl")
         os.environ.update({"CODEX_BIN": FAKE_CODEX, "FAKE_CODEX_LOG": self.codex_log, "FAKE_CODEX_SECONDS": "0.3"})
-        self.agent = voice_agent.VoiceAgent(speak=False, mac=AgentVHID(self.helper.socket), ears=EARS)
+        agent.stop_server()  # a fresh fake Codex, which writes to this test's log
+        self.addCleanup(agent.stop_server)
+        looker = mock.patch("agent.first_look", return_value=None)  # no screenshots of your screen
+        looker.start()
+        self.addCleanup(looker.stop)
+        self.captions = Captions()
+        self.agent = voice_agent.VoiceAgent(speak=False, mac=AgentVHID(self.helper.socket), ears=EARS,
+                                            captions=self.captions)
         self.agent.voice = Voice()
         self.heard: list[tuple[str, bool]] = []
         self.agent.heard = lambda text, final: (self.heard.append((text, final)),
@@ -147,12 +172,15 @@ class VoiceAgentTest(unittest.TestCase):
     def finals(self) -> list[str]:
         return [text for text, final in self.heard if final]
 
-    def prompts(self) -> list[str]:
+    def runs(self) -> list[dict]:
         try:
             with open(self.codex_log) as f:
-                return [json.loads(line)["prompt"] for line in f]
+                return [run for run in map(json.loads, f) if "prompt" in run]
         except FileNotFoundError:
             return []
+
+    def prompts(self) -> list[str]:
+        return [run["prompt"] for run in self.runs()]
 
     def test_words_show_up_as_you_talk_and_the_task_goes_to_codex(self):
         self.listen_to(speech("Open Calculator and work out twelve times thirty four."))
@@ -167,6 +195,30 @@ class VoiceAgentTest(unittest.TestCase):
         states = [(e.get("state"), e.get("reason")) for e in self.gate if "state" in e]
         self.assertIn(("engaged", "engaged_by_voice"), states)  # no key to hold: --hands-free
         self.assertEqual(states[-1], ("disengaged", "released_by_agent"))
+
+    def test_captions_show_what_its_doing(self):
+        self.listen_to(speech("Open Calculator."))
+        wait_for(lambda: self.agent.voice.said and self.agent.task is None, "the task to finish")
+        self.assertIn("Looking at the screen", self.captions.doings)  # the fake Codex takes a screenshot
+        self.assertEqual(self.captions.doings[-1], "")  # and when it's done, nothing
+        self.assertTrue(any(line.startswith("✅ done in ") for line in self.printed), self.printed)
+
+    def test_on_the_phone_it_works_on_the_phone_alongside_the_mac(self):
+        os.environ["FAKE_CODEX_SECONDS"] = "60"
+        self.listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts(), "codex")
+        mac_task = self.agent.task
+        self.listen_to(speech("Open Maps on my phone."))
+        wait_for(lambda: len(self.prompts()) == 2, "the phone task")
+        phone_run = self.runs()[1]
+        self.assertIn("iPhone", phone_run["prompt"])
+        self.assertIn("maps on my phone", phone_run["prompt"].lower())
+        self.assertEqual(phone_run["tools"], ["phone"])  # its tools, not the Mac's
+        self.assertIs(self.agent.task, mac_task)  # the Mac task carried on
+        self.assertTrue(mac_task.running)
+        self.assertTrue(self.agent.tasks["phone"].running)
+        self.listen_to(speech("Stop."))  # stops both
+        wait_for(lambda: not any(self.agent.tasks.values()), "both tasks to stop")
 
     def test_a_short_pause_doesnt_cut_you_off(self):
         self.listen_to(np.concatenate([speech("Open Safari."), silence(0.7), speech("Then search for the weather.")]))

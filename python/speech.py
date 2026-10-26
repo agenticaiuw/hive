@@ -47,10 +47,12 @@ def sentences(text: str) -> list[str]:
 
 
 class Voice:
-    """may_speak() is asked before each sentence; it waits while that's false (you're talking)."""
+    """may_speak() is asked before each sentence; it waits while that's false (you're talking).
+    on_play(words) is told each sentence as it starts playing (for captions)."""
 
-    def __init__(self, may_speak=lambda: True):
+    def __init__(self, may_speak=lambda: True, on_play=lambda words: None):
         self.may_speak = may_speak
+        self.on_play = on_play
         self.voice = os.environ.get("TTS_VOICE") or "af_heart"
         self.speed = float(os.environ.get("TTS_SPEED") or 1.0)
         self.error: str | None = None
@@ -135,16 +137,16 @@ class Voice:
                 if generation != self._generation:
                     continue
                 if not self._kokoro:
-                    self._audio.put((generation, ["say", text]))
+                    self._audio.put((generation, ["say", text], text))
                     continue
                 for sentence in sentences(text):
                     if generation != self._generation:
                         break
-                    self._audio.put((generation, ["afplay", self._wav(self.render(sentence))]))
+                    self._audio.put((generation, ["afplay", self._wav(self.render(sentence))], sentence))
             except Exception as e:
                 print(f"   ✗ voice: {e}", flush=True)
             finally:
-                self._audio.put((generation, None))  # this text is done: _play calls _done
+                self._audio.put((generation, None, None))  # this text is done: _play calls _done
 
     def _wav(self, samples) -> str:
         import numpy as np
@@ -161,7 +163,7 @@ class Voice:
 
     def _play(self):
         while True:
-            generation, command = self._audio.get()
+            generation, command, words = self._audio.get()
             if command is None:
                 self._done()
                 continue
@@ -169,6 +171,7 @@ class Voice:
                 while not self.may_speak() and generation == self._generation:
                     time.sleep(0.05)
                 if generation == self._generation:
+                    self.on_play(words)
                     self._player = self._start(command)
                     self._player.wait()
                     self._quiet_since = time.monotonic()

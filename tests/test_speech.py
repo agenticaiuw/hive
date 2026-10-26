@@ -100,6 +100,7 @@ class SpeechTest(unittest.TestCase):
         deadline = time.time() + 30
         while not voice.played and time.time() < deadline:
             time.sleep(0.02)
+        time.sleep(0.05)  # the player has been handed back and kept
         self.assertTrue(voice.audible())
         self.assertTrue(voice.wait(30))
         self.assertTrue(voice.audible())  # the room is still echoing
