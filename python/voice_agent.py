@@ -1,10 +1,12 @@
 """Talk to your Mac. Hold Right Option, say what you want done, let go: Superwhisper
 transcribes it and Codex does it with the real mouse and keyboard, in whatever window
-you're in. Touch anything to take over.
+you're in, then tells you out loud what it did (Kokoro, python/speech.py). Touch anything
+to take over.
 
-    python3 python/voice_agent.py [--no-speak]
+    .venv/bin/python python/voice_agent.py [--no-speak]
 
-  hold Right Option        talk (Superwhisper records in its "Computer Agent" mode; nothing is pasted)
+  hold Right Option        talk (Superwhisper records in its "Computer Agent" mode; nothing is pasted);
+                           it stops speaking
   say "stop"               cancel the running task
   talk during a task       interrupts it and continues with the new instruction
   touch keys / trackpad    take over; double-tap Right Option to let it continue
@@ -30,7 +32,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import settings  # noqa: E402
-from agent import CodexTask, find_codex  # noqa: E402
+import speech  # noqa: E402
+from agent import CodexTask, describe_model, find_codex  # noqa: E402
 from agent_vhid import AgentVHID, AgentVHIDError, NotAllowed  # noqa: E402
 
 SUPERWHISPER = os.path.expanduser("~/Documents/superwhisper")
@@ -98,7 +101,7 @@ def spoken(text: str) -> str:
 
 class VoiceAgent:
     def __init__(self, speak: bool = True):
-        self.speak = speak
+        self.voice = speech.Voice() if speak else None
         self.mac = AgentVHID()
         self.events: queue.Queue = queue.Queue()
         self.task: CodexTask | None = None
@@ -185,6 +188,8 @@ class VoiceAgent:
     def on_helper(self, event: dict):
         if event.get("talk") == "down" and not self.listening:
             self.listening = True
+            if self.voice:
+                self.voice.stop()  # you're talking over it
             mode = active_mode()
             self.previous_mode = mode if mode != MODE_KEY else self.previous_mode
             superwhisper(f"superwhisper://mode?key={MODE_KEY}")
@@ -269,12 +274,14 @@ class VoiceAgent:
             pass
 
     def say(self, text: str):
-        if self.speak and text:
-            subprocess.Popen(["say", spoken(text)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.voice and text:
+            self.voice.say(spoken(text))
 
     def shutdown(self):
         if self.task and self.task.running:
             self.task.stop()
+        if self.voice:
+            self.voice.stop()
         self.hand_back()
         if self.listening or self.expect_transcript_until:
             self.restore_mode()
@@ -325,6 +332,8 @@ def main(argv: list[str]) -> int:
     agent = VoiceAgent(speak="--no-speak" not in argv)
     if not wait_for_helper(agent.mac):
         return 1
+    print(f"Listening: Superwhisper. Voice: {agent.voice.describe() if agent.voice else 'off'}. "
+          f"Computer agent: {describe_model()}.", flush=True)
 
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)  # a script may start us with Ctrl-C ignored

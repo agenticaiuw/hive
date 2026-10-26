@@ -1,9 +1,9 @@
 # personal-agent
 
 Talk to your Mac and it talks back. Hold Right Option in any window and say what
-you want: a live voice answers you, and a computer agent does the work on screen
-with a real-looking keyboard and mouse. It hands control back to you the instant
-you touch anything, like Tesla's Autopilot.
+you want: a computer agent does the work on screen with a real-looking keyboard
+and mouse, then tells you out loud what it did. It hands control back to you the
+instant you touch anything, like Tesla's Autopilot.
 
 ```bash
 git submodule update --init   # once, after cloning: Karabiner's client headers
@@ -47,75 +47,75 @@ takeover working.
 ```
 
 One password prompt (for the helper), then, in any window: **hold Right Option,
-talk, let go.** It answers out loud. Anything that takes real work goes to the
-computer agent, which works out the steps from screenshots and does them with the
-virtual mouse and keyboard while you watch. When it's done, the voice tells you
-what happened and control comes back to you.
+say what you want, let go.** Superwhisper writes down what you said, the computer
+agent works out the steps from screenshots and does them with the virtual mouse
+and keyboard while you watch, and when it's done a voice tells you what happened
+and control comes back to you.
 
 | | |
 |---|---|
-| Hold Right Option and talk | It stops speaking and listens (a soft *tink*) |
+| Hold Right Option and talk | It stops speaking and listens |
 | Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
 | Double-tap Right Option | It carries on from where things are now |
 | Say something new while it works | It drops the old task and does the new one, knowing what it was doing |
 | Say "stop" | Stops the computer agent |
 
-Two models, each doing what it's good at:
-
-- **The voice: GPT-Live** (`gpt-live-1`, OpenAI's live speech-to-speech model),
-  in `python/live_agent.py`. It listens, talks and keeps the conversation going,
-  and hands over (*delegates*) anything that needs the computer, the screen, a
-  fact, a calculation, writing or careful thought. It's told not to guess while
-  the work is happening.
+- **Listening: Superwhisper.** `python/voice_agent.py` adds a *Computer Agent*
+  mode to Superwhisper (a copy of your Default mode with pasting turned off),
+  switches to it while you hold the key, starts and stops recording with
+  `superwhisper://` links, and switches back afterwards, so fn dictation works as
+  before. It reads the transcript from `~/Documents/superwhisper/recordings` and
+  ignores recordings that are only silence (Whisper tends to "hear" sentences in
+  silence).
 - **The worker: your Codex model**, e.g. **gpt-6-astra**, at your Codex config's
   reasoning effort (high, unless you set `AGENT_EFFORT`). Nothing about it is
-  scaled down for voice: it gets the request word for word plus the conversation
-  so far, uses your config's model and effort, and keeps web search. Its progress
-  goes back to GPT-Live as silent notes, so "what's it doing?" gets a real answer,
-  and its final report is what the voice tells you.
+  scaled down for voice: it gets what you said word for word, uses your config's
+  model and effort, and keeps web search. Its final report is what you hear.
+- **The voice: Kokoro** ([Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M),
+  an open-source text-to-speech model, Apache 2.0), in `python/speech.py`. It runs
+  on this Mac through ONNX Runtime at full precision (not quantized): it loads in
+  under a second and then speaks faster than real time, a sentence at a time, so
+  it starts talking before the whole reply is made. It sounds calm and natural, not
+  dramatic. `./voice.sh` downloads it into `models/` the first time (about 350 MB,
+  gitignored). If the model is missing or won't load, the Mac's own voice speaks
+  instead.
 
 Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your shell):
 
 | | |
 |---|---|
-| `OPENAI_API_KEY` | Your OpenAI key. Without one, `./voice.sh` uses Superwhisper instead (below) |
-| `LIVE_VOICE` | `marin` (default), `cedar`, `vesper`, ...; the full list is in `.env.example` |
-| `LIVE_IDLE_SECONDS` | How long a quiet conversation stays open (default 45) |
+| `TTS_VOICE` | `af_heart` (default), `af_sarah`, `af_bella`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`, ...: `af`/`am` are American, `bf`/`bm` British. `say` uses the Mac's voice |
+| `TTS_SPEED` | `1.0` is normal; `1.1` is a little quicker |
 | `AGENT_MODEL`, `AGENT_EFFORT` | Override the computer agent's model and effort; empty means your Codex config's |
 
-**Cost:** GPT-Live is $0.05 a minute, billed per second, for as long as a
-conversation is open. One opens when you hold Right Option and closes after
-`LIVE_IDLE_SECONDS` of quiet, never while the computer agent is working. Each
-close prints the seconds used and the cost. A new conversation is given the last
-few turns, so it carries on where you left off. A quick question and answer is
-about a cent.
+To hear a voice before you pick it:
 
-**Microphone:** it opens when `./voice.sh` starts and stays open, so macOS shows
-the orange microphone dot while it runs. A Mac can take seconds to wake its
-microphone after it has been idle, and push-to-talk has to catch your first word.
-What it hears is only sent while you hold Right Option: from 0.3 s before you
-press until 0.4 s after you let go. The rest of the time GPT-Live gets silence.
-After each conversation it rescans the audio devices, and if the microphone goes
-quiet (AirPods, an iPhone, a Zoom or Teams device coming or going) it reopens it.
-macOS asks for microphone access for the app you run it in the first time. If
-it prints "The microphone only gives silence", allow it in System Settings ›
-Privacy & Security › Microphone and restart `./voice.sh`.
+```bash
+TTS_VOICE=am_michael .venv/bin/python python/speech.py "Done. Twelve percent of 340 is 40.8."
+```
 
-The first run sets up `.venv` with `websockets` and `sounddevice`
-(`requirements.txt`); the rest of the project uses only the standard library.
+`./voice.sh --no-speak` keeps it quiet. The first run sets up `.venv` with
+`kokoro-onnx` and `sounddevice` (`requirements.txt`); the rest of the project
+uses only the standard library.
 
-### Without an OpenAI key: Superwhisper
+### A spoken conversation instead: GPT-Live
 
-`./voice.sh --superwhisper` (or no key in `.env`) uses Superwhisper to transcribe
-what you say, and the Mac's own voice reads out the result (`--no-speak` to keep
-it quiet). It's one-way: you talk, it works, it reports.
+`./voice.sh --live` swaps Superwhisper and Kokoro for GPT-Live (`gpt-live-1`,
+OpenAI's speech-to-speech model, in `python/live_agent.py`). It needs
+`OPENAI_API_KEY` in `.env`. GPT-Live holds the conversation and hands anything
+that needs the computer, a fact or careful thought to the same Codex worker,
+whose progress goes back to it as silent notes, so "what's it doing?" gets a real
+answer.
 
-- `voice_agent.py` adds a *Computer Agent* mode to Superwhisper (a copy of your
-  Default mode with pasting turned off), switches to it while you hold the key,
-  starts and stops recording with `superwhisper://` links, and switches back
-  afterwards, so fn dictation works as before. It reads the transcript from
-  `~/Documents/superwhisper/recordings` and ignores recordings that are only
-  silence (Whisper tends to "hear" sentences in silence).
+- **Cost:** $0.05 a minute, billed per second, while a conversation is open. One
+  opens when you hold Right Option and closes after `LIVE_IDLE_SECONDS` (45) of
+  quiet, never while the computer agent is working. Each close prints the cost;
+  a quick question and answer is about a cent.
+- **Microphone:** it stays open while `./voice.sh --live` runs (the orange dot),
+  so push-to-talk catches your first word, but what it hears is only sent while
+  you hold Right Option (from 0.3 s before to 0.4 s after). Diagnostics go to
+  `/tmp/personal-agent-live.log`.
+- `LIVE_VOICE` picks its voice (`marin` by default; the list is in `.env.example`).
 
 ### The computer agent
 
@@ -147,7 +147,7 @@ matching v6.14.0 client headers in `third_party/`.
    - **Input Monitoring**, so the helper can see your keyboard and mouse.
    - **Screen Recording**, so `screenshot()` sees windows rather than only the wallpaper.
      (This one is needed by whatever runs the agent, if that's a different app.)
-   - **Microphone**, for talking to it with GPT-Live.
+   - **Microphone**, only for `./voice.sh --live` (Superwhisper asks for its own).
    macOS asks the first time; restart the helper after allowing.
 
 ## Run it
@@ -221,16 +221,19 @@ python3 python/agent_vhid.py status
 
 ```bash
 python3 tests/test_dry_run.py
+.venv/bin/python tests/test_speech.py
 .venv/bin/python tests/test_live.py
 ```
 
 The first runs the real helper with `--dry-run` (no root, no virtual devices) and
 checks the HID reports it would send, the hand-over rules (including the talk-hold
-grant), release-on-disconnect, and the wrapper. The second runs `live_agent.py`
-against a fake GPT-Live server, the dry-run helper and a fake Codex
-(`tests/fake_codex.py`): handing a request over and reading the result back,
-"stop", replacing a running task, closing when idle and remembering on reconnect.
-Neither needs an API key or costs anything.
+grant), release-on-disconnect, and the wrapper. The second makes speech with
+Kokoro without playing it: sentence splitting, stopping mid-reply, and falling
+back to the Mac's voice. The third runs `live_agent.py` against a fake GPT-Live
+server, the dry-run helper and a fake Codex (`tests/fake_codex.py`): handing a
+request over and reading the result back, "stop", replacing a running task,
+closing when idle and remembering on reconnect. None of them needs an API key or
+costs anything.
 
 ## Things to know
 
