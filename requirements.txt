@@ -1,0 +1,3 @@
+# Only for the talking voice (python/live_agent.py); ./voice.sh installs these into .venv.
+websockets>=14
+sounddevice>=0.5
