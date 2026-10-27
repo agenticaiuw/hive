@@ -13,6 +13,7 @@ need that too). Without it the microphone still works; it just hears everything.
 
 from __future__ import annotations
 
+import atexit
 import os
 import queue
 import subprocess
@@ -121,11 +122,19 @@ class Microphone:
         except ImportError as e:
             self.error = str(e)
             return
+        quitting = threading.Event()
+        atexit.register(quitting.set)  # runs before sounddevice's own exit handler shuts PortAudio down
         stream = mic_device = tap = out_device = None
         tap_tried = 0.0
-        while True:
+        while not quitting.is_set():
             current = audio.microphone()
-            if stream is None or current != mic_device or not stream.active:
+            try:
+                active = stream is not None and stream.active
+            except sounddevice.PortAudioError:
+                if quitting.is_set():
+                    return  # PortAudio shut down under it as the program ends
+                raise
+            if not active or current != mic_device:
                 if stream is not None:
                     stream.close()
                     sounddevice._terminate()  # PortAudio only reads the device list when it starts
@@ -149,7 +158,7 @@ class Microphone:
                     tap.terminate()
                 out_device, tap_tried = output, time.monotonic()
                 tap = self._start_tap()
-            time.sleep(1)
+            quitting.wait(1)
 
     def _start_tap(self) -> subprocess.Popen | None:
         if not os.path.exists(TAP):

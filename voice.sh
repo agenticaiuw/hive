@@ -7,6 +7,7 @@
 # what the Mac plays is taken back out of what the microphone hears (python/mic.py).
 #
 #   ./voice.sh [--no-speak]
+#   ./voice.sh --enroll     teach it your voice, so it ignores other people talking nearby
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -33,6 +34,11 @@ for f in kokoro-v1.0.onnx voices-v1.0.bin; do
 done
 
 .venv/bin/python python/listen.py --download  # Parakeet and Silero VAD, once
+.venv/bin/python python/voiceprint.py --download  # WeSpeaker, which tells your voice from others, once
+
+if [ "${1:-}" = "--enroll" ]; then
+  exec .venv/bin/python python/voiceprint.py --enroll
+fi
 
 agent=(.venv/bin/python python/voice_agent.py)
 args=("$@")

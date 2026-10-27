@@ -251,8 +251,10 @@ class CodexTaskTest(unittest.TestCase):
         task = self.task()
         self.assertEqual(task.wait(), "Done on the phone.")
         run, reply = self.entries()
-        self.assertEqual(run["tools"], ["phone"])
+        self.assertEqual(run["tools"], ["mac", "phone"])  # every task can use both
+        self.assertEqual(run["model"], "gpt-6.1-terra")
         self.assertEqual(run["instructions"], agent.instructions())  # in place of Codex's own
+        self.assertIn("This request is for the iPhone", run["prompt"])
         self.assertEqual(run["effort"], "low")
         self.assertIn('"open Maps"', run["prompt"])
         self.assertEqual(reply["tool_reply"], {"success": True, "contentItems": [{"type": "inputText", "text": "Waited."}]})
@@ -294,9 +296,17 @@ class CodexTaskTest(unittest.TestCase):
         self.assertEqual(agent.tool_reply(res), {"success": True, "contentItems": [
             {"type": "inputText", "text": "Clicked."}, {"type": "inputImage", "imageUrl": "data:image/jpeg;base64,QUJD"}]})
         self.assertFalse(agent.tool_reply(mac_mcp.result(mac_mcp.text("no"), error=True))["success"])
-        specs = agent.tool_specs("mac")
-        self.assertEqual(specs[0]["name"], "mac")
+        specs = agent.tool_specs()
+        self.assertEqual([s["name"] for s in specs], ["mac", "phone"])
         self.assertIn("batch", [t["name"] for t in specs[0]["tools"]])
+        self.assertIn("tap", [t["name"] for t in specs[1]["tools"]])
+
+    def test_a_request_that_says_phone_starts_on_the_phone(self):
+        self.assertEqual(agent.focus("Open Maps on my phone"), "phone")
+        self.assertEqual(agent.focus("check the weather on the iPhone"), "phone")
+        self.assertEqual(agent.focus("what's my phone number"), "mac")
+        self.assertEqual(agent.focus("open Safari"), "mac")
+        self.assertEqual(agent.CodexTask("open Maps on my phone").device, "phone")
 
 
 class CaptionsTest(unittest.TestCase):
