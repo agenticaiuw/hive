@@ -2,7 +2,9 @@
 by `say` standing in for the microphone and Parakeet really transcribing it: it listens all the
 time, the words show up as you talk, a pause ends what you said, talking over it stops its
 voice, and with echo cancellation its own voice coming back into the microphone isn't taken for
-you. Nothing is played aloud: `say` writes files and the agent's voice is a stand-in.
+you. With your voice enrolled (Samantha plays you), other voices are left out, even right
+before or after you or under you. Nothing is played aloud: `say` writes files and the agent's
+voice is a stand-in.
 
     .venv/bin/python tests/test_voice.py
 """
@@ -31,10 +33,12 @@ import agent  # noqa: E402
 import listen  # noqa: E402
 import mic  # noqa: E402
 import voice_agent  # noqa: E402
+import voiceprint  # noqa: E402
 
 FAKE_CODEX = os.path.join(HERE, "fake_codex.py")
 SPEECH = tempfile.mkdtemp(prefix="voice-speech-")
 EARS = None  # loading Parakeet takes a few seconds; the tests share it
+YOUR_VOICE = None  # Samantha's voiceprint
 BLOCK = 800  # 50 ms of "microphone" at a time
 
 
@@ -66,6 +70,28 @@ def setup_ears():
         EARS = listen.Ears(lambda *_: None, mic=False)
     if not EARS.describe().startswith("Parakeet"):
         raise unittest.SkipTest(f"Parakeet isn't set up ({EARS.error}); ./voice.sh does it")
+
+
+def your_voiceprint() -> voiceprint.Voiceprint:
+    """Samantha, enrolled as you (in a temporary file, not models/voiceprint.npz)."""
+    global YOUR_VOICE
+    if YOUR_VOICE is None:
+        voice = voiceprint.Voiceprint(os.path.join(SPEECH, "voiceprint.npz"))
+        voice.threshold = voiceprint.MATCH
+        if not voice.ready():
+            raise unittest.SkipTest(f"no speaker model ({voice.error}); ./voice.sh downloads it")
+        voice.add([speech(sentence) for sentence in voiceprint.SENTENCES])
+        YOUR_VOICE = voice
+    return YOUR_VOICE
+
+
+def listen_to(samples: np.ndarray):
+    """The "microphone" hears samples in real time, then a moment of quiet."""
+    samples = np.concatenate([samples, silence(1.6)])
+    start = time.time()
+    for i in range(0, len(samples), BLOCK):
+        EARS.feed(samples[i:i + BLOCK])
+        time.sleep(max(0, start + (i + BLOCK) / listen.RATE - time.time()))
 
 
 def wait_for(check, what: str, timeout: float = 20):
@@ -161,14 +187,6 @@ class VoiceAgentTest(unittest.TestCase):
         except AgentVHIDError:
             pass  # the helper stopped at the end of the test
 
-    def listen_to(self, samples: np.ndarray):
-        """The "microphone" hears samples in real time, then a moment of quiet."""
-        samples = np.concatenate([samples, silence(1.6)])
-        start = time.time()
-        for i in range(0, len(samples), BLOCK):
-            EARS.feed(samples[i:i + BLOCK])
-            time.sleep(max(0, start + (i + BLOCK) / listen.RATE - time.time()))
-
     def finals(self) -> list[str]:
         return [text for text, final in self.heard if final]
 
@@ -183,7 +201,7 @@ class VoiceAgentTest(unittest.TestCase):
         return [run["prompt"] for run in self.runs()]
 
     def test_words_show_up_as_you_talk_and_the_task_goes_to_codex(self):
-        self.listen_to(speech("Open Calculator and work out twelve times thirty four."))
+        listen_to(speech("Open Calculator and work out twelve times thirty four."))
         wait_for(lambda: self.prompts(), "codex")
         partial = [text for text, final in self.heard if not final]
         self.assertTrue(any("Open calculator" in text for text in partial), partial)
@@ -197,7 +215,7 @@ class VoiceAgentTest(unittest.TestCase):
         self.assertEqual(states[-1], ("disengaged", "released_by_agent"))
 
     def test_captions_show_what_its_doing(self):
-        self.listen_to(speech("Open Calculator."))
+        listen_to(speech("Open Calculator."))
         wait_for(lambda: self.agent.voice.said and self.agent.task is None, "the task to finish")
         self.assertIn("Looking at the screen", self.captions.doings)  # the fake Codex takes a screenshot
         self.assertEqual(self.captions.doings[-1], "")  # and when it's done, nothing
@@ -205,29 +223,29 @@ class VoiceAgentTest(unittest.TestCase):
 
     def test_on_the_phone_it_works_on_the_phone_alongside_the_mac(self):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
-        self.listen_to(speech("Open Safari."))
+        listen_to(speech("Open Safari."))
         wait_for(lambda: self.prompts(), "codex")
         mac_task = self.agent.task
-        self.listen_to(speech("Open Maps on my phone."))
+        listen_to(speech("Open Maps on my phone."))
         wait_for(lambda: len(self.prompts()) == 2, "the phone task")
         phone_run = self.runs()[1]
         self.assertIn("iPhone", phone_run["prompt"])
         self.assertIn("maps on my phone", phone_run["prompt"].lower())
-        self.assertEqual(phone_run["tools"], ["phone"])  # its tools, not the Mac's
+        self.assertIn("This request is for the iPhone", phone_run["prompt"])
         self.assertIs(self.agent.task, mac_task)  # the Mac task carried on
         self.assertTrue(mac_task.running)
         self.assertTrue(self.agent.tasks["phone"].running)
-        self.listen_to(speech("Stop."))  # stops both
+        listen_to(speech("Stop."))  # stops both
         wait_for(lambda: not any(self.agent.tasks.values()), "both tasks to stop")
 
     def test_a_short_pause_doesnt_cut_you_off(self):
-        self.listen_to(np.concatenate([speech("Open Safari."), silence(0.7), speech("Then search for the weather.")]))
+        listen_to(np.concatenate([speech("Open Safari."), silence(0.7), speech("Then search for the weather.")]))
         wait_for(lambda: self.prompts(), "codex")
         self.assertIn("Open Safari", self.prompts()[0])
         self.assertIn("search for the weather", self.prompts()[0])
 
     def test_trailing_off_on_and_waits_longer(self):
-        self.listen_to(np.concatenate([speech("Open the browser and"), silence(1.8), speech("search for the weather.")]))
+        listen_to(np.concatenate([speech("Open the browser and"), silence(1.8), speech("search for the weather.")]))
         wait_for(lambda: self.prompts(), "codex")
         time.sleep(0.5)
         self.assertEqual(len(self.prompts()), 1, self.prompts())
@@ -235,9 +253,9 @@ class VoiceAgentTest(unittest.TestCase):
 
     def test_saying_more_right_after_adds_to_the_request(self):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
-        self.listen_to(speech("Open Safari."))
+        listen_to(speech("Open Safari."))
         wait_for(lambda: self.prompts(), "codex")
-        self.listen_to(speech("And look up the weather in Paris."))
+        listen_to(speech("And look up the weather in Paris."))
         wait_for(lambda: len(self.prompts()) == 2, "the second request")
         self.assertIn("Open Safari", self.prompts()[1])
         self.assertIn("weather in Paris", self.prompts()[1])
@@ -245,15 +263,15 @@ class VoiceAgentTest(unittest.TestCase):
 
     def test_saying_stop_stops_the_task(self):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
-        self.listen_to(speech("Open Safari."))
+        listen_to(speech("Open Safari."))
         wait_for(lambda: self.prompts() and self.agent.task and self.agent.task.running, "codex")
-        self.listen_to(speech("Stop."))
+        listen_to(speech("Stop."))
         wait_for(lambda: self.agent.task is None, "the task to stop")
         self.assertEqual(self.agent.voice.said, ["Stopped."])
         self.assertEqual(len(self.prompts()), 1)
 
     def test_noise_and_silence_do_nothing(self):
-        self.listen_to(np.concatenate([silence(1), noise(2)]))
+        listen_to(np.concatenate([silence(1), noise(2)]))
         time.sleep(1)
         self.assertEqual(self.heard, [])
         self.assertEqual(self.prompts(), [])
@@ -264,7 +282,7 @@ class VoiceAgentTest(unittest.TestCase):
         finals_when_stopped = []
         stop = self.agent.voice.stop
         self.agent.voice.stop = lambda: (finals_when_stopped.append(len(self.finals())), stop())
-        self.listen_to(speech("Wait, open Safari instead."))
+        listen_to(speech("Wait, open Safari instead."))
         wait_for(lambda: self.prompts(), "codex")
         self.assertEqual(finals_when_stopped[0], 0)  # it went quiet as you started, not once you'd finished
         self.assertIn("Safari", self.prompts()[0])
@@ -273,21 +291,163 @@ class VoiceAgentTest(unittest.TestCase):
     def test_over_its_voice_its_own_words_are_ignored(self, _):
         self.agent.say("I typed twelve times thirty four into Calculator.")
         self.agent.voice.playing = True
-        self.listen_to(speech("typed twelve times thirty four into Calculator", voice="Daniel"))
+        listen_to(speech("typed twelve times thirty four into Calculator", voice="Daniel"))
         wait_for(lambda: self.finals(), "the transcript")
         time.sleep(0.5)
         self.assertEqual(self.prompts(), [])
         self.assertTrue(any("heard its own voice" in line for line in self.printed), self.printed)
 
+    def test_with_your_voice_enrolled_someone_elses_isnt_a_task(self):
+        EARS.voiceprint = your_voiceprint()
+        self.addCleanup(setattr, EARS, "voiceprint", None)
+        listen_to(speech("Open Calculator and type twelve times thirty four.", voice="Daniel"))
+        time.sleep(0.5)
+        self.assertEqual(self.prompts(), [])
+        self.assertTrue(any("not your voice" in line for line in self.printed), self.printed)
+        listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts(), "codex")
+        self.assertIn("Open Safari", self.prompts()[0])
+
     def test_without_echo_cancellation_it_doesnt_listen_while_it_talks(self):
         self.agent.voice.playing = True  # and EARS has no microphone, so nothing hears the Mac
         with mock.patch("audio.output_is_speakers", return_value=True):
-            self.listen_to(speech("I opened Calculator for you.", voice="Daniel"))
+            listen_to(speech("I opened Calculator for you.", voice="Daniel"))
             self.assertEqual(self.heard, [])
             self.agent.voice.playing = False
-            self.listen_to(speech("Open Safari."))
+            listen_to(speech("Open Safari."))
         wait_for(lambda: self.prompts(), "codex")
         self.assertIn("Open Safari", self.prompts()[0])
+
+
+def heard(who: str, seconds: float) -> list[listen.Heard]:
+    """Windows of you, them (someone else) or a pause, for UtteranceTest's judge to tell apart."""
+    value = {"you": 0.1, "them": 0.2, "pause": 0.0}[who]
+    return [listen.Heard(np.full(listen.WINDOW, value, np.float32), who != "pause", None)
+            for _ in range(round(seconds * listen.RATE / listen.WINDOW))]
+
+
+def judge(windows: list[np.ndarray]) -> tuple[bool, float]:
+    """Stands in for the voiceprint: it's you if most of the speech is."""
+    yours = float(np.mean([np.isclose(w[0], 0.1) for w in windows]))
+    return yours >= 0.5, yours
+
+
+def who(utterance: listen.Utterance) -> tuple[float, float]:
+    """Seconds of your speech and of theirs it kept."""
+    values = [h.window[0] for h in utterance.kept if h.speech]
+    return (sum(np.isclose(values, 0.1)) * listen.WINDOW / listen.RATE,
+            sum(np.isclose(values, 0.2)) * listen.WINDOW / listen.RATE)
+
+
+class UtteranceTest(unittest.TestCase):
+    """How an utterance is put together phrase by phrase once it can tell voices apart (no models)."""
+
+    def hear(self, utterance: listen.Utterance, *parts: tuple[str, float]) -> float | None:
+        """Seconds into parts when it decided you'd finished, if it did."""
+        at = 0.0
+        for part in parts:
+            for h in heard(*part):
+                utterance.add(h)
+                at += listen.WINDOW / listen.RATE
+                if utterance.over(1.2, False):
+                    return at
+        return None
+
+    def test_without_a_judge_everything_is_kept(self):
+        utterance = listen.Utterance(heard("them", 0.1))
+        self.hear(utterance, ("them", 1), ("pause", 0.5), ("you", 1))
+        self.assertAlmostEqual(who(utterance)[1], 1.1, delta=0.05)
+        self.assertAlmostEqual(who(utterance)[0], 1, delta=0.05)
+
+    def test_someone_else_alone_is_left_out(self):
+        utterance = listen.Utterance(heard("them", 0.1), judge)
+        finished = self.hear(utterance, ("them", 2), ("pause", 0.5))
+        self.assertIsNotNone(finished)
+        self.assertLess(finished, 2.5)  # as soon as they paused
+        self.assertEqual(utterance.speech, 0)
+        self.assertEqual(len(utterance.ignored), 1)
+
+    def test_them_talking_on_after_you_counts_as_quiet(self):
+        utterance = listen.Utterance(heard("you", 0.1), judge)
+        finished = self.hear(utterance, ("you", 1.5), ("pause", 0.3), ("them", 5))
+        self.assertIsNotNone(finished, "it should notice you'd finished while they kept talking")
+        self.assertLess(finished, 1.6 + 1.2 + listen.CHECK_AFTER + 0.1)
+        yours, theirs = who(utterance)
+        self.assertAlmostEqual(yours, 1.6, delta=0.05)
+        self.assertEqual(theirs, 0)
+
+    def test_them_carrying_on_right_after_you_is_cut_off(self):
+        utterance = listen.Utterance(heard("you", 0.1), judge)
+        finished = self.hear(utterance, ("you", 2.2), ("them", 5))
+        self.assertIsNotNone(finished)
+        yours, theirs = who(utterance)
+        self.assertGreater(yours, 2.3 - 0.3)
+        self.assertLess(theirs, 0.3)
+
+    def test_you_starting_right_after_them_is_you(self):
+        utterance = listen.Utterance(heard("them", 0.1), judge)
+        self.hear(utterance, ("them", 3), ("you", 3))
+        yours, theirs = who(utterance)
+        self.assertAlmostEqual(yours, 3, delta=0.05)  # all of you...
+        self.assertLessEqual(theirs, listen.RECHECK_WINDOW + listen.PREROLL)  # ...and not much of them
+        self.assertTrue(utterance.ignored)
+
+    def test_a_word_too_short_to_tell_goes_with_whats_next(self):
+        utterance = listen.Utterance(heard("them", 0.1), judge)
+        self.hear(utterance, ("pause", 0.3), ("you", 1))
+        self.assertEqual(utterance.whose, True)  # the blip of them didn't decide it
+
+
+class VoiceMatchTest(unittest.TestCase):
+    """With your voice enrolled, Parakeet only gets you: Samantha plays you, Daniel someone nearby."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_ears()
+        cls.voiceprint = your_voiceprint()
+
+    def setUp(self):
+        self.finals, self.partials, self.spoke, self.ignored = [], [], [], []
+        EARS.on_text = lambda text, final: (self.finals if final else self.partials).append(text)
+        EARS.on_speech = lambda: self.spoke.append(time.time())
+        EARS.on_ignored = lambda seconds, similarity: self.ignored.append(similarity)
+        EARS.deaf = lambda: False
+        EARS.voiceprint = self.voiceprint
+        self.addCleanup(setattr, EARS, "voiceprint", None)
+
+    def chatter(self, repeat: int = 1) -> np.ndarray:
+        return speech(" ".join(["Did you see the game last night? It was unbelievable, they came back in the "
+                                "last two minutes and won it."] * repeat), voice="Daniel")
+
+    def test_someone_else_isnt_heard(self):
+        listen_to(self.chatter())
+        time.sleep(1)
+        self.assertEqual((self.finals, self.partials, self.spoke), ([], [], []))
+        self.assertTrue(self.ignored)
+        self.assertLess(max(self.ignored), voiceprint.MATCH)
+
+    def test_you_right_after_them(self):
+        listen_to(np.concatenate([self.chatter(), silence(0.3), speech("Open Safari.")]))
+        wait_for(lambda: self.finals, "the transcript")
+        self.assertEqual(self.finals, ["Open Safari."])
+        self.assertEqual(len(self.spoke), 1)
+
+    def test_you_finish_while_they_talk_on(self):
+        audio = np.concatenate([speech("Open Safari."), silence(0.4), self.chatter(2)])
+        hearing = threading.Thread(target=listen_to, args=(audio,))
+        hearing.start()
+        self.addCleanup(hearing.join)
+        wait_for(lambda: self.finals, "the transcript")
+        self.assertTrue(hearing.is_alive(), "it should be done while they're still talking")
+        self.assertEqual(self.finals, ["Open Safari."])
+
+    def test_you_over_a_tv(self):
+        you = speech("Open Safari and look up the weather for tomorrow.")
+        audio = self.chatter(2) * 0.5
+        audio[listen.RATE:listen.RATE + len(you)] += you
+        listen_to(audio)
+        wait_for(lambda: self.finals, "the transcript")
+        self.assertEqual(self.finals, ["Open Safari and look up the weather for tomorrow."])
 
 
 class EchoCancellationTest(unittest.TestCase):

@@ -1,16 +1,18 @@
-"""Give your Mac a task in plain English; Codex does it with the real mouse and keyboard.
+"""Give your Mac or iPhone a task in plain English; Codex does it with the real mouse and keyboard,
+or with taps on the phone.
 
     python3 python/agent.py "make a new note in Notes that says buy milk"
-    python3 python/agent.py --phone "open Safari on my phone"     # the iPhone (python/phone.py)
+    python3 python/agent.py "open Maps on my phone and find coffee nearby"
 
-Codex looks at the screen and acts with mac_mcp.py's tools (agent-vhid), or phone_mcp.py's on the
-iPhone. It runs on `codex app-server` (python/codex_app.py), so on your Codex subscription, with
+Codex looks at the screens and acts with mac_mcp.py's tools (agent-vhid) and phone_mcp.py's on the
+iPhone (python/phone.py). Every task gets both; one that says "phone" or "iPhone" starts with the
+phone's screen, any other with the Mac's. It runs on `codex app-server` (python/codex_app.py), so on your Codex subscription, with
 our instructions (instructions.md) in place of Codex's own. Touch any key, the trackpad or the
 mouse to take over; double-tap Right Option to let it continue.
 
 Environment (or .env):
   CODEX_BIN     codex executable (default: the one inside ChatGPT.app, else `codex` on PATH)
-  AGENT_MODEL   model (default: your Codex config's model)
+  AGENT_MODEL   model (default: gpt-6.1-terra)
   AGENT_EFFORT  reasoning effort for each step: low (default, quickest), medium, high. Higher
                 thinks longer before every click, which makes the agent several times slower
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -35,31 +38,49 @@ from codex_app import AppServer, CodexError  # noqa: E402
 
 BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
 LOG = os.path.join(tempfile.gettempdir(), "agent-vhid-codex.log")
+MODEL = "gpt-6.1-terra"
 EFFORT = "low"  # each step is a look and a click; more thinking mostly adds seconds to every one
 INSTRUCTIONS = os.path.join(HERE, "instructions.md")
 
 PROMPT = """\
-{intro} The user just asked (by voice, so words may be mis-transcribed; use the sensible meaning):
+You are operating the user's Mac and iPhone for them. {focus} The user just asked (by voice, so words \
+may be mis-transcribed; use the sensible meaning):
 
     "{task}"
 {previous}{conversation}
 How to work
-- If the request is only a question that needs neither the screen nor the {device}, answer it \
-directly without any tools.
+- If the request is only a question that needs neither the Mac nor the phone, answer it directly \
+without any tools.
 - Be quick: the user is waiting, and every call to a tool or the model costs seconds. Don't write \
 anything before or between actions (no plans, no progress notes); your only message is the final \
 reply.
 - Look before you act: use the screenshot attached to this request if there is one, otherwise take \
-one. Every action returns a screenshot taken just after it, so don't call screenshot again after \
-an action; check that one before the next step.
+one of the device you're using. Every action returns a screenshot taken just after it, so don't \
+call screenshot again after an action; check that one before the next step.
 - When you already know the next few steps, do them in one batch call rather than one call each.
-{how}
+- Use only the mac and phone tools to see and control the devices: the user wants to watch it \
+happen. Web search, when you have it, is fine for looking things up.
 - Finish the whole task, then reply in short spoken-style sentences (it is read aloud): what you \
 did, or the answer. One or two sentences unless the question needs more. If you couldn't finish, \
 say what is left.
 
-The user is in charge
-{in_charge}
+The Mac (the `mac` tools): you see its screen with screenshots and act with the real mouse and \
+keyboard, exactly like a person at the computer.
+- Coordinates are pixels in the latest Mac screenshot. Use find_text to get exact positions of \
+small buttons, menu items and links.
+- Prefer keyboard shortcuts and open_app (Spotlight) when they are quicker than clicking.
+- The user can take over at any moment by touching the keyboard, trackpad or mouse. When a tool \
+says they took control, stop, call wait_for_control, and look at the new screenshot before going \
+on. If they don't hand control back, stop and say where you got to.
+
+The iPhone (the `phone` tools): you see its screen with screenshots and act with taps, swipes and \
+typing, like a person holding it.
+- Coordinates are points in the latest phone screenshot. Use elements for the exact positions and \
+labels of small buttons, and tap_element to tap one by its label.
+- open_app opens an app by bundle id; press_home goes to the home screen.
+- If a tool says the phone isn't connected, stop and pass on what it said.
+- The user may pick the phone up and use it at any time. If the screen changes in a way you didn't \
+cause, look again before going on; if they seem to be using it, stop and say where you got to.
 
 Never do these unless the request clearly asks for that exact thing:
 - buy anything, pay, or move money
@@ -71,38 +92,22 @@ If the task needs one of these, get everything ready, stop before the final step
 left for the user to confirm.
 """
 
-DEVICES = {
-    "mac": {
-        "device": "computer",
-        "intro": "You are operating the user's Mac for them through the `mac` tools: you see the screen with "
-                 "screenshots and act with the real mouse and keyboard, exactly like a person at the computer.",
-        "how": """\
-- Coordinates are pixels in the latest screenshot. Use find_text to get exact positions of small \
-buttons, menu items and links.
-- Prefer keyboard shortcuts and open_app (Spotlight) when they are quicker than clicking.
-- Use only the mac tools to see and control the computer: the user wants to watch it happen on \
-screen. Web search, when you have it, is fine for looking things up.""",
-        "in_charge": """\
-- They can take over at any moment by touching the keyboard, trackpad or mouse. When a tool says \
-they took control, stop, call wait_for_control, and look at the new screenshot before going on. \
-If they don't hand control back, stop and say where you got to.""",
-    },
-    "phone": {
-        "device": "phone",
-        "intro": "You are operating the user's iPhone for them through the `phone` tools: you see its screen "
-                 "with screenshots and act with taps, swipes and typing, like a person holding it. The user "
-                 "may be using their Mac meanwhile; leave the Mac alone.",
-        "how": """\
-- Coordinates are points in the latest phone screenshot. Use elements for the exact positions and \
-labels of small buttons, and tap_element to tap one by its label.
-- open_app opens an app by bundle id; press_home goes to the home screen.
-- Use only the phone tools. Web search, when you have it, is fine for looking things up.
-- If a tool says the phone isn't connected, stop and pass on what it said.""",
-        "in_charge": """\
-- They may pick the phone up and use it at any time. If the screen changes in a way you didn't \
-cause, look again before going on; if they seem to be using it, stop and say where you got to.""",
-    },
+# Every task gets both devices' tools (mac.click, phone.tap, ...). The device a request is for
+# decides which one it looks at first and where it works when the request doesn't say.
+DEVICES = {"mac": "Mac", "phone": "iPhone"}
+FOCUS = {
+    "mac": "Use the device the request is about. When it doesn't say, use the Mac, unless the request "
+           "needs something only the phone has (one of its apps, or what's on it).",
+    "phone": "This request is for the iPhone. Another task may be using the Mac meanwhile, so leave the "
+             "Mac alone unless the request needs it.",
 }
+# "on my phone", "open Maps on the iPhone"; not "my phone number"
+PHONE = re.compile(r"\biphone\b|\b(?:my|the|on|from|with|using) phone\b(?! numbers?\b)")
+
+
+def focus(request: str) -> str:
+    """The device a request is for: 'phone' when it says so, else 'mac'."""
+    return "phone" if PHONE.search(request.lower()) else "mac"
 
 
 def find_codex() -> str:
@@ -197,25 +202,24 @@ def stop_server():
             _server = None
 
 
-def device_tools(device: str):
-    if device == "phone":
-        from phone_mcp import PhoneTools
-        return PhoneTools()
+def device_tools() -> dict:
+    """Each device's tools, which Codex's tool calls come back to. Neither connects until used."""
     from mac_mcp import MacTools
-    return MacTools()
+    from phone_mcp import PhoneTools
+    return {"mac": MacTools(), "phone": PhoneTools()}
 
 
-def tool_specs(device: str) -> list[dict]:
-    """The device's tools, as Codex's dynamic tools: the model calls them as `mac.click` etc."""
-    if device == "phone":
-        from phone_mcp import TOOLS
-        about = "The user's iPhone: see its screen and tap, swipe and type."
-    else:
-        from mac_mcp import TOOLS
-        about = "The user's Mac: see the screen and use the real mouse and keyboard."
-    return [{"type": "namespace", "name": device, "description": about,
+def tool_specs() -> list[dict]:
+    """Both devices' tools, as Codex's dynamic tools: the model calls them as `mac.click`,
+    `phone.tap` etc. Always the same, so they stay in the prompt cache from task to task."""
+    import mac_mcp
+    import phone_mcp
+    about = {"mac": "The user's Mac: see the screen and use the real mouse and keyboard.",
+             "phone": "The user's iPhone: see its screen and tap, swipe and type."}
+    tools = {"mac": mac_mcp.TOOLS, "phone": phone_mcp.TOOLS}
+    return [{"type": "namespace", "name": device, "description": about[device],
              "tools": [{"type": "function", "name": t["name"], "description": t["description"],
-                        "inputSchema": t["inputSchema"]} for t in TOOLS]}]
+                        "inputSchema": t["inputSchema"]} for t in tools[device]]} for device in DEVICES]
 
 
 def tool_reply(res: dict) -> dict:
@@ -252,16 +256,20 @@ def effort() -> str:
     return os.environ.get("AGENT_EFFORT") or EFFORT
 
 
+def model() -> str:
+    return os.environ.get("AGENT_MODEL") or MODEL
+
+
 def describe_model() -> str:
-    """The model and effort the computer agent runs with, e.g. 'gpt-6-astra, low effort'."""
-    model = os.environ.get("AGENT_MODEL") or codex_config().get("model") or "Codex's default model"
-    return f"{model}, {effort()} effort"
+    """The model and effort the computer agent runs with, e.g. 'gpt-6.1-terra, low effort'."""
+    return f"{model()}, {effort()} effort"
 
 
 def describe_call(item: dict) -> str:
     args = item.get("arguments") or {}
     shown = ", ".join(f"{k}={json.dumps(v)[:60]}" for k, v in args.items() if k != "screenshot")
-    return f"{item.get('tool')}({shown})"
+    on = "phone." if item.get("namespace") == "phone" else ""
+    return f"{on}{item.get('tool')}({shown})"
 
 
 def first_look(tools) -> tuple[str, str] | None:
@@ -309,9 +317,10 @@ class CodexTask:
     'think', 'done' or 'failed'. Each event is also written to LOG with the seconds since the start."""
 
     def __init__(self, task: str, previous: str | None = None, conversation: str | None = None, on_event=None,
-                 device: str = "mac"):
+                 device: str | None = None):
+        """device: the one the request is for, 'mac' or 'phone' (from its words when not given)."""
         self.task = task
-        self.device = device
+        self.device = device or focus(task)
         self.on_event = on_event or (lambda kind, text: None)
         prev = convo = ""
         if previous:
@@ -320,11 +329,11 @@ class CodexTask:
         if conversation:
             convo = f"\nThe conversation before this request, for context:\n{conversation}\n"
         self.prompt = PROMPT.format(task=task.replace('"', "'"), previous=prev, conversation=convo,
-                                    **DEVICES[device])
+                                    focus=FOCUS[self.device])
         self.final: str | None = None
         self.started_at = 0.0  # time.time()
         self.elapsed = 0.0  # seconds it took
-        self.tools = None  # MacTools or PhoneTools, which Codex's tool calls come back to
+        self.tools: dict = {}  # device_tools()
         self._server: AppServer | None = None
         self._thread = self._turn = None  # Codex's ids for this task
         self._log = None
@@ -352,28 +361,26 @@ class CodexTask:
         finally:
             if self._server and self._thread:
                 self._server.detach(self._thread)
-            if self.device == "mac" and self.tools:
-                self.tools.mac.close()
+            if self.tools:
+                self.tools["mac"].mac.close()
             log, self._log = self._log, None
             log.close()
 
     def _converse(self, look: bool):
-        self.tools = device_tools(self.device)
+        self.tools = device_tools()
         prompt, image = self.prompt, None
-        seen = first_look(self.tools) if look else None
+        seen = first_look(self.tools[self.device]) if look else None
         if seen:
             image, about = seen
-            prompt += (f"\nAttached: a screenshot taken as they asked, in the same coordinates as the tools. "
-                       f"{about}\n")
+            prompt += (f"\nAttached: a screenshot of the {DEVICES[self.device]} taken as they asked, in the same "
+                       f"coordinates as its tools. {about}\n")
             self._event("action", "screenshot (attached to the request)")
         if self._stopped:
             return self._finish("failed", "stopped")
         self._server = codex_server()
-        params = {"baseInstructions": instructions(), "dynamicTools": tool_specs(self.device), "ephemeral": True,
-                  "sandbox": "read-only", "approvalPolicy": "never",
+        params = {"baseInstructions": instructions(), "dynamicTools": tool_specs(), "model": model(),
+                  "ephemeral": True, "sandbox": "read-only", "approvalPolicy": "never",
                   "cwd": os.path.join(tempfile.gettempdir(), "agent-vhid-work")}
-        if os.environ.get("AGENT_MODEL"):
-            params["model"] = os.environ["AGENT_MODEL"]
         self._thread = self._server.request("thread/start", params)["thread"]["id"]
         self._server.attach(self._thread, self._on_message, self._call_tool)
         inputs = [{"type": "text", "text": prompt}] + ([{"type": "image", "url": image}] if image else [])
@@ -434,9 +441,11 @@ class CodexTask:
             self._finish("failed", f"Codex stopped unexpectedly (exit code {params.get('code')}); see {LOG}")
 
     def _call_tool(self, params: dict) -> dict:
-        if self._stopped:
-            return {"success": False, "contentItems": [{"type": "inputText", "text": "Stopped by the user."}]}
-        return tool_reply(self.tools.call(params["tool"], params.get("arguments") or {}))
+        tools = self.tools.get(params.get("namespace") or self.device)
+        if self._stopped or tools is None:
+            text = "Stopped by the user." if self._stopped else f"There are no {params.get('namespace')} tools."
+            return {"success": False, "contentItems": [{"type": "inputText", "text": text}]}
+        return tool_reply(tools.call(params["tool"], params.get("arguments") or {}))
 
     def _interrupt(self):
         try:
@@ -483,23 +492,16 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 0
     settings.load()
-    if argv[0] == "--phone":
-        run = CodexTask(" ".join(argv[1:]), on_event=print_event, device="phone").start()
-        try:
-            run.wait()
-        except KeyboardInterrupt:
-            run.stop()
-            return 130
-        return 0 if run.final is not None else 1
     task = " ".join(argv)
     mac = AgentVHID()
-    try:
-        status = mac.status()
-    except AgentVHIDError as e:
-        print(f"agent-vhid-helper isn't reachable ({e}). Start it with ./run.sh or ./voice.sh.")
-        return 1
-    if status.get("state") != "engaged":
-        print("Double-tap Right Option to hand over the mouse and keyboard.")
+    if focus(task) == "mac":
+        try:
+            status = mac.status()
+        except AgentVHIDError as e:
+            print(f"agent-vhid-helper isn't reachable ({e}). Start it with ./run.sh or ./voice.sh.")
+            return 1
+        if status.get("state") != "engaged":
+            print("Double-tap Right Option to hand over the mouse and keyboard.")
     run = CodexTask(task, on_event=print_event).start()
     try:
         run.wait()

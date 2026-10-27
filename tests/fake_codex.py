@@ -4,7 +4,7 @@ plays out each turn: a screenshot, one real call back to the agent's tools (wait
 screenshot, so nothing looks at your screen), some "work", then its final message. turn/interrupt
 ends the turn early.
 
-  FAKE_CODEX_LOG      file it appends to: {"prompt", "args", "tools", "instructions", "effort"} for
+  FAKE_CODEX_LOG      file it appends to: {"prompt", "args", "model", "tools", "instructions", "effort"} for
                       each task, {"tool_reply": ...} for each answer to its tool call
   FAKE_CODEX_SECONDS  how long the "work" takes (default 0.3)
   FAKE_CODEX_REPLY    the final message
@@ -87,6 +87,7 @@ def handle(msg: dict):
         interrupted[turn_id] = threading.Event()
         thread = threads[params["threadId"]]
         record({"prompt": params["input"][0]["text"], "args": sys.argv[1:], "effort": params.get("effort"),
+                "model": thread.get("model"),
                 "tools": [ns["name"] for ns in thread["dynamicTools"]], "instructions": thread["baseInstructions"],
                 "images": len(params["input"]) - 1})
         threading.Thread(target=play, args=(params["threadId"], turn_id), daemon=True).start()

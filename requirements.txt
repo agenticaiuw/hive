@@ -5,3 +5,4 @@ kokoro-onnx>=0.4.7   # the agent's voice (python/speech.py); its model goes in m
 sounddevice>=0.5     # the microphone
 livekit>=1.0         # WebRTC's echo canceller (python/mic.py): the Mac's own sound out of the microphone
 soxr>=0.5            # resampling what the Mac plays for it
+kaldi-native-fbank>=1.22  # the sound features python/voiceprint.py tells voices apart by

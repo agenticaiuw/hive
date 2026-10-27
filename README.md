@@ -4,8 +4,8 @@ Talk to your Mac and it talks back. It's always listening: say what you want, in
 any window, and a computer agent does the work on screen with a real-looking
 keyboard and mouse, then tells you out loud what it did. It hands control back to you the
 instant you touch anything, like Tesla's Autopilot. Captions at the bottom of the screen show
-what it says and what it's doing, and "... on my phone" has it use your iPhone instead,
-at the same time as the Mac.
+what it says and what it's doing. It can use your iPhone too, whenever a request needs it,
+and "... on my phone" runs on the phone at the same time as a task on the Mac.
 
 ```bash
 git submodule update --init   # once, after cloning: Karabiner's client headers
@@ -66,7 +66,7 @@ comes back to you.
 | Talk while it's talking | It goes quiet at once and listens |
 | Say more within a few seconds | It's added to what you just asked |
 | Say something new while it works | It drops the old task and does the new one, knowing what it was doing |
-| Say "... on my phone" / "on my iPhone" | It does that on your iPhone, alongside whatever it's doing on the Mac |
+| Say "... on my phone" / "on my iPhone" | It does that on your iPhone, alongside whatever it's doing on the Mac. Other requests can use the phone too when they need it |
 | Say "stop" | Stops the computer agent (on the Mac and the phone) |
 | Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
 | Double-tap Right Option | It carries on from where things are now |
@@ -74,6 +74,21 @@ comes back to you.
 It keeps listening while it talks, out of the speakers too: everything the Mac
 plays (its own voice, a video, music) is taken back out of what the microphone
 hears, so only you count. It waits for you to finish before it starts a sentence.
+
+To keep other people out (someone talking nearby, a video on another device),
+teach it your voice once:
+
+```bash
+./voice.sh --enroll
+```
+
+You read five short lines aloud. From then on it only listens to that voice:
+someone else's words don't show up or become a task, even when they talk right
+before or after you or carry on while you speak; the line your words show on
+just says "(not your voice, ignored ...)". It takes up to 0.8 s of your speech
+to be sure it's you, so the words and cutting in while it talks start then. Enroll
+again to add another microphone or room; `.venv/bin/python python/voiceprint.py
+--forget` goes back to hearing everyone.
 
 Listening and speaking both run on this Mac with open-source models, so they
 cost nothing and nothing you say leaves the Mac (until it becomes the task for
@@ -91,16 +106,26 @@ Codex):
   microphones it follows, except to a Bluetooth headset's (AirPods, Sony, ...):
   listening through one switches it to call-quality sound, so it keeps using the
   Mac's own microphone and your headphones keep sounding right.
+- **Telling your voice from others: WeSpeaker** ([ResNet34-LM](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM),
+  trained on VoxCeleb, CC-BY-4.0, 26 MB) in `python/voiceprint.py`, through ONNX
+  Runtime. Once you've enrolled, each thing heard is turned into a voiceprint and
+  compared with yours (your own voice scores around 0.6-0.9, other people's under
+  0.3; `VOICE_MATCH`, 0.4, is the line). Each phrase (speech between pauses of a
+  quarter second) is checked on its own after 0.8 s or when it ends; someone
+  else's is left out and counts as quiet, so you're done when *you* stop. While
+  someone else talks it keeps checking in case you start right after them, and
+  all you said together is checked once more at the end. Your voiceprint stays in
+  `models/voiceprint.npz`.
 - **Echo cancellation: WebRTC's** (the one in Chrome and Google Meet, from the
   `livekit` package, running on this Mac) in `python/mic.py`. `build/agent-vhid-tap`
   (`tools/tap.swift`, a Core Audio process tap) streams what the Mac is playing,
   and the canceller subtracts it from the microphone. Leftover echo is much quieter
   than you talking at the computer, so while the Mac plays something, only sound
   about as loud as you usually are counts as you (it learns how loud that is).
-- **The worker: your Codex model**, e.g. **gpt-6-astra**, at low reasoning effort
-  (set `AGENT_EFFORT` for more). Each step is a look and a click, and more thinking
-  mostly adds seconds to every one of them. It gets what you said word for word,
-  uses your config's model, and keeps web search.
+- **The worker: GPT-6.1 Terra** on your Codex subscription, at low reasoning effort
+  (set `AGENT_MODEL` or `AGENT_EFFORT` to change them). Each step is a look and a
+  click, and more thinking mostly adds seconds to every one of them. It gets what
+  you said word for word, and keeps web search.
 - **The voice: Kokoro** ([Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M),
   Apache 2.0) in `python/speech.py`, through ONNX Runtime at full precision. It
   speaks a sentence at a time, so it starts before the whole reply is made, and
@@ -109,8 +134,8 @@ Codex):
   speaks.
 
 `./voice.sh` sets these up the first time: the Python packages in `.venv`
-(`requirements.txt`), Kokoro and Silero VAD in `models/` (350 MB) and Parakeet in
-the Hugging Face cache (2.4 GB). The rest of the project uses only the standard library.
+(`requirements.txt`), Kokoro and Silero VAD in `models/` (350 MB) and Parakeet and
+WeSpeaker in the Hugging Face cache (2.4 GB). The rest of the project uses only the standard library.
 
 Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your shell):
 
@@ -120,7 +145,8 @@ Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your
 | `TTS_SPEED` | `1.0` is normal; `1.1` is a little quicker |
 | `STT_MODEL` | Empty for Parakeet v2 (English); `mlx-community/parakeet-tdt-0.6b-v3` also knows 24 other European languages |
 | `LISTEN_PAUSE` | Seconds of quiet that end what you're saying; `1.2` by default |
-| `AGENT_MODEL` | Override the computer agent's model; empty means your Codex config's |
+| `VOICE_MATCH` | After `./voice.sh --enroll`: how alike a voice has to be to count as you; `0.4` by default. Lower it if it ignores you, raise it if it still hears others |
+| `AGENT_MODEL` | Override the computer agent's model; empty means `gpt-6.1-terra` |
 | `AGENT_EFFORT` | Its reasoning effort: `low` (default), `medium`, `high`, ... |
 | `CAPTIONS` | `0` turns the on-screen captions off |
 | `PHONE_RELAY` | The phone relay's folder (see [Your iPhone](#your-iphone)); empty means no phone |
@@ -150,10 +176,10 @@ you.
   its IDE extensions use, signed in with your ChatGPT account, so the agent runs
   on your Codex subscription; no API key. Each task is a new thread on it.
 - **Only our tools and instructions:** `python/instructions.md` (a few lines)
-  replaces Codex's coding-agent system prompt, and the model gets one set of
-  tools, the Mac's from `python/mac_mcp.py` (screenshot, click, type_text,
+  replaces Codex's coding-agent system prompt, and the model gets two sets of
+  tools: the Mac's from `python/mac_mcp.py` (screenshot, click, type_text,
   press_key, scroll, drag, open_app, find_text, read_screen, wait_for_control,
-  batch, ...) or the iPhone's from `python/phone_mcp.py`. They run in the voice
+  batch, ...) and the iPhone's from `python/phone_mcp.py`. They run in the voice
   agent's own process: Codex calls back into it. Codex's own tools (shell, file
   edits, sub-agents, browser, image generation, ...), your connectors, plugins,
   hooks, skills and MCP servers are switched off for it with `-c` overrides; your
@@ -178,7 +204,7 @@ you.
   changing settings or typing passwords unless you asked for exactly that.
 
 Typing a task instead: `python3 python/agent.py "open Calculator and work out 12% of 340"`
-(double-tap Right Option to hand over), or add `--phone` for the iPhone. What Codex does,
+(double-tap Right Option to hand over), or `"open Maps on my phone"` for the iPhone. What Codex does,
 step by step with timings, goes to `agent-vhid-codex.log` in your temp folder (`$TMPDIR`),
 the helper's output to `/tmp/agent-vhid-helper.log`.
 
@@ -197,7 +223,10 @@ Shortcut, then check:
 ```
 
 On the phone it looks with screenshots, taps, swipes, types, opens apps by bundle
-id and reads the accessibility tree for exact labels. If the phone isn't
+id and reads the accessibility tree for exact labels. Every task gets the phone's
+tools along with the Mac's, so it uses the phone whenever a request needs it; one
+that says "phone" or "iPhone" starts by looking at the phone and leaves the Mac to
+any other task. If the phone isn't
 connected it says so and tells you to run Pocket Connect.
 
 ## One-time setup
