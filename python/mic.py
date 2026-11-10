@@ -39,10 +39,11 @@ class Microphone:
     thread; playing says the Mac was playing something then (so there may be a little echo left).
 
     devices=False opens neither the microphone nor the tap; from_mic() and from_mac() take the
-    audio instead (the tests use it)."""
+    audio instead (the tests use it). active=False leaves both closed until set_active(True)."""
 
-    def __init__(self, on_audio, devices: bool = True):
+    def __init__(self, on_audio, devices: bool = True, active: bool = True):
         self.on_audio = on_audio
+        self.active = active
         self.name = ""             # the microphone's
         self.error: str | None = None
         self.tap_error: str | None = None
@@ -57,6 +58,10 @@ class Microphone:
             self._canceller.set_stream_delay_ms(60)  # a starting guess; it measures the real delay
         except Exception as e:  # not installed
             self.canceller_error = str(e) or type(e).__name__
+        self._changed = threading.Event()  # set_active() was called, or the program is ending
+        self._quitting = threading.Event()
+        # Registered after the canceller is made, so it runs before livekit's own exit handler takes the canceller away.
+        atexit.register(lambda: (self._quitting.set(), self._changed.set()))
         threading.Thread(target=self._process, daemon=True).start()
         if devices:
             threading.Thread(target=self._keep_open, daemon=True).start()
@@ -67,6 +72,12 @@ class Microphone:
         if self.tap_error:
             return f"off ({self.tap_error})"
         return "on (it takes what the Mac plays out of what it hears)"
+
+    def set_active(self, on: bool):
+        """Opens (True) or closes the microphone and the tap. While closed, macOS shows no
+        microphone in use."""
+        self.active = on
+        self._changed.set()
 
     def hears_the_mac(self) -> bool:
         """The echo canceller is getting what the Mac plays, so the agent's voice won't be heard as you."""
@@ -88,45 +99,63 @@ class Microphone:
     def _process(self):
         mic = mac = np.zeros(0, np.float32)
         quiet_for = TAIL * RATE  # samples since the Mac last played something
-        while True:
+        while not self._quitting.is_set():
             kind, samples = self._queue.get()
-            if kind == "mac":
-                if np.abs(samples).max(initial=0) > SILENT:
-                    self.heard_mac_at = time.monotonic()
-                    quiet_for = 0
-                else:
-                    quiet_for += len(samples)
-                if self._canceller is None:
+            try:
+                if kind == "mac":
+                    if np.abs(samples).max(initial=0) > SILENT:
+                        self.heard_mac_at = time.monotonic()
+                        quiet_for = 0
+                    else:
+                        quiet_for += len(samples)
+                    if self._canceller is None:
+                        continue
+                    mac = np.concatenate([mac, samples])
+                    while len(mac) >= FRAME:
+                        self._canceller.process_reverse_stream(self._frame(mac[:FRAME]))
+                        mac = mac[FRAME:]
                     continue
-                mac = np.concatenate([mac, samples])
-                while len(mac) >= FRAME:
-                    self._canceller.process_reverse_stream(self._frame(mac[:FRAME]))
-                    mac = mac[FRAME:]
-                continue
-            mic = np.concatenate([mic, samples])
-            while len(mic) >= FRAME:
-                frame, mic = mic[:FRAME], mic[FRAME:]
-                if self._canceller is not None:
-                    data = self._frame(frame)
-                    self._canceller.process_stream(data)
-                    frame = np.frombuffer(data.data, np.int16).astype(np.float32) / 32768
-                self.on_audio(frame, quiet_for < TAIL * RATE)
+                mic = np.concatenate([mic, samples])
+                while len(mic) >= FRAME:
+                    frame, mic = mic[:FRAME], mic[FRAME:]
+                    if self._canceller is not None:
+                        data = self._frame(frame)
+                        self._canceller.process_stream(data)
+                        frame = np.frombuffer(data.data, np.int16).astype(np.float32) / 32768
+                    self.on_audio(frame, quiet_for < TAIL * RATE)
+            except Exception:
+                if self._quitting.is_set():
+                    return  # the program is ending and livekit has let go of the canceller
+                raise
 
     # -- keeping the microphone and the tap open --
 
     def _keep_open(self):
         """Reopens the microphone when you switch microphones (audio.microphone() picks which), and
-        the tap when you switch speakers."""
+        the tap when you switch speakers; closes both while not active."""
         try:
             import sounddevice
         except ImportError as e:
             self.error = str(e)
             return
         quitting = threading.Event()
-        atexit.register(quitting.set)  # runs before sounddevice's own exit handler shuts PortAudio down
+        # Runs before sounddevice's own exit handler shuts PortAudio down.
+        atexit.register(lambda: (quitting.set(), self._changed.set()))
         stream = mic_device = tap = out_device = None
         tap_tried = 0.0
         while not quitting.is_set():
+            if not self.active:
+                if stream is not None:
+                    stream.close()
+                    stream = mic_device = None
+                if tap is not None:
+                    if tap.poll() is None:
+                        tap.terminate()
+                    tap = out_device = None
+                    tap_tried = 0.0
+                self._changed.wait()
+                self._changed.clear()
+                continue
             current = audio.microphone()
             try:
                 active = stream is not None and stream.active
@@ -141,8 +170,14 @@ class Microphone:
                     sounddevice._initialize()
                 mic_device = current
                 wanted = audio.name(mic_device)
-                index = next((i for i, d in enumerate(sounddevice.query_devices())
-                              if d["name"] == wanted and d["max_input_channels"] > 0), None)
+                def find():
+                    return next((i for i, d in enumerate(sounddevice.query_devices())
+                                 if d["name"] == wanted and d["max_input_channels"] > 0), None)
+                index = find()
+                if index is None and wanted:  # plugged in while it was closed
+                    sounddevice._terminate()
+                    sounddevice._initialize()
+                    index = find()
                 try:
                     stream = sounddevice.InputStream(device=index, samplerate=RATE, channels=1, dtype="float32",
                                                      blocksize=FRAME, latency="low",
@@ -158,7 +193,8 @@ class Microphone:
                     tap.terminate()
                 out_device, tap_tried = output, time.monotonic()
                 tap = self._start_tap()
-            quitting.wait(1)
+            self._changed.wait(1)
+            self._changed.clear()
 
     def _start_tap(self) -> subprocess.Popen | None:
         if not os.path.exists(TAP):
@@ -173,6 +209,8 @@ class Microphone:
         header = tap.stdout.readline().split()
         if len(header) != 2:
             tap.wait()
+            if not self.active:
+                return  # closed on purpose
             self.tap_error = (tap.stderr.read().decode().strip().removeprefix("agent-vhid-tap: ")
                               or f"the tap stopped ({tap.returncode})")
             return

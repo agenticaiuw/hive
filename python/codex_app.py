@@ -1,6 +1,7 @@
 """A connection to `codex app-server`: the server the Codex app and its IDE extensions use, signed in
-with your ChatGPT account, so it runs on your Codex subscription. agent.py keeps one running for
-the whole session and starts a thread on it for each task, which beats `codex exec` because
+with your ChatGPT account, so it runs on your Codex subscription. agent.py keeps one running the
+whole time, with a thread on it for each conversation and a turn for each request, which beats
+`codex exec` because
 - our own few lines of instructions replace Codex's coding-agent system prompt,
 - the model gets our Mac and iPhone tools directly, and calls back into this process to use them
   (no MCP server in between),

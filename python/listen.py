@@ -2,7 +2,7 @@
 open-source speech recognition model) running on this Mac through MLX.
 
 Silero VAD (an open-source voice activity detector, models/silero_vad.onnx) notices when you
-start talking. The words show up as you go, and once you stop for LISTEN_PAUSE seconds (1.2 by
+start talking. The words show up as you go, and once you stop for LISTEN_PAUSE seconds (0.8 by
 default; longer if you trailed off on "and..." or a comma), the whole thing is transcribed once
 more for the final text. Coughs and clicks too short to be speech are ignored. It hears through
 python/mic.py, which takes whatever the Mac is playing (the agent's own voice, a video) back out
@@ -14,6 +14,15 @@ python/voiceprint.py), other people talking nearby are left out too.
 
 STT_MODEL picks another Parakeet model (default mlx-community/parakeet-tdt-0.6b-v2, English;
 mlx-community/parakeet-tdt-0.6b-v3 also knows 24 other European languages).
+
+STT_FINAL_MODEL, if set, writes down the final text instead of Parakeet (which still shows the
+words as you go): mlx-community/Qwen3-ASR-1.7B-8bit, Alibaba's open model, a little more accurate
+than Parakeet on the Open ASR Leaderboard and, unlike it, told the words you use (STT_VOCABULARY,
+comma-separated, on top of VOCABULARY), so names come out right. It runs through mlx-audio
+(pip install mlx-audio==0.5.9) and takes longer than Parakeet.
+
+    .venv/bin/python python/listen.py --download-final  # get it
+    .venv/bin/python python/listen.py --check-final     # how it and Parakeet do on test sentences
 """
 
 from __future__ import annotations
@@ -55,6 +64,9 @@ CHUNK, OVERLAP = 120, 15  # the final pass reads long recordings in overlapping 
 MIN_SECONDS = 2  # shorter audio is padded with silence
 LEAD_IN = 0.3  # seconds of silence put before what it reads: audio that starts mid-word can come out as nothing
 DEFAULT_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
+FINAL_MODEL = "mlx-community/Qwen3-ASR-1.7B-8bit"  # what --download-final gets
+VOCABULARY = ["Codex", "Claude", "ChatGPT", "Kokoro", "Parakeet", "Superwhisper", "iPhone", "macOS",
+              "PowerPoint", "Safari", "Finder"]  # words the final model is told you may say
 VAD_MODEL = os.path.join(ROOT, "models", "silero_vad.onnx")
 VAD_URL = "https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 
@@ -180,7 +192,10 @@ class Utterance:
         waited = self.quiet * WINDOW / RATE
         return waited >= pause and (waited >= LONG_PAUSE or not unfinished)
 
-    def end(self):
+    def end(self, cut: bool = False):
+        """cut: listening stopped, so the phrase going on ends here, with no pause to judge it at."""
+        if cut and self.whose is None and self.phrase_speech * WINDOW / RATE >= MIN_SPEECH:
+            self._check(self.phrase, self.phrase)
         if self.whose is False:  # someone else still talking
             self._ignore(self.phrase_speech * WINDOW / RATE)
 
@@ -247,10 +262,17 @@ class Ears:
     """on_text(text, final) is called from a background thread: with final=False as the words
     come while you talk, then once with final=True when you've finished. on_speech() is called
     once you've talked long enough that it isn't a cough (~0.3 s), before any words are ready.
+    Before each final on_text, heard_times says when (time.monotonic()) you stopped talking
+    ('stopped'), it decided you'd finished ('decided') and it had written it down ('written').
 
     deaf() is asked for every bit of audio: while it's true what the microphone hears is
     ignored (the agent's own voice out of the speakers, when echo cancellation can't hear the
     Mac). mic=False leaves the microphone closed; feed() then takes the audio (the tests use it).
+
+    listen(False) stops listening: what you were saying ends there, as if you'd paused, and the
+    microphone closes until listen(True). listening=False starts that way. cut(then) ends what
+    you're saying without stopping, and calls then() once its words have gone to on_text, so
+    what comes after can go somewhere else (dictation).
 
     With a voiceprint (python/voiceprint.py) you've enrolled, other voices are left out, phrase
     by phrase (Utterance): nothing shows or is written down until it's sure it's you, and each
@@ -258,20 +280,26 @@ class Ears:
     on_utterance(samples), if set, gets the audio of each thing you said; words=False skips
     Parakeet altogether (enrolling only needs the audio)."""
 
-    def __init__(self, on_text, mic: bool = True, deaf=lambda: False, voiceprint=None, words: bool = True):
+    def __init__(self, on_text, mic: bool = True, deaf=lambda: False, voiceprint=None, words: bool = True,
+                 listening: bool = True):
         self.on_text = on_text
+        self.listening = listening
         self.on_speech = lambda: None
         self.on_ignored = lambda seconds, similarity: None
         self.on_utterance = None
         self.deaf = deaf
         self.voiceprint = voiceprint
         self.words = words
-        self.pause = float(os.environ.get("LISTEN_PAUSE") or 1.2)
+        self.pause = float(os.environ.get("LISTEN_PAUSE") or 0.8)
         self.model_id = os.environ.get("STT_MODEL") or DEFAULT_MODEL
         self.model = None
         self.error: str | None = None
+        self.final_model_id = os.environ.get("STT_FINAL_MODEL") or ""
+        self.final_model = None
+        self.final_error: str | None = None
         self.mic_level = 0.0  # loudest sample so far; still 0 after a few seconds means no microphone access
         self.talking = False  # in the middle of hearing you
+        self.heard_times: dict[str, float] = {}  # for the latest final on_text
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._blocks: queue.Queue = queue.Queue()
@@ -288,14 +316,19 @@ class Ears:
         else:
             self._ready.set()
         threading.Thread(target=self._segmenter, daemon=True).start()
-        self.microphone = Microphone(self.feed) if mic else None  # last: it starts feeding at once
+        self.microphone = Microphone(self.feed, active=listening) if mic else None  # last: it starts feeding at once
 
     # -- for the voice agent --
 
     def describe(self) -> str:
         self._ready.wait()
         short = self.model_id.rsplit("/", 1)[-1]
-        return f"Parakeet ({short})" if self.model else f"nothing (Parakeet: {self.error})"
+        said = f"Parakeet ({short})" if self.model else f"nothing (Parakeet: {self.error})"
+        if self.final_model:
+            said += f", and {self.final_model_id.rsplit('/', 1)[-1]} for the final text"
+        elif self.final_model_id:
+            said += f" (not {self.final_model_id.rsplit('/', 1)[-1]} for the final text: {self.final_error})"
+        return said
 
     @property
     def mic_name(self) -> str:
@@ -308,9 +341,24 @@ class Ears:
     def hears_the_mac(self) -> bool:
         return bool(self.microphone and self.microphone.hears_the_mac())
 
+    def listen(self, on: bool):
+        if on == self.listening:
+            return
+        self.listening = on
+        if not on:
+            self.cut()
+        if self.microphone:
+            self.microphone.set_active(on)
+
+    def cut(self, then=None):
+        """What you're saying ends here, after what's already been heard, as if you'd paused.
+        then(), from the transcribing thread, comes after its words (if any) went to on_text."""
+        self._blocks.put((None, then))
+
     def feed(self, block: np.ndarray, playing: bool = False):
         """playing: the Mac was playing something, so what's left of its echo may sound like speech."""
-        self._blocks.put((block, playing))
+        if self.listening:
+            self._blocks.put((block, playing))
 
     def _gate(self) -> float:
         """While the Mac plays, quieter than this (dB) isn't you: leftover echo is much quieter
@@ -320,17 +368,21 @@ class Ears:
 
     def transcribe(self, samples: np.ndarray) -> str:
         """Text for 16 kHz mono float32 audio."""
+        return self.transcribe_with(self._read, samples)
+
+    def transcribe_with(self, read, samples: np.ndarray) -> str:
+        """read(samples) (_read, _read_final) on the transcribing thread, as MLX wants."""
         if threading.current_thread() is self._worker:
-            return self._read(samples)
+            return read(samples)
         answer: queue.Queue = queue.Queue()
-        self._requests.put((samples, answer))
+        self._requests.put((read, samples, answer))
         self._wake.set()
         return answer.get()
 
     # -- the segmenter thread: when you start and stop talking --
 
     def _checks_voices(self) -> bool:
-        return bool(self.voiceprint and self.voiceprint.enrolled and self.voiceprint.ready())
+        return bool(self.voiceprint and self.voiceprint.checks and self.voiceprint.ready())
 
     def _judge(self, windows: list[np.ndarray]) -> tuple[bool, float]:
         return self.voiceprint.matches(np.concatenate(windows)) if windows else (True, 1.0)
@@ -351,6 +403,23 @@ class Ears:
         announced = False  # on_speech() was called for this utterance
         while True:
             block, playing = self._blocks.get()
+            if block is None:  # cut(): what you were saying ends here, pause or not
+                then = playing
+                pending, pending_playing = pending[:0], pending_playing[:0]
+                if utterance is not None:
+                    self._close(utterance, cut=True)
+                    self._wrap_up(utterance, cut=True)
+                    utterance = None
+                recent.clear()
+                run, announced = 0, False
+                vad.reset()
+                if then:
+                    if self.words:
+                        self._finished.put(then)  # after the words, in the transcribing thread
+                    else:
+                        then()
+                self._wake.set()
+                continue
             self.mic_level = max(self.mic_level, float(np.abs(block).max(initial=0)))
             pending = np.concatenate([pending, block])
             pending_playing = np.concatenate([pending_playing, np.full(len(block), playing)])
@@ -390,33 +459,44 @@ class Ears:
                     self.on_speech()
                 if not utterance.over(self.pause, bool(UNFINISHED.search(self._live_text))):
                     continue
-                utterance.end()
-                while utterance.ignored:
-                    self.on_ignored(*utterance.ignored.pop(0))
-                with self._lock:
-                    self._capture, self._you = None, False
+                self._close(utterance)
                 done, utterance = utterance, None
                 # the lead-in for what's next is the pause, less its start (maybe a word trailing off)
                 while recent and len(recent) > done.gap - PHRASE_GAP * RATE / WINDOW:
                     recent.popleft()
-                self.talking = False
                 run, announced = 0, False
                 vad.reset()
-                said = done.speech * WINDOW / RATE
-                if said < MIN_SPEECH:
-                    continue
-                if done.judge:  # all of it together decides too, not just each phrase
-                    matched, similarity = self._judge(done.your_speech(MOST_CHECKED))
-                    if not matched:
-                        self.on_ignored(said, similarity)
-                        continue
-                self._levels.extend(done.levels)
-                samples = done.samples
-                if self.on_utterance:
-                    self.on_utterance(samples)
-                if self.words:
-                    self._finished.put(samples)
+                self._wrap_up(done)
             self._wake.set()
+
+    def _close(self, utterance: Utterance, cut: bool = False):
+        utterance.end(cut)
+        while utterance.ignored:
+            self.on_ignored(*utterance.ignored.pop(0))
+        with self._lock:
+            self._capture, self._you = None, False
+        self.talking = False
+
+    def _wrap_up(self, done: Utterance, cut: bool = False):
+        """Once you've finished: the last check that it was you, then Parakeet writes it down.
+        cut: it ended mid-word, maybe, with no pause after it, so it gets one."""
+        said = done.speech * WINDOW / RATE
+        if said < MIN_SPEECH:
+            return
+        if done.judge:  # all of it together decides too, not just each phrase
+            matched, similarity = self._judge(done.your_speech(MOST_CHECKED))
+            if not matched:
+                self.on_ignored(said, similarity)
+                return
+        self._levels.extend(done.levels)
+        samples = done.samples
+        if cut:
+            samples = np.concatenate([samples, np.zeros(int(LEAD_IN * RATE), np.float32)])
+        if self.on_utterance:
+            self.on_utterance(samples)
+        if self.words:
+            now = time.monotonic()
+            self._finished.put((samples, {"stopped": now - done.quiet * WINDOW / RATE, "decided": now}))
 
     # -- the worker thread: Parakeet --
 
@@ -457,19 +537,37 @@ class Ears:
                 tokens = merge_longest_common_subsequence(tokens, result.tokens, overlap_duration=OVERLAP)
         return sentences_to_result(tokens_to_sentences(tokens, DecodingConfig().sentence)).text.strip()
 
+    def _read_final(self, samples: np.ndarray) -> str:
+        """The final text: the final model's, if there is one, else Parakeet's."""
+        if self.final_model is None or len(samples) < RATE // 10:
+            return self._read(samples)
+        try:
+            return self.final_model.generate(samples, language="English",
+                                             system_prompt="Vocabulary: " + ", ".join(vocabulary())).text.strip()
+        except Exception as e:  # Parakeet will do
+            print(f"   ✗ {self.final_model_id}: {e}", flush=True)
+            return self._read(samples)
+
     def _load(self):
         try:
             import mlx.core as mx
             from parakeet_mlx import from_pretrained
             if not os.path.exists(VAD_MODEL):
                 raise FileNotFoundError("models/silero_vad.onnx isn't downloaded (./voice.sh does it)")
-            self.model = from_pretrained(self.model_id, dtype=mx.float32)  # full precision
+            self.model = from_pretrained(downloaded(self.model_id) or self.model_id, dtype=mx.float32)  # full precision
             self._read(np.zeros(RATE, dtype=np.float32))  # the first pass is slow; get it over with
         except Exception as e:  # not installed, not downloaded, no network for the first download
             self.model = None
             self.error = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
-        finally:
-            self._ready.set()
+        if self.final_model_id:
+            try:
+                from mlx_audio.stt import load
+                self.final_model = load(downloaded(self.final_model_id) or self.final_model_id)
+                self._read_final(np.zeros(RATE, dtype=np.float32))  # the first pass is slow
+            except Exception as e:  # not installed or downloaded: Parakeet writes it all down
+                self.final_model = None
+                self.final_error = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+        self._ready.set()
 
     def _transcriber(self):
         self._load()
@@ -478,11 +576,18 @@ class Ears:
             self._wake.wait(0.1)
             self._wake.clear()
             while not self._requests.empty():
-                samples, answer = self._requests.get()
-                answer.put(self._read(samples))
+                read, samples, answer = self._requests.get()
+                answer.put(read(samples))
             while not self._finished.empty():
                 shown_len = 0
-                self.on_text(self._read(self._finished.get()), True)
+                finished = self._finished.get()
+                if callable(finished):
+                    finished()  # cut()'s then
+                else:
+                    samples, times = finished
+                    text = self._read_final(samples)
+                    self.heard_times = {**times, "written": time.monotonic()}
+                    self.on_text(text, True)
             with self._lock:
                 capture = self._capture if self._you else None
                 samples = np.concatenate([heard.window for heard in capture]) if capture else None
@@ -494,6 +599,71 @@ class Ears:
                 if text and text != self._live_text and self._capture is capture:
                     self._live_text = text
                     self.on_text(("… " if len(samples) > LIVE_WINDOW * RATE else "") + text, False)
+
+
+def vocabulary() -> list[str]:
+    extra = [w.strip() for w in (os.environ.get("STT_VOCABULARY") or "").split(",") if w.strip()]
+    return extra + [w for w in VOCABULARY if w not in extra]
+
+
+def downloaded(model_id: str) -> str | None:
+    """Where the model is on this Mac, if it's been downloaded. Loading from there skips asking
+    Hugging Face whether there's a newer one, which can hang when a blocker filters the network."""
+    from huggingface_hub import snapshot_download
+    try:
+        return snapshot_download(model_id, local_files_only=True)
+    except Exception:
+        return None
+
+
+def download_final(model_id: str) -> int:
+    from huggingface_hub import snapshot_download
+    if downloaded(model_id):
+        print(f"{model_id} is already downloaded.", flush=True)
+        return 0
+    print(f"Downloading {model_id} (about 2.5 GB)...", flush=True)
+    try:
+        snapshot_download(model_id)
+        return 0
+    except Exception as e:
+        print(f"Couldn't download it: {e}")
+        return 1
+
+
+CHECK_SENTENCES = [  # what --check-final has the Mac's voice say, with your vocabulary in them
+    "Open Safari and find the Superwhisper download page.",
+    "Ask Codex why Kokoro sounds different from Claude.",
+    "Make this PowerPoint slide two columns, Microsoft on the left and Apple on the right.",
+    "What windows and tabs are open right now?",
+]
+
+
+def check_final() -> int:
+    """Says CHECK_SENTENCES with `say` (into files, not out loud) and writes each down with Parakeet
+    and with the final model, timing both."""
+    import subprocess
+    import tempfile
+    import wave
+    ears = Ears(lambda *_: None, mic=False)
+    print(f"Listening with {ears.describe()}.", flush=True)
+    if not ears.final_model:
+        return 1
+    folder = tempfile.mkdtemp(prefix="listen-check-")
+    for sentence in CHECK_SENTENCES:
+        path = os.path.join(folder, "s.wav")
+        subprocess.run(["say", "-o", path, "--file-format=WAVE", "--data-format=LEI16@16000", sentence], check=True)
+        with wave.open(path) as w:
+            samples = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
+        took = {}
+        texts = {}
+        for name, read in (("Parakeet", ears._read), ("final", ears._read_final)):
+            start = time.monotonic()
+            texts[name] = ears.transcribe_with(read, samples)
+            took[name] = time.monotonic() - start
+        print(f"said:     {sentence}\nParakeet: {texts['Parakeet']}  ({took['Parakeet']:.2f} s)\n"
+              f"final:    {texts['final']}  ({took['final']:.2f} s, {len(samples) / RATE:.1f} s of speech)\n",
+              flush=True)
+    return 0
 
 
 def download() -> int:
@@ -510,11 +680,8 @@ def download() -> int:
             return 1
     from huggingface_hub import snapshot_download
     model_id = os.environ.get("STT_MODEL") or DEFAULT_MODEL
-    try:
-        snapshot_download(model_id, local_files_only=True)
+    if downloaded(model_id):
         return 0
-    except Exception:  # not downloaded yet
-        pass
     print(f"Downloading the speech recognition model ({model_id}, about 2.4 GB, once)...", flush=True)
     try:
         snapshot_download(model_id)
@@ -529,6 +696,11 @@ def main(argv: list[str]) -> int:
     settings.load()
     if "--download" in argv:
         return download()
+    if "--download-final" in argv:
+        return download_final(os.environ.get("STT_FINAL_MODEL") or FINAL_MODEL)
+    if "--check-final" in argv:
+        os.environ.setdefault("STT_FINAL_MODEL", FINAL_MODEL)
+        return check_final()
 
     from voiceprint import Voiceprint
 

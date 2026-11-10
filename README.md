@@ -1,15 +1,16 @@
 # personal-agent
 
-Talk to your Mac and it talks back. It's always listening: say what you want, in
-any window, and a computer agent does the work on screen with a real-looking
+Talk to your Mac and it talks back. Tap **fn** in any window and say what you
+want, and a computer agent does the work on screen with a real-looking
 keyboard and mouse, then tells you out loud what it did. It hands control back to you the
 instant you touch anything, like Tesla's Autopilot. Captions at the bottom of the screen show
 what it says and what it's doing. It can use your iPhone too, whenever a request needs it,
-and "... on my phone" runs on the phone at the same time as a task on the Mac.
+and "... on my phone" runs on the phone at the same time as a task on the Mac. Hold **fn**
+instead and it's dictation: what you say is typed into the app you're in when you let go.
 
 ```bash
 git submodule update --init   # once, after cloning: Karabiner's client headers
-./voice.sh
+./install.sh                  # Agent in the menu bar, opened at login
 ```
 
 The keyboard and mouse part is **agent-vhid**:
@@ -31,45 +32,82 @@ Karabiner-VirtualHIDDevice-Daemon → DriverKit virtual keyboard + mouse → mac
 
 | You do | What happens |
 |---|---|
-| Double-tap **Right Option**, then let go | After 0.4 s with your hands off, the agent gets control (chime: Glass) |
+| Give it a task (say it, or type it) | After 0.4 s with your hands off, the agent gets control (chime: Glass) |
 | Press any key, touch the trackpad, move or click a mouse | The agent loses control at once; anything it was holding is released (chime: Funk) |
 | Touch anything during that 0.4 s | The hand-over is cancelled |
-| Say what you want (voice agent) | Your spoken task starts and gets control once your hands are off |
+| Say "continue" | It takes control back the same way and carries on |
+| Tap **fn**, or hold it to dictate | The voice agent starts listening, or stops, or types what you say; a task it's doing carries on either way |
 
-The helper starts with you in control, and the agent can't take control
-itself: it needs the double-tap. The one exception is the voice agent, when the
-helper was started with `--hands-free` (`./voice.sh` does that): a task you
-speak can take control, still only after 0.4 s with your hands off, and touching
-anything still takes it back at once. Without `--hands-free`, a spoken task
-needs you to have just held Right Option while talking (one hand-over per hold,
-within 30 s). If Input Monitoring is
-denied, the helper refuses to start, so the agent never runs without your
-takeover working.
+The helper starts with you in control. An agent asks for control (`engage`)
+when it starts a task, and only gets it once your hands have been off for 0.4 s;
+touching anything takes it back at once. If Input Monitoring is denied, the
+helper refuses to start, so the agent never runs without your takeover working.
 
 ## Talk to it
 
 ```bash
-./voice.sh
+./install.sh
 ```
 
-One password prompt (for the helper), then, in any window, **just say what you
-want**. No key to hold: it listens all the time and the words show up in the
-terminal as you say them. When you pause (1.2 s, or 2.5 s if you trailed off on
-"and..." or a comma), the computer agent works out the steps from screenshots
-and does them with the virtual mouse and keyboard while you watch, telling you
-out loud what it's doing as it goes and what happened at the end. Then control
-comes back to you.
+It asks for your password, has the Mac start the helper (as root, from now on
+at every startup), and puts **Agent** in `~/Applications` and opens it: a
+microphone in the menu bar, opened at login. Then, in any window, **tap fn and
+say what you want**. The icon turns red, the captions say it's listening, and
+the words show up there as you say them. When you pause (0.8 s, or 2.5 s if you
+trailed off on "and..." or a comma), the computer agent works out the steps from
+screenshots and does them with the virtual mouse and keyboard while you watch,
+telling you out loud what it's doing as it goes and what happened at the end.
+Then control comes back to you. Tap fn again to stop it listening: what you were
+in the middle of saying still counts, and a task it's doing carries on. Agent's
+menu does the same (Start/Stop Listening), and has Open at Login, Show Log
+(`~/Library/Logs/Agent.log`), Restart Agent and Quit Agent.
+
+Once, after installing:
+
+- **System Settings › Privacy & Security › Input Monitoring:** turn on
+  `agent-vhid-helper` (add `/Library/PrivilegedHelperTools/agent-vhid-helper`
+  with + if it isn't listed), so touching anything takes control back.
+- **Microphone** and **Screen & System Audio Recording:** allow Agent when it
+  asks, then Restart Agent from its menu.
+- **Accessibility:** allow Agent when it asks, the first time you dictate, so it
+  can type what you said.
+- **System Settings › Keyboard › "Press 🌐 key to": Do Nothing**, or each tap of
+  fn also starts the Mac's own dictation. Another app that records on fn
+  (superwhisper) needs another shortcut, or quitting.
+
+Agent runs the Python in this folder, so after changing it, Restart Agent from its
+menu; after changing the helper (`src/`) or the app (`tools/app.swift`), run
+`./install.sh` again. `./install.sh --uninstall` takes it all out. Or, without
+installing anything, `./voice.sh` runs the same in a terminal (one password prompt for the helper; Ctrl-C stops it), and the
+terminal app needs the permissions instead.
 
 | | |
 |---|---|
-| Talk | It listens all the time; a pause ends what you're saying |
+| Tap fn | It starts listening, and a new conversation: until the next time, it remembers everything you've asked. Tap again and it stops |
+| Talk | A pause ends what you're saying |
 | Talk while it's talking | It goes quiet at once and listens |
 | Say more within a few seconds | It's added to what you just asked |
 | Say something new while it works | It drops the old task and does the new one, knowing what it was doing |
 | Say "... on my phone" / "on my iPhone" | It does that on your iPhone, alongside whatever it's doing on the Mac. Other requests can use the phone too when they need it |
 | Say "stop" | Stops the computer agent (on the Mac and the phone) |
 | Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
-| Double-tap Right Option | It carries on from where things are now |
+| Say "continue" | It carries on from where things are now (tap fn first if it isn't listening) |
+| Hold fn and talk | Dictation: when you let go, what you said is typed where you're typing, and isn't a task |
+
+### Dictation
+
+Hold fn, say what you want written, and let go: Parakeet writes it down (with its
+own punctuation) and it's typed into the app in front, wherever the cursor is. It's
+pasted: the clipboard gets the text, ⌘V, and then the clipboard gets back what it
+had (`build/agent-vhid-paste`, `tools/paste.swift`; it marks the text so clipboard
+managers leave it out). Pauses while you hold fn are fine; it all goes in together.
+The captions say "Dictating" and show your words, and the menu bar icon turns into
+an orange waveform. fn with another key (fn+arrow, fn+delete) is a shortcut and
+types nothing; a quick tap is still the agent's on/off. It works whether or not
+the agent is listening, which carries on as before when you let go, and with your
+voice enrolled only your voice is written down. Agent's log notes how many words
+it typed, not what they were. Typing into another app needs Accessibility for
+Agent; until you allow it, what you dictated is left on the clipboard instead.
 
 It keeps listening while it talks, out of the speakers too: everything the Mac
 plays (its own voice, a video, music) is taken back out of what the microphone
@@ -96,8 +134,8 @@ Codex):
 
 - **Hearing you: Parakeet** ([parakeet-tdt-0.6b-v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2),
   NVIDIA's speech recognition model, CC-BY-4.0) in `python/listen.py`, through
-  MLX on the Mac's GPU, at full precision. The microphone stays open while
-  `./voice.sh` runs (the orange dot). [Silero VAD](https://github.com/snakers4/silero-vad)
+  MLX on the Mac's GPU, at full precision. The microphone is open only while
+  it's listening (the orange dot). [Silero VAD](https://github.com/snakers4/silero-vad)
   (MIT, 2 MB) notices when someone starts talking; only that stretch, from just
   before it until your pause, is transcribed, and nothing is recorded to disk.
   Coughs, clicks and "mm-hmm"s are ignored. While you talk it re-reads what
@@ -133,7 +171,7 @@ Codex):
   sounds calm and natural, not dramatic. Without the model the Mac's own voice
   speaks.
 
-`./voice.sh` sets these up the first time: the Python packages in `.venv`
+`./install.sh` (or `./voice.sh`) sets these up the first time: the Python packages in `.venv`
 (`requirements.txt`), Kokoro and Silero VAD in `models/` (350 MB) and Parakeet and
 WeSpeaker in the Hugging Face cache (2.4 GB). The rest of the project uses only the standard library.
 
@@ -144,9 +182,10 @@ Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your
 | `TTS_VOICE` | `af_heart` (default), `af_sarah`, `af_bella`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`, ...: `af`/`am` are American, `bf`/`bm` British. `say` uses the Mac's voice |
 | `TTS_SPEED` | `1.0` is normal; `1.1` is a little quicker |
 | `STT_MODEL` | Empty for Parakeet v2 (English); `mlx-community/parakeet-tdt-0.6b-v3` also knows 24 other European languages |
-| `LISTEN_PAUSE` | Seconds of quiet that end what you're saying; `1.2` by default |
+| `LISTEN_PAUSE` | Seconds of quiet that end what you're saying; `0.8` by default. Raise it if it cuts you off mid-thought |
 | `VOICE_MATCH` | After `./voice.sh --enroll`: how alike a voice has to be to count as you; `0.4` by default. Lower it if it ignores you, raise it if it still hears others |
 | `AGENT_MODEL` | Override the computer agent's model; empty means `gpt-6.1-terra` |
+| `AGENT_FAST` | `1` uses Codex's Fast tier: quicker replies, but it uses up your plan's usage sooner |
 | `AGENT_EFFORT` | Its reasoning effort: `low` (default), `medium`, `high`, ... |
 | `CAPTIONS` | `0` turns the on-screen captions off |
 | `PHONE_RELAY` | The phone relay's folder (see [Your iPhone](#your-iphone)); empty means no phone |
@@ -161,20 +200,21 @@ TTS_VOICE=am_michael .venv/bin/python python/speech.py "Done. Twelve percent of 
 .venv/bin/python python/listen.py
 ```
 
-`./voice.sh --no-speak` keeps it quiet. If it prints "The microphone only gives
-silence", allow microphone access for the app you run it in (System Settings ›
-Privacy & Security › Microphone) and restart `./voice.sh`. If it says it can't
-hear what the Mac is playing, allow that app under Screen & System Audio
-Recording (the agent's screenshots need it anyway); until then it stops listening
+`./voice.sh --no-speak` keeps it quiet. If it says "The microphone only gives
+silence", allow microphone access for Agent (with `./voice.sh`, the app you run
+it in) under System Settings › Privacy & Security › Microphone, and restart it. If
+it says it can't hear what the Mac is playing, allow the same app under Screen &
+System Audio Recording (the agent's screenshots need it anyway); until then it stops listening
 while it talks out of the speakers, and a video playing out loud may be taken for
 you.
 
 ### The computer agent
 
 - **Codex** runs as one `codex app-server` (`python/codex_app.py`), started with
-  `./voice.sh` and kept for the whole session. It's the server the Codex app and
+  the voice agent and kept while it runs. It's the server the Codex app and
   its IDE extensions use, signed in with your ChatGPT account, so the agent runs
-  on your Codex subscription; no API key. Each task is a new thread on it.
+  on your Codex subscription; no API key. Requests use a persistent primary thread,
+  resumed by ID after app or app-server restarts. Tapping fn keeps that conversation.
 - **Only our tools and instructions:** `python/instructions.md` (a few lines)
   replaces Codex's coding-agent system prompt, and the model gets two sets of
   tools: the Mac's from `python/mac_mcp.py` (screenshot, click, type_text,
@@ -188,13 +228,132 @@ you.
   Codex's "code mode", where every tool sits behind a JavaScript `exec` tool that
   the model first has to search for and then unpack screenshots from (a copy of
   Codex's model list, `$TMPDIR/agent-vhid-models.json`). That roughly halves what
-  the model reads before its first step, and it stays cached from task to task. A
-  screenshot taken as you finish talking comes with the task, every action returns
-  a fresh screenshot, and `batch` does several actions in one call, so most steps
-  are a single round trip to the model, about 1.5–2 s. Replies are short, and it says
-  "done" as soon as the model finishes. Each step's timing is in the log.
+  the model reads before its first step, and it stays cached from task to task.
+  Tapping fn starts the conversation's Codex thread straight away, which gets Codex's
+  connection to the model ready (the first request's reply starts 1–2.5 s sooner).
+  The Mac's screenshot, open windows and browser tabs are taken as you start
+  talking and go with the request the moment you finish, so it doesn't spend a
+  step looking. Every action returns a fresh screenshot, and `batch` does several
+  actions in one call, so most steps are a single round trip to the model, about
+  1.5–2 s. Replies are short, and each sentence is spoken as soon as the model has
+  written it. After each request `Agent.log` has a `⏱` line saying where the time
+  went (waiting to be sure you'd finished, writing it down, Codex, the voice), and
+  each step's timing is in Codex's log.
 - It uses the Codex inside ChatGPT.app when present (newer than the npm one);
   set `CODEX_BIN`, `AGENT_MODEL` or `AGENT_EFFORT` to change that.
+
+#### Durable sessions and visible context
+
+`python/resumable_thread.py` integrates the staged persistence prototype. The primary
+Codex thread ID lives in `~/Library/Application Support/Personal Agent/codex-thread-id`
+(`AGENT_STATE_DIR` overrides the directory). New threads use `ephemeral=false`;
+Codex stores their history in its own state directory. Identity writes use a private
+temporary file, fsync and atomic replacement, with a lock around creation/resumption.
+Missing state starts a thread. Invalid state, a mismatched resume ID, or a server
+resume error fails the task visibly and preserves the saved identity. No automatic
+fallback creates a replacement conversation. An interrupted/failed creation leaves
+an explicit pending marker and blocks another start, since the server may already
+have created a thread. Recovery requires investigating that state; it is not reset
+automatically.
+
+In Agent.app, **Show Agent Context** opens a local viewer of the exact app-visible
+thread instructions/tool definitions, request text, attached screenshots, tool
+arguments/results, and completed server items (including compaction events).
+The terminal prints its path: `$AGENT_STATE_DIR/context/index.html`, using the default
+directory above when unset. The index refreshes; individual records show images,
+full text, and a link to their exact JSON payload. Records survive restarts, use
+owner-only files, and load no remote resources. Recording failures produce a visible
+error rather than quietly pretending the view is complete. This is the exchanged
+event history, not hidden reasoning or an exact reconstruction of the model's
+post-compaction context. Screenshots and full payloads are retained locally without
+automatic pruning. The existing caption-window screenshot inclusion is preserved.
+
+#### Session journal (for reviewing and improving the agent)
+
+Each run of the voice agent, from opening Agent.app to quitting it, is a session saved in
+`$AGENT_STATE_DIR/sessions/<started>-<pid>/` (`sessions/latest` is the newest):
+
+- `journal.jsonl`: one line per thing that happened, written and synced to disk as it
+  happens. Every transcript of what you said and what became of it (`request`, `stop`,
+  `continue`, `filler, ignored`, `its own voice, ignored`), voices it left out, each request
+  with its device and whether it was added to or interrupted the last one, every action,
+  error, reply and outcome of each task with its Codex thread, and what it said that wasn't
+  from a task ("Stopped.", "Sorry, that didn't work.").
+- `manifest.json`: start and end, backend and model, the git commit of the code, and every
+  Codex thread used, with the path of its rollout file
+  (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`). That file is Codex's own
+  record of the thread's full model context: base and developer instructions, every input
+  with its screenshots, tool calls and results, replies, and compactions.
+- `index.html`: the same, readable in a browser.
+- `panel.json`: what the **Agent Context panel** shows (`python/context_panel.py`).
+
+#### Agent Context panel
+
+Agent menu › **Show Agent Context** opens a floating, resizable panel over every app
+(Esc or ⌘W closes it, ⌘F filters, ⌘R refreshes). It shows this session live, one group per
+request: what you said, what the agent did and said, and, folded under *What went to the
+model*, the prompt text, screenshots (counted, with **Open Exact Record** for the payload),
+tool calls and results. Text you added appears as its own group with whether it was
+verified. The top says plainly that this is the app's recorded history, not the model's
+exact current context, which Codex holds and compacts; it shows the last context size Codex
+reported, when it last compacted, and where Codex's full rollout file is. VoiceOver reads
+each row. *More* › *Every Payload (Browser)* is the old HTML viewer.
+
+#### Adding a transcript or other text to the conversation
+
+Agent menu › **Add Clipboard to Context…** or **Add Text File to Context…** asks first,
+showing its size, estimated tokens and that it goes to the model (OpenAI, through Codex).
+The text is saved privately (`$AGENT_STATE_DIR/ingested/`, mode 600) and split at paragraph
+breaks into parts of about 12,000 characters. Up to about 60,000 tokens, each part is a turn on
+the session's thread, marked as material, not instructions. Past that it isn't stuffed in:
+one turn says it exists, and the agent reads parts when it needs them with the
+`read_ingested` tool. Each part is checked against Codex's own rollout file; the journal and
+panel say *verified*, *sent, not verified* or *failed*. A thread past `COMPACT_AT` gets
+compacted, after which the model has a summary, but the saved text stays readable.
+`read_clipboard` used to return the first 8,000 characters and say nothing; now it says how
+long the clipboard is and reads on from an offset. `python/ingest.py list | read ID [PART]`.
+
+#### Lip reading (optional)
+
+Agent menu › **Input** › **Lip Reading (camera)**: tap fn and the camera turns on (green
+light, a "📷 Camera on" caption and a camera icon in the menu bar). Mouth what you want,
+then tap fn again. The camera turns off, the clip is read on this Mac and deleted, and the
+words become a request. Voice stays the default, and holding fn still dictates with the
+microphone. It uses Chaplin (MIT) with the Auto-AVSR LRS3 model (about 19% word error rate):
+its code and weights are for non-commercial research and private study only.
+`scripts/setup-lipread.sh` downloads it (about 1.1 GB) when you choose to. macOS asks once
+for camera access. See `python/lipread.py`.
+
+Every context-viewer record carries the session's id, so the two join up.
+
+```bash
+.venv/bin/python python/session_journal.py              # sessions, newest first
+.venv/bin/python python/session_journal.py show         # the latest, readable (or: show ID)
+.venv/bin/python python/session_journal.py paths        # its files and Codex rollouts
+```
+
+Not saved: what you dictate into other apps by holding fn (only its word count, unless
+`AGENT_JOURNAL_DICTATION=1`), audio, and words shown live while you talk (the final
+transcript is). On the Claude backend Claude Code keeps no transcript of its own
+(`--no-session-persistence`); the context viewer's records are its full history. Nothing is
+pruned automatically.
+
+Scope: primary Codex conversation recovery, without automatically continuing an
+interrupted task. An already-running ephemeral thread cannot be recovered by this
+change. Concurrent secondary threads still run separately; their history is saved
+by Codex and shown in the viewer, but they are not automatically reattached after
+restart. Their in-memory summaries have the same lifetime as the app. Claude gets
+the context viewer hooks; its existing session persistence behavior is unchanged.
+Resumption follows the [Codex app-server protocol](https://learn.chatgpt.com/docs/app-server),
+which restores saved dynamic tools when resuming without replacements.
+
+Offline regression tests (synthetic tools/screenshots, separate fake server and app
+processes; no account access):
+
+```sh
+AGENT_ENV_FILE=/dev/null .venv/bin/python tests/test_resumption.py -v
+AGENT_ENV_FILE=/dev/null .venv/bin/python tests/test_tools.py CodexTaskTest -v
+```
 - **Captions:** `build/agent-vhid-captions` (`tools/captions.swift`) shows what it
   says and, under that, what it's doing ("Thinking", "Typing “weather”"), at the
   bottom of the screen over every app. Clicks go through them and its screenshots
@@ -204,9 +363,10 @@ you.
   changing settings or typing passwords unless you asked for exactly that.
 
 Typing a task instead: `python3 python/agent.py "open Calculator and work out 12% of 340"`
-(double-tap Right Option to hand over), or `"open Maps on my phone"` for the iPhone. What Codex does,
+(it takes control once your hands are off), or `"open Maps on my phone"` for the iPhone. What Codex does,
 step by step with timings, goes to `agent-vhid-codex.log` in your temp folder (`$TMPDIR`),
-the helper's output to `/tmp/agent-vhid-helper.log`.
+the voice agent's output to `~/Library/Logs/Agent.log`, and the helper's to
+`/Library/Logs/agent-vhid-helper.log` (with `./voice.sh`, `/tmp/agent-vhid-helper.log`).
 
 ### Your iPhone
 
@@ -236,15 +396,24 @@ daemon 6.14.0) is installed and activated. This project builds against the
 matching v6.14.0 client headers in `third_party/`.
 
 1. Build: `make` (needs Xcode's command-line tools, and `git submodule update --init`
-   after a fresh clone). `./voice.sh` and `./run.sh` build it for you.
-2. Give the terminal app you'll run the helper from (Terminal, iTerm, …) these
-   permissions in System Settings › Privacy & Security:
-   - **Input Monitoring**, so the helper can see your keyboard and mouse.
+   after a fresh clone). `./install.sh`, `./voice.sh` and `./run.sh` build it for you.
+   With an "Apple Development" certificate in your keychain, `make` signs Agent with
+   it (and `./install.sh` the helper it installs), so macOS keeps their permissions
+   when they're rebuilt: it knows them by identifier and certificate, not by the build.
+   The first time, macOS asks whether codesign may use the certificate's key; choose
+   **Always Allow**, or each build asks. `./install.sh` and `tools/update-app.sh`
+   refuse to install an ad-hoc build (whose permissions would all be asked again);
+   `SIGN=-` signs ad hoc on purpose. `tools/update-app.sh` updates just Agent.app,
+   without sudo; `tools/update-app.sh --check` says how the installed app is signed.
+2. Permissions, in System Settings › Privacy & Security:
+   - **Input Monitoring**, so the helper can see your keyboard and mouse: for
+     `agent-vhid-helper` once `./install.sh` has installed it, or else for the
+     terminal app you run the helper from (Terminal, iTerm, …).
    - **Screen & System Audio Recording**, so `screenshot()` sees windows rather than
      only the wallpaper, and the voice agent can take the Mac's own sound out of what
-     it hears. (Needed by whatever runs the agent, if that's a different app.)
-   - **Microphone**, so the voice agent can hear you.
-   macOS asks the first time; restart the helper after allowing.
+     it hears: for Agent, or whatever runs the agent.
+   - **Microphone**, so the voice agent can hear you: for Agent, or the terminal app.
+   macOS asks the first time; restart the helper (or Agent) after allowing.
 
 ## Run it
 
@@ -252,10 +421,10 @@ matching v6.14.0 client headers in `third_party/`.
 ./run.sh
 ```
 
-It asks for your password once, starts Karabiner's daemon if needed, then runs
-the helper in the foreground. Ctrl-C stops both. Options: `--verbose` logs every
-physical input, `--no-sound`, `--quiet-ms N`, `--start-engaged`, `--hands-free`
-(a task spoken to the voice agent may take control without a key held).
+Not needed once `./install.sh` has the Mac running the helper. It asks for your
+password once, starts Karabiner's daemon if needed, then runs the helper in the
+foreground. Ctrl-C stops both. Options: `--verbose` logs every physical input,
+`--no-sound`, `--quiet-ms N`, `--start-engaged`.
 
 Then check everything end to end (moves the cursor, types into a scratch
 TextEdit file, takes a screenshot):
@@ -273,7 +442,8 @@ import sys; sys.path.insert(0, "python")
 from agent_vhid import AgentVHID, Disengaged
 
 mac = AgentVHID()
-mac.wait_engaged()                         # until you double-tap Right Option
+mac.engage()                               # ask for control
+mac.wait_engaged()                         # once your hands have been off for 0.4 s
 shot = mac.screenshot(max_width=1280)      # shot.path is a PNG for the model
 x, y = shot.to_screen(640, 400)            # image pixels -> screen points
 try:
@@ -286,10 +456,8 @@ except Disengaged:
 
 Everything else: `move_to`, `move_by`, `double_click`, `right_click`, `drag`,
 `scroll(down=, right=)`, `mouse_down/up`, `paste_text`, `cursor`, `status`,
-`watch()` (yields each hand-over and talk hold), `release_all`, `disengage()` (hand control
-back when done), `engage_after_talk()` / `engage_by_voice()` (take control for a spoken
-task: after a talk hold, or with a `--hands-free` helper), and
-`click(..., modifiers="cmd")`. `AgentVHID(speed=2)` moves
+`watch()` (yields each hand-over and fn tap), `release_all`, `disengage()` (hand control
+back when done), and `click(..., modifiers="cmd")`. `AgentVHID(speed=2)` moves
 and types faster; `human=False` drops the curved paths and timing jitter.
 
 Shell, for agents that only have a terminal (exit code 3 means you took over):
@@ -300,6 +468,7 @@ python3 python/agent_vhid.py type "hello"
 python3 python/agent_vhid.py key cmd+s
 python3 python/agent_vhid.py screenshot /tmp/screen.png --max-width 1280
 python3 python/agent_vhid.py status
+python3 python/agent_vhid.py engage        # take control, once your hands are off
 ```
 
 ## How it behaves like a person
@@ -325,11 +494,14 @@ python3 tests/test_dry_run.py
 ```
 
 The first runs the real helper with `--dry-run` (no root, no virtual devices) and
-checks the HID reports it would send, the hand-over rules (including the talk-hold
-grant and `--hands-free`), release-on-disconnect, and the wrapper. The second runs
+checks the HID reports it would send, the hand-over rules (including `engage` and
+what fn does), release-on-disconnect, and the wrapper. The second runs
 the voice agent against that helper and a fake `codex app-server` (`tests/fake_codex.py`), with
 speech made by `say` in place of the microphone and Parakeet really transcribing
-it: words show up as you talk, short pauses and trailing "and" don't cut you off,
+it: fn starts and stops it listening, stopping mid-sentence still takes what you
+said, holding fn dictates (a stand-in does the typing, so your clipboard isn't
+touched) and fn+key doesn't, "continue" carries on after you took over, words
+show up as you talk, short pauses and trailing "and" don't cut you off,
 more said right after is added, the task reaches Codex and its reply is spoken
 once, "stop" stops it, noise does nothing, talking over it stops its voice, and,
 through a simulated room, the echo canceller hears you and not its own voice.
@@ -344,9 +516,10 @@ touch your phone.
 
 ## Things to know
 
-- **Always listening** means other people talking nearby (a call on another
-  device, a TV) can be taken as a task. The Mac's own sound is cancelled, the
-  computer agent stops before anything risky, and touching anything takes over.
+- **While it's listening**, other people talking nearby (a call on another
+  device, a TV) can be taken as a task, unless you've enrolled your voice. The
+  Mac's own sound is cancelled, the computer agent stops before anything risky,
+  and touching anything takes over. Tap fn to stop it listening.
 
 - **Input method:** typing goes through whatever input source is active. If a
   Chinese/Pinyin input method is on, letters go to the IME. Switch to ABC first.

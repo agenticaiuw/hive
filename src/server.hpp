@@ -10,14 +10,14 @@
 //   keys MODS [USAGE ...]      -> full keyboard state: modifier bits + keyboard-page usages held
 //   release                    -> let go of every key and button (always allowed)
 //   disengage                  -> the agent is done: hand control back (always allowed)
-//   engage_after_talk          -> start handing control over, allowed once per talk hold (hold Right Option)
-//   engage_by_voice            -> start handing control over for a spoken task; only with --hands-free
-//   watch                      -> stream "event state=... reason=..." and "event talk=down|up" lines
-//                                 until the client closes
+//   engage                     -> start handing control over, for a task the human gave (spoken
+//                                 or typed); it passes once their hands have been off a moment
+//   watch                      -> stream "event state=... reason=..." lines, and "event fn=..."
+//                                 (down, then tap or up; other for fn+key), until the client closes
 //
 // Input commands reply "err disengaged <reason>" while the human has control.
-// With --dry-run, three extra commands simulate the human: "human SOURCE", "engage" (the
-// double-tap) and "talk down|up" (holding and letting go of Right Option).
+// With --dry-run, two extra commands simulate the human: "human SOURCE" (touching something)
+// and "fn [down|tap|up|other]" (fn; a tap if nothing else is said).
 //
 // Only the user who started the helper (and root) may connect.
 
@@ -218,7 +218,7 @@ private:
     }
     if (command == "status") {
       return "ok " + gate_.describe() + " " + injector_.describe() + " " + watch_status_() +
-             " dry_run=" + (dry_run_ ? "1" : "0") + " talk=1 hands_free=" + (gate_.hands_free() ? "1" : "0");
+             " dry_run=" + (dry_run_ ? "1" : "0") + " fn=1";
     }
     if (command == "release") {
       injector_.release_all();
@@ -228,18 +228,9 @@ private:
       gate_.release_control();
       return "ok";
     }
-    if (command == "engage_after_talk") {
-      if (!gate_.engage_after_talk()) {
-        return "err forbidden no talk hold in the last " + std::to_string(gate::talk_grant.count()) +
-               " s; double-tap Right Option instead";
-      }
-      return "ok";
-    }
-    if (command == "engage_by_voice") {
-      if (!gate_.engage_by_voice()) {
-        return std::string("err forbidden ") + (gate_.hands_free() ? "the safety watcher isn't working"
-                                                                   : "the helper wasn't started with --hands-free") +
-               "; double-tap Right Option instead";
+    if (command == "engage") {
+      if (!gate_.engage()) {
+        return "err forbidden the safety watcher isn't working";
       }
       return "ok";
     }
@@ -249,17 +240,13 @@ private:
       gate_.human_input(source);
       return "ok";
     }
-    if (dry_run_ && command == "engage") {
-      gate_.engage_gesture();
-      return "ok";
-    }
-    if (dry_run_ && command == "talk") {
-      std::string direction;
-      in >> direction;
-      if (direction != "down" && direction != "up") {
-        return "err bad_request usage: talk down|up";
+    if (dry_run_ && command == "fn") {
+      std::string what = "tap";
+      in >> what;
+      if (what != "down" && what != "tap" && what != "up" && what != "other") {
+        return "err bad fn " + what;
       }
-      gate_.talk(direction == "down");
+      gate_.fn(what);
       return "ok";
     }
 

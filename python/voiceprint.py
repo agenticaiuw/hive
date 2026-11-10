@@ -11,7 +11,7 @@ that come out alike for the same voice. You teach it yours once:
 Your voiceprint stays on this Mac, in models/voiceprint.npz. Enrolling again (with another
 microphone, say) adds to it. VOICE_MATCH is how alike a sentence has to sound to count as you:
 0.4 by default (your own voice scores around 0.6-0.9, other people's under 0.3); lower it if it
-ignores you, raise it if it still hears others. A word or two gets a little more leeway.
+ignores you, raise it if it still hears others; 0 turns it off. A word or two gets a little more leeway.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ MATCH = 0.4
 MIN_AUDIO = 0.25  # seconds of speech it needs to say anything at all
 FULL = 1.5  # seconds of speech for a steady voiceprint; shorter ones are rougher...
 SHORT_SLACK = 0.1  # ...so a word or two only has to be this much less alike
+MACHINE = 0.45  # this alike to its own voice (Kokoro, through the speakers) is it hearing itself...
+MACHINE_SHORT = 0.3  # ...or this, for a word or two (it measured 0.6-0.75 through a room, people about 0)
 SENTENCES = [  # to read aloud when enrolling: varied sounds, about five seconds each
     "Open Safari and find the weather for this weekend in Seattle.",
     "Check my recent orders on Amazon and tell me when the next one arrives.",
@@ -53,6 +55,8 @@ class Voiceprint:
         self.threshold = float(os.environ.get("VOICE_MATCH") or MATCH)
         self.error: str | None = None
         self._session = None
+        self.machine = np.zeros((0, 256), np.float32)  # the agent's own voice (learn_voice), never you
+        self.heard_machine = False  # the last thing left out was its own voice
         try:
             with np.load(path) as saved:
                 self.prints = saved["prints"].astype(np.float32)
@@ -62,6 +66,21 @@ class Voiceprint:
     @property
     def enrolled(self) -> bool:
         return len(self.prints) > 0
+
+    @property
+    def checks(self) -> bool:
+        """Something is left out: other people (you're enrolled) or its own voice (learned)."""
+        return (self.enrolled and self.threshold > 0) or len(self.machine) > 0
+
+    def learn_voice(self, clips: list[np.ndarray], rate: int):
+        """Learns the agent's own voice from some of its speech (rendered, not played), so what
+        of it gets past the echo canceller is left out, even with nobody enrolled."""
+        from math import gcd
+        from scipy.signal import resample_poly
+        g = gcd(RATE, rate)
+        embeddings = np.stack([self.embed(resample_poly(c, RATE // g, rate // g).astype(np.float32)) for c in clips])
+        mean = embeddings.mean(axis=0)
+        self.machine = (mean / np.linalg.norm(mean))[None].astype(np.float32)
 
     def ready(self) -> bool:
         """Loads the model (the first time); False, with error set, if it can't."""
@@ -82,6 +101,8 @@ class Voiceprint:
     def describe(self) -> str:
         if not self.enrolled:
             return "off (anyone talking nearby is heard; ./voice.sh --enroll teaches it your voice)"
+        if self.threshold <= 0:
+            return "off (VOICE_MATCH 0: everyone talking nearby is heard)"
         if not self.ready():
             return f"off ({self.error})"
         return f"on (your voice, VOICE_MATCH {self.threshold:g})"
@@ -102,19 +123,27 @@ class Voiceprint:
         embedding = self._session.run(None, {"feats": feats[None]})[0][0]
         return embedding / (np.linalg.norm(embedding) + 1e-9)
 
-    def score(self, samples: np.ndarray) -> float:
-        return float(np.max(self.prints @ self.embed(samples)))
-
     def needed(self, seconds: float) -> float:
         """How alike seconds of speech has to be."""
         short = min(1.0, max(0.0, (FULL - seconds) / (FULL - MIN_AUDIO)))
         return self.threshold - SHORT_SLACK * short
 
     def matches(self, samples: np.ndarray) -> tuple[bool, float]:
-        if not self.enrolled or not self.ready() or len(samples) < MIN_AUDIO * RATE:
+        if not self.checks or len(samples) < MIN_AUDIO * RATE or not self.ready():
             return True, 1.0
-        similarity = self.score(samples)
-        return similarity >= self.needed(len(samples) / RATE), similarity
+        seconds = len(samples) / RATE
+        embedding = self.embed(samples)
+        you = float(np.max(self.prints @ embedding)) if self.enrolled else 0.0
+        if len(self.machine):
+            short = min(1.0, max(0.0, (FULL - seconds) / (FULL - MIN_AUDIO)))
+            itself = float(np.max(self.machine @ embedding))
+            if itself >= MACHINE - (MACHINE - MACHINE_SHORT) * short and itself > you:
+                self.heard_machine = True
+                return False, you
+        self.heard_machine = False
+        if self.threshold <= 0 or not self.enrolled:
+            return True, 1.0
+        return you >= self.needed(seconds), you
 
     def add(self, clips: list[np.ndarray]):
         """Enrolls a voice from a few clips of it."""

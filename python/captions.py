@@ -1,6 +1,7 @@
-"""Captions on the screen: what the agent is saying, and under that what it's doing right now.
-build/agent-vhid-captions (tools/captions.swift) draws them at the bottom of the screen, over
-every app; clicks go through them and the agent's screenshots leave them out.
+"""Captions on the screen: what the agent is saying, and under that what it's doing right now; while
+it's listening or you're dictating, a line saying so on top, with what you're saying under it.
+build/agent-vhid-captions (tools/captions.swift) draws them at the bottom of the screen, over every
+app; clicks go through them and the agent's screenshots leave them out.
 
     CAPTIONS=0   no captions
 """
@@ -25,6 +26,23 @@ class Captions:
         if show and os.environ.get("CAPTIONS", "1") != "0" and os.path.exists(OVERLAY):
             self._proc = subprocess.Popen([OVERLAY], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                           stderr=subprocess.DEVNULL, text=True)
+
+    def listening(self, on: bool):
+        """The "Listening · tap fn to stop" line on top, while it listens."""
+        self._send(listening=on)
+
+    def dictating(self, on: bool):
+        """The "Dictating · let go of fn to type it" line on top instead, while you hold fn."""
+        self._send(dictating=on)
+
+    def camera(self, state: str):
+        """The camera line on top in lip reading mode: "starting", "waiting" (for macOS's
+        permission), "on" (it is recording), or "off" (none)."""
+        self._send(camera=state)
+
+    def hearing(self, words: str):
+        """What you're saying, as you say it; it fades a little after you stop."""
+        self._send(hearing=words)
 
     def say(self, words: str):
         """The words it's saying now; they fade once there's been time to read them."""
