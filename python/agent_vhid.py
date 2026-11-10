@@ -3,12 +3,13 @@
 The helper drives Karabiner's virtual HID keyboard and mouse, so macOS sees
 real hardware input. The moment you touch a real key, the trackpad or a mouse,
 the helper takes the agent's hands off: every call here raises Disengaged until
-you double-tap Right Option to hand control back.
+it asks again (engage(), for something you told it to do) and your hands are off.
 
     from agent_vhid import AgentVHID, Disengaged
 
     mac = AgentVHID()
-    mac.wait_engaged()                 # blocks until you double-tap Right Option
+    mac.engage()                       # for a task you gave it
+    mac.wait_engaged()                 # blocks until your hands are off
     shot = mac.screenshot(max_width=1280)
     try:
         mac.click(*shot.to_screen(640, 400))
@@ -61,7 +62,7 @@ class MoveFailed(AgentVHIDError):
 
 
 class NotAllowed(AgentVHIDError):
-    """The helper refused, e.g. engage_after_talk() with no recent talk hold."""
+    """The helper refused, e.g. engage() while its safety watcher isn't working."""
 
 
 # --- CoreGraphics, for reading where the cursor is and how big the screen is ---
@@ -246,7 +247,7 @@ class _Connection:
             self.sock.connect(path)
         except (FileNotFoundError, ConnectionRefusedError) as e:
             self.sock.close()
-            raise HelperUnavailable(f"agent-vhid-helper isn't running on {path} (start it with: sudo ./run.sh)") from e
+            raise HelperUnavailable(f"agent-vhid-helper isn't running on {path} (./install.sh has the Mac start it; or start it with ./voice.sh)") from e
         except PermissionError as e:
             self.sock.close()
             raise HelperUnavailable(f"no permission to use {path}; start the helper with sudo as this user") from e
@@ -350,8 +351,9 @@ class AgentVHID:
         return self.status().get("state") == "engaged"
 
     def watch(self):
-        """Yields {'state': ..., 'reason': ...} every time control changes hands, and
-        {'talk': 'down'} / {'talk': 'up'} when the human holds and lets go of Right Option."""
+        """Yields {'state': ..., 'reason': ...} every time control changes hands, and {'fn': ...} for
+        what the human does with fn: 'down', then 'tap' (the voice agent's listening switch) or 'up'
+        (the end of a hold, which dictates), and 'other' if they press another key with it."""
         conn = _Connection(self.socket_path, timeout=None)
         try:
             if not conn.request("watch").startswith("ok"):
@@ -364,11 +366,13 @@ class AgentVHID:
             conn.close()
 
     def wait_engaged(self, timeout: float | None = None, announce: bool = True) -> bool:
-        """Blocks until the human hands over control (double-tap Right Option). False on timeout."""
+        """Blocks until control has passed to the agent: after engage(), once the human's hands are off.
+        False on timeout."""
         if self.is_engaged():
             return True
         if announce:
-            print("[agent-vhid] waiting for you: double-tap Right Option to hand over control", file=sys.stderr)
+            print("[agent-vhid] waiting for control: keep your hands off the keyboard, trackpad and mouse",
+                  file=sys.stderr)
         conn = _Connection(self.socket_path, timeout=timeout)
         try:
             conn.request("watch")
@@ -384,15 +388,11 @@ class AgentVHID:
     def release_all(self):
         self._send("release")
 
-    def engage_after_talk(self):
-        """Starts taking control after the human spoke a task (held Right Option). Allowed once per hold,
-        within 30 s; raises NotAllowed otherwise. The helper still waits for their hands to be off."""
-        self._send("engage_after_talk")
-
-    def engage_by_voice(self):
-        """Starts taking control for a task the voice agent heard. Only allowed when the helper runs
-        with --hands-free (raises NotAllowed otherwise). It still waits for the human's hands to be off."""
-        self._send("engage_by_voice")
+    def engage(self):
+        """Starts taking control, for a task the human gave (said or typed) or after they said
+        "continue". The helper waits for their hands to be off first, and any touch takes it back.
+        Raises NotAllowed if its safety watcher isn't working."""
+        self._send("engage")
 
     def disengage(self):
         """Hands control back to the human, e.g. when a task is done."""
@@ -677,7 +677,9 @@ def _main(argv: list[str]) -> int:
     sub.add_parser("cursor")
     sub.add_parser("release")
     sub.add_parser("watch", help="print every hand-over until Ctrl-C")
-    p = sub.add_parser("wait", help="block until you hand over control")
+    p = sub.add_parser("wait", help="block until control has passed to the agent")
+    p.add_argument("--timeout", type=float)
+    p = sub.add_parser("engage", help="take control (once your hands are off), then return")
     p.add_argument("--timeout", type=float)
     p = sub.add_parser("move")
     p.add_argument("x", type=float)
@@ -717,8 +719,12 @@ def _main(argv: list[str]) -> int:
             mac.release_all()
         elif args.cmd == "watch":
             for event in mac.watch():
-                print(event.get("state"), event.get("reason"), flush=True)
+                print(*(("fn", event["fn"]) if "fn" in event else (event.get("state"), event.get("reason"))),
+                      flush=True)
         elif args.cmd == "wait":
+            return 0 if mac.wait_engaged(args.timeout) else 4
+        elif args.cmd == "engage":
+            mac.engage()
             return 0 if mac.wait_engaged(args.timeout) else 4
         elif args.cmd == "move":
             mac.move_to(args.x, args.y)

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Talk to your Mac. Starts the helper (one password prompt) and the voice agent.
-# Then, in any window, just say what you want; it's always listening. Ctrl-C stops everything.
+# Then, in any window, tap fn and say what you want; tap fn again to stop it listening.
+# Ctrl-C stops everything. To have it start with the Mac instead, in the menu bar: ./install.sh
 #
 # Parakeet writes down what you say as you say it, the computer agent does it, and Kokoro tells
 # you what it's doing (python/voice_agent.py). The models are open source and run on this Mac;
@@ -8,6 +9,7 @@
 #
 #   ./voice.sh [--no-speak]
 #   ./voice.sh --enroll     teach it your voice, so it ignores other people talking nearby
+#   ./voice.sh --setup      only build it and fetch what it needs (./install.sh does this)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -39,16 +41,22 @@ done
 if [ "${1:-}" = "--enroll" ]; then
   exec .venv/bin/python python/voiceprint.py --enroll
 fi
+[ "${1:-}" = "--setup" ] && exit 0
 
 agent=(.venv/bin/python python/voice_agent.py)
 args=("$@")
 
+if pgrep -qf "voice_agent.py --app"; then
+  echo "Agent.app is running, and it's already the one listening for fn. Quit it from its menu bar icon first."
+  exit 1
+fi
+
 status=$(python3 python/agent_vhid.py status 2>/dev/null || true)
 if [ -n "$status" ]; then
-  if grep -q '^hands_free=1' <<<"$status"; then
-    exec "${agent[@]}" ${args[@]+"${args[@]}"}  # the helper is already running
+  if grep -q '^fn=1' <<<"$status"; then
+    exec "${agent[@]}" ${args[@]+"${args[@]}"}  # the helper is already running (after ./install.sh, always)
   fi
-  echo "An agent-vhid-helper without --hands-free is running. Press Ctrl-C in its window; this carries on once it stops."
+  echo "An older agent-vhid-helper is running. Press Ctrl-C in its window; this carries on once it stops."
   while python3 python/agent_vhid.py status >/dev/null 2>&1; do sleep 1; done
   sleep 2  # its run.sh stops the daemon it started; let that finish first
 fi
@@ -58,4 +66,4 @@ sudo -v  # ask for the password before anything starts printing
 agent_pid=$!
 # A second Ctrl-C shouldn't cut the agent's goodbye short (it stops the task and hands back control).
 trap 'trap "" INT; kill $agent_pid 2>/dev/null || true; wait $agent_pid 2>/dev/null || true' EXIT
-./run.sh --hands-free >>/tmp/agent-vhid-helper.log 2>&1  # helper log: /tmp/agent-vhid-helper.log
+./run.sh >>/tmp/agent-vhid-helper.log 2>&1  # helper log: /tmp/agent-vhid-helper.log

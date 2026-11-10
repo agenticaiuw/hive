@@ -11,6 +11,7 @@ screen, or shows a window.
 import base64
 import json
 import os
+os.environ["AGENT_BACKEND"] = "codex"  # these drive the fake Codex app-server (fake_codex.py), never the real Claude
 import struct
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from test_dry_run import Helper, keyboard  # noqa: E402
 from agent_vhid import AgentVHID  # noqa: E402
 import agent  # noqa: E402
 import captions  # noqa: E402
+import desktop  # noqa: E402
 import mac_mcp  # noqa: E402
 import phone  # noqa: E402
 import phone_mcp  # noqa: E402
@@ -218,6 +220,34 @@ class MacBatchTest(unittest.TestCase):
             keyboard(0, 0x04), keyboard(0),                                   # a
         ])
 
+    def windows_with(self, front: str) -> list[desktop.Window]:
+        """Two presentations open in PowerPoint, `front` in front of the other."""
+        titles = ["10-29 Club-Wide Meeting", "GSSF_Presentation_styled"]
+        titles.sort(key=lambda t: t != front)
+        return [desktop.Window("Microsoft PowerPoint", t, True, 1) for t in titles] + \
+            [desktop.Window("Safari", "New meeting", False, 2)]
+
+    def test_switch_window_brings_an_open_document_forward(self):
+        pressed = []
+        real_key = self.tools.mac.key
+        self.tools.mac.key = lambda keys: (pressed.append(keys), real_key(keys))
+        front = lambda: "GSSF_Presentation_styled" if pressed else "10-29 Club-Wide Meeting"
+        n = len(self.helper.lines)
+        with mock.patch("desktop.windows", lambda: self.windows_with(front())), \
+                mock.patch("mac_mcp.frontmost_app", return_value="Microsoft PowerPoint"), \
+                mock.patch.object(self.tools, "look", lambda note="", context=False: mac_mcp.result(mac_mcp.text(note))):
+            res = self.tools.call("switch_window", {"title": "gssf"})
+        self.assertFalse(res["isError"], res)
+        self.assertIn('"GSSF_Presentation_styled" is in front', res["content"][0]["text"])
+        self.assertEqual(pressed, ["cmd+`"])  # once: PowerPoint was already the app in front
+        self.assertIn(keyboard(0x8, 0x35), self.helper.reports(n))
+
+    def test_switch_window_says_what_is_open_when_nothing_matches(self):
+        with mock.patch("desktop.windows", lambda: self.windows_with("10-29 Club-Wide Meeting")):
+            res = self.tools.call("switch_window", {"title": "budget"})
+        self.assertTrue(res["isError"])
+        self.assertIn('Microsoft PowerPoint: "GSSF_Presentation_styled"', res["content"][0]["text"])
+
     def test_stops_at_a_step_it_cant_do(self):
         res = self.tools.call("batch", {"steps": [{"tool": "press_key", "keys": "escape"}, {"tool": "screenshot"},
                                                   {"tool": "type_text", "text": "never"}], "screenshot": False})
@@ -232,25 +262,47 @@ class CodexTaskTest(unittest.TestCase):
     def setUp(self):
         self.log = os.path.join(tempfile.mkdtemp(prefix="codex-"), "codex.jsonl")
         env = {"CODEX_BIN": os.path.join(HERE, "fake_codex.py"), "FAKE_CODEX_LOG": self.log,
+               "AGENT_STATE_DIR": os.path.dirname(self.log), "CODEX_HOME": os.path.dirname(self.log),
                "FAKE_CODEX_SECONDS": "0.3", "FAKE_CODEX_REPLY": "Done on the phone."}
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
+        geometry = mock.patch("mac_mcp.geometry", return_value=mac_mcp.Screenshot("synthetic", 1280, 800, 1))
+        # The fake calls wait(screenshot=False), which never uses geometry. Keep
+        # the test independent of whether a display is available to this process.
+        geometry.start()
+        self.addCleanup(geometry.stop)
         agent.stop_server()
         self.addCleanup(agent.stop_server)
+        agent._session = agent.Session()
+        agent.new_session()
         self.events: list[tuple[str, str]] = []
 
     def entries(self) -> list[dict]:
+        if not os.path.exists(self.log):
+            return []
         with open(self.log) as f:
             return [json.loads(line) for line in f]
 
-    def task(self) -> agent.CodexTask:
-        return agent.CodexTask("open Maps", device="phone", on_event=lambda *e: self.events.append(e)).start(look=False)
+    def turns(self) -> list[dict]:
+        return [e for e in self.entries() if "prompt" in e]
+
+    def started(self) -> list[str]:
+        return [e["started"] for e in self.entries() if "started" in e]
+
+    def task(self, request: str = "open Maps", device: str = "phone") -> agent.CodexTask:
+        return agent.CodexTask(request, device=device, on_event=lambda *e: self.events.append(e)).start(look=False)
+
+    def until(self, check, seconds: float = 5):
+        end = time.monotonic() + seconds
+        while not check():
+            self.assertLess(time.monotonic(), end, "timed out")
+            time.sleep(0.05)
 
     def test_a_task_uses_our_instructions_and_tools(self):
         task = self.task()
         self.assertEqual(task.wait(), "Done on the phone.")
-        run, reply = self.entries()
+        run, reply = [e for e in self.entries() if "started" not in e]
         self.assertEqual(run["tools"], ["mac", "phone"])  # every task can use both
         self.assertEqual(run["model"], "gpt-6.1-terra")
         self.assertEqual(run["instructions"], agent.instructions())  # in place of Codex's own
@@ -268,6 +320,101 @@ class CodexTaskTest(unittest.TestCase):
         self.assertIs(agent.codex_server(), server)
         self.assertEqual(len([e for e in self.entries() if "prompt" in e]), 2)
 
+    def test_requests_in_a_session_are_turns_on_one_thread(self):
+        self.task().wait()
+        self.task("No, the other one").wait()
+        first, second = self.turns()
+        self.assertEqual(second["thread"], first["thread"])  # so it has the first request in context
+        self.assertTrue(second["prompt"].startswith(agent.FOCUS["phone"]))  # nothing more to tell it
+        self.assertIn('"the other one"', first["rules"])  # the rules come once, with the thread
+        self.assertNotIn("How to work", first["prompt"])
+
+    def test_tapping_fn_keeps_the_durable_session(self):
+        self.task().wait()
+        self.assertTrue(agent.new_session())
+        self.task().wait()
+        first, second = self.turns()
+        self.assertEqual(second["thread"], first["thread"])
+        self.assertEqual(len(self.started()), 1)
+
+    def test_tapping_fn_prepares_without_replacing_a_ready_thread(self):
+        self.task().wait()  # Codex is running
+        agent.new_session()
+        self.task().wait()
+        self.assertEqual(self.turns()[-1]["thread"], self.started()[-1])
+        self.assertEqual(len(self.started()), 1)
+
+    def test_the_reply_is_said_a_sentence_at_a_time_as_it_comes(self):
+        os.environ["FAKE_CODEX_REPLY"] = "Opened Maps. It shows three coffee shops nearby."
+        task = self.task()
+        task.wait()
+        self.until(lambda: self.events[-1][0] == "done")
+        said = [text for kind, text in self.events if kind == "say"]
+        self.assertEqual(said, ["Opened Maps.", "It shows three coffee shops nearby."])
+        self.assertEqual(self.events[-1], ("done", "Opened Maps. It shows three coffee shops nearby."))
+        self.assertIn("words", task.times)
+        self.assertEqual(task.calls_to_words, 1)
+
+    def test_a_look_taken_as_you_started_talking_goes_with_the_request(self):
+        ahead = agent.LookAhead(take=lambda: ("data:image/jpeg;base64,QUJD", "Open windows: Notes \"Shopping\"."))
+        with mock.patch("agent.first_look", side_effect=AssertionError("it looked again")):
+            agent.CodexTask("add milk to my list", device="mac", ahead=ahead,
+                            on_event=lambda *e: self.events.append(e)).start().wait()
+        run = self.turns()[0]
+        self.assertEqual(run["images"], 1)
+        self.assertIn('Open windows: Notes "Shopping".', run["prompt"])
+        self.assertIn(("action", "screenshot (taken as you started talking)"), self.events)
+
+    def test_a_stale_look_is_left_out(self):
+        ahead = agent.LookAhead(take=lambda: ("data:image/jpeg;base64,QUJD", "Open windows: Notes."))
+        ahead.at -= agent.LOOK_AHEAD_FRESH + 1  # you started talking long ago
+        with mock.patch("agent.first_look", return_value=None) as looked:
+            task = agent.CodexTask("add milk to my list", device="mac", ahead=ahead).start()
+            task.wait()
+        looked.assert_called_once()  # it looked again, at the time of the request
+        self.assertFalse(task.looked_ahead)
+        self.assertEqual(self.turns()[0]["images"], 0)
+
+    def test_fast_tier(self):
+        os.environ["AGENT_FAST"] = "1"
+        self.task().wait()
+        self.assertEqual(self.turns()[0]["tier"], "priority")
+        os.environ["AGENT_FAST"] = ""
+        agent.new_session()  # listening keeps the saved thread and its tier
+        self.task().wait()
+        self.assertEqual(self.turns()[1]["tier"], "priority")
+
+    def test_a_session_carries_on_while_a_request_is_under_way(self):
+        os.environ["FAKE_CODEX_SECONDS"] = "60"
+        task = self.task()
+        self.assertFalse(agent.new_session())
+        task.stop()
+
+    def test_a_request_that_replaces_a_stopped_one_waits_for_its_turn_to_end(self):
+        os.environ["FAKE_CODEX_SECONDS"] = "60,0.3"
+        first = self.task()
+        self.until(lambda: ("action", "wait(seconds=0.1)") in self.events)
+        first.stop()
+        self.assertEqual(self.task("open Maps, then search for coffee").wait(), "Done on the phone.")
+        stopped, replacement = self.turns()
+        self.assertEqual(replacement["thread"], stopped["thread"])
+
+    def test_a_request_while_the_thread_is_busy_gets_its_own_and_is_told_later(self):
+        os.environ["FAKE_CODEX_SECONDS"] = "60,0.3,0.3"
+        mac = self.task("open Notes", device="mac")
+        self.until(lambda: len(self.turns()) == 1)
+        self.assertEqual(self.task().wait(), "Done on the phone.")  # the phone while the Mac works
+        on_mac, on_phone = self.turns()
+        self.assertNotEqual(on_phone["thread"], on_mac["thread"])
+        self.assertIn('They asked: "open Notes"\n  You: (still working on it)', on_phone["prompt"])
+        self.until(lambda: {"unsubscribed": on_phone["thread"]} in self.entries())
+        mac.stop()
+        self.task("now do it again", device="mac").wait()
+        again = self.turns()[-1]
+        self.assertEqual(again["thread"], on_mac["thread"])
+        self.assertIn('They asked: "open Maps"\n  You: "Done on the phone."', again["prompt"])
+        self.assertNotIn("open Notes", again["prompt"])  # it was on this thread
+
     def test_stop_ends_the_turn(self):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
         task = self.task()
@@ -284,6 +431,7 @@ class CodexTaskTest(unittest.TestCase):
         self.assertIn('features.code_mode.direct_only_tool_namespaces=["mac", "phone"]', cmd)
         self.assertIn("features.shell_tool=false", cmd)
         self.assertIn("notify=[]", cmd)
+        self.assertIn("include_permissions_instructions=false", cmd)  # not "the sandbox only permits reading"
         catalog = [c.split("=", 1)[1] for c in cmd if c.startswith("model_catalog_json=")]
         if catalog:  # when Codex has cached its model list
             with open(json.loads(catalog[0])) as f:
@@ -309,6 +457,47 @@ class CodexTaskTest(unittest.TestCase):
         self.assertEqual(agent.CodexTask("open Maps on my phone").device, "phone")
 
 
+class DesktopTest(unittest.TestCase):
+    """What the agent is told is open. Reads the window list (no screenshot); never asks the browsers."""
+
+    def test_windows_and_tabs_read_front_to_back(self):
+        shown = [desktop.Window("Microsoft PowerPoint", "10-29 Club-Wide Meeting", True, 1),
+                 desktop.Window("Microsoft PowerPoint", "GSSF_Presentation_styled", False, 1)]
+        tabs = {"Safari": [{"current": 2, "tabs": [("Inbox", "https://mail.example.com/"),
+                                                   ("Agentic AI UW Hub", "https://hub.example.com/meet")]}]}
+        self.assertEqual(desktop.describe(shown, tabs), "\n".join([
+            "Open windows, front to back (app: title):",
+            '  - Microsoft PowerPoint: "10-29 Club-Wide Meeting"',
+            '  - Microsoft PowerPoint: "GSSF_Presentation_styled"   [not on screen: minimized, hidden or on '
+            'another desktop]',
+            "Safari window 1 tabs (* = the one showing):",
+            '    "Inbox" https://mail.example.com/',
+            '  * "Agentic AI UW Hub" https://hub.example.com/meet',
+        ]))
+
+    def test_addresses_lose_their_query(self):
+        self.assertEqual(desktop.page("https://accounts.example.com/signin?code=secret#frag"),
+                         "https://accounts.example.com/signin")
+        self.assertEqual(desktop.page("about:blank"), "about:blank")
+        self.assertEqual(desktop.page(None), "")
+
+    def test_no_browser_open_means_no_apple_events(self):
+        with mock.patch("subprocess.run") as run:
+            self.assertEqual(desktop.browser_tabs([desktop.Window("Notes", "Notes", True, 1)]), {})
+        run.assert_not_called()
+
+    def test_window_list_reads(self):
+        shown = desktop.windows()
+        self.assertTrue(all(isinstance(w, desktop.Window) and w.app for w in shown))
+        self.assertEqual(shown, sorted(shown, key=lambda w: not w.on_screen))  # on screen first
+
+    def test_codex_knows_the_new_tools(self):
+        names = [t["name"] for t in mac_mcp.TOOLS]
+        self.assertIn("windows", names)
+        self.assertIn("switch_window", names)
+        self.assertEqual(agent.doing({"tool": "switch_window", "arguments": {"title": "GSSF"}}), "Switching to “GSSF”")
+
+
 class CaptionsTest(unittest.TestCase):
     def test_overlay_draws_the_words(self):
         if not os.path.exists(captions.OVERLAY):
@@ -323,8 +512,24 @@ class CaptionsTest(unittest.TestCase):
         self.assertGreater(width, 300)
         self.assertGreater(height, 60)  # two lines: the words and what it's doing
 
+    def test_overlay_says_its_listening_and_what_it_hears(self):
+        if not os.path.exists(captions.OVERLAY):
+            self.skipTest("build/agent-vhid-captions isn't built (make)")
+        out = os.path.join(tempfile.mkdtemp(prefix="captions-"), "c.png")
+        heights = []
+        for extra in ([], ["--listening", "--hearing", "Open Safari and"], ["--dictating", "--hearing", "Dear Sam,"]):
+            subprocess.run([captions.OVERLAY, "--snapshot", out, *extra, "I opened Safari for you."],
+                           check=True, timeout=20)
+            size = subprocess.run(["sips", "-g", "pixelHeight", out], capture_output=True, text=True).stdout
+            heights.append(int(size.split("pixelHeight:")[1].split()[0]))
+        self.assertGreater(heights[1], heights[0] + 30)  # two more lines: "Listening" and your words
+        self.assertEqual(heights[2], heights[1])  # "Dictating" instead
+
     def test_hidden_captions_do_nothing(self):
         quiet = captions.Captions(show=False)
+        quiet.listening(True)
+        quiet.dictating(True)
+        quiet.hearing("open")
         quiet.say("hello")
         quiet.doing("Thinking")
         quiet.close()

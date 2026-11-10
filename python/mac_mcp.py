@@ -22,11 +22,14 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import desktop  # noqa: E402
+import ingest  # noqa: E402
 from agent_vhid import (  # noqa: E402
     AgentVHID, AgentVHIDError, Disengaged, Screenshot, TextBox, cursor_position, main_display_bounds,
 )
@@ -140,15 +143,45 @@ TOOLS = [
     {
         "name": "wait_for_control",
         "description": "Use when a tool says the user has control. Waits until they hand it back (they "
-                       "double-tap Right Option), then returns a fresh screenshot.",
+                       "say \"continue\"), then returns a fresh screenshot.",
         "inputSchema": {"type": "object", "properties": {
             "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 600, "default": 120},
         }},
     },
     {
         "name": "read_clipboard",
-        "description": "Return the text on the clipboard, e.g. after copying something with cmd+c.",
+        "description": "Return the text on the clipboard, e.g. after copying something with cmd+c: up to "
+                       "8,000 characters from offset, saying how long it is when there's more.",
+        "inputSchema": {"type": "object", "properties": {
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        }},
+    },
+    {
+        "name": "read_ingested",
+        "description": "Read a part of a text the user added with Add to Context (a transcript, say) that was "
+                       "too long to keep in the conversation. Its id and number of parts were given when it "
+                       "was added; an empty id means the latest one.",
+        "inputSchema": {"type": "object", "properties": {
+            "id": {"type": "string", "default": ""},
+            "part": {"type": "integer", "minimum": 1, "default": 1},
+        }},
+    },
+    {
+        "name": "windows",
+        "description": "List every open window, front to back, with its app and title (including ones that are "
+                       "minimized, hidden or on another desktop), and the tabs open in Safari and Chrome.",
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "switch_window",
+        "description": "Bring an open window to the front by its title, or part of it, as `windows` lists it: "
+                       "switches to its app, then to that window. Use it rather than opening a document that is "
+                       "already open. Returns a screenshot.",
+        "inputSchema": {"type": "object", "properties": {
+            "title": {"type": "string"},
+            "app": {"type": "string", "description": "The window's app, when several apps have a window with "
+                                                     "that title."},
+        }, "required": ["title"]},
     },
 ]
 BATCHABLE = ["click", "move_mouse", "drag", "scroll", "type_text", "press_key", "open_app", "wait"]
@@ -233,8 +266,15 @@ class MacTools:
 
     # -- seeing --
 
-    def look(self, note: str = "") -> dict:
+    def look(self, note: str = "", context: bool = False) -> dict:
+        """context: also list every open window and the browsers' tabs (desktop.py), for the first
+        look at a task."""
         g = geometry()
+        shown = desktop.windows()
+        tabs: dict = {}
+        fetching = threading.Thread(target=lambda: tabs.update(desktop.browser_tabs(shown)), daemon=True)
+        if context:
+            fetching.start()  # while the screenshot is taken
         fd, png = tempfile.mkstemp(prefix="mac-mcp-", suffix=".png")
         os.close(fd)
         jpg = png[:-4] + ".jpg"
@@ -249,8 +289,14 @@ class MacTools:
                 if os.path.exists(path):
                     os.unlink(path)
         cx, cy = g.from_screen(*cursor_position())
+        app = frontmost_app()
+        front = next((w for w in shown if w.app == app and w.on_screen and w.title), None)
         summary = (f"Screenshot {g.width}x{g.height} px. Mouse pointer at ({cx:.0f}, {cy:.0f}). "
-                   f"Frontmost app: {frontmost_app()}.")
+                   f"Frontmost app: {app}" + (f", window {json.dumps(front.title, ensure_ascii=False)}" if front else "")
+                   + ".")
+        if context:
+            fetching.join(2)
+            summary += "\n" + desktop.describe(shown, dict(tabs))
         return result(text(f"{note}\n{summary}" if note else summary),
                       {"type": "image", "data": data, "mimeType": "image/jpeg"})
 
@@ -334,7 +380,7 @@ class MacTools:
         if name == "wait_for_control":
             timeout = float(a.get("timeout_seconds", 120))
             if self.mac.status().get("state") != "engaged":
-                notify("Paused. Double-tap Right Option to let it continue.")
+                notify("Paused. Say “continue” to let it carry on (tap fn first if it isn't listening).")
             if self.mac.wait_engaged(timeout=timeout, announce=False):
                 return self.look("You have control again. The user may have changed things; "
                                  "check this screenshot before continuing.")
@@ -342,14 +388,50 @@ class MacTools:
                                "where you got to."), error=True)
         if name == "find_text":
             return self.find_text(a["text"])
+        if name == "windows":
+            return result(text(desktop.summary()))
+        if name == "switch_window":
+            return self.switch_window(a["title"], a.get("app"))
         if name == "read_screen":
             return self.read_screen()
         if name == "batch":
             return run_batch(self, a, BATCHABLE)
         if name == "read_clipboard":
             clip = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
-            return result(text(clip[:8000] if clip else "(the clipboard has no text)"))
+            return result(text(ingest.clipboard_slice(clip, a.get("offset") or 0)))
+        if name == "read_ingested":
+            return result(text(ingest.read_part(a.get("id") or None, int(a.get("part") or 1))))
         return result(text(f"Unknown tool {name!r}"), error=True)
+
+    def switch_window(self, title: str, app: str | None = None) -> dict:
+        """Switches to the window's app with Spotlight if it isn't in front, then presses cmd+` (the
+        app's next window) until the window is in front, like a person would."""
+        wanted, of = title.strip().lower(), (app or "").strip().lower()
+
+        def matches(w: desktop.Window) -> bool:
+            return bool(wanted) and wanted in w.title.lower() and of in w.app.lower()
+
+        shown = desktop.windows()
+        target = next((w for w in shown if matches(w)), None)
+        if target is None:
+            return result(text(f"No open window has {title!r} in its title.\n" + desktop.describe(shown, {})),
+                          error=True)
+        if frontmost_app() != target.app:
+            switched = self.call("open_app", {"name": target.app, "screenshot": False})
+            if switched["isError"]:
+                return switched
+        for _ in range(sum(w.app == target.app for w in shown) + 1):
+            front = desktop.front_window(target.app)
+            if front and matches(front):
+                time.sleep(SETTLE)
+                return self.look(f"{target.app}'s window {json.dumps(front.title, ensure_ascii=False)} is in front.")
+            pressed = self.act({"screenshot": False}, lambda: self.mac.key("cmd+`"), "")
+            if pressed["isError"]:
+                return pressed
+            time.sleep(0.3)  # the window comes forward
+        return self.look(f"Couldn't bring {json.dumps(target.title, ensure_ascii=False)} forward with cmd+` (it "
+                         f"may be minimized or on another desktop). Try {target.app}'s Window menu, which lists "
+                         "its windows.")
 
     def find_text(self, phrase: str) -> dict:
         words = phrase.lower().split()

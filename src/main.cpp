@@ -6,11 +6,15 @@
 #include "injector.hpp"
 #include "server.hpp"
 #include "watcher.hpp"
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
+#include <pwd.h>
 #include <spawn.h>
 #include <string>
+#include <unistd.h>
 
 extern char** environ;
 
@@ -25,18 +29,17 @@ struct options {
   bool start_engaged = false;
   bool sound = true;
   bool verbose = false;
-  bool hands_free = false;
+  std::string user; // owns the socket; default: whoever ran sudo
   int quiet_ms = 400;
 };
 
 void usage() {
   std::cerr << "usage: sudo agent-vhid-helper [options]\n"
                "  --socket PATH     socket the agent connects to (default /tmp/agent-vhid.sock)\n"
-               "  --start-engaged   start with the agent in control instead of waiting for the gesture\n"
+               "  --user NAME       the user whose agent may connect (default: whoever ran sudo; launchd\n"
+               "                    has no sudo, so install.sh passes it)\n"
+               "  --start-engaged   start with the agent in control instead of waiting for it to ask\n"
                "  --quiet-ms N      how long your hands must be off before the agent takes over (default 400)\n"
-               "  --hands-free      the voice agent listens all the time: let it take control for a\n"
-               "                    task it heard, without a Right Option hold (touching anything still\n"
-               "                    takes control back)\n"
                "  --no-sound        no chime on engage/disengage\n"
                "  --verbose         log every physical input event\n"
                "  --dry-run         no root, no virtual devices: log reports instead (for testing)\n"
@@ -60,8 +63,8 @@ bool parse(int argc, char** argv, options& o) {
       o.sound = false;
     } else if (a == "--verbose") {
       o.verbose = true;
-    } else if (a == "--hands-free") {
-      o.hands_free = true;
+    } else if (a == "--user" && i + 1 < argc) {
+      o.user = argv[++i];
     } else {
       return false;
     }
@@ -80,6 +83,27 @@ void play(const char* sound) {
   posix_spawn(&pid, args[0], nullptr, nullptr, const_cast<char**>(args), environ);
 }
 
+// Karabiner's package leaves starting its daemon to you, and macOS doesn't always load its launch
+// daemon at boot (it has no RunAtLoad). This helper does start at boot, so it loads the daemon
+// whenever the virtual keyboard and mouse aren't ready. (Already loaded: launchctl just says so.)
+void load_karabiner_daemon(bool say) {
+  static const char* plist = "/Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist";
+  if (access(plist, R_OK) != 0) {
+    return;
+  }
+  if (say) {
+    std::cerr << "[vhid] not ready: loading Karabiner's daemon" << std::endl;
+  }
+  posix_spawn_file_actions_t quiet;
+  posix_spawn_file_actions_init(&quiet);
+  posix_spawn_file_actions_addopen(&quiet, 1, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_addopen(&quiet, 2, "/dev/null", O_WRONLY, 0);
+  const char* args[] = {"/bin/launchctl", "bootstrap", "system", plist, nullptr};
+  pid_t pid;
+  posix_spawn(&pid, args[0], &quiet, nullptr, const_cast<char**>(args), environ);
+  posix_spawn_file_actions_destroy(&quiet);
+}
+
 int run(const options& o, uid_t owner_uid, gid_t owner_gid);
 
 } // namespace
@@ -96,10 +120,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // The socket belongs to whoever ran sudo, so the agent can connect without root.
+  // The socket belongs to whoever ran sudo (or --user), so the agent can connect without root.
   uid_t owner_uid = getuid();
   gid_t owner_gid = getgid();
-  if (geteuid() == 0) {
+  if (!o.user.empty()) {
+    auto pw = getpwnam(o.user.c_str());
+    if (!pw) {
+      std::cerr << "no such user: " << o.user << "\n";
+      return 64;
+    }
+    owner_uid = pw->pw_uid;
+    owner_gid = pw->pw_gid;
+  } else if (geteuid() == 0) {
     if (auto sudo_uid = std::getenv("SUDO_UID")) {
       owner_uid = static_cast<uid_t>(std::strtoul(sudo_uid, nullptr, 10));
     }
@@ -128,6 +160,7 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
     if (o.dry_run) {
       inj = std::make_unique<dry_run_injector>(o.verbose);
     } else {
+      load_karabiner_daemon(false);
       inj = std::make_unique<karabiner_injector>();
     }
 
@@ -143,12 +176,9 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
             play("Funk");
           }
         });
-    g.set_hands_free(o.hands_free);
-
     watcher w(
         [&g](const std::string& source) { g.human_input(source); },
-        [&g] { g.engage_gesture(); },
-        [&g](bool down) { g.talk(down); },
+        [&g](const std::string& what) { g.fn(what); },
         o.verbose);
 
     std::string watch_status = "watch=off";
@@ -175,20 +205,27 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
               << (o.dry_run ? " (dry run)" : "") << "\n"
               << "Karabiner client protocol " << pqrs::karabiner::driverkit::client_protocol_version::embedded_client_protocol_version
               << "\n\n"
-              << "  Double-tap Right Option to hand control to the agent.\n"
-              << (o.hands_free ? "  Talk to the voice agent any time; it takes control for a task it hears.\n"
-                               : "  Hold Right Option and speak to give the voice agent a task.\n")
-              << "  Touch any key, the trackpad, or the mouse to take it back.\n"
+              << "  Tap fn to have the voice agent listen, and again to stop it.\n"
+              << "  Hold fn and talk to type what you say into the app in front.\n"
+              << "  The agent takes the mouse and keyboard for a task you give it;\n"
+              << "  touch any key, the trackpad, or the mouse to take them back.\n"
               << "  Ctrl-C to quit.\n"
               << std::endl;
 
-    // Drives the arming timeout and the talk hold, and notices Ctrl-C. IOHIDManager callbacks run on this loop too.
+    // Drives the arming timeout and notices Ctrl-C. IOHIDManager callbacks run on this loop too.
     gate* gp = &g; // blocks copy C++ objects, so capture pointers
-    watcher* wp = &w;
+    injector* ip = inj.get();
+    bool dry_run = o.dry_run;
+    __block auto next_load = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    __block bool said = false;
     CFRunLoopTimerRef timer = CFRunLoopTimerCreateWithHandler(
         kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 0.05, 0, 0, ^(CFRunLoopTimerRef) {
           gp->tick();
-          wp->tick();
+          if (!dry_run && !ip->ready() && std::chrono::steady_clock::now() >= next_load) {
+            load_karabiner_daemon(!said);  // (every 10 s while it isn't ready; says so once)
+            said = true;
+            next_load = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+          }
           if (stop_requested) {
             CFRunLoopStop(CFRunLoopGetMain());
           }

@@ -2,18 +2,17 @@
 
 // The engage/disengage state machine.
 //
-//   disengaged --(double-tap Right Option)--> arming --(hands off for quiet_period)--> engaged
-//   disengaged --(agent asks, within talk_grant of a talk hold)--> arming
-//   disengaged --(agent asks, with --hands-free: the voice agent heard a spoken task)--> arming
+//   disengaged --(the agent asks, for a task the human gave it)--> arming
+//   arming     --(hands off for quiet_period)--> engaged
+//   arming     --(any real input before the quiet period ends)--> disengaged
 //   engaged    --(any real key, touch, click, or mouse motion)--> disengaged
 //   engaged    --(agent says it is done)--> disengaged
-//   arming     --(any real input before the quiet period ends)--> disengaged
 //
-// The agent can never move itself out of `disengaged` on its own: it needs either the
-// double-tap or, for a spoken task, the human having just held the talk key (one grant per hold).
-// With --hands-free the voice agent listens all the time, so there is no hold: started that way,
-// the helper lets it ask for control when it hears a task. Either way, control only passes once
-// the human's hands have been off for the quiet period, and any touch takes it back.
+// The voice agent asks when it hears a task (it only listens after you tap fn) or when you say
+// "continue" after taking over; agent.py asks for a typed task. Either way control only passes
+// once the human's hands have been off for the quiet period, and any touch takes it back.
+// What fn does is passed on to whoever is watching ("event fn=down", then "fn=tap" or "fn=up", and
+// "fn=other" if another key is pressed with it); it never moves the gate.
 
 #include <chrono>
 #include <functional>
@@ -75,44 +74,17 @@ public:
     }
   }
 
-  // The human asked to hand control to the agent.
-  void engage_gesture() {
+  // The agent asks for control for a task the human gave it. False if the safety watcher isn't working.
+  bool engage() {
     std::lock_guard<std::mutex> lock(mutex_);
-    begin_arming_locked("engage_requested");
+    return begin_arming_locked("engage_requested");
   }
 
-  // The human started (down) or finished (up) holding the talk key. Finishing lets the voice
-  // agent ask for control once in the next talk_grant, so a spoken task can start without the double-tap.
-  void talk(bool down) {
+  // fn went down, up, or was part of a shortcut: a tap turns the voice agent's listening on or off,
+  // and a hold dictates.
+  void fn(const std::string& what) {
     std::lock_guard<std::mutex> lock(mutex_);
-    talk_grant_until_ = down ? clock::time_point{} : clock::now() + talk_grant;
-    notify_locked(std::string("event talk=") + (down ? "down" : "up"));
-  }
-
-  // Spends the grant from the last talk hold and starts arming. False if there is no grant.
-  bool engage_after_talk() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (talk_grant_until_ == clock::time_point{} || clock::now() > talk_grant_until_) {
-      return false;
-    }
-    talk_grant_until_ = {};
-    return begin_arming_locked("engage_requested_by_voice");
-  }
-
-  // With --hands-free: the voice agent heard a spoken task and asks for control. False otherwise.
-  bool engage_by_voice() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return hands_free_ && begin_arming_locked("engage_requested_by_voice");
-  }
-
-  void set_hands_free(bool on) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    hands_free_ = on;
-  }
-
-  bool hands_free() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return hands_free_;
+    notify_locked("event fn=" + what);
   }
 
   // The agent finished and hands control back.
@@ -127,7 +99,7 @@ public:
   void tick() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == state::arming && clock::now() - arming_started_ >= quiet_period_) {
-      transition_locked(state::engaged, reason_ == "engage_requested_by_voice" ? "engaged_by_voice" : "engaged_by_human");
+      transition_locked(state::engaged, "engaged");
     }
   }
 
@@ -159,9 +131,6 @@ public:
     }
     return "unknown";
   }
-
-  // How long after a talk hold the voice agent may ask for control.
-  static constexpr std::chrono::seconds talk_grant{30};
 
 private:
   // True if arming started or control is already on its way to the agent.
@@ -205,9 +174,7 @@ private:
   std::function<void()> on_disengage_;
   std::function<void(state)> on_change_;
   bool watcher_healthy_ = true;
-  bool hands_free_ = false;
   clock::time_point arming_started_;
-  clock::time_point talk_grant_until_;
   std::map<int, listener> listeners_;
   int next_listener_id_ = 1;
 };

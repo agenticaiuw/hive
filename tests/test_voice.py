@@ -1,7 +1,8 @@
 """Runs the voice agent against the helper in --dry-run mode and a fake Codex, with speech made
-by `say` standing in for the microphone and Parakeet really transcribing it: it listens all the
-time, the words show up as you talk, a pause ends what you said, talking over it stops its
-voice, and with echo cancellation its own voice coming back into the microphone isn't taken for
+by `say` standing in for the microphone and Parakeet really transcribing it: tapping fn starts
+and stops it listening, the words show up as you talk, a pause (or tapping fn) ends what you
+said, holding fn dictates instead, "continue" carries on after you took over, talking over it
+stops its voice, and with echo cancellation its own voice coming back into the microphone isn't taken for
 you. With your voice enrolled (Samantha plays you), other voices are left out, even right
 before or after you or under you. Nothing is played aloud: `say` writes files and the agent's
 voice is a stand-in.
@@ -11,6 +12,8 @@ voice is a stand-in.
 
 import json
 import os
+from pathlib import Path
+os.environ["AGENT_BACKEND"] = "codex"  # these drive the fake Codex app-server (fake_codex.py), never the real Claude
 import subprocess
 import sys
 import tempfile
@@ -33,6 +36,7 @@ import agent  # noqa: E402
 import listen  # noqa: E402
 import mic  # noqa: E402
 import voice_agent  # noqa: E402
+import session_journal  # noqa: E402
 import voiceprint  # noqa: E402
 
 FAKE_CODEX = os.path.join(HERE, "fake_codex.py")
@@ -85,9 +89,10 @@ def your_voiceprint() -> voiceprint.Voiceprint:
     return YOUR_VOICE
 
 
-def listen_to(samples: np.ndarray):
-    """The "microphone" hears samples in real time, then a moment of quiet."""
-    samples = np.concatenate([samples, silence(1.6)])
+def listen_to(samples: np.ndarray, then_quiet: bool = True):
+    """The "microphone" hears samples in real time, then (then_quiet) a moment of quiet."""
+    if then_quiet:
+        samples = np.concatenate([samples, silence(1.6)])
     start = time.time()
     for i in range(0, len(samples), BLOCK):
         EARS.feed(samples[i:i + BLOCK])
@@ -104,16 +109,18 @@ def wait_for(check, what: str, timeout: float = 20):
 
 
 class Voice:
-    """Stands in for speech.Voice: writes down what it was asked to say. `playing` is whether
-    it's audible right now."""
+    """Stands in for speech.Voice: writes down what it was asked to say, and "plays" it straight
+    away (on_play). `playing` is whether it's audible right now."""
 
-    def __init__(self):
+    def __init__(self, on_play=lambda words: None):
         self.said: list[str] = []
         self.calls: list[str] = []
         self.playing = False
+        self.on_play = on_play
 
     def say(self, text):
         self.said.append(text)
+        self.on_play(text)
 
     def stop(self):
         self.calls.append("stop")
@@ -122,6 +129,9 @@ class Voice:
     def audible(self):
         return self.playing
 
+    def quiet_for(self):
+        return 0.0 if self.playing else 1e9
+
 
 class Captions:
     """Stands in for the on-screen captions: writes down what they'd show."""
@@ -129,9 +139,24 @@ class Captions:
     def __init__(self):
         self.words: list[str] = []
         self.doings: list[str] = []
+        self.listenings: list[bool] = []  # each time the header said it's listening, or stopped saying it
+        self.hearings: list[str] = []
+        self.dictatings: list[bool] = []
 
     def say(self, words):
         self.words.append(words)
+
+    def listening(self, on):
+        self.listenings.append(on)
+
+    def hearing(self, words):
+        self.hearings.append(words)
+
+    def dictating(self, on):
+        self.dictatings.append(on)
+
+    def camera(self, on):
+        self.cameras = getattr(self, "cameras", []) + [on]
 
     def doing(self, text):
         self.doings.append(text)
@@ -146,9 +171,13 @@ class VoiceAgentTest(unittest.TestCase):
         setup_ears()
 
     def setUp(self):
-        self.helper = Helper("--hands-free")
+        self.helper = Helper()
         self.addCleanup(self.helper.stop)
         self.dir = tempfile.mkdtemp(prefix="voice-")
+        isolation = mock.patch.dict(os.environ, {"AGENT_STATE_DIR": self.dir, "CODEX_HOME": self.dir})
+        isolation.start()
+        self.addCleanup(isolation.stop)
+        agent._session = agent.Session()
         self.codex_log = os.path.join(self.dir, "codex.jsonl")
         os.environ.update({"CODEX_BIN": FAKE_CODEX, "FAKE_CODEX_LOG": self.codex_log, "FAKE_CODEX_SECONDS": "0.3"})
         agent.stop_server()  # a fresh fake Codex, which writes to this test's log
@@ -159,10 +188,10 @@ class VoiceAgentTest(unittest.TestCase):
         self.captions = Captions()
         self.agent = voice_agent.VoiceAgent(speak=False, mac=AgentVHID(self.helper.socket), ears=EARS,
                                             captions=self.captions)
-        self.agent.voice = Voice()
+        self.agent.voice = Voice(on_play=self.agent.on_play)
         self.heard: list[tuple[str, bool]] = []
         self.agent.heard = lambda text, final: (self.heard.append((text, final)),
-                                                self.agent.events.put(("heard", (text, final))))
+                                                self.agent.events.put(("heard", (text, final, EARS.heard_times))))
         EARS.on_text = self.agent.heard
         notifier = mock.patch("voice_agent.notify")  # no notifications popping up on the screen
         notifier.start()
@@ -179,6 +208,17 @@ class VoiceAgentTest(unittest.TestCase):
         self.gate: list[dict] = []
         threading.Thread(target=self._watch_gate, daemon=True).start()
         time.sleep(0.3)  # the agent is watching the helper
+        self.assertFalse(EARS.listening)  # until you tap fn
+        self.tap_fn()
+        wait_for(lambda: self.captions.listenings == [True], "it to listen")  # the tap, not just fn down
+
+    def tap_fn(self):
+        self.helper.raw("fn down")
+        self.helper.raw("fn tap")
+
+    def hold_fn(self):
+        self.helper.raw("fn down")
+        wait_for(lambda: self.agent.dictation, "it to start dictating")
 
     def _watch_gate(self):
         try:
@@ -211,8 +251,249 @@ class VoiceAgentTest(unittest.TestCase):
         wait_for(lambda: self.agent.task is None, "the task to finish")
         self.assertEqual(self.agent.voice.said, ["Calculator shows 408."])  # once, though Codex says it twice
         states = [(e.get("state"), e.get("reason")) for e in self.gate if "state" in e]
-        self.assertIn(("engaged", "engaged_by_voice"), states)  # no key to hold: --hands-free
+        self.assertIn(("engaged", "engaged"), states)  # the task took control: no key to hold
         self.assertEqual(states[-1], ("disengaged", "released_by_agent"))
+
+    def test_the_session_is_saved_what_you_said_and_what_it_did(self):
+        self.agent.events.put(("heard", ("Um.", True, None)))
+        self.agent.events.put(("heard", ("Open Calculator and work out 12 times 34.", True, None)))
+        wait_for(lambda: self.agent.voice.said, "the reply")
+        wait_for(lambda: self.agent.task is None, "the task to finish")
+        journal = self.agent.journal
+        self.assertTrue(str(journal.dir).startswith(self.dir))  # (the test's own state folder)
+        entries = session_journal.read(journal.dir)
+        said = [(e["text"], e["outcome"]) for e in entries if e["kind"] == "you said"]
+        self.assertEqual(said, [("Um.", "filler, ignored"), ("Open Calculator and work out 12 times 34.", "request")])
+        request = next(e for e in entries if e["kind"] == "request")
+        self.assertEqual(request["device"], "mac")
+        self.assertIn("Calculator shows 408.", [e["text"] for e in entries if e["kind"] == "say"])
+        done = next(e for e in entries if e["kind"] == "done")
+        self.assertTrue(done["thread"])  # which Codex thread has the full context
+        self.assertEqual(done["request"], "Open Calculator and work out 12 times 34.")
+        manifest = json.loads((journal.dir / "manifest.json").read_text())
+        self.assertIn(done["thread"], [t["thread"] for t in manifest["threads"]])
+        self.assertIn("Calculator shows 408.", (journal.dir / "index.html").read_text())
+        records = [json.loads(p.read_text()) for p in (Path(self.dir) / "context").glob("*.json")]
+        self.assertTrue(records and all(r["session"] == journal.id for r in records))  # every payload, tagged
+
+        self.agent.shutdown()
+        self.assertEqual(session_journal.read(journal.dir)[-1]["kind"], "session ended")
+        self.assertIsNotNone(json.loads((journal.dir / "manifest.json").read_text())["ended"])
+
+    def test_text_you_add_goes_into_the_conversation_and_says_truthfully_if_it_got_there(self):
+        inbox = Path(self.dir, "ingest-inbox")
+        inbox.mkdir()
+        dropped = inbox / "x.txt"
+        dropped.write_text("Hivemind meeting\n" + "Alice: we should align on goals.\n\n" * 2000)
+        self.agent.events.put(("ingest", str(dropped)))
+        wait_for(lambda: any(e["kind"] == "ingest done" for e in session_journal.read(self.agent.journal.dir)),
+                 "the text to be added", timeout=30)
+        entries = session_journal.read(self.agent.journal.dir)
+        started = next(e for e in entries if e["kind"] == "ingest started")
+        self.assertEqual(started["text"], "Hivemind meeting")
+        parts = [e for e in entries if e["kind"] == "ingest part"]
+        self.assertEqual(len(parts), started["parts"])
+        self.assertTrue(all(p["on_session_thread"] for p in parts))
+        prompts = self.prompts()
+        self.assertEqual(len(prompts), started["parts"])  # one turn each, on the session's thread
+        self.assertTrue(all("not instructions" in p for p in prompts))
+        done = next(e for e in entries if e["kind"] == "ingest done")
+        self.assertEqual(done["status"], "sent")  # the fake Codex saves no rollout, so: not verified
+        self.assertFalse(dropped.exists())  # the app's copy is gone; the private saved copy stays
+        self.assertFalse(self.agent.voice.said)  # nothing said out loud
+
+    def test_lip_reading_turns_the_camera_on_until_the_second_tap(self):
+        agent_events = self.agent.events
+
+        class Reader:
+            def __init__(self):
+                self.started = 0
+
+            def start(self):
+                self.started += 1
+                agent_events.put(("camera", {"camera": "on"}))  # as the worker says once it records
+                agent_events.put(("camera", {"partial": "What time", "final": False}))
+
+            def stop(self, timeout=60):
+                return "What time is it?"
+
+            def close(self):
+                pass
+
+        self.tap_fn()  # stop listening (setUp started it)
+        wait_for(lambda: self.captions.listenings[-1] is False, "it to stop listening")
+        with mock.patch("lipread.available", return_value=(True, "fake")):
+            self.agent.events.put(("input", "lips"))
+            wait_for(lambda: self.agent.input_mode == "lips", "lip reading mode")
+        reader = self.agent.lips = Reader()
+        self.tap_fn()
+        wait_for(lambda: getattr(self.captions, "cameras", []) == ["starting", "on"], "the camera caption")
+        wait_for(lambda: reader.started == 1, "the camera to start")
+        wait_for(lambda: "What time" in self.captions.hearings, "live lip reading captions")
+        self.assertFalse(self.prompts())  # an unfinished hypothesis must not become a command
+        self.assertFalse(EARS.listening)  # the microphone stays closed
+        self.tap_fn()
+        wait_for(lambda: self.prompts(), "the request")
+        self.assertIn("What time is it?", self.prompts()[0])
+        self.assertIn("What time is it?", self.captions.hearings)
+        self.assertEqual(self.captions.cameras, ["starting", "on", "off"])
+        kinds = [(e["kind"], e["text"]) for e in session_journal.read(self.agent.journal.dir)]
+        self.assertIn(("lip reading", "camera on"), kinds)
+        self.assertIn(("lip reading", "What time is it?"), kinds)
+        self.agent.events.put(("input", "voice"))
+        wait_for(lambda: self.agent.input_mode == "voice", "voice mode again")
+
+    def test_lip_reading_empty_results_and_errors_are_visible(self):
+        for text, error, expected in [("", None, "Couldn't read your lips"),
+                                      ("", "no face was found", "Lip reading failed: no face was found")]:
+            with self.subTest(error=error):
+                self.agent.events.put(("lips", (text, error)))
+                wait_for(lambda: any(expected in w for w in self.captions.words), "visible lip reading feedback")
+                self.assertEqual(self.captions.hearings[-1], "")
+                self.assertFalse(self.prompts())
+
+    def test_a_camera_that_wont_open_says_so_at_once_and_isnt_shown_as_on(self):
+        agent_events = self.agent.events
+
+        class Reader:
+            def start(self):
+                agent_events.put(("camera", {"camera": "waiting"}))
+                agent_events.put(("camera", {"camera": "failed", "error": "the camera couldn't be opened"}))
+
+            def close(self):
+                pass
+
+        self.tap_fn()
+        wait_for(lambda: self.captions.listenings[-1] is False, "it to stop listening")
+        with mock.patch("lipread.available", return_value=(True, "fake")):
+            self.agent.events.put(("input", "lips"))
+            wait_for(lambda: self.agent.input_mode == "lips", "lip reading mode")
+        self.agent.lips = Reader()
+        self.tap_fn()
+        wait_for(lambda: "off" in getattr(self.captions, "cameras", []), "the camera caption to go")
+        self.assertEqual(self.captions.cameras, ["starting", "waiting", "off"])  # never "on"
+        self.assertTrue(any("Camera couldn't open" in w for w in self.captions.words))
+        wait_for(lambda: not self.agent.listening, "it to stop waiting for the second tap")
+        self.agent.events.put(("input", "voice"))
+
+    def test_it_looks_at_the_mac_as_you_start_talking_and_says_where_the_time_went(self):
+        looked = []
+
+        class Look:  # instead of a screenshot of your screen
+            def __init__(self):
+                looked.append(time.monotonic())
+
+            def seen(self):
+                return "data:image/jpeg;base64,QUJD", "Open windows: Calculator."
+
+        with mock.patch("voice_agent.LookAhead", Look):
+            listen_to(speech("Open Calculator and work out twelve times thirty four."))
+            wait_for(lambda: self.prompts(), "codex")
+        self.assertEqual(len(looked), 1)
+        self.assertLess(looked[0], EARS.heard_times["stopped"])  # while you were still talking
+        self.assertEqual(self.runs()[0]["images"], 1)
+        self.assertIn("Open windows: Calculator.", self.prompts()[0])
+        wait_for(lambda: any(line.startswith("⏱") for line in self.printed), "the timing")
+        timing = next(line for line in self.printed if line.startswith("⏱"))
+        for step in ("from when you stopped talking to hearing its reply", "to be sure you'd finished",
+                     "writing it down", "screenshot ready (taken as you talked)", "for Codex's first words"):
+            self.assertIn(step, timing)
+        pause = float(timing.split("s to be sure")[0].rsplit(" ", 2)[-2])
+        self.assertAlmostEqual(pause, EARS.pause, delta=0.25)
+
+    def test_tapping_fn_starts_and_stops_it_listening(self):
+        self.agent.app = True  # and tells Agent.app's menu bar
+        self.tap_fn()
+        wait_for(lambda: "@@ listening 0" in self.printed, "it to stop listening")
+        self.assertFalse(EARS.listening)
+        listen_to(speech("Open Safari."))
+        time.sleep(0.5)
+        self.assertEqual(self.heard, [])  # not listening: nothing heard
+        self.assertEqual(self.prompts(), [])
+        self.tap_fn()
+        wait_for(lambda: "@@ listening 1" in self.printed, "it to listen again")
+        self.assertTrue(EARS.listening)
+        self.assertEqual(self.captions.listenings, [True, False, True])
+        listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts(), "codex")
+        self.assertIn("Open Safari", self.prompts()[0])
+        self.assertTrue(any("Open" in words for words in self.captions.hearings), self.captions.hearings)
+
+    def test_tapping_fn_mid_sentence_takes_what_you_said(self):
+        listen_to(speech("Open Calculator and work out twelve times thirty four."), then_quiet=False)
+        self.tap_fn()  # no pause to end it: fn does
+        wait_for(lambda: self.prompts(), "codex", timeout=5)
+        self.assertIn("12 times 34", self.prompts()[0])
+        self.assertFalse(EARS.listening)
+
+    def test_holding_fn_types_what_you_say_into_the_app_in_front(self):
+        typed = []
+        self.agent.paste = typed.append  # returns None: it worked
+        self.agent.app = True
+        self.hold_fn()
+        listen_to(speech("Hello there. See you at five."))
+        self.helper.raw("fn up")
+        wait_for(lambda: typed, "the dictation to be typed")
+        self.assertIn("hello there", typed[0].lower())
+        self.assertIn("see you at", typed[0].lower())
+        self.assertEqual(self.prompts(), [])  # it isn't a task
+        self.assertTrue(any("see you" in words.lower() for words in self.captions.hearings), self.captions.hearings)
+        self.assertIn("@@ dictating 1", self.printed)
+        self.assertIn("@@ dictating 0", self.printed)
+        self.assertEqual(self.captions.dictatings, [True, False])
+        self.assertFalse(any("see you" in line.lower() for line in self.printed))  # the log doesn't keep the words
+        self.assertTrue(EARS.listening)  # and it's listening for the agent again
+        listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts(), "codex")
+        self.assertIn("Open Safari", self.prompts()[0])
+        self.assertEqual(len(typed), 1)
+
+    def test_letting_go_of_fn_mid_sentence_types_all_of_it(self):
+        typed = []
+        self.agent.paste = typed.append
+        self.tap_fn()  # it stops listening for the agent
+        wait_for(lambda: not EARS.listening, "it to stop listening")
+        self.hold_fn()  # the microphone opens just for this
+        listen_to(speech("Open Calculator and work out twelve times thirty four."), then_quiet=False)
+        self.helper.raw("fn up")
+        wait_for(lambda: typed, "the dictation to be typed", timeout=5)
+        self.assertIn("12 times 34", typed[0])
+        self.assertFalse(EARS.listening)
+        self.assertEqual(self.prompts(), [])
+
+    def test_fn_with_another_key_is_a_shortcut_not_dictation(self):
+        typed = []
+        self.agent.paste = typed.append
+        self.hold_fn()
+        listen_to(speech("Open Safari."))
+        self.helper.raw("fn other")  # fn+arrow, say
+        self.helper.raw("fn up")
+        time.sleep(1)
+        self.assertEqual(typed, [])
+        self.assertEqual(self.prompts(), [])
+        self.assertTrue(EARS.listening)
+
+    def test_dictation_it_cant_type_is_left_on_the_clipboard(self):
+        dictation = voice_agent.Dictation()
+        dictation.words = ["Hello there."]
+        self.agent.paste = lambda text: "it isn't allowed to press keys"
+        self.agent.type_dictation(dictation)
+        wait_for(lambda: any("couldn't type it" in line for line in self.printed), "the message")
+        self.assertTrue(any("on the clipboard" in line for line in self.printed), self.printed)
+
+    def test_saying_continue_carries_on_after_you_take_over(self):
+        os.environ["FAKE_CODEX_SECONDS"] = "60"
+        listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts() and self.agent.task and self.agent.task.running, "codex")
+        wait_for(lambda: self.agent.mac.is_engaged(), "it to take control")
+        self.helper.raw("human trackpad")  # you took over
+        wait_for(lambda: self.agent.pause_announced, "it to say how to let it carry on")
+        self.assertTrue(any("“continue”" in line for line in self.printed), self.printed)
+        listen_to(speech("Continue."))
+        wait_for(lambda: self.agent.mac.is_engaged(), "it to take control again")
+        self.assertEqual(len(self.prompts()), 1)  # the same task, not a new one
+        self.assertTrue(self.agent.task.running)
+        self.assertIn("▶️  continuing", self.printed)
 
     def test_captions_show_what_its_doing(self):
         listen_to(speech("Open Calculator."))
@@ -398,6 +679,38 @@ class UtteranceTest(unittest.TestCase):
         self.assertEqual(utterance.whose, True)  # the blip of them didn't decide it
 
 
+class ItsOwnVoiceTest(unittest.TestCase):
+    """It learns its own voice (Kokoro, rendered and never played) and leaves it out, with nobody
+    enrolled and VOICE_MATCH 0; people (Samantha, Daniel) are still heard."""
+
+    @classmethod
+    def setUpClass(cls):
+        import speech as tts
+        cls.tts = tts.Voice()
+        if cls.tts.kokoro() is None:
+            raise unittest.SkipTest(f"Kokoro isn't set up ({cls.tts.error}); ./voice.sh does it")
+        cls.print = voiceprint.Voiceprint(os.path.join(SPEECH, "nobody.npz"))
+        cls.print.threshold = 0
+        if not cls.print.ready():
+            raise unittest.SkipTest(f"no speaker model ({cls.print.error}); ./voice.sh downloads it")
+        cls.print.learn_voice([cls.tts.render(t) for t in voiceprint.SENTENCES[:3]], tts.RATE)
+
+    def kokoro(self, text: str) -> np.ndarray:
+        from scipy.signal import resample_poly
+        return resample_poly(self.tts.render(text), 2, 3).astype(np.float32) * 0.4  # quieter, as through a room
+
+    def test_its_voice_is_left_out(self):
+        for text in ("Yes, I didn't see a way to do that on your phone.", "Okay, opening Safari now."):
+            matched, _ = self.print.matches(self.kokoro(text))
+            self.assertFalse(matched, text)
+            self.assertTrue(self.print.heard_machine)
+
+    def test_people_are_heard(self):
+        for clip in (speech("Open Safari and look up the weather."), speech("What time is it?", voice="Daniel")):
+            self.assertEqual(self.print.matches(clip), (True, 1.0))
+            self.assertFalse(self.print.heard_machine)
+
+
 class VoiceMatchTest(unittest.TestCase):
     """With your voice enrolled, Parakeet only gets you: Samantha plays you, Daniel someone nearby."""
 
@@ -414,6 +727,7 @@ class VoiceMatchTest(unittest.TestCase):
         EARS.deaf = lambda: False
         EARS.voiceprint = self.voiceprint
         self.addCleanup(setattr, EARS, "voiceprint", None)
+        EARS.listen(True)  # as if you'd tapped fn
 
     def chatter(self, repeat: int = 1) -> np.ndarray:
         return speech(" ".join(["Did you see the game last night? It was unbelievable, they came back in the "
@@ -461,6 +775,9 @@ class EchoCancellationTest(unittest.TestCase):
         cls.microphone = mic.Microphone(EARS.feed, devices=False)
         if cls.microphone.canceller_error:
             raise unittest.SkipTest(f"no echo canceller ({cls.microphone.canceller_error}); ./voice.sh installs it")
+
+    def setUp(self):
+        EARS.listen(True)  # as if you'd tapped fn
 
     def test_it_hears_you_and_not_its_own_voice(self):
         rate = listen.RATE

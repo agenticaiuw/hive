@@ -114,6 +114,18 @@ class Voice:
         player = self._player
         return (player is not None and player.poll() is None) or time.monotonic() < self._quiet_since + ECHO
 
+    def quiet_for(self) -> float:
+        """Seconds since it last spoke (0 while it's speaking; a lot if it never has)."""
+        player = self._player
+        if player is not None and player.poll() is None:
+            return 0.0
+        return time.monotonic() - self._quiet_since if self._quiet_since else 1e9
+
+    def kokoro(self):
+        """The Kokoro model, once loaded (None if it fell back to the Mac's voice)."""
+        self._ready.wait()
+        return self._kokoro
+
     def wait(self, timeout: float | None = None) -> bool:
         with self._idle:
             return self._idle.wait_for(lambda: self._pending == 0, timeout)

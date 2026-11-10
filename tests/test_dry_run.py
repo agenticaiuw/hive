@@ -5,6 +5,7 @@ the reports it would send, the hand-over gate, and the Python wrapper.
 """
 
 import os
+os.environ["AGENT_BACKEND"] = "codex"  # these drive the fake Codex app-server (fake_codex.py), never the real Claude
 import re
 import socket
 import subprocess
@@ -18,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python"))
 
 import agent_vhid  # noqa: E402
-from agent_vhid import AgentVHID, AgentVHIDError, Disengaged, MoveFailed, NotAllowed, Screenshot  # noqa: E402
+from agent_vhid import AgentVHID, AgentVHIDError, Disengaged, MoveFailed, Screenshot  # noqa: E402
 
 HELPER = os.path.join(ROOT, "build", "agent-vhid-helper")
 
@@ -77,6 +78,7 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(status["state"], "engaged")
         self.assertEqual(status["dry_run"], "1")
         self.assertEqual(status["vhid"], "dry_run")
+        self.assertEqual(status["fn"], "1")
 
     def test_shortcut_presses_modifier_then_key(self):
         n = len(self.helper.lines)
@@ -153,15 +155,16 @@ class DryRunTest(unittest.TestCase):
         waiter = threading.Thread(target=lambda: result.setdefault("ok", self.mac.wait_engaged(3, announce=False)))
         waiter.start()
         time.sleep(0.1)
-        self.helper.raw("engage")
+        self.mac.engage()
         self.assertEqual(self.mac.status()["state"], "arming")
         waiter.join(3)
         self.assertTrue(result.get("ok"))
+        self.assertEqual(self.mac.status()["reason"], "engaged")
         self.mac.key("a")  # works again
 
     def test_touch_while_arming_cancels(self):
         self.helper.raw("human keyboard")
-        self.helper.raw("engage")
+        self.mac.engage()
         self.helper.raw("human trackpad")
         time.sleep(0.25)
         status = self.mac.status()
@@ -182,57 +185,35 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual([e["state"] for e in events], ["engaged", "disengaged"])
         self.assertEqual(events[1]["reason"], "mouse")
 
-    def test_voice_agent_can_engage_once_after_a_talk_hold(self):
+    def test_engage_hands_over_until_you_touch_something(self):
         self.helper.raw("human keyboard")
-        with self.assertRaises(NotAllowed):
-            self.mac.engage_after_talk()  # nobody spoke
-        self.helper.raw("talk down")
-        with self.assertRaises(NotAllowed):
-            self.mac.engage_after_talk()  # still holding the key
-        self.helper.raw("talk up")
-        self.mac.engage_after_talk()
-        self.assertEqual(self.mac.status()["state"], "arming")
+        self.mac.engage()
         self.assertTrue(self.mac.wait_engaged(2, announce=False))
-        self.assertEqual(self.mac.status()["reason"], "engaged_by_voice")
+        self.helper.raw("human trackpad")  # touching anything takes it back
+        status = self.mac.status()
+        self.assertEqual((status["state"], status["reason"]), ("disengaged", "trackpad"))
+        self.mac.engage()  # each task (or "continue") asks again
+        self.assertTrue(self.mac.wait_engaged(2, announce=False))
         self.mac.disengage()
         status = self.mac.status()
         self.assertEqual((status["state"], status["reason"]), ("disengaged", "released_by_agent"))
-        with self.assertRaises(NotAllowed):
-            self.mac.engage_after_talk()  # one grant per hold
 
-    def test_engage_by_voice_needs_hands_free(self):
-        self.helper.raw("human keyboard")
-        self.assertEqual(self.mac.status()["hands_free"], "0")
-        with self.assertRaises(NotAllowed):
-            self.mac.engage_by_voice()
-
-        hands_free = Helper("--hands-free")
-        self.addCleanup(hands_free.stop)
-        mac = AgentVHID(hands_free.socket, human=False)
-        self.addCleanup(mac.close)
-        self.assertEqual(mac.status()["hands_free"], "1")
-        mac.engage_by_voice()  # no talk hold needed
-        self.assertEqual(mac.status()["state"], "arming")
-        self.assertTrue(mac.wait_engaged(2, announce=False))
-        self.assertEqual(mac.status()["reason"], "engaged_by_voice")
-        hands_free.raw("human trackpad")  # touching anything still takes it back
-        status = mac.status()
-        self.assertEqual((status["state"], status["reason"]), ("disengaged", "trackpad"))
-
-    def test_watch_streams_talk_holds(self):
+    def test_watch_streams_fn_which_leaves_control_alone(self):
         events = []
         def collect():
             for event in self.mac.watch():
                 events.append(event)
-                if len(events) == 3:
+                if len(events) == 5:
                     return
         t = threading.Thread(target=collect, daemon=True)
         t.start()
         time.sleep(0.1)
-        self.helper.raw("talk down")
-        self.helper.raw("talk up")
+        for what in ("down", "tap", "down", "up", "other"):  # a tap, a hold, a shortcut
+            self.assertEqual(self.helper.raw(f"fn {what}"), "ok")
         t.join(2)
-        self.assertEqual(events[1:], [{"talk": "down"}, {"talk": "up"}])
+        self.assertEqual(events[1:], [{"fn": "down"}, {"fn": "tap"}, {"fn": "down"}, {"fn": "up"}])
+        self.assertEqual(self.mac.status()["state"], "engaged")  # talking or dictating isn't taking over
+        self.assertTrue(self.helper.raw("fn sideways").startswith("err"))
 
     def test_modifier_click_holds_the_modifier(self):
         n = len(self.helper.lines)

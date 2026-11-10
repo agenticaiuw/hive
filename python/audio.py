@@ -57,15 +57,8 @@ def has_input(device: int) -> bool:
 
 
 def microphone() -> int | None:
-    """The microphone to listen with: the default one, unless that's a Bluetooth headset's.
-    Listening through AirPods or headphones switches them to call-quality sound for as long as
-    the microphone is open, so then it's the Mac's own microphone."""
-    device = default_input()
-    if device and _get(device, "tran") in (_code("blue"), _code("blea")):
-        for other in devices():
-            if _get(other, "tran") == _code("bltn") and has_input(other):
-                return other
-    return device
+    """Use the macOS-selected input, including Bluetooth headsets."""
+    return default_input()
 
 
 def name(device: int | None) -> str:

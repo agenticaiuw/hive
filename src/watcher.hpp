@@ -8,9 +8,9 @@
 // - Trackpads (built-in and Magic Trackpad): the private MultitouchSupport
 //   framework, which reports a finger the moment it touches, before the cursor moves.
 //
-// It also recognizes two gestures on Right Option:
-//   double-tap: hand control to the agent
-//   hold:       talk to the voice agent (reported on press and on release)
+// It also follows fn (the 🌐 key) on its own: a tap turns the voice agent's listening on and
+// off, and holding it down dictates. fn by itself doesn't count as the human taking over, so
+// neither pauses a task.
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/hid/IOHIDKeys.h>
@@ -28,128 +28,58 @@
 
 namespace agent_vhid {
 
-// Double-tap of a single key with nothing else pressed in between.
-class double_tap_detector final {
+// fn on its own. Pressed and let go quickly is a tap; held longer, it's a hold that ends when it's
+// let go. With another key or button pressed while it's down (fn+arrow, fn+delete, fn+F1, a
+// click) it's a shortcut instead, and neither.
+class fn_key final {
 public:
   using clock = std::chrono::steady_clock;
 
-  explicit double_tap_detector(uint32_t usage) : usage_(usage) {}
+  explicit fn_key(clock::duration longest_tap) : longest_tap_(longest_tap) {}
 
-  // Returns true when this key event completes a double tap.
-  bool feed(uint32_t usage, bool down, clock::time_point now) {
-    using namespace std::chrono_literals;
-
-    if (usage != usage_) {
-      if (down) {
-        taps_ = 0;
-        pressed_ = false;
-      }
-      return false;
-    }
-
+  // fn went down or up: "down", then "tap" or "up"; "" for nothing new (a repeat).
+  const char* key(bool down, clock::time_point now) {
     if (down) {
-      if (taps_ == 1 && now - last_release_ > 400ms) {
-        taps_ = 0;
+      if (pressed_) {
+        return "";
       }
       pressed_ = true;
+      shortcut_ = false;
       press_time_ = now;
-      return false;
+      return "down";
     }
+    if (!std::exchange(pressed_, false)) {
+      return "";
+    }
+    return !shortcut_ && now - press_time_ <= longest_tap_ ? "tap" : "up";
+  }
 
-    if (!pressed_) {
-      return false;
+  // Something else was pressed: "other" the first time while fn is down.
+  const char* other() {
+    if (!pressed_ || std::exchange(shortcut_, true)) {
+      return "";
     }
-    pressed_ = false;
-    if (now - press_time_ > 350ms) {
-      taps_ = 0; // held, not tapped
-      return false;
-    }
-    last_release_ = now;
-    if (++taps_ == 2) {
-      taps_ = 0;
-      return true;
-    }
-    return false;
+    return "other";
   }
 
 private:
-  uint32_t usage_;
-  int taps_ = 0;
+  clock::duration longest_tap_;
   bool pressed_ = false;
-  clock::time_point press_time_;
-  clock::time_point last_release_;
-};
-
-// A single key held on its own. Reported once it has been down longer than any tap of the
-// double-tap (so the two gestures never mix), and again when it is let go. Pressing another
-// key first cancels it, so Option+key typing (é, ü, ...) never counts.
-class hold_detector final {
-public:
-  using clock = std::chrono::steady_clock;
-
-  hold_detector(uint32_t usage, clock::duration threshold) : usage_(usage), threshold_(threshold) {}
-
-  // Returns true when this key event ends a hold that was already reported.
-  bool feed(uint32_t usage, bool down, clock::time_point now) {
-    if (usage != usage_) {
-      if (down) {
-        pending_ = false;
-      }
-      return false;
-    }
-    if (down) {
-      pending_ = true;
-      press_time_ = now;
-      return false;
-    }
-    pending_ = false;
-    return std::exchange(active_, false);
-  }
-
-  // Call periodically. Returns true once, when the key has been held long enough.
-  bool poll(clock::time_point now) {
-    if (pending_ && now - press_time_ >= threshold_) {
-      pending_ = false;
-      active_ = true;
-      return true;
-    }
-    return false;
-  }
-
-private:
-  uint32_t usage_;
-  clock::duration threshold_;
-  bool pending_ = false;
-  bool active_ = false;
+  bool shortcut_ = false;
   clock::time_point press_time_;
 };
 
 class watcher final {
 public:
   using human_input_callback = std::function<void(const std::string& source)>;
-  using engage_callback = std::function<void()>;
-  using talk_callback = std::function<void(bool down)>;
+  using fn_callback = std::function<void(const std::string& what)>; // down, tap, up or other
 
-  static constexpr uint32_t right_option_usage = 0xe6;
-
-  watcher(human_input_callback on_human_input, engage_callback on_engage, talk_callback on_talk, bool verbose)
+  watcher(human_input_callback on_human_input, fn_callback on_fn, bool verbose)
       : on_human_input_(std::move(on_human_input)),
-        on_engage_(std::move(on_engage)),
-        on_talk_(std::move(on_talk)),
+        on_fn_(std::move(on_fn)),
         verbose_(verbose),
-        engage_detector_(right_option_usage),
-        talk_detector_(right_option_usage, std::chrono::milliseconds(360)) {
+        fn_(std::chrono::milliseconds(400)) {
     instance_ = this;
-  }
-
-  // Call periodically from the run loop the HID callbacks run on: reports a talk hold once it starts.
-  void tick() {
-    if (talk_detector_.poll(std::chrono::steady_clock::now())) {
-      if (verbose_) {
-        std::cerr << "[watch] talk gesture: down" << std::endl;
-      }
-      on_talk_(true);
-    }
   }
 
   ~watcher() {
@@ -169,8 +99,10 @@ public:
       access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
     }
     if (access != kIOHIDAccessTypeGranted) {
-      std::cerr << "[watch] Input Monitoring is not allowed for the app this runs in (Terminal, iTerm, ...).\n"
-                << "[watch] Allow it in System Settings > Privacy & Security > Input Monitoring, then restart.\n";
+      std::cerr << "[watch] Input Monitoring is not allowed for this helper: started by the Mac (./install.sh),\n"
+                << "[watch] that's /Library/PrivilegedHelperTools/agent-vhid-helper; started by ./run.sh, it's the\n"
+                << "[watch] app it runs in (Terminal, iTerm, ...). Allow it in System Settings > Privacy & Security >\n"
+                << "[watch] Input Monitoring (add it with + if it isn't listed), then restart it.\n";
       return false;
     }
 
@@ -302,36 +234,21 @@ private:
 
     const char* source = nullptr;
     switch (page) {
-      case kHIDPage_KeyboardOrKeypad: {
+      case kHIDPage_KeyboardOrKeypad:
         if (usage < kHIDUsage_KeyboardA || usage > kHIDUsage_KeyboardRightGUI) {
           return;
         }
-        auto now = std::chrono::steady_clock::now();
-        if (self->talk_detector_.feed(usage, integer != 0, now)) {
-          if (self->verbose_) {
-            std::cerr << "[watch] talk gesture: up" << std::endl;
-          }
-          self->on_talk_(false);
-        }
-        if (self->engage_detector_.feed(usage, integer != 0, now)) {
-          if (self->verbose_) {
-            std::cerr << "[watch] engage gesture" << std::endl;
-          }
-          self->on_engage_();
-          return;
-        }
         source = "keyboard";
         break;
-      }
       case kHIDPage_Consumer:
         source = "keyboard";
         break;
-      case 0xff: // Apple vendor top case: the fn key
-        if (usage != 0x03) {
-          return;
+      case 0xff:   // Apple vendor top case: the built-in keyboard's fn
+      case 0xff01: // Apple vendor keyboard: a Magic Keyboard's fn
+        if (usage == 0x03) {
+          self->fn(self->fn_.key(integer != 0, std::chrono::steady_clock::now()));
         }
-        source = "keyboard";
-        break;
+        return; // fn on its own isn't the human taking over
       case kHIDPage_Button:
         source = "mouse_button";
         break;
@@ -349,11 +266,24 @@ private:
     if (integer == 0) {
       return;
     }
+    if (page != kHIDPage_GenericDesktop) {
+      self->fn(self->fn_.other()); // fn+key, fn+click
+    }
     if (self->verbose_) {
       std::cerr << "[watch] " << source << " input from " << i.name
                 << " (page 0x" << std::hex << page << " usage 0x" << usage << std::dec << ")" << std::endl;
     }
     self->on_human_input_(source);
+  }
+
+  void fn(const std::string& what) {
+    if (what.empty()) {
+      return;
+    }
+    if (verbose_) {
+      std::cerr << "[watch] fn " << what << std::endl;
+    }
+    on_fn_(what);
   }
 
   static int touch_frame(void*, void*, int touches, double, int) {
@@ -365,11 +295,9 @@ private:
   }
 
   human_input_callback on_human_input_;
-  engage_callback on_engage_;
-  talk_callback on_talk_;
+  fn_callback on_fn_;
   bool verbose_;
-  double_tap_detector engage_detector_;
-  hold_detector talk_detector_;
+  fn_key fn_;
   IOHIDManagerRef manager_ = nullptr;
   CFArrayRef trackpads_ = nullptr;
   std::mutex devices_mutex_;
