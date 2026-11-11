@@ -313,52 +313,31 @@ fn killed_start_process_leaves_pending_identity_and_no_duplicate_start() {
     assert_eq!(fs::read_to_string(log).unwrap().lines().count(), 1);
 }
 
+/// The start/resume contract python/resumable_thread.py had, recorded from it (2026-11-11, after
+/// 5708994 added "config") before the Python was removed: the same calls and the same saved file.
 #[test]
-fn shared_python_and_rust_fixture_agree_on_start_and_resume_contract() {
+fn start_and_resume_contract_matches_the_recorded_python_one() {
     let dir = tempfile::tempdir().unwrap();
     let rust_path = dir.path().join("rust-thread");
-    let python_path = dir.path().join("python-thread");
     let mut rust = ResumableThread::new(&rust_path);
     let mut server = Fake::default();
     let start = json!({"ephemeral": true, "model": "example", "developerInstructions": "rules"});
-    let resume = json!({"baseInstructions": "base", "developerInstructions": "new rules", "cwd": "/tmp", "model": "excluded"});
+    let resume = json!({"baseInstructions": "base", "developerInstructions": "new rules", "cwd": "/tmp", "model": "excluded",
+                        "config": {"sandbox_workspace_write": {"network_access": true}}});
     let first = rust.connect(&mut server, &start).unwrap();
     let second = ResumableThread::new(&rust_path)
         .connect(&mut server, &resume)
         .unwrap();
     let rust_result = json!({"first": first, "second": second, "calls": server.calls,
                              "saved": fs::read_to_string(&rust_path).unwrap()});
-    let script = r#"
-import json,sys
-from pathlib import Path
-from resumable_thread import ResumableThread
-class Server:
- def __init__(self): self.calls=[]
- def request(self, method, params):
-  self.calls.append([method,params])
-  return {'thread': {'id': params.get('threadId','thread-123'), 'ephemeral': False}}
-p=Path(sys.argv[1]); s=Server()
-a=ResumableThread(p).connect(s, {'ephemeral':True,'model':'example','developerInstructions':'rules'})
-b=ResumableThread(p).connect(s, {'baseInstructions':'base','developerInstructions':'new rules','cwd':'/tmp','model':'excluded'})
-print(json.dumps({'first':a,'second':b,'calls':s.calls,'saved':p.read_text()}))
-"#;
-    let python_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("python");
-    let output = std::process::Command::new("python3")
-        .args(["-c", script])
-        .arg(&python_path)
-        .env("PYTHONPATH", python_dir)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let python_result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let python_result = json!({
+        "first": "thread-123", "second": "thread-123",
+        "calls": [
+            ["thread/start", {"ephemeral": false, "model": "example", "developerInstructions": "rules"}],
+            ["thread/resume", {"threadId": "thread-123", "baseInstructions": "base", "developerInstructions": "new rules",
+                               "cwd": "/tmp", "config": {"sandbox_workspace_write": {"network_access": true}}}]
+        ],
+        "saved": "thread-123\n"
+    });
     assert_eq!(rust_result, python_result);
 }

@@ -69,8 +69,10 @@ fn workspace_engine_choice_fail_closed_on_ambiguous_or_different_daemons() {
     );
 }
 
+/// What python/workspace_update.py's `decision` said for these reports, recorded from it
+/// (2026-11-11) before the Python was removed.
 #[test]
-fn existing_python_and_rust_decisions_agree_on_realistic_reports() {
+fn decisions_on_realistic_reports_match_the_recorded_python_ones() {
     let scenarios = json!([
         [{"daemon":{"running":false}}, {"daemon":{"running":false}}],
         [{"daemon":{"running":true,"instanceID":"one","matchesCLI":true}}, {"daemon":{"running":true,"instanceID":"one","matchesCLI":true}}],
@@ -87,24 +89,9 @@ fn existing_python_and_rust_decisions_agree_on_realistic_reports() {
         .iter()
         .map(|pair| decision(&pair[0], &pair[1]).as_str())
         .collect();
-    let code = "import json,sys; from workspace_update import decision; pairs=json.loads(sys.argv[1]); print(json.dumps([decision(a,b) for a,b in pairs]))";
-    let python_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("python");
-    let output = std::process::Command::new("python3")
-        .args(["-c", code, &scenarios.to_string()])
-        .env("PYTHONPATH", python_dir)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let python: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+    let python = [
+        "new", "new", "preserve", "unsafe", "unsafe", "unsafe", "unsafe", "unsafe",
+    ];
     assert_eq!(results, python);
 }
 
