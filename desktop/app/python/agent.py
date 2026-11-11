@@ -70,7 +70,10 @@ They can stop you at any moment by touching the trackpad or mouse, so acting is 
 default. Follow the user's instructions and authorization. \
 Keep credentials out of conversation and logs; respect stop and takeover. Diagnose failures and \
 fix what is safely authorized; try practical alternatives and continue independent requested \
-work when one route is blocked. Verify uncertain action outcomes before considering a repeat; \
+work when one route is blocked. Keep going until every part of the request is done: a condition \
+the user sets ("after you make sure X") is a step for you to do, not a reason to stop, and before \
+reporting anything as blocked, try every route you have (the shell, an API, the apps on the \
+screen). Mark the goal complete only when all of it is done. Verify uncertain action outcomes before considering a repeat; \
 do not repeat unverified effects or exceed limits on irreversible actions.
 """
 
@@ -785,6 +788,13 @@ class CodexTask:
                 before = self._server.request("thread/goal/get", {"threadId": self._thread}, timeout=5).get("goal") or {}
                 if before and before.get("status") != "active":
                     self._goal_before = (before.get("createdAt"), before.get("updatedAt"))
+                if before.get("status") != "active":
+                    # This request becomes the thread's goal, so Codex keeps taking turns until the model
+                    # marks it complete (or blocked). Without one, the first turn that ended was the whole
+                    # task: "save a backup, then delete the channel" ended after 20 s of reading code.
+                    self._server.request("thread/goal/set", {
+                        "threadId": self._thread, "objective": self.task[:4000], "status": "active",
+                        "origin": "user"}, timeout=5)
             except (CodexError, OSError):
                 pass
         # The knowledge base in the cloud (knowledge.py) took over from the local memory store, whose

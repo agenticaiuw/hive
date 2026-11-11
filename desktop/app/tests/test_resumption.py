@@ -726,7 +726,7 @@ class ProcessRestartTest(Isolated):
         self.assertEqual([e["resumed"] for e in entries if "resumed" in e], [first["thread"]])
         turns = [e for e in entries if "prompt" in e]
         self.assertIn("first request", turns[1]["prior_prompts"][0])
-        self.assertEqual(turns[1]["tools"], ["mac", "phone"])
+        self.assertEqual(turns[1]["tools"], ["mac", "phone", "knowledge"])
         records = [json.loads(p.read_text()) for p in (self.directory / "context").glob("*.json")]
         requests = [r for r in records if r["kind"] == "turn/start input"]
         self.assertEqual(len(requests), 2)
