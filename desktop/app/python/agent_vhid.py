@@ -122,6 +122,19 @@ def main_display_bounds() -> tuple[float, float, float, float]:
     return r.origin.x, r.origin.y, r.size.width, r.size.height
 
 
+def work_display_bounds() -> tuple[float, float, float, float]:
+    """The display the agent works on: Hive's virtual monitor while it is on, else the main display."""
+    import virtual_monitor
+    return virtual_monitor.bounds() or main_display_bounds()
+
+
+def capture_args() -> list[str]:
+    """screencapture's arguments that pick the display the agent works on."""
+    import virtual_monitor
+    b = virtual_monitor.bounds()
+    return ["-R" + ",".join(str(int(v)) for v in b)] if b else ["-m"]
+
+
 # --- Keyboard map (US / ABC layout) ---
 
 MODIFIERS = {
@@ -622,21 +635,21 @@ class AgentVHID:
     # -- screen --
 
     def screenshot(self, path: str | None = None, max_width: int | None = None) -> Screenshot:
-        """Captures the main display. With max_width, scales it down (models see fewer, bigger pixels).
+        """Captures the display the agent works on. With max_width, scales it down (models see fewer, bigger pixels).
         Use Screenshot.to_screen() to turn a point in the image into click() coordinates."""
         if path is None:
             fd, path = tempfile.mkstemp(prefix="agent-vhid-", suffix=".png")
             os.close(fd)
-        subprocess.run(["screencapture", "-x", "-m", "-t", "png", path], check=True)
+        ox, oy, points_wide, _ = work_display_bounds()
+        subprocess.run(["screencapture", "-x", *capture_args(), "-t", "png", path], check=True)
         width, height = _image_size(path)
         if max_width and width > max_width:
             subprocess.run(["sips", "--resampleWidth", str(max_width), path], check=True, capture_output=True)
             width, height = _image_size(path)
-        ox, oy, points_wide, _ = main_display_bounds()
         return Screenshot(path, width, height, points_wide / width, (ox, oy))
 
     def read_screen(self, shot: Screenshot | None = None) -> list[TextBox]:
-        """Every word on the main display, top to bottom, via Apple's on-device Vision text recognition."""
+        """Every word on the display the agent works on, top to bottom, via Apple's on-device Vision text recognition."""
         own_shot = shot is None
         if own_shot:
             shot = self.screenshot()  # full resolution reads small text best

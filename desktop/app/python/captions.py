@@ -27,13 +27,17 @@ class Captions:
             self._proc = subprocess.Popen([OVERLAY], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.DEVNULL, text=True)
             self.on_input = on_input or (lambda text: None)
+            self.on_control = lambda kind, value=None: None  # the overlay's mute and close buttons
             threading.Thread(target=self._read, args=(self._proc,), daemon=True).start()
 
     def _read(self, proc):
         for line in proc.stdout:
             try:
-                value = json.loads(line).get('text')
+                message = json.loads(line)
+                value = message.get('text')
                 if isinstance(value, str) and value.strip(): self.on_input(value.strip())
+                if isinstance(message.get('mute'), bool): self.on_control('mute', message['mute'])
+                if message.get('close') is True: self.on_control('close')
             except (ValueError, AttributeError):
                 continue
 
@@ -74,6 +78,17 @@ class Captions:
     def thinking(self, text: str):
         """Public progress or reasoning summary, shown while the task runs."""
         self._send(thinking=text)
+
+    def agent_request(self, text: str):
+        """A request another program sent (not your words), in its own row; '' removes it."""
+        self._send(agent_request=text)
+
+    def paused(self, text: str):
+        """Why the agent is paused and how to let it go on (press fn); '' removes it."""
+        self._send(paused=text)
+
+    def muted(self, on: bool):
+        self._send(muted=on)
 
     def activity(self, text: str):
         self._send(activity=text)
