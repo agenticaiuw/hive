@@ -6,9 +6,16 @@ Code, ...):
     codex exec -c mcp_servers.mac.command=python3 \\
                -c 'mcp_servers.mac.args=["/path/to/mac_mcp.py"]' "open Calculator"
 
-Every coordinate is a pixel in the screenshot images this server returns. When the
-human touches a key, the trackpad or a mouse, actions stop and the tools tell the
-model to wait for control instead of fighting for it.
+Every coordinate is a pixel in the screenshot images this server returns. The tools take the
+mouse and keyboard only for screen actions and let go of them when the agent turns to other work
+(the shell, thinking), so the user can use their Mac meanwhile. When the user touches a key, the
+trackpad or a mouse while the agent has them, screen actions stop until they press fn; the tools
+tell the model to carry on with work that doesn't need the screen.
+
+Every action that changes something carries a `step`: one sentence, shown to the user, of what it
+does. A step that can't be undone (it sends something others will see, deletes, pays or publishes)
+begins with "One-way:" and quotes the user's words that ask for it; the tools refuse it when those
+words aren't in what the user said (`words`).
 
 Speaks MCP over stdio (one JSON-RPC message per line). No third-party packages.
 """
@@ -39,9 +46,17 @@ PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 MAX_WIDTH = 1440  # one image pixel per screen point on most Mac displays
 SETTLE = 0.3  # seconds the screen gets to catch up before the screenshot that follows an action
 HUMAN_SOURCES = {"keyboard", "trackpad", "mouse", "mouse_button"}
+IDLE_RELEASE = 10.0  # seconds without a screen action after which the agent lets go of the mouse and keyboard
+ENGAGE_WAIT = 5.0  # how long a screen action waits for the user's hands to be off the keyboard and trackpad
 
 LOOK = {"type": "boolean", "default": True,
         "description": "Return a screenshot taken just after the action (default true)."}
+STEP = {"type": "string", "description": (
+    "Shown to the user as you act: one short sentence of what this does, e.g. \"Opening the #general "
+    "channel.\" If it can't be undone (it sends or posts something others will see, deletes data, pays "
+    "or publishes), begin with \"One-way:\" and quote the user's own words that ask for it, e.g. "
+    "\"One-way: posting your message in #general (you said: \\\"send the backup to the general "
+    "channel\\\").\"")}
 
 
 def point(desc: str) -> dict:
@@ -79,8 +94,8 @@ TOOLS = [
             "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
             "clicks": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1},
             "modifiers": {"type": "string", "description": "Keys held during the click, like 'cmd' or 'shift+cmd'."},
-            "screenshot": LOOK,
-        }, "required": ["x", "y"]},
+            "step": STEP, "screenshot": LOOK,
+        }, "required": ["step", "x", "y"]},
     },
     {
         "name": "move_mouse",
@@ -95,8 +110,8 @@ TOOLS = [
                        "resize windows).",
         "inputSchema": {"type": "object", "properties": {
             "from_x": point("Start x"), "from_y": point("Start y"),
-            "to_x": point("End x"), "to_y": point("End y"), "screenshot": LOOK,
-        }, "required": ["from_x", "from_y", "to_x", "to_y"]},
+            "to_x": point("End x"), "to_y": point("End y"), "step": STEP, "screenshot": LOOK,
+        }, "required": ["step", "from_x", "from_y", "to_x", "to_y"]},
     },
     {
         "name": "scroll",
@@ -114,8 +129,8 @@ TOOLS = [
         "description": "Type text on the keyboard into whatever has focus (click the field first). "
                        "'\\n' presses Return. Emoji and other characters a US keyboard can't type are pasted.",
         "inputSchema": {"type": "object", "properties": {
-            "text": {"type": "string"}, "screenshot": LOOK,
-        }, "required": ["text"]},
+            "text": {"type": "string"}, "step": STEP, "screenshot": LOOK,
+        }, "required": ["step", "text"]},
     },
     {
         "name": "press_key",
@@ -125,8 +140,8 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "keys": {"type": "string"},
             "repeat": {"type": "integer", "minimum": 1, "maximum": 50, "default": 1},
-            "screenshot": LOOK,
-        }, "required": ["keys"]},
+            "step": STEP, "screenshot": LOOK,
+        }, "required": ["step", "keys"]},
     },
     {
         "name": "open_app",
@@ -158,8 +173,9 @@ TOOLS = [
     },
     {
         "name": "wait_for_control",
-        "description": "Use when a tool says the user has control. Waits until they hand it back (they "
-                       "press fn or say \"continue\"), then returns a fresh screenshot.",
+        "description": "Use when a tool says the user has the mouse and keyboard and the screen is the only "
+                       "way forward (do everything else first). Waits until they hand it back (they press fn or "
+                       "say \"continue\"), then returns a fresh screenshot.",
         "inputSchema": {"type": "object", "properties": {
             "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 600, "default": 120},
         }},
@@ -214,8 +230,10 @@ def batch_tool(batchable: list[str], example: str) -> dict:
             "steps": {"type": "array", "minItems": 1, "maxItems": 20, "items": {
                 "type": "object", "properties": {"tool": {"type": "string", "enum": batchable}},
                 "required": ["tool"]}},
+            "step": {**STEP, "description": "What the whole batch does, the way `step` says it for one action. "
+                     + STEP["description"]},
             "screenshot": LOOK,
-        }, "required": ["steps"]},
+        }, "required": ["step", "steps"]},
     }
 
 
@@ -287,6 +305,28 @@ def frontmost_pid() -> int | None:
 NEW_WINDOW_APPS = {"Safari", "Google Chrome", "Arc", "Firefox", "Brave Browser", "Microsoft Edge", "Finder"}
 
 
+def said(words: str) -> str:
+    """Lowercase words only, so a quote compares with what the user said whatever the punctuation."""
+    return " ".join(re.findall(r"\w+(?:'\w+)*", words.replace("’", "'").lower()))
+
+
+def check_step(a: dict, words: str) -> dict | None:
+    """Refuses a step marked one-way that doesn't quote the user's words for it. The agent says what
+    each action does and whether it can be undone; this only checks that the quote is really something
+    the user said (words: their requests in this conversation)."""
+    step = str(a.get("step") or "")
+    if not step.lower().lstrip().startswith("one-way"):
+        return None
+    quotes = re.findall(r"[\"“]([^\"“”]{3,})[\"”]", step)
+    if any(said(q) and f" {said(q)} " in f" {said(words)} " for q in quotes):
+        return None
+    return result(text(
+        "Refused: a one-way step (it can't be undone) needs the user's own words asking for it, quoted "
+        f"exactly in `step`, and none of {quotes or 'your quotes'!r} is something the user said. If they "
+        "asked for it, quote their words; if they didn't, don't do it: find a way that can be undone, or "
+        "stop and ask them, saying exactly what you'd do and where."), error=True)
+
+
 def notify(message: str):
     subprocess.Popen(["osascript", "-e", f"display notification {json.dumps(message)} with title \"Agent\""],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -303,6 +343,82 @@ def result(*content: dict, error: bool = False) -> dict:
 class MacTools:
     def __init__(self):
         self.mac = AgentVHID(speed=2)  # still a person's curved moves and typing, just a quick one
+        self.words = ""  # what the user said in this conversation: a one-way step must quote it
+        self._acting = threading.RLock()  # held during a screen action, so control isn't let go mid-action
+        self._last_act = 0.0
+        self._holding = False  # the agent asked for the mouse and keyboard and hasn't let go of them
+        self._fresh = True  # this task hasn't had control yet: a takeover before it doesn't count
+        self._closed = threading.Event()
+        threading.Thread(target=self._let_go_when_idle, daemon=True).start()
+
+    def close(self):
+        self._closed.set()
+        self.mac.close()
+
+    # -- the mouse and keyboard, only while the screen is in use --
+
+    def take(self) -> str | None:
+        """Takes the mouse and keyboard for a screen action, once the user's hands are off them. None
+        when the agent has them; else why not (the user took over, or is busy with them)."""
+        status = self.mac.status()
+        state, reason = status.get("state"), status.get("reason", "")
+        if state == "engaged":
+            self._holding, self._fresh = True, False
+            return None
+        if state == "arming":
+            if self.mac.wait_engaged(timeout=ENGAGE_WAIT, announce=False):
+                self._holding, self._fresh = True, False
+                return None
+            reason = self.mac.status().get("reason", "")
+        elif reason == "watcher_unavailable":
+            return reason
+        elif self._fresh or not (reason in HUMAN_SOURCES or reason.startswith("engage_cancelled")):
+            # The agent let go after a pause, or this is the task's first screen action: ask again.
+            self.mac.engage()
+            self._fresh = False
+            if self.mac.wait_engaged(timeout=ENGAGE_WAIT, announce=False):
+                self._holding = True
+                return None
+            reason = self.mac.status().get("reason", "") or "busy"
+        return reason
+
+    def let_go(self):
+        """Hands the mouse and keyboard back while the agent works without the screen."""
+        with self._acting:
+            if not self._holding:
+                return
+            self._holding = False
+            try:
+                if self.mac.status().get("state") in ("engaged", "arming"):
+                    self.mac.disengage()
+                    self.mac.release_all()
+            except AgentVHIDError:
+                pass
+
+    def handed_back(self):
+        """The user pressed fn to give the screen back: the agent holds it as if it had just used it,
+        so it's let go again if the agent doesn't need it for a while."""
+        self._holding, self._fresh, self._last_act = True, False, time.monotonic()
+
+    def _let_go_when_idle(self):
+        while not self._closed.wait(1.0):
+            if self._holding and time.monotonic() - self._last_act > IDLE_RELEASE:
+                self.let_go()
+
+    def not_yours(self, reason: str) -> dict:
+        if reason in HUMAN_SOURCES or reason.startswith("engage_cancelled") or reason == "busy":
+            how = "took over" if reason in HUMAN_SOURCES else "is using them"
+            return result(text(
+                f"The user {how} the mouse and keyboard ({reason.replace('_', ' ')}), so screen actions wait "
+                "until they press fn. Don't stop working: carry on with everything that doesn't need the "
+                "screen (the shell, files, APIs, reading what you already have). Call wait_for_control only "
+                "when the screen is the one way forward, then look at the new screenshot before acting; "
+                "things may have changed."), error=True)
+        return result(text(f"You don't have the mouse and keyboard ({reason}). Work without the screen, or "
+                           "call wait_for_control."), error=True)
+
+    def check_step(self, a: dict) -> dict | None:
+        return check_step(a, self.words)
 
     # -- seeing --
 
@@ -353,26 +469,25 @@ class MacTools:
     # -- acting --
 
     def act(self, args: dict, fn, done: str) -> dict:
-        try:
-            if self.mac.status().get("state") == "arming":
-                self.mac.wait_engaged(timeout=3, announce=False)  # control is on its way
-            if virtual_monitor.bounds() and not virtual_monitor.contains(*cursor_position()) and self.mac.is_engaged():
-                virtual_monitor.bring_cursor(cursor_position())
-                time.sleep(0.3)  # macOS ignores mouse moves for a moment after the cursor is placed
-            fn()
-        except Disengaged as e:
-            m = re.search(r"reason=([\w-]+)", str(e))
-            reason = m.group(1) if m else "unknown"
-            if reason in HUMAN_SOURCES or reason.startswith("engage_cancelled"):
-                msg = (f"Stopped: the user took over ({reason.replace('_', ' ')}). Don't keep trying. Call "
-                       "wait_for_control, then look at the new screenshot before continuing; things may have "
-                       "changed.")
-            else:
-                msg = ("You don't have the mouse and keyboard: the user hasn't handed control over "
-                       f"(reason: {reason}). Call wait_for_control.")
-            return result(text(msg), error=True)
-        except (AgentVHIDError, ValueError) as e:
-            return result(text(f"Failed: {e}"), error=True)
+        refused = self.check_step(args)
+        if refused:
+            return refused
+        with self._acting:
+            try:
+                why_not = self.take()
+                if why_not:
+                    return self.not_yours(why_not)
+                if virtual_monitor.bounds() and not virtual_monitor.contains(*cursor_position()):
+                    virtual_monitor.bring_cursor(cursor_position())
+                    time.sleep(0.3)  # macOS ignores mouse moves for a moment after the cursor is placed
+                fn()
+            except Disengaged as e:
+                m = re.search(r"reason=([\w-]+)", str(e))
+                return self.not_yours(m.group(1) if m else "unknown")
+            except (AgentVHIDError, ValueError) as e:
+                return result(text(f"Failed: {e}"), error=True)
+            finally:
+                self._last_act = time.monotonic()
         if args.get("screenshot", True):
             time.sleep(SETTLE)
             return self.look(done)
@@ -414,9 +529,13 @@ class MacTools:
             if a:
                 return result(text("Authentication takes no arguments; never pass a password."), error=True)
             try:
-                if not self.mac.is_engaged():
-                    raise credentials.CredentialError("The user has control. Wait for control before authenticating.")
-                return result(text(credentials.authenticate_mac()))
+                with self._acting:
+                    if self.take():
+                        raise credentials.CredentialError("The user has control. Wait for control before authenticating.")
+                    try:
+                        return result(text(credentials.authenticate_mac()))
+                    finally:
+                        self._last_act = time.monotonic()
             except credentials.CredentialError as e:
                 return result(text(str(e)), error=True)
         g = geometry()
@@ -467,13 +586,18 @@ class MacTools:
             return self.look() if a.get("screenshot", True) else result(text("Waited."))
         if name == "wait_for_control":
             timeout = float(a.get("timeout_seconds", 120))
-            if self.mac.status().get("state") != "engaged":
-                notify("Paused because you took over. Press fn to let it carry on.")
+            with self._acting:
+                if not self.take():
+                    self._last_act = time.monotonic()
+                    return self.look("You have the mouse and keyboard.")
+            notify("Hive needs the screen. Press fn when it can have the mouse and keyboard.")
             if self.mac.wait_engaged(timeout=timeout, announce=False):
-                return self.look("You have control again. The user may have changed things; "
+                self._holding, self._last_act = True, time.monotonic()
+                return self.look("You have the mouse and keyboard again. The user may have changed things; "
                                  "check this screenshot before continuing.")
-            return result(text(f"The user hasn't handed control back after {timeout:.0f} s. Stop and say "
-                               "where you got to."), error=True)
+            return result(text(f"The user hasn't handed the screen back after {timeout:.0f} s. Finish what "
+                               "you can without it, then say where you got to and what needs the screen."),
+                          error=True)
         if name == "find_text":
             return self.find_text(a["text"])
         if name == "windows":
@@ -483,7 +607,7 @@ class MacTools:
         if name == "read_screen":
             return self.read_screen()
         if name == "batch":
-            return run_batch(self, a, BATCHABLE)
+            return self.check_step(a) or run_batch(self, a, BATCHABLE)
         if name == "read_clipboard":
             clip = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
             return result(text(ingest.clipboard_slice(clip, a.get("offset") or 0)))
@@ -566,7 +690,9 @@ class MacTools:
 
 INSTRUCTIONS = ("Use this Mac like a person: look with screenshot, act with click, type_text and press_key "
                 "(or several at once with batch). Coordinates are screenshot pixels. If a tool says the user "
-                "took over, call wait_for_control.")
+                "has the mouse and keyboard, keep doing the work that doesn't need the screen, and call "
+                "wait_for_control only when the screen is the one way forward. Give every action a `step` saying what it "
+                "does; one that can't be undone starts with \"One-way:\" and quotes the user's words asking for it.")
 
 
 class Server:

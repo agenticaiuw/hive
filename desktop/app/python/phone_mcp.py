@@ -18,7 +18,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mac_mcp import LOOK, Server, batch_tool, main, result, run_batch, text  # noqa: E402
+from mac_mcp import LOOK, STEP, Server, batch_tool, check_step, main, result, run_batch, text  # noqa: E402
 from phone import Phone, PhoneError, _phone_library  # noqa: E402
 
 SETTLE = 0.4  # seconds for the phone's screen to catch up before the screenshot after an action
@@ -47,15 +47,16 @@ TOOLS = [
         "description": "Tap the phone's screen at (x, y).",
         "inputSchema": {"type": "object", "properties": {
             "x": point("x in the latest phone screenshot"), "y": point("y in the latest phone screenshot"),
-            "screenshot": LOOK,
-        }, "required": ["x", "y"]},
+            "step": STEP, "screenshot": LOOK,
+        }, "required": ["step", "x", "y"]},
     },
     {
         "name": "tap_element",
         "description": "Tap a button, link or field by its label (from elements, or the text on it). More "
                        "reliable than coordinates for small targets.",
-        "inputSchema": {"type": "object", "properties": {"label": {"type": "string"}, "screenshot": LOOK},
-                        "required": ["label"]},
+        "inputSchema": {"type": "object", "properties": {"label": {"type": "string"}, "step": STEP,
+                                                         "screenshot": LOOK},
+                        "required": ["step", "label"]},
     },
     {
         "name": "swipe",
@@ -70,8 +71,9 @@ TOOLS = [
     {
         "name": "type_text",
         "description": "Type into the field that has focus (tap it first). '\\n' presses Return.",
-        "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "screenshot": LOOK},
-                        "required": ["text"]},
+        "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "step": STEP,
+                                                         "screenshot": LOOK},
+                        "required": ["step", "text"]},
     },
     {
         "name": "press_home",
@@ -104,7 +106,9 @@ TOOLS = [
 BATCHABLE = ["tap", "tap_element", "swipe", "type_text", "press_home", "open_app", "wait"]
 TOOLS.append(batch_tool(BATCHABLE, '[{"tool": "tap", "x": 220, "y": 90}, {"tool": "type_text", "text": "pizza\\\\n"}]'))
 INSTRUCTIONS = ("Use the user's iPhone like a person: look with screenshot, act with tap, swipe and type_text (or "
-                "several at once with batch). Coordinates are points in the phone screenshots.")
+                "several at once with batch). Coordinates are points in the phone screenshots. Give every "
+                "action a `step` saying what it does; one that can't be undone starts with \"One-way:\" and "
+                "quotes the user's words asking for it.")
 
 
 def shrink(png: bytes, width: int) -> bytes:
@@ -131,6 +135,7 @@ def shrink(png: bytes, width: int) -> bytes:
 class PhoneTools:
     def __init__(self, phone: Phone | None = None):
         self._phone = phone
+        self.words = ""  # what the user said in this conversation: a one-way step must quote it
 
     @property
     def phone(self) -> Phone:
@@ -147,6 +152,9 @@ class PhoneTools:
                       {"type": "image", "data": data, "mimeType": "image/jpeg"})
 
     def act(self, args: dict, fn, done: str) -> dict:
+        refused = check_step(args, self.words)
+        if refused:
+            return refused
         fn()
         if args.get("screenshot", True):
             time.sleep(SETTLE)
@@ -193,7 +201,7 @@ class PhoneTools:
             lines = p.elements()
             return result(text("\n".join(lines[:300]) if lines else "Nothing recognizable on screen."))
         if name == "batch":
-            return run_batch(self, a, BATCHABLE)
+            return check_step(a, self.words) or run_batch(self, a, BATCHABLE)
         return result(text(f"Unknown tool {name!r}"), error=True)
 
 

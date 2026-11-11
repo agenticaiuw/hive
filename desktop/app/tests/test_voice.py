@@ -256,8 +256,8 @@ class VoiceAgentTest(unittest.TestCase):
         wait_for(lambda: self.agent.task is None, "the task to finish")
         self.assertEqual(self.agent.voice.said, ["Calculator shows 408."])  # once, though Codex says it twice
         states = [(e.get("state"), e.get("reason")) for e in self.gate if "state" in e]
-        self.assertIn(("engaged", "engaged"), states)  # the task took control: no key to hold
-        self.assertEqual(states[-1], ("disengaged", "released_by_agent"))
+        # It only waited (no clicks or typing), so it never took your mouse and keyboard.
+        self.assertNotIn(("engaged", "engaged"), states)
 
     def test_the_session_is_saved_what_you_said_and_what_it_did(self):
         self.agent.events.put(("heard", ("Um.", True, None)))
@@ -507,10 +507,15 @@ class VoiceAgentTest(unittest.TestCase):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
         listen_to(speech("Open Safari."))
         wait_for(lambda: self.prompts() and self.agent.task and self.agent.task.running, "codex")
-        wait_for(lambda: self.agent.mac.is_engaged(), "it to take control")
+        self.assertFalse(self.agent.mac.is_engaged())  # it takes the mouse only for a screen action
+        tools = self.agent.task.tools["mac"]
+        tools.mac = AgentVHID(self.helper.socket, speed=2)
+        self.assertIsNone(tools.take())  # its first screen action takes control
         self.helper.raw("human trackpad")  # you took over
         wait_for(lambda: self.agent.pause_announced, "it to say how to let it carry on")
         self.assertTrue(any("“continue”" in line for line in self.printed), self.printed)
+        self.assertEqual(tools.take(), "trackpad")  # its screen actions wait for you; the rest goes on
+        self.assertTrue(self.agent.task.running)
         listen_to(speech("Continue."))
         wait_for(lambda: self.agent.mac.is_engaged(), "it to take control again")
         self.assertEqual(len(self.prompts()), 1)  # the same task, not a new one

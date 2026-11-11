@@ -61,20 +61,37 @@ GOAL_WATCHDOG_CHECK_SECONDS = 2
 # The rules for every request, given once when a session's thread starts (as developer
 # instructions, which Codex keeps when it compacts the thread).
 RULES = """\
-Use the computer and its mouse and keyboard tools to perform the user's requested work, \
-not merely describe what they could do. You are their agent, not a chat assistant: whenever you \
-could either act or explain, act. When they ask how to do something on their computer or phone \
-("how do I…", "how to…", "where do I…", "can you…"), do it for them on the screen, then say in a \
-sentence what you did; never answer with steps for them to follow, and don't stop to ask first. \
-They can stop you at any moment by touching the trackpad or mouse, so acting is always the \
-default. Follow the user's instructions and authorization. \
-Keep credentials out of conversation and logs; respect stop and takeover. Diagnose failures and \
-fix what is safely authorized; try practical alternatives and continue independent requested \
-work when one route is blocked. Keep going until every part of the request is done: a condition \
-the user sets ("after you make sure X") is a step for you to do, not a reason to stop, and before \
-reporting anything as blocked, try every route you have (the shell, an API, the apps on the \
-screen). Mark the goal complete only when all of it is done. Verify uncertain action outcomes before considering a repeat; \
-do not repeat unverified effects or exceed limits on irreversible actions.
+You are the user's agent on their own Mac and iPhone: do the work they ask for with the tools; \
+whenever you could either act or explain, act. When they ask how to do something on their \
+computer or phone ("how do I…", "where do I…", "can you…"), do it for them on the screen, then \
+say in a sentence what you did.
+
+Two kinds of steps. Almost every step can be undone or costs nothing to redo: looking, reading, \
+searching, signing in, opening and closing things, downloading, drafting, editing your own copies. \
+Take those freely without asking. A few steps can't be undone: anything other people will see as \
+coming from the user (a message, post, comment, email, invite, reaction, or a request to a bot or \
+to support), deleting what can't be restored, paying, publishing, and changing who has access. \
+Take one of those only when the user's own words ask for that exact thing, and do it as they \
+said: their message word for word, once, where they said. Why: a message sent as them speaks for \
+them to people who will believe it's theirs, and it can't be taken back, while a wrong click \
+anywhere else costs a moment. A message you write yourself must say it was written by an AI agent \
+on the user's behalf, and they still have to have asked for it.
+
+When the only way forward is a step that can't be undone and the user didn't ask for, it is not a \
+way forward: do every step you can undo, leave the rest ready (a draft, a file), then stop, say \
+exactly what you'd do and where, and mark the goal blocked. That is finishing the job, not \
+failing it. Example: asked to save a Discord channel, then post one message in #general, and the \
+shell can't reach Discord: don't ask the server's bot in another channel to export it as the \
+user; save what you can, then stop and say what you need. Elsewhere, when one route is blocked, \
+try another that can be undone, and finish every part of the request. A condition they set \
+("after you make sure X") is a step for you to do.
+
+Say what each step does. Every mouse, keyboard and tap call takes `step`: one short sentence the \
+user sees as you act. When the step can't be undone, start it with "One-way:" and quote the \
+user's words that ask for it; one without their words is refused.
+
+Keep credentials out of conversation and logs. Before repeating an action whose outcome you \
+aren't sure of, check what it did; never repeat a send or a payment that may have gone through.
 """
 
 REQUEST = """\
@@ -221,6 +238,9 @@ def thread_params() -> dict:
         params["permissions"] = "personal-agent"
     else:
         params["sandbox"] = "workspace-write"
+        # Its shell can reach the internet (curl, gh, wrangler, APIs). Without this the shell is offline,
+        # and an agent that can't reach an API turns to the screen and does the work as the user.
+        params["config"] = {"sandbox_workspace_write": {"network_access": True}}
     if os.environ.get('AGENT_WORKSPACE_CONNECTION'):
         params['developerInstructions'] += (
             '\nFor Mac tasks, use the workspace MCP tools to open and operate apps in the background workspace. '
@@ -245,8 +265,10 @@ def virtual_monitor_rules() -> str:
             "never call them.")
     if not virtual_monitor.enabled():
         return ("\nYour Mac tools work on the user's own screen with their real mouse and keyboard, and they "
-                "can watch you. If they touch the trackpad or keyboard you lose control; call "
-                "mac.wait_for_control and carry on when they press fn to hand it back." + gone)
+                "can watch you. You hold the mouse and keyboard only while you use them, and the user can "
+                "take them back by touching the trackpad or keyboard. Then keep working on whatever doesn't "
+                "need the screen (the shell, files, APIs), and call mac.wait_for_control only when the "
+                "screen is the one way forward; they press fn to hand it back." + gone)
     return ("\nYour Mac tools work on the virtual monitor: a second screen beside the user's own. "
             "Screenshots show it, and mac.click, mac.type_text and mac.press_key use the real mouse and "
             "keyboard there, so every control behaves as it does for a person. mac.open_app puts the "
@@ -434,8 +456,11 @@ SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 def doing(item: dict) -> str:
-    """What a tool call does, said simply: 'Opening Safari', 'Typing "weather"'."""
+    """What a tool call does, said simply: 'Opening Safari', 'Typing "weather"', or the step the
+    agent gave for it ('Opening the #general channel.')."""
     a = item.get("arguments") or {}
+    if str(a.get("step") or "").strip():
+        return str(a["step"]).strip()[:200]
     quoted = lambda key: "“" + str(a.get(key, ""))[:40].strip() + "”"
     phrases = {
         "screenshot": "Looking at the screen", "click": "Clicking", "move_mouse": "Moving the mouse",
@@ -647,7 +672,8 @@ def tool_error(item: dict) -> str | None:
 
 class CodexTask:
     """One task, run on the shared app-server in the background. Events go to on_event(kind, text),
-    where kind is 'action', 'doing' (what it's doing in plain words, or 'Thinking'), 'error', 'say',
+    where kind is 'action', 'doing' (what it's doing in plain words, or 'Thinking'), 'announce' (a step
+    that can't be undone, as it happens), 'error', 'say',
     'think', 'done' or 'failed'. Each event is also written to LOG with the seconds since the start."""
 
     def __init__(self, task: str, previous: str | None = None, on_event=None, device: str | None = None,
@@ -731,15 +757,28 @@ class CodexTask:
             if self._server and self._thread and not self.on_thread:
                 forget(self._server, self._thread)
             if self.tools:
-                self.tools["mac"].mac.close()
+                self.tools["mac"].close()
             if self._recovery_owner:
                 self._recovery_owner.close()
                 self._recovery_owner = None
             log, self._log = self._log, None
             log.close()
 
+    def words(self) -> str:
+        """What the user asked for in this conversation lately: this request and the ones before it in
+        the last two hours. A step that can't be undone must quote it (mac_mcp.check_step)."""
+        recent = [t.task for t in self.session.tasks
+                  if t is not self and t.started_at and time.time() - t.started_at < 2 * 3600]
+        return "\n".join(recent + [self.task])
+
+    def _tools(self) -> dict:
+        tools = device_tools()
+        for device in tools.values():
+            device.words = self.words()
+        return tools
+
     def _converse(self, look: bool):
-        self.tools = device_tools()
+        self.tools = self._tools()
         attached, image, seen = "", None, None
         if look and not (self.device == 'mac' and (os.environ.get('AGENT_WORKSPACE_CONNECTION') or os.environ.get('AGENT_SPACEO_COMMAND'))):
             seen = self.ahead.seen() if self.ahead else None
@@ -982,6 +1021,8 @@ class CodexTask:
             else:
                 self._event("action", "Running a local command")
                 self._event("doing", "Running a local command")
+            if self.tools.get("mac"):  # the shell doesn't need the mouse: the user can have it meanwhile
+                threading.Thread(target=self.tools["mac"].let_go, daemon=True).start()
         elif method == "item/completed" and itype == "commandExecution":
             code = item.get("exitCode")
             self._event("data", f"Local command {'completed' if code == 0 else 'ended'}" +
@@ -990,6 +1031,10 @@ class CodexTask:
         elif method == "item/started" and itype == "dynamicToolCall":
             self._event("action", describe_call(item))
             self._event("doing", doing(item))
+            step = str((item.get("arguments") or {}).get("step") or "").strip()
+            from mac_mcp import check_step
+            if step.lower().startswith("one-way") and check_step(item.get("arguments") or {}, self.words()) is None:
+                self._event("announce", step.split(":", 1)[-1].strip())  # said aloud: it can't be undone
         elif method == "item/started" and itype == "mcpToolCall":
             self._event("action", f"{item.get('server', 'tool')}.{item.get('tool', '')}({json.dumps(item.get('arguments') or {}, ensure_ascii=False)[:300]})")
             self._event("doing", f"Using {item.get('server', 'tool')}: {item.get('tool', '')}")
@@ -1143,7 +1188,7 @@ class CodexTask:
     def _restore_task(self):
         """Resume only the recorded conversation; never replay the interrupted request."""
         record = self._startup_record
-        self.tools = device_tools()
+        self.tools = self._tools()
         self._recovery_id = record['id']
         self._thread = record['thread']
         import provider_wait
@@ -1298,8 +1343,10 @@ class CodexTask:
                                     'type': 'text', 'text': 'Inspect the evidence, diagnose the blocker, and fix what is '
                                     'safely authorized. Try a practical alternative and continue independent requested '
                                     'work. Do not repeat a failed approach without new evidence or repeat an action '
-                                    'whose outcome is uncertain. Respect user stops and irreversible action boundaries. '
-                                    'If no useful authorized work remains, report the blocker and stop.'}]})
+                                    'whose outcome is uncertain. If the blocker is that the next step can\'t be undone '
+                                    'and the user didn\'t ask for it, that is the right place to stop: don\'t find '
+                                    'another way to do it. If no useful authorized work remains, say what you need '
+                                    'from the user and stop.'}]})
                                 return
                     except (CodexError, OSError, ValueError, ResumeError) as error:
                         self._event('error', f'Could not reassess blocked work: {error}')
