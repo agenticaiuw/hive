@@ -106,7 +106,7 @@ class CredentialTest(unittest.TestCase):
         self.assertTrue(result['isError'])
         self.read.assert_not_called()
 
-    def test_mac_privacy_entry_turns_off_caps_and_restores_it(self):
+    def test_mac_password_is_typed_into_focus_then_return(self):
         import agent_vhid
         caps = [True]
         class FakeFlags:
@@ -115,26 +115,24 @@ class CredentialTest(unittest.TestCase):
             CGEventSourceFlagsState = FakeFlags()
         class FakeMac:
             def __init__(self, **kw): self.events = []
-            def engage(self): pass
-            def wait_engaged(self, **kw): return True
             def is_engaged(self): return True
             def key(self, key):
                 self.events.append(key)
                 if key == 'capslock': caps[0] = not caps[0]
             def _keys(self, *keys): self.events.append(keys)
-            def disengage(self): pass
             def close(self): pass
         instance = FakeMac()
         self.read.side_effect = lambda action, **kw: (
             'com.apple.keylayout.ABC' if action == 'keyboard-layout'
-            else b'Ab9!' if action == 'read-privacy-keyboard' else '')
+            else b'Ab9!' if action == 'read-mac' else '')
         with patch.object(agent_vhid, 'AgentVHID', return_value=instance), patch('credentials.ctypes.CDLL', return_value=FakeCG()):
-            result = credentials.authorize_privacy_settings()
-        self.assertTrue(caps[0])
+            result = credentials.authenticate_mac()
+        self.assertTrue(caps[0])  # Caps Lock turned off for typing, then restored
         self.assertEqual(instance.events[0], 'capslock')
-        self.assertEqual(instance.events[-1], 'capslock')
+        self.assertEqual(instance.events[-2:], ['return', 'capslock'])
+        self.assertEqual(sum(1 for e in instance.events if isinstance(e, tuple) and len(e) == 2), 4)
         self.assertNotIn('Ab9!', result)
-        self.assertTrue(any(call.args == ('submit-privacy-keyboard',) for call in self.read.call_args_list))
+        self.assertEqual([c.args[0] for c in self.read.call_args_list], ['keyboard-layout', 'read-mac'])
 
     def test_tools_take_no_secret_arguments_and_are_not_batchable(self):
         for module in [mac_mcp, phone_mcp]:
@@ -146,6 +144,20 @@ class CredentialTest(unittest.TestCase):
         self.assertTrue(result['isError'])
         self.assertNotIn(SECRET, str(result))
         self.read.assert_not_called()
+
+    def test_batch_runs_authenticate_only_alone_and_without_arguments(self):
+        tools = Mock()
+        tools.call.return_value = mac_mcp.result(mac_mcp.text('filled'))
+        alone = mac_mcp.run_batch(tools, {'steps': [{'tool': 'authenticate'}]}, mac_mcp.BATCHABLE)
+        self.assertFalse(alone.get('isError'))
+        tools.call.assert_called_once_with('authenticate', {})
+        tools.call.reset_mock()
+        for steps in ([{'tool': 'authenticate'}, {'tool': 'click', 'x': 1, 'y': 2}],
+                      [{'tool': 'authenticate', 'password': SECRET}]):
+            refused = mac_mcp.run_batch(tools, {'steps': steps}, mac_mcp.BATCHABLE)
+            self.assertTrue(refused['isError'])
+            self.assertNotIn(SECRET, str(refused))
+        tools.call.assert_not_called()
 
 
 # Sensitive transport behavior is exercised through the Rust fixture in test_phone_rust.

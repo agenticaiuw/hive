@@ -4,6 +4,24 @@ Hive is the product name for the Hivemind platform: the desktop agent, cloud rel
 mobile and browser surfaces, hardware, and firmware. Existing bundle identifiers,
 state paths and service names remain unchanged for compatibility.
 
+## Design principles
+
+- **The cloud always has all the data.** Everything an agent task produces goes to the cloud
+  (Cloudflare): the screen recording of the task, the timeline of the agent's status and the
+  computer's state at exact times, the artifacts the agent makes and the code it writes. Copies on
+  a device are working copies; the cloud is the record.
+- **The agent's brain runs in the cloud and drives your own computer.** The agent's Codex session
+  is signed in on the cloud and operates the user's personal computer the way the user would,
+  with its real mouse and keyboard on its real screen.
+
+Where this stands today:
+
+- Done: every desktop agent task is screen-recorded with a timestamped timeline and uploaded to
+  the R2 bucket `hive-recordings` (`desktop/app/python/task_recording.py`,
+  `desktop/app/python/cloud_archive.py`; see `desktop/app/README.md`, "Task recordings").
+- Not yet: uploading the agent's other artifacts and the code it produces, and running the Codex
+  session in the cloud (the desktop agent still starts Codex on the Mac).
+
 ## Platform layout
 
 - `browser/chrome` and `browser/safari` — browser extensions.

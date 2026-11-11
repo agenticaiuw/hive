@@ -48,7 +48,7 @@ def native(*args, secret=False):
     if run.returncode:
         # Read-phone errors must never accidentally echo stdout or a credential.
         if secret:
-            raise CredentialError('Phone passcode unavailable or Keychain locked. Configure Agent → Authentication → Phone Passcode.')
+            raise CredentialError('Saved password unavailable or Keychain locked. Configure it in Hive → Authentication.')
         raise CredentialError(run.stderr.decode('utf-8', errors='replace').strip() or 'Authentication unavailable.')
     return run.stdout if secret else run.stdout.decode('utf-8').strip()
 
@@ -80,60 +80,48 @@ def claim_attempt(account):
     return path
 
 
-def authorize_privacy_settings():
-    """One user-authorized attempt at the verified macOS Privacy & Security prompt.
-
-    The keyboard path is needed when macOS makes the secure field read-only to AX.
-    Secrets go from Keychain through a private pipe to the local HID helper, never
-    into model arguments, logs, argv or the clipboard. Focus and takeover are
-    checked continuously; the guard remains after an unconfirmed attempt.
-    """
+def authenticate_mac():
+    """Types the saved Mac password with the agent's keyboard into the field that has the keyboard
+    focus, then presses Return, the way the user would. The agent clicks the password field first.
+    The password goes from the Keychain through a private pipe to the keyboard, never into model
+    arguments, tool results, logs, argv or the clipboard."""
     from agent_vhid import AgentVHID, CHARS, MODIFIERS
     secret = bytearray()
     mac = AgentVHID(human=False)
     caps_changed = False
+    cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
+    cg.CGEventSourceFlagsState.restype = ctypes.c_uint64
+    caps_on = lambda: bool(cg.CGEventSourceFlagsState(1) & (1 << 16))
     try:
-        native('prepare-privacy-keyboard')
+        if not mac.is_engaged():
+            raise CredentialError('The user has control. Call mac.wait_for_control, then authenticate again.')
         if native('keyboard-layout') not in ('com.apple.keylayout.ABC', 'com.apple.keylayout.US'):
-            raise CredentialError('The active keyboard layout is not supported for secure typing.')
-        secret = bytearray(native('read-privacy-keyboard', secret=True))
+            raise CredentialError('The keyboard layout is not ABC/US, so the password would be typed wrong.')
+        secret = bytearray(native('read-mac', secret=True))
         value = secret.decode('utf-8')
         if not value or any(ch not in CHARS for ch in value):
-            raise CredentialError('The password contains characters the current keyboard path cannot type safely.')
-        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-        cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
-        cg.CGEventSourceFlagsState.restype = ctypes.c_uint64
-        caps_on = lambda: bool(cg.CGEventSourceFlagsState(1) & (1 << 16))
-        mac.engage()
-        if not mac.wait_engaged(timeout=5, announce=False):
-            raise CredentialError('The keyboard is in use; authentication was not attempted.')
-        claim_attempt('mac-privacy')
+            raise CredentialError('The saved password has characters the keyboard path cannot type.')
         if caps_on():
             mac.key('capslock')
             caps_changed = True
-            if caps_on(): raise CredentialError('Could not turn Caps Lock off; no password was typed.')
-        native('verify-privacy-keyboard')
-        mac.key('cmd+a')
-        mac.key('delete')
         for ch in value:
-            native('verify-privacy-keyboard')
-            if caps_on(): raise CredentialError('Caps Lock changed; stopped typing the password.')
             usage, shifted = CHARS[ch]
             mods = MODIFIERS['shift'] if shifted else 0
             if mods: mac._keys(mods)
             mac._keys(mods, usage)
             mac._keys(0)
-        native('submit-privacy-keyboard')
-        return 'Password submitted to the verified Privacy & Security prompt. Check the result on screen.'
+        mac.key('return')
+        time.sleep(0.5)
+        return 'Typed the saved Mac password into the focused field and pressed Return. Take a screenshot to see the result.'
     except CredentialError:
         raise
     except Exception:
-        raise CredentialError('Could not safely complete authentication. Check the prompt; no automatic retry.') from None
+        raise CredentialError('Could not type the saved Mac password. Take a screenshot and try again.') from None
     finally:
         for i in range(len(secret)): secret[i] = 0
         try:
             if caps_changed and mac.is_engaged() and not caps_on(): mac.key('capslock')
-            mac.disengage()
             mac.close()
         except Exception: pass
 
