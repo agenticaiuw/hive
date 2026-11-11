@@ -771,6 +771,13 @@ fn workspace_command_is_visible_without_exposing_arguments() {
         .iter()
         .any(|(kind, text)| kind == "data" && text.contains("completed")));
     assert!(!format!("{:?}", events.all()).contains("secret"));
+    // The Rust controller the rules now name.
+    task.on_message(
+        "item/started",
+        &json!({"item": {"type": "commandExecution",
+                         "command": "build/workspace-tool call spaceo_session_list '{}'"}}),
+    );
+    assert!(events.has("action", "Virtual workspace: spaceo_session_list"));
 }
 
 #[test]

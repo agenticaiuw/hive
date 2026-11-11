@@ -2225,12 +2225,14 @@ fn describe_status(goal: &Value) -> String {
     }
 }
 
-/// The spaceo operations a workspace-tool command calls (`workspace-tool\.py\s+call\s+(spaceo_[a-z_]+)`).
+/// The spaceo operations a workspace-tool command calls: `build/workspace-tool call spaceo_...`, or
+/// `scripts/workspace-tool.py call spaceo_...` from before it was Rust.
 fn workspace_operations(command: &str) -> Vec<String> {
     use std::sync::OnceLock;
     static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
-        regex::Regex::new(r"workspace-tool\.py\s+call\s+(spaceo_[a-z_]+)").expect("valid pattern")
+        regex::Regex::new(r"workspace-tool(?:\.py)?\s+call\s+(spaceo_[a-z_]+)")
+            .expect("valid pattern")
     });
     pattern
         .captures_iter(command)
