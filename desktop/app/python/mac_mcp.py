@@ -159,7 +159,7 @@ TOOLS = [
     {
         "name": "wait_for_control",
         "description": "Use when a tool says the user has control. Waits until they hand it back (they "
-                       "say \"continue\"), then returns a fresh screenshot.",
+                       "press fn or say \"continue\"), then returns a fresh screenshot.",
         "inputSchema": {"type": "object", "properties": {
             "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 600, "default": 120},
         }},

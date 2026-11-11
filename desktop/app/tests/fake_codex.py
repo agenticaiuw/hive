@@ -126,6 +126,8 @@ def handle(msg: dict):
             result = {"goal": {"status": "complete" if done else "active"}}
         else:
             result = {"goal": None}
+    elif method == "thread/goal/set":
+        record({"goal": params})
     elif method == "thread/read":
         result = {"thread": {"status": {"type": "active" if params["threadId"] in busy else "idle"}}}
     elif method == "turn/start" and params["threadId"] in busy:

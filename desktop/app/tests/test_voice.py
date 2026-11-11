@@ -494,6 +494,15 @@ class VoiceAgentTest(unittest.TestCase):
         wait_for(lambda: any("couldn't type it" in line for line in self.printed), "the message")
         self.assertTrue(any("on the clipboard" in line for line in self.printed), self.printed)
 
+    def test_a_request_is_the_goal_codex_keeps_working_on_until_done(self):
+        listen_to(speech("Open Safari."))
+        wait_for(lambda: self.prompts(), "codex")
+        with open(self.codex_log) as f:
+            goals = [entry["goal"] for entry in map(json.loads, f) if "goal" in entry]
+        self.assertTrue(goals, "no goal was set, so the first turn to end would end the task")
+        self.assertEqual(goals[0]["status"], "active")
+        self.assertIn("Safari", goals[0]["objective"])
+
     def test_saying_continue_carries_on_after_you_take_over(self):
         os.environ["FAKE_CODEX_SECONDS"] = "60"
         listen_to(speech("Open Safari."))
