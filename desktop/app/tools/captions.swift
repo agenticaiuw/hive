@@ -22,15 +22,19 @@
 //   {"active": true}                a task is running: the card stays up with its controls and the log open
 //   {"dismiss": true}               hide the card until listening, the camera or a task starts again
 //   {"clear": true}                 empty the card now (all but the header and the paused row)
+//   {"focus": true}                 typing goes to the entry field (fn opened the card); {"focus": false} gives
+//                                   the keyboard back to the app in front (so does a new task, sending, the x)
 //
 // and writes one JSON object per line on stdout:
 //
 //   {"text": "…"}                   a request typed into the entry field
 //   {"mute": true} / {"mute": false}  the mic button: mute or unmute transcription
 //   {"close": true}                 the x button: stop the task; the card collapses
+//   {"focused": true} / {"focused": false}  whether the entry field has the keyboard now
 //
 // The card floats over every app, full-screen ones too, and never takes keyboard focus from the app in front
-// (only the entry field does, when you click into it); outside the card, clicks go through.
+// except for the entry field: when you click into it, or when fn opens the card ({"focus": true}). The app in
+// front stays in front either way; outside the card, clicks go through.
 //
 //   agent-vhid-captions --snapshot out.png [--activity] [--camera] [--listening|--dictating] [--muted]
 //       [--paused TEXT] [--other TEXT] [--hearing TEXT] [--thinking TEXT] "words" ["doing"]
@@ -726,6 +730,7 @@ final class Captions: NSObject {
     /// The x: asks for the task to stop and collapses the card until listening, the camera or a task starts again.
     @objc func close() {
         emit(["close": true])
+        releaseFocus()
         [fade, heardFade, otherFade].forEach { $0?.invalidate() }
         for section in [bubble.paused, bubble.other, bubble.heard, bubble.doing] { section.text = "" }
         bubble.say.text = ""
@@ -743,6 +748,25 @@ final class Captions: NSObject {
         guard !value.isEmpty else { return }
         emit(["text": value])
         bubble.entry.stringValue = ""
+        releaseFocus()  // the agent is about to work in the app in front
+    }
+
+    /// Typing goes to the entry field: fn opened the card to take a request. The app in front stays in front
+    /// (the card is a non-activating panel), so the agent and its screenshots see the same screen as before.
+    func focusEntry() {
+        guard visible, !bubble.entryBox.isHidden else { return }
+        window.makeKey()
+        window.makeFirstResponder(bubble.entry)
+        emit(["focused": window.isKeyWindow])
+    }
+
+    /// Gives the keyboard back to the app in front: for your typing, and the agent's.
+    func releaseFocus() {
+        guard window.isKeyWindow else { return }
+        window.makeFirstResponder(nil)
+        window.orderOut(nil)  // a panel stops being key only when it leaves the screen
+        if visible { window.orderFrontRegardless() }
+        emit(["focused": false])
     }
 
     /// Another agent's request stays while a task runs, and fades once there's been time to read it otherwise.
@@ -839,6 +863,8 @@ final class Captions: NSObject {
             bubble.activityText = String((current + (current.isEmpty ? "" : "\n\n") + activity).suffix(30_000))
         }
         show()
+        if message["active"] as? Bool == true { releaseFocus() }  // a task started: it types in the app in front
+        if let focus = message["focus"] as? Bool { focus ? focusEntry() : releaseFocus() }
     }
 
     func savedAnchor() -> Anchor? {
@@ -889,6 +915,11 @@ final class Captions: NSObject {
 
     func hide() {
         window.ignoresMouseEvents = true
+        if window.isKeyWindow {  // don't keep the keyboard through the fade
+            window.makeFirstResponder(nil)
+            window.orderOut(nil)
+            emit(["focused": false])
+        }
         guard visible else { return }
         visible = false
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; window.animator().alphaValue = 0 }, completionHandler: {

@@ -608,10 +608,14 @@ def vocabulary() -> list[str]:
 
 def downloaded(model_id: str) -> str | None:
     """Where the model is on this Mac, if it's been downloaded. Loading from there skips asking
-    Hugging Face whether there's a newer one, which can hang when a blocker filters the network."""
+    Hugging Face whether there's a newer one, which can hang when a blocker filters the network.
+    A download cut short leaves the model's folder with config.json and no weights; that isn't
+    downloaded (or nothing would ever fetch the rest, and loading it fails every time)."""
     from huggingface_hub import snapshot_download
     try:
-        return snapshot_download(model_id, local_files_only=True)
+        path = snapshot_download(model_id, local_files_only=True)
+        weights = [os.path.join(path, f) for f in os.listdir(path) if f.endswith((".safetensors", ".npz", ".bin", ".gguf"))]
+        return path if weights and all(os.path.getsize(w) > 0 for w in weights) else None
     except Exception:
         return None
 
