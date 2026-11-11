@@ -399,3 +399,96 @@ fn a_request_that_says_phone_starts_on_the_phone() {
         "phone"
     );
 }
+
+// -- tests/test_voice.py: the request is the goal ------------------------------------------------
+
+#[test]
+fn a_request_is_the_goal_codex_keeps_working_on_until_done() {
+    let c = Codex::new(&[]);
+    c.wait(&c.task_on("Open Safari.", "mac"));
+    let goals: Vec<Value> = c
+        .entries()
+        .into_iter()
+        .filter_map(|e| e.get("goal").cloned())
+        .collect();
+    assert!(
+        !goals.is_empty(),
+        "no goal was set, so the first turn to end would end the task"
+    );
+    assert_eq!(goals[0]["status"], "active");
+    assert!(goals[0]["objective"].as_str().unwrap().contains("Safari"));
+}
+
+// -- tests/test_agent_workspace_tools.py: the background workspace's tools -----------------------
+
+/// The workspace hook, recording what it was asked.
+#[derive(Default)]
+struct ScriptedWorkspace {
+    asked: std::sync::Mutex<Vec<Value>>,
+}
+
+impl crate::hooks::WorkspaceTools for ScriptedWorkspace {
+    fn workspace(&self, request: &Value) -> Result<Value, String> {
+        lock(&self.asked).push(request.clone());
+        Ok(json!({"content": [{"type": "text", "text": "workspace ready"}]}))
+    }
+}
+
+/// A task in workspace mode (`AGENT_SPACEO_COMMAND`), its workspace hook and its mac's tools.
+fn workspace_task(h: &Harness) -> (Arc<CodexTask>, Arc<ScriptedWorkspace>, Arc<FakeTool>) {
+    let workspace = Arc::new(ScriptedWorkspace::default());
+    let mut hooks = h.agent.hooks.clone();
+    hooks.workspace_tools = workspace.clone();
+    let env = crate::Env::default();
+    for key in ["AGENT_STATE_DIR", "CODEX_HOME", "AGENT_ENV_FILE"] {
+        env.set(key, h.agent.env.get(key).unwrap());
+    }
+    env.set("AGENT_SPACEO_COMMAND", "/engine");
+    let agent = crate::Agent::new(env, h.agent.config.clone(), hooks);
+    let task = CodexTask::new(
+        &agent,
+        "test",
+        TaskOptions {
+            session: Some(Arc::new(MockSession::default())),
+            ..TaskOptions::default()
+        },
+    );
+    let mac = FakeTool::new("mac");
+    let tools: std::collections::HashMap<String, Arc<dyn hive_common::tools::ToolNamespace>> =
+        [("mac".to_owned(), mac.clone() as Arc<dyn hive_common::tools::ToolNamespace>)].into();
+    *lock(&task.tools) = tools;
+    (task, workspace, mac)
+}
+
+#[test]
+fn physical_mouse_cannot_be_used_in_workspace_mode() {
+    let h = Harness::new();
+    let (task, workspace, mac) = workspace_task(&h);
+    let reply =
+        task.call_tool(&json!({"namespace": "mac", "tool": "click", "arguments": {"x": 1, "y": 1}}));
+    assert_eq!(reply["success"], false);
+    assert!(lock(&mac.calls).is_empty());
+    assert!(lock(&workspace.asked).is_empty());
+}
+
+#[test]
+fn workspace_request_is_dispatched_in_host_process() {
+    let h = Harness::new();
+    let (task, workspace, mac) = workspace_task(&h);
+    let reply = task.call_tool(&json!({"namespace": "mac", "tool": "read_ingested",
+                                       "arguments": {"id": "workspace:{\"name\":\"spaceo_session_list\"}"}}));
+    assert_eq!(reply["success"], true);
+    assert_eq!(*lock(&workspace.asked), [json!({"name": "spaceo_session_list"})]);
+    assert!(lock(&mac.calls).is_empty());
+}
+
+#[test]
+fn legacy_typed_tool_routes_to_workspace_without_physical_input() {
+    let h = Harness::new();
+    let (task, workspace, mac) = workspace_task(&h);
+    let reply = task.call_tool(&json!({"namespace": "mac", "tool": "type_text",
+                                       "arguments": {"text": "workspace:{\"method\":\"list\"}"}}));
+    assert_eq!(reply["success"], true);
+    assert_eq!(*lock(&workspace.asked), [json!({"method": "list"})]);
+    assert!(lock(&mac.calls).is_empty());
+}

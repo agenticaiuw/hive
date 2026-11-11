@@ -243,6 +243,20 @@ mod tests {
         );
     }
 
+    /// tests/test_ledger_control.py: a receipt ID that isn't one (say, text that slipped in) is
+    /// refused, and the saved record keeps the one it had.
+    #[test]
+    fn native_recovery_record_keeps_only_valid_receipt_id() {
+        let d = dir();
+        let receipt = "a".repeat(32);
+        begin(d.path(), "mac", "thread-1", Some(&receipt)).unwrap();
+        let saved = current(d.path()).unwrap().unwrap();
+        assert!(begin(d.path(), "mac", "thread-1", Some("secret-like text")).is_err());
+        let after = current(d.path()).unwrap().unwrap();
+        assert_eq!(after["receiptId"], receipt.as_str());
+        assert_eq!(after, saved);
+    }
+
     // tests/test_rust_task_recovery.py
 
     #[test]
