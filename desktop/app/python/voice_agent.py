@@ -73,6 +73,7 @@ CONTINUE = {"continue", "go on", "keep going", "resume", "carry on", "go ahead",
 JUST_SPOKE = 3.0  # seconds after its voice stops that what's heard may still be its echo
 FILLERS = {"yeah", "okay", "oh", "uh", "um", "hmm", "mm", "mmhmm", "mm-hmm", "uh-huh", "ah"}  # nothing to do
 HUMAN = {"keyboard", "trackpad", "mouse", "mouse_button"}
+TOOK_OVER = "You have the mouse and keyboard. The agent keeps working without the screen; press fn to hand them back."
 
 
 def took_over(reason) -> bool:
@@ -798,7 +799,8 @@ class VoiceAgent:
         if self.paused_since and not self.pause_announced and \
                 time.time() - self.paused_since > 1.0 and self.task and self.task.running:
             self.pause_announced = True
-            self.out("⏸  you have control. Press fn or say “continue” to let it carry on (or say something new).")
+            self.out("⏸  you have the mouse and keyboard; the agent keeps working without the screen. Press fn "
+                     "or say “continue” to hand them back (or say something new).")
 
     def on_overlay(self, kind: str, value=None):
         """The floating window's buttons: the x stops the agent; the mic mutes what it hears."""
@@ -861,16 +863,11 @@ class VoiceAgent:
             if hasattr(self.captions, "paused"):
                 self.captions.paused("")
         elif event.get("state") == "disengaged" and took_over(event.get("reason")) and not self.paused_since:
+            # You have the mouse and keyboard. The task keeps working on what doesn't need the screen
+            # (the shell, files, APIs); its screen actions wait until you press fn.
             self.paused_since = time.time()
             if self.task and self.task.running and hasattr(self.captions, "paused"):
-                self.captions.paused("Paused: you took over. Press fn to let the agent continue.")
-            if self.task and getattr(self.task, '_recovery_id', None):
-                try:
-                    import task_recovery
-                    with self.task._dispatch_lock:
-                        task_recovery.finish(self.task._recovery_id, 'paused')
-                except (OSError, ValueError) as error:
-                    self.out(f'Could not save the takeover state: {error}')
+                self.captions.paused(TOOK_OVER)
 
     # -- dictation: hold fn --
 
@@ -1101,7 +1098,7 @@ class VoiceAgent:
         if owned_receipt:
             self.finish_ui_receipt(owned_receipt)
         if device == "mac" and not (os.environ.get('AGENT_WORKSPACE_CONNECTION') or os.environ.get('AGENT_SPACEO_COMMAND')):
-            self.take_control()
+            self.prepare_screen()  # the task takes the mouse and keyboard only when it uses the screen
 
     def finish_ui_receipt(self, receipt):
         try:
@@ -1126,7 +1123,7 @@ class VoiceAgent:
         except Exception as error:
             self.out(f"   ✗ Could not set up where Hive works: {error}")
 
-    def take_control(self):
+    def prepare_screen(self):
         try:
             import virtual_monitor
             from agent_vhid import cursor_position
@@ -1136,10 +1133,18 @@ class VoiceAgent:
                 self._cursor_home = here  # where your cursor goes back to when the task ends
         except Exception:
             pass
+
+    def take_control(self):
+        """You handed the screen back (fn, or "continue"): the agent has the mouse and keyboard again,
+        and lets go of them if it doesn't use them for a while (mac_mcp.MacTools.handed_back)."""
+        self.prepare_screen()
         try:
             self.mac.engage()  # the helper still waits for your hands to be off
         except AgentVHIDError as e:
             self.out(f"   couldn't take control: {e}")
+        tools = (getattr(self.tasks.get("mac"), "tools", None) or {}).get("mac")
+        if hasattr(tools, "handed_back"):
+            tools.handed_back()
 
     def on_task_event(self, task: CodexTask, kind: str, text: str):
         if kind == "context":
@@ -1173,6 +1178,12 @@ class VoiceAgent:
         elif kind == "say":  # its reply, a sentence or so at a time as Codex writes it
             self.out(f"   💬 {mark}{text}")
             self.say(text, device, task)
+        elif kind == "announce":  # a step that can't be undone (a send, a delete), said as it happens
+            self.out(f"   ⚠️  {mark}{text}")
+            if hasattr(self.captions, 'activity'): self.captions.activity(f'One-way step: {mark}{text}')
+            replied = self.last_said.get(device)
+            self.say(text, device)
+            self.last_said[device] = replied  # not its reply: that's still said when it's done
         elif kind in ("done", "failed"):
             self.tasks[device] = None
             if hasattr(self.captions, 'active'):
@@ -1190,6 +1201,15 @@ class VoiceAgent:
                     self.hand_back()
                 notify(text, "Done")
                 if not self.last_said.get(device):  # (it has said its reply as it came)
+                    self.say(text, device, task)
+            elif text != "stopped" and text == getattr(task, "final", None):
+                # It stopped on purpose and said why: often a step it won't take without you (a send,
+                # a delete). Its words are the answer, not an error.
+                self.out(f"✋ {mark}{text}\n")
+                if device == "mac":
+                    self.hand_back()
+                notify(text, "Needs you")
+                if not self.last_said.get(device):
                     self.say(text, device, task)
             elif text != "stopped":
                 self.out(f"❌ {mark}{text}\n")

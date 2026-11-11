@@ -71,7 +71,7 @@ class FnStopTest(unittest.TestCase):
         agent.tasks["mac"]._recovery_id = None
         agent.on_helper({"state": "disengaged", "reason": "engage_cancelled_by_trackpad"})
         self.assertTrue(agent.paused_since)
-        agent.captions.paused.assert_called_once_with("Paused: you took over. Press fn to let the agent continue.")
+        agent.captions.paused.assert_called_once_with(voice_agent.TOOK_OVER)
         agent.paused_since -= 5
         agent.take_control = mock.Mock()
         agent.set_listening = mock.Mock()
