@@ -23,10 +23,10 @@ state paths and service names remain unchanged for compatibility.
 Where this stands today:
 
 - Done: every desktop agent task is screen-recorded with a timestamped timeline and uploaded to
-  the R2 bucket `hive-recordings` (`desktop/app/python/task_recording.py`,
-  `desktop/app/python/cloud_archive.py`; see `desktop/app/README.md`, "Task recordings").
+  the R2 bucket `hive-recordings` (`desktop/app/crates/hive/hive-knowledge/src/task_recording.rs`,
+  `desktop/app/crates/hive/hive-knowledge/src/cloud_archive.rs`; see `desktop/app/README.md`, "Task recordings").
 - Done: the knowledge base is the D1 database `hive-knowledge` (schema in `cloud/knowledge`), which
-  the desktop agent reads and adds to on every task (`desktop/app/python/knowledge.py`; see
+  the desktop agent reads and adds to on every task (`desktop/app/crates/hive/hive-knowledge/src/knowledge.rs`; see
   `desktop/app/README.md`, "Knowledge base").
 - Not yet: uploading the agent's other artifacts and the code it produces, running the Codex
   session in the cloud (the desktop agent still starts Codex on the Mac), and giving the phone and

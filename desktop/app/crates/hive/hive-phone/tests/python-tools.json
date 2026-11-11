@@ -1,0 +1,247 @@
+[
+ {
+  "name": "authenticate",
+  "description": "Use the locally saved device passcode at a verified iPhone system passcode prompt. Requires the configured phone to stay connected through Pocket Connect. Takes no secret arguments; this is not for app passwords or payments. Returns status only. If unavailable or rejected, stop and let the user authenticate; never retry or ask for the passcode in chat.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "screenshot",
+  "description": "See the iPhone's screen. Every x/y in the other tools is a point in this image.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {}
+  }
+ },
+ {
+  "name": "tap",
+  "description": "Tap the phone's screen at (x, y).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "x": {
+     "type": "number",
+     "description": "x in the latest phone screenshot"
+    },
+    "y": {
+     "type": "number",
+     "description": "y in the latest phone screenshot"
+    },
+    "step": {
+     "type": "string",
+     "description": "Shown to the user as you act: one short sentence of what this does, e.g. \"Opening the #general channel.\" If it can't be undone (it sends or posts something others will see, deletes data, pays or publishes), begin with \"One-way:\" and quote the user's own words that ask for it, e.g. \"One-way: posting your message in #general (you said: \\\"send the backup to the general channel\\\").\""
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "step",
+    "x",
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "tap_element",
+  "description": "Tap a button, link or field by its label (from elements, or the text on it). More reliable than coordinates for small targets.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "label": {
+     "type": "string"
+    },
+    "step": {
+     "type": "string",
+     "description": "Shown to the user as you act: one short sentence of what this does, e.g. \"Opening the #general channel.\" If it can't be undone (it sends or posts something others will see, deletes data, pays or publishes), begin with \"One-way:\" and quote the user's own words that ask for it, e.g. \"One-way: posting your message in #general (you said: \\\"send the backup to the general channel\\\").\""
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "step",
+    "label"
+   ]
+  }
+ },
+ {
+  "name": "swipe",
+  "description": "Drag a finger from one point to another: to scroll a list swipe up (from_y > to_y), to go back swipe right from the left edge, to search the home screen swipe down from its middle.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "from_x": {
+     "type": "number",
+     "description": "Start x"
+    },
+    "from_y": {
+     "type": "number",
+     "description": "Start y"
+    },
+    "to_x": {
+     "type": "number",
+     "description": "End x"
+    },
+    "to_y": {
+     "type": "number",
+     "description": "End y"
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "from_x",
+    "from_y",
+    "to_x",
+    "to_y"
+   ]
+  }
+ },
+ {
+  "name": "type_text",
+  "description": "Type into the field that has focus (tap it first). '\\n' presses Return.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "text": {
+     "type": "string"
+    },
+    "step": {
+     "type": "string",
+     "description": "Shown to the user as you act: one short sentence of what this does, e.g. \"Opening the #general channel.\" If it can't be undone (it sends or posts something others will see, deletes data, pays or publishes), begin with \"One-way:\" and quote the user's own words that ask for it, e.g. \"One-way: posting your message in #general (you said: \\\"send the backup to the general channel\\\").\""
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "step",
+    "text"
+   ]
+  }
+ },
+ {
+  "name": "press_home",
+  "description": "Go to the home screen.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   }
+  }
+ },
+ {
+  "name": "open_app",
+  "description": "Open an app by its bundle id, e.g. com.apple.mobilesafari, com.apple.MobileSMS, com.apple.mobilenotes, com.apple.mobilemail, com.apple.Maps, com.apple.Preferences, com.apple.camera, com.apple.mobilephone, com.google.chrome.ios. For an app whose id you don't know, swipe down on the home screen and type its name.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "bundle_id": {
+     "type": "string"
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "bundle_id"
+   ]
+  }
+ },
+ {
+  "name": "elements",
+  "description": "List what's on the phone's screen (buttons, fields, text) with the center of each, from the accessibility tree: exact positions and labels for tap or tap_element.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {}
+  }
+ },
+ {
+  "name": "wait",
+  "description": "Wait for something on the phone to load, then look again.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "seconds": {
+     "type": "number",
+     "minimum": 0.1,
+     "maximum": 30
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "seconds"
+   ]
+  }
+ },
+ {
+  "name": "batch",
+  "description": "Do several actions in a row and get one screenshot at the end. Use it whenever you already know the next steps; each separate call costs the user seconds. Each step is {\"tool\": name, ...that tool's arguments}, the tool being one of tap, tap_element, swipe, type_text, press_home, open_app, wait. For example: [{\"tool\": \"tap\", \"x\": 220, \"y\": 90}, {\"tool\": \"type_text\", \"text\": \"pizza\\\\n\"}]. Stops at the first step that fails.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "steps": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "properties": {
+       "tool": {
+        "type": "string",
+        "enum": [
+         "tap",
+         "tap_element",
+         "swipe",
+         "type_text",
+         "press_home",
+         "open_app",
+         "wait"
+        ]
+       }
+      },
+      "required": [
+       "tool"
+      ]
+     }
+    },
+    "step": {
+     "type": "string",
+     "description": "What the whole batch does, the way `step` says it for one action. Shown to the user as you act: one short sentence of what this does, e.g. \"Opening the #general channel.\" If it can't be undone (it sends or posts something others will see, deletes data, pays or publishes), begin with \"One-way:\" and quote the user's own words that ask for it, e.g. \"One-way: posting your message in #general (you said: \\\"send the backup to the general channel\\\").\""
+    },
+    "screenshot": {
+     "type": "boolean",
+     "default": true,
+     "description": "Return a screenshot taken just after the action (default true)."
+    }
+   },
+   "required": [
+    "step",
+    "steps"
+   ]
+  }
+ }
+]

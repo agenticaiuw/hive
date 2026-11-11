@@ -1,0 +1,29 @@
+[package]
+name = "hive-app"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Hive's desktop agent: the voice shell and event loop Hive.app runs"
+
+[[bin]]
+name = "hive-agent"
+path = "src/main.rs"
+
+[[bin]]
+name = "hive-auth-mcp"
+path = "src/bin/hive-auth-mcp.rs"
+
+[dependencies]
+hive-common.workspace = true
+hive-codex = { path = "../hive-codex" }
+hive-knowledge = { path = "../hive-knowledge" }
+hive-mac = { path = "../hive-mac" }
+hive-phone = { path = "../hive-phone" }
+hive-sidecars = { path = "../hive-sidecars" }
+hive-workspace = { path = "../hive-workspace" }
+serde_json.workspace = true
+regex.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

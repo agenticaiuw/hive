@@ -1,5 +1,5 @@
-# For the voice agent; ./voice.sh installs these into .venv. The rest of the project needs only
-# the standard library.
+# For the voice models' sidecar (python/sidecar_voice.py); ./voice.sh installs these into .venv.
+# The agent itself is Rust (crates/hive) and needs none of them.
 parakeet-mlx>=0.5.3  # hearing you (python/listen.py); its model downloads from Hugging Face on first use
 kokoro-onnx>=0.4.7   # the agent's voice (python/speech.py); its model goes in models/
 sounddevice>=0.5     # the microphone

@@ -1,6 +1,6 @@
 // Types what it reads on stdin into the app in front, the way you would paste it: the text goes on
 // the clipboard, it presses ⌘V, and then puts back what the clipboard had before (unless something
-// else has been copied since). For dictation (python/voice_agent.py).
+// else has been copied since). For dictation (the voice agent, crates/hive/hive-app).
 //
 // Pressing keys in another app needs Accessibility (System Settings › Privacy & Security) for the
 // app it runs from: Agent, or the terminal. Without it, macOS is asked to show you where to allow

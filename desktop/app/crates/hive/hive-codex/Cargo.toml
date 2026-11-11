@@ -1,0 +1,29 @@
+[package]
+name = "hive-codex"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "The Codex app-server driver: sessions, tasks, goals, recovery"
+
+[dependencies]
+hive-common.workspace = true
+personal-agent-core.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+libc.workspace = true
+# ~/.codex/config.toml: the names of the MCP servers to switch off for the agent's Codex.
+toml = { version = "0.8", features = ["preserve_order"] }
+# provider_wait: one HEAD request through the user's configured HTTPS proxy.
+ureq = "2.12"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# provider_wait: the system's HTTPS proxy (what Python's urllib.request.getproxies() reads).
+core-foundation = "0.10"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# A stand-in for `codex app-server` (tests/fake_codex.py), built with the tests.
+[[example]]
+name = "fake_codex"
+path = "examples/fake_codex.rs"
