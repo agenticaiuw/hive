@@ -47,3 +47,47 @@ pub fn get(key: &str) -> Option<String> {
 pub fn flag(key: &str) -> bool {
     matches!(get(key).map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "true" | "yes" | "on"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! tests/test_rust_settings.py.
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+
+    /// Set only in the child process that runs the real check with a cleared environment.
+    const MISSING: &str = "HIVE_TEST_MISSING_SETTINGS";
+
+    #[test]
+    fn unavailable_file_leaves_environment_unchanged() {
+        let Some(missing) = std::env::var_os(MISSING) else {
+            // Other tests here change the environment, so compare it in a process of its own.
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::unavailable_file_leaves_environment_unchanged",
+                ])
+                .env_clear()
+                .env("KEEP", "yes")
+                .env(MISSING, dir.path().join("missing-settings-file"))
+                .output()
+                .unwrap();
+            let log = String::from_utf8_lossy(&output.stdout);
+            let errors = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{log}{errors}");
+            assert!(log.contains("1 passed"), "{log}");
+            return;
+        };
+        let expected: BTreeMap<OsString, OsString> = [
+            ("KEEP".into(), "yes".into()),
+            (MISSING.into(), missing.clone()),
+        ]
+        .into();
+        assert_eq!(std::env::vars_os().collect::<BTreeMap<_, _>>(), expected);
+        load(Some(Path::new(&missing))).unwrap();
+        assert_eq!(std::env::vars_os().collect::<BTreeMap<_, _>>(), expected);
+        assert!(FROM_FILE.lock().unwrap().is_empty());
+        assert!(!Path::new(&missing).exists());
+    }
+}
