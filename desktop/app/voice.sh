@@ -4,8 +4,9 @@
 # Ctrl-C stops everything. To have it start with the Mac instead, in the menu bar: ./install.sh
 #
 # Parakeet writes down what you say as you say it, the computer agent does it, and Kokoro tells
-# you what it's doing (python/voice_agent.py). The models are open source and run on this Mac;
-# what the Mac plays is taken back out of what the microphone hears (python/mic.py).
+# you what it's doing (build/hive-agent, from crates/hive). The models are open source and run on
+# this Mac in a Python sidecar (python/sidecar_voice.py); what the Mac plays is taken back out of
+# what the microphone hears (python/mic.py).
 #
 #   ./voice.sh [--no-speak]
 #   ./voice.sh --enroll     teach it your voice, so it ignores other people talking nearby
@@ -37,27 +38,28 @@ done
 
 .venv/bin/python python/listen.py --download  # Parakeet and Silero VAD, once
 .venv/bin/python python/voiceprint.py --download  # WeSpeaker, which tells your voice from others, once
+make -s build/hive-agent build/hive-auth-mcp build/hive-vhid  # the agent (Rust, crates/hive); rebuilt after a change
 
 if [ "${1:-}" = "--enroll" ]; then
   exec .venv/bin/python python/voiceprint.py --enroll
 fi
 [ "${1:-}" = "--setup" ] && exit 0
 
-agent=(.venv/bin/python python/voice_agent.py)
+agent=(build/hive-agent)
 args=("$@")
 
-if pgrep -qf "voice_agent.py --app"; then
+if pgrep -qf "hive-agent --app"; then
   echo "Agent.app is running, and it's already the one listening for fn. Quit it from its menu bar icon first."
   exit 1
 fi
 
-status=$(python3 python/agent_vhid.py status 2>/dev/null || true)
+status=$(build/hive-vhid status 2>/dev/null || true)
 if [ -n "$status" ]; then
   if grep -q '^fn=1' <<<"$status"; then
     exec "${agent[@]}" ${args[@]+"${args[@]}"}  # the helper is already running (after ./install.sh, always)
   fi
   echo "An older agent-vhid-helper is running. Press Ctrl-C in its window; this carries on once it stops."
-  while python3 python/agent_vhid.py status >/dev/null 2>&1; do sleep 1; done
+  while build/hive-vhid status >/dev/null 2>&1; do sleep 1; done
   sleep 2  # its run.sh stops the daemon it started; let that finish first
 fi
 

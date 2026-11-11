@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 APP="$HOME/Applications/Hive.app"
 APPLICATIONS="$HOME/Applications"
-MIGRATOR="scripts/hive_bundle_migration.py"
+MIGRATOR="build/hive-bundle-migration"
 
 build_engine_choice() {
   cargo build --quiet --locked --release --manifest-path crates/agent-core/Cargo.toml --bin workspace-engine-choice
@@ -35,7 +35,8 @@ describe() {  # how macOS will know it: by certificate (stable) or by this exact
 }
 
 if [ "${1:-}" = "--check" ]; then
-  installed=$(python3 "$MIGRATOR" select "$APPLICATIONS")
+  make -s "$MIGRATOR"
+  installed=$("$MIGRATOR" select "$APPLICATIONS")
   describe "${installed:-$APP}"
   describe build/Agent.app
   exit 0
@@ -54,14 +55,15 @@ if [ "${1:-}" = "--schedule" ]; then
 fi
 
 # Fail before building or touching an app when legacy and new paths conflict.
-installed=$(python3 "$MIGRATOR" select "$APPLICATIONS")
+make -s "$MIGRATOR"
+installed=$("$MIGRATOR" select "$APPLICATIONS")
 export SIGN_REQUIRED=${SIGN_REQUIRED-1}
 [ "${SIGN:-}" = "-" ] && SIGN_REQUIRED=0
 candidate=build/Agent.app
 if [ -n "${AGENT_SPACEO_COMMAND:-}" ] || [ "${1:-}" = "--workspace" ] || { [ -n "$installed" ] && [ -x "$installed/Contents/Helpers/spaceo" ]; }; then
   candidate=build/Agent-WorkspaceCandidate.app
 fi
-make "$candidate" build/agent-vhid-captions build/agent-vhid-selection
+make "$candidate" build/agent-vhid-captions build/agent-vhid-selection build/hive-agent
 codesign --verify --deep --strict "$candidate"
 describe "$candidate"
 
@@ -160,7 +162,7 @@ guard apps.allSatisfy({ $0.isTerminated }) else {
 ' "${installed:-$APP}"
 }
 quit_agent
-if ! prior_login=$(python3 "$MIGRATOR" commit "$installed" "$APP" "$staged" "$backup"); then
+if ! prior_login=$("$MIGRATOR" commit "$installed" "$APP" "$staged" "$backup"); then
   if [ -n "$installed" ] && [ -d "$installed" ]; then
     original_app="$APP"
     APP="$installed"
@@ -180,7 +182,7 @@ fi
 
 if ! launch_without_activation; then
   [ ! -f "$update_dir/update-resume" ] || mv "$update_dir/update-resume" "$update_dir/update-applying"
-  python3 "$MIGRATOR" rollback "$installed" "$APP" "$staged" "$backup" "$prior_login"
+  "$MIGRATOR" rollback "$installed" "$APP" "$staged" "$backup" "$prior_login"
   if [ -n "$installed" ]; then
     original_app="$APP"
     APP="$installed"

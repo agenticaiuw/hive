@@ -22,7 +22,8 @@ KARABINER_PLIST=/Library/LaunchDaemons/$KARABINER_LABEL.plist
 KARABINER_OURS=third_party/Karabiner-DriverKit-VirtualHIDDevice/files/LaunchDaemons/$KARABINER_LABEL.plist
 DAEMON='/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon'
 APP="$HOME/Applications/Hive.app"
-installed=$(python3 scripts/hive_bundle_migration.py select "$HOME/Applications")
+make -s build/hive-bundle-migration build/hive-vhid
+installed=$(build/hive-bundle-migration select "$HOME/Applications")
 
 if [ "$(id -u)" = 0 ]; then
   echo "Run it as yourself, without sudo: it asks for your password when it needs it."
@@ -60,11 +61,11 @@ if [ "${1:-}" = "--uninstall" ]; then
   exit 0
 fi
 
-if pgrep -qf "python/voice_agent.py" && ! pgrep -qf "voice_agent.py --app"; then
+if pgrep -qf "build/hive-agent" && ! pgrep -qf "hive-agent --app"; then
   echo "./voice.sh is running. Stop it (Ctrl-C in its window), then run this again."
   exit 1
 fi
-if python3 python/agent_vhid.py status >/dev/null 2>&1 && ! launchctl print system/$LABEL >/dev/null 2>&1; then
+if build/hive-vhid status >/dev/null 2>&1 && ! launchctl print system/$LABEL >/dev/null 2>&1; then
   echo "An agent-vhid-helper started by ./run.sh is running. Stop it (Ctrl-C in its window), then run this again."
   exit 1
 fi
@@ -129,7 +130,7 @@ sudo launchctl bootstrap system "$PLIST"
 tools/update-app.sh
 
 for _ in $(seq 20); do
-  python3 python/agent_vhid.py status >/dev/null 2>&1 && break
+  build/hive-vhid status >/dev/null 2>&1 && break
   sleep 0.5
 done
 echo
@@ -137,7 +138,7 @@ echo "Installed. Hive is in the menu bar (the microphone) and opens at login. Ta
 echo "hold fn and talk to type what you say into the app you're in."
 echo
 echo "Once, in System Settings › Privacy & Security:"
-if python3 python/agent_vhid.py status >/dev/null 2>&1; then
+if build/hive-vhid status >/dev/null 2>&1; then
   echo "  - Input Monitoring: agent-vhid-helper is allowed already."
 else
   echo "  - Input Monitoring: turn on agent-vhid-helper. If it isn't listed, add it with +"

@@ -4,8 +4,9 @@
 // The menu starts and stops listening too, and has Open at Login, the log (~/Library/Logs/Agent.log)
 // and Quit.
 //
-// It runs `python/voice_agent.py --app` from the folder it was built in (AgentRepository in its
-// Info.plist), and starts it again if it stops. To macOS the voice agent is part of this app, so
+// It runs `build/hive-agent --app` (Rust, crates/hive) from the folder it was built in
+// (AgentRepository in its Info.plist), and starts it again if it stops. The voice models run in a
+// Python sidecar it starts itself (python/sidecar_voice.py). To macOS the voice agent is part of this app, so
 // the Microphone, Screen & System Audio Recording and Accessibility permissions are asked for, and
 // given, as "Agent".
 //
@@ -129,14 +130,14 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
     func start() {
         starts = starts.filter { $0.timeIntervalSinceNow > -120 } + [Date()]
-        let python = repository + "/.venv/bin/python"
-        guard FileManager.default.isExecutableFile(atPath: python) else {
+        let agentPath = repository + "/build/hive-agent"
+        guard FileManager.default.isExecutableFile(atPath: agentPath) else {
             statusLine.title = "Not set up: run ./voice.sh once in \(repository)"
             return
         }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = ["-u", "python/voice_agent.py", "--app"]
+        process.executableURL = URL(fileURLWithPath: agentPath)
+        process.arguments = ["--app"]
         process.currentDirectoryURL = URL(fileURLWithPath: repository)
         var environment = ProcessInfo.processInfo.environment
         // Opened at login, it gets launchd's short PATH; codex and Homebrew's tools live further out.
@@ -379,8 +380,8 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
     @objc func configurePhonePasscode() {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: repository + "/.venv/bin/python")
-        process.arguments = [repository + "/python/credentials.py", "configure", "phone"]
+        process.executableURL = URL(fileURLWithPath: repository + "/build/hive-credentials")
+        process.arguments = ["configure", "phone"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { Credentials.showError(error) }

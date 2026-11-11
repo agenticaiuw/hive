@@ -39,7 +39,7 @@ for (const [entry, expected] of Object.entries(components)) {
   }
   console.log(`ok: ${entry}`);
 }
-if (!existsSync(resolve(root, 'desktop/app/python/agent.py'))) {
+if (!existsSync(resolve(root, 'desktop/app/crates/hive/Cargo.toml'))) {
   console.log('pending: personal-agent source import');
 }
 console.log('pending: independent mobile agent');

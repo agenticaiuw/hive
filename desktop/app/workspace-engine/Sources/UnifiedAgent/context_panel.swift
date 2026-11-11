@@ -3,7 +3,7 @@
 // Show Agent Context opens it; Esc or the close button closes it.
 //
 // It reads sessions/<id>/panel.json, which the voice agent rewrites a moment after anything happens
-// (python/context_panel.py), and reloads it when it changes. What it shows is the app's own record
+// (crates/hive/hive-knowledge, context_panel), and reloads it when it changes. What it shows is the app's own record
 // of what it sent and got back: not the model's exact current context, which Codex holds and
 // compacts. The panel says so at the top, with the last context size Codex reported.
 

@@ -1,0 +1,20 @@
+[package]
+name = "hive-phone"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "The iPhone: transport and the phone tools"
+
+[dependencies]
+hive-common.workspace = true
+personal-agent-core.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+quick-xml = "0.42.0"
+
+[[bin]]
+name = "phone-status"
+path = "src/bin/phone-status.rs"
+
+[dev-dependencies]
+tempfile.workspace = true
