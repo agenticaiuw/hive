@@ -1,6 +1,6 @@
 //! tests/test_one_way.py's driver half (bc09c57): the caption is the agent's own `step`, a one-way
 //! step the user asked for is said aloud, the tools are told what the user said, the shell lets go
-//! of the mouse, and Codex's shell can reach the internet.
+//! of the mouse, and Codex's shell can reach the internet (a resumed conversation's too, 5708994).
 
 use super::support::*;
 use crate::describe::doing;
@@ -124,4 +124,23 @@ fn codex_s_shell_can_reach_the_internet() {
     let params = spaceo.agent.thread_params().unwrap();
     assert!(params.get("config").is_none());
     assert_eq!(params["permissions"], "personal-agent");
+}
+
+/// 5708994: the saved conversation is resumed with the same `config`, so its shell is online too.
+#[test]
+fn the_resumed_conversation_can_reach_the_internet_too() {
+    let h = Harness::new();
+    std::fs::write(h.path().join("thread-id"), "thread-123\n").unwrap();
+    let server = FakeServer::identity(None, None);
+    let session = crate::session::Session::new(&h.agent, Some(h.path().join("thread-id")));
+    let params = h.agent.thread_params().unwrap();
+    assert_eq!(session.connect_now(&server.dyn_(), &params).unwrap(), "thread-123");
+    let calls = lock(&server.calls);
+    assert_eq!(calls[0].0, "thread/resume");
+    assert_eq!(calls[0].1["threadId"], "thread-123");
+    assert_eq!(
+        calls[0].1["config"],
+        json!({"sandbox_workspace_write": {"network_access": true}})
+    );
+    assert_eq!(calls[0].1["sandbox"], "workspace-write");
 }
