@@ -79,6 +79,29 @@ class FnStopTest(unittest.TestCase):
         agent.take_control.assert_called_once()
         agent.set_listening.assert_not_called()
 
+    def test_fn_opening_the_card_puts_typing_in_its_text_box(self):
+        agent = self.make_agent()
+        agent.listening = False
+        agent.mac.is_engaged.return_value = False
+        with mock.patch.object(voice_agent, "new_session"):
+            agent.set_listening(True)
+        agent.ears.listen.assert_called_with(True)  # the microphone is on
+        agent.captions.focus.assert_called_once_with(True)
+        agent.set_listening(False)
+        agent.captions.focus.assert_called_with(False)
+
+    def test_the_text_box_never_takes_the_agents_typing(self):
+        agent = self.make_agent()
+        agent.listening = False
+        agent.mac.is_engaged.return_value = True  # e.g. Start Listening from the menu mid-task
+        with mock.patch.object(voice_agent, "new_session"):
+            agent.set_listening(True)
+        agent.captions.focus.assert_called_once_with(False)
+        agent.captions.focus.reset_mock()
+        agent.paused_since, agent.pause_announced = 0.0, False
+        agent.on_helper({"state": "engaged"})
+        agent.captions.focus.assert_called_once_with(False)
+
     def test_fn_never_says_it_stops_the_agent(self):
         swift = (Path(__file__).resolve().parents[1] / "tools" / "captions.swift").read_text()
         self.assertNotIn("tap fn to stop", swift)

@@ -45,6 +45,10 @@ class Captions:
         """The "Listening · tap fn to turn the mic off" line on top, while it listens."""
         self._send(listening=on)
 
+    def focus(self, on: bool):
+        """Typing goes to the card's entry field (fn opened it), or back to the app in front."""
+        self._send(focus=on)
+
     def dictating(self, on: bool):
         """The "Dictating · let go of fn to type it" line on top instead, while you hold fn."""
         self._send(dictating=on)
