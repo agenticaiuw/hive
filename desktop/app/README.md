@@ -20,13 +20,39 @@ default, and `AGENT_EXPERIMENTAL_SPACEO` can explicitly choose it. The former ex
 single-window Braus seat is not available in this build. Rust crates and voice models still
 need to be available locally or downloaded during setup.
 
+## How it's built
+
+The agent is Rust: one workspace, `crates/hive/`, with one crate per area. `make` builds
+it and copies the binaries into `build/`. Hive.app runs `build/hive-agent --app`, and
+`./voice.sh` runs the same thing in a terminal.
+
+| Crate | What it does |
+|---|---|
+| `hive-app` | The agent itself (`build/hive-agent`) and `build/hive-auth-mcp` |
+| `hive-codex` | Codex app-server, tasks, waiting on providers, recovery, resumable threads (with `personal-agent-core` in `crates/agent-core`) |
+| `hive-mac` | Virtual keyboard and mouse (`build/hive-vhid`), screenshots, the Mac's tools (`MacTools`), credentials |
+| `hive-phone` | The iPhone relay and its tools (`build/phone-status`) |
+| `hive-knowledge` | Knowledge base, cloud archive, task recordings, session journal, Agent Context panel, memory search |
+| `hive-workspace` | The workspace engine's bridge, fence, recovery and updates |
+| `hive-sidecars` | Clients for the Python sidecars (voice, captions, lip reading) |
+| `hive-common` | Shared code, such as ingesting text |
+
+The models stay Python, in one sidecar process the agent starts: `python/sidecar_voice.py`
+serves Parakeet, Silero VAD, the echo canceller, WeSpeaker and Kokoro over a JSON-lines
+protocol on stdin/stdout. Lip reading stays `scripts/lipread_*.py`. The speed is in the
+inference libraries (MLX, ONNX Runtime, PyTorch), and those are Python-first; what moved to
+Rust is the orchestration around them.
+
+Build with `make`; test with `cd crates/hive && cargo test` (or `cargo test -p hive-mac`,
+and so on per crate). The Python tests in `tests/` cover only the model sidecar code.
+
 The keyboard and mouse part is **agent-vhid**:
 
 The input goes through Karabiner's virtual HID driver, so macOS sees a USB
 keyboard and mouse, not simulated events. Nothing to plug in.
 
 ```
-agent (Python / any shell)                 you
+agent (Rust / any shell)                  you
    │  /tmp/agent-vhid.sock                  │ keyboard, trackpad, mouse
    ▼                                        ▼
 agent-vhid-helper (root) ── gate ◄── watcher (IOHIDManager + MultitouchSupport)
@@ -83,8 +109,8 @@ Once, after installing:
   fn also starts the Mac's own dictation. Another app that records on fn
   (superwhisper) needs another shortcut, or quitting.
 
-Agent runs the Python in this folder, so after changing it, Restart Agent from its
-menu; after changing the helper (`src/`) or the app (`workspace-engine/Sources/UnifiedAgent/app.swift`), run
+Agent runs the binaries in `build/`, so after changing the Rust (`crates/hive`) or the
+Python sidecar, run `make` and Restart Agent from its menu; after changing the helper (`src/`) or the app (`workspace-engine/Sources/UnifiedAgent/app.swift`), run
 `./install.sh` again. `./install.sh --uninstall` takes it all out. Or, without
 installing anything, `./voice.sh` runs the same in a terminal (one password prompt for the helper; Ctrl-C stops it), and the
 terminal app needs the permissions instead.
@@ -106,9 +132,9 @@ terminal app needs the permissions instead.
 ### Workspace creation policy
 
 Closing a virtual workspace is durable: it will not be recreated just because a session is
-missing or the app restarts. `python3 python/workspace_fence.py closed` records an explicit
+missing or the app restarts. `build/workspace-fence closed` records an explicit
 closure without changing any display. To explicitly authorize one creation attempt, run
-`python3 python/workspace_fence.py allow-once`; the next workspace bootstrap consumes that
+`build/workspace-fence allow-once`; the next workspace bootstrap consumes that
 permit before attempting creation. An ambiguous failure is not retried automatically. The
 command records policy only; it does not open a display itself.
 
@@ -212,7 +238,7 @@ Codex):
 
 `./install.sh` (or `./voice.sh`) sets these up the first time: the Python packages in `.venv`
 (`requirements.txt`), Kokoro and Silero VAD in `models/` (350 MB) and Parakeet and
-WeSpeaker in the Hugging Face cache (2.4 GB). The rest of the project uses only the standard library.
+WeSpeaker in the Hugging Face cache (2.4 GB). The rest of the project is Rust and needs no Python packages.
 
 Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your shell):
 
@@ -249,16 +275,16 @@ you.
 
 ### The computer agent
 
-- **Codex** runs as one `codex app-server` (`python/codex_app.py`), started with
+- **Codex** runs as one `codex app-server` (crate `hive-codex`), started with
   the voice agent and kept while it runs. It's the server the Codex app and
   its IDE extensions use, signed in with your ChatGPT account, so the agent runs
   on your Codex subscription; no API key. Requests use a persistent primary thread,
   resumed by ID after app or app-server restarts. Tapping fn keeps that conversation.
 - **Only our tools and instructions:** `python/instructions.md` (a few lines)
   replaces Codex's coding-agent system prompt, and the model gets two sets of
-  tools: the Mac's from `python/mac_mcp.py` (screenshot, click, type_text,
+  tools: the Mac's from `MacTools` in `hive-mac` (screenshot, click, type_text,
   press_key, scroll, drag, open_app, find_text, read_screen, wait_for_control,
-  batch, ...) and the iPhone's from `python/phone_mcp.py`. They run in the voice
+  batch, ...) and the iPhone's from `hive-phone`. They run in the voice
   agent's own process: Codex calls back into it. Codex's own tools (shell, file
   edits, sub-agents, browser, image generation, ...), your connectors, plugins,
   hooks, skills and MCP servers are switched off for it with `-c` overrides; your
@@ -272,7 +298,8 @@ you.
   connection to the model ready (the first request's reply starts 1–2.5 s sooner).
   The Mac's screenshot, open windows and browser tabs are taken as you start
   talking and go with the request the moment you finish, so it doesn't spend a
-  step looking. Every action returns a fresh screenshot, and `batch` does several
+  step looking. Screenshots are taken in-process (ScreenCaptureKit and ImageIO, not
+  `screencapture` and `sips`): about 76 ms for a 1440×900 JPEG, against 178 ms. Every action returns a fresh screenshot, and `batch` does several
   actions in one call, so most steps are a single round trip to the model, about
   1.5–2 s. Replies are short, and each sentence is spoken as soon as the model has
   written it. After each request `Agent.log` has a `⏱` line saying where the time
@@ -283,7 +310,7 @@ you.
 
 #### Durable sessions and visible context
 
-`python/resumable_thread.py` integrates the staged persistence prototype. The primary
+`hive-codex` (with `personal-agent-core` in `crates/agent-core` for the thread identity) integrates the staged persistence prototype. The primary
 Codex thread ID lives in `~/Library/Application Support/Personal Agent/codex-thread-id`
 (`AGENT_STATE_DIR` overrides the directory). New threads use `ephemeral=false`;
 Codex stores their history in its own state directory. Identity writes use a private
@@ -324,12 +351,12 @@ Each run of the voice agent, from opening Agent.app to quitting it, is a session
   record of the thread's full model context: base and developer instructions, every input
   with its screenshots, tool calls and results, replies, and compactions.
 - `index.html`: the same, readable in a browser.
-- `panel.json`: what the **Agent Context panel** shows (`python/context_panel.py`).
+- `panel.json`: what the **Agent Context panel** shows (`hive-knowledge`; `build/hive-context-panel`).
 
 #### Task recordings (in the cloud)
 
 The cloud always has all the data (see the top-level README). While any task runs, the whole
-screen is recorded with the cursor and clicks (`python/task_recording.py`), into
+screen is recorded with the cursor and clicks (`hive-knowledge`), into
 `~/Movies/Hive/<date time> <request>/`:
 
 - `screen.mov`: the video (macOS `screencapture`, full resolution, 60 fps).
@@ -342,7 +369,7 @@ screen is recorded with the cursor and clicks (`python/task_recording.py`), into
   status and the computer's state under the video.
 - `meta.json`: when the video started, its length, and the lag used to line the clocks up.
 
-When the task ends, `python/cloud_archive.py` uploads the folder to the Cloudflare R2 bucket
+When the task ends, `hive-knowledge` uploads the folder to the Cloudflare R2 bucket
 `hive-recordings` (`recordings/<folder>/…`) with the signed-in Cloudflare CLI (`cf r2 objects
 put`). The uploaded video is re-encoded at 10 fps, 1440 px wide, quality-based H.264: a mostly
 still screen is well under 1 MB a minute (the raw file is about 25 MB a minute and stays on the
@@ -355,13 +382,13 @@ and when the app starts. `HIVE_RECORD=0` turns recording off, `HIVE_RECORDINGS` 
 The agent builds the owner's knowledge base as it works (see the top-level README). It is a
 Cloudflare D1 database, `hive-knowledge`, in the owner's own Cloudflare account, one fact per
 row: a subject ("owner", a person, an organization), an attribute ("phone number"), the value,
-where the agent learned it and when (schema: `cloud/knowledge/migrations`). `python/knowledge.py`
+where the agent learned it and when (schema: `cloud/knowledge/migrations`). `hive-knowledge`
 reaches it with the signed-in Cloudflare CLI (`cf d1 query`) and creates it on first use.
 
 - The agent's tools are `knowledge.lookup` and `knowledge.save`. A conversation whose saved tool
   list predates them (the long-running one) sends `mac.batch` steps `knowledge_lookup` and
-  `knowledge_save` instead; `agent.py` routes both to `knowledge.py`.
-- Its instructions (`knowledge.RULES`, applied on every thread start and resume) and a line in every
+  `knowledge_save` instead; `hive-codex` routes both to `hive-knowledge`.
+- Its instructions (the knowledge rules in `hive-knowledge`, applied on every thread start and resume) and a line in every
   turn tell it to look a fact up there before searching the computer for it, and to save each
   lasting fact a task shows it: the owner's details, the people, organizations and places in their
   life, and outcomes that matter later.
@@ -376,7 +403,7 @@ reaches it with the signed-in Cloudflare CLI (`cf d1 query`) and creates it on f
   checked, with the next call or when the app starts.
 - The context and activity logs show what was looked up or saved, never the values.
 
-`python3 python/knowledge.py lookup <words>` shows what's stored; `sync` uploads waiting saves;
+`build/hive-knowledge lookup <words>` shows what's stored; `sync` uploads waiting saves;
 `import-memory` copied the facts of the old local memory store (`memory/personal-memory.sqlite3`)
 into it. `HIVE_KNOWLEDGE_DB` names another database.
 
@@ -404,7 +431,7 @@ one turn says it exists, and the agent reads parts when it needs them with the
 panel say *verified*, *sent, not verified* or *failed*. A thread past `COMPACT_AT` gets
 compacted, after which the model has a summary, but the saved text stays readable.
 `read_clipboard` used to return the first 8,000 characters and say nothing; now it says how
-long the clipboard is and reads on from an offset. `python/ingest.py list | read ID [PART]`.
+long the clipboard is and reads on from an offset. `build/hive-ingest list | read ID [PART]` lists and reads the saved parts.
 
 #### Lip reading (optional)
 
@@ -424,14 +451,14 @@ Frames stay in memory and no microphone input is used for lip reading.
 
 `scripts/setup-lipread.sh` installs the pinned source, isolated Python runtime and verified
 checkpoint (4.85 GB download). macOS asks once for camera access. `LIPREAD_DEVICE=cpu`
-overrides GPU selection. See `python/lipread.py`.
+overrides GPU selection. See `hive-sidecars` (the client) and `scripts/lipread_*.py` (the model).
 
 Every context-viewer record carries the session's id, so the two join up.
 
 ```bash
-.venv/bin/python python/session_journal.py              # sessions, newest first
-.venv/bin/python python/session_journal.py show         # the latest, readable (or: show ID)
-.venv/bin/python python/session_journal.py paths        # its files and Codex rollouts
+build/hive-session-journal list        # sessions, newest first
+build/hive-session-journal show        # the latest, readable (or: show ID)
+build/hive-session-journal paths       # its files and Codex rollouts
 ```
 
 Not saved: what you dictate into other apps by holding fn (only its word count, unless
@@ -453,18 +480,17 @@ Offline regression tests (synthetic tools/screenshots, separate fake server and 
 processes; no account access):
 
 ```sh
-AGENT_ENV_FILE=/dev/null .venv/bin/python tests/test_resumption.py -v
-AGENT_ENV_FILE=/dev/null .venv/bin/python tests/test_tools.py CodexTaskTest -v
+cd crates/hive && cargo test -p hive-codex
 ```
 - **Captions:** `build/agent-vhid-captions` (`tools/captions.swift`) shows what it
   says and, under that, what it's doing ("Thinking", "Typing “weather”"), at the
   bottom of the screen over every app. Clicks go through them and its screenshots
   leave them out. `CAPTIONS=0` turns them off.
 - Questions that don't need the screen are answered directly, without screenshots.
-- The prompt (in `python/agent.py`) has it stop before buying, sending, deleting,
+- The prompt (in `hive-codex`) has it stop before buying, sending, deleting,
   changing settings or typing passwords unless you asked for exactly that.
 
-Typing a task instead: `python3 python/agent.py "open Calculator and work out 12% of 340"`
+Typing a task instead: `build/hive-agent --task "open Calculator and work out 12% of 340"`
 (it takes control once your hands are off), or `"open Maps on my phone"` for the iPhone. What Codex does,
 step by step with timings, goes to `agent-vhid-codex.log` in your temp folder (`$TMPDIR`),
 the voice agent's output to `~/Library/Logs/Agent.log`, and the helper's to
@@ -481,7 +507,7 @@ prints the token). To connect the phone, unlock it and run the **Pocket Connect*
 Shortcut, then check:
 
 ```bash
-.venv/bin/python python/phone.py
+build/phone-status
 ```
 
 On the phone it looks with screenshots, taps, swipes, types, opens apps by bundle
@@ -497,7 +523,7 @@ Already done on this Mac: Karabiner-DriverKit-VirtualHIDDevice (driver 1.8.0,
 daemon 6.14.0) is installed and activated. This project builds against the
 matching v6.14.0 client headers in `third_party/`.
 
-1. Build: `make` (needs Xcode's command-line tools, and `git submodule update --init`
+1. Build: `make` (needs Xcode's command-line tools, a Rust toolchain, and `git submodule update --init`
    after a fresh clone). `./install.sh`, `./voice.sh` and `./run.sh` build it for you.
    With an "Apple Development" certificate in your keychain, `make` signs Agent with
    it (and `./install.sh` the helper it installs), so macOS keeps their permissions
@@ -532,17 +558,15 @@ Then check everything end to end (moves the cursor, types into a scratch
 TextEdit file, takes a screenshot):
 
 ```bash
-python3 examples/demo.py
+(cd crates/hive && cargo run -p hive-mac --example demo)
 ```
 
 ## Using it from an agent
 
-Python (no dependencies):
+In Rust, the `vhid` module of `hive-mac` (`crates/hive/hive-mac`) has these calls, and
+returns `Disengaged` when you take over (sketched here in pseudocode):
 
-```python
-import sys; sys.path.insert(0, "python")
-from agent_vhid import AgentVHID, Disengaged
-
+```
 mac = AgentVHID()
 mac.engage()                               # ask for control
 mac.wait_engaged()                         # once your hands have been off for 0.4 s
@@ -565,12 +589,12 @@ and types faster; `human=False` drops the curved paths and timing jitter.
 Shell, for agents that only have a terminal (exit code 3 means you took over):
 
 ```bash
-python3 python/agent_vhid.py click 720 450
-python3 python/agent_vhid.py type "hello"
-python3 python/agent_vhid.py key cmd+s
-python3 python/agent_vhid.py screenshot /tmp/screen.png --max-width 1280
-python3 python/agent_vhid.py status
-python3 python/agent_vhid.py engage        # take control, once your hands are off
+build/hive-vhid click 720 450
+build/hive-vhid type "hello"
+build/hive-vhid key cmd+s
+build/hive-vhid screenshot /tmp/screen.png --max-width 1280
+build/hive-vhid status
+build/hive-vhid engage        # take control, once your hands are off
 ```
 
 ## How it behaves like a person
@@ -589,32 +613,19 @@ python3 python/agent_vhid.py engage        # take control, once your hands are o
 ## Tests
 
 ```bash
-python3 tests/test_dry_run.py
-.venv/bin/python tests/test_voice.py
-.venv/bin/python tests/test_speech.py
-.venv/bin/python tests/test_tools.py
+cd crates/hive && cargo test
 ```
 
-The first runs the real helper with `--dry-run` (no root, no virtual devices) and
-checks the HID reports it would send, the hand-over rules (including `engage` and
-what fn does), release-on-disconnect, and the wrapper. The second runs
-the voice agent against that helper and a fake `codex app-server` (`tests/fake_codex.py`), with
-speech made by `say` in place of the microphone and Parakeet really transcribing
-it: fn starts and stops it listening, stopping mid-sentence still takes what you
-said, holding fn dictates (a stand-in does the typing, so your clipboard isn't
-touched) and fn+key doesn't, "continue" carries on after you took over, words
-show up as you talk, short pauses and trailing "and" don't cut you off,
-more said right after is added, the task reaches Codex and its reply is spoken
-once, "stop" stops it, noise does nothing, talking over it stops its voice, and,
-through a simulated room, the echo canceller hears you and not its own voice.
-The third makes speech with Kokoro without playing it: sentence splitting,
-stopping, waiting for you to finish, and falling back to the Mac's voice. The
-fourth checks `batch` against the dry-run helper, the iPhone tools against a
-stand-in for the relay (taps, typing, element labels, hidden passwords and tokens,
-the "not connected" message), a task's trip through the fake app-server (our
-instructions and tools, the call back into our tools, one server for every task,
-stopping), and draws the captions into a PNG. None of them play anything aloud or
-touch your phone.
+The Rust tests run the real helper with `--dry-run` (no root, no virtual devices) and
+check the HID reports it would send, the hand-over rules (including `engage` and what
+fn does), release-on-disconnect, and the wrapper; `batch` and the Mac's tools against it;
+the iPhone tools against a stand-in for the relay (taps, typing, element labels, hidden
+passwords and tokens, the "not connected" message); and a task's trip through a fake
+`codex app-server` (our instructions and tools, the call back into our tools, one server
+for every task, resumption, stopping). The remaining Python tests (`tests/test_*.py`)
+cover only the model sidecar code: speech made by Kokoro without playing it (sentence
+splitting, stopping, waiting for you to finish), and listening, voiceprints and echo
+cancellation. None of them play anything aloud or touch your phone.
 
 ## Things to know
 
