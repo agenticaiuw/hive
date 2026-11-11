@@ -415,6 +415,14 @@ class VoiceAgent:
         from spaceo_mcp_bridge import Bridge
         workspace = None
         try:
+            # A host-health latch left by an earlier sample would refuse the display below.
+            import workspace_recovery
+            outcome, detail = workspace_recovery.recover_if_latched(os.environ["AGENT_SPACEO_COMMAND"])
+            if outcome != "not-latched":
+                self.out(f"Virtual workspace safety latch {outcome}: {detail}")
+        except Exception as error:
+            self.out(f"Virtual workspace safety latch check failed: {error}")
+        try:
             workspace = Bridge(os.environ["AGENT_SPACEO_COMMAND"],
                                on_activity=lambda kind, text: self.events.put(("workspace_activity", (kind, text))))
             workspace.start_embedded()
