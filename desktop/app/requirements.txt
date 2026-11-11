@@ -1,0 +1,8 @@
+# For the voice agent; ./voice.sh installs these into .venv. The rest of the project needs only
+# the standard library.
+parakeet-mlx>=0.5.3  # hearing you (python/listen.py); its model downloads from Hugging Face on first use
+kokoro-onnx>=0.4.7   # the agent's voice (python/speech.py); its model goes in models/
+sounddevice>=0.5     # the microphone
+livekit>=1.0         # WebRTC's echo canceller (python/mic.py): the Mac's own sound out of the microphone
+soxr>=0.5            # resampling what the Mac plays for it
+kaldi-native-fbank>=1.22  # the sound features python/voiceprint.py tells voices apart by
