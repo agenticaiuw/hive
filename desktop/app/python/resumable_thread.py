@@ -175,7 +175,8 @@ class ResumableThread:
                 method, options = "thread/resume", {"threadId": self.thread_id}
                 # Preserve the conversation and its saved dynamic tools while applying current
                 # authentication/consent rules. This server supports instruction overrides on resume.
-                for key in ("baseInstructions", "developerInstructions", "cwd", "sandbox", "permissions", "approvalPolicy"):
+                for key in ("baseInstructions", "developerInstructions", "cwd", "sandbox", "permissions", "approvalPolicy",
+                            "config"):  # config: the shell's network access
                     if key in params:
                         options[key] = params[key]
             else:
