@@ -62,7 +62,12 @@ GOAL_WATCHDOG_CHECK_SECONDS = 2
 # instructions, which Codex keeps when it compacts the thread).
 RULES = """\
 Use the computer and its mouse and keyboard tools to perform the user's requested work, \
-not merely describe what they could do. Follow the user's instructions and authorization. \
+not merely describe what they could do. You are their agent, not a chat assistant: whenever you \
+could either act or explain, act. When they ask how to do something on their computer or phone \
+("how do I…", "how to…", "where do I…", "can you…"), do it for them on the screen, then say in a \
+sentence what you did; never answer with steps for them to follow, and don't stop to ask first. \
+They can stop you at any moment by touching the trackpad or mouse, so acting is always the \
+default. Follow the user's instructions and authorization. \
 Keep credentials out of conversation and logs; respect stop and takeover. Diagnose failures and \
 fix what is safely authorized; try practical alternatives and continue independent requested \
 work when one route is blocked. Verify uncertain action outcomes before considering a repeat; \
@@ -70,7 +75,8 @@ do not repeat unverified effects or exceed limits on irreversible actions.
 """
 
 REQUEST = """\
-{focus} The user just asked:
+{focus} The user's request, for you to carry out on the device yourself (a question about how \
+to do something means: do it for them):
 
     "{task}"
 {previous}"""
@@ -682,6 +688,7 @@ class CodexTask:
         self._context_log = None
         self._context_warning = False
         self._between_goal_turns = False
+        self._goal_before = None  # (createdAt, updatedAt) of a goal an earlier task left on the thread
         self._recovery_running = False
         self._routing_retry_available = True
         self._routing_failure = False
@@ -769,6 +776,17 @@ class CodexTask:
             # thread/resume returns. It is already our turn; do not start another.
             self._time("codex")
             return
+        # A goal an earlier task left on the thread (blocked, paused, complete) isn't this request's.
+        # Note which one it is, so this task ends on what it did, not on that old status: otherwise
+        # every task after a blocked one gets a "diagnose the blocker" turn and ends as failed.
+        self._goal_before = None
+        if self.on_thread:
+            try:
+                before = self._server.request("thread/goal/get", {"threadId": self._thread}, timeout=5).get("goal") or {}
+                if before and before.get("status") != "active":
+                    self._goal_before = (before.get("createdAt"), before.get("updatedAt"))
+            except (CodexError, OSError):
+                pass
         # The knowledge base in the cloud (knowledge.py) took over from the local memory store, whose
         # facts were copied into it; every turn reminds the agent to use it and add to it.
         memory_hint = knowledge.TURN_HINT
@@ -1192,6 +1210,9 @@ class CodexTask:
                 if "goal" not in result:
                     raise CodexError("Goal status response was incomplete")
                 goal = result["goal"] or {}
+                if (self._goal_before and goal.get("status") != "active"
+                        and (goal.get("createdAt"), goal.get("updatedAt")) == self._goal_before):
+                    goal = {}  # left over from an earlier task, untouched by this one: this task set no goal
                 check_failures = 0
             except (CodexError, OSError) as error:
                 if self._done.is_set() or not self._between_goal_turns or self._turn != finished_turn:
