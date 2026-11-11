@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.personal-agent.Agent</string>
+	<key>CFBundleName</key>
+	<string>Agent</string>
+	<key>CFBundleExecutable</key>
+	<string>Agent</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Agent listens to you after you tap fn, until you tap it again.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Agent takes what the Mac is playing back out of what the microphone hears, so its own voice or a video isn't taken for you.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Only in lip reading mode, which you choose in the Agent menu: the camera is on from when you tap fn until you tap it again, and the clip is read on this Mac.</string>
+	<key>AgentRepository</key>
+	<string>@REPO@</string>
+</dict>
+</plist>
