@@ -348,6 +348,36 @@ Mac). A folder that didn't upload (offline, signed out) is tried again after the
 and when the app starts. `HIVE_RECORD=0` turns recording off, `HIVE_RECORDINGS` and
 `HIVE_R2_BUCKET` change where it goes.
 
+#### Knowledge base (in the cloud)
+
+The agent builds the owner's knowledge base as it works (see the top-level README). It is a
+Cloudflare D1 database, `hive-knowledge`, in the owner's own Cloudflare account, one fact per
+row: a subject ("owner", a person, an organization), an attribute ("phone number"), the value,
+where the agent learned it and when (schema: `cloud/knowledge/migrations`). `python/knowledge.py`
+reaches it with the signed-in Cloudflare CLI (`cf d1 query`) and creates it on first use.
+
+- The agent's tools are `knowledge.lookup` and `knowledge.save`. A conversation whose saved tool
+  list predates them (the long-running one) sends `mac.batch` steps `knowledge_lookup` and
+  `knowledge_save` instead; `agent.py` routes both to `knowledge.py`.
+- Its instructions (`knowledge.RULES`, applied on every thread start and resume) and a line in every
+  turn tell it to look a fact up there before searching the computer for it, and to save each
+  lasting fact a task shows it: the owner's details, the people, organizations and places in their
+  life, and outcomes that matter later.
+- Every save checks for the same fact first and never stores it twice. Phone numbers, emails and web
+  addresses compare by what they point to, however written; a repeat only marks the fact as seen
+  again. A new value for the same attribute is added beside the old one, or replaces it
+  (`replaces`), which keeps the old one marked outdated.
+- Never stored: passwords, passcodes, verification codes, keys, tokens, card and bank numbers, Social
+  Security numbers. The tool refuses them.
+- The Mac keeps a working copy (`knowledge/cache.json` in the state folder) that answers lookups
+  while the cloud can't be reached; a save made then waits in `knowledge/pending.jsonl` and goes up,
+  checked, with the next call or when the app starts.
+- The context and activity logs show what was looked up or saved, never the values.
+
+`python3 python/knowledge.py lookup <words>` shows what's stored; `sync` uploads waiting saves;
+`import-memory` copied the facts of the old local memory store (`memory/personal-memory.sqlite3`)
+into it. `HIVE_KNOWLEDGE_DB` names another database.
+
 #### Agent Context panel
 
 Agent menu › **Show Agent Context** opens a floating, resizable panel over every app
