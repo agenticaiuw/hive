@@ -42,7 +42,7 @@ class Captions:
                 continue
 
     def listening(self, on: bool):
-        """The "Listening · tap fn to stop" line on top, while it listens."""
+        """The "Listening · tap fn to turn the mic off" line on top, while it listens."""
         self._send(listening=on)
 
     def dictating(self, on: bool):

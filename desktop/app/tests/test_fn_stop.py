@@ -65,6 +65,24 @@ class FnStopTest(unittest.TestCase):
         agent.take_control.assert_called_once()
         agent.set_listening.assert_not_called()
 
+    def test_touching_just_as_it_takes_control_pauses_and_fn_resumes(self):
+        agent = self.make_agent()
+        agent.paused_since, agent.pause_announced = 0.0, False
+        agent.tasks["mac"]._recovery_id = None
+        agent.on_helper({"state": "disengaged", "reason": "engage_cancelled_by_trackpad"})
+        self.assertTrue(agent.paused_since)
+        agent.captions.paused.assert_called_once_with("Paused: you took over. Press fn to let the agent continue.")
+        agent.paused_since -= 5
+        agent.take_control = mock.Mock()
+        agent.set_listening = mock.Mock()
+        agent.on_helper({"fn": "tap"})
+        agent.take_control.assert_called_once()
+        agent.set_listening.assert_not_called()
+
+    def test_fn_never_says_it_stops_the_agent(self):
+        swift = (Path(__file__).resolve().parents[1] / "tools" / "captions.swift").read_text()
+        self.assertNotIn("tap fn to stop", swift)
+
     def test_fn_tap_that_itself_took_over_toggles_listening(self):
         agent = self.make_agent()
         agent.paused_since = voice_agent.time.time()  # this very fn press disengaged it
