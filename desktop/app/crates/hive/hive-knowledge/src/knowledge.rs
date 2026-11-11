@@ -356,8 +356,15 @@ pub struct CloudflareCli;
 impl Cli for CloudflareCli {
     fn run(&self, args: &[String], timeout: Duration) -> Result<CliOutput, String> {
         let cf = crate::cloud_archive::cf().ok_or("the Cloudflare CLI (cf) isn't installed")?;
-        let out =
-            util::run(cf.command().args(args), None, Some(timeout)).map_err(|e| e.to_string())?;
+        // Run again once if Cloudflare refused the sign-in (Cf::run says why).
+        let out = cf
+            .run(
+                |command| {
+                    command.args(args);
+                },
+                timeout,
+            )
+            .map_err(|e| e.to_string())?;
         Ok(CliOutput {
             code: util::returncode(&out.status),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),

@@ -17,8 +17,9 @@ use crate::Report;
 use regex::Regex;
 use serde_json::json;
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -51,12 +52,44 @@ pub struct Cf {
     pub search_path: OsString,
 }
 
+/// What cf says when Cloudflare turned away its sign-in rather than the request. cf refreshes its
+/// hour-long sign-in without a lock, so two cf commands that start together just after it expires
+/// (the recording upload and the knowledge sync, when Hive starts) both spend the same one-time
+/// refresh token, and one is refused: "[7403] The given account is not valid or is not authorized
+/// to access this service" (2026-11-11). The request never ran, and by then the other command has
+/// saved the new sign-in.
+static SIGN_IN_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[(7403|10000)\]|Authentication error|auth token has expired|CLOUDFLARE_API_TOKEN|Not logged in")
+        .unwrap()
+});
+
+/// How long to wait before running a command again whose sign-in was refused.
+pub const SIGN_IN_PAUSE: Duration = Duration::from_secs(2);
+
 impl Cf {
     /// A command running `cf`, with its PATH.
     pub fn command(&self) -> Command {
         let mut command = Command::new(&self.path);
         command.env("PATH", &self.search_path);
         command
+    }
+
+    /// Runs `cf` with the arguments `args` adds, its output captured, killed past `timeout`. If
+    /// Cloudflare refused the sign-in ([`SIGN_IN_REFUSED`]), it runs once more after
+    /// [`SIGN_IN_PAUSE`]: nothing ran the first time, so nothing is done twice.
+    pub fn run(&self, args: impl Fn(&mut Command), timeout: Duration) -> io::Result<Output> {
+        let once = || {
+            let mut command = self.command();
+            args(&mut command);
+            util::run(&mut command, None, Some(timeout))
+        };
+        let first = once()?;
+        let said = [&first.stderr[..], &first.stdout[..]].concat();
+        if first.status.success() || !SIGN_IN_REFUSED.is_match(&String::from_utf8_lossy(&said)) {
+            return Ok(first);
+        }
+        std::thread::sleep(SIGN_IN_PAUSE);
+        once()
     }
 }
 
@@ -199,20 +232,21 @@ pub fn shrink(folder: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Uploads one file. Returns (whether it worked, the end of what cf said).
 pub fn put(cf: &Cf, bucket: &str, key: &str, path: &Path) -> (bool, String) {
-    let mut command = cf.command();
-    command
-        .args([
-            "r2",
-            "objects",
-            "put",
-            key,
-            "--bucket-name",
-            bucket,
-            "--file",
-        ])
-        .arg(path);
-    command.args(["--content-type", content_type(path)]);
-    match util::run(&mut command, None, Some(Duration::from_secs(3600))) {
+    let args = |command: &mut Command| {
+        command
+            .args([
+                "r2",
+                "objects",
+                "put",
+                key,
+                "--bucket-name",
+                bucket,
+                "--file",
+            ])
+            .arg(path)
+            .args(["--content-type", content_type(path)]);
+    };
+    match cf.run(args, Duration::from_secs(3600)) {
         Ok(run) => {
             let said = if !run.stderr.is_empty() {
                 &run.stderr
