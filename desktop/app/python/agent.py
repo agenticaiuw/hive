@@ -88,11 +88,17 @@ try another that can be undone, and finish every part of the request. A conditio
 
 Say what each step does. Every mouse, keyboard and tap call takes `step`: one short sentence the \
 user sees as you act. When the step can't be undone, start it with "One-way:" and quote the \
-user's words that ask for it; one without their words is refused.
+user's words that ask for it; one without their words is refused. If a tool's parameters don't \
+list `step`, include it anyway.
 
 Keep credentials out of conversation and logs. Before repeating an action whose outcome you \
 aren't sure of, check what it did; never repeat a send or a payment that may have gone through.
 """
+
+# With every request: the long-running conversation keeps the tool list it started with, which has no
+# `step`, and the model sends it anyway when told to.
+STEP_HINT = ("Steps: give every mouse, keyboard and tap call (and each batch) a `step`, even where the tool "
+             "doesn't list it; a step that can't be undone starts \"One-way:\" and quotes the user's words.\n")
 
 REQUEST = """\
 {focus} The user's request, for you to carry out on the device yourself (a question about how \
@@ -838,7 +844,7 @@ class CodexTask:
                 pass
         # The knowledge base in the cloud (knowledge.py) took over from the local memory store, whose
         # facts were copied into it; every turn reminds the agent to use it and add to it.
-        memory_hint = knowledge.TURN_HINT
+        memory_hint = knowledge.TURN_HINT + STEP_HINT
         try:
             remembered = automatic_context(self.task)
         except Exception:
