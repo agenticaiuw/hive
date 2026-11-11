@@ -75,6 +75,12 @@ FILLERS = {"yeah", "okay", "oh", "uh", "um", "hmm", "mm", "mmhmm", "mm-hmm", "uh
 HUMAN = {"keyboard", "trackpad", "mouse", "mouse_button"}
 
 
+def took_over(reason) -> bool:
+    """You took the mouse and keyboard: by touching them while the agent had control, or just as it
+    was taking control ("engage_cancelled_by_trackpad"). Either way fn hands control back."""
+    return reason in HUMAN or str(reason or "").startswith("engage_cancelled")
+
+
 def workspace_voice_allowed():
     """Only speak over the user's speakers while the workspace viewer is visible."""
     if not os.environ.get("AGENT_SPACEO_COMMAND"):
@@ -346,7 +352,7 @@ class VoiceAgent:
                 self.local_requests = None
                 self.out(f"Local request channel unavailable: {error}")
         threading.Thread(target=self.watch_helper, daemon=True).start()
-        self.out("Ready. Tap fn and say what you want done; tap fn again to stop it listening."
+        self.out("Ready. Tap fn and say what you want done; tap fn again to turn the mic off."
                  + ("" if self.app else " Ctrl-C to quit.") + "\n")
         self.tell("listening", "0")
         self.tell("status", "Typed requests ready; voice input is loading")
@@ -711,7 +717,7 @@ class VoiceAgent:
         self.captions.listening(on)
         self.tell("listening", "1" if on else "0")
         self.log("listening" if on else "stopped listening")
-        self.out("🎙  listening (tap fn to stop)" if on else "   (stopped listening; tap fn to talk)")
+        self.out("🎙  listening (tap fn to turn the mic off)" if on else "   (mic off; tap fn to talk)")
 
     def _stop_tasks_for_fn(self):
         """A close tap stops both devices and silences any ongoing spoken response."""
@@ -843,7 +849,7 @@ class VoiceAgent:
             self.paused_since, self.pause_announced = 0.0, False
             if hasattr(self.captions, "paused"):
                 self.captions.paused("")
-        elif event.get("state") == "disengaged" and event.get("reason") in HUMAN and not self.paused_since:
+        elif event.get("state") == "disengaged" and took_over(event.get("reason")) and not self.paused_since:
             self.paused_since = time.time()
             if self.task and self.task.running and hasattr(self.captions, "paused"):
                 self.captions.paused("Paused: you took over. Press fn to let the agent continue.")
