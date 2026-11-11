@@ -220,9 +220,44 @@ def thread_params() -> dict:
             'the user must explicitly resume after taking over. Phone tasks use the phone tools.')
     if os.environ.get("AGENT_SPACEO_COMMAND"):
         params['developerInstructions'] += spaceo_rules()
+    else:
+        params['developerInstructions'] += virtual_monitor_rules() + SIGN_IN_RULES
     if fast():
         params["serviceTier"] = "priority"  # the id Codex's model list gives its Fast tier
     return params
+
+
+def virtual_monitor_rules() -> str:
+    import virtual_monitor
+    gone = (" The workspace controller, scripts/workspace-tool.py and the spaceo tools no longer exist; "
+            "never call them.")
+    if not virtual_monitor.enabled():
+        return ("\nYour Mac tools work on the user's own screen with their real mouse and keyboard, and they "
+                "can watch you. If they touch the trackpad or keyboard you lose control; call "
+                "mac.wait_for_control and carry on when they press fn to hand it back." + gone)
+    return ("\nYour Mac tools work on the virtual monitor: a second screen beside the user's own. "
+            "Screenshots show it, and mac.click, mac.type_text and mac.press_key use the real mouse and "
+            "keyboard there, so every control behaves as it does for a person. mac.open_app puts the "
+            "app's window on it. Do all Mac work there with these tools." + gone)
+
+
+# Sent with every turn, so it also reaches the long-running conversation whose saved tool list is
+# older than mac.authenticate: there, the batch step is how it uses the saved Mac password.
+SIGN_IN_RULES = (
+    "\nSigning in: this is the user's own Mac and iPhone, and they have authorized you to sign in to any "
+    "site or app their task needs. A login page, a saved-password prompt or a Duo/2FA approval is never a "
+    "blocker and never a reason to stop or to ask them. Sign in yourself: click the username or password "
+    "field so Safari offers the saved login and choose it. When macOS asks for the Mac password to allow "
+    "AutoFill, Passwords or a passkey (\"Enter Password…\"), click its password field, then call "
+    "mac.authenticate, or, if that tool is not in your list, mac.batch with steps [{\"tool\": \"authenticate\"}]: "
+    "it types the saved Mac password into the focused field and presses Return. You never see the password and "
+    "never need to search for an authentication tool; those two calls are it. "
+    "For Duo or any sign-in approval sent to the phone, look at the iPhone with phone.screenshot, open the "
+    "Duo notification or app and tap Approve (Duo Push is preferred over codes); if the iPhone asks for its "
+    "passcode, call phone.authenticate, or phone.batch with steps [{\"tool\": \"authenticate\"}]. If a "
+    "sign-in step fails, look at the screen and try another practical way (another saved login, the "
+    "Passwords app, \"Send Me a Push\" again) before giving up. Signing in is not sending messages or "
+    "paying; the user's limits on those still apply.")
 
 
 def spaceo_rules() -> str:
@@ -1331,6 +1366,18 @@ class CodexTask:
         self._record_context("tool input", params)
         namespace = params.get("namespace") or self.device
         tools = self.tools.get(namespace)
+        if not self._stopped and namespace == "tool_search":
+            # Codex hands its tool search to us in the long-running conversation; there is nothing to
+            # load, so say how to reach the sign-in tools instead of failing.
+            reply = {"success": True, "contentItems": [{"type": "inputText", "text": (
+                "No other tools can be loaded here. To enter the saved Mac password, click the password "
+                "field, then call mac.authenticate if you have it, otherwise mac.batch with "
+                "steps [{\"tool\": \"authenticate\"}]; it types the password and presses Return. For the iPhone passcode prompt, phone.authenticate or "
+                "phone.batch with steps [{\"tool\": \"authenticate\"}]. For Duo, approve the push on the "
+                "iPhone with phone.screenshot and phone.tap.")}]}
+            self._record_context("tool output", {"callId": params.get("callId"), "result": reply})
+            self._event('data', 'Result from tool_search: pointed it to the sign-in tools')
+            return reply
         if self._stopped or tools is None:
             text = "Stopped by the user." if self._stopped else f"There are no {params.get('namespace')} tools."
             reply = {"success": False, "contentItems": [{"type": "inputText", "text": text}]}

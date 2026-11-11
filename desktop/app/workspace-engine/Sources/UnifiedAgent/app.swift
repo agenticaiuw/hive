@@ -245,18 +245,45 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         }
     }
 
+    // Hive's logo, the yellow hexagon, with a small dot while it listens (red), dictates (orange)
+    // or uses the camera (green).
+    func hiveIcon(dot: NSColor?) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY), radius: CGFloat = 8
+            let hexagon = NSBezierPath()
+            for i in 0..<6 {
+                let angle = CGFloat.pi / 2 + CGFloat(i) * .pi / 3
+                let point = NSPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
+                i == 0 ? hexagon.move(to: point) : hexagon.line(to: point)
+            }
+            hexagon.close()
+            NSColor(srgbRed: 0.976, green: 0.812, blue: 0.341, alpha: 1).setFill()
+            hexagon.fill()
+            if let dot {
+                let spot = NSRect(x: rect.maxX - 7, y: rect.minY, width: 7, height: 7)
+                NSColor.black.withAlphaComponent(0.55).setFill()
+                NSBezierPath(ovalIn: spot.insetBy(dx: -1, dy: -1)).fill()
+                dot.setFill()
+                NSBezierPath(ovalIn: spot).fill()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
     func show() {
         let button = item.button
+        button?.contentTintColor = nil
         if camera {
-            button?.image = NSImage(systemSymbolName: "camera.fill", accessibilityDescription: "Agent's camera is on, lip reading")
-            button?.contentTintColor = .systemGreen
+            button?.image = hiveIcon(dot: .systemGreen)
+            button?.setAccessibilityLabel("Hive: camera on, lip reading")
         } else if dictating {
-            button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Agent is dictating")
-            button?.contentTintColor = .systemOrange
+            button?.image = hiveIcon(dot: .systemOrange)
+            button?.setAccessibilityLabel("Hive is dictating")
         } else {
-            button?.image = NSImage(systemSymbolName: listening ? "mic.fill" : "mic",
-                                    accessibilityDescription: listening ? "Agent is listening" : "Agent")
-            button?.contentTintColor = listening ? .systemRed : nil
+            button?.image = hiveIcon(dot: listening ? .systemRed : nil)
+            button?.setAccessibilityLabel(listening ? "Hive is listening" : "Hive")
         }
         let lips = lipsItem.state == .on
         toggleItem.title = lips ? (listening ? "Stop Lip Reading (fn)" : "Start Lip Reading (fn)")

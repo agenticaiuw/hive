@@ -324,6 +324,30 @@ Each run of the voice agent, from opening Agent.app to quitting it, is a session
 - `index.html`: the same, readable in a browser.
 - `panel.json`: what the **Agent Context panel** shows (`python/context_panel.py`).
 
+#### Task recordings (in the cloud)
+
+The cloud always has all the data (see the top-level README). While any task runs, the whole
+screen is recorded with the cursor and clicks (`python/task_recording.py`), into
+`~/Movies/Hive/<date time> <request>/`:
+
+- `screen.mov`: the video (macOS `screencapture`, full resolution, 60 fps).
+- `timeline.jsonl`: one line per event with the wall-clock time (`t`) and the seconds into the
+  video (`video`): the agent's own lines (the request, each tool call, its words, the result),
+  its status line, who has the mouse and keyboard, and the computer's state (front app and
+  window, cursor, whether someone is touching it) whenever that changes. Nothing is drawn into
+  the video; the timeline lines up with it instead.
+- `screen.srt`: the same as subtitles, so a player that loads them (IINA, VLC) shows the agent's
+  status and the computer's state under the video.
+- `meta.json`: when the video started, its length, and the lag used to line the clocks up.
+
+When the task ends, `python/cloud_archive.py` uploads the folder to the Cloudflare R2 bucket
+`hive-recordings` (`recordings/<folder>/…`) with the signed-in Cloudflare CLI (`cf r2 objects
+put`). The uploaded video is re-encoded at 10 fps, 1440 px wide, quality-based H.264: a mostly
+still screen is well under 1 MB a minute (the raw file is about 25 MB a minute and stays on the
+Mac). A folder that didn't upload (offline, signed out) is tried again after the next recording
+and when the app starts. `HIVE_RECORD=0` turns recording off, `HIVE_RECORDINGS` and
+`HIVE_R2_BUCKET` change where it goes.
+
 #### Agent Context panel
 
 Agent menu › **Show Agent Context** opens a floating, resizable panel over every app

@@ -32,7 +32,7 @@ finish before it starts saying something. Once you've taught it your voice (./vo
 python/voiceprint.py), people talking nearby are ignored too.
 
 Needs agent-vhid-helper running: ./install.sh has the Mac start it, ./voice.sh starts it otherwise.
---app is how Agent.app (workspace-engine/Sources/UnifiedAgent/app.swift) runs it at login: "toggle" lines on stdin turn listening on
+--app is how Agent.app (tools/app.swift) runs it at login: "toggle" lines on stdin turn listening on
 and off like fn, and "@@ listening 1|0", "@@ dictating 1|0" and "@@ status TEXT" lines on stdout are
 for its menu bar.
 """
@@ -105,6 +105,12 @@ MIC_SILENT = ("   The microphone only gives silence. Allow microphone access for
               "Security › Microphone), then restart it.")
 
 
+def shortened(text: str, limit: int) -> str:
+    """One line of at most `limit` characters, for the floating window."""
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[:limit].rstrip() + "…"
+
+
 def notify(message: str, title: str = "Agent"):
     command = ["osascript", "-e", f"display notification {json.dumps(message)} with title {json.dumps(title)}"]
     threading.Thread(target=subprocess.run, args=(command,), daemon=True,
@@ -153,11 +159,38 @@ class VoiceAgent:
         self.events: queue.Queue = queue.Queue()
         if hasattr(self.captions, 'on_input'):
             self.captions.on_input = lambda text: self.events.put(('typed_request', text))
+        if hasattr(self.captions, 'on_control'):
+            self.captions.on_control = lambda kind, value=None: self.events.put(('overlay', (kind, value)))
         self.ears = ears or listen.Ears(self.heard, deaf=self.deaf, voiceprint=Voiceprint(), listening=False)
         self.ears.on_text, self.ears.deaf, self.ears.on_speech = self.heard, self.deaf, self.cut_in
         self.ears.on_ignored = self.ignored
         if self.voice and self.ears.voiceprint is not None:
             threading.Thread(target=self.learn_its_voice, daemon=True, name="learn-voice").start()
+        # Muted (the window's mic button): the microphone stays off however fn is used, and the agent
+        # and the window keep going.
+        self.muted = False
+        _listen = self.ears.listen
+        self.ears.listen = lambda on: _listen(bool(on) and not self.muted)
+        # Every task is recorded: the screen as a video, with a timeline of Hive's status and the Mac's
+        # state at exact times, uploaded to Cloudflare R2 afterwards (task_recording, cloud_archive).
+        import task_recording
+        import cloud_archive
+        from agent_vhid import cursor_position as _cursor
+
+        def _recording_title():
+            running = [t for t in self.tasks.values() if t is not None]
+            return getattr(running[0], "task", "") if running else ""
+
+        def _engaged():
+            mac = getattr(self, "mac", None)
+            return bool(mac and mac.is_engaged())
+
+        self.recorder = task_recording.Recorder(
+            running=lambda: any(t is not None for t in self.tasks.values()),
+            engaged=_engaged, title=_recording_title, cursor=_cursor,
+            on_finished=lambda folder: cloud_archive.archive_in_background(
+                report=lambda line: self.out(f"   🎞  {line}")))
+        cloud_archive.archive_in_background(report=lambda line: self.out(f"   🎞  {line}"))
         self.ears.listen(False)  # until you tap fn
         self.listening = False  # for the agent: you tapped fn
         self._discard_heard = False
@@ -298,6 +331,8 @@ class VoiceAgent:
         if self.app and os.environ.get("AGENT_SPACEO_COMMAND"):
             threading.Thread(target=self.start_embedded_workspace, daemon=True,
                              name="personal-agent-workspace").start()
+        elif self.app:
+            threading.Thread(target=self.start_virtual_monitor, daemon=True, name="virtual-monitor").start()
         self.local_requests = None
         if self.app:
             try:
@@ -392,6 +427,8 @@ class VoiceAgent:
                 self.on_ignored(*data)
             elif kind == "toggle":
                 self.set_listening(not self.listening)
+            elif kind == "overlay":
+                self.on_overlay(*data)
             elif kind == "typed_request":
                 self.captions.hearing(data)
                 self.on_transcript(data, typed=True)
@@ -456,7 +493,11 @@ class VoiceAgent:
                 result = server.request("thread/goal/set", goal_params, timeout=3)
                 if (result.get("goal") or {}).get("status") != "active":
                     raise RuntimeError("Codex did not confirm the goal is active.")
-            self.captions.hearing(text)
+            # Another program sent this, not you: one short line, never a screenful of its words.
+            if hasattr(self.captions, "agent_request"):
+                self.captions.agent_request(shortened(text, 160))
+            else:
+                self.captions.hearing("From another agent: " + shortened(text, 120))
             self.on_transcript(text, typed=True, captured=True, ingress_receipt=receipt_id)
             reply.put({"ok": True})
         except Exception as error:
@@ -655,7 +696,8 @@ class VoiceAgent:
         else:
             if hasattr(self.captions, "dismiss"):
                 self.captions.dismiss()
-            self._stop_tasks_for_fn()
+            if self.voice:
+                self.voice.stop()  # quiet now; the agent keeps working until the window's x
             self._discard_heard = True
             self._heard_barrier += 1
         self.ears.listen(on or self.held is not None)
@@ -738,16 +780,55 @@ class VoiceAgent:
         if self.paused_since and not self.pause_announced and \
                 time.time() - self.paused_since > 1.0 and self.task and self.task.running:
             self.pause_announced = True
-            how = "say" if self.listening else "tap fn and say"
-            self.out(f"⏸  you have control. To let it carry on, {how} “continue” (or something new).")
+            self.out("⏸  you have control. Press fn to let it carry on (or say something new).")
+
+    def on_overlay(self, kind: str, value=None):
+        """The floating window's buttons: the x stops the agent; the mic mutes what it hears."""
+        if kind == "close":
+            self.out("✋ stopped from the window's x")
+            self._stop_tasks_for_fn()
+            if hasattr(self.captions, "paused"):
+                self.captions.paused("")
+                self.captions.agent_request("")
+            self.paused_since, self.pause_announced = 0.0, False
+        elif kind == "mute":
+            self.muted = bool(value)
+            self.ears.listen(self.listening or self.held is not None)
+            if hasattr(self.captions, "muted"):
+                self.captions.muted(self.muted)
+            self.out("🔇 transcription muted; the agent keeps working" if self.muted else "🎙  transcription on")
+
+    def paused_by_you(self) -> bool:
+        """You took over a running Mac task a moment ago or more (not just now, with this fn press)."""
+        return bool(self.task and self.task.running and self.paused_since
+                    and time.time() - self.paused_since > 0.8)
+
+    def resume_control(self):
+        """fn while you have control of a running task: the agent takes it back once your hands are off."""
+        self.out("▶️  fn: handing control back to the agent (hands off the keyboard and trackpad)")
+        if hasattr(self.captions, "paused"):
+            self.captions.paused("Resuming once your hands are off the keyboard and trackpad…")
+        if getattr(self.task, '_recovery_id', None):  # the same as saying "continue"
+            try:
+                import task_recovery
+                task_recovery.finish(self.task._recovery_id, 'active')
+            except (OSError, ValueError) as error:
+                self.out(f'Could not save the resume state: {error}')
+        self.take_control()
 
     def on_helper(self, event: dict):
+        if event.get("state") in ("engaged", "disengaged") and getattr(self, "recorder", None):
+            self.recorder.event("control", "agent has the mouse and keyboard" if event["state"] == "engaged"
+                                else f"control went back to you ({event.get('reason', '')})")
         fn = event.get("fn")
         if fn == "down":
             self.start_dictation()
         elif fn == "tap":
             self.drop_dictation()
-            self.set_listening(not self.listening)
+            if self.paused_by_you():
+                self.resume_control()
+            else:
+                self.set_listening(not self.listening)
         elif fn == "other":  # fn+arrow, fn+delete, ...: a shortcut
             self.drop_dictation()
             self.ears.listen(self.listening)
@@ -757,8 +838,12 @@ class VoiceAgent:
             if self.pause_announced:
                 self.out("▶️  continuing")
             self.paused_since, self.pause_announced = 0.0, False
+            if hasattr(self.captions, "paused"):
+                self.captions.paused("")
         elif event.get("state") == "disengaged" and event.get("reason") in HUMAN and not self.paused_since:
             self.paused_since = time.time()
+            if self.task and self.task.running and hasattr(self.captions, "paused"):
+                self.captions.paused("Paused: you took over. Press fn to let the agent continue.")
             if self.task and getattr(self.task, '_recovery_id', None):
                 try:
                     import task_recovery
@@ -828,6 +913,9 @@ class VoiceAgent:
             sys.stdout.write("\r\033[K")
             self.live_shown = False
         print(text, flush=True)
+        recorder = getattr(self, "recorder", None)
+        if recorder and not text.lstrip().startswith("🎞"):
+            recorder.event("hive", text)
 
     def show_live(self, text: str):
         if self.live:
@@ -874,6 +962,7 @@ class VoiceAgent:
 
     def on_transcript(self, text: str, times: dict | None = None, typed: bool = False,
                       captured: bool = False, ingress_receipt: str | None = None):
+        from_agent = ingress_receipt is not None  # it came through the request socket, not from you
         ahead, self.ahead, self.timing = self.ahead, None, None
         words = re.sub(r"[^\w' -]", "", text.lower()).strip()
         over_its_voice, self.over_its_voice = self.over_its_voice, False
@@ -980,12 +1069,14 @@ class VoiceAgent:
         task = self.tasks[device] = CodexTask(text, previous=previous, device=device, ahead=ahead)
         task._receipt_id = ingress_receipt
         if hasattr(self.captions, 'active'): self.captions.active(True)
-        if hasattr(self.captions, 'activity'): self.captions.activity(f'Request: {said}')
+        if hasattr(self.captions, 'activity'):
+            self.captions.activity(f'Request from another agent: {shortened(said, 240)}' if from_agent
+                                   else f'Request: {said}')
         self.timing = {"task": task, **(times or {})}
         task.on_event = lambda kind, t, task=task: self.events.put(("task", (task, kind, t)))
         self.log("you said", said, outcome="request", heard=heard or None)
         self.log("request", text, device=device, interrupted=previous, added_to_last=joined or None)
-        notify(text, "On it")
+        notify(shortened(text, 160) if from_agent else text, "On it")
         task.start()
         if owned_receipt:
             self.finish_ui_receipt(owned_receipt)
@@ -999,7 +1090,32 @@ class VoiceAgent:
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             self.out(f'Request started, but receipt status is unknown: {error}')
 
+    def start_virtual_monitor(self):
+        """Asks where Hive should work (your screen or the virtual monitor) and sets that up. No
+        answer keeps the last choice; the Mac tools use your screen whenever the monitor is off."""
+        try:
+            import virtual_monitor
+            if os.environ.get("HIVE_VIRTUAL_MONITOR") not in ("0", "1") and os.environ.get("HIVE_ASK_WORK_SCREEN", "1") != "0":
+                virtual_monitor.ask()
+            if virtual_monitor.enabled():
+                if not virtual_monitor.ensure():
+                    self.out("   ✗ The virtual monitor did not start; working on your screen.")
+            else:
+                virtual_monitor.off()
+            self.out("Working on " + ("the virtual monitor." if virtual_monitor.bounds() else "your screen, with your mouse and keyboard."))
+        except Exception as error:
+            self.out(f"   ✗ Could not set up where Hive works: {error}")
+
     def take_control(self):
+        try:
+            import virtual_monitor
+            from agent_vhid import cursor_position
+            virtual_monitor.ensure()
+            here = cursor_position()
+            if not virtual_monitor.contains(*here):
+                self._cursor_home = here  # where your cursor goes back to when the task ends
+        except Exception:
+            pass
         try:
             self.mac.engage()  # the helper still waits for your hands to be off
         except AgentVHIDError as e:
@@ -1020,6 +1136,8 @@ class VoiceAgent:
         if kind == "doing":
             self.doing[device] = text
             self.show_doing()
+            if getattr(self, "recorder", None):
+                self.recorder.event("status", f"{mark}{text}")
         elif kind == "action":
             self.out(f"   → {mark}{text}")
             if hasattr(self.captions, 'activity'): self.captions.activity(f'Tool: {mark}{text}')
@@ -1041,6 +1159,9 @@ class VoiceAgent:
                 self.captions.active(any(t is not None for t in self.tasks.values()))
             if hasattr(self.captions, 'activity'):
                 self.captions.activity('Finished' if kind == 'done' else f'Stopped: {text}')
+            if device == "mac" and hasattr(self.captions, "paused"):
+                self.captions.paused("")
+                self.paused_since, self.pause_announced = 0.0, False
             self.doing.pop(device, None)
             self.show_doing()
             if kind == "done":
@@ -1090,6 +1211,15 @@ class VoiceAgent:
             self.mac.disengage()
             self.mac.release_all()
         except AgentVHIDError:
+            pass
+        try:  # your cursor returns from the virtual monitor to where it was on your screen
+            import virtual_monitor
+            from agent_vhid import cursor_position
+            home = getattr(self, "_cursor_home", None)
+            if home and virtual_monitor.contains(*cursor_position()):
+                virtual_monitor.warp(*home)
+            self._cursor_home = None
+        except Exception:
             pass
 
     def say(self, text: str, device: str | None = None, task: CodexTask | None = None):

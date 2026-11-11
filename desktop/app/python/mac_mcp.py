@@ -30,8 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import desktop  # noqa: E402
 import ingest  # noqa: E402
+import virtual_monitor  # noqa: E402
 from agent_vhid import (  # noqa: E402
-    AgentVHID, AgentVHIDError, Disengaged, Screenshot, TextBox, cursor_position, main_display_bounds,
+    AgentVHID, AgentVHIDError, Disengaged, Screenshot, TextBox, capture_args, cursor_position, work_display_bounds,
 )
 
 PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
@@ -57,10 +58,10 @@ TOOLS = [
     },
     {
         "name": "authenticate",
-        "description": "Use the locally saved Mac password in a verified Apple account sign-in, Passwords, "
-                       "AutoFill or passkey prompt, including its Use Password fallback. Takes no secret arguments. "
-                       "Never use for payments, purchases, admin changes or a webpage password field. "
-                       "Returns status only; inspect the screen afterward. If rejected or unavailable, stop; never retry or ask for the password in chat.",
+        "description": "Types the user's saved Mac password into the field that has the keyboard focus and presses "
+                       "Return, the way the user would. Click the password field first (for example the "
+                       "Passwords/AutoFill prompt's field). Takes no arguments; the password never reaches you. "
+                       "Take a screenshot afterwards to see the result.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
@@ -224,6 +225,15 @@ TOOLS.append(batch_tool(BATCHABLE, '[{"tool": "press_key", "keys": "cmd+l"}, '
 
 def run_batch(tools, args: dict, batchable: list[str]) -> dict:
     """Runs args["steps"] through tools.call without screenshots, then looks once."""
+    steps = args.get("steps") or []
+    if any(isinstance(s, dict) and s.get("tool") == "authenticate" for s in steps):
+        # Authentication is never chained with other actions. Alone, as the batch's only step and
+        # with no arguments, it is the same as calling authenticate: that is how a conversation whose
+        # saved tool list predates the authenticate tool can still use it.
+        if len(steps) != 1 or set(steps[0]) != {"tool"}:
+            return result(text("authenticate can't be combined with other steps or given arguments; "
+                               "send it as the only step: [{\"tool\": \"authenticate\"}]."), error=True)
+        return tools.call("authenticate", {})
     done = []
     for i, step in enumerate(args.get("steps") or [], 1):
         step = dict(step)
@@ -246,7 +256,7 @@ def run_batch(tools, args: dict, batchable: list[str]) -> dict:
 
 def geometry() -> Screenshot:
     """How screenshot pixels map to screen points. Fixed for a given display setup."""
-    ox, oy, w, h = main_display_bounds()
+    ox, oy, w, h = work_display_bounds()  # the virtual monitor while it is on
     width = int(min(w, MAX_WIDTH))
     return Screenshot("", width, round(h * width / w), w / width, (ox, oy))
 
@@ -260,6 +270,21 @@ def frontmost_app() -> str:
         return m.group(1) if m else "unknown"
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+
+
+def frontmost_pid() -> int | None:
+    try:
+        asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=2).stdout.strip()
+        out = subprocess.run(["lsappinfo", "info", "-only", "pid", asn], capture_output=True, text=True,
+                             timeout=2).stdout
+        m = re.search(r'=(\d+)', out)
+        return int(m.group(1)) if m else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# Apps where Cmd+N gives the agent a window of its own instead of taking one the user has open.
+NEW_WINDOW_APPS = {"Safari", "Google Chrome", "Arc", "Firefox", "Brave Browser", "Microsoft Edge", "Finder"}
 
 
 def notify(message: str):
@@ -294,7 +319,7 @@ class MacTools:
         os.close(fd)
         jpg = png[:-4] + ".jpg"
         try:
-            subprocess.run(["screencapture", "-x", "-m", "-C", "-t", "png", png], check=True)
+            subprocess.run(["screencapture", "-x", *capture_args(), "-C", "-t", "png", png], check=True)
             subprocess.run(["sips", "--resampleWidth", str(g.width), "-s", "format", "jpeg",
                             "-s", "formatOptions", "70", png, "--out", jpg], check=True, capture_output=True)
             with open(jpg, "rb") as f:
@@ -306,7 +331,8 @@ class MacTools:
         cx, cy = g.from_screen(*cursor_position())
         app = frontmost_app()
         front = next((w for w in shown if w.app == app and w.on_screen and w.title), None)
-        summary = (f"Screenshot {g.width}x{g.height} px. Mouse pointer at ({cx:.0f}, {cy:.0f}). "
+        where = "Screenshot of the virtual monitor, " if virtual_monitor.bounds() else "Screenshot "
+        summary = (f"{where}{g.width}x{g.height} px. Mouse pointer at ({cx:.0f}, {cy:.0f}). "
                    f"Frontmost app: {app}" + (f", window {json.dumps(front.title, ensure_ascii=False)}" if front else "")
                    + ".")
         if context:
@@ -330,6 +356,9 @@ class MacTools:
         try:
             if self.mac.status().get("state") == "arming":
                 self.mac.wait_engaged(timeout=3, announce=False)  # control is on its way
+            if virtual_monitor.bounds() and not virtual_monitor.contains(*cursor_position()) and self.mac.is_engaged():
+                virtual_monitor.bring_cursor(cursor_position())
+                time.sleep(0.3)  # macOS ignores mouse moves for a moment after the cursor is placed
             fn()
         except Disengaged as e:
             m = re.search(r"reason=([\w-]+)", str(e))
@@ -348,6 +377,25 @@ class MacTools:
             time.sleep(SETTLE)
             return self.look(done)
         return result(text(done))
+
+    def to_virtual_monitor(self, before: int | None, running: set):
+        """Moves the app that just came to the front onto the virtual monitor (nothing while it is
+        off). An app that was already open gets a new window first where that is safe, so a
+        window the user is using stays where they left it."""
+        if not virtual_monitor.bounds():
+            return
+        deadline = time.monotonic() + 5
+        pid = frontmost_pid()
+        while pid == before and time.monotonic() < deadline:
+            time.sleep(0.25)
+            pid = frontmost_pid()
+        app = frontmost_app()
+        if app in running and app in NEW_WINDOW_APPS:
+            self.mac.key("cmd+n")
+            time.sleep(0.8)
+        if pid:
+            virtual_monitor.place(pid)
+            time.sleep(0.4)
 
     def call(self, name: str, a: dict) -> dict:
         if name == "read_selected_text":
@@ -368,7 +416,7 @@ class MacTools:
             try:
                 if not self.mac.is_engaged():
                     raise credentials.CredentialError("The user has control. Wait for control before authenticating.")
-                return result(text(credentials.native('fill-mac')))
+                return result(text(credentials.authenticate_mac()))
             except credentials.CredentialError as e:
                 return result(text(str(e)), error=True)
         g = geometry()
@@ -403,20 +451,24 @@ class MacTools:
             return self.act(a, press, f"Pressed {a['keys']}.")
         if name == "open_app":
             def spotlight():
+                before = frontmost_pid()
+                running = {w.app for w in desktop.windows()}
                 self.mac.key("cmd+space")
                 time.sleep(0.4)
                 self.mac.type_text(a["name"])
                 time.sleep(0.6)  # Spotlight's top hit settles
                 self.mac.key("return")
                 time.sleep(0.5)  # the app starts coming up; the screenshot after shows how far
-            return self.act(a, spotlight, f"Opened {a['name']!r} from Spotlight.")
+                self.to_virtual_monitor(before, running)
+            on_monitor = " Its window is on the virtual monitor." if virtual_monitor.bounds() else ""
+            return self.act(a, spotlight, f"Opened {a['name']!r} from Spotlight.{on_monitor}")
         if name == "wait":
             time.sleep(min(30.0, float(a["seconds"])))
             return self.look() if a.get("screenshot", True) else result(text("Waited."))
         if name == "wait_for_control":
             timeout = float(a.get("timeout_seconds", 120))
             if self.mac.status().get("state") != "engaged":
-                notify("Paused. Say “continue” to let it carry on (tap fn first if it isn't listening).")
+                notify("Paused because you took over. Press fn to let it carry on.")
             if self.mac.wait_engaged(timeout=timeout, announce=False):
                 return self.look("You have control again. The user may have changed things; "
                                  "check this screenshot before continuing.")
