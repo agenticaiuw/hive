@@ -97,6 +97,10 @@ class Relay(BaseHTTPRequestHandler):
         if self.path == "/api/session/S1/element":
             if body["value"] == "Send":
                 return self._answer(200, {"value": {"ELEMENT": "E-1"}})
+            if body["using"] == "predicate string" and 'Fallback' in body["value"]:
+                return self._answer(200, {"value": {"element-6066-11e4-a52e-4f735466cecf": "E-2"}})
+            if body["value"] == "Bad ID":
+                return self._answer(200, {"value": {"ELEMENT": "../../bad"}})
             return self._answer(404, {"value": {"error": "no such element", "message": "unable to find"}})
         return self._answer(200, {"value": None})
 
@@ -173,6 +177,15 @@ class PhoneTest(unittest.TestCase):
         res = self.tools.call("tap_element", {"label": "Nope", "screenshot": False})
         self.assertTrue(res["isError"])
 
+    def test_tap_element_fallback_and_invalid_id(self):
+        self.tools.phone.tap_element('Fallback')
+        self.assertIn(('POST', '/api/session/S1/element',
+                       {'using': 'predicate string', 'value': 'name == "Fallback" OR label == "Fallback"'}), Relay.calls)
+        self.assertIn(('POST', '/api/session/S1/element/E-2/click', {}), Relay.calls)
+        with self.assertRaises(phone.PhoneError):
+            self.tools.phone.tap_element('Bad ID')
+        self.assertFalse(any('../../bad' in path for _, path, _ in Relay.calls))
+
     def test_batch(self):
         res = self.tools.call("batch", {"steps": [{"tool": "tap", "x": 1, "y": 2},
                                                   {"tool": "type_text", "text": "hi"}], "screenshot": False})
@@ -192,8 +205,8 @@ class PhoneTest(unittest.TestCase):
         real = subprocess.run
         with mock.patch("subprocess.run", lambda cmd, **kw: (seen.append(cmd), real(cmd, **kw))[1]):
             phone.Phone(self.folder).connected()
-        self.assertTrue(seen)
-        self.assertFalse(any(TOKEN in arg for cmd in seen for arg in cmd))
+        # Rust starts curl directly; the separate Rust transport fixture inspects argv.
+        self.assertEqual(seen, [])
 
     def test_without_a_relay_it_explains(self):
         with mock.patch.dict(os.environ, {"PHONE_RELAY": ""}):

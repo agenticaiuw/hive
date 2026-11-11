@@ -1,0 +1,36 @@
+name: Karabiner-VirtualHIDDevice-Daemon
+
+targets:
+  Karabiner-VirtualHIDDevice-Daemon:
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.pqrs.Karabiner-VirtualHIDDevice-Daemon
+      CODE_SIGN_ENTITLEMENTS: ''
+      CODE_SIGN_IDENTITY: '-'
+      CODE_SIGN_STYLE: Manual
+      OTHER_SWIFT_FLAGS: '-warnings-as-errors'
+      DEAD_CODE_STRIPPING: 'YES'
+      SWIFT_VERSION: '6.0'
+      SYSTEM_HEADER_SEARCH_PATHS:
+        - ../../vendor/vendor/include
+        - ../../include
+      HEADER_SEARCH_PATHS:
+        - include
+      OTHER_LDFLAGS:
+        - ../../vendor/vendor/src/spdlog-build/build/Release/libspdlog.a
+    type: application
+    platform: macOS
+    deploymentTarget: 13.0
+    sources:
+      - path: src
+        compilerFlags:
+          - -Wall
+          - -Werror
+          - -DSPDLOG_COMPILED_LIB
+          - '-std=c++23'
+      - path: ../../vendor/vendor/src/pqrs/osx/process_info
+      - path: Resources
+        excludes:
+          - Info.plist.in
+    dependencies:
+      - sdk: CoreFoundation.framework
+      - sdk: IOKit.framework

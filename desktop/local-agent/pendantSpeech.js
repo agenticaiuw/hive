@@ -1,0 +1,661 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { stripProtocolTerminators } from '../../mobile/simulator/shared/protocolText.js'
+
+export const PENDANT_SPEECH_SAMPLE_RATE = 24000
+export const PENDANT_SPEECH_CHANNELS = 1
+export const PENDANT_SPEECH_BITS = 16
+export const PENDANT_SPEECH_MAX_PCM_BYTES = 480000
+export const PENDANT_SPEECH_OPUS_BITRATE = 16000
+
+const MAX_SPOKEN_CHARACTERS = 180
+const SPEECH_RATE_WORDS_PER_MINUTE = 210
+const FADE_OUT_SAMPLES = Math.round(PENDANT_SPEECH_SAMPLE_RATE * 0.1)
+const CACHEABLE_SHORT_TEXT_MAX = 48
+const CACHEABLE_SHORT_TEXT_PATTERN = /^[A-Za-z0-9 .,!?'"-]+$/
+const ALWAYS_CACHE_PHRASES = new Set([
+  'Done.',
+  'Waiting for your approval on the dashboard.',
+  "That didn't finish on the Mac.",
+])
+
+/** @type {Map<string, { pcm: Buffer, opus: Buffer, truncated: boolean }>} */
+const pendantSpeechCache = new Map()
+
+export function clearPendantSpeechCache() {
+  pendantSpeechCache.clear()
+}
+
+export function pendantSpeechCacheSize() {
+  return pendantSpeechCache.size
+}
+
+function shouldCacheSpokenText(text) {
+  if (ALWAYS_CACHE_PHRASES.has(text)) return true
+  return (
+    text.length > 0 &&
+    text.length <= CACHEABLE_SHORT_TEXT_MAX &&
+    CACHEABLE_SHORT_TEXT_PATTERN.test(text)
+  )
+}
+
+/*
+ * The wire contract with cloud-relay's pendantSpeechForJob(), which drops any
+ * payload whose format/rate/channels/bits are not exactly this. Exported so
+ * long-form briefings (audioBrief.js) build it from the same place rather than
+ * from a copy that can drift out of step with the relay.
+ */
+export function pendantSpeechPayload(pcm, opus, truncated) {
+  return {
+    format: 's16le',
+    sampleRate: PENDANT_SPEECH_SAMPLE_RATE,
+    channels: PENDANT_SPEECH_CHANNELS,
+    bitsPerSample: PENDANT_SPEECH_BITS,
+    pcmBytes: pcm.length,
+    truncated: Boolean(truncated),
+    audioBase64: pcm.toString('base64'),
+    compressedFormat: 'ogg-opus',
+    compressedBytes: opus.length,
+    compressedAudioBase64: opus.toString('base64'),
+  }
+}
+
+/*
+ * Is this payload's opus track the one the relay will actually serve?
+ *
+ * Deliberately the SAME test cloud-relay's pendantSpeechForJob() applies before
+ * it prefers opus over raw PCM: right container name, Ogg magic, and enough
+ * bytes to be a real stream. Anything the relay would reject must keep its raw
+ * PCM, or the reply would arrive with no playable audio at all.
+ */
+export function hasServableOpus(speech) {
+  if (!speech || typeof speech !== 'object') return false
+  if (String(speech.compressedFormat || '').toLowerCase() !== 'ogg-opus') {
+    return false
+  }
+  const opus = Buffer.from(String(speech.compressedAudioBase64 || ''), 'base64')
+  return opus.length >= 64 && opus.toString('ascii', 0, 4) === 'OggS'
+}
+
+/**
+ * The payload as it should cross the wire to the relay.
+ *
+ * Raw `audioBase64` is 24 kHz s16le PCM: ~2.9 MB per spoken minute before
+ * base64, ~3.8 MB after. A pre-rendered research briefing is minutes long, so a
+ * single result reached ~25 MB and the relay refused the body outright (413) —
+ * the reply never landed at all. The relay does not even serve those bytes: it
+ * prefers the ~16x smaller opus track and only falls back to PCM when no usable
+ * opus exists. So when the opus track is one the relay will serve, the raw PCM
+ * is pure wire cost and is dropped here.
+ *
+ * FALLBACK, kept on purpose: when there is NO servable opus track — encoder
+ * missing or failed, a truncated stream, a payload built before opus existed —
+ * the raw PCM is left exactly as it was. It is then the only audio the pendant
+ * can play, and shipping a large body beats shipping a mute reply.
+ *
+ * Metadata (format, rate, channels, bits, pcmBytes) is always preserved: the
+ * relay validates against it, and the dashboard's TTS event reports from it.
+ * Local callers must keep using the un-stripped object — the Mac dashboard's
+ * output-side audio preview reads `audioBase64` (bridge.js
+ * reportSynthesizedSpeech), so this is applied only when building the relay
+ * body, never to the result the agent keeps for itself.
+ */
+export function pendantSpeechForWire(speech) {
+  if (!hasServableOpus(speech)) {
+    return speech
+  }
+  if (!String(speech.audioBase64 || '')) {
+    return speech
+  }
+
+  const wire = { ...speech }
+  delete wire.audioBase64
+  /* Explicit so an operator reading a stored result can tell this apart from
+   * a synthesis that produced no audio at all. */
+  wire.rawPcmOmitted = true
+  return wire
+}
+
+const WIRE_WALK_MAX_DEPTH = 8
+const WIRE_WALK_MAX_NODES = 5000
+
+/*
+ * The single canonical home for this job's reply audio. Every relay-side reader
+ * of audio -- pendantSpeechForJob, /v1/pendant/jobs/:jobId/speech, jobs.js's TTS
+ * event, history.js -- reads exactly this path, so it is the one position that
+ * must carry bytes. Anything else holding the same audio is duplication.
+ */
+export const CANONICAL_SPEECH_PATH = 'pendantSpeech'
+
+/* Audio small enough that a reference costs more than the bytes. */
+const WIRE_DEDUPE_MIN_CHARS = 4096
+
+/**
+ * The result as it should cross the wire: the reply audio carried ONCE at
+ * `pendantSpeech`, everything else referencing it instead of repeating it.
+ *
+ * Measured on the live 2026-08-08 runs, a single 58.5 s briefing is ~3.9 MB, but
+ * one posted body was 45,967,944 B. The excess was not this job's audio at all:
+ * `/execute` returns `logs: readLogs()` -- the agent's GLOBAL 200-entry activity
+ * ring (logger.js), 40 MB on disk, holding the audio of ~30 earlier briefings --
+ * and bridge.js spreads that whole response into the relay result. So the wire
+ * form does two things:
+ *
+ *   - the log ring is summarised, not shipped. It is per-Mac history, not part
+ *     of this job, no relay or dashboard reader consumes `result.logs`, and the
+ *     entries stay on disk where the agent already keeps them;
+ *   - identical audio appearing anywhere else becomes a reference to the
+ *     canonical path rather than a second copy of the bytes.
+ *
+ * Non-audio detail is preserved: `result.results` entries keep their fields
+ * because server.js and history.js summarise actions from them.
+ */
+export function resultForWire(result) {
+  if (!result || typeof result !== 'object') return result
+
+  const state = { nodes: 0, seen: new Map(), canonicalPayload: null }
+  /* Register the canonical payload FIRST so it is the copy that keeps bytes,
+   * whatever order the walk happens to reach the others in. Its own identity is
+   * remembered too, so it never dedupes against its own registration. */
+  const canonical = result.pendantSpeech
+  if (canonical && typeof canonical === 'object') {
+    state.canonicalPayload = canonical
+    for (const key of ['audioBase64', 'compressedAudioBase64']) {
+      const value = canonical[key]
+      if (typeof value === 'string' && value.length >= WIRE_DEDUPE_MIN_CHARS) {
+        state.seen.set(value, CANONICAL_SPEECH_PATH)
+      }
+    }
+  }
+  return walkForWire(result, state, 0)
+}
+
+function walkForWire(value, state, depth) {
+  if (depth > WIRE_WALK_MAX_DEPTH || state.nodes > WIRE_WALK_MAX_NODES) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    let changed = false
+    const next = value.map((entry) => {
+      state.nodes += 1
+      const mapped = walkForWire(entry, state, depth + 1)
+      if (mapped !== entry) changed = true
+      return mapped
+    })
+    return changed ? next : value
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  /* The canonical payload is the one position that keeps its bytes. */
+  const isCanonical = value === state.canonicalPayload
+
+  /* A speech payload is recognised by its own shape, so it is handled wherever
+   * it sits rather than only under a key named `pendantSpeech`. */
+  if (typeof value.audioBase64 === 'string' && hasServableOpus(value)) {
+    const wireForm = pendantSpeechForWire(value)
+    return isCanonical ? wireForm : dedupeAudioFields(wireForm, state)
+  }
+
+  let changed = false
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    if (key === 'logs' && Array.isArray(entry)) {
+      changed = true
+      next.logs = {
+        elided: 'agent activity log kept on the Mac, not shipped to the relay',
+        length: entry.length,
+      }
+      continue
+    }
+    const mapped = walkForWire(entry, state, depth + 1)
+    if (mapped !== entry) changed = true
+    next[key] = mapped
+  }
+  const walked = changed ? next : value
+  return isCanonical ? walked : dedupeAudioFields(walked, state)
+}
+
+/**
+ * The form for pipeline telemetry: no audio bytes at all, and no activity ring.
+ *
+ * Unlike the relay result, telemetry has no canonical audio position to protect,
+ * because the receiving end throws audio away regardless — pipelineTrace.js
+ * sanitizeMeta() drops every key matching /base64/ and clips strings to 1000
+ * characters before anything is stored. So bytes sent here can never be read by
+ * the dashboard; they only risk the POST.
+ *
+ * And that risk is not theoretical: with the briefing's payload attached, this
+ * POST exceeded the agent's own body limit and came back 413, losing the ENTIRE
+ * event — including the stage and timing the strip does render. Stripping the
+ * payload outright is what keeps the event itself deliverable.
+ */
+export function telemetryForWire(value, state = { nodes: 0 }, depth = 0) {
+  if (depth > WIRE_WALK_MAX_DEPTH || state.nodes > WIRE_WALK_MAX_NODES) {
+    return null
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      state.nodes += 1
+      return telemetryForWire(entry, state, depth + 1)
+    })
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  const next = {}
+  for (const [key, entry] of Object.entries(value)) {
+    state.nodes += 1
+    if (key === 'audioBase64' || key === 'compressedAudioBase64') {
+      next.audioOmitted = true
+      continue
+    }
+    if (key === 'logs' && Array.isArray(entry)) {
+      next.logs = { elided: 'activity log stays on the Mac', length: entry.length }
+      continue
+    }
+    next[key] = telemetryForWire(entry, state, depth + 1)
+  }
+  return next
+}
+
+/* Bytes already carried elsewhere become a pointer to where they live. */
+function dedupeAudioFields(payload, state) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload
+  }
+
+  let next = payload
+  for (const key of ['audioBase64', 'compressedAudioBase64']) {
+    const value = next[key]
+    if (typeof value !== 'string' || value.length < WIRE_DEDUPE_MIN_CHARS) {
+      continue
+    }
+    const existing = state.seen.get(value)
+    if (existing === undefined) {
+      state.seen.set(value, null)
+      continue
+    }
+    if (next === payload) next = { ...payload }
+    delete next[key]
+    next.audioOmitted = true
+    /* Null marks the first sighting of audio that is not the canonical reply;
+     * it is still a duplicate the second time round, just not of pendantSpeech. */
+    next.audioSameAs = existing || CANONICAL_SPEECH_PATH
+  }
+  return next
+}
+
+/**
+ * What the pendant should say for a result. Always returns non-empty text —
+ * a silent success is indistinguishable from a hang on a voice-first device.
+ */
+export function spokenTextForResult(result) {
+  const value = result && typeof result === 'object' ? result : {}
+  const direct = [
+    value.response,
+    value.summary,
+    value.message,
+    typeof value.result === 'string' ? value.result : '',
+    value.executionError,
+    value.error,
+  ]
+    .map((candidate) =>
+      stripProtocolTerminators(candidate).replace(/\s+/g, ' ').trim(),
+    )
+    .find(Boolean)
+
+  if (direct) {
+    return direct.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
+  if (
+    value.awaitingApproval === true ||
+    (Array.isArray(value.awaitingApproval) && value.awaitingApproval.length)
+  ) {
+    return 'Waiting for your approval on the dashboard.'
+  }
+
+  if (value.executed === false && !value.awaitingApproval) {
+    return "That didn't finish on the Mac."
+  }
+
+  const labels = Array.isArray(value.actions)
+    ? value.actions
+        .map((action) =>
+          String(action?.label || action?.description || action?.type || '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+        )
+        .filter(Boolean)
+    : []
+
+  if (!labels.length) {
+    return 'Done.'
+  }
+
+  const prefix = value.actions.some((action) => action?.requiresConfirmation)
+    ? 'Ready for confirmation: '
+    : ''
+  return `${prefix}${labels.join(', ')}.`.slice(0, MAX_SPOKEN_CHARACTERS)
+}
+
+export function extractWavePcm(wave) {
+  if (
+    !Buffer.isBuffer(wave) ||
+    wave.length < 44 ||
+    wave.toString('ascii', 0, 4) !== 'RIFF' ||
+    wave.toString('ascii', 8, 12) !== 'WAVE'
+  ) {
+    throw new Error('macOS speech output is not a valid RIFF/WAVE file.')
+  }
+
+  let format = null
+  let pcm = null
+
+  for (let offset = 12; offset + 8 <= wave.length; ) {
+    const chunkId = wave.toString('ascii', offset, offset + 4)
+    const chunkBytes = wave.readUInt32LE(offset + 4)
+    const chunkStart = offset + 8
+    const chunkEnd = chunkStart + chunkBytes
+
+    if (chunkEnd > wave.length) {
+      throw new Error(`Invalid ${chunkId} chunk length in speech WAVE file.`)
+    }
+
+    if (chunkId === 'fmt ') {
+      if (chunkBytes < 16) {
+        throw new Error('Speech WAVE format chunk is too short.')
+      }
+      format = {
+        encoding: wave.readUInt16LE(chunkStart),
+        channels: wave.readUInt16LE(chunkStart + 2),
+        sampleRate: wave.readUInt32LE(chunkStart + 4),
+        bits: wave.readUInt16LE(chunkStart + 14),
+      }
+    } else if (chunkId === 'data') {
+      pcm = Buffer.from(wave.subarray(chunkStart, chunkEnd))
+    }
+
+    offset = chunkEnd + (chunkBytes & 1)
+  }
+
+  if (!format || !pcm) {
+    throw new Error('Speech WAVE file is missing its format or audio data.')
+  }
+  if (
+    format.encoding !== 1 ||
+    format.channels !== PENDANT_SPEECH_CHANNELS ||
+    format.sampleRate !== PENDANT_SPEECH_SAMPLE_RATE ||
+    format.bits !== PENDANT_SPEECH_BITS
+  ) {
+    throw new Error(
+      `Unexpected speech format: encoding=${format.encoding}, channels=${format.channels}, sampleRate=${format.sampleRate}, bits=${format.bits}.`,
+    )
+  }
+  if (!pcm.length || (pcm.length & 1) !== 0) {
+    throw new Error('Speech PCM payload is empty or not aligned to 16-bit samples.')
+  }
+
+  return pcm
+}
+
+/*
+ * Some results arrive with their audio already rendered — a research briefing
+ * is a minute of speech produced hours before anyone asks for it. Re-rendering
+ * here would replace it with `say` reading the 180-character summary of
+ * itself, which is exactly the artifact the owner did NOT ask for.
+ *
+ * Only a payload that already satisfies the relay's format check is trusted;
+ * anything else falls through to a normal render rather than being forwarded
+ * and silently dropped downstream.
+ */
+export function prerenderedPendantSpeech(result) {
+  const candidates = [
+    result?.pendantSpeech,
+    ...(Array.isArray(result?.results)
+      ? result.results.map((entry) => entry?.pendantSpeech)
+      : []),
+  ]
+
+  for (const speech of candidates) {
+    if (
+      speech &&
+      typeof speech === 'object' &&
+      String(speech.format || '').toLowerCase() === 's16le' &&
+      Number(speech.sampleRate) === PENDANT_SPEECH_SAMPLE_RATE &&
+      Number(speech.channels) === PENDANT_SPEECH_CHANNELS &&
+      Number(speech.bitsPerSample) === PENDANT_SPEECH_BITS &&
+      String(speech.audioBase64 || '').length > 0
+    ) {
+      return speech
+    }
+  }
+  return null
+}
+
+export function synthesizePendantSpeech(result) {
+  // spokenTextForResult always returns text; keep a belt-and-braces fallback
+  // so a future regression cannot ship silent results to the pendant.
+  const text = spokenTextForResult(result) || 'Done.'
+
+  const prerendered = prerenderedPendantSpeech(result)
+  if (prerendered) {
+    return {
+      ...result,
+      response: String(result?.response || text),
+      pendantSpeech: prerendered,
+    }
+  }
+
+  const resultWithText =
+    result && typeof result === 'object' && !String(result.response || '').trim()
+      ? { ...result, response: text }
+      : result
+
+  const cached = pendantSpeechCache.get(text)
+  if (cached) {
+    const pcm = Buffer.from(cached.pcm)
+    const opus = cached.opus
+      ? Buffer.from(cached.opus)
+      : encodePendantSpeechOpus(pcm)
+    return {
+      ...resultWithText,
+      response: String(resultWithText?.response || text),
+      pendantSpeech: pendantSpeechPayload(pcm, opus, cached.truncated),
+    }
+  }
+
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'ai-pendant-speech-'),
+  )
+  const wavePath = path.join(temporaryDirectory, 'agent-reply.wav')
+
+  try {
+    const synthesis = spawnSync(
+      'say',
+      [
+        '-r',
+        String(SPEECH_RATE_WORDS_PER_MINUTE),
+        '-o',
+        wavePath,
+        '--file-format=WAVE',
+        `--data-format=LEI16@${PENDANT_SPEECH_SAMPLE_RATE}`,
+        `--channels=${PENDANT_SPEECH_CHANNELS}`,
+        text,
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 30000,
+      },
+    )
+
+    if (synthesis.error || synthesis.status !== 0) {
+      throw new Error(
+        synthesis.error?.message ||
+          synthesis.stderr?.trim() ||
+          `macOS say exited with status ${synthesis.status}.`,
+      )
+    }
+
+    const renderedPcm = extractWavePcm(fs.readFileSync(wavePath))
+    const wasTruncated = renderedPcm.length > PENDANT_SPEECH_MAX_PCM_BYTES
+    const pcm = Buffer.from(
+      renderedPcm.subarray(
+        0,
+        Math.min(renderedPcm.length, PENDANT_SPEECH_MAX_PCM_BYTES),
+      ),
+    )
+
+    if (wasTruncated) {
+      applyFadeOut(pcm)
+    }
+    const opus = encodePendantSpeechOpus(pcm)
+
+    if (shouldCacheSpokenText(text)) {
+      pendantSpeechCache.set(text, {
+        pcm: Buffer.from(pcm),
+        opus: Buffer.from(opus),
+        truncated: wasTruncated,
+      })
+    }
+
+    return {
+      ...resultWithText,
+      response: String(resultWithText?.response || text),
+      pendantSpeech: pendantSpeechPayload(pcm, opus, wasTruncated),
+    }
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true })
+  }
+}
+
+export function encodePendantSpeechOpus(pcm) {
+  if (!Buffer.isBuffer(pcm) || !pcm.length || (pcm.length & 1) !== 0) {
+    throw new Error('Opus input must be non-empty, 16-bit-aligned PCM.')
+  }
+
+  const encoder = spawnSync(
+    process.env.PENDANT_FFMPEG_PATH || 'ffmpeg',
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      's16le',
+      '-ar',
+      String(PENDANT_SPEECH_SAMPLE_RATE),
+      '-ac',
+      String(PENDANT_SPEECH_CHANNELS),
+      '-i',
+      'pipe:0',
+      '-map_metadata',
+      '-1',
+      '-c:a',
+      'libopus',
+      '-application',
+      'voip',
+      '-frame_duration',
+      '20',
+      '-b:a',
+      String(PENDANT_SPEECH_OPUS_BITRATE),
+      '-vbr',
+      'on',
+      '-compression_level',
+      '5',
+      '-f',
+      'ogg',
+      'pipe:1',
+    ],
+    {
+      input: pcm,
+      maxBuffer: 2 * 1024 * 1024,
+      timeout: 30000,
+    },
+  )
+
+  if (encoder.error || encoder.status !== 0) {
+    throw new Error(
+      encoder.error?.message ||
+        encoder.stderr?.toString().trim() ||
+        `ffmpeg Opus encoder exited with status ${encoder.status}.`,
+    )
+  }
+  if (
+    !Buffer.isBuffer(encoder.stdout) ||
+    encoder.stdout.length < 64 ||
+    encoder.stdout.toString('ascii', 0, 4) !== 'OggS'
+  ) {
+    throw new Error('ffmpeg did not produce an Ogg Opus stream.')
+  }
+
+  return encoder.stdout
+}
+
+function applyFadeOut(pcm) {
+  const sampleCount = pcm.length / 2
+  const fadeSamples = Math.min(FADE_OUT_SAMPLES, sampleCount)
+  const fadeStart = sampleCount - fadeSamples
+
+  for (let index = 0; index < fadeSamples; index += 1) {
+    const offset = (fadeStart + index) * 2
+    const sample = pcm.readInt16LE(offset)
+    const scaled = Math.round((sample * (fadeSamples - index - 1)) / fadeSamples)
+    pcm.writeInt16LE(scaled, offset)
+  }
+}
+
+// After actions run, the pendant should say what happened, not what was
+// planned — and it must always say something, even for a silent action.
+export function spokenConfirmation(plan, execution) {
+  const results = Array.isArray(execution?.results) ? execution.results : []
+  const failures = results.filter((entry) => entry?.ok === false)
+  const spoken = []
+
+  for (const entry of results) {
+    const message = String(entry?.message || '').replace(/\s+/g, ' ').trim()
+    if (message && entry?.ok !== false) spoken.push(message)
+  }
+
+  if (failures.length) {
+    const reason = String(
+      failures[0]?.reason || failures[0]?.message || 'it did not complete',
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+    return `That didn't work: ${reason}`.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
+  // A run whose steps all worked but whose GOAL was not met arrives with
+  // status 'incomplete' and the goal-grounded verdict sentence in
+  // execution.response ("Opened X and looked at the page — nothing was
+  // cancelled…"). Speak that, never the step messages: the steps sound like
+  // success, and the pendant must not.
+  const verdictSentence = String(execution?.response || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (execution?.status === 'incomplete' && verdictSentence) {
+    return verdictSentence.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+
+  const planned = String(plan?.response || '').replace(/\s+/g, ' ').trim()
+  if (spoken.length) {
+    return spoken.join('. ').slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+  if (planned) return planned.slice(0, MAX_SPOKEN_CHARACTERS)
+
+  const labels = Array.isArray(plan?.actions)
+    ? plan.actions
+        .map((action) => String(action?.label || action?.type || '').trim())
+        .filter(Boolean)
+    : []
+  if (labels.length) {
+    return `Done: ${labels.join(', ')}`.slice(0, MAX_SPOKEN_CHARACTERS)
+  }
+  return 'Done.'
+}

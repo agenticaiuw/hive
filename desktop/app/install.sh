@@ -21,7 +21,8 @@ KARABINER_LABEL=org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
 KARABINER_PLIST=/Library/LaunchDaemons/$KARABINER_LABEL.plist
 KARABINER_OURS=third_party/Karabiner-DriverKit-VirtualHIDDevice/files/LaunchDaemons/$KARABINER_LABEL.plist
 DAEMON='/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon'
-APP="$HOME/Applications/Agent.app"
+APP="$HOME/Applications/Hive.app"
+installed=$(python3 scripts/hive_bundle_migration.py select "$HOME/Applications")
 
 if [ "$(id -u)" = 0 ]; then
   echo "Run it as yourself, without sudo: it asks for your password when it needs it."
@@ -29,7 +30,7 @@ if [ "$(id -u)" = 0 ]; then
 fi
 
 quit_app() {
-  pkill -f "/Agent.app/Contents/MacOS/Agent" || true  # its voice agent sees the app go and stops too
+  pkill -f "${1}/Contents/MacOS/Agent" || true  # its voice agent sees the app go and stops too
 }
 
 # Takes a daemon out of launchd, and waits until it's gone so it can be put back.
@@ -43,11 +44,12 @@ bootout() {
 
 if [ "${1:-}" = "--uninstall" ]; then
   sudo -v
-  if [ -x "$APP/Contents/MacOS/Agent" ]; then
-    "$APP/Contents/MacOS/Agent" --unregister  # out of the login items
+  uninstall_app="${installed:-$APP}"
+  if [ -x "$uninstall_app/Contents/MacOS/Agent" ]; then
+    "$uninstall_app/Contents/MacOS/Agent" --unregister  # out of the login items
   fi
-  quit_app
-  rm -rf "$APP"
+  quit_app "$uninstall_app"
+  rm -rf "$uninstall_app"
   bootout $LABEL
   sudo rm -f "$PLIST" "$HELPER"
   if [ -f "$KARABINER_PLIST" ] && cmp -s "$KARABINER_PLIST" "$KARABINER_OURS"; then  # the one this put there
@@ -123,19 +125,15 @@ if ! sudo launchctl print system/$KARABINER_LABEL >/dev/null 2>&1; then
 fi
 sudo launchctl bootstrap system "$PLIST"
 
-quit_app
-mkdir -p "$HOME/Applications"
-rm -rf "$APP"
-ditto build/Agent.app "$APP"
-tools/update-app.sh --check | head -1
-open "$APP"  # it adds itself to the login items
+# The updater verifies identity, preserves the previous bundle, and rolls back on failure.
+tools/update-app.sh
 
 for _ in $(seq 20); do
   python3 python/agent_vhid.py status >/dev/null 2>&1 && break
   sleep 0.5
 done
 echo
-echo "Installed. Agent is in the menu bar (the microphone) and opens at login. Tap fn to talk to it;"
+echo "Installed. Hive is in the menu bar (the microphone) and opens at login. Tap fn to talk to it;"
 echo "hold fn and talk to type what you say into the app you're in."
 echo
 echo "Once, in System Settings › Privacy & Security:"

@@ -1,0 +1,107 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createD1SyncStore } from './d1-sync-store.mjs';
+import { applySyncOperation, flushSyncOutbox, readSyncRecord, readSyncChanges } from './sync.mjs';
+import { registerSyncRoutes } from './sync-routes.mjs';
+import { createSyncVerifier } from './sync-crypto.mjs';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+
+test('durable sync rejects conflicts and stale resurrection, retry is idempotent', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-sync-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'sync.sqlite'); let db = new DatabaseSync(path);
+  const adapter = () => ({ prepare(sql) { return { bind(...args) { return { async run() { return { meta: { changes: Number(db.prepare(sql).run(...args).changes) } }; }, async first() { return db.prepare(sql).get(...args) ?? null; }, async all() { return { results: db.prepare(sql).all(...args) }; } }; }, async run() { return { meta: { changes: Number(db.prepare(sql).run().changes) } }; } }; } });
+  let store = createD1SyncStore(adapter()); await store.initialize();
+  const authorize = (actor, node, namespace) => actor === 'owner' && node === 'node-a' && namespace === 'owner';
+  const op = { namespace: 'owner', recordId: 'task-1', nodeId: 'node-a', operationId: 'op-1', baseRevision: 0, ciphertext: 'encrypted-fixture', deleted: false };
+  const apply = operation => applySyncOperation({ store, authorize, principal: 'owner', operation });
+  assert.deepEqual(await apply(op), { status: 'applied', revision: 1 }); db.close(); db = new DatabaseSync(path); store = createD1SyncStore(adapter());
+  assert.deepEqual(await apply(op), { status: 'duplicate', revision: 1 });
+  assert.equal((await apply({ ...op, ciphertext: 'different' })).status, 'conflict');
+  assert.deepEqual(await apply({ ...op, operationId: 'op-2', baseRevision: 1, ciphertext: 'encrypted-tombstone', deleted: true }), { status: 'applied', revision: 2 });
+  const deletedRecord = await readSyncRecord({ store, authorize, principal: 'owner', namespace: 'owner', nodeId: 'node-a', recordId: 'task-1' });
+  assert.equal(deletedRecord.deleted, true); assert.equal(deletedRecord.baseRevision, 1);
+  const changes = await readSyncChanges({ store, authorize, principal: 'owner', namespace: 'owner', nodeId: 'node-a', after: 0, limit: 1 });
+  assert.equal(changes.changes[0].revision, 1);
+  const next = await readSyncChanges({ store, authorize, principal: 'owner', namespace: 'owner', nodeId: 'node-a', after: changes.nextCursor });
+  assert.equal(next.changes[0].revision, 2);
+  await assert.rejects(readSyncRecord({ store, authorize, principal: 'other', namespace: 'owner', nodeId: 'node-a', recordId: 'task-1' }), /authorization/);
+  assert.equal((await apply({ ...op, operationId: 'stale', baseRevision: 1 })).status, 'conflict');
+  await assert.rejects(applySyncOperation({ store, authorize, principal: 'other', operation: op }), /authorization/);
+  await store.grant('owner', 'node-a', true);
+  const deviceStore = createD1SyncStore(adapter(), { nodeId: 'node-a' });
+  assert.equal(await deviceStore.hasGrant('owner'), true);
+  assert.equal((await deviceStore.read('owner', 'task-1')).deleted, true);
+  await store.grant('owner', 'node-a', false);
+  assert.equal(await deviceStore.hasGrant('owner'), false);
+  assert.equal(await deviceStore.read('owner', 'task-1'), null);
+  assert.equal((await deviceStore.compareAndSet({ ...op, operationId: 'after-revoke', baseRevision: 2 })).status, 'conflict');
+  assert.equal((await deviceStore.changes('owner', 0, 10)).changes.length, 0);
+  let ack = []; let attempts = 0;
+  assert.deepEqual(await flushSyncOutbox({ operations: [op], send: async () => { attempts++; throw Error('offline'); }, acknowledge: id => ack.push(id) }), { acknowledged: 0, blocked: 'unavailable' });
+  assert.deepEqual(await flushSyncOutbox({ operations: [op], send: async () => ({ status: 'duplicate' }), acknowledge: id => ack.push(id) }), { acknowledged: 1, blocked: null });
+  assert.deepEqual(ack, ['op-1']); assert.equal(attempts, 1); db.close();
+});
+
+test('GCM verifier authenticates content, identity and deletion markers', async () => {
+  const key = randomBytes(32), nonce = randomBytes(12), keyId = 'key-1';
+  const op = { namespace: 'owner', recordId: 'r', nodeId: 'a', operationId: 'id', baseRevision: 3, deleted: true };
+  const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  cipher.setAAD(Buffer.from(JSON.stringify(['hive-sync-gcm-v1', op.namespace, op.recordId, op.nodeId, op.operationId, op.baseRevision, op.deleted, keyId])));
+  const body = Buffer.concat([cipher.update(Buffer.alloc(0)), cipher.final()]);
+  op.ciphertext = ['gcm1', keyId, nonce.toString('base64url'), cipher.getAuthTag().toString('base64url'), body.toString('base64url')].join('.');
+  const verify = createSyncVerifier({ getNamespaceKey: async () => key });
+  assert.equal(await verify(op), true);
+  assert.equal(await verify({ ...op, recordId: 'other' }), false);
+  assert.equal(await verify({ ...op, deleted: false }), false);
+  assert.equal(await verify({ ...op, ciphertext: 'plaintext' }), false);
+  assert.equal(await createSyncVerifier({ getNamespaceKey: async () => null })(op), false);
+});
+
+test('sync route fails closed without a cloud database', async () => {
+  const routes = {}; const app = { post(path, fn) { routes[`POST ${path}`] = fn; }, get(path, fn) { routes[`GET ${path}`] = fn; } };
+  registerSyncRoutes(app, { getDatabase: () => null });
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.value = value; return this; } };
+  await routes['POST /v1/sync/records']({ relayPrincipal: { kind: 'admin' }, body: {} }, res);
+  assert.equal(res.statusCode, 503); assert.equal(res.value.ok, false);
+});
+
+test('device routes require an explicit namespace grant and fence revocation', async () => {
+  const db = new DatabaseSync(':memory:');
+  const database = { prepare(sql) { return { bind(...args) { return { async run() { return { meta: { changes: Number(db.prepare(sql).run(...args).changes) } }; }, async first() { return db.prepare(sql).get(...args) ?? null; }, async all() { return { results: db.prepare(sql).all(...args) }; } }; }, async run() { return { meta: { changes: Number(db.prepare(sql).run().changes) } }; } }; } };
+  const routes = {}; const app = { post(path, fn) { routes[`POST ${path}`] = fn; }, get(path, fn) { routes[`GET ${path}`] = fn; } };
+  const key = randomBytes(32);
+  registerSyncRoutes(app, { getDatabase: () => database, verifyEnvelope: createSyncVerifier({ getNamespaceKey: async () => key }) });
+  const call = async (route, principal, body = {}, query = {}) => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.value = value; return this; } };
+    await routes[route]({ relayPrincipal: principal, body, query }, res); return res;
+  };
+  const admin = { kind: 'admin' }, device = { kind: 'device', deviceId: 'node-a' };
+  const op = { namespace: 'owner', recordId: 'r', nodeId: 'node-a', operationId: 'o', baseRevision: 0, deleted: false };
+  const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce), keyId = 'fixture-key';
+  cipher.setAAD(Buffer.from(JSON.stringify(['hive-sync-gcm-v1', op.namespace, op.recordId, op.nodeId, op.operationId, op.baseRevision, op.deleted, keyId])));
+  const body = Buffer.concat([cipher.update('fixture task'), cipher.final()]);
+  op.ciphertext = ['gcm1', keyId, nonce.toString('base64url'), cipher.getAuthTag().toString('base64url'), body.toString('base64url')].join('.');
+  assert.equal((await call('POST /v1/sync/records', device, op)).statusCode, 503);
+  assert.equal((await call('POST /v1/sync/grants', device, { namespace: 'owner', nodeId: 'node-a', enabled: true })).statusCode, 503);
+  assert.equal((await call('POST /v1/sync/grants', admin, { namespace: 'owner', nodeId: 'node-a', enabled: true })).statusCode, 200);
+  assert.equal((await call('POST /v1/sync/records', device, op)).value.status, 'applied');
+  const second = { kind: 'device', deviceId: 'node-b' };
+  await call('POST /v1/sync/grants', admin, { namespace: 'owner', nodeId: 'node-b', enabled: true });
+  const fetched = await call('GET /v1/sync/records', second, {}, { namespace: 'owner', nodeId: 'node-b', recordId: 'r' });
+  assert.equal(fetched.value.record.ciphertext, op.ciphertext);
+  const [, fetchedKeyId, fetchedNonce, fetchedTag, fetchedBody] = fetched.value.record.ciphertext.split('.');
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(fetchedNonce, 'base64url'));
+  decipher.setAuthTag(Buffer.from(fetchedTag, 'base64url'));
+  decipher.setAAD(Buffer.from(JSON.stringify(['hive-sync-gcm-v1', 'owner', 'r', fetched.value.record.nodeId, fetched.value.record.operationId, fetched.value.record.baseRevision, false, fetchedKeyId])));
+  assert.equal(Buffer.concat([decipher.update(Buffer.from(fetchedBody, 'base64url')), decipher.final()]).toString(), 'fixture task');
+  const feed = await call('GET /v1/sync/changes', second, {}, { namespace: 'owner', nodeId: 'node-b' });
+  assert.equal(feed.value.changes[0].recordId, 'r');
+  assert.equal((await call('GET /v1/sync/records', { kind: 'device', deviceId: 'other' }, {}, { namespace: 'owner', nodeId: 'node-a', recordId: 'r' })).statusCode, 503);
+  await call('POST /v1/sync/grants', admin, { namespace: 'owner', nodeId: 'node-a', enabled: false });
+  assert.equal((await call('GET /v1/sync/records', device, {}, { namespace: 'owner', nodeId: 'node-a', recordId: 'r' })).statusCode, 503);
+  db.close();
+});

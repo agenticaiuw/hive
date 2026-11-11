@@ -14,9 +14,15 @@ generate-json-schema` describes it).
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import signal
 import subprocess
 import threading
 import time
+
+
+RUST_APP_SERVER = Path(__file__).resolve().parent.parent / "build/agent-app-server-transport"
 
 
 class CodexError(Exception):
@@ -29,6 +35,9 @@ class AppServer:
     take a while."""
 
     def __init__(self, command: list[str], stderr=None, cwd: str | None = None):
+        self._rust_transport = RUST_APP_SERVER.is_file() and os.access(RUST_APP_SERVER, os.X_OK)
+        if self._rust_transport:
+            command = [str(RUST_APP_SERVER), *command]
         self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                                      cwd=cwd, text=True, start_new_session=True)
         self._write = threading.Lock()
@@ -78,7 +87,13 @@ class AppServer:
             self.proc.stdin.close()  # it exits when its input ends
             self.proc.wait(3)
         except (OSError, subprocess.TimeoutExpired):
-            self.proc.kill()
+            if self._rust_transport:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                self.proc.kill()
 
     def _send(self, msg: dict):
         with self._write:

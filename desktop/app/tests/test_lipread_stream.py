@@ -59,6 +59,18 @@ class StreamTest(unittest.TestCase):
                          'please open the browser and search')
         self.assertEqual(join_overlap('', 'hello'), 'hello')
 
+    def test_stop_refines_the_last_draft_even_without_more_frames(self):
+        events, draft = [], threading.Event()
+        def emit(**event):
+            events.append(event)
+            if 'partial' in event: draft.set()
+        stream = Stream(lambda frames, final=False: 'final words' if final else 'draft words', emit)
+        for i in range(25): stream.feed(i)
+        self.assertTrue(draft.wait(2))
+        stream.finish()
+        self.assertTrue(stream.done.wait(2))
+        self.assertEqual(events[-1]['text'], 'final words')
+
     def test_empty_session_finishes_without_decoding(self):
         events=[]
         stream=Stream(lambda *a, **k: self.fail('empty decode'), lambda **e: events.append(e))

@@ -15,13 +15,15 @@
 # build asks again. That is your keychain's own protection; nothing here changes it.
 set -uo pipefail
 target=$1 identifier=$2
+extra=()
+if [ "$#" -ge 3 ]; then extra=(--entitlements "$3"); fi
 identity=${SIGN-$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: / {print $2; exit}')}
 if [ "$identity" = "-" ]; then
-  exec codesign --force --sign - --identifier "$identifier" "$target"
+  exec codesign --force --sign - --identifier "$identifier" ${extra[@]+"${extra[@]}"} "$target"
 fi
 # A keychain prompt nobody answers would hold make up forever; after 60 s it gives up.
 if [ -n "$identity" ] &&
-   perl -e 'alarm 60; exec @ARGV' codesign --force --sign "$identity" --identifier "$identifier" "$target"; then
+   perl -e 'alarm 60; exec @ARGV' codesign --force --sign "$identity" --identifier "$identifier" ${extra[@]+"${extra[@]}"} "$target"; then
   exit 0
 fi
 why="no Apple Development certificate in your keychain"
@@ -32,4 +34,4 @@ if [ "${SIGN_REQUIRED:-}" = 1 ]; then
   exit 1
 fi
 echo "⚠️  Signing $target ad hoc: $why. macOS will ask for its permissions again." >&2
-exec codesign --force --sign - --identifier "$identifier" "$target"
+exec codesign --force --sign - --identifier "$identifier" ${extra[@]+"${extra[@]}"} "$target"

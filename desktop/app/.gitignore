@@ -1,7 +1,0 @@
-.env
-.venv/
-build/
-models/
-__pycache__/
-*.pyc
-.DS_Store

@@ -74,7 +74,7 @@ class Stream:
                     if self.error:
                         self.emit(error=self.error, final=True)
                         return
-                    if self.closed and self.count == self.last_end:
+                    if self.closed and self.count == 0:
                         self.emit(text=self.last_text, final=True)
                         return
                     if self.closed and len(self.frames) < 12:

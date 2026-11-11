@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -39,6 +40,7 @@ sys.path.insert(0, HERE)
 
 from resumable_thread import atomic_write, state_dir  # noqa: E402
 
+RUST_INGEST = Path(HERE).parent / "build/agent-ingest-split"
 CHUNK_CHARS = 12_000  # about 3k tokens a part: each is one turn, quick for the model to take in
 INLINE_TOKENS = 60_000  # more than this and it's read on demand: COMPACT_AT is 150k, screenshots need room
 MAX_CHARS = 5_000_000  # past this it's surely not a transcript
@@ -60,6 +62,19 @@ def split(text: str, size: int = CHUNK_CHARS) -> list[str]:
     """Parts of at most size characters, cut at a paragraph break if there's one in the second half
     of the part, else a line break, else the end of a sentence, else a space, else anywhere. Joined,
     they are the text again, exactly."""
+    if size <= 0:
+        raise ValueError("Chunk size must be positive")
+    if RUST_INGEST.is_file() and os.access(RUST_INGEST, os.X_OK):
+        result = subprocess.run([str(RUST_INGEST)], input=json.dumps({"text": text, "size": size}),
+                                capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError("Text ingestion failed")
+        parts = json.loads(result.stdout)
+        if (not isinstance(parts, list) or not parts or
+                any(not isinstance(part, str) or len(part) > size for part in parts) or
+                "".join(parts) != text):
+            raise RuntimeError("Invalid text ingestion response")
+        return parts
     parts, start = [], 0
     while len(text) - start > size:
         window = text[start:start + size]
@@ -162,6 +177,15 @@ def in_rollout(rollout: str | None, mark: str) -> bool:
     """Whether Codex's saved copy of the thread has a user message with the marker."""
     if not rollout or not os.path.exists(rollout):
         return False
+    if RUST_INGEST.is_file() and os.access(RUST_INGEST, os.X_OK):
+        result = subprocess.run([str(RUST_INGEST)], input=json.dumps({"op":"verify", "path":rollout, "marker":mark}),
+                                capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise OSError("Could not inspect Codex rollout")
+        found = json.loads(result.stdout)
+        if not isinstance(found, bool):
+            raise ValueError("Invalid rollout verification response")
+        return found
     with open(rollout, encoding="utf-8", errors="replace") as f:
         return any(mark in line for line in f)
 
