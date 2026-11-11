@@ -1,0 +1,25 @@
+name: Karabiner-VirtualHIDDevice-SMAppServiceExample
+
+targets:
+  Karabiner-VirtualHIDDevice-SMAppServiceExample:
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.pqrs.Karabiner-VirtualHIDDevice-SMAppServiceExample
+      # SMAppService requires codesigning
+      CODE_SIGN_ENTITLEMENTS: ''
+      CODE_SIGN_IDENTITY: 'Apple Development'
+      CODE_SIGN_STYLE: Automatic
+      # Sign to Run Locally
+      CODE_SIGN_IDENTITY[sdk=macosx*]: '-'
+      OTHER_SWIFT_FLAGS: '-warnings-as-errors'
+      DEAD_CODE_STRIPPING: 'YES'
+      SWIFT_VERSION: '6.0'
+    type: application
+    platform: macOS
+    deploymentTarget: 13.0
+    sources:
+      - path: src
+      - path: Resources
+        excludes:
+          - Info.plist.in
+    dependencies:
+      - sdk: ServiceManagement.framework

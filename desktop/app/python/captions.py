@@ -20,12 +20,22 @@ OVERLAY = os.path.join(os.path.dirname(HERE), "build", "agent-vhid-captions")
 class Captions:
     """Does nothing when show is False, the overlay isn't built (make), or CAPTIONS=0."""
 
-    def __init__(self, show: bool = True):
+    def __init__(self, show: bool = True, on_input=None):
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         if show and os.environ.get("CAPTIONS", "1") != "0" and os.path.exists(OVERLAY):
-            self._proc = subprocess.Popen([OVERLAY], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            self._proc = subprocess.Popen([OVERLAY], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.DEVNULL, text=True)
+            self.on_input = on_input or (lambda text: None)
+            threading.Thread(target=self._read, args=(self._proc,), daemon=True).start()
+
+    def _read(self, proc):
+        for line in proc.stdout:
+            try:
+                value = json.loads(line).get('text')
+                if isinstance(value, str) and value.strip(): self.on_input(value.strip())
+            except (ValueError, AttributeError):
+                continue
 
     def listening(self, on: bool):
         """The "Listening · tap fn to stop" line on top, while it listens."""
@@ -40,6 +50,15 @@ class Captions:
         permission), "on" (it is recording), or "off" (none)."""
         self._send(camera=state)
 
+    def dismiss(self):
+        self._send(dismiss=True)
+
+    def framing(self, text: str):
+        self._send(framing=text)
+
+    def preview(self, jpeg: str):
+        self._send(preview=jpeg)
+
     def hearing(self, words: str):
         """What you're saying, as you say it; it fades a little after you stop."""
         self._send(hearing=words)
@@ -52,6 +71,16 @@ class Captions:
         """The small line under the words, e.g. 'Typing “weather”'; '' removes it."""
         self._send(doing=text)
 
+    def thinking(self, text: str):
+        """Public progress or reasoning summary, shown while the task runs."""
+        self._send(thinking=text)
+
+    def activity(self, text: str):
+        self._send(activity=text)
+
+    def active(self, on: bool):
+        self._send(active=on)
+
     def clear(self):
         self._send(clear=True)
 
@@ -63,6 +92,8 @@ class Captions:
                     self._proc.wait(2)
                 except (OSError, subprocess.TimeoutExpired):
                     self._proc.kill()
+                    self._proc.wait()
+                if self._proc.stdout: self._proc.stdout.close()
                 self._proc = None
 
     def _send(self, **message):

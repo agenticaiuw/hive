@@ -1,0 +1,376 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		344BD4B5246717EF00E96DD9 /* HIDDriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 344BD4B4246717EF00E96DD9 /* HIDDriverKit.framework */; };
+		3459283524849574006AF0A6 /* IOBufferMemoryDescriptorUtility.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 3459283424849574006AF0A6 /* IOBufferMemoryDescriptorUtility.hpp */; };
+		347E9C0A24CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig in Sources */ = {isa = PBXBuildFile; fileRef = 347E9C0824CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig */; };
+		347E9C0B24CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 347E9C0924CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp */; };
+		349E2265246BED03005D3A87 /* version.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 349E2264246BED03005D3A87 /* version.hpp */; };
+		34F33B1D24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1724A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig */; };
+		34F33B1E24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1824A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp */; };
+		34F33B1F24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1924A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp */; };
+		34F33B2024A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1A24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp */; };
+		34F33B2124A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1B24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig */; };
+		34F33B2224A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig in Sources */ = {isa = PBXBuildFile; fileRef = 34F33B1C24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig */; };
+		34F435322467151C00ABFBC1 /* DriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 34F435312467151C00ABFBC1 /* DriverKit.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		344BD4B4246717EF00E96DD9 /* HIDDriverKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HIDDriverKit.framework; path = System/DriverKit/System/Library/Frameworks/HIDDriverKit.framework; sourceTree = SDKROOT; };
+		3459283424849574006AF0A6 /* IOBufferMemoryDescriptorUtility.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = IOBufferMemoryDescriptorUtility.hpp; sourceTree = "<group>"; };
+		347E9C0824CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.iig; path = org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig; sourceTree = "<group>"; };
+		347E9C0924CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp; sourceTree = "<group>"; };
+		349E2264246BED03005D3A87 /* version.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = version.hpp; sourceTree = "<group>"; };
+		34F33B1724A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.iig; path = org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig; sourceTree = "<group>"; };
+		34F33B1824A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp; sourceTree = "<group>"; };
+		34F33B1924A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp; sourceTree = "<group>"; };
+		34F33B1A24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp; sourceTree = "<group>"; };
+		34F33B1B24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.iig; path = org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig; sourceTree = "<group>"; };
+		34F33B1C24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.iig; path = org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig; sourceTree = "<group>"; };
+		34F4352E2467151C00ABFBC1 /* org.pqrs.Karabiner-DriverKit-VirtualHIDDevice.dext */ = {isa = PBXFileReference; explicitFileType = "wrapper.driver-extension"; includeInIndex = 0; path = "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice.dext"; sourceTree = BUILT_PRODUCTS_DIR; };
+		34F435312467151C00ABFBC1 /* DriverKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DriverKit.framework; path = Library/Frameworks/DriverKit.framework; sourceTree = DEVELOPER_DIR; };
+		34F435382467151C00ABFBC1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		34F4352B2467151C00ABFBC1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				34F435322467151C00ABFBC1 /* DriverKit.framework in Frameworks */,
+				344BD4B5246717EF00E96DD9 /* HIDDriverKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		34F435242467151C00ABFBC1 = {
+			isa = PBXGroup;
+			children = (
+				34F435332467151C00ABFBC1 /* Karabiner_DriverKit_VirtualHIDDevice */,
+				34F435302467151C00ABFBC1 /* Frameworks */,
+				34F4352F2467151C00ABFBC1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		34F4352F2467151C00ABFBC1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				34F4352E2467151C00ABFBC1 /* org.pqrs.Karabiner-DriverKit-VirtualHIDDevice.dext */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		34F435302467151C00ABFBC1 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				34F435312467151C00ABFBC1 /* DriverKit.framework */,
+				344BD4B4246717EF00E96DD9 /* HIDDriverKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		34F435332467151C00ABFBC1 /* Karabiner_DriverKit_VirtualHIDDevice */ = {
+			isa = PBXGroup;
+			children = (
+				34F435382467151C00ABFBC1 /* Info.plist */,
+				3459283424849574006AF0A6 /* IOBufferMemoryDescriptorUtility.hpp */,
+				347E9C0924CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp */,
+				347E9C0824CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig */,
+				34F33B1A24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp */,
+				34F33B1C24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig */,
+				34F33B1924A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp */,
+				34F33B1724A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig */,
+				34F33B1824A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp */,
+				34F33B1B24A17DD100F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig */,
+				349E2264246BED03005D3A87 /* version.hpp */,
+			);
+			name = Karabiner_DriverKit_VirtualHIDDevice;
+			path = "Karabiner-DriverKit-VirtualHIDDevice";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		34F435292467151C00ABFBC1 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				349E2265246BED03005D3A87 /* version.hpp in Headers */,
+				3459283524849574006AF0A6 /* IOBufferMemoryDescriptorUtility.hpp in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		34F4352D2467151C00ABFBC1 /* Karabiner-DriverKit-VirtualHIDDevice */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 34F4353C2467151C00ABFBC1 /* Build configuration list for PBXNativeTarget "Karabiner-DriverKit-VirtualHIDDevice" */;
+			buildPhases = (
+				34F435292467151C00ABFBC1 /* Headers */,
+				34F4352A2467151C00ABFBC1 /* Sources */,
+				34F4352B2467151C00ABFBC1 /* Frameworks */,
+				34F4352C2467151C00ABFBC1 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Karabiner-DriverKit-VirtualHIDDevice";
+			productName = "Karabiner-DriverKit-VirtualHIDDevice";
+			productReference = 34F4352E2467151C00ABFBC1 /* org.pqrs.Karabiner-DriverKit-VirtualHIDDevice.dext */;
+			productType = "com.apple.product-type.driver-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		34F435252467151C00ABFBC1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1200;
+				ORGANIZATIONNAME = "Takayama Fumihiko";
+				TargetAttributes = {
+					34F4352D2467151C00ABFBC1 = {
+						CreatedOnToolsVersion = 11.4.1;
+					};
+				};
+			};
+			buildConfigurationList = 34F435282467151C00ABFBC1 /* Build configuration list for PBXProject "Karabiner-DriverKit-VirtualHIDDevice" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 34F435242467151C00ABFBC1;
+			productRefGroup = 34F4352F2467151C00ABFBC1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				34F4352D2467151C00ABFBC1 /* Karabiner-DriverKit-VirtualHIDDevice */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		34F4352C2467151C00ABFBC1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		34F4352A2467151C00ABFBC1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				34F33B1D24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.iig in Sources */,
+				34F33B1E24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.cpp in Sources */,
+				34F33B2124A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDPointing.iig in Sources */,
+				347E9C0B24CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.cpp in Sources */,
+				347E9C0A24CD252700D170B9 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot.iig in Sources */,
+				34F33B2024A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.cpp in Sources */,
+				34F33B2224A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceUserClient.iig in Sources */,
+				34F33B1F24A17DD200F4BB09 /* org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		34F4353A2467151C00ABFBC1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DRIVERKIT_DEPLOYMENT_TARGET = 20.4;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = driverkit;
+			};
+			name = Debug;
+		};
+		34F4353B2467151C00ABFBC1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DRIVERKIT_DEPLOYMENT_TARGET = 20.4;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = driverkit;
+			};
+			name = Release;
+		};
+		34F4353D2467151C00ABFBC1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_DEADCODE_DEADSTORES = NO;
+				CLANG_ANALYZER_DIVIDE_BY_ZERO = NO;
+				CLANG_ANALYZER_NULL_DEREFERENCE = NO;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = G43BCU2T37;
+				ENABLE_HARDENED_RUNTIME = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SDKROOT)/System/DriverKit/System/Library/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = ../../include;
+				INFOPLIST_FILE = "Karabiner-DriverKit-VirtualHIDDevice/Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice";
+				PRODUCT_NAME = "$(inherited)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				RUN_CLANG_STATIC_ANALYZER = YES;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		34F4353E2467151C00ABFBC1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = G43BCU2T37;
+				ENABLE_HARDENED_RUNTIME = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SDKROOT)/System/DriverKit/System/Library/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = ../../include;
+				INFOPLIST_FILE = "Karabiner-DriverKit-VirtualHIDDevice/Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice";
+				PRODUCT_NAME = "$(inherited)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		34F435282467151C00ABFBC1 /* Build configuration list for PBXProject "Karabiner-DriverKit-VirtualHIDDevice" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				34F4353A2467151C00ABFBC1 /* Debug */,
+				34F4353B2467151C00ABFBC1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		34F4353C2467151C00ABFBC1 /* Build configuration list for PBXNativeTarget "Karabiner-DriverKit-VirtualHIDDevice" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				34F4353D2467151C00ABFBC1 /* Debug */,
+				34F4353E2467151C00ABFBC1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 34F435252467151C00ABFBC1 /* Project object */;
+}

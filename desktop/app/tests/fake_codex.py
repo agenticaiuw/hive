@@ -62,6 +62,8 @@ def seconds(turn: int) -> float:
 
 def end(thread_id: str, turn_id: str, status: str):
     busy.discard(thread_id)
+    if status == "completed":
+        threads[thread_id]["completedTurns"] = threads[thread_id].get("completedTurns", 0) + 1
     emit("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": status}})
 
 
@@ -79,6 +81,10 @@ def play(thread_id: str, turn_id: str):
                                    "arguments": wait["arguments"]})
     record({"tool_reply": reply})
     emit("item/completed", {**ids, "item": {**wait, **reply}})
+    crash_marker = STORE / "crashed-once"
+    if os.environ.get("FAKE_CODEX_CRASH_ONCE") and not crash_marker.exists():
+        crash_marker.write_text("crashed")
+        os._exit(23)
     if interrupted[turn_id].wait(seconds(int(turn_id.split("-")[1]))):
         return end(thread_id, turn_id, "interrupted")
     text = os.environ.get("FAKE_CODEX_REPLY", "Calculator shows 408.")
@@ -114,6 +120,14 @@ def handle(msg: dict):
             return send({"id": msg["id"], "error": {"code": -32600, "message": "saved thread unavailable"}})
         threads[thread_id] = json.loads(path.read_text())
         result = {"thread": {"id": thread_id}, "model": "fake"}
+    elif method == "thread/goal/get":
+        if os.environ.get("FAKE_CODEX_GOAL"):
+            done = threads[params["threadId"]].get("completedTurns", 0) >= 2
+            result = {"goal": {"status": "complete" if done else "active"}}
+        else:
+            result = {"goal": None}
+    elif method == "thread/read":
+        result = {"thread": {"status": {"type": "active" if params["threadId"] in busy else "idle"}}}
     elif method == "turn/start" and params["threadId"] in busy:
         return send({"id": msg["id"], "error": {"code": -32600, "message": "a turn is already in progress"}})
     elif method == "turn/start":

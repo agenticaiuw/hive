@@ -8,15 +8,26 @@ one used; empty values are skipped. AGENT_ENV_FILE points somewhere else (the te
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUST_SETTINGS = os.path.join(ROOT, "build/agent-settings-reader")
 from_file: set[str] = set()  # the variables that came from .env
 
 
 def load(path: str | None = None):
     path = path or os.environ.get("AGENT_ENV_FILE") or os.path.join(ROOT, ".env")
+    if os.path.isfile(RUST_SETTINGS) and os.access(RUST_SETTINGS, os.X_OK):
+        result = subprocess.run([RUST_SETTINGS, path], capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError("Settings could not be read")
+        for key, value in json.loads(result.stdout):
+            os.environ[key] = value
+            from_file.add(key)
+        return
     try:
         with open(path) as f:
             lines = f.read().splitlines()

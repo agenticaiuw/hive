@@ -1,0 +1,99 @@
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const browserExtensionDir = path.dirname(fileURLToPath(import.meta.url))
+const simulatorDir = path.resolve(browserExtensionDir, '../../mobile/simulator')
+const sourceDir = path.join(browserExtensionDir, 'src')
+const outputDir = path.join(browserExtensionDir, 'build')
+const chromeDir = path.join(outputDir, 'chrome')
+const safariDir = path.join(outputDir, 'safari')
+const chromeArchive = path.join(outputDir, 'ai-pendant-browser-bridge-chrome.zip')
+const rolldownPath = path.join(simulatorDir, 'node_modules', '.bin', 'rolldown')
+
+fs.rmSync(outputDir, { recursive: true, force: true })
+fs.mkdirSync(outputDir, { recursive: true })
+fs.cpSync(sourceDir, chromeDir, { recursive: true })
+fs.cpSync(sourceDir, safariDir, { recursive: true })
+
+/*
+ * Every entry point is bundled, not just the service worker. The Safari Xcode
+ * project references the extension resources file-by-file, so a new src/
+ * module must never become a new runtime file in the build output — it gets
+ * bundled into whichever entry imports it, and the shipped file set stays
+ * exactly the set the .pbxproj already knows.
+ */
+const entryPoints = [
+  ['background.js', 'AIPendantBrowserBridge'],
+  ['popup.js', 'AIPendantPopup'],
+]
+
+const entryNames = new Set(entryPoints.map(([entry]) => entry))
+
+for (const platformDir of [chromeDir, safariDir]) {
+  for (const [entry, globalName] of entryPoints) {
+    execFileSync(
+      rolldownPath,
+      [
+        path.join(sourceDir, entry),
+        '--format',
+        'iife',
+        '--platform',
+        'browser',
+        '--name',
+        globalName,
+        '--file',
+        path.join(platformDir, entry),
+      ],
+      { stdio: 'inherit' },
+    )
+  }
+
+  /*
+   * DERIVED, not hand-maintained: every .js the src copy brought along that
+   * is not itself an entry is bundled inside one, and shipping the loose
+   * module beside the bundle is how bridge-core.js once leaked into the
+   * Safari resources. Delete everything that is not an entry.
+   */
+  for (const dirent of fs.readdirSync(platformDir, { withFileTypes: true })) {
+    if (dirent.isFile() && dirent.name.endsWith('.js') && !entryNames.has(dirent.name)) {
+      fs.rmSync(path.join(platformDir, dirent.name), { force: true })
+    }
+  }
+
+  const manifestPath = path.join(platformDir, 'manifest.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  if (platformDir === safariDir) {
+    /*
+     * Safari gets the background PAGE form, not a service worker. Measured
+     * 2026-08-12 on the owner's Safari: with `service_worker`, the background
+     * never evaluated at all — no onStartup, no alarms, and runtime messages
+     * returned undefined without waking it, across multiple browser
+     * relaunches (storage timestamps stood still while the popup rendered
+     * stale chips). Apple's own sample extensions use `scripts`; that path
+     * is the one Safari actually exercises. Chrome keeps `service_worker`
+     * (MV3 requires it and rejects `scripts`).
+     */
+    delete manifest.background.service_worker
+    manifest.background.scripts = ['background.js']
+    /*
+     * `type: "module"` stays for Safari — research 2026-08-12: a Sequoia-era
+     * reporter on Apple's forums (thread 758479) found scripts WITHOUT the
+     * module type still failed to surface background content, and
+     * scripts+module "works. Every time." The bundle is an IIFE, which is
+     * valid module code, so declaring module costs nothing on any engine.
+     */
+  }
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+execFileSync(
+  'zip',
+  ['-q', '-r', '-X', chromeArchive, '.'],
+  { cwd: chromeDir },
+)
+
+console.log(`Chrome unpacked extension: ${chromeDir}`)
+console.log(`Chrome package: ${chromeArchive}`)
+console.log(`Safari converter input: ${safariDir}`)

@@ -61,8 +61,8 @@ class LipReaderError(Exception):
 
 
 class LipReader:
-    """A worker process (scripts/lipread_worker.py, in Chaplin's environment) that loads the model
-    once and, between start() and stop(), records the camera. on_event(dict) gets what it says
+    """A persistent FLARE worker that loads the model once and transcribes camera frames
+    between start() and stop(). on_event(dict) gets drafts and camera/model status
     ({"camera": "on"|"off"}, {"ready": true}, {"error": ...})."""
 
     def __init__(self, command: list[str] | None = None, cwd: str | None = None, on_event=None):
@@ -104,9 +104,11 @@ class LipReader:
             return ""
         self.recording = False
         self._finishing = True
-        self._send("stop")
-        completed = self._got.wait(timeout)
-        self._finishing = False
+        try:
+            self._send("stop")
+            completed = self._got.wait(timeout)
+        finally:
+            self._finishing = False
         if not completed:
             raise LipReaderError(f"no answer from the lip reader in {timeout:.0f} s")
         result = self._result or {}
@@ -121,6 +123,9 @@ class LipReader:
                 self.proc.wait(3)
             except (OSError, subprocess.TimeoutExpired):
                 self.proc.kill()
+                self.proc.wait()
+        if self.proc and self.proc.stdin and not self.proc.stdin.closed:
+            self.proc.stdin.close()
         if self.proc and self.proc.stdout:
             self.proc.stdout.close()
         self.proc, self.recording = None, False

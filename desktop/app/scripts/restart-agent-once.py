@@ -14,7 +14,7 @@ import tempfile
 import time
 
 REPO = Path(__file__).resolve().parents[1]
-APP = Path.home() / "Applications/Agent.app"
+APP = Path.home() / "Applications/Hive.app"
 IDENTIFIER = "local.personal-agent.Agent"
 
 CONTROL = r'''
@@ -68,7 +68,7 @@ def replace_once(text, old, new):
 
 
 def patched_sources(repo, stage):
-    app = (repo / "tools/app.swift").read_text()
+    app = (repo / "workspace-engine/Sources/UnifiedAgent/app.swift").read_text()
     app = replace_once(app, "    var quitting = false", '''    var quitting = false
     var listenOnce = CommandLine.arguments.contains("--listen-once")''')
     app = replace_once(app, '                statusLine.title = String(line.dropFirst("@@ status ".count))',

@@ -1,0 +1,15 @@
+{
+  "appId": "com.aipendant.app",
+  "appName": "Hive",
+  "webDir": "dist",
+  "server": {
+    "url": "https://ai-pendant-dashboard.evan20050827.workers.dev",
+    "allowNavigation": [
+      "ai-pendant-dashboard.evan20050827.workers.dev"
+    ],
+    "errorPath": "offline.html"
+  },
+  "ios": {
+    "path": "../ios"
+  }
+}

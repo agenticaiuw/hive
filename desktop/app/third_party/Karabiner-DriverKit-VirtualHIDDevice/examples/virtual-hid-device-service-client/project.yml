@@ -1,0 +1,21 @@
+name: virtual-hid-device-service-client
+
+targets:
+  virtual-hid-device-service-client:
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.pqrs.virtual-hid-device-service-client
+      OTHER_SWIFT_FLAGS: '-warnings-as-errors'
+      DEAD_CODE_STRIPPING: 'YES'
+      SWIFT_VERSION: '6.0'
+      SYSTEM_HEADER_SEARCH_PATHS:
+        - ../../vendor/vendor/include
+        - ../../include
+    type: tool
+    platform: macOS
+    deploymentTarget: 13.0
+    sources:
+      - path: src
+        compilerFlags:
+          - -Wall
+          - -Werror
+          - '-std=c++23'

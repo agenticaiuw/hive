@@ -1,4 +1,4 @@
-"""What the Agent Context panel (Agent menu → Show Agent Context, tools/app.swift) shows: this
+"""What the Agent Context panel (Agent menu → Show Agent Context, workspace-engine/Sources/UnifiedAgent/app.swift) shows: this
 session's conversation, grouped by request, with what was sent to the model under each, and what's
 known about the model's context right now. The voice agent rewrites
 sessions/<id>/panel.json a moment after anything is journaled or recorded; the panel reloads it.

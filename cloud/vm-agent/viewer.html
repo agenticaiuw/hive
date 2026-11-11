@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive VM browser</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+  header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: #1b1b1b; border-bottom: 1px solid #333; }
+  header strong { color: #f5c518; }
+  header span { flex: 1; color: #999; }
+  button { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: #333; }
+  main { display: flex; justify-content: center; padding: 12px; }
+  #screen { max-width: 100%; max-height: calc(100vh - 70px); border: 1px solid #333; outline: none; cursor: default; user-select: none; -webkit-user-drag: none; }
+  #screen.focused { border-color: #f5c518; }
+  #keys { position: fixed; left: -1000px; top: 0; width: 10px; height: 10px; opacity: 0; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Hive VM browser</strong>
+  <span id="status">Connecting… Click the picture, then type. What you type goes straight to the VM's browser and is not recorded.</span>
+  <button data-site="discord">Discord sign-in</button>
+  <button data-site="x">X sign-in</button>
+  <button id="link" title="Open a Discord or X link, such as a verify-login link from an email">Open a link…</button>
+</header>
+<main><img id="screen" alt="Browser on the VM" draggable="false" tabindex="0"></main>
+<textarea id="keys" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Keyboard input for the VM browser"></textarea>
+<script>
+(() => {
+  const screen = document.getElementById('screen');
+  const keys = document.getElementById('keys');
+  const status = document.getElementById('status');
+  const post = (path, body) => fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-hive-viewer': '1' }, body: JSON.stringify(body) }).catch(() => {});
+  const mods = e => (e.altKey ? 1 : 0) | ((e.ctrlKey || e.metaKey) ? 2 : 0) | (e.shiftKey ? 8 : 0);
+  const at = e => { const box = screen.getBoundingClientRect(); return { x: (e.clientX - box.left) / box.width, y: (e.clientY - box.top) / box.height }; };
+
+  const frames = new EventSource('/frames');
+  frames.onmessage = event => { const frame = JSON.parse(event.data); screen.src = 'data:image/jpeg;base64,' + frame.d; status.textContent = 'Live. Click the picture, then type. What you type goes straight to the VM\'s browser and is not recorded.'; };
+  frames.addEventListener('problem', event => { status.textContent = 'Browser problem: ' + JSON.parse(event.data); });
+  frames.onerror = () => { status.textContent = 'Disconnected. Run the sign-in command again if this does not recover.'; };
+
+  let down = false; let lastMove = 0;
+  screen.addEventListener('mousedown', e => { e.preventDefault(); keys.focus(); down = true; post('/input', { t: 'm', k: 'mousePressed', ...at(e), c: e.detail, mod: mods(e) }); });
+  window.addEventListener('mouseup', e => { if (!down) return; down = false; post('/input', { t: 'm', k: 'mouseReleased', ...at(e), c: e.detail, mod: mods(e) }); });
+  screen.addEventListener('mousemove', e => { const now = Date.now(); if (now - lastMove < 40) return; lastMove = now; post('/input', { t: 'm', k: 'mouseMoved', ...at(e), down, mod: mods(e) }); });
+  screen.addEventListener('wheel', e => { e.preventDefault(); post('/input', { t: 'w', ...at(e), dx: e.deltaX, dy: e.deltaY, mod: mods(e) }); }, { passive: false });
+  screen.addEventListener('contextmenu', e => e.preventDefault());
+
+  keys.addEventListener('focus', () => screen.classList.add('focused'));
+  keys.addEventListener('blur', () => screen.classList.remove('focused'));
+  const key = (kind, e) => {
+    const command = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' ? 'selectAll' : undefined;
+    const printable = e.key.length === 1 && !e.metaKey && !e.ctrlKey;
+    post('/input', { t: 'k', k: kind, key: e.key, code: e.code, kc: e.keyCode, mod: mods(e), command, text: kind === 'keyDown' ? (printable ? e.key : e.key === 'Enter' ? '\r' : undefined) : undefined });
+  };
+  keys.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && ['v', 'r', 't', 'w', 'q', 'l'].includes(e.key.toLowerCase())) return; // paste and local browser shortcuts stay local
+    if (e.isComposing) return;
+    e.preventDefault(); key('keyDown', e);
+  });
+  keys.addEventListener('keyup', e => { if (e.isComposing) return; e.preventDefault(); key('keyUp', e); });
+  keys.addEventListener('paste', e => { e.preventDefault(); const text = e.clipboardData.getData('text'); if (text) post('/input', { t: 'text', text }); });
+  keys.addEventListener('compositionend', e => { if (e.data) post('/input', { t: 'text', text: e.data }); keys.value = ''; });
+  keys.addEventListener('input', () => { keys.value = ''; });
+
+  document.getElementById('link').addEventListener('click', async () => {
+    const url = prompt('Paste a Discord or X link (for example the "verify login" link from an email). It opens in the VM\'s browser, not on this Mac.');
+    if (!url) return;
+    const response = await post('/go', { url: url.trim() });
+    if (!response || !response.ok) status.textContent = 'That link was not opened. Only https links to Discord or X open here.';
+    keys.focus();
+  });
+  for (const button of document.querySelectorAll('button[data-site]')) button.addEventListener('click', () => { post('/go', { site: button.dataset.site }); keys.focus(); });
+})();
+</script>
+</body>
+</html>

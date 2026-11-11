@@ -10,10 +10,13 @@ secrets.conf
 # Local captures, generated analysis, and private purchase records
 diagnostics/audio-captures/
 hardware/purchases/
+wearable/hardware/purchases/
 hardware/kicad/KiCad-backups/
+wearable/hardware/kicad/KiCad-backups/
 output/
 tmp/
 software/ai-pendant-simulator/local-agent/memory/*.json
+desktop/local-agent/memory/*.json
 
 # KiCad local UI state and automatic backups
 *.kicad_prl
@@ -22,7 +25,7 @@ software/ai-pendant-simulator/local-agent/memory/*.json
 *-bak
 
 # JavaScript
-node_modules/
+node_modules
 dist/
 dist-ssr/
 .next/
@@ -40,10 +43,14 @@ target/
 # Zephyr / Nordic
 build/
 build-*/
+.build/
+.swiftpm/
 # West workspace state and the west-managed libopus checkout; the pin
-# lives in firmware/nrf9160/west.yml (west init -l firmware/nrf9160 && west update)
+# lives in wearable/firmware/nrf9160/west.yml (west init -l wearable/firmware/nrf9160 && west update)
 firmware/.west/
 firmware/nrf9160/third_party/opus/
+wearable/firmware/.west/
+wearable/firmware/nrf9160/third_party/opus/
 
 # PlatformIO / Python
 .pio/
@@ -60,8 +67,27 @@ __pycache__/
 # Harness per-agent round locks: process-local, never shared.
 diagnostics/harness-derivation/*.lock
 software/ai-pendant-simulator/local-agent/memory/*.bak
+desktop/local-agent/memory/*.bak
 
 # Xcode per-user IDE state. Never shared, and in a tree where several agents
 # commit concurrently it is exactly the kind of file a stray sweep picks up.
 xcuserdata/
 *.xcuserdatad/
+
+# Local retained copies from personal-agent snapshot refreshes.
+desktop/.app-previous-*/
+desktop/app-refresh*/
+desktop/app-release-candidate/
+desktop/app-final/
+desktop/app-public-ready/
+desktop/app-quiescent/
+desktop/app-verified-final/
+desktop/app-current/
+desktop/app-final-readonly/
+desktop/app/.test-build/
+desktop/app/models/
+desktop/app-refresh*/models/
+desktop/.runtime-models-staging/
+
+# Private per-session task instructions and working logs are local-only.
+agent_sessions/

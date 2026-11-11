@@ -49,6 +49,21 @@ def point(desc: str) -> dict:
 
 TOOLS = [
     {
+        "name": "read_selected_text",
+        "description": "Read the entire text currently selected in the focused app directly into this conversation. "
+                       "Does not change the clipboard. If the app does not expose the selection, reports that; "
+                       "never reads secure password fields. Selections over 500 KB are explicitly refused.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "authenticate",
+        "description": "Use the locally saved Mac password in a verified Apple account sign-in, Passwords, "
+                       "AutoFill or passkey prompt, including its Use Password fallback. Takes no secret arguments. "
+                       "Never use for payments, purchases, admin changes or a webpage password field. "
+                       "Returns status only; inspect the screen afterward. If rejected or unavailable, stop; never retry or ask for the password in chat.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "screenshot",
         "description": "See the screen. Returns an image of the main display with the mouse pointer drawn in. "
                        "Every x/y in the other tools is a pixel in this image.",
@@ -335,6 +350,27 @@ class MacTools:
         return result(text(done))
 
     def call(self, name: str, a: dict) -> dict:
+        if name == "read_selected_text":
+            if a:
+                return result(text("This tool takes no arguments."), error=True)
+            binary = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'agent-vhid-selection')
+            try:
+                run = subprocess.run([binary], capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                return result(text("Couldn't read the selection. Build agent-vhid-selection and check Accessibility."), error=True)
+            if run.returncode:
+                return result(text(run.stderr.strip() or "The app didn't expose selected text."), error=True)
+            return result(text(run.stdout))
+        if name == "authenticate":
+            import credentials
+            if a:
+                return result(text("Authentication takes no arguments; never pass a password."), error=True)
+            try:
+                if not self.mac.is_engaged():
+                    raise credentials.CredentialError("The user has control. Wait for control before authenticating.")
+                return result(text(credentials.native('fill-mac')))
+            except credentials.CredentialError as e:
+                return result(text(str(e)), error=True)
         g = geometry()
 
         def at(x_key="x", y_key="y"):

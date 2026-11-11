@@ -21,8 +21,12 @@ import base64
 from dataclasses import asdict, is_dataclass
 import json
 import os
+import sys
 import threading
 import time
+import uuid
+from pathlib import Path
+from resumable_thread import atomic_write, state_dir, ResumeError
 
 import agent as A
 
@@ -69,8 +73,16 @@ def warm_up():
 class Conn:
     """One Claude Code process and the task whose turn is on it."""
 
-    def __init__(self):
+    def __init__(self, persistent=False):
         self.task: ClaudeTask | None = None
+        self.identity_path = state_dir() / "claude-session-id" if persistent else None
+        self.session_id = None
+        if self.identity_path and self.identity_path.exists():
+            saved = self.identity_path.read_text(encoding="utf-8").strip()
+            try:
+                self.session_id = str(uuid.UUID(saved))
+            except ValueError as error:
+                raise ResumeError("Invalid saved Claude session ID; refusing to replace the conversation") from error
         self.client = None
         self.lock: asyncio.Lock | None = None
         self.ready = run(self._connect())
@@ -79,7 +91,7 @@ class Conn:
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
         import mac_mcp
         import phone_mcp
-        servers, allowed = {}, []
+        servers, allowed = {}, ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
         for device, specs in (("mac", mac_mcp.TOOLS), ("phone", phone_mcp.TOOLS)):
             tools = []
             for spec in specs:
@@ -94,13 +106,33 @@ class Conn:
                 tools.append(tool(spec["name"], spec["description"], spec["inputSchema"])(handler()))
                 allowed.append(f"mcp__{device}__{spec['name']}")
             servers[device] = create_sdk_mcp_server(device, tools=tools)
+        spaceo = os.environ.get("AGENT_SPACEO_COMMAND", "")
+        if spaceo:
+            servers["spaceo"] = {"type": "stdio", "command": sys.executable,
+                                  "args": [os.path.join(A.HERE, "spaceo_mcp_bridge.py"), spaceo]}
+            allowed.append("mcp__spaceo__*")
         return ClaudeAgentOptions(
-            model=model(), effort=effort(), tools=[], allowed_tools=allowed, mcp_servers=servers,
+            model=model(), effort=effort(), tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
+            allowed_tools=allowed, mcp_servers=servers,
             strict_mcp_config=True, setting_sources=[], skills=[],
-            system_prompt=A.instructions() + "\n\n" + A.RULES, include_partial_messages=True,
-            cwd=os.path.join(os.environ.get("TMPDIR", "/tmp"), "agent-vhid-work"),
+            system_prompt=A.instructions() + "\n\n" + A.RULES + (A.spaceo_rules() if spaceo else ""), include_partial_messages=True,
+            cwd=os.path.dirname(A.HERE),
             settings=json.dumps({"fastMode": True}) if A.fast() else None,
-            extra_args={"no-session-persistence": None})
+            resume=self.session_id,
+            extra_args={} if self.identity_path else {"no-session-persistence": None})
+
+    def remember_session(self, value):
+        if not self.identity_path:
+            return
+        try:
+            identity = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ResumeError("Claude returned an invalid session ID") from error
+        if self.session_id and self.session_id != identity:
+            raise ResumeError("Claude session ID changed; refusing to replace the conversation")
+        if not self.session_id:
+            atomic_write(self.identity_path, identity + "\n")
+            self.session_id = identity
 
     async def _connect(self):
         from claude_agent_sdk import ClaudeSDKClient
@@ -141,12 +173,12 @@ class Session:
         """Starts the process now, so the first request doesn't wait for it."""
         with self._lock:
             if self.primary is None and not self._closed:
-                self.primary = Conn()
+                self.primary = Conn(persistent=True)
 
     def acquire(self, task) -> tuple[Conn, bool]:
         with self._lock:
             if self.primary is None:
-                self.primary = Conn()
+                self.primary = Conn(persistent=True)
             if self.primary.task is None or not self.primary.task.running:
                 self.primary.task = task
                 return self.primary, True
@@ -175,14 +207,12 @@ class Session:
 
 
 def new_session() -> bool:
-    """A new conversation for the requests from now on (the voice agent calls it at each fn tap)."""
+    """Keep the existing conversation when listening is toggled."""
     with A._session_lock:
         old = A._session
         if old.busy:
             return False
-        A._session = Session()
-        A._session.prepare()
-    old.close()
+        old.prepare()
     return True
 
 
@@ -268,11 +298,13 @@ class ClaudeTask(A.CodexTask):
 
     # -- what Claude sends ----------------------------------------------------------------------
     def _handle(self, m):
-        from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, ToolResultBlock, ToolUseBlock, \
+        from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, SystemMessage, ToolResultBlock, ToolUseBlock, \
             TextBlock, UserMessage
         if not isinstance(m, StreamEvent) and is_dataclass(m):
             self._record_context(type(m).__name__, asdict(m))
-        if isinstance(m, StreamEvent):
+        if isinstance(m, SystemMessage) and m.subtype == "init":
+            self._conn.remember_session(m.data.get("session_id"))
+        elif isinstance(m, StreamEvent):
             if m.parent_tool_use_id or self._stopped:
                 return
             e = m.event
@@ -313,6 +345,7 @@ class ClaudeTask(A.CodexTask):
                         self._event("error", body[:300] or "failed")
                     self._event("doing", "Thinking")
         elif isinstance(m, ResultMessage):
+            self._conn.remember_session(m.session_id)
             usage = m.usage or {}
             self._wrote = usage.get("output_tokens", 0)
             if self._stopped:

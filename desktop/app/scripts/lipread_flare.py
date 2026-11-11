@@ -34,12 +34,13 @@ class Flare:
         checkpoint = torch.load(root / 'large.pt', map_location='cpu', weights_only=False, mmap=True)
         pretrained = OmegaConf.load(root / 'flare/conf/pretrain/base_whisper_distill_offline_bestrq.yaml')
         # Architecture overrides from the released run_22_2_dual_large.sh.
-        enc_cfg = OmegaConf.merge(OmegaConf.structured(AVHubertConfig), pretrained.model,
+        defaults = OmegaConf.create(OmegaConf.to_container(OmegaConf.structured(AVHubertConfig)))
+        enc_cfg = OmegaConf.merge(defaults, pretrained.model,
             {'encoder_embed_dim':768, 'encoder_layers':18, 'encoder_attention_heads':12,
              'num_key_value_heads':2, 'frontend':'convnet', 'encoder_type':'qwenconv',
              'masking_type':'input2', 'input_modality':'image'})
         task_cfg = OmegaConf.merge(OmegaConf.structured(AVHubertPretrainingConfig),
-                                  {'sample_rate':25, 'avg':1, 'label_rate':25, 'input_modality':'image'})
+                                  {'sample_rate':25, 'avg':1, 'label_rate':25})
         dictionary = Dictionary.load(str(root / 'flare/data_demo/tsv_merge_face_lip_dataset/dict.wrd.txt'))
         state = checkpoint['model']
         original_load = np.load
@@ -51,6 +52,7 @@ class Flare:
             encoder = AVHubertModel(enc_cfg, task_cfg, [dictionary])
         cfg = OmegaConf.merge(OmegaConf.structured(AVHubertSeq2SeqConfig), checkpoint['cfg']['model'],
                               {'normalize':True, 'data':str(root / 'flare/data_demo/tsv_merge_face_lip_dataset')})
+        cfg.encoder_embed_dim = enc_cfg.encoder_embed_dim
         embedding = torch.nn.Embedding(len(dictionary), cfg.decoder_embed_dim, padding_idx=dictionary.pad())
         self.model = AVHubertSeq2Seq(HubertEncoderWrapper(encoder), TransformerDecoder(cfg, dictionary, embedding), dictionary, cfg)
         self.model.load_state_dict(state, strict=True)

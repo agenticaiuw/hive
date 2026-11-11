@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Hive Browser Bridge",
+  "version": "1.7.10",
+  "description": "Lets your local Hive agent control explicitly permitted browser tabs on this Mac.",
+  "minimum_chrome_version": "121",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png",
+    "512": "icons/icon-512.png"
+  },
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://ai-pendant-relay.evan20050827.workers.dev/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Hive Browser Bridge",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  }
+}

@@ -9,6 +9,7 @@ class Crops:
         self.mesh = mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=False,
                                                    min_detection_confidence=0.6, min_tracking_confidence=0.6)
         self.points = None
+        self.framing = 'Looking for your face'
 
     def close(self):
         self.mesh.close()
@@ -18,9 +19,19 @@ class Crops:
         result = self.mesh.process(rgb)
         if not result.multi_face_landmarks:
             self.points = None
+            self.framing = 'Face not visible — adjust the screen or camera'
             return None
         h, w = bgr.shape[:2]
         pts = np.array([(p.x * w, p.y * h) for p in result.multi_face_landmarks[0].landmark], dtype=np.float32)
+        lips = pts[[61, 291, 0, 17]]
+        if not ((lips[:, 0] >= 3).all() and (lips[:, 0] < w - 3).all()
+                and (lips[:, 1] >= 3).all() and (lips[:, 1] < h - 3).all()):
+            self.framing = 'Mouth is outside the camera view — adjust the screen'
+            return None
+        if np.linalg.norm(pts[61] - pts[291]) < 35:
+            self.framing = 'Mouth is small in the camera — move closer'
+        else:
+            self.framing = 'Mouth detected — keep it in view'
         # Stabilize eye/nose alignment while preserving current lip motion.
         anchors = np.array([(pts[33]+pts[133])/2, (pts[362]+pts[263])/2, pts[1]])
         self.points = anchors if self.points is None else 0.65 * anchors + 0.35 * self.points

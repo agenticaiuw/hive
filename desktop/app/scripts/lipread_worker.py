@@ -4,6 +4,7 @@ Commands and events are JSON lines tagged with a session number. No microphone, 
 network requests or agent actions. The camera is opened only for an explicit start command.
 """
 import json
+import base64
 import os
 from pathlib import Path
 import sys
@@ -60,7 +61,8 @@ class Recorder:
             self.emit(camera='on')
             next_frame = time.monotonic()
             last_good = next_frame
-            no_face = False
+            last_framing = None
+            next_preview = 0.0
             while not self.stop.is_set():
                 ok, frame = camera.read()
                 now = time.monotonic()
@@ -74,14 +76,18 @@ class Recorder:
                     continue
                 next_frame = max(next_frame + 1/25, now)
                 crop = crops(frame)
+                if now >= next_preview:
+                    # A small local-only preview lets the user see their actual camera framing.
+                    preview = cv2.resize(frame, (240, 180), interpolation=cv2.INTER_AREA)
+                    ok_preview, encoded = cv2.imencode('.jpg', preview, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                    if ok_preview:
+                        self.emit(preview=base64.b64encode(encoded).decode('ascii'))
+                    next_preview = now + .25
+                if crops.framing != last_framing:
+                    self.emit(framing=crops.framing)
+                    last_framing = crops.framing
                 if crop is None:
-                    if not no_face:
-                        self.emit(status='Face the camera so your lips are visible', final=False)
-                        no_face = True
                     continue
-                if no_face:
-                    self.emit(status='', final=False)
-                    no_face = False
                 self.stream.feed(crop)
                 if self.stream.done.is_set():
                     break
@@ -111,6 +117,9 @@ def main():
     say(status='Loading lip reader…', final=False)
     try:
         model = Flare(root)
+        # Compile GPU kernels while the model is loading, not during the first phrase.
+        import numpy as np
+        model([np.zeros((2, 88, 88), dtype=np.uint8)] * 20)
         say(ready=True, model=model.name, device=model.device)
     except Exception as exc:
         say(error=f'Lip reader could not load: {type(exc).__name__}: {exc}', final=False)
@@ -118,7 +127,7 @@ def main():
             command = json.loads(line)
             if command['command'] == 'start':
                 say(session=command['session'], error=f'Lip reader could not load: {exc}', final=True)
-        return
+        return 1
     recorder = None
     for line in sys.stdin:
         command = json.loads(line)
@@ -133,4 +142,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

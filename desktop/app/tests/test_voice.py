@@ -138,6 +138,8 @@ class Captions:
 
     def __init__(self):
         self.words: list[str] = []
+        self.on_input = lambda text: None
+        self.thoughts: list[str] = []
         self.doings: list[str] = []
         self.listenings: list[bool] = []  # each time the header said it's listening, or stopped saying it
         self.hearings: list[str] = []
@@ -151,6 +153,9 @@ class Captions:
 
     def hearing(self, words):
         self.hearings.append(words)
+
+    def thinking(self, words):
+        self.thoughts.append(words)
 
     def dictating(self, on):
         self.dictatings.append(on)
@@ -302,12 +307,19 @@ class VoiceAgentTest(unittest.TestCase):
         self.assertFalse(dropped.exists())  # the app's copy is gone; the private saved copy stays
         self.assertFalse(self.agent.voice.said)  # nothing said out loud
 
+    def test_typed_request_from_caption_is_sent_to_the_agent(self):
+        self.captions.on_input('What time is it?')
+        wait_for(lambda: self.prompts(), 'the typed request')
+        self.assertIn('What time is it?', self.prompts()[0])
+        self.assertIn('What time is it?', self.captions.hearings)
+
     def test_lip_reading_turns_the_camera_on_until_the_second_tap(self):
         agent_events = self.agent.events
 
         class Reader:
             def __init__(self):
                 self.started = 0
+                self.stopped = False
 
             def start(self):
                 self.started += 1
@@ -315,6 +327,7 @@ class VoiceAgentTest(unittest.TestCase):
                 agent_events.put(("camera", {"partial": "What time", "final": False}))
 
             def stop(self, timeout=60):
+                self.stopped = True
                 return "What time is it?"
 
             def close(self):
@@ -333,13 +346,12 @@ class VoiceAgentTest(unittest.TestCase):
         self.assertFalse(self.prompts())  # an unfinished hypothesis must not become a command
         self.assertFalse(EARS.listening)  # the microphone stays closed
         self.tap_fn()
-        wait_for(lambda: self.prompts(), "the request")
-        self.assertIn("What time is it?", self.prompts()[0])
-        self.assertIn("What time is it?", self.captions.hearings)
+        wait_for(lambda: reader.stopped, "the camera to stop")
+        self.assertFalse(self.prompts())  # closing must not submit the unfinished request
         self.assertEqual(self.captions.cameras, ["starting", "on", "off"])
         kinds = [(e["kind"], e["text"]) for e in session_journal.read(self.agent.journal.dir)]
         self.assertIn(("lip reading", "camera on"), kinds)
-        self.assertIn(("lip reading", "What time is it?"), kinds)
+        self.assertNotIn(("lip reading", "What time is it?"), kinds)
         self.agent.events.put(("input", "voice"))
         wait_for(lambda: self.agent.input_mode == "voice", "voice mode again")
 
@@ -419,11 +431,12 @@ class VoiceAgentTest(unittest.TestCase):
         self.assertIn("Open Safari", self.prompts()[0])
         self.assertTrue(any("Open" in words for words in self.captions.hearings), self.captions.hearings)
 
-    def test_tapping_fn_mid_sentence_takes_what_you_said(self):
+    def test_tapping_fn_mid_sentence_cancels_unfinished_speech(self):
         listen_to(speech("Open Calculator and work out twelve times thirty four."), then_quiet=False)
-        self.tap_fn()  # no pause to end it: fn does
-        wait_for(lambda: self.prompts(), "codex", timeout=5)
-        self.assertIn("12 times 34", self.prompts()[0])
+        self.tap_fn()
+        wait_for(lambda: not EARS.listening, "listening to stop")
+        wait_for(lambda: not self.agent._discard_heard, "unfinished speech to drain", timeout=10)
+        self.assertEqual(self.prompts(), [])
         self.assertFalse(EARS.listening)
 
     def test_holding_fn_types_what_you_say_into_the_app_in_front(self):
