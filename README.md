@@ -13,14 +13,24 @@ state paths and service names remain unchanged for compatibility.
 - **The agent's brain runs in the cloud and drives your own computer.** The agent's Codex session
   is signed in on the cloud and operates the user's personal computer the way the user would,
   with its real mouse and keyboard on its real screen.
+- **The agent builds the user's knowledge base while it works.** Every task that shows the agent a
+  lasting fact about the user or their world (their phone number on their Contacts card, a club's
+  meeting room, a friend's email, the outcome of a request) adds it to a knowledge base in the
+  cloud, after checking it isn't stored already. The more it holds, the better: before searching
+  the computer for a fact, the agent looks there first. Passwords, codes, keys and financial or
+  government numbers are never stored; those stay in the password manager.
 
 Where this stands today:
 
 - Done: every desktop agent task is screen-recorded with a timestamped timeline and uploaded to
   the R2 bucket `hive-recordings` (`desktop/app/python/task_recording.py`,
   `desktop/app/python/cloud_archive.py`; see `desktop/app/README.md`, "Task recordings").
-- Not yet: uploading the agent's other artifacts and the code it produces, and running the Codex
-  session in the cloud (the desktop agent still starts Codex on the Mac).
+- Done: the knowledge base is the D1 database `hive-knowledge` (schema in `cloud/knowledge`), which
+  the desktop agent reads and adds to on every task (`desktop/app/python/knowledge.py`; see
+  `desktop/app/README.md`, "Knowledge base").
+- Not yet: uploading the agent's other artifacts and the code it produces, running the Codex
+  session in the cloud (the desktop agent still starts Codex on the Mac), and giving the phone and
+  VM agents the knowledge base (they need an HTTP route to it in `cloud/worker`).
 
 ## Platform layout
 

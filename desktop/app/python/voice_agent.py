@@ -191,6 +191,9 @@ class VoiceAgent:
             on_finished=lambda folder: cloud_archive.archive_in_background(
                 report=lambda line: self.out(f"   🎞  {line}")))
         cloud_archive.archive_in_background(report=lambda line: self.out(f"   🎞  {line}"))
+        # The knowledge base in the cloud: upload saves made while offline, refresh the Mac's copy.
+        import knowledge
+        knowledge.sync_in_background(report=lambda line: self.out(f"   📚  {line}"))
         self.ears.listen(False)  # until you tap fn
         self.listening = False  # for the agent: you tapped fn
         self._discard_heard = False

@@ -441,7 +441,7 @@ class CodexTaskTest(unittest.TestCase):
     def test_codex_runs_lean(self):
         cmd = agent.app_server_command()
         self.assertEqual(cmd[1], "app-server")
-        self.assertIn('features.code_mode.direct_only_tool_namespaces=["mac", "phone"]', cmd)
+        self.assertIn('features.code_mode.direct_only_tool_namespaces=["mac", "phone", "knowledge", "spaceo"]', cmd)
         self.assertIn("features.shell_tool=false", cmd)
         self.assertIn("notify=[]", cmd)
         self.assertIn("include_permissions_instructions=false", cmd)  # not "the sandbox only permits reading"
@@ -458,7 +458,8 @@ class CodexTaskTest(unittest.TestCase):
             {"type": "inputText", "text": "Clicked."}, {"type": "inputImage", "imageUrl": "data:image/jpeg;base64,QUJD"}]})
         self.assertFalse(agent.tool_reply(mac_mcp.result(mac_mcp.text("no"), error=True))["success"])
         specs = agent.tool_specs()
-        self.assertEqual([s["name"] for s in specs], ["mac", "phone"])
+        self.assertEqual([s["name"] for s in specs], ["mac", "phone", "knowledge"])
+        self.assertEqual([t["name"] for t in specs[2]["tools"]], ["lookup", "save"])
         self.assertIn("batch", [t["name"] for t in specs[0]["tools"]])
         self.assertIn("tap", [t["name"] for t in specs[1]["tools"]])
 
