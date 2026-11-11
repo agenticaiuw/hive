@@ -715,9 +715,18 @@ class VoiceAgent:
             self.ears.cut(then=lambda: self.events.put(("heard_barrier", barrier)))
         self.listening_since = time.time() if on else 0.0
         self.captions.listening(on)
+        if hasattr(self.captions, "focus"):  # fn opened it: type a request, or say it
+            self.captions.focus(on and not self._agent_has_control())
         self.tell("listening", "1" if on else "0")
         self.log("listening" if on else "stopped listening")
         self.out("🎙  listening (tap fn to turn the mic off)" if on else "   (mic off; tap fn to talk)")
+
+    def _agent_has_control(self) -> bool:
+        """The agent has the mouse and keyboard now (its typing must not go into the card)."""
+        try:
+            return bool(self.mac.is_engaged())
+        except Exception:
+            return False
 
     def _stop_tasks_for_fn(self):
         """A close tap stops both devices and silences any ongoing spoken response."""
@@ -789,7 +798,7 @@ class VoiceAgent:
         if self.paused_since and not self.pause_announced and \
                 time.time() - self.paused_since > 1.0 and self.task and self.task.running:
             self.pause_announced = True
-            self.out("⏸  you have control. Press fn to let it carry on (or say something new).")
+            self.out("⏸  you have control. Press fn or say “continue” to let it carry on (or say something new).")
 
     def on_overlay(self, kind: str, value=None):
         """The floating window's buttons: the x stops the agent; the mic mutes what it hears."""
@@ -829,6 +838,8 @@ class VoiceAgent:
         if event.get("state") in ("engaged", "disengaged") and getattr(self, "recorder", None):
             self.recorder.event("control", "agent has the mouse and keyboard" if event["state"] == "engaged"
                                 else f"control went back to you ({event.get('reason', '')})")
+        if event.get("state") == "engaged" and hasattr(self.captions, "focus"):
+            self.captions.focus(False)  # the agent types now, in the app in front, not into the card
         fn = event.get("fn")
         if fn == "down":
             self.start_dictation()
