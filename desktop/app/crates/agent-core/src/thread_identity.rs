@@ -13,13 +13,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PENDING: &str = "!thread-start-pending\n";
-const RESUME_KEYS: [&str; 6] = [
+// "config" carries the shell's network access (sandbox_workspace_write.network_access).
+const RESUME_KEYS: [&str; 7] = [
     "baseInstructions",
     "developerInstructions",
     "cwd",
     "sandbox",
     "permissions",
     "approvalPolicy",
+    "config",
 ];
 
 /// A synchronous adapter to an already initialized app-server connection.
