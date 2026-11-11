@@ -641,7 +641,7 @@ struct Header { let symbol: String, text: String, icon: NSColor, color: NSColor 
 func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, listening: Bool, active: Bool) -> Header {
     switch camera {
     case "on":
-        return Header(symbol: "video.fill", text: framing.isEmpty ? "Camera on · lip reading · tap fn to stop" : framing,
+        return Header(symbol: "video.fill", text: framing.isEmpty ? "Camera on · lip reading · tap fn to send" : framing,
                       icon: cameraAccent, color: cameraAccent)
     case "starting":
         return Header(symbol: "video", text: "Turning the camera on…", icon: cameraAccent, color: secondaryText)
@@ -655,7 +655,7 @@ func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, l
                       icon: mutedAccent, color: mutedAccent)
     }
     if dictating { return Header(symbol: "keyboard", text: "Dictating · let go of fn to type it", icon: youAccent, color: secondaryText) }
-    if listening { return Header(symbol: "waveform", text: "Listening · tap fn to stop", icon: youAccent, color: secondaryText) }
+    if listening { return Header(symbol: "waveform", text: "Listening · tap fn to turn the mic off", icon: youAccent, color: secondaryText) }
     return Header(symbol: "sparkles", text: active ? "Hive · working" : "Hive", icon: tertiaryText, color: tertiaryText)
 }
 

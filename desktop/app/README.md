@@ -42,8 +42,9 @@ Karabiner-VirtualHIDDevice-Daemon → DriverKit virtual keyboard + mouse → mac
 | Give it a task (say it, or type it) | After 0.4 s with your hands off, the agent gets control (chime: Glass) |
 | Press any key, touch the trackpad, move or click a mouse | The agent loses control at once; anything it was holding is released (chime: Funk) |
 | Touch anything during that 0.4 s | The hand-over is cancelled |
-| Say "continue" | It takes control back the same way and carries on |
-| Tap **fn**, or hold it to dictate | The voice agent starts listening, or stops, or types what you say; a task it's doing carries on either way |
+| Say "continue", or tap **fn**, after you took over | It takes control back the same way and carries on |
+| Click the **x** on the floating window | The agent stops; nothing else stops it |
+| Tap **fn** otherwise, or hold it to dictate | The microphone turns on or off, or it types what you say; a task it's doing carries on either way |
 
 The helper starts with you in control. An agent asks for control (`engage`)
 when it starts a task, and only gets it once your hands have been off for 0.4 s;
@@ -97,8 +98,9 @@ terminal app needs the permissions instead.
 | Say something new while it works | It drops the old task and does the new one, knowing what it was doing |
 | Say "... on my phone" / "on my iPhone" | It does that on your iPhone, alongside whatever it's doing on the Mac. Other requests can use the phone too when they need it |
 | Say "stop" | Stops the computer agent (on the Mac and the phone) |
-| Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
-| Say "continue" | It carries on from where things are now (tap fn first if it isn't listening) |
+| Touch any key, the trackpad or the mouse | The computer agent lets go at once and waits for you (also when you touch them just as it takes control) |
+| Tap fn, or say "continue" | It carries on from where things are now |
+| Click the floating window's x | The computer agent stops |
 | Hold fn and talk | Dictation: when you let go, what you said is typed where you're typing, and isn't a task |
 
 ### Workspace creation policy
