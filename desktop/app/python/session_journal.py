@@ -27,7 +27,6 @@ unless AGENT_JOURNAL_DICTATION=1.
 from __future__ import annotations
 
 import glob
-import html
 import json
 import os
 import subprocess
@@ -75,8 +74,7 @@ class SessionJournal:
         started = time.time()
         self.id = time.strftime("%Y%m%d-%H%M%S", time.localtime(started)) + f"-{os.getpid()}"
         self.dir = Path(directory) if directory else sessions_dir() / self.id
-        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.dir.parent, 0o700)  # (mkdir's mode applies only to the last folder)
+        _journal_operation("initialize", directory=str(self.dir))
         self.error: str | None = None
         self._lock = threading.Lock()
         self._entries: list[dict] = []
@@ -84,7 +82,6 @@ class SessionJournal:
         self.manifest = {"session": self.id, "started": started, "ended": None, "pid": os.getpid(),
                          "code": git_commit(), **(about or {}), "threads": []}
         self._journal = open(self.dir / "journal.jsonl", "a", buffering=1, encoding="utf-8")
-        os.chmod(self.dir / "journal.jsonl", 0o600)
         self._save_manifest()
         self._changed = threading.Event()
         self._panel = None  # context_panel.Builder, made by the panel's thread
@@ -123,9 +120,7 @@ class SessionJournal:
                  **{k: v for k, v in fields.items() if v is not None}}
         try:
             with self._lock:
-                self._journal.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                self._journal.flush()
-                os.fsync(self._journal.fileno())
+                _append_journal(self._journal, json.dumps(entry, ensure_ascii=False) + "\n")
                 self._entries.append(entry)
                 thread = fields.get("thread")
                 if thread and thread not in self._threads:
@@ -149,8 +144,9 @@ class SessionJournal:
                 self.error = self.error or str(e)
 
     def _save_manifest(self):
-        self.manifest["threads"] = [{"thread": t, "rollout": rollout_for(t)} for t in self._threads]
-        atomic_write(self.dir / "manifest.json", json.dumps(self.manifest, ensure_ascii=False, indent=2))
+        threads = [{"thread": t, "rollout": rollout_for(t)} for t in self._threads]
+        self.manifest["threads"] = threads
+        _journal_operation("save_manifest", directory=str(self.dir), manifest=self.manifest, threads=threads)
 
     def _link_latest(self):
         latest = self.dir.parent / "latest"
@@ -167,61 +163,55 @@ class SessionJournal:
 
 
 # -- reading ----------------------------------------------------------------------------------
-LABELS = {"you said": "🗣", "agent said": "💬", "agent spoke": "🔊", "action": "→", "error": "✗",
-          "done": "✅", "failed": "❌", "request": "▶", "dictation": "✍️"}
+def _append_journal(stream, text: str):
+    # Pass only a duplicate descriptor into the helper; the owner keeps the stream.
+    reader = Path(HERE).parent / "build/agent-journal-reader"
+    fd = stream.fileno()  # Raises on a closed stream, as the previous writer did.
+    result = subprocess.run([str(reader), "--append", str(fd)], input=text.encode("utf-8"),
+                            pass_fds=(fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False)
+    if result.returncode:
+        raise OSError("Journal append failed")
+
+
+def _journal_operation(op: str, **values):
+    reader = Path(HERE).parent / "build/agent-journal-reader"
+    result = subprocess.run([str(reader), "--render"], input=json.dumps({"op": op, **values}, ensure_ascii=False),
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise RuntimeError("Could not render session journal")
+    return json.loads(result.stdout)
+
+
+def _render(op: str, **values) -> str:
+    rendered = _journal_operation(op, **values)
+    if not isinstance(rendered, str):
+        raise ValueError("Invalid journal renderer response")
+    return rendered
 
 
 def line(entry: dict) -> str:
-    when = time.strftime("%H:%M:%S", time.localtime(entry["time"]))
-    kind, text = entry["kind"], entry.get("text", "")
-    extra = {k: v for k, v in entry.items() if k not in ("time", "kind", "text")}
-    detail = "  " + json.dumps(extra, ensure_ascii=False) if extra else ""
-    return f"{when}  {LABELS.get(kind, '·')} {kind}: {text}{detail}"
+    return _render("line", entry=entry)
 
 
 def read(session: Path) -> list[dict]:
-    entries = []
-    with open(session / "journal.jsonl", encoding="utf-8") as f:
-        for raw in f:
-            try:
-                entries.append(json.loads(raw))
-            except ValueError:  # a line cut off by a crash
-                pass
+    """Read durable JSONL entries using the Rust journal reader."""
+    reader = Path(HERE).parent / "build/agent-journal-reader"
+    result = subprocess.run([str(reader), str(session)], capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise OSError("Could not read session journal")
+    entries = json.loads(result.stdout)
+    if not isinstance(entries, list):
+        raise ValueError("Invalid journal reader response")
     return entries
 
 
-STYLE = ("body{font:15px system-ui;margin:32px;max-width:1100px}li{margin:6px 0;white-space:pre-wrap;"
-         "overflow-wrap:anywhere}code{background:#eee;color:#111;padding:1px 4px}a{color:#1466ba}")
-
-
-def page(title: str, body: str) -> str:
-    return ('<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" '
-            "content=\"default-src 'none'; style-src 'unsafe-inline'\"><meta http-equiv=\"refresh\" content=\"5\">"
-            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head><body><h1>{html.escape(title)}</h1>"
-            f"{body}</body></html>")
-
-
 def session_page(manifest: dict, entries: list[dict]) -> str:
-    threads = "".join(f"<li>Codex thread <code>{html.escape(t['thread'])}</code>: full context in "
-                      f"<code>{html.escape(t['rollout'] or '(not saved yet)')}</code></li>"
-                      for t in manifest.get("threads", []))
-    body = (f'<p><a href="../index.html">All sessions</a> · <a href="journal.jsonl">journal.jsonl</a> · '
-            f'<a href="manifest.json">manifest.json</a> · <a href="../../context/index.html">Every payload '
-            f'(context viewer)</a></p><p>Code: <code>{html.escape(str(manifest.get("code")))}</code></p>'
-            f'<ul>{threads}</ul><ol>' + "".join(f"<li>{html.escape(line(e))}</li>" for e in entries) + "</ol>")
-    return page(f"Session {manifest['session']}", body)
+    return _render("session_page", manifest=manifest, entries=entries)
 
 
 def write_sessions_page(directory: Path):
-    items = []
-    for session in sorted((p for p in directory.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True):
-        try:
-            manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        items.append(f'<li><a href="{html.escape(session.name)}/index.html">{html.escape(session.name)}</a> '
-                     f'· {html.escape(str(manifest.get("backend", "")))}</li>')
-    atomic_write(directory / "index.html", page("Agent sessions", "<ol>" + "".join(items) + "</ol>"))
+    atomic_write(directory / "index.html", _render("sessions_page", directory=str(directory)))
 
 
 def find(session_id: str | None) -> Path:

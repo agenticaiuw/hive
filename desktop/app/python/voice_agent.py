@@ -32,7 +32,7 @@ finish before it starts saying something. Once you've taught it your voice (./vo
 python/voiceprint.py), people talking nearby are ignored too.
 
 Needs agent-vhid-helper running: ./install.sh has the Mac start it, ./voice.sh starts it otherwise.
---app is how Agent.app (tools/app.swift) runs it at login: "toggle" lines on stdin turn listening on
+--app is how Agent.app (workspace-engine/Sources/UnifiedAgent/app.swift) runs it at login: "toggle" lines on stdin turn listening on
 and off like fn, and "@@ listening 1|0", "@@ dictating 1|0" and "@@ status TEXT" lines on stdout are
 for its menu bar.
 """
@@ -73,6 +73,30 @@ CONTINUE = {"continue", "go on", "keep going", "resume", "carry on", "go ahead",
 JUST_SPOKE = 3.0  # seconds after its voice stops that what's heard may still be its echo
 FILLERS = {"yeah", "okay", "oh", "uh", "um", "hmm", "mm", "mmhmm", "mm-hmm", "uh-huh", "ah"}  # nothing to do
 HUMAN = {"keyboard", "trackpad", "mouse", "mouse_button"}
+
+
+def workspace_voice_allowed():
+    """Only speak over the user's speakers while the workspace viewer is visible."""
+    if not os.environ.get("AGENT_SPACEO_COMMAND"):
+        return True
+    try:
+        return (state_dir() / "workspace-viewer-visible").read_text().strip() == "1"
+    except OSError:
+        return False
+
+
+def startup_recovery_record():
+    import task_recovery
+    import provider_wait
+    saved = task_recovery.current()
+    provider_state = provider_wait.status(saved.get('id')) if saved else None
+    if saved and saved.get('status') == 'active' and provider_state == 'waiting':
+        return saved  # The process owner lock serializes harmless waiting across restarts.
+    if provider_state == 'resolved':
+        return None  # Dispatch may have happened before a crash; do not repeat it.
+    return task_recovery.reserve('startup')
+
+
 FOLLOW_UP = 8  # seconds: saying more this soon after a request adds to it rather than replacing it
 CANT_HEAR_THE_MAC = ("   It can't hear what the Mac is playing ({}), so it stops listening while it talks, and a video "
                      "playing out loud could be taken for you. Allow {} under System Settings › Privacy & Security › "
@@ -127,6 +151,8 @@ class VoiceAgent:
         self.voice = speech.Voice(may_speak=self.may_speak, on_play=self.on_play) if speak else None
         self.mac = mac or AgentVHID()
         self.events: queue.Queue = queue.Queue()
+        if hasattr(self.captions, 'on_input'):
+            self.captions.on_input = lambda text: self.events.put(('typed_request', text))
         self.ears = ears or listen.Ears(self.heard, deaf=self.deaf, voiceprint=Voiceprint(), listening=False)
         self.ears.on_text, self.ears.deaf, self.ears.on_speech = self.heard, self.deaf, self.cut_in
         self.ears.on_ignored = self.ignored
@@ -134,6 +160,8 @@ class VoiceAgent:
             threading.Thread(target=self.learn_its_voice, daemon=True, name="learn-voice").start()
         self.ears.listen(False)  # until you tap fn
         self.listening = False  # for the agent: you tapped fn
+        self._discard_heard = False
+        self._heard_barrier = 0
         self.listening_since = 0.0  # when you last tapped fn to talk; 0 while it isn't listening
         self.held: Dictation | None = None  # fn is down: it may be a tap, or the start of dictation
         self.dictation: Dictation | None = None  # where what's heard goes now, instead of the agent
@@ -252,13 +280,39 @@ class VoiceAgent:
         except Exception as e:
             self.out(f"   ✗ the session journal couldn't be started: {e}")
 
+    def announce_audio(self):
+        """Wait for speech initialization away from the request and workspace loop."""
+        hearing = self.ears.describe()
+        if self.ears.model is None:
+            self.out(f"Voice input unavailable: {hearing}. Typed requests remain available.")
+            self.tell('status', "Voice input unavailable; typed requests are ready")
+            return
+        self.out(f"Hears you with: {hearing}, microphone: {audio.name(audio.microphone()) or 'none'}, "
+                 f"echo cancellation: {self.ears.microphone.describe()}.\n"
+                 f"Only listening to you: {self.ears.voiceprint.describe()}.")
+        self.tell('status', 'Ready')
+
     def run(self):
         self.start_journal()
+        self.embedded_workspace = None
+        if self.app and os.environ.get("AGENT_SPACEO_COMMAND"):
+            threading.Thread(target=self.start_embedded_workspace, daemon=True,
+                             name="personal-agent-workspace").start()
+        self.local_requests = None
+        if self.app:
+            try:
+                from local_request import LocalRequests
+                self.local_requests = LocalRequests(state_dir() / "control", self.events)
+                self.local_requests.start()
+            except (OSError, RuntimeError) as error:
+                self.local_requests = None
+                self.out(f"Local request channel unavailable: {error}")
         threading.Thread(target=self.watch_helper, daemon=True).start()
         self.out("Ready. Tap fn and say what you want done; tap fn again to stop it listening."
                  + ("" if self.app else " Ctrl-C to quit.") + "\n")
         self.tell("listening", "0")
-        self.tell("status", "Ready")
+        self.tell("status", "Typed requests ready; voice input is loading")
+        threading.Thread(target=self.announce_audio, daemon=True, name='personal-agent-audio-ready').start()
         context = state_dir() / "context/index.html"
         if context.exists():
             self.tell("context", str(context))
@@ -273,6 +327,46 @@ class VoiceAgent:
             self.out(f"Agent context: {context}")
             if self.journal:
                 self.out(f"This session is saved in {self.journal.dir}")
+        resume = state_dir() / "updates" / "update-resume"
+        if not resume.exists():
+            resume = state_dir() / "update-resume"  # finish a handoff from an older version
+        if self.app and resume.exists():
+            try:
+                import task_recovery
+                saved = task_recovery.current()
+                resume.replace(resume.with_name("update-resumed"))
+                if not saved or saved.get('status') == 'active':
+                    self.events.put(("typed_request", "The agent update has been installed and restarted. "
+                                 "This maintenance restart was not a user request to stop; continue the prior "
+                                 "authorized request in this same conversation, unless the user separately "
+                                 "stopped or paused it. Work on other independent tasks if one is blocked. Verify the new "
+                                 "version and any uncertain effects before acting; do not schedule the "
+                                 "same update again or repeat actions that may already have happened."))
+            except (OSError, ValueError) as error:
+                self.out(f"Could not resume after the update: {error}")
+        elif self.app and os.environ.get('AGENT_BACKEND', 'codex') == 'codex':
+            # A durable reservation is committed before connecting. A crash during
+            # the continuation therefore never causes an automatic replay loop.
+            try:
+                import task_recovery
+                owner = task_recovery.acquire_owner()
+                record = None
+                if owner:
+                    record = startup_recovery_record()
+                if record:
+                    task = CodexTask('Continue the previously authorized work', device=record['device'])
+                    task._startup_record = record
+                    task._recovery_id = record['id']
+                    task._receipt_id = record.get('receiptId')
+                    task._recovery_owner = owner
+                    task.on_event = lambda kind, text, task=task: self.events.put(('task', (task, kind, text)))
+                    self.tasks[record['device']] = task
+                    task.start(look=False)
+                    self.out('Restoring the saved conversation and checking unfinished work.')
+                elif owner:
+                    owner.close()
+            except (OSError, ValueError) as error:
+                self.out(f'Could not restore unfinished work: {error}')
         while not self.stopped.is_set():
             self.tick()
             try:
@@ -283,14 +377,26 @@ class VoiceAgent:
                 self.on_helper(data)
             elif kind == "heard":
                 self.on_heard(*data)
+            elif kind == "heard_barrier":
+                if data == self._heard_barrier:
+                    self._discard_heard = False
             elif kind == "timing":
                 self.out(describe_timing(data))
             elif kind == "task":
                 self.on_task_event(*data)
+            elif kind == "workspace_activity":
+                task = self.tasks.get("mac")
+                if task is not None:
+                    self.on_task_event(task, *data)
             elif kind == "ignored":
                 self.on_ignored(*data)
             elif kind == "toggle":
                 self.set_listening(not self.listening)
+            elif kind == "typed_request":
+                self.captions.hearing(data)
+                self.on_transcript(data, typed=True)
+            elif kind == "local_request":
+                self.on_local_request(*data)
             elif kind == "ingest":
                 self.start_ingest(data)
             elif kind == "input":
@@ -304,6 +410,49 @@ class VoiceAgent:
             elif kind == "dictated":
                 self.dictation = None
                 self.type_dictation(data)
+
+    def start_embedded_workspace(self):
+        from spaceo_mcp_bridge import Bridge
+        workspace = None
+        try:
+            workspace = Bridge(os.environ["AGENT_SPACEO_COMMAND"],
+                               on_activity=lambda kind, text: self.events.put(("workspace_activity", (kind, text))))
+            workspace.start_embedded()
+            if self.stopped.is_set():
+                workspace.close()
+            else:
+                self.embedded_workspace = workspace
+        except Exception as error:
+            if workspace:
+                workspace.close()
+            Bridge.status("error", "Could not start the virtual workspace: " + str(error))
+            self.out(f"Virtual workspace unavailable: {error}")
+
+    def on_local_request(self, text, reply, deadline, resume_goal=False, goal_objective=None, receipt_id=None):
+        if time.monotonic() >= deadline:
+            reply.put({"ok": False, "error": "The request expired before it could start."})
+            return
+        if any(task and task.running for task in self.tasks.values()):
+            reply.put({"ok": False, "error": "The personal-agent is already working."})
+            return
+        try:
+            if resume_goal:
+                import agent
+                server = agent.running_server()
+                if server is None:
+                    raise RuntimeError("Codex server is not ready; goal was not resumed.")
+                thread_id = (state_dir() / "codex-thread-id").read_text().strip()
+                goal_params = {"threadId": thread_id, "status": "active", "origin": "user"}
+                if goal_objective:
+                    goal_params["objective"] = goal_objective
+                result = server.request("thread/goal/set", goal_params, timeout=3)
+                if (result.get("goal") or {}).get("status") != "active":
+                    raise RuntimeError("Codex did not confirm the goal is active.")
+            self.captions.hearing(text)
+            self.on_transcript(text, typed=True, captured=True, ingress_receipt=receipt_id)
+            reply.put({"ok": True})
+        except Exception as error:
+            reply.put({"ok": False, "error": str(error)})
 
     def start_ingest(self, path: str):
         """Agent menu → Add … to Context: the app wrote the text you chose to path (and asked you
@@ -328,6 +477,8 @@ class VoiceAgent:
             while any(t and t.running for t in self.tasks.values()) and time.time() < deadline:
                 time.sleep(0.5)
             task = CodexTask(f"(adding “{ing.title}” to the conversation)", device="mac")
+            # Document chunks are data, not an independently resumable user task.
+            task._durable_recovery = False
             task.prompt = prompt
             task.on_event = lambda kind, text: kind == "context" and self.tell("context", text)
             task.start(look=False)
@@ -400,29 +551,36 @@ class VoiceAgent:
             self.log("lip reading", "camera requested")
             self.out("📷 turning the camera on: mouth what you want, then tap fn")
             return
+        if hasattr(self.captions, "dismiss"):
+            self.captions.dismiss()
+        self._stop_tasks_for_fn()
+        self._lips_generation = getattr(self, "_lips_generation", 0) + 1
         self.captions.camera("off")
         self.tell("camera", "0")
         self.log("lip reading", "stopped")
-        self.out("   (reading your lips…)")
-        self.captions.doing("Reading your lips")
+        self.out("   (stopped lip reading)")
         lips = self.lips
-        generation = self._lips_generation
-
         def read():
             try:
-                text = lips.stop() if lips else ""
-            except lipread.LipReaderError as e:
-                self.events.put(("lips", ("", str(e), generation)))
-                return
-            self.events.put(("lips", (text, None, generation)))
+                if lips:
+                    lips.stop()
+            except lipread.LipReaderError:
+                pass
         threading.Thread(target=read, daemon=True).start()
 
     def on_camera(self, event: dict):
         """What the lip reading worker says about the camera."""
         if event.get("session") is not None and event["session"] != getattr(self.lips, "session", None):
             return
+        if "framing" in event and self.listening and self.input_mode == "lips":
+            if hasattr(self.captions, "framing"):
+                self.captions.framing(event["framing"])
+        if "preview" in event and self.listening and self.input_mode == "lips":
+            if hasattr(self.captions, "preview"):
+                self.captions.preview(event["preview"])
         if "partial" in event:
             if self.listening and self.input_mode == "lips":
+                self.captions.doing("")
                 self.captions.hearing(event["partial"])
             return
         if "status" in event and self.listening and self.input_mode == "lips":
@@ -431,8 +589,15 @@ class VoiceAgent:
             self.log("lip reading", "model ready", model=event.get("model"), device=event.get("device"))
         state = event.get("camera")
         if state is None:
-            if event.get("error") and not event.get("final", True):  # the model didn't load
+            if event.get("error"):
                 self.out(f"   ✗ lip reading: {event['error']}")
+                if self.input_mode == "lips":
+                    self.captions.doing("")
+                    self.captions.say(f"Lip reading failed: {event['error']}")
+                    if event.get("final"):
+                        self.captions.camera("off")
+                        self.listening = False
+                        self.tell("listening", "0")
             return
         on = state == "on"
         self.tell("camera", "1" if on else "0")
@@ -477,12 +642,52 @@ class VoiceAgent:
         self.listening = on
         if on:
             new_session()
+            if os.environ.get("AGENT_SPACEO_COMMAND"):
+                self.tell("workspace-resume", "1")
+        else:
+            if hasattr(self.captions, "dismiss"):
+                self.captions.dismiss()
+            self._stop_tasks_for_fn()
+            self._discard_heard = True
+            self._heard_barrier += 1
         self.ears.listen(on or self.held is not None)
+        if not on:
+            barrier = self._heard_barrier
+            self.ears.cut(then=lambda: self.events.put(("heard_barrier", barrier)))
         self.listening_since = time.time() if on else 0.0
         self.captions.listening(on)
         self.tell("listening", "1" if on else "0")
         self.log("listening" if on else "stopped listening")
         self.out("🎙  listening (tap fn to stop)" if on else "   (stopped listening; tap fn to talk)")
+
+    def _stop_tasks_for_fn(self):
+        """A close tap stops both devices and silences any ongoing spoken response."""
+        stopped = []
+        for device, task in self.tasks.items():
+            if task and task.running:
+                task.stop()
+                stopped.append(device)
+            self.tasks[device] = None
+        self.hand_back()
+        if self.voice:
+            self.voice.stop()
+        engine = os.environ.get("AGENT_SPACEO_COMMAND")
+        if engine and "mac" in stopped:
+            try:
+                result = subprocess.run([engine, "session", "pause", "--session", "personal-agent-workspace",
+                                         "--operator", "--reason", "Stopped by fn"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=3)
+                if result.returncode:
+                    self.out("   ✗ Could not confirm the workspace input was paused.")
+            except (OSError, subprocess.TimeoutExpired):
+                self.out("   ✗ Could not confirm the workspace input was paused.")
+        self.doing.clear()
+        self.timing = None
+        if hasattr(self.captions, "active"):
+            self.captions.active(False)
+        self.show_doing()
+        if stopped:
+            self.log("stopped by fn", stopped=stopped)
 
     def tell(self, what: str, text: str):
         """A line for Agent.app's menu bar."""
@@ -490,6 +695,22 @@ class VoiceAgent:
             print(f"@@ {what} {text}", flush=True)
 
     def tick(self):
+        audible_here = workspace_voice_allowed()
+        if not audible_here and getattr(self, "_viewer_voice_allowed", True) and self.voice:
+            self.voice.stop()
+        self._viewer_voice_allowed = audible_here
+        if os.environ.get("AGENT_SPACEO_COMMAND") and time.monotonic() >= getattr(self, "_workspace_status_at", 0):
+            self._workspace_status_at = time.monotonic() + 2
+            try:
+                status = json.loads((state_dir() / "workspace-status.json").read_text())
+                state = (status.get("state"), status.get("message"))
+                if state != getattr(self, "_workspace_last_status", None):
+                    self._workspace_last_status = state
+                    if state[0] == "error":
+                        self.tell("status", "Workspace unavailable: " + str(state[1])[:150])
+                        self.out("   ✗ Workspace unavailable: " + str(state[1])[:300])
+            except (OSError, ValueError, TypeError):
+                pass
         if self.held and not self.held.shown and time.time() - self.held.since > 0.4:
             self.show_dictating(self.held, True)  # held longer than a tap
         if not self.warned_about_mic and self.ears.mic_level == 0 and self.listening_since \
@@ -530,6 +751,13 @@ class VoiceAgent:
             self.paused_since, self.pause_announced = 0.0, False
         elif event.get("state") == "disengaged" and event.get("reason") in HUMAN and not self.paused_since:
             self.paused_since = time.time()
+            if self.task and getattr(self.task, '_recovery_id', None):
+                try:
+                    import task_recovery
+                    with self.task._dispatch_lock:
+                        task_recovery.finish(self.task._recovery_id, 'paused')
+                except (OSError, ValueError) as error:
+                    self.out(f'Could not save the takeover state: {error}')
 
     # -- dictation: hold fn --
 
@@ -625,6 +853,8 @@ class VoiceAgent:
         if self.dictation:
             self.on_dictated(text, final)
             return
+        if not self.listening or self._discard_heard:
+            return
         self.captions.hearing(text)
         if not final:
             self.show_live(text)
@@ -634,24 +864,49 @@ class VoiceAgent:
             self.live_shown = False
         self.on_transcript(text, times)
 
-    def on_transcript(self, text: str, times: dict | None = None):
+    def on_transcript(self, text: str, times: dict | None = None, typed: bool = False,
+                      captured: bool = False, ingress_receipt: str | None = None):
         ahead, self.ahead, self.timing = self.ahead, None, None
         words = re.sub(r"[^\w' -]", "", text.lower()).strip()
         over_its_voice, self.over_its_voice = self.over_its_voice, False
         heard = {k: round(v, 3) for k, v in (times or {}).items() if isinstance(v, (int, float))}
-        if not words or words in FILLERS:
+        if not words:
+            return
+        if words in FILLERS:
+            if not captured:
+                try:
+                    import ui_ingress
+                    channel = 'typed' if typed else ('lip' if getattr(self, 'input_mode', 'voice') == 'lips' else 'voice')
+                    receipt = ui_ingress.admit(text, channel)
+                    ui_ingress.finish(receipt, 'accepted')
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    self.out(f'Could not save the message: {error}')
             self.log("you said", text, outcome="filler, ignored")
             return  # a cough, a click, an "mm-hmm"
         just_spoke = over_its_voice or bool(self.voice and self.voice.quiet_for() < JUST_SPOKE)
-        if just_spoke and self.its_own_words(words):
+        if not typed and just_spoke and self.its_own_words(words):
             self.log("you said", text, outcome="its own voice, ignored")
             self.out(f"   (heard its own voice: {text})")
             return
+        # An explicit stop is executed immediately, even if the receipt store is
+        # unavailable. All other UI instructions are durably admitted first.
+        owned_receipt = None
+        if not captured and words not in CANCEL:
+            try:
+                import ui_ingress
+                channel = 'typed' if typed else ('lip' if getattr(self, 'input_mode', 'voice') == 'lips' else 'voice')
+                owned_receipt = ui_ingress.admit(text, channel)
+                ingress_receipt = owned_receipt
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                self.out(f'Could not save the request; it was not started: {error}')
+                return
         self.out(f"🗣  {text}")
 
         if self.voice:
             self.voice.stop()  # whatever it was saying is old news
         self.captions.say("")
+        if hasattr(self.captions, 'thinking'):
+            self.captions.thinking("")
         if words in CANCEL:
             running = [device for device, task in self.tasks.items() if task and task.running]
             self.log("you said", text, outcome="stop", stopped=running)
@@ -659,15 +914,45 @@ class VoiceAgent:
                 self.tasks[device].stop()
                 self.tasks[device] = None
                 self.doing.pop(device, None)
+            # A provider wait may have been durably armed while this process had
+            # no in-memory task. A stop also fences that pending recovery.
+            try:
+                import task_recovery, provider_wait
+                saved = task_recovery.current()
+                if (saved and saved.get('status') == 'active' and
+                        provider_wait.status(saved.get('id')) == 'waiting'):
+                    task_recovery.finish(saved['id'], 'stopped')
+            except (OSError, ValueError) as error:
+                self.out(f'Could not save the stop fence: {error}')
             if running:
                 if "mac" in running:
                     self.hand_back()
                 self.show_doing()
+                if hasattr(self.captions, 'active'):
+                    self.captions.active(any(t is not None for t in self.tasks.values()))
                 self.say("Stopped.")
+            if not captured:
+                try:
+                    import ui_ingress
+                    receipt = ui_ingress.admit(text, 'typed' if typed else 'voice')
+                    ui_ingress.finish(receipt, 'accepted')
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    self.out(f'Stopped, but could not save its receipt: {error}')
             return
+        if words in CONTINUE and os.environ.get("AGENT_SPACEO_COMMAND"):
+            self.tell("workspace-resume", "1")
         if words in CONTINUE and self.task and self.task.running:
             self.log("you said", text, outcome="continue")
-            self.take_control()  # it carries on from where things are now
+            if getattr(self.task, '_recovery_id', None):
+                try:
+                    import task_recovery
+                    task_recovery.finish(self.task._recovery_id, 'active')
+                except (OSError, ValueError) as error:
+                    self.out(f'Could not save the resume state: {error}')
+            if not os.environ.get("AGENT_SPACEO_COMMAND"):
+                self.take_control()  # it carries on from where things are now
+            if owned_receipt:
+                self.finish_ui_receipt(owned_receipt)
             return
 
         device = focus(words)
@@ -685,14 +970,26 @@ class VoiceAgent:
             self.paused_since, self.pause_announced = 0.0, False
         self.last_said[device] = ""
         task = self.tasks[device] = CodexTask(text, previous=previous, device=device, ahead=ahead)
+        task._receipt_id = ingress_receipt
+        if hasattr(self.captions, 'active'): self.captions.active(True)
+        if hasattr(self.captions, 'activity'): self.captions.activity(f'Request: {said}')
         self.timing = {"task": task, **(times or {})}
         task.on_event = lambda kind, t, task=task: self.events.put(("task", (task, kind, t)))
         self.log("you said", said, outcome="request", heard=heard or None)
         self.log("request", text, device=device, interrupted=previous, added_to_last=joined or None)
         notify(text, "On it")
         task.start()
-        if device == "mac":
+        if owned_receipt:
+            self.finish_ui_receipt(owned_receipt)
+        if device == "mac" and not (os.environ.get('AGENT_WORKSPACE_CONNECTION') or os.environ.get('AGENT_SPACEO_COMMAND')):
             self.take_control()
+
+    def finish_ui_receipt(self, receipt):
+        try:
+            import ui_ingress
+            ui_ingress.finish(receipt, 'accepted')
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self.out(f'Request started, but receipt status is unknown: {error}')
 
     def take_control(self):
         try:
@@ -706,7 +1003,7 @@ class VoiceAgent:
             return
         device = task.device
         current = self.tasks[device] is task
-        if kind != "doing":
+        if kind not in ("doing", "data", "plan_delta"):
             self.log(kind, text, device=device, request=task.task, thread=getattr(task, "_thread", None),
                      interrupted=None if current else True)
         if not current:
@@ -717,6 +1014,14 @@ class VoiceAgent:
             self.show_doing()
         elif kind == "action":
             self.out(f"   → {mark}{text}")
+            if hasattr(self.captions, 'activity'): self.captions.activity(f'Tool: {mark}{text}')
+        elif kind in ("think", "plan", "plan_delta"):
+            if hasattr(self.captions, 'thinking'):
+                self.captions.thinking(text[:600])
+            if kind == 'plan' and hasattr(self.captions, 'activity'):
+                self.captions.activity(f'Plan: {text}')
+        elif kind == "data":
+            if hasattr(self.captions, 'activity'): self.captions.activity(text)
         elif kind == "error":
             self.out(f"   ✗ {mark}{text}")
         elif kind == "say":  # its reply, a sentence or so at a time as Codex writes it
@@ -724,6 +1029,10 @@ class VoiceAgent:
             self.say(text, device, task)
         elif kind in ("done", "failed"):
             self.tasks[device] = None
+            if hasattr(self.captions, 'active'):
+                self.captions.active(any(t is not None for t in self.tasks.values()))
+            if hasattr(self.captions, 'activity'):
+                self.captions.activity('Finished' if kind == 'done' else f'Stopped: {text}')
             self.doing.pop(device, None)
             self.show_doing()
             if kind == "done":
@@ -738,6 +1047,28 @@ class VoiceAgent:
                 if device == "mac":
                     self.hand_back()
                 self.say("Sorry, that didn't work.")
+            if not any(self.tasks.values()):
+                self._apply_scheduled_update()
+
+    def _apply_scheduled_update(self):
+        """Run a prepared update outside this process only after every turn has finished."""
+        marker = state_dir() / "updates" / "update-pending"
+        if not marker.exists():
+            marker = state_dir() / "update-pending"  # finish a handoff from an older version
+        if not marker.exists():
+            return
+        claimed = marker.with_name("update-applying")
+        try:
+            marker.replace(claimed)
+            log_path = state_dir() / "update.log"
+            with log_path.open("a") as log:
+                subprocess.Popen(["/bin/bash", os.path.join(os.path.dirname(HERE), "tools", "update-app.sh")],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            self.out("Installing the prepared update; the conversation will be available after restart.")
+        except OSError as error:
+            if claimed.exists():
+                claimed.replace(marker)
+            self.out(f"Could not start the update: {error}")
 
     def show_doing(self):
         """The captions' small line: what each running task is doing ("Thinking", "Typing ...")."""
@@ -758,15 +1089,16 @@ class VoiceAgent:
         self.last_said[device] = text.strip()
         if not text:
             return
+        will_speak = bool(self.voice) and workspace_voice_allowed()
         timing = self.timing
         if task and timing and timing["task"] is task and not timing.get("queued"):
             timing["queued"] = True
-            if not self.voice:  # shown, not said
+            if not will_speak:  # shown, not said
                 timing["answered"] = time.monotonic()
                 self.out(describe_timing(timing))
         if task is None:  # (what a task says is saved with the task's events)
-            self.log("agent said", text, device=device, spoken=bool(self.voice))
-        if self.voice:
+            self.log("agent said", text, device=device, spoken=will_speak)
+        if will_speak:
             self.said = [(when, t) for when, t in self.said if time.time() - when < 30] + [(time.time(), text)]
             self.voice.say(spoken(text))  # the captions show each sentence as it's spoken
         else:
@@ -774,9 +1106,18 @@ class VoiceAgent:
 
     def shutdown(self):
         self.stopped.set()
+        if getattr(self, "embedded_workspace", None):
+            self.embedded_workspace.close()
+        if getattr(self, "local_requests", None):
+            self.local_requests.close()
+        maintenance = ((state_dir() / 'updates' / 'update-applying').exists() or
+                       (state_dir() / 'update-applying').exists())
         for task in self.tasks.values():
             if task and task.running:
-                task.stop()
+                if maintenance and hasattr(task, 'stop_for_maintenance'):
+                    task.stop_for_maintenance()
+                else:
+                    task.stop()
         if self.voice:
             self.voice.stop()
         self.hand_back()
@@ -912,17 +1253,6 @@ def main(argv: list[str]) -> int:
     if not wait_for_helper(mac, forever=app):
         return 1
     agent = VoiceAgent(speak="--no-speak" not in argv, mac=mac, captions=Captions(), app=app)
-    hearing = agent.ears.describe()
-    if agent.ears.model is None:
-        print(f"Can't listen: {hearing}. Run ./voice.sh to set it up.")
-        agent.tell("status", "Can't listen: run ./voice.sh to set it up")
-        return 1
-    print(f"Hears you with: {hearing}, microphone: {audio.name(audio.microphone()) or 'none'}, "
-          f"echo cancellation: {agent.ears.microphone.describe()}.\n"
-          f"Only listening to you: {agent.ears.voiceprint.describe()}.\n"
-          f"Voice: {agent.voice.describe() if agent.voice else 'off'}. Computer agent: {describe_model()}. "
-          f"Phone: {describe_phone()}.", flush=True)
-
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)  # a script may start us with Ctrl-C ignored
     try:

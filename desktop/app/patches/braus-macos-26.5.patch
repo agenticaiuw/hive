@@ -1,0 +1,324 @@
+diff --git a/BrausApp/App/Braus/Core/Checks/RoomCostCheck.swift b/BrausApp/App/Braus/Core/Checks/RoomCostCheck.swift
+index dd92694..bd36dcd 100644
+--- a/BrausApp/App/Braus/Core/Checks/RoomCostCheck.swift
++++ b/BrausApp/App/Braus/Core/Checks/RoomCostCheck.swift
+@@ -438,8 +438,10 @@ enum RoomCostCheck {
+         _ = RoomCostLedger.take()
+         watch.reset()
+         let start = CACurrentMediaTime()
+-        let path  = (1...steps).map { from + (to - from) * CGFloat($0) / CGFloat(steps) }
+-            + (back ? (0..<steps).reversed().map { from + (to - from) * CGFloat($0) / CGFloat(steps) } : [])
++        let width: CGFloat = to - from
++        let forward: [CGFloat] = (1...steps).map { index in from + width * CGFloat(index) / CGFloat(steps) }
++        let backward: [CGFloat] = back ? (0..<steps).reversed().map { index in from + width * CGFloat(index) / CGFloat(steps) } : []
++        let path: [CGFloat] = forward + backward
+         for position in path {
+             split.view.setPosition(
+                 position,
+diff --git a/BrausApp/App/Braus/Core/MCP/ExternalMCPSession.swift b/BrausApp/App/Braus/Core/MCP/ExternalMCPSession.swift
+index cbbe589..f572112 100644
+--- a/BrausApp/App/Braus/Core/MCP/ExternalMCPSession.swift
++++ b/BrausApp/App/Braus/Core/MCP/ExternalMCPSession.swift
+@@ -1,3 +1,6 @@
++import AppKit
++import CoreGraphics
++import SeatBroker
+ import AppAdapters
+ import AutomationMCP
+ import AutomationRuntime
+@@ -13,6 +16,12 @@ final class ExternalMCPSession {
+     typealias Performing = @MainActor (@escaping @MainActor () async throws -> JSONValue) async throws -> JSONValue
+ 
+     private let profile: MCPClientProfile
++    private let desktop: BrokeredAutomationSession
++    private var humanControl: HumanPreviewControl?
++    private var globalMonitor: Any?
++    private var localMonitor: Any?
++    private var rightOptionDown: TimeInterval?
++    private var rightOptionUsed = false
+     private let tools: AutomationTools
+     private let perform: Performing
+     private let activity: @MainActor (String) -> Void
+@@ -42,6 +51,7 @@ final class ExternalMCPSession {
+     /// those verbs are refused. `offersWeb` says that `session` routes web addresses to a web session.
+     init(
+         profile: MCPClientProfile,
++        desktop: BrokeredAutomationSession,
+         session: any AutomationSessionOperating,
+         channels: AutomationChannels = [],
+         perform: @escaping Performing = { try await $0() },
+@@ -52,6 +62,7 @@ final class ExternalMCPSession {
+         offersWeb: Bool = false
+     ) {
+         self.profile = profile
++        self.desktop = desktop
+         self.barrier = barrier
+         self.tools = AutomationTools(session: session, channels: channels,
+                                      adapters: channels.contains(.adapters) ? (adapters ?? .standard(approver: adapterApprover)) : nil,
+@@ -60,6 +71,54 @@ final class ExternalMCPSession {
+         self.tools.producer = CallProducer(source: .mcp, streamID: "mcp-" + profile.id.uuidString)
+         self.perform = perform
+         self.activity = activity
++        startRightOptionMonitor()
++    }
++
++    /// A standalone tap of the right Option key lends this client's current app
++    /// to the person. Other Option combinations pass through untouched.
++    private func startRightOptionMonitor() {
++        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
++        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
++            let type = event.type.rawValue, code: UInt16 = (event.type == .flagsChanged || event.type == .keyDown) ? event.keyCode : 0, flags = event.modifierFlags.rawValue
++            Task { @MainActor [weak self] in self?.observeInput(type: type, code: code, flags: flags) }
++        }
++        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
++            self?.observeInput(type: event.type.rawValue, code: (event.type == .flagsChanged || event.type == .keyDown) ? event.keyCode : 0, flags: event.modifierFlags.rawValue)
++            return event
++        }
++    }
++    private func observeInput(type: UInt, code: UInt16, flags: UInt) {
++        guard !isClosed else { return }
++        if type == NSEvent.EventType.flagsChanged.rawValue && code == 61 {
++            let down = CGEventSource.keyState(.combinedSessionState, key: 61)
++            if down && rightOptionDown == nil {
++                rightOptionDown = ProcessInfo.processInfo.systemUptime
++                let other = NSEvent.ModifierFlags(rawValue: flags).intersection([.command,.control,.shift,.function])
++                rightOptionUsed = !other.isEmpty
++            } else if !down, let since = rightOptionDown {
++                rightOptionDown = nil
++                if !rightOptionUsed && ProcessInfo.processInfo.systemUptime - since < 0.45 {
++                    Task { @MainActor [weak self] in await self?.toggleHumanControl() }
++                }
++            }
++        } else if rightOptionDown != nil { rightOptionUsed = true }
++    }
++    private func toggleHumanControl() async {
++        guard !isClosed else { return }
++        if let control = humanControl, !control.isFinished {
++            await control.finish(.resumingWorker)
++            humanControl = nil
++            return
++        }
++        guard desktop.id != nil else { return }
++        let control = desktop.makeHumanPreviewControl(
++            suspend: { [weak self] in self?.router.suspendForHumanIntervention() },
++            waitForAgent: { [weak self] in await self?.router.drain() },
++            endAgent: { [weak self] in self?.router.pause() },
++            resumeAgent: { [weak self] _, begin in try await begin(); self?.router.resume() }
++        )
++        humanControl = control
++        control.takeControl(on: NSScreen.main)
+     }
+ 
+     /// Braus's own tools, for a profile with desktop access, through the Seat's queue.
+@@ -87,6 +146,9 @@ final class ExternalMCPSession {
+     func close() async {
+         guard !isClosed else { return }
+         isClosed = true
++        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
++        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
++        if let humanControl { await humanControl.finish() }
+         await tools.session.close()
+     }
+ }
+diff --git a/BrausApp/App/Braus/Model/AppModel.swift b/BrausApp/App/Braus/Model/AppModel.swift
+index 7c8e703..33a8ef6 100644
+--- a/BrausApp/App/Braus/Model/AppModel.swift
++++ b/BrausApp/App/Braus/Model/AppModel.swift
+@@ -71,6 +71,7 @@ final class AppModel {
+         let web: WebAutomationSession? = channels.contains(.web) ? AppModel.webSession() : nil
+         let session = ExternalMCPSession(
+             profile: profile,
++            desktop: desktop,
+             session: AppModel.session(
+                 desktop : desktop,
+                 channels: channels,
+diff --git a/Package.swift b/Package.swift
+index f7f04bf..61f2105 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -1,4 +1,4 @@
+-// swift-tools-version: 6.4
++// swift-tools-version: 6.3
+ //
+ // Braus: an agent environment for the Mac. The repository is the library, and
+ // the folders under Sources/ are its layers. Each layer is a set of targets,
+@@ -258,12 +258,14 @@ let package = Package(
+         .library(name: "SeatBroker", targets: ["SeatBroker"]),
+         .library(name: "ModelTransports", targets: ["ModelTransports"]),
+         .executable(name: "braus", targets: ["braus"]),
++        .executable(name: "agent-unified-host", targets: ["agent-unified-host"]),
+         // The tool bridge a worker's agent launches, which the app bundles in place of the whole command line.
+         .executable(name: "braus-bridge", targets: ["braus-bridge"]),
+         // The native messaging host Chrome starts for the Braus extension, one per paired profile.
+         .executable(name: "braus-chrome-host", targets: ["braus-chrome-host"]),
+     ],
+     targets: [
++        .executableTarget(name: "agent-unified-host", dependencies: [.target(name: "SeatBroker"), .target(name: "LocalMCP"), .target(name: "AutomationMCP"), .target(name: "AutomationRuntime"), .target(name: "AppAdapters"), .target(name: "Memory")], path: "Sources/UnifiedAgent", swiftSettings: [.swiftLanguageMode(.v5)]),
+         .target(name: "Switches", path: "Sources/Switches", swiftSettings: pure),
+         .testTarget(name: "SwitchesTests", dependencies: ["Switches"], path: "Tests/SwitchesTests", swiftSettings: suite),
+         
+diff --git a/Sources/Driver/SeatSession/Seat/AgentSeat.swift b/Sources/Driver/SeatSession/Seat/AgentSeat.swift
+index d2ccc0d..37b2328 100644
+--- a/Sources/Driver/SeatSession/Seat/AgentSeat.swift
++++ b/Sources/Driver/SeatSession/Seat/AgentSeat.swift
+@@ -160,8 +160,6 @@ public final class AgentSeat {
+     var adoptingPlacementIdentity: WindowIdentity?
+     var isTearingDown = false
+ 
+-    @TaskLocal
+-    private nonisolated static var nativeTextInputID: UUID?
+ 
+     private var splitInputsInFlight = 0
+ 
+@@ -671,7 +669,7 @@ public final class AgentSeat {
+         within     : Duration = .seconds(3),
+         operation  : @escaping @MainActor @Sendable () async throws -> Void
+     ) async throws -> InputCleanupResult {
+-        guard nativeTextInputContext == nil, Self.nativeTextInputID == nil,
++        guard nativeTextInputContext == nil, SeatTaskContext.nativeTextInputID == nil,
+               menuContext == nil, !actionInFlight else {
+             throw InputFailure.nativeTextInputRefused(.contextActive)
+         }
+@@ -732,7 +730,7 @@ public final class AgentSeat {
+                 operation    : { @MainActor in
+                     self.actionInFlight = false
+                     self.restoreActionState(previous, reason: .requested)
+-                    try await Self.$nativeTextInputID.withValue(id) {
++                    try await SeatTaskContext.$nativeTextInputID.withValue(id) {
+                         try await operation()
+                     }
+                 }
+@@ -2735,11 +2733,11 @@ public final class AgentSeat {
+         // the adoption wrote with the frame the surface used to be at.
+         let recipient       = textField?.recipient ?? endpoint?.geometry.window ?? window.reference
+ 
+-        if Self.nativeTextInputID != nil || nativeTextInputContext != nil {
++        if SeatTaskContext.nativeTextInputID != nil || nativeTextInputContext != nil {
+             guard let context = nativeTextInputContext else {
+                 throw InputFailure.nativeTextInputRefused(.contextClosed)
+             }
+-            guard Self.nativeTextInputID == context.id else {
++            guard SeatTaskContext.nativeTextInputID == context.id else {
+                 throw InputFailure.nativeTextInputRefused(.contextMismatch)
+             }
+             try requireNativeTextInputCommand(routed)
+@@ -6613,3 +6611,5 @@ public final class AgentSeat {
+ 
+     deinit { eventChannel.finish() }
+ }
++
++private enum SeatTaskContext { @TaskLocal static var nativeTextInputID: UUID? }
+diff --git a/Sources/Driver/VirtualScreens/VirtualDisplay/VirtualDisplay.swift b/Sources/Driver/VirtualScreens/VirtualDisplay/VirtualDisplay.swift
+index fafc05c..a978d74 100644
+--- a/Sources/Driver/VirtualScreens/VirtualDisplay/VirtualDisplay.swift
++++ b/Sources/Driver/VirtualScreens/VirtualDisplay/VirtualDisplay.swift
+@@ -81,6 +81,7 @@ public final class VirtualDisplay {
+     public private(set) var isTopologyConfigured = false
+ 
+     /// The private object. The display is alive while this is not nil.
++    private var originalMode: CGDisplayMode?
+     private var retained: NSObject?
+ 
+     private init(
+@@ -90,8 +91,10 @@ public final class VirtualDisplay {
+         name                       : String,
+         topology                   : TopologyBaseline,
+         requestedOrigin            : CGPoint,
+-        mainChangedDuringCreation  : Bool
++        mainChangedDuringCreation  : Bool,
++        originalMode               : CGDisplayMode?
+     ) {
++        self.originalMode                = originalMode
+         self.retained                    = retained
+         self.displayID                   = displayID
+         self.pixelSize                   = pixelSize
+@@ -215,6 +218,7 @@ public final class VirtualDisplay {
+         }
+ 
+         let baseline = try TopologyBaseline.capture()
++        let originalMode = CGDisplayCopyDisplayMode(baseline.mainDisplayID)
+         let surface  = try makeSurface(
+             configuration  : configuration,
+             descriptorClass: descriptorClass,
+@@ -242,7 +246,8 @@ public final class VirtualDisplay {
+             name                       : VirtualDisplayConfiguration.displayName,
+             topology                   : baseline,
+             requestedOrigin            : origin,
+-            mainChangedDuringCreation  : surface.mainChanged
++            mainChangedDuringCreation  : surface.mainChanged,
++            originalMode               : originalMode
+         )
+     }
+ 
+@@ -388,6 +393,9 @@ public final class VirtualDisplay {
+             )
+         }
+ 
++        if topology.physicalDisplays.count == 1, !topology.physicalTopologyUnchanged, let mode = originalMode {
++            _ = CGDisplaySetDisplayMode(topology.mainDisplayID, mode, nil)
++        }
+         noteObservations()
+         try topology.attach(virtualDisplayID: displayID, at: requestedOrigin)
+         noteObservations()
+diff --git a/Sources/Integration/AutomationRuntime/CallRecorder.swift b/Sources/Integration/AutomationRuntime/CallRecorder.swift
+index 6d83fdd..70c30d7 100644
+--- a/Sources/Integration/AutomationRuntime/CallRecorder.swift
++++ b/Sources/Integration/AutomationRuntime/CallRecorder.swift
+@@ -311,18 +311,18 @@ public actor CallRecorder: ActionObserving {
+         let (kept, resultGap) = admit(result)
+         // A hand-back's reason is the driver's sentence: withheld as every text of the call is.
+         let route = self.route.map {
+-            CallRoute($0.route, handoffReason: $0.handoffReason.map { minimization.minimize(text: $0).0 })
++            CallRoute($0.route, handoffReason: $0.handoffReason.map { self.minimization.minimize(text: $0).0 })
+         }
+         // The rung's words are the driver's sentences about the call's gestures: withheld as every text of the call is.
+         let rungTaken = self.rung.map {
+-            CallRung(rung: $0.rung, how: minimization.minimize(text: $0.how).0,
+-                     skipped: $0.skipped.map { minimization.minimize(text: $0).0 })
++            CallRung(rung: $0.rung, how: self.minimization.minimize(text: $0.how).0,
++                     skipped: $0.skipped.map { self.minimization.minimize(text: $0).0 })
+         }
+         // The advice's route address and words are texts of the call too: withheld as every text of the call is; the
+         // decision is kept.
+         let adviceTaken = self.advice.map {
+-            CallRouteAdvice(decision: $0.decision, route: $0.route.map { minimization.minimize(text: $0).0 },
+-                            message: minimization.minimize(text: $0.message).0)
++            CallRouteAdvice(decision: $0.decision, route: $0.route.map { self.minimization.minimize(text: $0).0 },
++                            message: self.minimization.minimize(text: $0.message).0)
+         }
+         let end = AgentCallTransition(context.eventID, AgentCallProgress(
+             status, result: kept, endedAtMS: clock.calendarMS(), durationMS: duration, observedEffect: observed
+diff --git a/Sources/SeatBroker/Runtime/AgentSession.swift b/Sources/SeatBroker/Runtime/AgentSession.swift
+index 365071f..60a1b8a 100644
+--- a/Sources/SeatBroker/Runtime/AgentSession.swift
++++ b/Sources/SeatBroker/Runtime/AgentSession.swift
+@@ -256,12 +256,13 @@ public final class AgentSession {
+         ) {
+             // Not launched: `launch` asks a running application with no window to reopen, one more window.
+             var armed: LaunchFocusComeback?
+-            let bringForward: (() async -> Bool)? = BrowserOpening.needsFrontToOpen(bundleID: wanted.bundleID)
+-                ? {
++            let bringForward: (() async -> Bool)?
++            if BrowserOpening.needsFrontToOpen(bundleID: wanted.bundleID) {
++                bringForward = {
+                     guard let pid = wanted.pid, let armed else { return false }
+                     return await armed.bringInFront(processID: pid)
+                 }
+-                : nil
++            } else { bringForward = nil }
+             return try await BrowserOpening.seat(
+                 wanted,
+                 prepare: { try await self.driver.prepareSeat() },
+diff --git a/Sources/SeatBroker/Seat/HumanInterventionRecorder.swift b/Sources/SeatBroker/Seat/HumanInterventionRecorder.swift
+index d7752a6..49c5680 100644
+--- a/Sources/SeatBroker/Seat/HumanInterventionRecorder.swift
++++ b/Sources/SeatBroker/Seat/HumanInterventionRecorder.swift
+@@ -300,7 +300,7 @@ final class HumanInterventionRecorder {
+         // Poll the completion slot without joining a native capture that may ignore cancellation.
+         while let captureID, pictureID == captureID, pictureTask != nil,
+               stopping == nil, !Task.isCancelled, ContinuousClock.now < deadline {
+-            try? await Task.sleep(until: min(deadline, .now.advanced(by: .milliseconds(10))), clock: .continuous)
++            try? await Task.sleep(until: min(deadline, ContinuousClock.now.advanced(by: Duration.milliseconds(10))), clock: .continuous)
+         }
+         let picture = captureID != nil && pictureID == captureID ? readyPicture : nil
+         if pictureID == captureID {

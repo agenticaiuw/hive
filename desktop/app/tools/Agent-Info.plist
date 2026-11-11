@@ -4,6 +4,12 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>local.personal-agent.Agent</string>
+	<key>CFBundleDisplayName</key>
+	<string>Hive</string>
+	<key>CFBundleIconFile</key>
+	<string>Hive</string>
+	<key>AgentWorkspaceDefault</key>
+	<string>0</string>
 	<key>CFBundleName</key>
 	<string>Agent</string>
 	<key>CFBundleExecutable</key>

@@ -13,6 +13,13 @@ git submodule update --init   # once, after cloning: Karabiner's client headers
 ./install.sh                  # Agent in the menu bar, opened at login
 ```
 
+The app builds its workspace engine from the maintained `workspace-engine/` source in this
+repository, including its MIT license; the build does not clone Braus. The normal app keeps
+physical-device mode by default. The workspace candidate enables the virtual workspace by
+default, and `AGENT_EXPERIMENTAL_SPACEO` can explicitly choose it. The former experimental
+single-window Braus seat is not available in this build. Rust crates and voice models still
+need to be available locally or downloaded during setup.
+
 The keyboard and mouse part is **agent-vhid**:
 
 The input goes through Karabiner's virtual HID driver, so macOS sees a USB
@@ -76,7 +83,7 @@ Once, after installing:
   (superwhisper) needs another shortcut, or quitting.
 
 Agent runs the Python in this folder, so after changing it, Restart Agent from its
-menu; after changing the helper (`src/`) or the app (`tools/app.swift`), run
+menu; after changing the helper (`src/`) or the app (`workspace-engine/Sources/UnifiedAgent/app.swift`), run
 `./install.sh` again. `./install.sh --uninstall` takes it all out. Or, without
 installing anything, `./voice.sh` runs the same in a terminal (one password prompt for the helper; Ctrl-C stops it), and the
 terminal app needs the permissions instead.
@@ -93,6 +100,36 @@ terminal app needs the permissions instead.
 | Touch any key, the trackpad or the mouse | The computer agent stops at once and waits |
 | Say "continue" | It carries on from where things are now (tap fn first if it isn't listening) |
 | Hold fn and talk | Dictation: when you let go, what you said is typed where you're typing, and isn't a task |
+
+### Workspace creation policy
+
+Closing a virtual workspace is durable: it will not be recreated just because a session is
+missing or the app restarts. `python3 python/workspace_fence.py closed` records an explicit
+closure without changing any display. To explicitly authorize one creation attempt, run
+`python3 python/workspace_fence.py allow-once`; the next workspace bootstrap consumes that
+permit before attempting creation. An ambiguous failure is not retried automatically. The
+command records policy only; it does not open a display itself.
+
+### Local request receipts
+
+The local request socket records an admission before sending a request to the agent. Its
+private `control/request-ledger.sqlite3` stores task text and goal objectives encrypted with
+AES-GCM; the key is in `control/request-ledger.key`. Both files are mode 0600. Because the key
+is stored on the same Mac, encryption protects against casual plaintext inspection, not an
+account that can read both files. Requests matching conservative credential patterns are
+admitted without saving their text. This screening cannot recognize every unlabeled secret;
+do not submit credentials as task text. Source IDs are stored as hashes, and repeated IDs
+never cause a second dispatch, including when the first outcome is uncertain. The ledger
+records admission, not task completion, and does not automatically replay tasks.
+
+To inspect the most recent receipts locally, run:
+
+```sh
+build/agent-request-ledger "${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}/control"
+```
+
+The output contains decrypted task text and should be treated as private. If the ledger,
+key, or Rust request service is unavailable, the local request channel fails closed.
 
 ### Dictation
 
@@ -316,13 +353,22 @@ long the clipboard is and reads on from an offset. `python/ingest.py list | read
 #### Lip reading (optional)
 
 Agent menu › **Input** › **Lip Reading (camera)**: tap fn and the camera turns on (green
-light, a "📷 Camera on" caption and a camera icon in the menu bar). Mouth what you want,
-then tap fn again. The camera turns off, the clip is read on this Mac and deleted, and the
-words become a request. Voice stays the default, and holding fn still dictates with the
-microphone. It uses Chaplin (MIT) with the Auto-AVSR LRS3 model (about 19% word error rate):
-its code and weights are for non-commercial research and private study only.
-`scripts/setup-lipread.sh` downloads it (about 1.1 GB) when you choose to. macOS asks once
-for camera access. See `python/lipread.py`.
+light, a "📷 Camera on" caption and a camera icon in the menu bar). Words appear in the
+floating window while you mouth your request. Tap fn again to turn the camera off and
+submit the final transcript. Drafts can change as more video arrives; they never trigger
+commands. Voice stays the default, and holding fn still dictates with the microphone.
+
+The local model is [FLARE Large](https://github.com/jxzhanggg/FLARE), released in October
+2026 by researchers including iFLYTEK (MIT code). Its lightweight decoder reports 15.9%
+word error on LRS3; this benchmark is not a guarantee for silently mouthed webcam input.
+Capture and inference run concurrently, using overlapping video windows and Apple GPU
+acceleration when available. This is a full-context model producing rolling drafts,
+not a native causal speech recognizer. Latency depends on hardware and phrase length.
+Frames stay in memory and no microphone input is used for lip reading.
+
+`scripts/setup-lipread.sh` installs the pinned source, isolated Python runtime and verified
+checkpoint (4.85 GB download). macOS asks once for camera access. `LIPREAD_DEVICE=cpu`
+overrides GPU selection. See `python/lipread.py`.
 
 Every context-viewer record carries the session's id, so the two join up.
 

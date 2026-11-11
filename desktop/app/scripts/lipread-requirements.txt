@@ -1,0 +1,14 @@
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
+numpy==1.26.4
+fairseq==0.12.2
+transformers==4.40.0
+mediapipe==0.10.21
+opencv-python==4.11.0.86
+sentencepiece==0.2.3
+einops==0.8.2
+joblib==1.6.0
+scipy==1.15.3
+python-speech-features==0.6
+scikit-image==0.25.2

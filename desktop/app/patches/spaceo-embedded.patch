@@ -1,0 +1,394 @@
+diff --git a/Package.swift b/Package.swift
+index fffb6dc..f605c9c 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -7,9 +7,11 @@ let package = Package(
+     products: [
+         .library(name: "SpaceOKit", targets: ["SpaceOKit"]),
+         .executable(name: "spaceo", targets: ["spaceo"]),
+-        .executable(name: "SpaceOViewer", targets: ["SpaceOViewer"]),
++        .library(name: "SpaceOViewer", targets: ["SpaceOViewer"]),
++        .executable(name: "agent-unified-host", targets: ["agent-unified-host"]),
+     ],
+     targets: [
++        .executableTarget(name: "agent-unified-host", dependencies: ["SpaceOViewer"], path: "Sources/UnifiedAgent"),
+         // The only target that touches private API. dlsym avoids hard-link failure when a symbol
+         // disappears; higher-level lifecycle and route checks validate mutation behavior.
+         .target(
+@@ -34,7 +36,7 @@ let package = Package(
+         .executableTarget(name: "spaceo", dependencies: ["SpaceOKit", "SpaceOMCP"]),
+         // The VM-style console app. Touches no private API itself; everything unusual it does
+         // (per-PID event delivery, window stamping) goes through SpaceOKit's MirrorInput.
+-        .executableTarget(
++        .target(
+             name: "SpaceOViewer",
+             dependencies: ["SpaceOKit"],
+             linkerSettings: [
+diff --git a/Sources/SpaceOKit/DetachedSessionRecovery.swift b/Sources/SpaceOKit/DetachedSessionRecovery.swift
+index 2455e9c..35396b2 100644
+--- a/Sources/SpaceOKit/DetachedSessionRecovery.swift
++++ b/Sources/SpaceOKit/DetachedSessionRecovery.swift
+@@ -315,7 +315,7 @@ public struct DetachedSessionRecovery: Sendable {
+         var impreciseLaunched: [DurableSessionApp] = []
+         var launched: [DurableSessionApp] = []
+         let releaseApps =
+-            original.cleanupDisposition == .releaseApps
++            original.id == "personal-agent-workspace" || original.cleanupDisposition == .releaseApps
+ 
+         for app in original.apps {
+             switch processState(for: app.identity) {
+diff --git a/Sources/SpaceOKit/MirrorInput.swift b/Sources/SpaceOKit/MirrorInput.swift
+index 61effe7..e87da7c 100644
+--- a/Sources/SpaceOKit/MirrorInput.swift
++++ b/Sources/SpaceOKit/MirrorInput.swift
+@@ -50,7 +50,8 @@ public enum MirrorInput {
+             displayBounds: CGRect,
+             viewSize: CGSize,
+             zoom: CGFloat = 1,
+-            pan: CGPoint = .zero
++            pan: CGPoint = .zero,
++            stretch: Bool = ProcessInfo.processInfo.environment["SPACEO_FULLSCREEN_STRETCH"] == "1"
+         ) {
+             self.displayBounds = displayBounds
+             guard displayBounds.width.isFinite, displayBounds.height.isFinite,
+@@ -64,8 +65,8 @@ public enum MirrorInput {
+             }
+             let scale = min(viewSize.width / displayBounds.width,
+                             viewSize.height / displayBounds.height)
+-            let fittedSize = CGSize(width: displayBounds.width * scale,
+-                                    height: displayBounds.height * scale)
++            let fittedSize = stretch ? viewSize : CGSize(width: displayBounds.width * scale,
++                                                         height: displayBounds.height * scale)
+             let fittedOrigin = CGPoint(
+                 x: (viewSize.width - fittedSize.width) / 2,
+                 y: (viewSize.height - fittedSize.height) / 2
+diff --git a/Sources/SpaceOKit/SessionManager.swift b/Sources/SpaceOKit/SessionManager.swift
+index d77389f..b51997f 100644
+--- a/Sources/SpaceOKit/SessionManager.swift
++++ b/Sources/SpaceOKit/SessionManager.swift
+@@ -1017,16 +1017,17 @@ public actor SessionManager {
+         guard let session = sessions[canonical] else {
+             throw SpaceOError.unknownSession(canonical)
+         }
++        let effectiveQuitApps = canonical == "personal-agent-workspace" ? false : quitApps
+         // Persist intent before signalling or evacuating any process. A crash after this point is
+         // recoverable as cleanup work, never mistaken for a ready attached session.
+-        let cleanupDisposition: DurableSessionCleanupDisposition = quitApps
++        let cleanupDisposition: DurableSessionCleanupDisposition = effectiveQuitApps
+             ? .terminateLaunchedApps
+             : .releaseApps
+         try persistSession(
+             session,
+             operationState: .cleanupPending,
+             cleanupDisposition: cleanupDisposition)
+-        var report = session.destroy(quitApps: quitApps)
++        var report = session.destroy(quitApps: effectiveQuitApps)
+         guard report.isComplete else {
+             report.stillAttachedDisplayIDs = Array(
+                 Set(report.stillAttachedDisplayIDs + [session.stage.displayID])
+@@ -1094,7 +1095,7 @@ public actor SessionManager {
+         var report = TeardownReport()
+         for id in sessions.keys.sorted() {
+             guard sessions[id] != nil else { continue }
+-            let sessionReport = try destroyNow(id, quitApps: quitApps, reason: reason).report
++            let sessionReport = try destroyNow(id, quitApps: id == "personal-agent-workspace" ? false : quitApps, reason: reason).report
+             report.merge(sessionReport)
+         }
+         // Sessions with surviving processes still own their slots. Only empty displays may be
+@@ -1506,7 +1507,7 @@ public actor SessionManager {
+             commandLease.finish()
+             throw SpaceOError.badRequest("session '\(id)' destruction is already in progress")
+         }
+-        let quitApps = request.quitApps ?? true
++        let quitApps = id == "personal-agent-workspace" ? false : (request.quitApps ?? true)
+         let cleanupDisposition: DurableSessionCleanupDisposition = quitApps
+             ? .terminateLaunchedApps
+             : .releaseApps
+diff --git a/Sources/SpaceOKit/Stage.swift b/Sources/SpaceOKit/Stage.swift
+index 1564a0a..ff0187a 100644
+--- a/Sources/SpaceOKit/Stage.swift
++++ b/Sources/SpaceOKit/Stage.swift
+@@ -318,6 +318,11 @@ public final class Stage: @unchecked Sendable {
+                     .filter { id in !Self.ownership.lock.withLock { Self.ownership.displayIDs.contains(id) } }) {
+                 throw SpaceOError.stageCreationFailed(failure)
+             }
++            // On this Mac an attachment can reset the single built-in display's selected
++            // mode. Keep the exact pre-attachment mode and restore it before publication.
++            let mainDisplay = CGMainDisplayID()
++            let savedMainMode = userConfigurationBefore.displays.count == 1
++                ? CGDisplayCopyDisplayMode(mainDisplay) : nil
+             // A bounded identity, never a fresh one per attachment (RA-057). Every slot busy means
+             // 32 live displays of this geometry; refuse rather than mint an unbounded identity.
+             let onlineSerials = Set(online.map { CGDisplaySerialNumber($0) })
+@@ -371,6 +376,16 @@ public final class Stage: @unchecked Sendable {
+                                            coordinator: Self.lifecycle)
+             }
+             try operation.check()
++            if let savedMainMode,
++               let current = CGDisplayCopyDisplayMode(mainDisplay),
++               (current.width != savedMainMode.width || current.height != savedMainMode.height ||
++                current.pixelWidth != savedMainMode.pixelWidth || current.pixelHeight != savedMainMode.pixelHeight) {
++                let result = CGDisplaySetDisplayMode(mainDisplay, savedMainMode, nil)
++                guard result == .success else {
++                    try Self.rejectPublication(display, reason: "could not restore the original display mode",
++                                               coordinator: Self.lifecycle)
++                }
++            }
+ 
+             let deadline = ContinuousClock.now + .seconds(3)
+             var publicationFailure: String?
+diff --git a/Sources/SpaceOMCP/MCPTools.swift b/Sources/SpaceOMCP/MCPTools.swift
+index 44d32cf..57c853d 100644
+--- a/Sources/SpaceOMCP/MCPTools.swift
++++ b/Sources/SpaceOMCP/MCPTools.swift
+@@ -555,7 +555,7 @@ extension MCPToolCall {
+             throw MCPInputError.invalid("'session' is required: claim never picks a session for you")
+         }
+         // The claimed session gets the same protection a session created here would have.
+-        request.orphanGraceSeconds = MCPServer.defaultOrphanGraceSeconds
++        request.orphanGraceSeconds = 1800
+     }
+ }
+ 
+diff --git a/Sources/SpaceOViewer/SurfaceView.swift b/Sources/SpaceOViewer/SurfaceView.swift
+index 991c664..067eed9 100644
+--- a/Sources/SpaceOViewer/SurfaceView.swift
++++ b/Sources/SpaceOViewer/SurfaceView.swift
+@@ -63,6 +63,9 @@ final class VMSurfaceView: NSView {
+     private var activeTrackingArea: NSTrackingArea?
+     private var windowObservers: [NSObjectProtocol] = []
+     private var hostCaptureActive = false
++    private var useNativePointer: Bool {
++        ProcessInfo.processInfo.environment["SPACEO_NATIVE_POINTER"] == "1"
++    }
+     private var savedHostCursorPosition: CGPoint?
+     private var virtualPointer = CGPoint.zero
+     /// Control turns off during the reserved key-down callback. Remember that sequence so its
+@@ -205,6 +208,10 @@ final class VMSurfaceView: NSView {
+     }
+ 
+     override func resetCursorRects() {
++        if useNativePointer {
++            addCursorRect(bounds, cursor: .arrow)
++            return
++        }
+         if !interactionEnabled {
+             let hand: NSCursor = panDragOrigin != nil ? .closedHand : .openHand
+             addCursorRect(bounds, cursor: zoom > 1 ? hand : .arrow)
+@@ -270,6 +277,9 @@ final class VMSurfaceView: NSView {
+     }
+ 
+     private func viewPoint(for event: NSEvent) -> CGPoint {
++        if useNativePointer {
++            return convert(event.locationInWindow, from: nil)
++        }
+         guard hostCaptureActive else {
+             return convert(event.locationInWindow, from: nil)
+         }
+@@ -480,7 +490,7 @@ final class VMSurfaceView: NSView {
+         guard interactionEnabled,
+               window?.isKeyWindow == true,
+               !hostCaptureActive else { return }
+-        savedHostCursorPosition = CGEvent(source: nil)?.location
++        savedHostCursorPosition = useNativePointer ? nil : CGEvent(source: nil)?.location
+         let mapping = MirrorInput.ViewportMapping(
+             displayBounds: displayBounds,
+             viewSize: bounds.size,
+@@ -498,25 +508,25 @@ final class VMSurfaceView: NSView {
+         // outlives this process, so a crash between the breadcrumb and the restore is survivable
+         // while a crash between the takeover and the breadcrumb is not.
+         HostInputGuard.beginCapture()
+-        CGAssociateMouseAndMouseCursorPosition(0)
++        if !useNativePointer { CGAssociateMouseAndMouseCursorPosition(0) }
+         _ = MirrorInput.setHostGlobalShortcutsEnabled(false)
+-        NSCursor.hide()
++        if !useNativePointer { NSCursor.hide() }
+         hostCaptureActive = true
+-        virtualPointerLayer.isHidden = false
++        virtualPointerLayer.isHidden = useNativePointer
+         updateVirtualPointerLayer(mapping: mapping)
+     }
+ 
+     private func endHostInputCapture() {
+         guard hostCaptureActive else { return }
+         _ = MirrorInput.setHostGlobalShortcutsEnabled(true)
+-        CGAssociateMouseAndMouseCursorPosition(1)
++        if !useNativePointer { CGAssociateMouseAndMouseCursorPosition(1) }
+         if let savedHostCursorPosition {
+             CGWarpMouseCursorPosition(savedHostCursorPosition)
+         }
+         savedHostCursorPosition = nil
+         hostCaptureActive = false
+         virtualPointerLayer.isHidden = true
+-        NSCursor.unhide()
++        if !useNativePointer { NSCursor.unhide() }
+         HostInputGuard.endCapture()
+     }
+ 
+@@ -542,7 +552,7 @@ final class VMSurfaceView: NSView {
+     private func updateVirtualPointerLayer(
+         mapping: MirrorInput.ViewportMapping? = nil
+     ) {
+-        guard hostCaptureActive else {
++        guard hostCaptureActive, !useNativePointer else {
+             virtualPointerLayer.isHidden = true
+             return
+         }
+diff --git a/Sources/SpaceOViewer/ViewerApp.swift b/Sources/SpaceOViewer/ViewerApp.swift
+index a704716..92bf1f5 100644
+--- a/Sources/SpaceOViewer/ViewerApp.swift
++++ b/Sources/SpaceOViewer/ViewerApp.swift
+@@ -5,7 +5,6 @@ import SpaceOKit
+ /// A VM-style console onto SpaceO's virtual displays: watch an agent's screen live and, when
+ /// you flip the Control toggle, drive it with your own mouse and keyboard — delivered per-PID,
+ /// so the real cursor, keyboard focus, and frontmost app never change hands.
+-@main
+ struct SpaceOViewerApp: App {
+     static let mainWindowID = "viewer"
+ 
+diff --git a/Tests/SpaceOKitTests/DetachedSessionRecoveryTests.swift b/Tests/SpaceOKitTests/DetachedSessionRecoveryTests.swift
+index 9a6bfc6..eda3def 100644
+--- a/Tests/SpaceOKitTests/DetachedSessionRecoveryTests.swift
++++ b/Tests/SpaceOKitTests/DetachedSessionRecoveryTests.swift
+@@ -205,6 +205,22 @@ final class DetachedSessionRecoveryTests: XCTestCase {
+         XCTAssertTrue(retry.record.apps.isEmpty)
+     }
+ 
++    func testPersonalAgentWorkspaceNeverQuitsLaunchedAppsDuringRecovery() throws {
++        let clock = TestClock(start)
++        let world = ProcessWorld()
++        let launched = app(pid: 704, startedAt: 1_704, provenance: .launched)
++        world.setCurrent(launched.identity)
++        let recovery = try harness(clock: clock, world: world)
++        var original = record(apps: [launched])
++        original.id = "personal-agent-workspace"
++        let loaded = try fenced(original, recovery: recovery)
++        clock.advance(31)
++        let result = try recovery.cleanup(loaded)
++        XCTAssertTrue(world.quitCalls.isEmpty)
++        XCTAssertEqual(world.identity(for: launched.identity.pid), launched.identity)
++        XCTAssertEqual(result.outcome.preservedAdopted, [launched.identity])
++    }
++
+     func testLiveAdoptedAppIsReleasedWithoutTermination() throws {
+         let clock = TestClock(start)
+         let world = ProcessWorld()
+diff --git a/Tests/SpaceOKitTests/ViewerUnitTests.swift b/Tests/SpaceOKitTests/ViewerUnitTests.swift
+index b40d2cc..d7b085f 100644
+--- a/Tests/SpaceOKitTests/ViewerUnitTests.swift
++++ b/Tests/SpaceOKitTests/ViewerUnitTests.swift
+@@ -12,6 +12,17 @@ final class ViewerUnitTests: XCTestCase {
+     // The renderer letterboxes with `resizeAspect`; the mapping is that math in reverse.
+     // If these drift apart, clicks land next to what the user sees — so the mapping is pinned.
+ 
++    func testFullscreenStretchMapsPixelsAndInputToSameEdges() {
++        let mapping = MirrorInput.ViewportMapping(
++            displayBounds: CGRect(x: 1440, y: 0, width: 1920, height: 1080),
++            viewSize: CGSize(width: 1440, height: 900), stretch: true)
++        XCTAssertEqual(mapping.contentRect, CGRect(x: 0, y: 0, width: 1440, height: 900))
++        XCTAssertEqual(mapping.globalPoint(fromViewPoint: CGPoint(x: 720, y: 450)),
++                       CGPoint(x: 2400, y: 540))
++        XCTAssertEqual(mapping.globalPoint(fromViewPoint: CGPoint(x: 0, y: 0)),
++                       CGPoint(x: 1440, y: 0))
++    }
++
+     func testMappingWithoutLetterboxScalesAndOffsets() {
+         let mapping = MirrorInput.ViewportMapping(
+             displayBounds: CGRect(x: 2000, y: 100, width: 1920, height: 1080),
+diff --git a/Sources/SpaceOKit/DisplayModeTransaction.swift b/Sources/SpaceOKit/DisplayModeTransaction.swift
+new file mode 100644
+index 0000000..87ee506
+--- /dev/null
++++ b/Sources/SpaceOKit/DisplayModeTransaction.swift
+@@ -0,0 +1,49 @@
++import Foundation
++
++/// Offline-testable transaction boundary. No live display adapter is supplied: private API
++/// selection, confirmation, topology safety and rollback have not been established.
++struct DisplayModeSize: Equatable {
++    let width: Int
++    let height: Int
++}
++
++protocol DisplayModeTransactionBacking: AnyObject {
++    var identity: UInt32 { get }
++    var descriptorLimit: DisplayModeSize { get }
++    func currentMode() -> DisplayModeSize?
++    func applyMode(_ mode: DisplayModeSize) -> Bool
++}
++
++enum DisplayModeTransactionResult: Equatable {
++    case invalid, unavailable, changed, rolledBack, rollbackFailed, identityChanged
++}
++
++enum DisplayModeTransaction {
++    /// Largest integral exact-aspect mode that fits both descriptor dimensions.
++    static func matchingMode(view: DisplayModeSize, limit: DisplayModeSize) -> DisplayModeSize? {
++        guard view.width > 0, view.height > 0, limit.width > 0, limit.height > 0 else { return nil }
++        func gcd(_ a: Int, _ b: Int) -> Int { var (x, y) = (a, b); while y != 0 { (x, y) = (y, x % y) }; return x }
++        let divisor = gcd(view.width, view.height)
++        let w = view.width / divisor, h = view.height / divisor
++        let scale = min(limit.width / w, limit.height / h)
++        guard scale > 0 else { return nil }
++        return DisplayModeSize(width: w * scale, height: h * scale)
++    }
++
++    static func change(_ backing: DisplayModeTransactionBacking, view: DisplayModeSize) -> DisplayModeTransactionResult {
++        let id = backing.identity
++        guard id != 0 else { return .unavailable }
++        guard let target = matchingMode(view: view, limit: backing.descriptorLimit) else { return .invalid }
++        guard let old = backing.currentMode(), old.width > 0, old.height > 0 else { return .unavailable }
++        guard backing.identity == id else { return .identityChanged }
++        if old == target { return .changed }
++        let accepted = backing.applyMode(target)
++        guard backing.identity == id else { return .identityChanged }
++        if accepted && backing.currentMode() == target && backing.identity == id { return .changed }
++        guard backing.identity == id else { return .identityChanged }
++        let restored = backing.applyMode(old)
++        guard backing.identity == id else { return .identityChanged }
++        guard restored && backing.currentMode() == old && backing.identity == id else { return .rollbackFailed }
++        return .rolledBack
++    }
++}
+diff --git a/Tests/SpaceOKitTests/DisplayModeTransactionTests.swift b/Tests/SpaceOKitTests/DisplayModeTransactionTests.swift
+new file mode 100644
+index 0000000..5999205
+--- /dev/null
++++ b/Tests/SpaceOKitTests/DisplayModeTransactionTests.swift
+@@ -0,0 +1,36 @@
++import XCTest
++@testable import SpaceOKit
++
++final class DisplayModeTransactionTests: XCTestCase {
++    final class Fake: DisplayModeTransactionBacking {
++        var identity: UInt32 = 42
++        let descriptorLimit = DisplayModeSize(width: 1920, height: 1080)
++        var mode = DisplayModeSize(width: 1920, height: 1080)
++        var responses = [Bool]()
++        var calls = [DisplayModeSize]()
++        var changeIdentity = false
++        func currentMode() -> DisplayModeSize? { mode }
++        func applyMode(_ requested: DisplayModeSize) -> Bool {
++            calls.append(requested)
++            if changeIdentity { identity = 99 }
++            let ok = responses.isEmpty ? true : responses.removeFirst()
++            if ok { mode = requested }
++            return ok
++        }
++    }
++    let view = DisplayModeSize(width: 1710, height: 1107)
++    func testExactGeometryAndPointerMapping() {
++        let target = DisplayModeTransaction.matchingMode(view: view, limit: .init(width: 1920, height: 1080))!
++        XCTAssertEqual(target, .init(width: 1520, height: 984))
++        let m = MirrorInput.ViewportMapping(displayBounds: CGRect(x: 100, y: 50, width: target.width, height: target.height), viewSize: CGSize(width: view.width, height: view.height), stretch: true)
++        XCTAssertEqual(m.contentRect.size, CGSize(width: 1710, height: 1107))
++        let p = m.globalPoint(fromViewPoint: CGPoint(x: 855, y: 553.5))!
++        XCTAssertEqual(p.x, 860, accuracy: 0.001); XCTAssertEqual(p.y, 542, accuracy: 0.001)
++        XCTAssertEqual(m.contentRect.width / CGFloat(target.width), m.contentRect.height / CGFloat(target.height), accuracy: 0.00001)
++    }
++    func testSuccessAndIdentity() { let f = Fake(); XCTAssertEqual(DisplayModeTransaction.change(f, view: view), .changed); XCTAssertEqual(f.identity, 42); XCTAssertEqual(f.calls.count, 1) }
++    func testFailedApplyRollsBack() { let f = Fake(); f.responses = [false, true]; XCTAssertEqual(DisplayModeTransaction.change(f, view: view), .rolledBack); XCTAssertEqual(f.calls.count, 2) }
++    func testFailedRollback() { let f = Fake(); f.responses = [false, false]; XCTAssertEqual(DisplayModeTransaction.change(f, view: view), .rollbackFailed) }
++    func testIdentityChangeDoesNotTouchReplacement() { let f = Fake(); f.changeIdentity = true; XCTAssertEqual(DisplayModeTransaction.change(f, view: view), .identityChanged); XCTAssertEqual(f.calls.count, 1) }
++    func testInvalidGeometryDoesNotApply() { let f = Fake(); XCTAssertEqual(DisplayModeTransaction.change(f, view: .init(width: 0, height: 1)), .invalid); XCTAssertTrue(f.calls.isEmpty) }
++}

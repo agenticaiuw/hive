@@ -10,16 +10,16 @@ measured in.
 from __future__ import annotations
 
 import base64
+import ctypes
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mac_mcp import LOOK, Server, batch_tool, main, result, run_batch, text  # noqa: E402
-from phone import Phone, PhoneError  # noqa: E402
+from phone import Phone, PhoneError, _phone_library  # noqa: E402
 
 SETTLE = 0.4  # seconds for the phone's screen to catch up before the screenshot after an action
 
@@ -29,6 +29,14 @@ def point(desc: str) -> dict:
 
 
 TOOLS = [
+    {
+        "name": "authenticate",
+        "description": "Use the locally saved device passcode at a verified iPhone system passcode prompt. "
+                       "Requires the configured phone to stay connected through Pocket Connect. "
+                       "Takes no secret arguments; this is not for app passwords or payments. "
+                       "Returns status only. If unavailable or rejected, stop and let the user authenticate; never retry or ask for the passcode in chat.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
     {
         "name": "screenshot",
         "description": "See the iPhone's screen. Every x/y in the other tools is a point in this image.",
@@ -101,20 +109,23 @@ INSTRUCTIONS = ("Use the user's iPhone like a person: look with screenshot, act 
 
 def shrink(png: bytes, width: int) -> bytes:
     """The screenshot at one pixel per point, as JPEG: coordinates in it are what taps use."""
-    folder = tempfile.mkdtemp(prefix="phone-shot-")
-    src, out = os.path.join(folder, "s.png"), os.path.join(folder, "s.jpg")
+    lib = _phone_library()
+    lib.agent_phone_shrink.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int64,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t)]
+    lib.agent_phone_shrink.restype = ctypes.c_int
+    lib.agent_phone_bytes_free.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.agent_phone_bytes_free.restype = None
+    data = ctypes.create_string_buffer(png, len(png))
+    result, length = ctypes.c_void_p(), ctypes.c_size_t()
+    status = lib.agent_phone_shrink(data, len(png), width, ctypes.byref(result), ctypes.byref(length))
+    if status < 0:
+        raise OSError("Phone screenshot conversion failed")
+    if status:
+        raise subprocess.CalledProcessError(status, "sips")
     try:
-        with open(src, "wb") as f:
-            f.write(png)
-        subprocess.run(["sips", "--resampleWidth", str(width), "-s", "format", "jpeg", "-s", "formatOptions", "75",
-                        src, "--out", out], check=True, capture_output=True)
-        with open(out, "rb") as f:
-            return f.read()
+        return ctypes.string_at(result, length.value)
     finally:
-        for path in (src, out):
-            if os.path.exists(path):
-                os.unlink(path)
-        os.rmdir(folder)
+        lib.agent_phone_bytes_free(result, length.value)
 
 
 class PhoneTools:
@@ -149,6 +160,16 @@ class PhoneTools:
             return result(text(str(e)), error=True)
 
     def _call(self, name: str, a: dict) -> dict:
+        if name == "authenticate":
+            import credentials
+            if a:
+                return result(text("Authentication takes no arguments; never pass a passcode."), error=True)
+            try:
+                return result(text(credentials.authenticate_phone(self.phone)))
+            except (credentials.CredentialError, PhoneError, ValueError, OSError):
+                return result(text("Phone authentication was not confirmed. Check that Pocket Connect is online, "
+                                   "the device passcode is configured in Agent → Authentication, and a system passcode prompt is visible. "
+                                   "Do not retry a failed attempt; check the phone yourself."), error=True)
         if name == "wait":
             time.sleep(min(30.0, float(a["seconds"])))
             return self.look() if a.get("screenshot", True) else result(text("Waited."))
