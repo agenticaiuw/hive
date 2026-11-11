@@ -346,6 +346,37 @@ class Isolated(unittest.TestCase):
         task.session.release.assert_not_called()
 
 
+class ActAndLeftoverGoalTest(unittest.TestCase):
+    def _ended_with(self, goal, before):
+        task = agent.CodexTask("continue")
+        task._started = True
+        task.began = agent.time.monotonic()
+        task._turn = "first"
+        task._thread = "thread"
+        task._between_goal_turns = True
+        task._goal_before = before
+        task._server = mock.Mock()
+        task._server.request.return_value = {"goal": goal}
+        task.session = mock.Mock()
+        task._await_goal_continuation("first")
+        self.assertFalse(task.running)
+        return task
+
+    def test_a_goal_left_blocked_by_an_earlier_task_does_not_fail_this_one(self):
+        task = self._ended_with({"status": "blocked", "createdAt": 1, "updatedAt": 2}, (1, 2))
+        self.assertNotIn("blocked", task._ended)
+        task._server.request.assert_called_once()  # no "diagnose the blocker" turn
+
+    def test_a_goal_this_task_blocked_still_fails_it(self):
+        task = self._ended_with({"status": "blocked", "createdAt": 1, "updatedAt": 3}, (1, 2))
+        self.assertIn("blocked", task._ended)
+
+    def test_the_agent_always_acts_rather_than_explains(self):
+        self.assertIn("whenever you could either act or explain, act", " ".join(agent.RULES.split()))
+        self.assertNotIn("Explain without doing it", agent.RULES)
+        self.assertIn("do it for them", agent.REQUEST)
+
+
 class IdentityTest(Isolated):
     def test_start_and_resume_from_new_instance(self):
         server = Fake()
