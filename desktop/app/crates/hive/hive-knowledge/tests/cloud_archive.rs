@@ -153,3 +153,47 @@ fn keys_types_and_the_bucket() {
     env.set("HIVE_R2_BUCKET", "other");
     assert_eq!(cloud_archive::bucket(), "other");
 }
+
+/// A `cf` that logs its arguments and fails the first time with what it said on 2026-11-11 when
+/// another cf had just spent the shared refresh token, then works.
+fn cf_refused_once(dir: &Path, said: &str) -> Cf {
+    let path = dir.join("cf");
+    let log = dir.join("cf.log");
+    let first = dir.join("refused");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nif [ ! -e '{first}' ]; then : > '{first}'; \
+         printf '%s\\n' '{said}' >&2; exit 1; fi\nexit 0\n",
+        log = log.display(),
+        first = first.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    Cf {
+        path,
+        search_path: "/usr/bin:/bin".into(),
+    }
+}
+
+#[test]
+fn an_upload_whose_sign_in_was_refused_runs_once_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let said = "[7403] The given account is not valid or is not authorized to access this service";
+    let cf = cf_refused_once(dir.path(), said);
+    let file = dir.path().join("meta.json");
+    std::fs::write(&file, "{}").unwrap();
+    let (ok, _) = cloud_archive::put(&cf, "test-bucket", "recordings/x/meta.json", &file);
+    assert!(ok);
+    assert_eq!(calls(dir.path()).len(), 2);
+}
+
+#[test]
+fn any_other_failure_is_not_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cf = cf_refused_once(dir.path(), "bucket not found");
+    let file = dir.path().join("meta.json");
+    std::fs::write(&file, "{}").unwrap();
+    let (ok, said) = cloud_archive::put(&cf, "test-bucket", "recordings/x/meta.json", &file);
+    assert!(!ok);
+    assert_eq!(said, "bucket not found");
+    assert_eq!(calls(dir.path()).len(), 1);
+}
