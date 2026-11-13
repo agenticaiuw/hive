@@ -49,7 +49,7 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
-    '-c', 'mcp_servers.desktop.startup_timeout_sec=60', '-c', 'mcp_servers.desktop.tool_timeout_sec=300',
+    '-c', 'mcp_servers.desktop.startup_timeout_sec=60', '-c', 'mcp_servers.desktop.tool_timeout_sec=1900', // wait_until waits up to 30 minutes
     '-c', 'mcp_servers.phone.command="sudo"', '-c', `mcp_servers.phone.args=${toml(phone)}`,
     '-c', 'mcp_servers.phone.startup_timeout_sec=30', '-c', 'mcp_servers.phone.tool_timeout_sec=180', '-'];
 }
