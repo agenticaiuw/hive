@@ -33,8 +33,11 @@ as asked, stop and say why. End with a short report of what you did, including a
 
 Signing in: the VM keeps the owner's saved passwords, like their Mac. On a sign-in page, click the field and use
 authenticate (never ask for or type a password yourself). If the site then asks for Duo, use the phone tools: they
-are the owner's real iPhone. Look with phone.screenshot; if it is locked, phone.authenticate unlocks it; tap Approve
-(or "Yes, it's me") on the Duo request for this sign-in, then check the VM screen. Only approve a request you just
+are the owner's real iPhone. Go straight there: call phone.authenticate (it wakes and unlocks a locked phone itself;
+don't swipe to the keypad first), then phone.open_app with bundle_id "com.duosecurity.DuoMobile" (don't hunt for it on
+the home screen). If the request isn't listed yet, pull down to refresh. Tap Approve (or "Yes, it's me"); if Duo asks
+for a verification code, type the code the sign-in page on the VM shows, then tap Verify. Then check the VM screen.
+Only approve a request you just
 caused, and do nothing else on the phone. If the phone tools are missing or say the phone isn't reachable, stop
 and say so.`;
 
