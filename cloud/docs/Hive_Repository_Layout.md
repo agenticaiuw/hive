@@ -1,13 +1,12 @@
 # Hive repository layout
 
 Hive is the product name; Hivemind remains the repository and platform name.
-The repository groups its components into five product areas:
+The repository groups its components into four product areas:
 
 - `browser/`: Chrome and Safari extensions.
 - `cloud/`: relay and edge worker.
 - `desktop/`: the desktop app, agent, dashboard, orchestrator and integration tooling.
 - `mobile/`: simulator and iOS application.
-- `wearable/`: physical designs, firmware and build guides.
 
 Hive's icon is `branding/hive.svg` at the root, its only copy (the Mac app's `.icns`, the Chrome extension's icons and the dashboard all come from it); architecture documentation is in `cloud/docs/`. Device-specific tests and tools are placed with their components. Run `node cloud/tools/check-platform.mjs` to check component paths.
 

@@ -12,8 +12,6 @@ const components = {
   'cloud/worker': 'cloud/worker',
   'cloud/vm-agent': 'cloud/vm-agent',
   'mobile/ios': 'mobile/ios',
-  'wearable/hardware': 'wearable/hardware',
-  'wearable/firmware': 'wearable/firmware',
   'desktop': 'desktop',
 };
 let failed = false;

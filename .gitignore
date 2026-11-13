@@ -7,22 +7,12 @@
 secrets.conf
 *.log
 
-# Local captures, generated analysis, and private purchase records
+# Local captures and generated analysis
 diagnostics/audio-captures/
-hardware/purchases/
-wearable/hardware/purchases/
-hardware/kicad/KiCad-backups/
-wearable/hardware/kicad/KiCad-backups/
 output/
 tmp/
 desktop/local-agent/memory/*.json
 desktop/local-agent/memory/*.json
-
-# KiCad local UI state and automatic backups
-*.kicad_prl
-*.lck
-*-backups/
-*-bak
 
 # JavaScript
 node_modules
@@ -40,17 +30,11 @@ coverage/
 target/
 **/target/
 
-# Zephyr / Nordic
+# Build output
 build/
 build-*/
 .build/
 .swiftpm/
-# West workspace state and the west-managed libopus checkout; the pin
-# lives in wearable/firmware/nrf9160/west.yml (west init -l wearable/firmware/nrf9160 && west update)
-firmware/.west/
-firmware/nrf9160/third_party/opus/
-wearable/firmware/.west/
-wearable/firmware/nrf9160/third_party/opus/
 
 # PlatformIO / Python
 .pio/
