@@ -24,7 +24,9 @@ plist="$stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFile' "$plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string Hive.icns' "$plist"
 mkdir -p "$stage/Contents/Resources"
-cp "$repo_root/cloud/shared/branding/branding/Hive.icns" "$stage/Contents/Resources/Hive.icns"
+# Built from branding/hive.svg, the icon's only copy.
+make -s -C "$repo_root/desktop/app" build/Hive.icns >/dev/null
+cp "$repo_root/desktop/app/build/Hive.icns" "$stage/Contents/Resources/Hive.icns"
 entitlements="${stage}.entitlements.plist"
 codesign -d --entitlements :- "$source_app" > "$entitlements" 2>/dev/null || true
 if [ -s "$entitlements" ]; then

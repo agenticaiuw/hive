@@ -9,7 +9,7 @@ The repository groups its components into five product areas:
 - `mobile/`: simulator and iOS application.
 - `wearable/`: physical designs, firmware and build guides.
 
-Shared branding and architecture documentation are in `cloud/shared/branding/` and `cloud/docs/`. Device-specific tests and tools are placed with their components. Run `node cloud/tools/check-platform.mjs` to check component paths.
+Hive's icon is `branding/hive.svg` at the root, its only copy (the Mac app's `.icns`, the Chrome extension's icons and the dashboard all come from it); architecture documentation is in `cloud/docs/`. Device-specific tests and tools are placed with their components. Run `node cloud/tools/check-platform.mjs` to check component paths.
 
 The desktop app was imported as a reviewed snapshot; this layout does not establish live sync, full integration, permission continuity or publication readiness. The mobile agent is still a placeholder; the VM worker (`cloud/vm-agent`) is tested locally but not yet verified against live Discord or X. Imported code and third-party licenses, supported builds, user-state continuity and separate repository history still need verification before publication or retirement of the separate repository.
 
