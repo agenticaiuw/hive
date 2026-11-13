@@ -211,7 +211,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "ci-gate" | "ci-publish" => {
             let out = PathBuf::from(value(rest, "--out").ok_or("--out DIR is needed")?);
-            let r = if cmd == "ci-gate" { ci::gate(&out)? } else { ci::publish(&out)? };
+            let r = if cmd == "ci-gate" {
+                // A gate that can't run still answers, so the VM doesn't wait for nothing.
+                ci::gate(&out).inspect_err(|e| ci::report_error(&out, e))?
+            } else {
+                ci::publish(&out)?
+            };
             println!("{}", serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?);
             Ok(())
         }

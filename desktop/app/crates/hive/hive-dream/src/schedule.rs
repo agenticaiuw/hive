@@ -97,7 +97,8 @@ pub fn nightly(force: bool) -> Result<(), String> {
         log_line(&format!("already ran for {date}"));
         return Ok(());
     }
-    if let Some(why) = postpone_now() {
+    // On the Mac the dream waits for Hive to be idle; on the VM nothing it does touches Hive.
+    if let Some(why) = postpone_now().filter(|_| cfg!(target_os = "macos")) {
         log_line(&format!("postponed: {why}"));
         return Ok(());
     }
@@ -131,6 +132,11 @@ pub fn nightly(force: bool) -> Result<(), String> {
                 log_line(&format!("{} ({}): {}", r.outcome, r.agent, r.signature));
                 for note in &r.notes {
                     log_line(&format!("note: {note}"));
+                }
+                if let Some(done) = &r.deployed {
+                    // The macOS check already decided (the cloud dream).
+                    log_line(done);
+                    continue;
                 }
                 let deployed = match deploy::hold_reason(&r, deploy::autoland()) {
                     Some(why) if r.outcome == "proposed" => format!("not landed: {why}"),

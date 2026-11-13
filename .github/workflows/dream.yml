@@ -1,0 +1,134 @@
+# Hive's nightly dream (desktop/app/crates/hive/hive-dream) runs on Hive's cloud VM. Its agent
+# writes a test that fails on the code as it is, then the fix, and the VM pushes them to a
+# dream/* branch. The VM runs Linux, where hive-mac, hive-sidecars and hive-app don't build, so
+# this macOS runner judges every dream branch (hive-dream's src/ci.rs):
+#
+# - red: the test commit's tests on the code as it was must fail on an assertion;
+# - green: the branch squashed onto main must pass the gate (the touched crates' tests and the
+#   whole workspace's build);
+# - then the squashed commit is pushed to main and the branch deleted. The result (and the end of
+#   each log) is published as refs/dream/ci/<name>, which the VM waits for.
+#
+# The gate runs from main's hive-dream, without push rights; only the last step gets the token.
+# The scheduled run on main builds everything ahead of the night and saves the cache (a cache a
+# dream branch saved would be its own), then runs every test as a baseline.
+name: Dream check
+
+on:
+  push:
+    branches: ['dream/**']
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dream-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: '1.91.0'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  check:
+    if: startsWith(github.ref, 'refs/heads/dream/')
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rust
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/dream/target
+            ${{ runner.temp }}/gate-target
+          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
+            dream-${{ runner.os }}-
+      - name: Build the gate from main
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/main" origin/main
+          cargo build --release --locked -p hive-dream \
+            --manifest-path "$RUNNER_TEMP/main/desktop/app/crates/hive/Cargo.toml" --target-dir "$RUNNER_TEMP/gate-target"
+          cargo fetch --locked --manifest-path desktop/app/crates/hive/Cargo.toml
+          cargo fetch --locked --manifest-path desktop/app/crates/agent-core/Cargo.toml
+      - name: Gate (no push rights)
+        env:
+          HIVE_DREAM_DIR: ${{ runner.temp }}/dream
+          HIVE_DREAM_REPO: ${{ github.workspace }}
+        run: '"$RUNNER_TEMP/gate-target/release/hive-dream" ci-gate --out "$RUNNER_TEMP/out"'
+      - name: Merge and publish the result
+        if: always()
+        env:
+          HIVE_DREAM_DIR: ${{ runner.temp }}/dream
+          HIVE_DREAM_PUSH_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+        run: |
+          test -f "$RUNNER_TEMP/out/result.json" || { echo "ci-gate wrote no result"; exit 1; }
+          "$RUNNER_TEMP/gate-target/release/hive-dream" ci-publish --out "$RUNNER_TEMP/out" > "$RUNNER_TEMP/published.json"
+          {
+            echo "## Dream check: ${GITHUB_REF_NAME}"
+            jq -r '"Stage: \(.stage). Test failed on the old code: \(.red_failed) (\(.red_kind)). Merged into main: \(.merged).",
+                   (.reasons[] | "- \(.)")' "$RUNNER_TEMP/published.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -e '.reasons | length == 0' "$RUNNER_TEMP/published.json" > /dev/null
+
+  warm:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/dream/target
+            ${{ runner.temp }}/gate-target
+          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
+            dream-${{ runner.os }}-
+      - name: Build the gate and every test, as the gate does
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/dream/target
+          CARGO_INCREMENTAL: '0'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          cargo build --release --locked -p hive-dream \
+            --manifest-path desktop/app/crates/hive/Cargo.toml --target-dir "$RUNNER_TEMP/gate-target"
+          cargo test --locked --no-run --workspace --manifest-path desktop/app/crates/hive/Cargo.toml
+          cargo test --locked --no-run --manifest-path desktop/app/crates/agent-core/Cargo.toml
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/dream/target
+            ${{ runner.temp }}/gate-target
+          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+      - name: Every test (a baseline for the gate)
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/dream/target
+          CARGO_INCREMENTAL: '0'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+          HIVE_RECORD: '0'
+        run: |
+          cargo test --locked --workspace --manifest-path desktop/app/crates/hive/Cargo.toml --no-fail-fast
+          cargo test --locked --manifest-path desktop/app/crates/agent-core/Cargo.toml --no-fail-fast

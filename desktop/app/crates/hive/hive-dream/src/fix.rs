@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::ci;
 use crate::evidence::{category, Cluster};
 use crate::gate::{self, Verdict};
 use crate::normalize::{cut, redact};
@@ -490,7 +491,18 @@ pub fn record(register: &mut Register, r: &FixResult) {
         entry.worktree = r.worktree.clone();
     }
     let (status, note) = match r.outcome.as_str() {
-        "proposed" => (Status::Proposed, "the gate passed".to_string()),
+        "proposed" => (
+            Status::Proposed,
+            r.deployed
+                .clone()
+                .unwrap_or_else(|| "the gate passed".to_string()),
+        ),
+        "landed" => (
+            Status::Landed,
+            r.deployed
+                .clone()
+                .unwrap_or_else(|| "merged into main".to_string()),
+        ),
         "rejected" => (
             Status::Rejected,
             r.verdict.as_ref().map_or_else(
@@ -747,6 +759,77 @@ fn ask(
     Ok(said)
 }
 
+/// The VM's gate passed (or not): the branch goes to the macOS check, which merges it into main
+/// when its tests pass there too and step 1's test failed on an assertion.
+#[allow(clippy::too_many_arguments)]
+fn send_to_ci(
+    r: &mut FixResult,
+    worktree: &Path,
+    name: &str,
+    base: &str,
+    head: &str,
+    verdict: Verdict,
+    pushed: bool,
+    run_dir: &Path,
+) -> Result<(), String> {
+    r.commit = Some(head.to_string());
+    r.diffstat = git::git(worktree, &["diff", "--stat", base, head])
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
+    if !verdict.passed {
+        r.outcome = "rejected".into();
+        r.verdict = Some(verdict);
+        if pushed {
+            let _ = ci::delete_branch(worktree, name);
+        }
+        return Ok(());
+    }
+    ci::push(worktree, name, head)?;
+    let (res, _) = ci::wait(worktree, name, head, Duration::from_secs(ci::WAIT_SECS))?;
+    paths::write_atomic(
+        &run_dir.join("ci.json"),
+        &serde_json::to_string_pretty(&res).map_err(|e| e.to_string())?,
+    )?;
+    let green_passed = res.green.as_ref().is_some_and(|g| g.passed);
+    let link = if res.run_url.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", res.run_url)
+    };
+    let (outcome, said) = if res.merged {
+        (
+            "landed",
+            format!(
+                "merged into main as {} by the macOS check{link}",
+                res.merge_commit.as_deref().map_or("", |c| &c[..c.len().min(10)])
+            ),
+        )
+    } else if green_passed && !res.branch_deleted {
+        (
+            "proposed",
+            format!(
+                "the macOS check passed it but left it for a person: {}{link}",
+                res.reasons.join("; ")
+            ),
+        )
+    } else {
+        (
+            "rejected",
+            format!("the macOS check: {}{link}", res.reasons.join("; ")),
+        )
+    };
+    r.outcome = outcome.into();
+    r.deployed = Some(said);
+    let mut v = res.green.unwrap_or(verdict);
+    if outcome == "rejected" {
+        v.passed = false;
+        v.reasons = res.reasons.clone();
+    }
+    r.verdict = Some(v);
+    Ok(())
+}
+
 /// Files that are dirty in ~/hive now and weren't before the agent worked.
 fn new_in_main(repo: &Path, before: &[String]) -> Vec<String> {
     git::dirty(repo)
@@ -866,28 +949,55 @@ fn try_attempt(
         return Ok(());
     }
     let red_log = run_dir.join("red.log");
-    let red_runs = gate::run_tests(&worktree, dream, &packages, &red_log);
-    let Some(red) = red_runs.iter().find(|t| !t.ok) else {
-        rejected(
-            r,
-            "step 1's test passes on the code as it is, so it doesn't show the problem".into(),
-        );
-        return Ok(());
+    let ci = ci::enabled();
+    let wait = Duration::from_secs(ci::WAIT_SECS);
+    let mut pushed = false;
+    let red_summary = if ci && !gate::all_here(&packages) {
+        // The test's crate doesn't build here (Linux): the macOS check runs it on the old code.
+        ci::push(&worktree, &name, &test_commit)?;
+        pushed = true;
+        let (res, log) = ci::wait(&worktree, &name, &test_commit, wait)?;
+        paths::write_atomic(&red_log, &log)?;
+        if !res.run_url.is_empty() {
+            r.notes.push(format!("step 1's test ran in the macOS check: {}", res.run_url));
+        }
+        if !res.red_failed || res.red_kind.is_empty() {
+            rejected(
+                r,
+                format!("the macOS check: {}", res.reasons.join("; ")),
+            );
+            if !res.branch_deleted {
+                let _ = ci::delete_branch(&worktree, &name);
+            }
+            return Ok(());
+        }
+        r.red = res.red_kind;
+        res.red_summary
+    } else {
+        let red_runs = gate::run_tests(&worktree, dream, &packages, &red_log);
+        let Some(red) = red_runs.iter().find(|t| !t.ok) else {
+            rejected(
+                r,
+                "step 1's test passes on the code as it is, so it doesn't show the problem".into(),
+            );
+            return Ok(());
+        };
+        r.red = red_kind(&std::fs::read_to_string(&red_log).unwrap_or_default()).into();
+        if r.red.is_empty() {
+            rejected(
+                r,
+                format!(
+                    "step 1's test run failed, but not on a test or a build: {}",
+                    red.summary
+                ),
+            );
+            return Ok(());
+        }
+        red.summary.clone()
     };
-    r.red = red_kind(&std::fs::read_to_string(&red_log).unwrap_or_default()).into();
-    if r.red.is_empty() {
-        rejected(
-            r,
-            format!(
-                "step 1's test run failed, but not on a test or a build: {}",
-                red.summary
-            ),
-        );
-        return Ok(());
-    }
 
     // Step 2: the fix.
-    let prompt = fix_prompt(c, &setup, &terms, &s.files, &red.summary);
+    let prompt = fix_prompt(c, &setup, &terms, &s.files, &red_summary);
     let said = ask(&setup, &name, "fix", &prompt, &run_dir, r)?;
     r.codex_said = cut(&redact(&said.text, &terms), 2000);
     let changed = new_in_main(&repo, &main_before);
@@ -899,6 +1009,9 @@ fn try_attempt(
     }
     let Some(head) = commit_all(&worktree, &message, &run_dir.join("commit-message.txt"))? else {
         rejected(r, "step 2 changed nothing".into());
+        if pushed {
+            let _ = ci::delete_branch(&worktree, &name);
+        }
         return Ok(());
     };
 
@@ -916,6 +1029,9 @@ fn try_attempt(
         &run_dir.join("gate.json"),
         &serde_json::to_string_pretty(&verdict).map_err(|e| e.to_string())?,
     )?;
+    if ci {
+        return send_to_ci(r, &worktree, &name, &base, &head, verdict, pushed, &run_dir);
+    }
     let head = if verdict.passed {
         // One commit for the test and its fix, so main never has a red commit.
         git::git(&worktree, &["reset", "--soft", "--quiet", &base])?;
