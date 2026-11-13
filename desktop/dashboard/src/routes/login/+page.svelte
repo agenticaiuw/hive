@@ -14,7 +14,7 @@
 <main class="login-shell">
   <section class="login-card" aria-labelledby="login-title">
     <img class="brand-mark" src="{base}/hive.svg" alt="" aria-hidden="true" />
-    <p class="kicker">AI Pendant</p>
+    <p class="kicker">Hive</p>
     <h1 id="login-title">Dashboard</h1>
     <p class="login-copy">Enter your pairing code.</p>
 
