@@ -160,7 +160,10 @@ export function createAgent({
       if (!viewer) viewer = await openViewer();
       viewer.token = randomBytes(24).toString('base64url');
       viewer.lastUsed = Date.now();
-      if (site) await exclusive(async () => (await page()).goto(recipe(site).loginUrl).catch(() => null));
+      if (site) {
+        await exclusive(async () => (await page()).goto(recipe(site).loginUrl).catch(() => null));
+        await viewer.show(null);
+      }
       return { port: viewer.port, token: viewer.token, expiresAt: viewer.lastUsed + viewerIdleMs };
     },
     'POST /view/close': async () => { await closeViewer(); return { open: false }; },
@@ -169,7 +172,10 @@ export function createAgent({
   // ---- viewer -------------------------------------------------------------------------------
 
   async function openViewer() {
-    const state = { port: null, token: null, sessions: new Set(), clients: new Set(), lastUsed: Date.now(), casting: false, size: { width: 1280, height: 800 }, off: null, timer: null };
+    const state = {
+      port: null, token: null, sessions: new Set(), clients: new Set(), lastUsed: Date.now(), casting: false, size: { width: 1280, height: 800 },
+      tabs: new Map(), shown: null, watching: null, switching: Promise.resolve(), timer: null, show: null, stopTitles: null,
+    };
     const authed = request => {
       const cookie = /(?:^|;\s*)hv=([A-Za-z0-9_-]+)/.exec(request.headers.cookie ?? '')?.[1];
       return !!cookie && state.sessions.has(cookie);
@@ -179,29 +185,116 @@ export function createAgent({
       if (!origin) return true;
       try { return ['127.0.0.1', 'localhost'].includes(new URL(origin).hostname); } catch { return false; }
     };
+    const broadcast = (event, data) => { const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; for (const client of state.clients) client.write(line); };
     const pushFrame = (jpegBase64, size) => {
       if (size) state.size = size;
       const event = `data: ${JSON.stringify({ d: jpegBase64, w: state.size.width, h: state.size.height })}\n\n`;
       for (const client of state.clients) client.write(event);
     };
-    const startCast = async () => {
-      const tab = await page();
-      if (!state.off) {
-        state.off = tab.onEvent((method, params) => {
-          if (method !== 'Page.screencastFrame') return;
-          tab.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
-          pushFrame(params.data, { width: params.metadata.deviceWidth, height: params.metadata.deviceHeight });
-        });
-      }
-      if (!state.casting) { state.casting = true; await tab.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1600, maxHeight: 1200 }); }
+    const host = url => { try { return new URL(url).host; } catch { return ''; } };
+    const tabList = () => ({
+      shown: state.shown?.id ?? null,
+      tabs: [...state.tabs.values()].map(tab => ({ id: tab.id, title: String(tab.title ?? '').slice(0, 120), host: host(tab.url), main: tab.main })),
+    });
+    const pushTabs = () => broadcast('tabs', tabList());
+    // The viewer never launches a second browser: it uses the running one or waits its turn.
+    const live = () => (browser?.alive ? browser : exclusive(page));
+
+    // Every tab and popup window of the browser, so a sign-in popup (such as X's "Continue with
+    // Google") appears in the viewer: a new one is shown as it opens, and when the shown one
+    // closes, the tab that opened it is shown again.
+    const watch = async main => {
+      if (state.watching?.browser === main) return;
+      state.watching?.off();
+      state.shown?.off(); // the browser restarted: its old tabs are gone
+      state.tabs.clear(); state.shown = null;
+      let ready = false;
+      const off = main.onBrowserEvent((method, params) => {
+        if (method === 'Target.targetCreated' || method === 'Target.targetInfoChanged') {
+          const info = params.targetInfo;
+          if (info.type !== 'page' || info.url.startsWith('devtools://')) return;
+          const fresh = !state.tabs.has(info.targetId);
+          state.tabs.set(info.targetId, { id: info.targetId, title: info.title, url: info.url, opener: info.openerId ?? null, main: info.targetId === main.targetId });
+          if (fresh && ready) show(info.targetId); else pushTabs();
+        } else if (method === 'Target.targetDestroyed') {
+          const gone = state.tabs.get(params.targetId);
+          if (!gone) return;
+          state.tabs.delete(params.targetId);
+          if (state.shown?.id === params.targetId) show(state.tabs.has(gone.opener) ? gone.opener : main.targetId); else pushTabs();
+        }
+      });
+      state.watching = { browser: main, off };
+      await main.browserSend('Target.setDiscoverTargets', { discover: true });
+      if (!state.tabs.has(main.targetId)) state.tabs.set(main.targetId, { id: main.targetId, title: '', url: '', opener: null, main: true });
+      ready = true;
+    };
+    // Chrome doesn't always report a title change, so titles are read again as pictures come in:
+    // at most every 2 s, and always once after the latest picture.
+    let titlesReadAt = 0; let titlesDue = null;
+    const readTitles = main => {
+      if (titlesDue) return;
+      titlesDue = setTimeout(async () => {
+        titlesDue = null; titlesReadAt = Date.now();
+        if (!main.alive) return;
+        const { targetInfos = [] } = await main.browserSend('Target.getTargets').catch(() => ({}));
+        let changed = false;
+        for (const info of targetInfos) {
+          const tab = state.tabs.get(info.targetId);
+          if (tab && (tab.title !== info.title || tab.url !== info.url)) { tab.title = info.title; tab.url = info.url; changed = true; }
+        }
+        if (changed) pushTabs();
+      }, Math.max(0, titlesReadAt + 2_000 - Date.now()));
+      titlesDue.unref();
+    };
+    state.stopTitles = () => clearTimeout(titlesDue);
+    const cast = async tab => {
+      await tab.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1600, maxHeight: 1200 });
       pushFrame((await tab.screenshot({ quality: 60 })).toString('base64'), await tab.viewport());
     };
+    const release = async () => {
+      const shown = state.shown;
+      if (!shown) return;
+      state.shown = null;
+      shown.off();
+      await shown.tab.send('Page.stopScreencast').catch(() => {});
+      if (!shown.main) await shown.tab.detach().catch(() => {});
+    };
+    const showNow = async id => {
+      const main = await live();
+      await watch(main);
+      if (!state.tabs.has(id)) id = main.targetId;
+      if (state.shown?.id !== id) {
+        await release();
+        let tab = main;
+        if (id !== main.targetId) {
+          try { tab = await main.attach(id); } catch { id = main.targetId; } // it closed already
+        }
+        const off = tab.onEvent((method, params) => {
+          if (method !== 'Page.screencastFrame') return;
+          tab.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+          if (state.shown?.tab !== tab) return;
+          pushFrame(params.data, { width: params.metadata.deviceWidth, height: params.metadata.deviceHeight });
+          readTitles(main);
+        });
+        state.shown = { id, tab, off, main: tab === main };
+      }
+      // A tab in the background sends no pictures, so the shown one comes to the front.
+      await main.browserSend('Target.activateTarget', { targetId: id }).catch(() => {});
+      pushTabs();
+      if (state.casting) await cast(state.shown.tab);
+    };
+    // Switches happen one at a time, in order. null shows the main tab.
+    // A tab closing mid-switch is no problem: the switch its closing starts comes next.
+    const show = id => (state.switching = state.switching.then(() => showNow(id))
+      .catch(error => { if (error.code !== 'tab_closed') broadcast('problem', error.message); }));
+    state.show = show;
+    const startCast = () => { state.casting = true; return show(state.shown?.id ?? null); };
     const stopCast = async () => {
       state.casting = false;
-      if (browser?.alive) await browser.send('Page.stopScreencast').catch(() => {});
+      await state.shown?.tab.send('Page.stopScreencast').catch(() => {});
     };
     const forward = async event => {
-      const tab = await page();
+      const tab = state.shown?.tab ?? await live();
       const { width, height } = state.size;
       const at = { x: Math.round(Math.min(1, Math.max(0, Number(event.x) || 0)) * width), y: Math.round(Math.min(1, Math.max(0, Number(event.y) || 0)) * height) };
       const modifiers = Number(event.mod) & 15;
@@ -242,7 +335,8 @@ export function createAgent({
           response.write(': connected\n\n');
           state.clients.add(response);
           request.on('close', () => { state.clients.delete(response); if (!state.clients.size) stopCast(); });
-          await exclusive(startCast).catch(error => response.write(`event: problem\ndata: ${JSON.stringify(error.message)}\n\n`));
+          response.write(`event: tabs\ndata: ${JSON.stringify(tabList())}\n\n`);
+          await startCast();
           return;
         }
         if (request.method === 'POST' && request.headers['x-hive-viewer'] === '1') {
@@ -257,6 +351,15 @@ export function createAgent({
               target = body.page === 'home' ? site.homeUrl : site.loginUrl;
             }
             await exclusive(async () => (await page()).goto(target));
+            await show(null);
+            return send(204, '');
+          }
+          if (url.pathname === '/tab') {
+            const tab = state.tabs.get(String(body.id ?? ''));
+            if (!tab) throw new HttpError(404, 'no_tab', 'that tab has closed');
+            if (!body.close) await show(tab.id);
+            else if (tab.main) throw new HttpError(400, 'main_tab', 'the main tab stays open');
+            else await (await live()).browserSend('Target.closeTarget', { targetId: tab.id });
             return send(204, '');
           }
         }
@@ -276,9 +379,19 @@ export function createAgent({
     if (!viewer) return;
     const state = viewer; viewer = null;
     clearInterval(state.timer);
-    state.off?.();
+    state.stopTitles();
+    state.casting = false;
+    await state.switching;
+    state.watching?.off();
     for (const client of state.clients) client.end();
-    if (browser?.alive) await browser.send('Page.stopScreencast').catch(() => {});
+    if (state.watching?.browser.alive) {
+      const shown = state.shown;
+      if (shown) { shown.off(); await shown.tab.send('Page.stopScreencast').catch(() => {}); if (!shown.main) await shown.tab.detach().catch(() => {}); }
+      const main = state.watching.browser;
+      await main.browserSend('Target.setDiscoverTargets', { discover: false }).catch(() => {});
+      // Posting works in the main tab, so it goes back in front.
+      await main.browserSend('Target.activateTarget', { targetId: main.targetId }).catch(() => {});
+    }
     state.server.closeAllConnections?.();
     await new Promise(resolve => state.server.close(resolve));
     log('viewer closed');

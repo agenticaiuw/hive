@@ -10,6 +10,13 @@ import { PostError, PostStore, postDigest } from './posts.mjs';
 import { RECIPES, normalizeText, ownedLink, validatePost } from './sites.mjs';
 
 const tempDir = t => { const dir = mkdtempSync(join(tmpdir(), 'hive-vm-agent-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
+// A worker in a fresh state folder; the browser closes before the folder is removed.
+const agentIn = (t, options) => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'hive-vm-agent-'));
+  const agent = createAgent({ stateDir, ...options });
+  t.after(async () => { await agent.close(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 5 }); });
+  return agent;
+};
 const code = expected => error => error instanceof PostError && error.code === expected;
 
 test('a post is sent only once, only while a matching approval is fresh', t => {
@@ -85,6 +92,10 @@ function fixtureSite() {
       });
       return;
     }
+    // A page whose one button opens a popup window, and the popup, which closes itself when clicked.
+    const whole = 'style="position:fixed;inset:0;width:100%;height:100%"';
+    if (url.pathname === '/opener') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('Opener', `<button ${whole} onclick="window.open('/popup', 'signin', 'width=420,height=360')">Continue with a popup</button>`)); }
+    if (url.pathname === '/popup') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('Popup sign-in', `<button ${whole} onclick="window.close()">Done</button>`)); }
     if (url.pathname === '/login') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('Sign in', '<form method="post" action="/login"><input name="password" type="password" autofocus></form>')); }
     if (url.pathname === '/sent' && req.method === 'POST') {
       let body = ''; req.on('data', chunk => { body += chunk; });
@@ -156,8 +167,9 @@ const firstFrame = (port, cookie) => new Promise((resolve, reject) => {
     let buffer = '';
     response.on('data', chunk => {
       buffer += chunk;
-      const match = /^data: (.+)$/m.exec(buffer);
-      if (match && buffer.includes('\n\n', match.index)) { incoming.destroy(); resolve(JSON.parse(match[1])); }
+      // The first picture: a plain data block (tab lists come as "event: tabs").
+      const match = /(?:^|\n\n)data: (.+)\n\n/.exec(buffer);
+      if (match) { incoming.destroy(); resolve(JSON.parse(match[1])); }
     });
   });
   incoming.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
@@ -181,14 +193,95 @@ test('the browser goes through HIVE_VM_PROXY when it is set, and only a proxy ad
   }
 });
 
+// Reads a viewer's event stream: next(name, predicate) resolves with the next matching event's data.
+function viewerEvents(port, cookie) {
+  const seen = []; const waiting = [];
+  const settle = () => {
+    for (const wait of [...waiting]) {
+      const index = seen.findIndex(event => event.name === wait.name && wait.predicate(event.data));
+      if (index < 0) continue;
+      const event = seen[index];
+      // In order: earlier events of the same kind are used up too.
+      for (let i = index; i >= 0; i--) if (seen[i].name === wait.name) seen.splice(i, 1);
+      waiting.splice(waiting.indexOf(wait), 1); clearTimeout(wait.timer); wait.resolve(event.data);
+    }
+  };
+  const incoming = get({ host: '127.0.0.1', port, path: '/frames', headers: { cookie } }, response => {
+    let buffer = '';
+    response.on('data', chunk => {
+      buffer += chunk;
+      let end;
+      while ((end = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        const name = /^event: (.+)$/m.exec(block)?.[1] ?? 'message';
+        const data = /^data: (.+)$/m.exec(block)?.[1];
+        if (data) seen.push({ name, data: JSON.parse(data) });
+      }
+      settle();
+    });
+  });
+  incoming.on('error', () => {});
+  return {
+    next: (name, predicate = () => true, timeoutMs = 15_000) => new Promise((resolve, reject) => {
+      const wait = { name, predicate, resolve, timer: setTimeout(() => reject(new Error(`no ${name} event in time: ${predicate}`)), timeoutMs) };
+      waiting.push(wait); settle();
+    }),
+    close: () => incoming.destroy(),
+  };
+}
+
+test('a popup window opened from the page shows in the viewer, and its opener again when it closes', { skip: !CHROME && 'no Chromium available', timeout: 60_000 }, async t => {
+  const site = await fixtureSite(); t.after(site.close);
+  const agent = agentIn(t, {
+    executable: CHROME, headless: true, viewerPort: 0,
+    extraRecipes: { opener: { ...site.recipe, name: 'opener', loginUrl: `${site.base}/opener` } },
+  });
+  const view = await agent.handle('POST', '/view/open', { site: 'opener' });
+  const cookie = (await http(view.port, 'GET', `/auth?t=${view.token}`)).headers['set-cookie'][0].split(';')[0];
+  const events = viewerEvents(view.port, cookie); t.after(events.close);
+  const headers = { 'x-hive-viewer': '1', origin: `http://127.0.0.1:${view.port}` };
+  const click = async () => {
+    for (const k of ['mousePressed', 'mouseReleased']) assert.equal((await http(view.port, 'POST', '/input', { cookie, headers, body: JSON.stringify({ t: 'm', k, x: 0.5, y: 0.5, c: 1 }) })).status, 204);
+  };
+
+  const first = await events.next('tabs', list => list.tabs.some(tab => tab.title === 'Opener') && !!list.shown);
+  const main = first.tabs.find(tab => tab.main);
+  assert.equal(first.shown, main.id);
+  assert.equal(main.host, new URL(site.base).host);
+  const mainPicture = await events.next('message');
+
+  await click(); // the page opens its popup
+  const opened = await events.next('tabs', list => list.tabs.length === 2 && list.tabs.find(tab => tab.id === list.shown)?.title === 'Popup sign-in');
+  const popup = opened.tabs.find(tab => tab.id === opened.shown);
+  assert.equal(popup.main, false);
+  const picture = await events.next('message', frame => frame.w !== mainPicture.w); // popups open smaller
+  assert.ok(picture.d.length > 500, 'the viewer shows the popup');
+
+  // Switching by hand, and closing a tab other than the main one.
+  assert.equal((await http(view.port, 'POST', '/tab', { cookie, headers, body: JSON.stringify({ id: main.id }) })).status, 204);
+  await events.next('tabs', list => list.shown === main.id);
+  assert.equal((await http(view.port, 'POST', '/tab', { cookie, headers, body: JSON.stringify({ id: main.id, close: true }) })).status, 400, 'the main tab stays open');
+  assert.equal((await http(view.port, 'POST', '/tab', { cookie, headers, body: JSON.stringify({ id: 'nope' }) })).status, 404);
+  assert.equal((await http(view.port, 'POST', '/tab', { cookie, headers, body: JSON.stringify({ id: popup.id }) })).status, 204);
+  await events.next('tabs', list => list.shown === popup.id);
+
+  await click(); // the popup closes itself, as a finished sign-in popup does
+  const closed = await events.next('tabs', list => /* popup closed itself */ list.tabs.length === 1 && !!list.shown);
+  assert.equal(closed.shown, main.id, 'the page that opened the popup is shown again');
+
+  await click(); // a second popup, closed from the viewer
+  const again = await events.next('tabs', list => list.tabs.length === 2 && !!list.shown && list.shown !== main.id);
+  assert.equal((await http(view.port, 'POST', '/tab', { cookie, headers, body: JSON.stringify({ id: again.shown, close: true }) })).status, 204);
+  assert.equal((await events.next('tabs', list => /* closed from the viewer */ list.tabs.length === 1 && !!list.shown)).shown, main.id);
+});
+
 test('sign-in through the viewer, then an approved post with an attachment goes out exactly once', { skip: !CHROME && 'no Chromium available', timeout: 120_000 }, async t => {
   const site = await fixtureSite(); t.after(site.close);
   const logs = [];
-  const agent = createAgent({
-    stateDir: tempDir(t), executable: CHROME, headless: true, extraRecipes: { fixture: site.recipe }, viewerPort: 0, log: line => logs.push(line),
+  const agent = agentIn(t, {
+    executable: CHROME, headless: true, extraRecipes: { fixture: site.recipe }, viewerPort: 0, log: line => logs.push(line),
     timeouts: { arriveMs: 8_000, readbackMs: 3_000, attachMs: 5_000, proofMs: 3_000, proofWithFilesMs: 5_000 },
   });
-  t.after(() => agent.close());
   const destination = `${site.base}/channel`;
   const text = 'First line of the post\n\nSecond paragraph — with punctuation: "quotes", it\'s fine.';
 
