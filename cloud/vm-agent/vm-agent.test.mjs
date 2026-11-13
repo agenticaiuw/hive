@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, get, request } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgent } from './agent.mjs';
-import { proxyArgs } from './browser.mjs';
+import { desktopBrowserArgs, proxyArgs } from './browser.mjs';
 import { PostError, PostStore, postDigest } from './posts.mjs';
 import { RECIPES, normalizeText, ownedLink, validatePost } from './sites.mjs';
 
@@ -229,6 +230,89 @@ function viewerEvents(port, cookie) {
     close: () => incoming.destroy(),
   };
 }
+
+// Stand-ins for the sign-in desktop's browser and VNC server: each records its arguments (and the
+// VNC one the password it read) in <script>.json, and runs until asked to quit.
+function standIn(dir, name, body = '') {
+  const path = join(dir, name);
+  writeFileSync(path, `#!${process.execPath}
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+const record = { pid: process.pid, args: process.argv.slice(2), env: { DISPLAY: process.env.DISPLAY }, quit: null };
+const save = () => writeFileSync(${JSON.stringify(path + '.json')}, JSON.stringify(record));
+${body}
+save();
+process.on('SIGTERM', () => { record.quit = 'SIGTERM'; save(); process.exit(0); });
+setInterval(() => {}, 1000);
+`);
+  chmodSync(path, 0o755);
+  const record = () => JSON.parse(readFileSync(`${path}.json`, 'utf8'));
+  // The latest record that passes `test`, once there is one.
+  const recorded = async (test = () => true) => {
+    for (let i = 0; i < 100; i++) {
+      try { const value = record(); if (test(value)) return value; } catch { /* not written yet */ }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(`${name} never recorded what was expected`);
+  };
+  return { path, recorded };
+}
+const freePort = () => new Promise(resolve => { const server = createTcpServer().listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => resolve(port)); }); });
+
+test('the sign-in desktop browser is the same profile with no remote control', () => {
+  const args = desktopBrowserArgs({ profileDir: '/state/profile', proxy: 'socks5://127.0.0.1:11080', url: 'https://x.com/i/flow/login' });
+  assert.ok(args.includes('--user-data-dir=/state/profile'));
+  assert.ok(args.includes('--proxy-server=socks5://127.0.0.1:11080'));
+  assert.equal(args.at(-1), 'https://x.com/i/flow/login');
+  assert.ok(!args.some(arg => /remote-debugging|enable-automation|headless/.test(arg)), 'nothing remote-controls it');
+});
+
+test('while the sign-in desktop is open the worker drives nothing, and its browser comes back after', { skip: !CHROME && 'no Chromium available', timeout: 60_000 }, async t => {
+  const site = await fixtureSite(); t.after(site.close);
+  const dir = mkdtempSync(join(tmpdir(), 'hive-vm-desktop-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const port = await freePort();
+  const browser = standIn(dir, 'browser.mjs');
+  const vnc = standIn(dir, 'vnc.mjs', `
+const file = process.argv[process.argv.indexOf('-passwdfile') + 1].replace(/^rm:/, '');
+record.password = readFileSync(file, 'utf8').trim(); rmSync(file);
+const { createServer } = await import('node:net');
+createServer(socket => { socket.on('error', () => {}); socket.end('RFB 003.008\\n'); }).listen(Number(process.argv[process.argv.indexOf('-rfbport') + 1]), '127.0.0.1');`);
+  const agent = agentIn(t, { executable: CHROME, headless: true, extraRecipes: { fixture: site.recipe }, desktop: { port, display: ':99', vnc: vnc.path, browser: browser.path } });
+
+  assert.equal((await agent.handle('POST', '/check', { platform: 'fixture' })).state, 'needs_login');
+  assert.equal((await agent.handle('GET', '/status')).browser.state, 'running');
+  const desk = await agent.handle('POST', '/desktop/open', { site: 'fixture' });
+  assert.equal(desk.port, port);
+  assert.match(desk.password, /^[\w-]{8}$/);
+  const status = await agent.handle('GET', '/status');
+  assert.equal(status.browser.state, 'not_started', 'the remote-controlled browser closed first');
+  assert.equal(status.desktop.open, true);
+  assert.ok(!('password' in status.desktop), 'status does not show the password');
+  const opened = await browser.recorded();
+  assert.equal(opened.args.at(-1), site.recipe.loginUrl);
+  assert.ok(!opened.args.some(arg => arg.includes('remote-debugging')));
+  assert.equal(opened.env.DISPLAY, ':99');
+  const shared = await vnc.recorded();
+  assert.deepEqual(shared.args.slice(0, 5), ['-display', ':99', '-localhost', '-rfbport', String(port)]);
+  assert.equal(shared.password, desk.password, 'VNC asks for the one-time password');
+  assert.ok(!existsSync(shared.args[shared.args.indexOf('-passwdfile') + 1].replace(/^rm:/, '')), 'the password file is gone once read');
+
+  await assert.rejects(agent.handle('POST', '/check', { platform: 'fixture' }), { code: 'signing_in', status: 409 });
+  assert.equal((await agent.handle('POST', '/desktop/open', { site: 'fixture' })).password, desk.password, 'opening again keeps the same desktop');
+
+  await agent.handle('POST', '/desktop/close', {});
+  await browser.recorded(r => r.quit === 'SIGTERM'); // asked to quit, so it saves its cookies
+  await vnc.recorded(r => r.quit === 'SIGTERM');
+  assert.equal((await agent.handle('GET', '/status')).desktop.open, false);
+  assert.equal((await agent.handle('POST', '/check', { platform: 'fixture' })).state, 'needs_login', 'the worker uses its own browser again');
+
+  // Closing the browser on the desktop hands it back too.
+  await agent.handle('POST', '/desktop/open', {});
+  const second = await browser.recorded(r => r.quit === null && r.args.at(-1) === 'about:blank');
+  process.kill(second.pid, 'SIGTERM');
+  for (let i = 0; i < 50 && (await agent.handle('GET', '/status')).desktop.open; i++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await agent.handle('GET', '/status')).desktop.open, false);
+  await vnc.recorded(r => r.quit === 'SIGTERM' && r.password !== desk.password);
+});
 
 test('a popup window opened from the page shows in the viewer, and its opener again when it closes', { skip: !CHROME && 'no Chromium available', timeout: 60_000 }, async t => {
   const site = await fixtureSite(); t.after(site.close);

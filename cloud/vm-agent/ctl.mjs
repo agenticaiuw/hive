@@ -11,7 +11,7 @@ const ROUTES = {
   status: ['GET', '/status'], posts: ['GET', '/posts'], post: ['GET', '/post'], screenshot: ['GET', '/screenshot'],
   check: ['POST', '/check'], draft: ['POST', '/draft'], approve: ['POST', '/approve'], send: ['POST', '/send'],
   cancel: ['POST', '/cancel'], discover: ['POST', '/discover'], 'view-open': ['POST', '/view/open'], 'view-close': ['POST', '/view/close'],
-  upload: ['POST', '/upload'],
+  upload: ['POST', '/upload'], 'desktop-open': ['POST', '/desktop/open'], 'desktop-close': ['POST', '/desktop/close'],
 };
 
 const readStdin = async () => { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); return Buffer.concat(chunks); };
