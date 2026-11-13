@@ -14,7 +14,7 @@ HIVE_BINS := hive-agent hive-auth-mcp hive-phone-mcp hive-vhid hive-credentials 
 	spaceo-mcp-bridge workspace-fence workspace-update workspace-tool restart-agent-once hive-bundle-migration
 HIVE_BUILT := $(addprefix build/,$(HIVE_BINS))
 
-all: build/agent-vhid-helper build/agent-vhid-ocr build/agent-vhid-tap build/agent-vhid-captions $(HIVE_BUILT) \
+all: build/agent-vhid-helper build/agent-vhid-ocr build/agent-vhid-tap build/agent-vhid-captions build/hive-monitor $(HIVE_BUILT) \
 	build/agent-vhid-paste build/agent-vhid-selection build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger build/Agent.app
 
 # One cargo build for all of them; each is copied in through a temporary file and renamed, so a
@@ -114,6 +114,13 @@ build/agent-vhid-tap: tools/tap.swift
 build/agent-vhid-captions: tools/captions.swift
 	@mkdir -p build
 	swiftc -O tools/captions.swift -o $@.tmp
+	mv $@.tmp $@
+
+# The virtual monitor: `serve` makes the display, `switch` is the right Option key that shows it.
+build/hive-monitor: tools/hive_monitor.m
+	@mkdir -p build
+	clang -fobjc-arc -O2 -Wall tools/hive_monitor.m -o $@.tmp -framework Cocoa -framework ApplicationServices \
+		-framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework QuartzCore -framework IOSurface
 	mv $@.tmp $@
 
 build/agent-vhid-paste: tools/paste.swift

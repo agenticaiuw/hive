@@ -8,6 +8,10 @@
 //! Where Hive works is the user's choice, asked when the app starts and kept in the state folder's
 //! `work-screen` file: "real" (their own screen, the default) or "virtual". HIVE_VIRTUAL_MONITOR=1
 //! or =0 overrides the file.
+//!
+//! The virtual monitor has no glass, so `hive-monitor switch` runs with it: a tap of right Option
+//! shows it live on the user's screen with their cursor and keyboard on it, and the next tap brings
+//! them back (tools/hive_monitor.m).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -100,10 +104,71 @@ pub fn ask(timeout: u64) -> &'static str {
     picked
 }
 
-/// Turns the virtual monitor off; macOS moves its windows to the user's screen.
+/// Turns the virtual monitor off; macOS moves its windows to the user's screen. The right Option
+/// switch goes with it (it puts your cursor back first).
 pub fn off() {
-    let pattern = format!("{} serve", helper().display());
-    let _ = process::run("pkill", ["-TERM", "-f", &pattern], None, None);
+    for command in ["switch", "serve"] {
+        let pattern = format!("{} {command}", helper().display());
+        let _ = process::run("pkill", ["-TERM", "-f", &pattern], None, None);
+    }
+}
+
+/// The lock `hive-monitor switch` holds while it runs, so there is only ever one.
+pub fn switch_lock() -> PathBuf {
+    hive_common::state_dir().join("monitor-switch.lock")
+}
+
+/// `hive-monitor switch` is running: its lock is taken.
+pub fn switch_running() -> bool {
+    use std::os::unix::io::AsRawFd;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(switch_lock())
+    else {
+        return false;
+    };
+    // Taking it means nobody holds it; closing the file lets go again.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+}
+
+/// Starts the right Option switch (`hive-monitor switch`) unless it is running: a tap of right
+/// Option shows the virtual monitor on your screen with your cursor and keyboard on it, and the
+/// next tap brings you back. What it says goes to `monitor-switch.log` in the state folder.
+fn start_switch(helper: &std::path::Path) {
+    if switch_running() {
+        return;
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(hive_common::state_dir().join("monitor-switch.log"));
+    spawn_detached(helper, &["switch"], log.ok());
+}
+
+/// Runs the helper in a session of its own, so it outlives this process.
+fn spawn_detached(helper: &std::path::Path, args: &[&str], log: Option<std::fs::File>) {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(helper);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// The virtual monitor is wanted: HIVE_VIRTUAL_MONITOR=1/0, else the saved choice.
@@ -143,30 +208,14 @@ pub fn ensure(timeout: Duration) -> Option<Bounds> {
     }
     let found = bounds();
     let helper = helper();
-    if found.is_some() || !executable(&helper) {
+    if !executable(&helper) {
         return found;
     }
-    {
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-        let mut command = Command::new(&helper);
-        command
-            .args(["serve", &size()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        if let Ok(mut child) = command.spawn() {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+    start_switch(&helper);
+    if found.is_some() {
+        return found;
     }
+    spawn_detached(&helper, &["serve", &size()], None);
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(found) = bounds() {

@@ -72,6 +72,7 @@ HIVE_VM_BROWSER=/path/to/chromium node server.mjs
 ```bash
 node desktop/vm-post.mjs login x              # the VM's browser in Screen Sharing: sign in yourself
 node desktop/vm-post.mjs view x               # watch and use the worker's own browser
+node desktop/vm-post.mjs watch                # the VM's whole screen, live and view only, in Screen Sharing
 node desktop/vm-post.mjs where discord        # your servers; add a server id for its channels
 node desktop/vm-post.mjs send --to club-general --file shot.png --text "hello"
 node desktop/vm-post.mjs send --to x --text "hello"
