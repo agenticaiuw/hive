@@ -516,6 +516,21 @@ impl KnowledgeBase {
         Ok(found)
     }
 
+    /// Applies the repo's migrations the database hasn't had yet (a database made before a new
+    /// table was added gets it). Additive: every migration only creates tables and indexes.
+    pub fn apply_migrations(&self) -> Result<(), Error> {
+        let db = self.database_id()?;
+        if !self.migrations.is_dir() {
+            return Err(Error::Offline(format!(
+                "the knowledge base schema is missing ({})",
+                self.migrations.display()
+            )));
+        }
+        let dir = self.migrations.to_string_lossy().into_owned();
+        self.cf_json(&["d1", "migrations", "apply", &db, "--dir", &dir], 120)
+            .map(drop)
+    }
+
     /// Runs the statements as one D1 batch; returns each one's rows. The parameters go in a
     /// private file, never on the command line.
     pub fn query(&self, statements: &[(String, Vec<Value>)]) -> Result<Vec<Vec<Value>>, Error> {
