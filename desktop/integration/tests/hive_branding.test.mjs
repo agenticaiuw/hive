@@ -1,19 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '../../..');
 
-test('Hive assets are yellow hexagon and iOS identity remains unchanged', () => {
-  const svg = readFileSync(join(root, 'cloud/shared/branding/branding/hive.svg'), 'utf8');
-  assert.match(svg, /#F5C842/); assert.match(svg, /M512 152/);
+test('Hive assets are the gold hexagon and iOS identity remains unchanged', () => {
+  // One icon, at the root; the dashboard links to it and the Mac app's .icns is built from it.
+  const svg = readFileSync(join(root, 'branding/hive.svg'), 'utf8');
+  assert.match(svg, /id="gold"/); assert.match(svg, /id="shineTop"/); assert.match(svg, /id="shineSide"/);
+  assert.equal(realpathSync(join(root, 'desktop/dashboard/static/hive.svg')), realpathSync(join(root, 'branding/hive.svg')));
   const config = JSON.parse(readFileSync(join(root, 'mobile/simulator/capacitor.config.json')));
   assert.equal(config.appName, 'Hive'); assert.equal(config.appId, 'com.aipendant.app');
   const info = readFileSync(join(root, 'mobile/ios/App/App/Info.plist'), 'utf8');
   assert.match(info, /<key>CFBundleDisplayName<\/key>\s*<string>Hive<\/string>/);
-  assert.ok(existsSync(join(root, 'cloud/shared/branding/branding/Hive.icns')));
 });
 
 test('macOS package preserves bundle identity and never overwrites output', { skip: process.platform !== 'darwin' }, t => {

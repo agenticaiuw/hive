@@ -145,27 +145,41 @@ build/agent-vhid-selection: tools/selected-text.swift
 build/agent-unified-host: tools/build-workspace.sh scripts/build-spaceo.sh $(call sources,workspace-engine)
 	bash tools/build-workspace.sh
 
+# Hive's icon is drawn once, in branding/hive.svg at the repository's root; the app's .icns is
+# built from it. The Chrome extension's PNGs are kept in git: `make chrome-icons` after a change.
+build/hive-icon: tools/hive-icon.swift
+	@mkdir -p build
+	swiftc -O tools/hive-icon.swift -o $@.tmp
+	mv $@.tmp $@
+
+build/Hive.icns: ../../branding/hive.svg build/hive-icon
+	build/hive-icon ../../branding/hive.svg icns build/Hive.tmp.icns
+	mv build/Hive.tmp.icns $@
+
+chrome-icons: build/hive-icon
+	for size in 16 32 48 128 512; do build/hive-icon ../../branding/hive.svg png $$size ../../browser/chrome/src/icons/icon-$$size.png; done
+
 # Staged multi-window implementation. It is intentionally separate until the display and
 # takeover have been verified on this Mac; the normal installed Agent remains usable.
-build/Agent-WorkspaceCandidate.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh tools/Hive.icns tools/Agent-Info.plist $(call sources,workspace-engine)
+build/Agent-WorkspaceCandidate.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist $(call sources,workspace-engine)
 	SIGN_REQUIRED=1 bash scripts/build-spaceo.sh
 	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Helpers $@.tmp/Contents/Resources
 	cp build/spaceo-candidate/agent-unified-host $@.tmp/Contents/MacOS/Agent
 	cp build/spaceo-candidate/spaceo $@.tmp/Contents/Helpers/spaceo
 	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
-	cp tools/Hive.icns $@.tmp/Contents/Resources/Hive.icns
+	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
 	SIGN_REQUIRED=1 tools/sign.sh $@.tmp local.personal-agent.Agent
 	codesign --verify --deep --strict $@.tmp
 	rm -rf $@ && mv $@.tmp $@
 
-build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh tools/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine safari-hive-extension) $(shell find ../../browser/safari -type f | sed 's/ /\\ /g')
+build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine safari-hive-extension) $(shell find ../../browser/safari -type f | sed 's/ /\\ /g')
 	bash scripts/build-spaceo.sh
 	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Helpers $@.tmp/Contents/Resources
 	cp build/spaceo-candidate/agent-unified-host $@.tmp/Contents/MacOS/Agent
 	cp build/spaceo-candidate/spaceo $@.tmp/Contents/Helpers/spaceo
 	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
-	cp tools/Hive.icns $@.tmp/Contents/Resources/Hive.icns
+	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
 	bash safari-hive-extension/embed.sh $@.tmp
 	tools/sign.sh $@.tmp local.personal-agent.Agent
@@ -175,4 +189,4 @@ build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/
 clean:
 	rm -rf build
 
-.PHONY: all clean
+.PHONY: all clean chrome-icons
