@@ -41,7 +41,7 @@ for (const required of ['Makefile', 'python/agent.py', 'tools/app.swift']) {
 
 const entries = [
   'Makefile', 'README.md', 'requirements.txt', 'Cargo.toml', 'Cargo.lock', '.env.example', 'run.sh', 'voice.sh', 'install.sh',
-  'src', 'crates', 'python', 'tools', 'scripts', 'tests', 'workspace-engine', 'safari-agent-extension', 'safari-hive-extension',
+  'src', 'crates', 'python', 'tools', 'scripts', 'tests', 'workspace-engine',
   'examples', 'patches',
   'third_party/Karabiner-DriverKit-VirtualHIDDevice',
 ];

@@ -170,7 +170,7 @@ build/Agent-WorkspaceCandidate.app: build/agent-workspace-client build/agent-thr
 	codesign --verify --deep --strict $@.tmp
 	rm -rf $@ && mv $@.tmp $@
 
-build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine safari-hive-extension) $(shell find ../../browser/safari -type f | sed 's/ /\\ /g')
+build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/agent-memory-store build/agent-local-requests build/agent-settings-reader build/agent-memory-search build/agent-ingest-split build/agent-journal-reader build/libagent-core.dylib build/agent-app-server-transport build/agent-request-ledger scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
 	bash scripts/build-spaceo.sh
 	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Helpers $@.tmp/Contents/Resources
 	cp build/spaceo-candidate/agent-unified-host $@.tmp/Contents/MacOS/Agent
@@ -178,7 +178,6 @@ build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/
 	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
 	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
-	bash safari-hive-extension/embed.sh $@.tmp
 	tools/sign.sh $@.tmp local.personal-agent.Agent
 	codesign --verify --deep --strict $@.tmp
 	rm -rf $@ && mv $@.tmp $@
