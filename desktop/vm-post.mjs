@@ -8,10 +8,12 @@
 //   vm-post.mjs login <discord|x>            sign in yourself: the VM's browser in Screen Sharing, not
 //                                            remote-controlled, so "Continue with Google" works too
 //   vm-post.mjs view [discord|x]             watch and use the worker's own (remote-controlled) browser
+//   vm-post.mjs watch [hours]                watch the VM's whole screen live in Screen Sharing, view only
 //   vm-post.mjs vpn [status|down]            UW-Madison's VPN for the VM's browser (vpn.sh): you sign in
 //   vm-post.mjs where discord [server-id]    list your servers, or one server's channels
 //   vm-post.mjs send --to <name|channel-link|x> [--file path]... [--text "..."]   (or text on stdin)
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -111,6 +113,35 @@ async function openViewer(config, run, site, minutes) {
   await stop();
 }
 
+// The VM's whole screen (the display Hive's VM agent and the worker use), view only. One SSH
+// session forwards a port and runs an x11vnc of its own with -viewonly, so clicks and keys in the
+// viewer go nowhere and nothing the VM is doing is touched. The one-time VNC password goes over
+// stdin into a file x11vnc deletes once read. The x11vnc ends when this command does: the remote
+// shell waits on stdin, which closes with the SSH session.
+export const watchScript = ({ display = ':99', port = 38919 } = {}) => [
+  'umask 077; f=$(mktemp); head -n1 > "$f"',
+  "a=$(ps -o args= -C Xvfb | grep -o -- '-auth [^ ]*' | head -n1 | cut -d' ' -f2)",
+  `x11vnc -display ${display} \${a:+-auth "$a"} -viewonly -shared -forever -localhost -rfbport ${port} -passwdfile rm:"$f" -noxdamage -quiet </dev/null >/dev/null 2>&1 &`,
+  "v=$!; trap 'kill $v 2>/dev/null' EXIT",
+  'cat > /dev/null',
+].join('\n');
+
+async function watchScreen(config, hours) {
+  const port = 38919;
+  const password = randomBytes(6).toString('base64url'); // VNC passwords are 8 characters
+  const session = spawn('ssh', ['-o', 'ExitOnForwardFailure=yes', '-L', `127.0.0.1:${port}:127.0.0.1:${port}`, ...sshArgs(config),
+    watchScript({ port })], { stdio: ['pipe', 'inherit', 'inherit'] });
+  session.stdin.write(`${password}\n`);
+  await new Promise(done => setTimeout(done, 3000));
+  if (session.exitCode !== null) throw new Error('could not start the view-only screen on the VM');
+  spawnSync('open', [`vnc://:${encodeURIComponent(password)}@127.0.0.1:${port}`]);
+  console.log(`The VM's screen is open in Screen Sharing, view only, for up to ${hours} hours (VNC password ${password} if it asks).`);
+  console.log('Clicks and keys there do nothing. Press Ctrl-C here to stop watching.');
+  await new Promise(done => { const timer = setTimeout(done, hours * 3_600_000); process.once('SIGINT', () => { clearTimeout(timer); done(); }); process.once('SIGTERM', () => { clearTimeout(timer); done(); }); session.once('exit', () => { clearTimeout(timer); done(); }); });
+  session.stdin.end(); session.kill();
+  console.log('Stopped watching.');
+}
+
 // The sign-in desktop (cloud/vm-agent openDesktop): the VM's browser with remote control off,
 // shown in macOS Screen Sharing through an SSH tunnel. Ctrl-C hands the browser back to the worker.
 async function openSignInDesktop(config, run, site, minutes, keep = false) {
@@ -145,6 +176,7 @@ async function main(argv) {
     return openSignInDesktop(config, run, site || undefined, Number(minutes) || 30, keep);
   }
   if (command === 'view') return openViewer(config, run, rest[0], Number(rest[1]) || 20);
+  if (command === 'watch') return watchScreen(config, Number(rest[0]) || 6);
   if (command === 'vpn') {
     const action = rest[0] ?? 'up';
     if (!['up', 'status', 'down'].includes(action)) throw new Error('usage: vm-post.mjs vpn [status|down]');
@@ -175,7 +207,7 @@ async function main(argv) {
     process.exitCode = { sent: 0, cancelled: 1, needs_login: 3, unknown: 4 }[result.status] ?? 5;
     return;
   }
-  throw new Error('usage: vm-post.mjs <status|check|login|view|where|send|list|cancel|screenshot|vpn> ...');
+  throw new Error('usage: vm-post.mjs <status|check|login|view|watch|where|send|list|cancel|screenshot|vpn> ...');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
