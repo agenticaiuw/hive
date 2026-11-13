@@ -159,6 +159,50 @@ fn lip_reading_chosen_before_is_ready_at_start() {
 }
 
 #[test]
+fn speak_aloud_and_the_floating_window_left_off_stay_off_from_the_start() {
+    let env = Isolated::new();
+    std::fs::write(env.path().join("speak-aloud"), "off\n").unwrap();
+    std::fs::write(env.path().join("floating-window"), "off\n").unwrap();
+    let h = Harness::isolated(
+        env,
+        Setup {
+            app: true,
+            ..Setup::default()
+        },
+    );
+    assert!(!h.agent.speaking.get()); // before its first words
+    h.start();
+    h.wait_printed("@@ speak 0");
+    assert!(h.has_printed("@@ window 0"));
+    assert_eq!(h.captions.of("hidden"), ["true"]);
+    h.agent.say("Done.", None, None);
+    assert!(h.voice.said.is_empty());
+    assert_eq!(h.captions.of("say"), ["Done."]);
+}
+
+#[test]
+fn speak_aloud_and_the_floating_window_are_on_by_default() {
+    let h = Harness::app();
+    h.start();
+    h.wait_printed("@@ speak 1");
+    assert!(h.has_printed("@@ window 1"));
+    assert!(h.captions.of("hidden").is_empty());
+}
+
+#[test]
+fn quitting_from_the_menu_is_in_the_log_and_the_journal() {
+    let h = Harness::app();
+    h.agent.start_journal();
+    h.agent.note_menu_stop("quit from the menu");
+    assert!(h.has_printed("⏏  quit from the menu"));
+    let kinds = h.journal_kinds();
+    assert!(
+        kinds.contains(&("app".into(), "quit from the menu".into())),
+        "{kinds:?}"
+    );
+}
+
+#[test]
 fn shutdown_stops_tasks_and_hands_back_the_mac() {
     let h = Harness::new();
     let (mac, phone) = (

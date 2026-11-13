@@ -55,6 +55,8 @@ pub fn tool_list() -> Vec<Value> {
             "description": "Use the locally saved device passcode at a verified iPhone system passcode prompt. \
         Requires the configured phone to stay connected through the WebDriverAgent relay app. \
         Takes no secret arguments; this is not for app passwords or payments. \
+        On a locked iPhone, bring the prompt up first: press_home only wakes a locked screen (it never goes home there), \
+        then swipe up from the bottom edge until elements shows Enter Passcode, then call this. \
         Returns status only. If unavailable or rejected, stop and let the user authenticate; never retry or ask for the passcode in chat.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
         }),
@@ -98,7 +100,8 @@ pub fn tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "press_home",
-            "description": "Go to the home screen.",
+            "description": "Go to the home screen of an unlocked iPhone. It checks first: on a locked iPhone it never \
+        goes home (that freezes the phone's relay), it only wakes the screen; unlock with authenticate.",
             "inputSchema": {"type": "object", "properties": {"screenshot": look}},
         }),
         json!({

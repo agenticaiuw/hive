@@ -45,6 +45,10 @@ pub enum Event {
     /// What's heard from now on goes to this dictation, or (None) the agent.
     Route(Option<Arc<Dictation>>),
     Dictated(Arc<Dictation>),
+    /// Agent menu › Speak Aloud ("speak on|off").
+    Speak(bool),
+    /// Agent menu › Show Floating Window ("window on|off").
+    Window(bool),
 }
 
 impl Event {
@@ -68,6 +72,8 @@ impl Event {
             Event::Camera(_) => "camera",
             Event::Route(_) => "route",
             Event::Dictated(_) => "dictated",
+            Event::Speak(_) => "speak",
+            Event::Window(_) => "window",
         }
     }
 }
@@ -253,6 +259,9 @@ pub struct VoiceAgent {
     inbox: Mutex<Receiver<Event>>,
     /// The window's mic button: the microphone stays off however fn is used.
     pub muted: Flag,
+    /// Agent menu › Speak Aloud (kept in util::SPEAK_ALOUD): off, what it says is shown and
+    /// saved but not spoken.
+    pub speaking: Flag,
     /// Every task is recorded (task_recording); set by whoever builds the agent.
     pub recorder: Slot<Option<Arc<Recorder>>>,
     /// For the agent: you tapped fn.
@@ -340,6 +349,7 @@ impl VoiceAgent {
             events,
             inbox: Mutex::new(inbox),
             muted: Flag::new(false),
+            speaking: Flag::new(util::setting(util::SPEAK_ALOUD)), // before its first words
             recorder: Slot::new(None),
             listening: Flag::new(false),
             discard_heard: Flag::new(false),
@@ -615,6 +625,7 @@ impl VoiceAgent {
     /// Runs the main loop until [`shutdown`](Self::shutdown) or a signal.
     pub fn run(&self) {
         self.start_journal();
+        self.apply_menu_settings();
         let app = self.app.get();
         if app && env_set("AGENT_SPACEO_COMMAND") {
             self.spawn("personal-agent-workspace", |me| {
@@ -725,7 +736,97 @@ impl VoiceAgent {
                 self.dictation.set(None);
                 self.type_dictation(&dictation);
             }
+            Event::Speak(on) => self.set_speaking(on),
+            Event::Window(on) => self.set_window(on, "the menu"),
         }
+    }
+
+    /// Speak Aloud and Show Floating Window as they were left, for the menu's checkmarks and
+    /// before anything is said or shown.
+    fn apply_menu_settings(&self) {
+        let speaking = self.speaking.get();
+        let window = util::setting(util::FLOATING_WINDOW);
+        self.tell("speak", if speaking { "1" } else { "0" });
+        self.tell("window", if window { "1" } else { "0" });
+        if !window {
+            self.captions.hidden(true);
+            self.out(
+                "🫥 Show Floating Window is off (Agent menu): the card shows only while you use fn",
+            );
+        }
+        if !speaking {
+            self.out(
+                "🔇 Speak Aloud is off (Agent menu): replies are shown and logged, not spoken",
+            );
+        }
+    }
+
+    /// Agent menu › Speak Aloud ("speak on|off"). Off stops what it's saying at once and it says
+    /// nothing more: what it would have said still goes to the card, the log and the journal. On,
+    /// the next thing it says is spoken; no restart. The microphone is left as it is. Kept for the
+    /// next launch. The app's thread calls it too, so it goes quiet even while the loop is busy.
+    pub fn set_speaking(&self, on: bool) {
+        self.speaking.set(on);
+        if let Err(error) = util::set_setting(util::SPEAK_ALOUD, on) {
+            self.out(&format!(
+                "   ✗ Speak Aloud couldn't be kept for next time: {error}"
+            ));
+        }
+        if !on {
+            if let Some(voice) = &self.voice {
+                let cut_off = voice.audible();
+                voice.stop();
+                if cut_off {
+                    // what it was saying, on the card instead
+                    let last = self.said.lock().last().map(|(_, text)| text.clone());
+                    if let Some(text) = last {
+                        self.captions.say(&spoken(&text));
+                    }
+                }
+            }
+        }
+        self.tell("speak", if on { "1" } else { "0" });
+        self.log(
+            "speak aloud",
+            if on { "on" } else { "off" },
+            json!({"from": "the menu"}),
+        );
+        self.out(if on {
+            "🔊 Speak Aloud on (Agent menu): replies are spoken"
+        } else {
+            "🔇 Speak Aloud off (Agent menu): replies are shown and logged, not spoken"
+        });
+    }
+
+    /// Agent menu › Show Floating Window ("window on|off"), or the card's – (off). Off, the card
+    /// stays hidden, task or not, except while you use fn; it's still told everything, so turning
+    /// it on shows it as it is now. The task and the voice carry on either way. Kept for the next
+    /// launch; the menu's checkmark follows.
+    pub fn set_window(&self, on: bool, from: &str) {
+        if let Err(error) = util::set_setting(util::FLOATING_WINDOW, on) {
+            self.out(&format!(
+                "   ✗ Show Floating Window couldn't be kept for next time: {error}"
+            ));
+        }
+        self.captions.hidden(!on);
+        self.tell("window", if on { "1" } else { "0" });
+        self.log(
+            "floating window",
+            if on { "shown" } else { "hidden" },
+            json!({"from": from}),
+        );
+        self.out(&if on {
+            format!("🪟 floating window shown ({from})")
+        } else {
+            format!("🫥 floating window hidden ({from}); Hive keeps working, and fn still opens it")
+        });
+    }
+
+    /// Agent menu › Quit Agent or Restart Agent, in the log and the session journal before it
+    /// stops, so a quit isn't taken for a crash. The app's thread calls it.
+    pub fn note_menu_stop(&self, what: &str) {
+        self.log("app", what, json!({}));
+        self.out(&format!("⏏  {what}"));
     }
 
     /// An update's restart continues the request; otherwise (the app, Codex) the saved request
@@ -1419,7 +1520,8 @@ impl VoiceAgent {
         }
     }
 
-    /// The floating window's buttons: the x stops the agent; the mic mutes what it hears.
+    /// The floating window's buttons: the x stops the agent; the mic mutes what it hears; the –
+    /// hides the window (Show Floating Window off) while the task and the voice carry on.
     pub fn on_overlay(&self, kind: &str, value: Option<bool>) {
         if kind == "close" {
             self.out("✋ stopped from the window's x");
@@ -1437,6 +1539,8 @@ impl VoiceAgent {
             } else {
                 "🎙  transcription on"
             });
+        } else if kind == "hidden" {
+            self.set_window(!value.unwrap_or(true), "the card's –");
         }
     }
 
@@ -2222,7 +2326,8 @@ impl VoiceAgent {
         if text.is_empty() {
             return;
         }
-        let will_speak = self.voice.is_some() && util::workspace_voice_allowed();
+        let will_speak =
+            self.voice.is_some() && self.speaking.get() && util::workspace_voice_allowed();
         let shown = {
             let mut timing = self.timing.lock();
             match (task, timing.as_mut()) {

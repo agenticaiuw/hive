@@ -4,7 +4,7 @@
 
 mod support;
 
-use hive_app::app::{app_line, TASK_USAGE, USAGE};
+use hive_app::app::{app_line, menu_stop, TASK_USAGE, USAGE};
 use hive_app::{describe_timing, Event, Timing};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -17,6 +17,8 @@ fn kind(event: Option<Event>) -> Option<String> {
     event.map(|e| match e {
         Event::Ingest(path) => format!("ingest {path}"),
         Event::Input(mode) => format!("input {mode}"),
+        Event::Speak(on) => format!("speak {on}"),
+        Event::Window(on) => format!("window {on}"),
         other => other.kind().to_owned(),
     })
 }
@@ -33,8 +35,20 @@ fn the_apps_menu_lines() {
         kind(app_line("input voice")).as_deref(),
         Some("input voice")
     );
+    assert_eq!(kind(app_line("speak off")).as_deref(), Some("speak false"));
+    assert_eq!(kind(app_line("speak on\n")).as_deref(), Some("speak true"));
+    assert_eq!(
+        kind(app_line("window off")).as_deref(),
+        Some("window false")
+    );
+    assert_eq!(kind(app_line("window on")).as_deref(), Some("window true"));
+    assert_eq!(kind(app_line("speak loudly")), None);
     assert_eq!(kind(app_line("")), None);
     assert_eq!(kind(app_line("quit now")), None);
+    // Quit Agent and Restart Agent are said in the log and the journal before it stops
+    assert_eq!(menu_stop("quit\n"), Some("quit from the menu"));
+    assert_eq!(menu_stop("restart"), Some("restart from the menu"));
+    assert_eq!(menu_stop("quit now"), None);
 }
 
 /// A task with Codex's times (seconds after it began). The times are picked so no rounding is a tie.

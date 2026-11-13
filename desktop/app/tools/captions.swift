@@ -22,6 +22,9 @@
 //   {"activity": "…"}               appended to the Activity log
 //   {"active": true}                a task is running: the card stays up with its controls and the log open
 //   {"dismiss": true}               hide the card until listening, the camera or a task starts again
+//   {"hidden": true}                Show Floating Window is off: the card stays hidden, even when a task starts or
+//                                   updates, except while fn is in use (listening, dictating, the camera); everything
+//                                   sent meanwhile is kept, so {"hidden": false} shows it again as it is now
 //   {"clear": true}                 empty the card now (all but the header and the paused row)
 //   {"focus": true}                 typing goes to the entry field (fn opened the card); {"focus": false} gives
 //                                   the keyboard back to the app in front (so does a new task, sending, the x)
@@ -31,6 +34,8 @@
 //   {"text": "…"}                   a request typed into the entry field
 //   {"mute": true} / {"mute": false}  the mic button: mute or unmute transcription
 //   {"close": true}                 the x button: stop the task; the card collapses
+//   {"hidden": true}                the – button: the card hides (and stays hidden, as {"hidden": true} above);
+//                                   the task and its voice go on
 //   {"focused": true} / {"focused": false}  whether the entry field has the keyboard now
 //
 // The card floats over every app, full-screen ones too, and never takes keyboard focus from the app in front
@@ -378,7 +383,7 @@ final class HoverButton: NSButton {
 
 struct Caps { var paused = 2, other = 3, heard = 3, say = 5, thinking = 3, doing = 1, activity: CGFloat = 140, preview = true }
 
-/// The card. Top to bottom: header (status, mute, close), paused, another agent's request, what you're
+/// The card. Top to bottom: header (status, mute, hide, close), paused, another agent's request, what you're
 /// saying, the agent's words, its thinking, what it's doing, the camera preview, the activity log, and the
 /// Activity button with the entry field.
 final class Bubble: NSView {
@@ -388,6 +393,7 @@ final class Bubble: NSView {
     let headerIcon = SymbolView(frame: .zero)
     let header = TextRow(TextStyle(12, .semibold, secondaryText))
     let muteButton = HoverButton(frame: .zero)
+    let hideButton = HoverButton(frame: .zero)
     let closeButton = HoverButton(frame: .zero)
     let paused = Section(TextStyle(13.5, .medium, pausedText), symbol: "pause.circle.fill", accent: pausedAccent, tinted: true)
     let other = Section(TextStyle(15, .regular, otherText), caption: "Another agent", symbol: "cpu", accent: otherAccent, tinted: true)
@@ -422,6 +428,10 @@ final class Bubble: NSView {
         closeButton.symbol = "xmark"
         closeButton.restTint = NSColor(white: 1, alpha: 0.38)
         closeButton.toolTip = "Stop and close"
+        hideButton.symbol = "minus"
+        hideButton.restTint = NSColor(white: 1, alpha: 0.38)
+        hideButton.toolTip = "Hide; Hive keeps working"
+        hideButton.setAccessibilityLabel("Hide the floating window")
         refreshMute()
         detailsButton.label = "Activity"
         detailsButton.chip = true
@@ -469,7 +479,7 @@ final class Bubble: NSView {
         preview.layer?.cornerRadius = 8
         preview.layer?.masksToBounds = true
 
-        for view in [headerIcon, header, muteButton, closeButton, paused, other, heard, say, thinking, doing,
+        for view in [headerIcon, header, muteButton, hideButton, closeButton, paused, other, heard, say, thinking, doing,
                      preview, activityBox, detailsButton, entryBox] as [NSView] { addSubview(view) }
     }
 
@@ -556,8 +566,10 @@ final class Bubble: NSView {
         effect.frame = bounds
         chrome.frame = bounds
 
+        // The window's own controls (– hide, x stop) together on the right; the mic, about the transcript, apart.
         closeButton.frame = NSRect(x: width - 34, y: padTop, width: 24, height: 24)
-        muteButton.frame = NSRect(x: closeButton.frame.minX - 28, y: padTop, width: 24, height: 24)
+        hideButton.frame = NSRect(x: closeButton.frame.minX - 26, y: padTop, width: 24, height: 24)
+        muteButton.frame = NSRect(x: hideButton.frame.minX - 34, y: padTop, width: 24, height: 24)
         headerIcon.frame = NSRect(x: padX, y: padTop + 5, width: 14, height: 14)
         let headerX = padX + 21
         header.place(x: headerX, y: padTop + (headerHeight - header.height(lines: 1)) / 2,
@@ -685,6 +697,11 @@ final class Captions: NSObject {
     var listening = false, dictating = false, handsFree = false, camera = "off", framing = ""
     var dismissedByUser = false
     var visible = false
+    /// Show Floating Window is off (the menu, or the – button): hidden except while fn is in use.
+    var windowOff = false
+    /// fn opened the card since it was last hidden: listening, dictating or the camera started.
+    var fnOpened = false
+    var fnInUse: Bool { listening || dictating || camera != "off" }
 
     override init() {
         super.init()
@@ -705,6 +722,8 @@ final class Captions: NSObject {
         bubble.detailsButton.action = #selector(toggleDetails)
         bubble.muteButton.target = self
         bubble.muteButton.action = #selector(toggleMute)
+        bubble.hideButton.target = self
+        bubble.hideButton.action = #selector(hideCard)
         bubble.closeButton.target = self
         bubble.closeButton.action = #selector(close)
         bubble.onMoved = { [unowned self] in settle() }
@@ -748,6 +767,16 @@ final class Captions: NSObject {
         show()
     }
 
+    /// The –: only hides the card (no "close": the task and its voice go on) and turns Show Floating Window off,
+    /// which the agent saves and the menu shows. Everything sent meanwhile is kept for when it's shown again.
+    @objc func hideCard() {
+        emit(["hidden": true])
+        windowOff = true
+        fnOpened = false
+        bubble.hideButton.unhover()
+        show()  // hides it, giving the keyboard back if the entry field had it
+    }
+
     @objc func submit() {
         let value = bubble.entry.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
@@ -787,6 +816,10 @@ final class Captions: NSObject {
 
     func handle(_ message: [String: Any]) {
         if message["dismiss"] as? Bool == true { dismissedByUser = true }
+        if let hidden = message["hidden"] as? Bool {
+            windowOff = hidden
+            if hidden { fnOpened = false } else { dismissedByUser = false }  // shown again, as it is now
+        }
         if message["clear"] != nil {
             bubble.heard.text = ""
             bubble.other.text = ""
@@ -802,12 +835,12 @@ final class Captions: NSObject {
         }
         if let listening = message["listening"] as? Bool {
             self.listening = listening
-            if listening { dismissedByUser = false } else if !bubble.muted { dismissedByUser = true }  // muted: stay up
+            if listening { dismissedByUser = false; fnOpened = true } else if !bubble.muted { dismissedByUser = true }  // muted: stay up
             bubble.editing = listening
         }
         if let dictating = message["dictating"] as? Bool {
             self.dictating = dictating
-            if dictating { dismissedByUser = false }  // you're talking to it: show what it hears
+            if dictating { dismissedByUser = false; fnOpened = true }  // you're talking to it: show what it hears
         }
         if let handsFree = message["hands_free"] as? Bool {
             self.handsFree = handsFree
@@ -815,6 +848,7 @@ final class Captions: NSObject {
         if let camera = message["camera"] as? String {
             self.camera = camera
             if camera == "starting" || camera == "on" { dismissedByUser = false }
+            if camera == "starting" { fnOpened = true }
             if camera != "on" { framing = ""; bubble.previewVisible = false; bubble.preview.image = nil }
             bubble.editing = camera != "off" || listening
         }
@@ -871,6 +905,7 @@ final class Captions: NSObject {
             let current = bubble.activityText
             bubble.activityText = String((current + (current.isEmpty ? "" : "\n\n") + activity).suffix(30_000))
         }
+        if !fnInUse { fnOpened = false }  // that fn interaction is over: hidden again if the window is off
         show()
         if message["active"] as? Bool == true { releaseFocus() }  // a task started: it types in the app in front
         if let focus = message["focus"] as? Bool { focus ? focusEntry() : releaseFocus() }
@@ -944,7 +979,9 @@ final class Captions: NSObject {
         let line = headerLine(camera: camera, framing: framing, muted: bubble.muted, dictating: dictating,
                               listening: listening, active: bubble.active, handsFree: handsFree)
         bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
-        if dismissedByUser || !(bubble.hasContent || dictating || camera != "off") { hide(); return }
+        if dismissedByUser || (windowOff && !(fnOpened && fnInUse)) || !(bubble.hasContent || dictating || camera != "off") {
+            hide(); return
+        }
         guard let screen = targetScreen() else {
             visible = false
             window.ignoresMouseEvents = true

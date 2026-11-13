@@ -93,7 +93,8 @@ screenshots and does them with the virtual mouse and keyboard while you watch,
 telling you out loud what it's doing as it goes and what happened at the end.
 Then control comes back to you. Tap fn again to stop it listening: what you were
 in the middle of saying still counts, and a task it's doing carries on. Agent's
-menu does the same (Start/Stop Listening), and has Open at Login, Show Log
+menu does the same (Start/Stop Listening), and has Speak Aloud (off: replies are
+shown, not spoken), Show Floating Window, Open at Login, Show Log
 (`~/Library/Logs/Agent.log`), Restart Agent and Quit Agent.
 
 Once, after installing:
@@ -127,6 +128,7 @@ terminal app needs the permissions instead.
 | Touch any key, the trackpad or the mouse | The computer agent lets go at once and waits for you (also when you touch them just as it takes control) |
 | Tap fn, or say "continue" | It carries on from where things are now |
 | Click the floating window's x | The computer agent stops |
+| Click the floating window's – | The window hides and the work goes on; fn still opens it, Show Floating Window brings it back |
 | Hold fn and talk | Dictation: when you let go, what you said is typed where you're typing, and isn't a task |
 
 ### Workspace creation policy

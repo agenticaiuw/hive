@@ -11,6 +11,18 @@ use std::sync::Mutex;
 
 pub const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), open the WebDriverAgent relay app (WebDriverAgentRunner-Runner), then try again.";
 
+/// press_home on a locked iPhone (see [`Phone::home`]); it's also the line in Agent.log and the
+/// session journal (the task's error event).
+pub const LOCKED_HOME: &str =
+    "press_home refused: the iPhone is locked, and going home on a locked iPhone freezes \
+WebDriverAgent until the relay app is reopened, so no home-screen request was sent.";
+pub const UNLOCK_STEPS: &str =
+    "To unlock it: swipe up from the bottom edge so the passcode keypad shows, check with \
+elements that it says Enter Passcode, then call authenticate.";
+const LOCK_UNKNOWN: &str =
+    "press_home refused: the iPhone didn't say whether it's locked, so no home-screen request \
+was sent (on a locked iPhone that freezes WebDriverAgent). Look with screenshot or elements first.";
+
 /// A failure the phone tools report to the model as an error result (python's `PhoneError`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhoneError(pub String);
@@ -338,7 +350,35 @@ impl Phone {
         self.action("type_text", json!({"text": text}))
     }
 
+    /// Whether the iPhone is locked (WebDriverAgent's /wda/locked). Anything but a yes or a no is
+    /// an error, so [`home`](Self::home) never guesses.
+    pub fn locked(&self) -> Result<bool, PhoneError> {
+        let reply = self.request("/api/wda/locked", "GET", Value::Null, false)?;
+        reply["value"]
+            .as_bool()
+            .ok_or_else(|| PhoneError(LOCK_UNKNOWN.into()))
+    }
+
+    /// Lights the screen with the home button, as the relay's own unlock does on a locked iPhone:
+    /// it stays locked, and WebDriverAgent keeps answering.
+    pub fn wake(&self) -> Result<(), PhoneError> {
+        self.in_session("/wda/pressButton", "POST", json!({"name": "home"}))?;
+        Ok(())
+    }
+
+    /// The home screen, on an unlocked iPhone only. WebDriverAgent's homescreen call on a locked
+    /// iPhone hangs it: the relay stays connected but every later request times out until the
+    /// relay app is opened again (2026-11-12, 20:27). So it asks first; a locked iPhone only has
+    /// its screen woken, and the model is told how to unlock it.
     pub fn home(&self) -> Result<(), PhoneError> {
+        if self.locked()? {
+            return err(match self.wake() {
+                Ok(()) => format!("{LOCKED_HOME} It woke the screen instead. {UNLOCK_STEPS}"),
+                Err(e) => format!(
+                    "{LOCKED_HOME} Waking the screen didn't work either ({e}). {UNLOCK_STEPS}"
+                ),
+            });
+        }
         self.action("home", json!({}))
     }
 

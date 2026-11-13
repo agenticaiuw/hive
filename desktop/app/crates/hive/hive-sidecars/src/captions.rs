@@ -102,7 +102,8 @@ impl Captions {
         lock(&self.inner.callbacks).on_input = Some(Arc::new(f));
     }
 
-    /// The card's buttons: ("mute", Some(on)) for the mic button, ("close", None) for the x.
+    /// The card's buttons: ("mute", Some(on)) for the mic button, ("close", None) for the x,
+    /// ("hidden", Some(true)) for the – (hide the card; the task goes on).
     pub fn set_on_control(&self, f: impl Fn(&str, Option<bool>) + Send + Sync + 'static) {
         lock(&self.inner.callbacks).on_control = Some(Arc::new(f));
     }
@@ -146,6 +147,12 @@ impl Captions {
 
     pub fn dismiss(&self) {
         self.send(json!({"dismiss": true}));
+    }
+
+    /// Show Floating Window off (true): the card stays hidden, task or not, except while fn is in
+    /// use. Everything sent meanwhile is kept, so `hidden(false)` shows it as it is now.
+    pub fn hidden(&self, on: bool) {
+        self.send(json!({"hidden": on}));
     }
 
     pub fn framing(&self, text: &str) {
@@ -258,6 +265,11 @@ fn read(inner: Arc<Inner>, stdout: ChildStdout) {
         if message.get("close") == Some(&Value::Bool(true)) {
             if let Some(f) = &on_control {
                 f("close", None);
+            }
+        }
+        if let Some(hidden) = message.get("hidden").and_then(Value::as_bool) {
+            if let Some(f) = &on_control {
+                f("hidden", Some(hidden));
             }
         }
         if let Some(focused) = message.get("focused").and_then(Value::as_bool) {
