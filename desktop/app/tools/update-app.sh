@@ -4,6 +4,7 @@
 # touch the helper (./install.sh does that). Quits Agent and opens the new one.
 #
 #   tools/update-app.sh            build, check the signature, install, reopen
+#   HIVE_ASK_WORK_SCREEN=0 tools/update-app.sh   the same, reopening on the saved work screen (no dialog)
 #   tools/update-app.sh --check    only say how the installed and built apps are signed
 #   tools/update-app.sh --check-engine CANDIDATE INSTALLED    inspect engine compatibility only
 set -euo pipefail
@@ -129,6 +130,9 @@ launch_without_activation() {
 import AppKit
 let configuration = NSWorkspace.OpenConfiguration()
 configuration.activates = false
+if let ask = ProcessInfo.processInfo.environment["HIVE_ASK_WORK_SCREEN"] {
+    configuration.environment = ["HIVE_ASK_WORK_SCREEN": ask] // 0: keep the saved work screen
+}
 var finished = false
 var failed = false
 NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: CommandLine.arguments[1]), configuration: configuration) { _, error in
