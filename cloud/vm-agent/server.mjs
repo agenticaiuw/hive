@@ -12,6 +12,7 @@ const agent = createAgent({
   headless: process.env.HIVE_VM_HEADLESS === '1',
   proxy: process.env.HIVE_VM_PROXY || null,
   viewerPort: Number(process.env.HIVE_VM_VIEW_PORT ?? 38917),
+  desktop: { port: Number(process.env.HIVE_VM_DESKTOP_PORT ?? 38918) },
   log: line => console.log(`${new Date().toISOString()} ${line}`),
 });
 await agent.listen(join(stateDir, 'control.sock'));

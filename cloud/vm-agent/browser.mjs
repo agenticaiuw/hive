@@ -38,6 +38,16 @@ export function proxyArgs(proxy) {
   return [`--proxy-server=${proxy}`, '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'];
 }
 
+// The same browser for the owner to use by remote desktop: same profile, proxy and password store
+// (so a sign-in made there is the worker's too), and no remote control at all: no debugging port.
+export function desktopBrowserArgs({ profileDir, proxy = null, width = 1440, height = 900, url = 'about:blank' }) {
+  return [
+    `--user-data-dir=${profileDir}`, '--no-first-run', '--no-default-browser-check',
+    process.platform === 'darwin' ? '--use-mock-keychain' : '--password-store=basic',
+    '--window-position=0,0', `--window-size=${width},${height}`, ...proxyArgs(proxy), url,
+  ];
+}
+
 export class BrowserSession {
   #cdp; #child; #session; #stderr = '';
 

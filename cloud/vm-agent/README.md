@@ -20,12 +20,14 @@ those pages, not from a run. Treat the first real post on each site as the verif
   `unknown`.
 - Before and after screenshots are kept in `<state>/evidence/`.
 - Control is a mode-0600 Unix socket (`<state>/control.sock`). Nothing listens on the network.
-- The worker never types credentials. Sign-in happens through the viewer (below).
+- The worker never types credentials. The owner signs in on the sign-in desktop (below).
 
 ## What it does not do
 
 - No disguise: no user-agent changes, no stealth patches, no CAPTCHA handling. If a site asks for
-  verification, the owner does it in the viewer.
+  verification, the owner does it on the sign-in desktop or in the viewer. Sites that refuse a
+  remote-controlled browser (Google's sign-in) are not tricked: on the sign-in desktop the browser
+  really is not remote-controlled.
 - No scheduled or autonomous posting. Every post is one explicit owner approval.
 
 Both sites restrict automation of personal accounts (Discord's "self-bot" rule, X's rule against
@@ -46,6 +48,7 @@ HIVE_VM_BROWSER=/path/to/chromium node server.mjs
 | `HIVE_VM_BROWSER` | first Chromium found | browser executable |
 | `HIVE_VM_HEADLESS` | unset | `1` runs headless; otherwise needs a display (Xvfb) |
 | `HIVE_VM_VIEW_PORT` | `38917` | loopback port for the sign-in viewer |
+| `HIVE_VM_DESKTOP_PORT` | `38918` | loopback VNC port for the sign-in desktop (x11vnc) |
 | `HIVE_VM_PROXY` | unset | the browser's proxy, e.g. `socks5://127.0.0.1:11080` from `vpn.sh` |
 
 `node ctl.mjs status` talks to the running worker; see the top of `ctl.mjs` for the commands.
@@ -67,7 +70,8 @@ HIVE_VM_BROWSER=/path/to/chromium node server.mjs
 ```
 
 ```bash
-node desktop/vm-post.mjs login discord        # opens the VM's browser locally so you can sign in
+node desktop/vm-post.mjs login x              # the VM's browser in Screen Sharing: sign in yourself
+node desktop/vm-post.mjs view x               # watch and use the worker's own browser
 node desktop/vm-post.mjs where discord        # your servers; add a server id for its channels
 node desktop/vm-post.mjs send --to club-general --file shot.png --text "hello"
 node desktop/vm-post.mjs send --to x --text "hello"
@@ -77,7 +81,13 @@ node desktop/vm-post.mjs send --to x --text "hello"
 Exit codes: 0 sent, 1 cancelled, 3 the VM is signed out, 4 unknown (check the site, do not resend),
 5 failed (nothing was submitted).
 
-The sign-in viewer is a loopback page on the VM reached through an SSH tunnel. It needs a one-time
+The sign-in desktop (`login`) is the same browser and profile started with no remote control (no
+debugging port), shown by x11vnc on loopback with a one-time password, through an SSH tunnel into
+macOS Screen Sharing. The worker drives nothing while it is open; Ctrl-C (or 30 minutes) closes it,
+the browser saving its cookies as it quits, and the worker's own browser starts again signed in.
+Needs `sudo apt-get install x11vnc` on the VM.
+
+The viewer (`view`) is a loopback page on the VM reached through an SSH tunnel. It needs a one-time
 link, closes when idle, and does not log what is typed. "Open a link…" opens a pasted Discord or X
 link (such as a verify-login link from an email) in the VM's browser; other sites are refused.
 Every tab and popup window of the VM's browser is a tab in the viewer: a sign-in popup (such as
