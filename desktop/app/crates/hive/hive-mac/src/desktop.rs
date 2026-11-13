@@ -490,6 +490,28 @@ pub fn frontmost_pid() -> Option<i32> {
     })
 }
 
+/// Brings the app with this pid to the front through Launch Services (`open -a`), which macOS
+/// honours from a background app, unlike NSRunningApplication's activate.
+pub fn activate(pid: i32) {
+    let Some(path) = crate::process::run(
+        "lsappinfo",
+        ["info", "-only", "bundlepath", &pid.to_string()],
+        None,
+        Some(Duration::from_secs(2)),
+    )
+    .ok()
+    .and_then(|out| {
+        let out = out.stdout_text();
+        let start = out.find("=\"")? + 2;
+        let end = out[start..].find('"')?;
+        Some(out[start..start + end].to_string())
+    })
+    .filter(|p| p.ends_with(".app")) else {
+        return;
+    };
+    let _ = crate::process::run("open", ["-a", &path], None, Some(Duration::from_secs(3)));
+}
+
 /// Shows a notification titled "Agent" (without waiting for it).
 pub fn notify(message: &str) {
     let script = format!(

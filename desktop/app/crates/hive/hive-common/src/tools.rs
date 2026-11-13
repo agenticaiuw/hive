@@ -32,6 +32,9 @@ pub trait ToolNamespace: Send + Sync {
     fn let_go(&self) {}
     /// The user handed the screen back (fn, or "continue"): the tools hold it as if just used.
     fn handed_back(&self) {}
+    /// The user just took the mouse and keyboard: on the virtual monitor, the Mac tools put the
+    /// user's cursor and app back on their screen.
+    fn took_over(&self) {}
 }
 
 pub fn text(t: impl Into<String>) -> Value {

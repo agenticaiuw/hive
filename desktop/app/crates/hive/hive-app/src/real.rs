@@ -339,6 +339,11 @@ impl parts::Task for CodexJob {
             mac.handed_back();
         }
     }
+    fn took_over(&self) {
+        if let Some(mac) = self.0.device_tool("mac") {
+            mac.took_over();
+        }
+    }
 }
 
 /// hive-codex's agent, as the shell uses it.
