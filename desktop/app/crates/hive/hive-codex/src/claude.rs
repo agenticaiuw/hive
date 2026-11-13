@@ -853,7 +853,7 @@ impl Conn {
             )),
             Some(_) => Ok(()),
             None => {
-                personal_agent_core::thread_identity::atomic_write_standard(
+                hive_core::thread_identity::atomic_write_standard(
                     path,
                     format!("{identity}\n").as_bytes(),
                 )

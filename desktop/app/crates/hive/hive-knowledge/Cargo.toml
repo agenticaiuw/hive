@@ -7,7 +7,7 @@ description = "Knowledge base, cloud archive, memory search, task recording, ses
 
 [dependencies]
 hive-common.workspace = true
-personal-agent-core.workspace = true
+hive-core.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 libc.workspace = true

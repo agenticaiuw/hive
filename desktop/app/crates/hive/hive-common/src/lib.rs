@@ -13,7 +13,7 @@ pub mod paths;
 pub mod settings;
 pub mod tools;
 
-pub use personal_agent_core::thread_identity::{atomic_write, validate_identity, ResumableThread};
+pub use hive_core::thread_identity::{atomic_write, validate_identity, ResumableThread};
 pub use paths::{build_dir, python_dir, repo_root, state_dir};
 
 /// Prints one line for Agent.log (the app host copies the agent's stdout there) and flushes it.

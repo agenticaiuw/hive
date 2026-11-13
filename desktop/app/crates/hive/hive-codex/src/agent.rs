@@ -38,7 +38,7 @@ pub struct Config {
     pub instructions: PathBuf,
     /// The threads' working directory (desktop/app).
     pub repo: PathBuf,
-    /// `build/agent-app-server-transport`, which the app-server runs under when it's there.
+    /// `build/hive-app-server-transport`, which the app-server runs under when it's there.
     pub transport: Option<PathBuf>,
     /// The sign-in tools' MCP server (build/hive-auth-mcp; agent.py started
     /// `sys.executable python/authentication_mcp.py`).

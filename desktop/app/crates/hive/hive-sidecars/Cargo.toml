@@ -7,7 +7,7 @@ description = "Clients of the model sidecars (listen, speech, voiceprint, lip re
 
 [dependencies]
 hive-common.workspace = true
-personal-agent-core.workspace = true
+hive-core.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 

@@ -1,9 +1,9 @@
 //! Choose an update that keeps an active virtual display's engine compatible
-//! (python/workspace_update.py). The decision itself is agent-core's `workspace_update`, which the
+//! (python/workspace_update.py). The decision itself is hive-core's `workspace_update`, which the
 //! updater already uses through its `workspace-engine-choice` binary; this is the same pair of
 //! functions plus the `workspace-update CANDIDATE INSTALLED` command line python had.
 
-pub use personal_agent_core::workspace_update::{
+pub use hive_core::workspace_update::{
     compare_engines, decision, doctor, EngineChoice, DOCTOR_TIMEOUT,
 };
 

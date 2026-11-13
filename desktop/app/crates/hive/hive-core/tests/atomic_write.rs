@@ -1,7 +1,7 @@
 //! `thread_identity::atomic_write_standard`, the private state writer the hive crates share
 //! (ported from tests/test_rust_atomic_write.py, which reached it through `agent_atomic_write`).
 #![cfg(unix)]
-use personal_agent_core::thread_identity::{atomic_write_standard, IdentityError};
+use hive_core::thread_identity::{atomic_write_standard, IdentityError};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

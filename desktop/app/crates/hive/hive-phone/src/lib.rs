@@ -1,7 +1,7 @@
 //! Your iPhone, through the relay of the "Phone Control Automation" project, and the tools that let
 //! Codex use it. Replaces python/phone.py and python/phone_mcp.py.
 //!
-//! - [`Phone`]: the transport (python/phone.py). It calls agent-core's phone transport directly.
+//! - [`Phone`]: the transport (python/phone.py). It calls hive-core's phone transport directly.
 //! - [`PhoneTools`]: the `phone` tool namespace ([`hive_common::tools::ToolNamespace`]).
 
 mod elements;

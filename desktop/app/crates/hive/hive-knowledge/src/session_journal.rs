@@ -415,7 +415,7 @@ pub fn initialize(dir: &Path) -> io::Result<()> {
 /// Writes manifest.json (pretty JSON, 0600, atomically).
 pub fn save_manifest(dir: &Path, manifest: &Map<String, Value>) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
-    personal_agent_core::thread_identity::atomic_write_standard(&dir.join("manifest.json"), &bytes)
+    hive_core::thread_identity::atomic_write_standard(&dir.join("manifest.json"), &bytes)
         .map_err(|e| e.to_string())
 }
 
