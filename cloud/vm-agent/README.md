@@ -46,6 +46,7 @@ HIVE_VM_BROWSER=/path/to/chromium node server.mjs
 | `HIVE_VM_BROWSER` | first Chromium found | browser executable |
 | `HIVE_VM_HEADLESS` | unset | `1` runs headless; otherwise needs a display (Xvfb) |
 | `HIVE_VM_VIEW_PORT` | `38917` | loopback port for the sign-in viewer |
+| `HIVE_VM_PROXY` | unset | the browser's proxy, e.g. `socks5://127.0.0.1:11080` from `vpn.sh` |
 
 `node ctl.mjs status` talks to the running worker; see the top of `ctl.mjs` for the commands.
 
