@@ -94,10 +94,44 @@ Every tab and popup window of the VM's browser is a tab in the viewer: a sign-in
 X's "Continue with Google") is shown as it opens, and the page that opened it is shown again when
 it closes.
 
+## Hive's agent on the VM
+
+Besides the posting worker, the VM runs Hive's agent itself: a task given in words, done by Codex
+on the VM's own screen, the way the Mac's Hive works on the Mac.
+
+```bash
+echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs --keep-open
+```
+
+- `hive-task.mjs` starts the VM's Codex (`/root/.local/bin/codex`) with a Codex home of its own,
+  `HIVE_CODEX_HOME` (default `/root/.codex-hive`), signed in with `codex login --device-auth` to the
+  owner's ChatGPT account. It runs read-only, with no config file and no saved sessions, and prints
+  each step the agent states; everything goes to `<state>/tasks/<time>/`. `--model`, `--effort`
+  (defaults `HIVE_TASK_MODEL`, `HIVE_TASK_EFFORT`), and `--keep-open` to leave the browser up after.
+- `desktop-mcp.mjs` is its desktop: it opens the sign-in desktop (the same browser and profile, no
+  remote control), starts a private x11vnc on a Unix socket only this user can open, and gives
+  Codex screenshot, zoom, click, drag, scroll, type_text, press_key, wait, wait_until (a time on the
+  owner's clock, `HIVE_OWNER_TZ`), authenticate, list_files and fetch_file. Every tool needs a
+  `step`. `vnc.mjs` is the small VNC client underneath. Only printable ASCII, Return and Tab can be
+  typed; anything else is refused before a key is pressed (emoji go through a site's picker).
+- Saved logins: `hive-cred.mjs` (installed as the `hive-cred` command, run through sudo) keeps the
+  owner's logins encrypted with `systemd-creds` under the VM's machine key, in
+  `/var/lib/hive-credentials` (root only). `hive-cred import < export.csv` takes a Passwords (Mac) or
+  Chrome export; `list`, `sites`, `add`, `remove` manage it. The agent's `authenticate` tool types a
+  saved login into the field it clicked; the agent never sees the password.
+- The phone: Duo approvals and the phone's passcode are on the owner's phone, which only the Mac can
+  reach. `desktop/hive-bridge.mjs` on the Mac serves the phone's tools (`build/hive-phone-mcp`) on a
+  local socket and forwards it over SSH to `<state>/mac-phone.sock` (`ssh -R`, no network port), and
+  keeps the Mac awake while it runs (`--until 9:30` ends it). `phone-mcp.mjs` connects Codex to it,
+  and when the bridge isn't up it answers with no tools and says why.
+- Files: the R2 bucket `hive-files` is where Hive's nodes meet. `node desktop/hive-files.mjs send
+  <file> --to vm` uploads from the Mac and has the VM fetch it into `~/hive-files`;
+  `files.mjs fetch | put | list` is the VM's side (through root's Cloudflare login, by `sudo -n`).
+
 ## Tests
 
 ```bash
-node --test cloud/vm-agent/vm-agent.test.mjs desktop/tests/vm_post.test.mjs
+node --test cloud/vm-agent/vm-agent.test.mjs cloud/vm-agent/hive-agent.test.mjs desktop/tests/vm_post.test.mjs
 ```
 
 ## Neighbours on the VM

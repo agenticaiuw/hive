@@ -9,7 +9,7 @@ sources = $(shell find $(1) -type f -not -path '*/target/*' -not -path '*/.build
 
 # The agent itself (crates/hive, Rust): hive-agent is what Agent.app runs; the rest are the tools
 # Codex, the scripts and the menu start. The voice models stay Python (python/sidecar_voice.py).
-HIVE_BINS := hive-agent hive-auth-mcp hive-vhid hive-credentials hive-knowledge hive-session-journal hive-context-panel \
+HIVE_BINS := hive-agent hive-auth-mcp hive-phone-mcp hive-vhid hive-credentials hive-knowledge hive-session-journal hive-context-panel \
 	hive-memory-search hive-ingest phone-status \
 	spaceo-mcp-bridge workspace-fence workspace-update workspace-tool restart-agent-once hive-bundle-migration
 HIVE_BUILT := $(addprefix build/,$(HIVE_BINS))

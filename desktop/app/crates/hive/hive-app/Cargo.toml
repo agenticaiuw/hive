@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "hive-auth-mcp"
 path = "src/bin/hive-auth-mcp.rs"
 
+[[bin]]
+name = "hive-phone-mcp"
+path = "src/bin/hive-phone-mcp.rs"
+
 [dependencies]
 hive-common.workspace = true
 hive-codex = { path = "../hive-codex" }

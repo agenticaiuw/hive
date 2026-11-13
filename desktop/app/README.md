@@ -28,7 +28,7 @@ it and copies the binaries into `build/`. Hive.app runs `build/hive-agent --app`
 
 | Crate | What it does |
 |---|---|
-| `hive-app` | The agent itself (`build/hive-agent`) and `build/hive-auth-mcp` |
+| `hive-app` | The agent itself (`build/hive-agent`), `build/hive-auth-mcp`, and `build/hive-phone-mcp` (the phone's tools for the VM agent, via `desktop/hive-bridge.mjs`) |
 | `hive-codex` | Codex app-server, tasks, waiting on providers, recovery, resumable threads (with `personal-agent-core` in `crates/agent-core`) |
 | `hive-mac` | Virtual keyboard and mouse (`build/hive-vhid`), screenshots, the Mac's tools (`MacTools`), credentials |
 | `hive-phone` | The iPhone relay and its tools (`build/phone-status`) |

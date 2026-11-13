@@ -28,8 +28,11 @@ Where this stands today:
 - Done: the knowledge base is the D1 database `hive-knowledge` (schema in `cloud/knowledge`), which
   the desktop agent reads and adds to on every task (`desktop/app/crates/hive/hive-knowledge/src/knowledge.rs`; see
   `desktop/app/README.md`, "Knowledge base").
-- Not yet: uploading the agent's other artifacts and the code it produces, running the Codex
-  session in the cloud (the desktop agent still starts Codex on the Mac), and giving the phone and
+- Done: Hive's agent also runs on the cloud VM (`cloud/vm-agent/hive-task.mjs`): Codex there works the
+  VM's own screen, signs in with the owner's saved logins kept on the VM, and approves Duo on the
+  owner's phone through the Mac (`desktop/hive-bridge.mjs`). Files move between the Mac and the VM
+  through the R2 bucket `hive-files` (`desktop/hive-files.mjs`). See `cloud/vm-agent/README.md`.
+- Not yet: uploading the agent's other artifacts and the code it produces, and giving the phone and
   VM agents the knowledge base (they need an HTTP route to it in `cloud/worker`).
 
 ## Platform layout
