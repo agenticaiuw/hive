@@ -41,6 +41,12 @@ pub const JPEG_QUALITY: f64 = 0.7;
 pub const IDLE_RELEASE: Duration = Duration::from_secs(10);
 /// How long a screen action waits for the user's hands to be off the keyboard and trackpad.
 pub const ENGAGE_WAIT: Duration = Duration::from_secs(5);
+/// While Hive works on the virtual monitor, the user touching the mouse or keyboard doesn't stop
+/// it: a screen step waits until their hands have been still this long, then takes the mouse and
+/// keyboard for itself and puts the user's cursor and app back afterwards. Nothing waits for fn.
+pub const USER_STILL: Duration = Duration::from_millis(1500);
+/// How long a step on the virtual monitor waits for the user's hands to be still.
+pub const SHARE_WAIT: Duration = Duration::from_secs(60);
 
 pub const ABOUT: &str = "The user's Mac: see the screen and use the real mouse and keyboard.";
 
@@ -360,6 +366,9 @@ pub struct MacTools {
 /// The mouse and keyboard, held only while the screen is in use.
 struct Control {
     mac: Arc<AgentVHID>,
+    system: Arc<dyn System>,
+    /// Where the user's cursor and front app were, and the agent's, on the virtual monitor.
+    spots: Mutex<Spots>,
     /// What the user said in this conversation: a one-way step must quote it.
     words: Mutex<String>,
     /// Held during a screen action, so control isn't let go mid-action.
@@ -375,6 +384,21 @@ struct Holding {
     holding: bool,
     /// This task hasn't had control yet: a takeover before it doesn't count.
     fresh: bool,
+}
+
+/// A cursor position and the app in front.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Spot {
+    cursor: Option<(f64, f64)>,
+    pid: Option<i32>,
+}
+
+/// On the virtual monitor, one cursor and one front app are shared: the user's spot is put back
+/// whenever the agent gives them the mouse and keyboard, and the agent's when it takes them again.
+#[derive(Default)]
+struct Spots {
+    user: Option<Spot>,
+    agent: Option<Spot>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -399,6 +423,69 @@ impl Control {
         if let Ok(status) = self.mac.status() {
             if matches!(status.get("state"), Some("engaged" | "arming")) {
                 let _ = self.mac.disengage().and_then(|_| self.mac.release_all());
+            }
+        }
+        self.give_back();
+    }
+
+    /// Whether Hive works on the virtual monitor, sharing the mouse and keyboard with the user.
+    fn sharing(&self) -> bool {
+        self.system.virtual_monitor().is_some()
+    }
+
+    /// Just before the agent takes the mouse and keyboard: notes where the user's cursor is and
+    /// which app they have in front (unless the cursor is still on the virtual monitor).
+    fn remember_user(&self) {
+        let Some(monitor) = self.system.virtual_monitor() else {
+            return;
+        };
+        let (x, y) = self.system.cursor();
+        if !inside(monitor, x, y) {
+            lock(&self.spots).user = Some(Spot {
+                cursor: Some((x, y)),
+                pid: self.system.frontmost_pid(),
+            });
+        }
+    }
+
+    /// The agent let go of the mouse and keyboard, or the user took them: the user's cursor goes
+    /// back where it was on their screen and their app back in front. The agent's are noted.
+    fn give_back(&self) {
+        let Some(monitor) = self.system.virtual_monitor() else {
+            return;
+        };
+        let mut spots = lock(&self.spots);
+        let Some(user) = spots.user.take() else {
+            return;
+        };
+        let (x, y) = self.system.cursor();
+        let front = self.system.frontmost_pid();
+        let on_monitor = inside(monitor, x, y);
+        spots.agent = Some(Spot {
+            cursor: on_monitor.then_some((x, y)),
+            pid: front,
+        });
+        drop(spots);
+        if let (true, Some((ux, uy))) = (on_monitor, user.cursor) {
+            self.system.warp(ux, uy);
+        }
+        if let Some(pid) = user.pid.filter(|p| *p != 0 && front != Some(*p)) {
+            self.system.activate(pid);
+        }
+    }
+
+    /// The agent has the mouse and keyboard again: its cursor and app come back.
+    fn back_to_agent(&self) {
+        let Some(agent) = lock(&self.spots).agent.take() else {
+            return;
+        };
+        if let Some((x, y)) = agent.cursor {
+            self.system.warp(x, y);
+        }
+        if let Some(pid) = agent.pid.filter(|p| *p != 0) {
+            if self.system.frontmost_pid() != Some(pid) {
+                self.system.activate(pid);
+                std::thread::sleep(Duration::from_millis(300)); // it comes forward before the step
             }
         }
     }
@@ -453,6 +540,8 @@ impl MacTools {
         let mac = Arc::new(mac.with_system(system.clone()));
         let control = Arc::new(Control {
             mac: mac.clone(),
+            system: system.clone(),
+            spots: Mutex::new(Spots::default()),
             words: Mutex::new(String::new()),
             acting: Mutex::new(()),
             state: Mutex::new(Holding {
@@ -491,7 +580,59 @@ impl MacTools {
 
     /// Takes the mouse and keyboard for a screen action, once the user's hands are off them. `None`
     /// when the agent has them; else why not (the user took over, or is busy with them).
+    ///
+    /// On the virtual monitor a takeover doesn't stop the agent: the step waits (up to
+    /// [`SHARE_WAIT`]) for the user's hands to be still for [`USER_STILL`], then takes them.
     pub fn take(&self) -> Result<Option<String>, VhidError> {
+        let why_not = match self.take_once()? {
+            Some(reason)
+                if self.control.sharing()
+                    && (crate::vhid::took_over(Some(&reason)) || reason == "busy") =>
+            {
+                self.take_back()?
+            }
+            other => other,
+        };
+        if why_not.is_none() {
+            self.control.back_to_agent();
+        }
+        Ok(why_not)
+    }
+
+    /// On the virtual monitor, after the user used the mouse and keyboard: waits for their hands
+    /// to be still, then asks the helper again (it waits its own quiet moment, and gives up if they
+    /// touch anything meanwhile).
+    fn take_back(&self) -> Result<Option<String>, VhidError> {
+        let deadline = Instant::now() + SHARE_WAIT;
+        loop {
+            while self.system.seconds_since_input() < USER_STILL.as_secs_f64() {
+                if Instant::now() >= deadline {
+                    return Ok(Some("busy".into()));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let status = self.mac.status()?;
+            if status.get("state") != Some("engaged") {
+                if status.get("reason") == Some("watcher_unavailable") {
+                    return Ok(Some("watcher_unavailable".into()));
+                }
+                self.control.remember_user();
+                self.mac.engage()?;
+                if !self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
+                    if Instant::now() >= deadline {
+                        return Ok(Some("busy".into()));
+                    }
+                    continue;
+                }
+            }
+            let mut s = lock(&self.control.state);
+            s.holding = true;
+            s.fresh = false;
+            return Ok(None);
+        }
+    }
+
+    fn take_once(&self) -> Result<Option<String>, VhidError> {
         let status = self.mac.status()?;
         let state = status.get("state").unwrap_or("").to_string();
         let mut reason = status.get("reason").unwrap_or("").to_string();
@@ -507,6 +648,7 @@ impl MacTools {
             return Ok(None);
         }
         if state == "arming" {
+            self.control.remember_user();
             if self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
                 have(false);
                 return Ok(None);
@@ -516,6 +658,7 @@ impl MacTools {
             return Ok(Some(reason));
         } else if lock(&self.control.state).fresh || !crate::vhid::took_over(Some(&reason)) {
             // The agent let go after a pause, or this is the task's first screen action: ask again.
+            self.control.remember_user();
             self.mac.engage()?;
             lock(&self.control.state).fresh = false;
             if self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
@@ -535,6 +678,13 @@ impl MacTools {
         self.control.let_go();
     }
 
+    /// The user just took the mouse and keyboard (the helper said so). On the virtual monitor
+    /// their cursor and app come straight back to their screen; the agent goes on.
+    /// Doesn't wait for a step in progress (that step may be waiting for the user's hands).
+    pub fn took_over(&self) {
+        self.control.give_back();
+    }
+
     /// The user pressed fn to give the screen back: the agent holds it as if it had just used it,
     /// so it's let go again if the agent doesn't need it for a while.
     pub fn handed_back(&self) {
@@ -547,6 +697,20 @@ impl MacTools {
     /// Whether the agent holds the mouse and keyboard (it asked for them and hasn't let go).
     pub fn holding(&self) -> bool {
         lock(&self.control.state).holding
+    }
+
+    /// What a screen action says when it couldn't have the mouse and keyboard: on the virtual
+    /// monitor, that the user has been busy with them; else [`MacTools::not_yours`].
+    pub fn not_now(&self, reason: &str) -> Value {
+        if self.control.sharing() && reason == "busy" {
+            return error_text(format!(
+                "The user has kept using the mouse and keyboard for the last {} s. Hive works on the virtual \
+                 monitor, so it takes them for each step as soon as the user's hands are still for a moment; \
+                 nothing waits for fn. Carry on with what doesn't need the screen, then try the step again.",
+                SHARE_WAIT.as_secs()
+            ));
+        }
+        Self::not_yours(reason)
     }
 
     /// What a screen action says when the agent doesn't have the mouse and keyboard.
@@ -687,7 +851,7 @@ impl MacTools {
         };
         match acted {
             Ok(None) => {}
-            Ok(Some(why_not)) => return Ok(Self::not_yours(&why_not)),
+            Ok(Some(why_not)) => return Ok(self.not_now(&why_not)),
             Err(VhidError::Disengaged(e)) => {
                 let reason = e
                     .find("reason=")
@@ -699,6 +863,12 @@ impl MacTools {
                     })
                     .filter(|r| !r.is_empty())
                     .unwrap_or_else(|| "unknown".into());
+                if self.control.sharing() && crate::vhid::took_over(Some(&reason)) {
+                    self.control.give_back();
+                    return Ok(error_text(
+                        "The user touched the mouse or keyboard during this step, so it may be only partly done. Look at                          the screen and do what's left: the next step takes the mouse and keyboard back as soon as                          their hands are still. Nothing waits for fn.",
+                    ));
+                }
                 return Ok(Self::not_yours(&reason));
             }
             Err(VhidError::Io(e)) => return Err(e),
@@ -902,6 +1072,10 @@ impl MacTools {
                         self.control.acted();
                         return self.look_note("You have the mouse and keyboard.", false);
                     }
+                }
+                if self.control.sharing() {
+                    // nothing waits for fn here: take() already waited for the user's hands
+                    return Ok(self.not_now("busy"));
                 }
                 self.system.notify(
                     "Hive needs the screen. Press fn when it can have the mouse and keyboard.",
@@ -1224,6 +1398,9 @@ impl ToolNamespace for MacTools {
     }
     fn handed_back(&self) {
         MacTools::handed_back(self);
+    }
+    fn took_over(&self) {
+        MacTools::took_over(self);
     }
 }
 

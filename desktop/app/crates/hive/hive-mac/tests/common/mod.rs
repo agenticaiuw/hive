@@ -339,6 +339,12 @@ pub struct FakeSystem {
     pub monitor_windows: Mutex<Option<usize>>,
     /// The pids whose front window was moved onto the virtual monitor.
     pub placed: Mutex<Vec<i32>>,
+    /// Seconds since the user last touched the mouse or keyboard.
+    pub idle: Mutex<f64>,
+    /// The app in front's pid.
+    pub front_pid: Mutex<Option<i32>>,
+    /// The pids brought to the front, in order.
+    pub activated: Mutex<Vec<i32>>,
 }
 
 impl Default for FakeSystem {
@@ -357,6 +363,9 @@ impl Default for FakeSystem {
             own_window: Mutex::new(None),
             monitor_windows: Mutex::new(None),
             placed: Mutex::new(Vec::new()),
+            idle: Mutex::new(f64::INFINITY),
+            front_pid: Mutex::new(Some(1)),
+            activated: Mutex::new(Vec::new()),
         }
     }
 }
@@ -422,7 +431,14 @@ impl System for FakeSystem {
         lock(&self.front_app).clone()
     }
     fn frontmost_pid(&self) -> Option<i32> {
-        Some(1)
+        *lock(&self.front_pid)
+    }
+    fn seconds_since_input(&self) -> f64 {
+        *lock(&self.idle)
+    }
+    fn activate(&self, pid: i32) {
+        lock(&self.activated).push(pid);
+        *lock(&self.front_pid) = Some(pid);
     }
     fn notify(&self, message: &str) {
         lock(&self.notifications).push(message.to_string());

@@ -53,6 +53,12 @@ pub trait System: Send + Sync {
     fn own_window_at(&self, _x: f64, _y: f64) -> bool {
         false
     }
+    /// Seconds since the last input from a mouse, trackpad or keyboard (the helper's included).
+    fn seconds_since_input(&self) -> f64 {
+        f64::INFINITY
+    }
+    /// Brings the app with this pid to the front, as clicking its Dock icon would.
+    fn activate(&self, _pid: i32) {}
     /// While the virtual monitor is on: how many apps' windows are on it (desktop::windows_inside).
     /// None while it's off, or when that can't be told.
     fn windows_on_virtual_monitor(&self) -> Option<usize> {
@@ -135,6 +141,12 @@ impl System for RealMac {
     }
     fn own_window_at(&self, x: f64, y: f64) -> bool {
         desktop::own_window_at(x, y)
+    }
+    fn seconds_since_input(&self) -> f64 {
+        ffi::seconds_since_input()
+    }
+    fn activate(&self, pid: i32) {
+        desktop::activate(pid)
     }
     fn windows_on_virtual_monitor(&self) -> Option<usize> {
         virtual_monitor::bounds().map(desktop::windows_inside)
