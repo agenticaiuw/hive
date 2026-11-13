@@ -16,7 +16,9 @@
 //   {"agent_request": "…"}          a request from another agent, in its own violet "Another agent" row; "" removes it
 //   {"hearing": "Open Safari"}      what you're saying, in the blue "You" row (fades a few seconds after you
 //                                   stop); "" removes it
-//   {"say": "I opened Safari."}     the agent's words, big (they fade a few seconds later); "" removes them
+//   {"say": "I opened Safari."}     the agent's words, big, a sentence or so at a time: each stays until there's
+//                                   been time to read it, then the next one that came meanwhile replaces it; the
+//                                   last fades a few seconds later; "" removes them, and any still waiting
 //   {"thinking": "…"}               its progress or reasoning summary, small; "" removes it
 //   {"doing": "Typing “weather”"}   the line under them; "" removes it
 //   {"activity": "…"}               appended to the Activity log
@@ -692,6 +694,9 @@ final class Captions: NSObject {
     let window = InputPanel(contentRect: NSRect(x: 0, y: 0, width: cardWidth, height: 60),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     var fade: Timer?
+    /// The agent's words on the card are still being read; what it says meanwhile waits in sayQueue.
+    var sayHold: Timer?
+    var sayQueue: [String] = []
     var heardFade: Timer?
     var otherFade: Timer?
     var listening = false, dictating = false, handsFree = false, camera = "off", framing = ""
@@ -756,6 +761,7 @@ final class Captions: NSObject {
         emit(["close": true])
         releaseFocus()
         [fade, heardFade, otherFade].forEach { $0?.invalidate() }
+        dropWaitingWords()
         for section in [bubble.paused, bubble.other, bubble.heard, bubble.doing] { section.text = "" }
         bubble.say.text = ""
         bubble.thinking.text = ""
@@ -803,6 +809,45 @@ final class Captions: NSObject {
         emit(["focused": false])
     }
 
+    /// The agent's words, a sentence or so at a time, the same whether Speak Aloud is on or off. Each stays
+    /// until there's been time to read it (about 200 words a minute) before the next one replaces it: Codex
+    /// writes several a second, faster than anyone reads, and a voice says them about as fast as this. The
+    /// last one fades a few seconds later. "" removes them at once, with any still waiting.
+    func say(_ words: String) {
+        if tidy(words).isEmpty {
+            dropWaitingWords()
+            showSay("")
+        } else if sayHold != nil {
+            sayQueue.append(words)
+        } else {
+            showSay(words)
+        }
+    }
+
+    func showSay(_ words: String) {
+        bubble.say.text = words
+        fade?.invalidate()
+        sayHold?.invalidate()
+        sayHold = nil
+        let clean = bubble.say.clean
+        guard !clean.isEmpty else { return }
+        sayHold = Timer.scheduledTimer(withTimeInterval: 1.0 + 0.05 * Double(clean.count), repeats: false) { _ in
+            self.sayHold = nil
+            guard !self.sayQueue.isEmpty else { return }
+            self.showSay(self.sayQueue.removeFirst())
+            self.show()
+        }
+        fade = Timer.scheduledTimer(withTimeInterval: 2.5 + 0.06 * Double(clean.count), repeats: false) { _ in
+            self.handle(["say": ""])
+        }
+    }
+
+    func dropWaitingWords() {
+        sayQueue.removeAll()
+        sayHold?.invalidate()
+        sayHold = nil
+    }
+
     /// Another agent's request stays while a task runs, and fades once there's been time to read it otherwise.
     func scheduleOtherFade() {
         otherFade?.invalidate()
@@ -828,6 +873,8 @@ final class Captions: NSObject {
             bubble.thinking.text = ""
             bubble.activityText = ""
             otherFade?.invalidate()
+            fade?.invalidate()
+            dropWaitingWords()
         }
         if let muted = message["muted"] as? Bool {
             if muted && !bubble.muted { dismissedByUser = false }
@@ -879,13 +926,7 @@ final class Captions: NSObject {
             }
         }
         if let words = message["say"] as? String {
-            bubble.say.text = words
-            fade?.invalidate()
-            if !bubble.say.isBlank {  // long enough to read
-                fade = Timer.scheduledTimer(withTimeInterval: 2.5 + 0.06 * Double(words.count), repeats: false) { _ in
-                    self.handle(["say": ""])
-                }
-            }
+            say(words)
         }
         if let doing = message["doing"] as? String {
             bubble.doing.text = doing
@@ -897,6 +938,7 @@ final class Captions: NSObject {
             if active && !bubble.active {
                 dismissedByUser = false
                 bubble.detailsOpen = true
+                dropWaitingWords()  // a new task: what the last one still had to say is stale now
             }
             bubble.active = active
             scheduleOtherFade()
