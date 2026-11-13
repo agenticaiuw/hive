@@ -8,7 +8,7 @@
 //! - nothing starts up per task, and the prompt cache stays warm from one task to the next.
 //!
 //! The protocol is JSON-RPC, one message per line on stdin/stdout (`codex app-server
-//! generate-json-schema` describes it). When `build/agent-app-server-transport` is there, the
+//! generate-json-schema` describes it). When `build/hive-app-server-transport` is there, the
 //! server runs under it: it forwards the bytes and kills Codex if this process goes away.
 
 use crate::util::{lock, panic_text, AgentError, Env};
@@ -126,9 +126,9 @@ impl AppServer {
         Ok(server)
     }
 
-    /// `build/agent-app-server-transport`, if it's been built.
+    /// `build/hive-app-server-transport`, if it's been built.
     pub fn transport() -> Option<PathBuf> {
-        let path = hive_common::build_dir().join("agent-app-server-transport");
+        let path = hive_common::build_dir().join("hive-app-server-transport");
         executable(&path).then_some(path)
     }
 

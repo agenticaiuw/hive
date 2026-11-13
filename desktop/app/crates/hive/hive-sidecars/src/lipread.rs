@@ -60,7 +60,7 @@ pub fn set_mode(mode: &str) -> io::Result<String> {
             format!("input is one of {}", MODES.join(", ")),
         ));
     }
-    personal_agent_core::thread_identity::atomic_write_standard(
+    hive_core::thread_identity::atomic_write_standard(
         &hive_common::state_dir().join("input-mode"),
         mode.as_bytes(),
     )

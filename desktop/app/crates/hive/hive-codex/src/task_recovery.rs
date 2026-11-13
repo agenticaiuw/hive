@@ -1,5 +1,5 @@
 //! Durable, bounded ownership of a single primary conversation request (python/task_recovery.py),
-//! on `personal_agent_core::task_recovery` (what Python reached through libagent-core.dylib).
+//! on `hive_core::task_recovery`.
 //!
 //! `<state>/task-recovery.json` holds the request's id, device, thread, status and how many
 //! startup and blocked continuations were admitted; never the request's text. Errors: a state
@@ -12,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 
 fn apply(dir: &Path, request: Value) -> Result<Value, AgentError> {
-    personal_agent_core::task_recovery::apply(dir, &request).map_err(|message| {
+    hive_core::task_recovery::apply(dir, &request).map_err(|message| {
         if message == "State unavailable" {
             AgentError::Os(message)
         } else {

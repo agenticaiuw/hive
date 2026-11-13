@@ -37,13 +37,13 @@ fn err<T>(message: impl Into<String>) -> Result<T, PhoneError> {
     Err(PhoneError(message.into()))
 }
 
-/// Where requests go. Production: agent-core's relay transport; tests: a fake.
+/// Where requests go. Production: hive-core's relay transport; tests: a fake.
 pub trait Transport: Send + Sync {
-    /// One JSON request in agent-core's phone transport protocol; `None` if it failed outright.
+    /// One JSON request in hive-core's phone transport protocol; `None` if it failed outright.
     fn call(&self, payload: &Value) -> Option<Value>;
 }
 
-/// agent-core's `agent_phone_call`, called in-process (python reached it through ctypes).
+/// hive-core's `agent_phone_call`, called in-process (python reached it through ctypes).
 pub struct CoreTransport;
 
 impl Transport for CoreTransport {
@@ -52,12 +52,12 @@ impl Transport for CoreTransport {
         // SAFETY: `input` is a valid NUL-terminated string for the whole call; the returned
         // pointer is read once and released with agent_phone_free.
         unsafe {
-            let result = personal_agent_core::phone_transport::agent_phone_call(input.as_ptr());
+            let result = hive_core::phone_transport::agent_phone_call(input.as_ptr());
             if result.is_null() {
                 return None;
             }
             let parsed = serde_json::from_slice(CStr::from_ptr(result).to_bytes()).ok();
-            personal_agent_core::phone_transport::agent_phone_free(result);
+            hive_core::phone_transport::agent_phone_free(result);
             parsed
         }
     }

@@ -21,7 +21,7 @@ pub fn load(path: Option<&Path>) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let pairs = personal_agent_core::settings::read(&path)?;
+    let pairs = hive_core::settings::read(&path)?;
     let mut from_file = FROM_FILE.lock().unwrap_or_else(|e| e.into_inner());
     for (key, value) in pairs {
         if value.is_empty() {

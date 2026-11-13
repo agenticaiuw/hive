@@ -1,4 +1,4 @@
-use personal_agent_core::thread_identity::{
+use hive_core::thread_identity::{
     validate_identity, IdentityError, ResumableThread, SessionTransport,
 };
 use serde_json::{json, Value};

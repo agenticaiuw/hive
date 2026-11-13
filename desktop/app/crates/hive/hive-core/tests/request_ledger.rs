@@ -2,7 +2,7 @@
 //! README.md tells users to run as build/agent-request-ledger (ported from
 //! tests/test_ledger_control.py).
 #![cfg(unix)]
-use personal_agent_core::request_ledger::{admit, finish, list_page};
+use hive_core::request_ledger::{admit, finish, list_page};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +11,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const LEDGER: &str = env!("CARGO_BIN_EXE_request-ledger");
+const LEDGER: &str = env!("CARGO_BIN_EXE_hive-request-ledger");
 const DB: &str = "request-ledger.sqlite3";
 const KEY: &str = "request-ledger.key";
 const LOCK: &str = "request-ledger.key.lock";

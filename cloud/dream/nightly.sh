@@ -29,9 +29,7 @@ git -C "$HIVE_DREAM_REPO" worktree prune
 say "main is at $(git -C "$HIVE_DREAM_REPO" log -1 --format='%h %s')"
 
 # The gate's tests run offline, so everything main needs is fetched first.
-for manifest in desktop/app/crates/hive/Cargo.toml desktop/app/crates/agent-core/Cargo.toml; do
-  cargo fetch --quiet --locked --manifest-path "$HIVE_DREAM_REPO/$manifest"
-done
+cargo fetch --quiet --locked --manifest-path "$HIVE_DREAM_REPO/desktop/app/crates/hive/Cargo.toml"
 cargo build --quiet --release --locked -p hive-dream \
   --manifest-path "$HIVE_DREAM_REPO/desktop/app/crates/hive/Cargo.toml" --target-dir "$ROOT/gate-target"
 DREAM=$ROOT/gate-target/release/hive-dream

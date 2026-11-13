@@ -1,11 +1,11 @@
 //! The .env parser and the settings-reader binary (ported from tests/test_rust_settings.py).
 //! The expected values were recorded from python/settings.py's own parser on the same fixture.
-use personal_agent_core::settings::{parse, read};
+use hive_core::settings::{parse, read};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process::Command;
 
-const READER: &str = env!("CARGO_BIN_EXE_settings-reader");
+const READER: &str = env!("CARGO_BIN_EXE_hive-settings-reader");
 const FIXTURE: &str = "# comment\nexport KEY=first\nKEY=second # note\nQUOTED=' value # kept '\nDOUBLE=\"x=y\"\nEMPTY=\nNOEQUAL\nUNICODE=你好\u{2028}NEXT=ok\n";
 
 fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {

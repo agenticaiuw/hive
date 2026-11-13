@@ -5,7 +5,7 @@
 mod common;
 
 use hive_knowledge::ui_ingress;
-use personal_agent_core::request_ledger;
+use hive_core::request_ledger;
 use serde_json::{json, Value};
 
 fn listing(control: &std::path::Path) -> Value {

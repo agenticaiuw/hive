@@ -451,7 +451,7 @@ fn the_agent_always_acts_rather_than_explains() {
     assert!(prompts::REQUEST.contains("do it for them"));
 }
 
-// -- IdentityTest: the saved conversation (agent-core's ResumableThread, through a Session) -------
+// -- IdentityTest: the saved conversation (hive-core's ResumableThread, through a Session) -------
 
 fn identity(h: &Harness) -> Arc<Session> {
     Session::new(&h.agent, Some(h.path().join("thread-id")))

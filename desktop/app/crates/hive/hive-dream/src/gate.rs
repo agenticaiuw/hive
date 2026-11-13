@@ -129,7 +129,7 @@ pub const FORBIDDEN_PATHS: &[(&str, &str)] = &[
     ("cloud/vm-agent/hive-cred.mjs", "credentials"),
     ("cloud/server/approval*", "the VM poster's approval flow"),
     (
-        "desktop/app/crates/agent-core/src/request_ledger.rs",
+        "desktop/app/crates/hive/hive-core/src/request_ledger.rs",
         "the one-way quote check",
     ),
     ("**/.env*", "secrets"),
@@ -429,20 +429,17 @@ pub fn check_static(
     r
 }
 
-/// A package the tests run for: a member of the hive workspace, or agent-core (its own manifest).
+/// A package the tests run for: a member of the hive workspace.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Package {
     Hive(String),
-    AgentCore,
 }
 
 /// The packages the changed files belong to.
 pub fn touched_packages(worktree: &Path, files: &[String]) -> Vec<Package> {
     let mut out: Vec<Package> = Vec::new();
     for f in files {
-        let p = if f.starts_with("desktop/app/crates/agent-core/") {
-            Some(Package::AgentCore)
-        } else if let Some(rest) = f.strip_prefix("desktop/app/crates/hive/") {
+        let p = if let Some(rest) = f.strip_prefix("desktop/app/crates/hive/") {
             let dir = rest.split('/').next().unwrap_or("");
             let manifest = worktree
                 .join("desktop/app/crates/hive")
@@ -531,13 +528,6 @@ pub fn test_env(dream: &Path, name: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// agent-core's own build folder. It's a separate cargo workspace with its own lock file, and
-/// sharing the hive workspace's folder makes one build of personal-agent-core overwrite the
-/// other's (the next hive build then fails with two "different" serde_json types).
-pub fn core_target(dream: &Path) -> PathBuf {
-    dream.join("target").join("agent-core")
-}
-
 pub const TEST_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// The hive crates that don't build on this OS: on Linux (Hive's cloud VM) the three that need
@@ -562,7 +552,6 @@ pub fn all_here(packages: &[Package]) -> bool {
 pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path) -> Vec<TestRun> {
     let env = test_env(dream, "gate");
     let hive_manifest: PathBuf = worktree.join("desktop/app/crates/hive/Cargo.toml");
-    let core_manifest: PathBuf = worktree.join("desktop/app/crates/agent-core/Cargo.toml");
     let mut commands: Vec<Vec<String>> = Vec::new();
     let hive: Vec<&String> = packages
         .iter()
@@ -585,17 +574,6 @@ pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path
             c.push((*n).clone());
         }
         commands.push(c);
-    }
-    if packages.contains(&Package::AgentCore) {
-        commands.push(vec![
-            "cargo".into(),
-            "test".into(),
-            "--offline".into(),
-            "--manifest-path".into(),
-            m(&core_manifest),
-            "--target-dir".into(),
-            m(&core_target(dream)),
-        ]);
     }
     commands.push(vec![
         "cargo".into(),

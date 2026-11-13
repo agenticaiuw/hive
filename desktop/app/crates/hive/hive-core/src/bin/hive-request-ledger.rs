@@ -9,7 +9,7 @@ use std::{
 const MAX_INPUT: u64 = 1024 * 1024;
 fn run(directory: &Path, mode: &str) -> Result<Value, String> {
     if mode == "list" {
-        return personal_agent_core::request_ledger::list(directory);
+        return hive_core::request_ledger::list(directory);
     }
     let mut data = Vec::new();
     io::stdin()
@@ -44,7 +44,7 @@ fn run(directory: &Path, mode: &str) -> Result<Value, String> {
                 _ => return Err("Invalid input".into()),
             };
             let (receipts, next) =
-                personal_agent_core::request_ledger::list_page(directory, before, limit)?;
+                hive_core::request_ledger::list_page(directory, before, limit)?;
             Ok(json!({"receipts":receipts,"nextCursor":next.map(|n| format!("r:{n}"))}))
         }
         "admit" => {
@@ -65,7 +65,7 @@ fn run(directory: &Path, mode: &str) -> Result<Value, String> {
                 _ => return Err("Invalid input".into()),
             };
             let receipt =
-                personal_agent_core::request_ledger::admit(directory, source, text, objective)?;
+                hive_core::request_ledger::admit(directory, source, text, objective)?;
             Ok(
                 json!({"receiptId":receipt.id, "duplicate":receipt.duplicate, "status":receipt.status}),
             )
@@ -79,7 +79,7 @@ fn run(directory: &Path, mode: &str) -> Result<Value, String> {
                 .get("status")
                 .and_then(Value::as_str)
                 .ok_or("Invalid input")?;
-            personal_agent_core::request_ledger::finish(directory, id, status)?;
+            hive_core::request_ledger::finish(directory, id, status)?;
             Ok(json!({"ok":true}))
         }
         _ => Err("Invalid mode".into()),

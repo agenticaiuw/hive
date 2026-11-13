@@ -2,7 +2,7 @@
 //! sockets are temporary.
 
 use hive_workspace::local_request::{channel, LocalRequest, LocalRequests};
-use personal_agent_core::request_ledger;
+use hive_core::request_ledger;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;

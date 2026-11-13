@@ -1,6 +1,6 @@
 //! The accessibility tree as lines (python/phone.py `_elements_compat`).
 //!
-//! agent-core's transport handles the plain documents WebDriverAgent sends; this is the fallback
+//! hive-core's transport handles the plain documents WebDriverAgent sends; this is the fallback
 //! python took through ElementTree when the XML uses namespaces or a DTD: names are resolved to
 //! `{uri}local` as ElementTree does, and internal entities from the DOCTYPE are expanded.
 

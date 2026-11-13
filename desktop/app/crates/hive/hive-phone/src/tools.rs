@@ -146,7 +146,7 @@ pub fn shrink(png: &[u8], width: i64) -> Result<Vec<u8>, String> {
     // SAFETY: png is valid for png.len() bytes and out/length are valid for writes; on success the
     // buffer is copied and released once with agent_phone_bytes_free.
     unsafe {
-        let status = personal_agent_core::phone_transport::agent_phone_shrink(
+        let status = hive_core::phone_transport::agent_phone_shrink(
             png.as_ptr(),
             png.len(),
             width,
@@ -162,7 +162,7 @@ pub fn shrink(png: &[u8], width: i64) -> Result<Vec<u8>, String> {
             ));
         }
         let bytes = std::slice::from_raw_parts(out, length).to_vec();
-        personal_agent_core::phone_transport::agent_phone_bytes_free(out, length);
+        hive_core::phone_transport::agent_phone_bytes_free(out, length);
         Ok(bytes)
     }
 }

@@ -234,7 +234,7 @@ pub fn escape(text: &str) -> String {
 
 /// Python's resumable_thread.atomic_write: write a temporary file (0600) next to it, then rename.
 pub fn atomic_write(path: &Path, text: &str) -> io::Result<()> {
-    personal_agent_core::thread_identity::atomic_write_standard(path, text.as_bytes())
+    hive_core::thread_identity::atomic_write_standard(path, text.as_bytes())
         .map_err(|e| io::Error::other(e.to_string()))
 }
 

@@ -5,11 +5,11 @@
 //! byte. Here the server runs inside the agent, in threads.
 //!
 //! - [`LocalRequests`]: `request.sock`. Every accepted request is first made durable in the request
-//!   ledger (agent-core), then handed to the host as a [`LocalRequest`] to reply to within 5
+//!   ledger (hive-core), then handed to the host as a [`LocalRequest`] to reply to within 5
 //!   seconds; the reply gets `receiptId` and `status` added.
 //! - [`WorkspaceSocket`]: `workspace.sock`, the virtual workspace's tool socket, same framing, 50 s.
 
-use personal_agent_core::request_ledger;
+use hive_core::request_ledger;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};

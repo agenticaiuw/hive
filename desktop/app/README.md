@@ -29,13 +29,14 @@ it and copies the binaries into `build/`. Hive.app runs `build/hive-agent --app`
 | Crate | What it does |
 |---|---|
 | `hive-app` | The agent itself (`build/hive-agent`), `build/hive-auth-mcp`, and `build/hive-phone-mcp` (the phone's tools for the VM agent, via `desktop/hive-bridge.mjs`) |
-| `hive-codex` | Codex app-server, tasks, waiting on providers, recovery, resumable threads (with `personal-agent-core` in `crates/agent-core`) |
+| `hive-codex` | Codex app-server, tasks, waiting on providers, recovery, resumable threads (with `hive-core`) |
 | `hive-mac` | Virtual keyboard and mouse (`build/hive-vhid`), screenshots, the Mac's tools (`MacTools`), credentials |
 | `hive-phone` | The iPhone relay and its tools (`build/phone-status`) |
 | `hive-knowledge` | Knowledge base, cloud archive, task recordings, session journal, Agent Context panel, memory search |
 | `hive-workspace` | The workspace engine's bridge, fence, recovery and updates |
 | `hive-sidecars` | Clients for the Python sidecars (voice, captions, lip reading) |
 | `hive-common` | Shared code, such as ingesting text |
+| `hive-core` | The state that must survive restarts: the conversation identity, task recovery, the request ledger, memory and settings |
 
 The models stay Python, in one sidecar process the agent starts: `python/sidecar_voice.py`
 serves Parakeet, Silero VAD, the echo canceller, WeSpeaker and Kokoro over a JSON-lines
@@ -179,7 +180,7 @@ records admission, not task completion, and does not automatically replay tasks.
 To inspect the most recent receipts locally, run:
 
 ```sh
-build/agent-request-ledger "${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}/control"
+build/hive-request-ledger "${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}/control"
 ```
 
 The output contains decrypted task text and should be treated as private. If the ledger,
@@ -336,7 +337,7 @@ you.
 
 #### Durable sessions and visible context
 
-`hive-codex` (with `personal-agent-core` in `crates/agent-core` for the thread identity) integrates the staged persistence prototype. The primary
+`hive-codex` (with `hive-core` for the thread identity) integrates the staged persistence prototype. The primary
 Codex thread ID lives in `~/Library/Application Support/Personal Agent/codex-thread-id`
 (`AGENT_STATE_DIR` overrides the directory). New threads use `ephemeral=false`;
 Codex stores their history in its own state directory. Identity writes use a private

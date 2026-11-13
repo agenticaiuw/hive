@@ -1,4 +1,4 @@
-use personal_agent_core::workspace_update::{compare_engines, DOCTOR_TIMEOUT};
+use hive_core::workspace_update::{compare_engines, DOCTOR_TIMEOUT};
 use std::path::Path;
 
 fn main() {

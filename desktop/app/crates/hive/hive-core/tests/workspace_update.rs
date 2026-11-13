@@ -1,4 +1,4 @@
-use personal_agent_core::workspace_update::{compare_engines, decision, doctor, EngineChoice};
+use hive_core::workspace_update::{compare_engines, decision, doctor, EngineChoice};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{Duration, Instant};

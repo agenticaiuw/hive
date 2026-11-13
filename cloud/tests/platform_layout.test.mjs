@@ -25,7 +25,7 @@ test('import is opt-in, excludes secrets and refuses to overwrite', t => {
   const target = join(dir, 'dest');
   mkdirSync(join(source, 'python'), { recursive: true });
   mkdirSync(join(source, 'tools'), { recursive: true });
-  mkdirSync(join(source, 'crates/agent-core/src'), { recursive: true });
+  mkdirSync(join(source, 'crates/example/src'), { recursive: true });
   mkdirSync(join(source, 'examples'), { recursive: true });
   writeFileSync(join(source, 'examples/demo.txt'), 'fixture');
   mkdirSync(join(source, 'workspace-engine/.build'), { recursive: true });
@@ -34,7 +34,7 @@ test('import is opt-in, excludes secrets and refuses to overwrite', t => {
   writeFileSync(join(source, 'python/agent.py'), 'print("example")\n');
   writeFileSync(join(source, 'tools/app.swift'), '// example\n');
   writeFileSync(join(source, 'Cargo.toml'), '[workspace]\n');
-  writeFileSync(join(source, 'crates/agent-core/src/lib.rs'), 'pub fn ready() {}\n');
+  writeFileSync(join(source, 'crates/example/src/lib.rs'), 'pub fn ready() {}\n');
   writeFileSync(join(source, '.env'), 'PRIVATE=value\n');
   writeFileSync(join(source, 'python/.env.private'), 'PRIVATE=value\n');
   assert.equal(run('--source', source, '--destination', target).status, 0);
@@ -44,7 +44,7 @@ test('import is opt-in, excludes secrets and refuses to overwrite', t => {
   assert.equal(existsSync(join(target, 'python/.env.private')), false);
   assert.equal(existsSync(join(target, 'workspace-engine/.build')), false);
   assert.equal(readFileSync(join(target, 'python/agent.py'), 'utf8'), 'print("example")\n');
-  assert.equal(readFileSync(join(target, 'crates/agent-core/src/lib.rs'), 'utf8'), 'pub fn ready() {}\n');
+  assert.equal(readFileSync(join(target, 'crates/example/src/lib.rs'), 'utf8'), 'pub fn ready() {}\n');
   assert.equal(readFileSync(join(target, 'Cargo.toml'), 'utf8'), '[workspace]\n');
   assert.equal(readFileSync(join(target, 'examples/demo.txt'), 'utf8'), 'fixture');
   assert.equal(existsSync(join(target, '.import-incomplete')), false);

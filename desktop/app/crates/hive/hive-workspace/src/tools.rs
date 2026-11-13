@@ -4,7 +4,7 @@
 
 use crate::pydump::dumps;
 use hive_common::paths::home;
-use personal_agent_core::{memory, workspace_client};
+use hive_core::{memory, workspace_client};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

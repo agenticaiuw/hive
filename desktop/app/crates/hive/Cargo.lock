@@ -342,8 +342,8 @@ version = "0.1.0"
 dependencies = [
  "core-foundation",
  "hive-common",
+ "hive-core",
  "libc",
- "personal-agent-core",
  "regex",
  "serde_json",
  "tempfile",
@@ -356,9 +356,25 @@ name = "hive-common"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "hive-core",
  "libc",
- "personal-agent-core",
  "regex",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "hive-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "fs4",
+ "getrandom 0.4.3",
+ "libc",
+ "quick-xml",
+ "regex",
+ "rusqlite",
  "serde_json",
  "sha2",
  "tempfile",
@@ -380,8 +396,8 @@ name = "hive-knowledge"
 version = "0.1.0"
 dependencies = [
  "hive-common",
+ "hive-core",
  "libc",
- "personal-agent-core",
  "regex",
  "rusqlite",
  "serde_json",
@@ -396,9 +412,9 @@ dependencies = [
  "base64",
  "block2",
  "hive-common",
+ "hive-core",
  "libc",
  "objc2",
- "personal-agent-core",
  "quick-xml",
  "serde_json",
  "sha2",
@@ -411,7 +427,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hive-common",
- "personal-agent-core",
+ "hive-core",
  "quick-xml",
  "serde_json",
  "tempfile",
@@ -422,8 +438,8 @@ name = "hive-sidecars"
 version = "0.1.0"
 dependencies = [
  "hive-common",
+ "hive-core",
  "libc",
- "personal-agent-core",
  "serde_json",
  "tempfile",
 ]
@@ -434,8 +450,8 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hive-common",
+ "hive-core",
  "libc",
- "personal-agent-core",
  "regex",
  "serde",
  "serde_json",
@@ -659,22 +675,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "personal-agent-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "fs4",
- "getrandom 0.4.3",
- "libc",
- "quick-xml",
- "regex",
- "rusqlite",
- "serde_json",
- "sha2",
- "tempfile",
-]
 
 [[package]]
 name = "pkg-config"

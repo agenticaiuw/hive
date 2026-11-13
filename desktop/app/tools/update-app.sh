@@ -14,9 +14,9 @@ APPLICATIONS="$HOME/Applications"
 MIGRATOR="build/hive-bundle-migration"
 
 build_engine_choice() {
-  cargo build --quiet --locked --release --manifest-path crates/agent-core/Cargo.toml --bin workspace-engine-choice
+  cargo build --quiet --locked --release --manifest-path crates/hive/Cargo.toml -p hive-core --bin workspace-engine-choice
 }
-engine_choice_bin=crates/agent-core/target/release/workspace-engine-choice
+engine_choice_bin=crates/hive/target/release/workspace-engine-choice
 
 if [ "${1:-}" = "--check-engine" ]; then
   [ "$#" -eq 3 ] || { echo 'usage: update-app.sh --check-engine CANDIDATE INSTALLED' >&2; exit 2; }

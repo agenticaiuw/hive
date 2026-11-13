@@ -6,7 +6,7 @@
 //! app writes the text to a private file and sends "ingest <path>" to the voice agent, which
 //!   1. saves it in ~/Library/Application Support/Personal Agent/ingested/<id>.txt (with <id>.json),
 //!   2. splits it into parts of about [`CHUNK_CHARS`] characters at paragraph, line or sentence
-//!      breaks ([`personal_agent_core::ingest::split`]),
+//!      breaks ([`hive_core::ingest::split`]),
 //!   3. if it all fits in [`INLINE_TOKENS`], sends each part as its own turn on the session's Codex
 //!      thread, marked "[ingest <id> part i/n]" and labelled as material, not instructions;
 //!      otherwise sends one turn saying it exists, with a preview, and the agent reads parts when it
@@ -56,7 +56,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// of the part, else a line break, else the end of a sentence, else a space, else anywhere. Joined,
 /// they are the text again, exactly. `Err` for a size of 0.
 pub fn split(text: &str, size: usize) -> Result<Vec<String>, String> {
-    personal_agent_core::ingest::split(text, size).map_err(str::to_string)
+    hive_core::ingest::split(text, size).map_err(str::to_string)
 }
 
 /// A text saved for the conversation, and how it goes in.
@@ -138,7 +138,7 @@ pub fn prepare(text: &str, title: &str, source: &str) -> Result<Ingestion, Strin
 
 fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    personal_agent_core::thread_identity::atomic_write_standard(path, data)
+    hive_core::thread_identity::atomic_write_standard(path, data)
         .map_err(|e| e.to_string())?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())
@@ -215,7 +215,7 @@ pub fn in_rollout(rollout: Option<&Path>, mark: &str) -> Result<bool, String> {
     let Some(rollout) = rollout.filter(|p| p.exists()) else {
         return Ok(false);
     };
-    personal_agent_core::ingest::in_rollout(rollout, mark)
+    hive_core::ingest::in_rollout(rollout, mark)
         .map_err(|_| "Could not inspect Codex rollout".to_string())
 }
 

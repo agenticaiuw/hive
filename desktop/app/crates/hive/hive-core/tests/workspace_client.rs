@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use personal_agent_core::workspace_client::request;
+use hive_core::workspace_client::request;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;

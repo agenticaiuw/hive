@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TRANSPORT: &str = env!("CARGO_BIN_EXE_app-server-transport");
+const TRANSPORT: &str = env!("CARGO_BIN_EXE_hive-app-server-transport");
 
 fn transport(script: &str, args: &[&str]) -> Command {
     let mut command = Command::new(TRANSPORT);

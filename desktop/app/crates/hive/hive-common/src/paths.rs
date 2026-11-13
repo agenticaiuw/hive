@@ -19,7 +19,7 @@ pub fn repo_root() -> PathBuf {
 }
 
 fn is_repo(dir: &Path) -> bool {
-    dir.join("Makefile").is_file() && dir.join("crates/agent-core").is_dir()
+    dir.join("Makefile").is_file() && dir.join("crates/hive/Cargo.toml").is_file()
 }
 
 /// `<repo>/build`, where make puts the helpers (agent-vhid-ocr, agent-vhid-captions, ...).
