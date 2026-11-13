@@ -333,6 +333,8 @@ pub struct FakeSystem {
     pub notifications: Mutex<Vec<String>>,
     pub captures: AtomicUsize,
     pub natural: bool,
+    /// Where Hive's own floating window is, if it's up.
+    pub own_window: Mutex<Option<Bounds>>,
 }
 
 impl Default for FakeSystem {
@@ -348,6 +350,7 @@ impl Default for FakeSystem {
             notifications: Mutex::new(Vec::new()),
             captures: AtomicUsize::new(0),
             natural: true,
+            own_window: Mutex::new(None),
         }
     }
 }
@@ -365,6 +368,9 @@ impl FakeSystem {
 pub const FAKE_JPEG: &[u8] = b"\xff\xd8fake jpeg\xff\xd9";
 
 impl System for FakeSystem {
+    fn own_window_at(&self, x: f64, y: f64) -> bool {
+        lock(&self.own_window).is_some_and(|f| hive_mac::desktop::inside(f, x, y))
+    }
     fn cursor(&self) -> (f64, f64) {
         *lock(&self.cursor)
     }

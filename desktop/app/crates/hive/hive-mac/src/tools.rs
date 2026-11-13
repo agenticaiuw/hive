@@ -769,6 +769,15 @@ impl MacTools {
             "screenshot" => self.look_note("", false),
             "click" => {
                 let p = at("x", "y")?;
+                if self.system.own_window_at(p.0, p.1) {
+                    return Ok(error_text(format!(
+                        "Not clicked: ({}, {}) is on Hive's own floating window, the card that shows what you're \
+                         doing. It isn't part of the task, and its x would stop this task. Click the app you're \
+                         working in instead; if the card covers what you need, scroll or move that window.",
+                        py_str(&a["x"]),
+                        py_str(&a["y"])
+                    )));
+                }
                 let clicks = match a.get("clicks") {
                     Some(v) => int(v)?,
                     None => 1,
