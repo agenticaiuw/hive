@@ -3,8 +3,9 @@
 //! [`FakeBackend`] (a task that looks at the screen and answers, as tests/fake_codex.py) and fn is
 //! the helper's watch (its events, or a fake helper on a temporary socket).
 //!
-//! What the ears themselves do (Parakeet, pauses, noise, the voiceprint, echo) is
-//! hive-sidecars' (tests/voice.rs); what Codex is asked (prompts, goals) is hive-codex's.
+//! What the ears themselves do (Parakeet, pauses, noise, the voiceprint, echo) is tested in
+//! tests/test_voice_models.py, since listen.Ears stays Python; what Codex is asked (prompts, goals)
+//! in hive-codex's codex_task tests.
 
 mod support;
 

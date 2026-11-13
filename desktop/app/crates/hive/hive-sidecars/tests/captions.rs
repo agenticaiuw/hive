@@ -1,11 +1,15 @@
 //! The captions client (python/captions.py) against a stand-in for build/agent-vhid-captions that
 //! writes down every line it's sent and answers as tools/captions.swift does: a request typed into
 //! the entry field, the mute and close buttons, and whether the entry field has the keyboard.
+//!
+//! And the real overlay drawing its card into a PNG (`--snapshot`, tests/test_tools.py's
+//! CaptionsTest), skipped when it isn't built. No window is shown.
 
 use hive_sidecars::Captions;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -200,4 +204,87 @@ fn an_overlay_that_quit_is_left_alone() {
     let started = Instant::now();
     captions.close();
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+// ---------------------------------------------------------------- the real overlay, drawn into a PNG
+
+/// build/agent-vhid-captions, if it's built.
+fn built_overlay() -> Option<PathBuf> {
+    let program = hive_sidecars::captions::overlay();
+    if program.exists() {
+        Some(program)
+    } else {
+        eprintln!("skipped: build/agent-vhid-captions isn't built (make)");
+        None
+    }
+}
+
+/// `agent-vhid-captions --snapshot out ARGS...`: the card drawn into a PNG at `out`. Its width and
+/// height, from the PNG's IHDR.
+fn snapshot(program: &Path, out: &Path, args: &[&str]) -> (u32, u32) {
+    let mut child = Command::new(program)
+        .arg("--snapshot")
+        .arg(out)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("start agent-vhid-captions");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("agent-vhid-captions --snapshot took over 20 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "agent-vhid-captions --snapshot: {status}");
+    let png = std::fs::read(out).unwrap();
+    assert!(png.len() >= 24, "not a PNG: {} bytes", png.len());
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(&png[12..16], b"IHDR");
+    let be = |at: usize| u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]);
+    (be(16), be(20))
+}
+
+#[test]
+fn overlay_draws_the_words() {
+    let Some(program) = built_overlay() else { return };
+    let dir = tempfile::Builder::new().prefix("captions-").tempdir().unwrap();
+    let (width, height) = snapshot(
+        &program,
+        &dir.path().join("c.png"),
+        &["I opened Safari for you.", "Typing “weather”"],
+    );
+    assert!(width > 300, "{width}");
+    assert!(height > 60, "{height}"); // two lines: the words and what it's doing
+}
+
+#[test]
+fn overlay_says_its_listening_and_what_it_hears() {
+    let Some(program) = built_overlay() else { return };
+    let dir = tempfile::Builder::new().prefix("captions-").tempdir().unwrap();
+    let out = dir.path().join("c.png");
+    let heights: Vec<u32> = [
+        &[][..],
+        &["--listening", "--hearing", "Open Safari and"][..],
+        &["--dictating", "--hearing", "Dear Sam,"][..],
+    ]
+    .iter()
+    .map(|extra| {
+        let mut args = extra.to_vec();
+        args.push("I opened Safari for you.");
+        snapshot(&program, &out, &args).1
+    })
+    .collect();
+    assert!(heights[1] > heights[0] + 30, "{heights:?}"); // two more lines: "Listening" and your words
+    // "Dictating" and your words too, but since 4670b22 only listening opens the card's controls
+    // and its typing box (tapping fn types into it), so it is the tallest. (The Python test, from
+    // before that, expected the two to be the same height.)
+    assert!(heights[2] > heights[0] + 30, "{heights:?}");
+    assert!(heights[1] > heights[2], "{heights:?}");
 }
