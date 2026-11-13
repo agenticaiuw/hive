@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '../../..');
 
-test('Hive assets are the gold hexagon and iOS identity is Hive's', () => {
+test('Hive assets are the gold hexagon and the iOS app is Hive', () => {
   // One icon, at the root; the dashboard links to it and the Mac app's .icns is built from it.
   const svg = readFileSync(join(root, 'branding/hive.svg'), 'utf8');
   assert.match(svg, /id="gold"/); assert.match(svg, /id="shineTop"/); assert.match(svg, /id="shineSide"/);
