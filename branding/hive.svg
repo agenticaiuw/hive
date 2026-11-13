@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- Hive's icon, the only copy: the Mac app's Hive.icns is built from it (desktop/app:
-       make build/Hive.icns), the Chrome extension's PNGs too (make chrome-icons), and the
-       dashboard links to it. A flat-topped gold hexagon on the macOS icon shape, lit from
-       the top right. -->
+  <!-- Hive's icon, the only copy. The Mac app's Hive.icns is built from it (desktop/app:
+       make build/Hive.icns), the dashboard links to it, and `node mobile/tools/sync-icons.mjs`
+       draws it for the browser extensions, the iOS app and the mobile web app.
+       A flat-topped gold hexagon on the macOS icon shape, lit from the top right. -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#2E2A24"/>

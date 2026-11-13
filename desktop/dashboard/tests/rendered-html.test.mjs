@@ -137,8 +137,8 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>AI Pendant Dashboard<\/title>/i);
-  assert.match(html, /Dashboard/);
+  assert.match(html, /<title>Hive<\/title>/i);
+  assert.match(html, /<h1>Hive<\/h1>/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 
   // Topbar dot cluster exposes each subsystem through an accessible label.
@@ -212,7 +212,7 @@ test("serves the app-authenticated dashboard from a public Sites host", async ()
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("location"), null);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
-  assert.match(await response.text(), /Dashboard/);
+  assert.match(await response.text(), /<title>Hive<\/title>/i);
 });
 
 test("accepts the shared repo-root auth variable names server-side", async () => {
