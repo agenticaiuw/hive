@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod auth_mcp;
+pub mod live;
 pub mod parts;
 pub mod phone_mcp;
 pub mod real;
