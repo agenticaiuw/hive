@@ -330,6 +330,11 @@ impl Agent {
                 "mcp_servers.authentication.args={}",
                 py::dumps(&json!(self.config.authentication_args), true)
             ),
+            // Codex 0.167 asks before running an MCP tool; with approvalPolicy "never" that ask
+            // becomes a refusal, so Hive's own tools are approved up front.
+            "mcp_servers.authentication.default_tools_approval_mode=\"approve\"".into(),
+            // Codex's hosted web search clashes with Hive's own web.run tool (OpenAI 400).
+            "web_search=\"disabled\"".into(),
         ]);
         if let (Some(bridge), Some(connection)) = (
             self.env.get("AGENT_WORKSPACE_BRIDGE"),
@@ -345,6 +350,7 @@ impl Agent {
                     "mcp_servers.workspace.args={}",
                     py::dumps(&json!(["mcp-bridge", "--connection", connection]), true)
                 ),
+                "mcp_servers.workspace.default_tools_approval_mode=\"approve\"".into(),
             ]);
         }
         if let Some(catalog) = self.direct_tools_catalog() {
