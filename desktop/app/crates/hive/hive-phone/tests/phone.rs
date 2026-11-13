@@ -910,5 +910,5 @@ fn offline_phone_says_how_to_connect_it() {
         .call("tap", &json!({"x": 1, "y": 1}))
         .unwrap();
     assert!(is_error(&res));
-    assert!(texts(&res).contains("Pocket Connect"), "{}", texts(&res));
+    assert!(texts(&res).contains("WebDriverAgent relay app"), "{}", texts(&res));
 }
