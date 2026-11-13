@@ -72,21 +72,38 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(events[-1]['text'], 'final words')
 
     def test_a_full_window_is_kept_from_the_careful_decode(self):
+        # A phrase longer than `whole` is read in windows, joined by text.
         events, kept = [], threading.Event()
         def emit(**event):
             events.append(event)
             if event.get('partial') == 'careful25': kept.set()
         decode = lambda frames, final=False: f"{'careful' if final else 'draft'}{len(frames)}"
-        stream = Stream(decode, emit, window=1, overlap=0.2, interval=0.01)
+        stream = Stream(decode, emit, window=1, overlap=0.2, interval=0.01, whole=1.2)
         for i in range(25): stream.feed(i)
         self.assertTrue(kept.wait(2))
         self.assertEqual(stream.committed, 'careful25')
         for i in range(10): stream.feed(i)
         stream.finish()
         self.assertTrue(stream.done.wait(2))
+        self.assertIsNone(stream.phrase)
         self.assertEqual(events[-1], {'text': 'careful25 careful15', 'final': True,
                                       'inference_seconds': events[-1]['inference_seconds'],
                                       'video_seconds': 1.4})
+
+    def test_a_phrase_just_past_one_window_is_read_whole_not_joined(self):
+        # Five frames per word. Like the real models, a window that starts mid-phrase reads its
+        # first word differently ("domain shifts" / "domain shifting"), so a text join repeats it.
+        def decode(frames, final=False):
+            words = [f'w{frames[i] // 5}' for i in range(0, len(frames), 5)]
+            if frames[0]: words[0] += 'ing'
+            return ' '.join(words)
+        events = []
+        stream = Stream(decode, lambda **e: events.append(e), window=1, overlap=0.2, interval=0.01)
+        for i in range(40): stream.feed(i)
+        stream.finish()
+        self.assertTrue(stream.done.wait(2))
+        self.assertEqual(events[-1]['text'], 'w0 w1 w2 w3 w4 w5 w6 w7')
+        self.assertEqual(events[-1]['video_seconds'], 1.6)
 
     def test_empty_session_finishes_without_decoding(self):
         events=[]
