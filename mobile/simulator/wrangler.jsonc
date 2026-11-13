@@ -54,7 +54,7 @@
     {
       "binding": "DB",
       "database_name": "hive-relay-db",
-      "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
+      "database_id": "e7adf4c4-db9c-4b05-b485-96891ac3e37a"
     }
   ],
   // The bridge doorbell (cloudflare-worker/bridgeHub.js): one instance per
