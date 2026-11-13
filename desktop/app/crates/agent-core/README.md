@@ -1,61 +1,43 @@
-# Personal Agent core: Rust migration
+# Personal Agent core
 
-This crate contains a Rust implementation of the durable conversation identity
-currently in `python/resumable_thread.py`. That portion is a library and is not
-wired into the running app yet. It does not start a Codex server,
-control a desktop, read credentials, or create sessions by itself. A caller
-supplies a `SessionTransport` for app-server JSON requests.
+A Rust library, plus a few small binaries, that the desktop agent (`crates/hive`) builds on.
+It holds the parts that have to stay exact across restarts and processes:
 
-`ResumableThread::connect` keeps the existing state-file format and `.lock` file,
-serializes creation across processes, persists an ambiguous-start marker before
-requesting a thread, resumes an existing identity rather than replacing it,
-forwards the same six resume overrides, rejects mismatched/ephemeral identities,
-and atomically writes and syncs the resulting state. The Rust test suite checks
-those boundaries, tests process concurrency and a killed start, and compares a
-start/resume fixture against the Python implementation.
+- `thread_identity`: the durable conversation identity. `ResumableThread::connect` keeps the
+  state file and its `.lock`, serializes creation across processes, saves an ambiguous-start
+  marker before asking for a thread, and resumes an existing identity rather than replacing it.
+  It forwards the seven resume overrides (`baseInstructions`, `developerInstructions`, `cwd`,
+  `sandbox`, `permissions`, `approvalPolicy`, `config`), refuses mismatched or ephemeral
+  identities, and writes and syncs the result atomically. hive-codex resumes Codex through it.
+  A caller supplies a `SessionTransport` for the app-server's JSON requests.
+- `task_recovery`: the record of the running task, so a restart can recover it.
+- `request_ledger`: the encrypted ledger of requests from the request socket (`request-ledger`
+  lists it; see the app's README).
+- `workspace_update`: whether the active workspace engine can be replaced. `tools/update-app.sh`
+  runs the `workspace-engine-choice` binary for this; `--check-engine CANDIDATE INSTALLED`
+  runs it read-only. Rust rejects malformed daemon reports and non-string instance IDs, bounds
+  the doctor's output to 1 MiB, and captures it in a private temporary file.
+- `phone_transport`, `memory`, `ingest` and `settings`: the iPhone's WebDriverAgent calls, the
+  local memory store, splitting text for ingest, and the `.env`-style settings parser.
 
-The update script now uses the Rust `workspace-engine-choice` binary in place of
-`python/workspace_update.py` to decide whether the active workspace engine can
-be replaced. It builds the binary before staging an update when both engines
-exist, so builds require Cargo and the locked dependencies. A read-only
-`tools/update-app.sh --check-engine CANDIDATE INSTALLED` exercises that same
-binary without installing or restarting the app. Tests compare realistic
-reports with Python and exercise actual subprocesses, bad data and timeouts.
-Rust deliberately rejects malformed daemon reports and non-string instance IDs
-more strictly than Python; it bounds doctor output to 1 MiB. It captures output
-in a private temporary file, so a helper that exits while a descendant continues
-writing to its inherited output is not guaranteed the pipe-EOF behavior of
-Python's subprocess capture.
+`app-server-transport` is what hive-codex runs Codex's app-server under when it's built
+(`build/agent-app-server-transport`): it forwards the bytes exactly, passes signals on and
+reaps the server if the agent goes away.
 
-The workspace tool client is also implemented in Rust. Normal app builds put
-`workspace-client` in `build/agent-workspace-client`; the existing Python tool
-dispatch starts it when available and retains the Python transport if the
-binary has not been built. Once a Rust request starts, an error is never retried
-through Python because the server may already have performed the action. The
-binary receives request JSON on stdin and communicates through the same private
-Unix socket, with the existing response size limit and timeout. Run
-`make build/agent-workspace-client && python3 -m unittest discover -s tests -p test_rust_workspace_client.py`
-to compare both transports with a disposable local server. This still needs a
-real-workspace end-to-end check after a controlled app restart; the running app
-was not restarted for this migration.
-
-Run locally, without a provider account or network:
+Run the tests locally, without a provider account or network:
 
 ```sh
 cargo test --offline --manifest-path crates/agent-core/Cargo.toml
 ```
 
-This is **not the requested full migration**. The app still runs the Python
-conversation implementation. Before switching, integrate this crate into the app's actual
-app-server transport and observation hooks, reproduce its existing end-to-end
-restart/failure tests against both implementations, and verify resume on a real
-session. Python's optional `observe` callback and exact error-message wording are
-not yet reproduced. Tests above ran on macOS; Windows behavior, notably directory
-persistence guarantees, has not been qualified.
+They cover process concurrency and a killed start, atomic writes under competing and killed
+writers, the transport's signals and exit codes, the ledger's paging and fail-closed cases, and
+the settings parser. Where the Python version of something used to be compared against the
+Rust one (resume, engine choice, settings), the Python's results are recorded in the tests.
 
-The existing Python runtime also handles orchestration, the desktop and phone
-bridges, microphone and speech pipelines, local IPC, authentication, memory,
-and model-specific preprocessing. The voice stack currently relies on MLX and
-other native/model libraries through Python; those integrations need Rust
-bindings or replacement runtimes plus behavior and latency testing. This is an
-implementation constraint, not a requirement that the project keep Python.
+The orchestration was Python until November 2026; it is now `crates/hive`. Since then, nothing
+starts these binaries any more: `local-requests`, `memory-store`, `thread-identity`,
+`workspace-client`, `settings-reader`, `memory-search-reader`, `journal-reader` and
+`ingest-split`, or the FFI's `agent_atomic_write` and `agent_append_synced` in
+`libagent-core.dylib`. The Makefile still builds them. Tests above ran on macOS; Windows
+behavior, notably directory persistence guarantees, has not been qualified.

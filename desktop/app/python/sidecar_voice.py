@@ -8,7 +8,8 @@ on stdout.
 They are one process because they share state that changes every 32 ms: what the microphone hears is
 ignored while the agent's own voice is audible and the echo canceller can't hear the Mac (deaf), the
 voice doesn't start a sentence while you're talking (may_speak), and it learns its own voice by
-rendering Kokoro straight into the voiceprint model. Both rules are python/voice_agent.py's.
+rendering Kokoro straight into the voiceprint model. Both rules came from the Python voice agent
+(python/voice_agent.py, now crates/hive).
 
     .venv/bin/python python/sidecar_voice.py [--listening] [--no-speak] [--no-voiceprint]
 
