@@ -52,7 +52,7 @@ This repository currently uses:
 | Setting | Value |
 | --- | --- |
 | Display name | Hive |
-| Bundle identifier | `com.aipendant.app` |
+| Bundle identifier | `com.evanliu.hive` |
 | Apple team | `9684Z8GZ26` |
 | Minimum iOS | 15.0 |
 
