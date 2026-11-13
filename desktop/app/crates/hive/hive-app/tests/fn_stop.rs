@@ -4,7 +4,7 @@
 
 mod support;
 
-use hive_app::util::{now, TOOK_OVER};
+use hive_app::util::{now, setting, FLOATING_WINDOW, SPEAK_ALOUD, TOOK_OVER};
 use hive_app::Event;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -148,6 +148,77 @@ fn fn_tap_that_itself_took_over_toggles_listening() {
     assert_eq!(h.mac.count("engage"), 0);
     assert!(!h.agent.listening.get()); // set_listening(False)
     assert_eq!(h.captions.of("listening"), ["false"]);
+}
+
+#[test]
+fn window_hide_button_hides_it_and_the_work_goes_on() {
+    let h = Harness::app();
+    let mac = FakeTask::running("work", "mac");
+    h.agent.tasks.lock().mac = Some(mac.clone());
+    h.agent.start_journal();
+    h.agent.on_overlay("hidden", Some(true)); // the card's –
+    assert_eq!(mac.stop_count(), 0);
+    assert!(h.voice.calls.is_empty());
+    assert_eq!(h.mac.count("disengage"), 0);
+    assert_eq!(h.captions.of("hidden"), ["true"]);
+    // the menu's Show Floating Window goes off with it, and stays off at the next launch
+    assert!(h.has_printed("@@ window 0"));
+    assert!(!setting(FLOATING_WINDOW));
+    // the menu shows it again, as it is now
+    h.agent.dispatch(Event::Window(true));
+    assert_eq!(h.captions.of("hidden"), ["true", "false"]);
+    assert!(h.has_printed("@@ window 1"));
+    assert!(setting(FLOATING_WINDOW));
+    let kinds = h.journal_kinds();
+    assert!(
+        kinds.contains(&("floating window".into(), "hidden".into())),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&("floating window".into(), "shown".into())),
+        "{kinds:?}"
+    );
+    assert!(h.printed_with("floating window hidden (the card's –)"));
+    assert!(h.printed_with("floating window shown (the menu)"));
+}
+
+#[test]
+fn speak_aloud_off_silences_it_but_still_shows_and_saves_what_it_says() {
+    let h = Harness::app();
+    h.agent.start_journal();
+    h.voice.playing.store(true, Ordering::SeqCst);
+    h.agent.say("Opening Calculator now.", None, None);
+    assert_eq!(h.voice.said.all(), ["Opening Calculator now."]);
+    let microphone = h.ears.calls.all();
+    h.agent.set_speaking(false);
+    // what it was saying stops at once, and all of it goes on the card (which showed each
+    // sentence as it was spoken)
+    assert_eq!(h.voice.calls.all(), ["stop"]);
+    assert_eq!(
+        h.captions.of("say"),
+        ["Opening Calculator now.", "Opening Calculator now."]
+    );
+    assert!(h.has_printed("@@ speak 0"));
+    assert!(!setting(SPEAK_ALOUD)); // kept for the next launch
+    h.agent.say("Calculator is open.", None, None);
+    assert_eq!(h.voice.said.len(), 1); // nothing more is spoken
+    assert_eq!(h.captions.of("say").last().unwrap(), "Calculator is open.");
+    h.agent.set_speaking(true); // no restart
+    assert_eq!(h.ears.calls.all(), microphone); // the microphone is left as it was
+    h.agent.say("Done.", None, None);
+    assert_eq!(h.voice.said.all(), ["Opening Calculator now.", "Done."]);
+    assert!(h.has_printed("@@ speak 1"));
+    let kinds = h.journal_kinds();
+    for entry in [
+        ("speak aloud", "off"),
+        ("agent said", "Calculator is open."),
+        ("speak aloud", "on"),
+    ] {
+        assert!(
+            kinds.contains(&(entry.0.into(), entry.1.into())),
+            "{kinds:?}"
+        );
+    }
 }
 
 #[test]

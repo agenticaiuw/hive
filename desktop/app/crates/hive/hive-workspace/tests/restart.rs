@@ -143,7 +143,7 @@ final class Harness {{
     var listening = false, dictating = false, listenOnce = true, camera = false
     var contextURL: URL?, panelURL: URL?
     let statusLine = Line(), contextItem = Line(), clipboardItem = Line(), fileItem = Line()
-    let voiceItem = Line(), lipsItem = Line(), panel = Panel()
+    let voiceItem = Line(), lipsItem = Line(), speakItem = Line(), windowItem = Line(), panel = Panel()
     var toggles = 0
     func show() {{}}
     func write(_ text: String) {{}}

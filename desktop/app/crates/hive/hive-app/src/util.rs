@@ -289,6 +289,26 @@ pub fn workspace_voice_allowed() -> bool {
     }
 }
 
+/// Agent menu › Speak Aloud, in the state folder (see [`setting`]).
+pub const SPEAK_ALOUD: &str = "speak-aloud";
+/// Agent menu › Show Floating Window, in the state folder (see [`setting`]).
+pub const FLOATING_WINDOW: &str = "floating-window";
+
+/// A switch in the Agent menu, kept for the next launch in a small file in the state folder
+/// ("on" or "off", like input-mode): on unless the file says off.
+pub fn setting(name: &str) -> bool {
+    std::fs::read_to_string(hive_common::state_dir().join(name))
+        .map_or(true, |text| text.trim() != "off")
+}
+
+pub fn set_setting(name: &str, on: bool) -> std::io::Result<()> {
+    let path = hive_common::state_dir().join(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    hive_knowledge::util::atomic_write(&path, if on { "on\n" } else { "off\n" })
+}
+
 /// What you say while you hold fn, typed into the app in front when you let go.
 pub struct Dictation {
     pub since: f64,
