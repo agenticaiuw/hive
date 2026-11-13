@@ -172,6 +172,37 @@ fn voice_is_the_default_and_the_choice_is_kept() {
 }
 
 #[test]
+fn usr2_is_used_when_asked_for_and_installed() {
+    let _env = env_lock();
+    let fixture = Fixture::new();
+    let home = fixture.path().join("lipread");
+    std::env::set_var("AGENT_STATE_DIR", fixture.path());
+    std::env::set_var("LIPREAD_DIR", &home);
+    std::env::set_var("LIPREAD_MODEL", "usr2");
+    let (ok, why) = lipread::available();
+    assert!(!ok);
+    assert_eq!(why, "USR 2.0 isn't set up: run scripts/setup-lipread.sh");
+    std::fs::create_dir_all(home.join("flare/.venv/bin")).unwrap();
+    std::fs::write(home.join("flare/.venv/bin/python"), "").unwrap();
+    std::fs::create_dir_all(home.join("usr2/espnet/nets/pytorch_backend")).unwrap();
+    std::fs::create_dir_all(home.join("usr2/weights")).unwrap();
+    std::fs::write(
+        home.join("usr2/weights/huge_high_resource_lrs2lrs3vox2avsp.pth"),
+        "",
+    )
+    .unwrap();
+    let (ok, why) = lipread::available();
+    assert!(ok);
+    assert!(why.starts_with("USR 2.0 Huge"), "{why}");
+    std::env::remove_var("LIPREAD_MODEL");
+    let (ok, why) = lipread::available();
+    assert!(!ok, "FLARE, the default, isn't installed here");
+    assert!(why.starts_with("FLARE isn't set up"), "{why}");
+    std::env::remove_var("AGENT_STATE_DIR");
+    std::env::remove_var("LIPREAD_DIR");
+}
+
+#[test]
 fn not_set_up_says_how() {
     let _env = env_lock();
     let fixture = Fixture::new();
