@@ -16,6 +16,7 @@ export class Cdp {
   #pending = new Map();
   #listeners = new Set();
   #closed = null;
+  #detached = new Set(); // sessions of tabs that closed: requests to them fail at once
 
   constructor(ws) {
     this.#ws = ws;
@@ -37,13 +38,14 @@ export class Cdp {
 
   send(method, params = {}, sessionId, { timeoutMs = 30_000 } = {}) {
     if (this.#closed) return Promise.reject(this.#closed);
+    if (sessionId && this.#detached.has(sessionId)) return Promise.reject(new CdpError(method, { message: 'the tab has closed', code: 'tab_closed' }));
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new CdpError(method, { message: `no reply within ${timeoutMs} ms` }));
       }, timeoutMs);
-      this.#pending.set(id, { resolve, reject, method, timer });
+      this.#pending.set(id, { resolve, reject, method, timer, sessionId });
       this.#ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
     });
   }
@@ -83,6 +85,16 @@ export class Cdp {
       return;
     }
     if (!message.method) return;
+    if (message.method === 'Target.detachedFromTarget' && message.params?.sessionId) {
+      // The tab closed (or was let go): nothing it was asked will be answered.
+      const gone = message.params.sessionId;
+      this.#detached.add(gone);
+      for (const [id, entry] of this.#pending) {
+        if (entry.sessionId !== gone) continue;
+        this.#pending.delete(id); clearTimeout(entry.timer);
+        entry.reject(new CdpError(entry.method, { message: 'the tab has closed', code: 'tab_closed' }));
+      }
+    }
     for (const listener of [...this.#listeners]) {
       try { listener(message.method, message.params ?? {}, message.sessionId); } catch { /* a listener must not break the socket */ }
     }

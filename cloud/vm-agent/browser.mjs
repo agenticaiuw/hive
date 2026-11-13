@@ -41,10 +41,9 @@ export function proxyArgs(proxy) {
 export class BrowserSession {
   #cdp; #child; #session; #stderr = '';
 
-  constructor({ cdp, child, session, profileDir }) {
-    this.#cdp = cdp; this.#child = child; this.#session = session; this.profileDir = profileDir;
+  constructor({ cdp, child, session, profileDir, targetId }) {
+    this.#cdp = cdp; this.#child = child; this.#session = session; this.profileDir = profileDir; this.targetId = targetId;
   }
-
   static async launch({ executable, profileDir, headless = false, width = 1280, height = 800, extraArgs = [] }) {
     const binary = findBrowserExecutable(executable);
     mkdirSync(profileDir, { recursive: true, mode: 0o700 });
@@ -79,7 +78,7 @@ export class BrowserSession {
     const target = targetInfos.find(info => info.type === 'page')
       ?? { targetId: (await cdp.send('Target.createTarget', { url: 'about:blank' })).targetId };
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
-    const browser = new BrowserSession({ cdp, child, session: sessionId, profileDir });
+    const browser = new BrowserSession({ cdp, child, session: sessionId, profileDir, targetId: target.targetId });
     child.stderr.on('data', chunk => { browser.#stderr = (browser.#stderr + chunk).slice(-4000); });
     await browser.send('Page.enable');
     await browser.send('Runtime.enable');
@@ -93,6 +92,22 @@ export class BrowserSession {
   onEvent(listener) {
     return this.#cdp.on((method, params, session) => { if (session === this.#session) listener(method, params); });
   }
+
+  // The browser as a whole rather than this tab: its tabs and popup windows (Target.*).
+  browserSend(method, params = {}) { return this.#cdp.send(method, params); }
+
+  onBrowserEvent(listener) {
+    return this.#cdp.on((method, params, session) => { if (!session) listener(method, params); });
+  }
+
+  // Another tab or popup window of the same browser, driven the same way as this one.
+  // Let go of it with detach(); close() would close the whole browser.
+  async attach(targetId) {
+    const { sessionId } = await this.#cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    return new BrowserSession({ cdp: this.#cdp, child: this.#child, session: sessionId, profileDir: this.profileDir, targetId });
+  }
+
+  detach() { return this.#cdp.send('Target.detachFromTarget', { sessionId: this.#session }); }
 
   async evaluate(expression) {
     const { result, exceptionDetails } = await this.send('Runtime.evaluate', {

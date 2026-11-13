@@ -80,6 +80,9 @@ Exit codes: 0 sent, 1 cancelled, 3 the VM is signed out, 4 unknown (check the si
 The sign-in viewer is a loopback page on the VM reached through an SSH tunnel. It needs a one-time
 link, closes when idle, and does not log what is typed. "Open a link…" opens a pasted Discord or X
 link (such as a verify-login link from an email) in the VM's browser; other sites are refused.
+Every tab and popup window of the VM's browser is a tab in the viewer: a sign-in popup (such as
+X's "Continue with Google") is shown as it opens, and the page that opened it is shown again when
+it closes.
 
 ## Tests
 
