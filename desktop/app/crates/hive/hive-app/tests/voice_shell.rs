@@ -188,7 +188,7 @@ fn typed_request_from_caption_is_sent_to_the_agent() {
 
 /// Lip reading mode, with listening off (it was on since setUp).
 fn lip_reading(h: &Harness) {
-    h.tap_fn(); // stop listening
+    h.agent.put(Event::Toggle); // the menu turns listening off (fn only ever turns it on)
     wait_for("it to stop listening", 5.0, || {
         h.captions.of("listening").last().map(String::as_str) == Some("false")
     });
@@ -324,12 +324,16 @@ fn a_look_is_not_taken_while_a_task_works_on_the_mac() {
 }
 
 #[test]
-fn tapping_fn_starts_and_stops_it_listening() {
+fn tapping_fn_turns_listening_on_but_never_off() {
     let h = listening(Setup {
         app: true,
         ..Setup::default()
     }); // and tells Agent.app's menu bar
     h.tap_fn();
+    sleep(0.3);
+    assert_eq!(h.captions.of("listening"), ["true"]); // still listening: fn never turns it off
+    assert!(h.captions.of("dismiss").is_empty()); // and never closes the window
+    h.agent.put(Event::Toggle); // the menu turns it off
     wait_for("it to stop listening", 5.0, || {
         h.captions.of("listening") == ["true", "false"]
     });
@@ -362,11 +366,11 @@ fn tapping_fn_starts_and_stops_it_listening() {
 }
 
 #[test]
-fn tapping_fn_mid_sentence_cancels_unfinished_speech() {
+fn turning_listening_off_mid_sentence_cancels_unfinished_speech() {
     let h = listening(Setup::default());
     h.agent.heard("Open Calculator and work out", false);
     h.ears.hold_thens.store(true, Ordering::SeqCst); // the ears finish writing it down first
-    h.tap_fn();
+    h.agent.put(Event::Toggle); // the menu's Stop Listening
     wait_for("listening to stop", 5.0, || !h.ears.listening_now());
     h.say("Open Calculator and work out 12 times 34."); // what was cut, written down
     wait_for("the cut", 5.0, || !lock(&h.ears.thens).is_empty());
@@ -426,7 +430,7 @@ fn holding_fn_types_what_you_say_into_the_app_in_front() {
 #[test]
 fn letting_go_of_fn_mid_sentence_types_all_of_it() {
     let h = listening(Setup::default());
-    h.tap_fn(); // it stops listening for the agent
+    h.agent.put(Event::Toggle); // it stops listening for the agent (the menu)
     wait_for("it to stop listening", 5.0, || !h.ears.listening_now());
     hold_fn(&h);
     assert!(h.ears.listening_now()); // the microphone opens just for this

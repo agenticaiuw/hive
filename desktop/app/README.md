@@ -118,7 +118,7 @@ terminal app needs the permissions instead.
 
 | | |
 |---|---|
-| Tap fn | It starts listening, and a new conversation: until the next time, it remembers everything you've asked. Tap again and it stops |
+| Tap fn | It starts listening, and a new conversation: until the next time, it remembers everything you've asked. fn only ever resumes: tapping it again never stops listening or closes the floating window (the window's mic button mutes; its x stops the agent) |
 | Talk | A pause ends what you're saying |
 | Talk while it's talking | It goes quiet at once and listens |
 | Say more within a few seconds | It's added to what you just asked |
@@ -634,7 +634,7 @@ cancellation. None of them play anything aloud or touch your phone.
 - **While it's listening**, other people talking nearby (a call on another
   device, a TV) can be taken as a task, unless you've enrolled your voice. The
   Mac's own sound is cancelled, the computer agent stops before anything risky,
-  and touching anything takes over. Tap fn to stop it listening.
+  and touching anything takes over. The floating window's mic button mutes it.
 
 - **Input method:** typing goes through whatever input source is active. If a
   Chinese/Pinyin input method is on, letters go to the IME. Switch to ABC first.

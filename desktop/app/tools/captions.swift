@@ -678,7 +678,7 @@ func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, l
         return Header(symbol: "keyboard", text: handsFree ? "Dictating · press fn to type it" : "Dictating · let go of fn to type it",
                       icon: youAccent, color: secondaryText)
     }
-    if listening { return Header(symbol: "waveform", text: "Listening · tap fn to turn the mic off", icon: youAccent, color: secondaryText) }
+    if listening { return Header(symbol: "waveform", text: "Listening · the mic button mutes", icon: youAccent, color: secondaryText) }
     return Header(symbol: "sparkles", text: active ? "Hive · working" : "Hive", icon: tertiaryText, color: tertiaryText)
 }
 

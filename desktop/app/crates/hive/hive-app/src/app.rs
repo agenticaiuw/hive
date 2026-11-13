@@ -11,16 +11,16 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub const USAGE: &str = "Talk to your Mac. Tap fn and it listens, showing the words as you say them (Parakeet,
 python/listen.py); when you pause, Codex does what you said with the real mouse and keyboard in
-whatever window you're in, talking you through it out loud (Kokoro, python/speech.py). Tap fn
-again and it stops listening; a task it's doing carries on. Hold fn instead and what you say is
+whatever window you're in, talking you through it out loud (Kokoro, python/speech.py). fn only
+ever resumes: it never turns listening off or closes the floating window (its mic button mutes, its
+x stops the agent). Hold fn instead and what you say is
 typed into the app in front when you let go: dictation. Listening and speaking run on this Mac.
 
     hive-agent [--no-speak] [--app]
     hive-agent --task \"make a new note in Notes that says buy milk\"
 
-  tap fn                   it listens (the microphone opens), continuing the conversation. Tap
-                           again: it stops, and does what you just said without waiting for you
-                           to pause
+  tap fn                   it listens (the microphone opens), continuing the conversation; while
+                           you have the mouse and keyboard during a task, it hands them back
   hold fn and talk         dictation: let go and your words are typed where you're typing (pasted,
                            with the clipboard put back), not given to the agent
   fn + shift, then talk    dictation that goes on after you let go: press fn again and it's typed

@@ -1,6 +1,7 @@
-//! tests/test_fn_stop.py: turning listening off with fn quiets the voice but leaves the agent
-//! working; the floating window's x stops both devices. Neither turns unfinished speech into a
-//! task. fn while you have control of a running task hands control back.
+//! tests/test_fn_stop.py: turning listening off quiets the voice but leaves the agent working; the
+//! floating window's x stops both devices. Neither turns unfinished speech into a task. fn only
+//! resumes: while you have control of a running task it hands control back, and otherwise it opens
+//! the microphone; it never turns listening off or closes the window.
 
 mod support;
 
@@ -140,14 +141,36 @@ fn fn_never_says_it_stops_the_agent() {
 }
 
 #[test]
-fn fn_tap_that_itself_took_over_toggles_listening() {
-    let (h, _, _) = make_agent();
+fn fn_tap_that_itself_took_over_resumes_too() {
+    let (h, mac, _) = make_agent();
     h.agent.paused_since.set(now()); // this very fn press disengaged it
     h.agent
         .on_helper(&[("fn".to_owned(), "tap".to_owned())].into());
-    assert_eq!(h.mac.count("engage"), 0);
-    assert!(!h.agent.listening.get()); // set_listening(False)
-    assert_eq!(h.captions.of("listening"), ["false"]);
+    assert_eq!(h.mac.count("engage"), 1); // take_control
+    assert_eq!(mac.handed_back.load(Ordering::SeqCst), 1);
+    assert!(h.agent.listening.get());
+    assert!(h.captions.of("listening").is_empty());
+}
+
+#[test]
+fn fn_only_resumes_and_never_closes_the_window() {
+    let (h, _, _) = make_agent(); // listening, a task running, nobody took over
+    for _ in 0..3 {
+        h.agent
+            .on_helper(&[("fn".to_owned(), "tap".to_owned())].into());
+    }
+    assert!(h.agent.listening.get());
+    assert!(h.captions.of("listening").is_empty());
+    assert!(h.captions.of("dismiss").is_empty());
+    assert!(h.voice.calls.is_empty());
+    // with the mic off, fn turns it on (and only on)
+    h.agent.set_listening(false);
+    h.agent
+        .on_helper(&[("fn".to_owned(), "tap".to_owned())].into());
+    h.agent
+        .on_helper(&[("fn".to_owned(), "tap".to_owned())].into());
+    assert!(h.agent.listening.get());
+    assert_eq!(h.captions.of("listening"), ["false", "true"]);
 }
 
 #[test]

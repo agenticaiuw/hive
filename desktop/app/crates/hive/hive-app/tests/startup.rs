@@ -83,7 +83,7 @@ fn the_app_is_told_how_things_are_at_start() {
     let printed = h.printed();
     let journal = h.agent.journal.get().expect("the session journal");
     for line in [
-        "Ready. Tap fn and say what you want done; tap fn again to turn the mic off.\n",
+        "Ready. Tap fn and say what you want done; the floating window's mic button mutes it.\n",
         "@@ listening 0",
         "@@ status Typed requests ready; voice input is loading",
         &format!("@@ panel {}", journal.panel_path().display()),
@@ -110,7 +110,7 @@ fn the_app_is_told_how_things_are_at_start() {
 fn in_a_terminal_it_says_where_the_session_is_saved() {
     let h = Harness::new();
     h.start();
-    h.wait_printed("Ready. Tap fn and say what you want done; tap fn again to turn the mic off. Ctrl-C to quit.\n");
+    h.wait_printed("Ready. Tap fn and say what you want done; the floating window's mic button mutes it. Ctrl-C to quit.\n");
     let context = h.state().join("context/index.html");
     h.wait_printed(&format!("Agent context: {}", context.display()));
     let journal = h.agent.journal.get().unwrap();

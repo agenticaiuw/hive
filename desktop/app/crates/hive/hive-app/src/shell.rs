@@ -654,7 +654,7 @@ impl VoiceAgent {
         }
         self.watch_helper();
         self.out(&format!(
-            "Ready. Tap fn and say what you want done; tap fn again to turn the mic off.{}\n",
+            "Ready. Tap fn and say what you want done; the floating window's mic button mutes it.{}\n",
             if app { "" } else { " Ctrl-C to quit." }
         ));
         self.tell("listening", "0");
@@ -1388,7 +1388,7 @@ impl VoiceAgent {
             json!({}),
         );
         self.out(if on {
-            "🎙  listening (tap fn to turn the mic off)"
+            "🎙  listening (the floating window's mic button mutes it)"
         } else {
             "   (mic off; tap fn to talk)"
         });
@@ -1544,11 +1544,6 @@ impl VoiceAgent {
         }
     }
 
-    /// You took over a running Mac task a moment ago or more (not just now, with this fn press).
-    pub fn paused_by_you(&self) -> bool {
-        let since = self.paused_since.get();
-        self.mac_task_running() && since != 0.0 && now() - since > 0.8
-    }
 
     /// The saved request's state, if the Mac's task has one.
     fn save_recovery(&self, status: &str, failed: &str) {
@@ -1609,11 +1604,17 @@ impl VoiceAgent {
                 self.dictate_hands_free(); // fn, then shift
             }
             Some("tap") => {
+                // fn only ever resumes: it hands a paused task back the mouse and keyboard (even when
+                // this very press is what paused it), or opens the microphone. It never turns
+                // listening off or closes the floating window; the window's mic button mutes, its x
+                // stops. Lip reading is the exception: a second tap ends what you mouthed.
                 self.drop_dictation();
-                if self.paused_by_you() {
+                if self.mac_task_running() && self.paused_since.get() != 0.0 {
                     self.resume_control();
-                } else {
-                    self.set_listening(!self.listening.get());
+                } else if !self.listening.get() {
+                    self.set_listening(true);
+                } else if self.input_mode.get() == "lips" {
+                    self.set_listening(false);
                 }
             }
             Some("other") => {
