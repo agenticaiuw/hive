@@ -116,6 +116,9 @@ test('saved logins come from a Passwords or Chrome export, quoted fields and all
   assert.deepEqual(parseCsv('a,"b,c","d ""e"""\r\n\r\n"multi\nline",2,3'), [['a', 'b,c', 'd "e"'], ['multi\nline', '2', '3']]);
   const mac = loginsFromCsv('﻿Title,URL,Username,Password,Notes,OTPAuth\nUW,https://login.wisc.edu/idp/profile,bucky,pw1,,\nNo password,https://x.com,me,,,\n');
   assert.deepEqual(mac, [{ title: 'UW', url: 'https://login.wisc.edu/idp/profile', username: 'bucky', password: 'pw1' }]);
+  const twice = loginsFromCsv('Title,URL,Username,Password\nUW,https://login.wisc.edu, bucky\t,pw1\nUW,https://login.wisc.edu,bucky,pw1\n');
+  assert.deepEqual(twice.map(login => login.username), ['bucky', 'bucky'], 'spaces and tabs around a username are dropped');
+  assert.equal(merge([], twice).logins.length, 1, 'so the same login saved twice is one');
   const chrome = loginsFromCsv('name,url,username,password,note\nX,https://x.com/login,me,pw2,\n');
   assert.equal(chrome[0].password, 'pw2');
   assert.throws(() => loginsFromCsv('a,b\n1,2\n'), /URL and Password/);
