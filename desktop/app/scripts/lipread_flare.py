@@ -12,6 +12,12 @@ import time
 
 
 class Flare:
+    crop_shape = (2, 88, 88)
+
+    def crops(self):
+        from lipread_vision import Crops
+        return Crops()
+
     def __init__(self, root):
         import numpy as np
         import torch
