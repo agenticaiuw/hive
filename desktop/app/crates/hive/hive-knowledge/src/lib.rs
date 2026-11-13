@@ -10,6 +10,7 @@ pub mod agent_context;
 pub mod cloud_archive;
 pub mod context_panel;
 pub mod knowledge;
+pub mod log_archive;
 pub mod memory_search;
 pub mod pyjson;
 pub mod session_journal;

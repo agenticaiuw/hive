@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use hive_dream::register::{Register, Status};
-use hive_dream::{ci, collect, fix, land, paths, report, schedule, time};
+use hive_dream::{ci, collect, fix, land, paths, report, schedule, sync, time};
 
 const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Codex, gate, report).
 
@@ -21,6 +21,8 @@ const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Co
   hive-dream install-schedule [--exe PATH] [--print] [--no-load]
                                          write (and load) ~/Library/LaunchAgents/local.hive.dream.plist
   hive-dream uninstall-schedule
+  hive-dream sync [--mirror DIR]         on the VM: mirror the Mac's uploaded logs from R2
+                                         (default <dream>/mirror)
   hive-dream ci-gate --out DIR           the macOS check of a dream/* branch (GitHub Actions)
   hive-dream ci-publish --out DIR        push what ci-gate decided (needs HIVE_DREAM_PUSH_URL)
 
@@ -207,6 +209,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "uninstall-schedule" => {
             println!("{}", schedule::uninstall()?);
+            Ok(())
+        }
+        "sync" => {
+            let mirror = value(rest, "--mirror")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| paths::dream_dir().join("mirror"));
+            println!("{}", sync::run(&mirror)?);
             Ok(())
         }
         "ci-gate" | "ci-publish" => {

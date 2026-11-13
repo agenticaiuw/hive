@@ -323,7 +323,12 @@ pub fn archive_with(folder: &Path, cf: &Cf, bucket: &str) -> Result<String, Stri
 /// Uploads every finished recording that isn't uploaded yet, one at a time. Does nothing while
 /// another call is uploading.
 pub fn archive_pending(report: Option<Report>) {
-    archive_pending_in(&crate::task_recording::folder(), cf(), &bucket(), report)
+    let cf = cf();
+    archive_pending_in(&crate::task_recording::folder(), cf.clone(), &bucket(), report);
+    // Then what the nightly dream reads, for the dream in the cloud (log_archive).
+    if let Some(said) = cf.as_ref().and_then(|cf| crate::log_archive::upload_pending(cf, &bucket())) {
+        hive_common::say(format!("🎞 {said}"));
+    }
 }
 
 /// [`archive_pending`] for one recordings folder, with a given `cf` (None: not installed).
