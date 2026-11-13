@@ -55,8 +55,8 @@ pub fn tool_list() -> Vec<Value> {
             "description": "Use the locally saved device passcode at a verified iPhone system passcode prompt. \
         Requires the configured phone to stay connected through the WebDriverAgent relay app. \
         Takes no secret arguments; this is not for app passwords or payments. \
-        On a locked iPhone, bring the prompt up first: press_home only wakes a locked screen (it never goes home there), \
-        then swipe up from the bottom edge until elements shows Enter Passcode, then call this. \
+        On a locked iPhone just call this: it wakes the screen and brings up the passcode keypad itself (the keypad \
+        only stays up a few seconds, so don't swipe to it first). \
         Returns status only. If unavailable or rejected, stop and let the user authenticate; never retry or ask for the passcode in chat.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
         }),
@@ -388,7 +388,18 @@ impl PhoneTools {
                     });
             return Ok(match confirmed {
                 Ok(message) => ok_text(message),
-                Err(_) => error_text(AUTH_FAILED),
+                Err(why) => {
+                    // The model only ever sees AUTH_FAILED. The reason goes to the Mac-side log
+                    // (stderr) so a failed unlock can be fixed, with the relay's secrets masked.
+                    let mut why = why;
+                    if let Ok(phone) = self.phone() {
+                        for secret in phone.secret_strings() {
+                            why = why.replace(&secret, "[secret]");
+                        }
+                    }
+                    eprintln!("phone authenticate was not confirmed: {why}");
+                    error_text(AUTH_FAILED)
+                }
             });
         }
         if name == "wait" {

@@ -17,8 +17,7 @@ pub const LOCKED_HOME: &str =
     "press_home refused: the iPhone is locked, and going home on a locked iPhone freezes \
 WebDriverAgent until the relay app is reopened, so no home-screen request was sent.";
 pub const UNLOCK_STEPS: &str =
-    "To unlock it: swipe up from the bottom edge so the passcode keypad shows, check with \
-elements that it says Enter Passcode, then call authenticate.";
+    "To unlock it, call authenticate: it brings up the passcode keypad itself and types the saved passcode.";
 const LOCK_UNKNOWN: &str =
     "press_home refused: the iPhone didn't say whether it's locked, so no home-screen request \
 was sent (on a locked iPhone that freezes WebDriverAgent). Look with screenshot or elements first.";
@@ -364,6 +363,46 @@ impl Phone {
     pub fn wake(&self) -> Result<(), PhoneError> {
         self.in_session("/wda/pressButton", "POST", json!({"name": "home"}))?;
         Ok(())
+    }
+
+    /// Whether the system passcode keypad is up, by its "Enter Passcode" title: one small query
+    /// (about 0.4 s), not the whole screen's description (about 2 s), so it can be asked often.
+    pub fn passcode_prompt_showing(&self) -> Result<bool, PhoneError> {
+        let found = self.in_session(
+            "/elements",
+            "POST",
+            json!({"using": "predicate string",
+                   "value": "type == 'XCUIElementTypeStaticText' AND visible == 1 AND \
+(label CONTAINS[c] 'enter passcode' OR label CONTAINS[c] 'enter iphone passcode')"}),
+        )?;
+        Ok(found["value"].as_array().is_some_and(|a| !a.is_empty()))
+    }
+
+    /// On a locked iPhone, brings up the passcode keypad: wakes the screen, swipes up from the
+    /// bottom edge and waits for the keypad (it takes about 3 s to show). An untouched iPhone keeps
+    /// the keypad up only about 7 seconds before its screen sleeps again (measured 2026-11-13), so
+    /// authenticate does this itself, right before it checks and types; when the model did it,
+    /// a step or two earlier, the keypad was gone by the time authenticate looked. An unlocked
+    /// iPhone, or one already showing the keypad, is left as it is.
+    pub fn show_passcode_prompt(&self) -> Result<(), PhoneError> {
+        use std::time::{Duration, Instant};
+        if !self.locked()? || self.passcode_prompt_showing()? {
+            return Ok(());
+        }
+        self.wake()?;
+        std::thread::sleep(Duration::from_millis(400));
+        let (width, height) = self.size(None)?;
+        let (width, height) = (width as f64, height as f64);
+        // From just above the bottom edge: closer than 4 points is the home-indicator gesture.
+        self.swipe(width / 2.0, height - 11.0, width / 2.0, height * 0.2, 0.3)?;
+        let until = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < until {
+            if self.passcode_prompt_showing()? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        err("The passcode keypad didn't come up after waking the iPhone and swiping up.")
     }
 
     /// The home screen, on an unlocked iPhone only. WebDriverAgent's homescreen call on a locked

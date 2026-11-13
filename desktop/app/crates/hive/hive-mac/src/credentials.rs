@@ -170,6 +170,11 @@ pub trait PhoneDevice {
     ) -> Result<Value, String>;
     fn session(&self) -> Result<String, String>;
     fn in_session(&self, path: &str, method: &str, body: Option<&Value>) -> Result<Value, String>;
+    /// On a locked phone, wake it and bring up the passcode keypad (hive-phone's
+    /// `show_passcode_prompt`). It types nothing; the checks below still decide.
+    fn show_passcode_prompt(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn phone_err(e: String) -> CredentialError {
@@ -453,20 +458,21 @@ pub fn phone_prompt(phone: &dyn PhoneDevice) -> Result<String, CredentialError> 
     phone.session().map_err(phone_err)
 }
 
-/// Types the saved phone passcode into the system passcode prompt, once.
-pub fn authenticate_phone(phone: &dyn PhoneDevice) -> Result<String, CredentialError> {
-    authenticate_phone_with(phone, &NativeHelper, &|d| std::thread::sleep(d))
+/// The bundle id of the app in front.
+fn front_app(phone: &dyn PhoneDevice) -> Result<String, CredentialError> {
+    let app = phone
+        .request("/api/wda/activeAppInfo", "GET", None, false)
+        .map_err(phone_err)?;
+    Ok(app
+        .get("value")
+        .and_then(|v| v.get("bundleId"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string())
 }
 
-/// [`authenticate_phone`] with this credential helper and sleep.
-pub fn authenticate_phone_with(
-    phone: &dyn PhoneDevice,
-    native: &dyn Native,
-    sleep: &dyn Fn(Duration),
-) -> Result<String, CredentialError> {
-    // Checks precede secret access. Never fall back to coordinates, generic keys or clipboard.
-    let account = phone_account(phone)?;
-    let session = phone_prompt(phone)?;
+/// The one visible secure text field's element id.
+fn passcode_field(phone: &dyn PhoneDevice) -> Result<String, CredentialError> {
     let found = phone
         .in_session(
             "/elements",
@@ -486,22 +492,47 @@ pub fn authenticate_phone_with(
         .get("ELEMENT")
         .filter(|e| hive_common::mcp::truthy(e))
         .or_else(|| found[0].get("element-6066-11e4-a52e-4f735466cecf"));
-    let element = match element.and_then(Value::as_str) {
+    match element.and_then(Value::as_str) {
         Some(e)
             if !e.is_empty()
                 && e.chars()
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '-') =>
         {
-            e.to_string()
+            Ok(e.to_string())
         }
-        _ => return err("Invalid secure field identifier."),
-    };
+        _ => err("Invalid secure field identifier."),
+    }
+}
+
+/// Types the saved phone passcode into the system passcode prompt, once.
+pub fn authenticate_phone(phone: &dyn PhoneDevice) -> Result<String, CredentialError> {
+    authenticate_phone_with(phone, &NativeHelper, &|d| std::thread::sleep(d))
+}
+
+/// [`authenticate_phone`] with this credential helper and sleep.
+pub fn authenticate_phone_with(
+    phone: &dyn PhoneDevice,
+    native: &dyn Native,
+    sleep: &dyn Fn(Duration),
+) -> Result<String, CredentialError> {
+    // Checks precede secret access. Never fall back to coordinates, generic keys or clipboard.
+    // The keypad of an untouched, locked iPhone stays up only about 7 seconds, so it is brought
+    // up here, right before the checks, and the checks after the secret is read are the quick
+    // ones (about 1 s), not a second reading of the whole screen (about 2 s).
+    let account = phone_account(phone)?;
+    phone.show_passcode_prompt().map_err(phone_err)?;
+    let session = phone_prompt(phone)?;
+    let element = passcode_field(phone)?;
     let secret = native.secret(&["read-phone", &account])?;
     let digits = secret.bytes();
     if !(4..=12).contains(&digits.len()) || !digits.iter().all(u8::is_ascii_digit) {
         return err("The saved phone passcode is not supported. Configure a numeric passcode in Authentication.");
     }
-    if phone_account(phone)? != account || phone_prompt(phone)? != session {
+    if phone_account(phone)? != account
+        || front_app(phone)? != "com.apple.springboard"
+        || phone.session().map_err(phone_err)? != session
+        || passcode_field(phone)? != element
+    {
         return err("The phone or authentication screen changed. No credential was used.");
     }
     let marker = claim_attempt(&account)?;
