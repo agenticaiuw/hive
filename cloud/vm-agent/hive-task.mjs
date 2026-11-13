@@ -8,7 +8,12 @@
 // and the files sent to Hive; and phone-mcp.mjs, the owner's phone through their Mac (for Duo).
 // Shell commands it might run are read-only. Each step it says goes to stdout and to the task's folder.
 //
+// With --code DIR it works on code instead (Hive's nightly dream): no screen, no phone, no tool
+// servers, Codex's own sandbox with DIR (and each --writable DIR) writable and the network off.
+// Each --env K=V is set for the commands it runs (not for Codex itself).
+//
 //   node hive-task.mjs [--model m] [--effort e] [--keep-open] < task.txt   (or {"text"} as JSON)
+//   node hive-task.mjs --code DIR [--writable DIR]... [--env K=V]... [--effort e] < task.txt
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -40,6 +45,30 @@ for a verification code, type the code the sign-in page on the VM shows, then ta
 Only approve a request you just
 caused, and do nothing else on the phone. If the phone tools are missing or say the phone isn't reachable, stop
 and say so.`;
+
+export const CODE_GUIDE = `You are Hive's agent, working on code on the owner's cloud VM. There is no screen and no phone
+here: only the folder you were started in and a shell, with the network off. Before each command, say in one line what it
+is for. Only do what the task asks, and only change files where it says. Never commit, push or change git settings. End
+with a short report: what you changed, what you ran and what it showed.`;
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+/** Codex's arguments for a code task: its own sandbox, the folder (and `writable`) writable, no tool servers. */
+export function codeArgs({ model, effort, codeDir, writable = [], env = [] }) {
+  for (const value of [model, effort, codeDir, ...writable]) {
+    if (!SAFE.test(value)) throw new Error(`unsupported characters in "${value}"`);
+  }
+  const toml = value => JSON.stringify(value);
+  const set = env.flatMap(pair => {
+    const at = pair.indexOf('=');
+    const [name, value] = [pair.slice(0, at), pair.slice(at + 1)];
+    if (at < 1 || !ENV_NAME.test(name) || !SAFE.test(value)) throw new Error(`unsupported --env "${pair}"`);
+    return ['-c', `shell_environment_policy.set.${name}=${toml(value)}`];
+  });
+  return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'workspace-write', '-C', codeDir,
+    ...writable.flatMap(dir => ['--add-dir', dir]),
+    '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"', ...set, '-'];
+}
 
 export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, stepsFile, node = process.execPath, user = process.env.USER ?? 'ubuntu' }) {
   for (const value of [model, effort, workDir, appDir, stateDir, filesDir, stepsFile, node, user]) {
@@ -76,11 +105,15 @@ export function describe(event) {
 }
 
 async function main(argv) {
-  const options = { model: process.env.HIVE_TASK_MODEL ?? 'gpt-6.1-terra', effort: process.env.HIVE_TASK_EFFORT ?? 'low', keepOpen: false };
+  const options = { model: process.env.HIVE_TASK_MODEL ?? 'gpt-6.1-terra', effort: process.env.HIVE_TASK_EFFORT ?? 'low', keepOpen: false,
+    code: null, writable: [], env: [] };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--model') options.model = argv[++i];
     else if (argv[i] === '--effort') options.effort = argv[++i];
     else if (argv[i] === '--keep-open') options.keepOpen = true;
+    else if (argv[i] === '--code') options.code = argv[++i];
+    else if (argv[i] === '--writable') options.writable.push(argv[++i]);
+    else if (argv[i] === '--env') options.env.push(argv[++i]);
     else { console.error(`unknown option ${argv[i]}`); process.exit(2); }
   }
   const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk);
@@ -103,9 +136,12 @@ async function main(argv) {
   // Hive's own Codex home on the VM, signed in to the owner's account (Devhub's, /root/.codex, is another).
   const codexHome = process.env.HIVE_CODEX_HOME ?? '/root/.codex-hive';
   if (!SAFE.test(codexHome)) throw new Error('unsupported HIVE_CODEX_HOME');
-  const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`, '/root/.local/bin/codex',
-    ...codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile })], { stdio: ['pipe', 'pipe', 'pipe'] });
-  codex.stdin.end(`${GUIDE}\n\nThe task, from the owner:\n${text}\n`);
+  const args = options.code
+    ? codeArgs({ ...options, codeDir: options.code })
+    : codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile });
+  const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`, '/root/.local/bin/codex', ...args],
+    { stdio: ['pipe', 'pipe', 'pipe'] });
+  codex.stdin.end(options.code ? `${CODE_GUIDE}\n\nThe task:\n${text}\n` : `${GUIDE}\n\nThe task, from the owner:\n${text}\n`);
   let last = '';
   createInterface({ input: codex.stdout }).on('line', line => {
     appendFileSync(events, `${line}\n`);
@@ -116,7 +152,7 @@ async function main(argv) {
   let errors = '';
   codex.stderr.on('data', chunk => { errors += chunk; appendFileSync(join(workDir, 'codex.err'), chunk); });
   const status = await new Promise(resolve => codex.on('close', resolve));
-  if (!options.keepOpen) {
+  if (!options.keepOpen && !options.code) {
     // Asked, not killed: the browser saves its cookies as it quits, and the worker gets it back.
     await call(join(stateDir, 'control.sock'), 'POST', '/desktop/close', Buffer.from('{}')).catch(() => {});
   }

@@ -55,6 +55,24 @@ pub fn hive_ask() -> PathBuf {
     env_path("HIVE_DREAM_HIVE_ASK").unwrap_or_else(|| repo().join("desktop/app/build/hive-ask"))
 }
 
+/// Hive's agent on the VM (`cloud/vm-agent/hive-task.mjs`): `HIVE_DREAM_VM_AGENT`, else the
+/// repo's copy.
+pub fn vm_agent() -> PathBuf {
+    env_path("HIVE_DREAM_VM_AGENT").unwrap_or_else(|| repo().join("cloud/vm-agent/hive-task.mjs"))
+}
+
+/// Node for the VM agent: `HIVE_DREAM_NODE`, else /usr/local/bin/node when it's there, else `node`.
+pub fn node() -> PathBuf {
+    env_path("HIVE_DREAM_NODE").unwrap_or_else(|| {
+        let local = PathBuf::from("/usr/local/bin/node");
+        if local.is_file() {
+            local
+        } else {
+            PathBuf::from("node")
+        }
+    })
+}
+
 pub fn register(dream: &Path) -> PathBuf {
     dream.join("register.json")
 }

@@ -8,6 +8,7 @@
 //! or sends a message.
 
 pub mod agentlog;
+pub mod ci;
 pub mod collect;
 pub mod deploy;
 pub mod evidence;

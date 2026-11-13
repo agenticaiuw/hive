@@ -81,10 +81,15 @@ pub struct FixResult {
     pub notes: Vec<String>,
 }
 
-/// Who writes the test and the fix: Hive's own agent unless HIVE_DREAM_AGENT=codex.
+/// Who writes the test and the fix (HIVE_DREAM_AGENT): "vm", Hive's agent on its cloud VM (the
+/// default on Linux, where the dream runs); "hive", Hive's agent on the Mac through its request
+/// socket (the default on macOS); "codex", the Codex CLI.
 pub fn agent() -> &'static str {
     match std::env::var("HIVE_DREAM_AGENT").as_deref() {
         Ok("codex") => "codex",
+        Ok("hive") => "hive",
+        Ok("vm") => "vm",
+        _ if cfg!(target_os = "linux") => "vm",
         _ => "hive",
     }
 }
@@ -270,7 +275,10 @@ fn intro(s: &Setup, step: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     let mut p = String::new();
-    if s.agent == "hive" {
+    if s.agent == "vm" {
+        p.push_str("This is Hive's nightly dream, from hive-dream (Hive's self-review) on Hive's cloud VM, not a request anyone typed. Hive's logs show a failure that keeps coming back; you fix it in Hive's own code, test first.\n\n");
+        p.push_str(&format!("This VM runs Linux: {} only build on macOS, so their tests can't run here. Write them anyway, as carefully as if you could run them: a macOS check on GitHub Actions runs them, and step 2 shows you how they failed.\n\n", crate::gate::not_here().join(", ")));
+    } else if s.agent == "hive" {
         p.push_str("This is your nightly dream, from hive-dream (Hive's self-review), not a request the user typed: they are probably asleep. Your own logs show a failure that keeps coming back; you fix it in your own code, test first. ");
         p.push_str("Do all of it in the shell: no screen, no phone, no messages, no speaking, nothing that needs the user.\n\n");
     } else {
@@ -282,7 +290,12 @@ fn intro(s: &Setup, step: &str) -> String {
         s.branch
     ));
     p.push_str(&format!(
-        "Build and test with these set (a build folder hive-dream keeps; offline):\n\n    cd {wt} && export {env}\n    cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p <crate> <test name>\n\n(agent-core: `--manifest-path desktop/app/crates/agent-core/Cargo.toml`.) Your sandbox blocks Unix sockets and local ports, so tests that use a crate's fake helper or fake relay fail with \"Operation not permitted\": that is the sandbox, not the code. hive-dream runs the tests outside the sandbox afterwards.\n\n"
+        "Build and test with these set (a build folder hive-dream keeps; offline):\n\n    cd {wt} && export {env}\n    cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p <crate> <test name>\n\n(agent-core: `--manifest-path desktop/app/crates/agent-core/Cargo.toml`.) {}\n\n",
+        if s.agent == "vm" {
+            "Your sandbox has no network. A test that fails with \"Operation not permitted\" or \"Permission denied\" may be the sandbox, not the code: hive-dream runs the tests outside it afterwards."
+        } else {
+            "Your sandbox blocks Unix sockets and local ports, so tests that use a crate's fake helper or fake relay fail with \"Operation not permitted\": that is the sandbox, not the code. hive-dream runs the tests outside the sandbox afterwards."
+        }
     ));
     p
 }
@@ -575,7 +588,68 @@ fn ask(
 ) -> Result<Said, String> {
     paths::write_atomic(&run_dir.join(format!("prompt-{step}.md")), text)?;
     let started = std::time::Instant::now();
-    let said = if s.agent == "hive" {
+    let said = if s.agent == "vm" {
+        let script = paths::vm_agent();
+        if !script.is_file() {
+            return Err(format!("no VM agent at {}", script.display()));
+        }
+        let env = gate::test_env(s.dream, "vm");
+        let get = |key: &str| {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        let mut argv: Vec<String> = vec![
+            paths::node().to_string_lossy().into_owned(),
+            script.to_string_lossy().into_owned(),
+            "--code".into(),
+            s.worktree.to_string_lossy().into_owned(),
+            "--effort".into(),
+            "high".into(),
+            "--writable".into(),
+            s.dream.join("target").to_string_lossy().into_owned(),
+            "--writable".into(),
+            get("CARGO_HOME"),
+            "--writable".into(),
+            s.dream.join("tmp").join("vm").to_string_lossy().into_owned(),
+        ];
+        for (k, v) in &env {
+            argv.push("--env".into());
+            argv.push(format!("{k}={v}"));
+        }
+        let ran = proc::run(
+            &argv,
+            s.worktree,
+            &[(
+                "HIVE_VM_STATE".into(),
+                s.dream.join("vm-agent").to_string_lossy().into_owned(),
+            )],
+            Some(text),
+            &run_dir.join(format!("vm-{step}.log")),
+            Duration::from_secs(HIVE_WAIT_MINUTES * 60),
+        )?;
+        r.codex_exit = ran.code;
+        r.codex_timed_out = ran.timed_out;
+        if ran.timed_out {
+            return Err(format!(
+                "Hive's VM agent was still working after {HIVE_WAIT_MINUTES} minutes; nothing was committed"
+            ));
+        }
+        // Its report: everything from its last "💬" line on.
+        let report = ran
+            .output
+            .rfind("💬 ")
+            .map(|at| ran.output[at + "💬 ".len()..].to_string())
+            .unwrap_or_else(|| {
+                let lines: Vec<&str> = ran.output.lines().collect();
+                lines[lines.len().saturating_sub(30)..].join("\n")
+            });
+        Said {
+            finished: ran.ok,
+            text: report,
+        }
+    } else if s.agent == "hive" {
         let hive_ask = paths::hive_ask();
         if !hive_ask.is_file() {
             return Err(format!("no hive-ask at {}", hive_ask.display()));
