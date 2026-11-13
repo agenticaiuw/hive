@@ -61,6 +61,10 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub fn watcher_unavailable(&self) {
+        lock(&self.gate).transition("disengaged", "watcher_unavailable", &self.released);
+    }
+
     pub fn lines(&self) -> Vec<String> {
         lock(&self.lines).clone()
     }
