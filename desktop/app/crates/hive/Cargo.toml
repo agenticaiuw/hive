@@ -12,6 +12,7 @@ members = [
     "hive-sidecars",
     "hive-codex",
     "hive-app",
+    "hive-dream",
 ]
 
 [workspace.package]
