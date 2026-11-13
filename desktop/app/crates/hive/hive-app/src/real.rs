@@ -461,6 +461,9 @@ impl hive_mac::credentials::PhoneDevice for PhoneDevice<'_> {
             .in_session(path, method, body.cloned().unwrap_or(Value::Null))
             .map_err(|e| e.0)
     }
+    fn show_passcode_prompt(&self) -> Result<(), String> {
+        self.0.show_passcode_prompt().map_err(|e| e.0)
+    }
 }
 
 /// The phone's `authenticate` tool: credentials.authenticate_phone.
