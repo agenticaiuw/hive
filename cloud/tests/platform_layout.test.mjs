@@ -26,8 +26,8 @@ test('import is opt-in, excludes secrets and refuses to overwrite', t => {
   mkdirSync(join(source, 'python'), { recursive: true });
   mkdirSync(join(source, 'tools'), { recursive: true });
   mkdirSync(join(source, 'crates/agent-core/src'), { recursive: true });
-  mkdirSync(join(source, 'safari-hive-extension'), { recursive: true });
-  writeFileSync(join(source, 'safari-hive-extension/Info.plist'), 'fixture');
+  mkdirSync(join(source, 'examples'), { recursive: true });
+  writeFileSync(join(source, 'examples/demo.txt'), 'fixture');
   mkdirSync(join(source, 'workspace-engine/.build'), { recursive: true });
   symlinkSync('/tmp', join(source, 'workspace-engine/.build/debug'));
   writeFileSync(join(source, 'Makefile'), 'all:\n');
@@ -46,7 +46,7 @@ test('import is opt-in, excludes secrets and refuses to overwrite', t => {
   assert.equal(readFileSync(join(target, 'python/agent.py'), 'utf8'), 'print("example")\n');
   assert.equal(readFileSync(join(target, 'crates/agent-core/src/lib.rs'), 'utf8'), 'pub fn ready() {}\n');
   assert.equal(readFileSync(join(target, 'Cargo.toml'), 'utf8'), '[workspace]\n');
-  assert.equal(readFileSync(join(target, 'safari-hive-extension/Info.plist'), 'utf8'), 'fixture');
+  assert.equal(readFileSync(join(target, 'examples/demo.txt'), 'utf8'), 'fixture');
   assert.equal(existsSync(join(target, '.import-incomplete')), false);
   const manifest = JSON.parse(readFileSync(join(target, '.import-manifest.json'), 'utf8'));
   assert.equal(manifest.files.some(f => f.path.includes('.env')), false);
