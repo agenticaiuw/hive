@@ -11,7 +11,7 @@ import { Vnc, charKeysym, comboKeysyms, encodePng, untypable } from './vnc.mjs';
 import { checkKey, contentType, localPath } from './files.mjs';
 import { hostOf, loginsFromCsv, merge, parseCsv, pick } from './hive-cred.mjs';
 import { TOOLS, parseOwnerTime } from './desktop-mcp.mjs';
-import { GUIDE, codexArgs, describe } from './hive-task.mjs';
+import { CODE_GUIDE, GUIDE, codeArgs, codexArgs, describe } from './hive-task.mjs';
 import { OFFLINE, offlineAnswer } from './phone-mcp.mjs';
 
 const tempDir = t => { const dir = mkdtempSync(join(tmpdir(), 'hive-agent-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
@@ -192,4 +192,21 @@ test('without the Mac, the phone server still starts and says why it has no tool
   assert.equal(offlineAnswer({ id: 3, method: 'tools/call', params: { name: 'tap' } }).result.isError, true);
   assert.equal(offlineAnswer({ method: 'notifications/initialized' }), null);
   assert.equal(offlineAnswer({ id: 4, method: 'resources/list' }).error.code, -32601);
+});
+
+test('a code task gets Codex\'s own sandbox, its folders writable, the env for its commands, and no tool servers', () => {
+  const args = codeArgs({ model: 'gpt-6.1-terra', effort: 'high', codeDir: '/d/worktrees/x', writable: ['/d/target', '/d/cargo'],
+    env: ['CARGO_TARGET_DIR=/d/target', 'PATH=/d/cargo/bin:/usr/bin:/bin'] });
+  assert.deepEqual(args.slice(0, 9), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'workspace-write', '-C', '/d/worktrees/x']);
+  assert.deepEqual(args.filter((_, i) => args[i - 1] === '--add-dir'), ['/d/target', '/d/cargo']);
+  const config = args.filter((_, i) => args[i - 1] === '-c');
+  assert.ok(config.includes('shell_environment_policy.set.CARGO_TARGET_DIR="/d/target"'));
+  assert.ok(config.includes('shell_environment_policy.set.PATH="/d/cargo/bin:/usr/bin:/bin"'));
+  assert.ok(!config.some(c => c.startsWith('mcp_servers')), 'no screen or phone for code');
+  assert.equal(args.at(-1), '-');
+  assert.throws(() => codeArgs({ model: 'm', effort: 'high', codeDir: '/w', env: ['BAD NAME=1'] }), /unsupported --env/);
+  assert.throws(() => codeArgs({ model: 'm', effort: 'high', codeDir: '/w', env: ['X=$(id)'] }), /unsupported --env/);
+  assert.throws(() => codeArgs({ model: 'm', effort: 'high', codeDir: '/w; rm -rf /' }), /unsupported/);
+  assert.match(CODE_GUIDE, /network off/);
+  assert.match(CODE_GUIDE, /Never commit, push/);
 });
