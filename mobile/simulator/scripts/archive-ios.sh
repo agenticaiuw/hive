@@ -7,7 +7,7 @@ build_number="${PENDANT_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 archive_path="${archive_root}/Hive-${build_number}.xcarchive"
 export_path="${archive_root}/export-${build_number}"
 team_id="${PENDANT_APPLE_TEAM_ID:-9684Z8GZ26}"
-bundle_id="${PENDANT_BUNDLE_ID:-com.aipendant.app}"
+bundle_id="${PENDANT_BUNDLE_ID:-com.evanliu.hive}"
 
 cd "${project_root}"
 npm run ios:sync

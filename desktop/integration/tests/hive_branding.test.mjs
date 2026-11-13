@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '../../..');
 
-test('Hive assets are the gold hexagon and iOS identity remains unchanged', () => {
+test('Hive assets are the gold hexagon and iOS identity is Hive's', () => {
   // One icon, at the root; the dashboard links to it and the Mac app's .icns is built from it.
   const svg = readFileSync(join(root, 'branding/hive.svg'), 'utf8');
   assert.match(svg, /id="gold"/); assert.match(svg, /id="shineTop"/); assert.match(svg, /id="shineSide"/);
   assert.equal(realpathSync(join(root, 'desktop/dashboard/static/hive.svg')), realpathSync(join(root, 'branding/hive.svg')));
   const config = JSON.parse(readFileSync(join(root, 'mobile/simulator/capacitor.config.json')));
-  assert.equal(config.appName, 'Hive'); assert.equal(config.appId, 'com.aipendant.app');
+  assert.equal(config.appName, 'Hive'); assert.equal(config.appId, 'com.evanliu.hive');
   const info = readFileSync(join(root, 'mobile/ios/App/App/Info.plist'), 'utf8');
   assert.match(info, /<key>CFBundleDisplayName<\/key>\s*<string>Hive<\/string>/);
 });
