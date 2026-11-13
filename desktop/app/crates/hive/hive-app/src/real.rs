@@ -531,6 +531,68 @@ impl hive_codex::Memory for PersonalMemory {
     fn activity_summary(&self, result: &Value) -> Option<String> {
         hive_knowledge::memory_search::activity_summary(result)
     }
+    fn knowledge_context(&self, request: &str) -> Option<String> {
+        hive_knowledge::actions::context(request, &hive_knowledge::actions::folder())
+    }
+}
+
+/// Hive's action memory (hive-knowledge's actions): each step the agent takes, with where the Mac
+/// was, recorded on a thread of its own and uploaded to the knowledge base when the task ends.
+struct ActionMemory(Arc<hive_knowledge::actions::Recorder>);
+
+fn action_task(task: &hive_codex::ActionTask) -> hive_knowledge::actions::TaskInfo {
+    hive_knowledge::actions::TaskInfo {
+        run: task.run.clone(),
+        request: task.request.clone(),
+        device: task.device.clone(),
+        receipt: task.receipt.clone(),
+    }
+}
+
+impl hive_codex::ActionLog for ActionMemory {
+    fn begin(&self, task: &hive_codex::ActionTask) {
+        self.0.begin(&action_task(task));
+    }
+    fn step(
+        &self,
+        task: &hive_codex::ActionTask,
+        namespace: &str,
+        tool: &str,
+        args: &Value,
+        ok: bool,
+    ) {
+        let step = hive_knowledge::actions::StepInput {
+            namespace: namespace.to_owned(),
+            tool: tool.to_owned(),
+            arguments: args.clone(),
+            ok,
+        };
+        self.0.step(&action_task(task), step);
+    }
+    fn end(&self, task: &hive_codex::ActionTask, outcome: &str) {
+        self.0.end(&action_task(task), outcome);
+    }
+}
+
+/// One action memory for the whole app.
+fn action_memory() -> Arc<ActionMemory> {
+    static MEMORY: std::sync::OnceLock<Arc<ActionMemory>> = std::sync::OnceLock::new();
+    MEMORY
+        .get_or_init(|| {
+            let place: hive_knowledge::actions::PlaceFn = Arc::new(|| {
+                let front = hive_mac::desktop::front(Duration::from_millis(1500));
+                hive_knowledge::actions::Place {
+                    app: Some(front.app).filter(|a| !a.is_empty()),
+                    window: front.window,
+                    url: front.page,
+                }
+            });
+            let base = hive_knowledge::knowledge::KnowledgeBase::new();
+            Arc::new(ActionMemory(hive_knowledge::actions::Recorder::new(
+                base, place, None,
+            )))
+        })
+        .clone()
 }
 
 struct ContextInspector;
@@ -573,6 +635,7 @@ pub fn hooks() -> hive_codex::Hooks {
             hive_mac::desktop::browser_tabs(None, Duration::from_secs(120));
         }),
         provider: Arc::new(hive_codex::FileProviderWait),
+        actions: action_memory(),
     }
 }
 
@@ -713,7 +776,7 @@ pub fn start_update(log: &Path) -> std::io::Result<()> {
 /// Every task is recorded: the screen as a video, with a timeline of Hive's status and the Mac's
 /// state at exact times, uploaded to Cloudflare R2 afterwards (task_recording, cloud_archive).
 /// Also the knowledge base in the cloud: saves made while offline go up, the Mac's copy is
-/// refreshed.
+/// refreshed; so are the action memory's runs (a run Hive quit during is closed first).
 pub fn start_recording(agent: &Arc<VoiceAgent>) {
     use hive_knowledge::task_recording::{Recorder, RecorderOptions};
     let report = |agent: Weak<VoiceAgent>, mark: &'static str| -> hive_knowledge::Report {
@@ -752,6 +815,7 @@ pub fn start_recording(agent: &Arc<VoiceAgent>) {
     }));
     agent.recorder.set(Some(Recorder::new(options)));
     hive_knowledge::cloud_archive::archive_in_background(Some(report(me.clone(), "🎞")));
+    hive_knowledge::actions::sync_in_background(Some(report(me.clone(), "📚")));
     hive_knowledge::knowledge::sync_in_background(Some(report(me, "📚")));
 }
 

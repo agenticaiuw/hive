@@ -7,6 +7,7 @@
 //! | [`Hooks::device_tools`] | `device_tools()`: `{"mac": MacTools(), "phone": PhoneTools()}` |
 //! | [`Knowledge`] | `knowledge.py`: NAMESPACE, RULES, TURN_HINT, is_call, describe, call |
 //! | [`Memory`] | `memory_search.automatic_context`, `activity_summary` |
+//! | [`ActionLog`] | (Rust only) hive-knowledge's action memory: every tool step, recorded by Hive |
 //! | [`ContextRecorder`] | `agent_context.ContextLog().record(...)` |
 //! | [`WorkspaceTools`] | `agent_workspace_tools.workspace`, `.memory` |
 //! | [`Hooks::virtual_monitor_enabled`] | `virtual_monitor.enabled()` |
@@ -74,11 +75,47 @@ pub trait Memory: Send + Sync {
     fn activity_summary(&self, _result: &Value) -> Option<String> {
         None
     }
+    /// What the knowledge base has for the request (matching facts, and the steps that worked
+    /// in an earlier task like it), from the Mac's copies only, bounded and marked as data. Must
+    /// return quickly and never reach the network; None when there is nothing.
+    fn knowledge_context(&self, _request: &str) -> Option<String> {
+        None
+    }
 }
 
 /// No personal memory.
 pub struct NoMemory;
 impl Memory for NoMemory {}
+
+/// One run of a task, as the action memory knows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionTask {
+    /// Unique to this run.
+    pub run: String,
+    /// What the user asked for.
+    pub request: String,
+    /// "mac" or "phone".
+    pub device: String,
+    /// The ingress receipt the request came with.
+    pub receipt: Option<String>,
+}
+
+/// Hive's action memory: each tool step the agent takes, recorded by Hive, not the model. Every
+/// call must return at once (the recording happens on a thread of its own): it sits on the
+/// action path.
+pub trait ActionLog: Send + Sync {
+    /// The task began.
+    fn begin(&self, _task: &ActionTask) {}
+    /// A step finished: namespace "mac" or "phone" with the tool's arguments; "shell" with tool
+    /// "command" (`{"command", "cwd", "paths"}`) or "file_change" (`{"paths", "kinds"}`).
+    fn step(&self, _task: &ActionTask, _namespace: &str, _tool: &str, _args: &Value, _ok: bool) {}
+    /// The task ended: "done", "failed", "stopped" or "interrupted".
+    fn end(&self, _task: &ActionTask, _outcome: &str) {}
+}
+
+/// Records nothing.
+pub struct NoActionLog;
+impl ActionLog for NoActionLog {}
 
 /// The context inspector (python/agent_context.py's `ContextLog`): every payload that went to
 /// or came from Codex, for the user to look at.
@@ -165,6 +202,8 @@ pub struct Hooks {
     /// thread of its own by `warm_up`.
     pub warm_browser_tabs: Arc<dyn Fn() + Send + Sync>,
     pub provider: Arc<dyn ProviderWait>,
+    /// Hive's action memory.
+    pub actions: Arc<dyn ActionLog>,
 }
 
 impl Default for Hooks {
@@ -178,6 +217,7 @@ impl Default for Hooks {
             virtual_monitor_enabled: Arc::new(|| false),
             warm_browser_tabs: Arc::new(|| {}),
             provider: Arc::new(FileProviderWait),
+            actions: Arc::new(NoActionLog),
         }
     }
 }

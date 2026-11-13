@@ -433,6 +433,30 @@ reaches it with the signed-in Cloudflare CLI (`cf d1 query`) and creates it on f
 `import-memory` copied the facts of the old local memory store (`memory/personal-memory.sqlite3`)
 into it. `HIVE_KNOWLEDGE_DB` names another database.
 
+**Action memory** (`hive-knowledge/src/actions.rs`, tables `actions` and `action_runs`:
+`cloud/knowledge/migrations/0002_actions.sql`). Hive itself, not the model, records every step the
+agent takes: the tool, the step it gave, the app in front and its window, the page a browser shows
+(site, host, address without ?query, #fragment or token-like parts), the element when the call
+names it, the files and codebase (git toplevel) a command or edit touched (the programs it ran,
+never their arguments), and whether it worked.
+
+- Nothing on the action path: `hive-codex` hands each step to the recorder, whose own thread notes
+  where the Mac was and appends it to `knowledge/actions-open/<run>.jsonl`. When the task ends its
+  run waits in `knowledge/actions-pending.jsonl` and goes up to D1 in the background (and at the
+  app's start). A run Hive quit during is closed as "unknown" later.
+- Never recorded: what was typed (except a web address typed into an address bar), the
+  `authenticate` tool's details, and any field that names or looks like a password, code, key,
+  token, card or bank number; such a field is dropped whole.
+- The same step (same place, tool and normalized element or step) is stored once and counted
+  (`ok_count`, `error_count`, `last_seen`); the same run (request, steps, outcome) likewise
+  (`seen_count`).
+- Before each request, from the Mac's copies only (`knowledge/cache.json`,
+  `knowledge/actions-cache.json`, the runs waiting to go up), `hive-codex` attaches at most 1500
+  characters marked as data, not instructions: the facts that bear on the request, and the steps
+  that went through in the earlier task most like it (the same request, else one on a site, app
+  or codebase the request names, or a similar request). The context log leaves it out.
+- `HIVE_ACTION_MEMORY=0` turns it off.
+
 #### Agent Context panel
 
 Agent menu › **Show Agent Context** opens a floating, resizable panel over every app

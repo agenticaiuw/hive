@@ -1403,10 +1403,13 @@ pub(crate) fn call_tool(task: &CodexTask, device: &str, name: &str, args: &Value
             let call =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools.call(name, args)))
                     .unwrap_or_else(|panic| Err(panic_text(&*panic)));
-            match call {
+            let result = match call {
                 Ok(result) => result,
                 Err(error) => error_result(&format!("Failed: {error}")),
-            }
+            };
+            let ok = result.get("isError") != Some(&Value::Bool(true));
+            task.record_action(device, name, args, ok);
+            result
         }
     };
     task.record_context("Claude tool output", &result);

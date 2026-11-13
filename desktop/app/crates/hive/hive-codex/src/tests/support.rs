@@ -363,23 +363,38 @@ impl Harness {
     }
 
     pub fn with(setup: impl FnOnce(&Env, &mut Config)) -> Harness {
+        Self::with_hooks(setup, |_| {})
+    }
+
+    /// [`Harness::with`], with `adjust` changing the hooks the agent gets (a memory, an action
+    /// log).
+    pub fn with_hooks(
+        setup: impl FnOnce(&Env, &mut Config),
+        adjust: impl FnOnce(&mut Hooks),
+    ) -> Harness {
         let dir = tempfile::Builder::new()
             .prefix("hive-codex-test-")
             .tempdir()
             .unwrap();
-        Self::in_dir(Arc::new(dir), Arc::new(MemoryContext::default()), setup)
+        Self::in_dir(
+            Arc::new(dir),
+            Arc::new(MemoryContext::default()),
+            setup,
+            adjust,
+        )
     }
 
     /// Another agent (a new process, in the Python tests) on the same state folder, with the
     /// same context inspector.
     pub fn again(&self, setup: impl FnOnce(&Env, &mut Config)) -> Harness {
-        Self::in_dir(self.dir.clone(), self.context.clone(), setup)
+        Self::in_dir(self.dir.clone(), self.context.clone(), setup, |_| {})
     }
 
     fn in_dir(
         dir: Arc<tempfile::TempDir>,
         context: Arc<MemoryContext>,
         setup: impl FnOnce(&Env, &mut Config),
+        adjust: impl FnOnce(&mut Hooks),
     ) -> Harness {
         let env = Env::default();
         for key in ISOLATE {
@@ -400,13 +415,14 @@ impl Harness {
         let provider = Arc::new(ScriptedProvider::default());
         let (mac, phone) = (FakeTool::new("mac"), FakeTool::new("phone"));
         let (m, p) = (mac.clone(), phone.clone());
-        let hooks = Hooks {
+        let mut hooks = Hooks {
             device_tools: Arc::new(move || vec![m.clone() as Arc<dyn ToolNamespace>, p.clone()]),
             knowledge: Arc::new(TestKnowledge),
             context: context.clone(),
             provider: provider.clone(),
             ..Hooks::default()
         };
+        adjust(&mut hooks);
         let agent = Agent::new(env, config, hooks);
         Harness {
             dir,
@@ -487,4 +503,34 @@ pub fn clock(times: &[f64]) -> Box<dyn FnMut() -> f64 + Send> {
         }
         last
     })
+}
+
+/// An action log that keeps what it was given: "begin <request>", "step <namespace>.<tool> <ok>
+/// <arguments>", "end <outcome>".
+#[derive(Default)]
+pub struct ActionsSeen(pub Mutex<Vec<String>>);
+
+impl ActionsSeen {
+    pub fn all(&self) -> Vec<String> {
+        lock(&self.0).clone()
+    }
+}
+
+impl crate::hooks::ActionLog for ActionsSeen {
+    fn begin(&self, task: &crate::hooks::ActionTask) {
+        lock(&self.0).push(format!("begin {}", task.request));
+    }
+    fn step(
+        &self,
+        _task: &crate::hooks::ActionTask,
+        namespace: &str,
+        tool: &str,
+        args: &Value,
+        ok: bool,
+    ) {
+        lock(&self.0).push(format!("step {namespace}.{tool} {ok} {args}"));
+    }
+    fn end(&self, _task: &crate::hooks::ActionTask, outcome: &str) {
+        lock(&self.0).push(format!("end {outcome}"));
+    }
 }

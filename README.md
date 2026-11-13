@@ -28,6 +28,10 @@ Where this stands today:
 - Done: the knowledge base is the D1 database `hive-knowledge` (schema in `cloud/knowledge`), which
   the desktop agent reads and adds to on every task (`desktop/app/crates/hive/hive-knowledge/src/knowledge.rs`; see
   `desktop/app/README.md`, "Knowledge base").
+- Done: Hive records every step its agent takes (app, window, page, element, files, codebase,
+  outcome; never typed text or secrets) in the same database, counting repeats instead of storing
+  them again, and hands each new request the facts and the steps that worked last time on the
+  same site, app or codebase (`desktop/app/crates/hive/hive-knowledge/src/actions.rs`).
 - Done: Hive's agent also runs on the cloud VM (`cloud/vm-agent/hive-task.mjs`): Codex there works the
   VM's own screen, signs in with the owner's saved logins kept on the VM, and approves Duo on the
   owner's phone through the Mac (`desktop/hive-bridge.mjs`). Files move between the Mac and the VM

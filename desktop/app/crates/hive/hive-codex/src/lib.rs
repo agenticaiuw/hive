@@ -38,8 +38,9 @@ pub use app_server::{same_server, AppServer, OnMessage, OnToolCall, Server, DEFA
 pub use claude::{ClaudeSession, MODEL as CLAUDE_MODEL};
 pub use describe::{describe_call, describe_timing, doing, sentence_ends, tool_error, Timing};
 pub use hooks::{
-    ContextRecorder, DeviceTools, FileProviderWait, Hooks, Knowledge, Memory, NoContext,
-    NoKnowledge, NoMemory, NoWorkspaceTools, ProviderWait, WorkspaceTools,
+    ActionLog, ActionTask, ContextRecorder, DeviceTools, FileProviderWait, Hooks, Knowledge,
+    Memory, NoActionLog, NoContext, NoKnowledge, NoMemory, NoWorkspaceTools, ProviderWait,
+    WorkspaceTools,
 };
 pub use look::{first_look, LookAhead, LOOK_AHEAD_FRESH};
 pub use session::{forget, Session, TaskSession};

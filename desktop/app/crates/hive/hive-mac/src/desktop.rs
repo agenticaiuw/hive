@@ -289,6 +289,68 @@ fn split_scheme(url: &str) -> (String, &str) {
     (String::new(), url)
 }
 
+/// Where the Mac is: the app in front, its front window's title, and, when that app is a
+/// browser, the page its front window shows (without ?query or #fragment). Hive's action memory
+/// notes it for each step.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Front {
+    /// Empty when lsappinfo couldn't say.
+    pub app: String,
+    pub window: Option<String>,
+    pub page: Option<String>,
+}
+
+/// JavaScript for Automation: the address of the tab showing in a browser's front window (two
+/// Apple events), or nothing.
+pub const FRONT_TAB_SCRIPT: &str = r#"
+function run(argv) {
+  try {
+    const app = Application(argv[0]);
+    if (!app.running()) return "";
+    const w = app.windows[0];
+    const tab = argv[0] === "Safari" ? w.currentTab : w.activeTab;
+    return tab.url() || "";
+  } catch (e) {
+    return "";
+  }
+}
+"#;
+
+/// The Mac's [`Front`] now. The browser gets `timeout` to answer (the page is left out after
+/// that); macOS's Automation permission is the one [`browser_tabs`] already asks for.
+pub fn front(timeout: Duration) -> Front {
+    let app = frontmost_app();
+    front_with(&app, &windows(), &|browser: &str| {
+        let args = ["-l", "JavaScript", "-e", FRONT_TAB_SCRIPT, browser];
+        process::run("osascript", args, None, Some(timeout))
+            .ok()
+            .map(|o| o.stdout_text())
+    })
+}
+
+/// [`front`] for the app in front `app`, with the windows `shown` and the script run by `run`
+/// (given the browser to ask).
+pub fn front_with(app: &str, shown: &[Window], run: &dyn Fn(&str) -> Option<String>) -> Front {
+    if app.is_empty() || app == "unknown" {
+        return Front::default();
+    }
+    let window = front_window_in(shown, app)
+        .map(|w| w.title)
+        .filter(|t| !t.is_empty());
+    let page = if BROWSERS.contains(&app) {
+        run(app)
+            .map(|out| page(Some(out.trim())))
+            .filter(|p| !p.is_empty())
+    } else {
+        None
+    };
+    Front {
+        app: app.to_string(),
+        window,
+        page,
+    }
+}
+
 /// One browser window's tabs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BrowserWindow {
@@ -619,6 +681,34 @@ mod tests {
             MOST_TABS
         );
         assert!(text.contains("    \"t0\"\n")); // an empty address leaves no trailing space
+    }
+
+    #[test]
+    fn the_front_is_the_app_its_window_and_a_browsers_page() {
+        let shown = vec![
+            Window::new("Notes", "Shopping list", true, 2),
+            Window::new("Safari", "Course Portal", true, 1),
+            Window::new("Safari", "Other", true, 1),
+        ];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let run = |browser: &str| {
+            asked.borrow_mut().push(browser.to_string());
+            Some("https://portal.example.edu/grades?term=fall#top\n".to_string())
+        };
+        let safari = front_with("Safari", &shown, &run);
+        assert_eq!(safari.app, "Safari");
+        assert_eq!(safari.window.as_deref(), Some("Course Portal"));
+        assert_eq!(
+            safari.page.as_deref(),
+            Some("https://portal.example.edu/grades")
+        );
+        let notes = front_with("Notes", &shown, &run);
+        assert_eq!(notes.window.as_deref(), Some("Shopping list"));
+        assert_eq!(notes.page, None);
+        assert_eq!(*asked.borrow(), vec!["Safari"]); // only a browser is asked
+        assert_eq!(front_with("unknown", &shown, &run), Front::default());
+        let silent = front_with("Google Chrome", &shown, &|_: &str| None);
+        assert_eq!((silent.window, silent.page), (None, None));
     }
 
     #[test]

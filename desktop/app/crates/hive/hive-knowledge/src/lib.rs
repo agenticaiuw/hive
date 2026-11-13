@@ -5,6 +5,7 @@
 //! memory_search.py, ui_ingress.py): same files on disk, same strings, same environment variables.
 //! Everything blocks; the few background jobs run on their own named threads.
 
+pub mod actions;
 pub mod agent_context;
 pub mod cloud_archive;
 pub mod context_panel;
