@@ -205,7 +205,7 @@ test("serves the app-authenticated dashboard from a public Sites host", async ()
   const cookie = await sessionCookie(worker);
   const response = await request(
     worker,
-    "https://ai-pendant-dashboard.example.chatgpt.site/",
+    "https://hive-dashboard.example.chatgpt.site/",
     { cookie },
   );
 
@@ -638,7 +638,7 @@ test("publishes only sanitized agent status and keeps relay credentials server-s
                   llmPlannerEnabled: true,
                   logPath: localPath,
                   permissions: {
-                    hostApp: "AI Pendant Agent",
+                    hostApp: "Hive Local Agent",
                     nodePath: localPath,
                     ready: false,
                     accessibility: { trusted: true, detail: localPath },

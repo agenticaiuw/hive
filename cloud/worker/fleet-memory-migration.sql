@@ -9,7 +9,7 @@
 -- it to what was actually asked.
 --
 -- Apply:
---   npx wrangler d1 execute ai-pendant-relay-db --remote \
+--   npx wrangler d1 execute hive-relay-db --remote \
 --     --file cloudflare-worker/fleet-memory-migration.sql
 --
 -- Kept out of relay_state on purpose, and the reason is not tidiness. relay_state

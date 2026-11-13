@@ -3,7 +3,7 @@ import WebKit
 
 /// The only origin this app is allowed to hand the microphone to. It matches the
 /// `server.url` / `server.allowNavigation` entries in capacitor.config.json.
-private let pendantDashboardHost = "ai-pendant-dashboard.your-subdomain.workers.dev"
+private let pendantDashboardHost = "hive-dashboard.your-subdomain.workers.dev"
 
 /// Capacitor's own `WKUIDelegate` grants every media-capture request from every
 /// origin. The web UI is loaded remotely now, so narrow that to the dashboard

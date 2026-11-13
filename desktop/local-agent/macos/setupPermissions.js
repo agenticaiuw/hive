@@ -15,23 +15,23 @@ import {
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = repoRootFromHere()
-const APP_NAME = 'AI Pendant Agent.app'
+const APP_NAME = 'Hive Local Agent.app'
 const APP_PATH = path.join(os.homedir(), 'Applications', APP_NAME)
 const APP_SUPPORT_PATH = path.join(
   os.homedir(),
   'Library',
   'Application Support',
-  'AIPendant',
+  'HiveLocalAgent',
 )
 const AGENT_ROOT_CONFIG = path.join(APP_SUPPORT_PATH, 'agent-root')
-const LAUNCH_AGENT_LABEL = 'com.aipendant.agent'
-const LAUNCH_BRIDGE_LABEL = 'com.aipendant.bridge'
+const LAUNCH_AGENT_LABEL = 'local.hive.local-agent'
+const LAUNCH_BRIDGE_LABEL = 'local.hive.bridge'
 const AUTOSTART = process.argv.includes('--autostart')
 const INSIDE_APP = process.argv.includes('--inside-app')
 const INSTALL_ONLY = process.argv.includes('--install-only')
 
 async function main() {
-  console.log('\nAI Pendant — one-time Mac permission setup\n')
+  console.log('\nHive — one-time Mac permission setup\n')
   console.log(`Repo: ${REPO_ROOT}`)
 
   if (!INSIDE_APP) {
@@ -43,7 +43,7 @@ async function main() {
       return
     }
 
-    const launcher = path.join(APP_PATH, 'Contents', 'MacOS', 'AIPendantAgent')
+    const launcher = path.join(APP_PATH, 'Contents', 'MacOS', 'HiveLocalAgent')
     const result = spawnSync(
       launcher,
       ['setup', ...(AUTOSTART ? ['--autostart'] : [])],
@@ -51,7 +51,7 @@ async function main() {
         stdio: 'inherit',
         env: {
           ...process.env,
-          __CFBundleIdentifier: 'com.aipendant.agent',
+          __CFBundleIdentifier: 'local.hive.local-agent',
         },
       },
     )
@@ -132,7 +132,7 @@ async function installAgentApp() {
   fs.mkdirSync(macos, { recursive: true })
   fs.mkdirSync(resources, { recursive: true })
 
-  const launcher = path.join(macos, 'AIPendantAgent')
+  const launcher = path.join(macos, 'HiveLocalAgent')
   const embeddedNode = path.join(resources, 'node')
   const launcherSource = path.join(__dirname, 'agentLauncher.c')
 
@@ -272,7 +272,7 @@ async function installLaunchAgentPlists() {
   const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
   fs.mkdirSync(launchAgentsDir, { recursive: true })
 
-  const logsDir = path.join(os.homedir(), 'Library', 'Logs', 'AIPendant')
+  const logsDir = path.join(os.homedir(), 'Library', 'Logs', 'HiveLocalAgent')
   fs.mkdirSync(logsDir, { recursive: true })
 
   const agentPlist = path.join(launchAgentsDir, `${LAUNCH_AGENT_LABEL}.plist`)
@@ -282,7 +282,7 @@ async function installLaunchAgentPlists() {
     agentPlist,
     launchAgentPlist({
       label: LAUNCH_AGENT_LABEL,
-      args: [path.join(APP_PATH, 'Contents/MacOS/AIPendantAgent'), 'agent'],
+      args: [path.join(APP_PATH, 'Contents/MacOS/HiveLocalAgent'), 'agent'],
       stdout: path.join(logsDir, 'agent.out.log'),
       stderr: path.join(logsDir, 'agent.err.log'),
     }),
@@ -354,11 +354,11 @@ function buildInfoPlist() {
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>AI Pendant Agent</string>
+  <string>Hive Local Agent</string>
   <key>CFBundleDisplayName</key>
-  <string>AI Pendant Agent</string>
+  <string>Hive Local Agent</string>
   <key>CFBundleIdentifier</key>
-  <string>com.aipendant.agent</string>
+  <string>local.hive.local-agent</string>
   <key>CFBundleVersion</key>
   <string>1.1.0</string>
   <key>CFBundleShortVersionString</key>
@@ -366,19 +366,19 @@ function buildInfoPlist() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
-  <string>AIPendantAgent</string>
+  <string>HiveLocalAgent</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>AI Pendant needs Automation to control apps like Reminders, Mail, Notes, Calendar, and browsers on your Mac.</string>
+  <string>Hive needs Automation to control apps like Reminders, Mail, Notes, Calendar, and browsers on your Mac.</string>
   <key>NSRemindersUsageDescription</key>
-  <string>AI Pendant creates and updates reminders you ask for.</string>
+  <string>Hive creates and updates reminders you ask for.</string>
   <key>NSCalendarsUsageDescription</key>
-  <string>AI Pendant can create calendar events when you ask.</string>
+  <string>Hive can create calendar events when you ask.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>AI Pendant needs screen access to understand and interact with visible apps when you ask.</string>
+  <string>Hive needs screen access to understand and interact with visible apps when you ask.</string>
   <key>NSAppleScriptEnabled</key>
   <true/>
   <key>NSHighResolutionCapable</key>

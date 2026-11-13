@@ -49,9 +49,9 @@
 		<true/>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>AI Pendant needs the microphone so you can speak commands to your Mac.</string>
+	<string>Hive needs the microphone so you can speak commands to your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>AI Pendant connects to your home Mac agent on the local network.</string>
+	<string>Hive connects to your home Mac agent on the local network.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_http._tcp</string>

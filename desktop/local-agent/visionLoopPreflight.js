@@ -9,7 +9,7 @@ import { ACCESSIBILITY_GRANT, SCREEN_RECORDING_GRANT } from './visionLoopPolicy.
  *
  * MEASURED ON THIS MACHINE, 2026-08-07, from a live /ops/status:
  *
- *     accessibility.trusted            false   ("Enable Accessibility for AI Pendant Agent")
+ *     accessibility.trusted            false   ("Enable Accessibility for Hive Local Agent")
  *     screenRecording.granted          false
  *     computerUse.loopEnabled          false   (PENDANT_COMPUTER_USE_ENABLED unset)
  *     computerUse.visionUploadConsented false  (PENDANT_VISION_UPLOAD_CONSENT unset)
@@ -29,7 +29,7 @@ import { ACCESSIBILITY_GRANT, SCREEN_RECORDING_GRANT } from './visionLoopPolicy.
  * is named after in the course of trying to enable it. What it does instead is
  * name the exact binary the owner has to tick, because per-binary trust is the
  * part that actually goes wrong: a grant given to Terminal does nothing for an
- * agent running out of `AI Pendant Agent.app`, and vice versa.
+ * agent running out of `Hive Local Agent.app`, and vice versa.
  *
  * NOTHING HERE PROBES ON ITS OWN unless asked. The accessibility answer is read
  * from the same quiet permission call /health already makes, and from

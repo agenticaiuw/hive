@@ -170,7 +170,7 @@ Covered in §5, but the phone's unique contribution is the trigger inventory: NF
 
 ### Targets and project layout
 
-Open `software/ai-pendant-simulator/ios/App/App.xcworkspace` → File ▸ New ▸ Target ▸ watchOS ▸ App. Xcode 26 creates a single watch app target (no separate WatchKit extension since watchOS 7).
+Open `mobile/ios/App/App.xcworkspace` → File ▸ New ▸ Target ▸ watchOS ▸ App. Xcode 26 creates a single watch app target (no separate WatchKit extension since watchOS 7).
 
 | Setting | Value | Note |
 |---|---|---|
@@ -186,7 +186,7 @@ Open `software/ai-pendant-simulator/ios/App/App.xcworkspace` → File ▸ New �
 
 Put watch sources in `ios/App/PendantWatch/` and `ios/App/PendantWatchWidgets/`, **outside** `ios/App/App/public`, so `npx cap sync` never touches them. Register both new bundle IDs as App IDs with their own provisioning profiles. The watch app is not a separate App Store Connect record — it rides inside `com.aipendant.app`.
 
-**Capacitor gives you nothing here.** There is no WKWebView on watchOS at all, so the dashboard HTML cannot be reused. `Cap-go/capacitor-watch` is not a web runtime — it renders a fixed set of primitives from a JSON blob and locks you out of AVAudioRecorder, WidgetKit, App Intents, controls, and haptics. Write plain SwiftUI. The relay's JSON contract becomes the real interface between the two clients; consider promoting the shapes in `software/ai-pendant-contracts` to a small Swift package shared by the iOS and watch targets so they can't drift.
+**Capacitor gives you nothing here.** There is no WKWebView on watchOS at all, so the dashboard HTML cannot be reused. `Cap-go/capacitor-watch` is not a web runtime — it renders a fixed set of primitives from a JSON blob and locks you out of AVAudioRecorder, WidgetKit, App Intents, controls, and haptics. Write plain SwiftUI. The relay's JSON contract becomes the real interface between the two clients; consider promoting the shapes in `software/hive-contracts` to a small Swift package shared by the iOS and watch targets so they can't drift.
 
 ### Networking
 

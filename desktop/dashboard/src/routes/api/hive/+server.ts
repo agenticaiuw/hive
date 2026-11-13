@@ -13,7 +13,7 @@ export const prerender = false;
 /**
  * The hive observability snapshot, read back from the relay's generic state
  * store. The document under `/v1/state/hive` is written every ~8 s by
- * `ai-pendant-simulator/hive-dashboard/server.mjs`, which already truncates
+ * `mobile/simulator/hive-dashboard/server.mjs`, which already truncates
  * every string, masks secret-looking values, and scrubs `.env` values before
  * anything leaves that process — so this route passes the object through
  * intact. Unlike the spoken-transcript routes it deliberately keeps local

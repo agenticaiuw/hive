@@ -35,7 +35,7 @@ function sandbox() {
 /* The machine this was written on: both grants denied, both switches off.
  * Every test that wants a different world says so explicitly. */
 const DENIED = {
-  accessibility: { trusted: false, detail: 'Enable Accessibility for AI Pendant Agent' },
+  accessibility: { trusted: false, detail: 'Enable Accessibility for Hive Local Agent' },
   screenRecording: { granted: false, detail: 'Screen Recording permission missing' },
 }
 
@@ -45,9 +45,9 @@ const GRANTED = {
 }
 
 const HOST = {
-  bundleId: 'com.aipendant.agent',
-  bundlePath: '/Users/owner/Applications/AI Pendant Agent.app',
-  execPath: '/Users/owner/Applications/AI Pendant Agent.app/Contents/MacOS/node',
+  bundleId: 'local.hive.local-agent',
+  bundlePath: '/Users/owner/Applications/Hive Local Agent.app',
+  execPath: '/Users/owner/Applications/Hive Local Agent.app/Contents/MacOS/node',
   source: 'app-bundle Info.plist',
 }
 
@@ -58,7 +58,7 @@ const gateWith = (overrides = {}) =>
     loopEnabled: () => false,
     uploadConsented: () => false,
     host: HOST,
-    hostApp: 'AI Pendant Agent',
+    hostApp: 'Hive Local Agent',
     ...overrides,
   })
 
@@ -210,8 +210,8 @@ test('on this machine the preflight blocks, names the exact binary, and does not
   assert.equal(accessibility.held, false)
   assert.equal(accessibility.required, true)
   // Per-binary trust is the part that actually goes wrong.
-  assert.match(accessibility.ownerAction, /AI Pendant Agent/)
-  assert.match(accessibility.ownerAction, /AI Pendant Agent\.app/)
+  assert.match(accessibility.ownerAction, /Hive Local Agent/)
+  assert.match(accessibility.ownerAction, /Hive Local Agent\.app/)
   assert.match(gate.target.note, /per-binary/i)
 
   const screen = gate.grants.find((entry) => entry.grant === 'screenRecording')

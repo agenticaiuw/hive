@@ -130,7 +130,7 @@ const GRANT_CACHE_PATH = path.join(
   os.homedir(),
   'Library',
   'Application Support',
-  'AIPendant',
+  'HiveLocalAgent',
   'permissions-grant.json',
 )
 
@@ -301,8 +301,8 @@ export async function openPrivacySettings() {
 }
 
 export function detectHostApp() {
-  if (process.execPath.includes(`${path.sep}AI Pendant Agent.app${path.sep}`)) {
-    return 'AI Pendant Agent'
+  if (process.execPath.includes(`${path.sep}Hive Local Agent.app${path.sep}`)) {
+    return 'Hive Local Agent'
   }
 
   const termProgram = process.env.TERM_PROGRAM || ''
@@ -314,7 +314,7 @@ export function detectHostApp() {
   }
 
   const bundle = process.env.__CFBundleIdentifier || ''
-  if (bundle.includes('aipendant')) return 'AI Pendant Agent'
+  if (bundle.includes('hive.local-agent')) return 'Hive Local Agent'
   if (bundle.includes('warp')) return 'Warp'
   if (bundle.includes('iterm')) return 'iTerm'
   if (bundle.includes('Terminal')) return 'Terminal'
@@ -324,8 +324,8 @@ export function detectHostApp() {
 }
 
 function hostFingerprint(hostApp = detectHostApp()) {
-  if (hostApp === 'AI Pendant Agent') {
-    return 'com.aipendant.agent|~/Applications/AI Pendant Agent.app'
+  if (hostApp === 'Hive Local Agent') {
+    return 'local.hive.local-agent|~/Applications/Hive Local Agent.app'
   }
   return `${hostApp}|${process.execPath}|${process.env.__CFBundleIdentifier || ''}`
 }
@@ -377,7 +377,7 @@ async function requestAccessibilityPrompt() {
 async function checkScreenRecording() {
   const probePath = path.join(
     os.tmpdir(),
-    `aipendant-screen-probe-${process.pid}.png`,
+    `hive-screen-probe-${process.pid}.png`,
   )
 
   try {
@@ -414,7 +414,7 @@ async function requestScreenRecordingPrompt() {
 
   const probePath = path.join(
     os.tmpdir(),
-    `aipendant-screen-request-${process.pid}.png`,
+    `hive-screen-request-${process.pid}.png`,
   )
   try {
     await execFileAsync('screencapture', ['-x', probePath])

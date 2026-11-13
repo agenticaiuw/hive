@@ -2,7 +2,7 @@
 
 App-authenticated Mission Control dashboard for Hive: the pendant hardware and the
 cloud pipeline. Svelte 5 + `@sveltejs/adapter-cloudflare`, deployed as the
-`ai-pendant-dashboard` Worker.
+`hive-dashboard` Worker.
 
 It shows:
 
@@ -25,7 +25,7 @@ This app is the only dashboard. It ships to two places from the same source:
 
 | Command | Output | Serves | Backend |
 | --- | --- | --- | --- |
-| `npm run build` | `.svelte-kit/cloudflare` | the `ai-pendant-dashboard` Worker | relay, via this app's `/api/*` server routes |
+| `npm run build` | `.svelte-kit/cloudflare` | the `hive-dashboard` Worker | relay, via this app's `/api/*` server routes |
 | `npm run build:agent` | `build-agent/` | the Mac agent at `http://127.0.0.1:8000/dashboard` | the Mac agent's own routes, direct |
 
 `src/lib/dataSource.ts` is the only file that knows which backend it is on;
@@ -35,7 +35,7 @@ static SPA mounted under `/dashboard`, so its `kit.paths.base` is `/dashboard`
 disagree.
 
 `build-agent/` is gitignored. Run `npm run build:agent` after pulling, or the
-Mac agent falls back to whatever is in `ai-pendant-simulator/dist`.
+Mac agent falls back to whatever is in `mobile/simulator/dist`.
 
 ## Authentication
 
@@ -78,8 +78,8 @@ only into the server environment and the relay falls back to `RELAY_URL`.
 npm run deploy:cloudflare
 ```
 
-Deploys the `ai-pendant-dashboard` Worker with the `RELAY` service binding to
-`ai-pendant-relay`. The three secrets are never in `wrangler.jsonc`:
+Deploys the `hive-dashboard` Worker with the `RELAY` service binding to
+`hive-relay`. The three secrets are never in `wrangler.jsonc`:
 
 ```bash
 wrangler secret put RELAY_API_KEY

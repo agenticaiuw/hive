@@ -177,7 +177,7 @@ Shortcuts is not a consolation prize for not writing Swift. For a single-owner s
 
 **What App Intents buy you:** you write one Swift struct — `RunMacCommandIntent`, `MacStatusIntent`, `SpeakOnPendantIntent`, `CancelJobIntent` — and it appears simultaneously in Siri, Spotlight, the Shortcuts editor, widgets, Control Center, on the Action Button, on Lock Screen controls, in Live Activity buttons, and (when iOS 27's Siri lands) in Siri's natural-language reasoning. This is the highest-leverage Swift you will write.
 
-**What Siri specifically buys you, and what it doesn't:** `AppShortcutsProvider` gives you zero-setup phrases — "Hey Siri, AI Pendant status" works the instant the app is installed, answers out loud, and never opens the app. Three hard limits: max 10 App Shortcuts per app; every phrase must literally contain your app name (`"lock my Mac with AI Pendant"` — `"lock my Mac"` is impossible); and **phrases cannot take open-ended string parameters**. That last one is why the Vocal Shortcut + `Dictate Text` path in #0 exists.
+**What Siri specifically buys you, and what it doesn't:** `AppShortcutsProvider` gives you zero-setup phrases — "Hey Siri, Hive status" works the instant the app is installed, answers out loud, and never opens the app. Three hard limits: max 10 App Shortcuts per app; every phrase must literally contain your app name (`"lock my Mac with Hive"` — `"lock my Mac"` is impossible); and **phrases cannot take open-ended string parameters**. That last one is why the Vocal Shortcut + `Dictate Text` path in #0 exists.
 
 **Automations you probably haven't considered:**
 

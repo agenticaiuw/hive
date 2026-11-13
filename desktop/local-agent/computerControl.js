@@ -79,7 +79,7 @@ export async function executeComputerAction(action) {
   // Never let raw tkinter/python overlay hacks claim success — use the native helper.
   if (
     (action?.type === 'run_shell' || action?.type === 'run_project') &&
-    /tkinter|overrideredirect|mainloop|aipendant-screen-overlay|screenwidth/i.test(
+    /tkinter|overrideredirect|mainloop|hive-screen-overlay|screenwidth/i.test(
       String(action.params?.command ?? ''),
     )
   ) {

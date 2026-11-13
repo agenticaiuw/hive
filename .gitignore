@@ -15,7 +15,7 @@ hardware/kicad/KiCad-backups/
 wearable/hardware/kicad/KiCad-backups/
 output/
 tmp/
-software/ai-pendant-simulator/local-agent/memory/*.json
+desktop/local-agent/memory/*.json
 desktop/local-agent/memory/*.json
 
 # KiCad local UI state and automatic backups
@@ -66,7 +66,7 @@ __pycache__/
 
 # Harness per-agent round locks: process-local, never shared.
 diagnostics/harness-derivation/*.lock
-software/ai-pendant-simulator/local-agent/memory/*.bak
+desktop/local-agent/memory/*.bak
 desktop/local-agent/memory/*.bak
 
 # Xcode per-user IDE state. Never shared, and in a tree where several agents

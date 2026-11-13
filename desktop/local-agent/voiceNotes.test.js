@@ -30,7 +30,7 @@ import {
 
 /*
  * Every test writes to a temp store. The default path is
- * ~/AI-Pendant-Workspace/.pendant-voice-notes.json — the owner's real notes —
+ * ~/Hive-Workspace/.pendant-voice-notes.json — the owner's real notes —
  * and a suite that touched it would be writing the owner's own words as a side
  * effect of `node --test`. audioRetention.js makes the same complaint about
  * audioBrief.js and pipelineTrace.js hard-coding their paths; this module takes
@@ -46,7 +46,7 @@ const MADISON = 'America/Chicago'
 const NOW = Date.parse('2026-08-07T18:00:00.000Z')
 
 /*
- * The real bookmark from ~/AI-Pendant-Workspace/pendant-pipeline.json, copied
+ * The real bookmark from ~/Hive-Workspace/pendant-pipeline.json, copied
  * verbatim on 2026-08-07. Hand-written fixtures drift away from the wire; this
  * one is what the nRF9160 actually produced.
  */

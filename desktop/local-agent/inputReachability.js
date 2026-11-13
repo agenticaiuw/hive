@@ -47,7 +47,7 @@ export const INPUT_PROBE_INTERVAL_MS =
     : DEFAULT_INTERVAL_MS
 
 export const PROBE_METHOD =
-  'zero-delta mouse move to the cursor’s own location (aipendant-uicontrol probe)'
+  'zero-delta mouse move to the cursor’s own location (hive-uicontrol probe)'
 
 /*
  * Steps that only arrive by way of a posted event. The first four are the ones

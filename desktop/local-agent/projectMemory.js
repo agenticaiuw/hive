@@ -18,7 +18,7 @@ const seedStore = () => {
     projects: [
       {
         id: DEFAULT_PROJECT_ID,
-        name: 'AI Pendant Simulator',
+        name: 'Hive Simulator',
         path: repoPath,
         workspacePath,
         summary:
