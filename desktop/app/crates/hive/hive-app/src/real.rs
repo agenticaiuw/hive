@@ -148,6 +148,9 @@ impl parts::Captions for Window {
     fn dictating(&self, on: bool) {
         self.0.dictating(on)
     }
+    fn hands_free(&self, on: bool) {
+        self.0.hands_free(on)
+    }
     fn camera(&self, state: &str) {
         self.0.camera(state)
     }
