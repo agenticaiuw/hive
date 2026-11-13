@@ -438,6 +438,55 @@ fn the_phone_remembers_the_session_and_notices_rotation() {
 
 // ---------------------------------------------------------------- the real transport, fake curl
 
+/// A stand-in for curl: it writes down its arguments, how often it ran and its config (stdin), and
+/// answers as PHONE_FIXTURE_MODE says. `relay` and `offline` answer like the phone's relay with
+/// WebDriverAgent behind it, a 44x96-point phone (tests/test_tools.py's `Relay`), and write each
+/// call down as `METHOD PATH BODY` (the body as curl's config quotes it).
+const CURL: &str = r#"#!/bin/sh
+cfg=$(cat)
+printf '%s\n' "$*" >> "$PHONE_FIXTURE_LOG.args"
+echo call >> "$PHONE_FIXTURE_LOG.count"
+printf '%s\n' "$cfg" >> "$PHONE_FIXTURE_LOG.stdin"
+case "$PHONE_FIXTURE_MODE" in
+tls) exit 35;;
+timeout) echo 'synthetic secret' >&2; exit 28;;
+busy) printf '{}\n429'; exit 0;;
+relay|offline) ;;
+*) printf '{"value": null}\n200'; exit 0;;
+esac
+for a; do url=$a; done
+path=/${url#*://*/}
+method=GET; prev=
+for a; do [ "$prev" = --request ] && method=$a; prev=$a; done
+data=$(printf '%s\n' "$cfg" | sed -n 's/^data-binary = //p')
+answer() { printf '%s\n%s' "$2" "$1"; exit 0; }
+case "$cfg" in
+*'"Authorization: Bearer synthetic-token-1234"'*) ;;
+*) answer 401 '{"error": "unauthorized"}';;
+esac
+printf '%s %s %s\n' "$method" "$path" "$data" >> "$PHONE_FIXTURE_LOG.relay"
+if [ "$path" = /health ]; then
+  if [ "$PHONE_FIXTURE_MODE" = relay ]; then on=true; else on=false; fi
+  answer 200 "{\"connected\": $on, \"pending\": 0}"
+fi
+[ "$PHONE_FIXTURE_MODE" = offline ] && answer 503 '{"error": "phone offline"}'
+case "$path" in
+/api/status) answer 200 '{"sessionId": "S1", "value": {"ready": true}}';;
+/api/screenshot) answer 200 "$(cat "$PHONE_FIXTURE_LOG.screenshot")";;
+/api/wda/activeAppInfo) answer 200 '{"value": {"bundleId": "com.apple.mobilesafari", "name": "Safari"}}';;
+/api/session/S1/window/size) answer 200 '{"value": {"width": 44, "height": 96}}';;
+/api/session/S1/source) answer 200 "$(cat "$PHONE_FIXTURE_LOG.source")";;
+/api/session/S1/element)
+  case "$data" in
+  *'\"value\":\"Send\"}"') answer 200 '{"value": {"ELEMENT": "E-1"}}';;
+  *'\"using\":\"predicate string\"'*Fallback*) answer 200 '{"value": {"element-6066-11e4-a52e-4f735466cecf": "E-2"}}';;
+  *'\"value\":\"Bad ID\"}"') answer 200 '{"value": {"ELEMENT": "../../bad"}}';;
+  *) answer 404 '{"value": {"error": "no such element", "message": "unable to find"}}';;
+  esac;;
+esac
+answer 200 '{"value": null}'
+"#;
+
 struct CurlFixture {
     dir: tempfile::TempDir,
     old_path: Option<std::ffi::OsString>,
@@ -449,18 +498,7 @@ impl CurlFixture {
         let guard = env_lock();
         let dir = relay("synthetic-token-1234");
         let curl = dir.path().join("curl");
-        std::fs::write(
-            &curl,
-            "#!/bin/sh\ncfg=$(cat)\nprintf '%s\\n' \"$*\" >> \"$PHONE_FIXTURE_LOG.args\"\n\
-             echo call >> \"$PHONE_FIXTURE_LOG.count\"\n\
-             printf '%s\\n' \"$cfg\" >> \"$PHONE_FIXTURE_LOG.stdin\"\n\
-             case \"$PHONE_FIXTURE_MODE\" in\n\
-             tls) exit 35;;\n\
-             timeout) echo 'synthetic secret' >&2; exit 28;;\n\
-             busy) printf '{}\\n429';;\n\
-             *) printf '{\"value\": null}\\n200';;\nesac\n",
-        )
-        .unwrap();
+        std::fs::write(&curl, CURL).unwrap();
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
         let old_path = std::env::var_os("PATH");
         let mut path = dir.path().as_os_str().to_owned();
@@ -492,6 +530,47 @@ impl CurlFixture {
             json!({"CONTROL_TOKEN": secret}).to_string(),
         )
         .unwrap();
+    }
+    /// From now on curl answers like the relay, with the phone connected or not.
+    fn answer_as_relay(&self, online: bool) {
+        let shot = base64::engine::general_purpose::STANDARD.encode(png(132, 288));
+        std::fs::write(
+            self.file("calls.screenshot"),
+            json!({ "value": shot }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            self.file("calls.source"),
+            json!({ "value": SOURCE }).to_string(),
+        )
+        .unwrap();
+        std::env::set_var("PHONE_FIXTURE_MODE", if online { "relay" } else { "offline" });
+    }
+    /// What the relay was asked, in order: (method, path, body).
+    fn relay_calls(&self) -> Vec<(String, String, Value)> {
+        let log = std::fs::read_to_string(self.file("calls.relay")).unwrap_or_default();
+        log.lines()
+            .map(|line| {
+                let mut parts = line.splitn(3, ' ');
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let body = match parts.next().unwrap_or("") {
+                    "" => Value::Null,
+                    quoted => {
+                        let text: String = serde_json::from_str(quoted).unwrap();
+                        serde_json::from_str(&text).unwrap()
+                    }
+                };
+                (method, path, body)
+            })
+            .collect()
+    }
+    fn posts(&self) -> Vec<(String, Value)> {
+        self.relay_calls()
+            .into_iter()
+            .filter(|(method, _, _)| method == "POST")
+            .map(|(_, path, body)| (path, body))
+            .collect()
     }
 }
 
@@ -621,4 +700,215 @@ fn sensitive_busy_and_failure_do_not_retry_or_echo() {
         assert_eq!(fixture.calls(), 1, "{mode}");
         assert!(!error.0.contains("synthetic secret"), "{mode}: {}", error.0);
     }
+}
+
+// ---------------------------------------------------------------- tests/test_tools.py's PhoneTest:
+// the phone tools through agent-core's real phone transport, with curl answering like the relay
+
+const TOKEN: &str = "synthetic-token-1234";
+
+const SOURCE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Safari" visible="true" x="0" y="0" width="44" height="96">
+<XCUIElementTypeButton type="XCUIElementTypeButton" name="Send" label="Send" visible="true" x="30" y="80" width="10" height="6"/>
+<XCUIElementTypeTextField type="XCUIElementTypeTextField" label="Address" value="synthetic-token-1234" visible="true" x="2" y="4" width="40" height="5"/>
+<XCUIElementTypeSecureTextField type="XCUIElementTypeSecureTextField" label="Password" value="hunter2" visible="true" x="2" y="20" width="40" height="5"/>
+<XCUIElementTypeButton type="XCUIElementTypeButton" label="Hidden" visible="false" x="0" y="0" width="1" height="1"/>
+</XCUIElementTypeApplication></AppiumAUT>"#;
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// A plain grey PNG (test_tools.py's `png`), its pixels stored without compression.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let body = [kind, data].concat();
+        out.extend(&body);
+        out.extend(crc32(&body).to_be_bytes());
+    }
+    let mut rows = Vec::new();
+    for _ in 0..height {
+        rows.push(0); // no filter
+        for _ in 0..width {
+            rows.extend([0x80, 0x80, 0x80]);
+        }
+    }
+    let mut zlib = vec![0x78, 0x01];
+    let mut blocks = rows.chunks(65535).peekable();
+    while let Some(block) = blocks.next() {
+        zlib.push(u8::from(blocks.peek().is_none()));
+        let len = block.len() as u16;
+        zlib.extend(len.to_le_bytes());
+        zlib.extend((!len).to_le_bytes());
+        zlib.extend(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &rows {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend(((b << 16) | a).to_be_bytes());
+    let ihdr = [
+        &width.to_be_bytes()[..],
+        &height.to_be_bytes()[..],
+        &[8, 2, 0, 0, 0][..],
+    ]
+    .concat();
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &zlib);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// A JPEG's (width, height), from its start-of-frame segment.
+fn jpeg_size(jpeg: &[u8]) -> Option<(u16, u16)> {
+    let mut i = 2;
+    while i + 9 <= jpeg.len() {
+        if jpeg[i] != 0xff {
+            return None;
+        }
+        let marker = jpeg[i + 1];
+        if marker == 0xff {
+            i += 1;
+            continue;
+        }
+        if (0xc0..=0xcf).contains(&marker) && ![0xc4, 0xc8, 0xcc].contains(&marker) {
+            let height = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]);
+            let width = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]);
+            return Some((width, height));
+        }
+        i += 2 + usize::from(u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]));
+    }
+    None
+}
+
+fn relay_tools(fixture: &CurlFixture) -> PhoneTools {
+    PhoneTools::with_phone(fixture.phone()).with_settle(Duration::from_millis(1))
+}
+
+#[test]
+fn screenshot_is_in_points_with_the_app_in_front() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(true);
+    let res = relay_tools(&fixture).call("screenshot", &json!({})).unwrap();
+    assert!(!is_error(&res), "{}", texts(&res));
+    let note = res["content"][0]["text"].as_str().unwrap();
+    assert!(note.contains("44x96 points"), "{note}");
+    assert!(note.contains("Safari (com.apple.mobilesafari)"), "{note}");
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(res["content"][1]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+    let (width, _) = jpeg_size(&jpeg).expect("a JPEG frame");
+    assert_eq!(width, 44); // one pixel per point: what taps use
+}
+
+#[test]
+fn actions_go_to_webdriveragent() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(true);
+    let tools = relay_tools(&fixture);
+    for (tool, args) in [
+        ("tap", json!({"x": 10, "y": 20, "screenshot": false})),
+        ("type_text", json!({"text": "pizza\n", "screenshot": false})),
+        (
+            "open_app",
+            json!({"bundle_id": "com.apple.Maps", "screenshot": false}),
+        ),
+        ("press_home", json!({"screenshot": false})),
+        (
+            "swipe",
+            json!({"from_x": 20, "from_y": 80, "to_x": 20, "to_y": 20, "screenshot": false}),
+        ),
+    ] {
+        let res = tools.call(tool, &args).unwrap();
+        assert!(!is_error(&res), "{tool}: {}", texts(&res));
+    }
+    let posts = fixture.posts();
+    for expected in [
+        ("/api/session/S1/wda/tap", json!({"x": 10.0, "y": 20.0})),
+        ("/api/session/S1/wda/keys", json!({"value": ["pizza\n"]})),
+        (
+            "/api/session/S1/wda/apps/activate",
+            json!({"bundleId": "com.apple.Maps"}),
+        ),
+        ("/api/wda/homescreen", json!({})),
+        (
+            "/api/session/S1/wda/dragfromtoforduration",
+            json!({"fromX": 20.0, "fromY": 80.0, "toX": 20.0, "toY": 20.0, "duration": 0.3}),
+        ),
+    ] {
+        let expected = (expected.0.to_string(), expected.1);
+        assert!(posts.contains(&expected), "{expected:?} not in {posts:?}");
+    }
+    let settings: Vec<_> = posts
+        .iter()
+        .filter(|(path, _)| path.ends_with("/appium/settings"))
+        .map(|(_, body)| body.clone())
+        .collect();
+    assert_eq!(
+        settings,
+        [json!({"settings": {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}})]
+    );
+}
+
+#[test]
+fn elements_list_whats_visible_and_hide_secrets() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(true);
+    let res = relay_tools(&fixture).call("elements", &json!({})).unwrap();
+    let listing = res["content"][0]["text"].as_str().unwrap();
+    assert!(listing.contains("(35, 83) Button \"Send\""), "{listing}");
+    assert!(listing.contains("Address"), "{listing}");
+    assert!(!listing.contains(TOKEN), "{listing}");
+    assert!(!listing.contains("hunter2"), "{listing}"); // a password field's contents
+    assert!(!listing.contains("Hidden"), "{listing}"); // visible="false"
+}
+
+#[test]
+fn tap_element_fallback_and_invalid_id() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(true);
+    let phone = fixture.phone();
+    phone.tap_element("Fallback").unwrap();
+    let calls = fixture.relay_calls();
+    let call = |method: &str, path: &str, body: Value| (method.to_string(), path.to_string(), body);
+    let predicate = call(
+        "POST",
+        "/api/session/S1/element",
+        json!({"using": "predicate string", "value": "name == \"Fallback\" OR label == \"Fallback\""}),
+    );
+    assert!(calls.contains(&predicate), "{calls:?}");
+    let click = call("POST", "/api/session/S1/element/E-2/click", json!({}));
+    assert!(calls.contains(&click), "{calls:?}");
+    assert!(phone.tap_element("Bad ID").is_err());
+    assert!(!fixture
+        .relay_calls()
+        .iter()
+        .any(|(_, path, _)| path.contains("../../bad")));
+}
+
+#[test]
+fn offline_phone_says_how_to_connect_it() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(false);
+    assert!(!fixture.phone().connected().unwrap());
+    let res = relay_tools(&fixture)
+        .call("tap", &json!({"x": 1, "y": 1}))
+        .unwrap();
+    assert!(is_error(&res));
+    assert!(texts(&res).contains("Pocket Connect"), "{}", texts(&res));
 }
