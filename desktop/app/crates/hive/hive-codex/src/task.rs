@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// A task's events: `(kind, text)`, where kind is "action" (a tool call, for the activity view),
@@ -129,6 +130,20 @@ pub struct CodexTask {
     pub(crate) test: TestHooks,
     /// Its turn's process when Claude runs the requests (`AGENT_BACKEND=claude`).
     pub(crate) claude: crate::claude::TaskPart,
+    /// Its name in the action memory.
+    action_run: String,
+}
+
+static ACTION_RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// A name for a run of a task, unique on this Mac: the time, the process and a count.
+fn next_action_run() -> String {
+    let n = ACTION_RUNS.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}-{}-{n}",
+        (unix_time() * 1000.0) as u64,
+        std::process::id()
+    )
 }
 
 fn obj(value: Option<&Value>) -> Value {
@@ -235,6 +250,7 @@ impl CodexTask {
             tools: Mutex::new(HashMap::new()),
             test: TestHooks::default(),
             claude: Default::default(),
+            action_run: next_action_run(),
         })
     }
 
@@ -416,7 +432,32 @@ impl CodexTask {
         }
     }
 
+    /// This run, as the action memory knows it.
+    pub(crate) fn action_task(&self) -> crate::hooks::ActionTask {
+        crate::hooks::ActionTask {
+            run: self.action_run.clone(),
+            request: self.task.clone(),
+            device: self.device.clone(),
+            receipt: self.st().receipt_id.clone(),
+        }
+    }
+
+    /// Gives a finished step to the action memory, which records it on a thread of its own:
+    /// this returns at once and never fails the step.
+    pub(crate) fn record_action(&self, namespace: &str, tool: &str, args: &Value, ok: bool) {
+        let task = self.action_task();
+        let actions = self.agent.hooks.actions.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            actions.step(&task, namespace, tool, args, ok)
+        }));
+    }
+
     fn run(&self, look: bool) {
+        {
+            let task = self.action_task();
+            let actions = self.agent.hooks.actions.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| actions.begin(&task)));
+        }
         if self.agent.backend() == "claude" {
             return crate::claude::run(self, look);
         }
@@ -651,9 +692,19 @@ impl CodexTask {
             } else {
                 String::new()
             };
+        // What the knowledge base has for it (facts, and the steps that worked in an earlier task
+        // like it), from the Mac's copies: no network, and nothing at all on any failure.
+        let knowledge_context = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            memory.knowledge_context(&self.task)
+        }))
+        .ok()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| format!("\n{}\n", text.trim_end()))
+        .unwrap_or_default();
         let prompt = self.st().prompt.clone();
         let mut inputs = vec![json!({"type": "text",
-            "text": format!("{earlier}{prompt}{attached}{memory_hint}{memory_context}")})];
+            "text": format!("{earlier}{prompt}{attached}{memory_hint}{memory_context}{knowledge_context}")})];
         if let Some(url) = &image {
             inputs.push(json!({"type": "image", "url": url}));
         }
@@ -662,10 +713,11 @@ impl CodexTask {
             start["serviceTier"] = json!("priority");
         }
         let mut logged_start = start.clone();
-        let omitted = if memory_context.is_empty() {
-            ""
-        } else {
-            "\n[Automatic memory omitted from context log.]\n"
+        let omitted = match (memory_context.is_empty(), knowledge_context.is_empty()) {
+            (true, true) => "",
+            (false, true) => "\n[Automatic memory omitted from context log.]\n",
+            (true, false) => "\n[Automatic knowledge omitted from context log.]\n",
+            (false, false) => "\n[Automatic memory and knowledge omitted from context log.]\n",
         };
         logged_start["input"][0]["text"] =
             json!(format!("{earlier}{prompt}{attached}{memory_hint}{omitted}"));
@@ -680,6 +732,13 @@ impl CodexTask {
                 if let Some(activity) = memory.activity_summary(&remembered) {
                     // Do not copy personal memory into the general agent log.
                     self.emit("data", &activity);
+                }
+                if !knowledge_context.is_empty() {
+                    let lines = knowledge_context.trim().lines().count().saturating_sub(1);
+                    self.emit(
+                        "data",
+                        &format!("Knowledge base: attached {lines} lines it has for this request"),
+                    );
                 }
                 turn.ok_or_else(|| AgentError::Value("'turn'".into()))?
             }
@@ -839,6 +898,22 @@ impl CodexTask {
                 s.started,
             )
         };
+        {
+            let outcome = if kind == "done" {
+                "done"
+            } else if stopped {
+                "stopped"
+            } else if handoff {
+                "interrupted"
+            } else {
+                "failed"
+            };
+            let task = self.action_task();
+            let actions = self.agent.hooks.actions.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                actions.end(&task, outcome)
+            }));
+        }
         if let Some(id) = recovery_id.filter(|_| !handoff) {
             let status = if stopped { "stopped" } else { "finished" };
             if let Err(error) = task_recovery::finish(&self.state_dir(), &id, status) {
@@ -1018,6 +1093,56 @@ impl CodexTask {
                     .unwrap_or_default();
                 self.event("data", &format!("Local command {ended}{exit}"));
                 self.event("doing", "Thinking");
+                let paths: Vec<Value> = item
+                    .get("commandActions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.get("path").filter(|p| p.is_string()).cloned())
+                    .collect();
+                let ok = ended == "completed" && item.get("status") != Some(&json!("failed"));
+                self.record_action(
+                    "shell",
+                    "command",
+                    &json!({"command": item.get("command"), "cwd": item.get("cwd"), "paths": paths}),
+                    ok,
+                );
+            }
+            ("item/completed", "fileChange") => {
+                let changes: Vec<Value> = item
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let paths: Vec<Value> = changes
+                    .iter()
+                    .flat_map(|c| {
+                        let kind = c.get("kind");
+                        [c.get("path"), kind.and_then(|k| k.get("move_path"))]
+                    })
+                    .flatten()
+                    .filter(|p| p.is_string())
+                    .cloned()
+                    .collect();
+                let kinds: Vec<Value> = changes
+                    .iter()
+                    .map(|c| {
+                        let kind = c.get("kind");
+                        kind.and_then(|k| k.get("type"))
+                            .or(kind.filter(|k| k.is_string()))
+                            .cloned()
+                            .unwrap_or_else(|| json!("change"))
+                    })
+                    .collect();
+                if !changes.is_empty() {
+                    let ok = item.get("status") == Some(&json!("completed"));
+                    self.record_action(
+                        "shell",
+                        "file_change",
+                        &json!({"paths": paths, "kinds": kinds}),
+                        ok,
+                    );
+                }
             }
             ("item/started", "dynamicToolCall") => {
                 self.event(
@@ -1961,7 +2086,7 @@ impl CodexTask {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.run_tool(&namespace, tools, params, &arguments)
                 }));
-                match run {
+                let reply = match run {
                     Ok(Ok(result)) => tool_reply(&result),
                     Ok(Err(error)) => {
                         hive_common::tools::reply_text(false, format!("Failed: {error}"))
@@ -1970,7 +2095,10 @@ impl CodexTask {
                         false,
                         format!("Failed: {}", panic_text(&*panic)),
                     ),
-                }
+                };
+                let ok = reply.get("success") == Some(&Value::Bool(true));
+                self.record_action(&namespace, tool.unwrap_or(""), &arguments, ok);
+                reply
             }
             _ => {
                 let text = if stopped {
