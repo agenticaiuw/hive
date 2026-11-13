@@ -96,6 +96,7 @@ extern "C" {
     pub fn CGEventCreate(source: *const c_void) -> *const c_void;
     pub fn CGEventGetLocation(event: *const c_void) -> CGPoint;
     pub fn CGEventSourceFlagsState(state: i32) -> u64;
+    pub fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGGetActiveDisplayList(
@@ -292,6 +293,18 @@ pub fn warp(x: f64, y: f64) {
 /// A shift key is down (kCGEventSourceStateHIDSystemState's shift flag).
 pub fn shift_down() -> bool {
     unsafe { CGEventSourceFlagsState(1) & (1 << 17) != 0 }
+}
+
+/// Seconds since the last input from any mouse, trackpad or keyboard, the helper's virtual one
+/// included (kCGEventSourceStateHIDSystemState). Not kCGAnyInputEventType: some event that isn't
+/// a person's comes many times a second, so it's always near 0. These are the clicks, moves,
+/// drags, keys, modifier keys, scrolls and trackpad gestures.
+pub fn seconds_since_input() -> f64 {
+    const PEOPLE: [u32; 16] = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27, 29, 30];
+    PEOPLE
+        .iter()
+        .map(|t| unsafe { CGEventSourceSecondsSinceLastEventType(1, *t) })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Caps Lock is on (kCGEventSourceStateHIDSystemState's alpha-shift flag).

@@ -786,3 +786,72 @@ fn switch_window_moves_the_window_onto_the_virtual_monitor() {
     );
     assert_eq!(*s.system.placed.lock().unwrap(), [1]);
 }
+
+/// On the virtual monitor (hive-mac's take()): the user touching the mouse or keyboard doesn't
+/// stop the agent. Their cursor and app come back to their screen; the agent's next step waits
+/// until their hands are still, then takes the mouse and keyboard and puts its own back.
+#[test]
+fn on_the_virtual_monitor_a_takeover_doesnt_stop_the_agent() {
+    let s = setup_with(
+        false,
+        Arc::new(FakeSystem {
+            virtual_monitor: Some((1440.0, 0.0, 1440.0, 900.0)),
+            ..FakeSystem::default()
+        }),
+    );
+    *s.system.front_pid.lock().unwrap() = Some(7); // the user's app
+    let typed = |text: &str| {
+        let res = s
+            .tools
+            .call(
+                "type_text",
+                &json!({"text": text, "step": "Typing.", "screenshot": false}),
+            )
+            .unwrap();
+        first_text(&res)
+    };
+    assert_eq!(typed("a"), "Typed.");
+    assert_eq!(*s.system.cursor.lock().unwrap(), (2160.0, 450.0)); // over to the virtual monitor
+    *s.system.front_pid.lock().unwrap() = Some(9); // the app the agent works in
+    *s.system.cursor.lock().unwrap() = (2000.0, 300.0);
+
+    s.helper.raw("human trackpad"); // the user touches the trackpad
+    s.tools.took_over(); // the shell, told by the helper
+    assert_eq!(*s.system.cursor.lock().unwrap(), (500.0, 400.0)); // back where the user left it
+    assert_eq!(*s.system.activated.lock().unwrap(), vec![7]);
+
+    // The user keeps going for a moment; the agent's next step waits for them, not for fn.
+    *s.system.idle.lock().unwrap() = 0.0;
+    let system = s.system.clone();
+    let still = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        *system.idle.lock().unwrap() = f64::INFINITY;
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(typed("b"), "Typed.");
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    still.join().unwrap();
+    assert!(s.helper.raw("status").contains("state=engaged"));
+    assert_eq!(*s.system.cursor.lock().unwrap(), (2000.0, 300.0)); // the agent's cursor again
+    assert_eq!(*s.system.activated.lock().unwrap(), vec![7, 9]); // and its app
+
+    // Letting go after the step gives the user their cursor and app once more.
+    s.tools.let_go();
+    assert_eq!(*s.system.cursor.lock().unwrap(), (500.0, 400.0));
+    assert_eq!(*s.system.activated.lock().unwrap(), vec![7, 9, 7]);
+}
+
+/// On the virtual monitor, a touch in the middle of a step says so, without waiting for fn.
+#[test]
+fn on_the_virtual_monitor_a_touch_mid_step_says_to_look_and_go_on() {
+    let s = setup_on_monitor();
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 1}))
+        .unwrap();
+    assert!(texts(&res).starts_with("You have the mouse and keyboard."));
+    assert!(MacTools::not_yours("trackpad")
+        .to_string()
+        .contains("press fn"));
+    assert!(!s.tools.not_now("busy").to_string().contains("press fn"));
+}

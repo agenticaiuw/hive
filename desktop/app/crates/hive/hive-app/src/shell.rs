@@ -1650,6 +1650,17 @@ impl VoiceAgent {
             }
             _ if state == Some("disengaged")
                 && took_over(event.get("reason").map(String::as_str))
+                && self.host.virtual_monitor_on() =>
+            {
+                // Hive works on the virtual monitor: your touch doesn't pause it. Your cursor and
+                // app come back to your screen now; its next screen step waits until your hands
+                // are still for a moment, then borrows the mouse and keyboard (hive-mac's take()).
+                if let Some(task) = self.task() {
+                    self.spawn("give-back", move |_| task.took_over());
+                }
+            }
+            _ if state == Some("disengaged")
+                && took_over(event.get("reason").map(String::as_str))
                 && self.paused_since.get() == 0.0 =>
             {
                 // You have the mouse and keyboard. The task keeps working on what doesn't need the
@@ -2147,8 +2158,6 @@ impl VoiceAgent {
         }
     }
 
-    /// You handed the screen back (fn, or "continue"): the agent has the mouse and keyboard again,
-    /// and lets go of them if it doesn't use them for a while (the Mac tools' `handed_back`).
     /// One event of the request `device`'s task is doing, for other agents (live.rs); nothing
     /// for a task without a receipt.
     pub fn live_event(&self, device: &str, kind: &str, text: &str) {
@@ -2167,6 +2176,8 @@ impl VoiceAgent {
         self.live_receipts.lock().remove(device);
     }
 
+    /// You handed the screen back (fn, or "continue"): the agent has the mouse and keyboard again,
+    /// and lets go of them if it doesn't use them for a while (the Mac tools' `handed_back`).
     pub fn take_control(&self) {
         self.prepare_screen();
         if let Err(e) = self.mac.engage() {

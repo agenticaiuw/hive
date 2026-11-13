@@ -150,6 +150,9 @@ pub trait Task: Send + Sync {
     /// You handed the screen back: its Mac tools hold the mouse and keyboard again, and let go of
     /// them if they aren't used for a while (`task.tools["mac"].handed_back()`).
     fn handed_back(&self) {}
+    /// You just took the mouse and keyboard: on the virtual monitor, its Mac tools put your cursor
+    /// and app back on your screen, and the task goes on (`task.tools["mac"].took_over()`).
+    fn took_over(&self) {}
     /// Waits for it to end; false after `seconds`.
     fn wait_done(&self, seconds: f64) -> bool;
     /// Its reply (Python's `final`).

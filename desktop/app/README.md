@@ -69,6 +69,7 @@ Karabiner-VirtualHIDDevice-Daemon → DriverKit virtual keyboard + mouse → mac
 | Press any key, touch the trackpad, move or click a mouse | The agent loses control at once; anything it was holding is released (chime: Funk) |
 | Touch anything during that 0.4 s | The hand-over is cancelled |
 | Say "continue", or tap **fn**, after you took over | It takes control back the same way and carries on |
+| Use your mouse and keyboard while it works **on the virtual monitor** | It doesn't stop or wait for fn. Your cursor and app come straight back to your screen; its next screen step waits until your hands have been still for 1.5 s, borrows the mouse and keyboard on the virtual monitor, then gives them back where you left them |
 | Click the **x** on the floating window | The agent stops; nothing else stops it |
 | Tap **fn** otherwise, or hold it to dictate | The microphone turns on or off, or it types what you say; a task it's doing carries on either way |
 
