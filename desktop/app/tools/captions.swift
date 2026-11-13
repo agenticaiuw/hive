@@ -5,6 +5,7 @@
 //
 //   {"listening": true}             "Listening" in the header, until {"listening": false}
 //   {"dictating": true}             "Dictating" in the header instead, until {"dictating": false}
+//   {"hands_free": true}            the dictation (fn + shift) goes on until fn: "press fn to type it"
 //   {"camera": "on"}                "Camera on · lip reading" in the header, in green ("starting", "waiting":
 //                                   on the way; "off": gone)
 //   {"framing": "Move closer"}      the header while the camera is on
@@ -642,7 +643,8 @@ final class InputPanel: NSPanel {
 
 struct Header { let symbol: String, text: String, icon: NSColor, color: NSColor }
 
-func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, listening: Bool, active: Bool) -> Header {
+func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, listening: Bool, active: Bool,
+                handsFree: Bool = false) -> Header {
     switch camera {
     case "on":
         return Header(symbol: "video.fill", text: framing.isEmpty ? "Camera on · lip reading · tap fn to send" : framing,
@@ -658,7 +660,10 @@ func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, l
         return Header(symbol: "mic.slash.fill", text: active ? "Transcription muted · the agent keeps working" : "Transcription muted",
                       icon: mutedAccent, color: mutedAccent)
     }
-    if dictating { return Header(symbol: "keyboard", text: "Dictating · let go of fn to type it", icon: youAccent, color: secondaryText) }
+    if dictating {
+        return Header(symbol: "keyboard", text: handsFree ? "Dictating · press fn to type it" : "Dictating · let go of fn to type it",
+                      icon: youAccent, color: secondaryText)
+    }
     if listening { return Header(symbol: "waveform", text: "Listening · tap fn to turn the mic off", icon: youAccent, color: secondaryText) }
     return Header(symbol: "sparkles", text: active ? "Hive · working" : "Hive", icon: tertiaryText, color: tertiaryText)
 }
@@ -677,7 +682,7 @@ final class Captions: NSObject {
     var fade: Timer?
     var heardFade: Timer?
     var otherFade: Timer?
-    var listening = false, dictating = false, camera = "off", framing = ""
+    var listening = false, dictating = false, handsFree = false, camera = "off", framing = ""
     var dismissedByUser = false
     var visible = false
 
@@ -802,6 +807,10 @@ final class Captions: NSObject {
         }
         if let dictating = message["dictating"] as? Bool {
             self.dictating = dictating
+            if dictating { dismissedByUser = false }  // you're talking to it: show what it hears
+        }
+        if let handsFree = message["hands_free"] as? Bool {
+            self.handsFree = handsFree
         }
         if let camera = message["camera"] as? String {
             self.camera = camera
@@ -891,18 +900,22 @@ final class Captions: NSObject {
 
     /// The workspace display when the agent works in its own (and nothing when that's gone), otherwise the
     /// screen the card was dragged to, otherwise the main one.
+    /// Where the card goes: the virtual workspace's display when Hive works there and it's up,
+    /// otherwise your screen. Never nowhere: while Hive listens, you see the card.
     func targetScreen() -> NSScreen? {
         if ProcessInfo.processInfo.environment["AGENT_SPACEO_COMMAND"] != nil {
             let state = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ??
                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Personal Agent").path
             let path = URL(fileURLWithPath: state).appendingPathComponent("workspace-display-id")
-            guard let raw = try? String(contentsOf: path, encoding: .utf8),
-                  let displayID = UInt32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  CGDisplayVendorNumber(displayID) == 0x1AF2,
-                  CGDisplayModelNumber(displayID) == 0x0001 else { return nil }
-            return NSScreen.screens.first(where: {
-                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-            })
+            if let raw = try? String(contentsOf: path, encoding: .utf8),
+               let displayID = UInt32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+               CGDisplayVendorNumber(displayID) == 0x1AF2,
+               CGDisplayModelNumber(displayID) == 0x0001,
+               let screen = NSScreen.screens.first(where: {
+                   ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+               }) {
+                return screen
+            }
         }
         if bubble.dragging, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: window.frame.midX, y: window.frame.midY)) }) {
             return screen
@@ -929,7 +942,7 @@ final class Captions: NSObject {
 
     func show() {
         let line = headerLine(camera: camera, framing: framing, muted: bubble.muted, dictating: dictating,
-                              listening: listening, active: bubble.active)
+                              listening: listening, active: bubble.active, handsFree: handsFree)
         bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
         if dismissedByUser || !(bubble.hasContent || dictating || camera != "off") { hide(); return }
         guard let screen = targetScreen() else {

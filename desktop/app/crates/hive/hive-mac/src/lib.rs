@@ -24,3 +24,8 @@ pub use ffi::Bounds;
 pub use system::{RealMac, System};
 pub use tools::MacTools;
 pub use vhid::{AgentVHID, Fields, HelperWatcher, Screenshot, TextBox, VhidError};
+
+/// A shift key is down on any keyboard (fn + shift is dictation only).
+pub fn shift_held() -> bool {
+    ffi::shift_down()
+}

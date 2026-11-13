@@ -23,6 +23,7 @@ typed into the app in front when you let go: dictation. Listening and speaking r
                            to pause
   hold fn and talk         dictation: let go and your words are typed where you're typing (pasted,
                            with the clipboard put back), not given to the agent
+  fn + shift, then talk    dictation that goes on after you let go: press fn again and it's typed
   just talk                a pause of LISTEN_PAUSE seconds (0.8) ends what you're saying
   talk while it's talking  it goes quiet and listens
   say \"stop\"               cancel the running task
@@ -129,6 +130,14 @@ pub fn read_app(agent: Arc<Mutex<Option<Weak<VoiceAgent>>>>) {
 
 /// `hive-agent`'s main.
 pub fn main(argv: &[String]) -> i32 {
+    // SpaceO, the old virtual workspace, only when it's asked for at launch
+    // (AGENT_EXPERIMENTAL_SPACEO=1). Hive.app's workspace build passes AGENT_SPACEO_COMMAND by
+    // default; with it, the agent's mouse and keyboard, its voice and the floating window all
+    // went to a workspace that never started, so fn listened with no window to show it. Before
+    // any thread starts, so everything here and every helper sees the same environment.
+    if std::env::var("AGENT_EXPERIMENTAL_SPACEO").as_deref() != Ok("1") {
+        std::env::remove_var("AGENT_SPACEO_COMMAND");
+    }
     if let Some(at) = argv.iter().position(|a| a == "--task") {
         return task_main(&argv[at + 1..]);
     }

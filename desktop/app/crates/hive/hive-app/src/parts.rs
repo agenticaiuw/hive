@@ -73,6 +73,7 @@ pub trait Captions: Send + Sync {
     fn listening(&self, on: bool) {}
     fn focus(&self, on: bool) {}
     fn dictating(&self, on: bool) {}
+    fn hands_free(&self, on: bool) {}
     fn camera(&self, state: &str) {}
     fn dismiss(&self) {}
     fn framing(&self, text: &str) {}
@@ -279,6 +280,10 @@ pub trait Host: Send + Sync {
     /// Types dictation into the app in front; None if it did, else why not.
     fn paste(&self, text: &str) -> Option<String> {
         crate::util::paste(text)
+    }
+    /// A shift key is down: fn with shift dictates until fn again.
+    fn shift_held(&self) -> bool {
+        hive_mac::shift_held()
     }
 
     // -- where Hive works (virtual_monitor.py) --

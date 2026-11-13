@@ -140,7 +140,6 @@ build/Agent-WorkspaceCandidate.app: build/agent-workspace-client build/agent-thr
 	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
 	cp tools/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
-	plutil -replace AgentWorkspaceDefault -string 1 $@.tmp/Contents/Info.plist
 	SIGN_REQUIRED=1 tools/sign.sh $@.tmp local.personal-agent.Agent
 	codesign --verify --deep --strict $@.tmp
 	rm -rf $@ && mv $@.tmp $@

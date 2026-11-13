@@ -387,6 +387,9 @@ impl Captions for FakeCaptions {
     fn dictating(&self, on: bool) {
         self.put("dictating", on)
     }
+    fn hands_free(&self, on: bool) {
+        self.put("hands_free", on)
+    }
     fn camera(&self, state: &str) {
         self.put("camera", state)
     }
@@ -1072,6 +1075,8 @@ pub struct FakeHost {
     pub notes: Rec<(String, String)>,
     pub pasted: Rec<String>,
     pub paste_error: Mutex<Option<String>>,
+    /// A shift key is down.
+    pub shift: AtomicBool,
     pub asked_screen: AtomicUsize,
     pub vm_enabled: AtomicBool,
     pub vm_ensured: AtomicUsize,
@@ -1110,6 +1115,7 @@ impl FakeHost {
             notes: Rec::default(),
             pasted: Rec::default(),
             paste_error: Mutex::new(None),
+            shift: AtomicBool::new(false),
             asked_screen: AtomicUsize::new(0),
             vm_enabled: AtomicBool::new(false),
             vm_ensured: AtomicUsize::new(0),
@@ -1150,6 +1156,9 @@ impl Host for FakeHost {
     fn paste(&self, text: &str) -> Option<String> {
         self.pasted.push(text.to_owned());
         lock(&self.paste_error).clone()
+    }
+    fn shift_held(&self) -> bool {
+        self.shift.load(Ordering::SeqCst)
     }
     fn ask_work_screen(&self) {
         self.asked_screen.fetch_add(1, Ordering::SeqCst);
