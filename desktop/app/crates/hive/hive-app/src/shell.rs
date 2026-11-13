@@ -295,6 +295,10 @@ pub struct VoiceAgent {
     pub pause_announced: Flag,
     /// Device ("" for none): the last thing its task said.
     pub last_said: Slot<HashMap<String, String>>,
+    /// The direct channel (live.rs): each request's events, in a file other agents follow.
+    pub live_files: crate::live::Live,
+    /// Device: the receipt of the request its task is doing, for `live_files`.
+    pub live_receipts: Slot<HashMap<String, String>>,
     /// (when, text): what it has said lately.
     pub said: Slot<Vec<(f64, String)>>,
     /// The Mac's look, taken as you started saying this.
@@ -369,6 +373,8 @@ impl VoiceAgent {
             live_shown: Flag::new(false),
             paused_since: Slot::new(0.0),
             pause_announced: Flag::new(false),
+            live_files: crate::live::Live::default(),
+            live_receipts: Slot::new(HashMap::new()),
             last_said: Slot::default(),
             said: Slot::default(),
             ahead: Slot::new(None),
@@ -1407,6 +1413,7 @@ impl VoiceAgent {
             if let Some(task) = task.filter(|t| t.running()) {
                 task.stop();
                 stopped.push(device);
+                self.live_end(device, "stopped", "stopped from the floating window's x");
             }
         }
         self.hand_back();
@@ -1513,6 +1520,12 @@ impl VoiceAgent {
             && self.mac_task_running()
         {
             self.pause_announced.set(true);
+            self.live_event(
+                "mac",
+                "paused",
+                "The user took the mouse and keyboard. Steps that need the screen wait until fn or \
+                 “continue” hands them back; the rest goes on.",
+            );
             self.out(
                 "⏸  you have the mouse and keyboard; the agent keeps working without the screen. Press fn or say \
                  “continue” to hand them back (or say something new).",
@@ -1543,7 +1556,6 @@ impl VoiceAgent {
             self.set_window(!value.unwrap_or(true), "the card's –");
         }
     }
-
 
     /// The saved request's state, if the Mac's task has one.
     fn save_recovery(&self, status: &str, failed: &str) {
@@ -1625,6 +1637,11 @@ impl VoiceAgent {
             Some("up") => self.finish_dictation(),
             _ if state == Some("engaged") && self.mac_task_running() => {
                 if self.pause_announced.get() {
+                    self.live_event(
+                        "mac",
+                        "resumed",
+                        "The mouse and keyboard are back with Hive.",
+                    );
                     self.out("▶️  continuing");
                 }
                 self.paused_since.set(0.0);
@@ -2024,9 +2041,15 @@ impl VoiceAgent {
                 text = format!("{} {text}", task.task());
                 joined = true;
                 self.out("   (adding that to what you just asked)");
+                self.live_end(
+                    &device,
+                    "stopped",
+                    "added to a newer request, which goes on with it",
+                );
             } else {
                 previous = Some(task.task());
                 self.out("   (interrupted the previous task)");
+                self.live_end(&device, "stopped", "a newer request replaced it");
             }
         }
         if device == "mac" {
@@ -2038,6 +2061,12 @@ impl VoiceAgent {
             .backend
             .task(&text, previous.as_deref(), &device, ahead);
         self.tasks.lock().set(&device, Some(task.clone()));
+        if let Some(receipt) = &ingress_receipt {
+            self.live_receipts
+                .lock()
+                .insert(device.clone(), receipt.clone());
+            self.live_event(&device, "started", &text);
+        }
         task.set_receipt_id(ingress_receipt);
         self.captions.active(true);
         self.captions.activity(&if from_agent {
@@ -2120,6 +2149,24 @@ impl VoiceAgent {
 
     /// You handed the screen back (fn, or "continue"): the agent has the mouse and keyboard again,
     /// and lets go of them if it doesn't use them for a while (the Mac tools' `handed_back`).
+    /// One event of the request `device`'s task is doing, for other agents (live.rs); nothing
+    /// for a task without a receipt.
+    pub fn live_event(&self, device: &str, kind: &str, text: &str) {
+        let receipt = self.live_receipts.lock().get(device).cloned();
+        if let Some(receipt) = receipt {
+            if let Err(e) = self.live_files.event(&receipt, kind, text) {
+                self.console
+                    .line(&format!("   couldn't write the live channel's {kind}: {e}"));
+            }
+        }
+    }
+
+    /// The last event of that request: done, needs_you, failed or stopped.
+    pub fn live_end(&self, device: &str, kind: &str, text: &str) {
+        self.live_event(device, kind, text);
+        self.live_receipts.lock().remove(device);
+    }
+
     pub fn take_control(&self) {
         self.prepare_screen();
         if let Err(e) = self.mac.engage() {
@@ -2169,6 +2216,7 @@ impl VoiceAgent {
                 }
             }
             "action" => {
+                self.live_event(&device, "action", text);
                 self.out(&format!("   → {mark}{text}"));
                 self.captions.activity(&format!("Tool: {mark}{text}"));
             }
@@ -2179,14 +2227,19 @@ impl VoiceAgent {
                 }
             }
             "data" => self.captions.activity(text),
-            "error" => self.out(&format!("   ✗ {mark}{text}")),
+            "error" => {
+                self.live_event(&device, "error", text);
+                self.out(&format!("   ✗ {mark}{text}"))
+            }
             "say" => {
                 // its reply, a sentence or so at a time as Codex writes it
+                self.live_event(&device, "say", text);
                 self.out(&format!("   💬 {mark}{text}"));
                 self.say(text, Some(&device), Some(task));
             }
             "announce" => {
                 // a step that can't be undone (a send, a delete), said as it happens
+                self.live_event(&device, "announce", text);
                 self.out(&format!("   ⚠️  {mark}{text}"));
                 self.captions
                     .activity(&format!("One-way step: {mark}{text}"));
@@ -2216,6 +2269,7 @@ impl VoiceAgent {
                 self.doing.lock().retain(|(d, _)| *d != device);
                 self.show_doing();
                 if kind == "done" {
+                    self.live_end(&device, "done", text);
                     self.out(&format!("✅ {mark}done in {:.0} s\n", task.elapsed()));
                     if device == "mac" {
                         self.hand_back();
@@ -2233,6 +2287,7 @@ impl VoiceAgent {
                 } else if text != "stopped" && task.final_text().as_deref() == Some(text) {
                     // It stopped on purpose and said why: often a step it won't take without you (a
                     // send, a delete). Its words are the answer, not an error.
+                    self.live_end(&device, "needs_you", text);
                     self.out(&format!("✋ {mark}{text}\n"));
                     if device == "mac" {
                         self.hand_back();
@@ -2247,11 +2302,14 @@ impl VoiceAgent {
                         self.say(text, Some(&device), Some(task));
                     }
                 } else if text != "stopped" {
+                    self.live_end(&device, "failed", text);
                     self.out(&format!("❌ {mark}{text}\n"));
                     if device == "mac" {
                         self.hand_back();
                     }
                     self.say("Sorry, that didn't work.", None, None);
+                } else {
+                    self.live_end(&device, "stopped", "stopped");
                 }
                 if !self.tasks.lock().any() {
                     self.apply_scheduled_update();

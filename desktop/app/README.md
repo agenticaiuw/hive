@@ -141,6 +141,28 @@ closure without changing any display. To explicitly authorize one creation attem
 permit before attempting creation. An ambiguous failure is not retried automatically. The
 command records policy only; it does not open a display itself.
 
+### Giving Hive a task from another agent (hive-ask)
+
+Claude Code, or any program on this Mac, can hand Hive a task and follow it live:
+
+```sh
+build/hive-ask "Open Course Search & Enroll and read me the Spring 2027 cart"
+```
+
+It sends the request to the request socket, prints the receipt, then prints what Hive says and
+does for it as it happens, with the log's marks (💬 its words, → its steps, ⚠️ a one-way step,
+⏸ paused while you have the mouse and keyboard), and exits when the task ends: 0 done, 3 it
+stopped and needs you (its words say why), 1 failed, 2 stopped (the window's x, or a newer
+request replaced it), 4 still going when `--wait MINUTES` (default 120) ran out, 5 not accepted.
+`--follow RECEIPT` (or `--follow latest`) watches a request that was already sent, from its
+start; `--json` prints the events as they are stored; `-` reads the task from stdin. Claude Code
+runs it in the background and is told when it ends, with everything Hive said.
+
+Behind it, Hive writes one private file per request, `control/live/<receipt>.jsonl` in the
+state folder (`src/live.rs`): an event per line (`started`, `say`, `action`, `announce`,
+`error`, `paused`, `resumed`, then `done`, `needs_you`, `failed` or `stopped`). The newest 200
+are kept.
+
 ### Local request receipts
 
 The local request socket records an admission before sending a request to the agent. Its

@@ -404,3 +404,74 @@ fn events_of_a_replaced_task_are_kept_but_not_shown() {
     h.drain();
     assert!(h.has_printed("   💬 Looking it up."));
 }
+
+// -- the direct channel to other agents (live.rs, hive-ask) --
+
+const RECEIPT: &str = "0123456789abcdef0123456789abcdef";
+
+fn live_events(h: &Harness) -> Vec<(String, String)> {
+    let path = h
+        .state()
+        .join("control/live")
+        .join(format!("{RECEIPT}.jsonl"));
+    hive_app::live::read_from(&path, 0)
+        .0
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap_or("").to_owned(),
+                e["text"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn sent_with_receipt(h: &Harness, text: &str) -> Arc<FakeTask> {
+    let (mut sent, replies) = request(text, false, false, None);
+    sent.receipt_id = Some(RECEIPT.into());
+    h.agent.on_local_request(sent);
+    assert!(ok(&replies));
+    h.backend.last()
+}
+
+#[test]
+fn what_a_request_leads_to_goes_to_its_live_file() {
+    let h = Harness::new();
+    let task = sent_with_receipt(&h, "Check the cart");
+    task.emit("action", "click: Opening My Courses.");
+    task.emit("say", "The cart has seven courses.");
+    task.finish("Seven courses, 19 credits.");
+    h.drain();
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        live_events(&h),
+        pairs(&[
+            ("started", "Check the cart"),
+            ("action", "click: Opening My Courses."),
+            ("say", "The cart has seven courses."),
+            ("done", "Seven courses, 19 credits."),
+        ])
+    );
+    assert!(h.agent.live_receipts.lock().is_empty());
+}
+
+#[test]
+fn the_x_ends_a_requests_live_file_as_stopped() {
+    let h = Harness::new();
+    let _task = sent_with_receipt(&h, "Check the cart");
+    h.agent.on_overlay("close", None);
+    let events = live_events(&h);
+    assert_eq!(events.first().map(|e| e.0.as_str()), Some("started"));
+    assert_eq!(
+        events.last().cloned(),
+        Some((
+            "stopped".to_owned(),
+            "stopped from the floating window's x".to_owned()
+        ))
+    );
+    assert!(h.agent.live_receipts.lock().is_empty());
+}
