@@ -1070,9 +1070,15 @@ impl MacTools {
                 };
                 {
                     let _acting = lock(&self.control.acting);
-                    if self.take().map_err(|e| e.to_string())?.is_none() {
-                        self.control.acted();
-                        return self.look_note("You have the mouse and keyboard.", false);
+                    match self.take().map_err(|e| e.to_string())? {
+                        None => {
+                            self.control.acted();
+                            return self.look_note("You have the mouse and keyboard.", false);
+                        }
+                        Some(reason) if reason == "watcher_unavailable" => {
+                            return Ok(self.not_now(&reason));
+                        }
+                        Some(_) => {}
                     }
                 }
                 if self.control.sharing() {

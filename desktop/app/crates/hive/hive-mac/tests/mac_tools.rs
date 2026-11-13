@@ -412,6 +412,21 @@ fn an_action_looks_afterwards_unless_told_not_to() {
 }
 
 #[test]
+fn wait_for_control_reports_unavailable_watcher() {
+    let s = setup(false);
+    s.helper.shared.watcher_unavailable();
+
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 0}))
+        .unwrap();
+
+    assert!(is_error(&res));
+    assert!(first_text(&res).contains("watcher_unavailable"), "{res}");
+    assert!(s.system.notifications.lock().unwrap().is_empty());
+}
+
+#[test]
 fn wait_for_control_waits_for_the_hand_back() {
     let s = setup(true);
     assert_eq!(s.tools.take().unwrap(), None);
