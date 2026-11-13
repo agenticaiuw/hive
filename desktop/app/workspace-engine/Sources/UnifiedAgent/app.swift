@@ -1,8 +1,8 @@
 // Agent.app: the voice agent in the menu bar, opened at login. Tap fn anywhere to talk to it, and
 // again to stop it listening; the icon fills in while it listens. Hold fn and talk to dictate: when
 // you let go, what you said is typed into the app in front (that needs Accessibility for Agent).
-// The menu starts and stops listening too, and has Speak Aloud (off: replies are shown, not
-// spoken), Show Floating Window (off: the card shows only while fn is in use), Open at Login, the
+// The menu starts and stops listening too, and has Sound (Voice and Chimes) (off: replies are shown,
+// not spoken, and agent-vhid-helper plays no chime when the agent takes or gives back the screen), Show Floating Window (off: the card shows only while fn is in use), Open at Login, the
 // log (~/Library/Logs/Agent.log), Restart and Quit; Restart and Quit are written in the log and the
 // session journal, so a quit isn't taken for a crash.
 //
@@ -37,7 +37,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     let voiceItem = NSMenuItem(title: "Voice", action: #selector(chooseVoice), keyEquivalent: "")
     let lipsItem = NSMenuItem(title: "Lip Reading (camera)", action: #selector(chooseLips), keyEquivalent: "")
     // Checked as the agent says ("@@ speak 1|0", "@@ window 1|0"); it keeps both for the next launch.
-    let speakItem = NSMenuItem(title: "Speak Aloud", action: #selector(toggleSpeak), keyEquivalent: "")
+    let speakItem = NSMenuItem(title: "Sound (Voice and Chimes)", action: #selector(toggleSpeak), keyEquivalent: "")
     let windowItem = NSMenuItem(title: "Show Floating Window", action: #selector(toggleWindow), keyEquivalent: "")
     var contextURL: URL?  // the browser view of every payload, the panel's fallback
     var panelURL: URL?  // this session's panel.json
