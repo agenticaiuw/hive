@@ -58,6 +58,12 @@ pub const BATCHABLE: [&str; 8] = [
 const BATCH_EXAMPLE: &str = r#"[{"tool": "press_key", "keys": "cmd+l"}, {"tool": "type_text", "text": "weather in Paris\n"}]"#;
 
 /// Apps where Cmd+N gives the agent a window of its own instead of taking one the user has open.
+/// Added to a look at the virtual monitor while no app's window is on it.
+pub const EMPTY_MONITOR: &str =
+    " No app's window is on the virtual monitor yet. open_app puts one here (a new \
+window if the app is already open), and switch_window brings over a window that is open on the \
+user's screen. Do that yourself; don't ask the user to.";
+
 pub const NEW_WINDOW_APPS: [&str; 7] = [
     "Safari",
     "Google Chrome",
@@ -609,6 +615,9 @@ impl MacTools {
                 .map(|w| format!(", window {}", json_quote(&w.title)))
                 .unwrap_or_default()
         );
+        if self.system.windows_on_virtual_monitor() == Some(0) {
+            summary.push_str(EMPTY_MONITOR);
+        }
         if let Some(rx) = tabs {
             let tabs = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
             summary.push('\n');
@@ -709,6 +718,7 @@ impl MacTools {
         &self,
         before: Option<i32>,
         running: &HashSet<String>,
+        new_window: bool,
     ) -> Result<(), VhidError> {
         if self.system.virtual_monitor().is_none() {
             return Ok(());
@@ -720,7 +730,7 @@ impl MacTools {
             pid = self.system.frontmost_pid();
         }
         let app = self.system.frontmost_app();
-        if running.contains(&app) && NEW_WINDOW_APPS.contains(&app.as_str()) {
+        if new_window && running.contains(&app) && NEW_WINDOW_APPS.contains(&app.as_str()) {
             self.mac.key("cmd+n")?;
             std::thread::sleep(Duration::from_millis(800));
         }
@@ -860,7 +870,11 @@ impl MacTools {
                         std::thread::sleep(Duration::from_millis(600)); // Spotlight's top hit settles
                         self.mac.key("return")?;
                         std::thread::sleep(Duration::from_millis(500)); // the app starts coming up
-                        self.to_virtual_monitor(before, &running)
+                        self.to_virtual_monitor(
+                            before,
+                            &running,
+                            !a["_same_window"].as_bool().unwrap_or(false),
+                        )
                     },
                     &done,
                 )
@@ -1000,9 +1014,10 @@ impl MacTools {
             )));
         };
         if self.system.frontmost_app() != target.app {
+            // (no new window: it's an open one that's wanted)
             let switched = self.call_tool(
                 "open_app",
-                &json!({"name": target.app, "screenshot": false}),
+                &json!({"name": target.app, "screenshot": false, "_same_window": true}),
             )?;
             if hive_common::tools::is_error(&switched) {
                 return Ok(switched);
@@ -1012,12 +1027,23 @@ impl MacTools {
         for _ in 0..tries {
             let front = desktop::front_window_in(&self.system.windows(), &target.app);
             if let Some(front) = front.filter(|f| matches(f)) {
+                // On the virtual monitor, the agent sees and works there only: the window comes
+                // over from the user's screen.
+                let moved = self.system.virtual_monitor().is_some() && {
+                    let why = self.system.place_on_virtual_monitor(front.pid);
+                    why.is_empty()
+                };
                 std::thread::sleep(SETTLE);
                 return self.look_note(
                     &format!(
-                        "{}'s window {} is in front.",
+                        "{}'s window {} is in front{}.",
                         target.app,
-                        json_quote(&front.title)
+                        json_quote(&front.title),
+                        if moved {
+                            ", moved onto the virtual monitor"
+                        } else {
+                            ""
+                        }
                     ),
                     false,
                 );

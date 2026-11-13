@@ -163,6 +163,52 @@ pub fn own_window_at(x: f64, y: f64) -> bool {
     false
 }
 
+/// How many apps' windows are on screen with their middle inside the frame (x, y, width,
+/// height): ordinary windows only, not Hive's own.
+pub fn windows_inside(frame: (f64, f64, f64, f64)) -> usize {
+    let keys: Vec<Cf> = [
+        "kCGWindowOwnerName",
+        "kCGWindowLayer",
+        "kCGWindowBounds",
+        "X",
+        "Y",
+        "Width",
+        "Height",
+    ]
+    .iter()
+    .map(|k| Cf::string(k))
+    .collect();
+    let [owner, layer, bounds, kx, ky, kw, kh] = [0, 1, 2, 3, 4, 5, 6].map(|i| keys[i].0);
+    let mut count = 0;
+    unsafe {
+        let listed = ffi::CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0);
+        if listed.is_null() {
+            return 0;
+        }
+        let listed = Cf(listed);
+        for i in 0..ffi::CFArrayGetCount(listed.0) {
+            let info = ffi::CFArrayGetValueAtIndex(listed.0, i);
+            let app = ffi::cf_string(ffi::CFDictionaryGetValue(info, owner));
+            if HIVE_OWN_WINDOWS.contains(&app.as_str()) || app.starts_with("hive-monitor") {
+                continue;
+            }
+            if ffi::cf_number(ffi::CFDictionaryGetValue(info, layer)) != 0.0 {
+                continue; // the menu bar, the Dock, panels
+            }
+            let frame_info = ffi::CFDictionaryGetValue(info, bounds);
+            if frame_info.is_null() {
+                continue;
+            }
+            let n = |k| ffi::cf_number(ffi::CFDictionaryGetValue(frame_info, k));
+            let (x, y, w, h) = (n(kx), n(ky), n(kw), n(kh));
+            if w >= 100.0 && h >= 100.0 && inside(frame, x + w / 2.0, y + h / 2.0) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Whether (x, y) is within the frame (x, y, width, height).
 pub fn inside(frame: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     let (fx, fy, w, h) = frame;
