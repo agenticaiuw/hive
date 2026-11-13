@@ -61,7 +61,7 @@ pub fn render(date: &str, ev: &Evidence, fixes: &[FixResult], exe: &str) -> Stri
         if let Some(b) = &f.branch {
             let _ = writeln!(
                 o,
-                "- Branch: `{b}` (local only), worktree `{}`",
+                "- Branch: `{b}`, worktree `{}`",
                 f.worktree.as_deref().unwrap_or("")
             );
         }
@@ -131,12 +131,16 @@ pub fn render(date: &str, ev: &Evidence, fixes: &[FixResult], exe: &str) -> Stri
         if let Some(d) = &f.deployed {
             let _ = writeln!(o, "- Nightly: {}\n", md(d));
         }
-        let landed = f
-            .deployed
-            .as_deref()
-            .is_some_and(|d| d.starts_with("landed") && !d.contains("taken back"));
+        let landed = f.outcome == "landed"
+            || f
+                .deployed
+                .as_deref()
+                .is_some_and(|d| d.starts_with("landed") && !d.contains("taken back"));
         if let Some(b) = f.branch.as_ref().filter(|_| !landed) {
-            if f.outcome == "proposed" {
+            if f.outcome == "proposed" && f.deployed.is_some() && cfg!(target_os = "linux") {
+                // Held by the macOS check: the branch is on GitHub, and a person lands it on the Mac.
+                let _ = writeln!(o, "- Land it on the Mac, in ~/hive (cherry-picks onto main, never pushes):\n\n```\ngit fetch origin {b}:{b} && desktop/app/build/hive-dream land {b}\n```\n");
+            } else if f.outcome == "proposed" {
                 let _ = writeln!(o, "- Land it (cherry-picks onto main in ~/hive, never pushes):\n\n```\n{exe} land {b}\n```\n");
             } else {
                 let _ = writeln!(o, "- Not proposed; the branch is kept for a look: `git -C ~/hive log -p main..{b}`\n");
