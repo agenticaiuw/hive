@@ -184,6 +184,13 @@ static const unsigned short kRightOptionKey = 61;  // kVK_RightOption
 static const NSEventModifierFlags kRightOptionDown = 0x40;  // NX_DEVICERALTKEYMASK: right Option, not left
 static const double kTapSeconds = 0.7;
 
+/// The picture's window is on every Space and stays put through Mission Control. Never
+/// full-screen auxiliary: with that, Mission Control's opening and closing animation shrinks the
+/// picture like an ordinary window, and your own screen's windows flash through for a moment
+/// (recorded 2026-11-13; ignore-cycle is left out with it).
+static const NSWindowCollectionBehavior kPictureSpaces =
+    NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
+
 typedef struct { double started; BOOL down; BOOL used; } OptionTap;
 
 /// One event into the tap detector. YES when right Option went down and came up on its own within
@@ -381,8 +388,7 @@ static NSString *stateDir(void) {
         _window.ignoresMouseEvents = YES;          // clicks go to where the cursor really is: the virtual monitor
         _window.level = NSScreenSaverWindowLevel;  // over the menu bar and the Dock too
         _window.sharingType = NSWindowSharingNone; // never in a screenshot or recording of your screen
-        _window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary |
-                                     NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
+        _window.collectionBehavior = kPictureSpaces;  // no flash of your windows in Mission Control
         NSView *view = _window.contentView;
         view.wantsLayer = YES;
         _picture = [CALayer layer];
@@ -573,6 +579,10 @@ static int selftest(void) {
     CHECK(inside.x == 2000 && inside.y == 400, "a point on the monitor stays put");
     CGPoint left = clampInto(CGPointMake(1400, 950), area);
     CHECK(left.x == 1470 && left.y == 899, "a point off the monitor comes to its nearest edge");
+    CHECK((kPictureSpaces & NSWindowCollectionBehaviorStationary) && (kPictureSpaces & NSWindowCollectionBehaviorCanJoinAllSpaces),
+          "the picture is on every Space and stays put in Mission Control");
+    CHECK(!(kPictureSpaces & NSWindowCollectionBehaviorFullScreenAuxiliary),
+          "the picture is never full-screen auxiliary: Mission Control would shrink it and show your own windows");
 #undef CHECK
     if (!failed) printf("ok\n");
     return failed ? 1 : 0;
