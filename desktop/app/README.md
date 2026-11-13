@@ -647,6 +647,36 @@ build/hive-vhid status
 build/hive-vhid engage        # take control, once your hands are off
 ```
 
+## Dreaming: Hive fixes itself at night
+
+Every night (03:30, retried hourly until 07:30 while you're at the Mac or Hive
+is busy) `build/hive-dream nightly` reads what went wrong since the last run:
+the session journals, the task recordings' timelines and Agent.log. It groups
+the failures into clusters and counts how often each happened and how many
+minutes it cost. Then it hands the worst fixable cluster to **Hive's own
+agent**, as a request through Hive's socket (what `hive-ask` sends), in two
+steps, each in a private git worktree under `<state>/dream/worktrees/`:
+
+1. Write a test that shows the problem. hive-dream commits it and runs it on
+   the code as it is; it must fail.
+2. Fix the code so it passes.
+
+A gate written in code then checks the change. It must stay out of credentials, auth, settings defaults,
+prompts, approvals and the dream itself. It needs a test and a real code change,
+can't remove or ignore tests, and can't contain private terms. The crate's
+tests must pass and the whole workspace must build. A passing fix is landed on main in ~/hive, built with `make`,
+pushed, and Hive is restarted with it if nobody is using it. A build that fails
+takes the landing back. A fix whose test only failed to compile (it called code
+that didn't exist yet) waits for you: `build/hive-dream land <branch>`.
+
+The morning report is `<state>/dream/<date>/report.md`; `build/hive-dream
+status` lists every cluster. `make build/hive-dream && build/hive-dream
+install-schedule` sets it up; `uninstall-schedule` stops it.
+`HIVE_DREAM_AUTOLAND=0` keeps fixes on their branches; `HIVE_DREAM_AGENT=codex`
+asks the Codex CLI instead of Hive. Private terms (one per line, never in the
+repo) go in `<state>/dream/private-terms`. Hive's agent may write in
+`<state>/dream` for this; its sandbox is otherwise unchanged.
+
 ## How it behaves like a person
 
 - **Mouse:** a real mouse only reports "moved this much", and macOS adds

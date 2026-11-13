@@ -1,12 +1,13 @@
 //! The nightly run and its LaunchAgent. `hive-dream nightly` (what launchd starts) postpones when
 //! Hive is in the middle of a task or the user touched the mouse or keyboard in the last ten
-//! minutes, runs at most once per date, and otherwise collects, tries one fix and writes the
-//! report. `install-schedule` writes ~/Library/LaunchAgents/local.hive.dream.plist.
+//! minutes, runs at most once per date, and otherwise collects, has Hive's agent try one fix (test
+//! first), lands, builds, pushes and restarts Hive with a fix the gate passed (`deploy`), and
+//! writes the report. `install-schedule` writes ~/Library/LaunchAgents/local.hive.dream.plist.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::{collect, fix, paths, report, time};
+use crate::{collect, deploy, fix, paths, report, time};
 
 pub const LABEL: &str = "local.hive.dream";
 /// The user counts as present if they touched input more recently than this.
@@ -43,6 +44,12 @@ pub fn postpone_reason(task_recovery: Option<&str>, idle_ns: Option<u64>) -> Opt
         }
     }
     None
+}
+
+/// Why Hive shouldn't be disturbed right now, if it shouldn't (see [`postpone_reason`]).
+pub fn postpone_now() -> Option<String> {
+    let recovery = std::fs::read_to_string(paths::state_dir().join("task-recovery.json")).ok();
+    postpone_reason(recovery.as_deref(), hid_idle_ns())
 }
 
 fn hid_idle_ns() -> Option<u64> {
@@ -90,8 +97,7 @@ pub fn nightly(force: bool) -> Result<(), String> {
         log_line(&format!("already ran for {date}"));
         return Ok(());
     }
-    let recovery = std::fs::read_to_string(paths::state_dir().join("task-recovery.json")).ok();
-    if let Some(why) = postpone_reason(recovery.as_deref(), hid_idle_ns()) {
+    if let Some(why) = postpone_now() {
         log_line(&format!("postponed: {why}"));
         return Ok(());
     }
@@ -120,8 +126,23 @@ pub fn nightly(force: bool) -> Result<(), String> {
         dry_run: false,
     }) {
         Ok(results) => {
-            for r in results {
-                log_line(&format!("{}: {}", r.outcome, r.signature));
+            let night = paths::night(&dream, &collected.date);
+            for mut r in results {
+                log_line(&format!("{} ({}): {}", r.outcome, r.agent, r.signature));
+                for note in &r.notes {
+                    log_line(&format!("note: {note}"));
+                }
+                let deployed = match deploy::hold_reason(&r, deploy::autoland()) {
+                    Some(why) if r.outcome == "proposed" => format!("not landed: {why}"),
+                    Some(_) => continue,
+                    None => {
+                        let run_dir = night.join("fixes").join(&r.run);
+                        deploy::run(&r, &run_dir).unwrap_or_else(|e| format!("not landed: {e}"))
+                    }
+                };
+                log_line(&deployed);
+                r.deployed = Some(deployed);
+                let _ = fix::save_result(&night, &r);
             }
         }
         Err(e) => log_line(&format!("fix failed: {e}")),
