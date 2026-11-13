@@ -10,6 +10,7 @@ const agent = createAgent({
   stateDir,
   executable: process.env.HIVE_VM_BROWSER,
   headless: process.env.HIVE_VM_HEADLESS === '1',
+  proxy: process.env.HIVE_VM_PROXY || null,
   viewerPort: Number(process.env.HIVE_VM_VIEW_PORT ?? 38917),
   log: line => console.log(`${new Date().toISOString()} ${line}`),
 });
