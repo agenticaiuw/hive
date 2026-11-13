@@ -533,7 +533,25 @@ pub fn test_env(dream: &Path, name: &str) -> Vec<(String, String)> {
 
 pub const TEST_TIMEOUT_SECS: u64 = 30 * 60;
 
-/// Runs the touched packages' tests, then checks the whole hive workspace still compiles.
+/// The hive crates that don't build on this OS: on Linux (Hive's cloud VM) the three that need
+/// macOS frameworks. Their tests run in the macOS check on GitHub Actions (`ci`).
+pub fn not_here() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &[]
+    } else {
+        &["hive-mac", "hive-sidecars", "hive-app"]
+    }
+}
+
+/// Whether every package builds on this OS.
+pub fn all_here(packages: &[Package]) -> bool {
+    packages
+        .iter()
+        .all(|p| !matches!(p, Package::Hive(n) if not_here().contains(&n.as_str())))
+}
+
+/// Runs the touched packages' tests, then checks the whole hive workspace still compiles (on
+/// Linux, without the crates in [`not_here`]).
 pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path) -> Vec<TestRun> {
     let env = test_env(dream, "gate");
     let hive_manifest: PathBuf = worktree.join("desktop/app/crates/hive/Cargo.toml");
@@ -542,8 +560,8 @@ pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path
     let hive: Vec<&String> = packages
         .iter()
         .filter_map(|p| match p {
-            Package::Hive(n) => Some(n),
-            Package::AgentCore => None,
+            Package::Hive(n) if !not_here().contains(&n.as_str()) => Some(n),
+            _ => None,
         })
         .collect();
     let m = |p: &Path| p.to_string_lossy().into_owned();
@@ -579,6 +597,12 @@ pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path
         "--workspace".into(),
         "--no-run".into(),
     ]);
+    if let Some(c) = commands.last_mut() {
+        for n in not_here() {
+            c.push("--exclude".into());
+            c.push((*n).into());
+        }
+    }
     let mut runs = Vec::new();
     for c in commands {
         let started = std::time::Instant::now();

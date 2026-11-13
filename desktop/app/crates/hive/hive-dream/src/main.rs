@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use hive_dream::register::{Register, Status};
-use hive_dream::{collect, fix, land, paths, report, schedule, time};
+use hive_dream::{ci, collect, fix, land, paths, report, schedule, time};
 
 const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Codex, gate, report).
 
@@ -21,6 +21,8 @@ const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Co
   hive-dream install-schedule [--exe PATH] [--print] [--no-load]
                                          write (and load) ~/Library/LaunchAgents/local.hive.dream.plist
   hive-dream uninstall-schedule
+  hive-dream ci-gate --out DIR           the macOS check of a dream/* branch (GitHub Actions)
+  hive-dream ci-publish --out DIR        push what ci-gate decided (needs HIVE_DREAM_PUSH_URL)
 
 Everything is written under <state>/dream/ (HIVE_DREAM_DIR). Codex runs from ChatGPT.app
 (HIVE_DREAM_CODEX); the repo is ~/hive (HIVE_DREAM_REPO).";
@@ -205,6 +207,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "uninstall-schedule" => {
             println!("{}", schedule::uninstall()?);
+            Ok(())
+        }
+        "ci-gate" | "ci-publish" => {
+            let out = PathBuf::from(value(rest, "--out").ok_or("--out DIR is needed")?);
+            let r = if cmd == "ci-gate" { ci::gate(&out)? } else { ci::publish(&out)? };
+            println!("{}", serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?);
             Ok(())
         }
         "help" | "--help" | "-h" => {
