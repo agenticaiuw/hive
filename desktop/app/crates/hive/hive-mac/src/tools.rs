@@ -866,7 +866,9 @@ impl MacTools {
                 if self.control.sharing() && crate::vhid::took_over(Some(&reason)) {
                     self.control.give_back();
                     return Ok(error_text(
-                        "The user touched the mouse or keyboard during this step, so it may be only partly done. Look at                          the screen and do what's left: the next step takes the mouse and keyboard back as soon as                          their hands are still. Nothing waits for fn.",
+                        "The user touched the mouse or keyboard during this step, so it may be only partly done. Look at \
+                         the screen and do what's left: the next step takes the mouse and keyboard back as soon as \
+                         their hands are still. Nothing waits for fn.",
                     ));
                 }
                 return Ok(Self::not_yours(&reason));
