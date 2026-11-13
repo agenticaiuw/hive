@@ -681,8 +681,8 @@ hive-app can't build there.
 (the VM has a deploy key for this repo; it pushes nothing else).
 `.github/workflows/dream.yml` runs on a macOS runner: the test on the old code
 must fail on an assertion, and the fix, squashed onto main as it is now, must
-pass the same gate with every test. Then the workflow pushes the squash to main
-and deletes the branch. A test that only failed to compile (it called code that
+pass the same gate there, where every crate builds. Then the workflow pushes
+the squash to main and deletes the branch. A test that only failed to compile (it called code that
 didn't exist yet) proves nothing, so that branch waits for a person:
 `build/hive-dream land <branch>`. A test in a macOS-only crate goes to the
 check alone first, and the VM agent gets its failure for step 2. What the check
