@@ -9,7 +9,7 @@
 # openconnect signs in and hands the tunnel to ocproxy, a SOCKS5 proxy on 127.0.0.1:11080, which
 # the browser uses with HIVE_VM_PROXY=socks5://127.0.0.1:11080. There is no tun device and no
 # route change: SSH and everything else on the VM keep the normal network, and it needs no root.
-# Needs: sudo apt-get install openconnect ocproxy tmux.
+# Needs: sudo apt-get install openconnect ocproxy tmux. "Failed to open /dev/vhost-net" is harmless.
 set -eu
 port=${HIVE_VM_VPN_PORT:-11080}
 portal=${HIVE_VM_VPN_PORTAL:-uwmadison.vpn.wisc.edu}
@@ -21,7 +21,9 @@ case "${1:-up}" in
   connect)  # inside tmux
     echo "Signing in to $portal: type your NetID and password, then answer Duo (push, or a passcode)."
     echo "Once it says Connected, close this window; the VPN stays up."
-    openconnect --protocol=gp --script-tun --script "ocproxy -D $port -k 30" "$portal" || true
+    # The gateway asks for a HIP (host check) report; openconnect's own script sends one.
+    openconnect --protocol=gp --csd-wrapper=/usr/libexec/openconnect/hipreport.sh \
+      --script-tun --script "ocproxy -D $port -k 30" "$portal" || true
     echo "The VPN is off. Press Return to close."; read -r _ ;;
   status)
     if up; then echo "connected (proxy on 127.0.0.1:$port)"; else echo "not connected"; exit 1; fi ;;
