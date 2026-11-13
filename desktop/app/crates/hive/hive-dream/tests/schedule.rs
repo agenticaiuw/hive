@@ -1,10 +1,9 @@
-//! The nightly run's postpone checks and its LaunchAgent, plus the collect-time checks for
+//! The nightly run's postpone checks (the Mac), plus the collect-time checks for
 //! settings changed with nothing to explain them and for restart storms. Synthetic data only.
 
 use hive_dream::collect::{restart_storms, settings_check, window, SettingSnap};
 use hive_dream::register::Register;
-use hive_dream::schedule::{parse_hid_idle_ns, plist, postpone_reason};
-use std::path::Path;
+use hive_dream::schedule::{parse_hid_idle_ns, postpone_reason};
 
 const T0: f64 = 1_800_000_000.0;
 
@@ -35,20 +34,6 @@ fn postpones_when_hive_is_mid_task_or_the_user_is_there() {
     );
     assert_eq!(postpone_reason(None, None), None);
     assert_eq!(postpone_reason(Some("not json"), idle_long), None);
-}
-
-#[test]
-fn the_launch_agent_runs_nightly_at_half_past_three_and_logs_to_the_dream_folder() {
-    let p = plist(
-        Path::new("/opt/x/hive-dream"),
-        Path::new("/s/dream"),
-        Path::new("/h"),
-    );
-    assert!(p.contains("<string>local.hive.dream</string>"));
-    assert!(p.contains("<string>/opt/x/hive-dream</string>\n        <string>nightly</string>"));
-    assert!(p.contains("<key>Hour</key>\n            <integer>3</integer>\n            <key>Minute</key>\n            <integer>30</integer>"));
-    assert!(p.contains("<string>/s/dream/dream.log</string>"));
-    assert!(!p.contains("RunAtLoad"));
 }
 
 fn snap(value: &str, mtime: f64) -> SettingSnap {

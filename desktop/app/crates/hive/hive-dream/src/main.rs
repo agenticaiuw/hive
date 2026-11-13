@@ -5,29 +5,28 @@ use std::path::PathBuf;
 use hive_dream::register::{Register, Status};
 use hive_dream::{ci, collect, fix, land, paths, report, schedule, sync, time};
 
-const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Codex, gate, report).
+const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Hive's agent, gate, report).
 
   hive-dream collect [--since HOURS]     read journals, recordings and Agent.log into
                                          <state>/dream/<date>/evidence.json and the register
   hive-dream fix [--max N] [--cluster SLUG] [--dry-run]
-                                         Codex in a worktree on a local dream/<date>-<slug>
+                                         Hive's agent in a worktree on a dream/<date>-<slug>
                                          branch, then the gate (default --max 1)
   hive-dream report [--date YYYY-MM-DD]  rewrite and print the path of the morning report
   hive-dream land BRANCH [--dry-run]     cherry-pick a dream branch onto main in ~/hive (never pushes)
   hive-dream mark SLUG STATUS [--note TEXT]
                                          set a cluster open, ignored, landed, rejected or proposed
   hive-dream status                      the register: open, proposed, rejected, landed, ignored
-  hive-dream nightly [--force]           what launchd runs: postpone checks, collect, fix --max 1, report
-  hive-dream install-schedule [--exe PATH] [--print] [--no-load]
-                                         write (and load) ~/Library/LaunchAgents/local.hive.dream.plist
-  hive-dream uninstall-schedule
+  hive-dream nightly [--force]           what the VM's timer runs (cloud/dream/nightly.sh): collect,
+                                         fix --max 1, the macOS check, report
   hive-dream sync [--mirror DIR]         on the VM: mirror the Mac's uploaded logs from R2
                                          (default <dream>/mirror)
   hive-dream ci-gate --out DIR           the macOS check of a dream/* branch (GitHub Actions)
   hive-dream ci-publish --out DIR        push what ci-gate decided (needs HIVE_DREAM_PUSH_URL)
 
-Everything is written under <state>/dream/ (HIVE_DREAM_DIR). Codex runs from ChatGPT.app
-(HIVE_DREAM_CODEX); the repo is ~/hive (HIVE_DREAM_REPO).";
+Everything is written under <state>/dream/ (HIVE_DREAM_DIR); the repo is ~/hive
+(HIVE_DREAM_REPO). The agent is HIVE_DREAM_AGENT: vm (Hive's VM agent, the default on Linux),
+hive (Hive on the Mac, through its socket) or codex. HIVE_DREAM_CI=0 skips the macOS check.";
 
 fn value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -195,21 +194,6 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let r = schedule::nightly(has(rest, "--force"));
             schedule::flush();
             r
-        }
-        "install-schedule" => {
-            println!(
-                "{}",
-                schedule::install(
-                    value(rest, "--exe").map(PathBuf::from),
-                    has(rest, "--print"),
-                    !has(rest, "--no-load"),
-                )?
-            );
-            Ok(())
-        }
-        "uninstall-schedule" => {
-            println!("{}", schedule::uninstall()?);
-            Ok(())
         }
         "sync" => {
             let mirror = value(rest, "--mirror")

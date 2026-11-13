@@ -1,6 +1,6 @@
 //! `hive-dream land <branch>`: cherry-picks a dream branch's commits onto main in the shared
-//! repo, when a person runs it or the nightly run lands a fix the gate passed (`deploy`, which
-//! then builds and pushes). It refuses when main isn't checked out, when anything is staged, or
+//! repo, when a person runs it (a fix the macOS check held, or one from a run with the check off).
+//! It refuses when main isn't checked out, when anything is staged, or
 //! when a file the commits touch has uncommitted changes there. It never pushes itself.
 
 use crate::register::{Register, Status};

@@ -1,16 +1,15 @@
-//! hive-dream: Hive's nightly self-review, done by Hive's own agent. `collect` reads what went
-//! wrong since the last run (journals, task recordings, Agent.log; no model) into clusters of
-//! normalised failure signatures; `fix` hands the cluster that lost the most time to Hive's agent
-//! (a request through Hive's socket) in a private git worktree: first a test that must fail on the
-//! code as it is, then the fix; a deterministic gate decides whether the branch is proposed or
-//! rejected; the nightly run (`deploy`) lands a proposed fix on main, builds, pushes and restarts
-//! Hive when nobody is using it, and `land` does the landing by hand. Nothing here uses the screen
-//! or sends a message.
+//! hive-dream: Hive's nightly self-review, done by Hive's own agent, on Hive's cloud VM. `sync`
+//! mirrors what the Mac uploaded to R2 (journals, recordings' timelines, Agent.log); `collect`
+//! reads it (no model) into clusters of normalised failure signatures; `fix` hands the cluster
+//! that lost the most time to Hive's VM agent in a private git worktree: first a test that must
+//! fail on the code as it is, then the fix; a deterministic gate decides whether the branch is
+//! proposed or rejected; `ci` sends a proposed branch to the macOS check on GitHub Actions, which
+//! runs the tests Linux can't and squash-merges it into main when they pass. `land` lands a branch
+//! by hand. Nothing here uses the screen or sends a message.
 
 pub mod agentlog;
 pub mod ci;
 pub mod collect;
-pub mod deploy;
 pub mod evidence;
 pub mod fix;
 pub mod gate;
