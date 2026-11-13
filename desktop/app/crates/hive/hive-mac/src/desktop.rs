@@ -35,6 +35,7 @@ pub const MOST_TABS: usize = 60;
 
 const ALL: u32 = 0;
 const EXCLUDE_DESKTOP: u32 = 1 << 4;
+const ON_SCREEN_ONLY: u32 = 1 << 0;
 
 /// One window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +118,55 @@ pub fn windows() -> Vec<Window> {
     }
     found.sort_by_key(|w| !w.on_screen); // stable: each group stays front to back
     found
+}
+
+/// Hive's own windows: the floating window (the card with what the agent is doing, and its x that
+/// stops the task). The agent must never click them.
+pub const HIVE_OWN_WINDOWS: [&str; 1] = ["agent-vhid-captions"];
+
+/// Whether (x, y), in global screen points, is on one of Hive's own windows that's on screen.
+pub fn own_window_at(x: f64, y: f64) -> bool {
+    let keys: Vec<Cf> = [
+        "kCGWindowOwnerName",
+        "kCGWindowBounds",
+        "X",
+        "Y",
+        "Width",
+        "Height",
+    ]
+    .iter()
+    .map(|k| Cf::string(k))
+    .collect();
+    let [owner, bounds, kx, ky, kw, kh] = [0, 1, 2, 3, 4, 5].map(|i| keys[i].0);
+    unsafe {
+        let listed = ffi::CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0);
+        if listed.is_null() {
+            return false;
+        }
+        let listed = Cf(listed);
+        for i in 0..ffi::CFArrayGetCount(listed.0) {
+            let info = ffi::CFArrayGetValueAtIndex(listed.0, i);
+            let app = ffi::cf_string(ffi::CFDictionaryGetValue(info, owner));
+            if !HIVE_OWN_WINDOWS.contains(&app.as_str()) {
+                continue;
+            }
+            let frame = ffi::CFDictionaryGetValue(info, bounds);
+            if frame.is_null() {
+                continue;
+            }
+            let n = |k| ffi::cf_number(ffi::CFDictionaryGetValue(frame, k));
+            if inside((n(kx), n(ky), n(kw), n(kh)), x, y) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether (x, y) is within the frame (x, y, width, height).
+pub fn inside(frame: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    let (fx, fy, w, h) = frame;
+    w > 0.0 && h > 0.0 && x >= fx && x < fx + w && y >= fy && y < fy + h
 }
 
 /// The app's window that's in front of its others, if it has one on screen.

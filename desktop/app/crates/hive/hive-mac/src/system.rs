@@ -49,6 +49,10 @@ pub trait System: Send + Sync {
     fn set_clipboard(&self, data: &[u8]) -> Result<(), String>;
     /// Natural scrolling is on (the macOS default).
     fn natural_scrolling(&self) -> bool;
+    /// (x, y), in global screen points, is on one of Hive's own windows (desktop::own_window_at).
+    fn own_window_at(&self, _x: f64, _y: f64) -> bool {
+        false
+    }
 
     /// The display the agent works on: the virtual monitor while it is on, else the main display.
     fn work_display(&self) -> Bounds {
@@ -123,6 +127,9 @@ impl System for RealMac {
                 out.code.unwrap_or(-1)
             ))
         }
+    }
+    fn own_window_at(&self, x: f64, y: f64) -> bool {
+        desktop::own_window_at(x, y)
     }
     fn natural_scrolling(&self) -> bool {
         let out = crate::process::run(
