@@ -68,13 +68,29 @@ pub fn render(date: &str, ev: &Evidence, fixes: &[FixResult], exe: &str) -> Stri
         if let Some(e) = &f.error {
             let _ = writeln!(o, "- Error: {}", md(e));
         }
+        let who = if f.agent == "codex" {
+            "Codex"
+        } else {
+            "Hive's agent"
+        };
         let _ = writeln!(
             o,
-            "- Codex: {:.0} s, exit {}{}",
+            "- {who}: {:.0} s, exit {}{}",
             f.codex_seconds,
             f.codex_exit.map_or("none".into(), |c| c.to_string()),
             if f.codex_timed_out { ", timed out" } else { "" }
         );
+        if !f.red.is_empty() {
+            let how = if f.red == "assertion" {
+                "ran and failed"
+            } else {
+                "didn't compile (it needs code that wasn't there)"
+            };
+            let _ = writeln!(o, "- Step 1's test on the code as it was: {how}.");
+        }
+        for note in &f.notes {
+            let _ = writeln!(o, "- Note: {}", md(note));
+        }
         if !f.diffstat.is_empty() {
             let _ = writeln!(o, "- Diff:\n\n```\n{}\n```", f.diffstat);
         }
@@ -108,11 +124,18 @@ pub fn render(date: &str, ev: &Evidence, fixes: &[FixResult], exe: &str) -> Stri
         if !f.codex_said.is_empty() {
             let _ = writeln!(
                 o,
-                "- Codex said:\n\n> {}\n",
+                "- {who} said:\n\n> {}\n",
                 f.codex_said.trim().replace('\n', "\n> ")
             );
         }
-        if let Some(b) = &f.branch {
+        if let Some(d) = &f.deployed {
+            let _ = writeln!(o, "- Nightly: {}\n", md(d));
+        }
+        let landed = f
+            .deployed
+            .as_deref()
+            .is_some_and(|d| d.starts_with("landed") && !d.contains("taken back"));
+        if let Some(b) = f.branch.as_ref().filter(|_| !landed) {
             if f.outcome == "proposed" {
                 let _ = writeln!(o, "- Land it (cherry-picks onto main in ~/hive, never pushes):\n\n```\n{exe} land {b}\n```\n");
             } else {

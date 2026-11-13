@@ -1,7 +1,9 @@
 //! `hive-dream fix`: for the open clusters that lost the most time, a git worktree of the repo on
-//! a local `dream/<date>-<slug>` branch from origin/main, Codex (the user's ChatGPT account, never
-//! Claude) asked for a failing test and then a code fix, a commit in that worktree, and the gate.
-//! Nothing is merged, pushed or restarted; the shared working tree is never touched.
+//! a local `dream/<date>-<slug>` branch from origin/main, and two steps by Hive's own agent (a
+//! request through its socket, as `hive-ask` sends; HIVE_DREAM_AGENT=codex asks the Codex CLI
+//! instead; never Claude): step 1 a test, committed and run on the code as it is, which must
+//! fail; step 2 the fix. Then the gate on both, and one squashed commit on the branch. Landing is
+//! `land` (by hand) or the nightly run (`deploy`); the shared working tree is never touched here.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -14,6 +16,8 @@ use crate::register::{Register, Status};
 use crate::{collect, git, paths, proc, time};
 
 pub const CODEX_TIMEOUT_SECS: u64 = 60 * 60;
+/// How long each of the two requests to Hive may take.
+pub const HIVE_WAIT_MINUTES: u64 = 90;
 /// `fix` won't start with less free disk than this (a worktree and a target folder).
 pub const MIN_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 /// A cluster qualifies when seen this often and losing this many minutes.
@@ -58,6 +62,64 @@ pub struct FixResult {
     pub land: Option<String>,
     pub started: String,
     pub finished: String,
+    /// Who wrote the test and the fix: "hive" (Hive's own agent, through its request socket) or
+    /// "codex" (the Codex CLI, HIVE_DREAM_AGENT=codex).
+    #[serde(default)]
+    pub agent: String,
+    /// How step 1's test failed on the code as it was: "assertion" (it ran and failed) or
+    /// "compile" (it needs code that isn't there yet). Only an assertion lands by itself.
+    #[serde(default)]
+    pub red: String,
+    /// The test-only commit (step 1), before the two were squashed into one.
+    #[serde(default)]
+    pub test_commit: Option<String>,
+    /// What the nightly run did with a proposed fix: landed, built, pushed, restarted, or why not.
+    #[serde(default)]
+    pub deployed: Option<String>,
+    /// Anything worth a look: files changed in ~/hive itself while the agent worked, and so on.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Who writes the test and the fix: Hive's own agent unless HIVE_DREAM_AGENT=codex.
+pub fn agent() -> &'static str {
+    match std::env::var("HIVE_DREAM_AGENT").as_deref() {
+        Ok("codex") => "codex",
+        _ => "hive",
+    }
+}
+
+/// What hive-ask's exit status means for the step: Ok(true) the agent finished, Ok(false) it
+/// ended without finishing (its changes still go to the gate), Err why nothing can be used.
+pub fn hive_ask_outcome(code: Option<i32>, timed_out: bool) -> Result<bool, String> {
+    if timed_out {
+        return Err(format!(
+            "Hive was still working after {} minutes; nothing was committed",
+            HIVE_WAIT_MINUTES
+        ));
+    }
+    match code {
+        Some(0) => Ok(true),
+        Some(1) | Some(3) => Ok(false),
+        Some(2) => Err("the request was stopped (x)".into()),
+        Some(4) => Err(format!(
+            "Hive was still working after {HIVE_WAIT_MINUTES} minutes; nothing was committed"
+        )),
+        Some(5) => Err("Hive didn't take the request (is it running?)".into()),
+        other => Err(format!("hive-ask exited with {other:?}")),
+    }
+}
+
+/// How a test run that failed on the old code failed: "assertion" when a test ran and failed,
+/// "compile" when it didn't build, "" when it isn't clear.
+pub fn red_kind(output: &str) -> &'static str {
+    if output.contains("test result: FAILED") || output.contains("panicked at") {
+        "assertion"
+    } else if output.contains("could not compile") || output.contains("error[E") {
+        "compile"
+    } else {
+        ""
+    }
 }
 
 /// The clusters `fix` would take, best first.
@@ -149,11 +211,22 @@ fn code_hints(worktree: &Path, c: &Cluster) -> Vec<String> {
     files
 }
 
-pub fn prompt(c: &Cluster, worktree: &Path, terms: &[String]) -> String {
+/// Where to work, how to build, and what not to do, for whichever agent writes the change.
+pub struct Setup<'a> {
+    pub agent: &'a str,
+    pub worktree: &'a Path,
+    pub branch: &'a str,
+    pub dream: &'a Path,
+}
+
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// The failure and where its code is: the same for both steps.
+fn failure(c: &Cluster, worktree: &Path, terms: &[String]) -> String {
     let title = category(&c.category).map_or(c.category.as_str(), |k| k.title);
-    let mut p = String::new();
-    p.push_str("You are fixing one recurring failure in Hive, a macOS desktop agent (Rust workspace at desktop/app/crates/hive, plus desktop/app/crates/agent-core). Hive's nightly review found it in its own logs. Work only in this git worktree.\n\n");
-    p.push_str("## The failure\n\n");
+    let mut p = String::from("## The failure\n\n");
     p.push_str(&format!("- Signature: {}\n", redact(&c.signature, terms)));
     p.push_str(&format!("- What it is: {title}\n"));
     p.push_str(&format!(
@@ -164,6 +237,14 @@ pub fn prompt(c: &Cluster, worktree: &Path, terms: &[String]) -> String {
         p.push_str("- What Hive logged (shortened):\n");
         for e in &c.examples {
             p.push_str(&format!("  - {}\n", redact(e, terms)));
+        }
+    }
+    if !c.refs.is_empty() {
+        p.push_str(
+            "- Where it was seen (journals, recordings, Agent.log), to read more if you need to:\n",
+        );
+        for r in c.refs.iter().take(6) {
+            p.push_str(&format!("  - {}\n", redact(r, terms)));
         }
     }
     let hints: Vec<String> = category_hints(&c.category)
@@ -177,23 +258,85 @@ pub fn prompt(c: &Cluster, worktree: &Path, terms: &[String]) -> String {
             p.push_str(&format!("- {h}\n"));
         }
     }
-    p.push_str(
-        "\n## What to do\n\n\
-1. Find the code path that produces this failure. Read the code; the lines above are what it printed.\n\
-2. First write a test that fails because of the problem and reproduces it deterministically: a unit test in the crate's `#[cfg(test)] mod tests`, or a file in the crate's `tests/`. No network, no real screen, no real phone, no real accounts, no sleeping for real time if a clock can be passed in.\n\
-3. Then change the Rust code so the test passes: a deterministic fix in a tool, the harness, a timeout, a retry, state handling or error handling.\n\
-4. Run that crate's tests, for example `cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p hive-mac` (agent-core: `--manifest-path desktop/app/crates/agent-core/Cargo.toml`). Your sandbox blocks Unix sockets and local ports, so tests that use a crate's fake helper or fake relay fail inside it with \"Operation not permitted\": that is the sandbox, not the code. Run what you can; keep the test and the fix either way. hive-dream runs the crate's tests outside the sandbox when you finish and rejects the change if any fail.\n\
-5. Stop there. Do not commit, push or make branches; hive-dream commits and checks the change.\n\n\
-## Rules (a checker rejects the change otherwise)\n\n\
+    p
+}
+
+fn intro(s: &Setup, step: &str) -> String {
+    let wt = quote(s.worktree);
+    let env = crate::gate::test_env(s.dream, s.agent)
+        .into_iter()
+        .filter(|(k, _)| k != "HOME" && k != "PATH")
+        .map(|(k, v)| format!("{k}={}", quote(Path::new(&v))))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut p = String::new();
+    if s.agent == "hive" {
+        p.push_str("This is your nightly dream, from hive-dream (Hive's self-review), not a request the user typed: they are probably asleep. Your own logs show a failure that keeps coming back; you fix it in your own code, test first. ");
+        p.push_str("Do all of it in the shell: no screen, no phone, no messages, no speaking, nothing that needs the user.\n\n");
+    } else {
+        p.push_str("You are fixing one recurring failure in Hive, a macOS desktop agent. Hive's nightly review found it in its own logs.\n\n");
+    }
+    p.push_str(&format!("{step}\n\n"));
+    p.push_str(&format!(
+        "Work only in the git worktree {wt} (branch {}): a copy of the Hive repo (Rust workspace at desktop/app/crates/hive, plus desktop/app/crates/agent-core). `cd {wt}` first. Never edit ~/hive itself.\n\n",
+        s.branch
+    ));
+    p.push_str(&format!(
+        "Build and test with these set (a build folder hive-dream keeps; offline):\n\n    cd {wt} && export {env}\n    cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p <crate> <test name>\n\n(agent-core: `--manifest-path desktop/app/crates/agent-core/Cargo.toml`.) Your sandbox blocks Unix sockets and local ports, so tests that use a crate's fake helper or fake relay fail with \"Operation not permitted\": that is the sandbox, not the code. hive-dream runs the tests outside the sandbox afterwards.\n\n"
+    ));
+    p
+}
+
+const RULES: &str = "## Rules (a checker rejects the change otherwise)\n\n\
 - Editing prompt text, tool descriptions, strings, comments or documentation is not a fix and is rejected. Hive's prompts (hive-codex/src/prompts.rs) are off limits. The fix changes behaviour in code, and comes with a test.\n\
 - Do not touch: credentials or authentication code (credentials.rs, auth_mcp.rs, authenticate tools), the phone passcode, the one-way quote check (check_step), the knowledge base's secret filter, settings defaults (hive-common/src/settings.rs), install.sh, the root helper (desktop/app/src/*.cpp, *.hpp), launchd files, the VM poster's approval flow, hive-dream itself, or any Cargo.toml or Cargo.lock (no new dependencies).\n\
 - Do not remove tests or mark them #[ignore].\n\
 - Change only files under desktop/app/crates/.\n\
 - No personal data (names, emails, phone numbers, accounts) in code, tests or comments: use made-up values.\n\
 - Cargo is offline: don't fetch anything. Don't run Hive, don't use the screen, don't send messages.\n\
-- The evidence above is what the logs hold; it rarely proves a single cause. A small, safe, tested change to the code path that produced it (a case it mishandles, a wait that can end sooner, a state it forgets) is worth making; say what you assumed. Change nothing only if every change you can see would be unsafe or untestable, and say why.\n\n\
-In your last message: the cause, the fix, the test's name and the test result.\n",
+- Do not commit, push or make branches: hive-dream commits and checks each step.\n";
+
+/// Step 1: a test that fails on the code as it is, and nothing else.
+pub fn test_prompt(c: &Cluster, s: &Setup, terms: &[String]) -> String {
+    let mut p = intro(s, "Step 1 of 2: write a failing test that shows the problem. Only the test; the fix is step 2.");
+    p.push_str(&failure(c, s.worktree, terms));
+    p.push_str(
+        "\n## What to do now\n\n\
+1. Find the code path that produces this failure. Read the code; the lines above are what it printed.\n\
+2. Write a test that fails because of the problem and reproduces it deterministically: a unit test in the crate's `#[cfg(test)] mod tests`, or a file in the crate's `tests/`. No network, no real screen, no real phone, no real accounts, no sleeping for real time if a clock can be passed in.\n\
+3. The test calls code that exists now and fails on an assertion. A test that only fails because it calls a function that doesn't exist yet doesn't show the problem: it is kept for a person to judge and never lands by itself.\n\
+4. Run it and see it fail. Change no code outside tests in this step: hive-dream commits the test, runs it on the code as it is, and rejects it if it passes.\n\n",
     );
+    p.push_str(RULES);
+    p.push_str("\nThe evidence rarely proves a single cause: aim the test at the case the code mishandles, the wait that could end sooner or the state it forgets, and say what you assumed. If no test can be written safely, change nothing and say why.\n\nIn your last message: the test's name, what it shows and how it failed.\n");
+    p
+}
+
+/// Step 2: the fix, now that the test is committed and seen failing.
+pub fn fix_prompt(
+    c: &Cluster,
+    s: &Setup,
+    terms: &[String],
+    test_files: &[String],
+    red: &str,
+) -> String {
+    let mut p = intro(
+        s,
+        "Step 2 of 2: fix the code so the failing test from step 1 passes.",
+    );
+    p.push_str(&failure(c, s.worktree, terms));
+    p.push_str(&format!(
+        "\n## The test from step 1\n\nCommitted in {} and seen failing on the code as it is:\n\n```\n{}\n```\n",
+        test_files.join(", "),
+        cut(&redact(red, terms), 1500)
+    ));
+    p.push_str(
+        "\n## What to do now\n\n\
+1. Change the Rust code so the test passes: a deterministic fix in a tool, the harness, a timeout, a retry, state handling or error handling. Keep the test as it is (you may add more tests).\n\
+2. Run that crate's tests. hive-dream then runs the crate's tests and builds the whole workspace outside the sandbox, and rejects the change if anything fails.\n\n",
+    );
+    p.push_str(RULES);
+    p.push_str("\nIn your last message: the cause, the fix, and the test result.\n");
     p
 }
 
@@ -230,7 +373,7 @@ pub fn model() -> Option<String> {
 fn commit_message(c: &Cluster) -> String {
     let title = category(&c.category).map_or(c.category.as_str(), |k| k.title);
     format!(
-        "Dream fix: {}\n\n{}. Seen {} times, about {:.0} minutes lost ({} to {}).\nMade by hive-dream with Codex in a private worktree, checked by its gate; lands only when someone runs hive-dream land.\n\nDream-Cluster: {}\n",
+        "Dream fix: {}\n\n{}. Seen {} times, about {:.0} minutes lost ({} to {}).\nHive's nightly dream: its agent wrote a test that failed on the code as it was, then this fix, in a\nprivate worktree; hive-dream's gate ran the crate's tests and built the workspace.\n\nDream-Cluster: {}\n",
         cut(title, 60),
         cut(&c.signature, 200),
         c.count,
@@ -259,7 +402,7 @@ pub fn results(night: &Path) -> Vec<FixResult> {
     out
 }
 
-fn save_result(night: &Path, r: &FixResult) -> Result<(), String> {
+pub fn save_result(night: &Path, r: &FixResult) -> Result<(), String> {
     let text = serde_json::to_string_pretty(r).map_err(|e| e.to_string())?;
     paths::write_atomic(&result_path(night, r), &text)
 }
@@ -364,6 +507,181 @@ fn attempt(dream: &Path, night: &Path, date: &str, c: &Cluster) -> FixResult {
     r
 }
 
+fn rejected(r: &mut FixResult, why: String) {
+    r.outcome = "rejected".into();
+    r.verdict = Some(Verdict {
+        passed: false,
+        reasons: vec![why],
+        warnings: Vec::new(),
+        files: Vec::new(),
+        test_lines: 0,
+        code_lines: 0,
+        packages: Vec::new(),
+        tests: Vec::new(),
+    });
+}
+
+/// Commits what changed in the worktree, by name, as hive-dream.
+fn commit_all(worktree: &Path, message: &str, msg_file: &Path) -> Result<Option<String>, String> {
+    let files = git::dirty(worktree)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut add: Vec<&str> = vec!["add", "--"];
+    add.extend(files.iter().map(String::as_str));
+    git::git(worktree, &add)?;
+    commit(worktree, message, msg_file)?;
+    git::rev(worktree, "HEAD").map(Some)
+}
+
+fn commit(worktree: &Path, message: &str, msg_file: &Path) -> Result<(), String> {
+    paths::write_atomic(msg_file, message)?;
+    git::git(
+        worktree,
+        &[
+            "-c",
+            "user.name=hive-dream",
+            "-c",
+            "user.email=hive-dream@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "-F",
+            &msg_file.to_string_lossy(),
+        ],
+    )
+    .map(|_| ())
+}
+
+/// What the agent said at the end of a step.
+struct Said {
+    finished: bool,
+    text: String,
+}
+
+/// One step: the prompt to Hive (through hive-ask, which waits for the task to end) or to the
+/// Codex CLI. Err when nothing it did can be used.
+fn ask(
+    s: &Setup,
+    name: &str,
+    step: &str,
+    text: &str,
+    run_dir: &Path,
+    r: &mut FixResult,
+) -> Result<Said, String> {
+    paths::write_atomic(&run_dir.join(format!("prompt-{step}.md")), text)?;
+    let started = std::time::Instant::now();
+    let said = if s.agent == "hive" {
+        let hive_ask = paths::hive_ask();
+        if !hive_ask.is_file() {
+            return Err(format!("no hive-ask at {}", hive_ask.display()));
+        }
+        let argv: Vec<String> = vec![
+            hive_ask.to_string_lossy().into_owned(),
+            "--wait".into(),
+            HIVE_WAIT_MINUTES.to_string(),
+            "--source-id".into(),
+            format!("hive-dream-{name}-{step}"),
+            "-".into(),
+        ];
+        let ran = proc::run(
+            &argv,
+            s.worktree,
+            &[],
+            Some(text),
+            &run_dir.join(format!("hive-{step}.log")),
+            Duration::from_secs(HIVE_WAIT_MINUTES * 60 + 300),
+        )?;
+        r.codex_exit = ran.code;
+        r.codex_timed_out = ran.timed_out;
+        let finished = hive_ask_outcome(ran.code, ran.timed_out)?;
+        let tail: String = {
+            let lines: Vec<&str> = ran.output.lines().collect();
+            lines[lines.len().saturating_sub(30)..].join("\n")
+        };
+        Said {
+            finished,
+            text: tail,
+        }
+    } else {
+        let codex = paths::codex();
+        if !codex.is_file() {
+            return Err(format!("no Codex CLI at {}", codex.display()));
+        }
+        let env = gate::test_env(s.dream, "codex");
+        let get = |key: &str| {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        let (state, cargo_home) = (get("AGENT_STATE_DIR"), get("CARGO_HOME"));
+        // Codex keeps the real HOME (its sign-in); everything else as the tests have it.
+        let codex_env: Vec<(String, String)> =
+            env.iter().filter(|(k, _)| k != "HOME").cloned().collect();
+        let last = run_dir.join(format!("last-message-{step}.txt"));
+        let mut argv: Vec<String> = vec![
+            codex.to_string_lossy().into_owned(),
+            "exec".into(),
+            "--ignore-user-config".into(),
+            "--ignore-rules".into(),
+            "-s".into(),
+            "workspace-write".into(),
+            "-C".into(),
+            s.worktree.to_string_lossy().into_owned(),
+            "--add-dir".into(),
+            s.dream.join("target").to_string_lossy().into_owned(),
+            "--add-dir".into(),
+            cargo_home,
+            "--add-dir".into(),
+            state,
+        ];
+        if let Some(m) = model() {
+            argv.push("-m".into());
+            argv.push(m);
+        }
+        argv.extend([
+            "-c".into(),
+            "model_reasoning_effort=\"high\"".into(),
+            "--json".into(),
+            "-o".into(),
+            last.to_string_lossy().into_owned(),
+            "--color".into(),
+            "never".into(),
+            "-".into(),
+        ]);
+        let ran = proc::run(
+            &argv,
+            s.worktree,
+            &codex_env,
+            Some(text),
+            &run_dir.join(format!("codex-{step}.jsonl")),
+            Duration::from_secs(CODEX_TIMEOUT_SECS),
+        )?;
+        r.codex_exit = ran.code;
+        r.codex_timed_out = ran.timed_out;
+        Said {
+            finished: ran.ok,
+            text: std::fs::read_to_string(&last).unwrap_or_default(),
+        }
+    };
+    r.codex_seconds += (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    Ok(said)
+}
+
+/// Files that are dirty in ~/hive now and weren't before the agent worked.
+fn new_in_main(repo: &Path, before: &[String]) -> Vec<String> {
+    git::dirty(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| !before.contains(f))
+        .collect()
+}
+
 fn try_attempt(
     dream: &Path,
     night: &Path,
@@ -372,10 +690,8 @@ fn try_attempt(
     r: &mut FixResult,
 ) -> Result<(), String> {
     let repo = paths::repo();
-    let codex = paths::codex();
-    if !codex.is_file() {
-        return Err(format!("no Codex CLI at {}", codex.display()));
-    }
+    let agent = agent();
+    r.agent = agent.into();
     if let Some(free) = paths::free_bytes(dream) {
         if free < MIN_FREE_BYTES {
             return Err(format!(
@@ -412,129 +728,107 @@ fn try_attempt(
     r.branch = Some(branch.clone());
     r.worktree = Some(wt.clone());
     r.base = Some(base.clone());
-
-    // Codex, in the worktree, with the workspace-write sandbox.
     let terms = paths::load_private_terms(dream).unwrap_or_default();
-    let text = prompt(c, &worktree, &terms);
-    paths::write_atomic(&run_dir.join("prompt.md"), &text)?;
-    let env = gate::test_env(dream, "codex");
-    let state = env
-        .iter()
-        .find(|(k, _)| k == "AGENT_STATE_DIR")
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
-    let cargo_home = env
-        .iter()
-        .find(|(k, _)| k == "CARGO_HOME")
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
-    // Codex keeps the real HOME (its sign-in); everything else as the tests have it.
-    let codex_env: Vec<(String, String)> = env.into_iter().filter(|(k, _)| k != "HOME").collect();
-    let last = run_dir.join("last-message.txt");
-    let mut argv: Vec<String> = vec![
-        codex.to_string_lossy().into_owned(),
-        "exec".into(),
-        "--ignore-user-config".into(),
-        "--ignore-rules".into(),
-        "-s".into(),
-        "workspace-write".into(),
-        "-C".into(),
-        wt.clone(),
-        "--add-dir".into(),
-        dream.join("target").to_string_lossy().into_owned(),
-        "--add-dir".into(),
-        cargo_home,
-        "--add-dir".into(),
-        state,
-    ];
-    if let Some(m) = model() {
-        argv.push("-m".into());
-        argv.push(m);
-    }
-    argv.extend([
-        "-c".into(),
-        "model_reasoning_effort=\"high\"".into(),
-        "--json".into(),
-        "-o".into(),
-        last.to_string_lossy().into_owned(),
-        "--color".into(),
-        "never".into(),
-        "-".into(),
-    ]);
-    let started = std::time::Instant::now();
-    let ran = proc::run(
-        &argv,
-        &worktree,
-        &codex_env,
-        Some(&text),
-        &run_dir.join("codex.jsonl"),
-        Duration::from_secs(CODEX_TIMEOUT_SECS),
-    )?;
-    r.codex_seconds = (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
-    r.codex_exit = ran.code;
-    r.codex_timed_out = ran.timed_out;
-    r.codex_said = cut(
-        &redact(&std::fs::read_to_string(&last).unwrap_or_default(), &terms),
-        2000,
-    );
+    let private = paths::load_private_terms(dream);
+    let setup = Setup {
+        agent,
+        worktree: &worktree,
+        branch: &branch,
+        dream,
+    };
+    let main_before = git::dirty(&repo).unwrap_or_default();
 
-    // Commit whatever Codex changed, by name, in the private worktree.
-    let files = git::dirty(&worktree)?;
-    if files.is_empty() {
-        r.outcome = "rejected".into();
-        r.verdict = Some(Verdict {
-            passed: false,
-            reasons: vec![if ran.ok {
-                "Codex changed nothing".into()
+    // Step 1: the test, alone.
+    let said = ask(
+        &setup,
+        &name,
+        "test",
+        &test_prompt(c, &setup, &terms),
+        &run_dir,
+        r,
+    )?;
+    r.codex_said = cut(&redact(&said.text, &terms), 2000);
+    let changed = new_in_main(&repo, &main_before);
+    if !changed.is_empty() {
+        r.notes.push(format!(
+            "changed in ~/hive itself while the agent wrote the test (hive-dream left them alone): {}",
+            changed.join(", ")
+        ));
+    }
+    let message = commit_message(c);
+    let Some(test_commit) = commit_all(
+        &worktree,
+        &format!("Dream test: {}\n", cut(&c.signature, 120)),
+        &run_dir.join("test-commit-message.txt"),
+    )?
+    else {
+        rejected(
+            r,
+            if said.finished {
+                "step 1 wrote no test".into()
             } else {
-                format!(
-                    "Codex changed nothing (exit {:?}{})",
-                    ran.code,
-                    if ran.timed_out { ", timed out" } else { "" }
-                )
-            }],
-            warnings: Vec::new(),
-            files: Vec::new(),
-            test_lines: 0,
-            code_lines: 0,
-            packages: Vec::new(),
-            tests: Vec::new(),
-        });
+                format!("step 1 wrote no test (exit {:?})", r.codex_exit)
+            },
+        );
+        return Ok(());
+    };
+    r.test_commit = Some(test_commit.clone());
+    let changes = git::changes(&worktree, &base, &test_commit)?;
+    let s = gate::check_static(&changes, &message, private.as_deref());
+    if s.test_lines == 0 {
+        rejected(r, "step 1 added no test code".into());
         return Ok(());
     }
-    let mut add: Vec<&str> = vec!["add", "--"];
-    add.extend(files.iter().map(String::as_str));
-    git::git(&worktree, &add)?;
-    let message = commit_message(c);
-    let msg_file = run_dir.join("commit-message.txt");
-    paths::write_atomic(&msg_file, &message)?;
-    git::git(
-        &worktree,
-        &[
-            "-c",
-            "user.name=hive-dream",
-            "-c",
-            "user.email=hive-dream@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "--quiet",
-            "--no-verify",
-            "-F",
-            &msg_file.to_string_lossy(),
-        ],
-    )?;
-    let head = git::rev(&worktree, "HEAD")?;
-    r.commit = Some(head.clone());
-    r.diffstat = git::git(&worktree, &["diff", "--stat", &base, &head])
-        .unwrap_or_default()
-        .trim_end()
-        .to_string();
+    if s.code_lines > 0 {
+        rejected(
+            r,
+            format!("step 1 changed {} code lines outside tests", s.code_lines),
+        );
+        return Ok(());
+    }
+    let packages = gate::touched_packages(&worktree, &s.files);
+    if packages.is_empty() {
+        rejected(r, "step 1's test is in no Rust crate".into());
+        return Ok(());
+    }
+    let red_log = run_dir.join("red.log");
+    let red_runs = gate::run_tests(&worktree, dream, &packages, &red_log);
+    let Some(red) = red_runs.iter().find(|t| !t.ok) else {
+        rejected(
+            r,
+            "step 1's test passes on the code as it is, so it doesn't show the problem".into(),
+        );
+        return Ok(());
+    };
+    r.red = red_kind(&std::fs::read_to_string(&red_log).unwrap_or_default()).into();
+    if r.red.is_empty() {
+        rejected(
+            r,
+            format!(
+                "step 1's test run failed, but not on a test or a build: {}",
+                red.summary
+            ),
+        );
+        return Ok(());
+    }
 
-    // The gate.
-    let private = paths::load_private_terms(dream);
+    // Step 2: the fix.
+    let prompt = fix_prompt(c, &setup, &terms, &s.files, &red.summary);
+    let said = ask(&setup, &name, "fix", &prompt, &run_dir, r)?;
+    r.codex_said = cut(&redact(&said.text, &terms), 2000);
+    let changed = new_in_main(&repo, &main_before);
+    if !changed.is_empty() {
+        r.notes.push(format!(
+            "changed in ~/hive itself while the agent fixed it (hive-dream left them alone): {}",
+            changed.join(", ")
+        ));
+    }
+    let Some(head) = commit_all(&worktree, &message, &run_dir.join("commit-message.txt"))? else {
+        rejected(r, "step 2 changed nothing".into());
+        return Ok(());
+    };
+
+    // The gate, on the test and the fix together.
     let verdict = gate::judge(
         &worktree,
         dream,
@@ -548,6 +842,19 @@ fn try_attempt(
         &run_dir.join("gate.json"),
         &serde_json::to_string_pretty(&verdict).map_err(|e| e.to_string())?,
     )?;
+    let head = if verdict.passed {
+        // One commit for the test and its fix, so main never has a red commit.
+        git::git(&worktree, &["reset", "--soft", "--quiet", &base])?;
+        commit(&worktree, &message, &run_dir.join("commit-message.txt"))?;
+        git::rev(&worktree, "HEAD")?
+    } else {
+        head
+    };
+    r.commit = Some(head.clone());
+    r.diffstat = git::git(&worktree, &["diff", "--stat", &base, &head])
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
     r.outcome = if verdict.passed {
         "proposed"
     } else {

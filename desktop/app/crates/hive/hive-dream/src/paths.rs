@@ -50,6 +50,11 @@ pub fn codex() -> PathBuf {
     })
 }
 
+/// Hive's request command (`build/hive-ask`): `HIVE_DREAM_HIVE_ASK`, else the repo's build folder.
+pub fn hive_ask() -> PathBuf {
+    env_path("HIVE_DREAM_HIVE_ASK").unwrap_or_else(|| repo().join("desktop/app/build/hive-ask"))
+}
+
 pub fn register(dream: &Path) -> PathBuf {
     dream.join("register.json")
 }

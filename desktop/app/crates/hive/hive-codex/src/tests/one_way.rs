@@ -111,15 +111,20 @@ fn a_shell_command_lets_go_of_the_mouse() {
     assert!(events.has("doing", "Running a local command"));
 }
 
+/// The sandbox's config: online, and hive-dream's folder writable (its worktrees and build).
+fn online() -> serde_json::Value {
+    json!({"sandbox_workspace_write": {
+        "network_access": true,
+        "writable_roots": [crate::agent::dream_dir().display().to_string()],
+    }})
+}
+
 #[test]
 fn codex_s_shell_can_reach_the_internet() {
     let h = Harness::new();
     let params = h.agent.thread_params().unwrap();
     assert_eq!(params["sandbox"], "workspace-write");
-    assert_eq!(
-        params["config"],
-        json!({"sandbox_workspace_write": {"network_access": true}})
-    );
+    assert_eq!(params["config"], online());
     let spaceo = Harness::with(|env, _| env.set("AGENT_SPACEO_COMMAND", "true"));
     let params = spaceo.agent.thread_params().unwrap();
     assert!(params.get("config").is_none());
@@ -138,9 +143,6 @@ fn the_resumed_conversation_can_reach_the_internet_too() {
     let calls = lock(&server.calls);
     assert_eq!(calls[0].0, "thread/resume");
     assert_eq!(calls[0].1["threadId"], "thread-123");
-    assert_eq!(
-        calls[0].1["config"],
-        json!({"sandbox_workspace_write": {"network_access": true}})
-    );
+    assert_eq!(calls[0].1["config"], online());
     assert_eq!(calls[0].1["sandbox"], "workspace-write");
 }
