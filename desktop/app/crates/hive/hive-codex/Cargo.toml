@@ -27,3 +27,8 @@ tempfile.workspace = true
 [[example]]
 name = "fake_codex"
 path = "examples/fake_codex.rs"
+
+# A stand-in for the `claude` CLI in stream-json mode, for the Claude backend's tests.
+[[example]]
+name = "fake_claude"
+path = "examples/fake_claude.rs"

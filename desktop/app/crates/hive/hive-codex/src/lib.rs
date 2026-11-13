@@ -3,6 +3,8 @@
 //!
 //! - [`Agent`]: the agent's Codex: how its app-server is started, the thread parameters, the one
 //!   server every task shares and the current conversation. The app makes one, with its [`Hooks`].
+//! - [`ClaudeSession`]: the conversation on Claude instead (`AGENT_BACKEND=claude`, claude_agent.py):
+//!   turns on one `claude` CLI process, driven like the Claude Agent SDK.
 //! - [`Session`]: a conversation: one durable Codex thread (`codex-thread-id`) with a turn for
 //!   each request.
 //! - [`CodexTask`]: one request, its goal, the watchdog that keeps an active goal going, and
@@ -14,6 +16,7 @@
 
 mod agent;
 mod app_server;
+mod claude;
 mod describe;
 mod hooks;
 mod look;
@@ -32,6 +35,7 @@ pub use agent::{
     focus, print_event, Agent, Config, BUNDLED_CODEX, COMPACT_AT, EFFORT, MODEL, USAGE,
 };
 pub use app_server::{same_server, AppServer, OnMessage, OnToolCall, Server, DEFAULT_TIMEOUT};
+pub use claude::{ClaudeSession, MODEL as CLAUDE_MODEL};
 pub use describe::{describe_call, describe_timing, doing, sentence_ends, tool_error, Timing};
 pub use hooks::{
     ContextRecorder, DeviceTools, FileProviderWait, Hooks, Knowledge, Memory, NoContext,

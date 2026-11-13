@@ -48,6 +48,10 @@ pub trait TaskSession: Send + Sync {
     fn tasks(&self) -> Vec<Arc<CodexTask>> {
         Vec::new()
     }
+    /// The Claude conversation, when this is one (`AGENT_BACKEND=claude`).
+    fn claude(&self) -> Option<Arc<crate::claude::ClaudeSession>> {
+        None
+    }
 }
 
 /// Unsubscribes from a thread without deleting its persisted history.
