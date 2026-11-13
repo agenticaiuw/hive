@@ -1,8 +1,9 @@
 """The voice models that stay in Python (python/listen.py, mic.py, voiceprint.py, speech.py; the
 voice sidecar, python/sidecar_voice.py, serves them to the Rust agent): how an utterance is put
-together once it can tell voices apart, its own voice (Kokoro) left out, only you heard with your
-voice enrolled (Samantha plays you, Daniel someone nearby), and the echo canceller taking what the
-Mac plays out of what the microphone hears, with Parakeet really transcribing. Nothing is played
+together once it can tell voices apart, when you've finished (a short pause doesn't end it, trailing
+off waits longer, noise and silence are nothing), its own voice (Kokoro) left out, only you heard
+with your voice enrolled (Samantha plays you, Daniel someone nearby), and the echo canceller taking
+what the Mac plays out of what the microphone hears, with Parakeet really transcribing. Nothing is played
 aloud: `say` writes files. The voice agent itself is tested in Rust (crates/hive/hive-app,
 crates/hive/hive-sidecars).
 
@@ -13,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import wave
@@ -44,6 +46,15 @@ def speech(text: str, voice: str = "Samantha") -> np.ndarray:
 
 def silence(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * listen.RATE), np.float32)
+
+
+def noise(seconds: float) -> np.ndarray:
+    """A fan and a couple of keyboard clicks: not speech."""
+    x = np.random.default_rng(0).standard_normal(int(seconds * listen.RATE)).astype(np.float32) * 0.003
+    for at in (0.4, 1.1):
+        i = int(at * listen.RATE)
+        x[i:i + 80] += np.hanning(80).astype(np.float32) * 0.3
+    return x
 
 
 def setup_ears():
@@ -104,6 +115,47 @@ def who(utterance: listen.Utterance) -> tuple[float, float]:
     values = [h.window[0] for h in utterance.kept if h.speech]
     return (sum(np.isclose(values, 0.1)) * listen.WINDOW / listen.RATE,
             sum(np.isclose(values, 0.2)) * listen.WINDOW / listen.RATE)
+
+
+class EarsTest(unittest.TestCase):
+    """When you've finished talking, as listen.Ears decides it, with Parakeet really transcribing
+    (tests/test_voice.py's VoiceAgentTest cases; the final transcript stands in for the request
+    the voice agent sent to Codex)."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_ears()
+
+    def setUp(self):
+        self.heard: list[tuple[str, bool]] = []
+        EARS.on_text = lambda text, final: self.heard.append((text, final))
+        EARS.on_speech = lambda: None
+        EARS.on_ignored = lambda seconds, similarity: None
+        EARS.deaf = lambda: False
+        EARS.voiceprint = None
+        EARS.listen(True)  # as if you'd tapped fn
+        self.addCleanup(EARS.listen, False)
+
+    def finals(self) -> list[str]:
+        return [text for text, final in self.heard if final]
+
+    def test_a_short_pause_doesnt_cut_you_off(self):
+        listen_to(np.concatenate([speech("Open Safari."), silence(0.7), speech("Then search for the weather.")]))
+        wait_for(lambda: self.finals(), "the transcript")
+        self.assertIn("Open Safari", self.finals()[0])
+        self.assertIn("search for the weather", self.finals()[0])
+
+    def test_trailing_off_on_and_waits_longer(self):
+        listen_to(np.concatenate([speech("Open the browser and"), silence(1.8), speech("search for the weather.")]))
+        wait_for(lambda: self.finals(), "the transcript")
+        time.sleep(0.5)
+        self.assertEqual(len(self.finals()), 1, self.finals())
+        self.assertIn("search for the weather", self.finals()[0])
+
+    def test_noise_and_silence_do_nothing(self):
+        listen_to(np.concatenate([silence(1), noise(2)]))
+        time.sleep(1)
+        self.assertEqual(self.heard, [])
 
 
 class UtteranceTest(unittest.TestCase):
