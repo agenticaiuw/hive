@@ -186,8 +186,11 @@ static const double kTapSeconds = 0.7;
 
 /// The picture's window is on every Space and stays put through Mission Control. Never
 /// full-screen auxiliary: with that, Mission Control's opening and closing animation shrinks the
-/// picture like an ordinary window, and your own screen's windows flash through for a moment
-/// (recorded 2026-11-13; ignore-cycle is left out with it).
+/// picture like an ordinary window (recorded 2026-11-13; ignore-cycle is left out with it).
+/// Even so, Mission Control's first and last fifth of a second shrinks the whole Space, picture
+/// included, into its Spaces bar, at any window level (recorded at 60 fps, up to the shielding
+/// level). So while you're switched in, the apps whose windows are only on your screen are hidden
+/// (`hideYourWindows`), and those moments show your wallpaper, not your windows.
 static const NSWindowCollectionBehavior kPictureSpaces =
     NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
 
@@ -247,6 +250,29 @@ static pid_t frontOwnerOn(CGRect area) {
     return owner;
 }
 
+/// The apps that own an ordinary window on `area` (global, top-left coordinates).
+static NSMutableSet<NSNumber *> *ownersOn(CGRect area) {
+    NSMutableSet<NSNumber *> *owners = [NSMutableSet set];
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    for (NSDictionary *window in (__bridge NSArray *)list) {
+        if ([window[(id)kCGWindowLayer] intValue] != 0) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(id)kCGWindowBounds], &bounds)) continue;
+        if (bounds.size.width < 50 || bounds.size.height < 50 || !CGRectIntersectsRect(bounds, area)) continue;
+        [owners addObject:window[(id)kCGWindowOwnerPID]];
+    }
+    if (list) CFRelease(list);
+    return owners;
+}
+
+/// Hides or shows an app through Accessibility (an app's own `hide` refuses a background helper).
+static BOOL setAppHidden(pid_t pid, BOOL hidden) {
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    AXError error = AXUIElementSetAttributeValue(app, kAXHiddenAttribute, hidden ? kCFBooleanTrue : kCFBooleanFalse);
+    CFRelease(app);
+    return error == kAXErrorSuccess;
+}
+
 /// Brings an app forward (its keyboard focus with it) through Accessibility.
 static void bringForward(pid_t pid) {
     if (pid <= 0 || pid == getpid()) return;
@@ -290,6 +316,7 @@ static void beepUnlessMuted(void) {
     CGPoint _lastThere;       // your cursor on the virtual monitor when you last switched out
     BOOL _hasLastThere;
     pid_t _previous;          // the app you were using
+    NSMutableArray<NSNumber *> *_hidden;  // your apps (pids) hidden while you're switched in
     BOOL _pictured;           // the first frame of this switch-in arrived
     id _monitor;
 }
@@ -363,6 +390,7 @@ static void beepUnlessMuted(void) {
     _showing = YES;
     _pictured = NO;
     [self showOn:screen];
+    [self hideYourWindows:screen];
     [self capture];
     moveCursor(_hasLastThere && CGRectContainsPoint(_area, _lastThere) ? _lastThere
                                                                          : CGPointMake(CGRectGetMidX(_area), CGRectGetMidY(_area)));
@@ -377,6 +405,7 @@ static void beepUnlessMuted(void) {
     SCStream *stream = _stream;
     _stream = nil;
     [stream stopCaptureWithCompletionHandler:^(NSError *error) { (void)error; }];
+    [self unhideYourWindows];  // under the picture still, so they're simply there when it goes
     [_window orderOut:nil];
     _picture.contents = nil;
     CGPoint here = cursorNow();
@@ -384,6 +413,29 @@ static void beepUnlessMuted(void) {
     moveCursor(_returnTo);
     bringForward(_previous);
     fprintf(stderr, "switch: back on your screen\n");
+}
+
+/// Hides, under the picture, every app whose windows are on your screen and not on the virtual
+/// monitor, so Mission Control's opening and closing moments can't show them (kPictureSpaces).
+/// An app with a window on the virtual monitor stays: hiding it would hide that window too.
+- (void)hideYourWindows:(NSScreen *)screen {
+    if (!_hidden) _hidden = [NSMutableArray array];
+    CGRect yours = CGDisplayBounds([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue]);
+    NSMutableSet<NSNumber *> *only = ownersOn(yours);
+    [only minusSet:ownersOn(_area)];
+    [only removeObject:@(getpid())];
+    for (NSNumber *pid in only) {
+        NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid.intValue];
+        if (!app || app.hidden || app.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+        if (setAppHidden(pid.intValue, YES)) [_hidden addObject:pid];
+    }
+    if (_hidden.count) fprintf(stderr, "switch: hid %lu app(s) on your screen\n", (unsigned long)_hidden.count);
+}
+
+/// Shows again what `hideYourWindows` hid (an app you opened meanwhile already is).
+- (void)unhideYourWindows {
+    for (NSNumber *pid in _hidden) setAppHidden(pid.intValue, NO);
+    [_hidden removeAllObjects];
 }
 
 - (void)showOn:(NSScreen *)screen {
