@@ -7,7 +7,7 @@ description = "The Codex app-server driver: sessions, tasks, goals, recovery"
 
 [dependencies]
 hive-common.workspace = true
-personal-agent-core.workspace = true
+hive-core.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 libc.workspace = true

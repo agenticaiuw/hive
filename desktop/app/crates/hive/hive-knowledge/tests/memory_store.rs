@@ -1,11 +1,11 @@
 //! The memory store that memory_search reads (tests/test_rust_memory_store.py), called in-process
-//! through personal-agent-core as hive-app will: one shared private database, records deduplicated
+//! through hive-core as hive-app will: one shared private database, records deduplicated
 //! and trimmed, nothing created by a list, and a bad database never replaced.
 
 mod common;
 
 use hive_knowledge::memory_search;
-use personal_agent_core::memory::execute;
+use hive_core::memory::execute;
 use serde_json::{json, Value};
 
 fn rows(answer: &Value) -> Vec<Value> {

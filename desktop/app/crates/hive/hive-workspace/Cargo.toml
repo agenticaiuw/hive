@@ -7,7 +7,7 @@ description = "SpaceO workspace bridge, workspace fence/recovery/update, the loc
 
 [dependencies]
 hive-common.workspace = true
-personal-agent-core.workspace = true
+hive-core.workspace = true
 serde_json.workspace = true
 serde = "1"
 base64.workspace = true

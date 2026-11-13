@@ -167,7 +167,7 @@ fn category_hints(category: &str) -> &'static [&'static str] {
             "desktop/app/crates/hive/hive-mac/src/vhid.rs (the virtual mouse and keyboard)",
         ],
         "phone" => &[
-            "desktop/app/crates/agent-core/src/phone_transport.rs",
+            "desktop/app/crates/hive/hive-core/src/phone_transport.rs",
             "desktop/app/crates/hive/hive-phone/src/phone.rs",
             "desktop/app/crates/hive/hive-phone/src/tools.rs",
         ],
@@ -288,12 +288,11 @@ fn intro(s: &Setup, step: &str) -> String {
     }
     p.push_str(&format!("{step}\n\n"));
     p.push_str(&format!(
-        "Work only in the git worktree {wt} (branch {}): a copy of the Hive repo (Rust workspace at desktop/app/crates/hive, plus desktop/app/crates/agent-core). `cd {wt}` first. Never edit ~/hive itself.\n\n",
+        "Work only in the git worktree {wt} (branch {}): a copy of the Hive repo (Rust workspace at desktop/app/crates/hive). `cd {wt}` first. Never edit ~/hive itself.\n\n",
         s.branch
     ));
     p.push_str(&format!(
-        "Build and test with these set (a build folder hive-dream keeps; offline):\n\n    cd {wt} && export {env}\n    cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p <crate> <test name>\n\n(agent-core: `--manifest-path desktop/app/crates/agent-core/Cargo.toml --target-dir {}`, its own build folder.) {}\n\n",
-        crate::gate::core_target(s.dream).display(),
+        "Build and test with these set (a build folder hive-dream keeps; offline):\n\n    cd {wt} && export {env}\n    cargo test --offline --manifest-path desktop/app/crates/hive/Cargo.toml -p <crate> <test name>\n\n{}\n\n",
         if s.agent == "vm" {
             "Your sandbox has no network. A test that fails with \"Operation not permitted\" or \"Permission denied\" may be the sandbox, not the code: hive-dream runs the tests outside it afterwards."
         } else {

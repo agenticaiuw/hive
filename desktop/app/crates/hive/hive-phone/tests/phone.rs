@@ -769,7 +769,7 @@ fn sensitive_busy_and_failure_do_not_retry_or_echo() {
 }
 
 // ---------------------------------------------------------------- tests/test_tools.py's PhoneTest:
-// the phone tools through agent-core's real phone transport, with curl answering like the relay
+// the phone tools through hive-core's real phone transport, with curl answering like the relay
 
 const TOKEN: &str = "synthetic-token-1234";
 

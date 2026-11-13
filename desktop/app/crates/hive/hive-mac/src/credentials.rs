@@ -567,7 +567,7 @@ pub fn authenticate_phone_with(
 }
 
 /// The phone through its relay (python/phone.py's Phone, the part credentials needs), using
-/// agent-core's phone transport in-process.
+/// hive-core's phone transport in-process.
 pub struct RelayPhone {
     pub folder: String,
     pub base: String,
@@ -615,14 +615,14 @@ impl RelayPhone {
         drop(payload);
         input.0.push(0);
         let response = unsafe {
-            let out = personal_agent_core::phone_transport::agent_phone_call(
+            let out = hive_core::phone_transport::agent_phone_call(
                 input.bytes().as_ptr() as *const std::ffi::c_char,
             );
             if out.is_null() {
                 return Err("The phone relay transport failed.".into());
             }
             let text = std::ffi::CStr::from_ptr(out).to_bytes().to_vec();
-            personal_agent_core::phone_transport::agent_phone_free(out);
+            hive_core::phone_transport::agent_phone_free(out);
             text
         };
         let response: Value = serde_json::from_slice(&response)

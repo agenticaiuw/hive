@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUST_SETTINGS = os.path.join(ROOT, "build/agent-settings-reader")
+RUST_SETTINGS = os.path.join(ROOT, "build/hive-settings-reader")
 from_file: set[str] = set()  # the variables that came from .env
 
 

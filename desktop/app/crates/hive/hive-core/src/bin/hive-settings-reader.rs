@@ -10,7 +10,7 @@ fn main() {
         eprintln!("Invalid arguments");
         process::exit(2);
     }
-    match personal_agent_core::settings::read(Path::new(&path)) {
+    match hive_core::settings::read(Path::new(&path)) {
         Ok(pairs) => {
             if serde_json::to_writer(io::stdout().lock(), &pairs).is_err() {
                 process::exit(1);

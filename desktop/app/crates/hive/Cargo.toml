@@ -1,9 +1,11 @@
 # Hive's desktop agent in Rust: the orchestration that python/ used to run. One crate per area so
-# each can be built and tested on its own (`cargo test -p hive-mac`). ML inference (Parakeet,
-# Kokoro, WeSpeaker, lip reading) stays in Python sidecar processes behind JSON-lines protocols.
+# each can be built and tested on its own (`cargo test -p hive-mac`); hive-core holds the state
+# that must survive restarts. ML inference (Parakeet, Kokoro, WeSpeaker, lip reading) stays in
+# Python sidecar processes behind JSON-lines protocols.
 [workspace]
 resolver = "2"
 members = [
+    "hive-core",
     "hive-common",
     "hive-mac",
     "hive-knowledge",
@@ -20,7 +22,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
-personal-agent-core = { path = "../agent-core" }
+hive-core = { path = "hive-core" }
 hive-common = { path = "hive-common" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 base64 = "0.22"

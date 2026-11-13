@@ -1,11 +1,11 @@
 //! Durable UI request admissions in the shared private ingress ledger (python/ui_ingress.py,
-//! calling personal-agent-core's request ledger directly instead of agent-request-ledger).
+//! calling hive-core's request ledger directly).
 //!
 //! The ledger lives in `<state>/control`.
 
 use crate::pyjson;
 use crate::util;
-use personal_agent_core::request_ledger;
+use hive_core::request_ledger;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 

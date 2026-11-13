@@ -3,7 +3,7 @@
 //! did, and what it answered. Codex compacts the thread when it gets long.
 //!
 //! The thread's identity (`codex-thread-id` in the state folder) survives app and server
-//! restarts: agent-core's [`ResumableThread`] resumes it, and only a missing identity starts a new
+//! restarts: hive-core's [`ResumableThread`] resumes it, and only a missing identity starts a new
 //! one. A thread takes one turn at a time. A request that replaces one being stopped waits a
 //! moment for Codex to end that turn. One for the other device while a turn is under way (the
 //! phone while the Mac works) gets a thread of its own, told what was said so far, and the
@@ -19,7 +19,7 @@ use crate::prompts;
 use crate::py;
 use crate::task::CodexTask;
 use crate::util::{lock, AgentError, Event};
-use personal_agent_core::thread_identity::{
+use hive_core::thread_identity::{
     validate_identity, IdentityError, ResumableThread, SessionTransport,
 };
 use serde_json::{json, Value};
@@ -353,7 +353,7 @@ impl Session {
     }
 }
 
-/// The app-server, as agent-core's identity logic sees it: each request goes to Codex, and is
+/// The app-server, as hive-core's identity logic sees it: each request goes to Codex, and is
 /// recorded for the context inspector ("{method} input", then "output" or "error").
 struct Transport<'a> {
     server: &'a dyn Server,
