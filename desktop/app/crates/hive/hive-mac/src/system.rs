@@ -53,6 +53,11 @@ pub trait System: Send + Sync {
     fn own_window_at(&self, _x: f64, _y: f64) -> bool {
         false
     }
+    /// While the virtual monitor is on: how many apps' windows are on it (desktop::windows_inside).
+    /// None while it's off, or when that can't be told.
+    fn windows_on_virtual_monitor(&self) -> Option<usize> {
+        None
+    }
 
     /// The display the agent works on: the virtual monitor while it is on, else the main display.
     fn work_display(&self) -> Bounds {
@@ -130,6 +135,9 @@ impl System for RealMac {
     }
     fn own_window_at(&self, x: f64, y: f64) -> bool {
         desktop::own_window_at(x, y)
+    }
+    fn windows_on_virtual_monitor(&self) -> Option<usize> {
+        virtual_monitor::bounds().map(desktop::windows_inside)
     }
     fn natural_scrolling(&self) -> bool {
         let out = crate::process::run(

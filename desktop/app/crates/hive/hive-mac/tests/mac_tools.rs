@@ -47,8 +47,22 @@ struct Setup {
 }
 
 fn setup(engaged: bool) -> Setup {
+    setup_with(engaged, FakeSystem::new())
+}
+
+/// Hive working on the virtual monitor, at the right of the main display.
+fn setup_on_monitor() -> Setup {
+    setup_with(
+        true,
+        Arc::new(FakeSystem {
+            virtual_monitor: Some((1440.0, 0.0, 1440.0, 900.0)),
+            ..FakeSystem::default()
+        }),
+    )
+}
+
+fn setup_with(engaged: bool, system: Arc<FakeSystem>) -> Setup {
     let helper = FakeHelper::start(engaged);
-    let system = FakeSystem::new();
     let native = Arc::new(FakeNative::default());
     let mut tools = MacTools::with(helper.client(system.clone()), system.clone());
     tools.native = native.clone();
@@ -717,4 +731,58 @@ fn a_click_on_hives_own_window_is_refused() {
         first_text(&res)
     );
     assert!(!s.helper.lines().is_empty(), "the mouse moved");
+}
+
+/// On an empty virtual monitor the agent once asked the user to "make a window available" instead
+/// of opening one: a look at an empty monitor now says what brings a window there.
+#[test]
+fn an_empty_virtual_monitor_says_how_to_get_a_window_there() {
+    let s = setup_on_monitor();
+    *s.system.monitor_windows.lock().unwrap() = Some(0);
+    let res = s.tools.call("screenshot", &json!({})).unwrap();
+    assert!(!is_error(&res), "{res}");
+    let said = first_text(&res);
+    assert!(
+        said.starts_with("Screenshot of the virtual monitor"),
+        "{said}"
+    );
+    assert!(
+        said.contains(hive_mac::tools::EMPTY_MONITOR.trim()),
+        "{said}"
+    );
+
+    *s.system.monitor_windows.lock().unwrap() = Some(2);
+    let res = s.tools.call("screenshot", &json!({})).unwrap();
+    assert!(!first_text(&res).contains("No app's window"));
+
+    let off = setup(true); // the user's screen: no such note
+    let res = off.tools.call("screenshot", &json!({})).unwrap();
+    assert!(!first_text(&res).contains("No app's window"));
+}
+
+/// switch_window on the virtual monitor brings the window it found over from the user's screen.
+#[test]
+fn switch_window_moves_the_window_onto_the_virtual_monitor() {
+    let s = setup_on_monitor();
+    let log = s.helper.shared.clone();
+    let pressed = keys(8, &[0x35]);
+    s.system.set_windows(move || {
+        windows_with(if log.pressed(&pressed) {
+            "GSSF_Presentation_styled"
+        } else {
+            "10-29 Club-Wide Meeting"
+        })
+    });
+    *s.system.front_app.lock().unwrap() = "Microsoft PowerPoint".into();
+    let res = s
+        .tools
+        .call("switch_window", &json!({"title": "gssf"}))
+        .unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert!(
+        first_text(&res).contains("is in front, moved onto the virtual monitor"),
+        "{}",
+        first_text(&res)
+    );
+    assert_eq!(*s.system.placed.lock().unwrap(), [1]);
 }

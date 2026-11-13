@@ -335,6 +335,10 @@ pub struct FakeSystem {
     pub natural: bool,
     /// Where Hive's own floating window is, if it's up.
     pub own_window: Mutex<Option<Bounds>>,
+    /// How many apps' windows are on the virtual monitor (while it's on).
+    pub monitor_windows: Mutex<Option<usize>>,
+    /// The pids whose front window was moved onto the virtual monitor.
+    pub placed: Mutex<Vec<i32>>,
 }
 
 impl Default for FakeSystem {
@@ -351,6 +355,8 @@ impl Default for FakeSystem {
             captures: AtomicUsize::new(0),
             natural: true,
             own_window: Mutex::new(None),
+            monitor_windows: Mutex::new(None),
+            placed: Mutex::new(Vec::new()),
         }
     }
 }
@@ -386,8 +392,12 @@ impl System for FakeSystem {
     fn warp(&self, x: f64, y: f64) {
         *lock(&self.cursor) = (x, y);
     }
-    fn place_on_virtual_monitor(&self, _pid: i32) -> String {
+    fn place_on_virtual_monitor(&self, pid: i32) -> String {
+        lock(&self.placed).push(pid);
         String::new()
+    }
+    fn windows_on_virtual_monitor(&self) -> Option<usize> {
+        self.virtual_monitor.and(*lock(&self.monitor_windows))
     }
     fn work_display_pixels(&self) -> (usize, usize) {
         (2880, 1800)
