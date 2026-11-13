@@ -1,5 +1,5 @@
 {
-  "name": "ai-pendant-simulator",
+  "name": "hive-simulator",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,7 +8,7 @@
     "agent:install": "node ../../desktop/local-agent/macos/setupPermissions.js --install-only",
     "agent:setup": "node ../../desktop/local-agent/macos/setupPermissions.js",
     "agent:autostart": "node ../../desktop/local-agent/macos/setupPermissions.js --autostart",
-    "agent:logs": "tail -n 200 -F \"$HOME/Library/Logs/AIPendant/agent.out.log\" \"$HOME/Library/Logs/AIPendant/agent.err.log\"",
+    "agent:logs": "tail -n 200 -F \"$HOME/Library/Logs/HiveLocalAgent/agent.out.log\" \"$HOME/Library/Logs/HiveLocalAgent/agent.err.log\"",
     "bridge": "node ../../desktop/local-agent/runBridge.js",
     "relay": "node ../../cloud/server/server.js",
     "relay:cloudflare:dev": "npx wrangler dev",

@@ -488,7 +488,7 @@ test('the foreground app is parsed off lsappinfo, which needs no permission gran
 
 test('accessibility reports whether ui steps actually reach the screen', () => {
   const granted = projectAccessibility({
-    hostApp: 'AI Pendant Agent',
+    hostApp: 'Hive Local Agent',
     accessibility: { trusted: true, detail: 'Trusted' },
     inputPosting: { granted: true, secureInput: false },
     screenRecording: { granted: true },
@@ -500,7 +500,7 @@ test('accessibility reports whether ui steps actually reach the screen', () => {
   // The failure worth surfacing: the checkbox is on, but for another bundle,
   // so synthesized events vanish and every ui_* receipt says "success".
   const wrongBundle = projectAccessibility({
-    hostApp: 'AI Pendant Agent',
+    hostApp: 'Hive Local Agent',
     accessibility: { trusted: true, detail: 'Trusted' },
     inputPosting: { granted: false },
     screenRecording: { granted: false },
@@ -520,7 +520,7 @@ test('an unprobed input path is reported as unknown, not as "does not post"', ()
    * live run of this endpoint confidently told the owner their ui_* steps were
    * going nowhere. Absent means not probed. */
   const quiet = projectAccessibility({
-    hostApp: 'AI Pendant Agent',
+    hostApp: 'Hive Local Agent',
     accessibility: { trusted: true, detail: 'Accessibility is granted' },
     screenRecording: { granted: true },
     requiredMissing: [],
@@ -537,7 +537,7 @@ test('the opt-in probe answers the question the TCC lookup cannot', async () => 
   const probed = await observeHost({
     roots: [],
     permissions: {
-      hostApp: 'AI Pendant Agent',
+      hostApp: 'Hive Local Agent',
       accessibility: { trusted: true, detail: 'Accessibility is granted' },
       screenRecording: { granted: true },
     },

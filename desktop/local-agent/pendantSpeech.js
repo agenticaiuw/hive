@@ -472,7 +472,7 @@ export function synthesizePendantSpeech(result) {
   }
 
   const temporaryDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'ai-pendant-speech-'),
+    path.join(os.tmpdir(), 'hive-speech-'),
   )
   const wavePath = path.join(temporaryDirectory, 'agent-reply.wav')
 

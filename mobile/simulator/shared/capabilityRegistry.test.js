@@ -62,7 +62,7 @@ const NOW = Date.parse('2026-08-07T12:00:00.000Z')
  * enough to cover public, bearer, parameterised and collection.
  */
 const MAC_MANIFEST = {
-  service: 'AI Pendant Mac Local Agent',
+  service: 'Hive Mac Local Agent',
   http: {
     baseUrl: 'http://127.0.0.1:8000',
     auth: { statusContract: { 401: 'route exists, token missing or wrong' } },

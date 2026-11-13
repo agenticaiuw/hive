@@ -20,7 +20,7 @@ import { listDisplays, probeInput } from './uiControl.js'
 
 const execFileAsync = promisify(execFile)
 
-export const CAPTURE_ROOT = path.join(os.tmpdir(), 'aipendant-observations')
+export const CAPTURE_ROOT = path.join(os.tmpdir(), 'hive-observations')
 const RETENTION_MS = Number(process.env.PENDANT_SCREENSHOT_TTL_MS || 30 * 60 * 1000)
 const MAX_RETAINED = Number(process.env.PENDANT_SCREENSHOT_KEEP || 20)
 const KEEP_SCREENSHOTS = process.env.PENDANT_KEEP_SCREENSHOTS === '1'

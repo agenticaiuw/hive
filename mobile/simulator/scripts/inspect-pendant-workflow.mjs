@@ -303,7 +303,7 @@ function parseArgs(argv) {
     timeoutMs: 180000,
     outputDirectory: path.join(
       os.homedir(),
-      'AI-Pendant-Workspace',
+      'Hive-Workspace',
       'workflow-inspections',
     ),
   }

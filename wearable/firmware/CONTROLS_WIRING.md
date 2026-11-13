@@ -1,4 +1,4 @@
-# AI Pendant — Hardware Controls Wiring (breadboard prototype)
+# Hive — Hardware Controls Wiring (breadboard prototype)
 
 Parts arrived 2026-08-12. This is the exact wiring the firmware in
 `firmware/nrf9160` and `firmware/esp32-airpods-bridge` was written against.

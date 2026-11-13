@@ -116,7 +116,7 @@ test('spokenConfirmation speaks the goal verdict, not the steps, when the goal w
 
 test('extracts 24 kHz mono signed PCM from a macOS WAVE file', () => {
   const temporaryDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'ai-pendant-speech-test-'),
+    path.join(os.tmpdir(), 'hive-speech-test-'),
   )
   const wavePath = path.join(temporaryDirectory, 'test.wav')
 

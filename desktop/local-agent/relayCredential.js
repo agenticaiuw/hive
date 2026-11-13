@@ -20,7 +20,7 @@
  * Resolution order:
  *   1. RELAY_DEVICE_TOKEN            — env, for launchd/CI
  *   2. RELAY_DEVICE_TOKEN_FILE       — a file holding just the token
- *   3. ~/.config/ai-pendant/mac-bridge-token   (default file, if present)
+ *   3. ~/.config/hive/mac-bridge-token   (default file, if present)
  *   4. RELAY_API_KEY                 — admin fallback, logged once
  */
 import fs from 'node:fs'
@@ -30,7 +30,7 @@ import path from 'node:path'
 export const DEFAULT_DEVICE_TOKEN_FILE = path.join(
   os.homedir?.() || '.',
   '.config',
-  'ai-pendant',
+  'hive',
   'mac-bridge-token',
 )
 

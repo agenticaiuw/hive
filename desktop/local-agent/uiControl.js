@@ -1,4 +1,4 @@
-// Node wrapper around the aipendant-uicontrol Swift helper.
+// Node wrapper around the hive-uicontrol Swift helper.
 //
 // Packaging note: this adds NO third-party or heavyweight native dependency.
 // The helper is a single Swift file compiled lazily by the Xcode command line
@@ -21,8 +21,8 @@ import { assertFinite } from './coordinates.js'
 const execFileAsync = promisify(execFile)
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 const SOURCE_PATH = path.join(moduleDirectory, 'macos', 'UIControl.swift')
-const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AIPendant')
-const BIN_PATH = path.join(BIN_DIR, 'aipendant-uicontrol')
+const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'HiveLocalAgent')
+const BIN_PATH = path.join(BIN_DIR, 'hive-uicontrol')
 
 // Menu titles can contain any printable text, so segments are joined with a
 // control character the Swift helper splits on.
@@ -86,7 +86,7 @@ export async function ensureUiHelper({ execFileImpl = execFileAsync } = {}) {
   })().catch((error) => {
     cachedBinaryPromise = null
     throw new Error(
-      `Could not build the aipendant-uicontrol helper (${error.message}). Install the Xcode command line tools with: xcode-select --install`,
+      `Could not build the hive-uicontrol helper (${error.message}). Install the Xcode command line tools with: xcode-select --install`,
       { cause: error },
     )
   })

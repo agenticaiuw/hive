@@ -228,7 +228,7 @@ export function renderBriefAudio({
   fs.mkdirSync(directory, { recursive: true })
   const wavPath = path.join(directory, `${basename}.wav`)
   const opusPath = path.join(directory, `${basename}.opus`)
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-pendant-brief-'))
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-brief-'))
   const scriptPath = path.join(scratch, 'script.txt')
 
   try {

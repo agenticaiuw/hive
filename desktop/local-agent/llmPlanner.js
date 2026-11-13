@@ -2076,11 +2076,11 @@ function sanitizeActions(actions) {
          * one that actually intercepts. This copy carried a bare `overlay`
          * alternative the executor's did not, so `run_shell echo overlay`
          * planned as a full-screen black rectangle — a word in passing became a
-         * screen takeover. The executor's `aipendant-screen-overlay` is here
+         * screen takeover. The executor's `hive-screen-overlay` is here
          * for the reverse reason: it only ever matched on that side, so the two
          * disagreed in both directions.
          */
-        /tkinter|mainloop|overrideredirect|screenwidth|aipendant-screen-overlay/i.test(
+        /tkinter|mainloop|overrideredirect|screenwidth|hive-screen-overlay/i.test(
           String(action.params?.command ?? ''),
         )
       ) {

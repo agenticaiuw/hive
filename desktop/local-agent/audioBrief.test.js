@@ -65,7 +65,7 @@ test('waveFile round-trips through the pendant PCM reader', () => {
 })
 
 test('renderBriefAudio produces a long brief in the exact format the relay forwards', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-pendant-brief-test-'))
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-brief-test-'))
   try {
     /* Long enough that the 180-character reply path could not have produced it. */
     const script =
@@ -92,7 +92,7 @@ test('renderBriefAudio produces a long brief in the exact format the relay forwa
 })
 
 test('renderBriefAudio caps runaway scripts and fades instead of cutting', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-pendant-brief-test-'))
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-brief-test-'))
   try {
     const maxPcmBytes = PENDANT_SPEECH_SAMPLE_RATE * 2 * 2 // two seconds
     const audio = renderBriefAudio({

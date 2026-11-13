@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ai-pendant-relay",
+  "name": "hive-relay",
   "workers_dev": true,
   "main": "../../cloud/worker/worker.js",
   // NOTE: on Workers Paid, set "limits": { "cpu_ms": 300000 } here — a
@@ -34,7 +34,7 @@
   "r2_buckets": [
     {
       "binding": "AUDIO_BUCKET",
-      "bucket_name": "ai-pendant-audio"
+      "bucket_name": "hive-audio"
     }
   ],
   "ai": {
@@ -53,7 +53,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "ai-pendant-relay-db",
+      "database_name": "hive-relay-db",
       "database_id": "6addfd88-af2d-4027-aedc-12a1aad694b0"
     }
   ],

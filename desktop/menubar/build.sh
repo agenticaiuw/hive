@@ -1,9 +1,9 @@
 #!/bin/bash
-# Builds "AI Pendant.app" (menu-bar + desktop companion) into build/ and codesigns it.
+# Builds "Hive Menu Bar.app" (menu-bar + desktop companion) into build/ and codesigns it.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="AI Pendant.app"
+APP="Hive Menu Bar.app"
 OUT="build/$APP"
 
 mkdir -p build
@@ -20,7 +20,7 @@ cp ../integration/assets/icon/pendant.icns build/AppIcon.icns
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 
-xcrun swiftc -O -o "$OUT/Contents/MacOS/AI Pendant" Sources/main.swift
+xcrun swiftc -O -o "$OUT/Contents/MacOS/Hive Menu Bar" Sources/main.swift
 cp Info.plist "$OUT/Contents/Info.plist"
 cp build/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
 

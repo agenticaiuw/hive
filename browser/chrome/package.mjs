@@ -9,7 +9,7 @@ const sourceDir = path.join(browserExtensionDir, 'src')
 const outputDir = path.join(browserExtensionDir, 'build')
 const chromeDir = path.join(outputDir, 'chrome')
 const safariDir = path.join(outputDir, 'safari')
-const chromeArchive = path.join(outputDir, 'ai-pendant-browser-bridge-chrome.zip')
+const chromeArchive = path.join(outputDir, 'hive-browser-bridge-chrome.zip')
 const rolldownPath = path.join(simulatorDir, 'node_modules', '.bin', 'rolldown')
 
 fs.rmSync(outputDir, { recursive: true, force: true })
@@ -25,8 +25,8 @@ fs.cpSync(sourceDir, safariDir, { recursive: true })
  * exactly the set the .pbxproj already knows.
  */
 const entryPoints = [
-  ['background.js', 'AIPendantBrowserBridge'],
-  ['popup.js', 'AIPendantPopup'],
+  ['background.js', 'HiveBrowserBridge'],
+  ['popup.js', 'HivePopup'],
 ]
 
 const entryNames = new Set(entryPoints.map(([entry]) => entry))

@@ -6,14 +6,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DEFAULT_RELAY_URL =
-  'https://ai-pendant-relay.your-subdomain.workers.dev'
+  'https://hive-relay.your-subdomain.workers.dev'
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_OUTPUT_DIRECTORY = path.resolve(
   SCRIPT_DIRECTORY,
   '../../../diagnostics/audio-captures',
 )
 const DEFAULT_MODEL_PATH =
-  '/Users/you/AI-Pendant-Workspace/models/ggml-tiny.en-q5_1.bin'
+  '/Users/you/Hive-Workspace/models/ggml-tiny.en-q5_1.bin'
 
 function argumentValue(name) {
   const index = process.argv.indexOf(name)

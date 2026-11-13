@@ -34,11 +34,11 @@ static int read_agent_root(char *destination, size_t capacity) {
 
   char config_path[PATH_BUFFER_SIZE];
   snprintf(config_path, sizeof(config_path),
-           "%s/Library/Application Support/AIPendant/agent-root", home);
+           "%s/Library/Application Support/HiveLocalAgent/agent-root", home);
 
   FILE *config = fopen(config_path, "r");
   if (config == NULL) {
-    fprintf(stderr, "AI Pendant agent root is not configured: %s\n",
+    fprintf(stderr, "Hive agent root is not configured: %s\n",
             config_path);
     return -1;
   }
@@ -92,7 +92,7 @@ static int run_embedded_node(const char *node_path, char **node_argv) {
 
   pid_t child = fork();
   if (child < 0) {
-    perror("Unable to fork the embedded AI Pendant runtime");
+    perror("Unable to fork the embedded Hive runtime");
     return 1;
   }
 
@@ -101,7 +101,7 @@ static int run_embedded_node(const char *node_path, char **node_argv) {
     signal(SIGINT, SIG_DFL);
     signal(SIGHUP, SIG_DFL);
     execv(node_path, node_argv);
-    perror("Unable to start the embedded AI Pendant runtime");
+    perror("Unable to start the embedded Hive runtime");
     _exit(127);
   }
 
@@ -109,7 +109,7 @@ static int run_embedded_node(const char *node_path, char **node_argv) {
   int status = 0;
   while (waitpid(child, &status, 0) < 0) {
     if (errno != EINTR) {
-      perror("Unable to wait for the embedded AI Pendant runtime");
+      perror("Unable to wait for the embedded Hive runtime");
       return 1;
     }
   }
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
   char executable_path[PATH_BUFFER_SIZE];
   uint32_t executable_path_size = sizeof(executable_path);
   if (_NSGetExecutablePath(executable_path, &executable_path_size) != 0) {
-    fprintf(stderr, "Unable to locate AI Pendant Agent.app\n");
+    fprintf(stderr, "Unable to locate Hive Local Agent.app\n");
     return 1;
   }
 
@@ -144,11 +144,11 @@ int main(int argc, char **argv) {
   char agent_root[PATH_BUFFER_SIZE];
   if (read_agent_root(agent_root, sizeof(agent_root)) != 0 ||
       chdir(agent_root) != 0) {
-    perror("Unable to enter the AI Pendant project");
+    perror("Unable to enter the Hive project");
     return 1;
   }
 
-  setenv("__CFBundleIdentifier", "com.aipendant.agent", 1);
+  setenv("__CFBundleIdentifier", "local.hive.local-agent", 1);
   const char *mode = argc > 1 ? argv[1] : "agent";
   if (strcmp(mode, "setup") == 0) {
     // Make macOS attribute the prompts to this signed app bundle, not to

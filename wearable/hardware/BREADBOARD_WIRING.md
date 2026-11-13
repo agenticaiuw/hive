@@ -1,4 +1,4 @@
-# AI Pendant — Master Breadboard Wiring (the whole circuit)
+# Hive — Master Breadboard Wiring (the whole circuit)
 
 THE single source of truth for every wire on the bench. `firmware/CONTROLS_WIRING.md`
 keeps the deep rationale for the controls; this file is the complete net list.
@@ -381,7 +381,7 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "http://127.0.0.1:8000/bench/lin
 ```sh
 AGENT_TOKEN=$(node -e 'const {createHmac}=require("crypto"),fs=require("fs");
 const m=(fs.readFileSync(".env","utf8").match(/^PAIRING_CODE=(.*)$/m)||[])[1];
-process.stdout.write(createHmac("sha256",m.trim()).update("aipendant:agent-token").digest("hex"))')
+process.stdout.write(createHmac("sha256",m.trim()).update("hive:agent-token").digest("hex"))')
 ```
 
 Properties worth knowing before you write a grep against it:

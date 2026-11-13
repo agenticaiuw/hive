@@ -190,7 +190,7 @@ static int ogg_write_headers(struct ogg_writer *writer, uint16_t pre_skip,
 {
 	uint8_t opus_head[19] = { 0 };
 	uint8_t opus_tags[32] = { 0 };
-	const char vendor[] = "AI Pendant";
+	const char vendor[] = "Hive";
 	uint16_t packet_length;
 	int error;
 

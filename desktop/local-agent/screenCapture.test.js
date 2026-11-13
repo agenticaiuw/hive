@@ -13,7 +13,7 @@ const executionPayload = {
       action: { type: 'screenshot', label: 'Look at the screen', params: {} },
       ok: true,
       message: 'Captured display #1',
-      path: '/tmp/aipendant-observations/x/obs-1.jpg',
+      path: '/tmp/hive-observations/x/obs-1.jpg',
       sha256: 'deadbeef',
       image: { width: 1456, height: 910, bytes: 210_000 },
       scale: { x: 0.989, y: 0.989 },

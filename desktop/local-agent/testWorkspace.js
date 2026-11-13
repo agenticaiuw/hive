@@ -9,7 +9,7 @@
  * wherever one exists; this is the fallback for the ones that have neither.
  *
  * Why it matters: `node --test` runs each test file in its own process, but
- * every one of them defaults to the same real ~/AI-Pendant-Workspace — as does
+ * every one of them defaults to the same real ~/Hive-Workspace — as does
  * the agent app the owner actually has running. Those stores are read-modify-
  * write over a whole JSON document, and several cap themselves at the last N
  * entries, so a concurrent writer silently drops what a test just wrote. The

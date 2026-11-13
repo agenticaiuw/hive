@@ -1,7 +1,7 @@
 mainmenu "nRF9160 agentic pendant"
 
 config PENDANT_RELAY_API_KEY
-	string "AI Pendant cloud relay API key (shared admin key - legacy)"
+	string "Hive cloud relay API key (shared admin key - legacy)"
 	default ""
 	help
 	  The SHARED ADMIN key. It authenticates as principal kind 'admin' with
@@ -15,7 +15,7 @@ config PENDANT_RELAY_API_KEY
 	  instead and leave this empty once the pendant is paired.
 
 config PENDANT_RELAY_DEVICE_TOKEN
-	string "AI Pendant relay device token (scoped, revocable)"
+	string "Hive relay device token (scoped, revocable)"
 	default ""
 	help
 	  This pendant's own credential, of the form pdt_<id>.<secret>, minted

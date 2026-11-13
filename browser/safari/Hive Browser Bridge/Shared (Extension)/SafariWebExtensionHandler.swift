@@ -17,7 +17,7 @@ import os.log
  * stored pairing, forcing a re-pair. browser.storage.local belongs to Safari
  * and dies with that identity; THIS process's UserDefaults belong to the
  * appex's own sandbox container (~/Library/Containers/
- * com.evanliu.aipendant.browserbridge.Extension) and survive any Safari-side
+ * com.evanliu.hive.browserbridge.Extension) and survive any Safari-side
  * storage reset, app rebuild, or in-place update. So the extension worker
  * escrows the credential here right after a successful pair, and silently
  * restores from here when it wakes up unpaired.
@@ -40,7 +40,9 @@ import os.log
  * "forever" pairing), and null is not a property-list type — a dictionary
  * store would drop or crash on it depending on bridging mood.
  */
-private let escrowDefaultsKey = "aiPendantPairingEscrow"
+private let escrowDefaultsKey = "hivePairingEscrow"
+/// Where the escrow lived before the rename to Hive; moved to the new key on first use.
+private let legacyEscrowDefaultsKey = "aiPendantPairingEscrow"
 
 class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
@@ -75,6 +77,11 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
 
         let defaults = UserDefaults.standard
+        if defaults.object(forKey: escrowDefaultsKey) == nil,
+           let legacy = defaults.data(forKey: legacyEscrowDefaultsKey) {
+            defaults.set(legacy, forKey: escrowDefaultsKey)
+            defaults.removeObject(forKey: legacyEscrowDefaultsKey)
+        }
 
         switch type {
         case "escrow:store":

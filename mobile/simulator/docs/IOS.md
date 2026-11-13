@@ -1,6 +1,6 @@
 # iOS client and TestFlight
 
-AI Pendant ships the same product UI inside a Capacitor iOS shell. The shell is
+Hive ships the same product UI inside a Capacitor iOS shell. The shell is
 device-specific; durable product state is not.
 
 - Cloudflare Worker: authenticated API and device coordination
@@ -51,7 +51,7 @@ This repository currently uses:
 
 | Setting | Value |
 | --- | --- |
-| Display name | AI Pendant |
+| Display name | Hive |
 | Bundle identifier | `com.aipendant.app` |
 | Apple team | `9684Z8GZ26` |
 | Minimum iOS | 15.0 |
@@ -61,7 +61,7 @@ project:
 
 ```bash
 PENDANT_APPLE_TEAM_ID=YOUR_TEAM_ID \
-PENDANT_BUNDLE_ID=com.yourcompany.aipendant \
+PENDANT_BUNDLE_ID=com.yourcompany.hive \
 npm run ios:archive
 ```
 
@@ -99,7 +99,7 @@ Create a signed release archive:
 npm run ios:archive
 ```
 
-The archive is written under `build/ios/AI-Pendant-<build>.xcarchive`. Each
+The archive is written under `build/ios/Hive-<build>.xcarchive`. Each
 invocation uses a timestamp as the build number unless
 `PENDANT_BUILD_NUMBER` is supplied.
 
