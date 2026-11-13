@@ -256,6 +256,24 @@ pub fn gate(out: &Path) -> Result<CiResult, String> {
     Ok(r)
 }
 
+/// What `ci-gate` writes when it couldn't judge the branch at all.
+pub fn report_error(out: &Path, error: &str) {
+    let head = std::env::current_dir()
+        .ok()
+        .and_then(|d| git::rev(&d, "HEAD").ok())
+        .unwrap_or_default();
+    let _ = std::fs::create_dir_all(out);
+    let _ = save(
+        out,
+        &CiResult {
+            head,
+            stage: "error".into(),
+            reasons: vec![format!("the macOS check couldn't run: {error}")],
+            ..Default::default()
+        },
+    );
+}
+
 fn save(out: &Path, r: &CiResult) -> Result<(), String> {
     paths::write_atomic(
         &out.join("result.json"),
