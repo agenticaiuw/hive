@@ -4,11 +4,15 @@
 // The viewer (a live picture of the browser plus mouse and keyboard forwarding) exists so the
 // owner can sign in and watch. It binds to loopback, needs a one-time link, and is reached
 // through an SSH tunnel. Forwarded input is never logged or stored.
+// The sign-in desktop is for sites that refuse a remote-controlled browser (Google's sign-in):
+// the same browser and profile run with no remote control, shared by VNC on loopback.
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { extname, join } from 'node:path';
-import { BrowserSession, proxyArgs } from './browser.mjs';
+import { BrowserSession, desktopBrowserArgs, findBrowserExecutable, proxyArgs } from './browser.mjs';
 import { PostError, PostStore } from './posts.mjs';
 import { arrive, deliver } from './poster.mjs';
 import { recipeFor, validatePost, RECIPES, ownedLink } from './sites.mjs';
@@ -21,6 +25,29 @@ const MAX_JSON_BYTES = 64 * 1024;
 class HttpError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
 }
+
+// Ask a process to quit; kill it if it hasn't after `ms`.
+const stopProcess = (child, ms) => new Promise(resolve => {
+  if (child.exitCode !== null || child.signalCode !== null) return resolve();
+  const timer = setTimeout(() => child.kill('SIGKILL'), ms);
+  child.once('exit', () => { clearTimeout(timer); resolve(); });
+  child.kill('SIGTERM');
+});
+
+// Resolves once something accepts connections on 127.0.0.1:port.
+const listening = async (port, ms, failed) => {
+  for (const end = Date.now() + ms; ;) {
+    if (failed()) throw new Error('the VNC server stopped while starting');
+    const up = await new Promise(resolve => {
+      const socket = connect(port, '127.0.0.1');
+      socket.once('connect', () => { socket.destroy(); resolve(true); });
+      socket.once('error', () => resolve(false));
+    });
+    if (up) return;
+    if (Date.now() > end) throw new Error('the VNC server did not start listening');
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+};
 
 const readBody = (request, limit) => new Promise((resolve, reject) => {
   const chunks = []; let size = 0;
@@ -36,6 +63,7 @@ const readBody = (request, limit) => new Promise((resolve, reject) => {
 export function createAgent({
   stateDir, executable, headless = false, proxy = null, extraRecipes = {}, timeouts = {},
   approvalTtlMs = 10 * 60_000, viewerPort = 38917, viewerIdleMs = 20 * 60_000, log = () => {},
+  desktop: { port: desktopPort = 38918, display = process.env.DISPLAY, vnc: vncCommand = 'x11vnc', browser: desktopExecutable, minutes: desktopMinutes = 30 } = {},
 }) {
   for (const dir of [stateDir, join(stateDir, 'uploads'), join(stateDir, 'evidence')]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700);
@@ -45,11 +73,13 @@ export function createAgent({
   let browser = null; let browserError = null; let browserSince = null;
   let queue = Promise.resolve();
   let viewer = null;
+  let desktop = null; let desktopClosing = null;
 
   // One browser, one tab: every operation that touches the page waits its turn.
   const exclusive = task => { const run = queue.then(task, task); queue = run.catch(() => {}); return run; };
 
   async function page() {
+    if (desktop) throw new HttpError(409, 'signing_in', 'the browser is open for sign-in by remote desktop; close that first');
     if (browser?.alive) return browser;
     browser = null;
     try {
@@ -75,6 +105,7 @@ export function createAgent({
       browser: browser?.alive ? { state: 'running', since: browserSince } : { state: browserError ? 'failed' : 'not_started', error: browserError },
       logins, // each entry carries the time it was observed; nothing here is re-checked on read
       viewer: viewer ? { open: true, port: viewer.port, expiresAt: viewer.lastUsed + viewerIdleMs } : { open: false },
+      desktop: desktop ? { open: true, port: desktop.port, expiresAt: desktop.expiresAt } : { open: false },
       recent: store.list(5).map(({ id, platform, status, updatedAt }) => ({ id, platform, status, updatedAt })),
     }),
 
@@ -167,6 +198,21 @@ export function createAgent({
       return { port: viewer.port, token: viewer.token, expiresAt: viewer.lastUsed + viewerIdleMs };
     },
     'POST /view/close': async () => { await closeViewer(); return { open: false }; },
+
+    // The browser as an ordinary one, for the owner by remote desktop (see openDesktop).
+    'POST /desktop/open': async ({ site }) => {
+      const url = site === undefined ? 'about:blank' : recipe(site).loginUrl;
+      await closeViewer();
+      await exclusive(async () => {
+        await desktopClosing;
+        if (desktop) return;
+        if (browser) { await browser.close().catch(() => {}); browser = null; }
+        desktop = await openDesktop(url);
+      });
+      desktop.expiresAt = Date.now() + desktopMinutes * 60_000;
+      return { port: desktop.port, password: desktop.password, expiresAt: desktop.expiresAt };
+    },
+    'POST /desktop/close': async () => { await closeDesktop(); return { open: false }; },
   };
 
   // ---- viewer -------------------------------------------------------------------------------
@@ -397,6 +443,55 @@ export function createAgent({
     log('viewer closed');
   }
 
+  // ---- sign-in desktop ----------------------------------------------------------------------
+
+  // Some sign-ins (Google's, behind "Continue with Google") refuse a browser that is remote-
+  // controlled, as the worker's is. For those the same browser and profile are started with no
+  // remote control at all, on the worker's display, and x11vnc shares that display on loopback
+  // with a one-time password, reached through an SSH tunnel. Nothing about the browser is
+  // disguised: it is an ordinary browser the owner uses, and the worker drives nothing while it
+  // is open. The sign-in stays in the profile when the worker's own browser starts again.
+  async function openDesktop(url) {
+    if (!display) throw new HttpError(503, 'no_display', 'the worker has no display to share; start it with run.sh');
+    const env = { ...process.env, DISPLAY: display };
+    const chrome = spawn(desktopExecutable ?? findBrowserExecutable(executable),
+      desktopBrowserArgs({ profileDir: join(stateDir, 'profile'), proxy, url }), { stdio: 'ignore', env });
+    const password = randomBytes(6).toString('base64url'); // VNC passwords are 8 characters
+    const passwordFile = join(stateDir, 'desktop.pass');
+    writeFileSync(passwordFile, `${password}\n`, { mode: 0o600 });
+    const vnc = spawn(vncCommand, ['-display', display, '-localhost', '-rfbport', String(desktopPort), '-passwdfile', `rm:${passwordFile}`,
+      '-forever', '-shared', '-noxdamage', '-quiet'], { stdio: 'ignore', env });
+    const state = { chrome, vnc, port: desktopPort, password, expiresAt: Date.now() + desktopMinutes * 60_000, timer: null };
+    let failed = false;
+    for (const child of [chrome, vnc]) {
+      child.once('error', () => { failed = true; });
+      // The owner closed the browser, or VNC stopped: the worker may use its browser again.
+      child.once('exit', () => { failed = true; if (desktop === state) closeDesktop(); });
+    }
+    try { await listening(desktopPort, 10_000, () => failed); } catch (error) {
+      await Promise.all([stopProcess(vnc, 2_000), stopProcess(chrome, 10_000)]);
+      rmSync(passwordFile, { force: true });
+      throw new HttpError(503, 'desktop_failed', error.message);
+    }
+    state.timer = setInterval(() => { if (Date.now() > state.expiresAt) closeDesktop(); }, 30_000);
+    state.timer.unref();
+    log(`sign-in desktop open on 127.0.0.1:${desktopPort}`);
+    return state;
+  }
+
+  function closeDesktop() {
+    if (!desktop) return Promise.resolve();
+    desktopClosing ??= (async () => {
+      const state = desktop;
+      clearInterval(state.timer);
+      // Asked, not killed: the browser writes its cookies (the sign-in) as it quits.
+      await Promise.all([stopProcess(state.vnc, 3_000), stopProcess(state.chrome, 15_000)]);
+      desktop = null; desktopClosing = null;
+      log('sign-in desktop closed');
+    })();
+    return desktopClosing;
+  }
+
   // ---- control socket -----------------------------------------------------------------------
 
   async function handle(method, path, input = {}) {
@@ -441,6 +536,7 @@ export function createAgent({
     },
     async close() {
       await closeViewer();
+      await closeDesktop();
       await new Promise(resolve => (control.listening ? control.close(resolve) : resolve()));
       await queue.catch(() => {});
       if (browser) await browser.close().catch(() => {});
