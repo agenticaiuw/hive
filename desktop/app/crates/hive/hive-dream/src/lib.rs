@@ -24,5 +24,6 @@ pub mod register;
 pub mod report;
 pub mod rustscan;
 pub mod schedule;
+pub mod sync;
 pub mod time;
 pub mod timeline;
