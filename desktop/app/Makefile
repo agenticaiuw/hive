@@ -28,6 +28,14 @@ build/.hive-built: crates/hive/Cargo.toml crates/hive/Cargo.lock $(call sources,
 $(HIVE_BUILT): build/.hive-built
 	@:
 
+# The nightly self-review, not part of `all` (Agent.app never runs it): `make build/hive-dream`,
+# then `build/hive-dream install-schedule` writes its LaunchAgent.
+build/hive-dream: crates/hive/Cargo.toml crates/hive/Cargo.lock $(call sources,crates/hive/hive-dream)
+	@mkdir -p build
+	cargo build --locked --release --manifest-path crates/hive/Cargo.toml -p hive-dream --bin hive-dream
+	cp $(HIVE_RELEASE_DIR)/hive-dream $@.tmp
+	mv $@.tmp $@
+
 # Compiled separately from the running agent so updates never replace a live executable in place.
 build/agent-workspace-client: crates/agent-core/Cargo.toml crates/agent-core/Cargo.lock $(call sources,crates/agent-core/src)
 	@mkdir -p build

@@ -1,0 +1,19 @@
+[package]
+name = "hive-dream"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Hive's nightly self-review: clusters where tasks got stuck in its own journals, log and recordings, has Codex propose a tested code fix on a local branch, and gates it in code"
+
+[dependencies]
+serde_json.workspace = true
+regex.workspace = true
+libc.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "hive-dream"
+path = "src/main.rs"
