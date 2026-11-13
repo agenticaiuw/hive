@@ -307,12 +307,16 @@ pub fn archive_with(folder: &Path, cf: &Cf, bucket: &str) -> Result<String, Stri
         uploaded.push(json!({"key": key, "bytes": bytes}));
     }
     let count = uploaded.len();
+    let video = folder.join("screen.mov");
     let manifest = json!({"bucket": bucket, "uploaded": util::Local::now().iso_seconds(), "objects": uploaded,
-                          "originalVideoOnMac": folder.join("screen.mov").to_string_lossy()});
+                          "originalVideoOnMac": video.exists().then(|| video.to_string_lossy().into_owned())});
     let text = pyjson::dumps_with(&manifest, true, Some(1));
-    // As in Python: without an upload folder (no screen.mov or no ffmpeg) this fails, the folder
-    // isn't marked uploaded, and it is tried again next time.
-    let written = folder.join("upload/manifest.json");
+    // A recording whose screen capture made no video has no upload folder yet (only `shrink`
+    // makes one). Its timeline, subtitles and meta still went up, so it is done: before
+    // 2026-11-13 the manifest write failed here and every Hive start uploaded them again.
+    let upload = folder.join("upload");
+    std::fs::create_dir_all(&upload).map_err(|e| util::os_error(&e, &upload))?;
+    let written = upload.join("manifest.json");
     std::fs::write(&written, &text).map_err(|e| util::os_error(&e, &written))?;
     put(cf, bucket, &format!("{prefix}/manifest.json"), &written);
     let done = folder.join(".uploaded");
