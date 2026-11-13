@@ -507,23 +507,14 @@ impl Agent {
             params["sandbox"] = json!("workspace-write");
             // Its shell can reach the internet (curl, gh, wrangler, APIs). Without this the shell is
             // offline, and an agent that can't reach an API turns to the screen and does the work as
-            // the user. It can also write in hive-dream's folder: the nightly self-review hands Hive's
-            // agent a git worktree there to write a failing test and the fix in, and builds there.
-            params["config"] = json!({"sandbox_workspace_write": {
-                "network_access": true,
-                "writable_roots": [dream_dir().display().to_string()],
-            }});
+            // the user.
+            params["config"] = json!({"sandbox_workspace_write": {"network_access": true}});
         }
         if self.fast() {
             params["serviceTier"] = json!("priority"); // the id Codex's model list gives its Fast tier
         }
         Ok(params)
     }
-}
-
-/// hive-dream's folder (`<state>/dream`): its worktrees and build folder.
-pub fn dream_dir() -> PathBuf {
-    hive_common::state_dir().join("dream")
 }
 
 fn make_dirs(path: &Path) -> Result<(), AgentError> {
