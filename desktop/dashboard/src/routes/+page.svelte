@@ -471,7 +471,7 @@
 <main class="dashboard-shell">
   <header class="topbar">
     <div class="brand">
-      <!-- The product icon, from assets/icon via scripts/sync-icons.mjs — this used to be a green letter "P" that matched nothing else the product wears. -->
+      <!-- Hive's icon: static/hive.svg links to branding/hive.svg at the repository's root, its only copy. -->
       <img class="brand-mark" src="{base}/hive.svg" alt="Hive" title="Hive" />
       <h1>Hive</h1>
     </div>

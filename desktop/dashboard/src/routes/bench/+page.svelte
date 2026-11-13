@@ -580,7 +580,7 @@
   });
 </script>
 
-<svelte:head><title>Bench — AI Pendant</title></svelte:head>
+<svelte:head><title>Bench — Hive</title></svelte:head>
 
 <main class="bn">
   <header class="bn-head">

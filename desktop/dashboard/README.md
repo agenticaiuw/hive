@@ -1,6 +1,6 @@
-# AI Pendant Dashboard (SvelteKit)
+# Hive Dashboard (SvelteKit)
 
-App-authenticated Mission Control dashboard for the AI Pendant hardware and
+App-authenticated Mission Control dashboard for Hive: the pendant hardware and the
 cloud pipeline. Svelte 5 + `@sveltejs/adapter-cloudflare`, deployed as the
 `ai-pendant-dashboard` Worker.
 

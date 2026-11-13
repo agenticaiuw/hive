@@ -146,7 +146,7 @@ build/agent-unified-host: tools/build-workspace.sh scripts/build-spaceo.sh $(cal
 	bash tools/build-workspace.sh
 
 # Hive's icon is drawn once, in branding/hive.svg at the repository's root; the app's .icns is
-# built from it. The Chrome extension's PNGs are kept in git: `make chrome-icons` after a change.
+# built from it. The other places' PNGs are kept in git: `node mobile/tools/sync-icons.mjs`.
 build/hive-icon: tools/hive-icon.swift
 	@mkdir -p build
 	swiftc -O tools/hive-icon.swift -o $@.tmp
@@ -155,9 +155,6 @@ build/hive-icon: tools/hive-icon.swift
 build/Hive.icns: ../../branding/hive.svg build/hive-icon
 	build/hive-icon ../../branding/hive.svg icns build/Hive.tmp.icns
 	mv build/Hive.tmp.icns $@
-
-chrome-icons: build/hive-icon
-	for size in 16 32 48 128 512; do build/hive-icon ../../branding/hive.svg png $$size ../../browser/chrome/src/icons/icon-$$size.png; done
 
 # Staged multi-window implementation. It is intentionally separate until the display and
 # takeover have been verified on this Mac; the normal installed Agent remains usable.
@@ -189,4 +186,4 @@ build/Agent.app: build/agent-workspace-client build/agent-thread-identity build/
 clean:
 	rm -rf build
 
-.PHONY: all clean chrome-icons
+.PHONY: all clean

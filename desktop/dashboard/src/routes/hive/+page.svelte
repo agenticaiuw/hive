@@ -299,7 +299,7 @@
 </script>
 
 <svelte:head>
-  <title>Hive — AI Pendant Dashboard</title>
+  <title>Fleet — Hive</title>
 </svelte:head>
 
 <main class="hv-shell">

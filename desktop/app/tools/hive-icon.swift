@@ -1,9 +1,13 @@
 // Draws Hive's icon (branding/hive.svg at the repository's root, the only copy) at the sizes
 // each place needs. AppKit draws SVG itself.
 //
-//   hive-icon <svg> icns <out.icns>        the Mac app's icon, through iconutil
-//   hive-icon <svg> png <size> <out.png>   one square PNG (the Chrome extension's icons)
+//   hive-icon <svg> icns <out.icns>                 the Mac app's icon, through iconutil
+//   hive-icon <svg> png <size> <out.png> [opaque]   one square PNG; `opaque` drops the alpha
+//                                                   channel, as iOS app icons need
+// mobile/tools/sync-icons.mjs uses it for every other place that shows the icon.
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 func fail(_ said: String) -> Never {
     FileHandle.standardError.write((said + "\n").data(using: .utf8)!)
@@ -25,7 +29,26 @@ func png(_ image: NSImage, _ size: Int) -> Data {
     return data
 }
 
-let usage = "usage: hive-icon <svg> icns <out.icns> | hive-icon <svg> png <size> <out.png>"
+/// The same picture with no alpha channel (anything see-through comes out black).
+func opaquePNG(_ image: NSImage, _ size: Int) -> Data {
+    guard let drawn = NSBitmapImageRep(data: png(image, size))?.cgImage,
+          let context = CGContext(
+            data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { fail("hive-icon: no opaque bitmap for \(size) px") }
+    context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    context.draw(drawn, in: CGRect(x: 0, y: 0, width: size, height: size))
+    let data = NSMutableData()
+    guard let flat = context.makeImage(),
+          let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)
+    else { fail("hive-icon: no opaque PNG") }
+    CGImageDestinationAddImage(dest, flat, nil)
+    guard CGImageDestinationFinalize(dest) else { fail("hive-icon: no opaque PNG") }
+    return data as Data
+}
+
+let usage = "usage: hive-icon <svg> icns <out.icns> | hive-icon <svg> png <size> <out.png> [opaque]"
 let args = CommandLine.arguments
 guard args.count >= 4 else { fail(usage) }
 guard let image = NSImage(contentsOf: URL(fileURLWithPath: args[1])), image.isValid else {
@@ -33,9 +56,11 @@ guard let image = NSImage(contentsOf: URL(fileURLWithPath: args[1])), image.isVa
 }
 
 switch (args[2], args.count) {
-case ("png", 5):
+case ("png", 5), ("png", 6):
     guard let size = Int(args[3]), size > 0 else { fail(usage) }
-    try png(image, size).write(to: URL(fileURLWithPath: args[4]))
+    let opaque = args.count == 6
+    guard !opaque || args[5] == "opaque" else { fail(usage) }
+    try (opaque ? opaquePNG(image, size) : png(image, size)).write(to: URL(fileURLWithPath: args[4]))
 case ("icns", 4):
     let fm = FileManager.default
     let iconset = fm.temporaryDirectory.appendingPathComponent("hive-icon-\(getpid()).iconset")
