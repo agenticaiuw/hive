@@ -4,10 +4,11 @@
 //! app makes once (with its [`Hooks`]) and hands to every task.
 
 use crate::app_server::{AppServer, Server};
+use crate::claude::{self, ClaudeSession};
 use crate::hooks::Hooks;
 use crate::prompts;
 use crate::py;
-use crate::session::Session;
+use crate::session::{Session, TaskSession};
 use crate::util::{lock, AgentError, Env};
 use hive_common::tools::{namespace_spec, ToolNamespace};
 use serde_json::{json, Value};
@@ -80,6 +81,8 @@ pub struct Agent {
     pub hooks: Hooks,
     server: Mutex<Option<Arc<dyn Server>>>,
     session: Mutex<Arc<Session>>,
+    /// The Claude conversation, when `AGENT_BACKEND=claude` chose Claude over Codex.
+    claude: Option<Arc<ClaudeSession>>,
     /// The tests' stand-in for starting `codex app-server`.
     pub(crate) server_factory: Mutex<Option<ServerFactory>>,
     /// The tests' thread parameters (Python's `mock.patch.object(agent, "thread_params")`).
@@ -88,12 +91,14 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(env: Env, config: Config, hooks: Hooks) -> Arc<Agent> {
+        let claude = claude::wanted(&env);
         Arc::new_cyclic(|me: &Weak<Agent>| Agent {
             env,
             config,
             hooks,
             server: Mutex::new(None),
             session: Mutex::new(Session::with_agent(me.clone(), None)),
+            claude: claude.then(|| ClaudeSession::with_agent(me.clone())),
             server_factory: Mutex::new(None),
             params_override: Mutex::new(None),
         })
@@ -109,10 +114,35 @@ impl Agent {
         *lock(&self.session) = session;
     }
 
+    /// `AGENT_BACKEND=claude`'s conversation (claude_agent.py's `_session`); None on Codex.
+    pub fn claude_session(&self) -> Option<Arc<ClaudeSession>> {
+        self.claude.clone()
+    }
+
+    /// What runs the requests: "claude" or "codex" (`AGENT_BACKEND`, read when it was made).
+    pub fn backend(&self) -> &'static str {
+        if self.claude.is_some() {
+            "claude"
+        } else {
+            "codex"
+        }
+    }
+
+    /// The conversation a new task is part of.
+    pub(crate) fn task_session(&self) -> Arc<dyn TaskSession> {
+        match &self.claude {
+            Some(claude) => claude.clone(),
+            None => self.session(),
+        }
+    }
+
     /// Compatibility entry point: prepares the durable conversation when listening starts (false,
     /// doing nothing, while one of its requests is running). Listening toggles never reset the
     /// conversation's identity, including after a restart.
     pub fn new_session(&self) -> bool {
+        if let Some(claude) = &self.claude {
+            return claude.new_session();
+        }
         let session = self.session();
         if session.busy() {
             return false;
@@ -168,6 +198,9 @@ impl Agent {
 
     /// The model and effort the computer agent runs with, e.g. 'gpt-6.1-terra, low effort'.
     pub fn describe_model(&self) -> String {
+        if self.claude.is_some() {
+            return claude::describe_model(self);
+        }
         format!(
             "{}, {} effort{}",
             self.model(),
@@ -381,6 +414,9 @@ impl Agent {
 
     /// Ends the app-server (agent.py did this at exit).
     pub fn stop_server(&self) {
+        if let Some(claude) = &self.claude {
+            claude.terminate();
+        }
         let server = lock(&self.server).take();
         if let Some(server) = server {
             server.close();
@@ -392,6 +428,10 @@ impl Agent {
     pub fn warm_up(&self) {
         let tabs = self.hooks.warm_browser_tabs.clone();
         std::thread::spawn(move || tabs());
+        if let Some(claude) = &self.claude {
+            claude.prepare(); // its process starts in the background
+            return;
+        }
         if let Ok(server) = self.codex_server() {
             if self.env.get("AGENT_SPACEO_COMMAND").is_some() {
                 // Force MCP startup so the virtual display exists before the first spoken task.
