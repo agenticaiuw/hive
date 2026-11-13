@@ -93,8 +93,9 @@ screenshots and does them with the virtual mouse and keyboard while you watch,
 telling you out loud what it's doing as it goes and what happened at the end.
 Then control comes back to you. Tap fn again to stop it listening: what you were
 in the middle of saying still counts, and a task it's doing carries on. Agent's
-menu does the same (Start/Stop Listening), and has Speak Aloud (off: replies are
-shown, not spoken), Show Floating Window, Open at Login, Show Log
+menu does the same (Start/Stop Listening), and has Sound (Voice and Chimes) (off:
+replies are shown, not spoken, and there's no chime when the agent takes or gives
+back the screen), Show Floating Window, Open at Login, Show Log
 (`~/Library/Logs/Agent.log`), Restart Agent and Quit Agent.
 
 Once, after installing:

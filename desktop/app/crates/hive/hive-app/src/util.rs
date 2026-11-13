@@ -289,7 +289,8 @@ pub fn workspace_voice_allowed() -> bool {
     }
 }
 
-/// Agent menu › Speak Aloud, in the state folder (see [`setting`]).
+/// Agent menu › Sound (Voice and Chimes), in the state folder (see [`setting`]). agent-vhid-helper
+/// reads it too (src/main.cpp `sound_on`): off, no chime when the agent takes or gives back the screen.
 pub const SPEAK_ALOUD: &str = "speak-aloud";
 /// Agent menu › Show Floating Window, in the state folder (see [`setting`]).
 pub const FLOATING_WINDOW: &str = "floating-window";

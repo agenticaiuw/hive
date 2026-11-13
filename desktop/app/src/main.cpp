@@ -28,6 +28,7 @@ struct options {
   bool no_watch = false;
   bool start_engaged = false;
   bool sound = true;
+  std::string sound_setting; // Hive's sound switch; default: the owner's state folder
   bool verbose = false;
   std::string user; // owns the socket; default: whoever ran sudo
   int quiet_ms = 400;
@@ -41,6 +42,8 @@ void usage() {
                "  --start-engaged   start with the agent in control instead of waiting for it to ask\n"
                "  --quiet-ms N      how long your hands must be off before the agent takes over (default 400)\n"
                "  --no-sound        no chime on engage/disengage\n"
+               "  --sound-setting F Hive's sound switch: no chime while F says off (default: speak-aloud in\n"
+               "                    the owner's ~/Library/Application Support/Personal Agent)\n"
                "  --verbose         log every physical input event\n"
                "  --dry-run         no root, no virtual devices: log reports instead (for testing)\n"
                "  --no-watch        with --dry-run only: skip watching real input devices\n";
@@ -61,6 +64,8 @@ bool parse(int argc, char** argv, options& o) {
       o.start_engaged = true;
     } else if (a == "--no-sound") {
       o.sound = false;
+    } else if (a == "--sound-setting" && i + 1 < argc) {
+      o.sound_setting = argv[++i];
     } else if (a == "--verbose") {
       o.verbose = true;
     } else if (a == "--user" && i + 1 < argc) {
@@ -74,6 +79,26 @@ bool parse(int argc, char** argv, options& o) {
     return false;
   }
   return true;
+}
+
+// Hive's sound switch (the Agent menu's Sound: Voice and Chimes, kept as "on"/"off" in its state
+// folder) is read at each chime, so turning it off silences the chimes at once, as it does the
+// voice. A missing or unreadable file is on, as it is for Hive.
+bool sound_on(const std::string& setting) {
+  if (setting.empty()) {
+    return true;
+  }
+  int fd = open(setting.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    return true;
+  }
+  char text[16] = {0};
+  ssize_t n = read(fd, text, sizeof(text) - 1);
+  close(fd);
+  std::string word(text, n > 0 ? static_cast<size_t>(n) : 0);
+  word.erase(0, word.find_first_not_of(" \t\r\n"));
+  word.erase(word.find_last_not_of(" \t\r\n") + 1);
+  return word != "off";
 }
 
 void play(const char* sound) {
@@ -140,6 +165,12 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (o.sound_setting.empty()) {
+    if (auto pw = getpwuid(owner_uid); pw && pw->pw_dir) {
+      o.sound_setting = std::string(pw->pw_dir) + "/Library/Application Support/Personal Agent/speak-aloud";
+    }
+  }
+
   std::signal(SIGPIPE, SIG_IGN);
   std::signal(SIGCHLD, SIG_IGN); // afplay children reap themselves
   std::signal(SIGINT, [](int) { stop_requested = true; });
@@ -170,10 +201,20 @@ int run(const options& o, uid_t owner_uid, gid_t owner_gid) {
         [&inj] { inj->release_all(); },
         [&o](gate::state s) {
           std::cerr << "[gate] " << gate::name(s) << std::endl;
-          if (o.sound && s == gate::state::engaged) {
-            play("Glass");
-          } else if (o.sound && s == gate::state::disengaged) {
-            play("Funk");
+          const char* chime = s == gate::state::engaged      ? "Glass"
+                              : s == gate::state::disengaged ? "Funk"
+                                                             : nullptr;
+          if (!chime || !o.sound) {
+            return;
+          }
+          if (!sound_on(o.sound_setting)) {
+            if (o.verbose) {
+              std::cerr << "[sound] muted: " << chime << std::endl;
+            }
+          } else if (o.dry_run) {
+            std::cerr << "[sound] " << chime << std::endl; // a dry run says it instead of playing it
+          } else {
+            play(chime);
           }
         });
     watcher w(

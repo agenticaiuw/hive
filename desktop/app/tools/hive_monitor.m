@@ -261,6 +261,15 @@ static NSString *stateDir(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Personal Agent"];
 }
 
+/// The beep for a tap that can't switch, unless Hive's sound is off (Agent menu › Sound (Voice and
+/// Chimes): "off" in the state folder's speak-aloud).
+static void beepUnlessMuted(void) {
+    NSString *word = [NSString stringWithContentsOfFile:[stateDir() stringByAppendingPathComponent:@"speak-aloud"]
+                                               encoding:NSUTF8StringEncoding error:nil];
+    word = [word stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (![word isEqualToString:@"off"]) NSBeep();
+}
+
 @interface HiveSwitch : NSObject <SCStreamOutput, SCStreamDelegate>
 - (void)switchOut;
 - (void)toggle;
@@ -334,10 +343,10 @@ static NSString *stateDir(void) {
 
 - (void)switchIn {
     CGDirectDisplayID display = onlineHiveDisplay();
-    if (!display) { fprintf(stderr, "switch: the virtual monitor is off\n"); NSBeep(); return; }
+    if (!display) { fprintf(stderr, "switch: the virtual monitor is off\n"); beepUnlessMuted(); return; }
     if (!CGPreflightScreenCaptureAccess()) {
         fprintf(stderr, "switch: no Screen Recording permission, so the virtual monitor can't be shown\n");
-        NSBeep();
+        beepUnlessMuted();
         return;
     }
     _display = display;

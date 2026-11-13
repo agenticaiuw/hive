@@ -259,8 +259,8 @@ pub struct VoiceAgent {
     inbox: Mutex<Receiver<Event>>,
     /// The window's mic button: the microphone stays off however fn is used.
     pub muted: Flag,
-    /// Agent menu › Speak Aloud (kept in util::SPEAK_ALOUD): off, what it says is shown and
-    /// saved but not spoken.
+    /// Agent menu › Sound (Voice and Chimes), kept in util::SPEAK_ALOUD: off, what it says is shown
+    /// and saved but not spoken, and agent-vhid-helper reads the same file and plays no chimes.
     pub speaking: Flag,
     /// Every task is recorded (task_recording); set by whoever builds the agent.
     pub recorder: Slot<Option<Arc<Recorder>>>,
@@ -756,7 +756,7 @@ impl VoiceAgent {
         }
         if !speaking {
             self.out(
-                "🔇 Speak Aloud is off (Agent menu): replies are shown and logged, not spoken",
+                "🔇 Sound is off (Agent menu): no voice and no chimes; replies are shown and logged",
             );
         }
     }
@@ -769,7 +769,7 @@ impl VoiceAgent {
         self.speaking.set(on);
         if let Err(error) = util::set_setting(util::SPEAK_ALOUD, on) {
             self.out(&format!(
-                "   ✗ Speak Aloud couldn't be kept for next time: {error}"
+                "   ✗ Sound couldn't be kept for next time: {error}"
             ));
         }
         if !on {
@@ -792,9 +792,9 @@ impl VoiceAgent {
             json!({"from": "the menu"}),
         );
         self.out(if on {
-            "🔊 Speak Aloud on (Agent menu): replies are spoken"
+            "🔊 Sound on (Agent menu): replies are spoken, with chimes"
         } else {
-            "🔇 Speak Aloud off (Agent menu): replies are shown and logged, not spoken"
+            "🔇 Sound off (Agent menu): no voice and no chimes; replies are shown and logged"
         });
     }
 

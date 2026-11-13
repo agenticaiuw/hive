@@ -45,13 +45,21 @@ struct Helper {
 
 impl Helper {
     fn start(program: &Path, extra: &[&str]) -> Helper {
+        Helper::start_with(
+            program,
+            &["--dry-run", "--no-watch", "--no-sound", "--verbose"],
+            extra,
+        )
+    }
+
+    fn start_with(program: &Path, base: &[&str], extra: &[&str]) -> Helper {
         let dir = tempfile::Builder::new()
             .prefix("avh-")
             .tempdir()
             .expect("temp dir");
         let socket = dir.path().join("s.sock");
         let mut child = Command::new(program)
-            .args(["--dry-run", "--no-watch", "--no-sound", "--verbose"])
+            .args(base)
             .args(["--quiet-ms", "100", "--socket"])
             .arg(&socket)
             .args(extra)
@@ -132,6 +140,12 @@ impl Helper {
     fn mark(&self) -> usize {
         self.settle();
         self.count()
+    }
+
+    /// Every line it wrote after the first `since` lines.
+    fn lines_since(&self, since: usize) -> Vec<String> {
+        self.settle();
+        lock(&self.lines)[since..].to_vec()
     }
 
     /// The reports it logged after the first `since` lines.
@@ -538,4 +552,48 @@ fn helper_starts_disengaged_by_default() {
     assert!(helper
         .raw("move 1 1")
         .starts_with("err disengaged state=disengaged reason=startup"));
+}
+
+/// Hive's sound switch (Agent menu › Sound: Voice and Chimes, the state folder's `speak-aloud`) is
+/// read at each chime: off, the helper says it would have chimed and doesn't; on (or no file at all),
+/// it chimes. A dry run says "[sound] Glass" instead of playing it.
+#[test]
+fn hives_sound_switch_silences_the_chimes() {
+    let Some(program) = built() else { return };
+    let folder = tempfile::tempdir().unwrap();
+    let setting = folder.path().join("speak-aloud");
+    let helper = Helper::start_with(
+        &program,
+        &["--dry-run", "--no-watch", "--verbose"],
+        &["--sound-setting", setting.to_str().unwrap()],
+    );
+    let mac = AgentVHID::new(&helper.socket, 1.0, false).with_system(FakeSystem::new());
+    let engage = |what: &str| {
+        let since = helper.mark();
+        mac.engage().unwrap();
+        assert!(
+            mac.wait_engaged(Some(Duration::from_secs(3)), false).unwrap(),
+            "{what}: engaged"
+        );
+        helper.lines_since(since)
+    };
+
+    let lines = engage("no setting yet");
+    assert!(lines.iter().any(|l| l == "[sound] Glass"), "{lines:?}");
+
+    std::fs::write(&setting, "off\n").unwrap();
+    let since = helper.mark();
+    mac.disengage().unwrap();
+    let lines = helper.lines_since(since);
+    assert!(lines.iter().any(|l| l == "[sound] muted: Funk"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == "[sound] Funk"), "{lines:?}");
+    let lines = engage("off");
+    assert!(lines.iter().any(|l| l == "[sound] muted: Glass"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == "[sound] Glass"), "{lines:?}");
+
+    std::fs::write(&setting, "on\n").unwrap();
+    let since = helper.mark();
+    mac.disengage().unwrap();
+    let lines = helper.lines_since(since);
+    assert!(lines.iter().any(|l| l == "[sound] Funk"), "{lines:?}");
 }
