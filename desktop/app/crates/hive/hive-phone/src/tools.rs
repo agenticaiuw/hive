@@ -37,7 +37,7 @@ pub trait PhoneAuthenticator: Send + Sync {
     fn authenticate_phone(&self, phone: &Phone) -> Result<String, String>;
 }
 
-const AUTH_FAILED: &str = "Phone authentication was not confirmed. Check that Pocket Connect is online, \
+const AUTH_FAILED: &str = "Phone authentication was not confirmed. Check that the WebDriverAgent relay app is online, \
 the device passcode is configured in Agent → Authentication, and a system passcode prompt is visible. \
 Do not retry a failed attempt; check the phone yourself.";
 
@@ -53,7 +53,7 @@ pub fn tool_list() -> Vec<Value> {
         json!({
             "name": "authenticate",
             "description": "Use the locally saved device passcode at a verified iPhone system passcode prompt. \
-        Requires the configured phone to stay connected through Pocket Connect. \
+        Requires the configured phone to stay connected through the WebDriverAgent relay app. \
         Takes no secret arguments; this is not for app passwords or payments. \
         Returns status only. If unavailable or rejected, stop and let the user authenticate; never retry or ask for the passcode in chat.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
