@@ -28,8 +28,8 @@ build/.hive-built: crates/hive/Cargo.toml crates/hive/Cargo.lock $(call sources,
 $(HIVE_BUILT): build/.hive-built
 	@:
 
-# The nightly self-review, not part of `all` (Agent.app never runs it): `make build/hive-dream`,
-# then `build/hive-dream install-schedule` writes its LaunchAgent.
+# The nightly self-review, not part of `all` (Agent.app never runs it). It runs on Hive's cloud
+# VM (cloud/dream/install.sh); `make build/hive-dream` builds it here to try it by hand.
 build/hive-dream: crates/hive/Cargo.toml crates/hive/Cargo.lock $(call sources,crates/hive/hive-dream)
 	@mkdir -p build
 	cargo build --locked --release --manifest-path crates/hive/Cargo.toml -p hive-dream --bin hive-dream

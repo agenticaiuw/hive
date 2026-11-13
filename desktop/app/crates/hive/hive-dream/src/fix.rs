@@ -1,9 +1,10 @@
 //! `hive-dream fix`: for the open clusters that lost the most time, a git worktree of the repo on
-//! a local `dream/<date>-<slug>` branch from origin/main, and two steps by Hive's own agent (a
-//! request through its socket, as `hive-ask` sends; HIVE_DREAM_AGENT=codex asks the Codex CLI
-//! instead; never Claude): step 1 a test, committed and run on the code as it is, which must
-//! fail; step 2 the fix. Then the gate on both, and one squashed commit on the branch. Landing is
-//! `land` (by hand) or the nightly run (`deploy`); the shared working tree is never touched here.
+//! a `dream/<date>-<slug>` branch from origin/main, and two steps by Hive's own agent (on the VM
+//! its VM agent, `cloud/vm-agent/hive-task.mjs --code`; on the Mac a request through Hive's
+//! socket, as `hive-ask` sends; HIVE_DREAM_AGENT=codex asks the Codex CLI; never Claude): step 1
+//! a test, committed and run on the code as it is, which must fail; step 2 the fix. Then the gate
+//! on both, one squashed commit on the branch, and the macOS check (`ci`), which lands it or
+//! doesn't. `land` lands a branch by hand; the shared working tree is never touched here.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

@@ -649,33 +649,53 @@ build/hive-vhid engage        # take control, once your hands are off
 
 ## Dreaming: Hive fixes itself at night
 
-Every night (03:30, retried hourly until 07:30 while you're at the Mac or Hive
-is busy) `build/hive-dream nightly` reads what went wrong since the last run:
-the session journals, the task recordings' timelines and Agent.log. It groups
-the failures into clusters and counts how often each happened and how many
-minutes it cost. Then it hands the worst fixable cluster to **Hive's own
-agent**, as a request through Hive's socket (what `hive-ask` sends), in two
-steps, each in a private git worktree under `<state>/dream/worktrees/`:
+The dream runs in the cloud, on Hive's VM, and is done by Hive's own agent.
+
+**The logs go up.** The Mac uploads what the dream reads to R2 (hive-knowledge's
+`log_archive`, at most every 30 minutes, after each recording and when Hive
+starts): the session journals, Agent.log, the few settings files it checks, and
+`logs/index.json` listing them with every uploaded recording.
+
+**The night.** A systemd timer on the VM starts `cloud/dream/nightly.sh` at
+09:30 UTC (caught up after a reboot). It brings the VM's clone up to main,
+builds hive-dream, mirrors the Mac's logs from R2 (`hive-dream sync`, the last
+14 days), then runs `hive-dream nightly`: it groups what went wrong into
+clusters, counts how often each happened and how many minutes it cost, and
+hands the worst fixable one to **Hive's VM agent** (`cloud/vm-agent/hive-task.mjs
+--code`: Codex in a sandbox with no network that can write only in its git
+worktree), in two steps:
 
 1. Write a test that shows the problem. hive-dream commits it and runs it on
    the code as it is; it must fail.
 2. Fix the code so it passes.
 
-A gate written in code then checks the change. It must stay out of credentials, auth, settings defaults,
-prompts, approvals and the dream itself. It needs a test and a real code change,
-can't remove or ignore tests, and can't contain private terms. The crate's
-tests must pass and the whole workspace must build. A passing fix is landed on main in ~/hive, built with `make`,
-pushed, and Hive is restarted with it if nobody is using it. A build that fails
-takes the landing back. A fix whose test only failed to compile (it called code
-that didn't exist yet) waits for you: `build/hive-dream land <branch>`.
+**The gate**, written in code, then checks the change. It must stay out of
+credentials, auth, settings defaults, prompts, approvals and the dream itself.
+It needs a test and a real code change, can't remove or ignore tests, and can't
+contain private terms (one per line, never in the repo, in
+`/var/lib/hive-dream/dream/private-terms`). The crate's tests must pass and the
+workspace must build. The VM runs Linux, so hive-mac, hive-sidecars and
+hive-app can't build there.
 
-The morning report is `<state>/dream/<date>/report.md`; `build/hive-dream
-status` lists every cluster. `make build/hive-dream && build/hive-dream
-install-schedule` sets it up; `uninstall-schedule` stops it.
-`HIVE_DREAM_AUTOLAND=0` keeps fixes on their branches; `HIVE_DREAM_AGENT=codex`
-asks the Codex CLI instead of Hive. Private terms (one per line, never in the
-repo) go in `<state>/dream/private-terms`. Hive's agent may write in
-`<state>/dream` for this; its sandbox is otherwise unchanged.
+**The macOS check.** A passing fix is pushed to a `dream/<date>-<slug>` branch
+(the VM has a deploy key for this repo; it pushes nothing else).
+`.github/workflows/dream.yml` runs on a macOS runner: the test on the old code
+must fail on an assertion, and the fix, squashed onto main as it is now, must
+pass the same gate with every test. Then the workflow pushes the squash to main
+and deletes the branch. A test that only failed to compile (it called code that
+didn't exist yet) proves nothing, so that branch waits for a person:
+`build/hive-dream land <branch>`. A test in a macOS-only crate goes to the
+check alone first, and the VM agent gets its failure for step 2. What the check
+decided is on `refs/dream/ci/<name>` (result.json and the logs). The workflow's
+daily run on main (08:00 UTC) keeps its build cache warm and shows which tests
+fail on main before any dream.
+
+A fix on main reaches the Mac with its next pull and build. The morning report
+is `/var/lib/hive-dream/dream/<date>/report.md` on the VM and
+`hive-recordings/dream/<date>/report.md` in R2; `hive-dream status` there lists
+every cluster. `sudo bash cloud/dream/install.sh` (from the VM's clone) sets it
+up. To try it on the Mac, `make build/hive-dream` and run it with
+`HIVE_DREAM_AGENT=hive` (Hive's agent through its socket) and `HIVE_DREAM_CI=0`.
 
 ## How it behaves like a person
 
