@@ -98,7 +98,8 @@ fn pending_recordings_are_reported_and_marked() {
     let cf = fake_cf(dir.path(), 0);
     let done = recording(&root, "done");
     std::fs::write(done.join(".uploaded"), "{}").unwrap();
-    recording(&root, "no upload folder"); // as in Python: the manifest can't be written yet
+    // No video was captured, so no upload folder: its timeline, subtitles and meta still go up.
+    let no_video = recording(&root, "no video");
     let ready = recording(&root, "ready");
     std::fs::create_dir(ready.join("upload")).unwrap();
     std::fs::create_dir(root.join("unfinished")).unwrap(); // no meta.json: still recording
@@ -109,15 +110,28 @@ fn pending_recordings_are_reported_and_marked() {
     cloud_archive::archive_pending_in(&root, Some(cf), "b", Some(report.clone()));
     let lines = lines.lock().unwrap().clone();
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(lines[0].starts_with(
-        "Recording no upload folder: upload failed: [Errno 2] No such file or directory: "
-    ));
     assert_eq!(
-        lines[1],
-        "Recording ready: uploaded 3 files to R2 b/recordings/ready"
+        lines,
+        [
+            "Recording no video: uploaded 3 files to R2 b/recordings/no-video",
+            "Recording ready: uploaded 3 files to R2 b/recordings/ready",
+        ]
     );
     assert!(ready.join(".uploaded").exists());
-    assert!(!root.join("no upload folder/.uploaded").exists());
+    assert!(no_video.join(".uploaded").exists());
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(no_video.join("upload/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest["originalVideoOnMac"].is_null());
+    // Once marked, a folder isn't uploaded again.
+    let again = Arc::new(Mutex::new(Vec::new()));
+    let seen = again.clone();
+    let report: hive_knowledge::Report =
+        Arc::new(move |line: &str| seen.lock().unwrap().push(line.to_string()));
+    cloud_archive::archive_pending_in(&root, Some(fake_cf(dir.path(), 0)), "b", Some(report));
+    assert!(again.lock().unwrap().is_empty());
+    std::fs::remove_file(no_video.join(".uploaded")).unwrap();
     let missing = Arc::new(Mutex::new(Vec::new()));
     let seen = missing.clone();
     let report: hive_knowledge::Report =
@@ -125,7 +139,7 @@ fn pending_recordings_are_reported_and_marked() {
     cloud_archive::archive_pending_in(&root, None, "b", Some(report));
     assert_eq!(
         *missing.lock().unwrap(),
-        ["Recording no upload folder: cf (Cloudflare CLI) not found"]
+        ["Recording no video: cf (Cloudflare CLI) not found"]
     );
 }
 

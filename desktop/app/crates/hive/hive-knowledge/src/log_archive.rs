@@ -130,9 +130,12 @@ pub fn upload_with(
     let all = items(state, agent_log);
     let (mut sent, mut failed) = (0usize, Vec::new());
     for item in &all {
-        let same = known
-            .get(&item.key)
-            .is_some_and(|v| v[0].as_u64() == Some(item.bytes) && v[1].as_f64() == Some(item.mtime));
+        // serde_json's default float parsing can come back a hair off what was written, so the
+        // mtime is compared to the microsecond, not exactly.
+        let same = known.get(&item.key).is_some_and(|v| {
+            v[0].as_u64() == Some(item.bytes)
+                && v[1].as_f64().is_some_and(|m| (m - item.mtime).abs() < 1e-6)
+        });
         if same {
             continue;
         }
