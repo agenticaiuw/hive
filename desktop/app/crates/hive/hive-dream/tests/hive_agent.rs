@@ -1,9 +1,8 @@
 //! The dream done by Hive's own agent: the two prompts it gets, what hive-ask's exit status means
-//! for a step, how step 1's test failed, and which fixes land by themselves.
+//! for a step, and how step 1's test failed.
 
-use hive_dream::deploy::hold_reason;
 use hive_dream::evidence::Cluster;
-use hive_dream::fix::{fix_prompt, hive_ask_outcome, red_kind, test_prompt, FixResult, Setup};
+use hive_dream::fix::{fix_prompt, hive_ask_outcome, red_kind, test_prompt, Setup};
 use std::path::Path;
 
 fn cluster() -> Cluster {
@@ -106,27 +105,4 @@ fn a_red_test_failed_on_an_assertion_or_on_the_build() {
         "compile"
     );
     assert_eq!(red_kind("Killed: 9"), "");
-}
-
-#[test]
-fn only_a_fix_whose_test_failed_on_an_assertion_lands_by_itself() {
-    let proposed = |red: &str| FixResult {
-        outcome: "proposed".into(),
-        red: red.into(),
-        branch: Some("dream/x".into()),
-        ..Default::default()
-    };
-    assert_eq!(hold_reason(&proposed("assertion"), true), None);
-    assert!(hold_reason(&proposed("compile"), true)
-        .unwrap()
-        .contains("by hand"));
-    assert!(hold_reason(&proposed("assertion"), false)
-        .unwrap()
-        .contains("AUTOLAND"));
-    let rejected = FixResult {
-        outcome: "rejected".into(),
-        red: "assertion".into(),
-        ..Default::default()
-    };
-    assert!(hold_reason(&rejected, true).is_some());
 }

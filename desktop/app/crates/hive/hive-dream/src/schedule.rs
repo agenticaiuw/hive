@@ -1,21 +1,16 @@
-//! The nightly run and its LaunchAgent. `hive-dream nightly` (what launchd starts) postpones when
-//! Hive is in the middle of a task or the user touched the mouse or keyboard in the last ten
-//! minutes, runs at most once per date, and otherwise collects, has Hive's agent try one fix (test
-//! first), lands, builds, pushes and restarts Hive with a fix the gate passed (`deploy`), and
-//! writes the report. `install-schedule` writes ~/Library/LaunchAgents/local.hive.dream.plist.
+//! The nightly run. On Hive's cloud VM a systemd timer starts it (`cloud/dream/nightly.sh`,
+//! installed by `cloud/dream/install.sh`): `hive-dream nightly` runs at most once per date,
+//! collects, has Hive's VM agent try one fix (test first), and writes the report. The fix goes to
+//! the macOS check on GitHub Actions (`ci`), which lands it on main or doesn't. Run on the Mac by
+//! hand (HIVE_DREAM_AGENT=hive), it first waits for Hive to be idle and the user away.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::{collect, deploy, fix, paths, report, time};
+use crate::{collect, fix, paths, report, time};
 
-pub const LABEL: &str = "local.hive.dream";
 /// The user counts as present if they touched input more recently than this.
 pub const IDLE_SECS: f64 = 600.0;
-/// Local times launchd starts the nightly run (a run that already finished for the date, or one
-/// postponed, makes the later ones a retry). launchd runs a time missed while asleep on wake.
-pub const TIMES: &[(u32, u32)] = &[(3, 30), (4, 30), (5, 30), (6, 30), (7, 30)];
-
 /// `"HIDIdleTime" = 45043833` (nanoseconds) from `ioreg -c IOHIDSystem`.
 pub fn parse_hid_idle_ns(text: &str) -> Option<u64> {
     text.lines()
@@ -81,7 +76,7 @@ fn lock(dream: &Path) -> Result<std::fs::File, String> {
     Ok(f)
 }
 
-/// What launchd runs. Exits cleanly (with a log line) when it postpones or has nothing to do.
+/// What the VM's timer runs. Exits cleanly (with a log line) when it postpones or has nothing to do.
 pub fn nightly(force: bool) -> Result<(), String> {
     let dream = paths::dream_dir();
     let _lock = match lock(&dream) {
@@ -134,20 +129,19 @@ pub fn nightly(force: bool) -> Result<(), String> {
                     log_line(&format!("note: {note}"));
                 }
                 if let Some(done) = &r.deployed {
-                    // The macOS check already decided (the cloud dream).
+                    // The macOS check decided: landed on main, held for a person, or rejected.
                     log_line(done);
                     continue;
                 }
-                let deployed = match deploy::hold_reason(&r, deploy::autoland()) {
-                    Some(why) if r.outcome == "proposed" => format!("not landed: {why}"),
-                    Some(_) => continue,
-                    None => {
-                        let run_dir = night.join("fixes").join(&r.run);
-                        deploy::run(&r, &run_dir).unwrap_or_else(|e| format!("not landed: {e}"))
-                    }
-                };
-                log_line(&deployed);
-                r.deployed = Some(deployed);
+                if r.outcome != "proposed" {
+                    continue;
+                }
+                let branch = r.branch.clone().unwrap_or_default();
+                let kept = format!(
+                    "not landed: kept on {branch}, the macOS check being off (HIVE_DREAM_CI=0); `hive-dream land {branch}` lands it"
+                );
+                log_line(&kept);
+                r.deployed = Some(kept);
                 let _ = fix::save_result(&night, &r);
             }
         }
@@ -157,119 +151,6 @@ pub fn nightly(force: bool) -> Result<(), String> {
     paths::write_atomic(&done, &time::iso(time::now()))?;
     log_line(&format!("report: {}", path.display()));
     Ok(())
-}
-
-fn xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// The LaunchAgent: `<exe> nightly` at [`TIMES`], output to `<dream>/dream.log`, low priority.
-pub fn plist(exe: &Path, dream: &Path, home: &Path) -> String {
-    let log = xml(&dream.join("dream.log").to_string_lossy());
-    let times: String = TIMES
-        .iter()
-        .map(|(h, m)| {
-            format!("        <dict>\n            <key>Hour</key>\n            <integer>{h}</integer>\n            <key>Minute</key>\n            <integer>{m}</integer>\n        </dict>\n")
-        })
-        .collect();
-    let path = format!(
-        "{}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        home.to_string_lossy()
-    );
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>
-        <string>nightly</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <array>
-{times}    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{}</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>{log}</string>
-    <key>StandardErrorPath</key>
-    <string>{log}</string>
-    <key>LowPriorityIO</key>
-    <true/>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-</dict>
-</plist>
-"#,
-        xml(&exe.to_string_lossy()),
-        xml(&path)
-    )
-}
-
-pub fn plist_path() -> PathBuf {
-    paths::home()
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"))
-}
-
-/// Writes the LaunchAgent and (unless `load` is false) loads it with launchctl.
-pub fn install(exe: Option<PathBuf>, print: bool, load: bool) -> Result<String, String> {
-    let exe = match exe {
-        Some(e) => e,
-        None => std::env::current_exe().map_err(|e| e.to_string())?,
-    };
-    let exe = exe
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", exe.display()))?;
-    let text = plist(&exe, &paths::dream_dir(), &paths::home());
-    if print {
-        return Ok(text);
-    }
-    let path = plist_path();
-    paths::write_atomic(&path, &text)?;
-    if !load {
-        return Ok(format!("wrote {} (not loaded)", path.display()));
-    }
-    let uid = unsafe { libc::getuid() };
-    let domain = format!("gui/{uid}");
-    let _ = std::process::Command::new("/bin/launchctl")
-        .args(["bootout", &format!("{domain}/{LABEL}")])
-        .output();
-    let out = std::process::Command::new("/bin/launchctl")
-        .args(["bootstrap", &domain, &path.to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "launchctl bootstrap: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(format!("installed and loaded {}", path.display()))
-}
-
-pub fn uninstall() -> Result<String, String> {
-    let uid = unsafe { libc::getuid() };
-    let _ = std::process::Command::new("/bin/launchctl")
-        .args(["bootout", &format!("gui/{uid}/{LABEL}")])
-        .output();
-    let path = plist_path();
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(format!("removed {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("nothing installed".into()),
-        Err(e) => Err(e.to_string()),
-    }
 }
 
 /// For `hive-dream nightly` run by hand: flush stdout so the log reads in order.
