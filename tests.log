@@ -1,0 +1,254 @@
+$ cargo test --offline --manifest-path /Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/Cargo.toml -p hive-mac (19s)
+   Compiling personal-agent-core v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/agent-core)
+   Compiling hive-common v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-common)
+   Compiling hive-mac v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-mac)
+    Finished `test` profile [unoptimized] target(s) in 6.70s
+     Running unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_mac-377f115d6fa53373)
+
+running 17 tests
+test desktop::tests::no_browser_open_means_no_apple_events ... ok
+test desktop::tests::addresses_lose_their_query ... ok
+test desktop::tests::tabs_from_the_script ... ok
+test desktop::tests::the_front_is_the_app_its_window_and_a_browsers_page ... ok
+test desktop::tests::many_tabs_are_cut_off ... ok
+test desktop::tests::windows_and_tabs_read_front_to_back ... ok
+test tools::tests::finds_phrases_and_lines ... ok
+test tools::tests::tool_list_matches_python ... ok
+test vhid::tests::chars ... ok
+test vhid::tests::combos ... ok
+test vhid::tests::helper_unavailable ... ok
+test vhid::tests::replies ... ok
+test vhid::tests::rounding_and_formatting_match_python ... ok
+test vhid::tests::screenshot_coordinates ... ok
+test vhid::tests::took_over_means_a_human_touched_something ... ok
+test desktop::tests::window_list_reads ... ok
+test process::tests::runs_feeds_and_times_out ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running unittests src/bin/hive-credentials.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_credentials-f2882b7fea2a2631)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/hive-mac-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_mac_mcp-c327ecebd3b09809)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/hive-vhid.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_vhid-37e8e8502f1ec2d0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/credentials.rs (/Users/runner/work/_temp/dream/target/debug/deps/credentials-bbea3394a44ecef2)
+
+running 12 tests
+test device_changed_before_write ... ok
+test missing_bundles_fail_without_invocation ... ok
+test no_http_or_unknown_device ... ok
+test damaged_or_symlinked_hive_never_falls_back ... ok
+test fallback_only_when_hive_bundle_is_absent ... ok
+test phone_exact_secure_field_and_secret_free_result ... ok
+test reject_failed_attempt_and_passcode_change_screens ... ok
+test rejected_passcode_cannot_be_retried_across_instances ... ok
+test nonexecutable_hive_never_falls_back ... ok
+test prefers_installed_hive_over_legacy_and_build ... ok
+test webpage_cannot_request_device_passcode ... ok
+test usage ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/helper_dry_run.rs (/Users/runner/work/_temp/dream/target/debug/deps/helper_dry_run-25dce37968d538cc)
+
+running 20 tests
+test characters_off_the_keyboard_are_pasted ... ok
+test bad_requests ... ok
+test drag_keeps_button_held_while_moving ... ok
+test engage_hands_over_until_you_touch_something ... ok
+test engage_waits_for_quiet_period ... ok
+test helper_refuses_to_run_without_root_or_watcher ... ok
+test helper_starts_disengaged_by_default ... ok
+test hives_sound_switch_silences_the_chimes ... ok
+test human_input_disengages_and_releases_everything ... ok
+test keys_are_released_when_a_client_disconnects ... ok
+test large_moves_are_split_into_hid_sized_reports ... ok
+test modifier_click_holds_the_modifier ... ok
+test move_reports_when_cursor_does_not_follow ... ok
+test scroll_direction_follows_natural_scrolling ... ok
+test shortcut_presses_modifier_then_key ... ok
+test status ... ok
+test touch_while_arming_cancels ... ok
+test typing_uses_shift_for_capitals_and_symbols ... ok
+test watch_streams_fn_which_leaves_control_alone ... ok
+test watch_streams_hand_overs ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mac_tools.rs (/Users/runner/work/_temp/dream/target/debug/deps/mac_tools-6b9b82c0106d9742)
+
+running 31 tests
+test a_one_way_step_is_refused_before_the_mouse_or_keyboard_is_touched ... ok
+test a_failing_step_says_what_was_done ... ok
+test actions_after_a_takeover_carry_on_without_the_screen ... ok
+test a_click_on_hives_own_window_is_refused ... ok
+test an_empty_virtual_monitor_says_how_to_get_a_window_there ... ok
+test authentication_tools_call_the_mac ... ok
+test authenticate_takes_no_arguments ... ok
+test batch_runs_authenticate_only_alone_and_without_arguments ... ok
+test every_action_says_what_it_does ... ok
+test clipboard_and_unknown_tools ... ok
+test inaccessible_selection_is_an_error ... ok
+test mac_respects_user_takeover ... ok
+test an_action_looks_afterwards_unless_told_not_to ... ok
+test on_the_virtual_monitor_a_touch_mid_step_says_to_look_and_go_on ... ok
+test screenshot_pixels_map_to_points ... ok
+test screenshot_says_what_it_shows ... ok
+test mac_password_is_typed_into_focus_then_return ... ok
+test stops_at_a_step_it_cant_do ... ok
+test several_actions_in_one_call ... ok
+test on_the_virtual_monitor_a_takeover_doesnt_stop_the_agent ... ok
+test switch_window_says_what_is_open_when_nothing_matches ... ok
+test the_first_look_lists_the_windows ... ok
+test switch_window_brings_an_open_document_forward ... ok
+test the_mcp_server_lists_and_calls_the_tools ... ok
+test the_namespace_is_mac ... ok
+test tools_take_no_secret_arguments_and_are_not_batchable ... ok
+test wait_for_control_reports_unavailable_watcher ... ok
+test the_mouse_and_keyboard_are_taken_only_for_a_screen_action ... ok
+test whole_selection_goes_to_tool_result ... ok
+test switch_window_moves_the_window_onto_the_virtual_monitor ... ok
+test wait_for_control_waits_for_the_hand_back ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.14s
+
+     Running tests/monitor_switch.rs (/Users/runner/work/_temp/dream/target/debug/deps/monitor_switch-4456875a15a701ce)
+
+running 2 tests
+test hive_starts_the_switch_only_when_none_holds_its_lock ... ok
+test the_switch_counts_only_a_tap_of_right_option ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.75s
+
+     Running tests/vhid_client.rs (/Users/runner/work/_temp/dream/target/debug/deps/vhid_client-2693f9f3b12483c1)
+
+running 23 tests
+test bad_requests ... ok
+test cli_status_prints_fields ... ok
+test cli_without_a_helper ... ok
+test double_and_right_clicks ... ok
+test drag_keeps_button_held_while_moving ... ok
+test engage_hands_over_until_you_touch_something ... ok
+test characters_off_the_keyboard_are_pasted ... ok
+test helper_watcher_reports_events_and_stops ... ok
+test human_input_disengages_and_releases_everything ... ok
+test cli_keys_and_exit_codes ... ok
+test modifier_click_holds_the_modifier ... ok
+test engage_waits_for_quiet_period ... ok
+test natural_scrolling_is_read_from_the_mac_once ... ok
+test scroll_direction_follows_natural_scrolling ... ok
+test reconnects_after_the_helper_drops_the_connection ... ok
+test status ... ok
+test shortcut_presses_modifier_then_key ... ok
+test move_reports_when_cursor_does_not_follow ... ok
+test wait_engaged_times_out ... ok
+test touch_while_arming_cancels ... ok
+test watch_streams_fn_which_leaves_control_alone ... ok
+test watch_streams_hand_overs ... ok
+test typing_uses_shift_for_capitals_and_symbols ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.19s
+
+   Doc-tests hive_mac
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+$ cargo test --offline --manifest-path /Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/Cargo.toml --workspace --no-run (38s)
+   Compiling personal-agent-core v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/agent-core)
+   Compiling hive-dream v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-dream)
+   Compiling hive-common v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-common)
+   Compiling hive-workspace v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-workspace)
+   Compiling hive-knowledge v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-knowledge)
+   Compiling hive-mac v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-mac)
+   Compiling hive-sidecars v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-sidecars)
+   Compiling hive-phone v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-phone)
+   Compiling hive-codex v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-codex)
+   Compiling hive-app v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-app)
+    Finished `test` profile [unoptimized] target(s) in 37.09s
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_app-7d3695d927e31f9d)
+  Executable unittests src/main.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_agent-1699a6d55128a476)
+  Executable unittests src/bin/hive-ask.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_ask-5452a6734ab38609)
+  Executable unittests src/bin/hive-auth-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_auth_mcp-63270b8b3b688090)
+  Executable unittests src/bin/hive-phone-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_phone_mcp-99b43f3333f8641c)
+  Executable tests/app.rs (/Users/runner/work/_temp/dream/target/debug/deps/app-0ecb7d26ae494745)
+  Executable tests/fn_stop.rs (/Users/runner/work/_temp/dream/target/debug/deps/fn_stop-9b5b42e14c9fa901)
+  Executable tests/hive_ask.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_ask-245975bc6830bf86)
+  Executable tests/requests.rs (/Users/runner/work/_temp/dream/target/debug/deps/requests-7accd44e3d8a896d)
+  Executable tests/sidecar_cut_in.rs (/Users/runner/work/_temp/dream/target/debug/deps/sidecar_cut_in-998664281c199e80)
+  Executable tests/startup.rs (/Users/runner/work/_temp/dream/target/debug/deps/startup-0040571dea342272)
+  Executable tests/voice_shell.rs (/Users/runner/work/_temp/dream/target/debug/deps/voice_shell-87d0ea66090d09e1)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_codex-dca58dfc355c4930)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_common-580259dc59556178)
+  Executable unittests src/bin/hive-ingest.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_ingest-dd07d7d58385b9d0)
+  Executable tests/one_way.rs (/Users/runner/work/_temp/dream/target/debug/deps/one_way-6d92eaa643151768)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_dream-58f292528e1158e2)
+  Executable unittests src/main.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_dream-29191eddcf5d3176)
+  Executable tests/cluster.rs (/Users/runner/work/_temp/dream/target/debug/deps/cluster-6a01175a924d1e4a)
+  Executable tests/gate.rs (/Users/runner/work/_temp/dream/target/debug/deps/gate-2c62ee7ada6ee2ea)
+  Executable tests/hive_agent.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_agent-0d21e034ed9ee12f)
+  Executable tests/land.rs (/Users/runner/work/_temp/dream/target/debug/deps/land-c5571bc67f6d56dc)
+  Executable tests/normalize.rs (/Users/runner/work/_temp/dream/target/debug/deps/normalize-12dbbfe52056b39d)
+  Executable tests/register.rs (/Users/runner/work/_temp/dream/target/debug/deps/register-230dfd3098caeb7b)
+  Executable tests/schedule.rs (/Users/runner/work/_temp/dream/target/debug/deps/schedule-02c6adb5e855334a)
+  Executable tests/sync.rs (/Users/runner/work/_temp/dream/target/debug/deps/sync-b99f499fcdfa447d)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_knowledge-f215c20f8b1f8567)
+  Executable unittests src/bin/hive-context-panel.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_context_panel-cb28d198d7408f19)
+  Executable unittests src/bin/hive-knowledge.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_knowledge-fc9c31dcea4d8df3)
+  Executable unittests src/bin/hive-memory-search.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_memory_search-0b1ce3d28359816a)
+  Executable unittests src/bin/hive-session-journal.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_session_journal-f009c822c710757f)
+  Executable tests/actions.rs (/Users/runner/work/_temp/dream/target/debug/deps/actions-62e102fc3b0f5f21)
+  Executable tests/agent_context.rs (/Users/runner/work/_temp/dream/target/debug/deps/agent_context-716db217ab919ba0)
+  Executable tests/cloud_archive.rs (/Users/runner/work/_temp/dream/target/debug/deps/cloud_archive-8e769328ee59697a)
+  Executable tests/context_panel.rs (/Users/runner/work/_temp/dream/target/debug/deps/context_panel-8ee390c8dd6691a9)
+  Executable tests/journal.rs (/Users/runner/work/_temp/dream/target/debug/deps/journal-850d6536d3984adb)
+  Executable tests/knowledge.rs (/Users/runner/work/_temp/dream/target/debug/deps/knowledge-6900f4941b882ffd)
+  Executable tests/memory_search.rs (/Users/runner/work/_temp/dream/target/debug/deps/memory_search-b9d97ba4ff1f8db9)
+  Executable tests/memory_store.rs (/Users/runner/work/_temp/dream/target/debug/deps/memory_store-4ab904cec72e6609)
+  Executable tests/task_recording.rs (/Users/runner/work/_temp/dream/target/debug/deps/task_recording-d1ac93a0f8452b50)
+  Executable tests/ui_ingress.rs (/Users/runner/work/_temp/dream/target/debug/deps/ui_ingress-b19986e98193a641)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_mac-f4ad657bce8e3ecb)
+  Executable unittests src/bin/hive-credentials.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_credentials-da8da33e4b152f17)
+  Executable unittests src/bin/hive-mac-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_mac_mcp-c00fef454a0ef4a4)
+  Executable unittests src/bin/hive-vhid.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_vhid-b9e769626136509e)
+  Executable tests/credentials.rs (/Users/runner/work/_temp/dream/target/debug/deps/credentials-6403d18ac0b204f8)
+  Executable tests/helper_dry_run.rs (/Users/runner/work/_temp/dream/target/debug/deps/helper_dry_run-7fb2be42dfe1a25a)
+  Executable tests/mac_tools.rs (/Users/runner/work/_temp/dream/target/debug/deps/mac_tools-1ceb804f1f2c1ac7)
+  Executable tests/monitor_switch.rs (/Users/runner/work/_temp/dream/target/debug/deps/monitor_switch-2f8fa09e5127683a)
+  Executable tests/vhid_client.rs (/Users/runner/work/_temp/dream/target/debug/deps/vhid_client-8405860181d7831b)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_phone-09d356ddd5eae06c)
+  Executable unittests src/bin/phone-status.rs (/Users/runner/work/_temp/dream/target/debug/deps/phone_status-424ecd321ab37092)
+  Executable tests/phone.rs (/Users/runner/work/_temp/dream/target/debug/deps/phone-130933a5b2ab6de6)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_sidecars-63958e49f4751f9d)
+  Executable tests/audio.rs (/Users/runner/work/_temp/dream/target/debug/deps/audio-7ee8311d72403dc8)
+  Executable tests/captions.rs (/Users/runner/work/_temp/dream/target/debug/deps/captions-feb24df93a055a11)
+  Executable tests/lipread.rs (/Users/runner/work/_temp/dream/target/debug/deps/lipread-cecd356c788463ae)
+  Executable tests/voice.rs (/Users/runner/work/_temp/dream/target/debug/deps/voice-009ec0b7148c7de0)
+  Executable unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_workspace-7ffc6e34953d9f7c)
+  Executable unittests src/bin/hive-bundle-migration.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_bundle_migration-f7f248a40cf3ef1c)
+  Executable unittests src/bin/restart-agent-once.rs (/Users/runner/work/_temp/dream/target/debug/deps/restart_agent_once-560f71e7028fd8f9)
+  Executable unittests src/bin/spaceo-mcp-bridge.rs (/Users/runner/work/_temp/dream/target/debug/deps/spaceo_mcp_bridge-3f59068e75ce8738)
+  Executable unittests src/bin/workspace-fence.rs (/Users/runner/work/_temp/dream/target/debug/deps/workspace_fence-f27bffc60fca8699)
+  Executable unittests src/bin/workspace-tool.rs (/Users/runner/work/_temp/dream/target/debug/deps/workspace_tool-da704683210906de)
+  Executable unittests src/bin/workspace-update.rs (/Users/runner/work/_temp/dream/target/debug/deps/workspace_update-cb4699e63e81928d)
+  Executable tests/bridge.rs (/Users/runner/work/_temp/dream/target/debug/deps/bridge-83cf309e295e76cd)
+  Executable tests/local_request.rs (/Users/runner/work/_temp/dream/target/debug/deps/local_request-fe945d9b617452f9)
+  Executable tests/migration.rs (/Users/runner/work/_temp/dream/target/debug/deps/migration-75ed1f13a942974a)
+  Executable tests/restart.rs (/Users/runner/work/_temp/dream/target/debug/deps/restart-f6a72dfe9d7fb8cb)
+  Executable tests/updater.rs (/Users/runner/work/_temp/dream/target/debug/deps/updater-a8602b92a6c4ee70)
+  Executable tests/workspace.rs (/Users/runner/work/_temp/dream/target/debug/deps/workspace-7241014128ebb1e4)

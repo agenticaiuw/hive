@@ -1,0 +1,8 @@
+Dream fix: the agent waited for the user to hand back the screen
+
+wait_for_control: the agent waited for the user to hand back the mouse and keyboard. Seen 60 times, about 116 minutes lost (2026-11-12T23:56:32 to 2026-11-13T10:10:12).
+Hive's nightly dream: its agent wrote a test that failed on the code as it was, then this fix, in a
+private worktree; hive-dream's gate ran the crate's tests and built the workspace.
+
+Dream-Cluster: wait-for-control-the-agent-waited-for-th-083780
+
