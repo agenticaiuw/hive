@@ -263,6 +263,10 @@ pub struct VoiceAgent {
     pub listening_since: Slot<f64>,
     /// fn is down: it may be a tap, or the start of dictation.
     pub held: Slot<Option<Arc<Dictation>>>,
+    /// fn + shift: the dictation in `held` goes on after you let go, until you press fn again.
+    pub hands_free: Flag,
+    /// fn went down during hands-free dictation: letting go types it.
+    pub hands_free_ending: Flag,
     /// Where what's heard goes now, instead of the agent.
     pub dictation: Slot<Option<Arc<Dictation>>>,
     pub tasks: Slot<Tasks>,
@@ -342,6 +346,8 @@ impl VoiceAgent {
             heard_barrier: Slot::new(0),
             listening_since: Slot::new(0.0),
             held: Slot::new(None),
+            hands_free: Flag::new(false),
+            hands_free_ending: Flag::new(false),
             dictation: Slot::new(None),
             tasks: Slot::default(),
             doing: Slot::default(),
@@ -1476,8 +1482,28 @@ impl VoiceAgent {
         if state == Some("engaged") {
             self.captions.focus(false); // the agent types now, in the app in front, not into the card
         }
-        match event.get("fn").map(String::as_str) {
-            Some("down") => self.start_dictation(),
+        let fn_key = event.get("fn").map(String::as_str);
+        if self.hands_free.get() && fn_key.is_some() {
+            // fn + shift's dictation: the next press of fn (with shift or without) types it
+            match fn_key {
+                Some("down") => {
+                    self.hands_free_ending.set(true);
+                }
+                Some("tap" | "up") if self.hands_free_ending.get() => self.finish_dictation(),
+                _ => {} // letting go of the fn + shift that started it; shift itself
+            }
+            return;
+        }
+        match fn_key {
+            Some("down") => {
+                self.start_dictation();
+                if self.host.shift_held() {
+                    self.dictate_hands_free(); // shift, then fn
+                }
+            }
+            Some("other") if self.holding() && self.host.shift_held() => {
+                self.dictate_hands_free(); // fn, then shift
+            }
             Some("tap") => {
                 self.drop_dictation();
                 if self.paused_by_you() {
@@ -1532,7 +1558,21 @@ impl VoiceAgent {
         self.ears_listen(true);
     }
 
+    /// fn + shift: dictation only (Parakeet, as when you hold fn), and it goes on after you let
+    /// go, so you can say a lot without holding a key. Press fn again and it's typed.
+    pub fn dictate_hands_free(&self) {
+        let Some(held) = self.held.get() else {
+            return;
+        };
+        self.hands_free.set(true);
+        self.hands_free_ending.set(false);
+        self.captions.hands_free(true);
+        self.show_dictating(&held, true);
+        self.out("✍️  dictating until you press fn (fn + shift)");
+    }
+
     pub fn drop_dictation(&self) {
+        self.end_hands_free();
         if let Some(held) = self.held.set(None) {
             held.state().dropped = true;
             let events = Mutex::new(self.events.clone());
@@ -1548,6 +1588,7 @@ impl VoiceAgent {
 
     /// fn was let go after a hold: once the last of what you said is written down, it's typed.
     pub fn finish_dictation(&self) {
+        self.end_hands_free();
         if let Some(held) = self.held.set(None) {
             let events = Mutex::new(self.events.clone());
             let dictated = held.clone();
@@ -1559,6 +1600,13 @@ impl VoiceAgent {
             })));
             self.ears_listen(self.listening.get());
             self.show_dictating(&held, false);
+        }
+    }
+
+    fn end_hands_free(&self) {
+        self.hands_free_ending.set(false);
+        if self.hands_free.set(false) {
+            self.captions.hands_free(false);
         }
     }
 

@@ -132,6 +132,12 @@ impl Captions {
         self.send(json!({"dictating": on}));
     }
 
+    /// Dictation started with fn + shift: it goes on after you let go, and the line says
+    /// "press fn to type it".
+    pub fn hands_free(&self, on: bool) {
+        self.send(json!({"hands_free": on}));
+    }
+
     /// The camera line on top in lip reading mode: "starting", "waiting" (for macOS's permission),
     /// "on" (it is recording), or "off" (none).
     pub fn camera(&self, state: &str) {

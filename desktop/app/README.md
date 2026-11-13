@@ -15,8 +15,8 @@ git submodule update --init   # once, after cloning: Karabiner's client headers
 
 The app builds its workspace engine from the maintained `workspace-engine/` source in this
 repository, including its MIT license; the build does not clone Braus. The normal app keeps
-physical-device mode by default. The workspace candidate enables the virtual workspace by
-default, and `AGENT_EXPERIMENTAL_SPACEO` can explicitly choose it. The former experimental
+physical-device mode by default. The virtual workspace (SpaceO) runs only when chosen at
+launch with `AGENT_EXPERIMENTAL_SPACEO=1`; otherwise Hive works on your own screen. The former experimental
 single-window Braus seat is not available in this build. Rust crates and voice models still
 need to be available locally or downloaded during setup.
 

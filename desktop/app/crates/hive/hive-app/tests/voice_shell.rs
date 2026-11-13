@@ -458,6 +458,42 @@ fn fn_with_another_key_is_a_shortcut_not_dictation() {
 }
 
 #[test]
+fn fn_and_shift_dictate_until_fn_again() {
+    for shift_first in [true, false] {
+        let h = listening(Setup {
+            app: true,
+            ..Setup::default()
+        });
+        if shift_first {
+            h.host.shift.store(true, Ordering::SeqCst);
+            hold_fn(&h);
+        } else {
+            hold_fn(&h);
+            h.host.shift.store(true, Ordering::SeqCst);
+            h.helper_event(&[("fn", "other")]); // shift, pressed with fn
+        }
+        h.wait_printed("@@ dictating 1"); // at once, not after a hold
+        h.helper_event(&[("fn", "up")]);
+        h.host.shift.store(false, Ordering::SeqCst);
+        sleep(0.3);
+        assert!(h.agent.dictation.lock().is_some(), "letting go doesn't end it");
+        assert!(h.host.pasted.is_empty());
+        h.say("Dear team, the demo is on Friday.");
+        h.helper_event(&[("fn", "down")]); // fn again types it
+        h.helper_event(&[("fn", "tap")]);
+        wait_for("the dictation to be typed", 5.0, || {
+            !h.host.pasted.is_empty()
+        });
+        assert!(h.host.pasted.all()[0].contains("demo is on Friday"));
+        assert_eq!(h.captions.of("hands_free"), ["true", "false"]);
+        assert_eq!(h.captions.of("dictating"), ["true", "false"]);
+        no_request(&h); // dictation only: nothing for the agent
+        assert!(h.agent.listening.get(), "that fn didn't turn listening off");
+        assert!(h.ears.listening_now());
+    }
+}
+
+#[test]
 fn dictation_it_cant_type_is_left_on_the_clipboard() {
     let h = Harness::new();
     *lock(&h.host.paste_error) = Some("it isn't allowed to press keys".into());

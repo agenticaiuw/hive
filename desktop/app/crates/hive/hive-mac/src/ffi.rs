@@ -289,6 +289,11 @@ pub fn warp(x: f64, y: f64) {
     unsafe { CGWarpMouseCursorPosition(CGPoint { x, y }) };
 }
 
+/// A shift key is down (kCGEventSourceStateHIDSystemState's shift flag).
+pub fn shift_down() -> bool {
+    unsafe { CGEventSourceFlagsState(1) & (1 << 17) != 0 }
+}
+
 /// Caps Lock is on (kCGEventSourceStateHIDSystemState's alpha-shift flag).
 pub fn caps_lock_on() -> bool {
     unsafe { CGEventSourceFlagsState(1) & (1 << 16) != 0 }
