@@ -37,6 +37,7 @@ export const handle: Handle = async ({ event, resolve }) => {
     url.pathname === "/login" ||
     url.pathname === "/favicon.ico" ||
     url.pathname === "/favicon.svg" ||
+    url.pathname === "/hive.svg" ||
     url.pathname === "/og.png" ||
     url.pathname.startsWith("/assets/") ||
     // SvelteKit's immutable build output.
