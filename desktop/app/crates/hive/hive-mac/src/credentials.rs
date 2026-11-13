@@ -664,8 +664,8 @@ pub fn main(args: &[String]) -> i32 {
         Ok(code) => code,
         Err(_) => {
             let message = if phone {
-                "Phone credential setup needs the configured phone online and unlocked. Run Pocket Connect on the \
-                 phone, then try again."
+                "Phone credential setup needs the configured phone online and unlocked. Open the WebDriverAgent relay \
+                 app on the phone, then try again."
             } else {
                 "Authentication setup could not start."
             };

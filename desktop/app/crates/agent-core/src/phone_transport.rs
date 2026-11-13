@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), run the Shortcut “Pocket Connect” to start its controller, then try again.";
+const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), open the WebDriverAgent relay app (WebDriverAgentRunner-Runner), then try again.";
 
 fn request(
     input: &Value,
@@ -169,7 +169,7 @@ fn session(input: &Value, sid: &mut Option<String>) -> Result<String, String> {
                 .map(str::to_owned);
         }
         *sid =
-            Some(id.ok_or("The iPhone's controller has no session; run “Pocket Connect” again.")?);
+            Some(id.ok_or("The iPhone's controller has no session; reopen the WebDriverAgent relay app on it.")?);
         let _ = request(
             input,
             &format!("/api/session/{}/appium/settings", sid.as_ref().unwrap()),

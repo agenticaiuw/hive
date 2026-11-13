@@ -1,5 +1,5 @@
 //! The iPhone through its relay (python/phone.py): the iPhone runs WebDriverAgent inside its
-//! controller app (started by the "Pocket Connect" Shortcut), which keeps a connection open to a
+//! controller app (the WebDriverAgent relay app, WebDriverAgentRunner-Runner), which keeps a connection open to a
 //! Cloudflare Worker; this asks that Worker. `PHONE_RELAY` is the relay's folder: `endpoint.txt` has
 //! its address, `private/secrets.json` its CONTROL_TOKEN (read when needed, never printed or passed
 //! on a command line).
@@ -9,7 +9,7 @@ use std::ffi::{CStr, CString};
 use std::fmt;
 use std::sync::Mutex;
 
-pub const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), run the Shortcut “Pocket Connect” to start its controller, then try again.";
+pub const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), open the WebDriverAgent relay app (WebDriverAgentRunner-Runner), then try again.";
 
 /// A failure the phone tools report to the model as an error result (python's `PhoneError`).
 #[derive(Debug, Clone, PartialEq, Eq)]

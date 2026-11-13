@@ -335,7 +335,7 @@ impl Dictation {
 pub fn describe_phone() -> String {
     match hive_phone::Phone::new(None).and_then(|p| p.connected()) {
         Ok(true) => "connected".into(),
-        Ok(false) => "not connected (run “Pocket Connect” on it)".into(),
+        Ok(false) => "not connected (open the WebDriverAgent relay app on it)".into(),
         Err(e) if !env_set("PHONE_RELAY") => {
             let _ = e;
             "off".into()

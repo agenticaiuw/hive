@@ -503,8 +503,8 @@ WebDriverAgent inside its controller app, which keeps a connection open to a
 Cloudflare Worker, so it works over Wi-Fi or cellular with no cable. Set
 `PHONE_RELAY` in `.env` to that project's `work/phone-relay` folder (it reads the
 address from `endpoint.txt` and the token from `private/secrets.json`, and never
-prints the token). To connect the phone, unlock it and run the **Pocket Connect**
-Shortcut, then check:
+prints the token). To connect the phone, unlock it and open the WebDriverAgent relay app
+(**WebDriverAgentRunner-Runner**), then check:
 
 ```bash
 build/phone-status
@@ -515,7 +515,7 @@ id and reads the accessibility tree for exact labels. Every task gets the phone'
 tools along with the Mac's, so it uses the phone whenever a request needs it; one
 that says "phone" or "iPhone" starts by looking at the phone and leaves the Mac to
 any other task. If the phone isn't
-connected it says so and tells you to run Pocket Connect.
+connected it says so and tells you to open the relay app.
 
 ## One-time setup
 
