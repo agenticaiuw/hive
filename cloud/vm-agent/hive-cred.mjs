@@ -44,11 +44,14 @@ export function loginsFromCsv(text) {
   const at = { title: column(['title', 'name']), url: column(['url', 'website', 'login_uri']), username: column(['username', 'login_username']),
     password: column(['password', 'login_password']), otp: column(['otpauth', 'totp', 'login_totp']) };
   if (at.url < 0 || at.password < 0) throw new Error('the file has no URL and Password columns; export it from Passwords or Chrome');
-  return rows.map(row => ({
+  return rows.map(row => tidy({
     title: at.title >= 0 ? row[at.title] ?? '' : '', url: row[at.url] ?? '', username: at.username >= 0 ? row[at.username] ?? '' : '',
     password: row[at.password] ?? '', ...(at.otp >= 0 && row[at.otp] ? { otp: row[at.otp] } : {}),
   })).filter(login => login.url && login.password);
 }
+
+/** Spaces and tabs around a site or username are typos ("name\t" is the same login); a password is kept as it is. */
+export const tidy = login => ({ ...login, url: String(login.url ?? '').trim(), username: String(login.username ?? '').trim() });
 
 /** "https://login.wisc.edu/idp/..." or "login.wisc.edu" → "login.wisc.edu". */
 export function hostOf(url) {
@@ -87,7 +90,8 @@ export function merge(logins, incoming) {
 
 function load() {
   if (!existsSync(STORE)) return [];
-  return JSON.parse(execFileSync('systemd-creds', ['decrypt', `--name=${NAME}`, STORE, '-'], { maxBuffer: 64 * 1024 * 1024 }).toString('utf8'));
+  const saved = JSON.parse(execFileSync('systemd-creds', ['decrypt', `--name=${NAME}`, STORE, '-'], { maxBuffer: 64 * 1024 * 1024 }).toString('utf8'));
+  return merge([], saved.map(tidy)).logins;
 }
 
 function save(logins) {
