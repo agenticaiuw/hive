@@ -51,10 +51,10 @@ jobs:
             ~/.cargo/git
             ${{ runner.temp }}/dream/target
             ${{ runner.temp }}/gate-target
-          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+          key: dream-v2-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
-            dream-${{ runner.os }}-
+            dream-v2-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
+            dream-v2-${{ runner.os }}-
       - name: Build the gate from main
         run: |
           git worktree add --detach "$RUNNER_TEMP/main" origin/main
@@ -99,10 +99,10 @@ jobs:
             ~/.cargo/git
             ${{ runner.temp }}/dream/target
             ${{ runner.temp }}/gate-target
-          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+          key: dream-v2-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
-            dream-${{ runner.os }}-
+            dream-v2-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-
+            dream-v2-${{ runner.os }}-
       - name: Build the gate and every test, as the gate does
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/dream/target
@@ -113,7 +113,8 @@ jobs:
           cargo build --release --locked -p hive-dream \
             --manifest-path desktop/app/crates/hive/Cargo.toml --target-dir "$RUNNER_TEMP/gate-target"
           cargo test --locked --no-run --workspace --manifest-path desktop/app/crates/hive/Cargo.toml
-          cargo test --locked --no-run --manifest-path desktop/app/crates/agent-core/Cargo.toml
+          cargo test --locked --no-run --manifest-path desktop/app/crates/agent-core/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/dream/target/agent-core"
       - uses: actions/cache/save@v4
         with:
           path: |
@@ -121,7 +122,7 @@ jobs:
             ~/.cargo/git
             ${{ runner.temp }}/dream/target
             ${{ runner.temp }}/gate-target
-          key: dream-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
+          key: dream-v2-${{ runner.os }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock', 'desktop/app/crates/agent-core/Cargo.lock') }}-${{ github.sha }}
       - name: Every test (a baseline for the gate)
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/dream/target
@@ -131,4 +132,5 @@ jobs:
           HIVE_RECORD: '0'
         run: |
           cargo test --locked --workspace --manifest-path desktop/app/crates/hive/Cargo.toml --no-fail-fast
-          cargo test --locked --manifest-path desktop/app/crates/agent-core/Cargo.toml --no-fail-fast
+          cargo test --locked --manifest-path desktop/app/crates/agent-core/Cargo.toml --no-fail-fast \
+            --target-dir "$RUNNER_TEMP/dream/target/agent-core"
