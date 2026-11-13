@@ -51,7 +51,7 @@ function draw(size, destination, { ios = false } = {}) {
 
 try {
   /* --- browser extension, Chrome and Safari --- */
-  const bridge = path.join(repo, 'browser/safari/AI Pendant Browser Bridge')
+  const bridge = path.join(repo, 'browser/safari/Hive Browser Bridge')
   for (const size of [16, 32, 48, 128, 512]) {
     draw(size, path.join(repo, `browser/chrome/src/icons/icon-${size}.png`))
     draw(size, path.join(bridge, `Shared (Extension)/Resources/icons/icon-${size}.png`))

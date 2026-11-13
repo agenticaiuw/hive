@@ -81,8 +81,8 @@ test('the relay URL is an allowlist, not "any https"', () => {
   /* The exact shape of the attack the loopback rule exists to stop: an https
    * URL that is simply not ours. */
   assert.equal(normalizeRelayUrl('https://evil.example.com'), '')
-  assert.equal(normalizeRelayUrl('https://ai-pendant-relay.evan20050827.workers.dev.evil.com'), '')
-  assert.equal(normalizeRelayUrl('http://ai-pendant-relay.evan20050827.workers.dev'), '')
+  assert.equal(normalizeRelayUrl('https://hive-relay.evan20050827.workers.dev.evil.com'), '')
+  assert.equal(normalizeRelayUrl('http://hive-relay.evan20050827.workers.dev'), '')
   assert.equal(normalizeRelayUrl(''), '')
   assert.equal(normalizeRelayUrl('not a url'), '')
   assert.equal(normalizeRelayUrl('file:///etc/passwd'), '')

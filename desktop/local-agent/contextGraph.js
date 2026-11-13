@@ -79,7 +79,7 @@ export function loadDemoContextGraph() {
 
   const david = context.upsertEntity('Person', 'David')
   const gpu = context.upsertEntity('Resource', 'GPU resources')
-  const project = context.upsertEntity('Project', 'AI Pendant Project')
+  const project = context.upsertEntity('Project', 'Hive Project')
   const emailDraft = context.addEntity(
     'EmailDraft',
     'Question about GPU resources',
@@ -93,7 +93,7 @@ export function loadDemoContextGraph() {
     due: 'tomorrow morning',
   })
   const note = context.addEntity('File', 'meeting-notes.md', {
-    path: path.join(os.homedir(), 'AI-Pendant-Workspace', 'meeting-notes.md'),
+    path: path.join(os.homedir(), 'Hive-Workspace', 'meeting-notes.md'),
   })
   const mac = context.upsertEntity('Device', 'MacBook')
   const model = context.upsertEntity('Model', 'Rule-based Planner')
@@ -127,7 +127,7 @@ export function updateContextGraphFromExecution({ command, actions, results }) {
 
   const mac = context.upsertEntity('Device', 'MacBook')
   const model = context.upsertEntity('Model', 'Rule-based Planner')
-  const defaultProject = context.upsertEntity('Project', 'AI Pendant Project')
+  const defaultProject = context.upsertEntity('Project', 'Hive Project')
 
   actions.forEach((action, index) => {
     const result = results[index]

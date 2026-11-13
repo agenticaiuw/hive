@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# ship-safari-extension.sh — the ONE way to ship the AI Pendant Safari extension.
+# ship-safari-extension.sh — the ONE way to ship the Hive Safari extension.
 #
 # WHY THIS SCRIPT EXISTS. The owner, 2026-08-12: "we likely gonna keep updating
 # the extension, make sure this issue doesn't happen again." Twice (2026-08-10
@@ -15,14 +15,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHROME="$ROOT/browser/chrome"
 SRC_MANIFEST="$CHROME/src/manifest.json"
-XCODE_DIR="$ROOT/browser/safari/AI Pendant Browser Bridge"
+XCODE_DIR="$ROOT/browser/safari/Hive Browser Bridge"
 RESOURCES_DIR="$XCODE_DIR/Shared (Extension)/Resources"
 DERIVED="$XCODE_DIR/build"
-BUILT_APP="$DERIVED/Build/Products/Release/AI Pendant Browser Bridge.app"
-INSTALLED_APP="$HOME/Applications/AI Pendant Browser Bridge.app"
-INSTALLED_APPEX="$INSTALLED_APP/Contents/PlugIns/AI Pendant Browser Bridge Extension.appex"
+BUILT_APP="$DERIVED/Build/Products/Release/Hive Browser Bridge.app"
+INSTALLED_APP="$HOME/Applications/Hive Browser Bridge.app"
+INSTALLED_APPEX="$INSTALLED_APP/Contents/PlugIns/Hive Browser Bridge Extension.appex"
 INSTALLED_MANIFEST="$INSTALLED_APPEX/Contents/Resources/manifest.json"
-EXT_ID="com.evanliu.aipendant.browserbridge"
+EXT_ID="com.evanliu.hive.browserbridge"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 manifest_version() {
@@ -58,8 +58,8 @@ echo "==> Step 3/8: sync build/safari into the Xcode extension Resources (with -
 rsync -a --delete "$CHROME/build/safari/." "$RESOURCES_DIR/"
 
 echo "==> Step 4/8: xcodebuild Release"
-xcodebuild -project "$XCODE_DIR/AI Pendant Browser Bridge.xcodeproj" \
-  -scheme "AI Pendant Browser Bridge (macOS)" \
+xcodebuild -project "$XCODE_DIR/Hive Browser Bridge.xcodeproj" \
+  -scheme "Hive Browser Bridge (macOS)" \
   -configuration Release \
   -derivedDataPath "$DERIVED" \
   build

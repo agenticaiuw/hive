@@ -84,7 +84,7 @@ test('a refusal from the helper surfaces its code rather than a generic failure'
     () =>
       runUiHelper(['type', '--text', 'hunter2'], {
         execFileImpl,
-        binaryPath: '/nonexistent/aipendant-uicontrol',
+        binaryPath: '/nonexistent/hive-uicontrol',
       }),
     (error) => {
       assert.equal(error.code, 'SECURE_INPUT')

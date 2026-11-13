@@ -55,7 +55,7 @@ import {
 import { BACKGROUND_HOLDER, ENGINE_LEASE_KEY } from './page-engine.js'
 
 const api = globalThis.browser ?? globalThis.chrome
-const POLL_ALARM = 'ai-pendant-poll'
+const POLL_ALARM = 'hive-poll'
 const POLL_WINDOW_MS = 25_000
 
 let activePoll = null
@@ -397,7 +397,7 @@ async function maybeRestorePairingFromEscrow() {
   await api.storage.local.set(plan.values)
   /* Deliberately loud: this line in the worker console is the proof that an
    * update reset storage and the escrow put the pairing back. */
-  console.log('[ai-pendant] Pairing restored from the app escrow after a storage reset.')
+  console.log('[hive] Pairing restored from the app escrow after a storage reset.')
 }
 
 /*

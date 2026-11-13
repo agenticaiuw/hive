@@ -112,7 +112,7 @@ test('buildFleetPayloadFromLocal produces put-ready object', () => {
       applications: ['Safari'],
     },
     browser: { online: false, devices: [] },
-    permissions: { ready: true, hostApp: 'AI Pendant Agent' },
+    permissions: { ready: true, hostApp: 'Hive Local Agent' },
   })
   assert.equal(payload.version, 1)
   assert.equal(payload.mac.applications[0], 'Safari')

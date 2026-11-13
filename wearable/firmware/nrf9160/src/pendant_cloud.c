@@ -79,7 +79,7 @@ static void lte_attach_probe_fn(struct k_work *work)
 }
 
 #define RELAY_HOSTNAME \
-	"ai-pendant-relay.evan20050827.workers.dev"
+	"hive-relay.evan20050827.workers.dev"
 #define RELAY_PORT "443"
 #define PENDANT_EVENT_PATH_PREFIX "/v1/pendant/jobs/"
 #define PENDANT_EVENT_PATH_SUFFIX "/events"

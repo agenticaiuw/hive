@@ -25,10 +25,10 @@ required.
 
 The checked-in Wrangler configuration deploys:
 
-- Worker: `ai-pendant-relay`
-- D1 database: `ai-pendant-relay-db`
+- Worker: `hive-relay`
+- D1 database: `hive-relay-db`
 - Worker URL:
-  `https://ai-pendant-relay.evan20050827.workers.dev`
+  `https://hive-relay.evan20050827.workers.dev`
 - Speech model: `@cf/openai/whisper-large-v3-turbo`
 
 The relay API key and pairing code are Cloudflare Worker secrets and are not
@@ -69,14 +69,14 @@ npx wrangler whoami
 Create the D1 database if it does not exist:
 
 ```bash
-npx wrangler d1 create ai-pendant-relay-db --location enam
+npx wrangler d1 create hive-relay-db --location enam
 ```
 
 Copy the emitted database ID into the `DB` binding in `wrangler.jsonc`, then
 initialize the schema:
 
 ```bash
-npx wrangler d1 execute ai-pendant-relay-db --remote \
+npx wrangler d1 execute hive-relay-db --remote \
   --file=cloudflare-worker/schema.sql
 ```
 

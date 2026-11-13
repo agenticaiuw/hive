@@ -1,6 +1,6 @@
-// AI Pendant — macOS menu-bar + desktop companion app.
-// Observes and controls the separately-installed "AI Pendant Mac Local Agent"
-// (LaunchAgent com.aipendant.agent) strictly from the outside over HTTP:
+// Hive Menu Bar — macOS menu-bar + desktop companion app.
+// Observes and controls the separately-installed "Hive Mac Local Agent"
+// (LaunchAgent local.hive.local-agent) strictly from the outside over HTTP:
 // it polls http://localhost:8000/health, streams live activity (SSE), and can
 // kickstart the LaunchAgent. It never touches the agent's files, plist, or app
 // bundle.
@@ -32,7 +32,7 @@ import UniformTypeIdentifiers
 
 enum AgentEnv {
     static let envPathDefaultsKey = "AgentEnvPath"
-    static let bundleId = "com.aipendant.menubar"
+    static let bundleId = "local.hive.menubar"
 
     /// Secrets file: the `defaults write … AgentEnvPath` override (if any),
     /// then the repo root .env. First readable path wins.
@@ -82,12 +82,12 @@ enum AgentEnv {
     /// only the one owner-minted secret — PAIRING_CODE — and AGENT_TOKEN is a
     /// labelled HMAC of it. This derivation MUST stay bit-identical to
     /// deriveSecret in mobile/simulator/load-pendant-env.mjs: HMAC-SHA256 keyed by the
-    /// pairing code over "aipendant:agent-token", lowercase hex digest.
+    /// pairing code over "hive:agent-token", lowercase hex digest.
     static func loadToken() -> String? {
         if let explicit = value(forKey: "AGENT_TOKEN") { return explicit }
         guard let code = value(forKey: "PAIRING_CODE") else { return nil }
         let mac = HMAC<SHA256>.authenticationCode(
-            for: Data("aipendant:agent-token".utf8),
+            for: Data("hive:agent-token".utf8),
             using: SymmetricKey(data: Data(code.utf8)))
         return mac.map { String(format: "%02x", $0) }.joined()
     }
@@ -758,7 +758,7 @@ struct ActivityView: View {
                     Spacer()
                     HStack {
                         Spacer()
-                        Text("Can't read AGENT_TOKEN — add it to \(model.envPathDisplay) (path overridable via `defaults write com.aipendant.menubar \(AgentEnv.envPathDefaultsKey)`), then reopen this window.")
+                        Text("Can't read AGENT_TOKEN — add it to \(model.envPathDisplay) (path overridable via `defaults write local.hive.menubar \(AgentEnv.envPathDefaultsKey)`), then reopen this window.")
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.45))
                             .multilineTextAlignment(.center)
@@ -961,7 +961,7 @@ struct BrowserBridgeView: View {
                     Spacer()
                     HStack {
                         Spacer()
-                        Text("Can't derive AGENT_TOKEN — add PAIRING_CODE to \(model.envPathDisplay) (path overridable via `defaults write com.aipendant.menubar \(AgentEnv.envPathDefaultsKey)`), then reopen this window.")
+                        Text("Can't derive AGENT_TOKEN — add PAIRING_CODE to \(model.envPathDisplay) (path overridable via `defaults write local.hive.menubar \(AgentEnv.envPathDefaultsKey)`), then reopen this window.")
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.45))
                             .multilineTextAlignment(.center)
@@ -1072,7 +1072,7 @@ struct BrowserBridgeView: View {
                         .background(Capsule().fill(.white.opacity(0.08)))
                 }
                 .buttonStyle(.plain)
-                .help("launchctl kickstart -k the com.aipendant.agent LaunchAgent")
+                .help("launchctl kickstart -k the local.hive.local-agent LaunchAgent")
                 Spacer()
             }
             // Deliberately disabled, not hidden: the agent exposes no
@@ -1164,11 +1164,11 @@ final class WebPane: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        NSLog("AI Pendant: dashboard navigation failed: \(error.localizedDescription)")
+        NSLog("Hive Menu Bar: dashboard navigation failed: \(error.localizedDescription)")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        NSLog("AI Pendant: dashboard load failed: \(error.localizedDescription)")
+        NSLog("Hive Menu Bar: dashboard load failed: \(error.localizedDescription)")
     }
 }
 
@@ -2048,13 +2048,13 @@ final class GlobalHotkey {
                                              hotKeyID, GetEventDispatcherTarget(), 0, &ref)
             if status == noErr, let ref {
                 hotKeyRef = ref
-                NSLog("AI Pendant: global hotkey bound: %@", candidate.label)
+                NSLog("Hive Menu Bar: global hotkey bound: %@", candidate.label)
                 return candidate.label
             }
-            NSLog("AI Pendant: hotkey %@ unavailable (OSStatus %d), trying next fallback",
+            NSLog("Hive Menu Bar: hotkey %@ unavailable (OSStatus %d), trying next fallback",
                   candidate.label, status)
         }
-        NSLog("AI Pendant: no global hotkey could be registered — HUD stays menu-only")
+        NSLog("Hive Menu Bar: no global hotkey could be registered — HUD stays menu-only")
         return nil
     }
 
@@ -2164,8 +2164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private static let thisMacTabKey = "ShowThisMacTab"
     private static let tabsItemIdentifier = NSToolbarItem.Identifier("tabs")
 
-    private let dashboardURL = URL(string: "https://ai-pendant-dashboard.evan20050827.workers.dev")!
-    private let launchAgentLabel = "com.aipendant.agent"
+    private let dashboardURL = URL(string: "https://hive-dashboard.evan20050827.workers.dev")!
+    private let launchAgentLabel = "local.hive.local-agent"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -2235,7 +2235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false)
-            window.title = "AI Pendant"
+            window.title = "Hive Menu Bar"
             window.contentMinSize = NSSize(width: 900, height: 600)
             window.isReleasedWhenClosed = false
             window.delegate = self
@@ -2283,14 +2283,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             bridgePaneView = bridge
             window.contentView = container
 
-            let toolbar = NSToolbar(identifier: "AIPendantToolbar")
+            let toolbar = NSToolbar(identifier: "HiveMenuBarToolbar")
             toolbar.delegate = self
             toolbar.displayMode = .iconOnly
             toolbar.centeredItemIdentifier = Self.tabsItemIdentifier
             window.toolbar = toolbar
             window.toolbarStyle = .unified
 
-            window.setFrameAutosaveName("AIPendantMainWindow")
+            window.setFrameAutosaveName("HiveMenuBarMainWindow")
             if window.frame.width < 900 { window.setContentSize(NSSize(width: 1200, height: 800)) }
             window.center()
             mainWindow = window
@@ -2378,7 +2378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func buildStatusMenu() {
         statusMenu.delegate = self
 
-        statusMenu.addItem(makeItem("Open AI Pendant", #selector(showMainWindow)))
+        statusMenu.addItem(makeItem("Open Hive Menu Bar", #selector(showMainWindow)))
         floatCommandItem.target = self
         statusMenu.addItem(floatCommandItem)
         statusMenu.addItem(.separator())
@@ -2406,12 +2406,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About AI Pendant",
+        appMenu.addItem(withTitle: "About Hive Menu Bar",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide AI Pendant",
+        appMenu.addItem(withTitle: "Hide Hive Menu Bar",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Quit AI Pendant",
+        appMenu.addItem(withTitle: "Quit Hive Menu Bar",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
@@ -2513,8 +2513,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             // because AppKit constrains a (0,0) frame onto the visible screen
             // at init, so it is never .zero even on a fresh install.
             let hasSavedFrame = UserDefaults.standard
-                .object(forKey: "NSWindow Frame AIPendantFloatPanel") != nil
-            panel.setFrameAutosaveName("AIPendantFloatPanel")
+                .object(forKey: "NSWindow Frame HiveMenuBarFloatPanel") != nil
+            panel.setFrameAutosaveName("HiveMenuBarFloatPanel")
 
             let host = NSHostingView(rootView: FloatingCommandView(model: floatModel))
             host.frame = NSRect(x: 0, y: 0, width: 660, height: 56)
@@ -2570,7 +2570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let maxDim = Int(max(maxBox.width, maxBox.height) * screen.backingScaleFactor)
         guard let image = AttachmentThumbnail.load(path: url.path, maxPixel: min(maxDim, 4000),
                                                    cached: false) else {
-            NSLog("AI Pendant: preview — could not decode %@", url.path)
+            NSLog("Hive Menu Bar: preview — could not decode %@", url.path)
             return
         }
         // Aspect-fit into the box (modest upscaling for tiny images), then wrap in
@@ -2671,7 +2671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let displayIndex = Self.screencaptureDisplayIndex(for: targetScreen)
         let windowNumber = panel.windowNumber
         let path = NSTemporaryDirectory()
-            .appending("aipendant-shot-\(Int(Date().timeIntervalSince1970)).png")
+            .appending("hive-shot-\(Int(Date().timeIntervalSince1970)).png")
 
         panel.orderOut(nil)
 
@@ -2702,8 +2702,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                         self.floatModel.addAttachments(urls: [URL(fileURLWithPath: path)])
                     } else {
                         self.floatModel.status =
-                            "Screenshot failed — grant AI Pendant Screen Recording in System Settings"
-                        NSLog("AI Pendant: screencapture exit=%d fileExists=%d",
+                            "Screenshot failed — grant Hive Menu Bar Screen Recording in System Settings"
+                        NSLog("Hive Menu Bar: screencapture exit=%d fileExists=%d",
                               proc.terminationStatus, exists ? 1 : 0)
                     }
                 }
@@ -2711,7 +2711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             do {
                 try process.run()
             } catch {
-                NSLog("AI Pendant: screencapture failed to launch: \(error)")
+                NSLog("Hive Menu Bar: screencapture failed to launch: \(error)")
                 if wasVisible { self.showFloatPanel() }
             }
         }
@@ -2819,7 +2819,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         do {
             try process.run()
         } catch {
-            NSLog("AI Pendant: failed to kickstart agent: \(error)")
+            NSLog("Hive Menu Bar: failed to kickstart agent: \(error)")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.model.pollHealth()
@@ -2828,7 +2828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func viewLogs() {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/AIPendant", isDirectory: true)
+            .appendingPathComponent("Library/Logs/HiveLocalAgent", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
     }
@@ -2842,7 +2842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 try service.register()
             }
         } catch {
-            NSLog("AI Pendant: login item toggle failed: \(error)")
+            NSLog("Hive Menu Bar: login item toggle failed: \(error)")
         }
         refreshLoginItemState()
     }

@@ -1,8 +1,8 @@
-# AI Pendant Simulator
+# Hive Simulator
 
 ## Short Description
 
-AI Pendant Simulator is a minimal phone-style controller plus Mac local agent prototype. The browser acts like an AI pendant: it accepts a command, prepares a short plan, asks for confirmation, then sends safe predefined actions to a local Mac worker.
+Hive Simulator is a minimal phone-style controller plus Mac local agent prototype. The browser acts like an AI pendant: it accepts a command, prepares a short plan, asks for confirmation, then sends safe predefined actions to a local Mac worker.
 
 ## Features
 
@@ -22,7 +22,7 @@ AI Pendant Simulator is a minimal phone-style controller plus Mac local agent pr
 - Ontology-style Context Graph stored in `local-agent/memory/context_graph.json`
 - Follow-up command resolution for references like `that email` and `him`
 - Hidden Mock Demo Mode for developer testing
-- Export Demo Log as `ai-pendant-demo-log.json`
+- Export Demo Log as `hive-demo-log.json`
 - Reset Demo Data
 
 ## How To Run
@@ -39,12 +39,12 @@ Start the Mac local agent:
 npm run agent:setup
 ```
 
-This installs `~/Applications/AI Pendant Agent.app` with an embedded Node
+This installs `~/Applications/Hive Local Agent.app` with an embedded Node
 runtime and signs it with the first available Apple code-signing identity. The
 app is the permanent macOS privacy identity, so changing terminals, repository
 folders, or NVM versions does not create a new permission target. Approve
 Accessibility, Screen Recording, and the requested Automation targets for
-**AI Pendant Agent**, then enable the login service:
+**Hive Local Agent**, then enable the login service:
 
 ```bash
 npm run agent:autostart
@@ -182,7 +182,7 @@ When `FULL_CONTROL_MODE=true` and `LLM_API_KEY` is set, the LLM can plan any com
 Shopping, Google Docs, and browser-based tasks use a combination of `open_url`, `type_text`, and `press_keys`.
 
 macOS will ask for **Accessibility**, **Screen Recording**, and **Automation**
-permissions for the signed **AI Pendant Agent** app during
+permissions for the signed **Hive Local Agent** app during
 `npm run agent:setup`.
 
 ## Supported Safe Actions (Legacy Demo Mode)
@@ -248,7 +248,7 @@ Set `FULL_CONTROL_MODE=false` to restore whitelist-only demo mode:
 
 - Full control requires `LLM_API_KEY` for open-ended natural language commands.
 - Keyboard automation needs macOS Accessibility permission for the signed
-  `AI Pendant Agent.app`.
+  `Hive Local Agent.app`.
 - Mail sending uses Mail.app, not Gmail API.
 - Browser shopping automation depends on visible UI automation (no headless browser yet).
 - Voice input depends on browser Web Speech API support.
@@ -258,7 +258,7 @@ Set `FULL_CONTROL_MODE=false` to restore whitelist-only demo mode:
 - **Mac Ops dashboard** (full control room): `http://localhost:8000/dashboard` after `npm run build && npm run agent` — see [docs/OPS_DASHBOARD.md](docs/OPS_DASHBOARD.md)
 - Sessions, context graph editing, job queue, relay/bridge health, and activity logs live there
 - Pendant UI also has a lighter **Dashboard** panel for session turns
-- Sessions are stored on the home Mac at `AI-Pendant-Workspace/pendant-sessions.json`
+- Sessions are stored on the home Mac at `Hive-Workspace/pendant-sessions.json`
 
 ## Relay History, Playback & Memory APIs
 
@@ -438,10 +438,9 @@ kept in local extension storage, never browser sync. The agent can then plan:
 
 These run inside Chrome with your existing logged-in cookies.
 
-For Safari, open
-`safari-browser-extension/AI Pendant Browser Bridge/AI Pendant Browser Bridge.xcodeproj`
-in Xcode. The wrapper shares the same extension source and includes macOS and
-iOS schemes.
+For Safari, ship it with `browser/safari/scripts/ship-safari-extension.sh`; the
+Xcode project is `browser/safari/Hive Browser Bridge/Hive Browser Bridge.xcodeproj`,
+a macOS wrapper around the same extension source.
 
 ## Built-in Programs (No LLM)
 
@@ -495,7 +494,7 @@ decisions; private hidden chain-of-thought is not exposed.
 Deploy the relay with the authenticated Wrangler CLI:
 
 ```bash
-npx wrangler d1 execute ai-pendant-relay-db --remote \
+npx wrangler d1 execute hive-relay-db --remote \
   --file=cloudflare-worker/schema.sql
 npx wrangler secret put RELAY_API_KEY
 npx wrangler secret put PAIRING_CODE
@@ -503,7 +502,7 @@ npm run relay:cloudflare:deploy
 ```
 
 Diagnostic recordings are backward compatible with D1-only deployments. For
-durable binary storage, create the private `ai-pendant-audio` R2 bucket, then
+durable binary storage, create the private `hive-audio` R2 bucket, then
 uncomment the `AUDIO_BUCKET` binding in `wrangler.jsonc` before deployment.
 New recordings will store only private R2 object metadata in D1; existing D1
 Base64 recordings remain readable. Audio-capture metadata is retained across

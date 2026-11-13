@@ -94,14 +94,14 @@ test('a posted event records verified with the bundle and the timestamp', async 
 
   const result = await probeInputReachability({
     probeImpl: async () => ({ axTrusted: true, secureInput: false }),
-    host: { bundleId: 'com.aipendant.agent', execPath: '/x/node' },
+    host: { bundleId: 'local.hive.local-agent', execPath: '/x/node' },
     now: () => new Date('2026-08-07T09:00:00.000Z'),
   })
 
   assert.equal(result.status, 'verified')
   assert.equal(result.checkedAt, '2026-08-07T09:00:00.000Z')
-  assert.equal(result.host.bundleId, 'com.aipendant.agent')
-  assert.match(result.detail, /com\.aipendant\.agent/)
+  assert.equal(result.host.bundleId, 'local.hive.local-agent')
+  assert.match(result.detail, /local\.hive\.local-agent/)
   assert.deepEqual(getInputReachability(), result)
 
   assert.deepEqual(inputPostingFromReachability(result), {
@@ -116,7 +116,7 @@ test('an untrusted binary is "failed", and so is a probe that cannot run', async
 
   const swallowed = await probeInputReachability({
     probeImpl: async () => ({ axTrusted: false }),
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
   })
   assert.equal(swallowed.status, 'failed')
   assert.match(swallowed.detail, /granted to a different binary/)
@@ -128,7 +128,7 @@ test('an untrusted binary is "failed", and so is a probe that cannot run', async
     probeImpl: async () => {
       throw new Error('helper not built')
     },
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
   })
   assert.equal(broken.status, 'failed')
   assert.match(broken.detail, /helper not built/)
@@ -212,12 +212,12 @@ test('only steps that post events carry the annotation', () => {
   const verified = {
     status: 'verified',
     checkedAt: '2026-08-07T09:00:00.000Z',
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
   }
   assert.equal(annotateInputReachability('read_file', verified), null)
   assert.deepEqual(annotateInputReachability('ui_click', verified), {
     status: 'verified',
-    bundleId: 'com.aipendant.agent',
+    bundleId: 'local.hive.local-agent',
     checkedAt: '2026-08-07T09:00:00.000Z',
     warning: null,
   })
@@ -236,7 +236,7 @@ test('receipts annotate a possible no-op without changing the verdict', () => {
   const failed = {
     status: 'failed',
     checkedAt: '2026-08-07T09:00:00.000Z',
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
   }
 
   const receipt = buildActionReceipt({
@@ -248,7 +248,7 @@ test('receipts annotate a possible no-op without changing the verdict', () => {
   })
 
   assert.equal(receipt.inputReachability.status, 'failed')
-  assert.equal(receipt.inputReachability.bundleId, 'com.aipendant.agent')
+  assert.equal(receipt.inputReachability.bundleId, 'local.hive.local-agent')
   assert.match(receipt.inputReachability.warning, /ui_click may have been a no-op/)
   // Annotation only. The step ran, the executor said success, and nothing here
   // is allowed to overturn or withhold that.
@@ -269,7 +269,7 @@ test('/observe reports the recorded measurement and honours "not probed"', async
   resetInputReachability()
 
   const permissions = {
-    hostApp: 'AI Pendant Agent',
+    hostApp: 'Hive Local Agent',
     accessibility: { trusted: true, detail: 'Accessibility is granted' },
     screenRecording: { granted: true },
     requiredMissing: [],
@@ -285,13 +285,13 @@ test('/observe reports the recorded measurement and honours "not probed"', async
 
   await probeInputReachability({
     probeImpl: async () => ({ axTrusted: true, secureInput: false }),
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
     now: () => new Date('2026-08-07T09:00:00.000Z'),
   })
 
   const probed = await observeHost({ roots: [], permissions, execFileImpl })
   assert.equal(probed.inputReachability.status, 'verified')
-  assert.equal(probed.inputReachability.host.bundleId, 'com.aipendant.agent')
+  assert.equal(probed.inputReachability.host.bundleId, 'local.hive.local-agent')
   assert.equal(probed.inputReachability.checkedAt, '2026-08-07T09:00:00.000Z')
   assert.equal(probed.accessibility.eventsPost, true)
   assert.equal(probed.accessibility.uiActionsWillReachTheScreen, true)
@@ -305,13 +305,13 @@ test('a failed probe annotates /observe and still gates nothing', async () => {
 
   await probeInputReachability({
     probeImpl: async () => ({ axTrusted: false }),
-    host: { bundleId: 'com.aipendant.agent' },
+    host: { bundleId: 'local.hive.local-agent' },
   })
 
   const observed = await observeHost({
     roots: [],
     permissions: {
-      hostApp: 'AI Pendant Agent',
+      hostApp: 'Hive Local Agent',
       accessibility: { trusted: true, detail: 'Accessibility is granted' },
       screenRecording: { granted: true },
       requiredMissing: [],

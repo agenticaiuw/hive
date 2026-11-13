@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>AI Pendant — Offline</title>
+    <title>Hive — Offline</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -65,11 +65,11 @@
   <body>
     <main>
       <h1>Can't reach the dashboard</h1>
-      <p>AI Pendant needs a network connection to load your dashboard. Check your connection and try again.</p>
+      <p>Hive needs a network connection to load your dashboard. Check your connection and try again.</p>
       <button type="button" id="retry">Try again</button>
     </main>
     <script>
-      var DASHBOARD_URL = 'https://ai-pendant-dashboard.evan20050827.workers.dev/'
+      var DASHBOARD_URL = 'https://hive-dashboard.evan20050827.workers.dev/'
       document.getElementById('retry').addEventListener('click', function () {
         window.location.replace(DASHBOARD_URL)
       })

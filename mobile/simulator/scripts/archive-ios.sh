@@ -4,7 +4,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 archive_root="${project_root}/build/ios"
 build_number="${PENDANT_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
-archive_path="${archive_root}/AI-Pendant-${build_number}.xcarchive"
+archive_path="${archive_root}/Hive-${build_number}.xcarchive"
 export_path="${archive_root}/export-${build_number}"
 team_id="${PENDANT_APPLE_TEAM_ID:-9684Z8GZ26}"
 bundle_id="${PENDANT_BUNDLE_ID:-com.aipendant.app}"

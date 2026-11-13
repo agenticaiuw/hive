@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "AI Pendant Browser Bridge",
+  "name": "Hive Browser Bridge",
   "version": "1.7.10",
-  "description": "Lets your local AI Pendant agent control explicitly permitted browser tabs on this Mac.",
+  "description": "Lets your local Hive agent control explicitly permitted browser tabs on this Mac.",
   "minimum_chrome_version": "121",
   "icons": {
     "16": "icons/icon-16.png",
@@ -20,7 +20,7 @@
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://ai-pendant-relay.evan20050827.workers.dev/*"
+    "https://hive-relay.evan20050827.workers.dev/*"
   ],
   "optional_host_permissions": [
     "http://*/*",
@@ -33,7 +33,7 @@
     ]
   },
   "action": {
-    "default_title": "AI Pendant Browser Bridge",
+    "default_title": "Hive Browser Bridge",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

@@ -766,7 +766,7 @@
 	//#endregion
 	//#region browser-extension/src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
-		"https://ai-pendant-relay.evan20050827.workers.dev",
+		"https://hive-relay.evan20050827.workers.dev",
 		"http://127.0.0.1:8787",
 		"http://localhost:8787"
 	]);
@@ -1608,7 +1608,7 @@
 		return {
 			...config,
 			instanceId: values.instanceId,
-			extensionId: `ai-pendant-${api$2.runtime.id}-${values.instanceId}`
+			extensionId: `hive-${api$2.runtime.id}-${values.instanceId}`
 		};
 	}
 	async function request(config, path, options = {}) {
@@ -4763,7 +4763,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 	//#endregion
 	//#region browser-extension/src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
-	const POLL_ALARM = "ai-pendant-poll";
+	const POLL_ALARM = "hive-poll";
 	const POLL_WINDOW_MS = 25e3;
 	let activePoll = null;
 	let activeRelayDrain = null;
@@ -4947,7 +4947,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		const plan = escrowRestorePlan((await escrowSend({ type: "escrow:fetch" }))?.values);
 		if (!plan.restore) return;
 		await api.storage.local.set(plan.values);
-		console.log("[ai-pendant] Pairing restored from the app escrow after a storage reset.");
+		console.log("[hive] Pairing restored from the app escrow after a storage reset.");
 	}
 	async function enforceCredentialLifetime() {
 		const values = await api.storage.local.get([

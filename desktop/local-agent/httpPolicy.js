@@ -1,7 +1,7 @@
 export function publicHealthPayload() {
   return {
     ok: true,
-    service: 'AI Pendant Mac Local Agent',
+    service: 'Hive Mac Local Agent',
     version: '0.5.0',
     // A route name, not an operational detail. Without it a caller holding a
     // valid token still has to guess that a manifest exists at all — which is

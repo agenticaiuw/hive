@@ -155,7 +155,7 @@
  * becomes unreachable.
  *
  * WHY IT MUST BE A CHILD OF THE AGENT
- * macOS TCC grants are per-binary. The "AI Pendant Agent" app already holds
+ * macOS TCC grants are per-binary. The "Hive Local Agent" app already holds
  * Accessibility and Screen Recording, so a phone-harness spawned by this
  * process inherits the grant and passes both checks; the same binary run from
  * a plain terminal fails them. Nothing here should ever be re-homed into a

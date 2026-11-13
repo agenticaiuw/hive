@@ -88,7 +88,7 @@ const elements = {
 const standalone = new URLSearchParams(location.search).get('standalone') === '1'
 if (standalone) {
   document.body.classList.add('standalone')
-  document.title = 'AI Pendant Console'
+  document.title = 'Hive Console'
   elements.popOut.hidden = true
 }
 

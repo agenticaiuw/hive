@@ -1,4 +1,4 @@
-# AI Pendant — Hybrid-Watch Variant (design study)
+# Hive — Hybrid-Watch Variant (design study)
 
 **Status:** design study (2026-08-12) — feasibility, parts research, and a first-prototype plan. Nothing here changes `Design_Package_v1.md`; the pendant board remains the reference design. Companion docs: `Design_Package_v1.md` (power tree, pin map), `hardware/datasheets/` (all cited pendant parts), `firmware/nrf9160/boards/nrf9160dk_nrf9160_ns.overlay` (the breadboard controls this study remaps).
 

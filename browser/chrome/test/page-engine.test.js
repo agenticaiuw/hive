@@ -208,7 +208,7 @@ test('a successful direct pair stores the full patch, escrows, and records the o
         ok: true,
         agentToken: 'agent-token-1',
         relay: {
-          url: 'https://ai-pendant-relay.evan20050827.workers.dev',
+          url: 'https://hive-relay.evan20050827.workers.dev',
           deviceId: 'browser-abc123',
           deviceToken: 'pdt_1',
         },

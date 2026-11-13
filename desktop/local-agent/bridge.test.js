@@ -71,7 +71,7 @@ test('a screenshot job never uploads the frame to the cloud relay', async (t) =>
           action: { type: 'screenshot', label: 'Look at the screen', params: {} },
           ok: true,
           message: 'Captured display #1',
-          path: '/tmp/aipendant-observations/x/obs-1.jpg',
+          path: '/tmp/hive-observations/x/obs-1.jpg',
           sha256: 'deadbeef',
           image: { width: 1456, height: 910, bytes: 210_000 },
           imageBase64: SCREENSHOT_BYTES,
@@ -544,7 +544,7 @@ test('a routine job auto-runs the confirm-tier plan its own command produced', a
           label: 'Research and speak the headlines',
           params: {
             command:
-              'node /Users/evanliu/agentic-gadget/software/ai-pendant-simulator/scripts/research-brief.mjs --topic "news" --mode brief',
+              'node /Users/evanliu/hive/mobile/simulator/scripts/research-brief.mjs --topic "news" --mode brief',
             timeout: 120000,
           },
         },

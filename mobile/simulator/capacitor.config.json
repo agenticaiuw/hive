@@ -3,9 +3,9 @@
   "appName": "Hive",
   "webDir": "dist",
   "server": {
-    "url": "https://ai-pendant-dashboard.evan20050827.workers.dev",
+    "url": "https://hive-dashboard.evan20050827.workers.dev",
     "allowNavigation": [
-      "ai-pendant-dashboard.evan20050827.workers.dev"
+      "hive-dashboard.evan20050827.workers.dev"
     ],
     "errorPath": "offline.html"
   },

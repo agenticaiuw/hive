@@ -1,4 +1,4 @@
-// Generates AppIcon.icns for the AI Pendant companion app.
+// Generates AppIcon.icns for the Hive Menu Bar companion app.
 // Usage: xcrun swift Tools/make-icon.swift <output-path/AppIcon.icns>
 // Draws a 1024x1024 dark rounded-square gradient tile with a white
 // "waveform.circle.fill" SF Symbol glyph, emits the .iconset PNG sizes,

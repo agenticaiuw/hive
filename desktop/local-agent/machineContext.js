@@ -27,7 +27,7 @@ const RESEARCH_BRIEF_PROMPT = `Research briefs (work the owner is NOT waiting fo
   - mode "compare" when they are weighing options or asking what to get. It recommends and never buys — do not add any purchase or checkout step.
   - mode "page" when the subject is a page or tab they already have open; add --match "<a word from the page or site>".
   - Add --now only if the owner is clearly waiting to hear it right now. Default (omitted) leaves it for later.
-- It searches the public web, reads the sources, writes a cited note under ~/AI-Pendant-Workspace/Briefings and renders the audio. Do not plan those steps yourself and never pair it with browser_* or open_url actions.
+- It searches the public web, reads the sources, writes a cited note under ~/Hive-Workspace/Briefings and renders the audio. Do not plan those steps yourself and never pair it with browser_* or open_url actions.
 - To play one back ("read me my briefing", "what did you find out"): node ${RESEARCH_CLI} --play latest`
 
 let cachedContext = null

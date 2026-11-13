@@ -69,7 +69,7 @@ CP2104 port observed as `/dev/cu.usbserial-0287A9CA`.
 
 ## 2. Deploy the cloud relay worker
 
-**What it is:** The **relay** is a small always-on program in Cloudflare’s cloud (`ai-pendant-relay…workers.dev`). It:
+**What it is:** The **relay** is a small always-on program in Cloudflare’s cloud (`hive-relay…workers.dev`). It:
 
 - Receives audio from the board  
 - Turns speech into text (and optionally a plan)  
@@ -77,13 +77,13 @@ CP2104 port observed as `/dev/cu.usbserial-0287A9CA`.
 - Stores history  
 
 **“Deploy”** means: upload the latest JavaScript from  
-`software/ai-pendant-simulator/cloud-relay/`  
+`cloud/server/`  
 to Cloudflare so the public URL runs the new code (multimodal STT, single-shot command path, etc.).
 
 **How:**
 
 ```bash
-cd ~/agentic-gadget/software/ai-pendant-simulator
+cd ~/hive/mobile/simulator
 # needs wrangler logged in + secrets already set
 npx wrangler deploy
 # (exact command may be in README / wrangler.jsonc — same idea)
@@ -116,26 +116,26 @@ It is the **link between the cloud and your laptop**. Without the bridge, the bo
 
 Code lives mainly in:
 
-- `software/ai-pendant-simulator/local-agent/bridge.js`  
-- `software/ai-pendant-simulator/local-agent/server.js` (local tools/LLM)
+- `desktop/local-agent/bridge.js`  
+- `desktop/local-agent/server.js` (local tools/LLM)
 
 ---
 
 ## 5. LaunchAgent
 
-**What it is:** macOS’s way of **auto-starting** the Mac agent when you log in (and restarting it if it crashes). Name used earlier: `com.aipendant.agent`.
+**What it is:** macOS’s way of **auto-starting** the Mac agent when you log in (and restarting it if it crashes). Name used earlier: `local.hive.local-agent`.
 
-Think: “always keep the AI Pendant Mac agent running in the background.”
+Think: “always keep the Hive Mac agent running in the background.”
 
 Useful commands (user domain):
 
 ```bash
 # status
-launchctl print gui/$(id -u)/com.aipendant.agent 2>/dev/null | head
+launchctl print gui/$(id -u)/local.hive.local-agent 2>/dev/null | head
 
 # stop / start (paths may match how it was installed)
-launchctl bootout gui/$(id -u)/com.aipendant.agent
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aipendant.agent.plist
+launchctl bootout gui/$(id -u)/local.hive.local-agent
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hive.local-agent.plist
 ```
 
 After you pull new `local-agent` code, **restart the LaunchAgent** (or kill and relaunch the agent) so it loads the new bridge/TTS cache behavior.

@@ -287,7 +287,7 @@ test('the page engine inherits identity from storage, never invents its own', ()
   assert.match(engine, /getConfig\(\)/, 'agent identity comes from getConfig')
   assert.match(engine, /getRelayConfig\(\)/, 'relay identity comes from getRelayConfig')
   assert.equal(
-    engine.includes('ai-pendant-'),
+    engine.includes('hive-'),
     false,
     'the extensionId template lives in executor.js alone',
   )
@@ -295,7 +295,7 @@ test('the page engine inherits identity from storage, never invents its own', ()
   const executor = src('executor.js')
   assert.match(
     executor,
-    /ai-pendant-\$\{api\.runtime\.id\}-\$\{values\.instanceId\}/,
+    /hive-\$\{api\.runtime\.id\}-\$\{values\.instanceId\}/,
     'executor.js builds the one extensionId both engines send',
   )
 })

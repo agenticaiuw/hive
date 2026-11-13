@@ -380,7 +380,7 @@ app.get('/health', async (_request, response) => {
 
   response.json({
     ok: true,
-    service: 'AI Pendant Cloud Relay',
+    service: 'Hive Cloud Relay',
     version: '1.1.0',
     platform: cloudflareBindings ? 'cloudflare-workers' : 'node',
     store: store.kind,
@@ -3408,7 +3408,7 @@ app.use((error, request, response, next) => {
 })
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`AI Pendant Cloud Relay listening on http://0.0.0.0:${PORT}`)
+  console.log(`Hive Cloud Relay listening on http://0.0.0.0:${PORT}`)
   console.log('[relay] Store mode: Cloudflare D1 in Workers, memory locally')
 })
 

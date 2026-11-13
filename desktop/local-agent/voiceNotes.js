@@ -33,7 +33,7 @@ import { scheduleReminder } from './remindMe.js'
  *   pipelineAudio.js              writes the recording to pipeline-audio/.
  *   pendantSpeech.js              renders the reply.
  *
- * Measured in ~/AI-Pendant-Workspace/pendant-pipeline.json on 2026-08-07: 67
+ * Measured in ~/Hive-Workspace/pendant-pipeline.json on 2026-08-07: 67
  * runs, 23 of them carrying a finished transcript, plus one real `bookmark`
  * event from the nRF9160. A voice NOTE differs from a voice COMMAND only in
  * what is done with that text, so this module reads the run and never opens a

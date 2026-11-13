@@ -16,7 +16,7 @@ import SafariServices
 typealias PlatformViewController = NSViewController
 #endif
 
-let extensionBundleIdentifier = "com.evanliu.aipendant.browserbridge.Extension"
+let extensionBundleIdentifier = "com.evanliu.hive.browserbridge.Extension"
 
 class ViewController: PlatformViewController, WKNavigationDelegate, WKScriptMessageHandler {
 

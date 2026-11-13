@@ -119,7 +119,7 @@ export function classifyBrowserError(error) {
     return new BrowserOfflineError(
       status.online
         ? 'The browser extension is online but did not answer in time. Safari may be blocked on a dialog or a page that never finished loading.'
-        : 'The browser extension is offline. Open Safari and enable the AI Pendant Browser Bridge extension; no browser_* action can run until it is polling.',
+        : 'The browser extension is offline. Open Safari and enable the Hive Browser Bridge extension; no browser_* action can run until it is polling.',
     )
   }
 

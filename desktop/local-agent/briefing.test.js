@@ -38,7 +38,7 @@ Scheduled Reminders|Friday, August 7, 2026 at 09:00:00|Friday, August 7, 2026 at
 
 const MAIL_STDOUT = `false|Thursday, August 6, 2026 at 08:12:00|"Rappi" <rappi_at_hello_rappi_com_mx_6s8c57w82c_21669c14@privaterelay.appleid.com>|La comida mejor rankeada de tu zona
 false|Thursday, August 6, 2026 at 09:30:00|Dana Whitfield <dana@northwind.example>|Contract redlines before Friday
-true|Thursday, August 6, 2026 at 10:00:00|Evan Liu via TestFlight <testflight_no_reply@email.apple.com>|Evan Liu has invited you to test AI Pendant.
+true|Thursday, August 6, 2026 at 10:00:00|Evan Liu via TestFlight <testflight_no_reply@email.apple.com>|Evan Liu has invited you to test Hive.
 `
 
 const NOW = new Date(2026, 7, 7, 7, 30, 0)

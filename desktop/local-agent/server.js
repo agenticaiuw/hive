@@ -1674,7 +1674,7 @@ registerContextGraphRetentionRoutes(app)
 /* The shelf's own record of what it dropped. Read-only, and the whole point of
  * it: an unheard briefing that gets evicted leaves a tombstone, and until this
  * was mounted the tombstone was visible only by opening
- * ~/AI-Pendant-Workspace/.pendant-briefings.json by hand — a record the owner
+ * ~/Hive-Workspace/.pendant-briefings.json by hand — a record the owner
  * cannot reach is the silent deletion it was built to end.
  *
  * Base path is /briefings/shelf and NOT under /research/briefings, where
@@ -2514,7 +2514,7 @@ app.use((error, request, response, next) => {
 })
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`AI Pendant Mac Local Agent listening on http://localhost:${PORT}`)
+  console.log(`Hive Mac Local Agent listening on http://localhost:${PORT}`)
   // Any screenshots left behind by a crashed run die with the old process.
   purgeAllCaptures()
   // Routines only fire while this process is up; start the loop with it.
@@ -2604,7 +2604,7 @@ async function buildHealthPayload() {
 
   return {
     ok: true,
-    service: 'AI Pendant Mac Local Agent',
+    service: 'Hive Mac Local Agent',
     version: '0.5.0',
     tokenRequired: true,
     tokenConfigured: Boolean(AGENT_TOKEN),

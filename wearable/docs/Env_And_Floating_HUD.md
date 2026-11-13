@@ -28,7 +28,7 @@ Aliases applied in `load-pendant-env.mjs`: `LLM_API_KEY`, `DASHBOARD_ACCESS_KEY`
 
 ## Floating HUD
 
-Menu bar AI Pendant → **Floating Command…** — always-on-top text + mic over other apps.
+Hive Menu Bar → **Floating Command…** — always-on-top text + mic over other apps.
 
 ## Dashboard idle
 

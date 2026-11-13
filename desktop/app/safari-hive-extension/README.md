@@ -1,7 +1,7 @@
 # Hive Safari extension
 
 The shared extension resources and native credential escrow handler live in
-`browser/safari/AI Pendant Browser Bridge/Shared (Extension)` in this repository.
+`browser/safari/Hive Browser Bridge/Shared (Extension)` in this repository.
 The name and bundle identifier are adapted for the Hive app. `embed.sh` embeds
 and signs the extension before the containing app is signed.
 

@@ -32,7 +32,7 @@ const STARTED_AT = Date.now();
 // only reads process.env. It has already applied precedence and derivation.
 const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 const RELAY_API_KEY = process.env.RELAY_API_KEY || '';
-const RELAY_BASE = (process.env.RELAY_URL || 'https://ai-pendant-relay.evan20050827.workers.dev').replace(/\/+$/, '');
+const RELAY_BASE = (process.env.RELAY_URL || 'https://hive-relay.evan20050827.workers.dev').replace(/\/+$/, '');
 const AGENT_BASE = 'http://127.0.0.1:8000';
 
 // Every value from .env is treated as a secret and scrubbed from every outbound
@@ -1301,7 +1301,7 @@ function startPusher() {
 const CORS_ORIGINS = new Set([
   'http://localhost:8000',
   'http://127.0.0.1:8000',
-  'https://ai-pendant-dashboard.evan20050827.workers.dev',
+  'https://hive-dashboard.evan20050827.workers.dev',
 ]);
 function corsHeaders(req) {
   const origin = req.headers.origin || '';

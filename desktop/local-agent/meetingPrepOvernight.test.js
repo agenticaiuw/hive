@@ -26,7 +26,7 @@ const NOW = new Date('2026-08-06T22:30:00')
 /*
  * The `file` sink is off in every test here, and finding out why cost the
  * owner a file: briefing.js's writeBriefingFile writes into the real
- * ~/AI-Pendant-Workspace/briefings and rewrites latest.json, which is what GET
+ * ~/Hive-Workspace/briefings and rewrites latest.json, which is what GET
  * /briefing/latest serves. A test run with the default sinks left the owner's
  * "latest briefing" pointing at a fabricated meeting with a fabricated
  * attendee. A test may compose a brief; it may not publish one.

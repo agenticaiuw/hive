@@ -2,7 +2,7 @@
 
 ## Decision
 
-The AI Pendant should have one account-scoped product experience across web and
+Hive should have one account-scoped product experience across web and
 iOS. Device agents are execution peers, not separate products.
 
 - **Dashboard** becomes the shared product shell: home, conversations,
@@ -21,9 +21,9 @@ iOS. Device agents are execution peers, not separate products.
 | Surface | Current source | Current authority | Problem |
 | --- | --- | --- | --- |
 | Dashboard | `software/dashboard-sveltekit` | D1 jobs plus a bounded `agent-snapshot` copied from the Mac | Hardware-focused view; not the full product |
-| Local Ops dashboard | `software/ai-pendant-simulator/src/ops` | Mac JSON files and local agent APIs | Fullest UI, but tied to one Mac and duplicated remotely through an RPC proxy |
-| Pendant controller / Capacitor | `software/ai-pendant-simulator/src` | Browser localStorage in mock mode, Mac or relay otherwise | Separate shell and session cache; diverges from web |
-| Local Mac agent | `software/ai-pendant-simulator/local-agent` | Device-local permissions, execution, logs, and JSON stores | Product records are still authored and stored primarily on one Mac |
+| Local Ops dashboard | `mobile/simulator/src/ops` | Mac JSON files and local agent APIs | Fullest UI, but tied to one Mac and duplicated remotely through an RPC proxy |
+| Pendant controller / Capacitor | `mobile/simulator/src` | Browser localStorage in mock mode, Mac or relay otherwise | Separate shell and session cache; diverges from web |
+| Local Mac agent | `desktop/local-agent` | Device-local permissions, execution, logs, and JSON stores | Product records are still authored and stored primarily on one Mac |
 | Cloudflare relay | Worker plus D1 | Devices, jobs/runs, and generic state blobs | D1 is persistent, but product data is not normalized or account-partitioned |
 
 Cloudflare is not a single server/database object. The Worker is the API and
@@ -180,7 +180,7 @@ paired `deviceId`.
 
 ## Capability and permission reports
 
-Use `software/ai-pendant-contracts` for the versioned shapes. A capability entry
+Use `software/hive-contracts` for the versioned shapes. A capability entry
 separates:
 
 - `availability`: whether the tool actually works now;

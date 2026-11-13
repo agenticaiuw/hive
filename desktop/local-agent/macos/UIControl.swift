@@ -1,4 +1,4 @@
-// aipendant-uicontrol — mouse / keyboard / accessibility helper for the AI Pendant
+// hive-uicontrol — mouse / keyboard / accessibility helper for the Hive
 // local agent.
 //
 // Why a compiled helper at all: CGEventPost is the only reliable way to
@@ -7,7 +7,7 @@
 // osascript is orders of magnitude slower and cannot read element frames.
 //
 // TCC: this binary is deliberately unsigned and un-bundled. It MUST be spawned
-// as a short-lived direct child of the agent process ("AI Pendant Agent.app").
+// as a short-lived direct child of the agent process ("Hive Local Agent.app").
 // Responsibility for TCC is inherited across posix_spawn, so the child inherits
 // the parent's Accessibility grant. Do not daemonize it, do not wrap it in its
 // own .app, do not launch it via launchctl, do not child.unref() it — any of
@@ -431,7 +431,7 @@ func flagInt(_ name: String, _ fallback: Int) -> Int { flags[name].flatMap(Int.i
 func flagString(_ name: String) -> String? { flags[name] }
 
 guard let command = positional.first else {
-    fail("USAGE", "Usage: aipendant-uicontrol <probe|displays|cursor|move|click|down|up|drag|scroll|key|type|snapshot|find|press|menu|hittest>")
+    fail("USAGE", "Usage: hive-uicontrol <probe|displays|cursor|move|click|down|up|drag|scroll|key|type|snapshot|find|press|menu|hittest>")
 }
 
 let modifierFlags = parseModifiers(flagString("modifiers"))

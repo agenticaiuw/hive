@@ -97,7 +97,7 @@ export function envLoadedFrom() {
 export function deriveSecret(masterSecret, label) {
   const master = String(masterSecret ?? '')
   if (!master) return ''
-  return createHmac('sha256', master).update(`aipendant:${label}`).digest('hex')
+  return createHmac('sha256', master).update(`hive:${label}`).digest('hex')
 }
 
 if (process.env.PAIRING_CODE) {
@@ -116,7 +116,7 @@ if (process.env.PAIRING_CODE) {
  * development sets RELAY_URL=http://localhost:8787 explicitly.
  */
 applyParsedEnv({
-  RELAY_URL: 'https://ai-pendant-relay.evan20050827.workers.dev',
+  RELAY_URL: 'https://hive-relay.evan20050827.workers.dev',
 })
 
 /**

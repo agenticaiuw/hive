@@ -10,7 +10,7 @@ Verified from four independent sources: OpenRouter's catalog reports `"modality"
 
 Failure mode if you try anyway: OpenRouter returns HTTP 404 with `{"error":{"message":"No endpoints found that support image input","code":404}}`. It does NOT silently strip the image, so you get a loud error rather than a hallucinating planner. Web sources claiming V4 or V4-Pro accept images (mindstudio.ai, aimadetools.com, deepseek-ai.net, deepseek.ai — note deepseek.ai is NOT DeepSeek's domain) are wrong.
 
-Separate DeepSeek finding worth acting on regardless of vision: the bare slug `deepseek/deepseek-v4-flash` in /Users/evanliu/agentic-gadget/software/ai-pendant-simulator/local-agent/llmPlanner.js line 12-13 resolves to the **April preview checkpoint `deepseek-v4-flash-20260423`** on OpenRouter, not the much stronger 0731 release. The agentic delta is enormous (DeepSWE 7.3 → 54.4, Terminal-Bench 2.1 61.8 → 82.7, Toolathlon 49.7 → 70.3). Pin `deepseek/deepseek-v4-flash-0731` — it is also cheaper on OpenRouter ($0.09/$0.18 vs $0.14/$0.28).
+Separate DeepSeek finding worth acting on regardless of vision: the bare slug `deepseek/deepseek-v4-flash` in /Users/evanliu/hive/desktop/local-agent/llmPlanner.js line 12-13 resolves to the **April preview checkpoint `deepseek-v4-flash-20260423`** on OpenRouter, not the much stronger 0731 release. The agentic delta is enormous (DeepSWE 7.3 → 54.4, Terminal-Bench 2.1 61.8 → 82.7, Toolathlon 49.7 → 70.3). Pin `deepseek/deepseek-v4-flash-0731` — it is also cheaper on OpenRouter ($0.09/$0.18 vs $0.14/$0.28).
 
 ## Recommendation
 
@@ -66,7 +66,7 @@ Honest gap: nobody publishes TTFT measured *with an image in the prompt* for any
 
 ## Implementation notes
 
-Target file: /Users/evanliu/agentic-gadget/software/ai-pendant-simulator/local-agent/llmPlanner.js
+Target file: /Users/evanliu/hive/desktop/local-agent/llmPlanner.js
 
 1) MODEL ROUTING (lines 11-13). Add alongside the existing constant:
    const LLM_MODEL        = process.env.LLM_MODEL        || 'deepseek/deepseek-v4-flash-0731'

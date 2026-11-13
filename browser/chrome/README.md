@@ -1,4 +1,4 @@
-# AI Pendant Browser Bridge
+# Hive Browser Bridge
 
 The Browser Bridge lets the authenticated local Mac agent use a browser profile
 that is already signed into websites. Chrome and Safari share the same Manifest
@@ -104,7 +104,7 @@ After website access is granted it can:
 - **list_tabs**, **navigate**, **activate_tab** (find-or-open by URL), **click** / **type** by ref or CSS selector
 - **wait_for**, **scroll**, **select**, **press_key**, **read_page**, **capture** (tab PNG)
 
-Install it only in a browser profile you want AI Pendant to control.
+Install it only in a browser profile you want Hive to control.
 
 ## The brain: this node thinks for itself
 
@@ -206,8 +206,8 @@ refresh the wrapper after changing shared extension files:
 node browser-extension/package.mjs
 xcrun safari-web-extension-converter browser-extension/build/safari \
   --project-location safari-browser-extension \
-  --app-name "AI Pendant Browser Bridge" \
-  --bundle-identifier com.evanliu.aipendant.browserbridge \
+  --app-name "Hive Browser Bridge" \
+  --bundle-identifier com.evanliu.hive.browserbridge \
   --swift \
   --copy-resources \
   --no-open \
@@ -216,7 +216,7 @@ xcrun safari-web-extension-converter browser-extension/build/safari \
 ```
 
 Open the Xcode project, select your Apple development team, and run the macOS
-app. Then enable **AI Pendant Browser Bridge** in Safari → Settings →
+app. Then enable **Hive Browser Bridge** in Safari → Settings →
 Extensions, choose **Always Allow on Every Website**, and configure the same
 loopback URL and token from the extension settings.
 

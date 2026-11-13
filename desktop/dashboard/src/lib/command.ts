@@ -35,7 +35,7 @@ export const MAX_COMMAND_LENGTH = 2000;
 
 /** Same conversation id the voice/text composer uses, so one browser is one
  * conversation no matter which box the owner typed into. */
-const SESSION_STORAGE_KEY = "ai-pendant-dashboard-conversation-id";
+const SESSION_STORAGE_KEY = "hive-dashboard-conversation-id";
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$/;
 
 export function conversationSessionId(): string {
@@ -352,7 +352,7 @@ export type CommandHistoryEntry = {
   at: number;
 };
 
-const HISTORY_KEY = "ai-pendant-dashboard-command-history-v1";
+const HISTORY_KEY = "hive-dashboard-command-history-v1";
 export const HISTORY_LIMIT = 10;
 
 export function loadCommandHistory(): CommandHistoryEntry[] {

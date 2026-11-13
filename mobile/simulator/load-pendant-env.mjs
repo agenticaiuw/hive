@@ -1,5 +1,5 @@
 /**
- * Load the single repo-root `.env` for every AI Pendant package.
+ * Load the single repo-root `.env` for every Hive package.
  * There is intentionally no package-local env file — only <repo>/.env.
  *
  * Safe on Cloudflare Workers: never throws if import.meta.url / fs are
@@ -41,7 +41,7 @@ try {
 export function deriveSecret(masterSecret, label) {
   const master = String(masterSecret ?? '')
   if (!master) return ''
-  return createHmac('sha256', master).update(`aipendant:${label}`).digest('hex')
+  return createHmac('sha256', master).update(`hive:${label}`).digest('hex')
 }
 
 if (process.env.PAIRING_CODE) {
@@ -57,7 +57,7 @@ if (process.env.PAIRING_CODE) {
 // RELAY_URL=http://localhost:8787. Config, not a secret — the extension ships
 // this origin in its allowlist already.
 if (!process.env.RELAY_URL) {
-  process.env.RELAY_URL = 'https://ai-pendant-relay.evan20050827.workers.dev'
+  process.env.RELAY_URL = 'https://hive-relay.evan20050827.workers.dev'
 }
 
 // --- aliases (old names → short set) ---

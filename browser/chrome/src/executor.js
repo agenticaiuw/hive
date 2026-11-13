@@ -71,7 +71,7 @@ export async function getConfig() {
   return {
     ...config,
     instanceId: values.instanceId,
-    extensionId: `ai-pendant-${api.runtime.id}-${values.instanceId}`,
+    extensionId: `hive-${api.runtime.id}-${values.instanceId}`,
   }
 }
 

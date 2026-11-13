@@ -9,7 +9,7 @@ import { redactInline } from "$lib/jobs";
 import type { RuntimeEnv } from "./env";
 
 const DEFAULT_RELAY_URL =
-  "https://ai-pendant-relay.evan20050827.workers.dev";
+  "https://hive-relay.evan20050827.workers.dev";
 
 type RelayFetch = (path: string, init?: RequestInit) => Promise<Response>;
 

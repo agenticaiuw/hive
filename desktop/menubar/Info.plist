@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.aipendant.menubar</string>
+	<string>local.hive.menubar</string>
 	<key>CFBundleName</key>
-	<string>AI Pendant</string>
+	<string>Hive Menu Bar</string>
 	<key>CFBundleDisplayName</key>
-	<string>AI Pendant</string>
+	<string>Hive Menu Bar</string>
 	<key>CFBundleExecutable</key>
-	<string>AI Pendant</string>
+	<string>Hive Menu Bar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -25,9 +25,9 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>AI Pendant needs the microphone so you can record voice commands from the dashboard inside this app.</string>
+	<string>Hive Menu Bar needs the microphone so you can record voice commands from the dashboard inside this app.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>AI Pendant transcribes your voice into the floating command field on this Mac.</string>
+	<string>Hive Menu Bar transcribes your voice into the floating command field on this Mac.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

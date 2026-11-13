@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url'
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SOURCE_PATH = path.join(__dirname, 'InputSourceSelect.swift')
-const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AIPendant')
-const BIN_PATH = path.join(BIN_DIR, 'aipendant-inputsource')
+const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'HiveLocalAgent')
+const BIN_PATH = path.join(BIN_DIR, 'hive-inputsource')
 
 export async function listInputSources() {
   const binary = await ensureHelper()

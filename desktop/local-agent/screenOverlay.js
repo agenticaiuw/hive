@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url'
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SOURCE_PATH = path.join(__dirname, 'macos', 'ScreenOverlay.swift')
-const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AIPendant')
-const BIN_PATH = path.join(BIN_DIR, 'aipendant-screen-overlay')
+const BIN_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'HiveLocalAgent')
+const BIN_PATH = path.join(BIN_DIR, 'hive-screen-overlay')
 
 /**
  * Show a native always-on-top screen overlay (AppKit).

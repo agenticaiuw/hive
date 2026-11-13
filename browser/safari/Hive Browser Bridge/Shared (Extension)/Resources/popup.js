@@ -1318,7 +1318,7 @@
 	//#endregion
 	//#region browser-extension/src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
-		"https://ai-pendant-relay.evan20050827.workers.dev",
+		"https://hive-relay.evan20050827.workers.dev",
 		"http://127.0.0.1:8787",
 		"http://localhost:8787"
 	]);
@@ -2048,7 +2048,7 @@
 		return {
 			...config,
 			instanceId: values.instanceId,
-			extensionId: `ai-pendant-${api$2.runtime.id}-${values.instanceId}`
+			extensionId: `hive-${api$2.runtime.id}-${values.instanceId}`
 		};
 	}
 	async function request(config, path, options = {}) {
@@ -5391,7 +5391,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 	const standalone = new URLSearchParams(location.search).get("standalone") === "1";
 	if (standalone) {
 		document.body.classList.add("standalone");
-		document.title = "AI Pendant Console";
+		document.title = "Hive Console";
 		elements.popOut.hidden = true;
 	}
 	let dashboardUrl = dashboardUrlFor(DEFAULT_AGENT_URL);

@@ -113,7 +113,7 @@ export { RELAY_NODE_ADDRESS, BRIDGE_PING_FRAME, BRIDGE_PING_INTERVAL_MS }
  * is the same argument that keeps the Mac agent on loopback.
  */
 export const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
-  'https://ai-pendant-relay.evan20050827.workers.dev',
+  'https://hive-relay.evan20050827.workers.dev',
   'http://127.0.0.1:8787',
   'http://localhost:8787',
 ])

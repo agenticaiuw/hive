@@ -12,7 +12,7 @@ export const AGENT_TOKEN = process.env.AGENT_TOKEN || ''
 
 export const workspacePath = path.resolve(
   process.env.PENDANT_WORKSPACE_PATH ||
-    path.join(homeDirectory, 'AI-Pendant-Workspace'),
+    path.join(homeDirectory, 'Hive-Workspace'),
 )
 const configuredProjectPath = path.resolve(
   process.env.PENDANT_PROJECT_PATH || repositoryRoot,

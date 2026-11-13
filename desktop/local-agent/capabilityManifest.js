@@ -997,7 +997,7 @@ export function buildCapabilityManifest(
 
   return {
     ok: true,
-    service: 'AI Pendant Mac Local Agent',
+    service: 'Hive Mac Local Agent',
     version,
     generatedAt: new Date().toISOString(),
     generatedFrom: [

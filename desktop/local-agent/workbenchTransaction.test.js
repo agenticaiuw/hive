@@ -33,7 +33,7 @@ const moduleUrl = new URL('./workbenchTransaction.js', import.meta.url).href
 const here = path.dirname(fileURLToPath(import.meta.url))
 
 /* Every test gets its own base directory. Nothing in this file may touch
- * ~/AI-Pendant-Workspace, and nothing may read a production default. */
+ * ~/Hive-Workspace, and nothing may read a production default. */
 function createBase(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-txn-'))
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
