@@ -1,4 +1,5 @@
-//! Local FLARE Large lip reading with live, replaceable caption drafts (python/lipread.py).
+//! Local lip reading (FLARE Large, or USR 2.0 Huge; see [`available`]) with live, replaceable
+//! caption drafts (scripts/lipread_worker.py).
 //!
 //! Tap fn to open the camera; tap again to submit the final transcript. Capture and inference run
 //! concurrently in a persistent worker (scripts/lipread_worker.py, PyTorch). Drafts never trigger
@@ -67,8 +68,25 @@ pub fn set_mode(mode: &str) -> io::Result<String> {
     Ok(mode.to_string())
 }
 
-/// Whether lip reading is set up, and if not, what's missing.
+/// Whether lip reading is set up, and if not, what's missing. The worker runs on FLARE's Python;
+/// its model is FLARE Large, or USR 2.0 Huge from [`home`]/usr2 with LIPREAD_MODEL=usr2
+/// (scripts/lipread_worker.py says why FLARE is the default).
 pub fn available() -> (bool, String) {
+    if std::env::var("LIPREAD_MODEL").as_deref() == Ok("usr2") {
+        let usr2 = home().join("usr2");
+        let required = [
+            home().join("flare/.venv/bin/python"),
+            usr2.join("weights/huge_high_resource_lrs2lrs3vox2avsp.pth"),
+            usr2.join("espnet/nets/pytorch_backend"),
+        ];
+        if !required.iter().all(|path| path.exists()) {
+            return (
+                false,
+                "USR 2.0 isn't set up: run scripts/setup-lipread.sh".into(),
+            );
+        }
+        return (true, "USR 2.0 Huge (2026), local live captions".into());
+    }
     let runtime = home().join("flare");
     let required = [
         runtime.join(".venv/bin/python"),
@@ -137,7 +155,8 @@ pub struct LipReader {
 }
 
 impl LipReader {
-    /// The FLARE worker in [`home`]/flare: `flare/.venv/bin/python scripts/lipread_worker.py`.
+    /// The worker on FLARE's Python in [`home`]/flare:
+    /// `flare/.venv/bin/python scripts/lipread_worker.py`.
     pub fn new(on_event: impl Fn(Value) + Send + Sync + 'static) -> LipReader {
         let base = home();
         let command = vec![

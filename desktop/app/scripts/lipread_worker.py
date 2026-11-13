@@ -1,7 +1,9 @@
-"""Persistent local FLARE worker: in-memory camera capture and rolling partial transcripts.
+"""Persistent local lip-reading worker: in-memory camera capture and rolling partial transcripts.
 
-Commands and events are JSON lines tagged with a session number. No microphone, MP4 files,
-network requests or agent actions. The camera is opened only for an explicit start command.
+The model is FLARE Large (<lipread>/flare), or USR 2.0 Huge (<lipread>/usr2,
+scripts/lipread_usr2.py) with LIPREAD_MODEL=usr2. Commands and events are JSON lines tagged with
+a session number. No microphone, MP4 files, network requests or agent actions. The camera is
+opened only for an explicit start command.
 """
 import json
 import base64
@@ -25,6 +27,7 @@ def say(**event):
 class Recorder:
     def __init__(self, model, session):
         self.session = session
+        self.model = model
         self.stop = threading.Event()
         self.cancelled = False
         self.stream = Stream(model, self.emit)
@@ -37,7 +40,6 @@ class Recorder:
 
     def run(self):
         import cv2
-        from lipread_vision import Crops
         camera = crops = None
         error = None
         try:
@@ -54,7 +56,7 @@ class Recorder:
                 self.stop.wait(1)
             if self.stop.is_set():
                 return
-            crops = Crops()
+            crops = self.model.crops()
             camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             camera.set(cv2.CAP_PROP_FPS, 25)
@@ -111,15 +113,26 @@ class Recorder:
         self.thread.join(3)
 
 
-def main():
+def load_model():
+    """FLARE Large, or USR 2.0 Huge with LIPREAD_MODEL=usr2. The worker runs in FLARE's folder
+    with FLARE's Python, which runs USR 2.0's code too. FLARE is the default: on USR 2.0's own
+    demo clip it read the sentence nearly word for word and USR 2.0 didn't (scripts/
+    lipread_usr2.py), so which is better for a given face is measured, not assumed."""
+    flare = Path(os.environ.get('LIPREAD_FLARE_DIR', Path.cwd()))
+    if os.environ.get('LIPREAD_MODEL') == 'usr2':
+        from lipread_usr2 import Usr2
+        return Usr2(os.environ.get('LIPREAD_USR2_DIR', flare.parent / 'usr2'))
     from lipread_flare import Flare
-    root = Path(os.environ.get('LIPREAD_FLARE_DIR', Path.cwd()))
+    return Flare(flare)
+
+
+def main():
     say(status='Loading lip reader…', final=False)
     try:
-        model = Flare(root)
+        model = load_model()
         # Compile GPU kernels while the model is loading, not during the first phrase.
         import numpy as np
-        model([np.zeros((2, 88, 88), dtype=np.uint8)] * 20)
+        model([np.zeros(model.crop_shape, dtype=np.uint8)] * 20)
         say(ready=True, model=model.name, device=model.device)
     except Exception as exc:
         say(error=f'Lip reader could not load: {type(exc).__name__}: {exc}', final=False)

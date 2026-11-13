@@ -84,7 +84,8 @@ class Stream:
                     start, end = self.base, self.base + len(batch)
                     final = self.closed and len(self.frames) <= self.limit
                 began = time.monotonic()
-                text = self.decode(batch, final=final).strip()
+                # A full window is kept for good, so it gets the careful decode as the last one does.
+                text = self.decode(batch, final=final or len(batch) == self.limit).strip()
                 elapsed = time.monotonic() - began
                 with self.condition:
                     if self.cancelled:

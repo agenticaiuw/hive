@@ -71,6 +71,23 @@ class StreamTest(unittest.TestCase):
         self.assertTrue(stream.done.wait(2))
         self.assertEqual(events[-1]['text'], 'final words')
 
+    def test_a_full_window_is_kept_from_the_careful_decode(self):
+        events, kept = [], threading.Event()
+        def emit(**event):
+            events.append(event)
+            if event.get('partial') == 'careful25': kept.set()
+        decode = lambda frames, final=False: f"{'careful' if final else 'draft'}{len(frames)}"
+        stream = Stream(decode, emit, window=1, overlap=0.2, interval=0.01)
+        for i in range(25): stream.feed(i)
+        self.assertTrue(kept.wait(2))
+        self.assertEqual(stream.committed, 'careful25')
+        for i in range(10): stream.feed(i)
+        stream.finish()
+        self.assertTrue(stream.done.wait(2))
+        self.assertEqual(events[-1], {'text': 'careful25 careful15', 'final': True,
+                                      'inference_seconds': events[-1]['inference_seconds'],
+                                      'video_seconds': 1.4})
+
     def test_empty_session_finishes_without_decoding(self):
         events=[]
         stream=Stream(lambda *a, **k: self.fail('empty decode'), lambda **e: events.append(e))
