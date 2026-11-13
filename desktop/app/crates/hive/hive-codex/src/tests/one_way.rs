@@ -111,12 +111,9 @@ fn a_shell_command_lets_go_of_the_mouse() {
     assert!(events.has("doing", "Running a local command"));
 }
 
-/// The sandbox's config: online, and hive-dream's folder writable (its worktrees and build).
+/// The sandbox's config: online.
 fn online() -> serde_json::Value {
-    json!({"sandbox_workspace_write": {
-        "network_access": true,
-        "writable_roots": [crate::agent::dream_dir().display().to_string()],
-    }})
+    json!({"sandbox_workspace_write": {"network_access": true}})
 }
 
 #[test]
