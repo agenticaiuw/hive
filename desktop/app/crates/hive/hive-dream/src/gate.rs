@@ -531,6 +531,13 @@ pub fn test_env(dream: &Path, name: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// agent-core's own build folder. It's a separate cargo workspace with its own lock file, and
+/// sharing the hive workspace's folder makes one build of personal-agent-core overwrite the
+/// other's (the next hive build then fails with two "different" serde_json types).
+pub fn core_target(dream: &Path) -> PathBuf {
+    dream.join("target").join("agent-core")
+}
+
 pub const TEST_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// The hive crates that don't build on this OS: on Linux (Hive's cloud VM) the three that need
@@ -586,6 +593,8 @@ pub fn run_tests(worktree: &Path, dream: &Path, packages: &[Package], log: &Path
             "--offline".into(),
             "--manifest-path".into(),
             m(&core_manifest),
+            "--target-dir".into(),
+            m(&core_target(dream)),
         ]);
     }
     commands.push(vec![
