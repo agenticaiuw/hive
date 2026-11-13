@@ -169,6 +169,7 @@ test('Codex runs on its own home with both tool servers, as the VM user, read-on
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);
   assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', '/usr/bin/node', '/app/phone-mcp.mjs']);
+  for (const name of ['desktop', 'phone']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
   assert.match(GUIDE, /authenticate/);

@@ -51,7 +51,10 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     '-c', 'mcp_servers.desktop.startup_timeout_sec=60', '-c', 'mcp_servers.desktop.tool_timeout_sec=1900', // wait_until waits up to 30 minutes
     '-c', 'mcp_servers.phone.command="sudo"', '-c', `mcp_servers.phone.args=${toml(phone)}`,
-    '-c', 'mcp_servers.phone.startup_timeout_sec=30', '-c', 'mcp_servers.phone.tool_timeout_sec=180', '-'];
+    '-c', 'mcp_servers.phone.startup_timeout_sec=30', '-c', 'mcp_servers.phone.tool_timeout_sec=180',
+    // Codex asks before running an MCP tool, and with no one to ask (exec) that ask is a refusal, so
+    // Hive's own two servers are approved up front, as the Mac's Hive does (hive-codex agent.rs).
+    '-c', 'mcp_servers.desktop.default_tools_approval_mode="approve"', '-c', 'mcp_servers.phone.default_tools_approval_mode="approve"', '-'];
 }
 
 /** One line for a person, from one of Codex's JSON events; null for the rest. */
