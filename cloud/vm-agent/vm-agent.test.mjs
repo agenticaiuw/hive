@@ -5,6 +5,7 @@ import { createServer, get, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgent } from './agent.mjs';
+import { proxyArgs } from './browser.mjs';
 import { PostError, PostStore, postDigest } from './posts.mjs';
 import { RECIPES, normalizeText, ownedLink, validatePost } from './sites.mjs';
 
@@ -168,6 +169,15 @@ test('a pasted link opens only when it leads to a known site over https', () => 
   assert.equal(ownedLink('https://twitter.com/i/flow/login'), 'https://twitter.com/i/flow/login');
   for (const bad of ['http://discord.com/login', 'https://discord.com.evil.example/', 'https://evildiscord.com/', 'https://user@discord.com/', 'javascript:alert(1)', 'file:///etc/passwd', 'not a link']) {
     assert.throws(() => ownedLink(bad), /link/, bad);
+  }
+});
+
+test('the browser goes through HIVE_VM_PROXY when it is set, and only a proxy address is accepted', () => {
+  assert.deepEqual(proxyArgs(null), []);
+  assert.deepEqual(proxyArgs('socks5://127.0.0.1:11080'),
+    ['--proxy-server=socks5://127.0.0.1:11080', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']);
+  for (const bad of ['127.0.0.1:11080', 'socks5://127.0.0.1:11080 --no-sandbox', 'file:///etc/passwd']) {
+    assert.throws(() => proxyArgs(bad), /HIVE_VM_PROXY/, bad);
   }
 });
 

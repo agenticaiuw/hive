@@ -6,6 +6,7 @@
 //
 //   vm-post.mjs status | check <discord|x> | list | cancel <id> | screenshot [file.jpg]
 //   vm-post.mjs login <discord|x>            open the VM's browser here so you can sign in yourself
+//   vm-post.mjs vpn [status|down]            UW-Madison's VPN for the VM's browser (vpn.sh): you sign in
 //   vm-post.mjs where discord [server-id]    list your servers, or one server's channels
 //   vm-post.mjs send --to <name|channel-link|x> [--file path]... [--text "..."]   (or text on stdin)
 import { spawn, spawnSync } from 'node:child_process';
@@ -118,6 +119,14 @@ async function main(argv) {
   if (command === 'cancel') return print(await run('cancel', { input: { id: rest[0] } }));
   if (command === 'where') return print(await run('discover', { input: { platform: rest[0], ...(rest[1] ? { server: rest[1] } : {}) } }));
   if (command === 'login') return openViewer(config, run, rest[0], Number(rest[1]) || 20);
+  if (command === 'vpn') {
+    const action = rest[0] ?? 'up';
+    if (!['up', 'status', 'down'].includes(action)) throw new Error('usage: vm-post.mjs vpn [status|down]');
+    // A terminal of its own on the VM: the NetID, password and Duo answer go from your keyboard to openconnect.
+    const { status } = spawnSync('ssh', ['-t', ...sshArgs(config), `${config.remoteDir}/vpn.sh ${action}`], { stdio: 'inherit' });
+    process.exitCode = status ?? 1;
+    return;
+  }
   if (command === 'screenshot') {
     const shot = await run('screenshot');
     const file = resolve(rest[0] ?? join(homedir(), '.hivemind', 'vm-agent', 'screenshot.jpg'));
@@ -140,7 +149,7 @@ async function main(argv) {
     process.exitCode = { sent: 0, cancelled: 1, needs_login: 3, unknown: 4 }[result.status] ?? 5;
     return;
   }
-  throw new Error('usage: vm-post.mjs <status|check|login|where|send|list|cancel|screenshot> ...');
+  throw new Error('usage: vm-post.mjs <status|check|login|where|send|list|cancel|screenshot|vpn> ...');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

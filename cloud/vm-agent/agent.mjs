@@ -8,7 +8,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join } from 'node:path';
-import { BrowserSession } from './browser.mjs';
+import { BrowserSession, proxyArgs } from './browser.mjs';
 import { PostError, PostStore } from './posts.mjs';
 import { arrive, deliver } from './poster.mjs';
 import { recipeFor, validatePost, RECIPES, ownedLink } from './sites.mjs';
@@ -34,7 +34,7 @@ const readBody = (request, limit) => new Promise((resolve, reject) => {
 });
 
 export function createAgent({
-  stateDir, executable, headless = false, extraRecipes = {}, timeouts = {},
+  stateDir, executable, headless = false, proxy = null, extraRecipes = {}, timeouts = {},
   approvalTtlMs = 10 * 60_000, viewerPort = 38917, viewerIdleMs = 20 * 60_000, log = () => {},
 }) {
   for (const dir of [stateDir, join(stateDir, 'uploads'), join(stateDir, 'evidence')]) {
@@ -53,7 +53,7 @@ export function createAgent({
     if (browser?.alive) return browser;
     browser = null;
     try {
-      browser = await BrowserSession.launch({ executable, headless, profileDir: join(stateDir, 'profile') });
+      browser = await BrowserSession.launch({ executable, headless, profileDir: join(stateDir, 'profile'), extraArgs: proxyArgs(proxy) });
       browserError = null; browserSince = Date.now();
       log('browser started');
       return browser;

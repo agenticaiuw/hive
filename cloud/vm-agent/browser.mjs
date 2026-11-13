@@ -29,6 +29,15 @@ const KEYS = {
 };
 const MODIFIERS = { alt: 1, ctrl: 2, meta: 4, shift: 8 };
 
+// Chromium flags that send all of the browser's traffic through `proxy` (HIVE_VM_PROXY, such as
+// vpn.sh's socks5://127.0.0.1:11080), host names included, and keep WebRTC from going around it.
+// Without a proxy, none. If the proxy is down, pages fail instead of quietly going direct.
+export function proxyArgs(proxy) {
+  if (!proxy) return [];
+  if (!/^(socks5|http):\/\/[\w.-]+:\d{1,5}$/.test(proxy)) throw new Error(`HIVE_VM_PROXY must look like socks5://127.0.0.1:11080, not ${proxy}`);
+  return [`--proxy-server=${proxy}`, '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'];
+}
+
 export class BrowserSession {
   #cdp; #child; #session; #stderr = '';
 
