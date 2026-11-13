@@ -426,6 +426,9 @@ impl Captions for FakeCaptions {
     fn active(&self, on: bool) {
         self.put("active", on)
     }
+    fn hidden(&self, on: bool) {
+        self.put("hidden", on)
+    }
     fn close(&self) {
         self.put("close", "")
     }

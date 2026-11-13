@@ -1,8 +1,10 @@
 // Agent.app: the voice agent in the menu bar, opened at login. Tap fn anywhere to talk to it, and
 // again to stop it listening; the icon fills in while it listens. Hold fn and talk to dictate: when
 // you let go, what you said is typed into the app in front (that needs Accessibility for Agent).
-// The menu starts and stops listening too, and has Open at Login, the log (~/Library/Logs/Agent.log)
-// and Quit.
+// The menu starts and stops listening too, and has Speak Aloud (off: replies are shown, not
+// spoken), Show Floating Window (off: the card shows only while fn is in use), Open at Login, the
+// log (~/Library/Logs/Agent.log), Restart and Quit; Restart and Quit are written in the log and the
+// session journal, so a quit isn't taken for a crash.
 //
 // It runs `build/hive-agent --app` (Rust, crates/hive) from the folder it was built in
 // (AgentRepository in its Info.plist), and starts it again if it stops. The voice models run in a
@@ -34,6 +36,9 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     let fileItem = NSMenuItem(title: "Add Text File to Context…", action: #selector(addFile), keyEquivalent: "")
     let voiceItem = NSMenuItem(title: "Voice", action: #selector(chooseVoice), keyEquivalent: "")
     let lipsItem = NSMenuItem(title: "Lip Reading (camera)", action: #selector(chooseLips), keyEquivalent: "")
+    // Checked as the agent says ("@@ speak 1|0", "@@ window 1|0"); it keeps both for the next launch.
+    let speakItem = NSMenuItem(title: "Speak Aloud", action: #selector(toggleSpeak), keyEquivalent: "")
+    let windowItem = NSMenuItem(title: "Show Floating Window", action: #selector(toggleWindow), keyEquivalent: "")
     var contextURL: URL?  // the browser view of every payload, the panel's fallback
     var panelURL: URL?  // this session's panel.json
     lazy var panel = ContextPanel()
@@ -71,6 +76,10 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         for choice in [voiceItem, lipsItem] { choice.target = self; inputMenu.addItem(choice) }
         inputItem.submenu = inputMenu
         menu.addItem(inputItem)
+        speakItem.state = .on
+        windowItem.state = .on
+        menu.addItem(speakItem)
+        menu.addItem(windowItem)
         let authentication = NSMenuItem(title: "Authentication", action: nil, keyEquivalent: "")
         let authMenu = NSMenu()
         let macPassword = NSMenuItem(title: "Mac Password…", action: #selector(configureMacPassword), keyEquivalent: "")
@@ -119,6 +128,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if !quitting { write("--- quit, not from the menu (macOS or another app asked) \(Date())\n") }
         quitting = true
 #if canImport(SpaceOViewer)
         monitorViewer?.shutdown()
@@ -175,8 +185,17 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         write("--- started \(Date())\n")
     }
 
-    func stop() {
+    /// `note` ("quit", "restart") first goes to the agent, which writes it in the log and the
+    /// session journal and then stops itself; SIGTERM if it hasn't begun to in half a second.
+    func stop(note: String? = nil) {
         guard let process = agent, process.isRunning else { return }
+        if let note, let input {
+            input.write(Data("\(note)\n".utf8))
+            let noted = Date().addingTimeInterval(0.5)
+            while process.isRunning && Date() < noted {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
         process.terminate()  // SIGTERM: it stops the task and hands back the mouse and keyboard
         let deadline = Date().addingTimeInterval(3)
         while process.isRunning && Date() < deadline {
@@ -233,6 +252,10 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
                 lipsItem.state = lips ? .on : .off
                 voiceItem.state = lips ? .off : .on
                 show()
+            } else if line.hasPrefix("@@ speak ") {
+                speakItem.state = line.hasSuffix("1") ? .on : .off
+            } else if line.hasPrefix("@@ window ") {
+                windowItem.state = line.hasSuffix("1") ? .on : .off
             } else if line.hasPrefix("@@ camera ") {
                 camera = line.hasSuffix("1")
                 show()
@@ -376,6 +399,11 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
     @objc func chooseVoice() { input?.write(Data("input voice\n".utf8)) }
 
+    // The checkmark changes when the agent says it has (a line it's sent before it's running is dropped).
+    @objc func toggleSpeak() { input?.write(Data("speak \(speakItem.state == .on ? "off" : "on")\n".utf8)) }
+
+    @objc func toggleWindow() { input?.write(Data("window \(windowItem.state == .on ? "off" : "on")\n".utf8)) }
+
     @objc func configureMacPassword() { Credentials.configure("mac") }
 
     @objc func configurePhonePasscode() {
@@ -401,15 +429,19 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     }
 
     @objc func restart() {
+        write("--- restart from the menu \(Date())\n")
         starts = []
         if agent == nil {
             start()
         } else {
-            stop()  // it starts again once it has stopped
+            stop(note: "restart")  // it starts again once it has stopped
         }
     }
 
     @objc func quit() {
+        write("--- quit from the menu \(Date())\n")
+        quitting = true
+        stop(note: "quit")
         NSApp.terminate(nil)
     }
 }

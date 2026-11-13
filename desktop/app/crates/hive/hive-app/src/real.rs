@@ -187,6 +187,9 @@ impl parts::Captions for Window {
     fn active(&self, on: bool) {
         self.0.active(on)
     }
+    fn hidden(&self, on: bool) {
+        self.0.hidden(on)
+    }
     fn close(&self) {
         self.0.close()
     }

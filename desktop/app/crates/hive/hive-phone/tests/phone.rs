@@ -40,6 +40,8 @@ struct Fake {
     source: Arc<Mutex<String>>,
     element: Arc<Mutex<Value>>,
     fail_on: Arc<Mutex<Option<String>>>,
+    /// What /wda/locked answers (None: false, an unlocked phone).
+    locked: Arc<Mutex<Option<Value>>>,
     real: bool,
 }
 
@@ -77,6 +79,9 @@ impl Transport for Fake {
                 "/api/screenshot" => json!({"value": PNG}),
                 "/api/wda/activeAppInfo" => {
                     json!({"value": {"name": "Safari", "bundleId": "com.apple.mobilesafari"}})
+                }
+                "/api/wda/locked" => {
+                    json!({"value": self.locked.lock().unwrap().clone().unwrap_or(json!(false))})
                 }
                 _ => json!({"value": null}),
             },
@@ -175,10 +180,70 @@ fn tap_posts_the_planned_action_and_confirms_with_the_given_numbers() {
         .call("press_home", &json!({"screenshot": false}))
         .unwrap();
     assert_eq!(texts(&home), "Home screen.");
+    // only once the phone has said it isn't locked
     assert_eq!(
-        fake.operations().last().unwrap(),
-        "request /api/wda/homescreen"
+        fake.operations()[2..],
+        [
+            "request /api/wda/locked",
+            "action_plan ",
+            "request /api/wda/homescreen"
+        ]
     );
+}
+
+/// press_home on a locked iPhone hung WebDriverAgent until the relay app was reopened
+/// (2026-11-12): it only wakes the screen there, and says how to unlock.
+#[test]
+fn press_home_never_goes_home_on_a_locked_phone() {
+    let relay = relay("synthetic-token");
+    let fake = Fake::default();
+    *fake.locked.lock().unwrap() = Some(json!(true));
+    let t = tools(&fake, relay.path());
+    let res = t.call("press_home", &json!({"screenshot": false})).unwrap();
+    assert!(is_error(&res));
+    assert_eq!(
+        texts(&res),
+        format!(
+            "{} It woke the screen instead. {}",
+            hive_phone::LOCKED_HOME,
+            hive_phone::UNLOCK_STEPS
+        )
+    );
+    assert!(texts(&res).contains("call authenticate"));
+    assert_eq!(
+        fake.operations(),
+        ["request /api/wda/locked", "in_session /wda/pressButton"]
+    );
+    let wake = fake.seen.lock().unwrap()[1].clone();
+    assert_eq!(wake["method"], "POST");
+    assert_eq!(wake["body"], json!({"name": "home"}));
+
+    // in a batch too: it stops there
+    let batch = t
+        .call("batch", &json!({"steps": [{"tool": "press_home"}, {"tool": "tap", "x": 1, "y": 2}], "screenshot": false}))
+        .unwrap();
+    assert!(is_error(&batch));
+    assert!(
+        texts(&batch).starts_with("Step 1 (press_home) failed"),
+        "{}",
+        texts(&batch)
+    );
+
+    // a wake that fails is said, and still nothing goes home
+    *fake.fail_on.lock().unwrap() = Some("/wda/pressButton".into());
+    let res = t.call("press_home", &json!({"screenshot": false})).unwrap();
+    assert!(texts(&res)
+        .contains("Waking the screen didn't work either (The relay refused /wda/pressButton)."));
+
+    // and when the phone doesn't say whether it's locked, it doesn't guess
+    *fake.fail_on.lock().unwrap() = None;
+    *fake.locked.lock().unwrap() = Some(Value::Null);
+    let res = t.call("press_home", &json!({"screenshot": false})).unwrap();
+    assert!(is_error(&res));
+    assert!(
+        texts(&res).starts_with("press_home refused: the iPhone didn't say whether it's locked")
+    );
+    assert!(!fake.operations().iter().any(|o| o.contains("homescreen")));
 }
 
 // ---------------------------------------------------------------- tests/test_one_way.py
@@ -474,6 +539,7 @@ case "$path" in
 /api/status) answer 200 '{"sessionId": "S1", "value": {"ready": true}}';;
 /api/screenshot) answer 200 "$(cat "$PHONE_FIXTURE_LOG.screenshot")";;
 /api/wda/activeAppInfo) answer 200 '{"value": {"bundleId": "com.apple.mobilesafari", "name": "Safari"}}';;
+/api/wda/locked) if [ -e "$PHONE_FIXTURE_LOG.locked" ]; then answer 200 '{"value": true}'; else answer 200 '{"value": false}'; fi;;
 /api/session/S1/window/size) answer 200 '{"value": {"width": 44, "height": 96}}';;
 /api/session/S1/source) answer 200 "$(cat "$PHONE_FIXTURE_LOG.source")";;
 /api/session/S1/element)
@@ -863,6 +929,31 @@ fn actions_go_to_webdriveragent() {
         settings,
         [json!({"settings": {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}})]
     );
+}
+
+#[test]
+fn a_locked_phone_is_woken_and_never_sent_home() {
+    let fixture = CurlFixture::new();
+    fixture.answer_as_relay(true);
+    std::fs::write(fixture.file("calls.locked"), "").unwrap();
+    let res = relay_tools(&fixture)
+        .call("press_home", &json!({"screenshot": false}))
+        .unwrap();
+    assert!(is_error(&res));
+    assert!(texts(&res).starts_with(hive_phone::LOCKED_HOME));
+    let calls = fixture.relay_calls();
+    assert!(
+        calls.contains(&("GET".into(), "/api/wda/locked".into(), Value::Null)),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(_, path, _)| path.contains("homescreen")),
+        "{calls:?}"
+    );
+    assert!(fixture.posts().contains(&(
+        "/api/session/S1/wda/pressButton".into(),
+        json!({"name": "home"})
+    )));
 }
 
 #[test]

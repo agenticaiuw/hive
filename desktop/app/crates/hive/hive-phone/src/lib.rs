@@ -8,7 +8,9 @@ mod elements;
 mod phone;
 mod tools;
 
-pub use phone::{status_line, CoreTransport, Phone, PhoneError, Transport, OFFLINE};
+pub use phone::{
+    status_line, CoreTransport, Phone, PhoneError, Transport, LOCKED_HOME, OFFLINE, UNLOCK_STEPS,
+};
 pub use tools::{
     shrink, tool_list, PhoneAuthenticator, PhoneTools, BATCHABLE, INSTRUCTIONS, SETTLE,
 };

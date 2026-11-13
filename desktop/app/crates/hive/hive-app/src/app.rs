@@ -90,36 +90,66 @@ pub fn on_signals() {
 }
 
 /// What a line from Agent.app's menu asks for: "toggle" is the same as tapping fn; "ingest PATH"
-/// adds the text in PATH to the conversation; "input voice|lips" picks how you talk to it.
+/// adds the text in PATH to the conversation; "input voice|lips" picks how you talk to it;
+/// "speak on|off" is Speak Aloud and "window on|off" Show Floating Window.
 pub fn app_line(line: &str) -> Option<Event> {
     let line = line.trim();
     if line == "toggle" {
         return Some(Event::Toggle);
     }
     let (what, arg) = line.split_once(' ')?;
+    let on = || match arg.trim() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    };
     match what {
         "ingest" => Some(Event::Ingest(arg.to_owned())),
         "input" => Some(Event::Input(arg.to_owned())),
+        "speak" => on().map(Event::Speak),
+        "window" => on().map(Event::Window),
+        _ => None,
+    }
+}
+
+/// "quit" and "restart": the menu's Quit Agent and Restart Agent, said in the log and the session
+/// journal before the agent stops itself (the app starts it again after a restart).
+pub fn menu_stop(line: &str) -> Option<&'static str> {
+    match line.trim() {
+        "quit" => Some("quit from the menu"),
+        "restart" => Some("restart from the menu"),
         _ => None,
     }
 }
 
 /// Agent.app's menu on stdin (python's `read_app`). The end of stdin means the app quit: it
-/// sends itself SIGTERM. Lines before the agent exists are dropped.
+/// sends itself SIGTERM, as it does after "quit" and "restart". Lines before the agent exists
+/// are dropped. Speak Aloud is set here, not on the main loop, so it goes quiet at once.
 pub fn read_app(agent: Arc<Mutex<Option<Weak<VoiceAgent>>>>) {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
+        let target = || {
+            agent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade)
+        };
+        if let Some(what) = menu_stop(&line) {
+            match target() {
+                Some(agent) => agent.note_menu_stop(what),
+                None => hive_common::say(format!("⏏  {what}")),
+            }
+            break;
+        }
         let Some(event) = app_line(&line) else {
             continue;
         };
-        let target = agent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(Weak::upgrade);
-        if let Some(agent) = target {
-            agent.put(event);
+        match (target(), event) {
+            (Some(agent), Event::Speak(on)) => agent.set_speaking(on),
+            (Some(agent), event) => agent.put(event),
+            (None, _) => {}
         }
     }
     // SAFETY: kill and getpid have no memory effects.

@@ -1,6 +1,6 @@
 //! The captions client (python/captions.py) against a stand-in for build/agent-vhid-captions that
 //! writes down every line it's sent and answers as tools/captions.swift does: a request typed into
-//! the entry field, the mute and close buttons, and whether the entry field has the keyboard.
+//! the entry field, the mute, close and hide buttons, and whether the entry field has the keyboard.
 //!
 //! And the real overlay drawing its card into a PNG (`--snapshot`, tests/test_tools.py's
 //! CaptionsTest), skipped when it isn't built. No window is shown.
@@ -38,6 +38,7 @@ for line in sys.stdin:
         emit(close=False)
         emit(close=True)
         emit(mute="yes")
+        emit(hidden=True)
 "#;
 
 /// An executable stand-in overlay in a temporary folder; what it was sent is in `<it>.got`.
@@ -81,6 +82,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
     captions.dictating(false);
     captions.camera("waiting");
     captions.dismiss();
+    captions.hidden(true);
     captions.framing("Move a little to the left");
     captions.preview("/9j/4AAQ");
     captions.hearing("open saf");
@@ -102,6 +104,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
             json!({"dictating": false}),
             json!({"camera": "waiting"}),
             json!({"dismiss": true}),
+            json!({"hidden": true}),
             json!({"framing": "Move a little to the left"}),
             json!({"preview": "/9j/4AAQ"}),
             json!({"hearing": "open saf"}),
@@ -117,7 +120,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
         ]
     );
     captions.say("after it closed"); // nothing, and no panic
-    assert_eq!(got(&program).len(), 17);
+    assert_eq!(got(&program).len(), 18);
 }
 
 #[test]
@@ -141,13 +144,14 @@ fn what_you_type_the_buttons_and_the_keyboard_come_back() {
     assert_eq!(*inputs.lock().unwrap(), ["open safari"]);
 
     captions.doing("(buttons)");
-    wait_for("the buttons", || controls.lock().unwrap().len() == 3);
+    wait_for("the buttons", || controls.lock().unwrap().len() == 4);
     assert_eq!(
         *controls.lock().unwrap(),
         [
             ("mute".to_string(), Some(true)),
             ("mute".to_string(), Some(false)),
-            ("close".to_string(), None)
+            ("close".to_string(), None),
+            ("hidden".to_string(), Some(true)) // the –: hide the card, the task goes on
         ]
     );
 

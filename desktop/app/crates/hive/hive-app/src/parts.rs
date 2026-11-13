@@ -86,6 +86,8 @@ pub trait Captions: Send + Sync {
     fn muted(&self, on: bool) {}
     fn activity(&self, text: &str) {}
     fn active(&self, on: bool) {}
+    /// Show Floating Window off (true): the card stays hidden except while fn is in use.
+    fn hidden(&self, on: bool) {}
     fn close(&self) {}
 }
 
