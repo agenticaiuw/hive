@@ -117,16 +117,18 @@ pub struct CodexTask {
     me: Weak<CodexTask>,
     task: String,
     device: String,
-    ahead: Option<Arc<LookAhead>>,
+    pub(crate) ahead: Option<Arc<LookAhead>>,
     on_event: Mutex<OnEvent>,
     session: Mutex<Arc<dyn TaskSession>>,
     pub(crate) state: Mutex<State>,
     pub(crate) done: Event,
     pub(crate) turn_over: Event,
     dispatch_lock: Mutex<()>,
-    log: Mutex<Option<File>>,
+    pub(crate) log: Mutex<Option<File>>,
     pub(crate) tools: Mutex<HashMap<String, Arc<dyn ToolNamespace>>>,
     pub(crate) test: TestHooks,
+    /// Its turn's process when Claude runs the requests (`AGENT_BACKEND=claude`).
+    pub(crate) claude: crate::claude::TaskPart,
 }
 
 fn obj(value: Option<&Value>) -> Value {
@@ -173,9 +175,7 @@ impl CodexTask {
             &task.replace('"', "'"),
             &previous,
         );
-        let session = options
-            .session
-            .unwrap_or_else(|| agent.session() as Arc<dyn TaskSession>);
+        let session = options.session.unwrap_or_else(|| agent.task_session());
         let ahead = if device == "mac" { options.ahead } else { None };
         Arc::new_cyclic(|me| CodexTask {
             agent: agent.clone(),
@@ -234,6 +234,7 @@ impl CodexTask {
             log: Mutex::new(None),
             tools: Mutex::new(HashMap::new()),
             test: TestHooks::default(),
+            claude: Default::default(),
         })
     }
 
@@ -250,7 +251,7 @@ impl CodexTask {
     pub(crate) fn st(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
     }
-    fn arc(&self) -> Arc<CodexTask> {
+    pub(crate) fn arc(&self) -> Arc<CodexTask> {
         self.me.upgrade().expect("a task is used through its Arc")
     }
     /// Started and not finished yet.
@@ -409,13 +410,16 @@ impl CodexTask {
         }
     }
 
-    fn log_write(&self, text: &str) {
+    pub(crate) fn log_write(&self, text: &str) {
         if let Some(file) = lock(&self.log).as_mut() {
             let _ = file.write_all(text.as_bytes());
         }
     }
 
     fn run(&self, look: bool) {
+        if self.agent.backend() == "claude" {
+            return crate::claude::run(self, look);
+        }
         let file = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -488,7 +492,7 @@ impl CodexTask {
     }
 
     /// The devices' tools for this task, each told what the user said (`words`).
-    fn device_tools_for_task(&self) -> HashMap<String, Arc<dyn ToolNamespace>> {
+    pub(crate) fn device_tools_for_task(&self) -> HashMap<String, Arc<dyn ToolNamespace>> {
         let tools = self.agent.device_tools();
         let words = self.words();
         for device in tools.values() {
@@ -737,7 +741,7 @@ impl CodexTask {
         self.emit(kind, text);
     }
 
-    fn time(&self, step: &str) {
+    pub(crate) fn time(&self, step: &str) {
         let mut s = self.st();
         if !s.times.iter().any(|(k, _)| k == step) {
             let at = monotonic() - s.began;
@@ -784,7 +788,7 @@ impl CodexTask {
 
     /// Says each sentence of a message as soon as Codex has written it, rather than waiting for
     /// the whole message: the voice starts on the first while the rest is still coming.
-    fn speak(&self, item_id: &str, text: &str, whole: bool) {
+    pub(crate) fn speak(&self, item_id: &str, text: &str, whole: bool) {
         let said_text = {
             let mut s = self.st();
             let said = s.said.get(item_id).copied().unwrap_or(0);
@@ -2171,6 +2175,9 @@ impl CodexTask {
     /// Stops Codex's turn. (An action already under way on the Mac stops when control is handed
     /// back: the helper refuses the rest of it.)
     pub fn stop(&self) {
+        if self.agent.backend() == "claude" {
+            return crate::claude::stop(self);
+        }
         let (turn, on_thread, server, thread) = {
             let _dispatch = lock(&self.dispatch_lock);
             let mut s = self.st();
