@@ -30,7 +30,7 @@ export function loadConfig(path = CONFIG_PATH) {
   return { ...config, ssh: { host, user, identityFile: identityFile ? expand(identityFile) : null }, destinations: config.destinations ?? {} };
 }
 
-const sshArgs = ({ ssh }) => [
+export const sshArgs = ({ ssh }) => [
   ...(ssh.identityFile ? ['-i', ssh.identityFile] : []),
   '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=yes', `${ssh.user}@${ssh.host}`,
 ];
@@ -113,19 +113,22 @@ async function openViewer(config, run, site, minutes) {
 
 // The sign-in desktop (cloud/vm-agent openDesktop): the VM's browser with remote control off,
 // shown in macOS Screen Sharing through an SSH tunnel. Ctrl-C hands the browser back to the worker.
-async function openSignInDesktop(config, run, site, minutes) {
+async function openSignInDesktop(config, run, site, minutes, keep = false) {
   const desk = await run('desktop-open', { input: site ? { site } : {} });
   const localPort = 38918;
   const tunnel = spawn('ssh', ['-N', '-o', 'ExitOnForwardFailure=yes', '-L', `127.0.0.1:${localPort}:127.0.0.1:${desk.port}`, ...sshArgs(config)], { stdio: 'inherit' });
-  const stop = async () => { tunnel.kill(); await run('desktop-close', { input: {} }).catch(() => {}); };
+  // --keep: the VM's browser stays open after the viewer goes (a session cookie, such as a NetID
+  // sign-in, lasts only while the browser runs); something on the VM keeps it open from there.
+  const stop = async () => { tunnel.kill(); if (!keep) await run('desktop-close', { input: {} }).catch(() => {}); };
   await new Promise(done => setTimeout(done, 2500));
   if (tunnel.exitCode !== null) { await stop(); throw new Error('could not open the SSH tunnel to the VM'); }
   spawnSync('open', [`vnc://:${encodeURIComponent(desk.password)}@127.0.0.1:${localPort}`]);
   console.log(`The VM's browser is open in Screen Sharing for up to ${minutes} minutes (VNC password ${desk.password} if it asks).`);
-  console.log('Sign in there yourself, Google included. Press Ctrl-C here when done: the sign-in is kept.');
+  console.log(keep ? 'Sign in there yourself. Press Ctrl-C here when done: the VM\'s browser stays open, signed in.'
+    : 'Sign in there yourself, Google included. Press Ctrl-C here when done: the sign-in is kept.');
   await new Promise(done => { const timer = setTimeout(done, minutes * 60_000); process.once('SIGINT', () => { clearTimeout(timer); done(); }); process.once('SIGTERM', () => { clearTimeout(timer); done(); }); tunnel.once('exit', () => { clearTimeout(timer); done(); }); });
   await stop();
-  console.log('Closed. The worker uses its own browser again, signed in.');
+  console.log(keep ? 'Viewer closed; the VM\'s browser is still open.' : 'Closed. The worker uses its own browser again, signed in.');
 }
 
 async function main(argv) {
@@ -137,7 +140,10 @@ async function main(argv) {
   if (command === 'check') return print(await run('check', { input: { platform: rest[0] } }));
   if (command === 'cancel') return print(await run('cancel', { input: { id: rest[0] } }));
   if (command === 'where') return print(await run('discover', { input: { platform: rest[0], ...(rest[1] ? { server: rest[1] } : {}) } }));
-  if (command === 'login') return openSignInDesktop(config, run, rest[0], Number(rest[1]) || 30);
+  if (command === 'login') {
+    const keep = rest.includes('--keep'); const [site, minutes] = rest.filter(arg => arg !== '--keep');
+    return openSignInDesktop(config, run, site || undefined, Number(minutes) || 30, keep);
+  }
   if (command === 'view') return openViewer(config, run, rest[0], Number(rest[1]) || 20);
   if (command === 'vpn') {
     const action = rest[0] ?? 'up';
