@@ -686,3 +686,35 @@ fn authentication_tools_call_the_mac() {
     let res = tools::call_authentication(&s.tools, "unlock_everything", &json!({})).unwrap();
     assert_eq!(first_text(&res), "Unknown authentication tool.");
 }
+
+/// The agent never clicks Hive's own floating window: in four tasks it clicked the card's x and so
+/// stopped itself. The click is refused before the mouse moves; anywhere else it clicks.
+#[test]
+fn a_click_on_hives_own_window_is_refused() {
+    let s = setup(true);
+    *s.system.own_window.lock().unwrap() = Some((0.0, 0.0, 1440.0, 900.0));
+    let res = s
+        .tools
+        .call("click", &json!({"x": 700, "y": 20, "screenshot": false}))
+        .unwrap();
+    assert!(is_error(&res));
+    assert!(
+        first_text(&res).contains("Hive's own floating window"),
+        "{}",
+        first_text(&res)
+    );
+    assert!(s.helper.lines().is_empty(), "the mouse never moved");
+
+    *s.system.own_window.lock().unwrap() = Some((5000.0, 5000.0, 300.0, 200.0));
+    let res = s
+        .tools
+        .call("click", &json!({"x": 700, "y": 20, "screenshot": false}))
+        .unwrap();
+    // (the fake cursor doesn't follow the mouse, so the click itself fails here; it was tried)
+    assert!(
+        !first_text(&res).contains("Hive's own floating window"),
+        "{}",
+        first_text(&res)
+    );
+    assert!(!s.helper.lines().is_empty(), "the mouse moved");
+}
