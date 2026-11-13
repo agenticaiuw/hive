@@ -823,7 +823,11 @@ fn send_to_ci(
     };
     r.outcome = outcome.into();
     r.deployed = Some(said);
+    let here = verdict.warnings.clone();
     let mut v = res.green.unwrap_or(verdict);
+    // The runner has no private terms (they never leave the VM); the gate here checked them.
+    v.warnings.retain(|w| !w.starts_with("no private-terms file") && !here.contains(w));
+    v.warnings.splice(0..0, here);
     if outcome == "rejected" {
         v.passed = false;
         v.reasons = res.reasons.clone();
