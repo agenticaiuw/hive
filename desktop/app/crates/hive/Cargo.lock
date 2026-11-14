@@ -357,6 +357,7 @@ dependencies = [
  "core-foundation",
  "hive-common",
  "hive-core",
+ "hive-tasks",
  "libc",
  "regex",
  "serde_json",

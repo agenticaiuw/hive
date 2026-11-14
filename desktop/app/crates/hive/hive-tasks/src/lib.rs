@@ -40,6 +40,8 @@ pub const VALUES: [&str; 3] = ["low", "medium", "high"];
 pub const MAX_SAME_BLOCKS: i64 = 2;
 /// A task worth less than this many minutes of work at low value is flagged worth asking about.
 pub const ASK_MINUTES: i64 = 30;
+/// The board's project for what the owner asks Hive's own agent (by voice or typed).
+pub const HIVE_PROJECT: &str = "Hive";
 /// How many tasks a hook names before it says how many more.
 const LIST_MAX: usize = 12;
 
@@ -373,6 +375,63 @@ impl Ledger {
         Ok(out)
     }
 
+    // ---- Hive's own agent ----------------------------------------------------------------------
+
+    /// Puts a request to Hive's own agent on the board, as one task that is now active: Hive
+    /// calls this itself rather than through the hooks, because each of its turns to Codex or
+    /// Claude carries Hive's memory and knowledge along with the owner's words, and a Stop hook
+    /// would hold back its spoken answer. The same request again that day is the same task,
+    /// active again (and counted as said twice). Returns the task's id ("T7").
+    pub fn hive_request(&self, text: &str) -> Result<String, String> {
+        let at = now();
+        let day = &iso(at)[..10];
+        let (message, _) =
+            self.save_message("hive", &format!("hive-{day}"), HIVE_PROJECT, text, at, true)?;
+        let existing: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT id FROM tasks WHERE message = ?1 ORDER BY id DESC LIMIT 1",
+                [message],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let said = self.message(message)?["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let title = clip(said.lines().next().unwrap_or(""), 120);
+                let added = self.add(message, &json!([{"quote": said, "title": title}]))?;
+                task_id(added[0].split_whitespace().next().unwrap_or(""))?
+            }
+        };
+        self.report(&json!([{"id": format!("T{id}"), "status": "active"}]))?;
+        Ok(format!("T{id}"))
+    }
+
+    /// How a request to Hive's own agent ended: Hive's "done", "stopped", "interrupted" (Hive
+    /// restarted; it resumes the task) or "failed", and what the agent said (or why it failed).
+    pub fn hive_finished(&self, task: &str, ended: &str, said: &str) -> Result<(), String> {
+        let (status, fallback) = match ended {
+            "done" => ("done", "Done."),
+            "stopped" => ("dropped", "Stopped before it finished."),
+            "interrupted" => ("waiting", ""),
+            _ => ("blocked", "It failed."),
+        };
+        let outcome = match (status, said.trim()) {
+            ("waiting", _) => {
+                "Hive restarted in the middle of it; it picks it up again on its own."
+            }
+            (_, "") => fallback,
+            (_, said) => said,
+        };
+        self.report(&json!([{"id": task, "status": status, "outcome": outcome}]))
+            .map(|_| ())
+    }
+
     fn event(&self, task: i64, status: &str, note: Option<&str>) -> Result<(), String> {
         self.db
             .execute(
@@ -669,26 +728,23 @@ impl Ledger {
         if session.is_empty() {
             return Ok(Value::Null);
         }
-        let cwd = str_of(input, "cwd");
         let transcript = str_of(input, "transcript_path");
-        match str_of(input, "hook_event_name") {
-            "UserPromptSubmit" => self.on_prompt(
-                harness,
-                session,
-                &project_of(cwd),
-                transcript,
-                str_of(input, "prompt"),
-            ),
-            "Stop" => self.on_stop(harness, session, &project_of(cwd), transcript, input),
-            "PreToolUse" => self.on_edit(session, &project_of(cwd), input),
-            "SessionStart" => self.on_start(
-                harness,
-                session,
-                &project_of(cwd),
-                transcript,
-                str_of(input, "source"),
-            ),
-            _ => Ok(Value::Null),
+        let event = str_of(input, "hook_event_name");
+        if !matches!(
+            event,
+            "UserPromptSubmit" | "Stop" | "PreToolUse" | "SessionStart"
+        ) {
+            return Ok(Value::Null);
+        }
+        let project = project_of(str_of(input, "cwd"));
+        let id = project.id.as_str();
+        match event {
+            "UserPromptSubmit" => {
+                self.on_prompt(harness, session, id, transcript, str_of(input, "prompt"))
+            }
+            "Stop" => self.on_stop(harness, session, id, transcript, input),
+            "PreToolUse" => self.on_edit(session, &project, input),
+            _ => self.on_start(harness, session, id, transcript, str_of(input, "source")),
         }
     }
 
@@ -821,15 +877,15 @@ impl Ledger {
         Ok(json!({"decision": "block", "reason": reason.trim_end()}))
     }
 
-    fn on_edit(&self, session: &str, project: &str, input: &Value) -> Result<Value, String> {
+    fn on_edit(&self, session: &str, project: &Project, input: &Value) -> Result<Value, String> {
         let paths = edited_paths(input.get("tool_input").unwrap_or(&Value::Null));
         if paths.is_empty() {
             return Ok(Value::Null);
         }
-        let rules = self.rules(Some(project), true)?;
+        let rules = self.rules(Some(&project.id), true)?;
         let mut lines = Vec::new();
         for path in &paths {
-            let rel = relative(project, path);
+            let rel = relative(&project.root, path);
             for rule in &rules {
                 let globs: Vec<&str> = rule["paths"]
                     .as_array()
@@ -863,7 +919,7 @@ impl Ledger {
         }
         Ok(context(
             "PreToolUse",
-            &format!("The owner's rules for {} (Hive shows each once a session, when you edit a file it covers):\n{}", paths.iter().map(|p| relative(project, p)).collect::<Vec<_>>().join(", "), lines.join("\n")),
+            &format!("The owner's rules for {} (Hive shows each once a session, when you edit a file it covers):\n{}", paths.iter().map(|p| relative(&project.root, p)).collect::<Vec<_>>().join(", "), lines.join("\n")),
         ))
     }
 
@@ -1189,20 +1245,58 @@ fn collect_strings<'a>(map: &'a Map<String, Value>, out: &mut Vec<&'a str>) {
     }
 }
 
-/// The git checkout `cwd` is in, else `cwd` itself.
-pub fn project_of(cwd: &str) -> String {
+/// Where an agent works: `root` is the folder (the git checkout, else the working folder), and
+/// `id` names the project the same way on every machine (its git remote, as
+/// "github.com/owner/repo"), so a checkout on the Mac and one on the VM are one project.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Project {
+    pub id: String,
+    pub root: String,
+}
+
+pub fn project_of(cwd: &str) -> Project {
     if cwd.is_empty() {
-        return String::new();
+        return Project::default();
     }
-    std::process::Command::new("git")
-        .args(["-C", cwd, "rev-parse", "--show-toplevel"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| cwd.trim_end_matches('/').to_string())
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let root = git(&["rev-parse", "--show-toplevel"])
+        .unwrap_or_else(|| cwd.trim_end_matches('/').to_string());
+    let id = git(&["config", "--get", "remote.origin.url"])
+        .and_then(|u| remote_id(&u))
+        .unwrap_or_else(|| root.clone());
+    Project { id, root }
+}
+
+/// "git@github.com:Owner/Repo.git", "https://user@github.com/Owner/Repo" and
+/// "ssh://git@github.com/Owner/Repo.git" are all "github.com/owner/repo".
+pub fn remote_id(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.to_string(),
+        None => url.replacen(':', "/", 1), // scp-like: user@host:path
+    };
+    let rest = rest.rsplit_once('@').map(|(_, r)| r).unwrap_or(&rest);
+    let rest = rest
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    let (host, path) = rest.split_once('/')?;
+    let host = host.split(':').next().unwrap_or(host); // drop a port
+    if host.is_empty() || path.is_empty() || host.starts_with('/') {
+        return None;
+    }
+    Some(format!("{host}/{path}").to_lowercase())
 }
 
 fn relative(project: &str, path: &str) -> String {

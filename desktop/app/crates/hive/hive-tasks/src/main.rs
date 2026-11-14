@@ -78,6 +78,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         )
+        .id
     };
     match cmd {
         "hook" => {
@@ -85,7 +86,11 @@ fn run(args: &[String]) -> Result<String, String> {
                 h @ ("claude" | "codex") => h,
                 other => return Err(format!("hook takes claude or codex, not {other:?}")),
             };
-            let out = ledger.hook(harness, &stdin_json()?)?;
+            let input = stdin_json()?;
+            if inside_hive() {
+                return Ok(String::new());
+            }
+            let out = ledger.hook(harness, &input)?;
             Ok(if out.is_null() {
                 String::new()
             } else {
@@ -125,6 +130,39 @@ fn run(args: &[String]) -> Result<String, String> {
         "rule-off" => ledger.rule_off(arg(1)),
         other => Err(format!("Unknown command {other:?}.\n{HELP}")),
     }
+}
+
+/// Hive's own agent (its Codex and Claude) puts the owner's requests on the board itself (see
+/// `Ledger::hive_request`), so the hooks stay out of its way: Hive sets HIVE_TASKS_OFF=1 for
+/// them, and a Hive built before that is recognized by being an ancestor process.
+fn inside_hive() -> bool {
+    if std::env::var("HIVE_TASKS_OFF").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output()
+    else {
+        return false;
+    };
+    let table: std::collections::HashMap<i64, (i64, String)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse().ok()?;
+            let ppid = parts.next()?.parse().ok()?;
+            Some((pid, (ppid, parts.collect::<Vec<_>>().join(" "))))
+        })
+        .collect();
+    let mut pid = unsafe { libc::getppid() } as i64;
+    for _ in 0..16 {
+        match table.get(&pid) {
+            Some((_, comm)) if comm.contains("/Hive.app/") => return true,
+            Some((ppid, _)) if *ppid > 1 && *ppid != pid => pid = *ppid,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Copies this program to ~/.local/bin and adds its hooks to Claude Code's

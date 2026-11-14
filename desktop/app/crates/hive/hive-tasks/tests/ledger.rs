@@ -368,3 +368,56 @@ fn installing_keeps_other_hooks_and_is_undone_by_uninstalling() {
     assert_eq!(merge_hooks(once, "claude", None), theirs);
     assert_eq!(merge_hooks(json!({}), "claude", None), json!({}));
 }
+
+#[test]
+fn hive_agent_requests_go_on_the_board() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("t.sqlite3")).unwrap();
+    let t = ledger
+        .hive_request("Open Spotify and play my focus playlist")
+        .unwrap();
+    let board = ledger.board(Some(hive_tasks::HIVE_PROJECT)).unwrap();
+    assert_eq!(board["in_progress"][0]["id"], t);
+    // Said again the same day: the same task, counted twice.
+    assert_eq!(
+        ledger
+            .hive_request("open spotify and play my focus playlist!")
+            .unwrap(),
+        t
+    );
+    ledger
+        .hive_finished(&t, "done", "Playing Focus Flow on Spotify.")
+        .unwrap();
+    let shown = ledger.show(&t).unwrap();
+    assert_eq!(shown["status"], "done");
+    assert_eq!(shown["outcome"], "Playing Focus Flow on Spotify.");
+    let other = ledger
+        .hive_request("Send the slides to the club channel")
+        .unwrap();
+    ledger
+        .hive_finished(&other, "interrupted", "maintenance interruption")
+        .unwrap();
+    assert_eq!(ledger.show(&other).unwrap()["status"], "waiting");
+    // Hive's turns don't run the hooks (it records requests itself).
+    assert!(ledger.board(Some("Hive")).unwrap()["not_split"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn remotes_name_the_same_project_everywhere() {
+    for url in [
+        "git@github.com:AgenticAIUW/hive.git",
+        "https://github.com/agenticaiuw/hive",
+        "https://someone@github.com/agenticaiuw/hive.git/",
+        "ssh://git@github.com:22/agenticaiuw/hive.git",
+    ] {
+        assert_eq!(
+            hive_tasks::remote_id(url).as_deref(),
+            Some("github.com/agenticaiuw/hive"),
+            "{url}"
+        );
+    }
+    assert_eq!(hive_tasks::remote_id("/srv/git/hive.git"), None);
+}

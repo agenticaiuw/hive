@@ -8,6 +8,8 @@ description = "The Codex app-server driver: sessions, tasks, goals, recovery"
 [dependencies]
 hive-common.workspace = true
 hive-core.workspace = true
+# The owner's task board: each request to the agent goes on it (CodexTask::board).
+hive-tasks = { path = "../hive-tasks" }
 serde_json.workspace = true
 regex.workspace = true
 libc.workspace = true
