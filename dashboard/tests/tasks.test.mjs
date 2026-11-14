@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byPart, cost, estimates, normalizeBoard, parts, projectName, projects, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, cost, estimates, folderList, normalizeBoard, normalizeFolder, projectName, projects, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -75,19 +75,35 @@ test('projects, names and times in the owner\'s words', () => {
   assert.equal(ago(1_000_000 - 86400 * 3, 1_000_000), '3 days ago');
 });
 
-test('one project by name however it is written; parts group similar tasks', () => {
+test('one project by name however it is written; folders group similar tasks', () => {
   const b = normalizeBoard({ source: 'cloud', board: { now: 100, tasks: [
-    { machine: 'mac', id: 'T1', title: 'a', status: 'open', project: 'github.com/agenticaiuw/hive', part: 'memory retrieval', updated_at: 50 },
+    { machine: 'mac', id: 'T1', title: 'a', status: 'open', project: 'github.com/agenticaiuw/hive', folder: 'memory retrieval', updated_at: 50 },
     { machine: 'mac', id: 'T2', title: 'b', status: 'open', project: '/Users/x/hive', updated_at: 40 },
+    // An older ledger's "part"; a scratch session's task filed in hive's folder by name.
     { machine: 'mac', id: 'T3', title: 'c', status: 'done', project: 'Hive', part: 'Memory retrieval', updated_at: 30 },
-    { machine: 'mac', id: 'T4', title: 'd', status: 'open', project: 'github.com/evan1liu/buckymatch', part: 'major requirements validation', updated_at: 20 },
+    { machine: 'mac', id: 'T5', title: 'e', status: 'open', project: '/U/scratch-workspaces/x', folder: 'hive › memory retrieval', updated_at: 25 },
+    { machine: 'mac', id: 'T4', title: 'd', status: 'open', project: 'github.com/evan1liu/buckymatch', folder: 'major requirements validation', updated_at: 20 },
+  ], folders: [
+    { project: 'hive', key: 'memory retrieval', name: 'Memory retrieval', about: 'Finding facts', memories: 3, updated_at: 10 },
+    { project: 'hive', key: 'voice', name: 'Voice', about: '', memories: 1, updated_at: 10 },
+    { project: 'hivemind', key: 'dreams', name: 'Dreams', about: '', memories: 0, updated_at: 10 },
   ] } });
-  assert.deepEqual(projects(b.tasks).map((p) => [p.key, p.name, p.open, p.all]), [['hive', 'hive', 2, 3], ['buckymatch', 'buckymatch', 1, 1]]);
-  assert.deepEqual(parts(b.tasks, 'hive').map((p) => [p.key, p.all]), [['memory retrieval', 2]]);
-  assert.deepEqual(sections(b.tasks, { part: 'memory retrieval' }).flatMap((s) => s.tasks.map((t) => t.id)), ['T1', 'T3']);
-  assert.deepEqual(byPart(b.tasks).map((r) => [r.part, r.tasks.map((t) => t.id)]), [
-    ['memory retrieval', ['T1', 'T3']], ['major requirements validation', ['T4']], ['', ['T2']],
+  assert.deepEqual(projects(b.tasks, b.folders).map((p) => [p.key, p.name, p.open, p.all]),
+    [['hive', 'hive', 3, 4], ['buckymatch', 'buckymatch', 1, 1], ['hivemind', 'hivemind', 0, 0]]);
+  assert.deepEqual(folderList(b.tasks, b.folders, 'hive').map((f) => [f.key, f.name, f.open, f.all, f.memories]),
+    [['memory retrieval', 'Memory retrieval', 2, 3, 3], ['voice', 'Voice', 0, 0, 1]]);
+  assert.deepEqual(sections(b.tasks, { project: 'hive', folder: 'memory retrieval' }).flatMap((s) => s.tasks.map((t) => t.id)), ['T1', 'T5', 'T3']);
+  assert.deepEqual(byFolder(b.tasks).map((r) => [r.folder, r.tasks.map((t) => t.id)]), [
+    ['memory retrieval', ['T1', 'T3', 'T5']], ['major requirements validation', ['T4']], ['', ['T2']],
   ]);
+});
+
+test('a folder and its memories in one shape from the cloud or a ledger', () => {
+  const cloud = normalizeFolder({ folder: { project: 'hive', key: 'voice', name: 'Voice', about: 'Speech' },
+    memories: [{ machine: 'web', id: 2, kind: 'spec', title: 'Wake word', body: 'Hey Hive', task: null, created_at: 5 }] });
+  assert.deepEqual([cloud.name, cloud.about, cloud.memories[0].key, cloud.memories[0].kind, cloud.memories[0].task], ['Voice', 'Speech', 'web:2', 'spec', '']);
+  const local = normalizeFolder({ project: 'hive', name: 'Voice', memories: [{ id: 1, kind: 'note', title: 'a', body: 'b', from: null, created_at: '2026-11-14T05:00:00' }] });
+  assert.deepEqual([local.key, local.memories[0].key, local.memories[0].created > 0], ['voice', 'here:1', true]);
 });
 
 test('the agents at work and the task each is on; what a task cost', () => {

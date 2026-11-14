@@ -6,10 +6,15 @@
  * board (cloud/tasks). `GET /api/tasks` answers `{source, note?, board}` on every host:
  *
  *   - `source: "cloud"`: `board` is the cloud board, every machine:
- *     `{now, tasks: [row], unsplit: [message], rules: [rule]}`, a row carrying its `machine`;
+ *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder]}`, a row carrying
+ *     its `machine`;
  *   - `source: "local"`: the cloud couldn't be reached and `board` is this machine's ledger
  *     (`hive-tasks board --all --json`): `{generated_at, needs_you, in_progress, not_started,
- *     left_open, done, not_split, rules}`, with `note` saying why.
+ *     left_open, done, not_split, rules, folders}`, with `note` saying why.
+ *
+ * Folders are the parts of a project ("memory retrieval" in hive): a task names its folder
+ * ("memory retrieval", or "hive › memory retrieval" when it's another project's), and each folder
+ * keeps memories every agent working in it gets in full (`GET /api/folder`).
  *
  * Plain JavaScript so `node --test` can load it without a build.
  */
@@ -17,8 +22,11 @@
 /** @typedef {{key: string, id: string, machine: string, message: string, quote: string,
  *   title: string, status: string, minutes: number|null, value: string, outcome: string,
  *   evidence: string, harness: string, session: string, project: string, projectName: string,
- *   part: string, workSeconds: number|null, tokensIn: number|null, tokensOut: number|null,
- *   created: number, updated: number}} Task */
+ *   folder: string, report: string, workSeconds: number|null, tokensIn: number|null,
+ *   tokensOut: number|null, created: number, updated: number}} Task */
+
+/** @typedef {{project: string, key: string, name: string, about: string, memories: number,
+ *   updated: number}} Folder */
 
 export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' };
 
@@ -67,6 +75,12 @@ function number(value) {
 function toTask(row, machine) {
   const text = (/** @type {string} */ key) => (row[key] == null ? '' : String(row[key]));
   const where = text('machine') || machine;
+  // "hive › memory retrieval" is a folder of another project than the session's (its first name
+  // was "part").
+  const named = (text('folder') || text('part')).trim();
+  const [inProject, folder] = named.includes('›')
+    ? named.split('›').map((s) => s.trim())
+    : ['', named];
   return {
     key: `${where}:${text('id')}`,
     id: text('id'),
@@ -82,8 +96,9 @@ function toTask(row, machine) {
     harness: text('harness'),
     session: text('session'),
     project: text('project'),
-    projectName: projectName(row.project),
-    part: text('part').trim(),
+    projectName: inProject || projectName(row.project),
+    folder,
+    report: text('report'),
     workSeconds: number(row.work_seconds),
     tokensIn: number(row.tokens_in),
     tokensOut: number(row.tokens_out),
@@ -120,6 +135,14 @@ export function normalizeBoard(answer) {
       text: String(m.text ?? ''),
       said: seconds(m.said_at),
     })),
+    folders: /** @type {Folder[]} */ ((board.folders ?? []).map((/** @type {any} */ f) => ({
+      project: String(f.project ?? '').toLowerCase(),
+      key: String(f.key ?? f.name ?? '').toLowerCase(),
+      name: String(f.name ?? f.key ?? ''),
+      about: String(f.about ?? ''),
+      memories: Number(f.memories) || 0,
+      updated: seconds(f.updated_at),
+    }))),
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),
@@ -141,23 +164,23 @@ export function projectKey(task) {
 }
 
 /**
- * Whether a task matches the chosen project and part and the search words.
+ * Whether a task matches the chosen project and folder and the search words.
  * @param {Task} task
- * @param {{project?: string, part?: string, query?: string}} filter
+ * @param {{project?: string, folder?: string, query?: string}} filter
  */
-export function matches(task, { project = '', part = '', query = '' } = {}) {
+export function matches(task, { project = '', folder = '', query = '' } = {}) {
   if (project && projectKey(task) !== project) return false;
-  if (part && task.part.toLowerCase() !== part) return false;
+  if (folder && task.folder.toLowerCase() !== folder) return false;
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
-  const text = `${task.title} ${task.quote} ${task.outcome} ${task.id} ${task.part}`.toLowerCase();
+  const text = `${task.title} ${task.quote} ${task.outcome} ${task.id} ${task.folder}`.toLowerCase();
   return words.every((w) => text.includes(w));
 }
 
 /**
  * The board's sections with their tasks, newest first; "Done" keeps the last `doneLimit`.
  * @param {Task[]} tasks
- * @param {{project?: string, part?: string, query?: string, doneLimit?: number}} [filter]
+ * @param {{project?: string, folder?: string, query?: string, doneLimit?: number}} [filter]
  */
 export function sections(tasks, filter = {}) {
   const shown = tasks.filter((t) => matches(t, filter)).sort((a, b) => b.updated - a.updated);
@@ -192,44 +215,90 @@ function groups(tasks, keyOf, nameOf) {
 }
 
 /**
- * The projects with tasks by name (see projectKey), the ones with the most unfinished first.
+ * The projects, by name (see projectKey): those with tasks, the most unfinished first, then those
+ * that only have folders so far.
  * @param {Task[]} tasks
+ * @param {Folder[]} [folders]
  */
-export function projects(tasks) {
-  return groups(tasks, projectKey, (t) => t.projectName);
+export function projects(tasks, folders = []) {
+  const list = groups(tasks, projectKey, (t) => t.projectName);
+  for (const f of folders) {
+    if (f.project && !list.some((p) => p.key === f.project)) {
+      list.push({ key: f.project, name: f.project, open: 0, all: 0 });
+    }
+  }
+  return list;
 }
 
 /**
- * The parts of a project (or every project) that tasks name, the busiest first: "memory
- * retrieval", "major requirements validation".
+ * A project's folders (or every project's): the ones the board keeps and the ones tasks name,
+ * with their unfinished and total tasks and memories, the busiest first.
  * @param {Task[]} tasks
+ * @param {Folder[]} folders
  * @param {string} [project] a projectKey
  */
-export function parts(tasks, project = '') {
-  return groups(
-    tasks.filter((t) => !project || projectKey(t) === project),
-    (t) => t.part.toLowerCase(),
-    (t) => t.part,
+export function folderList(tasks, folders, project = '') {
+  const inProject = tasks.filter((t) => t.folder && (!project || projectKey(t) === project));
+  const counted = groups(inProject, (t) => `${projectKey(t)}\u0000${t.folder.toLowerCase()}`, (t) => t.folder);
+  /** @type {Map<string, Folder & {open: number, all: number}>} */
+  const by = new Map();
+  for (const f of folders) {
+    if (project && f.project !== project) continue;
+    by.set(`${f.project}\u0000${f.key}`, { ...f, open: 0, all: 0 });
+  }
+  for (const g of counted) {
+    const [p, key] = g.key.split('\u0000');
+    const known = by.get(g.key);
+    by.set(g.key, known
+      ? { ...known, open: g.open, all: g.all }
+      : { project: p, key, name: g.name, about: '', memories: 0, updated: 0, open: g.open, all: g.all });
+  }
+  return [...by.values()].sort(
+    (a, b) => b.open - a.open || b.all - a.all || a.name.localeCompare(b.name),
   );
 }
 
 /**
- * Tasks in runs by part, in the order given, so similar work sits together: each part's tasks
- * where its first one was, the ones with no part last.
+ * Tasks in runs by folder, in the order given, so similar work sits together: each folder's
+ * tasks where its first one was, the ones in no folder last.
  * @param {Task[]} tasks
  */
-export function byPart(tasks) {
-  /** @type {Map<string, {part: string, tasks: Task[]}>} */
+export function byFolder(tasks) {
+  /** @type {Map<string, {folder: string, tasks: Task[]}>} */
   const runs = new Map();
   for (const t of tasks) {
-    const key = t.part.toLowerCase();
-    const run = runs.get(key) ?? { part: t.part, tasks: [] };
+    const key = t.folder.toLowerCase();
+    const run = runs.get(key) ?? { folder: t.folder, tasks: [] };
     run.tasks.push(t);
     runs.set(key, run);
   }
   const none = runs.get('');
   runs.delete('');
   return [...runs.values(), ...(none ? [none] : [])];
+}
+
+/**
+ * A folder and its memories from `GET /api/folder`, from the cloud board or a machine's ledger
+ * (`hive-tasks folder … --json`), in one shape.
+ * @param {any} answer
+ */
+export function normalizeFolder(answer) {
+  const f = answer?.folder ?? answer ?? {};
+  return {
+    project: String(f.project ?? ''),
+    key: String(f.key ?? f.name ?? '').toLowerCase(),
+    name: String(f.name ?? f.key ?? ''),
+    about: String(f.about ?? ''),
+    memories: (answer?.memories ?? []).map((/** @type {any} */ m) => ({
+      key: `${m.machine ?? m.from ?? 'here'}:${m.id}`,
+      kind: String(m.kind ?? 'note'),
+      title: String(m.title ?? ''),
+      body: String(m.body ?? ''),
+      task: String(m.task ?? ''),
+      from: String(m.machine ?? m.from ?? ''),
+      created: seconds(m.created_at),
+    })),
+  };
 }
 
 /**

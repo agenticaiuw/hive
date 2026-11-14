@@ -470,6 +470,35 @@ export async function fetchTaskBoard(): Promise<any> {
   return apiRequest(`${base}/api/tasks`);
 }
 
+/** A folder and every one of its memories: `{folder: {project, key, name, about}, memories}`. */
+export async function fetchFolder(project: string, key: string): Promise<any> {
+  return apiRequest(`${base}/api/folder?${new URLSearchParams({ project, key })}`);
+}
+
+/** Makes a folder in a project, or says what it's for. */
+export async function saveFolder(folder: { project: string; name: string; about?: string }) {
+  return apiRequest(`${base}/api/folders`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(folder),
+  });
+}
+
+/** Adds a memory to a folder; every agent put on the folder gets it from then on. */
+export async function saveMemory(memory: {
+  project: string;
+  folder: string;
+  kind: string;
+  title: string;
+  body: string;
+}) {
+  return apiRequest(`${base}/api/folders/memory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(memory),
+  });
+}
+
 export type AgentChoice = {
   id: string;
   name: string;
