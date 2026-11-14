@@ -1,0 +1,17 @@
+// For developers. People using Hive never run wrangler: the Mac app uploads worker.js through the
+// Cloudflare API with the same bindings (crates/hive/hive-cloud/src/deploy.rs).
+{
+  "name": "hive-cloud",
+  "main": "worker.js",
+  "compatibility_date": "2026-07-31",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      { "name": "ACCOUNT", "class_name": "Account" },
+      { "name": "SHARD", "class_name": "BlobShard" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Account", "BlobShard"] }]
+  // Optional, needs R2 enabled on the account: "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "hive-cloud-blobs" }]
+  // Required secret: CLAIM_HASH (SHA-256 hex of the one-time claim secret), set with `wrangler secret put CLAIM_HASH`.
+}
