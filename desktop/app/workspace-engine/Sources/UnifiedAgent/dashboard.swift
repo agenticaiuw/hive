@@ -7,6 +7,9 @@
 //                            ledger (`hive-tasks board --all --json`) when the cloud is out of reach
 //   GET  /api/agents         the agents it can hand a task to: Hive, through its request socket
 //   POST /api/agents/send    {agent, text}: the text to Hive's request socket, as a request
+//   GET  /api/folder         ?project&key: a folder and all its memories, from the cloud board
+//   POST /api/folders        {project, name, about?}: makes a folder (on the cloud board)
+//   POST /api/folders/memory {project, folder, kind, title, body}: a memory for the folder
 //
 // Opened from the menu (Open Dashboard) or a hive:// link: `open hive://tasks`, which is what
 // `hive-tasks web` does on the Mac. While it's open Hive is in the Dock and in ⌘-Tab.
@@ -118,7 +121,7 @@ final class DashboardScheme: NSObject, WKURLSchemeHandler {
         let id = ObjectIdentifier(task)
         let state = stateDir
         DispatchQueue.global(qos: .userInitiated).async {
-            let (status, data) = DashboardAPI.answer(method: method, path: path, body: body, stateDir: state)
+            let (status, data) = DashboardAPI.answer(method: method, path: path, query: url.query ?? "", body: body, stateDir: state)
             DispatchQueue.main.async {
                 if self.stopped.remove(id) != nil { return }
                 self.reply(task, url: url, status: status, type: "application/json; charset=utf-8", data: data)
@@ -187,11 +190,14 @@ final class DashboardScheme: NSObject, WKURLSchemeHandler {
 enum DashboardAPI {
     static let hiveAgent = "hive-mac"
 
-    static func answer(method: String, path: String, body: Data, stateDir: URL) -> (Int, Data) {
+    static func answer(method: String, path: String, query: String = "", body: Data, stateDir: URL) -> (Int, Data) {
         switch (method.uppercased(), path) {
         case ("GET", "/api/tasks"): return tasks()
         case ("GET", "/api/agents"): return agents(stateDir: stateDir)
         case ("POST", "/api/agents/send"): return send(body, stateDir: stateDir)
+        case ("GET", "/api/folder"): return folder(query)
+        case ("POST", "/api/folders"): return board("post", "/v1/folders", body)
+        case ("POST", "/api/folders/memory"): return board("post", "/v1/folders/memory", body, thenSync: true)
         default: return (404, json(["error": "The desktop app doesn't answer \(path) yet."]))
         }
     }
@@ -213,13 +219,35 @@ enum DashboardAPI {
         return (502, json(["error": "hive-tasks couldn't read the board (\(tool))."]))
     }
 
+    /// A folder and all its memories, as the cloud board has them (`hive-tasks get /v1/folder`).
+    static func folder(_ query: String) -> (Int, Data) {
+        var asked = URLComponents()
+        asked.query = query
+        let item = { (name: String) in asked.queryItems?.first(where: { $0.name == name })?.value ?? "" }
+        var out = URLComponents()
+        out.queryItems = [URLQueryItem(name: "project", value: item("project")), URLQueryItem(name: "key", value: item("key"))]
+        return board("get", "/v1/folder?" + (out.percentEncodedQuery ?? ""), Data())
+    }
+
+    /// Asks the cloud board through `hive-tasks get|post` (the machine's sign-in stays with it).
+    /// Everything is kept in the cloud first; `thenSync` has this Mac's ledger take it in now.
+    static func board(_ verb: String, _ path: String, _ body: Data, thenSync: Bool = false) -> (Int, Data) {
+        let tool = hiveTasks()
+        guard let out = run(tool, [verb, path], input: verb == "post" ? body : nil),
+              (try? JSONSerialization.jsonObject(with: out)) != nil else {
+            return (502, json(["error": "Couldn't reach the cloud board (\(path))."]))
+        }
+        if thenSync { DispatchQueue.global().async { _ = run(tool, ["sync", "--quiet"], seconds: 60) } }
+        return (200, out)
+    }
+
     static func hiveTasks() -> String {
         let local = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hive-tasks").path
         return FileManager.default.isExecutableFile(atPath: local) ? local : "/opt/homebrew/bin/hive-tasks"
     }
 
     /// Runs `tool args`; its output when it exits 0 within `seconds`.
-    static func run(_ tool: String, _ args: [String], seconds: Double = 15) -> Data? {
+    static func run(_ tool: String, _ args: [String], input: Data? = nil, seconds: Double = 15) -> Data? {
         guard FileManager.default.isExecutableFile(atPath: tool) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
@@ -227,7 +255,13 @@ enum DashboardAPI {
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
+        let stdin = input.map { _ in Pipe() }
+        if let stdin { process.standardInput = stdin }
         do { try process.run() } catch { return nil }
+        if let stdin, let input {
+            stdin.fileHandleForWriting.write(input)
+            try? stdin.fileHandleForWriting.close()
+        }
         let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: timer)
         let data = out.fileHandleForReading.readDataToEndOfFile()
