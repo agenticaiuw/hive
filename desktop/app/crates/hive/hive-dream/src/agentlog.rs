@@ -27,7 +27,7 @@ static MARKER: LazyLock<Regex> = LazyLock::new(|| {
 
 static MACHINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:warning:|Warning:|error:|Error:|thread '.*' panicked|Traceback \(most recent call last\)|\[spaceo-mcp\] tool \S+ failed|🎞\s+Recording .* failed|Voice input unavailable|Virtual workspace unavailable|agent-vhid-helper isn't running|the voice sidecar stopped)",
+        r"^(?:warning:|Warning:|error:|Error:|thread '.*' panicked|Traceback \(most recent call last\)|\[engine-mcp\] tool \S+ failed|🎞\s+Recording .* failed|Voice input unavailable|Virtual workspace unavailable|agent-vhid-helper isn't running|the voice sidecar stopped)",
     )
     .expect("machine line")
 });

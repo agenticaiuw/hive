@@ -759,13 +759,13 @@ fn workspace_command_is_visible_without_exposing_arguments() {
     task.on_message(
         "item/started",
         &json!({"item": {"type": "commandExecution",
-                         "command": "python scripts/workspace-tool.py call spaceo_open_url '{secret}'"}}),
+                         "command": "python scripts/workspace-tool.py call workspace_visit_url '{secret}'"}}),
     );
     task.on_message(
         "item/completed",
         &json!({"item": {"type": "commandExecution", "exitCode": 0}}),
     );
-    assert!(events.has("action", "Virtual workspace: spaceo_open_url"));
+    assert!(events.has("action", "Virtual workspace: workspace_visit_url"));
     assert!(events
         .all()
         .iter()
@@ -775,9 +775,9 @@ fn workspace_command_is_visible_without_exposing_arguments() {
     task.on_message(
         "item/started",
         &json!({"item": {"type": "commandExecution",
-                         "command": "build/workspace-tool call spaceo_session_list '{}'"}}),
+                         "command": "build/workspace-tool call workspace_session_list '{}'"}}),
     );
-    assert!(events.has("action", "Virtual workspace: spaceo_session_list"));
+    assert!(events.has("action", "Virtual workspace: workspace_session_list"));
 }
 
 #[test]

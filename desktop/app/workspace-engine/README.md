@@ -1,11 +1,12 @@
-# Agent workspace engine
+# workspace-engine
 
-This directory contains the workspace engine source maintained in this repository.
-It originated from SpaceO revision `23918951d67da6567703ecaba21b03d1c0154dd3`,
-including local integration changes. Its MIT license and copyright notice are in
-`LICENSE`. The build uses these files directly and does not clone the upstream repo.
+The Swift package for Hive.app's main executable, `agent-unified-host` (`Sources/UnifiedAgent`:
+the app shell, the context panel and the credential helper). `tools/build-workspace.sh` builds it
+under `build/workspace-engine/`, and the Makefile copies it into `build/Agent.app` as
+`Contents/MacOS/Agent`.
 
-The Agent app integration sources in `tools/` are copied into the build tree by
-`scripts/build-spaceo.sh`; edit those integration files in `tools/`. The copy in
-`build/` is disposable. Retain the display-safety rules in `docs/DISPLAY_SAFETY.md`
-when changing display lifecycle code.
+Hive's own virtual workspace engine, a separate display the agent works on without taking your
+screen, is being written for this package. The Rust side already expects it: `hive-workspace`'s
+`workspace-mcp-bridge` talks to the engine named by `AGENT_WORKSPACE_ENGINE`, and Hive starts it
+only with `AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1`. Until the engine lands, Hive works on your
+own screen only.

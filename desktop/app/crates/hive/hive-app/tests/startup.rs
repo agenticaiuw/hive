@@ -291,7 +291,7 @@ fn unfinished_work_is_restored_at_start() {
 #[test]
 fn the_embedded_workspace_starts_and_its_activity_shows() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test/spaceo");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test/engine");
     let h = Harness::isolated(
         env,
         Setup {
@@ -324,7 +324,7 @@ fn the_embedded_workspace_starts_and_its_activity_shows() {
 #[test]
 fn a_workspace_that_wont_start_says_so() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test/spaceo");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test/engine");
     let h = Harness::isolated(
         env,
         Setup {
@@ -344,21 +344,21 @@ fn a_workspace_that_wont_start_says_so() {
 #[test]
 fn the_window_x_pauses_the_workspace_input() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test/spaceo");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test/engine");
     let h = Harness::isolated(env, Setup::default());
     h.agent.tasks.lock().mac = Some(FakeTask::running("work", "mac"));
     h.host
         .pause_ok
         .store(false, std::sync::atomic::Ordering::SeqCst);
     h.agent.on_overlay("close", None);
-    assert_eq!(h.host.paused.all(), ["/test/spaceo"]);
+    assert_eq!(h.host.paused.all(), ["/test/engine"]);
     assert!(h.has_printed("   ✗ Could not confirm the workspace input was paused."));
 }
 
 #[test]
 fn speech_follows_workspace_visibility() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test");
     assert!(!workspace_voice_allowed());
     let state = env.path().join("workspace-viewer-visible");
     std::fs::write(&state, "1\n").unwrap();
@@ -376,7 +376,7 @@ fn non_workspace_mode_keeps_voice() {
 #[test]
 fn hiding_the_workspace_viewer_quiets_the_voice_and_its_words_show_instead() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test");
     let h = Harness::isolated(env, Setup::default());
     h.agent.tick();
     h.agent.tick();
@@ -392,7 +392,7 @@ fn hiding_the_workspace_viewer_quiets_the_voice_and_its_words_show_instead() {
 #[test]
 fn a_workspace_error_shows_once() {
     let mut env = Isolated::new();
-    env.set("AGENT_SPACEO_COMMAND", "/test");
+    env.set("AGENT_WORKSPACE_ENGINE", "/test");
     let h = Harness::isolated(
         env,
         Setup {

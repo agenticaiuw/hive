@@ -280,7 +280,7 @@ fn run_with_input(
 
 /// Only speak over the user's speakers while the workspace viewer is visible.
 pub fn workspace_voice_allowed() -> bool {
-    if !env_set("AGENT_SPACEO_COMMAND") {
+    if !env_set("AGENT_WORKSPACE_ENGINE") {
         return true;
     }
     match std::fs::read_to_string(hive_common::state_dir().join("workspace-viewer-visible")) {

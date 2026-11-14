@@ -10,7 +10,7 @@ sources = $(shell find $(1) -type f -not -path '*/target/*' -not -path '*/.build
 # Codex, the scripts and the menu start. The voice models stay Python (python/sidecar_voice.py).
 HIVE_BINS := hive-agent hive-ask hive-auth-mcp hive-phone-mcp hive-vhid hive-credentials hive-knowledge hive-session-journal hive-context-panel \
 	hive-memory-search hive-ingest phone-status \
-	spaceo-mcp-bridge workspace-fence workspace-update workspace-tool restart-agent-once hive-bundle-migration \
+	workspace-mcp-bridge workspace-fence workspace-update workspace-tool restart-agent-once hive-bundle-migration \
 	hive-app-server-transport hive-settings-reader hive-request-ledger
 HIVE_BUILT := $(addprefix build/,$(HIVE_BINS))
 
@@ -74,8 +74,8 @@ build/agent-vhid-selection: tools/selected-text.swift
 	swiftc -O tools/selected-text.swift -o $@.tmp
 	mv $@.tmp $@
 
-# Optional standalone host, built from the repository's maintained workspace source.
-build/agent-unified-host: tools/build-workspace.sh scripts/build-spaceo.sh $(call sources,workspace-engine)
+# Hive.app's main executable: workspace-engine/Sources/UnifiedAgent.
+build/agent-unified-host: tools/build-workspace.sh $(call sources,workspace-engine)
 	bash tools/build-workspace.sh
 
 # Hive's icon is drawn once, in branding/hive.svg at the repository's root; the app's .icns is
@@ -89,26 +89,9 @@ build/Hive.icns: ../../branding/hive.svg build/hive-icon
 	build/hive-icon ../../branding/hive.svg icns build/Hive.tmp.icns
 	mv build/Hive.tmp.icns $@
 
-# Staged multi-window implementation. It is intentionally separate until the display and
-# takeover have been verified on this Mac; the normal installed Agent remains usable.
-build/Agent-WorkspaceCandidate.app: scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist $(call sources,workspace-engine)
-	SIGN_REQUIRED=1 bash scripts/build-spaceo.sh
-	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Helpers $@.tmp/Contents/Resources
-	cp build/spaceo-candidate/agent-unified-host $@.tmp/Contents/MacOS/Agent
-	cp build/spaceo-candidate/spaceo $@.tmp/Contents/Helpers/spaceo
-	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
-	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
-	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
-	SIGN_REQUIRED=1 tools/sign.sh $@.tmp local.personal-agent.Agent
-	codesign --verify --deep --strict $@.tmp
-	rm -rf $@ && mv $@.tmp $@
-
-build/Agent.app: scripts/build-spaceo.sh build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
-	bash scripts/build-spaceo.sh
-	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Helpers $@.tmp/Contents/Resources
-	cp build/spaceo-candidate/agent-unified-host $@.tmp/Contents/MacOS/Agent
-	cp build/spaceo-candidate/spaceo $@.tmp/Contents/Helpers/spaceo
-	cp build/spaceo-candidate/LICENSE $@.tmp/Contents/Resources/SpaceO-LICENSE
+build/Agent.app: build/agent-unified-host build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
+	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Resources
+	cp build/agent-unified-host $@.tmp/Contents/MacOS/Agent
 	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
 	tools/sign.sh $@.tmp local.personal-agent.Agent

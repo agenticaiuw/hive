@@ -1,5 +1,5 @@
-//! The SpaceO bridge: the workspace request handler, capability and environment reports, the
-//! bootstrap decisions and the MCP handshake. A scripted engine stands in for SpaceO; no display,
+//! The workspace bridge: the workspace request handler, capability and environment reports, the
+//! bootstrap decisions and the MCP handshake. A scripted engine stands in for the real one; no display,
 //! daemon or real session is touched.
 
 use hive_workspace::bridge::*;
@@ -63,10 +63,10 @@ impl Engine for ScriptedEngine {
         }
     }
     fn request(&self, _method: &str, _params: &Value) -> Result<Value, String> {
-        Ok(json!({"tools": [{"name": "spaceo_session_list"}, {"name": "spaceo_session_destroy"}]}))
+        Ok(json!({"tools": [{"name": "workspace_session_list"}, {"name": "workspace_session_destroy"}]}))
     }
     fn command(&self) -> String {
-        "/agent/spaceo".into()
+        "/agent/engine".into()
     }
 }
 
@@ -154,7 +154,7 @@ fn retry_only_explicit_pre_dispatch_transient_health_receipt() {
     *h.engine.script.lock().unwrap() = vec![failure(REFUSED), ok("done")].into();
     let result = h
         .handler
-        .call_with_transient_health_retry("spaceo_click", &json!({}))
+        .call_with_transient_health_retry("workspace_click", &json!({}))
         .unwrap();
     assert_eq!(result, text("done"));
     assert_eq!(h.engine.count(), 2);
@@ -169,7 +169,7 @@ fn no_retry_for_ambiguous_or_post_dispatch_failure() {
     ] {
         let h = harness();
         *h.engine.script.lock().unwrap() = vec![failure(body)].into();
-        let result = h.handler.call_with_transient_health_retry("spaceo_click", &json!({})).unwrap();
+        let result = h.handler.call_with_transient_health_retry("workspace_click", &json!({})).unwrap();
         assert_eq!(result["isError"], true);
         assert_eq!(h.engine.count(), 1, "{body}");
     }
@@ -182,7 +182,7 @@ fn transient_health_retry_is_bounded() {
     *h.engine.script.lock().unwrap() = vec![failure(REFUSED)].into();
     let result = h
         .handler
-        .call_with_transient_health_retry("spaceo_click", &json!({}))
+        .call_with_transient_health_retry("workspace_click", &json!({}))
         .unwrap();
     assert_eq!(result["isError"], true);
     assert_eq!(h.engine.count(), 1);
@@ -200,7 +200,7 @@ fn list_only_exposes_workspace_tools() {
         .collect();
     assert_eq!(
         names,
-        ["spaceo_session_list", "workspace_authenticate_passwords"]
+        ["workspace_session_list", "workspace_authenticate_passwords"]
     );
 }
 
@@ -209,14 +209,14 @@ fn calls_use_existing_workspace() {
     let h = harness();
     let reply = h
         .handler
-        .handle(&json!({"name": "spaceo_open_app", "arguments": {"app": "Calculator"}}));
+        .handle(&json!({"name": "workspace_launch_app", "arguments": {"app": "Calculator"}}));
     assert_eq!(reply["ok"], true);
     let calls = h.engine.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0],
         (
-            "spaceo_open_app".to_string(),
+            "workspace_launch_app".to_string(),
             json!({"app": "Calculator", "session": "personal-agent-workspace"})
         )
     );
@@ -227,7 +227,7 @@ fn reversible_workspace_access_does_not_require_proven_isolation() {
     let h = harness();
     let reply = h
         .handler
-        .handle(&json!({"name": "spaceo_open_app", "arguments": {
+        .handle(&json!({"name": "workspace_launch_app", "arguments": {
         "app": "Safari", "strict": true, "require_isolation": ["key_input_route"]}}));
     assert_eq!(reply["ok"], true);
     assert_eq!(
@@ -242,13 +242,13 @@ fn chrome_launch_is_still_disabled_by_safari_preference() {
     std::fs::write(h.state.path().join("browser-preference"), "Safari\n").unwrap();
     assert_eq!(
         h.handler
-            .handle(&json!({"name": "spaceo_open_app", "arguments": {"app": "Google Chrome"}}))
+            .handle(&json!({"name": "workspace_launch_app", "arguments": {"app": "Google Chrome"}}))
             ["ok"],
         false
     );
     assert_eq!(
         h.handler
-            .handle(&json!({"name": "spaceo_open_url", "arguments": {"url": "https://x"}}))["ok"],
+            .handle(&json!({"name": "workspace_visit_url", "arguments": {"url": "https://x"}}))["ok"],
         false
     );
     assert_eq!(h.engine.count(), 0);
@@ -258,7 +258,7 @@ fn chrome_launch_is_still_disabled_by_safari_preference() {
         .as_array()
         .unwrap()
         .iter()
-        .all(|t| t["name"] != "spaceo_open_url"));
+        .all(|t| t["name"] != "workspace_visit_url"));
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn browser_default_is_not_hardcoded_to_safari() {
     assert!(!prefer_safari(h.state.path()));
     assert_eq!(
         h.handler
-            .handle(&json!({"name": "spaceo_open_app", "arguments": {"app": "Google Chrome"}}))
+            .handle(&json!({"name": "workspace_launch_app", "arguments": {"app": "Google Chrome"}}))
             ["ok"],
         true
     );
@@ -278,13 +278,13 @@ fn refuses_foreign_session_and_destructive_tools() {
     let h = harness();
     assert_eq!(
         h.handler
-            .handle(&json!({"name": "spaceo_read_screen", "arguments": {"session": "other"}}))
+            .handle(&json!({"name": "workspace_read_screen", "arguments": {"session": "other"}}))
             ["ok"],
         false
     );
     assert_eq!(
         h.handler
-            .handle(&json!({"name": "spaceo_session_destroy", "arguments": {}}))["ok"],
+            .handle(&json!({"name": "workspace_session_destroy", "arguments": {}}))["ok"],
         false
     );
     assert_eq!(h.engine.count(), 0);
@@ -294,10 +294,10 @@ fn refuses_foreign_session_and_destructive_tools() {
 fn adoption_and_placement_are_rejected_before_engine_call() {
     let h = harness();
     for name in [
-        "spaceo_adopt",
-        "spaceo_place",
-        "spaceo_session_adopt",
-        "spaceo_window_place",
+        "workspace_adopt",
+        "workspace_place",
+        "workspace_session_adopt",
+        "workspace_window_place",
     ] {
         let reply = h
             .handler
@@ -322,7 +322,7 @@ fn workspace_auth_uses_verified_target_without_secret_arguments() {
     let filler = Arc::new(RecordingPasswords(Mutex::default()));
     h.handler.passwords = filler.clone();
     h.handler.target = Arc::new(|command| {
-        assert_eq!(command, "/agent/spaceo");
+        assert_eq!(command, "/agent/engine");
         Ok((123, 456))
     });
     let reply = h
@@ -367,18 +367,18 @@ fn activity_reports_tool_and_loaded_text_without_input_arguments() {
     let events = capture(&mut h.handler);
     *h.engine.fallback.lock().unwrap() = Some(text("Page content"));
     h.handler
-        .handle(&json!({"name": "spaceo_read_text", "arguments": {"secret": "do-not-display"}}));
+        .handle(&json!({"name": "workspace_read_text", "arguments": {"secret": "do-not-display"}}));
     let events = events.lock().unwrap();
     assert_eq!(
         *events,
         vec![
             (
                 "action".to_string(),
-                "Virtual workspace: spaceo_read_text".to_string()
+                "Virtual workspace: workspace_read_text".to_string()
             ),
             (
                 "data".to_string(),
-                "spaceo_read_text: Page content".to_string()
+                "workspace_read_text: Page content".to_string()
             )
         ]
     );
@@ -393,7 +393,7 @@ fn status_refreshes_owned_session_read_only() {
     assert_eq!(reply["ok"], true);
     assert!(events.lock().unwrap()[0].1.contains("input unknown"));
     let calls = h.engine.calls.lock().unwrap();
-    assert_eq!(*calls, vec![("spaceo_session_list".to_string(), json!({}))]);
+    assert_eq!(*calls, vec![("workspace_session_list".to_string(), json!({}))]);
 }
 
 // ------------------------------------------------------------------------------------ reports
@@ -438,7 +438,7 @@ fn bounded_redacted_and_labelled_observations() {
         .contains("unknown"));
     obs.display_seen("42");
     obs.record(
-        "spaceo_verify_isolation",
+        "workspace_verify_isolation",
         Some(&text(
             "isolation: partial\n- key_input_route: unknown [unknown]\nSECRET_DO_NOT_RETAIN",
         )),
@@ -446,7 +446,7 @@ fn bounded_redacted_and_labelled_observations() {
     );
     for _ in 0..8 {
         obs.record(
-            "spaceo_type",
+            "workspace_type",
             Some(&json!({"isError": true, "content": [{"text": "SECRET_DO_NOT_RETAIN"}]})),
             false,
         );
@@ -463,7 +463,7 @@ fn bounded_redacted_and_labelled_observations() {
     assert_eq!(report["recent_failures"].as_array().unwrap().len(), 5);
     assert!(!report.to_string().contains("SECRET_DO_NOT_RETAIN"));
     obs.record(
-        "spaceo_verify_isolation",
+        "workspace_verify_isolation",
         Some(&json!({"isError": true})),
         false,
     );
@@ -567,7 +567,7 @@ fn claim_existing_workspace() {
     let b = boot();
     let engine = ScriptedEngine::new(vec![ok("claimed")]);
     b.run(&engine, &FakeClock::new()).unwrap();
-    assert_eq!(engine.names(), ["spaceo_session_claim"]);
+    assert_eq!(engine.names(), ["workspace_session_claim"]);
     assert_eq!(b.published(), 1);
 }
 
@@ -579,7 +579,7 @@ fn create_only_when_explicitly_unknown() {
     b.run(&engine, &FakeClock::new()).unwrap();
     assert_eq!(
         engine.names(),
-        ["spaceo_session_claim", "spaceo_session_create"]
+        ["workspace_session_claim", "workspace_session_create"]
     );
     assert_eq!(engine.calls.lock().unwrap()[1].1["preset"], "exclusive");
 }
@@ -600,7 +600,7 @@ fn missing_session_alone_never_authorizes_creation() {
     let engine = ScriptedEngine::new(vec![unknown()]);
     let error = b.run(&engine, &FakeClock::new()).unwrap_err();
     assert!(error.contains("explicit user request"));
-    assert_eq!(engine.names(), ["spaceo_session_claim"]);
+    assert_eq!(engine.names(), ["workspace_session_claim"]);
 }
 
 #[test]
@@ -672,10 +672,10 @@ fn detached_record_is_replaced_only_after_daemon_reports_cleanup() {
     assert_eq!(
         engine.names(),
         [
-            "spaceo_session_claim",
-            "spaceo_session_claim",
-            "spaceo_session_claim",
-            "spaceo_session_create"
+            "workspace_session_claim",
+            "workspace_session_claim",
+            "workspace_session_claim",
+            "workspace_session_create"
         ]
     );
     assert_eq!(b.published(), 1);
@@ -693,9 +693,9 @@ fn live_legacy_detached_claim_waits_for_explicit_cleanup() {
     assert_eq!(
         engine.names(),
         [
-            "spaceo_session_claim",
-            "spaceo_session_claim",
-            "spaceo_session_create"
+            "workspace_session_claim",
+            "workspace_session_claim",
+            "workspace_session_create"
         ]
     );
 }
@@ -718,7 +718,7 @@ fn detached_cleanup_timeout_does_not_create_or_remove_session() {
         .run(&engine, &FakeClock::scripted(&[0.0, 0.0, 46.0]))
         .unwrap_err();
     assert!(error.contains("cleanup did not finish"));
-    assert_eq!(engine.names(), ["spaceo_session_claim"]);
+    assert_eq!(engine.names(), ["workspace_session_claim"]);
 }
 
 #[test]
@@ -743,7 +743,7 @@ fn disappearing_existing_workspace_is_not_replaced() {
     assert!(error.contains("Existing workspace"));
     assert_eq!(
         engine.names(),
-        ["spaceo_session_claim", "spaceo_session_claim"]
+        ["workspace_session_claim", "workspace_session_claim"]
     );
 }
 
@@ -789,15 +789,15 @@ fn display_selection_publishes_the_exclusive_display() {
 
 // ------------------------------------------------------------------------------------ the process
 
-const FAKE_SPACEO: &str = r#"#!/bin/sh
+const FAKE_ENGINE: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$FAKE_EVENTS"
   case "$line" in *'"id":'*) ;; *) continue ;; esac
   id=$(printf '%s' "$line" | sed -E 's/.*"id": ?("[^"]*"|[0-9]+).*/\1/')
   case "$line" in
-    *spaceo_session_claim*) result='{"isError": true, "content": [{"text": "[unknown_session] no session"}]}' ;;
-    *spaceo_session_create*) result='{"content": [{"text": "created"}]}' ;;
-    *spaceo_session_list*) result='{"content": [{"text": "[yours] session '"'"'personal-agent-workspace'"'"' on whole display 15, 1920x1080"}]}' ;;
+    *workspace_session_claim*) result='{"isError": true, "content": [{"text": "[unknown_session] no session"}]}' ;;
+    *workspace_session_create*) result='{"content": [{"text": "created"}]}' ;;
+    *workspace_session_list*) result='{"content": [{"text": "[yours] session '"'"'personal-agent-workspace'"'"' on whole display 15, 1920x1080"}]}' ;;
     *) result='{"ok": true}' ;;
   esac
   printf '{"jsonrpc": "2.0", "id": %s, "result": %s}\n' "$id" "$result"
@@ -811,10 +811,10 @@ fn mcp_handshake_bootstraps_without_leaking_internal_responses() {
     let root = temp.path();
     fence::set_policy(root, "allow-once").unwrap();
     let events = root.join("events");
-    let fake = root.join("spaceo");
-    std::fs::write(&fake, FAKE_SPACEO).unwrap();
+    let fake = root.join("workspace");
+    std::fs::write(&fake, FAKE_ENGINE).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut process = Command::new(env!("CARGO_BIN_EXE_spaceo-mcp-bridge"))
+    let mut process = Command::new(env!("CARGO_BIN_EXE_workspace-mcp-bridge"))
         .arg(&fake)
         .env("FAKE_EVENTS", &events)
         .env("AGENT_STATE_DIR", root)
@@ -840,8 +840,8 @@ fn mcp_handshake_bootstraps_without_leaking_internal_responses() {
     send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}));
     assert_eq!(read_id(&mut stdout), 2);
     let log = std::fs::read_to_string(&events).unwrap();
-    assert!(log.contains("spaceo_session_claim"));
-    assert!(log.contains("spaceo_session_create"));
+    assert!(log.contains("workspace_session_claim"));
+    assert!(log.contains("workspace_session_create"));
     assert_eq!(
         std::fs::read_to_string(root.join("workspace-display-id"))
             .unwrap()
@@ -862,13 +862,13 @@ fn mcp_handshake_bootstraps_without_leaking_internal_responses() {
 
 #[test]
 fn bridge_usage_error() {
-    let output = Command::new(env!("CARGO_BIN_EXE_spaceo-mcp-bridge"))
+    let output = Command::new(env!("CARGO_BIN_EXE_workspace-mcp-bridge"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Usage: spaceo-mcp-bridge /absolute/path/to/spaceo\n"
+        "Usage: workspace-mcp-bridge /absolute/path/to/engine\n"
     );
 }
 
@@ -926,7 +926,7 @@ fn large_request_and_response() {
     }));
     let reply = request(
         s.socket.path(),
-        &json!({"name": "spaceo_open_app", "arguments": {"app": app}}),
+        &json!({"name": "workspace_launch_app", "arguments": {"app": app}}),
     );
     assert_eq!(
         reply["result"]["content"][0]["text"]
@@ -946,7 +946,7 @@ fn large_request_and_response() {
 #[test]
 fn utf8_request_near_limit_is_not_expanded() {
     let s = served();
-    let value = json!({"name": "spaceo_open_app", "arguments": {"app": "界".repeat(4000)}});
+    let value = json!({"name": "workspace_launch_app", "arguments": {"app": "界".repeat(4000)}});
     let raw = serde_json::to_string(&value).unwrap();
     assert!(raw.len() < 16384);
     assert_eq!(request(s.socket.path(), &value)["ok"], true);
@@ -963,7 +963,7 @@ fn concurrent_responses_are_not_crossed() {
             std::thread::spawn(move || {
                 let reply = request(
                     &path,
-                    &json!({"name": "spaceo_open_app", "arguments": {"app": i.to_string()}}),
+                    &json!({"name": "workspace_launch_app", "arguments": {"app": i.to_string()}}),
                 );
                 (
                     i,
@@ -986,7 +986,7 @@ fn non_object_and_forbidden_tools_never_dispatch() {
     let s = served();
     assert_eq!(request(s.socket.path(), &json!([]))["ok"], false);
     assert_eq!(
-        request(s.socket.path(), &json!({"name": "spaceo_session_destroy"}))["ok"],
+        request(s.socket.path(), &json!({"name": "workspace_session_destroy"}))["ok"],
         false
     );
     assert_eq!(s.engine.count(), 0);
@@ -1000,7 +1000,7 @@ fn second_workspace_server_cannot_replace_live_socket() {
     assert_eq!(
         request(
             s.socket.path(),
-            &json!({"name": "spaceo_open_app", "arguments": {"app": "Safari"}})
+            &json!({"name": "workspace_launch_app", "arguments": {"app": "Safari"}})
         )["ok"],
         true
     );

@@ -3,7 +3,7 @@ name = "hive-workspace"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "SpaceO workspace bridge, workspace fence/recovery/update, the local request socket"
+description = "Virtual workspace bridge, workspace fence/recovery/update, the local request socket"
 
 [dependencies]
 hive-common.workspace = true
@@ -16,8 +16,8 @@ libc.workspace = true
 tempfile.workspace = true
 
 [[bin]]
-name = "spaceo-mcp-bridge"
-path = "src/bin/spaceo-mcp-bridge.rs"
+name = "workspace-mcp-bridge"
+path = "src/bin/workspace-mcp-bridge.rs"
 
 [[bin]]
 name = "workspace-fence"

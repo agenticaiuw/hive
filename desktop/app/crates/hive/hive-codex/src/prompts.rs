@@ -105,9 +105,9 @@ pub const FOCUS_MAC: &str = "Use the device the request is about. When it doesn'
 
 pub const FOCUS_PHONE: &str = "This request is for the iPhone. Another task may be using the Mac meanwhile, so leave the Mac alone unless the request needs it.";
 
-pub const MONITOR_GONE: &str = " The workspace controller (build/workspace-tool, earlier scripts/workspace-tool.py) and the spaceo tools no longer exist; never call them.";
+pub const MONITOR_GONE: &str = " The workspace controller (build/workspace-tool, earlier scripts/workspace-tool.py) and its workspace_* tools are not available here; never call them.";
 
-pub const SPACEO_RULES: &str = "\nUse the workspace controller via `build/workspace-tool list` and `call TOOL '{JSON arguments}'`. The controller manages workspace isolation. Resume the existing conversation after updates.";
+pub const VIRTUAL_WORKSPACE_RULES: &str = "\nUse the workspace controller via `build/workspace-tool list` and `call TOOL '{JSON arguments}'`. The controller manages workspace isolation. Resume the existing conversation after updates.";
 
 pub const WORKSPACE_RULES: &str = "\nFor Mac tasks, use the workspace MCP tools to open and operate apps in the background workspace. Do not use the mac mouse/keyboard tools or move the physical pointer as a fallback. If the workspace cannot perform an action, explain the limitation. Tap right Option to hand the current workspace application to the user; the user must explicitly resume after taking over. Phone tasks use the phone tools.";
 
