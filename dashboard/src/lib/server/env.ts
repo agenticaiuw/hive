@@ -13,6 +13,8 @@ export type RuntimeEnv = {
   TASKS?: RelayBinding;
   TASKS_URL?: string;
   TASKS_TOKEN?: string;
+  /** Workers AI: the website's speech model reads dictation (/api/transcribe). */
+  AI?: { run(model: string, input: unknown): Promise<any> };
   PAIRING_CODE?: string;
   SESSION_SECRET?: string;
   DASHBOARD_ACCESS_KEY?: string;

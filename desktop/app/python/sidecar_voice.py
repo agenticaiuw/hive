@@ -269,6 +269,79 @@ class Server:
         voiceprint.learn_voice([self.voice.render(t) for t in SENTENCES[:3]], speech.RATE)
         return True
 
+    def dictate(self, path) -> str:
+        """The words in a recording (a 16-bit PCM .wav), read by the model that hears you: the
+        final-text model if there is one, else Parakeet, on the ears' own transcribing thread."""
+        import wave
+        import numpy as np
+        if not isinstance(path, str) or not path.endswith(".wav"):
+            raise ValueError('send {"wav": "<path to a .wav file>"}')
+        with wave.open(path, "rb") as w:
+            if w.getsampwidth() != 2:
+                raise ValueError("the recording must be 16-bit PCM")
+            rate, channels = w.getframerate(), w.getnchannels()
+            pcm = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
+        if channels > 1:
+            pcm = pcm[: len(pcm) // channels * channels].reshape(-1, channels).mean(axis=1)
+        if rate != 16000 and len(pcm):
+            n = int(len(pcm) * 16000 / rate)
+            pcm = np.interp(np.linspace(0, len(pcm) - 1, n), np.arange(len(pcm)), pcm).astype(np.float32)
+
+        def read(samples):  # (an exception here would end the transcribing thread)
+            try:
+                return "text", self.ears._read_final(samples)
+            except Exception as e:
+                return "error", f"{type(e).__name__}: {e}"
+        kind, text = self.ears.transcribe_with(read, pcm)
+        if kind == "error":
+            raise RuntimeError(text)
+        if not text and self.ears.model is None:
+            raise RuntimeError("Hive's speech model isn't loaded" + (f": {self.ears.error}" if self.ears.error else "."))
+        return text.strip()
+
+    def serve_dictation(self, path: str):
+        """Takes dictation for other programs on this Mac (Hive's dashboard window) on a socket
+        only you can open: one JSON line in, {"wav": path}; one back, {"text"} or {"error"}."""
+        import socket
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        mask = os.umask(0o177)
+        try:
+            listener.bind(path)
+        finally:
+            os.umask(mask)
+        listener.listen(4)
+
+        def one(conn):
+            with conn:
+                conn.settimeout(10)
+                data = b""
+                try:
+                    while b"\n" not in data and len(data) < 65536:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    reply = {"text": self.dictate(json.loads(data.split(b"\n", 1)[0]).get("wav"))}
+                except Exception as e:
+                    reply = {"error": str(e) or type(e).__name__}
+                try:
+                    conn.sendall((json.dumps(reply) + "\n").encode())
+                except OSError:
+                    pass  # it stopped waiting
+
+        def accept():
+            while not self.quitting.is_set():
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    return
+                threading.Thread(target=one, args=(conn,), daemon=True).start()
+        threading.Thread(target=accept, daemon=True, name="sidecar-dictation").start()
+
     def answer(self, request_id, work):
         """work() in its own thread (it may wait for a model to load); its dict is the reply."""
         def run():
@@ -331,6 +404,13 @@ class Server:
             self.voice.stop()  # nothing keeps playing once the agent is gone
 
 
+def state_dir() -> str:
+    """Hive's state folder, as hive_common::state_dir finds it."""
+    legacy = os.path.expanduser("~/Library/Application Support/Personal Agent")
+    return os.environ.get("AGENT_STATE_DIR") or (
+        legacy if os.path.isdir(legacy) else os.path.expanduser("~/Library/Application Support/Hive"))
+
+
 def protocol_out():
     """The protocol gets stdout to itself: fd 1 now goes to stderr (a C library writing there can't
     break a line), and print() (the model code's "✗ ..." lines) becomes log events."""
@@ -356,8 +436,17 @@ def main(argv: list[str]) -> int:
                                                voiceprint=None if "--no-voiceprint" in argv else Voiceprint(),
                                                listening="--listening" in argv)
     server.attach(ears, voice)
+    dictation = os.path.join(state_dir(), "dictation.sock")
+    try:
+        server.serve_dictation(dictation)
+    except OSError as e:  # (voice works without it)
+        server.emit("error", error=f"dictation socket {dictation}: {e}")
     server.hello(speech.ECHO)
     server.serve(sys.stdin)
+    try:
+        os.unlink(dictation)
+    except OSError:
+        pass
     return 0
 
 
