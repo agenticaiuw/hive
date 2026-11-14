@@ -14,9 +14,9 @@ git submodule update --init   # once, after cloning: Karabiner's client headers
 ```
 
 Hive.app's main executable is built from `workspace-engine/Sources/UnifiedAgent`. Hive works on
-your own screen. Its own virtual workspace (a separate display the agent works on) is being
-written for `workspace-engine/`; until it lands, `AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1` has no
-engine to start. The former experimental single-window Braus seat is not available in this
+your own screen. With `AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1` it works on a virtual workspace
+instead: a display of its own, made by Hive's engine (`Contents/Helpers/workspace-engine`, built
+from `workspace-engine/`; see its README). The former experimental single-window Braus seat is not available in this
 build. Rust crates and voice models still need to be available locally or downloaded during
 setup.
 

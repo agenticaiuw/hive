@@ -74,9 +74,12 @@ build/agent-vhid-selection: tools/selected-text.swift
 	swiftc -O tools/selected-text.swift -o $@.tmp
 	mv $@.tmp $@
 
-# Hive.app's main executable: workspace-engine/Sources/UnifiedAgent.
+# Hive.app's main executable and its virtual workspace engine: workspace-engine/Sources.
 build/agent-unified-host: tools/build-workspace.sh $(call sources,workspace-engine)
 	bash tools/build-workspace.sh
+
+build/workspace-engine: build/agent-unified-host
+	@:
 
 # Hive's icon is drawn once, in branding/hive.svg at the repository's root; the app's .icns is
 # built from it. The other places' PNGs are kept in git: `node branding/sync-icons.mjs`.
@@ -89,9 +92,11 @@ build/Hive.icns: ../../branding/hive.svg build/hive-icon
 	build/hive-icon ../../branding/hive.svg icns build/Hive.tmp.icns
 	mv build/Hive.tmp.icns $@
 
-build/Agent.app: build/agent-unified-host build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
-	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Resources
+build/Agent.app: build/agent-unified-host build/workspace-engine build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
+	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Resources $@.tmp/Contents/Helpers
 	cp build/agent-unified-host $@.tmp/Contents/MacOS/Agent
+	cp build/workspace-engine $@.tmp/Contents/Helpers/workspace-engine
+	tools/sign.sh $@.tmp/Contents/Helpers/workspace-engine local.personal-agent.workspace-engine
 	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
 	tools/sign.sh $@.tmp local.personal-agent.Agent
