@@ -349,6 +349,12 @@ pub struct FakeSystem {
     pub front_pid: Mutex<Option<i32>>,
     /// The pids brought to the front, in order.
     pub activated: Mutex<Vec<i32>>,
+    /// The browsers' tabs.
+    pub tabs: Mutex<Tabs>,
+    /// The tabs shown: (browser, window, tab).
+    pub shown_tabs: Mutex<Vec<(String, usize, usize)>>,
+    /// The windows picked from Window menus: (app, title).
+    pub window_menu: Mutex<Vec<(String, String)>>,
 }
 
 impl Default for FakeSystem {
@@ -370,6 +376,9 @@ impl Default for FakeSystem {
             idle: Mutex::new(f64::INFINITY),
             front_pid: Mutex::new(Some(1)),
             activated: Mutex::new(Vec::new()),
+            tabs: Mutex::new(Vec::new()),
+            shown_tabs: Mutex::new(Vec::new()),
+            window_menu: Mutex::new(Vec::new()),
         }
     }
 }
@@ -429,7 +438,15 @@ impl System for FakeSystem {
         (lock(&self.windows))()
     }
     fn browser_tabs(&self, _shown: &[Window]) -> Tabs {
-        Vec::new()
+        lock(&self.tabs).clone()
+    }
+    fn show_tab(&self, browser: &str, window: usize, tab: usize) -> String {
+        lock(&self.shown_tabs).push((browser.into(), window, tab));
+        String::new()
+    }
+    fn raise_from_window_menu(&self, app: &str, title: &str) -> String {
+        lock(&self.window_menu).push((app.into(), title.into()));
+        String::new()
     }
     fn frontmost_app(&self) -> String {
         lock(&self.front_app).clone()

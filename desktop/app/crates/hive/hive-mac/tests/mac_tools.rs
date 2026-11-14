@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{keys, FakeHelper, FakeSystem, FAKE_JPEG};
 use hive_common::tools::{is_error, texts, ToolNamespace};
 use hive_mac::credentials::{CredentialError, Native, Secret};
-use hive_mac::desktop::Window;
+use hive_mac::desktop::{BrowserWindow, Window};
 use hive_mac::tools::{self, MacTools, BATCHABLE};
 use serde_json::{json, Value};
 
@@ -169,7 +169,85 @@ fn switch_window_says_what_is_open_when_nothing_matches() {
         .unwrap();
     assert!(is_error(&res));
     assert!(first_text(&res).contains(r#"Microsoft PowerPoint: "GSSF_Presentation_styled""#));
-    assert!(first_text(&res).starts_with("No open window has 'budget' in its title.\n"));
+    assert!(first_text(&res).starts_with("No open window or browser tab has 'budget' in its title.\n"));
+}
+
+/// A tab that isn't the one showing has no window title to match: switch_window finds it among the
+/// browser's tabs and shows it (the Course Search tab the user asked for over and over).
+#[test]
+fn switch_window_shows_a_background_browser_tab() {
+    let s = setup(true);
+    *s.system.tabs.lock().unwrap() = vec![(
+        "Safari".into(),
+        vec![
+            BrowserWindow { current: Some(1), tabs: vec![("Inbox".into(), "https://mail.example.com/".into())] },
+            BrowserWindow {
+                current: Some(1),
+                tabs: vec![
+                    ("Canvas".into(), "https://canvas.example.edu/".into()),
+                    ("Course Search & Enroll".into(), "https://enroll.example.edu/search".into()),
+                ],
+            },
+        ],
+    )];
+    let system = s.system.clone();
+    s.system.set_windows(move || {
+        let front = if system.shown_tabs.lock().unwrap().is_empty() { "Inbox" } else { "Course Search & Enroll" };
+        vec![Window::new("Safari", front, true, 2), Window::new("Safari", "Canvas", false, 2)]
+    });
+    let res = s.tools.call("switch_window", &json!({"title": "course search"})).unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(*s.system.shown_tabs.lock().unwrap(), [("Safari".to_string(), 2, 2)]);
+    assert!(first_text(&res).contains(r#"Safari's window "Course Search & Enroll" is in front"#), "{}", first_text(&res));
+}
+
+/// A browser window that's minimized or on another desktop comes forward by the browser's script.
+#[test]
+fn switch_window_brings_a_hidden_browser_window_by_script() {
+    let s = setup(true);
+    *s.system.tabs.lock().unwrap() = vec![(
+        "Safari".into(),
+        vec![
+            BrowserWindow { current: Some(1), tabs: vec![("Inbox".into(), String::new())] },
+            BrowserWindow { current: Some(2), tabs: vec![("a".into(), String::new()), ("Budget 2026".into(), String::new())] },
+        ],
+    )];
+    let system = s.system.clone();
+    s.system.set_windows(move || {
+        if system.shown_tabs.lock().unwrap().is_empty() {
+            vec![Window::new("Safari", "Inbox", true, 2), Window::new("Safari", "Budget 2026", false, 2)]
+        } else {
+            vec![Window::new("Safari", "Budget 2026", true, 2), Window::new("Safari", "Inbox", true, 2)]
+        }
+    });
+    let res = s.tools.call("switch_window", &json!({"title": "budget"})).unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(*s.system.shown_tabs.lock().unwrap(), [("Safari".to_string(), 2, 2)]);
+    assert!(s.helper.lines().iter().all(|l| *l != keys(8, &[0x35])), "no cmd+` needed");
+}
+
+/// A window cmd+` can't reach (minimized, another desktop) is picked from the app's Window menu.
+#[test]
+fn switch_window_falls_back_to_the_window_menu() {
+    let s = setup(true);
+    let system = s.system.clone();
+    s.system.set_windows(move || {
+        let raised = !system.window_menu.lock().unwrap().is_empty();
+        let mut shown = windows_with("10-29 Club-Wide Meeting");
+        shown.push(Window::new("Microsoft PowerPoint", "Q3 Report", raised, 1));
+        if raised {
+            shown.rotate_right(1);
+        }
+        shown
+    });
+    *s.system.front_app.lock().unwrap() = "Microsoft PowerPoint".into();
+    let res = s.tools.call("switch_window", &json!({"title": "q3 report"})).unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(
+        *s.system.window_menu.lock().unwrap(),
+        [("Microsoft PowerPoint".to_string(), "Q3 Report".to_string())]
+    );
+    assert!(first_text(&res).contains(r#""Q3 Report" is in front"#), "{}", first_text(&res));
 }
 
 #[test]
