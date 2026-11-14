@@ -59,6 +59,16 @@ pub trait System: Send + Sync {
     }
     /// Brings the app with this pid to the front, as clicking its Dock icon would.
     fn activate(&self, _pid: i32) {}
+    /// Shows tab `tab` of browser window `window` (both 1-based, in browser_tabs' order) and brings
+    /// that window to the front, even minimized or on another desktop. "" when it did, else why not.
+    fn show_tab(&self, _browser: &str, _window: usize, _tab: usize) -> String {
+        "this Mac can't switch browser tabs".into()
+    }
+    /// Brings `app`'s window titled `title` forward from the app's Window menu (which lists the
+    /// minimized ones and those on other desktops too). "" when it did, else why not.
+    fn raise_from_window_menu(&self, _app: &str, _title: &str) -> String {
+        "this Mac can't use Window menus".into()
+    }
     /// While the virtual monitor is on: how many apps' windows are on it (desktop::windows_inside).
     /// None while it's off, or when that can't be told.
     fn windows_on_virtual_monitor(&self) -> Option<usize> {
@@ -112,6 +122,12 @@ impl System for RealMac {
     }
     fn browser_tabs(&self, shown: &[Window]) -> Tabs {
         desktop::browser_tabs(Some(shown), Duration::from_secs_f64(1.5))
+    }
+    fn show_tab(&self, browser: &str, window: usize, tab: usize) -> String {
+        desktop::show_tab(browser, window, tab)
+    }
+    fn raise_from_window_menu(&self, app: &str, title: &str) -> String {
+        desktop::raise_from_window_menu(app, title)
     }
     fn frontmost_app(&self) -> String {
         desktop::frontmost_app()

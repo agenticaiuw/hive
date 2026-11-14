@@ -252,6 +252,85 @@ function run(argv) {
 }
 "#;
 
+/// JavaScript for Automation: shows tab `argv[2]` of window `argv[1]` (both 1-based, in
+/// TABS_SCRIPT's order) of browser `argv[0]`, brings that window in front of the browser's others
+/// (un-minimizing it), and switches to the browser, which takes macOS to the window's desktop.
+pub const SHOW_TAB_SCRIPT: &str = r#"
+function run(argv) {
+  const app = Application(argv[0]);
+  const w = app.windows[parseInt(argv[1]) - 1];
+  const t = parseInt(argv[2]);
+  if (argv[0] === "Safari") {
+    try { if (w.miniaturized()) w.miniaturized = false; } catch (e) {}
+    w.currentTab = w.tabs[t - 1];
+  } else {
+    try { if (w.minimized()) w.minimized = false; } catch (e) {}
+    w.activeTabIndex = t;
+  }
+  w.index = 1;
+  app.activate();
+  return "ok";
+}
+"#;
+
+/// AppleScript: switches to app `item 1 of argv` and picks its window titled `item 2 of argv` from
+/// the app's Window menu, which lists windows that are minimized or on another desktop too.
+pub const WINDOW_MENU_SCRIPT: &str = r#"
+on run argv
+  set appName to item 1 of argv
+  set wanted to item 2 of argv
+  tell application appName to activate
+  tell application "System Events" to tell process appName
+    click (first menu item of menu 1 of menu bar item "Window" of menu bar 1 whose name is wanted)
+  end tell
+  return "ok"
+end run
+"#;
+
+/// Shows a browser's tab with SHOW_TAB_SCRIPT: "" when it did, else what went wrong.
+pub fn show_tab(browser: &str, window: usize, tab: usize) -> String {
+    let (w, t) = (window.to_string(), tab.to_string());
+    script_result(process::run(
+        "osascript",
+        [
+            "-l",
+            "JavaScript",
+            "-e",
+            SHOW_TAB_SCRIPT,
+            browser,
+            w.as_str(),
+            t.as_str(),
+        ],
+        None,
+        Some(Duration::from_secs(3)),
+    ))
+}
+
+/// Brings an app's window forward from its Window menu: "" when it did, else what went wrong.
+pub fn raise_from_window_menu(app: &str, title: &str) -> String {
+    script_result(process::run(
+        "osascript",
+        ["-e", WINDOW_MENU_SCRIPT, app, title],
+        None,
+        Some(Duration::from_secs(3)),
+    ))
+}
+
+fn script_result(out: std::io::Result<process::Output>) -> String {
+    match out {
+        Ok(o) if o.success() => String::new(),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if err.is_empty() {
+                format!("osascript exited with {}", o.code.unwrap_or(-1))
+            } else {
+                err
+            }
+        }
+        Err(e) => e.to_string(),
+    }
+}
+
 /// The address without its ?query and #fragment (urllib's urlsplit, then scheme://netloc/path).
 pub fn page(url: Option<&str>) -> String {
     let Some(url) = url.filter(|u| !u.is_empty()) else {
