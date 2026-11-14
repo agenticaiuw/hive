@@ -1293,58 +1293,76 @@ impl Ledger {
 
 // ---- text --------------------------------------------------------------------------------------
 
-/// An agent's own `hive-tasks add|report|done|rule-off` command, as `(command, id, json)`: its
-/// shell text holds the program's name, the subcommand, and the JSON (in a here-document, or
-/// quoted and piped in) or, for done, the outcome.
+/// An agent's own board command, as `(command, id, body)`, when it is the whole shell command
+/// (after an optional `cd <dir> &&`): `hive-tasks add M3 <<'EOF' … EOF`, `echo '…' | hive-tasks
+/// report`, `hive-tasks done T3 <outcome>` or `hive-tasks rule-off R2`. Anything else, such as a
+/// board command chained with other work, isn't taken over: the hook must never keep the rest of a
+/// command from running.
 pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
     let text = match &tool_input["command"] {
         Value::String(s) => s.clone(),
         Value::Array(a) => a.last().and_then(Value::as_str).unwrap_or("").to_string(),
         _ => return None,
     };
-    static CALL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?m)(?:^|[|;&(])[ \t]*(?:[^\s|;&()]*/)?hive-tasks[ \t]+(add|report|done|rule-off)\b[ \t]*([MTRmtr]?\d+)?([^\n]*)").unwrap()
+    static WRAPPED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?s)^\S*\b(?:ba|z)?sh\s+-l?c\s+'(.*)'$"#).unwrap());
+    static CD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^cd\s+\S+\s*&&\s*").unwrap());
+    static HEREDOC: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)^(?:\S*/)?hive-tasks[ \t]+(add|report)[ \t]*([Mm]\d+)?[ \t]*<<-?[ \t]*['"]?(\w+)['"]?[ \t]*\n(.*?)\n[ \t]*(\w+)$"#).unwrap()
     });
-    let call = CALL.captures(&text)?;
-    let command = call[1].to_string();
-    let id = call
-        .get(2)
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
-    // Only a call that is plainly the agent's: the right kind of id where one is needed.
-    let kind = match command.as_str() {
-        "add" => Some('M'),
-        "done" => Some('T'),
-        "rule-off" => Some('R'),
-        _ => None,
+    static PIPED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)^(?:echo|printf(?:[ \t]+'%s\\n')?)[ \t]+'(.*)'[ \t]*\|[ \t]*(?:\S*/)?hive-tasks[ \t]+(add|report)[ \t]*([Mm]\d+)?$").unwrap()
+    });
+    static DONE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:\S*/)?hive-tasks[ \t]+done[ \t]+([Tt]\d+)[ \t]+([^\n;&|]+)$").unwrap()
+    });
+    static RULE_OFF: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:\S*/)?hive-tasks[ \t]+rule-off[ \t]+([Rr]\d+)$").unwrap()
+    });
+    let text = text.trim();
+    let text = WRAPPED
+        .captures(text)
+        .map(|c| c[1].replace("'\\''", "'"))
+        .unwrap_or_else(|| text.to_string());
+    let text = CD.replace(text.trim(), "").trim().to_string();
+    let unquote = |s: &str| s.replace("'\\''", "'");
+    let (command, id, body) = if let Some(c) = HEREDOC.captures(&text) {
+        if c[3] != c[5] {
+            return None;
+        }
+        (
+            c[1].to_string(),
+            c.get(2).map_or("", |m| m.as_str()).to_string(),
+            c[4].to_string(),
+        )
+    } else if let Some(c) = PIPED.captures(&text) {
+        (
+            c[2].to_string(),
+            c.get(3).map_or("", |m| m.as_str()).to_string(),
+            unquote(&c[1]),
+        )
+    } else if let Some(c) = DONE.captures(&text) {
+        let outcome = c[2].trim();
+        let outcome = outcome
+            .strip_prefix('\'')
+            .and_then(|o| o.strip_suffix('\''))
+            .map(unquote)
+            .or_else(|| {
+                outcome
+                    .strip_prefix('"')
+                    .and_then(|o| o.strip_suffix('"'))
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| outcome.to_string());
+        ("done".to_string(), c[1].to_string(), outcome)
+    } else if let Some(c) = RULE_OFF.captures(&text) {
+        ("rule-off".to_string(), c[1].to_string(), String::new())
+    } else {
+        return None;
     };
-    if kind.is_some_and(|k| prefixed(&id, k).is_err()) {
+    if command == "add" && prefixed(&id, 'M').is_err() {
         return None;
     }
-    let rest = call.get(3).map(|m| m.as_str()).unwrap_or("");
-    let body = if command == "done" {
-        rest.trim()
-            .trim_matches(|c| c == '\'' || c == '"')
-            .to_string()
-    } else if let Some(heredoc) = Regex::new(r#"<<-?\s*['"]?(\w+)['"]?"#)
-        .unwrap()
-        .captures(rest)
-    {
-        let end = heredoc[1].to_string();
-        let after = &text[text.find(rest).unwrap_or(0) + rest.len()..];
-        after
-            .trim_start_matches('\n')
-            .lines()
-            .take_while(|l| l.trim() != end)
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        // echo '[...]' | hive-tasks report
-        let before = &text[..call.get(0)?.start()];
-        let start = before.find('\'')?;
-        let end = before.rfind('\'')?;
-        (end > start).then(|| before[start + 1..end].replace("'\\''", "'"))?
-    };
     Some((command, id, body))
 }
 

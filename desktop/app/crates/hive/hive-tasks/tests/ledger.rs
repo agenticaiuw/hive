@@ -518,4 +518,10 @@ fn only_a_real_board_command_is_taken_over() {
     );
     assert!(cmd("cd /x && ~/.local/bin/hive-tasks add M3 <<'EOF'\n[]\nEOF").is_some());
     assert!(cmd("echo '[]' | hive-tasks report").is_some());
+    // Chained with other work: left to run as it is.
+    assert!(cmd("cargo test && hive-tasks done T1 tests pass").is_none());
+    assert!(cmd("sed -i '' s/a/b/ f; echo '[]' | ~/.local/bin/hive-tasks report").is_none());
+    // Codex may hand over the whole shell invocation.
+    assert!(cmd("/bin/bash -lc 'hive-tasks done T2 shipped it'")
+        .is_some_and(|(_, id, body)| id == "T2" && body == "shipped it"));
 }
