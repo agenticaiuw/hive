@@ -30,6 +30,7 @@
   } from "$lib/dataSource";
   import {
     HARNESSES,
+    REQUEST_WORDS,
     STATUS_WORDS,
     agentsAtWork,
     ago,
@@ -91,6 +92,14 @@
   const working = $derived(board ? agentsAtWork(board.tasks, board.now) : []);
   const pace = $derived(board ? estimates(board.tasks) : null);
   const limits = $derived(board ? planLimits(board.limits, board.now) : []);
+  // What was sent to Hive in the cloud lately: anything still going, and what ended in the last day.
+  const requests = $derived(
+    board
+      ? board.requests
+          .filter((r) => !["done", "failed"].includes(r.status) || board!.now - r.updated < 86400)
+          .slice(0, 5)
+      : [],
+  );
   const chosen = $derived(agents.find((a) => a.id === agent));
   const unfinished = $derived(
     board ? board.tasks.filter((t) => !["done", "dropped"].includes(t.status)).length : 0,
@@ -167,7 +176,9 @@
           text:
             answer.accepted === null
               ? `Sent. ${chosen.name} may already have it; check below before sending it again.`
-              : `${chosen.name} has it. Its tasks show up below once it saves them.`,
+              : answer.receiptId?.startsWith("R")
+                ? `${chosen.name} has it (${answer.receiptId})${answer.ahead ? ` after ${answer.ahead} more` : ""}. It plans it into tasks, picks a model for each and starts them; they show below.`
+                : `${chosen.name} has it. Its tasks show up below once it saves them.`,
         };
         text = "";
         setTimeout(refresh, 3000);
@@ -554,6 +565,18 @@
         <p class="composer-note">{chosen.note}</p>
       {:else if sent}
         <p class="composer-note" class:bad={!sent.ok} role="status">{sent.text}</p>
+      {/if}
+      {#if requests.length}
+        <ul class="requests" aria-label="Sent to Hive in the cloud">
+          {#each requests as r (r.id)}
+            <li class="request {r.status}">
+              <span class="state">{REQUEST_WORDS[r.status as keyof typeof REQUEST_WORDS] ?? r.status}</span>
+              <span class="said" title={r.text}>{r.text}</span>
+              <span class="id">{r.id} · {ago(r.updated, board?.now ?? 0)}</span>
+              {#if r.outcome && ["done", "failed"].includes(r.status)}<p class="outcome">{r.outcome}</p>{/if}
+            </li>
+          {/each}
+        </ul>
       {/if}
     </form>
 
@@ -1165,6 +1188,51 @@
   button[disabled] {
     opacity: 0.45;
     cursor: default;
+  }
+  .requests {
+    list-style: none;
+    margin: 0;
+    padding: var(--s2) 0 0;
+    border-top: 1px solid var(--line);
+    display: grid;
+    gap: 6px;
+  }
+  .request {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: var(--s2);
+    align-items: baseline;
+    font-size: var(--fs-small);
+  }
+  .request .state {
+    padding: 1px 8px;
+    border-radius: 99px;
+    background: var(--raise-2);
+    color: var(--ink-2);
+    font-size: var(--fs-micro);
+    white-space: nowrap;
+  }
+  .request.planning .state,
+  .request.working .state {
+    color: var(--blue);
+  }
+  .request.done .state {
+    color: var(--green);
+  }
+  .request.failed .state {
+    color: var(--red);
+  }
+  .request .said {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  .request .outcome {
+    grid-column: 2 / -1;
+    margin: 0;
+    color: var(--ink-2);
+    font-size: var(--fs-micro);
   }
   .composer-note,
   .board-note {

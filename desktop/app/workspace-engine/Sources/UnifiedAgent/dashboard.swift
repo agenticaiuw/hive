@@ -5,8 +5,9 @@
 //
 //   GET  /api/tasks          every machine's tasks (`hive-tasks board --cloud`), or this Mac's
 //                            ledger (`hive-tasks board --all --json`) when the cloud is out of reach
-//   GET  /api/agents         the agents it can hand a task to: Hive, through its request socket
-//   POST /api/agents/send    {agent, text}: the text to Hive's request socket, as a request
+//   GET  /api/agents         the agents it can hand a task to: Hive's orchestrator in the cloud (the
+//                            board's queue, as the website sends), and Hive on this Mac (its socket)
+//   POST /api/agents/send    {agent, text}: to the cloud's queue, or to Hive's request socket
 //   GET  /api/folder         ?project&key: a folder and all its memories, from the cloud board
 //   POST /api/folders        {project, name, about?}: makes a folder (on the cloud board)
 //   POST /api/folders/memory {project, folder, kind, title, body}: a memory for the folder
@@ -242,6 +243,7 @@ final class DashboardScheme: NSObject, WKURLSchemeHandler {
 /// The dashboard's /api/* on the Mac. Runs off the main thread.
 enum DashboardAPI {
     static let hiveAgent = "hive-mac"
+    static let cloudAgent = "hive-cloud"
 
     static func answer(method: String, path: String, query: String = "", body: Data, stateDir: URL) -> (Int, Data) {
         switch (method.uppercased(), path) {
@@ -369,18 +371,32 @@ enum DashboardAPI {
         let up = FileManager.default.fileExists(atPath: socket(stateDir))
         var hive: [String: Any] = ["id": hiveAgent, "name": "Hive", "where": "this Mac", "available": up]
         if !up { hive["note"] = "Hive isn't running on this Mac, so it can't take a request." }
-        return (200, json(["agents": [hive]]))
+        // The main orchestrator first: it plans, picks each task's model and starts the agents.
+        let cloud: [String: Any] = ["id": cloudAgent, "name": "Hive", "where": "the cloud", "available": true]
+        return (200, json(["agents": [cloud, hive]]))
+    }
+
+    /// The instruction on the cloud board's queue for Hive's orchestrator (cloud/vm-agent/orchestrator.mjs).
+    static func toCloud(_ text: String) -> (Int, Data) {
+        let (status, out) = board("post", "/v1/requests", json(["text": text, "agent": cloudAgent]))
+        let answer = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
+        guard status == 200, let id = answer["id"] as? Int else {
+            return (502, json(["accepted": false, "error": answer["error"] as? String ?? "Couldn't reach Hive in the cloud."]))
+        }
+        return (200, json(["accepted": true, "receiptId": "R\(id)", "ahead": answer["ahead"] as? Int ?? 0]))
     }
 
     static func send(_ body: Data, stateDir: URL) -> (Int, Data) {
         let request = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         let text = (request["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard request["agent"] as? String == hiveAgent else {
-            return (400, json(["accepted": false, "error": "The desktop app can only send to Hive for now."]))
+        let agent = request["agent"] as? String
+        guard agent == hiveAgent || agent == cloudAgent else {
+            return (400, json(["accepted": false, "error": "The desktop app sends to Hive, in the cloud or on this Mac."]))
         }
-        guard !text.isEmpty, text.utf8.count <= 12000 else {
+        guard !text.isEmpty, text.utf8.count <= (agent == cloudAgent ? 4000 : 12000) else {
             return (400, json(["accepted": false, "error": text.isEmpty ? "Say what to do." : "That's too long for one request."]))
         }
+        if agent == cloudAgent { return toCloud(text) }
         return (200, json(toHive(text, socket: socket(stateDir))))
     }
 

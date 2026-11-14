@@ -593,7 +593,7 @@ export async function fetchAgents(): Promise<AgentChoice[]> {
 export async function sendToAgent(
   agent: string,
   text: string,
-): Promise<{ accepted: boolean | null; receiptId?: string; error?: string }> {
+): Promise<{ accepted: boolean | null; receiptId?: string; ahead?: number; error?: string }> {
   return apiRequest(`${base}/api/agents/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

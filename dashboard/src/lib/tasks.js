@@ -36,6 +36,18 @@
 
 /** @typedef {{minutes: number, used: number, resetsAt: number}} LimitWindow */
 
+/** @typedef {{id: string, text: string, project: string, folder: string, status: string,
+ *   outcome: string, created: number, updated: number}} Request */
+
+/** What each state of an instruction sent to Hive's orchestrator in the cloud reads as. */
+export const REQUEST_WORDS = {
+  queued: 'Waiting for Hive',
+  planning: 'Hive is planning it',
+  working: 'Hive is working on it',
+  done: 'Done',
+  failed: "Didn't finish",
+};
+
 /** @typedef {{key: string, machine: string, harness: string, home: string, plan: string,
  *   windows: LimitWindow[], at: number}} Limit */
 
@@ -209,6 +221,16 @@ export function normalizeBoard(answer) {
       updated: seconds(f.updated_at),
     }))),
     limits: /** @type {Limit[]} */ ((board.limits ?? []).map((/** @type {any} */ l) => toLimit(l, machine))),
+    requests: /** @type {Request[]} */ ((board.requests ?? []).map((/** @type {any} */ r) => ({
+      id: `R${r.id}`,
+      text: String(r.text ?? ''),
+      project: String(r.project ?? ''),
+      folder: String(r.folder ?? ''),
+      status: String(r.status ?? 'queued'),
+      outcome: String(r.outcome ?? ''),
+      created: seconds(r.created_at),
+      updated: seconds(r.updated_at),
+    }))),
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),

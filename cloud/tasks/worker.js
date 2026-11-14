@@ -3,7 +3,8 @@
 // and gets back the rules set on the owner's other machines and the folders and memories made
 // elsewhere (other machines, the dashboard), so an instruction given once reaches every agent.
 // The owner reads all of it on one page (/), signed in by a one-use code from `hive-tasks web`.
-// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0008 (the hive-knowledge D1 database).
+// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0009 (the hive-knowledge D1 database).
+// The dashboard also sends instructions here for Hive's orchestrator in the cloud (/v1/requests).
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -20,6 +21,9 @@ export default {
       if (url.pathname === "/v1/folder") return await folder(url, request, env);
       if (url.pathname === "/v1/folders" && request.method === "POST") return await saveFolder(request, env);
       if (url.pathname === "/v1/folders/memory" && request.method === "POST") return await saveMemory(request, env);
+      if (url.pathname === "/v1/requests" && request.method === "POST") return await sendRequest(request, env);
+      if (url.pathname === "/v1/requests/take" && request.method === "POST") return await takeRequest(request, env);
+      if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
     } catch (error) {
@@ -214,6 +218,136 @@ async function saveMemory(request, env) {
   return json({ ok: true, id: next.id });
 }
 
+// ---- requests: instructions for Hive's orchestrator in the cloud ---------------------------
+//
+// The dashboard sends an instruction here (POST /v1/requests); it becomes a board message on machine
+// "cloud" (harness "hive", session "web") and a queued request with the same id. The orchestrator on
+// the VM (cloud/vm-agent/orchestrator.mjs) takes the oldest (POST /v1/requests/take), plans it into
+// tasks and reports each one as it goes (POST /v1/requests/update). A request's task n has the id
+// request * 100 + n, so its tasks sort with it and never meet another machine's ids.
+
+const REQUEST_STATUSES = ["queued", "planning", "working", "done", "failed"];
+const TASK_STATUSES = ["open", "active", "waiting", "blocked", "done", "dropped"];
+
+/** "For hive › Voice: do x" → {project: "hive", folder: "Voice"}; "For hive: x" → {project: "hive"}. */
+export function scopeOf(words) {
+  const match = /^For ([^›:\n]{1,120}?)(?: › ([^:\n]{1,120}?))?: /.exec(words);
+  return match ? { project: match[1].trim(), folder: (match[2] || "").trim() } : { project: "", folder: "" };
+}
+
+async function sendRequest(request, env) {
+  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const words = text(body.text, 4000);
+  if (!words) return json({ error: "Say what to do (text)." }, 400);
+  const agent = text(body.agent, 40) || "hive-cloud";
+  const { project, folder } = scopeOf(words);
+  const at = now();
+  const [made] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at)
+       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3 FROM board_requests RETURNING id`,
+    ).bind(agent, folder || null, at),
+    env.DB.prepare(
+      `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
+       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', 'web', ?1, ?2, ?3, 1, NULL, ?3)`,
+    ).bind(project.toLowerCase(), words, at),
+  ]);
+  const id = made.results[0].id;
+  const ahead = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM board_requests WHERE status IN ('queued', 'planning', 'working') AND id < ?1",
+  ).bind(id).first();
+  return json({ ok: true, id, ahead: ahead.n });
+}
+
+async function takeRequest(request, env) {
+  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const by = text(body.by, 80);
+  if (!by) return json({ error: "Say who is taking it (by)." }, 400);
+  const agent = text(body.agent, 40) || "hive-cloud";
+  const at = now();
+  const [, taken] = await env.DB.batch([
+    // What this orchestrator held when it last stopped won't be finished by it now.
+    env.DB.prepare(
+      `UPDATE board_requests SET status = 'failed', finished_at = ?2, updated_at = ?2,
+         outcome = COALESCE(outcome, 'The orchestrator restarted before it finished this.')
+       WHERE taken_by = ?1 AND status IN ('planning', 'working') AND ?3 = 1`,
+    ).bind(by, at, body.fresh ? 1 : 0),
+    env.DB.prepare(
+      `UPDATE board_requests SET status = 'planning', taken_by = ?1, taken_at = ?2, updated_at = ?2
+       WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY id LIMIT 1)
+       RETURNING id, folder`,
+    ).bind(by, at, agent),
+  ]);
+  const row = taken.results[0];
+  if (!row) return json({ request: null });
+  const message = await env.DB.prepare("SELECT project, text, said_at FROM board_messages WHERE machine = 'cloud' AND id = ?1")
+    .bind(row.id).first();
+  return json({
+    request: { id: row.id, folder: row.folder || "", project: message?.project || "", text: message?.text || "", said_at: message?.said_at },
+  });
+}
+
+async function updateRequest(request, env) {
+  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id < 1) return json({ error: "Say which request (id)." }, 400);
+  const at = now();
+  const statements = [];
+  if (body.status !== undefined || body.outcome !== undefined) {
+    const status = REQUEST_STATUSES.includes(body.status) ? body.status : null;
+    statements.push(
+      env.DB.prepare(
+        `UPDATE board_requests SET status = COALESCE(?2, status), outcome = COALESCE(?3, outcome), updated_at = ?4,
+           finished_at = CASE WHEN ?2 IN ('done', 'failed') THEN ?4 ELSE finished_at END
+         WHERE id = ?1`,
+      ).bind(id, status, body.outcome === undefined ? null : text(body.outcome, 4000), at),
+    );
+  }
+  const project = text(body.project, 120).toLowerCase();
+  if (project) {
+    statements.push(
+      env.DB.prepare("UPDATE board_messages SET project = ?2, synced_at = ?3 WHERE machine = 'cloud' AND id = ?1 AND project = ''")
+        .bind(id, project, at),
+    );
+  }
+  const tasks = Array.isArray(body.tasks) ? body.tasks.slice(0, 40) : [];
+  if (tasks.length) {
+    statements.push(
+      env.DB.prepare("UPDATE board_messages SET split_at = COALESCE(split_at, ?2), synced_at = ?2 WHERE machine = 'cloud' AND id = ?1")
+        .bind(id, at),
+    );
+    const message = await env.DB.prepare("SELECT project FROM board_messages WHERE machine = 'cloud' AND id = ?1").bind(id).first();
+    const home = project || message?.project || "";
+    for (const t of tasks) {
+      const n = Number(t.key);
+      if (!Number.isInteger(n) || n < 1 || n > 99) continue;
+      const status = TASK_STATUSES.includes(t.status) ? t.status : "open";
+      const folder = text(t.folder, 120);
+      const number = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Math.round(Number(v)));
+      statements.push(
+        upsert(env, "board_tasks", TASK_COLUMNS, "cloud", {
+          id: id * 100 + n, message: id, quote: text(t.quote, 2000), title: text(t.title, 300), status,
+          minutes: number(t.minutes), value: ["low", "medium", "high"].includes(t.value) ? t.value : null,
+          outcome: text(t.outcome, 4000) || null, evidence: text(t.evidence, 4000) || null,
+          created_at: number(t.created_at) || at, updated_at: at,
+          done_at: ["done", "dropped"].includes(status) ? number(t.done_at) || at : null, left_open_at: null,
+          work_seconds: number(t.work_seconds), tokens_in: number(t.tokens_in), tokens_out: number(t.tokens_out),
+          folder: folder || null, report: text(t.report, 20000) || null, files: null, commits: null,
+        }, at),
+      );
+      if (folder && home && !folder.includes("›")) {
+        statements.push(upsertFolder(env, "cloud", { project: home, key: folder, name: folder, about: "", created_at: at, updated_at: at }, at));
+      }
+    }
+  }
+  if (!statements.length) return json({ error: "Nothing to change." }, 400);
+  await env.DB.batch(statements);
+  return json({ ok: true });
+}
+
 // ---- the owner's browser -------------------------------------------------------------------
 
 async function loginCode(request, env) {
@@ -250,7 +384,7 @@ async function board(request, env) {
     return json({ error: "Not signed in." }, 401);
   }
   const since = now() - 14 * DAY;
-  const [tasks, unsplit, rules, folders, limits] = await env.DB.batch([
+  const [tasks, unsplit, rules, folders, limits, requests] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
@@ -272,10 +406,15 @@ async function board(request, env) {
        FROM board_folders f ORDER BY f.project, f.key`,
     ),
     env.DB.prepare("SELECT machine, harness, home, plan, windows, at, synced_at FROM board_limits ORDER BY machine, harness, home"),
+    env.DB.prepare(
+      `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.created_at, r.updated_at, r.finished_at, m.text, m.project
+       FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
+       ORDER BY r.id DESC LIMIT 20`,
+    ),
   ]);
   return json({
     now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results,
-    limits: limits.results,
+    limits: limits.results, requests: requests.results,
   });
 }
 
