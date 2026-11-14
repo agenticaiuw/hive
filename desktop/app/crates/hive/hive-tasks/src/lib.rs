@@ -577,13 +577,17 @@ impl Ledger {
             let evidence = str_of(e, "evidence").trim().to_string();
             let minutes = e.get("minutes").and_then(Value::as_i64);
             let report = str_of(e, "report").trim().to_string();
-            checked.push((id, status.to_string(), outcome, evidence, minutes, report));
+            let folder = str_of(e, "folder").trim().to_string();
+            checked.push((id, status.to_string(), outcome, evidence, minutes, report, folder));
         }
         let now = now();
         let closing: Vec<(i64, String)> = checked.iter().map(|c| (c.0, c.1.clone())).collect();
         self.charge(&closing, now)?;
         let mut out = Vec::new();
-        for (id, status, outcome, evidence, minutes, report) in checked {
+        for (id, status, outcome, evidence, minutes, report, folder) in checked {
+            if !folder.is_empty() {
+                self.file_in(id, &folder)?;
+            }
             self.db
                 .execute(
                     "UPDATE tasks SET status = ?2, outcome = COALESCE(NULLIF(?3, ''), outcome),
@@ -605,6 +609,28 @@ impl Ledger {
             out.push(format!("T{id} {status}"));
         }
         Ok(out)
+    }
+
+    /// Puts a task in a folder ("memory retrieval", or "hive › memory retrieval" for another
+    /// project's), making the folder if it's new.
+    fn file_in(&self, id: i64, place: &str) -> Result<(), String> {
+        let project: String = self
+            .db
+            .query_row(
+                "SELECT m.project FROM tasks t JOIN messages m ON m.id = t.message WHERE t.id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let Some((p, name)) = folder_place(&project, place) else {
+            return Ok(());
+        };
+        let name = self.ensure_folder(&p, &name)?;
+        let folder = if p == project_key(&project) { name } else { format!("{p} › {name}") };
+        self.db
+            .execute("UPDATE tasks SET folder = ?2 WHERE id = ?1", params![id, folder])
+            .map_err(err)?;
+        Ok(())
     }
 
     /// Writes a done task's report: what came of it (the agent's report, else its outcome), its

@@ -14,7 +14,8 @@ hive-tasks add M<n>             register what message M<n> asks for: a JSON list
                                 \"folder\": \"<project › folder>\"}
                                 (a standing preference: \"kind\": \"rule\", \"paths\": [globs]); [] for nothing
 hive-tasks report               a JSON list on stdin of {\"id\": \"T<n>\", \"status\", \"outcome\", \"evidence\",
-                                \"report\"} (a done task's report goes in its folder's memories);
+                                \"report\", \"folder\"} (a done task's report goes in its folder's memories;
+                                \"folder\" files the task in one first);
                                 status: open, active, done, waiting, blocked, dropped
 hive-tasks done T<n> <outcome>  report one task done
 hive-tasks board [--all] [--json]   this project's tasks (--all: every project)
