@@ -60,7 +60,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { deposit } from '../../mobile/simulator/scripts/commons.mjs'
+import { deposit } from './commons.mjs'
 import {
   ensureJsonStore,
   readJsonWithRecovery,

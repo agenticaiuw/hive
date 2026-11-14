@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { PLAYBACK_UNKNOWN_STATUS } from '../../mobile/simulator/shared/audioDelivery.js'
+import { PLAYBACK_UNKNOWN_STATUS } from '../../cloud/shared/audioDelivery.js'
 
 const testWorkspace = fs.mkdtempSync(
   path.join(os.tmpdir(), 'pendant-delivery-test-'),

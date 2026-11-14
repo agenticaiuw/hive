@@ -9,7 +9,7 @@ import {
 } from './atomicJsonStore.js'
 import { classifySensitivity } from './redaction.js'
 import { readContextGraph } from './contextGraph.js'
-import { domainFactClass, parseDomainFactKey } from '../../mobile/simulator/shared/domainMemory.js'
+import { domainFactClass, parseDomainFactKey } from '../../cloud/shared/domainMemory.js'
 
 /*
  * One scoped store for everything the model is told about the owner.

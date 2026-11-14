@@ -10,7 +10,7 @@
  * A paired mac_bridge token does exactly what the bridge does and nothing
  * more: claim work, post results, heartbeat itself, write fleet/agent-snapshot
  * state, sync product state, open its own doorbell socket. Losing it costs one
- * `pendant-credentials.mjs revoke` and one re-pair.
+ * `device-credentials.mjs revoke` and one re-pair.
  *
  * The fallback exists so a mid-migration fleet keeps working, and it is LOUD
  * exactly once. A silent fallback is how a migration finishes on paper and
@@ -117,7 +117,7 @@ export function migrationNotice({ kind, source, malformed } = {}) {
     return (
       '[bridge] Using the shared admin RELAY_API_KEY. This credential holds every ' +
       'scope including /v1/ops/*. Commission a scoped token: node ' +
-      'scripts/pendant-credentials.mjs pair --device-id <id> --role mac_bridge, ' +
+      'cloud/tools/device-credentials.mjs pair --device-id <id> --role mac_bridge, ' +
       'then set RELAY_DEVICE_TOKEN or write it to ' +
       `${DEFAULT_DEVICE_TOKEN_FILE}.`
     )

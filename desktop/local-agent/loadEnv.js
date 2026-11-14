@@ -88,7 +88,7 @@ export function envLoadedFrom() {
  * record would ride into run_shell children — the exact leak childEnv
  * exists to prevent.
  *
- * The same derivation exists in software/load-pendant-env.mjs for scripts
+ * The same derivation exists in cloud/shared/loadEnv.mjs for scripts
  * and the dashboards. Duplicated, not imported — the loaders belong to
  * different packages and each must work with the other absent — and
  * loadEnv.test.js asserts the two stay bit-identical.

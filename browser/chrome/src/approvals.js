@@ -22,7 +22,7 @@ import {
   approvalIsExpired,
   settleApprovalPrompt,
   undecidedApprovalCount,
-} from '../../../mobile/simulator/shared/approvalMesh.js'
+} from '../../../cloud/shared/approvalMesh.js'
 
 /* Only the names background.js and popup.js actually consume ride through
  * this barrel; everything else is imported from shared/approvalMesh.js
@@ -32,7 +32,7 @@ export {
   approvalIsAnswerable,
   approvalIsExpired,
   mergeApprovalPrompts,
-} from '../../../mobile/simulator/shared/approvalMesh.js'
+} from '../../../cloud/shared/approvalMesh.js'
 
 /* Where the prompt list persists. Read by the popup, written by the worker. */
 export const APPROVALS_KEY = 'pendingApprovals'

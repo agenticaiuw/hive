@@ -15,7 +15,7 @@ import {
   rememberFact,
   touchFacts,
 } from './memoryService.js'
-import { normalizeDomainFact } from '../../mobile/simulator/shared/domainMemory.js'
+import { normalizeDomainFact } from '../../cloud/shared/domainMemory.js'
 
 const DAY = 24 * 60 * 60 * 1000
 

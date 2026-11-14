@@ -33,7 +33,7 @@ import {
   RELAY_URL,
 } from './bridgeConfig.js'
 import { resolveRelayCredential } from './relayCredential.js'
-import { riskLabelFor } from '../../mobile/simulator/shared/approvalHandoff.js'
+import { riskLabelFor } from '../../cloud/shared/approvalHandoff.js'
 
 /* The device whose approval index the bridge writes parked plans into. One
  * list per fleet today; see createParkedApproval in bridge.js. */

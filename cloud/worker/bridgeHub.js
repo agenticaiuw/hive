@@ -52,7 +52,7 @@ import {
   BRIDGE_WORK_FRAME,
   MESH_SUBPROTOCOL,
   parseBridgeFrame,
-} from '../../mobile/simulator/shared/bridgeSocketProtocol.js'
+} from '../shared/bridgeSocketProtocol.js'
 
 const LAST_DOORBELL_KEY = 'lastDoorbell'
 

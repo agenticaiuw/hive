@@ -31,7 +31,7 @@ const ROOT = path.resolve(HERE, '../..')
 
 /* The servers are the only legitimate mount points, plus a module that composes
  * another's routes into its own registration. */
-const SEARCHED = ['desktop/local-agent', 'cloud/server', 'mobile/simulator/shared', 'browser/chrome/src']
+const SEARCHED = ['desktop/local-agent', 'cloud/server', 'cloud/shared', 'browser/chrome/src']
 
 const sourceFiles = () => {
   const out = []

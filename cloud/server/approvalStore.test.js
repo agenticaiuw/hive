@@ -12,7 +12,7 @@ import {
   DELIVERY_PROVES_HEARING,
   attestApprovalDelivery,
   confirmWordFor,
-} from '../../mobile/simulator/shared/approvalHandoff.js'
+} from '../shared/approvalHandoff.js'
 import {
   answerApproval,
   listApprovals,
@@ -89,7 +89,7 @@ function sourceFiles() {
       found.push(full)
     }
   }
-  for (const tree of ['mobile/simulator/shared', 'desktop/local-agent', 'cloud/server']) walk(path.join(ROOT, tree))
+  for (const tree of ['cloud/shared', 'desktop/local-agent', 'cloud/server']) walk(path.join(ROOT, tree))
   return found
 }
 

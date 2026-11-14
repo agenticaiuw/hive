@@ -11,7 +11,7 @@ import { recordGapSafely } from './capabilityGapInbox.js'
 import { applyGoalVerdict } from './goalVerdict.js'
 import { planCommand } from './llmPlanner.js'
 import { rememberDomainFact } from './memoryService.js'
-import { extractDomainFacts } from '../../mobile/simulator/shared/domainCapture.js'
+import { extractDomainFacts } from '../../cloud/shared/domainCapture.js'
 import {
   TIER_BACKGROUND,
   TIER_DETERMINISTIC,

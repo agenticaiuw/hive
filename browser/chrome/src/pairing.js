@@ -12,7 +12,7 @@
  * setup now, and this module is its policy.
  *
  * WHAT THIS REPLACES. Setup used to be two secrets across two surfaces: copy
- * AGENT_TOKEN out of .env, run pendant-credentials.mjs, copy the printed
+ * AGENT_TOKEN out of .env, run device-credentials.mjs, copy the printed
  * pdt_ token, retype the device id. The owner's first live attempt produced
  * a credential with `lastUsed: never` — minted, printed, never pasted. Now
  * the pairing code goes in ONE box; the agent's loopback /pair/browser route

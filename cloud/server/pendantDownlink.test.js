@@ -5,7 +5,7 @@ import test from 'node:test'
 import {
   PLAYBACK_UNKNOWN_STATUS,
   gradeAudioDelivery,
-} from '../../mobile/simulator/shared/audioDelivery.js'
+} from '../shared/audioDelivery.js'
 import {
   pendantDownlinkEvent,
   pendantSpeechJobId,

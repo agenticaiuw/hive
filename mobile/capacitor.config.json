@@ -1,0 +1,15 @@
+{
+  "appId": "com.evanliu.hive",
+  "appName": "Hive",
+  "webDir": "dist",
+  "server": {
+    "url": "https://hive-dashboard.evan20050827.workers.dev",
+    "allowNavigation": [
+      "hive-dashboard.evan20050827.workers.dev"
+    ],
+    "errorPath": "offline.html"
+  },
+  "ios": {
+    "path": "ios"
+  }
+}

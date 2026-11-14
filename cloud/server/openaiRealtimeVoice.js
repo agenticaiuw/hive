@@ -30,10 +30,10 @@ import {
   MEMORY_DOMAINS,
   MEMORY_TOOL_SPECS,
   MEMORY_TOOL_TYPES,
-} from '../../mobile/simulator/shared/domains/index.js'
+} from '../shared/domains/index.js'
 import { READ_WEB_PAGE_TOOL, runReadWebPage } from './serverBrowser.js'
 import { SPOKEN_MAX_CHARS } from './jobRecall.js'
-import { contextItemsFromRealtimeState } from '../../mobile/simulator/shared/contextHandoff.js'
+import { contextItemsFromRealtimeState } from '../shared/contextHandoff.js'
 
 export const REALTIME_PCM_RATE = 24000
 /* G.711 μ-law (audio/pcmu) is fixed at 8 kHz, 8 bits — 64 kbps. The pendant

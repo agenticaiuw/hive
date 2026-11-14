@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { executeMemoryLookup, executeMemorySave } from './domainMemoryActions.js'
-import { MEMORY_DOMAINS } from '../../mobile/simulator/shared/domains/index.js'
+import { MEMORY_DOMAINS } from '../../cloud/shared/domains/index.js'
 
 function store(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pendant-domain-actions-'))

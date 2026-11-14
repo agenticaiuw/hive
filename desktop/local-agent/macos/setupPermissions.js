@@ -147,8 +147,8 @@ async function installAgentApp() {
    * four different icons at once. Copied best-effort: an installer that
    * refuses to install over a missing icon has its priorities backwards.
    */
-  /* REPO_ROOT is the PACKAGE root (mobile/simulator) — the
-   * launchd working directory — not the git root. The icon assets live two
+  /* REPO_ROOT is desktop/ — the launchd working directory —
+   * not the git root. The icon assets live two
    * levels up, and the first version of this line missed for exactly that
    * reason: the app installed faceless while claiming success. */
   const icnsSource = path.resolve(REPO_ROOT, 'integration/assets/icon/pendant.icns')

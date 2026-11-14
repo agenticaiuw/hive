@@ -27,7 +27,7 @@
  */
 import crypto from 'node:crypto'
 import { Buffer } from 'node:buffer'
-import { HEARD_UNKNOWN } from '../../mobile/simulator/shared/audioDelivery.js'
+import { HEARD_UNKNOWN } from '../shared/audioDelivery.js'
 
 /* nRF9160 WS_RX_BUF_BYTES is 640; anything larger closes the socket. Half of
  * that is a ceiling no control frame should ever come near. */

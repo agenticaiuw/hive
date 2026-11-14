@@ -81,7 +81,7 @@ enum AgentEnv {
     /// that stored the old value), but since 2026-08-09 the repo .env holds
     /// only the one owner-minted secret — PAIRING_CODE — and AGENT_TOKEN is a
     /// labelled HMAC of it. This derivation MUST stay bit-identical to
-    /// deriveSecret in mobile/simulator/load-pendant-env.mjs: HMAC-SHA256 keyed by the
+    /// deriveSecret in cloud/shared/loadEnv.mjs: HMAC-SHA256 keyed by the
     /// pairing code over "hive:agent-token", lowercase hex digest.
     static func loadToken() -> String? {
         if let explicit = value(forKey: "AGENT_TOKEN") { return explicit }

@@ -40,12 +40,12 @@
  *      believes about it.
  */
 import { COMMAND_TYPES } from './bridge-core.js'
-import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../../mobile/simulator/shared/authorizedAccess.js'
+import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../../cloud/shared/authorizedAccess.js'
 import {
   MEMORY_TOOL_SPECS,
   MEMORY_TOOL_TYPES,
   isMemoryToolType,
-} from '../../../mobile/simulator/shared/domains/index.js'
+} from '../../../cloud/shared/domains/index.js'
 
 /* ===================================================================== *
  * Bounds.

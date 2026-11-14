@@ -20,7 +20,7 @@ import {
   resetNodeMailboxWarnings,
   sendNodeMessage,
 } from './nodeMailbox.js'
-import { MAX_INBOX_PAGE, RELAY_NODE_ADDRESS } from '../../mobile/simulator/shared/nodeMesh.js'
+import { MAX_INBOX_PAGE, RELAY_NODE_ADDRESS } from '../shared/nodeMesh.js'
 
 const NOW = Date.parse('2026-08-08T12:00:00.000Z')
 

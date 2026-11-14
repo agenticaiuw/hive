@@ -38,8 +38,8 @@ import {
   parseContextHandle,
   publicContext,
   verifyContextHandle,
-} from '../../mobile/simulator/shared/contextHandoff.js'
-import { normalizePipelineStatus } from '../../mobile/simulator/shared/audioDelivery.js'
+} from '../shared/contextHandoff.js'
+import { normalizePipelineStatus } from '../shared/audioDelivery.js'
 import { getStore } from './store/index.js'
 import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 import { registerPendantDownlinkWitness } from './pendantDownlink.js'
@@ -65,7 +65,7 @@ import { FLEET_STATE_KEY, loadFleetFromStore } from './fleetContext.js'
 import {
   DOMAIN_MEMORY_FIELD,
   mergeDomainMemory,
-} from '../../mobile/simulator/shared/domainMemory.js'
+} from '../shared/domainMemory.js'
 import { createDomainMemoryRelay, readDomainMemory } from './domainMemoryRelay.js'
 import { requiredScopesForRequest } from './relayScopes.js'
 import { synthesizeSpeech } from './speak.js'
@@ -114,7 +114,7 @@ import { parseByteRange, RANGE_UNSATISFIABLE } from './httpRange.js'
 import {
   PRODUCT_SYNC_LIMITS,
   visibleProductSync,
-} from '../../mobile/simulator/shared/productSync.js'
+} from '../shared/productSync.js'
 import {
   authenticateRelayRequest,
   createDeviceCredential,

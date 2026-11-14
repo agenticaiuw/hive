@@ -28,7 +28,7 @@ import {
 import {
   BEARER_SUBPROTOCOL_PREFIX,
   MESH_SUBPROTOCOL,
-} from '../../mobile/simulator/shared/bridgeSocketProtocol.js'
+} from '../shared/bridgeSocketProtocol.js'
 import { createDeviceCredential } from './deviceAuth.js'
 
 /** A relay with one injected principal, on a port the OS chooses. */

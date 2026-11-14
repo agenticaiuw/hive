@@ -5,8 +5,8 @@ import {
   formatMachineContextForPrompt,
   getMachineContext,
 } from './machineContext.js'
-import { stripProtocolTerminators } from '../../mobile/simulator/shared/protocolText.js'
-import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../mobile/simulator/shared/authorizedAccess.js'
+import { stripProtocolTerminators } from '../../cloud/shared/protocolText.js'
+import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../cloud/shared/authorizedAccess.js'
 /* The executor's dispatch table is the authority on what can actually run;
  * see isKnownActionType. computerControl does not import this file, so there
  * is no cycle. */
@@ -21,7 +21,7 @@ import {
   clarifyDomainRequest,
   domainForTool,
   domainsForActions,
-} from '../../mobile/simulator/shared/domains/index.js'
+} from '../../cloud/shared/domains/index.js'
 
 // Mac / browser planning uses OpenAI only (cheap text tier). Pendant voice on
 // Cloudflare uses Realtime separately — this process never opens Realtime.
@@ -1341,7 +1341,7 @@ async function planWithLlm(
     if (memoryDomains.length) {
       const { listDomainFacts } = await import('./memoryService.js')
       const { lookupDomainFacts, renderDomainFactLines } = await import(
-        '../../mobile/simulator/shared/domainMemory.js'
+        '../../cloud/shared/domainMemory.js'
       )
       domainFactsPool = listDomainFacts({})
       memoryBlock = renderDomainMemoryBlock({

@@ -4,7 +4,7 @@
  *
  * WHY THIS EXISTS. Setting up the extension used to mean handling two secrets
  * by hand: copy AGENT_TOKEN out of .env into one field, run
- * pendant-credentials.mjs in a terminal, copy the printed pdt_ token into
+ * device-credentials.mjs in a terminal, copy the printed pdt_ token into
  * another field, and type the --device-id again without typo. The owner's
  * first live attempt stalled exactly there — a paired relay credential sat
  * unused (`lastUsed: never`) because the paste never happened, and the
@@ -16,7 +16,7 @@
  * pre-auth plus code by design. So the code becomes the only secret a human
  * ever handles: the extension posts it to this route once, and this route
  * hands back the agent bearer AND commissions the browser_node relay
- * credential server-side (the same request pendant-credentials.mjs sends,
+ * credential server-side (the same request device-credentials.mjs sends,
  * built by relayPairRequest below). The two wire credentials stay separate —
  * agent token to loopback, device token to the relay, never crossed — the
  * HUMAN just no longer carries either.
@@ -74,7 +74,7 @@ export function normalizeDeviceId(raw) {
 }
 
 /*
- * The relay pair call, in the exact shape pendant-credentials.mjs sends —
+ * The relay pair call, in the exact shape device-credentials.mjs sends —
  * that script is the contract's reference client. role is pinned to
  * browser_node: this route pairs BROWSERS, and a compromised page that
  * somehow reached it must not be able to ask for mac_bridge and walk away

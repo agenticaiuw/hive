@@ -2,13 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { describeResume, resumeContext } from './contextResume.js'
-import { packContext } from '../../mobile/simulator/shared/contextHandoff.js'
+import { packContext } from '../../cloud/shared/contextHandoff.js'
 import { createMemoryStore } from '../../cloud/server/store/memoryStore.js'
 import {
   parseContextHandle,
   publicContext,
   verifyContextHandle,
-} from '../../mobile/simulator/shared/contextHandoff.js'
+} from '../../cloud/shared/contextHandoff.js'
 
 function jsonResponse(body, status = 200) {
   return {

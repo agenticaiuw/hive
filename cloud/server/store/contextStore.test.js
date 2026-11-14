@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { createD1Store } from './d1Store.js'
 import { createMemoryStore } from './memoryStore.js'
-import { packContext, verifyContextHandle } from '../../../mobile/simulator/shared/contextHandoff.js'
+import { packContext, verifyContextHandle } from '../../shared/contextHandoff.js'
 import { createPlanJob, publicJob } from '../jobs.js'
 
 /* Same shape as the other store tests: a fake D1 that only answers the queries

@@ -50,7 +50,7 @@ if [[ "$SRC_VERSION" == "$INSTALLED_VERSION" ]]; then
 fi
 
 echo "==> Step 2/8: package the extension (node browser-extension/package.mjs)"
-(cd "$ROOT/mobile/simulator" && node "$CHROME/package.mjs")
+(cd "$CHROME" && node package.mjs)
 
 echo "==> Step 3/8: sync build/safari into the Xcode extension Resources (with --delete)"
 # --delete so removed files (e.g. options.html, deleted 2026-08-12) do not

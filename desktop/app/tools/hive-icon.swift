@@ -4,7 +4,7 @@
 //   hive-icon <svg> icns <out.icns>                 the Mac app's icon, through iconutil
 //   hive-icon <svg> png <size> <out.png> [opaque]   one square PNG; `opaque` drops the alpha
 //                                                   channel, as iOS app icons need
-// mobile/tools/sync-icons.mjs uses it for every other place that shows the icon.
+// branding/sync-icons.mjs uses it for every other place that shows the icon.
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers

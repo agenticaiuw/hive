@@ -45,7 +45,7 @@ import { listDomainFacts, rememberDomainFact } from './memoryService.js'
 import {
   DOMAIN_MEMORY_FIELD,
   normalizeDomainFact,
-} from '../../mobile/simulator/shared/domainMemory.js'
+} from '../../cloud/shared/domainMemory.js'
 import {
   createRateLimitedErrorReporter,
   createRetryBackoff,
@@ -84,7 +84,7 @@ let pushSocket = null
 export async function startBridge() {
   if (relayCredential.kind === 'none') {
     throw new Error(
-      'No relay credential for the Mac bridge. Pair one (node scripts/pendant-credentials.mjs ' +
+      'No relay credential for the Mac bridge. Pair one (node cloud/tools/device-credentials.mjs ' +
         'pair --device-id <id> --role mac_bridge) and set RELAY_DEVICE_TOKEN, or set RELAY_API_KEY in .env.',
     )
   }
@@ -178,7 +178,7 @@ async function registerBridge() {
   if (relayCredential.kind === 'device') {
     throw new Error(
       `Relay has no device row for ${BRIDGE_DEVICE_ID} (heartbeat ${heartbeatResponse.status}). ` +
-        'Re-pair it: node scripts/pendant-credentials.mjs pair --device-id ' +
+        'Re-pair it: node cloud/tools/device-credentials.mjs pair --device-id ' +
         `${BRIDGE_DEVICE_ID} --role mac_bridge`,
     )
   }

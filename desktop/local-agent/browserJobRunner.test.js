@@ -706,7 +706,7 @@ test('the routes register in an order where /drain is not read as a job id', () 
 })
 
 test('the module announces itself in the capability registry\'s own vocabulary', async () => {
-  const { defineCapability } = await import('../../mobile/simulator/shared/capabilityRegistry.js')
+  const { defineCapability } = await import('../../cloud/shared/capabilityRegistry.js')
   for (const capability of BROWSER_JOB_CAPABILITIES) {
     const defined = defineCapability(capability)
     assert.equal(defined.surface, 'browser')

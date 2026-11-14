@@ -267,7 +267,7 @@ import { registerBrowserProvenanceRoutes } from './browserProvenance.js'
 import { registerBenchRoutes } from './benchRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const distDir = path.resolve(__dirname, '../../mobile/simulator/dist')
+const distDir = path.resolve(__dirname, '../../mobile/dist')
 
 /*
  * The dashboard is one SvelteKit app with two hosts: the Cloudflare Worker and

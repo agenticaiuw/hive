@@ -19,7 +19,7 @@ import {
   toolCatalogueDrift,
 } from '../src/brain.js'
 import { COMMAND_TYPES } from '../src/bridge-core.js'
-import { MEMORY_TOOL_TYPES } from '../../../mobile/simulator/shared/domains/index.js'
+import { MEMORY_TOOL_TYPES } from '../../../cloud/shared/domains/index.js'
 
 /*
  * The relay's own ceilings, copied here from cloud-relay/nodeInference.js so a

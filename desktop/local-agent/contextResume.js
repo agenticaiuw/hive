@@ -11,7 +11,7 @@
  * them return `{ resumed: false }` and the planner starts cold, which is what
  * it did before any of this existed. Nothing in this file may fail a job.
  */
-import { buildResumeMessages, parseContextHandle } from '../../mobile/simulator/shared/contextHandoff.js'
+import { buildResumeMessages, parseContextHandle } from '../../cloud/shared/contextHandoff.js'
 import { RELAY_API_KEY, RELAY_URL } from './bridgeConfig.js'
 
 /* A resume that takes longer than planning cold is worse than no resume. The

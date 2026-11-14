@@ -10,7 +10,7 @@
 // user approves the goal AND its budget once, up front.
 
 import crypto from 'node:crypto'
-import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../mobile/simulator/shared/authorizedAccess.js'
+import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../cloud/shared/authorizedAccess.js'
 import { classifySensitivity } from './redaction.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { captureObservation, observationDataUrl, releaseCaptures } from './screenCapture.js'

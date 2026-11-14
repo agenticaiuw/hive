@@ -6,5 +6,15 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "ws": "^8.21.1"
+  },
+  "scripts": {
+    "agent": "node server.js",
+    "agent:install": "node macos/setupPermissions.js --install-only",
+    "agent:setup": "node macos/setupPermissions.js",
+    "agent:autostart": "node macos/setupPermissions.js --autostart",
+    "agent:logs": "tail -n 200 -F \"$HOME/Library/Logs/HiveLocalAgent/agent.out.log\" \"$HOME/Library/Logs/HiveLocalAgent/agent.err.log\"",
+    "bridge": "node runBridge.js",
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1 *.test.js"
   }
 }

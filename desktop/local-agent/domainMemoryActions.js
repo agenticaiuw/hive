@@ -15,8 +15,8 @@ import {
   lookupDomainFacts,
   normalizeDomainFact,
   renderDomainFactLines,
-} from '../../mobile/simulator/shared/domainMemory.js'
-import { MEMORY_DOMAINS } from '../../mobile/simulator/shared/domains/index.js'
+} from '../../cloud/shared/domainMemory.js'
+import { MEMORY_DOMAINS } from '../../cloud/shared/domains/index.js'
 import { listDomainFacts, rememberDomainFact } from './memoryService.js'
 
 /**

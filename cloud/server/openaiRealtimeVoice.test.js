@@ -14,7 +14,7 @@ const {
   planUtteranceWithRealtime,
 } = await import('./openaiRealtimeVoice.js')
 const { MEMORY_DOMAINS, MEMORY_TOOL_SPECS } = await import(
-  '../../mobile/simulator/shared/domains/index.js'
+  '../shared/domains/index.js'
 )
 
 test('REALTIME_TOOLS expose status + control + search + browser + delegate + page read + job recall + memory', () => {

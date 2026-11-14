@@ -7,7 +7,7 @@ import {
   runBrowserActions,
 } from './browserPage.js'
 import { extractByAnchor } from './pageWatch.js'
-import { fingerprint, similarity } from '../../mobile/simulator/scripts/novelty.mjs'
+import { fingerprint, similarity } from './novelty.mjs'
 
 /*
  * Ask one question of a page behind the owner's login, and answer it with

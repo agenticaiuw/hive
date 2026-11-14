@@ -22,9 +22,9 @@
 import {
   DOMAIN_MEMORY_FIELD,
   normalizeDomainMemoryBlock,
-} from '../../mobile/simulator/shared/domainMemory.js'
+} from '../shared/domainMemory.js'
 
-import { AUTHORIZED_ACCESS_INSTRUCTION } from '../../mobile/simulator/shared/authorizedAccess.js'
+import { AUTHORIZED_ACCESS_INSTRUCTION } from '../shared/authorizedAccess.js'
 
 export const FLEET_STATE_KEY = 'fleet'
 export const MAX_APPLICATIONS_IN_PROMPT = 220

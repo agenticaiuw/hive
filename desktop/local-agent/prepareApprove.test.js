@@ -13,7 +13,7 @@ import {
   registerPrepareApproveRoutes,
 } from './prepareApprove.js'
 import { getLedger } from './actionLedger.js'
-import { attestApprovalDelivery } from '../../mobile/simulator/shared/approvalHandoff.js'
+import { attestApprovalDelivery } from '../../cloud/shared/approvalHandoff.js'
 
 /*
  * These tests run against a REAL ledger file and a REAL temp directory rather
