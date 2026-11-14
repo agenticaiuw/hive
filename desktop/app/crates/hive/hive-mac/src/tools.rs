@@ -250,8 +250,9 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "switch_window",
-            "description": "Bring an open window to the front by its title, or part of it, as `windows` lists it: \
-                            switches to its app, then to that window. Use it rather than opening a document that is \
+            "description": "Bring an open window, or a browser tab, to the front by its title, or part of it, as \
+                            `windows` lists them: switches to its app, then to that window or tab, even when it's \
+                            minimized or on another desktop. Use it rather than opening a document or page that is \
                             already open. Returns a screenshot.",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string"},
@@ -1177,8 +1178,11 @@ impl MacTools {
         }
     }
 
-    /// Switches to the window's app with Spotlight if it isn't in front, then presses cmd+` (the
-    /// app's next window) until the window is in front, like a person would.
+    /// Brings a window, or a browser tab, to the front by its title. A browser's tab is shown by the
+    /// browser's own script, which also reaches a window that's minimized or on another desktop.
+    /// Another app's window: switch to the app, then press cmd+` (its next window) until the window
+    /// is in front, like a person would; when cmd+` can't reach it (minimized, another desktop),
+    /// pick it from the app's Window menu.
     pub fn switch_window(&self, title: &str, app: Option<&str>) -> Result<Value, String> {
         let wanted = title.trim().to_lowercase();
         let of = app.unwrap_or("").trim().to_lowercase();
@@ -1188,11 +1192,44 @@ impl MacTools {
                 && w.app.to_lowercase().contains(&of)
         };
         let shown = self.system.windows();
-        let Some(target) = shown.iter().find(|w| matches(w)).cloned() else {
+        let target = shown.iter().find(|w| matches(w)).cloned();
+        let in_browser = target
+            .as_ref()
+            .is_none_or(|t| desktop::BROWSERS.contains(&t.app.as_str()));
+        let tabs = if in_browser && !wanted.is_empty() {
+            self.system.browser_tabs(&shown)
+        } else {
+            Vec::new()
+        };
+        if let Some((browser, window, tab, tab_title)) =
+            find_tab(&tabs, &wanted, &of, target.as_ref())
+        {
+            let why = self.system.show_tab(&browser, window, tab);
+            if why.is_empty() {
+                let shows = |w: &Window| w.title == tab_title || matches(w);
+                for _ in 0..4 {
+                    if let Some(done) = self.front_note(&browser, &shows) {
+                        return done;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                return self.look_note(
+                    &format!("Showed {browser}'s tab {}.", json_quote(&tab_title)),
+                    false,
+                );
+            }
+            if target.is_none() {
+                return Ok(error_text(format!(
+                    "{browser} has a tab {} but couldn't show it: {why}",
+                    json_quote(&tab_title)
+                )));
+            }
+        }
+        let Some(target) = target else {
             return Ok(error_text(format!(
-                "No open window has {} in its title.\n{}",
+                "No open window or browser tab has {} in its title.\n{}",
                 py_repr(title),
-                desktop::describe(&shown, &Vec::new())
+                desktop::describe(&shown, &tabs)
             )));
         };
         if self.system.frontmost_app() != target.app {
@@ -1207,28 +1244,8 @@ impl MacTools {
         }
         let tries = shown.iter().filter(|w| w.app == target.app).count() + 1;
         for _ in 0..tries {
-            let front = desktop::front_window_in(&self.system.windows(), &target.app);
-            if let Some(front) = front.filter(|f| matches(f)) {
-                // On the virtual monitor, the agent sees and works there only: the window comes
-                // over from the user's screen.
-                let moved = self.system.virtual_monitor().is_some() && {
-                    let why = self.system.place_on_virtual_monitor(front.pid);
-                    why.is_empty()
-                };
-                std::thread::sleep(SETTLE);
-                return self.look_note(
-                    &format!(
-                        "{}'s window {} is in front{}.",
-                        target.app,
-                        json_quote(&front.title),
-                        if moved {
-                            ", moved onto the virtual monitor"
-                        } else {
-                            ""
-                        }
-                    ),
-                    false,
-                );
+            if let Some(done) = self.front_note(&target.app, &matches) {
+                return done;
             }
             let pressed = self.act(&json!({"screenshot": false}), || self.mac.key("cmd+`"), "")?;
             if hive_common::tools::is_error(&pressed) {
@@ -1236,15 +1253,50 @@ impl MacTools {
             }
             std::thread::sleep(Duration::from_millis(300)); // the window comes forward
         }
+        let why = self
+            .system
+            .raise_from_window_menu(&target.app, &target.title);
+        if why.is_empty() {
+            std::thread::sleep(Duration::from_millis(300));
+            if let Some(done) = self.front_note(&target.app, &matches) {
+                return done;
+            }
+        }
         self.look_note(
             &format!(
-                "Couldn't bring {} forward with cmd+` (it may be minimized or on another desktop). Try {}'s Window \
-                 menu, which lists its windows.",
+                "Couldn't bring {} forward with cmd+` or {}'s Window menu{}.",
                 json_quote(&target.title),
-                target.app
+                target.app,
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({why})")
+                }
             ),
             false,
         )
+    }
+
+    /// When `app`'s front window passes `ok`: the note saying it's in front, with a screenshot. On
+    /// the virtual monitor the agent sees and works there only, so the window comes over from the
+    /// user's screen first.
+    fn front_note(&self, app: &str, ok: &dyn Fn(&Window) -> bool) -> Option<Result<Value, String>> {
+        let front = desktop::front_window_in(&self.system.windows(), app).filter(|f| ok(f))?;
+        let moved = self.system.virtual_monitor().is_some()
+            && self.system.place_on_virtual_monitor(front.pid).is_empty();
+        std::thread::sleep(SETTLE);
+        Some(self.look_note(
+            &format!(
+                "{app}'s window {} is in front{}.",
+                json_quote(&front.title),
+                if moved {
+                    ", moved onto the virtual monitor"
+                } else {
+                    ""
+                }
+            ),
+            false,
+        ))
     }
 
     pub fn find_text(&self, phrase: &str) -> Result<Value, String> {
@@ -1518,4 +1570,45 @@ mod tests {
         assert_eq!(mac["name"], "authenticate_mac");
         assert_eq!(selected["name"], "read_selected_text");
     }
+}
+
+/// The browser tab `switch_window` should show: (browser, window, tab, its title), both indexes
+/// 1-based. With a `window` already matched, the tab showing in that browser window (so a window
+/// that's minimized or on another desktop comes forward too); otherwise the first tab whose title,
+/// else whose address, has `wanted` in it, in a browser whose name has `of` in it.
+fn find_tab(
+    tabs: &desktop::Tabs,
+    wanted: &str,
+    of: &str,
+    window: Option<&Window>,
+) -> Option<(String, usize, usize, String)> {
+    let all = || {
+        tabs.iter()
+            .filter(move |(browser, _)| browser.to_lowercase().contains(of))
+            .flat_map(|(browser, windows)| {
+                windows.iter().enumerate().flat_map(move |(w, bw)| {
+                    bw.tabs
+                        .iter()
+                        .enumerate()
+                        .map(move |(t, (title, address))| {
+                            (browser, w + 1, t + 1, bw.current, title, address)
+                        })
+                })
+            })
+    };
+    let pick =
+        |(browser, w, t, _, title, _): (&String, usize, usize, Option<i64>, &String, &String)| {
+            (browser.clone(), w, t, title.clone())
+        };
+    if let Some(window) = window {
+        return all()
+            .find(|(browser, _, t, current, title, _)| {
+                **browser == window.app && *current == Some(*t as i64) && **title == window.title
+            })
+            .map(pick);
+    }
+    all()
+        .find(|(_, _, _, _, title, _)| title.to_lowercase().contains(wanted))
+        .or_else(|| all().find(|(_, _, _, _, _, address)| address.to_lowercase().contains(wanted)))
+        .map(pick)
 }
