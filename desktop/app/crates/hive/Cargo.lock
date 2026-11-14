@@ -337,6 +337,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hive-cloud"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hive-common",
+ "libc",
+ "ring",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "hive-codex"
 version = "0.1.0"
 dependencies = [

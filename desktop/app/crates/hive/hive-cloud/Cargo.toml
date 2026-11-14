@@ -1,0 +1,22 @@
+[package]
+name = "hive-cloud"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Hive Cloud client: deploys the owner's private cloud, enrolls devices, end-to-end encrypted sync, restore and status"
+
+[dependencies]
+hive-common.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+libc.workspace = true
+ring = "0.17"
+ureq = "2.12"
+rusqlite = "0.41.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "hive-cloud"
+path = "src/bin/hive-cloud.rs"
