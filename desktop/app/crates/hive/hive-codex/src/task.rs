@@ -106,6 +106,8 @@ pub(crate) struct State {
     pub provider_waiting: bool,
     pub recovery_id: Option<String>,
     pub receipt_id: Option<String>,
+    /// The owner's task board's id for this request ("T7"), while it runs.
+    pub board_task: Option<String>,
     pub durable_recovery: bool,
     pub startup_record: Option<Value>,
     pub recovery_owner: Option<OwnerLock>,
@@ -238,6 +240,7 @@ impl CodexTask {
                 provider_waiting: false,
                 recovery_id: None,
                 receipt_id: None,
+                board_task: None,
                 durable_recovery: true,
                 startup_record: None,
                 recovery_owner: None,
@@ -369,6 +372,15 @@ impl CodexTask {
     fn state_dir(&self) -> std::path::PathBuf {
         self.agent.state_dir()
     }
+    /// The owner's task board, where every coding agent's work goes too (hive-tasks): each
+    /// request goes on it as it starts and gets what came of it as it ends. Never in a task's way.
+    fn board<T>(&self, write: impl FnOnce(&hive_tasks::Ledger) -> Result<T, String>) -> Option<T> {
+        let path = self.state_dir().join("tasks/tasks.sqlite3");
+        let result = hive_tasks::Ledger::open(&path).and_then(|board| write(&board));
+        result
+            .map_err(|e| self.event("error", &format!("Task board: {e}")))
+            .ok()
+    }
     fn log_path(&self) -> String {
         self.agent.config.log.display().to_string()
     }
@@ -393,8 +405,15 @@ impl CodexTask {
 
     /// Starts it in the background. `look`: attach a screenshot taken now (first_look).
     pub fn start(self: &Arc<Self>, look: bool) -> Arc<CodexTask> {
+        // A task Hive resumes after a restart is already on the board (and its record keeps no
+        // words); only new requests go on it.
+        let resumed = self.st().startup_record.is_some();
+        let board_task = (!resumed)
+            .then(|| self.board(|board| board.hive_request(&self.task)))
+            .flatten();
         {
             let mut s = self.st();
+            s.board_task = board_task;
             s.began = monotonic();
             s.started_at = unix_time();
             s.started = true;
@@ -908,6 +927,14 @@ impl CodexTask {
             } else {
                 "failed"
             };
+            let (board_task, said) = {
+                let mut s = self.st();
+                let said = s.final_.clone().filter(|t| !t.is_empty());
+                (s.board_task.take(), said.unwrap_or_else(|| text.to_owned()))
+            };
+            if let Some(id) = board_task {
+                self.board(|board| board.hive_finished(&id, outcome, &said));
+            }
             let task = self.action_task();
             let actions = self.agent.hooks.actions.clone();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
