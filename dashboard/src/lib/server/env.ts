@@ -9,6 +9,10 @@ export type RuntimeEnv = {
   RELAY?: RelayBinding;
   RELAY_URL?: string;
   RELAY_API_KEY?: string;
+  /** The task board Worker (cloud/tasks), as a service binding or by URL, and its machine token. */
+  TASKS?: RelayBinding;
+  TASKS_URL?: string;
+  TASKS_TOKEN?: string;
   PAIRING_CODE?: string;
   SESSION_SECRET?: string;
   DASHBOARD_ACCESS_KEY?: string;

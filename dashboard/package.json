@@ -10,6 +10,7 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vite dev",
     "build": "vite build",
     "build:agent": "DASHBOARD_TARGET=agent VITE_DASHBOARD_BACKEND=agent vite build",
+    "build:desktop": "DASHBOARD_TARGET=desktop VITE_DASHBOARD_BACKEND=desktop vite build",
     "preview": "vite preview",
     "deploy:cloudflare": "npm run build && wrangler deploy --env=\"\"",
     "test": "npm run build && node --test tests/*.test.mjs",

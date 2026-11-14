@@ -18,6 +18,12 @@
       "binding": "RELAY",
       "service": "hive-relay",
       "remote": true
+    },
+    // The task board (cloud/tasks); /api/tasks signs in to it with the TASKS_TOKEN secret.
+    {
+      "binding": "TASKS",
+      "service": "hive-tasks",
+      "remote": true
     }
   ],
   "observability": {

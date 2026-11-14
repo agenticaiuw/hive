@@ -1,41 +1,39 @@
 # Hive Dashboard (SvelteKit)
 
-App-authenticated Mission Control dashboard for Hive: the pendant hardware and the
-cloud pipeline. Svelte 5 + `@sveltejs/adapter-cloudflare`, deployed as the
-`hive-dashboard` Worker.
+The one Hive dashboard. The same source runs everywhere Hive does: in Hive's Mac app, on the
+website, and next on the phone and in the browser extension. Nothing else in the repository is a
+dashboard; a surface that needs one hosts this folder's build.
 
-It shows:
+Its home page (`/`) is the task board: every task the owner has given any agent (Claude Code,
+Codex, Hive) on any machine, saved by `hive-tasks` and synced to the cloud board (`cloud/tasks`),
+with a box to hand an agent the next one. What needs the owner comes first, then what's being
+worked on, what hasn't started, and what's done. The voice pipeline page is at `/voice`; `/hive`
+and `/pc` are as before.
 
-- Cloudflare Worker, D1, Workers AI, and Mac bridge health
-- live nRF microphone recordings and transcription quality
-- the six-stage voice pipeline from speech-to-text through I²S playback
-  (two stages for runs that originated in this dashboard)
-- recent commands, agent responses, timing, PCM, and hardware telemetry
-- canonical D1-backed chat/session and memory summaries shared with iOS
-- sanitized Mac permission status, browser-extension connectivity, and recent
-  local-agent activity
+## One app, every host
 
-The browser never receives the relay API key. Every `/api/*` route runs on the
-server, reads `RELAY_URL` / `RELAY_API_KEY` from the runtime bindings, and
-proxies through the authenticated Cloudflare relay.
-
-## Two hosts, one build
-
-This app is the only dashboard. It ships to two places from the same source:
-
-| Command | Output | Serves | Backend |
+| Host | Build | Served from | `/api/*` answered by |
 | --- | --- | --- | --- |
-| `npm run build` | `.svelte-kit/cloudflare` | the `hive-dashboard` Worker | relay, via this app's `/api/*` server routes |
-| `npm run build:agent` | `build-agent/` | the Mac agent at `http://127.0.0.1:8000/dashboard` | the Mac agent's own routes, direct |
+| Hive's Mac app | `npm run build:desktop` → `build-desktop/` (`make build/dashboard` in `desktop/app` copies it to `desktop/app/build/dashboard`) | `hive://app/` in Hive.app's Dashboard window | the window itself (`desktop/app/workspace-engine/Sources/UnifiedAgent/dashboard.swift`) |
+| Website | `npm run build` → `.svelte-kit/cloudflare` | the `hive-dashboard` Worker | this app's server routes |
+| Phone, browser extension | next: the desktop build, hosted the same way | | |
+| Old Mac agent | `npm run build:agent` → `build-agent/` | `http://127.0.0.1:8000/dashboard` | the Python agent's routes |
 
-`src/lib/dataSource.ts` is the only file that knows which backend it is on;
-every component above it works in one normalised shape. `build-agent/` is a
-static SPA mounted under `/dashboard`, so its `kit.paths.base` is `/dashboard`
-— which `dataSource` also reads as the backend marker, so the two can never
-disagree.
+Every host answers the same task routes, so the pages never branch on where they run:
 
-`build-agent/` is gitignored. Run `npm run build:agent` after pulling, or the
-Mac agent falls back to whatever is in `mobile/dist`.
+- `GET /api/tasks` → `{source: "cloud" | "local", note?, board}`. The cloud board has every
+  machine; `local` is the Mac's own ledger when the cloud is out of reach (`$lib/tasks` reads
+  both).
+- `GET /api/agents` → `{agents: [{id, name, where, available, note?}]}`.
+- `POST /api/agents/send` with `{agent, text}` → `{accepted: true | false | null, receiptId?,
+  error?}`. `null` means it may have started.
+
+In the Mac app, the agent is Hive itself, through its request socket. On the website, `/api/tasks`
+reads the board through the `TASKS` service binding with the `TASKS_TOKEN` secret, and sending
+isn't wired yet.
+
+`src/lib/dataSource.ts` is the only file that knows which backend the pipeline views talk to.
+The task routes are the same everywhere, so they need no switch.
 
 ## Authentication
 
@@ -79,12 +77,14 @@ npm run deploy:cloudflare
 ```
 
 Deploys the `hive-dashboard` Worker with the `RELAY` service binding to
-`hive-relay`. The three secrets are never in `wrangler.jsonc`:
+`hive-relay` and the `TASKS` binding to `hive-tasks`. The secrets are never in
+`wrangler.jsonc`:
 
 ```bash
 wrangler secret put RELAY_API_KEY
 wrangler secret put DASHBOARD_ACCESS_KEY
 wrangler secret put DASHBOARD_SESSION_SECRET
+wrangler secret put TASKS_TOKEN   # the task board's machine token (hive-tasks' cloud token)
 ```
 
 `wrangler dev --env local` runs without the remote service binding.
