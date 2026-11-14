@@ -1,7 +1,7 @@
 //! `hive-tasks`: the owner's instructions to every coding agent, and the hooks that keep agents
 //! from dropping them (see the library's docs).
 
-use hive_tasks::{default_path, project_of, render_board, Ledger};
+use hive_tasks::{default_path, project_of, render_board, sync_soon, Cloud, Ledger};
 use serde_json::Value;
 use std::io::Read;
 
@@ -19,6 +19,9 @@ hive-tasks rules [--all]        the owner's rules, where each applies and how of
 hive-tasks rule-off R<n>        stop applying a rule
 hive-tasks install|uninstall [--claude] [--codex]
                                 put the hooks into (or take them out of) Claude Code and Codex
+hive-tasks sync                 push what changed to the cloud copy (~/.config/hive/tasks.json) and
+                                take in the rules set on other machines (runs by itself after changes)
+hive-tasks web                  open every machine's board in the browser, signed in
 ";
 
 fn main() {
@@ -71,7 +74,14 @@ fn run(args: &[String]) -> Result<String, String> {
         };
         return install(cmd == "install", &harnesses);
     }
-    let ledger = Ledger::open(&default_path())?;
+    if cmd == "sync" {
+        return sync(flag("--quiet"));
+    }
+    if cmd == "web" {
+        return web();
+    }
+    let path = default_path();
+    let ledger = Ledger::open(&path)?;
     let here = || {
         project_of(
             &std::env::current_dir()
@@ -91,6 +101,9 @@ fn run(args: &[String]) -> Result<String, String> {
                 return Ok(String::new());
             }
             let out = ledger.hook(harness, &input)?;
+            if input["hook_event_name"] != "PreToolUse" {
+                sync_soon(&path);
+            }
             Ok(if out.is_null() {
                 String::new()
             } else {
@@ -102,13 +115,21 @@ fn run(args: &[String]) -> Result<String, String> {
                 .trim_start_matches(['M', 'm'])
                 .parse::<i64>()
                 .map_err(|_| "add M<n>".to_string())?;
-            Ok(ledger.add(id, &stdin_json()?)?.join("\n"))
+            let out = ledger.add(id, &stdin_json()?)?.join("\n");
+            sync_soon(&path);
+            Ok(out)
         }
-        "report" => Ok(ledger.report(&stdin_json()?)?.join("\n")),
+        "report" => {
+            let out = ledger.report(&stdin_json()?)?.join("\n");
+            sync_soon(&path);
+            Ok(out)
+        }
         "done" => {
             let outcome = args.get(2..).unwrap_or_default().join(" ");
             let report = serde_json::json!([{"id": arg(1), "status": "done", "outcome": outcome}]);
-            Ok(ledger.report(&report)?.join("\n"))
+            let out = ledger.report(&report)?.join("\n");
+            sync_soon(&path);
+            Ok(out)
         }
         "board" => {
             let project = (!flag("--all")).then(here);
@@ -127,8 +148,57 @@ fn run(args: &[String]) -> Result<String, String> {
                     .unwrap_or_default(),
             )
         }
-        "rule-off" => ledger.rule_off(arg(1)),
+        "rule-off" => {
+            let out = ledger.rule_off(arg(1))?;
+            sync_soon(&path);
+            Ok(out)
+        }
         other => Err(format!("Unknown command {other:?}.\n{HELP}")),
+    }
+}
+
+/// One sync at a time (a lock next to the ledger); a sync started while another runs leaves it
+/// to that one, which goes on until nothing is left to push.
+fn sync(quiet: bool) -> Result<String, String> {
+    let Some(cloud) = Cloud::load() else {
+        return Err("No cloud copy set up (~/.config/hive/tasks.json).".into());
+    };
+    let path = default_path();
+    let lock_path = path.with_file_name("sync.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())?;
+    use std::os::unix::io::AsRawFd;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(if quiet {
+            String::new()
+        } else {
+            "A sync is already running.".into()
+        });
+    }
+    let ledger = Ledger::open(&path)?;
+    let said = ledger.sync(&cloud)?;
+    Ok(if quiet { String::new() } else { said })
+}
+
+/// Opens the board page signed in, with a one-use code that never appears on screen.
+fn web() -> Result<String, String> {
+    let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
+    let answer = cloud.post("/v1/login-code", &serde_json::json!({}))?;
+    let code = answer["code"]
+        .as_str()
+        .ok_or("The cloud gave no sign-in code.")?;
+    let link = format!("{}/login?code={code}", cloud.url);
+    if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+            .arg(&link)
+            .status()
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Opened {} (signed in for a year).", cloud.url))
+    } else {
+        Err("Run hive-tasks web on your Mac; this machine has no browser.".into())
     }
 }
 

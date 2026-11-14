@@ -113,9 +113,128 @@ CREATE TABLE IF NOT EXISTS stop_blocks (
   signature TEXT NOT NULL,
   count INTEGER NOT NULL
 );
+-- What changed since the last push to the owner's cloud copy (`hive-tasks sync`), kept by the
+-- triggers below.
+CREATE TABLE IF NOT EXISTS outbox (
+  kind TEXT NOT NULL,
+  id INTEGER NOT NULL,
+  PRIMARY KEY (kind, id)
+);
+-- Rules set on the owner's other machines: their cloud name (\"vm:3\") and their row here, which
+-- has no message and is never pushed back.
+CREATE TABLE IF NOT EXISTS remote_rules (
+  origin TEXT PRIMARY KEY,
+  rule INTEGER NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS messages_added AFTER INSERT ON messages BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('message', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_changed AFTER UPDATE ON messages BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('message', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_added AFTER INSERT ON tasks BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('task', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_changed AFTER UPDATE ON tasks BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('task', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS rules_added AFTER INSERT ON rules WHEN NEW.message IS NOT NULL BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('rule', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS rules_changed AFTER UPDATE ON rules
+  WHEN NEW.id NOT IN (SELECT rule FROM remote_rules) BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('rule', NEW.id);
+END;
 CREATE INDEX IF NOT EXISTS tasks_message ON tasks (message);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (harness, session);
 ";
+
+/// Where the owner's cloud copy is and how this machine signs in to it: ~/.config/hive/tasks.json
+/// (or `HIVE_TASKS_CLOUD`), `{"url", "token", "machine"}`. No file, no cloud copy.
+pub struct Cloud {
+    pub url: String,
+    token: String,
+    pub machine: String,
+}
+
+impl Cloud {
+    pub fn load() -> Option<Cloud> {
+        let path = std::env::var_os("HIVE_TASKS_CLOUD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| hive_common::paths::home().join(".config/hive/tasks.json"));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let url = str_of(&v, "url").trim_end_matches('/').to_string();
+        let token = str_of(&v, "token").to_string();
+        if url.is_empty() || token.is_empty() {
+            return None;
+        }
+        let machine = match str_of(&v, "machine") {
+            "" => std::process::Command::new("hostname")
+                .arg("-s")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default(),
+            m => m.to_string(),
+        };
+        Some(Cloud {
+            url,
+            token,
+            machine,
+        })
+    }
+
+    pub fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let answer = ureq::post(&format!("{}{path}", self.url))
+            .set("authorization", &format!("Bearer {}", self.token))
+            .set("user-agent", "hive-tasks")
+            .timeout(Duration::from_secs(20))
+            .send_json(body);
+        match answer {
+            Ok(r) => r
+                .into_json()
+                .map_err(|e| format!("The cloud's answer isn't JSON: {e}")),
+            Err(ureq::Error::Status(code, r)) => Err(format!(
+                "The cloud said {code}: {}",
+                clip(&r.into_string().unwrap_or_default(), 200)
+            )),
+            Err(e) => Err(format!("Couldn't reach the cloud: {e}")),
+        }
+    }
+}
+
+/// Pushes the ledger at `path` to the cloud in the background, if it is this machine's ledger
+/// and there is a cloud copy: a detached `hive-tasks sync` (one at a time; it catches up on
+/// whatever changed while another ran).
+pub fn sync_soon(path: &Path) {
+    if path != default_path()
+        || Cloud::load().is_none()
+        || std::env::var_os("HIVE_TASKS_NO_SYNC").is_some()
+    {
+        return;
+    }
+    let me = std::env::current_exe()
+        .ok()
+        .filter(|p| p.file_name().is_some_and(|n| n == "hive-tasks"));
+    let program = me.unwrap_or_else(|| hive_common::paths::home().join(".local/bin/hive-tasks"));
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["sync", "--quiet"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let _ = cmd.spawn();
+}
 
 pub fn default_path() -> PathBuf {
     std::env::var_os("HIVE_TASKS_DB")
@@ -430,6 +549,166 @@ impl Ledger {
         };
         self.report(&json!([{"id": task, "status": status, "outcome": outcome}]))
             .map(|_| ())
+    }
+
+    // ---- the cloud copy ------------------------------------------------------------------------
+
+    /// What to push next: up to `max` changed rows as `{messages, tasks, rules}`, and their
+    /// outbox keys for `sync_sent`. The first time, everything the ledger already has.
+    pub fn sync_batch(&self, max: usize) -> Result<(Value, Vec<(String, i64)>), String> {
+        let backfilled: Option<String> = self
+            .db
+            .query_row("SELECT value FROM meta WHERE key = 'backfilled'", [], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(err)?;
+        if backfilled.is_none() {
+            self.db
+                .execute_batch(
+                    "INSERT OR IGNORE INTO outbox SELECT 'message', id FROM messages;
+                     INSERT OR IGNORE INTO outbox SELECT 'task', id FROM tasks;
+                     INSERT OR IGNORE INTO outbox SELECT 'rule', id FROM rules
+                       WHERE id NOT IN (SELECT rule FROM remote_rules);
+                     INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '1');",
+                )
+                .map_err(err)?;
+        }
+        let keys: Vec<(String, i64)> = {
+            let mut stmt = self
+                .db
+                .prepare("SELECT kind, id FROM outbox ORDER BY kind, id LIMIT ?1")
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([max as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(err)?;
+            rows.collect::<Result<_, _>>().map_err(err)?
+        };
+        let rows = |sql: &str, kind: &str| -> Result<Vec<Value>, String> {
+            let mut out = Vec::new();
+            let mut stmt = self.db.prepare(sql).map_err(err)?;
+            for (_, id) in keys.iter().filter(|(k, _)| k == kind) {
+                let row = stmt
+                    .query_row([id], |r| {
+                        let mut m = Map::new();
+                        for (i, name) in r.as_ref().column_names().enumerate() {
+                            let v = match r.get_ref(i)? {
+                                rusqlite::types::ValueRef::Integer(n) => json!(n),
+                                rusqlite::types::ValueRef::Text(t) => {
+                                    json!(String::from_utf8_lossy(t))
+                                }
+                                rusqlite::types::ValueRef::Real(f) => json!(f),
+                                _ => Value::Null,
+                            };
+                            m.insert(name.to_string(), v);
+                        }
+                        Ok(Value::Object(m))
+                    })
+                    .optional()
+                    .map_err(err)?;
+                out.extend(row);
+            }
+            Ok(out)
+        };
+        let payload = json!({
+            "messages": rows("SELECT id, harness, session, project, text, said_at, times, split_at FROM messages WHERE id = ?1", "message")?,
+            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at FROM tasks WHERE id = ?1", "task")?,
+            "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
+        });
+        Ok((payload, keys))
+    }
+
+    /// The cloud has these rows now.
+    pub fn sync_sent(&self, keys: &[(String, i64)]) -> Result<(), String> {
+        let mut stmt = self
+            .db
+            .prepare("DELETE FROM outbox WHERE kind = ?1 AND id = ?2")
+            .map_err(err)?;
+        for (kind, id) in keys {
+            stmt.execute(params![kind, id]).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Takes in the rules set on the owner's other machines (`[{machine, id, project, paths,
+    /// text, quote, created_at, active}]`), so they reach agents here as well. A rule turned off
+    /// here stays off.
+    pub fn take_rules(&self, rules: &Value) -> Result<usize, String> {
+        let mut taken = 0;
+        for r in rules.as_array().map(Vec::as_slice).unwrap_or_default() {
+            let origin = format!("{}:{}", str_of(r, "machine"), r["id"]);
+            let paths = match &r["paths"] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let active = r["active"].as_i64().unwrap_or(1);
+            let created = r["created_at"].as_i64().unwrap_or_else(now);
+            let known: Option<i64> = self
+                .db
+                .query_row(
+                    "SELECT rule FROM remote_rules WHERE origin = ?1",
+                    [&origin],
+                    |x| x.get(0),
+                )
+                .optional()
+                .map_err(err)?;
+            match known {
+                Some(id) => {
+                    self.db
+                        .execute(
+                            "UPDATE rules SET project = ?2, paths = ?3, text = ?4, quote = ?5,
+                               active = CASE WHEN ?6 = 0 THEN 0 ELSE active END WHERE id = ?1",
+                            params![
+                                id,
+                                str_of(r, "project"),
+                                paths,
+                                str_of(r, "text"),
+                                str_of(r, "quote"),
+                                active
+                            ],
+                        )
+                        .map_err(err)?;
+                }
+                None => {
+                    self.db
+                        .execute(
+                            "INSERT INTO rules (message, project, paths, text, quote, created_at, active)
+                             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![str_of(r, "project"), paths, str_of(r, "text"), str_of(r, "quote"), created, active],
+                        )
+                        .map_err(err)?;
+                    let id = self.db.last_insert_rowid();
+                    self.db
+                        .execute(
+                            "INSERT INTO remote_rules (origin, rule) VALUES (?1, ?2)",
+                            params![origin, id],
+                        )
+                        .map_err(err)?;
+                }
+            }
+            taken += 1;
+        }
+        Ok(taken)
+    }
+
+    /// Pushes what changed to the owner's cloud copy and takes in the other machines' rules.
+    pub fn sync(&self, cloud: &Cloud) -> Result<String, String> {
+        let mut pushed = 0;
+        let mut rules = 0;
+        for _ in 0..50 {
+            let (mut payload, keys) = self.sync_batch(200)?;
+            payload["machine"] = json!(cloud.machine);
+            let answer = cloud.post("/v1/sync", &payload)?;
+            rules = self.take_rules(&answer["rules"])?;
+            self.sync_sent(&keys)?;
+            pushed += keys.len();
+            if keys.len() < 200 {
+                break;
+            }
+        }
+        Ok(format!(
+            "Pushed {pushed} changes; {rules} rules from other machines."
+        ))
     }
 
     fn event(&self, task: i64, status: &str, note: Option<&str>) -> Result<(), String> {
