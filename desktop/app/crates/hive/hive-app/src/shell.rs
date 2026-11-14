@@ -633,7 +633,7 @@ impl VoiceAgent {
         self.start_journal();
         self.apply_menu_settings();
         let app = self.app.get();
-        if app && env_set("AGENT_SPACEO_COMMAND") {
+        if app && env_set("AGENT_WORKSPACE_ENGINE") {
             self.spawn("personal-agent-workspace", |me| {
                 me.start_embedded_workspace()
             });
@@ -911,11 +911,11 @@ impl VoiceAgent {
     }
 
     pub fn start_embedded_workspace(&self) {
-        let Ok(spaceo) = std::env::var("AGENT_SPACEO_COMMAND") else {
+        let Ok(engine) = std::env::var("AGENT_WORKSPACE_ENGINE") else {
             return;
         };
         // A host-health latch left by an earlier sample would refuse the display below.
-        match self.host.recover_workspace(&spaceo) {
+        match self.host.recover_workspace(&engine) {
             Ok((outcome, detail)) => {
                 if outcome != "not-latched" {
                     self.out(&format!(
@@ -934,7 +934,7 @@ impl VoiceAgent {
                 .unwrap_or_else(|e| e.into_inner())
                 .send(Event::WorkspaceActivity(kind.to_owned(), text.to_owned()));
         });
-        match self.host.start_workspace(&spaceo, on_activity) {
+        match self.host.start_workspace(&engine, on_activity) {
             Ok(workspace) => {
                 if self.stopped.get() {
                     workspace.close();
@@ -1362,7 +1362,7 @@ impl VoiceAgent {
         self.listening.set(on);
         if on {
             self.backend.new_session();
-            if env_set("AGENT_SPACEO_COMMAND") {
+            if env_set("AGENT_WORKSPACE_ENGINE") {
                 self.tell("workspace-resume", "1");
             }
         } else {
@@ -1420,7 +1420,7 @@ impl VoiceAgent {
         if let Some(voice) = &self.voice {
             voice.stop();
         }
-        if let Ok(engine) = std::env::var("AGENT_SPACEO_COMMAND") {
+        if let Ok(engine) = std::env::var("AGENT_WORKSPACE_ENGINE") {
             if !engine.is_empty() && stopped.contains(&"mac") && !self.host.pause_workspace(&engine)
             {
                 self.out("   ✗ Could not confirm the workspace input was paused.");
@@ -1450,7 +1450,7 @@ impl VoiceAgent {
             }
         }
         self.viewer_voice_allowed.set(audible_here);
-        if env_set("AGENT_SPACEO_COMMAND") && monotonic() >= self.workspace_status_at.get() {
+        if env_set("AGENT_WORKSPACE_ENGINE") && monotonic() >= self.workspace_status_at.get() {
             self.workspace_status_at.set(monotonic() + 2.0);
             let path = hive_common::state_dir().join("workspace-status.json");
             if let Some(status) = std::fs::read_to_string(&path)
@@ -2023,13 +2023,13 @@ impl VoiceAgent {
             return;
         }
         let carry_on = CONTINUE.contains(&words.as_str());
-        if carry_on && env_set("AGENT_SPACEO_COMMAND") {
+        if carry_on && env_set("AGENT_WORKSPACE_ENGINE") {
             self.tell("workspace-resume", "1");
         }
         if carry_on && self.mac_task_running() {
             self.log("you said", text, json!({"outcome": "continue"}));
             self.save_recovery("active", "Could not save the resume state");
-            if !env_set("AGENT_SPACEO_COMMAND") {
+            if !env_set("AGENT_WORKSPACE_ENGINE") {
                 self.take_control(); // it carries on from where things are now
             }
             if let Some(receipt) = owned_receipt {
@@ -2110,7 +2110,7 @@ impl VoiceAgent {
             self.finish_ui_receipt(&receipt);
         }
         if device == "mac"
-            && !(env_set("AGENT_WORKSPACE_CONNECTION") || env_set("AGENT_SPACEO_COMMAND"))
+            && !(env_set("AGENT_WORKSPACE_CONNECTION") || env_set("AGENT_WORKSPACE_ENGINE"))
         {
             self.prepare_screen(); // the task takes the mouse and keyboard only when it uses the screen
         }

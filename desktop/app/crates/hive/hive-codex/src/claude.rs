@@ -423,7 +423,7 @@ impl Conn {
     /// The CLI's command line after the executable (the SDK's `_build_command` for
     /// claude_agent.py's options).
     pub(crate) fn arguments(&self, agent: &Agent) -> Result<Vec<String>, AgentError> {
-        let spaceo = agent.env.get("AGENT_SPACEO_COMMAND");
+        let engine = agent.env.get("AGENT_WORKSPACE_ENGINE");
         let mut allowed: Vec<String> = BUILT_IN.iter().map(|t| t.to_string()).collect();
         let mut servers = Map::new();
         for (device, tools) in &self.servers {
@@ -434,17 +434,17 @@ impl Conn {
             }
             servers.insert(device.clone(), json!({"type": "sdk", "name": device}));
         }
-        if let Some(spaceo) = &spaceo {
-            let bridge = agent.config.repo.join("build/spaceo-mcp-bridge");
+        if let Some(engine) = &engine {
+            let bridge = agent.config.repo.join("build/workspace-mcp-bridge");
             servers.insert(
-                "spaceo".into(),
-                json!({"type": "stdio", "command": bridge.display().to_string(), "args": [spaceo]}),
+                "workspace".into(),
+                json!({"type": "stdio", "command": bridge.display().to_string(), "args": [engine]}),
             );
-            allowed.push("mcp__spaceo__*".into());
+            allowed.push("mcp__workspace__*".into());
         }
         let mut system = format!("{}\n\n{}", agent.instructions()?, prompts::RULES);
-        if spaceo.is_some() {
-            system.push_str(prompts::SPACEO_RULES);
+        if engine.is_some() {
+            system.push_str(prompts::VIRTUAL_WORKSPACE_RULES);
         }
         let mut args: Vec<String> = ["--output-format", "stream-json", "--verbose"]
             .map(String::from)

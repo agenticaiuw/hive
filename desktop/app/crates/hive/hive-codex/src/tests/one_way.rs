@@ -122,8 +122,8 @@ fn codex_s_shell_can_reach_the_internet() {
     let params = h.agent.thread_params().unwrap();
     assert_eq!(params["sandbox"], "workspace-write");
     assert_eq!(params["config"], online());
-    let spaceo = Harness::with(|env, _| env.set("AGENT_SPACEO_COMMAND", "true"));
-    let params = spaceo.agent.thread_params().unwrap();
+    let engine = Harness::with(|env, _| env.set("AGENT_WORKSPACE_ENGINE", "true"));
+    let params = engine.agent.thread_params().unwrap();
     assert!(params.get("config").is_none());
     assert_eq!(params["permissions"], "personal-agent");
 }

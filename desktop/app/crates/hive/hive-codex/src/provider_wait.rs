@@ -215,7 +215,7 @@ pub fn resolve(dir: &Path, identity: &str) -> Result<bool, AgentError> {
 
 /// A closed or unknown workspace viewer must never be reopened by recovery
 /// (`<state>/workspace-viewer-visible` holds "1" while it is open).
-pub fn workspace_open(dir: &Path) -> bool {
+pub fn workspace_is_open(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("workspace-viewer-visible"))
         .map(|t| crate::py::strip(&t) == "1")
         .unwrap_or(false)

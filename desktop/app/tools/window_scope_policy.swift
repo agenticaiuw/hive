@@ -1,4 +1,4 @@
-// Offline policy prototype only. It is not connected to SpaceO or macOS APIs.
+// Offline policy prototype only. It is not connected to the workspace engine or macOS APIs.
 // The caller must independently establish the provenance of every observation.
 import Foundation
 

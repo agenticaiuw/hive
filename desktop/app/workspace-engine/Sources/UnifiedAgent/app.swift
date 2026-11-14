@@ -20,8 +20,8 @@
 import AppKit
 import ServiceManagement
 import UniformTypeIdentifiers
-#if canImport(SpaceOViewer)
-import SpaceOViewer
+#if canImport(WorkspaceViewer)
+import WorkspaceViewer
 #endif
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Agent.log")
@@ -56,7 +56,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     var quitting = false
     var listening = false, dictating = false
     var workspace: WorkspaceHost?
-#if canImport(SpaceOViewer)
+#if canImport(WorkspaceViewer)
     var monitorViewer: AgentWorkspaceViewer?
 #endif
 
@@ -106,8 +106,8 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
 
         openLog()
-#if canImport(SpaceOViewer)
-        let workspaceSetting = ProcessInfo.processInfo.environment["AGENT_EXPERIMENTAL_SPACEO"]
+#if canImport(WorkspaceViewer)
+        let workspaceSetting = ProcessInfo.processInfo.environment["AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE"]
         let workspaceDefault = (Bundle.main.object(forInfoDictionaryKey: "AgentWorkspaceDefault") as? String) != "0"
         if workspaceSetting.map({ $0 != "0" }) ?? workspaceDefault {
             monitorViewer = AgentWorkspaceViewer()
@@ -130,7 +130,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     func applicationWillTerminate(_ notification: Notification) {
         if !quitting { write("--- quit, not from the menu (macOS or another app asked) \(Date())\n") }
         quitting = true
-#if canImport(SpaceOViewer)
+#if canImport(WorkspaceViewer)
         monitorViewer?.shutdown()
 #endif
         stop()
@@ -152,9 +152,9 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         var environment = ProcessInfo.processInfo.environment
         // Opened at login, it gets launchd's short PATH; codex and Homebrew's tools live further out.
         environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
-#if canImport(SpaceOViewer)
+#if canImport(WorkspaceViewer)
         if monitorViewer != nil {
-            environment["AGENT_SPACEO_COMMAND"] = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/spaceo").path
+            environment["AGENT_WORKSPACE_ENGINE"] = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/workspace-engine").path
         }
 #endif
         if let workspace, workspace.ready {
@@ -260,7 +260,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
                 camera = line.hasSuffix("1")
                 show()
             } else if line.hasPrefix("@@ workspace-resume ") {
-#if canImport(SpaceOViewer)
+#if canImport(WorkspaceViewer)
                 monitorViewer?.resumeAfterTakeover()
 #endif
             } else {
@@ -451,8 +451,8 @@ enum Main {
     static let delegate = AgentApp()
 
     static func main() {
-#if canImport(SpaceOViewer)
-        if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--spaceo-self-test" {
+#if canImport(WorkspaceViewer)
+        if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--viewer-self-test" {
             _ = NSApplication.shared
             let viewer = AgentWorkspaceViewer()
             withExtendedLifetime(viewer) {

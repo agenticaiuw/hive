@@ -1,5 +1,5 @@
-//! One persistent SpaceO MCP session for Agent, preserved across short restarts
-//! (python/spaceo_mcp_bridge.py).
+//! One persistent virtual workspace MCP session for Agent, preserved across short restarts
+//! (python/workspace_mcp_bridge.py).
 //!
 //! The upstream controller retains the lease and renews it. Startup claims the existing workspace
 //! first; it creates one only when the daemon explicitly says it does not exist. All other
@@ -7,7 +7,7 @@
 //!
 //! Two ways to run it: embedded in the agent ([`Bridge::start_embedded`], which holds the lease
 //! for the agent process and serves `workspace.sock`), or as the stdio MCP server
-//! `spaceo-mcp-bridge /absolute/path/to/spaceo` that Claude's agent launches ([`Bridge::run`]).
+//! `workspace-mcp-bridge /absolute/path/to/engine` that Claude's agent launches ([`Bridge::run`]).
 
 use crate::credentials::{NativeCredentials, PasswordsFiller};
 use crate::fence;
@@ -27,25 +27,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const WORKSPACE: &str = "personal-agent-workspace";
 pub const INTERNAL_PREFIX: &str = "agent-workspace-internal-";
 pub const ALLOWED_TOOLS: [&str; 20] = [
-    "spaceo_session_list",
-    "spaceo_open_app",
-    "spaceo_open_url",
-    "spaceo_wait_for",
-    "spaceo_find",
-    "spaceo_read_text",
-    "spaceo_read_screen",
-    "spaceo_list_targets",
-    "spaceo_attach_target",
-    "spaceo_screenshot",
-    "spaceo_click",
-    "spaceo_scroll",
-    "spaceo_select_text",
-    "spaceo_move",
-    "spaceo_drag",
-    "spaceo_type",
-    "spaceo_press_key",
-    "spaceo_list_windows",
-    "spaceo_events",
+    "workspace_session_list",
+    "workspace_launch_app",
+    "workspace_visit_url",
+    "workspace_wait_for",
+    "workspace_find",
+    "workspace_read_text",
+    "workspace_read_screen",
+    "workspace_list_targets",
+    "workspace_attach_target",
+    "workspace_screenshot",
+    "workspace_click",
+    "workspace_scroll",
+    "workspace_select_text",
+    "workspace_move",
+    "workspace_drag",
+    "workspace_type",
+    "workspace_press_key",
+    "workspace_list_windows",
+    "workspace_events",
     "workspace_authenticate_passwords",
 ];
 
@@ -53,14 +53,14 @@ pub const ALLOWED_TOOLS: [&str; 20] = [
 /// can have irreversible effects: the agent must still avoid sending, submitting, purchasing,
 /// publishing, and other irreversible actions.
 pub const WORKSPACE_ACTIONS: [&str; 8] = [
-    "spaceo_open_app",
-    "spaceo_click",
-    "spaceo_scroll",
-    "spaceo_select_text",
-    "spaceo_move",
-    "spaceo_drag",
-    "spaceo_type",
-    "spaceo_press_key",
+    "workspace_launch_app",
+    "workspace_click",
+    "workspace_scroll",
+    "workspace_select_text",
+    "workspace_move",
+    "workspace_drag",
+    "workspace_type",
+    "workspace_press_key",
 ];
 
 const CAPABILITY_BASE: &str = "Shell: personal-agent profile configured in workspace mode; effective file/OS grants unverified. \
@@ -130,7 +130,7 @@ fn utc_stamp() -> String {
 
 // ------------------------------------------------------------------------------------ the engine
 
-/// The engine as the bridge talks to it: MCP requests to the `spaceo mcp` process.
+/// The engine as the bridge talks to it: MCP requests to the `engine mcp` process.
 pub trait Engine: Send + Sync {
     /// `tools/call`: the MCP result (`{"content": [...], "isError"?}`).
     fn call(&self, name: &str, arguments: &Value) -> Result<Value, String>;
@@ -327,7 +327,7 @@ impl EnvironmentObservations {
     /// Reads only our owned session listing; retains strictly bounded metadata.
     pub fn refresh_session(&self, call: &dyn Fn(&str, &Value) -> Result<Value, String>) {
         let outcome = (|| -> Result<Observation, ()> {
-            let result = call("spaceo_session_list", &json!({})).map_err(|_| ())?;
+            let result = call("workspace_session_list", &json!({})).map_err(|_| ())?;
             if !result.is_object() || is_error(&result) {
                 return Err(());
             }
@@ -393,7 +393,7 @@ impl EnvironmentObservations {
         let stamp = utc_stamp();
         let mut inner = self.inner.lock().unwrap();
         let failure = result.map(is_error).unwrap_or(false);
-        if name == "spaceo_verify_isolation" {
+        if name == "workspace_verify_isolation" {
             inner.isolation = match result {
                 Some(r)
                     if r.as_object().map(|o| !o.is_empty()).unwrap_or(false) && !is_error(r) =>
@@ -466,7 +466,7 @@ impl EnvironmentObservations {
                 "user_holds_control": holds,
             },
             "model_permissions": {
-                "configured_when_spaceo_enabled": "personal-agent extends workspace; writable memory, captures and update-handoff roots and workspace socket; network proxy enabled, registry.npmjs.org allowed",
+                "configured_when_workspace_enabled": "personal-agent extends workspace; writable memory, captures and update-handoff roots and workspace socket; network proxy enabled, registry.npmjs.org allowed",
                 "effective_file_network_and_os_permissions": "unknown; runtime and OS restrictions may further limit access",
             },
             "browser": "Managed Chromium launcher configures a separate private profile; exact app/session sharing and Safari/Passwords are unverified.",
@@ -596,7 +596,7 @@ impl WorkspaceHandler {
                     .into_iter()
                     .filter(|t| {
                         let name = t.get("name").and_then(Value::as_str).unwrap_or("");
-                        ALLOWED_TOOLS.contains(&name) && !(safari && name == "spaceo_open_url")
+                        ALLOWED_TOOLS.contains(&name) && !(safari && name == "workspace_visit_url")
                     })
                     .collect();
                 tools.push(json!({
@@ -635,8 +635,8 @@ impl WorkspaceHandler {
         }
         let safari = prefer_safari(&self.state);
         if safari
-            && (name == "spaceo_open_url"
-                || (name == "spaceo_open_app"
+            && (name == "workspace_visit_url"
+                || (name == "workspace_launch_app"
                     && dumps(&Value::Object(arguments.clone()), true)
                         .to_lowercase()
                         .contains("chrome")))
@@ -657,7 +657,7 @@ impl WorkspaceHandler {
         {
             return Err("only the personal-agent workspace is available".into());
         }
-        if name != "spaceo_session_list" {
+        if name != "workspace_session_list" {
             arguments.insert("session".into(), json!(WORKSPACE));
         }
         self.activity("action", &format!("Virtual workspace: {name}"));
@@ -665,9 +665,9 @@ impl WorkspaceHandler {
         self.observations.record(name, Some(&result), false);
         if self.on_activity.is_some() {
             let text = description(&result);
-            let detail = if name == "spaceo_verify_isolation" {
+            let detail = if name == "workspace_verify_isolation" {
                 capability_report(Some(&result))
-            } else if ["spaceo_read_text", "spaceo_read_screen", "spaceo_find"].contains(&name) {
+            } else if ["workspace_read_text", "workspace_read_screen", "workspace_find"].contains(&name) {
                 if text.chars().count() > 1600 {
                     format!("{}…", text.chars().take(1600).collect::<String>())
                 } else {
@@ -713,7 +713,7 @@ pub fn bootstrap(
     let mut saw_detached = false;
     let mut text;
     loop {
-        let claim = engine.call("spaceo_session_claim", &json!({"session": WORKSPACE}))?;
+        let claim = engine.call("workspace_session_claim", &json!({"session": WORKSPACE}))?;
         if !is_error(&claim) {
             fence::settle_existing(state)?;
             return publish();
@@ -749,7 +749,7 @@ pub fn bootstrap(
     }
     let created = fence::create_once(state, || {
         engine.call(
-            "spaceo_session_create",
+            "workspace_session_create",
             &json!({"name": WORKSPACE, "title": "Agent workspace", "preset": "exclusive",
                     "orphan_grace_seconds": 1800, "ttl_seconds": 3600}),
         )
@@ -776,7 +776,7 @@ pub fn publish_display(
     state: &Path,
     observations: &EnvironmentObservations,
 ) -> Result<(), String> {
-    let listing = engine.call("spaceo_session_list", &json!({}))?;
+    let listing = engine.call("workspace_session_list", &json!({}))?;
     if is_error(&listing) {
         return Err(format!(
             "Could not find the workspace display: {}",
@@ -802,7 +802,7 @@ pub fn publish_display(
 
 // ------------------------------------------------------------------------------------ the process
 
-/// The `spaceo mcp` process and the MCP conversation with it.
+/// The `engine mcp` process and the MCP conversation with it.
 pub struct Bridge {
     command: String,
     state: PathBuf,
@@ -860,7 +860,7 @@ impl Bridge {
         });
         bridge.status("starting", "Starting the virtual workspace")?;
         std::thread::Builder::new()
-            .name("spaceo-bridge-reader".into())
+            .name("workspace-bridge-reader".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
@@ -1038,14 +1038,14 @@ impl Engine for Bridge {
     }
 }
 
-/// The `spaceo-mcp-bridge /absolute/path/to/spaceo` command line.
+/// The `workspace-mcp-bridge /absolute/path/to/engine` command line.
 pub fn main(args: &[String]) -> i32 {
     let [command] = args else {
-        eprintln!("Usage: spaceo-mcp-bridge /absolute/path/to/spaceo");
+        eprintln!("Usage: workspace-mcp-bridge /absolute/path/to/engine");
         return 1;
     };
     if !Path::new(command).is_absolute() {
-        eprintln!("Usage: spaceo-mcp-bridge /absolute/path/to/spaceo");
+        eprintln!("Usage: workspace-mcp-bridge /absolute/path/to/engine");
         return 1;
     }
     match Bridge::spawn(command, None) {

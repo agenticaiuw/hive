@@ -347,7 +347,7 @@ fn codex_runs_lean() {
     let cmd = c.h.agent.app_server_command().unwrap();
     assert_eq!(cmd[1], "app-server");
     let has = |o: &str| cmd.iter().any(|c| c == o);
-    assert!(has("features.code_mode.direct_only_tool_namespaces=[\"mac\", \"phone\", \"knowledge\", \"spaceo\"]"));
+    assert!(has("features.code_mode.direct_only_tool_namespaces=[\"mac\", \"phone\", \"knowledge\", \"workspace\"]"));
     assert!(has("notify=[]"));
     assert!(has("include_permissions_instructions=false")); // not "the sandbox only permits reading"
     let catalog: Vec<&str> = cmd
@@ -441,7 +441,7 @@ impl crate::hooks::WorkspaceTools for ScriptedWorkspace {
     }
 }
 
-/// A task in workspace mode (`AGENT_SPACEO_COMMAND`), its workspace hook and its mac's tools.
+/// A task in workspace mode (`AGENT_WORKSPACE_ENGINE`), its workspace hook and its mac's tools.
 fn workspace_task(h: &Harness) -> (Arc<CodexTask>, Arc<ScriptedWorkspace>, Arc<FakeTool>) {
     let workspace = Arc::new(ScriptedWorkspace::default());
     let mut hooks = h.agent.hooks.clone();
@@ -450,7 +450,7 @@ fn workspace_task(h: &Harness) -> (Arc<CodexTask>, Arc<ScriptedWorkspace>, Arc<F
     for key in ["AGENT_STATE_DIR", "CODEX_HOME", "AGENT_ENV_FILE"] {
         env.set(key, h.agent.env.get(key).unwrap());
     }
-    env.set("AGENT_SPACEO_COMMAND", "/engine");
+    env.set("AGENT_WORKSPACE_ENGINE", "/engine");
     let agent = crate::Agent::new(env, h.agent.config.clone(), hooks);
     let task = CodexTask::new(
         &agent,
@@ -486,11 +486,11 @@ fn workspace_request_is_dispatched_in_host_process() {
     let h = Harness::new();
     let (task, workspace, mac) = workspace_task(&h);
     let reply = task.call_tool(&json!({"namespace": "mac", "tool": "read_ingested",
-                                       "arguments": {"id": "workspace:{\"name\":\"spaceo_session_list\"}"}}));
+                                       "arguments": {"id": "workspace:{\"name\":\"workspace_session_list\"}"}}));
     assert_eq!(reply["success"], true);
     assert_eq!(
         *lock(&workspace.asked),
-        [json!({"name": "spaceo_session_list"})]
+        [json!({"name": "workspace_session_list"})]
     );
     assert!(lock(&mac.calls).is_empty());
 }

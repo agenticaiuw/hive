@@ -91,7 +91,7 @@ impl From<std::io::Error> for AgentError {
 }
 
 /// The environment the agent reads its settings from (CODEX_BIN, AGENT_MODEL, AGENT_STATE_DIR,
-/// AGENT_SPACEO_COMMAND, ...): the process's own, with overrides on top. The tests give each
+/// AGENT_WORKSPACE_ENGINE, ...): the process's own, with overrides on top. The tests give each
 /// agent its own overrides instead of changing the process's environment, and the app-server is
 /// started with them.
 #[derive(Default)]

@@ -8,10 +8,10 @@ use hive_dream::normalize::{
 #[test]
 fn numbers_ids_paths_quotes_and_times_are_placeholders() {
     let a = signature_text(
-        "✗ spaceo_open_app failed: pid 4312 produced no window within 8s at 2026-01-02 03:04:05",
+        "✗ workspace_launch_app failed: pid 4312 produced no window within 8s at 2026-01-02 03:04:05",
     );
     let b = signature_text(
-        "✗ spaceo_open_app failed: pid 77 produced no window within 12s at 2025-12-31 23:59:59",
+        "✗ workspace_launch_app failed: pid 77 produced no window within 12s at 2025-12-31 23:59:59",
     );
     assert_eq!(a, b);
     assert!(a.contains("<n>") && a.contains("<time>"), "{a}");

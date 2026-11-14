@@ -317,7 +317,7 @@ impl ProviderWait for ScriptedProvider {
             .pop_front()
             .unwrap_or_else(|| self.always_reachable.load(Ordering::SeqCst))
     }
-    fn workspace_open(&self, _dir: &Path) -> bool {
+    fn workspace_is_open(&self, _dir: &Path) -> bool {
         false
     }
 }
@@ -339,7 +339,7 @@ pub fn instructions_path() -> PathBuf {
 
 /// The variables a test must not inherit from whoever runs it.
 const ISOLATE: [&str; 16] = [
-    "AGENT_SPACEO_COMMAND",
+    "AGENT_WORKSPACE_ENGINE",
     "AGENT_WORKSPACE_CONNECTION",
     "AGENT_WORKSPACE_BRIDGE",
     "AGENT_FAST",

@@ -165,11 +165,11 @@ fn sequence(calls: &Calls) -> Vec<Vec<String>> {
 #[test]
 fn healthy_engine_is_left_alone() {
     let (run, calls) = engine(
-        json!({"displaySafety": {"state": "ready"}, "displays": {"spaceO": [4]}}),
+        json!({"displaySafety": {"state": "ready"}, "displays": {"workspace": [4]}}),
         (0, "cleared".into(), String::new()),
     );
     assert_eq!(
-        recover_if_latched("spaceo", &run),
+        recover_if_latched("workspace", &run),
         ("not-latched".into(), String::new())
     );
     assert_eq!(sequence(&calls), [["doctor", "--json"]]);
@@ -178,11 +178,11 @@ fn healthy_engine_is_left_alone() {
 #[test]
 fn idle_host_health_latch_is_cleared_with_the_engine_command() {
     let (run, calls) = engine(
-        json!({"displaySafety": {"state": "blocked", "reason": "host health: swap_activity"}, "displays": {"spaceO": []}}),
+        json!({"displaySafety": {"state": "blocked", "reason": "host health: swap_activity"}, "displays": {"workspace": []}}),
         (0, "cleared".into(), String::new()),
     );
     assert_eq!(
-        recover_if_latched("spaceo", &run),
+        recover_if_latched("workspace", &run),
         ("cleared".into(), "host health: swap_activity".into())
     );
     assert_eq!(
@@ -205,7 +205,7 @@ fn engine_refusal_is_reported_not_retried() {
             "error: host health is not ready: swap_activity\n".into(),
         ),
     );
-    let (outcome, detail) = recover_if_latched("spaceo", &run);
+    let (outcome, detail) = recover_if_latched("workspace", &run);
     assert_eq!(outcome, "refused");
     assert!(detail.contains("swap_activity"));
     assert_eq!(
@@ -217,13 +217,13 @@ fn engine_refusal_is_reported_not_retried() {
 #[test]
 fn online_display_other_failures_and_unreadable_reports_change_nothing() {
     for report in [
-        json!({"displaySafety": {"state": "blocked", "reason": "host health: memory_pressure"}, "displays": {"spaceO": [4]}}),
+        json!({"displaySafety": {"state": "blocked", "reason": "host health: memory_pressure"}, "displays": {"workspace": [4]}}),
         json!({"displaySafety": {"state": "blocked", "reason": "unfinished display mutation"}}),
         json!({"displaySafety": {"state": "unknown"}}),
         json!("not json"),
     ] {
         let (run, calls) = engine(report.clone(), (0, "cleared".into(), String::new()));
-        let (outcome, _) = recover_if_latched("spaceo", &run);
+        let (outcome, _) = recover_if_latched("workspace", &run);
         assert_eq!(outcome, "skipped", "{report}");
         assert_eq!(sequence(&calls), [["doctor", "--json"]]);
     }
@@ -429,13 +429,13 @@ fn memory_and_workspace_prefixes_route_only_mac_text_calls() {
         &fake.state,
         "mac",
         "read_ingested",
-        &json!({"id": "workspace:{\"name\":\"spaceo_session_list\"}"}),
+        &json!({"id": "workspace:{\"name\":\"workspace_session_list\"}"}),
     );
     assert_eq!(
         routed.unwrap().unwrap()["content"][0]["text"],
         "workspace ready"
     );
-    assert_eq!(fake.finish(), vec![json!({"name": "spaceo_session_list"})]);
+    assert_eq!(fake.finish(), vec![json!({"name": "workspace_session_list"})]);
     let fake = serve(vec![line(json!({"ok": true, "result": {"content": []}}))]);
     assert!(tools::route(
         &fake.state,
@@ -491,7 +491,7 @@ fn tool_cli_sends_the_documented_requests_and_reports_success() {
     for args in [
         &["status"][..],
         &["list"],
-        &["call", "spaceo_click", "{\"x\": 1}"],
+        &["call", "workspace_click", "{\"x\": 1}"],
     ] {
         let (result, code) = tool_cli::run(&fake.state, &strings(args)).unwrap();
         assert_eq!((result, code), (reply.clone(), 0));
@@ -501,7 +501,7 @@ fn tool_cli_sends_the_documented_requests_and_reports_success() {
         vec![
             json!({"method": "status"}),
             json!({"method": "list"}),
-            json!({"name": "spaceo_click", "arguments": {"x": 1}})
+            json!({"name": "workspace_click", "arguments": {"x": 1}})
         ]
     );
 }
@@ -561,7 +561,7 @@ fn tool_cli_saves_images_privately_and_never_prints_their_bytes() {
         {"type": "image", "mimeType": "image/jpeg", "data": jpg},
     ]}}))]);
     let (result, code) =
-        tool_cli::run(&fake.state, &strings(&["call", "spaceo_screenshot", "{}"])).unwrap();
+        tool_cli::run(&fake.state, &strings(&["call", "workspace_screenshot", "{}"])).unwrap();
     assert_eq!(code, 0);
     let content = result["result"]["content"].as_array().unwrap();
     let saved = |item: &Value| -> PathBuf {

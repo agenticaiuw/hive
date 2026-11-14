@@ -555,7 +555,7 @@ impl CodexTask {
         let mut image = None;
         let mut seen = None;
         let workspace = self.agent.env.get("AGENT_WORKSPACE_CONNECTION").is_some()
-            || self.agent.env.get("AGENT_SPACEO_COMMAND").is_some();
+            || self.agent.env.get("AGENT_WORKSPACE_ENGINE").is_some();
         if look && !(self.device == "mac" && workspace) {
             seen = self.ahead.as_ref().and_then(|a| a.seen());
             let ahead = seen.is_some();
@@ -1065,7 +1065,7 @@ impl CodexTask {
                     Some(v) if py::truthy(Some(v)) => py::str_of(v),
                     _ => String::new(),
                 };
-                let operations: Vec<String> = workspace_operations(&command);
+                let operations: Vec<String> = workspace_tool_calls(&command);
                 if !operations.is_empty() {
                     let names = operations.join(", ");
                     self.event("action", &format!("Virtual workspace: {names}"));
@@ -2006,9 +2006,9 @@ impl CodexTask {
                             self.session().release(self);
                             return Ok(false);
                         }
-                        let workspace = self.agent.env.get("AGENT_SPACEO_COMMAND").is_some()
+                        let workspace = self.agent.env.get("AGENT_WORKSPACE_ENGINE").is_some()
                             || self.agent.env.get("AGENT_WORKSPACE_CONNECTION").is_some();
-                        if workspace && !provider.workspace_open(&dir) {
+                        if workspace && !provider.workspace_is_open(&dir) {
                             self.event("doing", "Provider is reachable; workspace is closed, so recovery is waiting");
                             self.done_wait(30.0);
                             continue;
@@ -2193,7 +2193,7 @@ impl CodexTask {
             };
         }
         if namespace == "mac"
-            && self.agent.env.get("AGENT_SPACEO_COMMAND").is_some()
+            && self.agent.env.get("AGENT_WORKSPACE_ENGINE").is_some()
             && tool != "read_ingested"
         {
             return Ok(
@@ -2360,13 +2360,13 @@ fn describe_status(goal: &Value) -> String {
     }
 }
 
-/// The spaceo operations a workspace-tool command calls: `build/workspace-tool call spaceo_...`, or
-/// `scripts/workspace-tool.py call spaceo_...` from before it was Rust.
-fn workspace_operations(command: &str) -> Vec<String> {
+/// The engine operations a workspace-tool command calls: `build/workspace-tool call workspace_...`, or
+/// `scripts/workspace-tool.py call workspace_...` from before it was Rust.
+fn workspace_tool_calls(command: &str) -> Vec<String> {
     use std::sync::OnceLock;
     static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
-        regex::Regex::new(r"workspace-tool(?:\.py)?\s+call\s+(spaceo_[a-z_]+)")
+        regex::Regex::new(r"workspace-tool(?:\.py)?\s+call\s+(workspace_[a-z_]+)")
             .expect("valid pattern")
     });
     pattern
