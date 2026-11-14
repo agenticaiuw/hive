@@ -164,6 +164,7 @@ fn sync(quiet: bool) -> Result<String, String> {
         return Err("No cloud copy set up (~/.config/hive/tasks.json).".into());
     };
     let path = default_path();
+    let ledger = Ledger::open(&path)?; // makes the folder the lock goes in
     let lock_path = path.with_file_name("sync.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -178,7 +179,6 @@ fn sync(quiet: bool) -> Result<String, String> {
             "A sync is already running.".into()
         });
     }
-    let ledger = Ledger::open(&path)?;
     let said = ledger.sync(&cloud)?;
     Ok(if quiet { String::new() } else { said })
 }
