@@ -1,0 +1,20 @@
+[package]
+name = "hive-tasks"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "The owner's instructions to every coding agent (Claude Code, Codex, Hive), kept word for word, split into tasks with a state and a report, and enforced through the harnesses' hooks"
+
+[dependencies]
+hive-common.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+libc.workspace = true
+rusqlite = "0.41.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "hive-tasks"
+path = "src/main.rs"

@@ -459,6 +459,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hive-tasks"
+version = "0.1.0"
+dependencies = [
+ "hive-common",
+ "libc",
+ "regex",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hive-workspace"
 version = "0.1.0"
 dependencies = [
