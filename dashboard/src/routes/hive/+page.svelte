@@ -343,7 +343,7 @@
       <p class="hv-err">local aggregator ({HIVE_LOCAL_BASE}): {localError}</p>
       <p class="hv-err">relay snapshot (/api/hive): {relayError}</p>
       <p class="hv-mut">
-        On the Mac: start it with <code>node desktop/dashboard/aggregator/server.mjs</code>.
+        On the Mac: start it with <code>node dashboard/aggregator/server.mjs</code>.
         Elsewhere: the aggregator must be running on the Mac for the relay copy to stay fresh.
       </p>
     </div>

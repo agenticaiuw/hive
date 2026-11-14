@@ -18,9 +18,9 @@ import { parseEnv } from 'node:util';
 // Shared repo loader: parses <repo>/.env into process.env and DERIVES
 // AGENT_TOKEN / SESSION_SECRET from PAIRING_CODE (labelled HMAC). Since
 // 2026-08-09 those tokens are no longer stored in .env at all.
-import '../../../cloud/shared/loadEnv.mjs';
+import '../../cloud/shared/loadEnv.mjs';
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
+const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const ENV_PATH = path.join(REPO_ROOT, '.env');
 const DIAG_DIR = path.join(REPO_ROOT, 'diagnostics', 'harness-derivation');
 const PORTS = [8010, 8011, 8012, 8013, 8014, 8015, 8016, 8017, 8018, 8019, 8020];
