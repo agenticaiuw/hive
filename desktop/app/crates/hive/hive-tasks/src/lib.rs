@@ -47,6 +47,10 @@ pub const ASK_MINUTES: i64 = 30;
 pub const HIVE_PROJECT: &str = "Hive";
 /// How many tasks a hook names before it says how many more.
 const LIST_MAX: usize = 12;
+/// A folder's memories longer than this go in a file the agent is told to read whole.
+pub const BRIEF_INLINE: usize = 24_000;
+/// What a memory can be.
+pub const MEMORY_KINDS: [&str; 4] = ["note", "spec", "decision", "report"];
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
@@ -152,6 +156,48 @@ CREATE TRIGGER IF NOT EXISTS rules_changed AFTER UPDATE ON rules
   WHEN NEW.id NOT IN (SELECT rule FROM remote_rules) BEGIN
   INSERT OR IGNORE INTO outbox (kind, id) VALUES ('rule', NEW.id);
 END;
+-- Folders: the parts of a project (memory retrieval, major requirements validation), each holding
+-- its tasks and its own memories. A project here is its short name in lower case (hive), the same
+-- on every machine and on the web.
+CREATE TABLE IF NOT EXISTS folders (
+  id INTEGER PRIMARY KEY,
+  project TEXT NOT NULL,
+  key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  about TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  -- 'cloud' when it came from another machine or the web: never pushed back.
+  origin TEXT,
+  UNIQUE (project, key)
+);
+-- What an agent put on a folder has to know, all of it loaded every time: notes, specs, decisions
+-- and the reports of the folder's done tasks.
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY,
+  project TEXT NOT NULL,
+  folder TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  task TEXT,
+  created_at INTEGER NOT NULL,
+  -- Its cloud name (vm:3, web:2) when it came from elsewhere: never pushed back.
+  origin TEXT UNIQUE
+);
+CREATE TRIGGER IF NOT EXISTS folders_added AFTER INSERT ON folders WHEN NEW.origin IS NULL BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('folder', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS folders_changed AFTER UPDATE ON folders WHEN NEW.origin IS NULL BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('folder', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_added AFTER INSERT ON memories WHEN NEW.origin IS NULL BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('memory', NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_changed AFTER UPDATE ON memories WHEN NEW.origin IS NULL BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('memory', NEW.id);
+END;
+CREATE INDEX IF NOT EXISTS memories_folder ON memories (project, folder);
 CREATE INDEX IF NOT EXISTS tasks_message ON tasks (message);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (harness, session);
 ";
@@ -262,6 +308,8 @@ pub fn default_path() -> PathBuf {
 
 pub struct Ledger {
     db: Connection,
+    /// The ledger's folder (long folder briefs are written in it).
+    dir: PathBuf,
     /// How an agent runs this program, named in what the hooks tell it.
     pub command: String,
 }
@@ -279,18 +327,25 @@ impl Ledger {
         let db = Connection::open(path).map_err(err)?;
         db.busy_timeout(Duration::from_secs(5)).map_err(err)?;
         db.execute_batch(SCHEMA).map_err(err)?;
-        // Columns added since the first ledgers: what each task cost and the part it belongs to.
-        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("part", "TEXT")] {
-            let has: i64 = db
-                .query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1", [column], |r| r.get(0))
-                .map_err(err)?;
-            if has == 0 {
+        // Columns added since the first ledgers: what each task cost, the folder it's in (first
+        // called its part) and its report.
+        let has = |column: &str| -> Result<bool, String> {
+            db.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1", [column], |r| r.get::<_, i64>(0))
+                .map(|n| n > 0)
+                .map_err(err)
+        };
+        if has("part")? && !has("folder")? {
+            db.execute_batch("ALTER TABLE tasks RENAME COLUMN part TO folder").map_err(err)?;
+        }
+        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("folder", "TEXT"), ("report", "TEXT")] {
+            if !has(column)? {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {kind}")).map_err(err)?;
             }
         }
         private(path, 0o600);
         Ok(Self {
             db,
+            dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
             command: command_name(),
         })
     }
@@ -414,12 +469,17 @@ impl Ledger {
                     .collect(),
                 Some(_) => return Err(format!("Entry {n}: paths is a list of globs.")),
             };
-            let part = clip(str_of(e, "part").trim(), 80);
-            checked.push((kind, quote, clip(&title, 200), minutes, value, paths, part));
+            let named = match str_of(e, "folder").trim() {
+                "" => str_of(e, "part").trim(),
+                f => f,
+            };
+            let folder = folder_place(&project, named);
+            checked.push((kind, quote, clip(&title, 200), minutes, value, paths, folder));
         }
         let now = now();
         let mut out = Vec::new();
-        for (kind, quote, title, minutes, value, paths, part) in checked {
+        let mut places: Vec<(String, String)> = Vec::new();
+        for (kind, quote, title, minutes, value, paths, folder) in checked {
             if kind == "rule" {
                 self.db
                     .execute(
@@ -445,11 +505,22 @@ impl Ledger {
                     self.db.last_insert_rowid()
                 ));
             } else {
+                // A task in another project's folder names that project ("hive › memory retrieval").
+                let folder = match folder {
+                    Some((p, name)) => {
+                        let name = self.ensure_folder(&p, &name)?;
+                        if !places.contains(&(p.clone(), name.clone())) {
+                            places.push((p.clone(), name.clone()));
+                        }
+                        if p == project_key(&project) { name } else { format!("{p} › {name}") }
+                    }
+                    None => String::new(),
+                };
                 self.db
                     .execute(
-                        "INSERT INTO tasks (message, quote, title, minutes, value, created_at, updated_at, part)
+                        "INSERT INTO tasks (message, quote, title, minutes, value, created_at, updated_at, folder)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, NULLIF(?7, ''))",
-                        params![message, quote, title, minutes, value, now, part],
+                        params![message, quote, title, minutes, value, now, folder],
                     )
                     .map_err(err)?;
                 let id = self.db.last_insert_rowid();
@@ -466,11 +537,17 @@ impl Ledger {
         if out.is_empty() {
             out.push(format!("M{message}: no tasks."));
         }
+        // Everything the folders know, loaded in full for the agent about to work in them.
+        for (p, name) in places {
+            out.push(self.folder_brief(&p, &name)?);
+        }
         Ok(out)
     }
 
-    /// Reports on tasks: a JSON list of `{id: "T3", status, outcome?, evidence?, minutes?}`.
-    /// done, waiting, blocked and dropped need an outcome saying what happened or what on.
+    /// Reports on tasks: a JSON list of `{id: "T3", status, outcome?, evidence?, minutes?,
+    /// report?}`. done, waiting, blocked and dropped need an outcome saying what happened or what
+    /// on. A task that's done gets a report (the agent's, else its outcome), with what it cost,
+    /// kept on the task and in its folder's memories.
     pub fn report(&self, entries: &Value) -> Result<Vec<String>, String> {
         let list = entries.as_array().ok_or("Give a JSON list of reports.")?;
         let mut checked = Vec::new();
@@ -496,13 +573,14 @@ impl Ledger {
             }
             let evidence = str_of(e, "evidence").trim().to_string();
             let minutes = e.get("minutes").and_then(Value::as_i64);
-            checked.push((id, status.to_string(), outcome, evidence, minutes));
+            let report = str_of(e, "report").trim().to_string();
+            checked.push((id, status.to_string(), outcome, evidence, minutes, report));
         }
         let now = now();
         let closing: Vec<(i64, String)> = checked.iter().map(|c| (c.0, c.1.clone())).collect();
         self.charge(&closing, now)?;
         let mut out = Vec::new();
-        for (id, status, outcome, evidence, minutes) in checked {
+        for (id, status, outcome, evidence, minutes, report) in checked {
             self.db
                 .execute(
                     "UPDATE tasks SET status = ?2, outcome = COALESCE(NULLIF(?3, ''), outcome),
@@ -518,9 +596,249 @@ impl Ledger {
                 &status,
                 Some(&outcome).filter(|o| !o.is_empty()).map(|o| o.as_str()),
             )?;
+            if status == "done" {
+                self.file_report(id, &report)?;
+            }
             out.push(format!("T{id} {status}"));
         }
         Ok(out)
+    }
+
+    /// Writes a done task's report: what came of it (the agent's report, else its outcome), its
+    /// evidence and what it cost. Kept on the task and, for a task in a folder, as one of the
+    /// folder's memories (the same memory, rewritten, if the task is reported done again).
+    fn file_report(&self, id: i64, given: &str) -> Result<(), String> {
+        type Row = (String, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, String);
+        let (title, outcome, evidence, minutes, secs, tokens_in, tokens_out, folder, project): Row = self
+            .db
+            .query_row(
+                "SELECT t.title, t.outcome, t.evidence, t.minutes, t.work_seconds, t.tokens_in, t.tokens_out,
+                        t.folder, m.project
+                 FROM tasks t JOIN messages m ON m.id = t.message WHERE t.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+            )
+            .map_err(err)?;
+        let mut text = match given {
+            "" => outcome.unwrap_or_default(),
+            given => given.to_string(),
+        };
+        if let Some(e) = evidence.filter(|e| !e.trim().is_empty()) {
+            text.push_str(&format!("\nEvidence: {e}"));
+        }
+        let mut cost = Vec::new();
+        if let Some(s) = secs.filter(|s| *s > 0) {
+            cost.push(match minutes {
+                Some(m) => format!("took {} (estimated {})", span(s), span(m * 60)),
+                None => format!("took {}", span(s)),
+            });
+        }
+        if let (Some(i), Some(o)) = (tokens_in, tokens_out) {
+            if i + o > 0 {
+                cost.push(format!("{} tokens read, {} written", token_count(i), token_count(o)));
+            }
+        }
+        if !cost.is_empty() {
+            text.push_str(&format!("\nCost: {}.", cost.join("; ")));
+        }
+        let text = clip(text.trim(), 6000);
+        self.db
+            .execute("UPDATE tasks SET report = ?2 WHERE id = ?1", params![id, text])
+            .map_err(err)?;
+        let Some((p, name)) = folder.and_then(|f| folder_place(&project, &f)) else {
+            return Ok(());
+        };
+        let name = self.ensure_folder(&p, &name)?;
+        let task = format!("T{id}");
+        let title = format!("{task} {title}");
+        let updated = self
+            .db
+            .execute(
+                "UPDATE memories SET title = ?2, body = ?3, project = ?4, folder = ?5
+                 WHERE task = ?1 AND kind = 'report' AND origin IS NULL",
+                params![task, title, text, p, name.to_lowercase()],
+            )
+            .map_err(err)?;
+        if updated == 0 {
+            self.db
+                .execute(
+                    "INSERT INTO memories (project, folder, kind, title, body, task, created_at)
+                     VALUES (?1, ?2, 'report', ?3, ?4, ?5, ?6)",
+                    params![p, name.to_lowercase(), title, text, task, now()],
+                )
+                .map_err(err)?;
+        }
+        Ok(())
+    }
+
+    // ---- folders -------------------------------------------------------------------------------
+
+    /// Makes the folder if it's new; returns its name as it was first written.
+    pub fn ensure_folder(&self, project: &str, name: &str) -> Result<String, String> {
+        let at = now();
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO folders (project, key, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![project, name.to_lowercase(), name, at],
+            )
+            .map_err(err)?;
+        self.db
+            .query_row(
+                "SELECT name FROM folders WHERE project = ?1 AND key = ?2",
+                params![project, name.to_lowercase()],
+                |r| r.get(0),
+            )
+            .map_err(err)
+    }
+
+    /// Says what a folder is for (shown above its memories).
+    pub fn describe_folder(&self, project: &str, name: &str, about: &str) -> Result<String, String> {
+        let name = self.ensure_folder(project, name)?;
+        self.db
+            .execute(
+                "UPDATE folders SET about = ?3, updated_at = ?4, origin = NULL WHERE project = ?1 AND key = ?2",
+                params![project, name.to_lowercase(), clip(about.trim(), 2000), now()],
+            )
+            .map_err(err)?;
+        Ok(format!("{project} › {name}: described."))
+    }
+
+    /// Every folder (of one project, or all), with how many memories each holds.
+    pub fn folders(&self, project: Option<&str>) -> Result<Vec<Value>, String> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT f.project, f.key, f.name, f.about, f.updated_at,
+                        (SELECT COUNT(*) FROM memories m WHERE m.project = f.project AND m.folder = f.key)
+                 FROM folders f WHERE ?1 IS NULL OR f.project = ?1 ORDER BY f.project, f.key",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([project], |r| {
+                Ok(json!({
+                    "project": r.get::<_, String>(0)?,
+                    "key": r.get::<_, String>(1)?,
+                    "name": r.get::<_, String>(2)?,
+                    "about": r.get::<_, String>(3)?,
+                    "updated_at": iso(r.get(4)?),
+                    "memories": r.get::<_, i64>(5)?,
+                }))
+            })
+            .map_err(err)?;
+        rows.collect::<Result<_, _>>().map_err(err)
+    }
+
+    /// A folder's memories, oldest first.
+    pub fn memories(&self, project: &str, key: &str) -> Result<Vec<Value>, String> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT id, kind, title, body, task, created_at, origin FROM memories
+                 WHERE project = ?1 AND folder = ?2 ORDER BY created_at, id",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([project, key], |r| {
+                let origin: Option<String> = r.get(6)?;
+                Ok(json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "kind": r.get::<_, String>(1)?,
+                    "title": r.get::<_, String>(2)?,
+                    "body": r.get::<_, String>(3)?,
+                    "task": r.get::<_, Option<String>>(4)?,
+                    "created_at": iso(r.get(5)?),
+                    "from": origin.as_deref().and_then(|o| o.split(':').next()),
+                }))
+            })
+            .map_err(err)?;
+        rows.collect::<Result<_, _>>().map_err(err)
+    }
+
+    /// Puts a memory on a folder (made if new): `kind` is note, spec, decision or report; the
+    /// body's first line is its title.
+    pub fn remember(&self, project: &str, name: &str, kind: &str, body: &str) -> Result<String, String> {
+        if !MEMORY_KINDS.contains(&kind) {
+            return Err(format!("A memory is a {}, not {kind:?}.", MEMORY_KINDS.join(", ")));
+        }
+        let body = redact(body.trim());
+        if body.is_empty() {
+            return Err("Nothing to remember (give the memory on stdin; its first line is its title).".into());
+        }
+        let (title, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
+        let title = clip(title.trim().trim_start_matches('#').trim(), 200);
+        let rest = rest.trim();
+        let name = self.ensure_folder(project, name)?;
+        self.db
+            .execute(
+                "INSERT INTO memories (project, folder, kind, title, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![project, name.to_lowercase(), kind, title, clip(if rest.is_empty() { &title } else { rest }, 60_000), now()],
+            )
+            .map_err(err)?;
+        Ok(format!("Saved to {project} › {name} as a {kind}: {title}"))
+    }
+
+    /// Everything an agent put on a folder has to know, in full: what the folder is for and every
+    /// one of its memories, saying how many there are, so nothing is left wondering whether they
+    /// were all loaded. Past [`BRIEF_INLINE`] characters they go in a file to read whole.
+    pub fn folder_brief(&self, project: &str, name: &str) -> Result<String, String> {
+        let key = name.to_lowercase();
+        let (name, about): (String, String) = self
+            .db
+            .query_row(
+                "SELECT name, about FROM folders WHERE project = ?1 AND key = ?2",
+                params![project, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(err)?
+            .unwrap_or_else(|| (name.to_string(), String::new()));
+        let place = format!("{project} › {name}");
+        let about = if about.trim().is_empty() { String::new() } else { format!("\nWhat it's for: {}", about.trim()) };
+        let list = self.memories(project, &key)?;
+        let n = list.len();
+        if n == 0 {
+            return Ok(format!("Hive folder \"{place}\": no memories yet, so nothing earlier to load.{about}"));
+        }
+        let mut text = String::new();
+        for (i, m) in list.iter().enumerate() {
+            text.push_str(&format!(
+                "--- {}/{n} · {} · {} · {} ---\n{}\n",
+                i + 1,
+                m["kind"].as_str().unwrap_or(""),
+                m["title"].as_str().unwrap_or(""),
+                m["created_at"].as_str().unwrap_or("").get(..10).unwrap_or(""),
+                m["body"].as_str().unwrap_or("").trim_end()
+            ));
+        }
+        let all = if n == 1 { "its 1 memory".to_string() } else { format!("all {n} of its memories") };
+        let chars = text.chars().count();
+        if chars <= BRIEF_INLINE {
+            return Ok(format!(
+                "Hive folder \"{place}\": {all}, in full. Read every one before working in it.{about}\n{text}--- end of \"{place}\" ({n} of {n}) ---"
+            ));
+        }
+        let dir = self.dir.join("folders");
+        std::fs::create_dir_all(&dir).map_err(err)?;
+        let slug: String = format!("{project}--{key}")
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .collect();
+        let file = dir.join(format!("{slug}.md"));
+        std::fs::write(&file, format!("# {place}{about}\n\n{text}--- end ({n} of {n}) ---\n")).map_err(err)?;
+        private(&file, 0o600);
+        Ok(format!(
+            "Hive folder \"{place}\": {all} ({chars} characters, too long to show here) are in {}. Read that whole file before working in it.",
+            file.display()
+        ))
+    }
+
+    /// The folder a request names ("For hive › memory retrieval: …", as the dashboard sends it),
+    /// with all its memories, for Hive's own agent to read with the request.
+    pub fn folder_context(&self, text: &str) -> Option<String> {
+        let (p, name) = addressed_folder(text)?;
+        let name = self.ensure_folder(&p, &name).ok()?;
+        self.folder_brief(&p, &name).ok()
     }
 
     /// Charges each task a report closes (done, waiting, blocked or dropped, from open, active,
@@ -659,7 +977,13 @@ impl Ledger {
                     .unwrap_or("")
                     .to_string();
                 let title = clip(said.lines().next().unwrap_or(""), 120);
-                let added = self.add(message, &json!([{"quote": said, "title": title}]))?;
+                let folder = addressed_folder(&said)
+                    .map(|(p, name)| format!("{p} › {name}"))
+                    .unwrap_or_default();
+                let added = self.add(
+                    message,
+                    &json!([{"quote": said, "title": title, "folder": folder}]),
+                )?;
                 task_id(added[0].split_whitespace().next().unwrap_or(""))?
             }
         };
@@ -706,6 +1030,8 @@ impl Ledger {
                      INSERT OR IGNORE INTO outbox SELECT 'task', id FROM tasks;
                      INSERT OR IGNORE INTO outbox SELECT 'rule', id FROM rules
                        WHERE id NOT IN (SELECT rule FROM remote_rules);
+                     INSERT OR IGNORE INTO outbox SELECT 'folder', id FROM folders WHERE origin IS NULL;
+                     INSERT OR IGNORE INTO outbox SELECT 'memory', id FROM memories WHERE origin IS NULL;
                      INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '1');",
                 )
                 .map_err(err)?;
@@ -748,8 +1074,10 @@ impl Ledger {
         };
         let payload = json!({
             "messages": rows("SELECT id, harness, session, project, text, said_at, times, split_at FROM messages WHERE id = ?1", "message")?,
-            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, part FROM tasks WHERE id = ?1", "task")?,
+            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, folder, report FROM tasks WHERE id = ?1", "task")?,
             "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
+            "folders": rows("SELECT id, project, key, name, about, created_at, updated_at FROM folders WHERE id = ?1", "folder")?,
+            "memories": rows("SELECT id, project, folder, kind, title, body, task, created_at FROM memories WHERE id = ?1", "memory")?,
         });
         Ok((payload, keys))
     }
@@ -827,15 +1155,82 @@ impl Ledger {
         Ok(taken)
     }
 
-    /// Pushes what changed to the owner's cloud copy and takes in the other machines' rules.
+    /// Takes in the folders and memories made on the owner's other machines and on the web
+    /// (`{folders: [{project, key, name, about, created_at, updated_at}], memories: [{machine, id,
+    /// project, folder, kind, title, body, task, created_at}]}`). Returns how many.
+    pub fn take_folders(&self, answer: &Value) -> Result<usize, String> {
+        let list = |key: &str| answer[key].as_array().cloned().unwrap_or_default();
+        let (folders, memories) = (list("folders"), list("memories"));
+        for f in &folders {
+            let at = f["updated_at"].as_i64().unwrap_or_else(now);
+            self.db
+                .execute(
+                    "INSERT INTO folders (project, key, name, about, created_at, updated_at, origin)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'cloud')
+                     ON CONFLICT (project, key) DO UPDATE SET name = excluded.name, about = excluded.about,
+                       updated_at = excluded.updated_at, origin = 'cloud'
+                     WHERE excluded.updated_at >= folders.updated_at",
+                    params![
+                        str_of(f, "project"),
+                        str_of(f, "key"),
+                        str_of(f, "name"),
+                        str_of(f, "about"),
+                        f["created_at"].as_i64().unwrap_or(at),
+                        at
+                    ],
+                )
+                .map_err(err)?;
+        }
+        for m in &memories {
+            let origin = format!("{}:{}", str_of(m, "machine"), m["id"]);
+            self.db
+                .execute(
+                    "INSERT INTO memories (project, folder, kind, title, body, task, created_at, origin)
+                     VALUES (?1, ?2, ?3, ?4, ?5, NULLIF(?6, ''), ?7, ?8)
+                     ON CONFLICT (origin) DO UPDATE SET project = excluded.project, folder = excluded.folder,
+                       kind = excluded.kind, title = excluded.title, body = excluded.body, task = excluded.task",
+                    params![
+                        str_of(m, "project"),
+                        str_of(m, "folder"),
+                        str_of(m, "kind"),
+                        str_of(m, "title"),
+                        str_of(m, "body"),
+                        str_of(m, "task"),
+                        m["created_at"].as_i64().unwrap_or_else(now),
+                        origin
+                    ],
+                )
+                .map_err(err)?;
+        }
+        Ok(folders.len() + memories.len())
+    }
+
+    /// Pushes what changed to the owner's cloud copy and takes in the other machines' rules, and
+    /// the folders and memories made elsewhere since the last time.
     pub fn sync(&self, cloud: &Cloud) -> Result<String, String> {
         let mut pushed = 0;
         let mut rules = 0;
+        let mut taken = 0;
         for _ in 0..50 {
             let (mut payload, keys) = self.sync_batch(200)?;
             payload["machine"] = json!(cloud.machine);
+            let since: Option<String> = self
+                .db
+                .query_row("SELECT value FROM meta WHERE key = 'pulled_at'", [], |r| r.get(0))
+                .optional()
+                .map_err(err)?;
+            payload["since"] = json!(since.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0));
             let answer = cloud.post("/v1/sync", &payload)?;
             rules = self.take_rules(&answer["rules"])?;
+            taken += self.take_folders(&answer)?;
+            if let Some(at) = answer["now"].as_i64() {
+                self.db
+                    .execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('pulled_at', ?1)",
+                        [at.to_string()],
+                    )
+                    .map_err(err)?;
+            }
             self.sync_sent(&keys)?;
             pushed += keys.len();
             if keys.len() < 200 {
@@ -843,7 +1238,7 @@ impl Ledger {
             }
         }
         Ok(format!(
-            "Pushed {pushed} changes; {rules} rules from other machines."
+            "Pushed {pushed} changes; {rules} rules from other machines; {taken} folders and memories from elsewhere."
         ))
     }
 
@@ -873,7 +1268,7 @@ impl Ledger {
         let sql = format!(
             "SELECT t.id, t.title, t.status, t.quote, t.message, m.session, m.harness, m.project,
                     t.minutes, t.value, t.outcome, t.evidence, t.created_at, t.updated_at, t.done_at,
-                    t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.part
+                    t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report
              FROM tasks t JOIN messages m ON m.id = t.message WHERE {filter}"
         );
         let mut stmt = self.db.prepare(&sql).map_err(err)?;
@@ -905,7 +1300,8 @@ impl Ledger {
                     "work_seconds": r.get::<_, Option<i64>>(17)?,
                     "tokens_in": r.get::<_, Option<i64>>(18)?,
                     "tokens_out": r.get::<_, Option<i64>>(19)?,
-                    "part": r.get::<_, Option<String>>(20)?,
+                    "folder": r.get::<_, Option<String>>(20)?,
+                    "report": r.get::<_, Option<String>>(21)?,
                 }))
             })
             .map_err(err)?;
@@ -1008,6 +1404,7 @@ impl Ledger {
             "not_split": not_split,
             "done": done,
             "rules": self.rules(project, true)?,
+            "folders": self.folders(project.map(project_key).as_deref())?,
         }))
     }
 
@@ -1162,7 +1559,10 @@ impl Ledger {
                 self.on_prompt(harness, session, id, transcript, str_of(input, "prompt"))
             }
             "Stop" => self.on_stop(harness, session, id, transcript, input),
-            "PreToolUse" => match self.on_command(input)? {
+            "PreToolUse" if matches!(str_of(input, "tool_name"), "Agent" | "Task") => {
+                self.on_subagent(id, input)
+            }
+            "PreToolUse" => match self.on_command(input, id)? {
                 Value::Null => self.on_edit(session, &project, input),
                 done => Ok(done),
             },
@@ -1199,7 +1599,24 @@ impl Ledger {
                  [{{\"quote\": \"<the owner's exact words for one instruction>\", \"title\": \"<one line>\", \"minutes\": <estimate>, \"value\": \"low|medium|high\"}}]\n\
                  EOF\n\
                  Use [] if it asks for nothing. A standing preference (\"never…\", \"always…\") is {{\"kind\": \"rule\", \"paths\": [\"<globs it applies to, or none for the whole project>\"], ...}} instead of a task. \
-                 Add \"part\": \"<the part of the project it's about>\" when the owner names one. If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\"}}]' | {cmd} report"
+                 Put each task in its folder, the part of the project it's about: \"folder\": \"<project › folder>\" (Hive then loads every memory of that folder for you). If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\", \"report\": \"<when done: what you did, where, what's left>\"}}]' | {cmd} report. \
+                 Handing folder work to a subagent, put a line \"Hive folder: <project › folder>\" in its prompt and Hive adds that folder's memories. Save what later agents in a folder must know: {cmd} remember \"<project › folder>\" [note|spec|decision] <<'EOF' (first line the title)."
+            ));
+            let here = project_key(project);
+            let names: Vec<String> = self
+                .folders(Some(&here))?
+                .iter()
+                .filter_map(|f| f["name"].as_str().map(str::to_string))
+                .collect();
+            if !names.is_empty() {
+                out.push_str(&format!("\nFolders in {here}: {}.", names.join(", ")));
+            }
+        }
+        if let Some((p, name)) = addressed_folder(prompt) {
+            let name = self.ensure_folder(&p, &name)?;
+            out.push_str(&format!(
+                "\nThe owner sent this for the folder \"{p} › {name}\": put its tasks there.\n{}",
+                self.folder_brief(&p, &name)?
             ));
         }
         if let Some(r) = self.estimate_ratio()?.filter(|r| !(0.8..=1.25).contains(r)) {
@@ -1307,7 +1724,34 @@ impl Ledger {
     /// An agent's `hive-tasks add|report|done|rule-off`, done here rather than by the command:
     /// the hook runs outside the harness's sandbox, which may not let the command write the
     /// ledger. The agent gets the result in place of running it.
-    fn on_command(&self, input: &Value) -> Result<Value, String> {
+    /// A subagent handed work in a folder (its prompt has a line "Hive folder: hive › memory
+    /// retrieval") starts with every memory of that folder added to its prompt.
+    fn on_subagent(&self, project: &str, input: &Value) -> Result<Value, String> {
+        static NAMED: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?mi)^[ \t*-]*Hive folder:[ \t]*(.+?)[ \t]*$").unwrap());
+        let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
+        let prompt = str_of(&tool_input, "prompt");
+        let mut briefs = Vec::new();
+        for c in NAMED.captures_iter(prompt) {
+            if let Some((p, name)) = folder_place(project, c[1].trim_matches(['"', '\'', '`'])) {
+                let name = self.ensure_folder(&p, &name)?;
+                briefs.push(self.folder_brief(&p, &name)?);
+            }
+        }
+        if briefs.is_empty() {
+            return Ok(Value::Null);
+        }
+        let mut updated = tool_input.clone();
+        updated["prompt"] = json!(format!("{prompt}\n\n{}", briefs.join("\n\n")));
+        Ok(json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "Hive added the folder's memories to the subagent's prompt.",
+            "updatedInput": updated,
+        }}))
+    }
+
+    fn on_command(&self, input: &Value, project: &str) -> Result<Value, String> {
         let Some((command, id, body)) =
             agent_command(input.get("tool_input").unwrap_or(&Value::Null))
         else {
@@ -1324,6 +1768,15 @@ impl Ledger {
             "done" => self
                 .report(&json!([{"id": id, "status": "done", "outcome": body}]))
                 .map(|l| l.join("\n")),
+            "folder" => folder_place(project, &id)
+                .ok_or_else(|| format!("{id:?} isn't a folder."))
+                .and_then(|(p, name)| self.folder_brief(&p, &name)),
+            remember if remember.starts_with("remember") => folder_place(project, &id)
+                .ok_or_else(|| format!("{id:?} isn't a folder."))
+                .and_then(|(p, name)| {
+                    let kind = remember.strip_prefix("remember:").unwrap_or("note");
+                    self.remember(&p, &name, kind, &body)
+                }),
             _ => self.rule_off(&id),
         };
         let reason = match result {
@@ -1480,6 +1933,18 @@ pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
     static RULE_OFF: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^(?:\S*/)?hive-tasks[ \t]+rule-off[ \t]+([Rr]\d+)$").unwrap()
     });
+    static FOLDER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"^(?:\S*/)?hive-tasks[ \t]+folder[ \t]+(?:"([^"\n]+)"|'([^'\n]+)'|([^\n;&|<>]+?))[ \t]*$"#).unwrap()
+    });
+    static REMEMBER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)^(?:\S*/)?hive-tasks[ \t]+remember[ \t]+(?:"([^"\n]+)"|'([^'\n]+)')(?:[ \t]+(note|spec|decision))?[ \t]*<<-?[ \t]*['"]?(\w+)['"]?[ \t]*\n(.*?)\n[ \t]*(\w+)$"#).unwrap()
+    });
+    let quoted = |c: &regex::Captures, groups: &[usize]| {
+        groups
+            .iter()
+            .find_map(|g| c.get(*g))
+            .map_or(String::new(), |m| m.as_str().trim().to_string())
+    };
     let text = text.trim();
     let text = WRAPPED
         .captures(text)
@@ -1518,6 +1983,14 @@ pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
         ("done".to_string(), c[1].to_string(), outcome)
     } else if let Some(c) = RULE_OFF.captures(&text) {
         ("rule-off".to_string(), c[1].to_string(), String::new())
+    } else if let Some(c) = FOLDER.captures(&text) {
+        ("folder".to_string(), quoted(&c, &[1, 2, 3]), String::new())
+    } else if let Some(c) = REMEMBER.captures(&text) {
+        if c[4] != c[6] {
+            return None;
+        }
+        let kind = c.get(3).map_or("note", |m| m.as_str());
+        (format!("remember:{kind}"), quoted(&c, &[1, 2]), c[5].to_string())
     } else {
         return None;
     };
@@ -1525,6 +1998,59 @@ pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
         return None;
     }
     Some((command, id, body))
+}
+
+/// A project's short name, the same on every machine and on the web: the repository's name for
+/// "github.com/owner/name", the folder's name for a path ("a scratch folder" for the desktop app's
+/// throwaway session folders), in lower case (the dashboard's projectName, lower-cased).
+pub fn project_key(project: &str) -> String {
+    let text = project.trim().trim_end_matches('/');
+    if text.contains("/scratch-workspaces/") {
+        return "a scratch folder".into();
+    }
+    text.rsplit('/').next().unwrap_or(text).to_lowercase()
+}
+
+/// Where a folder named in a task or a message is, as (project, folder name): "hive › memory
+/// retrieval" (or "hive > memory retrieval") names its project; "memory retrieval" is in
+/// `project`, the project id of the session that names it.
+pub fn folder_place(project: &str, folder: &str) -> Option<(String, String)> {
+    let folder = folder.trim();
+    let (p, name) = match folder.split_once('›').or_else(|| folder.split_once(" > ")) {
+        Some((p, name)) => (p.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase(), name),
+        None => (project_key(project), folder),
+    };
+    let name = clip(&name.split_whitespace().collect::<Vec<_>>().join(" "), 80);
+    (!name.is_empty() && !p.is_empty()).then_some((p, name))
+}
+
+/// The folder a message from the dashboard is for: it starts "For hive › memory retrieval: ".
+pub fn addressed_folder(text: &str) -> Option<(String, String)> {
+    static FOR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^For ([^:\n›]+?) › ([^:\n]+?): ").unwrap());
+    let c = FOR.captures(text.trim_start())?;
+    folder_place("", &format!("{} › {}", &c[1], &c[2]))
+}
+
+/// "40 s", "14 min", "2 h 5 min".
+pub fn span(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        s if s < 3600 => format!("{} min", (s + 30) / 60),
+        s => match (s + 30) / 60 % 60 {
+            0 => format!("{} h", s / 3600),
+            m => format!("{} h {m} min", s / 3600),
+        },
+    }
+}
+
+/// "900", "18k", "1.2M".
+pub fn token_count(n: i64) -> String {
+    match n {
+        n if n < 1000 => n.to_string(),
+        n if n < 1_000_000 => format!("{}k", (n + 500) / 1000),
+        n => format!("{:.1}M", n as f64 / 1e6),
+    }
 }
 
 fn context(event: &str, text: &str) -> Value {
@@ -1952,7 +2478,7 @@ fn private(path: &Path, mode: u32) {
 /// patches can arrive through more than one tool, and the hook ignores any call that edits nothing.
 fn hook_events(harness: &str) -> Vec<(&'static str, Option<&'static str>, u64)> {
     let edit = if harness == "claude" {
-        Some("Edit|Write|MultiEdit|NotebookEdit|Bash")
+        Some("Edit|Write|MultiEdit|NotebookEdit|Bash|Agent|Task")
     } else {
         None
     };

@@ -1,4 +1,4 @@
-use hive_tasks::{edited_paths, glob_match, owner_message, parse_iso_utc, redact, words, Ledger};
+use hive_tasks::{addressed_folder, agent_command, edited_paths, folder_place, glob_match, owner_message, parse_iso_utc, redact, words, Ledger};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -358,7 +358,7 @@ fn installing_keeps_other_hooks_and_is_undone_by_uninstalling() {
     assert_eq!(stop[1]["hooks"][0]["command"], cmd);
     assert_eq!(
         once["hooks"]["PreToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit|Bash"
+        "Edit|Write|MultiEdit|NotebookEdit|Bash|Agent|Task"
     );
     assert!(
         merge_hooks(json!({}), "codex", Some(cmd))["hooks"]["PreToolUse"][0]
@@ -617,7 +617,7 @@ fn closing_tasks_are_charged_the_agents_time_and_tokens_shared_by_estimate() {
         ),
         (json!(600), json!(60))
     );
-    assert_eq!(task("T2")["part"], "site footer");
+    assert_eq!(task("T2")["folder"], "site footer"); // "part" is the old name for "folder"
     assert!(task("T1")["work_seconds"].as_i64().unwrap() >= 0);
     // Reporting a done task again charges nothing more.
     f.ledger
@@ -648,4 +648,168 @@ fn codex_tokens_are_the_running_total_across_the_stretch_and_long_gaps_are_not_w
     assert_eq!((spent.tokens_in, spent.tokens_out), (1_600, 100));
     // 0→60→120 is work, the hour's gap isn't, then 3720→3800 is.
     assert_eq!(spent.busy_seconds, 60 + 60 + 80);
+}
+
+#[test]
+fn a_folder_keeps_its_memories_and_every_agent_put_on_it_gets_all_of_them() {
+    let f = fixture();
+    f.prompt("make memory retrieval faster and write down how ranking works");
+    let added = f
+        .ledger
+        .add(1, &json!([{"quote": "make memory retrieval faster", "title": "Faster retrieval", "folder": "Memory retrieval"}]))
+        .unwrap();
+    assert_eq!(added[0], "T1 Faster retrieval");
+    assert!(added[1].contains("\"project › Memory retrieval\": no memories yet"), "{added:?}");
+    f.ledger.remember("project", "memory retrieval", "spec", "# Ranking\nRecent facts first, then by match.").unwrap();
+    f.ledger.remember("project", "Memory Retrieval", "decision", "No embeddings on the Mac").unwrap();
+    assert!(f.ledger.remember("project", "memory retrieval", "gossip", "x").is_err());
+
+    // Registering a task in the folder loads every memory, and says how many.
+    f.prompt("also cache the retrieval results");
+    let added = f
+        .ledger
+        .add(2, &json!([{"quote": "cache the retrieval results", "title": "Cache", "folder": "memory retrieval"}]))
+        .unwrap();
+    let brief = &added[1];
+    assert!(brief.contains("all 2 of its memories, in full"), "{brief}");
+    assert!(brief.contains("--- 1/2 · spec · Ranking ·") && brief.contains("Recent facts first, then by match."));
+    assert!(brief.contains("--- 2/2 · decision · No embeddings on the Mac ·"));
+    assert!(brief.contains("(2 of 2) ---"));
+    // Same folder whatever the case; the name stays as first written.
+    let folders = f.ledger.folders(Some("project")).unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0]["name"], "Memory retrieval");
+    assert_eq!(folders[0]["memories"], 2);
+
+    // A subagent handed work in the folder gets them in its prompt.
+    let out = f.hook(
+        "PreToolUse",
+        json!({"tool_name": "Agent", "tool_input": {"description": "cache", "prompt": "Add a cache.\nHive folder: project › memory retrieval"}}),
+    );
+    let prompt = out["hookSpecificOutput"]["updatedInput"]["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("Add a cache.\nHive folder:"));
+    assert!(prompt.contains("Recent facts first") && prompt.contains("No embeddings on the Mac"));
+    assert_eq!(out["hookSpecificOutput"]["updatedInput"]["description"], "cache");
+    // One without a folder line is left alone.
+    let out = f.hook("PreToolUse", json!({"tool_name": "Agent", "tool_input": {"prompt": "Look around."}}));
+    assert!(out.is_null());
+
+    // A done task's report goes on the task and into the folder's memories, once.
+    f.ledger
+        .report(&json!([{"id": "T1", "status": "done", "outcome": "Retrieval is 3× faster.", "report": "Indexed facts by project; queries take 40 ms now. Left: the VM copy."}]))
+        .unwrap();
+    f.ledger.report(&json!([{"id": "T1", "status": "done", "outcome": "Retrieval is 3× faster."}])).unwrap();
+    let t1 = f.ledger.show("T1").unwrap();
+    assert!(t1["report"].as_str().unwrap().starts_with("Retrieval is 3× faster."), "{t1}");
+    let memories = f.ledger.memories("project", "memory retrieval").unwrap();
+    let reports: Vec<_> = memories.iter().filter(|m| m["kind"] == "report").collect();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["title"], "T1 Faster retrieval");
+    assert_eq!(reports[0]["task"], "T1");
+    // A report without a folder stays on the task.
+    f.prompt("rename the settings tab");
+    f.ledger.add(3, &json!([{"quote": "rename the settings tab", "title": "Rename"}])).unwrap();
+    f.ledger.report(&json!([{"id": "T3", "status": "done", "outcome": "Renamed it Preferences."}])).unwrap();
+    assert_eq!(f.ledger.show("T3").unwrap()["report"], "Renamed it Preferences.");
+}
+
+#[test]
+fn a_message_from_the_dashboard_names_its_folder_and_gets_the_folders_memories() {
+    let f = fixture();
+    f.ledger.remember("bucky match", "major requirements validation", "spec", "Rules\nA major needs 3 electives.").unwrap();
+    assert_eq!(
+        addressed_folder("For Bucky Match › Major requirements validation: check the CS major"),
+        Some(("bucky match".into(), "Major requirements validation".into()))
+    );
+    assert_eq!(addressed_folder("For hive: do it"), None);
+    let context = f.prompt("For Bucky Match › Major requirements validation: check the CS major");
+    assert!(context.contains("for the folder \"bucky match › major requirements validation\""), "{context}");
+    assert!(context.contains("A major needs 3 electives."));
+    // The project's folders are listed for the agent to file tasks in.
+    f.ledger.ensure_folder("project", "Footer").unwrap();
+    let context = f.prompt("change the footer links");
+    assert!(context.contains("Folders in project: Footer."), "{context}");
+    // Another project's folder, named in full, is kept that way on the task.
+    f.ledger
+        .add(2, &json!([{"quote": "change the footer links", "title": "Links", "folder": "hive › Dashboard"}]))
+        .unwrap();
+    assert_eq!(f.ledger.show("T1").unwrap()["folder"], "hive › Dashboard");
+    assert_eq!(folder_place("/x/project", "Footer"), Some(("project".into(), "Footer".into())));
+    assert_eq!(folder_place("/x/project", "  "), None);
+    // Hive's own agent: a dashboard send goes in its folder, and its turn gets the memories.
+    let t = f.ledger.hive_request("For Bucky Match › Major requirements validation: check minors too").unwrap();
+    assert_eq!(f.ledger.show(&t).unwrap()["folder"], "bucky match › major requirements validation");
+    let context = f.ledger.folder_context("For bucky match › major requirements validation: x").unwrap();
+    assert!(context.contains("its 1 memory, in full") && context.contains("A major needs 3 electives."), "{context}");
+}
+
+#[test]
+fn folders_and_memories_go_to_the_cloud_and_those_made_elsewhere_come_back_once() {
+    let f = fixture();
+    f.ledger.remember("hive", "Voice", "note", "Parakeet\nRuns in the sidecar.").unwrap();
+    let (batch, keys) = f.ledger.sync_batch(200).unwrap();
+    assert_eq!(batch["folders"][0]["name"], "Voice");
+    assert_eq!(batch["memories"][0]["title"], "Parakeet");
+    f.ledger.sync_sent(&keys).unwrap();
+    let taken = f
+        .ledger
+        .take_folders(&json!({
+            "folders": [{"project": "hive", "key": "voice", "name": "Voice", "about": "Speech in and out", "created_at": 1, "updated_at": 4102444800i64}],
+            "memories": [{"machine": "web", "id": 1, "project": "hive", "folder": "voice", "kind": "spec", "title": "Wake word", "body": "Hey Hive", "created_at": 2}]
+        }))
+        .unwrap();
+    assert_eq!(taken, 2);
+    // Taking the same again changes nothing, and none of it is pushed back.
+    f.ledger
+        .take_folders(&json!({"memories": [{"machine": "web", "id": 1, "project": "hive", "folder": "voice", "kind": "spec", "title": "Wake word", "body": "Hey Hive", "created_at": 2}]}))
+        .unwrap();
+    let (batch, _) = f.ledger.sync_batch(200).unwrap();
+    assert_eq!(batch["folders"].as_array().unwrap().len(), 0, "{batch}");
+    assert_eq!(batch["memories"].as_array().unwrap().len(), 0, "{batch}");
+    let brief = f.ledger.folder_brief("hive", "voice").unwrap();
+    assert!(brief.contains("all 2 of its memories") && brief.contains("What it's for: Speech in and out"), "{brief}");
+    let memories = f.ledger.memories("hive", "voice").unwrap();
+    assert_eq!(memories[0]["from"], "web"); // oldest first
+    assert_eq!(memories[1]["from"], Value::Null); // made here
+}
+
+#[test]
+fn a_long_folder_is_written_to_a_file_the_agent_reads_whole() {
+    let f = fixture();
+    for i in 0..30 {
+        f.ledger.remember("hive", "Dream", "note", &format!("Night {i}\n{}", "x".repeat(1000))).unwrap();
+    }
+    let brief = f.ledger.folder_brief("hive", "dream").unwrap();
+    assert!(brief.contains("all 30 of its memories") && brief.contains("Read that whole file"), "{brief}");
+    let path = brief.split(" are in ").nth(1).unwrap().split(". Read").next().unwrap();
+    let file = std::fs::read_to_string(path).unwrap();
+    assert!(file.contains("--- 30/30 · note · Night 29") && file.contains("(30 of 30)"));
+}
+
+#[test]
+fn an_agents_folder_commands_are_done_by_the_hook() {
+    let cmd = |c: &str| agent_command(&json!({"command": c}));
+    assert_eq!(
+        cmd("hive-tasks folder \"hive › Voice\""),
+        Some(("folder".into(), "hive › Voice".into(), String::new()))
+    );
+    assert_eq!(
+        cmd("hive-tasks remember 'hive › Voice' spec <<'EOF'\nWake word\nHey Hive\nEOF"),
+        Some(("remember:spec".into(), "hive › Voice".into(), "Wake word\nHey Hive".into()))
+    );
+    assert_eq!(
+        cmd("hive-tasks remember \"Voice\" <<EOF\nA note\nEOF"),
+        Some(("remember:note".into(), "Voice".into(), "A note".into()))
+    );
+    assert_eq!(cmd("hive-tasks folder Voice && rm -rf x"), None);
+    let f = fixture();
+    let out = f.hook(
+        "PreToolUse",
+        json!({"tool_name": "Bash", "tool_input": {"command": "hive-tasks remember \"Voice\" decision <<'EOF'\nOn device\nKeep it local.\nEOF"}}),
+    );
+    let said = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(said.contains("Saved to project › Voice as a decision: On device"), "{said}");
+    let out = f.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "hive-tasks folder Voice"}}));
+    let said = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(said.contains("Keep it local."), "{said}");
 }
