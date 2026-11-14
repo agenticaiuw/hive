@@ -311,3 +311,44 @@ fn clusters_sum_minutes_and_keep_first_and_last_seen() {
     assert_eq!(c[0].last_t, T0 + 100.0);
     assert_eq!(c[0].refs[0], format!("journal s:{}", T0 + 100.0));
 }
+
+#[test]
+fn asking_again_counts_against_the_failure_before_it() {
+    use hive_dream::evidence::charge_asked_again;
+    let fail = |t: f64| {
+        Occurrence::new(
+            "tool_error",
+            "No open window or browser tab has <q> in its title.",
+            t,
+            Source::Journal,
+            format!("journal s:{t}"),
+        )
+        .minutes(0.01)
+    };
+    let again = |t: f64| {
+        Occurrence::new(
+            "regression_words",
+            "again",
+            t,
+            Source::Journal,
+            format!("journal s:{t}"),
+        )
+    };
+    let mut all = vec![
+        fail(T0),
+        again(T0 + 20.0),
+        fail(T0 + 100.0),
+        again(T0 + 130.0),
+        // Too long after any failure: about something else.
+        again(T0 + 2000.0),
+    ];
+    assert_eq!(charge_asked_again(&mut all), 2);
+    let clusters = cluster(&all);
+    let switch = clusters
+        .iter()
+        .find(|c| c.category == "tool_error")
+        .unwrap();
+    assert_eq!(switch.minutes, 4.02);
+    assert!(switch.refs.iter().any(|r| r.starts_with("asked again: ")));
+    assert_eq!(clusters[0].category, "tool_error", "now ranks first");
+}

@@ -208,6 +208,41 @@ pub fn merge(mut all: Vec<Occurrence>) -> Vec<Occurrence> {
     out
 }
 
+/// What each time the owner had to ask again costs, in minutes: noticing, repeating, waiting.
+pub const ASKED_AGAIN_MINUTES: f64 = 2.0;
+/// The owner's "again" is about a failure at most this long before it.
+pub const ASKED_AGAIN_SECS: f64 = 600.0;
+
+/// Charges each time the owner said something came back ("again", "still") to the fixable
+/// failure just before it, as [`ASKED_AGAIN_MINUTES`] more, with a reference to what they said.
+/// Without it a failure that fails fast but has the owner asking again and again ranks by its
+/// own few seconds (switch_window: 13 "again"s, 0.1 minutes). Returns how many were charged.
+pub fn charge_asked_again(occurrences: &mut [Occurrence]) -> usize {
+    let mut order: Vec<usize> = (0..occurrences.len()).collect();
+    order.sort_by(|&a, &b| occurrences[a].t.total_cmp(&occurrences[b].t));
+    let mut charged = 0;
+    for (pos, &i) in order.iter().enumerate() {
+        if occurrences[i].category != "regression_words" {
+            continue;
+        }
+        let t = occurrences[i].t;
+        let before = order[..pos]
+            .iter()
+            .rev()
+            .copied()
+            .take_while(|&j| t - occurrences[j].t <= ASKED_AGAIN_SECS)
+            .find(|&j| fixable(&occurrences[j].category, &occurrences[j].signature));
+        if let Some(j) = before {
+            let said = occurrences[i].refs.first().cloned().unwrap_or_default();
+            let o = &mut occurrences[j];
+            o.minutes += ASKED_AGAIN_MINUTES;
+            o.refs.push(format!("asked again: {said}"));
+            charged += 1;
+        }
+    }
+    charged
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cluster {
     pub signature: String,

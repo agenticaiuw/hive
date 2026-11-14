@@ -322,8 +322,9 @@ pub fn run(opts: &Options) -> Result<Collected, String> {
     }
 
     counts.occurrences_before_merge = all.len();
-    let merged = evidence::merge(all);
+    let mut merged = evidence::merge(all);
     counts.occurrences = merged.len();
+    evidence::charge_asked_again(&mut merged);
     let mut clusters = evidence::cluster(&merged);
     let applied = register.apply(&clusters, until);
     for c in &mut clusters {
