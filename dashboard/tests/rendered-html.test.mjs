@@ -129,10 +129,10 @@ test("redirects anonymous visitors to the product login", async () => {
   );
 });
 
-test("server-renders the Dashboard after pairing-code login", async () => {
+test("server-renders the voice page after pairing-code login", async () => {
   const worker = await loadWorker();
   const cookie = await sessionCookie(worker);
-  const response = await request(worker, "http://localhost/", { cookie });
+  const response = await request(worker, "http://localhost/voice", { cookie });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
@@ -198,6 +198,17 @@ test("server-renders the Dashboard after pairing-code login", async () => {
   assert.doesNotMatch(html, /Or speak from this browser/);
   // It renders idle on the server; recording chrome only appears after a tap.
   assert.doesNotMatch(html, /Stop recording and send/);
+});
+
+test("the home page is the task board: a box to tell an agent, then every task", async () => {
+  const worker = await loadWorker();
+  const cookie = await sessionCookie(worker);
+  const response = await request(worker, "http://localhost/", { cookie });
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Tell an agent what to do/);
+  assert.match(html, /aria-current="page"[^>]*>Tasks</);
+  assert.match(html, /href="\/voice"/);
 });
 
 test("serves the app-authenticated dashboard from a public Sites host", async () => {
@@ -1247,11 +1258,11 @@ test("reports scheduled routines as unreadable from the cloud rather than absent
 
 /* ------------------------- Ask the hive (universal command box) --------- */
 
-test("renders one merged voice+text ask-the-hive box on the dashboard and hive pages", async () => {
+test("renders one merged voice+text ask-the-hive box on the voice and hive pages", async () => {
   const worker = await loadWorker();
   const cookie = await sessionCookie(worker);
 
-  for (const path of ["/", "/hive"]) {
+  for (const path of ["/voice", "/hive"]) {
     const response = await request(worker, `https://dashboard.example${path}`, {
       cookie,
     });

@@ -15,7 +15,7 @@ HIVE_BINS := hive-agent hive-ask hive-auth-mcp hive-phone-mcp hive-vhid hive-cre
 HIVE_BUILT := $(addprefix build/,$(HIVE_BINS))
 
 all: build/agent-vhid-helper build/agent-vhid-ocr build/agent-vhid-tap build/agent-vhid-captions build/hive-monitor $(HIVE_BUILT) \
-	build/agent-vhid-paste build/agent-vhid-selection build/Agent.app
+	build/agent-vhid-paste build/agent-vhid-selection build/Agent.app build/dashboard
 
 # One cargo build for all of them; each is copied in through a temporary file and renamed, so a
 # running agent keeps its old executable.
@@ -27,6 +27,14 @@ build/.hive-built: crates/hive/Cargo.toml crates/hive/Cargo.lock $(call sources,
 
 $(HIVE_BUILT): build/.hive-built
 	@:
+
+# The dashboard (../../dashboard, the same app as the website) built for Hive.app's window, which
+# serves it from here (workspace-engine/Sources/UnifiedAgent/dashboard.swift).
+build/dashboard: ../../dashboard/package.json ../../dashboard/svelte.config.js ../../dashboard/vite.config.ts \
+		$(call sources,../../dashboard/src ../../dashboard/static)
+	cd ../../dashboard && npm run build:desktop
+	rm -rf $@.tmp && cp -R ../../dashboard/build-desktop $@.tmp
+	rm -rf $@ && mv $@.tmp $@
 
 # The nightly self-review, not part of `all` (Agent.app never runs it). It runs on Hive's cloud
 # VM (cloud/dream/install.sh); `make build/hive-dream` builds it here to try it by hand.

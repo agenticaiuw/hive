@@ -14,6 +14,7 @@ hive-tasks report               a JSON list on stdin of {\"id\": \"T<n>\", \"sta
                                 status: open, active, done, waiting, blocked, dropped
 hive-tasks done T<n> <outcome>  report one task done
 hive-tasks board [--all] [--json]   this project's tasks (--all: every project)
+hive-tasks board --cloud        every machine's board from the cloud copy, as JSON
 hive-tasks show T<n>|M<n>|R<n>  one task's report, a message and its tasks, or a rule
 hive-tasks rules [--all]        the owner's rules, where each applies and how often it was shown
 hive-tasks rule-off R<n>        stop applying a rule
@@ -21,7 +22,7 @@ hive-tasks install|uninstall [--claude] [--codex]
                                 put the hooks into (or take them out of) Claude Code and Codex
 hive-tasks sync                 push what changed to the cloud copy (~/.config/hive/tasks.json) and
                                 take in the rules set on other machines (runs by itself after changes)
-hive-tasks web                  open every machine's board in the browser, signed in
+hive-tasks web                  open Hive's dashboard with every machine's tasks (its window on the Mac)
 ";
 
 fn main() {
@@ -137,6 +138,11 @@ fn run(args: &[String]) -> Result<String, String> {
             sync_soon(&path);
             Ok(out)
         }
+        // Every machine's board, as the cloud copy has it (what the dashboard shows).
+        "board" if flag("--cloud") => {
+            let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
+            Ok(serde_json::to_string(&cloud.get("/v1/board")?).unwrap_or_default())
+        }
         "board" => {
             let project = (!flag("--all")).then(here);
             let board = ledger.board(project.as_deref())?;
@@ -189,8 +195,18 @@ fn sync(quiet: bool) -> Result<String, String> {
     Ok(if quiet { String::new() } else { said })
 }
 
-/// Opens the board page signed in, with a one-use code that never appears on screen.
+/// Opens Hive's dashboard: on the Mac its window in Hive.app (`hive://tasks`), else the board page
+/// signed in, with a one-use code that never appears on screen.
 fn web() -> Result<String, String> {
+    if cfg!(target_os = "macos")
+        && std::process::Command::new("open")
+            .arg("hive://tasks")
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        return Ok("Opened Hive's dashboard.".into());
+    }
     let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
     let answer = cloud.post("/v1/login-code", &serde_json::json!({}))?;
     let code = answer["code"]
