@@ -74,7 +74,7 @@ const MESSAGE_COLUMNS = ["id", "harness", "session", "project", "text", "said_at
 const TASK_COLUMNS = [
   "id", "message", "quote", "title", "status", "minutes", "value", "outcome", "evidence",
   "created_at", "updated_at", "done_at", "left_open_at", "work_seconds", "tokens_in", "tokens_out", "folder",
-  "report",
+  "report", "files", "commits",
 ];
 const MEMORY_COLUMNS = ["id", "project", "folder", "kind", "title", "body", "task", "created_at"];
 const EVENT_COLUMNS = ["id", "task", "at", "status", "note"];
@@ -242,7 +242,7 @@ async function board(request, env) {
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
-              m.harness, m.session, m.project, m.times, m.said_at
+              t.files, t.commits, m.harness, m.session, m.project, m.times, m.said_at
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1
        ORDER BY t.updated_at DESC LIMIT 600`,
