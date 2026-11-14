@@ -1,0 +1,18 @@
+# Hive's orchestrator on the VM: takes the owner's instructions from the dashboard's queue (the task
+# board Worker), plans them into tasks with a model each, runs them and reports back (orchestrator.mjs).
+# Install: sudo cp hive-orchestrator.service /etc/systemd/system/ && sudo systemctl enable --now hive-orchestrator
+[Unit]
+Description=Hive orchestrator (the owner's instructions from the dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hive-vm-agent/app
+Environment=HIVE_VM_STATE=/home/ubuntu/hive-vm-agent/state
+ExecStart=/usr/local/bin/node /home/ubuntu/hive-vm-agent/app/orchestrator.mjs
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

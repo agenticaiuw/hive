@@ -129,10 +129,34 @@ echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs 
   <file> --to vm` uploads from the Mac and has the VM fetch it into `~/hive-files`;
   `files.mjs fetch | put | list` is the VM's side (through root's Cloudflare login, by `sudo -n`).
 
+## Hive's orchestrator
+
+`orchestrator.mjs` is where the owner's instructions from the dashboard go, from any surface (the
+website, the phone, the extension). The dashboard queues each one on the task board Worker
+(`POST /v1/requests`, `cloud/tasks`), where it is also a board message on machine `cloud`. The
+orchestrator takes the oldest one and then:
+
+1. Plans it: a cheap Codex (`gpt-6.1-terra`, low effort, no tools) splits it into tasks and rates
+   each `easy`, `normal`, `hard` or `hardest`.
+2. Picks each task's model from its rating (`MODELS`: `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`,
+   `gpt-6-astra`). A code task gets at least `gpt-6.1-sol`. The board shows the choice in the task's
+   evidence.
+3. Files the tasks on the board under the request, in the folder the owner sent it from. A folder the
+   planner names is used only if it already exists.
+4. Runs each task through `hive-task.mjs` with that model. The task gets every memory of its folder,
+   in full. Code tasks wait on the board for a coding agent on the Mac, since this agent doesn't
+   change code yet.
+5. Reports each task as it goes: its status, time, tokens, outcome and report. A task's report is
+   also saved to its folder as a memory.
+
+It runs as the `hive-orchestrator` systemd service (`hive-orchestrator.service`), as `ubuntu`. It
+reads the board's address and token from root's hive-tasks config by `sudo -n`. One request runs at
+a time, and its tasks run one after another, since the VM has one screen.
+
 ## Tests
 
 ```bash
-node --test cloud/vm-agent/vm-agent.test.mjs cloud/vm-agent/hive-agent.test.mjs desktop/tests/vm_post.test.mjs
+node --test cloud/vm-agent/vm-agent.test.mjs cloud/vm-agent/hive-agent.test.mjs cloud/vm-agent/orchestrator.test.mjs desktop/tests/vm_post.test.mjs
 ```
 
 ## Neighbours on the VM

@@ -315,6 +315,50 @@ test("queues a typed dashboard command through the pendant relay pipeline", asyn
   });
 });
 
+test("sends an instruction from the website to Hive's orchestrator through the board's queue", async () => {
+  const worker = await loadWorker();
+  const boardCalls = [];
+  const runtimeEnv = {
+    ...env,
+    TASKS_TOKEN: "server-side-board-token",
+    TASKS: {
+      async fetch(url, init) {
+        boardCalls.push({ path: new URL(url).pathname, init, body: JSON.parse(init.body) });
+        return Response.json({ ok: true, id: 7, ahead: 1 });
+      },
+    },
+  };
+  const cookie = await sessionCookie(worker, runtimeEnv);
+
+  const listed = await request(worker, "https://dashboard.example/api/agents", { cookie, runtimeEnv });
+  assert.deepEqual((await listed.json()).agents, [
+    { id: "hive-cloud", name: "Hive", where: "the cloud", available: true },
+  ]);
+
+  const response = await postJson(
+    worker,
+    "https://dashboard.example/api/agents/send",
+    { agent: "hive-cloud", text: "  For hive › Voice: check the dictation socket  " },
+    { cookie, runtimeEnv },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { accepted: true, receiptId: "R7", ahead: 1 });
+  assert.equal(boardCalls.length, 1);
+  assert.equal(boardCalls[0].path, "/v1/requests");
+  assert.equal(boardCalls[0].init.method, "POST");
+  assert.equal(boardCalls[0].init.headers.authorization, "Bearer server-side-board-token");
+  assert.deepEqual(boardCalls[0].body, { text: "For hive › Voice: check the dictation socket", agent: "hive-cloud" });
+
+  // Nothing to send to without the board, and nobody but the owner can send.
+  const unplugged = await request(worker, "https://dashboard.example/api/agents", { cookie, runtimeEnv: { ...env } });
+  const [hive] = (await unplugged.json()).agents;
+  assert.equal(hive.available, false);
+  assert.match(hive.note, /isn't connected/);
+  const anonymous = await postJson(worker, "https://dashboard.example/api/agents/send", { text: "x" }, { runtimeEnv });
+  assert.notEqual(anonymous.status, 200);
+  assert.equal(boardCalls.length, 1);
+});
+
 test("transcribes a browser recording and dispatches the transcript", async () => {
   const worker = await loadWorker();
   const relayApiKey = "server-side-relay-secret";
