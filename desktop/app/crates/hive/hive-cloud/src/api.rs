@@ -3,6 +3,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
+/// The code for an HTTP error whose body isn't Hive Cloud's JSON.
+pub const NOT_HIVE: &str = "http_error";
+
 #[derive(Debug)]
 pub enum ApiError {
     /// No answer: offline, DNS, TLS or timeout. Safe to retry later.
@@ -83,12 +86,22 @@ impl Client {
         match result {
             Ok(res) => Ok(res),
             Err(ureq::Error::Status(status, res)) => {
-                let body: Value = res.into_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-                Err(ApiError::Http {
-                    status,
-                    code: body["error"].as_str().unwrap_or("http_error").to_string(),
-                    message: body["message"].as_str().unwrap_or("").to_string(),
-                })
+                let text = res.into_string().unwrap_or_default();
+                let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                match body["error"].as_str() {
+                    Some(code) => Err(ApiError::Http {
+                        status,
+                        code: code.to_string(),
+                        message: body["message"].as_str().unwrap_or("").to_string(),
+                    }),
+                    // Not Hive Cloud's own answer: Cloudflare's edge (a Worker that hasn't reached
+                    // every server yet, a limit) or something in between. Show what came back.
+                    None => Err(ApiError::Http {
+                        status,
+                        code: NOT_HIVE.into(),
+                        message: text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect(),
+                    }),
+                }
             }
             Err(ureq::Error::Transport(t)) => Err(ApiError::Offline(t.to_string())),
         }

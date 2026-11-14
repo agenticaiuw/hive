@@ -29,7 +29,9 @@ Sync
   push | pull            Only one direction.
       --allow-mass-delete   Let a sync delete more than a quarter of the cloud's files.
       --max-new-mb N        Upload at most N MB of new data this time.
-  watch [--every S]      Keep syncing (every 60 s, and right away when cloud/nudge is touched).
+  watch [--every S] [--parent PID]
+                         Keep syncing (every 60 s, and right away when cloud/nudge is touched);
+                         with --parent, stop when that process is gone (Hive.app starts it so).
   restore <empty folder> Download everything into a folder, checked byte for byte.
   verify [--all|--sample N]
                          Download records and check every chunk and file hash (default 50).
@@ -373,6 +375,9 @@ fn cmd_sync(cmd: &str, args: &[String]) -> Result<(), String> {
 
 fn cmd_watch(args: &[String]) -> Result<(), String> {
     let every: u64 = opt(args, "--every").map(|s| s.parse().map_err(|_| "--every takes seconds")).transpose()?.unwrap_or(60);
+    let parent: Option<i32> = opt(args, "--parent").map(|s| s.parse().map_err(|_| "--parent takes a process ID")).transpose()?;
+    // SAFETY: kill with signal 0 only checks that the process exists.
+    let orphaned = || parent.is_some_and(|pid| unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
     let _lock = sync::lock()?;
     let engine = Engine::load()?;
     let opts = push_options(args)?;
@@ -400,6 +405,9 @@ fn cmd_watch(args: &[String]) -> Result<(), String> {
         let start = Instant::now();
         while start.elapsed() < wait {
             std::thread::sleep(Duration::from_secs(2));
+            if orphaned() {
+                return Ok(());
+            }
             if stamp(&nudge) != seen {
                 break;
             }

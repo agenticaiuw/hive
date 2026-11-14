@@ -773,6 +773,69 @@ pub fn start_update(log: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Hive Cloud, the person's own cloud (crates/hive/hive-cloud): once this Mac is enrolled
+/// (`<state>/cloud/config.json`), Hive keeps `hive-cloud watch` running while it runs. It syncs
+/// every minute and right away when a recording finishes; it stops when Hive does.
+fn start_cloud_sync(agent: &Arc<VoiceAgent>) {
+    let cloud = cloud_dir();
+    if !cloud.join("config.json").is_file() {
+        return;
+    }
+    let program = hive_common::build_dir().join("hive-cloud");
+    if !program.is_file() {
+        agent.out(&format!("   ☁️  Hive Cloud is set up, but {} is missing (make).", program.display()));
+        return;
+    }
+    let me = Arc::downgrade(agent);
+    std::thread::spawn(move || {
+        let mut said = false;
+        // A watch from a Hive that just quit can still hold the sync lock for a moment, and a
+        // crash shouldn't end syncing: start it again a minute after it stops.
+        while me.upgrade().is_some() {
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(cloud.join("watch.log"));
+            let mut command = Command::new(&program);
+            command.args(["watch", "--parent", &std::process::id().to_string()]).stdin(Stdio::null());
+            if let Ok(log) = log {
+                if let Ok(err) = log.try_clone() {
+                    command.stdout(log).stderr(err);
+                }
+            }
+            match command.spawn().and_then(|mut child| child.wait()) {
+                Ok(status) if !status.success() && !said => {
+                    said = true;
+                    if let Some(agent) = me.upgrade() {
+                        agent.out(&format!("   ☁️  Hive Cloud sync stopped ({status}); see {}", cloud.join("watch.log").display()));
+                    }
+                }
+                Err(error) if !said => {
+                    said = true;
+                    if let Some(agent) = me.upgrade() {
+                        agent.out(&format!("   ☁️  Hive Cloud sync couldn't start: {error}"));
+                    }
+                }
+                _ => {}
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+}
+
+/// `HIVE_CLOUD_DIR`, else `<state>/cloud`, as hive-cloud has it.
+fn cloud_dir() -> PathBuf {
+    match std::env::var_os("HIVE_CLOUD_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => hive_common::state_dir().join("cloud"),
+    }
+}
+
+/// Ask a running `hive-cloud watch` to sync now.
+fn nudge_cloud() {
+    let cloud = cloud_dir();
+    if cloud.join("config.json").is_file() {
+        let _ = std::fs::write(cloud.join("nudge"), b"");
+    }
+}
+
 /// Every task is recorded: the screen as a video, with a timeline of Hive's status and the Mac's
 /// state at exact times, uploaded to Cloudflare R2 afterwards (task_recording, cloud_archive).
 /// Also the knowledge base in the cloud: saves made while offline go up, the Mac's copy is
@@ -812,8 +875,10 @@ pub fn start_recording(agent: &Arc<VoiceAgent>) {
     let finished = report(me.clone(), "🎞");
     options.on_finished = Some(Box::new(move |_folder: &Path| {
         hive_knowledge::cloud_archive::archive_in_background(Some(finished.clone()));
+        nudge_cloud();
     }));
     agent.recorder.set(Some(Recorder::new(options)));
+    start_cloud_sync(agent);
     hive_knowledge::cloud_archive::archive_in_background(Some(report(me.clone(), "🎞")));
     hive_knowledge::actions::sync_in_background(Some(report(me.clone(), "📚")));
     hive_knowledge::knowledge::sync_in_background(Some(report(me, "📚")));
