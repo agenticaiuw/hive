@@ -11,7 +11,7 @@ sources = $(shell find $(1) -type f -not -path '*/target/*' -not -path '*/.build
 HIVE_BINS := hive-agent hive-ask hive-auth-mcp hive-phone-mcp hive-vhid hive-credentials hive-knowledge hive-session-journal hive-context-panel \
 	hive-memory-search hive-ingest phone-status \
 	workspace-mcp-bridge workspace-fence workspace-update workspace-tool restart-agent-once hive-bundle-migration \
-	hive-app-server-transport hive-settings-reader hive-request-ledger
+	hive-app-server-transport hive-settings-reader hive-request-ledger hive-cloud
 HIVE_BUILT := $(addprefix build/,$(HIVE_BINS))
 
 all: build/agent-vhid-helper build/agent-vhid-ocr build/agent-vhid-tap build/agent-vhid-captions build/hive-monitor $(HIVE_BUILT) \
