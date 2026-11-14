@@ -46,7 +46,7 @@ import {
   presentApproval,
   settleApproval,
   worldFingerprintFor,
-} from '../../mobile/simulator/shared/approvalHandoff.js'
+} from '../../cloud/shared/approvalHandoff.js'
 
 /*
  * WHAT THE PENDANT CAN ACTUALLY DO TODAY, written down where the feature lives

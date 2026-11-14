@@ -6,5 +6,9 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "ws": "^8.21.1"
+  },
+  "scripts": {
+    "relay": "node server.js",
+    "test": "node --test --test-concurrency=1 *.test.js store/*.test.js ../shared/*.test.js ../shared/*.test.mjs ../shared/domains/*.test.js"
   }
 }

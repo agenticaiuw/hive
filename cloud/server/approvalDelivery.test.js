@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { prepareAction } from '../../desktop/local-agent/prepareApprove.js'
-import { attestApprovalDelivery } from '../../mobile/simulator/shared/approvalHandoff.js'
+import { attestApprovalDelivery } from '../shared/approvalHandoff.js'
 import {
   APPROVAL_DECISION_KIND,
   APPROVAL_REQUEST_KIND,

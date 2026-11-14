@@ -32,7 +32,7 @@
  * AFTER the authentication middleware (it reads `request.relayPrincipal`) and
  * BEFORE the route declarations (it wraps the response before the handler runs).
  */
-import { DELIVERY_STAGES } from '../../mobile/simulator/shared/audioDelivery.js'
+import { DELIVERY_STAGES } from '../shared/audioDelivery.js'
 import { ringBridgeDoorbell } from './bridgeDoorbell.js'
 
 /**

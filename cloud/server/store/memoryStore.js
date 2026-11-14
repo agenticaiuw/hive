@@ -2,7 +2,7 @@ import { JOB_TTL_MS } from '../config.js'
 import {
   mergeProductSync as mergeProductSyncDocuments,
   normalizeProductSync,
-} from '../../../mobile/simulator/shared/productSync.js'
+} from '../../shared/productSync.js'
 import {
   compareJobsNewestFirst,
   jobIsBeforeCursor,

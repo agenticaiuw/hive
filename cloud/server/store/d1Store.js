@@ -6,7 +6,7 @@ import {
   normalizeProductSync,
   PRODUCT_SYNC_SCHEMA_VERSION,
   recordVersionKey,
-} from '../../../mobile/simulator/shared/productSync.js'
+} from '../../shared/productSync.js'
 import {
   likePatternForSearch,
   normalizeJobCursor,

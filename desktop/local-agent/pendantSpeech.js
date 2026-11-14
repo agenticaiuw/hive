@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { stripProtocolTerminators } from '../../mobile/simulator/shared/protocolText.js'
+import { stripProtocolTerminators } from '../../cloud/shared/protocolText.js'
 
 export const PENDANT_SPEECH_SAMPLE_RATE = 24000
 export const PENDANT_SPEECH_CHANNELS = 1

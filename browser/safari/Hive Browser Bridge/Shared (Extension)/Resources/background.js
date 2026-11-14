@@ -825,7 +825,7 @@
 		if (!relayEnabled) reason = "The relay peer is switched off (relayEnabled is not true).";
 		else if (!relayUrl) reason = "No usable relayUrl is configured. It must be one of the allowlisted relay origins.";
 		else if (!relayDeviceId) reason = "No relayDeviceId is configured — that is the address the relay delivers this extension's mail to.";
-		else if (!deviceToken) reason = "No deviceToken is configured — pair this browser with `pendant-credentials.mjs pair --role browser_node`.";
+		else if (!deviceToken) reason = "No deviceToken is configured — pair this browser with `device-credentials.mjs pair --role browser_node`.";
 		return {
 			relayEnabled,
 			relayUrl,

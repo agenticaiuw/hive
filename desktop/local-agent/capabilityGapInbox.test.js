@@ -11,8 +11,8 @@ import test from 'node:test'
  */
 import { testWorkspacePath } from './testWorkspace.js'
 
-import { commonsPaths } from '../../mobile/simulator/scripts/commons.mjs'
-import { createCapabilityRegistry } from '../../mobile/simulator/shared/capabilityRegistry.js'
+import { commonsPaths } from './commons.mjs'
+import { createCapabilityRegistry } from '../../cloud/shared/capabilityRegistry.js'
 import {
   DEDUP_WINDOW_MS,
   listGaps,

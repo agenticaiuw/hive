@@ -3,7 +3,7 @@ import {
   DELIVERY_STAGES,
   deliveryRunStatus,
   gradeAudioDelivery,
-} from '../../mobile/simulator/shared/audioDelivery.js'
+} from '../shared/audioDelivery.js'
 /* The one definition of "this plan is parked for the owner's approval" —
  * shared with the routine reaper so the run feed and the scheduler can never
  * disagree about what a parked job is. */

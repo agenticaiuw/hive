@@ -75,7 +75,7 @@
  * action. Execution stays where the abort controller and the job tracker live.
  */
 
-import { canInvoke, resolveCapability } from '../../mobile/simulator/shared/capabilityRegistry.js'
+import { canInvoke, resolveCapability } from '../../cloud/shared/capabilityRegistry.js'
 
 /* What a part is allowed to touch. 'not-web' keeps the field non-null for
  * parts where the question does not arise, so a reader never has to guess

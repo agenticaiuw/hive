@@ -4,13 +4,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const browserExtensionDir = path.dirname(fileURLToPath(import.meta.url))
-const simulatorDir = path.resolve(browserExtensionDir, '../../mobile/simulator')
 const sourceDir = path.join(browserExtensionDir, 'src')
 const outputDir = path.join(browserExtensionDir, 'build')
 const chromeDir = path.join(outputDir, 'chrome')
 const safariDir = path.join(outputDir, 'safari')
 const chromeArchive = path.join(outputDir, 'hive-browser-bridge-chrome.zip')
-const rolldownPath = path.join(simulatorDir, 'node_modules', '.bin', 'rolldown')
+const rolldownPath = path.join(browserExtensionDir, 'node_modules', '.bin', 'rolldown')
 
 fs.rmSync(outputDir, { recursive: true, force: true })
 fs.mkdirSync(outputDir, { recursive: true })

@@ -30,7 +30,7 @@ import {
 import { voiceRunForJob } from './jobs.js'
 import { composeRelayMail, registerNodeMeshRoutes } from './nodeMailbox.js'
 import { consumeRelayApprovalMail } from './approvalDelivery.js'
-import { createNodeEnvelope } from '../../mobile/simulator/shared/nodeMesh.js'
+import { createNodeEnvelope } from '../shared/nodeMesh.js'
 
 const BROWSER_DEVICE = 'ext-probe-chrome'
 const TASK_ID = '6f0b8a04-1111-4222-8333-abcdefabcdef'

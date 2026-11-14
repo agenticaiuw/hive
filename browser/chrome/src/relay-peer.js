@@ -81,7 +81,7 @@ import {
   normalizeNodeAddress,
   parseNodeEnvelope,
   RELAY_NODE_ADDRESS,
-} from '../../../mobile/simulator/shared/nodeMesh.js'
+} from '../../../cloud/shared/nodeMesh.js'
 import {
   BEARER_SUBPROTOCOL_PREFIX,
   BRIDGE_MAIL_FRAME,
@@ -89,7 +89,7 @@ import {
   BRIDGE_PING_INTERVAL_MS,
   MESH_SUBPROTOCOL,
   parseBridgeFrame,
-} from '../../../mobile/simulator/shared/bridgeSocketProtocol.js'
+} from '../../../cloud/shared/bridgeSocketProtocol.js'
 import { COMMAND_TYPES } from './bridge-core.js'
 
 export { RELAY_NODE_ADDRESS, BRIDGE_PING_FRAME, BRIDGE_PING_INTERVAL_MS }
@@ -212,7 +212,7 @@ export function normalizeRelayConfig(values = {}) {
       'No relayDeviceId is configured — that is the address the relay delivers this extension\'s mail to.'
   } else if (!deviceToken) {
     reason =
-      'No deviceToken is configured — pair this browser with `pendant-credentials.mjs pair --role browser_node`.'
+      'No deviceToken is configured — pair this browser with `device-credentials.mjs pair --role browser_node`.'
   }
 
   return {

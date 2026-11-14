@@ -1,7 +1,7 @@
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import '../../mobile/simulator/load-pendant-env.mjs'
+import '../../cloud/shared/loadEnv.mjs'
 
 const localAgentDirectory = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(localAgentDirectory, '..')

@@ -57,7 +57,7 @@ import {
   MAX_INBOX_PAGE,
   normalizeNodeAddress,
   RELAY_NODE_ADDRESS,
-} from '../../mobile/simulator/shared/nodeMesh.js'
+} from '../shared/nodeMesh.js'
 import { principalOwnsDevice } from './deviceAuth.js'
 
 /* A hub ring may cost a send this much and no more. A send is often awaited
