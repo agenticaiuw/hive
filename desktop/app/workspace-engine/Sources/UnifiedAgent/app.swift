@@ -39,6 +39,9 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     // Checked as the agent says ("@@ speak 1|0", "@@ window 1|0"); it keeps both for the next launch.
     let speakItem = NSMenuItem(title: "Sound (Voice and Chimes)", action: #selector(toggleSpeak), keyEquivalent: "")
     let windowItem = NSMenuItem(title: "Show Floating Window", action: #selector(toggleWindow), keyEquivalent: "")
+    /// The dashboard (dashboard/ at the repository's root) in a window; see dashboard.swift.
+    lazy var dashboard = DashboardWindow(files: URL(fileURLWithPath: repository).appendingPathComponent("build/dashboard"),
+                                         stateDir: stateDir)
     var contextURL: URL?  // the browser view of every payload, the panel's fallback
     var panelURL: URL?  // this session's panel.json
     lazy var panel = ContextPanel()
@@ -69,6 +72,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         let dictateItem = NSMenuItem(title: "Hold fn to Dictate", action: nil, keyEquivalent: "")
         dictateItem.isEnabled = false
         menu.addItem(dictateItem)
+        menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(.separator())
         let inputItem = NSMenuItem(title: "Input", action: nil, keyEquivalent: "")
         let inputMenu = NSMenu()
@@ -349,6 +353,13 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
             try? service.register()
         }
         loginItem.state = service.status == .enabled ? .on : .off
+    }
+
+    @objc func openDashboard() { dashboard.show() }
+
+    /// hive:// links (`open hive://tasks`) open the dashboard there.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "hive" { dashboard.show(path: DashboardWindow.path(for: url)) }
     }
 
     @objc func showLog() {

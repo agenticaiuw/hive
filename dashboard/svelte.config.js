@@ -12,12 +12,26 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
  * app is the cheap kind of duplication; two apps was the expensive kind.
  */
 const agentBuild = process.env.DASHBOARD_TARGET === "agent";
+/*
+ * `DASHBOARD_TARGET=desktop` emits the same static SPA for Hive's Mac app, which serves it from
+ * hive://app/ (no base path) and answers /api/* itself (desktop/app/workspace-engine,
+ * dashboard.swift).
+ */
+const desktopBuild = process.env.DASHBOARD_TARGET === "desktop";
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
   preprocess: vitePreprocess(),
   kit: {
-    adapter: agentBuild
+    adapter: desktopBuild
+      ? staticAdapter({
+          pages: "build-desktop",
+          assets: "build-desktop",
+          fallback: "index.html",
+          precompress: false,
+          strict: false,
+        })
+      : agentBuild
       ? staticAdapter({
           pages: "build-agent",
           assets: "build-agent",

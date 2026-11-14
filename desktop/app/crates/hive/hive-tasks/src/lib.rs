@@ -193,6 +193,20 @@ impl Cloud {
             .set("user-agent", "hive-tasks")
             .timeout(Duration::from_secs(20))
             .send_json(body);
+        Self::answer(answer)
+    }
+
+    /// `GET path` on the cloud copy, signed in as this machine.
+    pub fn get(&self, path: &str) -> Result<Value, String> {
+        let answer = ureq::get(&format!("{}{path}", self.url))
+            .set("authorization", &format!("Bearer {}", self.token))
+            .set("user-agent", "hive-tasks")
+            .timeout(Duration::from_secs(10))
+            .call();
+        Self::answer(answer)
+    }
+
+    fn answer(answer: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
         match answer {
             Ok(r) => r
                 .into_json()

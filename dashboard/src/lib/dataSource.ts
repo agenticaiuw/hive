@@ -460,3 +460,37 @@ export async function runRoutine(routineId: string) {
     method: "POST",
   });
 }
+
+/*
+ * Tasks and agents. Every host answers the same three routes (the website's server routes, the
+ * desktop app's hive:// handler), so nothing here branches on the backend. The board's shape is
+ * `$lib/tasks`'s to read.
+ */
+export async function fetchTaskBoard(): Promise<any> {
+  return apiRequest(`${base}/api/tasks`);
+}
+
+export type AgentChoice = {
+  id: string;
+  name: string;
+  where: string;
+  available: boolean;
+  note?: string;
+};
+
+export async function fetchAgents(): Promise<AgentChoice[]> {
+  const answer = await apiRequest(`${base}/api/agents`);
+  return Array.isArray(answer?.agents) ? answer.agents : [];
+}
+
+/** Hands `text` to an agent. `accepted: null` means it may or may not have started. */
+export async function sendToAgent(
+  agent: string,
+  text: string,
+): Promise<{ accepted: boolean | null; receiptId?: string; error?: string }> {
+  return apiRequest(`${base}/api/agents/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent, text }),
+  });
+}
