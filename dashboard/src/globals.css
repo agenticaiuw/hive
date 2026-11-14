@@ -1953,7 +1953,7 @@ blockquote {
 
 /* ---------- Hive (observability view, /hive) ---------- */
 /*
- * Ported from desktop/dashboard/aggregator/index.html and re-tokened to
+ * Ported from dashboard/aggregator/index.html and re-tokened to
  * this dashboard's palette. Every class is hv-prefixed; the six source colors
  * are hive-only categorical tokens (validated against --background).
  */

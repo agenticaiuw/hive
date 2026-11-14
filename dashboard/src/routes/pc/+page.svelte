@@ -2,9 +2,9 @@
   // @ts-nocheck
   import { base } from '$app/paths';
   import { onDestroy } from 'svelte';
-  import { pairMeshDevice } from '../../../../../cloud/shared/mesh-pairing.mjs';
-  import { MobilePcMeshClient } from '../../../../../cloud/shared/pc-mesh-client.mjs';
-  import { openPcMeshStore } from '../../../../../cloud/shared/pc-mesh-store.mjs';
+  import { pairMeshDevice } from '../../../../cloud/shared/mesh-pairing.mjs';
+  import { MobilePcMeshClient } from '../../../../cloud/shared/pc-mesh-client.mjs';
+  import { openPcMeshStore } from '../../../../cloud/shared/pc-mesh-store.mjs';
 
   let relayUrl = $state('');
   let deviceId = $state('');

@@ -2,7 +2,7 @@
 
 The relay's protocol and record shapes, used by every node that talks to it: the relay itself
 (`cloud/server`, `cloud/worker`), the Mac's local agent (`desktop/local-agent`), the browser
-extension (`browser/chrome`) and the dashboard (`desktop/dashboard`). Plain ES modules with no
+extension (`browser/chrome`) and the dashboard (`dashboard`). Plain ES modules with no
 npm dependencies, so each of those can import them directly.
 
 - `loadEnv.mjs`: reads the repo-root `.env` and derives `AGENT_TOKEN` / `SESSION_SECRET` from
