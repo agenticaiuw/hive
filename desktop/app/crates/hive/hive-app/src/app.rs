@@ -249,6 +249,14 @@ pub fn main(argv: &[String]) -> i32 {
     }
     real::wire_window(&window.0, &agent);
     real::start_recording(&agent);
+    // What the owner does on the Mac, all the time (hive-mac activity): the dream learns from it.
+    let working = Arc::downgrade(&agent);
+    let alive = Arc::downgrade(&agent);
+    hive_mac::activity::start(
+        hive_common::state_dir().join("activity"),
+        move || working.upgrade().is_some_and(|a| a.tasks.lock().any()),
+        move || alive.upgrade().is_some(),
+    );
     *target.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&agent));
     on_signals(); // a script may start us with Ctrl-C ignored
     agent.run();

@@ -40,6 +40,7 @@ pub fn local_path(mirror: &Path, kind: &str, name: &str) -> Option<PathBuf> {
     }
     match kind {
         "journal" => Some(mirror.join("state/sessions").join(name).join("journal.jsonl")),
+        "activity" => Some(mirror.join("state/activity").join(name)),
         "setting" => Some(mirror.join("state").join(name)),
         "agent_log" => Some(mirror.join("Agent.log")),
         _ => None,
@@ -69,7 +70,11 @@ pub fn plan(index: &Value, mirror: &Path, since: f64) -> Vec<(String, PathBuf, f
             continue;
         };
         // Agent.log and the settings are read whatever their age.
-        let since_here = if kind == "journal" { since } else { 0.0 };
+        let since_here = if kind == "journal" || kind == "activity" {
+            since
+        } else {
+            0.0
+        };
         if let Some(path) = local_path(mirror, kind, name) {
             want(key, path, mtime, since_here);
         }
