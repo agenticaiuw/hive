@@ -10,6 +10,7 @@
 //! - [`credentials`]: typing the saved Mac password, and the phone passcode (python/credentials.py).
 //! - [`system`]: what the tools read from the Mac outside the helper, behind a trait tests fake.
 
+pub mod activity;
 pub mod credentials;
 pub mod desktop;
 mod ffi;

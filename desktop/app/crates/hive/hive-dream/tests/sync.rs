@@ -13,6 +13,10 @@ fn index_entries_land_where_collect_reads_them_and_nothing_escapes_the_mirror() 
     );
     assert_eq!(local_path(m, "setting", "work-screen").unwrap(), Path::new("/m/state/work-screen"));
     assert_eq!(local_path(m, "agent_log", "Agent.log").unwrap(), Path::new("/m/Agent.log"));
+    assert_eq!(
+        local_path(m, "activity", "2026-11-14.jsonl").unwrap(),
+        Path::new("/m/state/activity/2026-11-14.jsonl")
+    );
     assert!(local_path(m, "journal", "../../etc").is_none());
     assert!(local_path(m, "journal", "a/b").is_none());
     assert!(local_path(m, "other", "x").is_none());

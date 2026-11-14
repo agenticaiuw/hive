@@ -1,10 +1,11 @@
 //! Copies what Hive's nightly dream reads to Cloudflare R2, so the dream runs in the cloud
 //! (hive-dream on Hive's VM, which mirrors these back with `hive-dream sync`): the session
-//! journals, Agent.log and the small settings files the dream checks, and `logs/index.json`
-//! listing them along with every uploaded recording's timeline.
+//! journals, the activity log, Agent.log and the small settings files the dream checks, and
+//! `logs/index.json` listing them along with every uploaded recording's timeline.
 //!
 //! Objects, in the recordings bucket ([`crate::cloud_archive::bucket`]):
-//! `logs/sessions/<id>/journal.jsonl`, `logs/Agent.log`, `logs/settings/<name>`, `logs/index.json`.
+//! `logs/sessions/<id>/journal.jsonl`, `logs/activity/<date>.jsonl`, `logs/Agent.log`,
+//! `logs/settings/<name>`, `logs/index.json`.
 //! Only files that changed since their last upload go up (`<state>/cloud-logs.json` remembers
 //! each one's size and mtime), and at most once every [`MIN_GAP_SECS`]. It runs after each
 //! recording's upload and when Hive starts, like the recordings.
@@ -77,6 +78,13 @@ pub fn items(state: &Path, agent_log: &Path) -> Vec<Item> {
             id,
             dir.join("journal.jsonl"),
         );
+    }
+    // The activity log, a file a day (hive-mac activity).
+    for file in util::listing(&state.join("activity")) {
+        let name = util::file_name(&file);
+        if safe_name(&name) && name.ends_with(".jsonl") {
+            add(format!("logs/activity/{name}"), "activity", name, file);
+        }
     }
     add("logs/Agent.log".into(), "agent_log", "Agent.log".into(), agent_log.to_path_buf());
     for name in SETTINGS {
