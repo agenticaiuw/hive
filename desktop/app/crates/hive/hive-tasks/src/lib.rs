@@ -1022,7 +1022,10 @@ impl Ledger {
                 self.on_prompt(harness, session, id, transcript, str_of(input, "prompt"))
             }
             "Stop" => self.on_stop(harness, session, id, transcript, input),
-            "PreToolUse" => self.on_edit(session, &project, input),
+            "PreToolUse" => match self.on_command(input)? {
+                Value::Null => self.on_edit(session, &project, input),
+                done => Ok(done),
+            },
             _ => self.on_start(harness, session, id, transcript, str_of(input, "source")),
         }
     }
@@ -1156,6 +1159,39 @@ impl Ledger {
         Ok(json!({"decision": "block", "reason": reason.trim_end()}))
     }
 
+    /// An agent's `hive-tasks add|report|done|rule-off`, done here rather than by the command:
+    /// the hook runs outside the harness's sandbox, which may not let the command write the
+    /// ledger. The agent gets the result in place of running it.
+    fn on_command(&self, input: &Value) -> Result<Value, String> {
+        let Some((command, id, body)) =
+            agent_command(input.get("tool_input").unwrap_or(&Value::Null))
+        else {
+            return Ok(Value::Null);
+        };
+        let json = || {
+            serde_json::from_str::<Value>(body.trim()).map_err(|e| format!("That isn't JSON: {e}"))
+        };
+        let result = match command.as_str() {
+            "add" => prefixed(&id, 'M')
+                .and_then(|m| self.add(m, &json()?))
+                .map(|l| l.join("\n")),
+            "report" => json().and_then(|j| self.report(&j)).map(|l| l.join("\n")),
+            "done" => self
+                .report(&json!([{"id": id, "status": "done", "outcome": body}]))
+                .map(|l| l.join("\n")),
+            _ => self.rule_off(&id),
+        };
+        let reason = match result {
+            Ok(said) => format!("Hive did this for you (no need to run it): {said}"),
+            Err(e) => format!("Hive couldn't do that: {e} Fix it and run the command again."),
+        };
+        Ok(json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }}))
+    }
+
     fn on_edit(&self, session: &str, project: &Project, input: &Value) -> Result<Value, String> {
         let paths = edited_paths(input.get("tool_input").unwrap_or(&Value::Null));
         if paths.is_empty() {
@@ -1256,6 +1292,61 @@ impl Ledger {
 }
 
 // ---- text --------------------------------------------------------------------------------------
+
+/// An agent's own `hive-tasks add|report|done|rule-off` command, as `(command, id, json)`: its
+/// shell text holds the program's name, the subcommand, and the JSON (in a here-document, or
+/// quoted and piped in) or, for done, the outcome.
+pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
+    let text = match &tool_input["command"] {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.last().and_then(Value::as_str).unwrap_or("").to_string(),
+        _ => return None,
+    };
+    static CALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?m)(?:^|[|;&(])[ \t]*(?:[^\s|;&()]*/)?hive-tasks[ \t]+(add|report|done|rule-off)\b[ \t]*([MTRmtr]?\d+)?([^\n]*)").unwrap()
+    });
+    let call = CALL.captures(&text)?;
+    let command = call[1].to_string();
+    let id = call
+        .get(2)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
+    // Only a call that is plainly the agent's: the right kind of id where one is needed.
+    let kind = match command.as_str() {
+        "add" => Some('M'),
+        "done" => Some('T'),
+        "rule-off" => Some('R'),
+        _ => None,
+    };
+    if kind.is_some_and(|k| prefixed(&id, k).is_err()) {
+        return None;
+    }
+    let rest = call.get(3).map(|m| m.as_str()).unwrap_or("");
+    let body = if command == "done" {
+        rest.trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string()
+    } else if let Some(heredoc) = Regex::new(r#"<<-?\s*['"]?(\w+)['"]?"#)
+        .unwrap()
+        .captures(rest)
+    {
+        let end = heredoc[1].to_string();
+        let after = &text[text.find(rest).unwrap_or(0) + rest.len()..];
+        after
+            .trim_start_matches('\n')
+            .lines()
+            .take_while(|l| l.trim() != end)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        // echo '[...]' | hive-tasks report
+        let before = &text[..call.get(0)?.start()];
+        let start = before.find('\'')?;
+        let end = before.rfind('\'')?;
+        (end > start).then(|| before[start + 1..end].replace("'\\''", "'"))?
+    };
+    Some((command, id, body))
+}
 
 fn context(event: &str, text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
@@ -1682,7 +1773,7 @@ fn private(path: &Path, mode: u32) {
 /// patches can arrive through more than one tool, and the hook ignores any call that edits nothing.
 fn hook_events(harness: &str) -> Vec<(&'static str, Option<&'static str>, u64)> {
     let edit = if harness == "claude" {
-        Some("Edit|Write|MultiEdit|NotebookEdit")
+        Some("Edit|Write|MultiEdit|NotebookEdit|Bash")
     } else {
         None
     };

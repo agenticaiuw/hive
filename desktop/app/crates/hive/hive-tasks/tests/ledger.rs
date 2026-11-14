@@ -358,7 +358,7 @@ fn installing_keeps_other_hooks_and_is_undone_by_uninstalling() {
     assert_eq!(stop[1]["hooks"][0]["command"], cmd);
     assert_eq!(
         once["hooks"]["PreToolUse"][0]["matcher"],
-        "Edit|Write|MultiEdit|NotebookEdit"
+        "Edit|Write|MultiEdit|NotebookEdit|Bash"
     );
     assert!(
         merge_hooks(json!({}), "codex", Some(cmd))["hooks"]["PreToolUse"][0]
@@ -454,4 +454,68 @@ fn changes_queue_for_the_cloud_and_other_machines_rules_apply_here() {
         ledger.rule_list(Some("github.com/o/r")).unwrap()[0]["active"],
         false
     );
+}
+
+#[test]
+fn the_hook_does_an_agents_board_commands_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("t.sqlite3")).unwrap();
+    let (m, _) = ledger
+        .save_message(
+            "codex",
+            "s1",
+            "p",
+            "Fix the login page and don't touch the API",
+            1,
+            false,
+        )
+        .unwrap();
+    let hook = |command: &str| {
+        ledger
+            .hook(
+                "codex",
+                &json!({"hook_event_name": "PreToolUse", "session_id": "s1", "cwd": "/tmp",
+                        "tool_name": "Bash", "tool_input": {"command": command}}),
+            )
+            .unwrap()
+    };
+    let added = hook(&format!(
+        "/root/.local/bin/hive-tasks add M{m} <<'EOF'\n[{{\"quote\": \"Fix the login page\", \"title\": \"Fix login\"}},\n {{\"quote\": \"don't touch the API\", \"title\": \"API stays\", \"kind\": \"rule\"}}]\nEOF"
+    ));
+    let out = &added["hookSpecificOutput"];
+    assert_eq!(out["permissionDecision"], "deny");
+    assert!(
+        out["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("T1 Fix login"),
+        "{out}"
+    );
+    let reported = hook(
+        r#"echo '[{"id": "T1", "status": "done", "outcome": "It'\''s fixed"}]' | hive-tasks report"#,
+    );
+    assert!(reported.to_string().contains("T1 done"), "{reported}");
+    assert_eq!(ledger.show("T1").unwrap()["outcome"], "It's fixed");
+    let bad = hook("hive-tasks report <<'EOF'\nnot json\nEOF");
+    assert!(bad.to_string().contains("couldn't"), "{bad}");
+    // Other commands run as usual.
+    assert!(hook("cargo test").is_null());
+    assert!(hive_tasks::agent_command(
+        &json!({"command": ["bash", "-lc", "hive-tasks done T1 shipped it"]})
+    )
+    .is_some_and(|(c, id, body)| c == "done" && id == "T1" && body == "shipped it"));
+}
+
+#[test]
+fn only_a_real_board_command_is_taken_over() {
+    use hive_tasks::agent_command;
+    let cmd = |c: &str| agent_command(&json!({"command": c}));
+    assert!(cmd("git commit -m \"an agent's hive-tasks add/report could fail\"").is_none());
+    assert!(cmd("grep -n 'hive-tasks add M3' notes.md").is_none());
+    assert!(
+        cmd("hive-tasks add <<'EOF'\n[]\nEOF").is_none(),
+        "no message id"
+    );
+    assert!(cmd("cd /x && ~/.local/bin/hive-tasks add M3 <<'EOF'\n[]\nEOF").is_some());
+    assert!(cmd("echo '[]' | hive-tasks report").is_some());
 }
