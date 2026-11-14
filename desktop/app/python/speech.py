@@ -66,6 +66,8 @@ class Voice:
         self._player: subprocess.Popen | None = None
         self._quiet_since = 0.0  # when the last sentence finished playing
         self._dir = tempfile.mkdtemp(prefix="agent-voice-")
+        self._espeak: dict = {}  # an espeak for each language, kept open (see _phonemes)
+        self._espeak_lock = threading.Lock()
         if self.voice == "say":
             self._ready.set()
         else:
@@ -137,9 +139,23 @@ class Voice:
 
     def render(self, text: str):
         """One piece of text as float32 samples at 24 kHz."""
-        samples, _rate = self._kokoro.create(text, voice=self.voice, speed=self.speed,
-                                             lang=LANGS.get(self.voice[0], "en-us"))
+        lang = LANGS.get(self.voice[0], "en-us")
+        samples, _rate = self._kokoro.create(self._phonemes(text, lang), voice=self.voice, speed=self.speed,
+                                             lang=lang, is_phonemes=True)
         return samples
+
+    def _phonemes(self, text: str, lang: str) -> str:
+        """What Kokoro's own phonemize() makes, with espeak kept open: phonemizer.phonemize() loads
+        a fresh copy of espeak every call, which was 0.6 s of every sentence."""
+        with self._espeak_lock:  # espeak isn't thread-safe; render() is also called to learn your voice
+            backend = self._espeak.get(lang)
+            if backend is None:
+                from phonemizer.backend import EspeakBackend
+                backend = self._espeak[lang] = EspeakBackend(lang, preserve_punctuation=True, with_stress=True)
+            lines = [line for line in text.strip().split("\n") if line.strip()]
+            phonemes = "\n".join(backend.phonemize(lines)) if lines else ""
+        vocab = self._kokoro.tokenizer.vocab
+        return "".join(c for c in phonemes if c in vocab).strip()
 
     def _make_audio(self):
         while True:
