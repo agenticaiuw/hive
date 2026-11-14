@@ -34,7 +34,7 @@ process.on('exit', () => {
 })
 
 const { rememberDomainFact } = await import('./memoryService.js')
-const { normalizeDomainFact } = await import('../../mobile/simulator/shared/domainMemory.js')
+const { normalizeDomainFact } = await import('../../cloud/shared/domainMemory.js')
 const { planCommand } = await import('./llmPlanner.js')
 
 rememberDomainFact(

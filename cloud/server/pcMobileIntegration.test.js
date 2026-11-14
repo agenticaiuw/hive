@@ -6,7 +6,7 @@ import { createMemoryStore } from './store/memoryStore.js';
 import { createDeviceCredential, authenticateRelayRequest } from './deviceAuth.js';
 import { registerNodeMeshRoutes } from './nodeMailbox.js';
 import { PcMeshBridge } from '../../desktop/mesh-bridge.mjs';
-import { MobilePcMeshClient } from '../../mobile/pc-mesh-client.mjs';
+import { MobilePcMeshClient } from '../shared/pc-mesh-client.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

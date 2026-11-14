@@ -10,7 +10,7 @@ import {
 import {
   mergeProductSync,
   normalizeProductSync,
-} from '../../mobile/simulator/shared/productSync.js'
+} from '../../cloud/shared/productSync.js'
 
 const DEFAULT_PRODUCT_STATE_PATH = '/v1/product/state'
 

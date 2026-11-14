@@ -58,13 +58,13 @@ agent bearer and commissions this browser's own `browser_node` relay
 credential in the same call. The code is spent, never stored; the two wire
 credentials stay per-host, the human just stops carrying them. Re-pairing
 with the same device ID rotates the credential — but does **not** revoke the
-old one; kill strays with `pendant-credentials.mjs revoke --token-id <id>`.
+old one; kill strays with `device-credentials.mjs revoke --token-id <id>`.
 
 The manual path still works for unusual topologies (pairing a browser on a
 different machine than the agent, narrowing scopes):
 
 ```bash
-node scripts/pendant-credentials.mjs pair \
+node cloud/tools/device-credentials.mjs pair \
   --device-id <this-browser> --role browser_node --name "Safari on the MacBook"
 ```
 

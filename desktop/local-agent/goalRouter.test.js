@@ -6,7 +6,7 @@ import {
   recordCapabilityObservation,
   registerCapabilities,
   registerSurface,
-} from '../../mobile/simulator/shared/capabilityRegistry.js'
+} from '../../cloud/shared/capabilityRegistry.js'
 /*
  * The real definition of "the public internet can reach this", not a stand-in.
  * The whole public-vs-authenticated rule rests on this function, so a test that

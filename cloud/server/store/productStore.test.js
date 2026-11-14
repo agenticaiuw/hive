@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { PRODUCT_SYNC_LIMITS } from '../../../mobile/simulator/shared/productSync.js'
+import { PRODUCT_SYNC_LIMITS } from '../../shared/productSync.js'
 import { createD1Store } from './d1Store.js'
 import { createMemoryStore } from './memoryStore.js'
 

@@ -8,11 +8,11 @@ import {
   normalizeProductSync,
   PRODUCT_SYNC_LIMITS,
   visibleProductSync,
-} from '../../mobile/simulator/shared/productSync.js'
+} from '../../cloud/shared/productSync.js'
 import {
   isProtocolOnlyText,
   stripProtocolTerminators,
-} from '../../mobile/simulator/shared/protocolText.js'
+} from '../../cloud/shared/protocolText.js'
 
 export const LOCAL_SESSION_SCHEMA_VERSION = 'local-session-store.v2'
 export const SINGLE_OWNER_ACCOUNT_ID =

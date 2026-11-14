@@ -47,7 +47,7 @@ import {
   registerFromCapabilityManifest,
   registerGrantedTools,
   registerSurface,
-} from '../../mobile/simulator/shared/capabilityRegistry.js'
+} from '../../cloud/shared/capabilityRegistry.js'
 
 /*
  * The goal-level names surfaces answer to, attached as ALIASES to the granted

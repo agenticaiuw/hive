@@ -72,7 +72,7 @@ test('with no device token it falls back to the admin key, loudly, once', () => 
   const notice = migrationNotice(resolved)
   assert.ok(notice)
   assert.match(notice, /admin/i)
-  assert.match(notice, /pendant-credentials\.mjs pair/)
+  assert.match(notice, /device-credentials\.mjs pair/)
   assert.equal(notice.includes(ADMIN_KEY), false)
 })
 

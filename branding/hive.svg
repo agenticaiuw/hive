@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <!-- Hive's icon, the only copy. The Mac app's Hive.icns is built from it (desktop/app:
-       make build/Hive.icns), the dashboard links to it, and `node mobile/tools/sync-icons.mjs`
+       make build/Hive.icns), the dashboard links to it, and `node branding/sync-icons.mjs`
        draws it for the browser extensions, the iOS app and the mobile web app.
        A flat-topped gold hexagon on the macOS icon shape, lit from the top right. -->
   <defs>

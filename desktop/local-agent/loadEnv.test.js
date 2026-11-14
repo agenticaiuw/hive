@@ -65,14 +65,14 @@ test('derived secrets are labelled, stable, and never invented without a master'
 
 test('both loaders derive bit-identical secrets', async () => {
   /*
-   * The derivation is deliberately duplicated in software/load-pendant-env.mjs
+   * The derivation is deliberately duplicated in cloud/shared/loadEnv.mjs
    * (different packages, each must work with the other absent). This is the
    * assertion that keeps the copies honest: if they drift, the agent and the
    * scripts compute DIFFERENT agent tokens from the same pairing code, and
    * every script gets 401s that look like a corrupted .env.
    */
   const local = (await import('./loadEnv.js')).deriveSecret
-  const shared = (await import('../../mobile/simulator/load-pendant-env.mjs')).deriveSecret
+  const shared = (await import('../../cloud/shared/loadEnv.mjs')).deriveSecret
 
   for (const label of ['agent-token', 'session-secret', 'future-label']) {
     assert.equal(local('sample-master', label), shared('sample-master', label))

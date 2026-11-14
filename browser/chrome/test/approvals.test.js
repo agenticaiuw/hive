@@ -33,7 +33,7 @@ import {
   approvalPromptFromEnvelope,
   pruneApprovalPrompts,
   settleApprovalPrompt,
-} from '../../../mobile/simulator/shared/approvalMesh.js'
+} from '../../../cloud/shared/approvalMesh.js'
 
 const NOW = Date.parse('2026-08-09T04:00:00.000Z')
 

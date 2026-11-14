@@ -8,7 +8,7 @@ import { workspacePath } from './config.js'
 import {
   deliveryRunStatus,
   gradeAudioDelivery,
-} from '../../mobile/simulator/shared/audioDelivery.js'
+} from '../../cloud/shared/audioDelivery.js'
 
 const pipelinePath = path.join(workspacePath, 'pendant-pipeline.json')
 const MAX_RUNS = 80

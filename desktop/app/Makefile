@@ -79,7 +79,7 @@ build/agent-unified-host: tools/build-workspace.sh scripts/build-spaceo.sh $(cal
 	bash tools/build-workspace.sh
 
 # Hive's icon is drawn once, in branding/hive.svg at the repository's root; the app's .icns is
-# built from it. The other places' PNGs are kept in git: `node mobile/tools/sync-icons.mjs`.
+# built from it. The other places' PNGs are kept in git: `node branding/sync-icons.mjs`.
 build/hive-icon: tools/hive-icon.swift
 	@mkdir -p build
 	swiftc -O tools/hive-icon.swift -o $@.tmp

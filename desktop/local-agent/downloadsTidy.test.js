@@ -21,7 +21,7 @@ import {
  *
  * The default is the owner's real workspace, and saveStore() keeps only the
  * last 20 plans. Every other writer of that one file — the agent app the owner
- * has running, computerControl.js tidy actions, scripts/pendant-tidy.mjs, or
+ * has running, computerControl.js tidy actions, tidyDownloads.mjs, or
  * simply this test file running again in a parallel `node --test` process —
  * does a read-modify-write on the whole document, so it can evict the plan a
  * test previewed a moment ago. apply then fails with "No tidy plan ... Preview

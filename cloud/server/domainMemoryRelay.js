@@ -21,7 +21,7 @@ import {
   mergeDomainMemory,
   normalizeDomainMemoryBlock,
   renderDomainFactLines,
-} from '../../mobile/simulator/shared/domainMemory.js'
+} from '../shared/domainMemory.js'
 import { FLEET_STATE_KEY } from './fleetContext.js'
 
 /**

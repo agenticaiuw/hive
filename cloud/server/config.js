@@ -1,4 +1,4 @@
-import '../../mobile/simulator/load-pendant-env.mjs'
+import '../shared/loadEnv.mjs'
 
 export const PORT = Number(process.env.RELAY_PORT || process.env.PORT || 8787)
 export const RELAY_API_KEY = process.env.RELAY_API_KEY || ''

@@ -38,7 +38,7 @@ import {
   presentApproval,
   selectApprovalToSpeak,
   settleApproval,
-} from '../../mobile/simulator/shared/approvalHandoff.js'
+} from '../shared/approvalHandoff.js'
 import { getStore as defaultGetStore } from './store/index.js'
 
 const WRITER = 'approval-store'

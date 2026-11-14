@@ -42,7 +42,7 @@ import {
   presentApproval,
   riskLabelFor,
   settleApproval,
-} from '../../mobile/simulator/shared/approvalHandoff.js'
+} from '../shared/approvalHandoff.js'
 import {
   answerApproval,
   listApprovals,
@@ -52,7 +52,7 @@ import {
 } from './approvalStore.js'
 import { sendNodeMessage } from './nodeMailbox.js'
 import { nudgeConverseSession } from './converseSessions.js'
-import { RELAY_NODE_ADDRESS, MAX_TTL_MS } from '../../mobile/simulator/shared/nodeMesh.js'
+import { RELAY_NODE_ADDRESS, MAX_TTL_MS } from '../shared/nodeMesh.js'
 
 /*
  * The envelope kinds of this exchange. FROZEN, with the underscore: the

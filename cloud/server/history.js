@@ -1,6 +1,6 @@
 import { voiceRunForCapture, voiceRunForJob } from './jobs.js'
 import { BROWSER_TASK_JOB_TYPE } from './browserTaskHistory.js'
-import { stripProtocolTerminators } from '../../mobile/simulator/shared/protocolText.js'
+import { stripProtocolTerminators } from '../shared/protocolText.js'
 
 /*
  * History is derived from the same `plan` jobs the operator feed already shows,

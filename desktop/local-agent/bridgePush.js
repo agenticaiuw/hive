@@ -19,7 +19,7 @@
 import {
   BRIDGE_PING_FRAME,
   parseBridgeFrame,
-} from '../../mobile/simulator/shared/bridgeSocketProtocol.js'
+} from '../../cloud/shared/bridgeSocketProtocol.js'
 import {
   createRateLimitedErrorReporter,
   createRetryBackoff,

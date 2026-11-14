@@ -35,7 +35,7 @@ static SPA mounted under `/dashboard`, so its `kit.paths.base` is `/dashboard`
 disagree.
 
 `build-agent/` is gitignored. Run `npm run build:agent` after pulling, or the
-Mac agent falls back to whatever is in `mobile/simulator/dist`.
+Mac agent falls back to whatever is in `mobile/dist`.
 
 ## Authentication
 

@@ -1,0 +1,17 @@
+{
+  "name": "hive-ios",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:ios": "node scripts/build-ios-web.mjs",
+    "ios": "npm run ios:sync && npx cap open ios",
+    "ios:sync": "npm run build:ios && npx cap sync ios",
+    "ios:archive": "bash scripts/archive-ios.sh",
+    "ios:testflight": "PENDANT_UPLOAD_TESTFLIGHT=1 bash scripts/archive-ios.sh"
+  },
+  "dependencies": {
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/ios": "^8.4.2"
+  }
+}
