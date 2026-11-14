@@ -7,7 +7,7 @@ dashboard; a surface that needs one hosts this folder's build.
 Its home page (`/`) is the task board: every task the owner has given any agent (Claude Code,
 Codex, Hive) on any machine, saved by `hive-tasks` and synced to the cloud board (`cloud/tasks`),
 with a box to hand an agent the next one. What needs the owner comes first, then what's being
-worked on, what hasn't started, and what's done. The voice pipeline page is at `/voice`; `/hive`
+worked on, what hasn't started, and what's done. `/hive`
 and `/pc` are as before.
 
 ## One app, every host
