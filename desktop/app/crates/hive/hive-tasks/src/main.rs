@@ -41,6 +41,12 @@ fn main() {
         }
         Err(e) => {
             eprintln!("{e}");
+            if e.contains("readonly database") || e.contains("unable to open database") {
+                eprintln!(
+                    "A sandbox may be keeping this from writing the board. Run the hive-tasks \
+                     command on its own (not chained with other commands) and Hive's hook does it."
+                );
+            }
             1
         }
     };
