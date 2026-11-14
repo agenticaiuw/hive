@@ -24,7 +24,9 @@
     saveFolder,
     saveMemory,
     sendToAgent,
+    startDictation,
     type AgentChoice,
+    type Dictation,
   } from "$lib/dataSource";
   import {
     HARNESSES,
@@ -55,6 +57,9 @@
   let text = $state("");
   let sending = $state(false);
   let sent = $state<{ ok: boolean; text: string } | null>(null);
+  // Dictation: recording while `dictation` is set, then `reading` while the speech model reads it.
+  let dictation = $state<Dictation | null>(null);
+  let reading = $state(false);
   let project = $state("");
   let folder = $state("");
   let query = $state("");
@@ -247,6 +252,38 @@
 
   function composerKeys(event: KeyboardEvent) {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send(event);
+    else if (event.key === "Escape" && dictation) {
+      event.stopPropagation();
+      dictation.cancel();
+      dictation = null;
+    }
+  }
+
+  /** The mic: the first press starts recording, the second has the speech model write it in. */
+  async function dictate() {
+    if (reading) return;
+    sent = null;
+    if (!dictation) {
+      try {
+        dictation = await startDictation();
+      } catch (error) {
+        sent = { ok: false, text: error instanceof Error ? error.message : String(error) };
+      }
+      return;
+    }
+    const recording = dictation;
+    dictation = null;
+    reading = true;
+    try {
+      const words = await recording.stop();
+      if (words) text = text.trim() ? `${text.trimEnd()} ${words}` : words;
+      else sent = { ok: false, text: "No words came through; try again a little closer." };
+      composerBox?.focus();
+    } catch (error) {
+      sent = { ok: false, text: error instanceof Error ? error.message : String(error) };
+    } finally {
+      reading = false;
+    }
   }
 
   onMount(() => {
@@ -261,6 +298,7 @@
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", focus);
+      dictation?.cancel();
     };
   });
 </script>
@@ -458,6 +496,26 @@
             {/each}
           </select>
         </label>
+        <button
+          type="button"
+          class="mic"
+          class:on={dictation}
+          onclick={dictate}
+          disabled={reading}
+          aria-pressed={Boolean(dictation)}
+          aria-label={dictation ? "Stop and write in what you said" : "Dictate"}
+          title={dictation ? "Stop and write it in (Esc throws it away)" : "Dictate"}
+        >
+          {#if reading}
+            Writing…
+          {:else}
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+            {#if dictation}<span>Listening</span>{/if}
+          {/if}
+        </button>
         <kbd class="hint">⌘↵</kbd>
         <button type="submit" disabled={!text.trim() || !chosen?.available || sending}>
           {sending ? "Sending…" : "Send"}
@@ -987,6 +1045,37 @@
     background: transparent;
     color: var(--ink-2);
     cursor: pointer;
+  }
+  .composer .mic {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--line-strong);
+    background: transparent;
+    color: var(--ink-2);
+    font: inherit;
+    font-size: var(--fs-small);
+    cursor: pointer;
+  }
+  .composer .mic:hover {
+    color: var(--ink);
+  }
+  .composer .mic.on {
+    border-color: var(--red);
+    color: var(--red);
+    animation: listening 1.4s ease-in-out infinite;
+  }
+  @keyframes listening {
+    50% {
+      background: color-mix(in srgb, var(--red) 14%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .composer .mic.on {
+      animation: none;
+    }
   }
   button[disabled] {
     opacity: 0.45;

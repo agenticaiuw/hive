@@ -27,6 +27,7 @@ import {
   type RoutineView,
 } from "$lib/jobs";
 import { RELAY_VISIBLE_SOURCES } from "$lib/hiveFeed.js";
+import { toWav } from "$lib/wav.js";
 
 export type Backend = "agent" | "relay";
 
@@ -497,6 +498,82 @@ export async function saveMemory(memory: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(memory),
   });
+}
+
+/*
+ * Voice-to-text for the composer. In Hive's window the app records you and Hive's own speech
+ * model (the one that hears you when you tap fn) reads it; in a browser the page records you and
+ * the website's speech model, in the cloud, reads it.
+ */
+export type Dictation = { stop(): Promise<string>; cancel(): void };
+
+/** Five minutes is plenty for one instruction, and keeps a recording under 10 MB. */
+const MAX_DICTATION_SECONDS = 300;
+
+export async function startDictation(): Promise<Dictation> {
+  if (CONFIGURED === "desktop") {
+    const call = (action: string) =>
+      apiRequest(`${base}/api/dictation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    await call("start");
+    return {
+      stop: async () => String((await call("stop"))?.text ?? "").trim(),
+      cancel: () => void call("cancel").catch(() => {}),
+    };
+  }
+  const recording = await recordHere();
+  return {
+    stop: async () => {
+      const answer = await apiRequest(`${base}/api/transcribe`, {
+        method: "POST",
+        headers: { "Content-Type": "audio/wav" },
+        body: recording.stop(),
+      });
+      return String(answer?.text ?? "").trim();
+    },
+    cancel: () => void recording.stop(),
+  };
+}
+
+/** The microphone, recorded in the page until stop(), which hands back a 16 kHz WAV. */
+async function recordHere(): Promise<{ stop(): Blob }> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("This browser won't let the page use the microphone.");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  });
+  const context = new AudioContext();
+  const source = context.createMediaStreamSource(stream);
+  // (ScriptProcessor is old but everywhere; a worklet would need its own module file.)
+  const tap = context.createScriptProcessor(4096, 1, 1);
+  const chunks: Float32Array[] = [];
+  let length = 0;
+  const limit = context.sampleRate * MAX_DICTATION_SECONDS;
+  tap.onaudioprocess = (event) => {
+    if (length >= limit) return;
+    const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
+    chunks.push(chunk);
+    length += chunk.length;
+  };
+  source.connect(tap);
+  tap.connect(context.destination);
+  let done: Blob | null = null;
+  return {
+    stop() {
+      if (!done) {
+        tap.disconnect();
+        source.disconnect();
+        stream.getTracks().forEach((track) => track.stop());
+        void context.close();
+        done = new Blob([toWav(chunks, context.sampleRate)], { type: "audio/wav" });
+      }
+      return done;
+    },
+  };
 }
 
 export type AgentChoice = {
