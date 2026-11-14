@@ -10,11 +10,14 @@
 //   GET  /api/folder         ?project&key: a folder and all its memories, from the cloud board
 //   POST /api/folders        {project, name, about?}: makes a folder (on the cloud board)
 //   POST /api/folders/memory {project, folder, kind, title, body}: a memory for the folder
+//   POST /api/dictation      {action: start|stop|cancel}: this window records you; on stop, Hive's
+//                            voice process reads it with the model that hears you ({text})
 //
 // Opened from the menu (Open Dashboard) or a hive:// link: `open hive://tasks`, which is what
 // `hive-tasks web` does on the Mac. While it's open Hive is in the Dock and in ⌘-Tab.
 
 import AppKit
+import AVFoundation
 import WebKit
 
 @MainActor final class DashboardWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
@@ -198,6 +201,7 @@ enum DashboardAPI {
         case ("GET", "/api/folder"): return folder(query)
         case ("POST", "/api/folders"): return board("post", "/v1/folders", body)
         case ("POST", "/api/folders/memory"): return board("post", "/v1/folders/memory", body, thenSync: true)
+        case ("POST", "/api/dictation"): return Dictation.answer(body, stateDir: stateDir)
         default: return (404, json(["error": "The desktop app doesn't answer \(path) yet."]))
         }
     }
@@ -239,6 +243,41 @@ enum DashboardAPI {
         }
         if thenSync { DispatchQueue.global().async { _ = run(tool, ["sync", "--quiet"], seconds: 60) } }
         return (200, out)
+    }
+
+    /// One JSON line to a Unix socket and the JSON line it answers. nil: nothing is listening
+    /// there (or the line couldn't be sent); .some(nil): no readable answer within `seconds`.
+    static func ask(socket path: String, _ request: [String: Any], seconds: Int) -> [String: Any]?? {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var wait = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return nil }
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var line = json(request)
+        line.append(0x0A)
+        let sent = line.withUnsafeBytes { write(fd, $0.baseAddress, line.count) }
+        guard sent == line.count else { return nil }
+        var answer = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while answer.count < 65536, !answer.contains(0x0A) {
+            let n = read(fd, &buffer, buffer.count)
+            if n <= 0 { break }
+            answer.append(buffer, count: n)
+        }
+        guard let end = answer.firstIndex(of: 0x0A) else { return .some(nil) }
+        return .some((try? JSONSerialization.jsonObject(with: answer[..<end])) as? [String: Any])
     }
 
     static func hiveTasks() -> String {
@@ -299,38 +338,10 @@ enum DashboardAPI {
     /// (`{ok, receiptId?, status?, error?}`), read the way desktop/local-request.mjs reads it.
     static func toHive(_ text: String, socket path: String) -> [String: Any] {
         let notRunning: [String: Any] = ["accepted": false, "error": "Hive isn't running on this Mac, so it can't take a request."]
-        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return notRunning }
-        defer { close(fd) }
-        var wait = timeval(tv_sec: 8, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return notRunning }
-        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
-        let connected = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard connected == 0 else { return notRunning }
-        var line = json(["text": text, "sourceId": "dashboard:" + UUID().uuidString.lowercased()])
-        line.append(0x0A)
-        let sent = line.withUnsafeBytes { write(fd, $0.baseAddress, line.count) }
-        guard sent == line.count else { return notRunning }
-        var answer = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while answer.count < 16384, !answer.contains(0x0A) {
-            let n = read(fd, &buffer, buffer.count)
-            if n <= 0 { break }
-            answer.append(buffer, count: n)
-        }
         let unknown: [String: Any] = ["accepted": NSNull(), "error": "No answer from Hive; it may have started anyway."]
-        guard let end = answer.firstIndex(of: 0x0A),
-              let reply = (try? JSONSerialization.jsonObject(with: answer[..<end])) as? [String: Any],
-              let ok = reply["ok"] as? Bool else { return unknown }
+        let request: [String: Any] = ["text": text, "sourceId": "dashboard:" + UUID().uuidString.lowercased()]
+        guard let answer = ask(socket: path, request, seconds: 8) else { return notRunning }
+        guard let reply = answer, let ok = reply["ok"] as? Bool else { return unknown }
         var out: [String: Any] = [:]
         if let receipt = reply["receiptId"] as? String { out["receiptId"] = receipt }
         let status = reply["status"] as? String ?? ""
@@ -348,5 +359,92 @@ enum DashboardAPI {
                 : (error ?? "Hive didn't take it.")
         }
         return out
+    }
+}
+
+/// Dictation for the composer. This window records you (16 kHz mono WAV, the rate Parakeet
+/// reads) between start and stop, then hands the file to Hive's voice process
+/// (python/sidecar_voice.py, `<state>/dictation.sock`), which reads it with the same model that
+/// hears you when you tap fn. The recording is deleted once it's read.
+enum Dictation {
+    private static var recorder: AVAudioRecorder?
+    private static var file: URL?
+
+    static func answer(_ body: Data, stateDir: URL) -> (Int, Data) {
+        let request = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        switch request["action"] as? String {
+        case "start": return start()
+        case "stop": return stop(stateDir)
+        case "cancel":
+            if let recorded = finish() { try? FileManager.default.removeItem(at: recorded) }
+            return (200, DashboardAPI.json(["recording": false]))
+        default: return (400, DashboardAPI.json(["error": "action is start, stop or cancel."]))
+        }
+    }
+
+    static func start() -> (Int, Data) {
+        guard allowed() else {
+            return (403, DashboardAPI.json(["error": "Hive isn't allowed to use the microphone. Allow it in System Settings › Privacy & Security › Microphone."]))
+        }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("hive-dictation-\(UUID().uuidString).wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+        ]
+        let error: String? = DispatchQueue.main.sync {
+            if let old = finish() { try? FileManager.default.removeItem(at: old) }
+            do {
+                let new = try AVAudioRecorder(url: path, settings: settings)
+                guard new.record(forDuration: 600) else { return "The microphone wouldn't start recording." }
+                recorder = new
+                file = path
+                return nil
+            } catch {
+                return "The microphone wouldn't start recording: \(error.localizedDescription)"
+            }
+        }
+        if let error { return (500, DashboardAPI.json(["error": error])) }
+        return (200, DashboardAPI.json(["recording": true]))
+    }
+
+    static func stop(_ stateDir: URL) -> (Int, Data) {
+        guard let recorded = finish() else {
+            return (409, DashboardAPI.json(["error": "Nothing was being recorded."]))
+        }
+        defer { try? FileManager.default.removeItem(at: recorded) }
+        let socket = stateDir.appendingPathComponent("dictation.sock").path
+        guard let answer = DashboardAPI.ask(socket: socket, ["wav": recorded.path], seconds: 120) else {
+            return (503, DashboardAPI.json(["error": "Hive's voice isn't running, so it can't read what you said."]))
+        }
+        guard let reply = answer else {
+            return (504, DashboardAPI.json(["error": "Hive's voice didn't answer in time."]))
+        }
+        if let error = reply["error"] as? String { return (502, DashboardAPI.json(["error": error])) }
+        return (200, DashboardAPI.json(["text": reply["text"] as? String ?? ""]))
+    }
+
+    /// Stops recording; the file it made, if it was recording.
+    private static func finish() -> URL? {
+        let stopNow = {
+            recorder?.stop()
+            recorder = nil
+            defer { file = nil }
+            return file
+        }
+        return Thread.isMainThread ? stopNow() : DispatchQueue.main.sync(execute: stopNow)
+    }
+
+    /// Asks once (macOS shows its prompt for Hive) and waits for the answer.
+    private static func allowed() -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return true
+        case .notDetermined:
+            let answered = DispatchSemaphore(value: 0)
+            var granted = false
+            AVCaptureDevice.requestAccess(for: .audio) { granted = $0; answered.signal() }
+            _ = answered.wait(timeout: .now() + 120)
+            return granted
+        default: return false
+        }
     }
 }

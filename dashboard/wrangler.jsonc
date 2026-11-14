@@ -26,6 +26,11 @@
       "remote": true
     }
   ],
+  // Workers AI: Whisper reads what you dictate on the website (/api/transcribe). In Hive's
+  // window, Hive's own speech model reads it instead.
+  "ai": {
+    "binding": "AI"
+  },
   "observability": {
     "enabled": true
   },
