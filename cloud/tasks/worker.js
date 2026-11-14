@@ -69,7 +69,7 @@ async function browserAllowed(request, env) {
 const MESSAGE_COLUMNS = ["id", "harness", "session", "project", "text", "said_at", "times", "split_at"];
 const TASK_COLUMNS = [
   "id", "message", "quote", "title", "status", "minutes", "value", "outcome", "evidence",
-  "created_at", "updated_at", "done_at", "left_open_at",
+  "created_at", "updated_at", "done_at", "left_open_at", "work_seconds", "tokens_in", "tokens_out", "part",
 ];
 const RULE_COLUMNS = ["id", "project", "paths", "text", "quote", "created_at", "active", "shown", "last_shown_at"];
 
@@ -142,7 +142,7 @@ async function board(request, env) {
   const [tasks, unsplit, rules] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
-              t.created_at, t.updated_at, t.done_at, t.left_open_at,
+              t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.part,
               m.harness, m.session, m.project, m.times, m.said_at
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1

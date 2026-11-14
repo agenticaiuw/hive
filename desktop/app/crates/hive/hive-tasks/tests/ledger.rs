@@ -544,3 +544,108 @@ fn harness_notices_are_not_the_owners_messages() {
         "<side-sessions-event>done</side-sessions-event>"
     ));
 }
+
+/// "2026-11-14T11:30:00.000Z" for a time, as the agents' transcripts write it.
+fn utc(secs: i64) -> String {
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
+}
+
+#[test]
+fn closing_tasks_are_charged_the_agents_time_and_tokens_shared_by_estimate() {
+    let f = fixture();
+    f.prompt("fix the login button and also update the footer");
+    f.ledger
+        .add(1, &json!([
+            {"quote": "fix the login button", "title": "Login", "minutes": 10},
+            {"quote": "update the footer", "title": "Footer", "minutes": 30, "part": "site footer"}
+        ]))
+        .unwrap();
+    let at = utc(hive_tasks::now());
+    let reply = json!({"type": "assistant", "timestamp": at, "message": {"id": "r1", "usage": {
+        "input_tokens": 0, "output_tokens": 0,
+        "iterations": [{"input_tokens": 100, "cache_read_input_tokens": 300, "output_tokens": 40}]}}});
+    f.append(reply.clone());
+    f.append(reply); // the same reply on a second line counts once
+    f.append(
+        json!({"type": "assistant", "timestamp": at, "message": {"id": "r2", "usage": {
+        "input_tokens": 200, "cache_creation_input_tokens": 200, "output_tokens": 40}}}),
+    );
+    f.ledger
+        .report(&json!([
+            {"id": "T1", "status": "done", "outcome": "Fixed"},
+            {"id": "T2", "status": "done", "outcome": "Updated"}
+        ]))
+        .unwrap();
+    let task = |id: &str| -> Value {
+        let board = f.ledger.board(None).unwrap();
+        board["done"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    // 800 in and 80 out in all, shared 1:3 by the estimates.
+    assert_eq!(
+        (
+            task("T1")["tokens_in"].clone(),
+            task("T1")["tokens_out"].clone()
+        ),
+        (json!(200), json!(20))
+    );
+    assert_eq!(
+        (
+            task("T2")["tokens_in"].clone(),
+            task("T2")["tokens_out"].clone()
+        ),
+        (json!(600), json!(60))
+    );
+    assert_eq!(task("T2")["part"], "site footer");
+    assert!(task("T1")["work_seconds"].as_i64().unwrap() >= 0);
+    // Reporting a done task again charges nothing more.
+    f.ledger
+        .report(&json!([{"id": "T1", "status": "done", "outcome": "Fixed, checked"}]))
+        .unwrap();
+    assert_eq!(task("T1")["tokens_in"], 200);
+}
+
+#[test]
+fn codex_tokens_are_the_running_total_across_the_stretch_and_long_gaps_are_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout.jsonl");
+    let total = |at: i64, i: i64, o: i64| {
+        json!({"timestamp": utc(at), "type": "event_msg", "payload": {"type": "token_count",
+            "info": {"total_token_usage": {"input_tokens": i, "output_tokens": o}}}})
+        .to_string()
+    };
+    let t = 1_794_660_000;
+    let lines = [
+        total(t - 100, 1_000, 100), // before the stretch
+        total(t + 60, 1_500, 150),
+        total(t + 120, 2_000, 180), // then the agent sits idle for an hour
+        total(t + 120 + 3_600, 2_600, 200),
+        total(t + 99_999, 9_000, 900), // after it
+    ];
+    std::fs::write(&path, lines.join("\n")).unwrap();
+    let spent = hive_tasks::usage::spent(&path, t, t + 3_800).unwrap();
+    assert_eq!((spent.tokens_in, spent.tokens_out), (1_600, 100));
+    // 0→60→120 is work, the hour's gap isn't, then 3720→3800 is.
+    assert_eq!(spent.busy_seconds, 60 + 60 + 80);
+}

@@ -23,9 +23,12 @@
 //!
 //! A session's history from before Hive first saw it is skipped, not imported.
 
+pub mod usage;
+
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -276,6 +279,15 @@ impl Ledger {
         let db = Connection::open(path).map_err(err)?;
         db.busy_timeout(Duration::from_secs(5)).map_err(err)?;
         db.execute_batch(SCHEMA).map_err(err)?;
+        // Columns added since the first ledgers: what each task cost and the part it belongs to.
+        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("part", "TEXT")] {
+            let has: i64 = db
+                .query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1", [column], |r| r.get(0))
+                .map_err(err)?;
+            if has == 0 {
+                db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {kind}")).map_err(err)?;
+            }
+        }
         private(path, 0o600);
         Ok(Self {
             db,
@@ -402,11 +414,12 @@ impl Ledger {
                     .collect(),
                 Some(_) => return Err(format!("Entry {n}: paths is a list of globs.")),
             };
-            checked.push((kind, quote, clip(&title, 200), minutes, value, paths));
+            let part = clip(str_of(e, "part").trim(), 80);
+            checked.push((kind, quote, clip(&title, 200), minutes, value, paths, part));
         }
         let now = now();
         let mut out = Vec::new();
-        for (kind, quote, title, minutes, value, paths) in checked {
+        for (kind, quote, title, minutes, value, paths, part) in checked {
             if kind == "rule" {
                 self.db
                     .execute(
@@ -434,9 +447,9 @@ impl Ledger {
             } else {
                 self.db
                     .execute(
-                        "INSERT INTO tasks (message, quote, title, minutes, value, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                        params![message, quote, title, minutes, value, now],
+                        "INSERT INTO tasks (message, quote, title, minutes, value, created_at, updated_at, part)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, NULLIF(?7, ''))",
+                        params![message, quote, title, minutes, value, now, part],
                     )
                     .map_err(err)?;
                 let id = self.db.last_insert_rowid();
@@ -486,6 +499,8 @@ impl Ledger {
             checked.push((id, status.to_string(), outcome, evidence, minutes));
         }
         let now = now();
+        let closing: Vec<(i64, String)> = checked.iter().map(|c| (c.0, c.1.clone())).collect();
+        self.charge(&closing, now)?;
         let mut out = Vec::new();
         for (id, status, outcome, evidence, minutes) in checked {
             self.db
@@ -506,6 +521,113 @@ impl Ledger {
             out.push(format!("T{id} {status}"));
         }
         Ok(out)
+    }
+
+    /// Charges each task a report closes (done, waiting, blocked or dropped, from open, active,
+    /// waiting or blocked) with what the agent spent on it since it started on it: since the latest
+    /// of the task's own message (or, coming back from waiting, the owner's latest message in that
+    /// session), the last time another task there closed, and the task's own last report. Busy time
+    /// and tokens come from the session's transcript (usage.rs); without one, the wall time. Tasks
+    /// one report closes together share the stretch by their estimates.
+    fn charge(&self, closing: &[(i64, String)], now: i64) -> Result<(), String> {
+        let batch = closing.iter().map(|c| c.0.to_string()).collect::<Vec<_>>().join(",");
+        let mut groups: HashMap<String, Vec<(i64, i64, i64)>> = HashMap::new();
+        for (id, status) in closing {
+            let (prev, harness, session, minutes, asked): (String, String, String, Option<i64>, i64) = self
+                .db
+                .query_row(
+                    "SELECT t.status, m.harness, m.session, t.minutes, m.said_at
+                     FROM tasks t JOIN messages m ON m.id = t.message WHERE t.id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .map_err(err)?;
+            if prev == *status
+                || matches!(prev.as_str(), "done" | "dropped")
+                || !matches!(status.as_str(), "done" | "waiting" | "blocked" | "dropped")
+            {
+                continue;
+            }
+            let one = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Option<i64>, String> {
+                self.db.query_row(sql, args, |r| r.get(0)).map_err(err)
+            };
+            let own = one("SELECT MAX(at) FROM task_events WHERE task = ?1 AND status != 'open'", &[id])?;
+            let said = if matches!(prev.as_str(), "waiting" | "blocked") {
+                one(
+                    "SELECT MAX(said_at) FROM messages WHERE harness = ?1 AND session = ?2 AND said_at <= ?3",
+                    &[&harness, &session, &now],
+                )?
+            } else {
+                Some(asked)
+            };
+            let others = one(
+                &format!(
+                    "SELECT MAX(e.at) FROM task_events e JOIN tasks t ON t.id = e.task JOIN messages m ON m.id = t.message
+                     WHERE m.harness = ?1 AND m.session = ?2 AND e.at <= ?3
+                       AND e.status IN ('done', 'waiting', 'blocked', 'dropped') AND e.task NOT IN ({batch})"
+                ),
+                &[&harness, &session, &now],
+            )?;
+            let start = [own, said, others].into_iter().flatten().max().unwrap_or(now).min(now);
+            groups
+                .entry(session)
+                .or_default()
+                .push((*id, start, minutes.unwrap_or(1).max(1)));
+        }
+        for (session, tasks) in groups {
+            let from = tasks.iter().map(|t| t.1).min().unwrap_or(now);
+            let path: Option<String> = self
+                .db
+                .query_row(
+                    "SELECT path FROM scans WHERE session = ?1 ORDER BY rowid DESC LIMIT 1",
+                    [&session],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(err)?;
+            let spent = path.and_then(|p| usage::spent(Path::new(&p), from, now));
+            let busy = spent.map_or(now - from, |s| s.busy_seconds);
+            let total: i64 = tasks.iter().map(|t| t.2).sum();
+            for (id, _, weight) in tasks {
+                let share = |x: i64| x * weight / total;
+                self.db
+                    .execute(
+                        "UPDATE tasks SET work_seconds = COALESCE(work_seconds, 0) + ?2,
+                           tokens_in = CASE WHEN ?5 THEN COALESCE(tokens_in, 0) + ?3 ELSE tokens_in END,
+                           tokens_out = CASE WHEN ?5 THEN COALESCE(tokens_out, 0) + ?4 ELSE tokens_out END
+                         WHERE id = ?1",
+                        params![
+                            id,
+                            share(busy),
+                            spent.map_or(0, |s| share(s.tokens_in)),
+                            spent.map_or(0, |s| share(s.tokens_out)),
+                            spent.is_some()
+                        ],
+                    )
+                    .map_err(err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// How long done tasks have taken against their estimates lately (actual ÷ estimate over the
+    /// last 30 with both), once there are 5 to go on.
+    pub fn estimate_ratio(&self) -> Result<Option<f64>, String> {
+        let (count, actual, estimate): (i64, Option<i64>, Option<i64>) = self
+            .db
+            .query_row(
+                "SELECT COUNT(*), SUM(work_seconds), SUM(minutes * 60) FROM (
+                   SELECT work_seconds, minutes FROM tasks
+                   WHERE status = 'done' AND work_seconds > 0 AND minutes > 0
+                   ORDER BY done_at DESC LIMIT 30)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(err)?;
+        Ok(match (count, actual, estimate) {
+            (5.., Some(a), Some(e)) if e > 0 => Some(a as f64 / e as f64),
+            _ => None,
+        })
     }
 
     // ---- Hive's own agent ----------------------------------------------------------------------
@@ -626,7 +748,7 @@ impl Ledger {
         };
         let payload = json!({
             "messages": rows("SELECT id, harness, session, project, text, said_at, times, split_at FROM messages WHERE id = ?1", "message")?,
-            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at FROM tasks WHERE id = ?1", "task")?,
+            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, part FROM tasks WHERE id = ?1", "task")?,
             "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
         });
         Ok((payload, keys))
@@ -751,7 +873,7 @@ impl Ledger {
         let sql = format!(
             "SELECT t.id, t.title, t.status, t.quote, t.message, m.session, m.harness, m.project,
                     t.minutes, t.value, t.outcome, t.evidence, t.created_at, t.updated_at, t.done_at,
-                    t.left_open_at, m.times
+                    t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.part
              FROM tasks t JOIN messages m ON m.id = t.message WHERE {filter}"
         );
         let mut stmt = self.db.prepare(&sql).map_err(err)?;
@@ -780,6 +902,10 @@ impl Ledger {
                     "done_at": r.get::<_, Option<i64>>(14)?.map(iso),
                     "left_open": r.get::<_, Option<i64>>(15)?.is_some(),
                     "repeated": r.get::<_, i64>(16)? > 1,
+                    "work_seconds": r.get::<_, Option<i64>>(17)?,
+                    "tokens_in": r.get::<_, Option<i64>>(18)?,
+                    "tokens_out": r.get::<_, Option<i64>>(19)?,
+                    "part": r.get::<_, Option<String>>(20)?,
                 }))
             })
             .map_err(err)?;
@@ -1073,7 +1199,12 @@ impl Ledger {
                  [{{\"quote\": \"<the owner's exact words for one instruction>\", \"title\": \"<one line>\", \"minutes\": <estimate>, \"value\": \"low|medium|high\"}}]\n\
                  EOF\n\
                  Use [] if it asks for nothing. A standing preference (\"never…\", \"always…\") is {{\"kind\": \"rule\", \"paths\": [\"<globs it applies to, or none for the whole project>\"], ...}} instead of a task. \
-                 If a task is low value but long, ask the owner before doing it. As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\"}}]' | {cmd} report"
+                 Add \"part\": \"<the part of the project it's about>\" when the owner names one. If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\"}}]' | {cmd} report"
+            ));
+        }
+        if let Some(r) = self.estimate_ratio()?.filter(|r| !(0.8..=1.25).contains(r)) {
+            out.push_str(&format!(
+                "\nDone tasks lately took {r:.1}× their estimates; estimate with that in mind."
             ));
         }
         let earlier: Vec<Value> = self
