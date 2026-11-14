@@ -1,0 +1,9 @@
+{
+  "name": "hive-cloud",
+  "private": true,
+  "type": "module",
+  "description": "One person's private Hive cloud, deployed into their own Cloudflare account",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
