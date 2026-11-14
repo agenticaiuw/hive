@@ -88,6 +88,9 @@ impl AppServer {
             cmd.current_dir(dir);
         }
         env.apply(&mut cmd);
+        // Hive puts the owner's requests on the task board itself (CodexTask::board); the
+        // board's Codex hooks are for the owner's own Codex sessions.
+        cmd.env("HIVE_TASKS_OFF", "1");
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

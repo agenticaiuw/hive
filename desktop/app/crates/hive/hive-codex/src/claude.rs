@@ -500,6 +500,7 @@ impl Conn {
         agent.env.apply(&mut command);
         command.env_remove("CLAUDECODE"); // so it doesn't think it runs inside Claude Code
         command.env("CLAUDE_CODE_ENTRYPOINT", "sdk-py");
+        command.env("HIVE_TASKS_OFF", "1"); // Hive puts requests on the task board itself
         command.env("CLAUDE_AGENT_SDK_VERSION", SDK_VERSION);
         if agent
             .env
