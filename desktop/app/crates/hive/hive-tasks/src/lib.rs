@@ -197,6 +197,9 @@ END;
 CREATE TRIGGER IF NOT EXISTS memories_changed AFTER UPDATE ON memories WHEN NEW.origin IS NULL BEGIN
   INSERT OR IGNORE INTO outbox (kind, id) VALUES ('memory', NEW.id);
 END;
+CREATE TRIGGER IF NOT EXISTS task_events_added AFTER INSERT ON task_events BEGIN
+  INSERT OR IGNORE INTO outbox (kind, id) VALUES ('event', NEW.rowid);
+END;
 CREATE INDEX IF NOT EXISTS memories_folder ON memories (project, folder);
 CREATE INDEX IF NOT EXISTS tasks_message ON tasks (message);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (harness, session);
@@ -1023,6 +1026,21 @@ impl Ledger {
             })
             .optional()
             .map_err(err)?;
+        // Everything the ledger keeps about the owner's work is in the cloud too; each task's history
+        // has been since the ledgers had folders.
+        let events: Option<String> = self
+            .db
+            .query_row("SELECT value FROM meta WHERE key = 'events_backfilled'", [], |r| r.get(0))
+            .optional()
+            .map_err(err)?;
+        if events.is_none() {
+            self.db
+                .execute_batch(
+                    "INSERT OR IGNORE INTO outbox SELECT 'event', rowid FROM task_events;
+                     INSERT OR REPLACE INTO meta (key, value) VALUES ('events_backfilled', '1');",
+                )
+                .map_err(err)?;
+        }
         if backfilled.is_none() {
             self.db
                 .execute_batch(
@@ -1078,6 +1096,7 @@ impl Ledger {
             "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
             "folders": rows("SELECT id, project, key, name, about, created_at, updated_at FROM folders WHERE id = ?1", "folder")?,
             "memories": rows("SELECT id, project, folder, kind, title, body, task, created_at FROM memories WHERE id = ?1", "memory")?,
+            "events": rows("SELECT rowid AS id, task, at, status, note FROM task_events WHERE rowid = ?1", "event")?,
         });
         Ok((payload, keys))
     }
