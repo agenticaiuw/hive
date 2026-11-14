@@ -421,3 +421,37 @@ fn remotes_name_the_same_project_everywhere() {
     }
     assert_eq!(hive_tasks::remote_id("/srv/git/hive.git"), None);
 }
+
+#[test]
+fn changes_queue_for_the_cloud_and_other_machines_rules_apply_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("t.sqlite3")).unwrap();
+    let t = ledger.hive_request("Water the plants at noon").unwrap();
+    let (payload, keys) = ledger.sync_batch(200).unwrap();
+    assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["tasks"][0]["status"], "active");
+    ledger.sync_sent(&keys).unwrap();
+    assert!(ledger.sync_batch(200).unwrap().1.is_empty());
+    ledger.hive_finished(&t, "done", "Watered.").unwrap();
+    let (payload, _) = ledger.sync_batch(200).unwrap();
+    assert_eq!(payload["tasks"][0]["outcome"], "Watered.");
+
+    // A rule from the VM reaches agents here, is never pushed back, and stays off once off here.
+    let vm = json!([{"machine": "vm", "id": 4, "project": "github.com/o/r", "paths": "[\"docs/**\"]",
+        "text": "Docs stay in plain English", "quote": "keep docs plain", "created_at": 1, "active": 1}]);
+    assert_eq!(ledger.take_rules(&vm).unwrap(), 1);
+    assert_eq!(ledger.take_rules(&vm).unwrap(), 1);
+    let rules = ledger.rule_list(Some("github.com/o/r")).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["paths"], json!(["docs/**"]));
+    ledger
+        .sync_sent(&ledger.sync_batch(200).unwrap().1)
+        .unwrap();
+    ledger.rule_off(rules[0]["id"].as_str().unwrap()).unwrap();
+    assert!(ledger.sync_batch(200).unwrap().1.is_empty());
+    ledger.take_rules(&vm).unwrap();
+    assert_eq!(
+        ledger.rule_list(Some("github.com/o/r")).unwrap()[0]["active"],
+        false
+    );
+}

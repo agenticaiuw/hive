@@ -11,6 +11,8 @@ serde_json.workspace = true
 regex.workspace = true
 libc.workspace = true
 rusqlite = "0.41.1"
+# The owner's cloud copy of the board (cloud/tasks/worker.js).
+ureq = { version = "2.12", features = ["json"] }
 
 [dev-dependencies]
 tempfile.workspace = true
