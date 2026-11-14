@@ -8,7 +8,7 @@
 //! lost: the other version is kept beside it under a `.conflict-`, `.from-cloud-` or
 //! `.before-cloud-` name. Deleting a file writes a tombstone; the cloud keeps the previous
 //! version for 30 days.
-use crate::api::{ApiError, Client};
+use crate::api::{ApiError, Client, NOT_HIVE};
 use crate::config::{cloud_dir, now_ms, write_private, Config, Secrets};
 use crate::crypto::{self, Keys, CHUNK};
 use crate::scan::{self, Item, Kind, Root};
@@ -1059,7 +1059,8 @@ fn send_pack(api: &Client, pack: &[(String, Vec<u8>)]) -> Result<(), String> {
                     continue;
                 }
             }
-            Err(ApiError::Http { status, code, message }) if status != 0 && status < 500 && status != 429 => {
+            // Only Hive Cloud's own refusals are final; an answer from Cloudflare's edge is retried.
+            Err(ApiError::Http { status, code, message }) if status != 0 && status < 500 && status != 429 && code != NOT_HIVE => {
                 return Err(format!("the cloud refused a chunk pack ({status} {code}): {message}"));
             }
             Err(e) if stalls >= 6 => return Err(e.to_string()),
@@ -1094,7 +1095,7 @@ fn fetch_group(api: &Client, group: &[String]) -> Result<Vec<(String, Vec<u8>)>,
                 continue;
             }
             Ok(_) => return Err(format!("chunk {} is missing from the cloud", left[0])),
-            Err(ApiError::Http { status, code, message }) if status < 500 && status != 429 => {
+            Err(ApiError::Http { status, code, message }) if status < 500 && status != 429 && code != NOT_HIVE => {
                 return Err(format!("the cloud refused to send chunks ({status} {code}): {message}"));
             }
             Err(e) if stalls >= 5 => return Err(e.to_string()),

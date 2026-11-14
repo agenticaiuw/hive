@@ -203,13 +203,25 @@ fn read(res: ureq::Response) -> String {
 }
 
 /// Wait until a new Worker answers its health check (a new workers.dev name can take a minute).
+/// One answer isn't enough: a new Worker reaches Cloudflare's servers one by one, so it waits for
+/// several in a row.
 pub fn wait_healthy(url: &str, timeout: Duration) -> Result<Value, String> {
     let api = crate::api::Client::new(url, None)?;
     let start = std::time::Instant::now();
+    let mut good = 0;
     loop {
         match api.get("/v1/health") {
-            Ok(v) if v["service"] == "hive-cloud" => return Ok(v),
-            Ok(_) | Err(_) if start.elapsed() < timeout => std::thread::sleep(Duration::from_secs(3)),
+            Ok(v) if v["service"] == "hive-cloud" => {
+                good += 1;
+                if good >= 5 {
+                    return Ok(v);
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(_) | Err(_) if start.elapsed() < timeout => {
+                good = 0;
+                std::thread::sleep(Duration::from_secs(3));
+            }
             Ok(v) => return Err(format!("{url} answered, but not as a Hive Cloud: {v}")),
             Err(e) => return Err(format!("{url} did not come up: {e}")),
         }
