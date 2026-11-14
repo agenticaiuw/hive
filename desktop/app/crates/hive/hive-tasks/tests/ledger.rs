@@ -711,6 +711,14 @@ fn a_folder_keeps_its_memories_and_every_agent_put_on_it_gets_all_of_them() {
     f.ledger.add(3, &json!([{"quote": "rename the settings tab", "title": "Rename"}])).unwrap();
     f.ledger.report(&json!([{"id": "T3", "status": "done", "outcome": "Renamed it Preferences."}])).unwrap();
     assert_eq!(f.ledger.show("T3").unwrap()["report"], "Renamed it Preferences.");
+    // Reporting with a folder files the task there first, another project's folder too.
+    f.ledger
+        .report(&json!([{"id": "T3", "status": "done", "outcome": "Renamed it Preferences.", "folder": "hive › Settings"}]))
+        .unwrap();
+    assert_eq!(f.ledger.show("T3").unwrap()["folder"], "hive › Settings");
+    let filed = f.ledger.memories("hive", "settings").unwrap();
+    assert_eq!(filed.len(), 1);
+    assert_eq!(filed[0]["title"], "T3 Rename");
 }
 
 #[test]
