@@ -269,6 +269,18 @@ pub fn regression_words(request: &str) -> Option<String> {
         .map(|c| c[1].to_lowercase().replace('\u{2019}', "'"))
 }
 
+/// The words a request opens with when the user is correcting what the agent just did ("no,",
+/// "not that", "I meant"), lowercased; None for anything else.
+pub fn correction_words(request: &str) -> Option<String> {
+    static R: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"(?i)^\W*(no(?:pe)?\b[,.!]|not (?:that|this|what i)\b|that'?s (?:not|wrong)\b|wrong\b|i (?:said|meant|told you)\b|don'?t do that\b)",
+        )
+    });
+    let t = request.trim_start_matches('🗣').replace('\u{2019}', "'");
+    R.captures(&t).map(|c| c[1].to_lowercase())
+}
+
 /// A request another agent sent (Claude Code's briefs), not the user's own words.
 pub fn agent_brief(request: &str) -> bool {
     let t = request.trim_start_matches('🗣').trim();

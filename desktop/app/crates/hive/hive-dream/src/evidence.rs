@@ -147,6 +147,16 @@ pub const CATEGORIES: &[Category] = &[
         fixable: false,
     },
     Category {
+        name: "correction",
+        title: "the user corrected the agent (no, not that, I meant)",
+        fixable: false,
+    },
+    Category {
+        name: "slow_task",
+        title: "a task finished, but slowly",
+        fixable: false,
+    },
+    Category {
         name: "regression_words",
         title: "the user said something came back (again, still, I thought we changed)",
         fixable: false,
@@ -213,8 +223,8 @@ pub const ASKED_AGAIN_MINUTES: f64 = 2.0;
 /// The owner's "again" is about a failure at most this long before it.
 pub const ASKED_AGAIN_SECS: f64 = 600.0;
 
-/// Charges each time the owner said something came back ("again", "still") to the fixable
-/// failure just before it, as [`ASKED_AGAIN_MINUTES`] more, with a reference to what they said.
+/// Charges each time the owner said something came back ("again", "still") or corrected the
+/// agent ("no, not that") to the fixable failure just before it, as [`ASKED_AGAIN_MINUTES`] more, with a reference to what they said.
 /// Without it a failure that fails fast but has the owner asking again and again ranks by its
 /// own few seconds (switch_window: 13 "again"s, 0.1 minutes). Returns how many were charged.
 pub fn charge_asked_again(occurrences: &mut [Occurrence]) -> usize {
@@ -222,7 +232,7 @@ pub fn charge_asked_again(occurrences: &mut [Occurrence]) -> usize {
     order.sort_by(|&a, &b| occurrences[a].t.total_cmp(&occurrences[b].t));
     let mut charged = 0;
     for (pos, &i) in order.iter().enumerate() {
-        if occurrences[i].category != "regression_words" {
+        if !["regression_words", "correction"].contains(&occurrences[i].category.as_str()) {
             continue;
         }
         let t = occurrences[i].t;

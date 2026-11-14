@@ -8,14 +8,16 @@ use std::path::Path;
 
 use crate::evidence::{Occurrence, Source};
 use crate::normalize::{
-    agent_brief, call_text, error_category, ignorable_call, regression_words, signature_text,
-    tool_name, unfinished_class,
+    agent_brief, call_text, correction_words, error_category, ignorable_call, regression_words,
+    signature_text, tool_name, unfinished_class,
 };
 
 /// A wait or a failing call that takes longer than this is something else (the app was asleep).
 pub const MAX_CALL_MINUTES: f64 = 15.0;
 /// A task's ending counts at most this much lost time.
 pub const MAX_TASK_MINUTES: f64 = 60.0;
+/// A task that finished after more than this many minutes was slow; the minutes past it count.
+pub const SLOW_TASK_MINUTES: f64 = 10.0;
 
 /// What one journal gave: its occurrences, its starts (for restart storms) and the times of
 /// settings changes made from Hive's own menu or card (for "changed without a request").
@@ -141,10 +143,13 @@ pub fn scan_text(session: &str, text: &str, since: f64, until: f64) -> JournalSc
                 request_start.insert(e.text.clone(), e.t);
                 out.requests.push((e.t, e.text.clone()));
                 if !agent_brief(&e.text) {
-                    if let Some(word) = regression_words(&e.text) {
+                    let said = regression_words(&e.text)
+                        .map(|w| ("regression_words", w))
+                        .or_else(|| correction_words(&e.text).map(|w| ("correction", w)));
+                    if let Some((category, word)) = said {
                         occ.push(
                             Occurrence::new(
-                                "regression_words",
+                                category,
                                 &format!("the user said \"{word}\""),
                                 e.t,
                                 Source::Journal,
@@ -218,7 +223,21 @@ pub fn scan_text(session: &str, text: &str, since: f64, until: f64) -> JournalSc
                 };
                 occ.push(o.minutes(minutes).example(&e.text).outcome());
             }
-            "done" => flush_run(&mut run, &mut occ, e.t),
+            "done" => {
+                flush_run(&mut run, &mut occ, e.t);
+                let took = request_start
+                    .get(&e.request)
+                    .map_or(0.0, |started| (e.t - started) / 60.0);
+                if took > SLOW_TASK_MINUTES {
+                    let past = (took - SLOW_TASK_MINUTES).min(MAX_TASK_MINUTES);
+                    let slow = format!("a task took more than {SLOW_TASK_MINUTES:.0} minutes");
+                    occ.push(
+                        Occurrence::new("slow_task", &slow, e.t, Source::Journal, r(e.line))
+                            .minutes(past)
+                            .example(&format!("{took:.0} min: {}", e.request)),
+                    );
+                }
+            }
             kind => {
                 if let Some((name, _)) = SETTINGS_KINDS.iter().find(|(_, k)| *k == kind) {
                     out.settings_events.push((name.to_string(), e.t));

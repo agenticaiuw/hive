@@ -352,3 +352,33 @@ fn asking_again_counts_against_the_failure_before_it() {
     assert!(switch.refs.iter().any(|r| r.starts_with("asked again: ")));
     assert_eq!(clusters[0].category, "tool_error", "now ranks first");
 }
+
+#[test]
+fn corrections_and_slow_tasks_are_friction() {
+    let slow = "write the essay outline";
+    let fix = "no, not that one, the second tab";
+    let lines = [
+        jline(T0, "request", slow, slow, ""),
+        jline(T0 + 25.0 * 60.0, "done", "ok", slow, ""),
+        jline(T0 + 26.0 * 60.0, "request", fix, fix, ""),
+        jline(T0 + 27.0 * 60.0, "done", "ok", fix, ""),
+        jline(T0 + 28.0 * 60.0, "request", "Nobody's home yet?", "x", ""),
+    ];
+    let scan = journal::scan_text("s1", &lines.join("\n"), T0 - 1.0, T0 + 3600.0);
+    let of = |category: &str| -> Vec<&Occurrence> {
+        scan.occurrences
+            .iter()
+            .filter(|o| o.category == category)
+            .collect()
+    };
+    let corrections = of("correction");
+    assert_eq!(corrections.len(), 1, "\"Nobody's\" isn't a correction");
+    assert_eq!(
+        corrections[0].signature,
+        "correction: the user said \"no,\""
+    );
+    let slow_tasks = of("slow_task");
+    assert_eq!(slow_tasks.len(), 1, "the one-minute task isn't slow");
+    assert_eq!(slow_tasks[0].minutes, 15.0);
+    assert!(slow_tasks[0].example.contains(slow));
+}
