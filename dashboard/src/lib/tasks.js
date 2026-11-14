@@ -6,11 +6,14 @@
  * board (cloud/tasks). `GET /api/tasks` answers `{source, note?, board}` on every host:
  *
  *   - `source: "cloud"`: `board` is the cloud board, every machine:
- *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder]}`, a row carrying
- *     its `machine`;
+ *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder], limits: [limit]}`,
+ *     a row carrying its `machine`;
  *   - `source: "local"`: the cloud couldn't be reached and `board` is this machine's ledger
  *     (`hive-tasks board --all --json`): `{generated_at, needs_you, in_progress, not_started,
- *     left_open, done, not_split, rules, folders}`, with `note` saying why.
+ *     left_open, done, not_split, rules, folders, limits}`, with `note` saying why.
+ *
+ * Limits are how much of each subscription's usage windows the agents have used, as each machine
+ * last read them from its harness (Codex writes them into every session; Claude Code doesn't).
  *
  * Folders are the parts of a project ("memory retrieval" in hive): a task names its folder
  * ("memory retrieval", or "hive › memory retrieval" when it's another project's), and each folder
@@ -30,6 +33,11 @@
 
 /** @typedef {{project: string, key: string, name: string, about: string, memories: number,
  *   updated: number}} Folder */
+
+/** @typedef {{minutes: number, used: number, resetsAt: number}} LimitWindow */
+
+/** @typedef {{key: string, machine: string, harness: string, home: string, plan: string,
+ *   windows: LimitWindow[], at: number}} Limit */
 
 export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' };
 
@@ -141,6 +149,30 @@ function toTask(row, machine) {
 }
 
 /**
+ * A plan limit row (the cloud's, its windows a JSON text, or the local ledger's, a list).
+ * @param {any} l
+ * @param {string} machine
+ * @returns {Limit}
+ */
+function toLimit(l, machine) {
+  const harness = String(l.harness ?? '');
+  const home = String(l.home ?? '');
+  return {
+    key: `${l.machine || machine}:${harness}:${home}`,
+    machine: String(l.machine || machine),
+    harness,
+    home,
+    plan: String(l.plan ?? ''),
+    windows: list(l.windows).map((/** @type {any} */ w) => ({
+      minutes: Number(w.minutes) || 0,
+      used: Math.max(0, Math.min(100, Number(w.used) || 0)),
+      resetsAt: Number(w.resets_at ?? w.resetsAt) || 0,
+    })),
+    at: seconds(l.at),
+  };
+}
+
+/**
  * The board in one shape, from either source.
  * @param {any} answer `GET /api/tasks`'s JSON
  */
@@ -176,6 +208,7 @@ export function normalizeBoard(answer) {
       memories: Number(f.memories) || 0,
       updated: seconds(f.updated_at),
     }))),
+    limits: /** @type {Limit[]} */ ((board.limits ?? []).map((/** @type {any} */ l) => toLimit(l, machine))),
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),
@@ -417,6 +450,57 @@ export function estimates(tasks) {
   const actual = done.reduce((s, t) => s + (t.workSeconds ?? 0), 0);
   const estimate = done.reduce((s, t) => s + (t.minutes ?? 0) * 60, 0);
   return { count: done.length, ratio: actual / estimate };
+}
+
+/**
+ * Each subscription's windows for the side panel: "Codex · prolite · evans-mbp", then "Week 15%,
+ * resets in 4 days" per window. A window whose reset has passed since the harness last wrote it
+ * starts over, so it shows 0% and `fresh` (nothing used since, as far as anyone has seen).
+ * @param {Limit[]} limits
+ * @param {number} now
+ */
+export function planLimits(limits, now) {
+  return limits
+    .filter((l) => l.windows.length)
+    .map((l) => ({
+      key: l.key,
+      who: [HARNESSES[/** @type {keyof typeof HARNESSES} */ (l.harness)] ?? l.harness, l.plan, l.machine]
+        .filter(Boolean)
+        .join(' · '),
+      home: l.home,
+      windows: l.windows.map((w) => {
+        const fresh = w.resetsAt > 0 && w.resetsAt <= now;
+        return {
+          label: windowName(w.minutes),
+          used: fresh ? 0 : w.used,
+          fresh,
+          resets: fresh || !w.resetsAt ? '' : `resets in ${until(w.resetsAt, now)}`,
+        };
+      }),
+    }));
+}
+
+/**
+ * A usage window by its length: "5 h", "Week", "Day".
+ * @param {number} minutes
+ */
+function windowName(minutes) {
+  if (minutes === 10080) return 'Week';
+  if (minutes === 1440) return 'Day';
+  return duration(minutes * 60);
+}
+
+/**
+ * "12 min", "3 h", "4 days" from now to `then`.
+ * @param {number} then
+ * @param {number} now
+ */
+function until(then, now) {
+  const s = Math.max(0, then - now);
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min`;
+  if (s < 86400) return `${Math.round(s / 3600)} h`;
+  const days = Math.round(s / 86400);
+  return days === 1 ? '1 day' : `${days} days`;
 }
 
 /**

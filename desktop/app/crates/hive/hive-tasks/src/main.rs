@@ -23,6 +23,7 @@ hive-tasks board --cloud        every machine's board from the cloud copy, as JS
 hive-tasks show T<n>|M<n>|R<n>  one task's report, a message and its tasks, or a rule
 hive-tasks rules [--all]        the owner's rules, where each applies and how often it was shown
 hive-tasks rule-off R<n>        stop applying a rule
+hive-tasks limits               this machine's Codex plan limits (each window's share used, when it resets)
 hive-tasks folders [--all] [--json]   this project's folders (--all: every project's)
 hive-tasks folder \"<project › folder>\" [--json]   everything in a folder: what it's for and all
                                 its memories, in full
@@ -186,6 +187,9 @@ fn run(args: &[String]) -> Result<String, String> {
             let out = ledger.rule_off(arg(1))?;
             sync_soon(&path);
             Ok(out)
+        }
+        "limits" => {
+            serde_json::to_string_pretty(&hive_tasks::plan_limits()).map_err(|e| e.to_string())
         }
         "folders" => {
             let project = (!flag("--all")).then(|| project_key(&here()));

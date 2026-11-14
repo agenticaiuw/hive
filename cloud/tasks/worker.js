@@ -3,7 +3,7 @@
 // and gets back the rules set on the owner's other machines and the folders and memories made
 // elsewhere (other machines, the dashboard), so an instruction given once reaches every agent.
 // The owner reads all of it on one page (/), signed in by a one-use code from `hive-tasks web`.
-// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0006 (the hive-knowledge D1 database).
+// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0008 (the hive-knowledge D1 database).
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -98,6 +98,17 @@ function upsertFolder(env, machine, row, at) {
   );
 }
 const RULE_COLUMNS = ["id", "project", "paths", "text", "quote", "created_at", "active", "shown", "last_shown_at"];
+const LIMIT_COLUMNS = ["id", "harness", "home", "plan", "windows", "at"];
+
+// A subscription's usage windows as the machine read them (hive-tasks' plan_limits).
+function limitRow(row) {
+  const harness = text(row.harness, 40);
+  const home = text(row.home, 200);
+  return {
+    id: `${harness}:${home}`, harness, home, plan: text(row.plan, 40),
+    windows: JSON.stringify(Array.isArray(row.windows) ? row.windows.slice(0, 6) : []), at: Number(row.at) || null,
+  };
+}
 
 function upsert(env, table, columns, machine, row, at) {
   const names = ["machine", ...columns, "synced_at"];
@@ -125,6 +136,7 @@ async function sync(request, env) {
     ...(body.folders || []).map((r) => upsertFolder(env, machine, r, at)),
     ...(body.memories || []).map((r) => upsert(env, "board_memories", MEMORY_COLUMNS, machine, r, at)),
     ...(body.events || []).map((r) => upsert(env, "board_task_events", EVENT_COLUMNS, machine, r, at)),
+    ...(body.limits || []).slice(0, 10).map((r) => upsert(env, "board_limits", LIMIT_COLUMNS, machine, limitRow(r), at)),
   ];
   for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
   const since = Number(body.since) || 0;
@@ -238,7 +250,7 @@ async function board(request, env) {
     return json({ error: "Not signed in." }, 401);
   }
   const since = now() - 14 * DAY;
-  const [tasks, unsplit, rules, folders] = await env.DB.batch([
+  const [tasks, unsplit, rules, folders, limits] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
@@ -259,8 +271,12 @@ async function board(request, env) {
               (SELECT COUNT(*) FROM board_memories m WHERE m.project = f.project AND m.folder = f.key) AS memories
        FROM board_folders f ORDER BY f.project, f.key`,
     ),
+    env.DB.prepare("SELECT machine, harness, home, plan, windows, at, synced_at FROM board_limits ORDER BY machine, harness, home"),
   ]);
-  return json({ now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results });
+  return json({
+    now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results,
+    limits: limits.results,
+  });
 }
 
 async function page(request, env) {
