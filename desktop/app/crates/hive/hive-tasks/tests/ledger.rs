@@ -1,4 +1,4 @@
-use hive_tasks::{addressed_folder, agent_command, edited_paths, folder_place, glob_match, owner_message, parse_iso_utc, redact, words, Ledger};
+use hive_tasks::{addressed_folder, agent_command, commits_in, edited_paths, folder_place, glob_match, owner_message, parse_iso_utc, redact, words, Ledger};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -365,6 +365,7 @@ fn installing_keeps_other_hooks_and_is_undone_by_uninstalling() {
             .get("matcher")
             .is_none()
     );
+    assert_eq!(once["hooks"]["PostToolUse"][0]["matcher"], "Bash");
     assert_eq!(merge_hooks(once, "claude", None), theirs);
     assert_eq!(merge_hooks(json!({}), "claude", None), json!({}));
 }
@@ -827,4 +828,53 @@ fn an_agents_folder_commands_are_done_by_the_hook() {
     let out = f.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "hive-tasks folder Voice"}}));
     let said = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
     assert!(said.contains("Keep it local."), "{said}");
+}
+
+#[test]
+fn a_task_keeps_the_files_its_agent_edited_and_the_commits_it_made() {
+    let f = fixture();
+    f.prompt("fix the login page and the signup page");
+    f.ledger
+        .add(1, &json!([{"quote": "fix the login page", "title": "Fix login"}, {"quote": "the signup page", "title": "Fix signup"}]))
+        .unwrap();
+    // Nothing is kept for a task that isn't active.
+    let edit = |path: &str| f.hook("PreToolUse", json!({"tool_name": "Edit", "tool_input": {"file_path": path}}));
+    edit(&format!("{}/src/login.ts", f.cwd));
+    assert_eq!(f.ledger.show("T1").unwrap()["files"], json!([]));
+
+    f.ledger.report(&json!([{"id": "T1", "status": "active"}])).unwrap();
+    edit(&format!("{}/src/login.ts", f.cwd));
+    edit(&format!("{}/src/login.ts", f.cwd)); // once, however often it's edited
+    edit(&format!("{}/src/auth.ts", f.cwd));
+    let commit = |command: Value, stdout: &str| {
+        f.hook(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stdout": stdout, "stderr": ""}}),
+        )
+    };
+    assert!(commit(json!("git commit -m 'Fix login'"), "[main e9256e3] Fix the login page\n 2 files changed").is_null());
+    commit(json!("git log -1"), "[main 1234567] not made by this command");
+    commit(json!(["bash", "-lc", "git commit --amend"]), "[main 0abcdef1] Fix the login page, really");
+    let t1 = f.ledger.show("T1").unwrap();
+    assert_eq!(t1["files"], json!(["src/login.ts", "src/auth.ts"]));
+    let hashes: Vec<&str> = t1["commits"].as_array().unwrap().iter().map(|c| c["hash"].as_str().unwrap()).collect();
+    assert_eq!(hashes, ["e9256e3", "0abcdef1"]);
+    assert_eq!(t1["commits"][0]["title"], "Fix the login page");
+    assert_eq!(f.ledger.show("T2").unwrap()["files"], json!([]));
+
+    // They go to the cloud with the task.
+    let (batch, _) = f.ledger.sync_batch(100).unwrap();
+    let synced = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
+    assert!(synced["files"].as_str().unwrap().contains("src/auth.ts"), "{synced}");
+    assert!(synced["commits"].as_str().unwrap().contains("e9256e3"));
+}
+
+#[test]
+fn git_commit_output_is_read_for_its_commits() {
+    let made = commits_in("[main (root-commit) 1a2b3c4] First\n[detached HEAD 89abcdef] Second\nnoise [x 1234567] no");
+    assert_eq!(made.len(), 2);
+    assert_eq!(made[0]["hash"], "1a2b3c4");
+    assert_eq!(made[0]["branch"], "main");
+    assert_eq!(made[1]["branch"], "detached HEAD");
+    assert_eq!(made[1]["title"], "Second");
 }

@@ -48,6 +48,10 @@ pub const HIVE_PROJECT: &str = "Hive";
 /// How many tasks a hook names before it says how many more.
 const LIST_MAX: usize = 12;
 /// A folder's memories longer than this go in a file the agent is told to read whole.
+/// The most files and commits kept on one task.
+const MOST_FILES: usize = 200;
+const MOST_COMMITS: usize = 50;
+
 pub const BRIEF_INLINE: usize = 24_000;
 /// What a memory can be.
 pub const MEMORY_KINDS: [&str; 4] = ["note", "spec", "decision", "report"];
@@ -340,7 +344,7 @@ impl Ledger {
         if has("part")? && !has("folder")? {
             db.execute_batch("ALTER TABLE tasks RENAME COLUMN part TO folder").map_err(err)?;
         }
-        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("folder", "TEXT"), ("report", "TEXT")] {
+        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("folder", "TEXT"), ("report", "TEXT"), ("files", "TEXT"), ("commits", "TEXT")] {
             if !has(column)? {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {kind}")).map_err(err)?;
             }
@@ -1118,7 +1122,7 @@ impl Ledger {
         };
         let payload = json!({
             "messages": rows("SELECT id, harness, session, project, text, said_at, times, split_at FROM messages WHERE id = ?1", "message")?,
-            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, folder, report FROM tasks WHERE id = ?1", "task")?,
+            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, folder, report, files, commits FROM tasks WHERE id = ?1", "task")?,
             "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
             "folders": rows("SELECT id, project, key, name, about, created_at, updated_at FROM folders WHERE id = ?1", "folder")?,
             "memories": rows("SELECT id, project, folder, kind, title, body, task, created_at FROM memories WHERE id = ?1", "memory")?,
@@ -1313,7 +1317,8 @@ impl Ledger {
         let sql = format!(
             "SELECT t.id, t.title, t.status, t.quote, t.message, m.session, m.harness, m.project,
                     t.minutes, t.value, t.outcome, t.evidence, t.created_at, t.updated_at, t.done_at,
-                    t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report
+                    t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
+                    t.files, t.commits
              FROM tasks t JOIN messages m ON m.id = t.message WHERE {filter}"
         );
         let mut stmt = self.db.prepare(&sql).map_err(err)?;
@@ -1347,6 +1352,8 @@ impl Ledger {
                     "tokens_out": r.get::<_, Option<i64>>(19)?,
                     "folder": r.get::<_, Option<String>>(20)?,
                     "report": r.get::<_, Option<String>>(21)?,
+                    "files": json_list(r.get(22)?),
+                    "commits": json_list(r.get(23)?),
                 }))
             })
             .map_err(err)?;
@@ -1593,7 +1600,7 @@ impl Ledger {
         let event = str_of(input, "hook_event_name");
         if !matches!(
             event,
-            "UserPromptSubmit" | "Stop" | "PreToolUse" | "SessionStart"
+            "UserPromptSubmit" | "Stop" | "PreToolUse" | "PostToolUse" | "SessionStart"
         ) {
             return Ok(Value::Null);
         }
@@ -1611,6 +1618,7 @@ impl Ledger {
                 Value::Null => self.on_edit(session, &project, input),
                 done => Ok(done),
             },
+            "PostToolUse" => self.on_ran(session, input),
             _ => self.on_start(harness, session, id, transcript, str_of(input, "source")),
         }
     }
@@ -1840,6 +1848,8 @@ impl Ledger {
         if paths.is_empty() {
             return Ok(Value::Null);
         }
+        let shown: Vec<String> = paths.iter().map(|p| shown_path(&project.root, p)).collect();
+        self.note_changes(session, &shown, &[])?;
         let rules = self.rules(Some(&project.id), true)?;
         let mut lines = Vec::new();
         for path in &paths {
@@ -1879,6 +1889,65 @@ impl Ledger {
             "PreToolUse",
             &format!("The owner's rules for {} (Hive shows each once a session, when you edit a file it covers):\n{}", paths.iter().map(|p| relative(&project.root, p)).collect::<Vec<_>>().join(", "), lines.join("\n")),
         ))
+    }
+
+    /// After a command ran: the commits it made go on the session's active tasks.
+    fn on_ran(&self, session: &str, input: &Value) -> Result<Value, String> {
+        let command = text_of(input.pointer("/tool_input/command").unwrap_or(&Value::Null));
+        if !command.contains("commit") {
+            return Ok(Value::Null);
+        }
+        let said = input.get("tool_response").or_else(|| input.get("tool_output"));
+        let made = commits_in(&text_of(said.unwrap_or(&Value::Null)));
+        self.note_changes(session, &[], &made)?;
+        Ok(Value::Null)
+    }
+
+    /// What an agent changed for its work, kept on each task its session has active: the files
+    /// it edited and the commits it made (the dashboard lists them; a commit links to its diff).
+    /// Only a real change is written, so the task isn't synced again for nothing.
+    fn note_changes(&self, session: &str, files: &[String], commits: &[Value]) -> Result<(), String> {
+        if files.is_empty() && commits.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT t.id, t.files, t.commits FROM tasks t JOIN messages m ON m.id = t.message
+                 WHERE m.session = ?1 AND t.status = 'active'",
+            )
+            .map_err(err)?;
+        type Row = (i64, Option<String>, Option<String>);
+        let rows: Vec<Row> = stmt
+            .query_map([session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        for (id, had_files, had_commits) in rows {
+            let (mut kept_files, mut kept_commits) = (json_list(had_files), json_list(had_commits));
+            let before = (kept_files.len(), kept_commits.len());
+            for file in files {
+                if kept_files.len() < MOST_FILES && !kept_files.iter().any(|f| f == file) {
+                    kept_files.push(json!(file));
+                }
+            }
+            for commit in commits {
+                if kept_commits.len() < MOST_COMMITS && !kept_commits.iter().any(|c| c["hash"] == commit["hash"]) {
+                    kept_commits.push(commit.clone());
+                }
+            }
+            if (kept_files.len(), kept_commits.len()) == before {
+                continue;
+            }
+            let stored = |list: Vec<Value>| (!list.is_empty()).then(|| Value::Array(list).to_string());
+            self.db
+                .execute(
+                    "UPDATE tasks SET files = ?2, commits = ?3 WHERE id = ?1",
+                    params![id, stored(kept_files), stored(kept_commits)],
+                )
+                .map_err(err)?;
+        }
+        Ok(())
     }
 
     fn on_start(
@@ -2218,6 +2287,44 @@ pub fn render_board(board: &Value) -> String {
     out
 }
 
+/// A JSON list kept as text (a task's files or commits); empty when there's none.
+fn json_list(text: Option<String>) -> Vec<Value> {
+    text.and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// Every string in a value, one per line: a command given as text or as a list of arguments, a
+/// tool's output as text or as {stdout, stderr}.
+fn text_of(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(list) => list.iter().map(text_of).collect::<Vec<_>>().join("\n"),
+        Value::Object(map) => map.values().map(text_of).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The commits git reports making: "[main e9256e3] Dictation in the composer" (also
+/// "[main (root-commit) …]" and "[detached HEAD …]").
+pub fn commits_in(output: &str) -> Vec<Value> {
+    static MADE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?m)^\[(.+?)(?: \(root-commit\))? ([0-9a-f]{7,40})\] (.+)$").unwrap()
+    });
+    MADE.captures_iter(output)
+        .map(|c| json!({"hash": &c[2], "branch": &c[1], "title": clip(c[3].trim(), 200)}))
+        .collect()
+}
+
+/// A path as the dashboard shows it: inside the project, relative to it; elsewhere, from ~.
+fn shown_path(root: &str, path: &str) -> String {
+    let rel = relative(root, path);
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && rel.starts_with(&format!("{home}/")) => format!("~{}", &rel[home.len()..]),
+        _ => rel,
+    }
+}
+
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -2531,6 +2638,8 @@ fn hook_events(harness: &str) -> Vec<(&'static str, Option<&'static str>, u64)> 
         ("SessionStart", None, 10),
         ("UserPromptSubmit", None, 10),
         ("PreToolUse", edit, 10),
+        // After a command: the commits it made go on the task (Codex: every tool, as above).
+        ("PostToolUse", (harness == "claude").then_some("Bash"), 10),
         ("Stop", None, 10),
     ]
 }

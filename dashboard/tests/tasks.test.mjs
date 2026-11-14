@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, cost, estimates, folderList, normalizeBoard, normalizeFolder, projectName, projects, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, projectName, projects, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -120,4 +120,19 @@ test('the agents at work and the task each is on; what a task cost', () => {
   assert.equal(cost(b.tasks[3]), 'took 14 min (est. 10 min) · 1.2M tokens, 18k written');
   assert.equal(cost(b.tasks[0]), '');
   assert.equal(estimates(b.tasks), null);
+});
+
+test('a task shows the files its agent changed and its commits, each linking to its diff', () => {
+  const board = normalizeBoard({ source: 'cloud', board: { now: 1, tasks: [
+    { machine: 'mac', id: 'T9', title: 'Fix login', status: 'done', project: 'github.com/agenticaiuw/hive',
+      files: '["src/login.ts","~/notes.md"]', commits: '[{"hash":"e9256e3","branch":"main","title":"Fix the login"}]' },
+    { machine: 'mac', id: 'T10', title: 'Local', status: 'done', project: '/Users/me/scratch',
+      files: 'not json', commits: [{ hash: 'abcdef1', title: 'Local work' }, { title: 'no hash' }] },
+  ] } });
+  const [github, local] = [board.tasks.find((t) => t.id === 'T9'), board.tasks.find((t) => t.id === 'T10')];
+  assert.deepEqual(github.files, ['src/login.ts', '~/notes.md']);
+  assert.equal(commitUrl(github, github.commits[0]), 'https://github.com/agenticaiuw/hive/commit/e9256e3');
+  assert.deepEqual(local.files, []);
+  assert.equal(local.commits.length, 1);
+  assert.equal(commitUrl(local, local.commits[0]), '');
 });
