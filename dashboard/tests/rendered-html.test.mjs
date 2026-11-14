@@ -129,77 +129,6 @@ test("redirects anonymous visitors to the product login", async () => {
   );
 });
 
-test("server-renders the voice page after pairing-code login", async () => {
-  const worker = await loadWorker();
-  const cookie = await sessionCookie(worker);
-  const response = await request(worker, "http://localhost/voice", { cookie });
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
-
-  const html = await response.text();
-  assert.match(html, /<title>Hive<\/title>/i);
-  assert.match(html, /<h1>Hive<\/h1>/);
-  assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
-
-  // Topbar dot cluster exposes each subsystem through an accessible label.
-  assert.match(html, /aria-label="Cloudflare relay: (?:online|offline)"/);
-  assert.match(html, /aria-label="Mac bridge: (?:connected|disconnected)"/);
-  assert.match(html, /aria-label="Mic input: (?:ok|speech not detected)"/);
-  assert.match(html, /aria-label="Browser extension: (?:online|offline)"/);
-
-  // Icon-only actions keep their accessible names.
-  assert.match(html, /aria-label="Refresh"/);
-  assert.match(html, /aria-label="Sign out"/);
-  assert.match(html, /action="\/api\/auth\/logout"/);
-
-  // The answer card is the hero, and with no data it renders the empty state:
-  // what the state is, plus the pathway to the ask box directly below it.
-  assert.match(html, /class="answer-card"/);
-  assert.match(html, />Ready</);
-  assert.match(html, /Press the pendant or type a command/);
-
-  /*
-   * Nothing is claimed before data arrives. A cold server render has no runs
-   * and nothing parked, so neither the "needs your approval" region nor the
-   * Recent list may appear — an empty section with a heading and no rows is
-   * exactly the clutter this layout exists to remove. (The old design always
-   * emitted an empty run strip; it no longer does.)
-   */
-  assert.doesNotMatch(html, /id="needs-you"/);
-  assert.doesNotMatch(html, /Needs your approval/);
-  assert.doesNotMatch(html, /class="recent"/);
-
-  // Telemetry is behind a labelled disclosure and is not on a data-free page.
-  assert.doesNotMatch(html, /Sample rate/);
-  assert.doesNotMatch(html, />STT</);
-
-  // No tiles at all, one feed. The whole System row is deleted, not hidden —
-  // the owner, 2026-08-12: "i told you to delete these 4 tabs in the system
-  // do that please" (History and Memory fell in the earlier consolidation:
-  // "jobs, memory, and history are literally the same thing … repeated 4
-  // times"). What the tiles carried lives on elsewhere: subsystem health in
-  // the topbar dot cluster (asserted above), the needs-you count in the
-  // approval banner and the feed's "Needs you" group, node health on Hive.
-  assert.doesNotMatch(html, /class="tile-strip"/);
-  for (const gone of ["Work", "System", "Mac", "Browser", "History", "Memory"]) {
-    assert.doesNotMatch(html, new RegExp(`>${gone}</span>`));
-  }
-  // The Work feed itself is always on — no tile needed to reach it.
-  assert.match(html, /id="tile-panel-jobs"/);
-
-  // ONE composer: mic + a single "Ask the hive" field + send. The old second
-  // box ("Or speak from this browser" with its own field) is gone, not hidden.
-  assert.match(html, /aria-label="Record a voice command"/);
-  assert.match(html, /placeholder="Ask the hive…"/);
-  assert.match(html, /aria-label="Send to the hive"/);
-  assert.equal(html.match(/placeholder="Ask the hive…"/g).length, 1);
-  assert.doesNotMatch(html, /placeholder="Type a command…"/);
-  assert.doesNotMatch(html, /aria-label="Send command"/);
-  assert.doesNotMatch(html, /Or speak from this browser/);
-  // It renders idle on the server; recording chrome only appears after a tap.
-  assert.doesNotMatch(html, /Stop recording and send/);
-});
-
 test("the home page is the task board: a box to tell an agent, then every task", async () => {
   const worker = await loadWorker();
   const cookie = await sessionCookie(worker);
@@ -208,7 +137,7 @@ test("the home page is the task board: a box to tell an agent, then every task",
   const html = await response.text();
   assert.match(html, /Tell an agent what to do/);
   assert.match(html, /aria-current="page"[^>]*>Tasks</);
-  assert.match(html, /href="\/voice"/);
+  assert.doesNotMatch(html, /href="\/voice"/);
 });
 
 test("serves the app-authenticated dashboard from a public Sites host", async () => {
@@ -1258,11 +1187,11 @@ test("reports scheduled routines as unreadable from the cloud rather than absent
 
 /* ------------------------- Ask the hive (universal command box) --------- */
 
-test("renders one merged voice+text ask-the-hive box on the voice and hive pages", async () => {
+test("renders one merged voice+text ask-the-hive box on the hive page", async () => {
   const worker = await loadWorker();
   const cookie = await sessionCookie(worker);
 
-  for (const path of ["/voice", "/hive"]) {
+  for (const path of ["/hive"]) {
     const response = await request(worker, `https://dashboard.example${path}`, {
       cookie,
     });

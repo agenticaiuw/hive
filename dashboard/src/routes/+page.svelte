@@ -149,7 +149,6 @@
     </div>
     <nav class="top-actions" aria-label="Dashboard">
       <a class="hive-link current" href="{base}/" aria-current="page">Tasks</a>
-      <a class="hive-link" href="{base}/voice">Voice</a>
       <a class="hive-link" href="{base}/pc">PC</a>
       <a class="hive-link" href="{base}/hive">⬡ Hive</a>
     </nav>
