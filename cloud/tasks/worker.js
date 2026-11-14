@@ -1,8 +1,9 @@
 // The owner's task board in the cloud. Every machine's hive-tasks (desktop/app/crates/hive/
-// hive-tasks) pushes the messages, tasks and rules that changed (POST /v1/sync) and gets back the
-// rules set on the owner's other machines, so an instruction given once reaches every agent.
+// hive-tasks) pushes the messages, tasks, rules, folders and memories that changed (POST /v1/sync)
+// and gets back the rules set on the owner's other machines and the folders and memories made
+// elsewhere (other machines, the dashboard), so an instruction given once reaches every agent.
 // The owner reads all of it on one page (/), signed in by a one-use code from `hive-tasks web`.
-// Tables: cloud/knowledge/migrations/0003_task_board.sql (the hive-knowledge D1 database).
+// Tables: cloud/knowledge/migrations/0003_task_board.sql, 0004, 0005 (the hive-knowledge D1 database).
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -16,6 +17,9 @@ export default {
       if (url.pathname === "/v1/login-code" && request.method === "POST") return await loginCode(request, env);
       if (url.pathname === "/login") return await login(url, env);
       if (url.pathname === "/v1/board") return await board(request, env);
+      if (url.pathname === "/v1/folder") return await folder(url, request, env);
+      if (url.pathname === "/v1/folders" && request.method === "POST") return await saveFolder(request, env);
+      if (url.pathname === "/v1/folders/memory" && request.method === "POST") return await saveMemory(request, env);
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
     } catch (error) {
@@ -69,8 +73,29 @@ async function browserAllowed(request, env) {
 const MESSAGE_COLUMNS = ["id", "harness", "session", "project", "text", "said_at", "times", "split_at"];
 const TASK_COLUMNS = [
   "id", "message", "quote", "title", "status", "minutes", "value", "outcome", "evidence",
-  "created_at", "updated_at", "done_at", "left_open_at", "work_seconds", "tokens_in", "tokens_out", "part",
+  "created_at", "updated_at", "done_at", "left_open_at", "work_seconds", "tokens_in", "tokens_out", "folder",
+  "report",
 ];
+const MEMORY_COLUMNS = ["id", "project", "folder", "kind", "title", "body", "task", "created_at"];
+const KINDS = ["note", "spec", "decision", "report"];
+const text = (value, max) => String(value == null ? "" : value).trim().slice(0, max);
+
+// A folder is one row whoever writes it: its name stays as first written, and an empty "about"
+// (a folder an agent made by filing a task in it) never wipes one written elsewhere.
+function upsertFolder(env, machine, row, at) {
+  const updated = Number(row.updated_at) || at;
+  return env.DB.prepare(
+    `INSERT INTO board_folders (project, key, name, about, machine, created_at, updated_at, synced_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+     ON CONFLICT (project, key) DO UPDATE SET
+       about = CASE WHEN excluded.about = '' THEN board_folders.about ELSE excluded.about END,
+       machine = excluded.machine, updated_at = excluded.updated_at, synced_at = excluded.synced_at
+     WHERE excluded.updated_at >= board_folders.updated_at`,
+  ).bind(
+    text(row.project, 120).toLowerCase(), text(row.key || row.name, 120).toLowerCase(), text(row.name, 120),
+    text(row.about, 2000), machine, Number(row.created_at) || at, updated, at,
+  );
+}
 const RULE_COLUMNS = ["id", "project", "paths", "text", "quote", "created_at", "active", "shown", "last_shown_at"];
 
 function upsert(env, table, columns, machine, row, at) {
@@ -91,16 +116,88 @@ async function sync(request, env) {
   const at = now();
   const statements = [
     ...(body.messages || []).map((r) => upsert(env, "board_messages", MESSAGE_COLUMNS, machine, r, at)),
-    ...(body.tasks || []).map((r) => upsert(env, "board_tasks", TASK_COLUMNS, machine, r, at)),
+    // A task's folder was first called its part (older hive-tasks still send that).
+    ...(body.tasks || []).map((r) =>
+      upsert(env, "board_tasks", TASK_COLUMNS, machine, r.folder === undefined ? { ...r, folder: r.part } : r, at),
+    ),
     ...(body.rules || []).map((r) => upsert(env, "board_rules", RULE_COLUMNS, machine, r, at)),
+    ...(body.folders || []).map((r) => upsertFolder(env, machine, r, at)),
+    ...(body.memories || []).map((r) => upsert(env, "board_memories", MEMORY_COLUMNS, machine, r, at)),
   ];
   for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
-  const rules = await env.DB.prepare(
-    "SELECT machine, id, project, paths, text, quote, created_at, active FROM board_rules WHERE machine != ?1",
-  )
-    .bind(machine)
-    .all();
-  return json({ saved: statements.length, rules: rules.results });
+  const since = Number(body.since) || 0;
+  const [rules, folders, memories] = await env.DB.batch([
+    env.DB.prepare(
+      "SELECT machine, id, project, paths, text, quote, created_at, active FROM board_rules WHERE machine != ?1",
+    ).bind(machine),
+    // Every folder changed since the machine last asked, its own pushes too (they come back merged).
+    env.DB.prepare(
+      "SELECT project, key, name, about, created_at, updated_at FROM board_folders WHERE synced_at >= ?1",
+    ).bind(since),
+    env.DB.prepare(
+      `SELECT machine, id, project, folder, kind, title, body, task, created_at FROM board_memories
+       WHERE machine != ?1 AND synced_at >= ?2 ORDER BY synced_at LIMIT 2000`,
+    ).bind(machine, since),
+  ]);
+  return json({ saved: statements.length, now: at, rules: rules.results, folders: folders.results, memories: memories.results });
+}
+
+// ---- folders -------------------------------------------------------------------------------
+
+async function allowed(request, env) {
+  return (await browserAllowed(request, env)) || (await machineAllowed(request, env));
+}
+
+// GET /v1/folder?project=hive&key=memory%20retrieval: the folder and every one of its memories.
+async function folder(url, request, env) {
+  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const project = text(url.searchParams.get("project"), 120).toLowerCase();
+  const key = text(url.searchParams.get("key"), 120).toLowerCase();
+  if (!project || !key) return json({ error: "Say which folder (project and key)." }, 400);
+  const [found, memories] = await env.DB.batch([
+    env.DB.prepare("SELECT project, key, name, about, created_at, updated_at FROM board_folders WHERE project = ?1 AND key = ?2").bind(project, key),
+    env.DB.prepare(
+      `SELECT machine, id, kind, title, body, task, created_at FROM board_memories
+       WHERE project = ?1 AND folder = ?2 ORDER BY created_at, machine, id`,
+    ).bind(project, key),
+  ]);
+  return json({ folder: found.results[0] || { project, key, name: key, about: "" }, memories: memories.results });
+}
+
+// POST /v1/folders {project, name, about?}: makes a folder (or says what one is for) from the web.
+async function saveFolder(request, env) {
+  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const project = text(body.project, 120).toLowerCase();
+  const name = text(body.name, 80);
+  if (!project || !name) return json({ error: "A folder needs a project and a name." }, 400);
+  const at = now();
+  await upsertFolder(env, "web", { project, key: name.toLowerCase(), name, about: body.about, created_at: at, updated_at: at }, at).run();
+  return json({ ok: true, project, key: name.toLowerCase() });
+}
+
+// POST /v1/folders/memory {project, folder, kind?, title, body}: a memory written on the web,
+// which every machine takes in on its next sync.
+async function saveMemory(request, env) {
+  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const project = text(body.project, 120).toLowerCase();
+  const name = text(body.folder, 80);
+  const kind = KINDS.includes(body.kind) ? body.kind : "note";
+  const title = text(body.title, 200);
+  const content = text(body.body, 60000);
+  if (!project || !name || !(title || content)) return json({ error: "A memory needs a project, a folder and some text." }, 400);
+  const at = now();
+  const key = name.toLowerCase();
+  const next = await env.DB.prepare("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM board_memories WHERE machine = 'web'").first();
+  await env.DB.batch([
+    upsertFolder(env, "web", { project, key, name, about: "", created_at: at, updated_at: at }, at),
+    env.DB.prepare(
+      `INSERT INTO board_memories (machine, id, project, folder, kind, title, body, task, created_at, synced_at)
+       VALUES ('web', ?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?7)`,
+    ).bind(next.id, project, key, kind, title || content.split("\n")[0].slice(0, 200), content || title, at),
+  ]);
+  return json({ ok: true, id: next.id });
 }
 
 // ---- the owner's browser -------------------------------------------------------------------
@@ -139,10 +236,10 @@ async function board(request, env) {
     return json({ error: "Not signed in." }, 401);
   }
   const since = now() - 14 * DAY;
-  const [tasks, unsplit, rules] = await env.DB.batch([
+  const [tasks, unsplit, rules, folders] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
-              t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.part,
+              t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
               m.harness, m.session, m.project, m.times, m.said_at
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1
@@ -155,8 +252,13 @@ async function board(request, env) {
     env.DB.prepare(
       "SELECT machine, id, project, paths, text, quote, active, shown FROM board_rules WHERE active = 1 ORDER BY created_at DESC",
     ),
+    env.DB.prepare(
+      `SELECT f.project, f.key, f.name, f.about, f.updated_at,
+              (SELECT COUNT(*) FROM board_memories m WHERE m.project = f.project AND m.folder = f.key) AS memories
+       FROM board_folders f ORDER BY f.project, f.key`,
+    ),
   ]);
-  return json({ now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results });
+  return json({ now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results });
 }
 
 async function page(request, env) {

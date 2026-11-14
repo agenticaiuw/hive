@@ -62,7 +62,8 @@ pub fn spent(path: &Path, from: i64, to: i64) -> Option<Spent> {
     let mut replies: HashMap<String, (i64, i64)> = HashMap::new();
     let mut loose = (0, 0);
     // Codex's running totals: the last one before the stretch and the last one in it.
-    let (mut before, mut last): (Option<(i64, i64)>, Option<(i64, i64)>) = (None, None);
+    let mut before: Option<(i64, i64)> = None;
+    let mut last: Option<(i64, i64)> = None;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
         let Some(at) = line_time(&line) else { continue };
