@@ -525,3 +525,22 @@ fn only_a_real_board_command_is_taken_over() {
     assert!(cmd("/bin/bash -lc 'hive-tasks done T2 shipped it'")
         .is_some_and(|(_, id, body)| id == "T2" && body == "shipped it"));
 }
+
+#[test]
+fn harness_notices_are_not_the_owners_messages() {
+    use hive_tasks::from_the_owner;
+    assert!(from_the_owner("fix the login page"));
+    assert!(from_the_owner("  <b>bold</b> is fine in a real message"));
+    assert!(!from_the_owner(
+        "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"
+    ));
+    assert!(!from_the_owner(
+        "<cross-session-message from=\"x\">hi</cross-session-message>"
+    ));
+    assert!(!from_the_owner(
+        "\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated event"
+    ));
+    assert!(!from_the_owner(
+        "<side-sessions-event>done</side-sessions-event>"
+    ));
+}
