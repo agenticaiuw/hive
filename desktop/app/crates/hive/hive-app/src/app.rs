@@ -160,13 +160,13 @@ pub fn read_app(agent: Arc<Mutex<Option<Weak<VoiceAgent>>>>) {
 
 /// `hive-agent`'s main.
 pub fn main(argv: &[String]) -> i32 {
-    // SpaceO, the old virtual workspace, only when it's asked for at launch
-    // (AGENT_EXPERIMENTAL_SPACEO=1). Hive.app's workspace build passes AGENT_SPACEO_COMMAND by
+    // The virtual workspace engine only when it's asked for at launch
+    // (AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1). Hive.app's workspace build passes AGENT_WORKSPACE_ENGINE by
     // default; with it, the agent's mouse and keyboard, its voice and the floating window all
     // went to a workspace that never started, so fn listened with no window to show it. Before
     // any thread starts, so everything here and every helper sees the same environment.
-    if std::env::var("AGENT_EXPERIMENTAL_SPACEO").as_deref() != Ok("1") {
-        std::env::remove_var("AGENT_SPACEO_COMMAND");
+    if std::env::var("AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE").as_deref() != Ok("1") {
+        std::env::remove_var("AGENT_WORKSPACE_ENGINE");
     }
     if let Some(at) = argv.iter().position(|a| a == "--task") {
         return task_main(&argv[at + 1..]);

@@ -134,7 +134,7 @@ impl Isolated {
         isolated.set("CODEX_HOME", &state);
         isolated.set("AGENT_ENV_FILE", "/dev/null");
         for name in [
-            "AGENT_SPACEO_COMMAND",
+            "AGENT_WORKSPACE_ENGINE",
             "AGENT_WORKSPACE_CONNECTION",
             "AGENT_JOURNAL_DICTATION",
             "AGENT_BACKEND",
@@ -1192,12 +1192,12 @@ impl Host for FakeHost {
         self.paused.push(engine.to_owned());
         self.pause_ok.load(Ordering::SeqCst)
     }
-    fn recover_workspace(&self, _spaceo: &str) -> Result<(String, String), String> {
+    fn recover_workspace(&self, _engine: &str) -> Result<(String, String), String> {
         lock(&self.latch).clone()
     }
     fn start_workspace(
         &self,
-        _spaceo: &str,
+        _engine: &str,
         on_activity: OnEvent,
     ) -> Result<Arc<dyn Closeable>, String> {
         self.workspace_started.fetch_add(1, Ordering::SeqCst);

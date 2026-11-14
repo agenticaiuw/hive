@@ -3,10 +3,10 @@
 //!
 //! The engine stops creating virtual displays after it samples memory pressure, swap activity or
 //! an unreadable health reading, and it stays stopped until someone runs
-//! `spaceo safety clear-host-health --operator` by hand. That left the virtual monitor unavailable
+//! `engine safety clear-host-health --operator` by hand. That left the virtual monitor unavailable
 //! after every such sample, so the app now runs the same command itself, once, at startup.
 //!
-//! The engine's command keeps all of its own checks: it refuses while a SpaceO display is online,
+//! The engine's command keeps all of its own checks: it refuses while a workspace display is online,
 //! while another owner holds the journal, for any failure other than host health, and while the
 //! host is unhealthy right now. Nothing here bypasses those; a refusal is reported and the
 //! workspace start then fails the way it did before.
@@ -88,9 +88,9 @@ fn py_str(value: Option<&Value>) -> String {
 }
 
 /// Returns (outcome, detail). Outcomes: not-latched, cleared, refused, skipped.
-pub fn recover_if_latched(spaceo: &str, run: &dyn Fn(&[&str], u64) -> Output) -> (String, String) {
+pub fn recover_if_latched(engine: &str, run: &dyn Fn(&[&str], u64) -> Output) -> (String, String) {
     let skipped = |detail: &str| ("skipped".to_string(), detail.to_string());
-    let (_, out, _) = run(&[spaceo, "doctor", "--json"], 45);
+    let (_, out, _) = run(&[engine, "doctor", "--json"], 45);
     let Ok(Value::Object(report)) = serde_json::from_str::<Value>(&out) else {
         return skipped("the engine's health report could not be read");
     };
@@ -117,7 +117,7 @@ pub fn recover_if_latched(spaceo: &str, run: &dyn Fn(&[&str], u64) -> Output) ->
     let online = report
         .get("displays")
         .filter(|v| truthy(v))
-        .and_then(|d| d.get("spaceO"))
+        .and_then(|d| d.get("workspace"))
         .map(truthy)
         .unwrap_or(false);
     if online {
@@ -126,8 +126,8 @@ pub fn recover_if_latched(spaceo: &str, run: &dyn Fn(&[&str], u64) -> Output) ->
         ));
     }
     // An idle daemon is a journal owner; with no display online it has nothing to lose.
-    run(&[spaceo, "daemon", "stop"], 30);
-    let (code, out, err) = run(&[spaceo, "safety", "clear-host-health", "--operator"], 120);
+    run(&[engine, "daemon", "stop"], 30);
+    let (code, out, err) = run(&[engine, "safety", "clear-host-health", "--operator"], 120);
     if code == 0 {
         return ("cleared".into(), reason);
     }

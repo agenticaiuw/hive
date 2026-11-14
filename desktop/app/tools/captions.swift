@@ -980,7 +980,7 @@ final class Captions: NSObject {
     /// Where the card goes: the virtual workspace's display when Hive works there and it's up,
     /// otherwise your screen. Never nowhere: while Hive listens, you see the card.
     func targetScreen() -> NSScreen? {
-        if ProcessInfo.processInfo.environment["AGENT_SPACEO_COMMAND"] != nil {
+        if ProcessInfo.processInfo.environment["AGENT_WORKSPACE_ENGINE"] != nil {
             let state = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ??
                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Personal Agent").path
             let path = URL(fileURLWithPath: state).appendingPathComponent("workspace-display-id")

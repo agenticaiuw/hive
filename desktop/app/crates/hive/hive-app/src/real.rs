@@ -711,8 +711,8 @@ impl Closeable for Bridge {
     }
 }
 
-pub fn start_workspace(spaceo: &str, on_activity: OnEvent) -> Result<Arc<dyn Closeable>, String> {
-    let bridge = hive_workspace::bridge::Bridge::spawn(spaceo, Some(on_activity))?;
+pub fn start_workspace(engine: &str, on_activity: OnEvent) -> Result<Arc<dyn Closeable>, String> {
+    let bridge = hive_workspace::bridge::Bridge::spawn(engine, Some(on_activity))?;
     if let Err(error) = bridge.start_embedded() {
         bridge.close();
         return Err(error);

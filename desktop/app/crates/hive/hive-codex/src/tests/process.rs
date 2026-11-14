@@ -210,11 +210,11 @@ fn new_application_and_server_process_resume_same_conversation() {
 #[test]
 fn workspace_mode_resumes_same_thread_without_physical_screenshot() {
     let h = Harness::new();
-    let first = worker(&h, &[("AGENT_SPACEO_COMMAND", "/synthetic/spaceo")]);
+    let first = worker(&h, &[("AGENT_WORKSPACE_ENGINE", "/synthetic/engine")]);
     let second = worker(
         &h,
         &[
-            ("AGENT_SPACEO_COMMAND", "/synthetic/spaceo"),
+            ("AGENT_WORKSPACE_ENGINE", "/synthetic/engine"),
             ("TEST_PROMPT", "workspace follow-up"),
         ],
     );

@@ -61,9 +61,6 @@ installed=$("$MIGRATOR" select "$APPLICATIONS")
 export SIGN_REQUIRED=${SIGN_REQUIRED-1}
 [ "${SIGN:-}" = "-" ] && SIGN_REQUIRED=0
 candidate=build/Agent.app
-if [ -n "${AGENT_SPACEO_COMMAND:-}" ] || [ "${1:-}" = "--workspace" ] || { [ -n "$installed" ] && [ -x "$installed/Contents/Helpers/spaceo" ]; }; then
-  candidate=build/Agent-WorkspaceCandidate.app
-fi
 make "$candidate" build/agent-vhid-captions build/agent-vhid-selection build/hive-agent
 codesign --verify --deep --strict "$candidate"
 describe "$candidate"
@@ -85,7 +82,7 @@ fi
 # Build before staging or replacing anything, so a missing Rust toolchain or a
 # failed build leaves the running app untouched.
 engine_choice_built=0
-if [ -n "$installed" ] && [ -x "$installed/Contents/Helpers/spaceo" ] && [ -x "$candidate/Contents/Helpers/spaceo" ]; then
+if [ -n "$installed" ] && [ -x "$installed/Contents/Helpers/workspace-engine" ] && [ -x "$candidate/Contents/Helpers/workspace-engine" ]; then
   build_engine_choice
   engine_choice_built=1
 fi
@@ -104,8 +101,8 @@ codesign --verify --deep --strict "$staged"
 # An app restart must not strand the display's still-running daemon with a
 # different helper. Keep the existing engine for this update; the newly built
 # engine can be installed once the display service is stopped safely.
-installed_engine="${installed:-$APP}/Contents/Helpers/spaceo"
-candidate_engine="$staged/Contents/Helpers/spaceo"
+installed_engine="${installed:-$APP}/Contents/Helpers/workspace-engine"
+candidate_engine="$staged/Contents/Helpers/workspace-engine"
 if [ -x "$installed_engine" ] && [ -x "$candidate_engine" ]; then
   [ "$engine_choice_built" -eq 1 ] || { echo 'Update stopped: workspace engines changed during staging.' >&2; exit 1; }
   engine_choice=$("$engine_choice_bin" "$candidate_engine" "$installed_engine")

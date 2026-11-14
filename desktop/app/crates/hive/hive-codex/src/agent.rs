@@ -254,7 +254,7 @@ impl Agent {
     /// `codex app-server` with the agent's settings.
     pub fn app_server_command(&self) -> Result<Vec<String>, AgentError> {
         let mut devices: Vec<Value> = prompts::DEVICES.iter().map(|(d, _)| json!(d)).collect();
-        devices.extend([json!("knowledge"), json!("spaceo")]);
+        devices.extend([json!("knowledge"), json!("workspace")]);
         let mut overrides: Vec<String> = vec![
             "notify=[]".into(), // no sounds or notifications when a task ends
             // Quick steps and short replies: it's read aloud, and nobody reads the reasoning summaries.
@@ -275,7 +275,7 @@ impl Agent {
             ),
             format!("model_auto_compact_token_limit={COMPACT_AT}"),
         ];
-        if self.env.get("AGENT_SPACEO_COMMAND").is_some() {
+        if self.env.get("AGENT_WORKSPACE_ENGINE").is_some() {
             let state = self.state_dir();
             let roots: Vec<String> = ["memory", "captures", "updates"]
                 .iter()
@@ -439,7 +439,7 @@ impl Agent {
             return;
         }
         if let Ok(server) = self.codex_server() {
-            if self.env.get("AGENT_SPACEO_COMMAND").is_some() {
+            if self.env.get("AGENT_WORKSPACE_ENGINE").is_some() {
                 // Force MCP startup so the virtual display exists before the first spoken task.
                 let _ = server.request("mcpServerStatus/list", json!({}), 45.0);
             }
@@ -480,13 +480,13 @@ impl Agent {
         if let Some(params) = lock(&self.params_override).clone() {
             return Ok(params);
         }
-        let spaceo = self.env.get("AGENT_SPACEO_COMMAND").is_some();
+        let engine = self.env.get("AGENT_WORKSPACE_ENGINE").is_some();
         let mut rules = prompts::RULES.to_owned();
         if self.env.get("AGENT_WORKSPACE_CONNECTION").is_some() {
             rules.push_str(prompts::WORKSPACE_RULES);
         }
-        if spaceo {
-            rules.push_str(prompts::SPACEO_RULES);
+        if engine {
+            rules.push_str(prompts::VIRTUAL_WORKSPACE_RULES);
         } else {
             rules.push_str(&prompts::virtual_monitor_rules((self
                 .hooks
@@ -501,7 +501,7 @@ impl Agent {
             "model": self.model(), "ephemeral": false, "approvalPolicy": "never",
             "cwd": self.config.repo.display().to_string(),
         });
-        if spaceo {
+        if engine {
             params["permissions"] = json!("personal-agent");
         } else {
             params["sandbox"] = json!("workspace-write");

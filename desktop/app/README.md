@@ -13,12 +13,12 @@ git submodule update --init   # once, after cloning: Karabiner's client headers
 ./install.sh                  # Agent in the menu bar, opened at login
 ```
 
-The app builds its workspace engine from the maintained `workspace-engine/` source in this
-repository, including its MIT license; the build does not clone Braus. The normal app keeps
-physical-device mode by default. The virtual workspace (SpaceO) runs only when chosen at
-launch with `AGENT_EXPERIMENTAL_SPACEO=1`; otherwise Hive works on your own screen. The former experimental
-single-window Braus seat is not available in this build. Rust crates and voice models still
-need to be available locally or downloaded during setup.
+Hive.app's main executable is built from `workspace-engine/Sources/UnifiedAgent`. Hive works on
+your own screen. Its own virtual workspace (a separate display the agent works on) is being
+written for `workspace-engine/`; until it lands, `AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1` has no
+engine to start. The former experimental single-window Braus seat is not available in this
+build. Rust crates and voice models still need to be available locally or downloaded during
+setup.
 
 ## How it's built
 

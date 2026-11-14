@@ -276,7 +276,7 @@ fn wait_resumes_only_after_proxy_probe_succeeds() {
 
 #[test]
 fn closed_workspace_is_never_reopened_by_provider_recovery() {
-    let h = Harness::with(|env, _| env.set("AGENT_SPACEO_COMMAND", "spaceo"));
+    let h = Harness::with(|env, _| env.set("AGENT_WORKSPACE_ENGINE", "workspace"));
     let identity = task_recovery::begin(h.path(), "mac", "thread", None).unwrap();
     let (task, _) = h.task("work");
     task.st().recovery_id = Some(identity);

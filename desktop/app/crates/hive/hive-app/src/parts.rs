@@ -320,25 +320,25 @@ pub trait Host: Send + Sync {
         hive_mac::virtual_monitor::warp(x, y)
     }
 
-    // -- the workspace (AGENT_SPACEO_COMMAND) --
+    // -- the workspace (AGENT_WORKSPACE_ENGINE) --
     /// `<engine> session pause ... --reason "Stopped by fn"` worked (3 s).
     fn pause_workspace(&self, engine: &str) -> bool {
         crate::real::pause_workspace(engine)
     }
     /// workspace_recovery.recover_if_latched: (outcome, detail).
-    fn recover_workspace(&self, spaceo: &str) -> Result<(String, String), String> {
+    fn recover_workspace(&self, engine: &str) -> Result<(String, String), String> {
         Ok(hive_workspace::recovery::recover_if_latched(
-            spaceo,
+            engine,
             &hive_workspace::recovery::run_command,
         ))
     }
     /// The embedded workspace bridge, started (`Bridge(...).start_embedded()`).
     fn start_workspace(
         &self,
-        spaceo: &str,
+        engine: &str,
         on_activity: OnEvent,
     ) -> Result<Arc<dyn Closeable>, String> {
-        crate::real::start_workspace(spaceo, on_activity)
+        crate::real::start_workspace(engine, on_activity)
     }
     /// `Bridge.status("error", message)`.
     fn workspace_error(&self, message: &str) {

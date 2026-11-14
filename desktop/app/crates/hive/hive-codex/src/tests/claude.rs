@@ -228,21 +228,21 @@ fn the_command_line_is_the_sdks() {
 
 /// test_workspace_backend_is_configured_without_physical_display_fallback
 #[test]
-fn spaceo_is_a_stdio_server_with_its_rules() {
-    let h = claude(|env, _| env.set("AGENT_SPACEO_COMMAND", "/tmp/spaceo"));
+fn workspace_is_a_stdio_server_with_its_rules() {
+    let h = claude(|env, _| env.set("AGENT_WORKSPACE_ENGINE", "/tmp/engine"));
     let args = args_for(&h, true);
     let config: Value = serde_json::from_str(flag(&args, "--mcp-config")).unwrap();
-    let bridge = h.path().join("build/spaceo-mcp-bridge");
+    let bridge = h.path().join("build/workspace-mcp-bridge");
     assert_eq!(
-        config["mcpServers"]["spaceo"],
-        json!({"type": "stdio", "command": bridge.display().to_string(), "args": ["/tmp/spaceo"]})
+        config["mcpServers"]["workspace"],
+        json!({"type": "stdio", "command": bridge.display().to_string(), "args": ["/tmp/engine"]})
     );
-    assert!(flag(&args, "--allowedTools").ends_with(",mcp__spaceo__*"));
-    // (The Python test's "Do not silently fall back" is no longer in SPACEO_RULES.)
+    assert!(flag(&args, "--allowedTools").ends_with(",mcp__workspace__*"));
+    // (The Python test's "Do not silently fall back" is no longer in VIRTUAL_WORKSPACE_RULES.)
     let system = flag(&args, "--system-prompt");
     assert_eq!(
         system,
-        format!("{}{}", system_prompt(&h), prompts::SPACEO_RULES)
+        format!("{}{}", system_prompt(&h), prompts::VIRTUAL_WORKSPACE_RULES)
     );
 }
 
@@ -450,10 +450,10 @@ fn the_in_process_mcp_servers_answer_as_the_sdks() {
     );
     assert_eq!(
         mcp(
-            "spaceo",
+            "workspace",
             json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
         ),
-        json!({"jsonrpc": "2.0", "id": 4, "error": {"code": -32601, "message": "Server 'spaceo' not found"}})
+        json!({"jsonrpc": "2.0", "id": 4, "error": {"code": -32601, "message": "Server 'workspace' not found"}})
     );
     let call = |name: &str| {
         mcp(

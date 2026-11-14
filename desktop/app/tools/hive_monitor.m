@@ -12,8 +12,8 @@
 //                                       screen with your cursor and keyboard on it; tap again to come back
 //   hive-monitor selftest               check the right Option tap rules
 //
-// The display-creation calls follow the approach of the SpaceO engine this replaces
-// (CoreGraphics' CGVirtualDisplay classes, looked up at run time, on a private queue).
+// The display is made with CoreGraphics' CGVirtualDisplay classes, looked up at run time, on a
+// private queue.
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreMedia/CoreMedia.h>

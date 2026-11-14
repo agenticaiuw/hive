@@ -179,8 +179,8 @@ pub trait ProviderWait: Send + Sync {
     fn reachable(&self, env: &Env) -> bool {
         provider_wait::reachable(env)
     }
-    fn workspace_open(&self, dir: &Path) -> bool {
-        provider_wait::workspace_open(dir)
+    fn workspace_is_open(&self, dir: &Path) -> bool {
+        provider_wait::workspace_is_open(dir)
     }
 }
 
