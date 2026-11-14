@@ -1039,7 +1039,7 @@ impl Ledger {
         prompt: &str,
     ) -> Result<Value, String> {
         self.mark_transcript(session, transcript)?;
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() || !from_the_owner(prompt) {
             return Ok(Value::Null);
         }
         let (id, new) = self.save_message(harness, session, project, prompt, now(), true)?;
@@ -1292,6 +1292,22 @@ impl Ledger {
 }
 
 // ---- text --------------------------------------------------------------------------------------
+
+/// Whether a submitted prompt is the owner's own message. A harness also submits its own notices
+/// as prompts: a background task finishing, another session's message, a side-session or CI event.
+/// Those aren't the owner's words, so they don't go on the board.
+pub fn from_the_owner(prompt: &str) -> bool {
+    const NOTICES: [&str; 6] = [
+        "<task-notification>",
+        "<cross-session-message",
+        "<side-sessions-event",
+        "<ci-monitor-event",
+        "<system-reminder>",
+        "[SYSTEM NOTIFICATION",
+    ];
+    let start = prompt.trim_start();
+    !NOTICES.iter().any(|n| start.starts_with(n))
+}
 
 /// An agent's own board command, as `(command, id, body)`, when it is the whole shell command
 /// (after an optional `cd <dir> &&`): `hive-tasks add M3 <<'EOF' … EOF`, `echo '…' | hive-tasks
