@@ -377,6 +377,7 @@ impl CodexTask {
     fn board<T>(&self, write: impl FnOnce(&hive_tasks::Ledger) -> Result<T, String>) -> Option<T> {
         let path = self.state_dir().join("tasks/tasks.sqlite3");
         let result = hive_tasks::Ledger::open(&path).and_then(|board| write(&board));
+        hive_tasks::sync_soon(&path); // every machine's board is one copy in the cloud
         result
             .map_err(|e| self.event("error", &format!("Task board: {e}")))
             .ok()

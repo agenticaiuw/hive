@@ -1,0 +1,17 @@
+// The owner's task board in the cloud (worker.js). Deployed with `cf deploy` from this folder;
+// the one secret, TASKS_TOKEN, is what every machine's hive-tasks signs in with
+// (~/.config/hive/tasks.json on each machine).
+{
+  "name": "hive-tasks",
+  "main": "worker.js",
+  "compatibility_date": "2026-07-31",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hive-knowledge",
+      "database_id": "852c59f8-9ed1-4ff4-b865-358c64eaa8e1",
+      "migrations_dir": "../knowledge/migrations"
+    }
+  ]
+}
