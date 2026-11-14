@@ -18,7 +18,7 @@ const HELP: &str = "hive-dream: Hive's nightly self-review (collect, fix with Hi
                                          set a cluster open, ignored, landed, rejected or proposed
   hive-dream status                      the register: open, proposed, rejected, landed, ignored
   hive-dream nightly [--force]           what the VM's timer runs (cloud/dream/nightly.sh): collect,
-                                         fix --max 1, the macOS check, report
+                                         fix --max 3, the macOS check, report
   hive-dream sync [--mirror DIR]         on the VM: mirror the Mac's uploaded logs from R2
                                          (default <dream>/mirror)
   hive-dream ci-gate --out DIR           the macOS check of a dream/* branch (GitHub Actions)

@@ -1,8 +1,9 @@
 //! The nightly run. On Hive's cloud VM a systemd timer starts it (`cloud/dream/nightly.sh`,
 //! installed by `cloud/dream/install.sh`): `hive-dream nightly` runs at most once per date,
-//! collects, has Hive's VM agent try one fix (test first), and writes the report. The fix goes to
-//! the macOS check on GitHub Actions (`ci`), which lands it on main or doesn't. Run on the Mac by
-//! hand (HIVE_DREAM_AGENT=hive), it first waits for Hive to be idle and the user away.
+//! collects, has Hive's VM agent try up to [`FIXES_A_NIGHT`] fixes (test first), and writes the
+//! report. Each fix goes to the macOS check on GitHub Actions (`ci`), which lands it on main or
+//! doesn't. Run on the Mac by hand (HIVE_DREAM_AGENT=hive), it first waits for Hive to be idle
+//! and the user away.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -11,6 +12,9 @@ use crate::{collect, fix, paths, report, time};
 
 /// The user counts as present if they touched input more recently than this.
 pub const IDLE_SECS: f64 = 600.0;
+/// How many of the clusters that lost the most time a night tries to fix, one after another.
+/// Each is small and checked on its own, so one that fails doesn't hold the others back.
+pub const FIXES_A_NIGHT: usize = 3;
 /// `"HIDIdleTime" = 45043833` (nanoseconds) from `ioreg -c IOHIDSystem`.
 pub fn parse_hid_idle_ns(text: &str) -> Option<u64> {
     text.lines()
@@ -115,9 +119,9 @@ pub fn nightly(force: bool) -> Result<(), String> {
         top.join("; ")
     ));
     report::write(&dream, &collected.date)?;
-    log_line("fix --max 1");
+    log_line(&format!("fix --max {FIXES_A_NIGHT}"));
     match fix::run(&fix::Options {
-        max: 1,
+        max: FIXES_A_NIGHT,
         cluster: None,
         dry_run: false,
     }) {
