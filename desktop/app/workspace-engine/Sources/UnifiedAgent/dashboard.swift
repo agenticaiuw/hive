@@ -38,8 +38,58 @@ import WebKit
             web?.load(URLRequest(url: url))
         }
         NSApp.setActivationPolicy(.regular)
+        installMenu()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The menu bar while the window is up. Hive otherwise lives in the menu bar with no menus,
+    /// and without an Edit menu ⌘C, ⌘V and ⌘A do nothing in the page; View has full screen
+    /// (⌃⌘F) and Reload (⌘R, for a freshly built dashboard). No Quit: closing this window
+    /// shouldn't be one slip away from stopping Hive.
+    private func installMenu() {
+        guard NSApp.mainMenu?.item(withTitle: "Edit") == nil else { return }
+        let bar = NSMenu()
+        func item(_ title: String, _ action: Selector, _ key: String,
+                  _ modifiers: NSEvent.ModifierFlags = .command, to target: AnyObject? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = target
+            return item
+        }
+        func add(_ title: String, _ items: [NSMenuItem]) {
+            let menu = NSMenu(title: title)
+            items.forEach(menu.addItem)
+            let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            holder.submenu = menu
+            bar.addItem(holder)
+        }
+        add("Hive", [
+            item("Hide Hive", #selector(NSApplication.hide(_:)), "h"),
+            item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+        ])
+        add("Edit", [
+            item("Undo", Selector(("undo:")), "z"),
+            item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            .separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x"),
+            item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Paste", #selector(NSText.paste(_:)), "v"),
+            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ])
+        add("View", [
+            item("Reload", #selector(reload), "r", to: self),
+            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.control, .command]),
+        ])
+        add("Window", [
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            item("Zoom", #selector(NSWindow.performZoom(_:)), ""),
+        ])
+        NSApp.mainMenu = bar
+    }
+
+    @objc private func reload() {
+        web?.reload()
     }
 
     private func make(_ url: URL) {
