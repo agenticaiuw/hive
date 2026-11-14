@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::evidence::{self, Counts, Evidence, Occurrence, Source};
 use crate::register::Register;
-use crate::{agentlog, journal, paths, time, timeline};
+use crate::{activity, agentlog, journal, paths, time, timeline};
 
 /// A first run (no register yet) reads this far back; later runs read from the last run, and at
 /// least this far (overlap is harmless: the register counts each occurrence once).
@@ -325,6 +325,8 @@ pub fn run(opts: &Options) -> Result<Collected, String> {
     let mut merged = evidence::merge(all);
     counts.occurrences = merged.len();
     evidence::charge_asked_again(&mut merged);
+    let steps = activity::read(&state.join("activity"), since, until);
+    activity::attach_demonstrations(&mut merged, &steps);
     let mut clusters = evidence::cluster(&merged);
     let applied = register.apply(&clusters, until);
     for c in &mut clusters {
