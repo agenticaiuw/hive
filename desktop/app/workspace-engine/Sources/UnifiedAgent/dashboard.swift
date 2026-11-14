@@ -53,6 +53,8 @@ import WebKit
         window.contentView = web
         window.isReleasedWhenClosed = false
         window.delegate = self
+        // Open on the desktop the owner is on, over a full-screen app too, not on the one it was made on.
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.center()
         window.setFrameAutosaveName("HiveDashboard")
         web.load(URLRequest(url: url))
