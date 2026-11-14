@@ -23,7 +23,10 @@
  *   title: string, status: string, minutes: number|null, value: string, outcome: string,
  *   evidence: string, harness: string, session: string, project: string, projectName: string,
  *   folder: string, report: string, workSeconds: number|null, tokensIn: number|null,
- *   tokensOut: number|null, created: number, updated: number}} Task */
+ *   tokensOut: number|null, created: number, updated: number, files: string[],
+ *   commits: Commit[]}} Task */
+
+/** @typedef {{hash: string, branch: string, title: string}} Commit */
 
 /** @typedef {{project: string, key: string, name: string, about: string, memories: number,
  *   updated: number}} Folder */
@@ -60,6 +63,32 @@ export function projectName(project) {
   if (!text) return '';
   if (text.includes('/scratch-workspaces/')) return 'a scratch folder';
   return text.split('/').pop() || text;
+}
+
+/**
+ * A list the ledger keeps as JSON text (a task's files or commits), or already a list.
+ * @param {unknown} value
+ * @returns {any[]}
+ */
+function list(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where a commit's diff is: GitHub's page for it when the project is a GitHub repository.
+ * @param {Task} task
+ * @param {Commit} commit
+ */
+export function commitUrl(task, commit) {
+  const repo = task.project.match(/^github\.com\/[\w.-]+\/[\w.-]+$/);
+  return repo && /^[0-9a-f]{7,40}$/.test(commit.hash) ? `https://${repo[0]}/commit/${commit.hash}` : '';
 }
 
 /** @param {unknown} value */
@@ -102,6 +131,10 @@ function toTask(row, machine) {
     workSeconds: number(row.work_seconds),
     tokensIn: number(row.tokens_in),
     tokensOut: number(row.tokens_out),
+    files: list(row.files).filter((f) => typeof f === 'string'),
+    commits: list(row.commits)
+      .filter((c) => c && typeof c.hash === 'string')
+      .map((c) => ({ hash: c.hash, branch: String(c.branch || ''), title: String(c.title || '') })),
     created: seconds(row.created_at ?? row.said_at),
     updated: seconds(row.updated_at ?? row.done_at ?? row.created_at ?? row.said_at),
   };

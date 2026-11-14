@@ -34,6 +34,7 @@
     agentsAtWork,
     ago,
     byFolder,
+    commitUrl,
     cost,
     estimates,
     folderList,
@@ -600,6 +601,29 @@
                           <p class="label">Evidence</p>
                           <p class="report">{task.evidence}</p>
                         {/if}
+                        {#if task.commits.length}
+                          <p class="label">Commits</p>
+                          <ul class="changes">
+                            {#each task.commits as commit (commit.hash)}
+                              <li>
+                                {#if commitUrl(task, commit)}
+                                  <a class="hash" href={commitUrl(task, commit)} target="_blank" rel="noreferrer">{commit.hash.slice(0, 7)}</a>
+                                {:else}
+                                  <code class="hash">{commit.hash.slice(0, 7)}</code>
+                                {/if}
+                                {commit.title}
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if task.files.length}
+                          <details class="files">
+                            <summary class="label">Changed {task.files.length} {task.files.length === 1 ? "file" : "files"}</summary>
+                            <ul class="changes">
+                              {#each task.files as file (file)}<li><code>{file}</code></li>{/each}
+                            </ul>
+                          </details>
+                        {/if}
                         <p class="meta">Asked in {task.message || "a message"}{#if task.session} · session {task.session.slice(0, 8)}{/if}</p>
                       </div>
                     {/if}
@@ -1159,6 +1183,28 @@
   }
   .task-more .report {
     margin-left: 0;
+  }
+  .changes {
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 3px;
+    font-size: var(--fs-small);
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+  .changes code,
+  .changes .hash {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.92em;
+  }
+  .changes .hash {
+    margin-right: 6px;
+    color: var(--green);
+  }
+  .files summary {
+    cursor: pointer;
   }
   .label {
     margin: var(--s2) 0 0;
