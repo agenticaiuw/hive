@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Hive's nightly dream on its cloud VM, run as root by hive-dream.service (install.sh puts a copy
 # of this file in /var/lib/hive-dream). It brings the repo clone up to main, builds hive-dream,
-# mirrors what the Mac uploaded (`hive-dream sync`), runs the night (collect, one fix by Hive's
-# VM agent, test first, sent to a dream/* branch for the macOS check), and puts the morning
+# mirrors what the Mac uploaded (`hive-dream sync`), runs the night (collect, up to three fixes by
+# Hive's VM agent, test first, sent to a dream/* branch for the macOS check), and puts the morning
 # report in R2 (hive-recordings/dream/<date>/report.md).
 #
 #   nightly.sh [--force]     --force runs again on a night that already ran
