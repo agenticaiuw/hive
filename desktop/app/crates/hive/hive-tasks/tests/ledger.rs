@@ -747,7 +747,14 @@ fn a_message_from_the_dashboard_names_its_folder_and_gets_the_folders_memories()
 fn folders_and_memories_go_to_the_cloud_and_those_made_elsewhere_come_back_once() {
     let f = fixture();
     f.ledger.remember("hive", "Voice", "note", "Parakeet\nRuns in the sidecar.").unwrap();
+    f.prompt("say hello");
+    f.ledger.add(1, &json!([{"quote": "say hello", "title": "Hello"}])).unwrap();
+    f.ledger.report(&json!([{"id": "T1", "status": "done", "outcome": "Said it."}])).unwrap();
     let (batch, keys) = f.ledger.sync_batch(200).unwrap();
+    // Each task's history goes too: nothing stays only on this machine.
+    let events: Vec<_> = batch["events"].as_array().unwrap().iter().map(|e| e["status"].as_str().unwrap().to_string()).collect();
+    assert_eq!(events, ["open", "done"]);
+    assert_eq!(batch["events"][1]["note"], "Said it.");
     assert_eq!(batch["folders"][0]["name"], "Voice");
     assert_eq!(batch["memories"][0]["title"], "Parakeet");
     f.ledger.sync_sent(&keys).unwrap();

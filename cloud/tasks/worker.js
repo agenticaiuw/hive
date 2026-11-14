@@ -3,7 +3,7 @@
 // and gets back the rules set on the owner's other machines and the folders and memories made
 // elsewhere (other machines, the dashboard), so an instruction given once reaches every agent.
 // The owner reads all of it on one page (/), signed in by a one-use code from `hive-tasks web`.
-// Tables: cloud/knowledge/migrations/0003_task_board.sql, 0004, 0005 (the hive-knowledge D1 database).
+// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0006 (the hive-knowledge D1 database).
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -77,6 +77,7 @@ const TASK_COLUMNS = [
   "report",
 ];
 const MEMORY_COLUMNS = ["id", "project", "folder", "kind", "title", "body", "task", "created_at"];
+const EVENT_COLUMNS = ["id", "task", "at", "status", "note"];
 const KINDS = ["note", "spec", "decision", "report"];
 const text = (value, max) => String(value == null ? "" : value).trim().slice(0, max);
 
@@ -123,6 +124,7 @@ async function sync(request, env) {
     ...(body.rules || []).map((r) => upsert(env, "board_rules", RULE_COLUMNS, machine, r, at)),
     ...(body.folders || []).map((r) => upsertFolder(env, machine, r, at)),
     ...(body.memories || []).map((r) => upsert(env, "board_memories", MEMORY_COLUMNS, machine, r, at)),
+    ...(body.events || []).map((r) => upsert(env, "board_task_events", EVENT_COLUMNS, machine, r, at)),
   ];
   for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
   const since = Number(body.since) || 0;
