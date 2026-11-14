@@ -40,6 +40,7 @@
     folderList,
     normalizeBoard,
     normalizeFolder,
+    planLimits,
     projects,
     sections,
     where,
@@ -89,6 +90,7 @@
   const folderChosen = $derived(folders.find((f) => f.key === folder));
   const working = $derived(board ? agentsAtWork(board.tasks, board.now) : []);
   const pace = $derived(board ? estimates(board.tasks) : null);
+  const limits = $derived(board ? planLimits(board.limits, board.now) : []);
   const chosen = $derived(agents.find((a) => a.id === agent));
   const unfinished = $derived(
     board ? board.tasks.filter((t) => !["done", "dropped"].includes(t.status)).length : 0,
@@ -393,6 +395,32 @@
                 {ago(a.last, board?.now ?? 0)}{#if a.on.length + a.open.length > 1} · {a.on.length + a.open.length - 1} more{/if}
               </p>
             </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+
+    {#if limits.length}
+      <p class="side-label">Plan limits</p>
+      <ul class="limits">
+        {#each limits as l (l.key)}
+          <li>
+            <p class="who" title={l.home}>{l.who}</p>
+            {#each l.windows as w (w.label)}
+              <div class="window" class:high={w.used >= 80}>
+                <span class="window-name">{w.label}</span>
+                <span
+                  class="bar"
+                  role="meter"
+                  aria-label="{l.who}, {w.label} window used"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={w.used}
+                ><span style="width: {w.used}%"></span></span>
+                <span class="used">{w.fresh ? "reset" : `${Math.round(w.used)}%`}</span>
+              </div>
+              {#if w.resets}<p class="when">{w.resets}</p>{/if}
+            {/each}
           </li>
         {/each}
       </ul>
@@ -775,6 +803,7 @@
   .tree,
   .folders,
   .agents,
+  .limits,
   .memories,
   .task-list {
     list-style: none;
@@ -887,6 +916,38 @@
     margin: 0;
     color: var(--muted);
     font-size: var(--fs-micro);
+  }
+  .limits {
+    display: grid;
+    gap: var(--s3);
+  }
+  .window {
+    display: grid;
+    grid-template-columns: 3.2em 1fr 3em;
+    align-items: center;
+    gap: var(--s2);
+    margin-top: 4px;
+    font-size: var(--fs-micro);
+    color: var(--ink-2);
+  }
+  .bar {
+    height: 6px;
+    border-radius: 99px;
+    background: var(--raise-2);
+    overflow: hidden;
+  }
+  .bar > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--blue);
+  }
+  .window.high .bar > span {
+    background: var(--amber);
+  }
+  .used {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .agent .on {
     margin: 2px 0;

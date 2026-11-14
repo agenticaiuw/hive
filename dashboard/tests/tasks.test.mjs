@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, projectName, projects, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -135,4 +135,43 @@ test('a task shows the files its agent changed and its commits, each linking to 
   assert.deepEqual(local.files, []);
   assert.equal(local.commits.length, 1);
   assert.equal(commitUrl(local, local.commits[0]), '');
+});
+
+test('plan limits come from either board and show each window, reset once its time passes', () => {
+  const now = 1_795_000_000;
+  const cloud = normalizeBoard({
+    source: 'cloud',
+    board: {
+      now,
+      tasks: [],
+      limits: [
+        {
+          machine: 'evans-mbp', harness: 'codex', home: '~/.codex', plan: 'prolite', at: now - 60,
+          windows: JSON.stringify([
+            { minutes: 300, used: 92.4, resets_at: now + 2 * 3600 },
+            { minutes: 10080, used: 15, resets_at: now + 4 * 86400 },
+          ]),
+        },
+        { machine: 'vm', harness: 'codex', home: '~/.codex-hive', plan: 'pro', windows: '[{"minutes": 300, "used": 40, "resets_at": 1}]' },
+        { machine: 'vm', harness: 'claude', home: '~/.claude', plan: '', windows: '[]' },
+      ],
+    },
+  });
+  assert.equal(cloud.limits.length, 3);
+  const shown = planLimits(cloud.limits, now);
+  assert.equal(shown.length, 2); // nothing to show for a harness with no windows
+  assert.equal(shown[0].who, 'Codex · prolite · evans-mbp');
+  assert.deepEqual(shown[0].windows, [
+    { label: '5 h', used: 92.4, fresh: false, resets: 'resets in 2 h' },
+    { label: 'Week', used: 15, fresh: false, resets: 'resets in 4 days' },
+  ]);
+  assert.deepEqual(shown[1].windows, [{ label: '5 h', used: 0, fresh: true, resets: '' }]);
+
+  const local = normalizeBoard({
+    source: 'local',
+    board: { done: [], limits: [{ harness: 'codex', home: '~/.codex', plan: 'plus', windows: [{ minutes: 10080, used: 150, resets_at: now + 600 }] }] },
+  });
+  assert.equal(local.limits[0].machine, 'this machine');
+  assert.deepEqual(planLimits(local.limits, now)[0].windows, [{ label: 'Week', used: 100, fresh: false, resets: 'resets in 10 min' }]);
+  assert.deepEqual(normalizeBoard({ board: { tasks: [] } }).limits, []);
 });
