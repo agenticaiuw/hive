@@ -122,3 +122,83 @@ pub fn spent(path: &Path, from: i64, to: i64) -> Option<Spent> {
         tokens_out,
     })
 }
+
+/// A Codex home's plan limits as its newest session last reported them: each window's share used
+/// and when it resets (Codex writes `rate_limits` with every `token_count`). Claude Code's
+/// transcripts don't carry its limits, so there's nothing to read for it.
+pub fn codex_limits(home: &Path) -> Option<Value> {
+    for path in newest_rollouts(&home.join("sessions"), 6) {
+        if let Some(limits) = last_limits(&path) {
+            return Some(limits);
+        }
+    }
+    None
+}
+
+/// The newest `rollout-*.jsonl` files under sessions/YYYY/MM/DD, newest first.
+fn newest_rollouts(sessions: &Path, most: usize) -> Vec<std::path::PathBuf> {
+    let sorted = |dir: &Path| -> Vec<std::path::PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        entries.sort();
+        entries.reverse();
+        entries
+    };
+    let mut out = Vec::new();
+    for year in sorted(sessions).iter().filter(|p| p.is_dir()) {
+        for month in sorted(year).iter().filter(|p| p.is_dir()) {
+            for day in sorted(month).iter().filter(|p| p.is_dir()) {
+                let mut files: Vec<_> = sorted(day)
+                    .into_iter()
+                    .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+                    .collect();
+                files.sort_by_key(|p| std::cmp::Reverse(p.metadata().and_then(|m| m.modified()).ok()));
+                out.extend(files);
+                if out.len() >= most {
+                    out.truncate(most);
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The last `rate_limits` in a rollout, read from its last 1 MB.
+fn last_limits(path: &Path) -> Option<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(1 << 20))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    for line in tail.lines().rev() {
+        if !line.contains("\"rate_limits\":{") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(limits) = v.pointer("/payload/rate_limits") else { continue };
+        let windows: Vec<Value> = ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| limits.get(*k).filter(|w| w.is_object()))
+            .map(|w| {
+                serde_json::json!({
+                    "minutes": w.get("window_minutes").and_then(Value::as_i64),
+                    "used": w.get("used_percent").and_then(Value::as_f64),
+                    "resets_at": w.get("resets_at").and_then(Value::as_i64),
+                })
+            })
+            .collect();
+        if windows.is_empty() {
+            continue;
+        }
+        return Some(serde_json::json!({
+            "plan": limits.get("plan_type").and_then(Value::as_str),
+            "windows": windows,
+            "at": line_time(line),
+        }));
+    }
+    None
+}

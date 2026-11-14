@@ -878,3 +878,25 @@ fn git_commit_output_is_read_for_its_commits() {
     assert_eq!(made[1]["branch"], "detached HEAD");
     assert_eq!(made[1]["title"], "Second");
 }
+
+#[test]
+fn codex_plan_limits_are_read_from_its_newest_session() {
+    let home = tempfile::tempdir().unwrap();
+    let day = home.path().join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let count = |at: &str, used: f64| {
+        format!(
+            r#"{{"timestamp":"{at}","type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{{"primary":{{"used_percent":{used},"window_minutes":300,"resets_at":1795000000}},"secondary":{{"used_percent":40.0,"window_minutes":10080,"resets_at":1795500000}},"plan_type":"pro"}}}}}}"#
+        )
+    };
+    let lines = [count("2026-11-14T10:00:00.000Z", 10.0), count("2026-11-14T10:05:00.000Z", 12.5), r#"{"timestamp":"2026-11-14T10:06:00.000Z","type":"response_item"}"#.to_string()];
+    std::fs::write(day.join("rollout-a.jsonl"), lines.join("\n")).unwrap();
+    let limits = hive_tasks::usage::codex_limits(home.path()).unwrap();
+    assert_eq!(limits["plan"], "pro");
+    assert_eq!(limits["windows"][0]["used"], 12.5);
+    assert_eq!(limits["windows"][0]["minutes"], 300);
+    assert_eq!(limits["windows"][1]["minutes"], 10080);
+    assert_eq!(limits["windows"][1]["resets_at"], 1795500000);
+    assert!(limits["at"].as_i64().unwrap() > 0);
+    assert!(hive_tasks::usage::codex_limits(&home.path().join("nowhere")).is_none());
+}

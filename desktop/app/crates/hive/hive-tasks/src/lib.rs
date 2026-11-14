@@ -1263,6 +1263,7 @@ impl Ledger {
         for _ in 0..50 {
             let (mut payload, keys) = self.sync_batch(200)?;
             payload["machine"] = json!(cloud.machine);
+            payload["limits"] = json!(plan_limits());
             let since: Option<String> = self
                 .db
                 .query_row("SELECT value FROM meta WHERE key = 'pulled_at'", [], |r| r.get(0))
@@ -1457,6 +1458,7 @@ impl Ledger {
             "done": done,
             "rules": self.rules(project, true)?,
             "folders": self.folders(project.map(project_key).as_deref())?,
+            "limits": plan_limits(),
         }))
     }
 
@@ -2285,6 +2287,26 @@ pub fn render_board(board: &Value) -> String {
         }
     }
     out
+}
+
+/// This machine's Codex plan limits, one entry per Codex home (yours, and Hive's own agent's on
+/// the VM), as {harness, home, plan, windows: [{minutes, used, resets_at}], at}.
+pub fn plan_limits() -> Vec<Value> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut homes: Vec<String> = std::env::var("CODEX_HOME").into_iter().filter(|h| !h.is_empty()).collect();
+    for dir in [".codex", ".codex-hive"] {
+        homes.push(format!("{home}/{dir}"));
+    }
+    homes.dedup();
+    homes
+        .iter()
+        .filter_map(|h| {
+            let mut limits = usage::codex_limits(Path::new(h))?;
+            limits["harness"] = json!("codex");
+            limits["home"] = json!(h.strip_prefix(&home).map(|rest| format!("~{rest}")).unwrap_or_else(|| h.clone()));
+            Some(limits)
+        })
+        .collect()
 }
 
 /// A JSON list kept as text (a task's files or commits); empty when there's none.
