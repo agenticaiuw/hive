@@ -722,9 +722,17 @@ impl CodexTask {
         .filter(|text| !text.trim().is_empty())
         .map(|text| format!("\n{}\n", text.trim_end()))
         .unwrap_or_default();
+        // A request for one of the owner's folders ("For hive › memory retrieval: …", as the
+        // dashboard sends it) comes with everything that folder holds: all its memories, always.
+        let folder_context =
+            hive_tasks::Ledger::open(&self.state_dir().join("tasks/tasks.sqlite3"))
+                .ok()
+                .and_then(|board| board.folder_context(&self.task))
+                .map(|text| format!("\n{text}\n"))
+                .unwrap_or_default();
         let prompt = self.st().prompt.clone();
         let mut inputs = vec![json!({"type": "text",
-            "text": format!("{earlier}{prompt}{attached}{memory_hint}{memory_context}{knowledge_context}")})];
+            "text": format!("{earlier}{prompt}{attached}{memory_hint}{memory_context}{knowledge_context}{folder_context}")})];
         if let Some(url) = &image {
             inputs.push(json!({"type": "image", "url": url}));
         }
@@ -740,7 +748,7 @@ impl CodexTask {
             (false, false) => "\n[Automatic memory and knowledge omitted from context log.]\n",
         };
         logged_start["input"][0]["text"] =
-            json!(format!("{earlier}{prompt}{attached}{memory_hint}{omitted}"));
+            json!(format!("{earlier}{prompt}{attached}{memory_hint}{omitted}{folder_context}"));
         self.record_context("turn/start input", &logged_start);
         let turn = match server.request("turn/start", start, DEFAULT_TIMEOUT) {
             Ok(reply) => {

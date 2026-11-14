@@ -1,16 +1,20 @@
 //! `hive-tasks`: the owner's instructions to every coding agent, and the hooks that keep agents
 //! from dropping them (see the library's docs).
 
-use hive_tasks::{default_path, project_of, render_board, sync_soon, Cloud, Ledger};
+use hive_tasks::{
+    default_path, folder_place, project_key, project_of, render_board, sync_soon, Cloud, Ledger,
+};
 use serde_json::Value;
 use std::io::Read;
 
 const HELP: &str = "\
 hive-tasks hook claude|codex    a harness hook: reads the hook's JSON on stdin
 hive-tasks add M<n>             register what message M<n> asks for: a JSON list on stdin of
-                                {\"quote\", \"title\", \"minutes\", \"value\": low|medium|high}
+                                {\"quote\", \"title\", \"minutes\", \"value\": low|medium|high,
+                                \"folder\": \"<project › folder>\"}
                                 (a standing preference: \"kind\": \"rule\", \"paths\": [globs]); [] for nothing
-hive-tasks report               a JSON list on stdin of {\"id\": \"T<n>\", \"status\", \"outcome\", \"evidence\"};
+hive-tasks report               a JSON list on stdin of {\"id\": \"T<n>\", \"status\", \"outcome\", \"evidence\",
+                                \"report\"} (a done task's report goes in its folder's memories);
                                 status: open, active, done, waiting, blocked, dropped
 hive-tasks done T<n> <outcome>  report one task done
 hive-tasks board [--all] [--json]   this project's tasks (--all: every project)
@@ -18,6 +22,13 @@ hive-tasks board --cloud        every machine's board from the cloud copy, as JS
 hive-tasks show T<n>|M<n>|R<n>  one task's report, a message and its tasks, or a rule
 hive-tasks rules [--all]        the owner's rules, where each applies and how often it was shown
 hive-tasks rule-off R<n>        stop applying a rule
+hive-tasks folders [--all] [--json]   this project's folders (--all: every project's)
+hive-tasks folder \"<project › folder>\" [--json]   everything in a folder: what it's for and all
+                                its memories, in full
+hive-tasks remember \"<project › folder>\" [note|spec|decision]   save a memory to a folder: the
+                                text on stdin, its first line the title
+hive-tasks describe \"<project › folder>\" <what it's for>   say what a folder is for
+hive-tasks get|post /v1/<path>  ask the cloud copy (post: JSON on stdin), as JSON
 hive-tasks install|uninstall [--claude] [--codex]
                                 put the hooks into (or take them out of) Claude Code and Codex
 hive-tasks sync                 push what changed to the cloud copy (~/.config/hive/tasks.json) and
@@ -86,6 +97,16 @@ fn run(args: &[String]) -> Result<String, String> {
     }
     if cmd == "web" {
         return web();
+    }
+    // The cloud copy, for Hive's dashboard window (it answers the same questions the website does).
+    if matches!(cmd, "get" | "post") {
+        let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
+        let path = arg(1);
+        if !path.starts_with("/v1/") {
+            return Err("get and post take a /v1/ path.".into());
+        }
+        let answer = if cmd == "get" { cloud.get(path)? } else { cloud.post(path, &stdin_json()?)? };
+        return Ok(serde_json::to_string(&answer).unwrap_or_default());
     }
     let path = default_path();
     let ledger = Ledger::open(&path)?;
@@ -164,6 +185,56 @@ fn run(args: &[String]) -> Result<String, String> {
             let out = ledger.rule_off(arg(1))?;
             sync_soon(&path);
             Ok(out)
+        }
+        "folders" => {
+            let project = (!flag("--all")).then(|| project_key(&here()));
+            let list = ledger.folders(project.as_deref())?;
+            Ok(if flag("--json") {
+                serde_json::to_string_pretty(&list).unwrap_or_default()
+            } else if list.is_empty() {
+                "No folders yet.".into()
+            } else {
+                list.iter()
+                    .map(|f| {
+                        format!(
+                            "{} › {} ({} memories){}",
+                            f["project"].as_str().unwrap_or(""),
+                            f["name"].as_str().unwrap_or(""),
+                            f["memories"],
+                            f["about"].as_str().filter(|a| !a.is_empty()).map(|a| format!(": {a}")).unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+        "folder" | "remember" | "describe" => {
+            let (p, name) = folder_place(&here(), arg(1))
+                .ok_or_else(|| format!("{cmd} \"<project › folder>\""))?;
+            match cmd {
+                "folder" if flag("--json") => {
+                    let name = ledger.ensure_folder(&p, &name)?;
+                    let memories = ledger.memories(&p, &name.to_lowercase())?;
+                    Ok(serde_json::json!({"project": p, "name": name, "memories": memories}).to_string())
+                }
+                "folder" => ledger.folder_brief(&p, &name),
+                "remember" => {
+                    let kind = match arg(2) {
+                        "" => "note",
+                        k => k,
+                    };
+                    let mut body = String::new();
+                    std::io::stdin().read_to_string(&mut body).map_err(|e| e.to_string())?;
+                    let out = ledger.remember(&p, &name, kind, &body)?;
+                    sync_soon(&path);
+                    Ok(out)
+                }
+                _ => {
+                    let out = ledger.describe_folder(&p, &name, &args.get(2..).unwrap_or_default().join(" "))?;
+                    sync_soon(&path);
+                    Ok(out)
+                }
+            }
         }
         other => Err(format!("Unknown command {other:?}.\n{HELP}")),
     }
