@@ -1,7 +1,7 @@
 /**
  * Credential-inventory view logic for the hive node panel.
  *
- * Ported from `desktop/dashboard/aggregator` (the hand-rolled page's
+ * Ported from `dashboard/aggregator` (the hand-rolled page's
  * `credentialSection` plus the aggregator's per-node filtering) when that page
  * folded into this dashboard. The revoke POST itself stays with the local
  * aggregator, which holds the admin key; the browser only ever names a

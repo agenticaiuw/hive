@@ -274,7 +274,7 @@ const distDir = path.resolve(__dirname, '../../mobile/dist')
  * this agent. Serving the very same build here is what stops the local and the
  * deployed dashboards drifting apart — they were separate codebases, and every
  * change had to be written twice. Produced by `npm run build:agent` in
- * desktop/dashboard.
+ * dashboard.
  */
 const svelteDashboardDir = path.resolve(
   __dirname,

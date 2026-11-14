@@ -3,14 +3,14 @@
 One JSON/SSE feed that shows, live: which nodes are active, the
 context/environment and tool calls inside each node, and what is shared/synced
 between nodes. The UI is the SvelteKit dashboard's **/hive** route
-(`desktop/dashboard`), which reads this server's `/api/*` when the
+(`dashboard`), which reads this server's `/api/*` when the
 browser is on the Mac and the relay snapshot copy everywhere else; the old
 hand-rolled page this server used to serve at `/` was folded into it.
 
 ## Run
 
 ```sh
-node desktop/dashboard/aggregator/server.mjs   # from the repo root
+node dashboard/aggregator/server.mjs   # from the repo root
 ```
 
 It binds **http://127.0.0.1:8010** (if 8010 is busy it walks 8011…8020 and
