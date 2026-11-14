@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, normalizeBoard, projectName, projects, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byPart, cost, estimates, normalizeBoard, parts, projectName, projects, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -40,7 +40,7 @@ test('sections: what needs the owner first, then work, then not started, then do
     ['not-started', ['mac:T2']],
     ['done', ['mac:T3']],
   ]);
-  const hive = sections(normalizeBoard(cloud).tasks, { project: 'github.com/agenticaiuw/hive', query: 'post' });
+  const hive = sections(normalizeBoard(cloud).tasks, { project: 'hive', query: 'post' });
   assert.deepEqual(hive.flatMap((x) => x.tasks.map((t) => t.key)), ['vm:T1']);
 });
 
@@ -73,4 +73,35 @@ test('projects, names and times in the owner\'s words', () => {
   assert.equal(ago(1000 - 600, 1000), '10 min ago');
   assert.equal(ago(100_000 - 7200, 100_000), '2 h ago');
   assert.equal(ago(1_000_000 - 86400 * 3, 1_000_000), '3 days ago');
+});
+
+test('one project by name however it is written; parts group similar tasks', () => {
+  const b = normalizeBoard({ source: 'cloud', board: { now: 100, tasks: [
+    { machine: 'mac', id: 'T1', title: 'a', status: 'open', project: 'github.com/agenticaiuw/hive', part: 'memory retrieval', updated_at: 50 },
+    { machine: 'mac', id: 'T2', title: 'b', status: 'open', project: '/Users/x/hive', updated_at: 40 },
+    { machine: 'mac', id: 'T3', title: 'c', status: 'done', project: 'Hive', part: 'Memory retrieval', updated_at: 30 },
+    { machine: 'mac', id: 'T4', title: 'd', status: 'open', project: 'github.com/evan1liu/buckymatch', part: 'major requirements validation', updated_at: 20 },
+  ] } });
+  assert.deepEqual(projects(b.tasks).map((p) => [p.key, p.name, p.open, p.all]), [['hive', 'hive', 2, 3], ['buckymatch', 'buckymatch', 1, 1]]);
+  assert.deepEqual(parts(b.tasks, 'hive').map((p) => [p.key, p.all]), [['memory retrieval', 2]]);
+  assert.deepEqual(sections(b.tasks, { part: 'memory retrieval' }).flatMap((s) => s.tasks.map((t) => t.id)), ['T1', 'T3']);
+  assert.deepEqual(byPart(b.tasks).map((r) => [r.part, r.tasks.map((t) => t.id)]), [
+    ['memory retrieval', ['T1', 'T3']], ['major requirements validation', ['T4']], ['', ['T2']],
+  ]);
+});
+
+test('the agents at work and the task each is on; what a task cost', () => {
+  const b = normalizeBoard({ source: 'cloud', board: { now: 10_000, tasks: [
+    { machine: 'mac', id: 'T1', title: 'On it', status: 'active', harness: 'claude', session: 's1', project: 'hive', updated_at: 1_000 },
+    { machine: 'vm', id: 'T1', title: 'Just asked', status: 'open', harness: 'codex', session: 's2', project: 'hive', created_at: 9_500 },
+    { machine: 'mac', id: 'T2', title: 'Stale', status: 'open', harness: 'claude', session: 's3', project: 'hive', created_at: 100 },
+    { machine: 'mac', id: 'T3', title: 'Done', status: 'done', harness: 'claude', session: 's1', project: 'hive', minutes: 10,
+      work_seconds: 840, tokens_in: 1_200_000, tokens_out: 18_000, updated_at: 900 },
+  ] } });
+  assert.deepEqual(agentsAtWork(b.tasks, 10_000).map((a) => [a.machine, a.session, a.on.map((t) => t.id), a.open.map((t) => t.id)]), [
+    ['vm', 's2', [], ['T1']], ['mac', 's1', ['T1'], []],
+  ]);
+  assert.equal(cost(b.tasks[3]), 'took 14 min (est. 10 min) · 1.2M tokens, 18k written');
+  assert.equal(cost(b.tasks[0]), '');
+  assert.equal(estimates(b.tasks), null);
 });

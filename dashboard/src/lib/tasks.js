@@ -17,6 +17,7 @@
 /** @typedef {{key: string, id: string, machine: string, message: string, quote: string,
  *   title: string, status: string, minutes: number|null, value: string, outcome: string,
  *   evidence: string, harness: string, session: string, project: string, projectName: string,
+ *   part: string, workSeconds: number|null, tokensIn: number|null, tokensOut: number|null,
  *   created: number, updated: number}} Task */
 
 export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' };
@@ -53,6 +54,11 @@ export function projectName(project) {
   return text.split('/').pop() || text;
 }
 
+/** @param {unknown} value */
+function number(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 /**
  * @param {Record<string, any>} row
  * @param {string} machine
@@ -77,6 +83,10 @@ function toTask(row, machine) {
     session: text('session'),
     project: text('project'),
     projectName: projectName(row.project),
+    part: text('part').trim(),
+    workSeconds: number(row.work_seconds),
+    tokensIn: number(row.tokens_in),
+    tokensOut: number(row.tokens_out),
     created: seconds(row.created_at ?? row.said_at),
     updated: seconds(row.updated_at ?? row.done_at ?? row.created_at ?? row.said_at),
   };
@@ -122,22 +132,32 @@ export function normalizeBoard(answer) {
 }
 
 /**
- * Whether a task matches the chosen project and the search words.
- * @param {Task} task
- * @param {{project?: string, query?: string}} filter
+ * Which project a task is in, by name: the repository, its folder on the Mac and the same name
+ * spelled another way are one project ("github.com/agenticaiuw/hive", "/Users/x/hive", "Hive").
+ * @param {{projectName: string}} task
  */
-export function matches(task, { project = '', query = '' } = {}) {
-  if (project && task.project !== project) return false;
+export function projectKey(task) {
+  return task.projectName.toLowerCase();
+}
+
+/**
+ * Whether a task matches the chosen project and part and the search words.
+ * @param {Task} task
+ * @param {{project?: string, part?: string, query?: string}} filter
+ */
+export function matches(task, { project = '', part = '', query = '' } = {}) {
+  if (project && projectKey(task) !== project) return false;
+  if (part && task.part.toLowerCase() !== part) return false;
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
-  const text = `${task.title} ${task.quote} ${task.outcome} ${task.id}`.toLowerCase();
+  const text = `${task.title} ${task.quote} ${task.outcome} ${task.id} ${task.part}`.toLowerCase();
   return words.every((w) => text.includes(w));
 }
 
 /**
  * The board's sections with their tasks, newest first; "Done" keeps the last `doneLimit`.
  * @param {Task[]} tasks
- * @param {{project?: string, query?: string, doneLimit?: number}} [filter]
+ * @param {{project?: string, part?: string, query?: string, doneLimit?: number}} [filter]
  */
 export function sections(tasks, filter = {}) {
   const shown = tasks.filter((t) => matches(t, filter)).sort((a, b) => b.updated - a.updated);
@@ -149,20 +169,152 @@ export function sections(tasks, filter = {}) {
 }
 
 /**
- * The projects with tasks, the ones with the most unfinished first.
+ * Groups by a key, counting each group's unfinished tasks; the most unfinished first.
+ * @param {Task[]} tasks
+ * @param {(t: Task) => string} keyOf
+ * @param {(t: Task) => string} nameOf
+ */
+function groups(tasks, keyOf, nameOf) {
+  /** @type {Map<string, {key: string, name: string, open: number, all: number, names: Map<string, number>}>} */
+  const by = new Map();
+  for (const t of tasks) {
+    const key = keyOf(t);
+    if (!key) continue;
+    const g = by.get(key) ?? { key, name: '', open: 0, all: 0, names: new Map() };
+    g.all += 1;
+    if (!['done', 'dropped'].includes(t.status)) g.open += 1;
+    g.names.set(nameOf(t), (g.names.get(nameOf(t)) ?? 0) + 1);
+    by.set(key, g);
+  }
+  return [...by.values()]
+    .map(({ names, ...g }) => ({ ...g, name: [...names].sort((a, b) => b[1] - a[1])[0][0] }))
+    .sort((a, b) => b.open - a.open || b.all - a.all || a.name.localeCompare(b.name));
+}
+
+/**
+ * The projects with tasks by name (see projectKey), the ones with the most unfinished first.
  * @param {Task[]} tasks
  */
 export function projects(tasks) {
-  /** @type {Map<string, {project: string, name: string, open: number, all: number}>} */
+  return groups(tasks, projectKey, (t) => t.projectName);
+}
+
+/**
+ * The parts of a project (or every project) that tasks name, the busiest first: "memory
+ * retrieval", "major requirements validation".
+ * @param {Task[]} tasks
+ * @param {string} [project] a projectKey
+ */
+export function parts(tasks, project = '') {
+  return groups(
+    tasks.filter((t) => !project || projectKey(t) === project),
+    (t) => t.part.toLowerCase(),
+    (t) => t.part,
+  );
+}
+
+/**
+ * Tasks in runs by part, in the order given, so similar work sits together: each part's tasks
+ * where its first one was, the ones with no part last.
+ * @param {Task[]} tasks
+ */
+export function byPart(tasks) {
+  /** @type {Map<string, {part: string, tasks: Task[]}>} */
+  const runs = new Map();
+  for (const t of tasks) {
+    const key = t.part.toLowerCase();
+    const run = runs.get(key) ?? { part: t.part, tasks: [] };
+    run.tasks.push(t);
+    runs.set(key, run);
+  }
+  const none = runs.get('');
+  runs.delete('');
+  return [...runs.values(), ...(none ? [none] : [])];
+}
+
+/**
+ * The agents at work and what each is on: every session with a task marked active, or that the
+ * owner wrote to or that reported in the last `recent` seconds with tasks still open.
+ * @param {Task[]} tasks
+ * @param {number} now
+ * @param {number} [recent]
+ */
+export function agentsAtWork(tasks, now, recent = 20 * 60) {
+  /** @type {Map<string, {key: string, harness: string, machine: string, projectName: string,
+   *   session: string, on: Task[], open: Task[], last: number}>} */
   const by = new Map();
   for (const t of tasks) {
-    if (!t.project) continue;
-    const p = by.get(t.project) ?? { project: t.project, name: t.projectName, open: 0, all: 0 };
-    p.all += 1;
-    if (!['done', 'dropped'].includes(t.status)) p.open += 1;
-    by.set(t.project, p);
+    if (!t.session) continue;
+    const key = `${t.machine}:${t.harness}:${t.session}`;
+    const a = by.get(key) ?? {
+      key, harness: t.harness, machine: t.machine, projectName: t.projectName, session: t.session,
+      on: [], open: [], last: 0,
+    };
+    if (t.status === 'active') a.on.push(t);
+    if (t.status === 'open') a.open.push(t);
+    a.last = Math.max(a.last, t.updated, t.created);
+    by.set(key, a);
   }
-  return [...by.values()].sort((a, b) => b.open - a.open || b.all - a.all || a.name.localeCompare(b.name));
+  return [...by.values()]
+    .filter((a) => a.on.length || (a.open.length && now - a.last <= recent))
+    .sort((a, b) => b.last - a.last);
+}
+
+/**
+ * "14 min", "1 h 5 min", "40 s".
+ * @param {number|null} secs
+ */
+export function duration(secs) {
+  if (secs == null) return '';
+  if (secs < 60) return `${Math.round(secs)} s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  return mins % 60 ? `${h} h ${mins % 60} min` : `${h} h`;
+}
+
+/**
+ * "850", "18k", "1.2M".
+ * @param {number|null} n
+ */
+export function tokenCount(n) {
+  if (n == null) return '';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+}
+
+/**
+ * What a task cost, for its card: "took 14 min (est. 10 min) · 1.2M tokens, 18k written".
+ * @param {Task} task
+ */
+export function cost(task) {
+  const bits = [];
+  if (task.workSeconds != null) {
+    bits.push(`took ${duration(task.workSeconds)}${task.minutes ? ` (est. ${duration(task.minutes * 60)})` : ''}`);
+  } else if (task.minutes) {
+    bits.push(`est. ${duration(task.minutes * 60)}`);
+  }
+  if (task.tokensIn != null || task.tokensOut != null) {
+    bits.push(`${tokenCount((task.tokensIn ?? 0) + (task.tokensOut ?? 0))} tokens, ${tokenCount(task.tokensOut ?? 0)} written`);
+  }
+  return bits.join(' · ');
+}
+
+/**
+ * How done tasks' real time compares with their estimates: actual ÷ estimate over the last 30
+ * with both, or null with fewer than 5.
+ * @param {Task[]} tasks
+ */
+export function estimates(tasks) {
+  const done = tasks
+    .filter((t) => t.status === 'done' && t.workSeconds && t.minutes)
+    .sort((a, b) => b.updated - a.updated)
+    .slice(0, 30);
+  if (done.length < 5) return null;
+  const actual = done.reduce((s, t) => s + (t.workSeconds ?? 0), 0);
+  const estimate = done.reduce((s, t) => s + (t.minutes ?? 0) * 60, 0);
+  return { count: done.length, ratio: actual / estimate };
 }
 
 /**
