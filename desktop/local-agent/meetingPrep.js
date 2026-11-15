@@ -759,7 +759,7 @@ export function scanDocuments(roots, { now = new Date(), maxFiles = MAX_SCAN_FIL
  * Drop the meeting words that match everything the owner owns.
  *
  * The invite names the organiser, and the organiser is usually the owner — so
- * "evan" and "liu" were scoring every file on the machine and dragging in an
+ * their first and last name were scoring every file on the machine and dragging in an
  * unrelated PDF because it had the owner's own name in the path. A term that
  * appears in most candidates carries no information about which document is
  * the right one, whoever it names.

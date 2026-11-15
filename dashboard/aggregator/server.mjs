@@ -19,6 +19,7 @@ import { parseEnv } from 'node:util';
 // AGENT_TOKEN / SESSION_SECRET from PAIRING_CODE (labelled HMAC). Since
 // 2026-08-09 those tokens are no longer stored in .env at all.
 import '../../cloud/shared/loadEnv.mjs';
+import { hiveWorkerUrl } from '../../cloud/shared/hiveCloud.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const ENV_PATH = path.join(REPO_ROOT, '.env');
@@ -32,7 +33,7 @@ const STARTED_AT = Date.now();
 // only reads process.env. It has already applied precedence and derivation.
 const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 const RELAY_API_KEY = process.env.RELAY_API_KEY || '';
-const RELAY_BASE = (process.env.RELAY_URL || 'https://hive-relay.your-subdomain.workers.dev').replace(/\/+$/, '');
+const RELAY_BASE = (process.env.RELAY_URL || hiveWorkerUrl('hive-relay')).replace(/\/+$/, '');
 const AGENT_BASE = 'http://127.0.0.1:8000';
 
 // Every value from .env is treated as a secret and scrubbed from every outbound
@@ -1301,7 +1302,7 @@ function startPusher() {
 const CORS_ORIGINS = new Set([
   'http://localhost:8000',
   'http://127.0.0.1:8000',
-  'https://hive-dashboard.your-subdomain.workers.dev',
+  ...(hiveWorkerUrl('hive-dashboard') ? [hiveWorkerUrl('hive-dashboard')] : []),
 ]);
 function corsHeaders(req) {
   const origin = req.headers.origin || '';

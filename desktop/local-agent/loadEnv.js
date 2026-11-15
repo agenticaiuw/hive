@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseEnv } from 'node:util'
+import { hiveWorkerUrl } from '../../cloud/shared/hiveCloud.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -108,16 +109,15 @@ if (process.env.PAIRING_CODE) {
 }
 
 /*
- * The production relay, as the default. The localhost:8787 fallback in
- * bridgeConfig.js dated from before the worker was deployed; on this machine
- * RELAY_URL has pointed at the worker ever since, so the env line was
- * restating a constant. The extension already ships this origin in its
- * RELAY_ORIGIN_ALLOWLIST — it is config, not a secret. `npm run relay` local
- * development sets RELAY_URL=http://localhost:8787 explicitly.
+ * This person's production relay, as the default (cloud/shared/hiveCloud.mjs reads their
+ * Cloudflare subdomain; the repository names nobody's). It is config, not a secret. `npm run relay`
+ * local development sets RELAY_URL=http://localhost:8787 explicitly.
  */
-applyParsedEnv({
-  RELAY_URL: 'https://hive-relay.your-subdomain.workers.dev',
-})
+if (hiveWorkerUrl('hive-relay')) {
+  applyParsedEnv({
+    RELAY_URL: hiveWorkerUrl('hive-relay'),
+  })
+}
 
 /**
  * The keys this file put into process.env, so callers can take them back out.
