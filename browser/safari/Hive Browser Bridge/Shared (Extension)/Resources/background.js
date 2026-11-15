@@ -749,7 +749,7 @@
 		return candidate;
 	}
 	//#endregion
-	//#region shared/bridgeSocketProtocol.js
+	//#region ../../cloud/shared/bridgeSocketProtocol.js
 	const BRIDGE_PING_FRAME = "{\"type\":\"ping\"}";
 	const MESH_SUBPROTOCOL = "pendant.mesh.v1";
 	const BEARER_SUBPROTOCOL_PREFIX = "bearer.";
@@ -764,7 +764,7 @@
 		}
 	}
 	//#endregion
-	//#region browser-extension/src/relay-peer.js
+	//#region src/relay-peer.js
 	const RELAY_ORIGIN_ALLOWLIST = Object.freeze([
 		"https://hive-relay.your-subdomain.workers.dev",
 		"http://127.0.0.1:8787",
@@ -1259,7 +1259,7 @@
 		return `Relay peer: ${config.relayDeviceId} @ ${config.relayUrl} — ${choice.reason}`;
 	}
 	//#endregion
-	//#region browser-extension/src/pairing.js
+	//#region src/pairing.js
 	const PAIR_LIFETIMES = Object.freeze([
 		"session",
 		"7d",
@@ -1515,7 +1515,7 @@
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/approvals.js
+	//#region src/approvals.js
 	const APPROVALS_KEY = "pendingApprovals";
 	/**
 	* What the toolbar badge shows: the number of prompts still waiting on the
@@ -1584,7 +1584,7 @@
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/executor.js
+	//#region src/executor.js
 	const api$2 = globalThis.browser ?? globalThis.chrome;
 	const FETCH_TIMEOUT_MS = 7e3;
 	const BACKGROUND_POLL_INTERVAL_MS = 5e3;
@@ -2306,7 +2306,7 @@
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 	//#endregion
-	//#region browser-extension/src/command-console.js
+	//#region src/command-console.js
 	const CONSOLE_SOURCE = "browser-extension";
 	const HISTORY_KEY = "consoleHistory";
 	const SESSION_KEY = "consoleSessionId";
@@ -2627,7 +2627,7 @@
 		}
 	}
 	//#endregion
-	//#region browser-extension/src/affinity.js
+	//#region src/affinity.js
 	const CAPABILITY_BROWSER = "browser";
 	const CAPABILITY_HIVE = "hive";
 	const EFFECT_READ = "read";
@@ -2948,7 +2948,10 @@
 		return `${effects.read} read, ${effects.opened} page(s) opened, ${effects.act} page interaction(s), ${effects.outward} approved outward step(s), ${effects.failed} failed`;
 	}
 	//#endregion
-	//#region shared/domains/browser.js
+	//#region ../../cloud/shared/authorizedAccess.js
+	const AUTHORIZED_ACCESS_INSTRUCTION = `When the owner has already authorized account access, use available signed-in sessions or supported sign-in methods directly without repeatedly asking for the same authorization. Use only methods and tools actually available on this surface; never bypass a tool restriction, security control, or the user's limits on irreversible actions. Keep credentials and verification codes out of logs, prompts, and reports. When work fails, diagnose the cause and try distinct supported alternatives within the authorized scope; do not repeat the same failed attempt blindly. If a blocker remains, report it and continue other authorized work; do not claim sign-in succeeded without evidence.`;
+	//#endregion
+	//#region ../../cloud/shared/domains/browser.js
 	var browser_default = Object.freeze({
 		name: "browser",
 		what: "Live web pages in the logged-in browser: tabs, forms, reads — and the sites the owner uses.",
@@ -2978,7 +2981,7 @@
 		})])
 	});
 	//#endregion
-	//#region shared/domains/calendar.js
+	//#region ../../cloud/shared/domains/calendar.js
 	var calendar_default = Object.freeze({
 		name: "calendar",
 		what: "Reminders, meetings, day plans, focus blocks, and which list or calendar they land on.",
@@ -3010,7 +3013,7 @@
 		})])
 	});
 	//#endregion
-	//#region shared/domains/email.js
+	//#region ../../cloud/shared/domains/email.js
 	var email_default = Object.freeze({
 		name: "email",
 		what: "Send or draft email, triage the inbox, and the accounts and people mail goes to.",
@@ -3037,7 +3040,7 @@
 		})])
 	});
 	//#endregion
-	//#region shared/domains/files.js
+	//#region ../../cloud/shared/domains/files.js
 	var files_default = Object.freeze({
 		name: "files",
 		what: "Files and folders: read, write, search, move, tidy — and where the owner keeps things.",
@@ -3073,7 +3076,7 @@
 		})])
 	});
 	//#endregion
-	//#region shared/domains/music.js
+	//#region ../../cloud/shared/domains/music.js
 	var music_default = Object.freeze({
 		name: "music",
 		what: "Music and audio playback, and the services and playlists the owner actually uses.",
@@ -3097,7 +3100,7 @@
 		})])
 	});
 	//#endregion
-	//#region shared/domains/system.js
+	//#region ../../cloud/shared/domains/system.js
 	var system_default = Object.freeze({
 		name: "system",
 		what: "Mac volume, brightness, battery, clipboard, keyboard language — and the owner’s standing levels.",
@@ -3131,7 +3134,7 @@
 		clarify: Object.freeze([])
 	});
 	//#endregion
-	//#region shared/domains/index.js
+	//#region ../../cloud/shared/domains/index.js
 	const DOMAIN_MODULES = Object.freeze([
 		email_default,
 		calendar_default,
@@ -3225,9 +3228,10 @@ ${BRAIN_TOOLS.map((tool) => `- ${tool.type}: ${tool.description}`).join("\n")}
 
 How to work:
 - Look before you act. snapshot gives you refs; click/type/select need one.
-- Use activate_tab to reach a site. The owner is already signed in there; navigate replaces the page they were looking at.
+- Use activate_tab to reach a site. An existing tab may be signed in; verify the state. Navigate replaces the page they were looking at.
+- ${AUTHORIZED_ACCESS_INSTRUCTION}
 - One tool per reply. You will be given its result and asked again.
-- If a step fails twice the same way, stop and answer with what you learned.
+- If a step fails repeatedly, diagnose it and try a distinct supported alternative within the existing limits; do not repeat the same failing action blindly.
 
 The owner's memory:
 - memory_lookup and memory_save run on the relay, not on the page. Use them for the owner's durable facts, never for page contents.
@@ -3606,7 +3610,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		};
 	}
 	//#endregion
-	//#region browser-extension/src/execution-status.js
+	//#region src/execution-status.js
 	const EXECUTION_STATUS_KEY = "localExecutionStatus";
 	const PENDING_APPROVALS_KEY = "localPendingApprovals";
 	const APPROVAL_TTL_MS = 10 * 6e4;
@@ -3787,7 +3791,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		});
 	}
 	//#endregion
-	//#region browser-extension/src/console-engine.js
+	//#region src/console-engine.js
 	const api$1 = globalThis.browser ?? globalThis.chrome;
 	const RELAY_LEDGER_KEY = "relaySeenEnvelopes";
 	async function getRelayConfig() {
@@ -4209,6 +4213,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		const sessionId = String(stored["consoleSessionId"] ?? "").trim();
 		const planOutcome = await consolePost(config, "/plan", {
 			command: commandText,
+			instructionId: id,
 			...context ? { context } : {},
 			...sessionId ? { sessionId } : {},
 			source: CONSOLE_SOURCE
@@ -4232,6 +4237,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		await patchEntry(id, { headline: "Plan ready — executing…" });
 		await patchEntry(id, outcomeToPatch(await consolePost(config, "/execute", {
 			command: commandText,
+			instructionId: id,
 			...context ? { context } : {},
 			actions: planOutcome.actions,
 			...planOutcome.sessionId ? { sessionId: planOutcome.sessionId } : {},
@@ -4690,6 +4696,7 @@ Answer with the JSON object only. No prose, no code fences.`;
 		const approvedContext = commandContext(entry.page);
 		const outcome = await consolePost(config, "/execute", {
 			command: buildCommandText(entry.command, entry.page),
+			instructionId: entry.id,
 			...approvedContext ? { context: approvedContext } : {},
 			actions: pending.actions,
 			...pending.sessionId ? { sessionId: pending.sessionId } : {},
@@ -4757,11 +4764,11 @@ Answer with the JSON object only. No prose, no code fences.`;
 		}
 	}
 	//#endregion
-	//#region browser-extension/src/page-engine.js
+	//#region src/page-engine.js
 	const ENGINE_LEASE_KEY = "engineLease";
 	const BACKGROUND_HOLDER = "background";
 	//#endregion
-	//#region browser-extension/src/background.js
+	//#region src/background.js
 	const api = globalThis.browser ?? globalThis.chrome;
 	const POLL_ALARM = "hive-poll";
 	const POLL_WINDOW_MS = 25e3;
