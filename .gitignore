@@ -75,3 +75,6 @@ desktop/.runtime-models-staging/
 
 # Private per-session task instructions and working logs are local-only.
 agent_sessions/
+
+# Run diagnostics (recordings, state dumps, mail) were scrubbed from history (T81); never track them again.
+diagnostics/
