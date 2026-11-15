@@ -167,14 +167,24 @@ Mac-planned path alike:
   drain `@relay`, so the record can never be claimed as Mac work. Nothing
   renders these into hive history yet — a named gap, not an accident.
 
+## Hive's dashboard in the side panel
+
+The popup's **Dashboard** button opens Hive's one dashboard, the same page as the website, the
+iPhone app and Hive's window on the Mac. In Chrome it opens in the side panel beside the page
+(`sidepanel.html` frames it, and `dashboard-panel.js` opens it). Safari has no side panel, so
+there it opens in a tab. The extension's host permission for the dashboard lets the dashboard's
+sign-in cookie work inside the panel. Sign in once with your pairing code. The Safari build
+leaves out the panel page and its manifest keys.
+
 ## Chrome setup
 
-1. Run `node browser-extension/package.mjs`.
+1. Run `node browser/chrome/package.mjs` (or `npm run package` here).
 2. Start the installed local agent and confirm `http://127.0.0.1:8000/health`
    responds.
 3. Open `chrome://extensions`, enable **Developer mode**, and choose
    **Load unpacked**.
-4. Select `browser-extension/build/chrome`.
+4. Select `browser/chrome/build/chrome`. After a new build, press the extension's reload
+   button on `chrome://extensions`.
 5. Open the extension. In **Settings**, enter:
    - Agent URL: `http://127.0.0.1:8000`
    - Agent token: the same `AGENT_TOKEN` used by the installed Mac agent
