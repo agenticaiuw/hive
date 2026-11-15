@@ -11,9 +11,13 @@
 //
 // Models: the planner is cheap (gpt-6.1-terra, low effort). It rates each task easy, normal, hard or
 // hardest, and the subagent gets the model for that rating from MODELS, so the choice is ours, not
-// a string the planner made up. Code tasks get at least the coding workhorse. Hive's cloud agent
-// doesn't change code yet (no checkouts, read-only shell), so code tasks wait on the board for the
-// owner's coding agents on the Mac.
+// a string the planner made up. Code tasks get at least the coding workhorse.
+//
+// Code tasks in a repository the VM can push to (REPOS) run on the VM in a fresh worktree off main,
+// with the network off (hive-task.mjs --code); what they change is committed and pushed to its own
+// branch, hive/r<request>-<n>-<title>, never to main, and waits on the board for the owner's review.
+// Code tasks anywhere else wait for the owner's coding agents on the Mac. Every brief carries the
+// owner's standing rules for the project (GET /v1/rules).
 //
 //   node orchestrator.mjs [--once]     (as ubuntu on the VM: the hive-orchestrator systemd service)
 //
@@ -39,6 +43,8 @@ export const PLANNER = { model: 'gpt-6.1-terra', effort: 'low' };
 const RATINGS = Object.keys(MODELS);
 const KINDS = ['screen', 'answer', 'code'];
 const MOST_TASKS = 8;
+/** Repositories Hive's cloud agent changes code in: project → origin (the dream's deploy key pushes to it). */
+export const REPOS = { hive: 'git@github.com:agenticaiuw/hive.git' };
 const POLL_MS = 5000;
 
 /** The model and effort for a planned task: its rating's, and never less than `hard` for code. */
@@ -90,16 +96,22 @@ export function scopeOf(words) {
   return match ? { project: match[1].trim(), folder: (match[2] || '').trim() } : { project: '', folder: '' };
 }
 
-/** What the subagent is told: the task, the owner's words, and every memory of its folder in full. */
-export function taskBrief(task, request, folder) {
+/** What the subagent is told: the task, the owner's words, their rules, and every memory of its folder in full. */
+export function taskBrief(task, request, folder, rules = []) {
   const parts = [task.brief || task.title, `The owner's words: "${task.quote || request.text}"`];
+  if (rules.length) {
+    parts.push(`The owner's standing rules for this project; follow every one:\n${rules.map(r => {
+      const paths = (() => { try { return JSON.parse(r.paths || '[]'); } catch { return []; } })();
+      return `- ${r.text}${r.quote ? ` (the owner said: "${r.quote}")` : ''}${paths.length ? ` (applies to ${paths.join(', ')})` : ''}`;
+    }).join('\n')}`);
+  }
   if (folder) {
     const memories = folder.memories ?? [];
     parts.push(memories.length
       ? `This task is in the folder "${folder.name}" of ${folder.project}. Every memory of that folder, all ${memories.length}, in full:\n\n`
         + memories.map(m => `### ${m.title} (${m.kind})\n${m.body}`).join('\n\n')
       : `This task is in the folder "${folder.name}" of ${folder.project}, which has no memories yet.`);
-    if (folder.about) parts.splice(2, 0, `What the folder is for: ${folder.about}`);
+    if (folder.about) parts.splice(parts.length - 1, 0, `What the folder is for: ${folder.about}`);
   }
   return parts.join('\n\n');
 }
@@ -126,12 +138,20 @@ export function outcomeOf(report, fallback) {
   return (first || fallback).slice(0, 240);
 }
 
+/** The branch a code task's change goes to: hive/r<request>-<n>-<a few words of its title>. */
+export function branchOf(requestId, task) {
+  const words = String(task.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, '');
+  return `hive/r${requestId}-${task.key}${words ? `-${words}` : ''}`;
+}
+
 /**
  * One request, start to end. `deps`: board(path, body?) → JSON; plan(text) → the planner's answer;
- * run(brief, choice) → {ok, report, seconds, tokensIn, tokensOut}; now() → seconds; log(line).
+ * run(brief, choice) → {ok, report, seconds, tokensIn, tokensOut}; code(brief, choice, {project,
+ * branch, title, request, key}) → the same plus {branch, files} when it pushed a change (optional:
+ * without it code tasks wait for the Mac); now() → seconds; log(line).
  */
 export async function handle(request, deps) {
-  const { board, plan, run, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
+  const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
   log(`R${request.id}: ${request.text}`);
   let planned;
@@ -159,6 +179,9 @@ export async function handle(request, deps) {
     }
     return folders.get(key);
   };
+  const rules = project
+    ? ((await board(`/v1/rules?project=${encodeURIComponent(project)}`).catch(() => null))?.rules ?? [])
+    : [];
   const created = now();
   const tasks = [];
   for (const [i, t] of planned.tasks.entries()) {
@@ -175,32 +198,46 @@ export async function handle(request, deps) {
   await board('/v1/requests/update', { id: request.id, status: 'working', project, tasks: tasks.map(row) });
 
   for (const task of tasks) {
-    if (task.kind === 'code') {
+    const coding = task.kind === 'code';
+    if (coding && !(code && REPOS[project])) {
       task.status = 'waiting';
-      task.outcome = "A code change: Hive's cloud agent doesn't change code yet, so it waits for a coding agent on the Mac.";
+      task.outcome = project && code
+        ? `A code change in ${project}: Hive's cloud agent changes code only in ${Object.keys(REPOS).join(', ')}, so it waits for a coding agent on the Mac.`
+        : "A code change: it waits for a coding agent on the Mac.";
       await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
       continue;
     }
     task.status = 'active';
     await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
     const folder = await folderOf(task.folder).catch(() => null);
-    log(`  T${request.id * 100 + task.key} ${task.title} → ${task.choice.model} (${task.choice.effort})`);
+    log(`  T${request.id * 100 + task.key} ${task.title} → ${task.choice.model} (${task.choice.effort})${coding ? ' on code' : ''}`);
     let result;
     try {
-      result = await run(taskBrief(task, request, folder), task.choice);
+      const brief = taskBrief(task, request, folder, rules);
+      result = coding
+        ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key })
+        : await run(brief, task.choice);
     } catch (error) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
     }
+    const files = result.files ?? [];
+    task.branch = result.branch && files.length ? result.branch : null;
+    const where = task.branch
+      ? `${files.length} file${files.length === 1 ? '' : 's'} changed on branch ${task.branch}, not merged`
+      : '';
     Object.assign(task, {
-      status: result.ok ? 'done' : 'blocked',
-      report: result.report || null,
-      outcome: outcomeOf(result.report, result.ok ? 'Done.' : 'The agent stopped before it finished.'),
+      // A pushed change waits for the owner to review and merge it; nothing goes to main by itself.
+      status: !result.ok ? 'blocked' : task.branch ? 'waiting' : 'done',
+      report: [result.report, where && `${where}: ${files.join(', ')}.`].filter(Boolean).join('\n\n') || null,
+      outcome: task.branch && result.ok
+        ? `Ready for your review: ${where}.`
+        : outcomeOf(result.report, result.ok ? 'Done.' : `The agent stopped before it finished${where ? ` (${where})` : ''}.`),
       seconds: result.seconds, tokensIn: result.tokensIn, tokensOut: result.tokensOut,
     });
     await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
-    if (folder && result.report) {
+    if (folder && task.report) {
       await board('/v1/folders/memory', {
-        project, folder: folder.name, kind: 'report', title: `Report: ${task.title}`, body: result.report,
+        project, folder: folder.name, kind: 'report', title: `Report: ${task.title}`, body: task.report,
       }).catch(() => {});
     }
   }
@@ -208,7 +245,7 @@ export async function handle(request, deps) {
   const done = tasks.filter(t => t.status === 'done').length;
   const left = tasks.filter(t => t.status !== 'done');
   const outcome = left.length
-    ? `${done} of ${tasks.length} done; ${left.map(t => `${t.title} (${t.status})`).join(', ')}.`
+    ? `${done} of ${tasks.length} done; ${left.map(t => `${t.title} (${t.branch ? `${t.status}, on ${t.branch}` : t.status})`).join(', ')}.`
     : tasks.length === 1 ? outcomeOf(tasks[0].report, 'Done.') : `All ${tasks.length} tasks done.`;
   const failed = tasks.every(t => t.status === 'blocked');
   await board('/v1/requests/update', { id: request.id, status: failed ? 'failed' : 'done', outcome });
@@ -265,12 +302,11 @@ function planWithCodex(words) {
   });
 }
 
-/** One task on the VM's screen through hive-task.mjs, with the model picked for it. */
-function runOnVm(brief, choice) {
+/** hive-task.mjs with these arguments and the brief on stdin: whether it finished, its report, time and tokens. */
+function runAgent(args, brief) {
   const started = Date.now();
   return new Promise(resolve => {
-    const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), '--model', choice.model, '--effort', choice.effort],
-      { stdio: ['pipe', 'pipe', 'inherit'] });
+    const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), ...args], { stdio: ['pipe', 'pipe', 'inherit'] });
     let workDir = '';
     createInterface({ input: agent.stdout }).on('line', line => {
       process.stdout.write(`    ${line}\n`);
@@ -286,12 +322,72 @@ function runOnVm(brief, choice) {
   });
 }
 
+/** One task on the VM's screen, with the model picked for it. */
+const runOnVm = (brief, choice) => runAgent(['--model', choice.model, '--effort', choice.effort], brief);
+
+// Code work lives in root's /var/lib/hive-orchestrator (like Codex, which runs as root): a clone per
+// repository and a worktree per task. The toolchain and the deploy key are the nightly dream's.
+const CODE_ROOT = process.env.HIVE_CODE_ROOT ?? '/var/lib/hive-orchestrator';
+const DREAM_ROOT = '/var/lib/hive-dream';
+const COMMITTER = ['-c', "user.name=Hive's cloud agent", '-c', 'user.email=hive@agent.invalid'];
+
+function asRoot(args) {
+  return execFileSync('sudo', ['-n', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10 * 60_000 }).trim();
+}
+
+/** One code task: a worktree off main, Codex in it with the network off, its change pushed to `branch`. */
+async function codeOnVm(brief, choice, { project, branch, title, request, key }) {
+  const repo = join(CODE_ROOT, project);
+  const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
+  const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
+  try { asRoot(['test', '-d', join(repo, '.git')]); } catch {
+    asRoot(['mkdir', '-p', '-m', '700', CODE_ROOT]);
+    git('clone', '--quiet', REPOS[project], repo);
+  }
+  git('-C', repo, 'fetch', '--quiet', 'origin', 'main');
+  const dir = join(CODE_ROOT, 'work', `r${request}-${key}`);
+  try { git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
+  git('-C', repo, 'worktree', 'prune');
+  git('-C', repo, 'worktree', 'add', '--quiet', '-B', branch, dir, 'origin/main');
+  const tmp = join(CODE_ROOT, 'tmp');
+  asRoot(['mkdir', '-p', join(CODE_ROOT, 'target'), join(tmp, 'home'), join(tmp, 'state')]);
+  const env = {
+    HOME: join(tmp, 'home'), AGENT_STATE_DIR: join(tmp, 'state'), HIVE_RECORD: '0',
+    CARGO_HOME: `${DREAM_ROOT}/cargo`, RUSTUP_HOME: `${DREAM_ROOT}/rustup`, PATH: `${DREAM_ROOT}/cargo/bin:/usr/local/bin:/usr/bin:/bin`,
+    CARGO_TARGET_DIR: join(CODE_ROOT, 'target'), CARGO_INCREMENTAL: '0', CARGO_NET_OFFLINE: 'true', CARGO_TERM_COLOR: 'never',
+  };
+  try {
+    const result = await runAgent(['--code', dir, '--model', choice.model, '--effort', choice.effort,
+      '--writable', join(CODE_ROOT, 'target'), '--writable', `${DREAM_ROOT}/cargo`, '--writable', tmp,
+      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])], brief);
+    if (git('-C', dir, 'status', '--porcelain')) {
+      git('-C', dir, 'add', '-A');
+      git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m',
+        `${title}\n\nHive's cloud agent (${choice.model}, ${choice.effort} effort), for the owner's request R${request}, task T${request * 100 + key}.`);
+    }
+    const files = git('-C', dir, 'diff', '--name-only', 'origin/main', 'HEAD').split('\n').filter(Boolean);
+    if (!files.length) return { ...result, files };
+    git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+    return { ...result, branch, files };
+  } finally {
+    try { git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
+  }
+}
+
+/** The VM's ledger syncs, which also sends this machine's Codex plan limits (Hive's home among them). */
+function syncLedger() {
+  try {
+    execFileSync('sudo', ['-n', 'env', 'HOME=/root', '/root/.local/bin/hive-tasks', 'sync'], { stdio: 'ignore', timeout: 60_000 });
+  } catch {}
+}
+
 async function main(argv) {
   const once = argv.includes('--once');
   const config = boardConfig();
   const board = boardClient(config);
   const log = line => console.log(`${new Date().toISOString()} ${line}`);
   log(`Hive's orchestrator: taking requests for hive-cloud as ${config.machine}`);
+  syncLedger();
   let fresh = true;
   for (;;) {
     let request = null;
@@ -302,11 +398,12 @@ async function main(argv) {
       log(`couldn't reach the board: ${error.message}`);
     }
     if (request) {
-      await handle(request, { board, plan: planWithCodex, run: runOnVm, log }).catch(async error => {
+      await handle(request, { board, plan: planWithCodex, run: runOnVm, code: codeOnVm, log }).catch(async error => {
         log(`R${request.id} failed: ${error.stack || error}`);
         await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `The orchestrator hit an error: ${error.message}` })
           .catch(() => {});
       });
+      syncLedger();
       continue;
     }
     if (once) return;

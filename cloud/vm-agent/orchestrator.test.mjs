@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, handle, outcomeOf, parsePlan, pick, readEvents, scopeOf, taskBrief } from './orchestrator.mjs';
+import { MODELS, branchOf, handle, outcomeOf, parsePlan, pick, readEvents, scopeOf, taskBrief } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -69,6 +69,7 @@ function fakeBoard(folders = {}) {
   const calls = [];
   const board = async (path, body) => {
     calls.push({ path, body });
+    if (path.startsWith('/v1/rules?')) return { rules: folders.__rules ?? [] };
     if (path.startsWith('/v1/folder?')) {
       const key = new URL(`http://x${path}`).searchParams.get('key');
       const found = folders[key];
@@ -142,4 +143,58 @@ test("a folder the planner guesses is used only if it exists; a plan that fails 
   const second = fakeBoard();
   await handle({ id: 6, text: 'x' }, { board: second.board, plan: async () => 'sorry', run: async () => assert.fail('no run') });
   assert.deepEqual(second.calls.at(-1).body, { id: 6, status: 'failed', outcome: "Couldn't plan it: the planner didn't answer with JSON" });
+});
+
+test("every brief carries the owner's standing rules for the project, before the folder's memories", () => {
+  const brief = taskBrief(
+    { brief: 'Tidy the reader.', quote: 'tidy it' },
+    { text: 'tidy it' },
+    { name: 'Voice', project: 'hive', about: 'Speech', memories: [{ title: 'Socket', kind: 'spec', body: 'JSON lines.' }] },
+    [{ text: "Don't resume the Rust voice port", quote: 'the rust port is stopped', paths: '[]' },
+     { text: 'Keep it in the cloud', quote: '', paths: '["cloud/**"]' }],
+  );
+  assert.match(brief, /The owner's standing rules for this project; follow every one:\n- Don't resume the Rust voice port \(the owner said: "the rust port is stopped"\)\n- Keep it in the cloud \(applies to cloud\/\*\*\)/);
+  assert.ok(brief.indexOf('standing rules') < brief.indexOf('What the folder is for') && brief.indexOf('What the folder is for') < brief.indexOf('### Socket'));
+});
+
+test('a code task in a repository the VM can push to runs there and waits for review on its own branch', async () => {
+  const folders = { __rules: [{ text: 'Never push to main', quote: 'no main', paths: '[]' }] };
+  const { board, calls } = fakeBoard(folders);
+  const coded = [];
+  await handle({ id: 7, text: 'For hive: fix the reader, and fix the bot in buckymatch' }, {
+    board,
+    plan: async () => JSON.stringify({ project: 'hive', tasks: [
+      { title: 'Fix the reader!', quote: 'fix the reader', kind: 'code', difficulty: 'easy' },
+    ] }),
+    run: async () => assert.fail('a code task never goes to the screen'),
+    code: async (brief, choice, where) => {
+      coded.push({ brief, choice, where });
+      return { ok: true, report: 'Fixed the reader. Tests pass.', seconds: 60, tokensIn: 5000, tokensOut: 300,
+        branch: where.branch, files: ['src/reader.rs', 'tests/reader.rs'] };
+    },
+  });
+  assert.equal(coded.length, 1);
+  assert.deepEqual(coded[0].choice, { rating: 'hard', ...MODELS.hard });
+  assert.deepEqual(coded[0].where, { project: 'hive', branch: 'hive/r7-1-fix-the-reader', title: 'Fix the reader!', request: 7, key: 1 });
+  assert.match(coded[0].brief, /- Never push to main \(the owner said: "no main"\)/);
+  const updates = calls.filter(c => c.path === '/v1/requests/update').map(c => c.body);
+  const task = updates.flatMap(u => u.tasks ?? []).at(-1);
+  assert.equal(task.status, 'waiting');
+  assert.equal(task.outcome, 'Ready for your review: 2 files changed on branch hive/r7-1-fix-the-reader, not merged.');
+  assert.match(task.report, /^Fixed the reader\. Tests pass\.\n\n2 files changed on branch hive\/r7-1-fix-the-reader, not merged: src\/reader\.rs, tests\/reader\.rs\.$/);
+  assert.deepEqual([task.work_seconds, task.tokens_in, task.tokens_out], [60, 5000, 300]);
+  assert.equal(updates.at(-1).outcome, '0 of 1 done; Fix the reader! (waiting, on hive/r7-1-fix-the-reader).');
+  assert.equal(branchOf(3, { key: 2, title: '  ' }), 'hive/r3-2');
+
+  // Elsewhere (no repository the VM can push to) it waits for the Mac, and nothing runs.
+  const other = fakeBoard();
+  await handle({ id: 8, text: 'fix the bot' }, {
+    board: other.board,
+    plan: async () => JSON.stringify({ project: 'buckymatch', tasks: [{ title: 'Fix the bot', quote: 'fix the bot', kind: 'code' }] }),
+    run: async () => assert.fail('no run'),
+    code: async () => assert.fail('no code run outside REPOS'),
+  });
+  const waiting = other.calls.filter(c => c.path === '/v1/requests/update').flatMap(c => c.body.tasks ?? []).at(-1);
+  assert.equal(waiting.status, 'waiting');
+  assert.match(waiting.outcome, /code change in buckymatch: Hive's cloud agent changes code only in hive/);
 });

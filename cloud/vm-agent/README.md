@@ -143,11 +143,16 @@ orchestrator takes the oldest one and then:
    evidence.
 3. Files the tasks on the board under the request, in the folder the owner sent it from. A folder the
    planner names is used only if it already exists.
-4. Runs each task through `hive-task.mjs` with that model. The task gets every memory of its folder,
-   in full. Code tasks wait on the board for a coding agent on the Mac, since this agent doesn't
-   change code yet.
-5. Reports each task as it goes: its status, time, tokens, outcome and report. A task's report is
-   also saved to its folder as a memory.
+4. Runs each task through `hive-task.mjs` with that model. The task gets the owner's standing rules
+   for the project (`GET /v1/rules`) and every memory of its folder, in full.
+5. Runs a code task in a repository the VM can push to (`REPOS`: hive, with the dream's deploy key)
+   in a fresh worktree off main under root's `/var/lib/hive-orchestrator`, with the network off
+   (`hive-task.mjs --code`, the dream's Rust toolchain). Its change is committed and pushed to its
+   own branch, `hive/r<request>-<n>-<title>`, never to main, and the task waits on the board for the
+   owner's review. A code task anywhere else waits for a coding agent on the Mac.
+6. Reports each task as it goes: its status, time, tokens, outcome and report. A task's report is
+   also saved to its folder as a memory. After each request the VM's ledger syncs, which also sends
+   its Codex plan limits.
 
 It runs as the `hive-orchestrator` systemd service (`hive-orchestrator.service`), as `ubuntu`. It
 reads the board's address and token from root's hive-tasks config by `sudo -n`. One request runs at
