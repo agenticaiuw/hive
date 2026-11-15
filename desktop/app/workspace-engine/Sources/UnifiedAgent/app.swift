@@ -273,22 +273,65 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         }
     }
 
-    // Hive's logo, the yellow hexagon, with a small dot while it listens (red), dictates (orange)
-    // or uses the camera (green).
+    // Hive's logo (branding/hive.svg) in the menu bar: its flat-topped gold hexagon and two shine
+    // lines, without the app icon's dark square. A small dot shows while it listens (red),
+    // dictates (orange) or uses the camera (green).
     func hiveIcon(dot: NSColor?) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY), radius: CGFloat = 8
-            let hexagon = NSBezierPath()
-            for i in 0..<6 {
-                let angle = CGFloat.pi / 2 + CGFloat(i) * .pi / 3
-                let point = NSPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
-                i == 0 ? hexagon.move(to: point) : hexagon.line(to: point)
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
+            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
+            func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+                CGColor(srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255,
+                        blue: CGFloat(hex & 0xff) / 255, alpha: alpha)
             }
-            hexagon.close()
-            NSColor(srgbRed: 0.976, green: 0.812, blue: 0.341, alpha: 1).setFill()
-            hexagon.fill()
+            func gradient(_ stops: [(CGFloat, CGColor)]) -> CGGradient {
+                CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                           colors: stops.map(\.1) as CFArray, locations: stops.map(\.0))!
+            }
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x, y: y) }
+            // The svg's units: the hexagon spans x 212…812 and y 252…772 of its 1024 square.
+            let scale = (rect.width - 1) / 600
+            cg.saveGState()
+            cg.translateBy(x: rect.midX - 512 * scale, y: rect.midY - 512 * scale)
+            cg.scaleBy(x: scale, y: scale)
+            let hexagon = CGMutablePath()
+            hexagon.move(to: point(802, 494.7))
+            hexagon.addQuadCurve(to: point(802, 529.3), control: point(812, 512))
+            hexagon.addLine(to: point(672, 754.5))
+            hexagon.addQuadCurve(to: point(642, 771.8), control: point(662, 771.8))
+            hexagon.addLine(to: point(382, 771.8))
+            hexagon.addQuadCurve(to: point(352, 754.5), control: point(362, 771.8))
+            hexagon.addLine(to: point(222, 529.3))
+            hexagon.addQuadCurve(to: point(222, 494.7), control: point(212, 512))
+            hexagon.addLine(to: point(352, 269.5))
+            hexagon.addQuadCurve(to: point(382, 252.2), control: point(362, 252.2))
+            hexagon.addLine(to: point(642, 252.2))
+            hexagon.addQuadCurve(to: point(672, 269.5), control: point(662, 252.2))
+            hexagon.closeSubpath()
+            cg.saveGState()
+            cg.addPath(hexagon)
+            cg.clip()
+            cg.drawLinearGradient(gradient([(0, color(0xFFEBB0)), (0.28, color(0xF6C547)),
+                                            (0.68, color(0xDC9C22)), (1, color(0xA86C10))]),
+                                  start: point(702, 252), end: point(322, 772), options: [])
+            cg.restoreGState()
+            // The shine lines, a little wider than the svg's so they still show at 18 points.
+            for (from, to, fade) in [(point(442, 282), point(630, 282), false),
+                                     (point(659, 306), point(720, 413), true)] {
+                cg.saveGState()
+                cg.setLineWidth(26)
+                cg.setLineCap(.round)
+                cg.move(to: from)
+                cg.addLine(to: to)
+                cg.replacePathWithStrokedPath()
+                cg.clip()
+                let shine = [(CGFloat(0), color(0xFFF9E6, fade ? 0.95 : 0)), (1, color(0xFFF9E6, fade ? 0 : 0.95))]
+                cg.drawLinearGradient(gradient(shine), start: from, end: to,
+                                      options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                cg.restoreGState()
+            }
+            cg.restoreGState()
             if let dot {
-                let spot = NSRect(x: rect.maxX - 7, y: rect.minY, width: 7, height: 7)
+                let spot = NSRect(x: rect.maxX - 7, y: rect.maxY - 7, width: 7, height: 7)
                 NSColor.black.withAlphaComponent(0.55).setFill()
                 NSBezierPath(ovalIn: spot.insetBy(dx: -1, dy: -1)).fill()
                 dot.setFill()

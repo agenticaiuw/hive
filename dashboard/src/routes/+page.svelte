@@ -1125,6 +1125,9 @@
     font: inherit;
     font-size: var(--fs-body);
   }
+  textarea:focus {
+    border-color: rgba(255, 255, 255, 0.28);
+  }
   .memory-form textarea,
   .about-form textarea {
     font-size: var(--fs-small);
