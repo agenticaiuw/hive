@@ -59,6 +59,27 @@ summary {
   display: list-item;
 }
 
+/* No blue focus ring. Safari's WebKit (Hive's window, the phone app) rings every focused text
+   field in blue, and the window focuses the composer whenever it opens. Text fields show focus
+   with a lighter border instead; buttons and links keep a quiet ring for the keyboard only. */
+input,
+textarea,
+select {
+  outline: none;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+:focus-visible {
+  outline: none;
+}
+:where(button, a, summary, [tabindex]):focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.35);
+  outline-offset: 2px;
+}
+
 /* `.cmd-parked-reasons` etc. set no list-style of their own. */
 ol,
 ul {
@@ -269,8 +290,7 @@ body {
 }
 
 .login-form input:focus {
-  border-color: rgba(112, 167, 255, 0.72);
-  box-shadow: 0 0 0 3px rgba(112, 167, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
 }
 
 .login-form button {
@@ -1019,7 +1039,7 @@ body {
 }
 
 .composer-field:focus-within {
-  border-color: rgba(112, 167, 255, 0.45);
+  border-color: rgba(255, 255, 255, 0.28);
 }
 
 .composer-field input {
@@ -1233,7 +1253,7 @@ body {
 }
 
 .tech > summary:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 1px solid rgba(255, 255, 255, 0.35);
   outline-offset: 4px;
   border-radius: 4px;
 }
@@ -1339,7 +1359,7 @@ body {
 }
 
 .recent-row:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 1px solid rgba(255, 255, 255, 0.35);
   outline-offset: -2px;
 }
 
