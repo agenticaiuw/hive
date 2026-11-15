@@ -74,6 +74,14 @@ for (const platformDir of [chromeDir, safariDir]) {
      * is the one Safari actually exercises. Chrome keeps `service_worker`
      * (MV3 requires it and rejects `scripts`).
      */
+    /*
+     * Safari has no side panel: its popup opens Hive's dashboard in a tab
+     * (dashboard-panel.js), so the panel page and its manifest keys stay out
+     * of the Safari resources (the .pbxproj lists those file by file).
+     */
+    delete manifest.side_panel
+    manifest.permissions = manifest.permissions.filter((name) => name !== 'sidePanel')
+    fs.rmSync(path.join(platformDir, 'sidepanel.html'), { force: true })
     delete manifest.background.service_worker
     manifest.background.scripts = ['background.js']
     /*

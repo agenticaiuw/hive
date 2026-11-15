@@ -64,6 +64,9 @@
   let dictation = $state<Dictation | null>(null);
   let reading = $state(false);
   let project = $state("");
+  /** On a phone the projects, agents and plan limits fold away behind one toggle, so the
+   * composer and the tasks come first; on wider screens they are always shown. */
+  let sideOpen = $state(false);
   let folder = $state("");
   let query = $state("");
   let showAllDone = $state(false);
@@ -143,6 +146,7 @@
   }
 
   function choose(nextProject: string, nextFolder = "") {
+    sideOpen = false;
     project = nextProject;
     folder = nextFolder;
     folderView = null;
@@ -338,6 +342,18 @@
       <kbd>⌘K</kbd>
     </label>
 
+    <button
+      type="button"
+      class="side-toggle"
+      aria-expanded={sideOpen}
+      aria-controls="side-rest"
+      onclick={() => (sideOpen = !sideOpen)}
+    >
+      <span>{sideOpen ? "Hide" : "Show"} projects, agents and plan limits</span>
+      {#if working.length}<span class="n">{working.length} at work</span>{/if}
+    </button>
+
+    <div class="side-rest" id="side-rest" class:open={sideOpen}>
     <button type="button" class="row top" class:on={!project} onclick={() => choose("")}>
       <span class="name">Everything</span>
       {#if unfinished}<span class="n">{unfinished}</span>{/if}
@@ -436,6 +452,7 @@
         {/each}
       </ul>
     {/if}
+    </div>
   </aside>
 
   <main class="main">
@@ -753,6 +770,13 @@
   }
 
   /* ---- the side: projects, folders, agents ---- */
+  /* The side's own grid lays out what's in .side-rest; the toggle only exists on phones. */
+  .side-rest {
+    display: contents;
+  }
+  .side-toggle {
+    display: none;
+  }
   .side {
     position: sticky;
     top: var(--s5);
@@ -1420,6 +1444,24 @@
       position: static;
       max-height: none;
       overflow: visible;
+    }
+    .side-toggle {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: var(--s2);
+      width: 100%;
+      padding: var(--s2) var(--s3);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--ink-2);
+      font-size: var(--fs-small);
+      text-align: left;
+      cursor: pointer;
+    }
+    .side-rest:not(.open) {
+      display: none;
     }
     .search kbd,
     .hint {

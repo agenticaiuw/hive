@@ -22,6 +22,7 @@ import {
   describeEntry,
 } from './command-console.js'
 import { DEFAULT_AGENT_URL } from './bridge-core.js'
+import { openHiveDashboard } from './dashboard-panel.js'
 import {
   PAIR_OUTCOME_KEY,
   defaultPairDeviceId,
@@ -702,8 +703,14 @@ elements.form.addEventListener('submit', async (event) => {
 /* The include-page checkbox is deleted (owner, 2026-08-12): page context
  * rides along by default; the stored INCLUDE_PAGE_KEY still wins if false. */
 
+/* Hive's one dashboard (the website's, every machine's tasks): Chrome's side panel beside this
+ * page, or a tab where there is none. The window id is read now, since sidePanel.open must run
+ * inside the click's gesture. */
+let currentWindowId = null
+void Promise.resolve(api.windows?.getCurrent?.()).then((win) => { currentWindowId = win?.id ?? null }).catch(() => {})
+
 elements.openDashboard.addEventListener('click', () => {
-  void api.tabs.create({ url: dashboardUrl })
+  void openHiveDashboard(api, currentWindowId)
 })
 
 /* "Connect now" is gone (owner, 2026-08-12): the page engine connects on
@@ -774,7 +781,6 @@ function renderSetup({ agentConfigured, brainWorking }) {
    * command box still works (via the Mac), so both stay visible. */
   elements.form.hidden = !agentConfigured
   elements.history.hidden = elements.history.hidden || !agentConfigured
-  elements.openDashboard.parentElement.hidden = !agentConfigured
 }
 
 elements.setupRepair.addEventListener('click', () => {

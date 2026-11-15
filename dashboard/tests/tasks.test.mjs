@@ -174,4 +174,6 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.equal(local.limits[0].machine, 'this machine');
   assert.deepEqual(planLimits(local.limits, now)[0].windows, [{ label: 'Week', used: 100, fresh: false, resets: 'resets in 10 min' }]);
   assert.deepEqual(normalizeBoard({ board: { tasks: [] } }).limits, []);
+  const month = planLimits([{ machine: 'vm', harness: 'codex', home: '~/.codex', plan: 'free', windows: [{ minutes: 43200, used: 94, resets_at: now + 3600 }, { minutes: 4320, used: 1 }] }], now);
+  assert.deepEqual(month[0].windows.map(w => w.label), ['Month', '3 days']);
 });
