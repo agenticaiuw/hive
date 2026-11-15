@@ -8,3 +8,13 @@ not started and the last five done, plus other projects' tasks that wait on you.
 dashboard shows), every 20 seconds and whenever a turn starts. `/hive-board` reopens the pane.
 
 Needs `~/.local/bin/hive-tasks` (desktop/app/crates/hive/hive-tasks).
+
+## Install it for every Claude Code session
+
+From this folder's marketplace (it reads the folder in place, so edits here reach new sessions):
+
+    claude plugin marketplace add ~/hive/desktop/claude-code/hive-board
+    claude plugin install hive-board@hive --scope user
+
+Or from GitHub: `/plugin install hive-board --marketplace agenticaiuw/hive` once a marketplace file
+sits at the repository root.
