@@ -357,11 +357,11 @@ test('drafts go to the top of the two reply buckets, urgent first', async () => 
 
 test('the template draft brackets what it does not know instead of inventing it', () => {
   const draft = templateDraft(
-    message({ sender: '"Owner, Hive" <owner@example.edu>', subject: 'Re: probe rerun' }),
+    message({ sender: '"Rivera, Sam" <sam@example.edu>', subject: 'Re: probe rerun' }),
     { body: 'Hi — can you rerun the probe before Thursday?', signature: 'Hive Owner' },
   )
   assert.equal(draft.subject, 'Re: probe rerun')
-  assert.match(draft.body, /^Hi Evan,/)
+  assert.match(draft.body, /^Hi Sam,/)
   assert.match(draft.body, /can you rerun the probe before Thursday\?/)
   assert.match(draft.body, /\[your answer\]/)
   assert.match(draft.body, /Hive Owner$/)

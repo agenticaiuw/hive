@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseEnv } from 'node:util'
+import { hiveWorkerUrl } from './hiveCloud.mjs'
 
 try {
   const here = path.dirname(fileURLToPath(import.meta.url))
@@ -53,11 +54,10 @@ if (process.env.PAIRING_CODE) {
   }
 }
 
-// The deployed relay as default; local relay dev overrides with an explicit
-// RELAY_URL=http://localhost:8787. Config, not a secret — the extension ships
-// this origin in its allowlist already.
-if (!process.env.RELAY_URL) {
-  process.env.RELAY_URL = 'https://hive-relay.your-subdomain.workers.dev'
+// This person's deployed relay as default (cloud/shared/hiveCloud.mjs); local relay dev overrides
+// with an explicit RELAY_URL=http://localhost:8787. Config, not a secret.
+if (!process.env.RELAY_URL && hiveWorkerUrl('hive-relay')) {
+  process.env.RELAY_URL = hiveWorkerUrl('hive-relay')
 }
 
 // --- aliases (old names → short set) ---

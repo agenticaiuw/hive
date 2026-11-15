@@ -9,9 +9,6 @@
     "binding": "ASSETS",
     "directory": ".svelte-kit/cloudflare"
   },
-  "vars": {
-    "RELAY_URL": "https://hive-relay.your-subdomain.workers.dev"
-  },
   // `hive-relay` is the live relay Worker's real name.
   "services": [
     {
@@ -41,10 +38,8 @@
   // RELAY_API_KEY / DASHBOARD_ACCESS_KEY / DASHBOARD_SESSION_SECRET are
   // secrets: `wrangler secret put <NAME>`. Never put them in this file.
   "env": {
-    "local": {
-      "vars": {
-        "RELAY_URL": "https://hive-relay.your-subdomain.workers.dev"
-      }
-    }
+    // RELAY_URL (this person's relay Worker) comes from the repository's .env for local runs; the
+    // repository names no account's address.
+    "local": {}
   }
 }

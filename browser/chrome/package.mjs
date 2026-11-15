@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fillSubdomain, hiveCloudSubdomain, rewriteTree } from '../../cloud/shared/hiveCloud.mjs'
 
 const browserExtensionDir = path.dirname(fileURLToPath(import.meta.url))
 const sourceDir = path.join(browserExtensionDir, 'src')
@@ -93,6 +94,18 @@ for (const platformDir of [chromeDir, safariDir]) {
      */
   }
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+/*
+ * The source names Hive's Workers under the placeholder subdomain (`your-subdomain`); the build
+ * points them at the Cloudflare account of whoever runs this Hive (cloud/shared/hiveCloud.mjs), so
+ * nobody's account is in the repository.
+ */
+const subdomain = hiveCloudSubdomain()
+if (subdomain) {
+  for (const platformDir of [chromeDir, safariDir]) rewriteTree(platformDir, (text) => fillSubdomain(text, subdomain))
+} else {
+  console.warn('No Hive cloud set up on this machine (~/.config/hive/tasks.json): the build keeps the placeholder Worker addresses.')
 }
 
 execFileSync(

@@ -57,6 +57,10 @@ echo "==> Step 3/8: sync build/safari into the Xcode extension Resources (with -
 # linger inside the shipped appex and resurrect dead surfaces.
 rsync -a --delete "$CHROME/build/safari/." "$RESOURCES_DIR/"
 
+# The build points the extension at this Mac's Hive cloud; the Resources folder is in the repository,
+# so put the placeholder Worker addresses back once Xcode has built (cloud/shared/hiveCloud.mjs).
+trap 'node "$ROOT/cloud/shared/hiveCloud.mjs" empty "$RESOURCES_DIR"' EXIT
+
 echo "==> Step 4/8: xcodebuild Release"
 xcodebuild -project "$XCODE_DIR/Hive Browser Bridge.xcodeproj" \
   -scheme "Hive Browser Bridge (macOS)" \

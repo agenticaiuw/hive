@@ -81,7 +81,7 @@ test('the hive block refuses node-scoped facts on both read and merge', () => {
     {
       facts: [
         { domain: 'email', name: 'account.personal', value: 'e@x.com', scope: 'hive' },
-        { domain: 'files', name: 'place.notes', value: '/Users/evan/Notes', scope: 'node' },
+        { domain: 'files', name: 'place.notes', value: '/Users/you/Notes', scope: 'node' },
       ],
     },
     { now: NOW },

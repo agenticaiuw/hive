@@ -1,10 +1,6 @@
 import Capacitor
 import WebKit
 
-/// The only origin this app is allowed to hand the microphone to. It matches the
-/// `server.url` / `server.allowNavigation` entries in capacitor.config.json.
-private let pendantDashboardHost = "hive-dashboard.your-subdomain.workers.dev"
-
 /// Capacitor's own `WKUIDelegate` grants every media-capture request from every
 /// origin. The web UI is loaded remotely now, so narrow that to the dashboard
 /// origin over https and deny anything else (a third-party iframe, an injected
@@ -12,9 +8,14 @@ private let pendantDashboardHost = "hive-dashboard.your-subdomain.workers.dev"
 /// forwarded to Capacitor untouched.
 final class PendantMediaCaptureUIDelegate: NSObject, WKUIDelegate {
     private let wrapped: WKUIDelegate
+    /// The only origin this app is allowed to hand the microphone to: the host of
+    /// `server.url` in capacitor.config.json, which the build points at the owner's
+    /// own Hive cloud. Empty (so nothing is granted) when the config has no host.
+    private let dashboardHost: String
 
-    init(wrapping wrapped: WKUIDelegate) {
+    init(wrapping wrapped: WKUIDelegate, dashboardHost: String) {
         self.wrapped = wrapped
+        self.dashboardHost = dashboardHost.lowercased()
         super.init()
     }
 
@@ -24,7 +25,8 @@ final class PendantMediaCaptureUIDelegate: NSObject, WKUIDelegate {
                  type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
         let isDashboardOrigin = origin.`protocol`.lowercased() == "https"
-            && origin.host.lowercased() == pendantDashboardHost
+            && !dashboardHost.isEmpty
+            && origin.host.lowercased() == dashboardHost
         decisionHandler(isDashboardOrigin ? .grant : .deny)
     }
 
@@ -102,7 +104,8 @@ final class PendantBridgeViewController: CAPBridgeViewController {
 
     override func capacitorDidLoad() {
         if let webView = webView, let capacitorDelegate = webView.uiDelegate {
-            let delegate = PendantMediaCaptureUIDelegate(wrapping: capacitorDelegate)
+            let delegate = PendantMediaCaptureUIDelegate(wrapping: capacitorDelegate,
+                                                         dashboardHost: bridge?.config.serverURL.host ?? "")
             mediaCaptureDelegate = delegate
             webView.uiDelegate = delegate
         }

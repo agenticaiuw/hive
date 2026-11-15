@@ -196,17 +196,17 @@ test('conversational future tense is not a prior action item', () => {
 
 test('the organiser’s own name is dropped when it matches everything they own', () => {
   const candidates = Array.from({ length: 20 }, (_unused, index) => ({
-    path: `/Users/evan/Documents/hive-owner-file-${index}.md`,
+    path: `/Users/you/Documents/hive-owner-file-${index}.md`,
   }))
-  candidates[0].path = '/Users/evan/Documents/hive-owner-pendant-firmware.md'
+  candidates[0].path = '/Users/you/Documents/hive-owner-pendant-firmware.md'
 
-  const terms = discriminatingTerms(['evan', 'liu', 'pendant', 'firmware'], candidates)
+  const terms = discriminatingTerms(['hive', 'owner', 'pendant', 'firmware'], candidates)
   assert.deepEqual(terms, ['pendant', 'firmware'], 'a term in every file names nothing')
 })
 
 test('a small corpus keeps its terms — frequency needs something to measure', () => {
-  const candidates = [{ path: '/a/evan-notes.md' }, { path: '/a/evan-other.md' }]
-  assert.deepEqual(discriminatingTerms(['evan', 'notes'], candidates), ['evan', 'notes'])
+  const candidates = [{ path: '/a/owner-notes.md' }, { path: '/a/owner-other.md' }]
+  assert.deepEqual(discriminatingTerms(['owner', 'notes'], candidates), ['owner', 'notes'])
 })
 
 /* ------------------------------------------------------- open questions */

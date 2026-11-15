@@ -20,7 +20,11 @@ cp ../integration/assets/icon/pendant.icns build/AppIcon.icns
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 
-xcrun swiftc -O -o "$OUT/Contents/MacOS/Hive Menu Bar" Sources/main.swift
+# The source names the dashboard under the placeholder subdomain; compile a copy pointed at this
+# Mac's Hive cloud (cloud/shared/hiveCloud.mjs), so nobody's account is in the repository.
+cp Sources/main.swift build/main.swift
+node ../../cloud/shared/hiveCloud.mjs fill build
+xcrun swiftc -O -o "$OUT/Contents/MacOS/Hive Menu Bar" build/main.swift
 cp Info.plist "$OUT/Contents/Info.plist"
 cp build/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
 

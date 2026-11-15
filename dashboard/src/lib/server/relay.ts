@@ -8,8 +8,6 @@
 import { redactInline } from "$lib/jobs";
 import type { RuntimeEnv } from "./env";
 
-const DEFAULT_RELAY_URL =
-  "https://hive-relay.your-subdomain.workers.dev";
 
 type RelayFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -26,9 +24,15 @@ export function missingRelayCredential(): Response {
   );
 }
 
+/**
+ * The deployed dashboard reaches the relay through its RELAY service binding; anywhere else
+ * (`vite dev`, the Mac app) RELAY_URL names this person's relay Worker. The repository names no
+ * account's address, so a dashboard with neither has no relay.
+ */
 export function relayClient(env: RuntimeEnv): RelayClient | null {
-  const relayUrl = String(env.RELAY_URL || DEFAULT_RELAY_URL).replace(/\/$/, "");
+  const relayUrl = String(env.RELAY_URL || "").replace(/\/$/, "");
   const relayApiKey = String(env.RELAY_API_KEY || "");
+  if (!env.RELAY && !relayUrl) return null;
   const relayFetch: RelayFetch = (path, init) =>
     env.RELAY
       ? env.RELAY.fetch(new Request(`https://relay.internal${path}`, init))
