@@ -509,6 +509,8 @@ export function planLimits(limits, now) {
 function windowName(minutes) {
   if (minutes === 10080) return 'Week';
   if (minutes === 1440) return 'Day';
+  if (minutes >= 40320 && minutes <= 44640) return 'Month'; // 28 to 31 days
+  if (minutes > 1440 && minutes % 1440 === 0) return `${minutes / 1440} days`;
   return duration(minutes * 60);
 }
 
