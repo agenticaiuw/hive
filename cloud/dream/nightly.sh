@@ -28,6 +28,15 @@ git -C "$HIVE_DREAM_REPO" reset --quiet --hard origin/main
 git -C "$HIVE_DREAM_REPO" worktree prune
 say "main is at $(git -C "$HIVE_DREAM_REPO" log -1 --format='%h %s')"
 
+# This file is a copy (the clone moves under a running night), so a copy left behind by a change
+# on main (a renamed crate) broke the night on 2026-11-14. Main's copy takes over before anything
+# else runs: it replaces this one and runs in its place, once.
+if [ -z "${HIVE_DREAM_UPDATED:-}" ] && ! cmp -s "$HIVE_DREAM_REPO/cloud/dream/nightly.sh" "$ROOT/nightly.sh"; then
+  install -m 700 "$HIVE_DREAM_REPO/cloud/dream/nightly.sh" "$ROOT/nightly.sh"
+  say "nightly.sh: took main's copy"
+  HIVE_DREAM_UPDATED=1 exec "$ROOT/nightly.sh" "$@"
+fi
+
 # The gate's tests run offline, so everything main needs is fetched first.
 cargo fetch --quiet --locked --manifest-path "$HIVE_DREAM_REPO/desktop/app/crates/hive/Cargo.toml"
 cargo build --quiet --release --locked -p hive-dream \

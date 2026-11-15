@@ -19,6 +19,7 @@ export default {
       if (url.pathname === "/login") return await login(url, env);
       if (url.pathname === "/v1/board") return await board(request, env);
       if (url.pathname === "/v1/folder") return await folder(url, request, env);
+      if (url.pathname === "/v1/rules") return await projectRules(url, request, env);
       if (url.pathname === "/v1/folders" && request.method === "POST") return await saveFolder(request, env);
       if (url.pathname === "/v1/folders/memory" && request.method === "POST") return await saveMemory(request, env);
       if (url.pathname === "/v1/requests" && request.method === "POST") return await sendRequest(request, env);
@@ -180,6 +181,22 @@ async function folder(url, request, env) {
     ).bind(project, key),
   ]);
   return json({ folder: found.results[0] || { project, key, name: key, about: "" }, memories: memories.results });
+}
+
+// GET /v1/rules?project=hive: the owner's standing rules for a project, for an agent the cloud starts
+// (Hive's orchestrator puts them in every task's brief). "hive" matches the machines' full project
+// names ("github.com/agenticaiuw/hive"); a rule synced from more than one machine is listed once.
+async function projectRules(url, request, env) {
+  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const project = text(url.searchParams.get("project"), 120).toLowerCase();
+  if (!project) return json({ error: "Say which project." }, 400);
+  const found = await env.DB.prepare(
+    `SELECT machine, id, project, paths, text, quote, created_at FROM board_rules
+     WHERE active = 1 AND (lower(project) = ?1 OR lower(project) LIKE '%/' || ?1) ORDER BY created_at, machine, id`,
+  ).bind(project).all();
+  const seen = new Set();
+  const rules = found.results.filter((r) => !seen.has(r.text) && seen.add(r.text));
+  return json({ rules });
 }
 
 // POST /v1/folders {project, name, about?}: makes a folder (or says what one is for) from the web.
