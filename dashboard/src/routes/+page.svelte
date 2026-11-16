@@ -37,7 +37,6 @@
     byFolder,
     commitUrl,
     cost,
-    estimates,
     folderList,
     normalizeBoard,
     normalizeFolder,
@@ -93,7 +92,6 @@
   const folders = $derived(board && project ? folderList(board.tasks, board.folders, project) : []);
   const folderChosen = $derived(folders.find((f) => f.key === folder));
   const working = $derived(board ? agentsAtWork(board.tasks, board.now) : []);
-  const pace = $derived(board ? estimates(board.tasks) : null);
   const limits = $derived(board ? planLimits(board.limits, board.now) : []);
   // What was sent to Hive in the cloud lately: anything still going, and what ended in the last day.
   const requests = $derived(
@@ -338,8 +336,7 @@
 
     <label class="search">
       <span class="visually-hidden">Search tasks</span>
-      <input bind:this={searchBox} type="search" placeholder="Search tasks" bind:value={query} />
-      <kbd>⌘K</kbd>
+      <input bind:this={searchBox} type="search" placeholder="Search" title="Search tasks (⌘K)" bind:value={query} />
     </label>
 
     <button
@@ -349,7 +346,7 @@
       aria-controls="side-rest"
       onclick={() => (sideOpen = !sideOpen)}
     >
-      <span>{sideOpen ? "Hide" : "Show"} projects, agents and plan limits</span>
+      <span>Projects</span>
       {#if working.length}<span class="n">{working.length} at work</span>{/if}
     </button>
 
@@ -387,7 +384,6 @@
                       onclick={() => choose(p.key, folder === f.key ? "" : f.key)}
                     >
                       <span class="name">{f.name}</span>
-                      {#if f.memories}<span class="mem" title="{f.memories} memories">◆ {f.memories}</span>{/if}
                       {#if f.open}<span class="n">{f.open}</span>{/if}
                     </button>
                   </li>
@@ -412,15 +408,10 @@
           <li class="agent" class:busy={a.on.length > 0}>
             <span class="pulse" aria-hidden="true"></span>
             <div>
-              <p class="who">
-                {HARNESSES[a.harness as keyof typeof HARNESSES] ?? a.harness} · {a.machine}{#if a.projectName} · {a.projectName}{/if}
+              <p class="who" title="{a.machine} · {ago(a.last, board?.now ?? 0)}">
+                {HARNESSES[a.harness as keyof typeof HARNESSES] ?? a.harness}{#if a.projectName} · {a.projectName}{/if}
               </p>
-              {#if on}
-                <p class="on">{a.on.length ? "" : "Next: "}{on.title} <span class="id">{on.id}</span></p>
-              {/if}
-              <p class="when">
-                {ago(a.last, board?.now ?? 0)}{#if a.on.length + a.open.length > 1} · {a.on.length + a.open.length - 1} more{/if}
-              </p>
+              {#if on}<p class="on">{on.title}</p>{/if}
             </div>
           </li>
         {/each}
@@ -434,7 +425,7 @@
           <li>
             <p class="who" title={l.home}>{l.who}</p>
             {#each l.windows as w (w.label)}
-              <div class="window" class:high={w.used >= 80}>
+              <div class="window" class:high={w.used >= 80} title={w.resets || undefined}>
                 <span class="window-name">{w.label}</span>
                 <span
                   class="bar"
@@ -446,7 +437,6 @@
                 ><span style="width: {w.used}%"></span></span>
                 <span class="used">{w.fresh ? "reset" : `${Math.round(w.used)}%`}</span>
               </div>
-              {#if w.resets}<p class="when">{w.resets}</p>{/if}
             {/each}
           </li>
         {/each}
@@ -484,10 +474,6 @@
             <button type="button" class="link" onclick={editAbout}>Edit</button>
           </p>
         {/if}
-        <p class="folder-note">
-          Every agent put on this folder gets all {folderView ? folderView.memories.length : folderChosen.memories}
-          of its memories, in full.
-        </p>
         {#if folderError}<p class="bad">{folderError}</p>{/if}
         {#if folderView?.memories.length}
           <ul class="memories">
@@ -574,7 +560,7 @@
           {/if}
         </button>
         <button type="submit" disabled={!text.trim() || !chosen?.available || sending}>
-          {sending ? "Sending…" : "Send"}<kbd class="hint">⌘↵</kbd>
+          {sending ? "Sending…" : "Send"}
         </button>
       </div>
       {#if chosen && !chosen.available && chosen.note}
@@ -587,9 +573,8 @@
           {#each requests as r (r.id)}
             <li class="request {r.status}">
               <span class="state">{REQUEST_WORDS[r.status as keyof typeof REQUEST_WORDS] ?? r.status}</span>
-              <span class="said" title={r.text}>{r.text}</span>
-              <span class="id">{r.id} · {ago(r.updated, board?.now ?? 0)}</span>
-              {#if r.outcome && ["done", "failed"].includes(r.status)}<p class="outcome">{r.outcome}</p>{/if}
+              <span class="said" title={r.outcome || r.text}>{r.text}</span>
+              <span class="id">{ago(r.updated, board?.now ?? 0)}</span>
             </li>
           {/each}
         </ul>
@@ -601,12 +586,7 @@
     {:else if !board}
       <p class="board-note">Loading the tasks…</p>
     {:else}
-      <p class="board-note">
-        {unfinished} unfinished · {board.source === "cloud" ? "every machine" : "this machine only"}
-        {#if board.note}· {board.note}{/if}
-        {#if loadError}· last refresh failed: {loadError}{/if}
-        {#if pace}· done tasks lately took {pace.ratio.toFixed(1)}× their estimates{/if}
-      </p>
+      {#if loadError}<p class="board-note bad">Couldn't refresh: {loadError}</p>{/if}
 
       {#each shown as section (section.id)}
         {#if section.tasks.length || section.id === "needs-you"}
@@ -635,18 +615,11 @@
                       aria-expanded={opened === task.key}
                       onclick={() => (opened = opened === task.key ? "" : task.key)}
                     >
-                      <span class="dot" aria-hidden="true"></span>
-                      <span class="task-text">
-                        <span class="title">{task.title}</span>
-                        {#if task.outcome && opened !== task.key}
-                          <span class="outcome">{task.outcome}</span>
-                        {/if}
-                        <span class="meta">
-                          <span class="status-word">{STATUS_WORDS[task.status as keyof typeof STATUS_WORDS] ?? task.status}</span>
-                          · {where(task)}{#if task.folder} › {task.folder}{/if} · {ago(task.updated, board.now)} · {task.id}{#if cost(task)}
-                            <span class="cost">· {cost(task)}</span>{/if}
-                        </span>
-                      </span>
+                      <!-- A row is its title and when: the section says its status and the heading
+                           its folder; who ran it and what it cost are inside, when it's opened. -->
+                      <span class="dot" aria-hidden="true" title={STATUS_WORDS[task.status as keyof typeof STATUS_WORDS] ?? task.status}></span>
+                      <span class="title">{task.title}</span>
+                      <span class="when">{ago(task.updated, board.now)}</span>
                     </button>
                     {#if opened === task.key}
                       <div class="task-more">
@@ -690,7 +663,7 @@
                             </ul>
                           </details>
                         {/if}
-                        <p class="meta">Asked in {task.message || "a message"}{#if task.session} · session {task.session.slice(0, 8)}{/if}</p>
+                        <p class="meta">{where(task)}{#if cost(task)} · {cost(task)}{/if}</p>
                       </div>
                     {/if}
                   </li>
@@ -713,7 +686,6 @@
             {#each board.unsplit as m (m.key)}
               <li class="task plain">
                 <p class="quote">“{m.text}”</p>
-                <p class="meta">{where({ harness: m.harness, machine: m.machine, projectName: m.projectName })} · {ago(m.said, board.now)} · {m.id}</p>
               </li>
             {/each}
           </ul>
@@ -726,9 +698,7 @@
           <ul class="task-list">
             {#each board.rules as r (r.key)}
               <li class="task plain">
-                <p class="title">{r.text}</p>
-                {#if r.quote}<p class="quote">“{r.quote}”</p>{/if}
-                <p class="meta">{r.projectName || "everywhere"} · {r.id}</p>
+                <p class="title" title={r.quote ? `You said: “${r.quote}”` : undefined}>{r.text}</p>
               </li>
             {/each}
           </ul>
@@ -758,16 +728,6 @@
     font: inherit;
     color: inherit;
   }
-  kbd {
-    padding: 0 5px;
-    border-radius: 5px;
-    border: 1px solid var(--line-strong);
-    color: var(--muted);
-    font: inherit;
-    font-size: var(--fs-micro);
-    line-height: 1.5;
-  }
-
   /* ---- the side: projects, folders, agents ---- */
   /* The side lays out what's in .side-rest; the toggle only exists on phones. */
   .side-rest {
@@ -937,10 +897,6 @@
     margin: 2px 0 var(--s2) 14px;
     padding-left: var(--s2);
     border-left: 1px solid var(--line);
-  }
-  .mem {
-    color: var(--muted);
-    font-size: var(--fs-micro);
   }
   .n {
     color: var(--muted);
@@ -1119,8 +1075,7 @@
   .composer:focus-within {
     border-color: rgba(245, 197, 66, 0.4);
   }
-  .about,
-  .folder-note {
+  .about {
     margin: 0;
     color: var(--ink-2);
     font-size: var(--fs-small);
@@ -1128,9 +1083,6 @@
   .about .link {
     margin-left: var(--s2);
     font-size: var(--fs-micro);
-  }
-  .folder-note {
-    color: var(--muted);
   }
   .memories {
     display: grid;
@@ -1277,12 +1229,6 @@
     background: var(--raise-2);
     color: var(--muted);
   }
-  .composer button[type="submit"] kbd {
-    padding: 0 4px;
-    border-color: currentColor;
-    color: inherit;
-    opacity: 0.55;
-  }
   .row-actions .quiet {
     padding: 6px 12px;
     border-radius: 8px;
@@ -1367,12 +1313,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--ink);
-  }
-  .request .outcome {
-    grid-column: 2 / -1;
-    margin: 0;
-    color: var(--ink-2);
-    font-size: var(--fs-micro);
   }
   .composer-note,
   .board-note {
@@ -1470,20 +1410,30 @@
   }
   .task-main {
     display: grid;
-    grid-template-columns: 8px minmax(0, 1fr);
+    grid-template-columns: 8px minmax(0, 1fr) auto;
     gap: var(--s3);
     align-items: start;
     width: 100%;
-    padding: 12px var(--s4);
+    padding: 11px var(--s4);
     border: 0;
     background: none;
     text-align: left;
     cursor: pointer;
   }
-  .task-text {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
+  .task-main .title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+  .task.open .task-main .title {
+    display: block;
+  }
+  .task-main .when {
+    margin-top: 3px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .task-more {
     padding: 0 var(--s4) var(--s4) calc(var(--s4) + 8px + var(--s3));
@@ -1546,7 +1496,7 @@
     margin: 0;
     color: var(--ink);
     font-size: var(--fs-body);
-    font-weight: 600;
+    font-weight: 500;
     line-height: 1.45;
   }
   .status-done .title,
@@ -1562,30 +1512,10 @@
     line-height: 1.55;
     max-width: var(--measure);
   }
-  .outcome {
-    color: var(--ink-2);
-    font-size: var(--fs-small);
-    line-height: 1.5;
-    max-width: var(--measure);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
-  }
   .meta {
     margin: 2px 0 0;
     color: var(--muted);
     font-size: 0.75rem;
-  }
-  .status-word {
-    font-weight: 550;
-  }
-  .status-blocked .status-word,
-  .status-waiting .status-word {
-    color: var(--amber);
-  }
-  .status-active .status-word {
-    color: var(--blue);
   }
   .empty {
     color: var(--muted);
@@ -1648,10 +1578,6 @@
       cursor: pointer;
     }
     .side-rest:not(.open) {
-      display: none;
-    }
-    .search kbd,
-    .hint {
       display: none;
     }
   }
