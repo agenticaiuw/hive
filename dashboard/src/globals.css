@@ -198,6 +198,24 @@ html {
   color-scheme: dark;
   background: var(--background);
 }
+/* With "show scroll bars: always" (or a mouse plugged in) WebKit draws wide light bars; these are
+   thin and faint, like the page around them. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 99px;
+  background: rgba(255, 244, 228, 0.12) padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 244, 228, 0.24);
+}
 
 body {
   color: var(--ink);
