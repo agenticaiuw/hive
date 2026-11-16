@@ -99,11 +99,6 @@ import WebKit
     private func make(_ url: URL) {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(scheme, forURLScheme: "hive")
-        // The page runs under the window's buttons (no title bar); this class tells it to leave
-        // room for them (dashboard/src/routes/+page.svelte).
-        config.userContentController.addUserScript(WKUserScript(
-            source: "document.documentElement.classList.add('mac-app')",
-            injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
@@ -111,25 +106,15 @@ import WebKit
         web.setValue(false, forKey: "drawsBackground")
         if #available(macOS 13.3, *) { web.isInspectable = true }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "Hive"
-        // No grey title bar: the dashboard fills the window and its side runs up under the window
-        // buttons, as in Mail or Notes. The strip along the top still drags the window.
+        // A solid black title bar above the dashboard: the bar shows the window's background.
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
         window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = .black
         window.minSize = NSSize(width: 720, height: 480)
-        window.backgroundColor = web.underPageBackgroundColor
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 1180, height: 820))
-        web.frame = content.bounds
-        web.autoresizingMask = [.width, .height]
-        content.addSubview(web)
-        let strip = TitlebarStrip(frame: NSRect(x: 0, y: content.bounds.height - TitlebarStrip.height,
-                                                width: content.bounds.width, height: TitlebarStrip.height))
-        strip.autoresizingMask = [.width, .minYMargin]
-        content.addSubview(strip)  // above the page
-        window.contentView = content
+        window.contentView = web
         window.isReleasedWhenClosed = false
         window.delegate = self
         // Opens on the desktop the owner is on, and can go full screen (the green button, ⌃⌘F).
@@ -170,27 +155,6 @@ import WebKit
         let rest = link.path
         if ["", "app", "tasks", "dashboard"].contains(host) { return rest.isEmpty ? "/" : rest }
         return "/" + host + rest
-    }
-}
-
-/// The strip along the top of the dashboard window, which has no title bar: dragging it moves the
-/// window and a double-click does what the owner set for title bars (zoom or minimize), because the
-/// page underneath would otherwise take those clicks. The page leaves this strip empty.
-final class TitlebarStrip: NSView {
-    static let height: CGFloat = 32
-
-    override var mouseDownCanMoveWindow: Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        guard event.clickCount == 2 else {
-            window?.performDrag(with: event)
-            return
-        }
-        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
-        case "Minimize": window?.performMiniaturize(nil)
-        case "None": break
-        default: window?.performZoom(nil)
-        }
     }
 }
 
