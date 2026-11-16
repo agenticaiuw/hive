@@ -18,6 +18,7 @@
 //   Agent --unregister    take it out of the login items, then quit (./install.sh --uninstall)
 
 import AppKit
+import SafariServices
 import ServiceManagement
 import UniformTypeIdentifiers
 #if canImport(WorkspaceViewer)
@@ -31,6 +32,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     let statusLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
     let toggleItem = NSMenuItem(title: "Start Listening (fn)", action: #selector(toggle), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    let safariItem = NSMenuItem(title: "Turn On Hive in Safari…", action: #selector(openSafariSettings), keyEquivalent: "")
     let contextItem = NSMenuItem(title: "Show Agent Context", action: #selector(showContext), keyEquivalent: "")
     let clipboardItem = NSMenuItem(title: "Add Clipboard to Context…", action: #selector(addClipboard), keyEquivalent: "")
     let fileItem = NSMenuItem(title: "Add Text File to Context…", action: #selector(addFile), keyEquivalent: "")
@@ -64,6 +66,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let quietly = launchedQuietly()  // first: it reads the event that opened Hive
         let menu = NSMenu()
         statusLine.isEnabled = false
         menu.addItem(statusLine)
@@ -73,6 +76,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         dictateItem.isEnabled = false
         menu.addItem(dictateItem)
         menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d"))
+        menu.addItem(safariItem)
         menu.addItem(.separator())
         let inputItem = NSMenuItem(title: "Input", action: nil, keyEquivalent: "")
         let inputMenu = NSMenu()
@@ -99,6 +103,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Agent", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
+        menu.delegate = self  // menuWillOpen: hide the Safari item once the extension is on
         item.menu = menu
         show()
 
@@ -130,11 +135,20 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
             start()
         }
 
-        // Opened by you (Spotlight, Finder, Launchpad), Hive comes up active: show its window. At
-        // login and after an update it starts without activation and stays in the menu bar.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-            if NSApp.isActive { dashboard.show() }
-        }
+        // Opened by you (Spotlight, Finder, Launchpad, the Dock), Hive shows its window. At login
+        // and when an update reopens it, it stays in the menu bar.
+        if !quietly { dashboard.show() }
+        refreshSafariItem()
+    }
+
+    /// Hive was opened at login (the event that launched it says so) or by tools/update-app.sh after
+    /// an update (HIVE_STAY_IN_MENU_BAR=1), not by you. Whether Hive was the active app half a
+    /// second in didn't tell: opened from Spotlight it often wasn't yet, and no window came.
+    func launchedQuietly() -> Bool {
+        if ProcessInfo.processInfo.environment["HIVE_STAY_IN_MENU_BAR"] == "1" { return true }
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == AEEventID(kAEOpenApplication) else { return false }
+        return event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
     }
 
     /// Opening Hive while it's running (Spotlight, Finder, the Dock) shows its window, not just the menu.
@@ -412,6 +426,23 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
     @objc func openDashboard() { dashboard.show() }
 
+    /// Hive's Safari extension (Contents/PlugIns/Hive.appex) does nothing until you turn it on in
+    /// Safari's settings; this opens them at it. Only the app that carries an extension may ask
+    /// Safari about it, so this lives here.
+    var safariExtension: String { (Bundle.main.bundleIdentifier ?? "local.personal-agent.Agent") + ".Safari" }
+
+    @objc func openSafariSettings() {
+        SFSafariApplication.showPreferencesForExtension(withIdentifier: safariExtension, completionHandler: nil)
+    }
+
+    /// Hides "Turn On Hive in Safari…" once the extension is on.
+    func refreshSafariItem() {
+        SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: safariExtension) { state, _ in
+            let on = state?.isEnabled ?? false
+            Task { @MainActor [weak self] in self?.safariItem.isHidden = on }
+        }
+    }
+
     /// hive:// links (`open hive://tasks`) open the dashboard there.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "hive" { dashboard.show(path: DashboardWindow.path(for: url)) }
@@ -510,6 +541,10 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         stop(note: "quit")
         NSApp.terminate(nil)
     }
+}
+
+extension AgentApp: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) { refreshSafariItem() }
 }
 
 @main @MainActor
