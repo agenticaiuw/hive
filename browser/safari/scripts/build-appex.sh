@@ -20,8 +20,12 @@ trap 'rm -rf "$work"' EXIT
 # Package in a copy: browser/chrome/build is the folder Chrome loads the extension from.
 mkdir -p "$work/repo/browser" "$work/repo/cloud"
 rsync -a --exclude /build --exclude /node_modules "$root/browser/chrome/" "$work/repo/browser/chrome/"
-ln -s "$root/browser/chrome/node_modules" "$work/repo/browser/chrome/node_modules"
 cp -R "$root/cloud/shared" "$work/repo/cloud/shared"
+if [ -d "$root/browser/chrome/node_modules" ]; then
+  ln -s "$root/browser/chrome/node_modules" "$work/repo/browser/chrome/node_modules"
+else  # a clean checkout or export: its bundler comes from the lockfile
+  (cd "$work/repo/browser/chrome" && npm ci --silent --no-audit --no-fund)
+fi
 (cd "$work/repo/browser/chrome" && node package.mjs >/dev/null)
 
 rsync -a --exclude /build "$root/browser/safari/Hive Browser Bridge/" "$work/project/"
