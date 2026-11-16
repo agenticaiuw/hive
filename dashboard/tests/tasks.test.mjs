@@ -15,6 +15,8 @@ const cloud = {
         harness: 'claude', project: 'github.com/evan1liu/buckymatch', updated_at: '2026-11-14T03:00:00' },
       { machine: 'mac', id: 'T3', quote: 'old', title: 'Old thing', status: 'done', outcome: 'Shipped',
         harness: 'hive', project: 'github.com/agenticaiuw/hive', updated_at: '2026-11-13T03:00:00' },
+      { machine: 'mac', id: 'T4', quote: 'merge', title: 'Merge the fork', status: 'blocked',
+        harness: 'claude', project: 'github.com/agenticaiuw/hive', updated_at: '2026-11-14T02:00:00' },
     ],
     unsplit: [{ machine: 'mac', id: 'M9', harness: 'claude', project: '/Users/x', text: 'login', said_at: '2026-11-14T00:49:29' }],
     rules: [{ machine: 'mac', id: 'R1', text: 'One dashboard', quote: 'one dashboard', project: 'github.com/agenticaiuw/hive' }],
@@ -24,19 +26,20 @@ const cloud = {
 test('the cloud board: every machine, the same id on two machines kept apart', () => {
   const b = normalizeBoard(cloud);
   assert.equal(b.source, 'cloud');
-  assert.equal(b.tasks.length, 4);
-  assert.deepEqual(b.tasks.map((t) => t.key), ['mac:T1', 'vm:T1', 'mac:T2', 'mac:T3']);
+  assert.equal(b.tasks.length, 5);
+  assert.deepEqual(b.tasks.map((t) => t.key), ['mac:T1', 'vm:T1', 'mac:T2', 'mac:T3', 'mac:T4']);
   assert.equal(b.tasks[0].projectName, 'hive');
   assert.equal(b.unsplit[0].text, 'login');
   assert.equal(b.rules[0].text, 'One dashboard');
   assert.equal(where(b.tasks[1]), 'Codex · vm · hive');
 });
 
-test('sections: what needs the owner first, then work, then not started, then done', () => {
+test('sections: what needs the owner first, then work, then stuck, then not started, then done', () => {
   const s = sections(normalizeBoard(cloud).tasks);
   assert.deepEqual(s.map((x) => [x.id, x.tasks.map((t) => t.key)]), [
     ['needs-you', ['mac:T1']],
     ['working', ['vm:T1']],
+    ['stuck', ['mac:T4']],
     ['not-started', ['mac:T2']],
     ['done', ['mac:T3']],
   ]);
@@ -66,7 +69,7 @@ test("this machine's ledger when the cloud is out of reach", () => {
 });
 
 test('projects, names and times in the owner\'s words', () => {
-  assert.deepEqual(projects(normalizeBoard(cloud).tasks).map((p) => [p.name, p.open]), [['hive', 2], ['buckymatch', 1]]);
+  assert.deepEqual(projects(normalizeBoard(cloud).tasks).map((p) => [p.name, p.open]), [['hive', 3], ['buckymatch', 1]]);
   assert.equal(projectName('/Users/x/Library/Application Support/Claude/scratch-workspaces/a/b/scratch-2026'), 'a scratch folder');
   assert.equal(projectName('/Users/you/'), 'you');
   assert.equal(ago(1000 - 30, 1000), 'just now');
