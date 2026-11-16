@@ -338,17 +338,14 @@
   <CommandBox variant="bar" />
 
   {#if mode === "unavailable"}
+    <!-- Why there's nothing (both feeds' errors) is on hover, not spelled out on the page. -->
     <div class="hv-dead">
-      <p>No hive data on either path. Nothing below is a placeholder — there is simply no feed.</p>
-      <p class="hv-err">local aggregator ({HIVE_LOCAL_BASE}): {localError}</p>
-      <p class="hv-err">relay snapshot (/api/hive): {relayError}</p>
-      <p class="hv-mut">
-        On the Mac: start it with <code>node dashboard/aggregator/server.mjs</code>.
-        Elsewhere: the aggregator must be running on the Mac for the relay copy to stay fresh.
+      <p class="hv-mut" title="Local aggregator ({HIVE_LOCAL_BASE}): {localError}&#10;Relay snapshot (/api/hive): {relayError}">
+        Nothing to show yet.
       </p>
     </div>
   {:else if mode === "probing"}
-    <div class="hv-dead"><p class="hv-mut">probing the local hive aggregator…</p></div>
+    <div class="hv-dead"><p class="hv-mut">Loading…</p></div>
   {:else}
     {#if failingSources.length}
       <div class="hv-alerts">
