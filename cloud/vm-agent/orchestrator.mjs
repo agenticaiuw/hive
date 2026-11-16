@@ -99,7 +99,11 @@ export function scopeOf(words) {
 /** What the subagent is told: the task, the owner's words, their rules, and every memory of its folder in full. */
 export function taskBrief(task, request, folder, rules = []) {
   const parts = [task.brief || task.title, `The owner's words: "${task.quote || request.text}"`];
-  if (request.from && request.from !== 'web') parts.push(`The owner sent this from their ${request.from}.`);
+  if (request.from === 'siri') {
+    parts.push('The owner said this to Siri on their iPhone, likely from across the room through AirPods, so do it on the ' +
+      'iPhone with the phone tools: if it is locked, unlock it first with authenticate (it types the saved passcode itself), ' +
+      'then do the task there and say what you did.');
+  } else if (request.from && request.from !== 'web') parts.push(`The owner sent this from their ${request.from}.`);
   if (rules.length) {
     parts.push(`The owner's standing rules for this project; follow every one:\n${rules.map(r => {
       const paths = (() => { try { return JSON.parse(r.paths || '[]'); } catch { return []; } })();
