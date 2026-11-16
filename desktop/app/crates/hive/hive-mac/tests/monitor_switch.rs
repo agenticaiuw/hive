@@ -42,6 +42,10 @@ fn the_switch_counts_only_a_tap_of_right_option() {
             "QuartzCore",
             "-framework",
             "IOSurface",
+            "-framework",
+            "IOKit",
+            "-framework",
+            "Carbon",
         ])
         .output();
     let Ok(built) = built else {

@@ -692,6 +692,13 @@ impl AgentVHID {
         self.send("disengage").map(drop)
     }
 
+    /// Sharing (Hive on its virtual monitor, hive-monitor turning the user's input into a drawn
+    /// cursor and keys sent to their own app): the user's hands no longer take control, and engage
+    /// doesn't wait for them. An Err from a helper too old to share.
+    pub fn share(&self, on: bool) -> Result<()> {
+        self.send(if on { "share on" } else { "share off" }).map(drop)
+    }
+
     // -- mouse --
 
     pub fn cursor(&self) -> (f64, f64) {
