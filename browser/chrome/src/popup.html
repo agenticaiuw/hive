@@ -9,7 +9,8 @@
   <body>
     <main class="popup">
       <div class="popup-header">
-        <div>
+        <div class="brand">
+          <img class="brand-logo" src="icons/icon-48.png" alt="" />
           <h2>Hive</h2>
         </div>
         <div class="header-tools">
@@ -68,12 +69,13 @@
       -->
       <section id="setup" class="setup" hidden>
         <p class="setup-title">Connect this browser</p>
+        <p class="setup-help">Hive works in your tabs once this browser is paired with it.</p>
         <input
           id="pair-code"
           type="text"
           autocomplete="off"
           spellcheck="false"
-          placeholder="Pairing code (PAIRING_CODE in the repo .env)"
+          placeholder="Pairing code"
         />
         <div class="setup-row">
           <label class="setup-lifetime" for="pair-lifetime">
@@ -136,7 +138,7 @@
             type="text"
             autocomplete="off"
             maxlength="2000"
-            placeholder="Ask the agent anything…"
+            placeholder="Ask Hive anything…"
           />
           <button id="command-send" class="primary" type="submit">Send</button>
         </div>

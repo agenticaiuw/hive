@@ -46,8 +46,8 @@ import WebKit
 
     /// The menu bar while the window is up. Hive otherwise lives in the menu bar with no menus,
     /// and without an Edit menu ⌘C, ⌘V and ⌘A do nothing in the page; View has full screen
-    /// (⌃⌘F) and Reload (⌘R, for a freshly built dashboard). No Quit: closing this window
-    /// shouldn't be one slip away from stopping Hive.
+    /// (⌃⌘F) and Reload (⌘R, for a freshly built dashboard). ⌘Q quits Hive like any Mac app
+    /// (the owner asked for it); ⌘W only closes the window and leaves Hive in the menu bar.
     private func installMenu() {
         guard NSApp.mainMenu?.item(withTitle: "Edit") == nil else { return }
         let bar = NSMenu()
@@ -68,6 +68,9 @@ import WebKit
         add("Hive", [
             item("Hide Hive", #selector(NSApplication.hide(_:)), "h"),
             item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+            .separator(),
+            // AgentApp.quit, the menu bar's Quit: it says so in the log and stops the agent first.
+            item("Quit Hive", Selector(("quit")), "q"),
         ])
         add("Edit", [
             item("Undo", Selector(("undo:")), "z"),
@@ -96,18 +99,37 @@ import WebKit
     private func make(_ url: URL) {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(scheme, forURLScheme: "hive")
+        // The page runs under the window's buttons (no title bar); this class tells it to leave
+        // room for them (dashboard/src/routes/+page.svelte).
+        config.userContentController.addUserScript(WKUserScript(
+            source: "document.documentElement.classList.add('mac-app')",
+            injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
-        web.underPageBackgroundColor = NSColor(red: 0.03, green: 0.04, blue: 0.06, alpha: 1)
+        web.underPageBackgroundColor = NSColor(red: 0.063, green: 0.059, blue: 0.051, alpha: 1)  // --background
         web.setValue(false, forKey: "drawsBackground")
         if #available(macOS 13.3, *) { web.isInspectable = true }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 820),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Hive"
+        // No grey title bar: the dashboard fills the window and its side runs up under the window
+        // buttons, as in Mail or Notes. The strip along the top still drags the window.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.minSize = NSSize(width: 720, height: 480)
         window.backgroundColor = web.underPageBackgroundColor
-        window.contentView = web
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 1180, height: 820))
+        web.frame = content.bounds
+        web.autoresizingMask = [.width, .height]
+        content.addSubview(web)
+        let strip = TitlebarStrip(frame: NSRect(x: 0, y: content.bounds.height - TitlebarStrip.height,
+                                                width: content.bounds.width, height: TitlebarStrip.height))
+        strip.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(strip)  // above the page
+        window.contentView = content
         window.isReleasedWhenClosed = false
         window.delegate = self
         // Opens on the desktop the owner is on, and can go full screen (the green button, ⌃⌘F).
@@ -148,6 +170,27 @@ import WebKit
         let rest = link.path
         if ["", "app", "tasks", "dashboard"].contains(host) { return rest.isEmpty ? "/" : rest }
         return "/" + host + rest
+    }
+}
+
+/// The strip along the top of the dashboard window, which has no title bar: dragging it moves the
+/// window and a double-click does what the owner set for title bars (zoom or minimize), because the
+/// page underneath would otherwise take those clicks. The page leaves this strip empty.
+final class TitlebarStrip: NSView {
+    static let height: CGFloat = 32
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 2 else {
+            window?.performDrag(with: event)
+            return
+        }
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window?.performMiniaturize(nil)
+        case "None": break
+        default: window?.performZoom(nil)
+        }
     }
 }
 

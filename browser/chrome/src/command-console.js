@@ -547,7 +547,7 @@ export function describeBrainState({ relayStatus, agentConfigured = false } = {}
   if (state === 'connected' || state === 'degraded') {
     return {
       brain: 'local',
-      label: 'Thinks here',
+      label: 'Ready',
       tone: 'ok',
       /* One sentence (owner: no long paragraphs in the popup). The full
        * explanation lives in the chip tooltip via this same string. */
@@ -562,7 +562,7 @@ export function describeBrainState({ relayStatus, agentConfigured = false } = {}
   if (state === 'unauthorized') {
     return {
       brain: 'mac',
-      label: 'Bad token',
+      label: 'Reconnect',
       tone: 'error',
       help:
         'The relay rejected this browser’s credential, so it cannot think for itself ' +
@@ -573,7 +573,7 @@ export function describeBrainState({ relayStatus, agentConfigured = false } = {}
 
   return {
     brain: 'mac',
-    label: 'No brain',
+    label: 'Via your Mac',
     tone: 'warn',
     /* The settings page is gone (owner, 2026-08-12); pairing lives in this
      * popup, so the directions point at the box the reader is looking at. */
@@ -581,8 +581,8 @@ export function describeBrainState({ relayStatus, agentConfigured = false } = {}
       ? 'This browser has no brain of its own yet, so every command goes to the agent ' +
         'on your Mac and needs it awake. Paste the pairing code in this popup and press ' +
         'Connect to let it think here instead.'
-      : 'This browser is not set up: paste the pairing code above (PAIRING_CODE in the ' +
-        'repo .env) and press Connect. One paste configures everything.',
+      : 'This browser is not set up: paste your Hive pairing code above and press Connect. ' +
+        'One paste configures everything.',
   }
 }
 

@@ -135,7 +135,7 @@ export function pairStoragePatch(payload, { agentUrl, lifetime, now = Date.now()
     return {
       ok: true,
       values,
-      note: `Paired. This browser is ${values.relayDeviceId} on the relay — the brain is on.`,
+      note: `Connected. Hive can work in this browser now.`,
     }
   }
 

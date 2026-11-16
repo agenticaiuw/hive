@@ -1,11 +1,38 @@
+/*
+ * Hive's browser extension: the popup, its pop-out console and the setup card.
+ * Hive's colours, the same as its dashboard and Mac app (dashboard/src/globals.css):
+ * warm near-black and honey gold from the icon. Gold is for Hive and for the main
+ * button; green, amber and red only say how something is doing.
+ */
 :root {
   color-scheme: dark;
+  --ink: #f6f3ee;
+  --ink-2: #bdb6aa;
+  --muted: #958d81;
+  --background: #141210;
+  --panel: #1c1a17;
+  --field: #110f0d;
+  --raise-1: rgba(255, 244, 228, 0.04);
+  --raise-2: rgba(255, 244, 228, 0.07);
+  --line: rgba(255, 244, 228, 0.09);
+  --line-strong: rgba(255, 244, 228, 0.16);
+  --gold: #f5c542;
+  --gold-hover: #ffd45e;
+  --gold-soft: rgba(245, 197, 66, 0.12);
+  --on-gold: #1d1505;
+  --green: #7ad8a0;
+  --amber: #ffad5c;
+  --amber-soft: rgba(255, 173, 92, 0.1);
+  --red: #ff7b70;
+  --red-soft: rgba(255, 123, 112, 0.1);
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, ui-sans-serif,
     sans-serif;
-  background: #08100e;
-  color: #effaf7;
+  font-size: 13px;
+  background: var(--background);
+  color: var(--ink);
   font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -15,9 +42,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(circle at 20% -10%, rgba(12, 154, 119, 0.22), transparent 38%),
-    #08100e;
+  background: var(--background);
 }
 
 main {
@@ -26,44 +51,45 @@ main {
 }
 
 .popup {
-  width: 340px;
+  width: 360px;
   margin: 0;
-  padding: 20px;
+  padding: 16px;
 }
 
 .eyebrow {
   margin: 0 0 8px;
-  color: #79dac0;
-  font-size: 12px;
-  font-weight: 750;
-  letter-spacing: 0.12em;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 h1 {
   margin: 0;
   font-size: clamp(28px, 6vw, 44px);
-  font-weight: 550;
-  letter-spacing: -0.04em;
+  font-weight: 600;
+  letter-spacing: -0.03em;
 }
 
 h2 {
-  margin: 0 0 14px;
-  font-size: 18px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 p {
-  color: #a6bbb5;
-  line-height: 1.55;
+  color: var(--ink-2);
+  line-height: 1.5;
 }
 
 .card {
   margin-top: 20px;
   padding: 20px;
-  border: 1px solid #1c3932;
-  border-radius: 18px;
-  background: rgba(8, 22, 19, 0.82);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
 }
 
 .status-row,
@@ -71,7 +97,7 @@ p {
 .permission-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .status-row,
@@ -81,26 +107,23 @@ p {
 
 .button-row {
   flex-wrap: wrap;
-  margin-top: 18px;
+  margin-top: 14px;
 }
 
 .dot {
-  width: 10px;
-  height: 10px;
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: #64736f;
-  box-shadow: 0 0 0 5px rgba(100, 115, 111, 0.12);
+  background: var(--amber);
 }
 
 .dot.connected {
-  background: #1dd6a5;
-  box-shadow: 0 0 0 5px rgba(29, 214, 165, 0.12);
+  background: var(--green);
 }
 
 .dot.error {
-  background: #ff806d;
-  box-shadow: 0 0 0 5px rgba(255, 128, 109, 0.12);
+  background: var(--red);
 }
 
 .status-copy {
@@ -116,16 +139,16 @@ p {
 .meta,
 .help {
   margin-top: 4px;
-  color: #849992;
+  color: var(--muted);
   font-size: 12px;
 }
 
 label {
   display: block;
-  margin-top: 16px;
-  color: #c8d9d4;
-  font-size: 13px;
-  font-weight: 650;
+  margin-top: 14px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 label.checkbox {
@@ -142,62 +165,85 @@ label.checkbox input {
 input,
 select {
   width: 100%;
-  margin-top: 7px;
-  padding: 11px 12px;
-  border: 1px solid #294840;
-  border-radius: 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
   outline: none;
-  background: #071411;
-  color: #f6fffc;
+  background: var(--field);
+  color: var(--ink);
   font: inherit;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  background: var(--field)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23958d81' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    no-repeat right 9px center / 9px;
+  cursor: pointer;
 }
 
 input:focus,
 select:focus {
-  border-color: #24c79d;
-  box-shadow: 0 0 0 3px rgba(36, 199, 157, 0.12);
+  border-color: rgba(245, 197, 66, 0.55);
+  box-shadow: 0 0 0 3px rgba(245, 197, 66, 0.12);
 }
 
 button {
-  min-height: 40px;
-  padding: 0 15px;
-  border: 1px solid #2b574c;
-  border-radius: 10px;
-  background: #0d241f;
-  color: #e9faf5;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--raise-1);
+  color: var(--ink);
   font: inherit;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
 }
 
 button:hover {
-  background: #15362e;
+  background: var(--raise-2);
 }
 
 button.primary {
-  border-color: #19aa86;
-  background: #0e8c70;
+  border-color: transparent;
+  background: var(--gold);
+  color: var(--on-gold);
+}
+
+button.primary:hover {
+  background: var(--gold-hover);
 }
 
 button.danger {
-  border-color: #663a33;
-  color: #ffc6bc;
+  border-color: rgba(255, 123, 112, 0.4);
+  color: var(--red);
 }
 
 button:disabled {
   cursor: wait;
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .notice {
-  min-height: 22px;
-  margin: 14px 0 0;
-  color: #79dac0;
-  font-size: 13px;
+  min-height: 0;
+  margin: 10px 0 0;
+  color: var(--green);
+  font-size: 12px;
+}
+
+.notice:empty {
+  display: none;
 }
 
 .notice.error {
-  color: #ff9d8d;
+  color: var(--red);
 }
 
 /*
@@ -208,103 +254,123 @@ button:disabled {
  * the full card for the stored-but-dead-credential case.
  */
 .setup-compact input,
-.setup-compact .setup-row {
+.setup-compact .setup-row,
+.setup-compact .setup-help {
   display: none;
 }
 
 .setup-repair {
+  min-height: 0;
   margin-top: 6px;
   padding: 0;
   border: none;
   background: none;
-  color: #849992;
+  color: var(--muted);
   font-size: 12px;
+  font-weight: 500;
   text-decoration: underline;
   cursor: pointer;
 }
 
 .setup-repair:hover {
-  color: #c8d9d4;
+  background: none;
+  color: var(--ink);
 }
 
 /* The page-engine banner: amber, like every "this needs your awareness"
  * state — the bridge works, but it lives and dies with this document. */
 .engine-note {
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   padding: 8px 10px;
-  border: 1px solid rgba(176, 124, 31, 0.55);
+  border: 1px solid rgba(255, 173, 92, 0.35);
   border-radius: 8px;
-  background: rgba(176, 124, 31, 0.14);
-  color: #e3b769;
+  background: var(--amber-soft);
+  color: var(--amber);
   font-size: 12px;
   line-height: 1.45;
 }
 
 code {
-  color: #b7eee0;
+  color: var(--ink);
   overflow-wrap: anywhere;
 }
 
 hr {
-  margin: 18px 0;
+  margin: 16px 0;
   border: 0;
-  border-top: 1px solid #1c3932;
+  border-top: 1px solid var(--line);
 }
 
 .privacy {
   padding: 12px 14px;
   border-radius: 10px;
-  background: #0b1a17;
-  color: #a9bbb6;
+  background: var(--panel);
+  color: var(--ink-2);
   font-size: 12px;
   line-height: 1.5;
 }
 
 /* ===== Popup command console ===== */
 
-.popup {
-  width: 380px;
-}
-
 .popup-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 
-.popup-header h2 {
-  margin-bottom: 0;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-logo {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
 }
 
 .status-mini {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  color: #849992;
-  font-size: 12px;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--raise-1);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.status-mini[hidden] {
+  display: none;
+}
+
+.status-mini small {
+  font-size: inherit;
 }
 
 .header-tools {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
 }
 
 /* The pop-out pin: quiet until hovered, like the status text beside it. */
 .icon-button {
   display: grid;
   place-items: center;
-  width: 30px;
-  min-height: 30px;
+  width: 28px;
+  min-height: 28px;
   padding: 0;
-  border-color: #1c3932;
-  border-radius: 8px;
+  border-color: transparent;
+  border-radius: 7px;
   background: transparent;
-  color: #849992;
+  color: var(--muted);
 }
 
 /* `display: grid` above would otherwise beat the UA's [hidden] rule — and
@@ -315,8 +381,8 @@ hr {
 }
 
 .icon-button:hover {
-  background: #0d241f;
-  color: #79dac0;
+  background: var(--raise-2);
+  color: var(--ink);
 }
 
 /* ===== Setup card =====
@@ -325,18 +391,25 @@ hr {
  * row so the card stays three lines tall. */
 
 .setup {
-  margin-top: 16px;
+  margin-top: 14px;
   padding: 14px;
-  border: 1px solid #1c3932;
+  border: 1px solid var(--line);
   border-radius: 12px;
-  background: #0a1815;
+  background: var(--panel);
 }
 
 .setup-title {
   margin: 0;
-  color: #effaf7;
-  font-size: 14px;
-  font-weight: 700;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.setup-help {
+  margin: 4px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .setup-row {
@@ -349,20 +422,23 @@ hr {
 .setup-lifetime {
   flex: 1;
   margin-top: 0;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--muted);
 }
 
 .setup-lifetime select {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .setup-row button {
   flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 16px;
 }
 
 .setup .notice {
   margin-top: 8px;
-  min-height: 0;
 }
 
 .grant-pages {
@@ -371,18 +447,38 @@ hr {
 }
 
 .command-form {
-  margin-top: 16px;
+  margin-top: 14px;
+}
+
+.command-form[hidden] {
+  display: none;
 }
 
 .command-row {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--field);
+}
+
+.command-row:focus-within {
+  border-color: rgba(245, 197, 66, 0.55);
 }
 
 .command-row input {
   flex: 1;
   margin-top: 0;
+  padding: 6px 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.command-row input:focus {
+  box-shadow: none;
 }
 
 .command-row button {
@@ -396,8 +492,15 @@ hr {
 .mic-button {
   display: grid;
   place-items: center;
-  width: 42px;
+  width: 32px;
   padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.mic-button:hover {
+  color: var(--ink);
 }
 
 .mic-button .mic-stop-glyph {
@@ -405,9 +508,8 @@ hr {
 }
 
 .mic-button.is-listening {
-  border-color: #b0563f;
-  background: #2a120c;
-  color: #ff9d8d;
+  background: var(--red-soft);
+  color: var(--red);
   animation: mic-pulse 1.6s ease-in-out infinite;
 }
 
@@ -426,10 +528,10 @@ hr {
 @keyframes mic-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 128, 109, 0.28);
+    box-shadow: 0 0 0 0 rgba(255, 123, 112, 0.28);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(255, 128, 109, 0);
+    box-shadow: 0 0 0 5px rgba(255, 123, 112, 0);
   }
 }
 
@@ -438,7 +540,7 @@ hr {
   align-items: center;
   gap: 8px;
   margin-top: 10px;
-  color: #a6bbb5;
+  color: var(--ink-2);
   font-size: 12px;
   font-weight: 500;
 }
@@ -446,35 +548,39 @@ hr {
 .check-row input {
   width: auto;
   margin: 0;
-  accent-color: #1dd6a5;
+  accent-color: var(--gold);
 }
 
 .command-form .notice {
   margin-top: 8px;
-  min-height: 0;
 }
 
 .history {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   max-height: 320px;
-  margin-top: 14px;
+  margin-top: 12px;
   overflow-y: auto;
+}
+
+.history:empty,
+.history[hidden] {
+  display: none;
 }
 
 .entry {
   padding: 10px 12px;
-  border: 1px solid #1c3932;
-  border-radius: 12px;
-  background: rgba(8, 22, 19, 0.82);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
 }
 
 .entry-command {
   margin: 0;
-  color: #effaf7;
+  color: var(--ink);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -482,35 +588,35 @@ hr {
   display: inline-block;
   margin-right: 8px;
   padding: 1px 8px;
-  border: 1px solid #2b574c;
   border-radius: 999px;
-  color: #79dac0;
+  background: rgba(122, 216, 160, 0.12);
+  color: var(--green);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 650;
   white-space: nowrap;
 }
 
 .entry-parked .entry-chip {
-  border-color: #6b5b2b;
-  color: #ffd98d;
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 .entry-failed .entry-chip,
 .entry-refused .entry-chip,
 .entry-denied .entry-chip,
 .entry-lost .entry-chip {
-  border-color: #663a33;
-  color: #ff9d8d;
+  background: var(--red-soft);
+  color: var(--red);
 }
 
 .entry-working .entry-chip {
-  border-color: #64736f;
-  color: #a6bbb5;
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 
 .entry-headline {
   margin: 6px 0 0;
-  color: #c8d9d4;
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -521,7 +627,7 @@ hr {
   max-height: 120px;
   margin: 6px 0 0;
   overflow: auto;
-  color: #849992;
+  color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   line-height: 1.5;
@@ -532,9 +638,9 @@ hr {
 .entry-link {
   display: inline-block;
   margin-top: 8px;
-  color: #79dac0;
+  color: var(--gold);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /*
@@ -550,7 +656,6 @@ hr {
 
 .entry-actions button {
   flex: 1;
-  min-height: 34px;
 }
 
 .entry-actions button:disabled {
@@ -560,7 +665,7 @@ hr {
 /* Why this one cannot be decided here — expired, or parked without its steps. */
 .entry-note {
   margin: 8px 0 0;
-  color: #ffd98d;
+  color: var(--amber);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -573,22 +678,26 @@ hr {
 .approvals {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 16px;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.approvals[hidden] {
+  display: none;
 }
 
 .approval {
   padding: 12px 14px;
-  border: 1px solid #6b5b2b;
-  border-radius: 12px;
-  background: rgba(34, 27, 10, 0.5);
+  border: 1px solid rgba(255, 173, 92, 0.35);
+  border-radius: 10px;
+  background: var(--amber-soft);
 }
 
 .approval-summary {
   margin: 0;
-  color: #effaf7;
+  color: var(--ink);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -596,18 +705,18 @@ hr {
   display: inline-block;
   margin-right: 8px;
   padding: 1px 8px;
-  border: 1px solid #6b5b2b;
   border-radius: 999px;
-  color: #ffd98d;
+  background: var(--amber-soft);
+  color: var(--amber);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 650;
   white-space: nowrap;
   text-transform: lowercase;
 }
 
 .approval-detail {
   margin: 6px 0 0;
-  color: #c8d9d4;
+  color: var(--ink-2);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -615,14 +724,14 @@ hr {
 
 .approval-clock {
   margin: 6px 0 0;
-  color: #ffd98d;
+  color: var(--amber);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 650;
+  letter-spacing: 0.03em;
 }
 
 .approval-clock.expired {
-  color: #ff9d8d;
+  color: var(--red);
 }
 
 .approval-actions {
@@ -633,7 +742,6 @@ hr {
 
 .approval-actions button {
   flex: 1;
-  min-height: 34px;
 }
 
 .approval-decided,
@@ -642,12 +750,21 @@ hr {
 }
 
 .approval-expired .approval-chip {
-  border-color: #663a33;
-  color: #ff9d8d;
+  background: var(--red-soft);
+  color: var(--red);
 }
 
 .approval button:disabled {
   cursor: not-allowed;
+}
+
+/* The Dashboard button: one quiet full-width row at the foot of the popup. */
+.popup > .button-row {
+  margin-top: 12px;
+}
+
+.popup > .button-row button {
+  flex: 1;
 }
 
 /* ===== Standalone console =====
@@ -666,6 +783,7 @@ hr {
   width: min(560px, 100%);
   min-height: 100vh;
   margin: 0 auto;
+  padding: 20px;
 }
 
 .standalone .history {
@@ -675,9 +793,8 @@ hr {
 }
 
 /*
- * Two status chips now share the header (bridge + brain), and at popover width
- * that was enough to wrap "Browser Bridge" onto two lines. The chips shrink and
- * the title does not: which brain is in use is a glance, the product name is a
+ * Two status chips share the header (bridge + brain). The chips shrink and the
+ * title does not: which brain is in use is a glance, the product name is a
  * heading, and a heading that reflows every time a peer changes state reads as
  * the layout breaking.
  */

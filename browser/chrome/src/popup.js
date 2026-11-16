@@ -261,9 +261,9 @@ function renderStatus(status) {
     state === 'connected'
       ? 'Connected'
       : state === 'needs-setup'
-        ? 'Needs setup'
+        ? 'Not connected'
         : state === 'unauthorized'
-          ? 'Bad token'
+          ? 'Sign in again'
           : 'Offline'
 }
 
@@ -473,7 +473,7 @@ function renderMic() {
    * into it mid-flight would fight the interim results. */
   elements.input.disabled = listening
   elements.send.disabled = listening
-  elements.input.placeholder = listening ? 'Listening…' : 'Ask the agent anything…'
+  elements.input.placeholder = listening ? 'Listening…' : 'Ask Hive anything…'
 }
 
 function settleVoice() {
@@ -764,15 +764,17 @@ function renderSetup({ agentConfigured, brainWorking }) {
    *              leave only the textbox."
    */
   elements.setup.hidden = agentConfigured && brainWorking
+  /* Before pairing the setup card says it all; a second "not set up" chip beside it is noise. */
+  elements.brainDot.parentElement.hidden = !agentConfigured
   const compact = agentConfigured && !brainWorking && !forceFullSetup
   elements.setup.classList.toggle('setup-compact', compact)
   if (elements.setupRepair) elements.setupRepair.hidden = !compact
   const title = elements.setup.querySelector('.setup-title')
   if (title) {
     title.textContent = compact
-      ? 'Starting the brain…'
+      ? 'Connecting…'
       : agentConfigured
-        ? 'Reconnect the brain'
+        ? 'Reconnect this browser'
         : 'Connect this browser'
   }
   /* One thing at a time in 400px: while the MAC half is unpaired, the
