@@ -113,6 +113,23 @@ pub fn off() {
     }
 }
 
+/// One line to `hive-monitor switch`'s share socket and its answer: `hold` (the agent keeps the
+/// real cursor and keyboard on the virtual monitor, and the user's input becomes a drawn cursor
+/// and keys sent to their own app), `release`, `status`. None when no switch (or an older one
+/// without sharing) is running.
+pub fn share(command: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let socket = hive_common::state_dir().join("monitor-share.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream.write_all(format!("{command}\n").as_bytes()).ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    let line = line.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
 /// The lock `hive-monitor switch` holds while it runs, so there is only ever one.
 pub fn switch_lock() -> PathBuf {
     hive_common::state_dir().join("monitor-switch.lock")

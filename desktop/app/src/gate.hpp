@@ -8,6 +8,9 @@
 //   engaged    --(any real key, touch, click, or mouse motion)--> disengaged
 //   engaged    --(agent says it is done)--> disengaged
 //
+// Sharing (`share on`, Hive on its virtual monitor): the human's input goes to their own apps
+// through hive-monitor instead, so it never disengages the agent, and engaging skips arming.
+//
 // The voice agent asks when it hears a task (it only listens after you tap fn) or when you say
 // "continue" after taking over; agent.py asks for a typed task. Either way control only passes
 // once the human's hands have been off for the quiet period, and any touch takes it back.
@@ -64,9 +67,25 @@ public:
     }
   }
 
+  // Sharing: Hive works on its virtual monitor and hive-monitor replays the human's input into
+  // their own apps (a drawn cursor, their keys to their app), so the two work at the same time.
+  // While it's on, the human's input never takes control from the agent, and the agent doesn't
+  // wait for still hands to take it.
+  void set_sharing(bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sharing_ == on) {
+      return;
+    }
+    sharing_ = on;
+    notify_locked(std::string("event share=") + (on ? "on" : "off"));
+  }
+
   // Real input from the human: a key press, touch, click, or mouse motion.
   void human_input(const std::string& source) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (sharing_) {
+      return;
+    }
     if (state_ == state::engaged) {
       transition_locked(state::disengaged, source);
     } else if (state_ == state::arming) {
@@ -105,7 +124,7 @@ public:
 
   std::string describe() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return "state=" + name(state_) + " reason=" + reason_;
+    return "state=" + name(state_) + " reason=" + reason_ + " share=" + (sharing_ ? "1" : "0");
   }
 
   int subscribe(listener l) {
@@ -142,6 +161,10 @@ private:
       notify_locked("event state=disengaged reason=watcher_unavailable");
       return false;
     }
+    if (sharing_) {  // the human's hands needn't be off: their input goes to their own apps
+      transition_locked(state::engaged, "engaged");
+      return true;
+    }
     arming_started_ = clock::now();
     transition_locked(state::arming, reason);
     return true;
@@ -174,6 +197,7 @@ private:
   std::function<void()> on_disengage_;
   std::function<void(state)> on_change_;
   bool watcher_healthy_ = true;
+  bool sharing_ = false;
   clock::time_point arming_started_;
   std::map<int, listener> listeners_;
   int next_listener_id_ = 1;

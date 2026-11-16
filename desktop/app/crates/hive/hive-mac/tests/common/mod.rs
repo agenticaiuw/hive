@@ -355,6 +355,10 @@ pub struct FakeSystem {
     pub shown_tabs: Mutex<Vec<(String, usize, usize)>>,
     /// The windows picked from Window menus: (app, title).
     pub window_menu: Mutex<Vec<(String, String)>>,
+    /// What hive-monitor's sharing answers `hold` with (None: nothing shares here).
+    pub share_hold: Mutex<Option<String>>,
+    /// The lines sent to hive-monitor's sharing, in order.
+    pub share_lines: Mutex<Vec<String>>,
 }
 
 impl Default for FakeSystem {
@@ -379,6 +383,8 @@ impl Default for FakeSystem {
             tabs: Mutex::new(Vec::new()),
             shown_tabs: Mutex::new(Vec::new()),
             window_menu: Mutex::new(Vec::new()),
+            share_hold: Mutex::new(None),
+            share_lines: Mutex::new(Vec::new()),
         }
     }
 }
@@ -460,6 +466,11 @@ impl System for FakeSystem {
     fn activate(&self, pid: i32) {
         lock(&self.activated).push(pid);
         *lock(&self.front_pid) = Some(pid);
+    }
+    fn share(&self, command: &str) -> Option<String> {
+        let answer = lock(&self.share_hold).clone()?;
+        lock(&self.share_lines).push(command.to_string());
+        Some(if command == "hold" { answer } else { "ok".into() })
     }
     fn notify(&self, message: &str) {
         lock(&self.notifications).push(message.to_string());

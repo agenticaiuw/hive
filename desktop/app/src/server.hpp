@@ -10,6 +10,9 @@
 //   keys MODS [USAGE ...]      -> full keyboard state: modifier bits + keyboard-page usages held
 //   release                    -> let go of every key and button (always allowed)
 //   disengage                  -> the agent is done: hand control back (always allowed)
+//   share on|off               -> Hive works on its virtual monitor beside the human: their input
+//                                 goes to their own apps (hive-monitor replays it), never takes
+//                                 control, and engage doesn't wait for still hands
 //   engage                     -> start handing control over, for a task the human gave (spoken
 //                                 or typed); it passes once their hands have been off a moment
 //   watch                      -> stream "event state=... reason=..." lines, and "event fn=..."
@@ -226,6 +229,15 @@ private:
     }
     if (command == "disengage") {
       gate_.release_control();
+      return "ok";
+    }
+    if (command == "share") {
+      std::string on;
+      in >> on;
+      if (on != "on" && on != "off") {
+        return "err bad_request usage: share on|off";
+      }
+      gate_.set_sharing(on == "on");
       return "ok";
     }
     if (command == "engage") {

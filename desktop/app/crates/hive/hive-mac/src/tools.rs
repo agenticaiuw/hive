@@ -375,6 +375,9 @@ struct Control {
     /// Held during a screen action, so control isn't let go mid-action.
     acting: Mutex<()>,
     state: Mutex<Holding>,
+    /// hive-monitor is sharing: the agent has the real cursor and keyboard on the virtual monitor
+    /// while the user's input goes to their own apps, and the helper doesn't count their hands.
+    shared: Mutex<bool>,
     /// Set by close(): the idle thread ends.
     closed: (Mutex<bool>, Condvar),
 }
@@ -434,6 +437,40 @@ impl Control {
         self.system.virtual_monitor().is_some()
     }
 
+    /// Asks hive-monitor to share (`hold`): the agent keeps the real cursor and keyboard on the
+    /// virtual monitor, the user's mouse becomes a drawn cursor and their keys go to their own app,
+    /// so both work at once. Then the helper stops counting the user's hands (`share on`). False
+    /// where that can't be (no virtual monitor, it's being shown, an older hive-monitor or
+    /// helper): the agent waits for still hands instead.
+    fn hold_shared(&self) -> bool {
+        if !self.sharing() {
+            self.release_shared();
+            return false;
+        }
+        if !self.system.share("hold").is_some_and(|r| r.starts_with("ok")) {
+            self.release_shared();
+            return false;
+        }
+        if self.mac.share(true).is_err() {
+            let _ = self.system.share("release");
+            self.release_shared();
+            return false;
+        }
+        *lock(&self.shared) = true;
+        true
+    }
+
+    /// Ends sharing: hive-monitor puts the user's cursor and app back, and the helper counts their
+    /// hands again. False if nothing was shared.
+    fn release_shared(&self) -> bool {
+        if !std::mem::take(&mut *lock(&self.shared)) {
+            return false;
+        }
+        let _ = self.system.share("release");
+        let _ = self.mac.share(false);
+        true
+    }
+
     /// Just before the agent takes the mouse and keyboard: notes where the user's cursor is and
     /// which app they have in front (unless the cursor is still on the virtual monitor).
     fn remember_user(&self) {
@@ -452,6 +489,9 @@ impl Control {
     /// The agent let go of the mouse and keyboard, or the user took them: the user's cursor goes
     /// back where it was on their screen and their app back in front. The agent's are noted.
     fn give_back(&self) {
+        if self.release_shared() {
+            return;
+        }
         let Some(monitor) = self.system.virtual_monitor() else {
             return;
         };
@@ -550,6 +590,7 @@ impl MacTools {
                 holding: false,
                 fresh: true,
             }),
+            shared: Mutex::new(false),
             closed: (Mutex::new(false), Condvar::new()),
         });
         let idle = control.clone();
@@ -585,6 +626,12 @@ impl MacTools {
     /// On the virtual monitor a takeover doesn't stop the agent: the step waits (up to
     /// [`SHARE_WAIT`]) for the user's hands to be still for [`USER_STILL`], then takes them.
     pub fn take(&self) -> Result<Option<String>, VhidError> {
+        if self.control.hold_shared() {
+            if self.engage_shared()? {
+                return Ok(None);
+            }
+            self.control.release_shared();
+        }
         let why_not = match self.take_once()? {
             Some(reason)
                 if self.control.sharing()
@@ -598,6 +645,25 @@ impl MacTools {
             self.control.back_to_agent();
         }
         Ok(why_not)
+    }
+
+    /// While sharing, the helper engages at once (the user's hands don't count); false if it won't
+    /// (Secure Input has it counting them again, or the safety watcher is down).
+    fn engage_shared(&self) -> Result<bool, VhidError> {
+        let status = self.mac.status()?;
+        if status.get("state") != Some("engaged") {
+            if status.get("reason") == Some("watcher_unavailable") {
+                return Ok(false);
+            }
+            self.mac.engage()?;
+            if !self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
+                return Ok(false);
+            }
+        }
+        let mut s = lock(&self.control.state);
+        s.holding = true;
+        s.fresh = false;
+        Ok(true)
     }
 
     /// On the virtual monitor, after the user used the mouse and keyboard: waits for their hands
@@ -738,6 +804,7 @@ impl MacTools {
     /// Ends this task's hold on the Mac: the idle thread stops and the helper connection closes.
     pub fn close(&self) {
         self.control.close();
+        self.control.release_shared();
         self.mac.close();
     }
 
@@ -1467,6 +1534,7 @@ impl ToolNamespace for MacTools {
 impl Drop for MacTools {
     fn drop(&mut self) {
         self.control.close();
+        self.control.release_shared();
     }
 }
 

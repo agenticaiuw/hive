@@ -59,6 +59,11 @@ pub trait System: Send + Sync {
     }
     /// Brings the app with this pid to the front, as clicking its Dock icon would.
     fn activate(&self, _pid: i32) {}
+    /// One line to the virtual monitor's sharing (virtual_monitor::share) and its answer; None
+    /// when nothing shares here.
+    fn share(&self, _command: &str) -> Option<String> {
+        None
+    }
     /// Shows tab `tab` of browser window `window` (both 1-based, in browser_tabs' order) and brings
     /// that window to the front, even minimized or on another desktop. "" when it did, else why not.
     fn show_tab(&self, _browser: &str, _window: usize, _tab: usize) -> String {
@@ -101,6 +106,9 @@ impl System for RealMac {
     }
     fn warp(&self, x: f64, y: f64) {
         ffi::warp(x, y)
+    }
+    fn share(&self, command: &str) -> Option<String> {
+        virtual_monitor::share(command)
     }
     fn place_on_virtual_monitor(&self, pid: i32) -> String {
         virtual_monitor::place(pid)

@@ -69,7 +69,7 @@ build/agent-vhid-captions: tools/captions.swift
 build/hive-monitor: tools/hive_monitor.m
 	@mkdir -p build
 	clang -fobjc-arc -O2 -Wall tools/hive_monitor.m -o $@.tmp -framework Cocoa -framework ApplicationServices \
-		-framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework QuartzCore -framework IOSurface
+		-framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework QuartzCore -framework IOSurface -framework IOKit -framework Carbon
 	mv $@.tmp $@
 
 build/agent-vhid-paste: tools/paste.swift
