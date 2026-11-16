@@ -14,6 +14,10 @@
 //                                       (monitor-share.sock in the state folder; see "share" below)
 //   hive-monitor selftest               check the right Option tap rules
 //
+// serve and switch outlive the agent that starts them, so a restart of the agent keeps the monitor
+// and its windows. They still end with Hive: HIVE_MONITOR_OWNER names the app Hive runs under, and
+// when it quits or is killed they stop (see endWithHive).
+//
 // The display is made with CoreGraphics' CGVirtualDisplay classes, looked up at run time, on a
 // private queue.
 #import <Cocoa/Cocoa.h>
@@ -81,6 +85,8 @@ static void printInfo(CGDirectDisplayID display, const char *state) {
     fflush(stdout);
 }
 
+static void endWithHive(dispatch_block_t stop);
+
 static int serve(uint32_t width, uint32_t height) {
     CGDirectDisplayID existing = onlineHiveDisplay();
     if (existing) { printInfo(existing, "already-on"); return 0; }
@@ -128,6 +134,7 @@ static int serve(uint32_t width, uint32_t height) {
     // The display goes away when this process ends, however it ends.
     signal(SIGTERM, SIG_DFL);
     signal(SIGINT, SIG_DFL);
+    endWithHive(^{ exit(0); });
     dispatch_main();
     return 0;
 }
@@ -1285,6 +1292,52 @@ static CGEventRef shareTapped(CGEventTapProxy proxy, CGEventType type, CGEventRe
     return [(__bridge HiveShare *)info tapped:event type:type];
 }
 
+// While tools/update-app.sh swaps Hive.app it leaves a note, monitor-keep in the state folder; a
+// note this fresh means the app is coming back, and the helpers wait this long for it.
+static const double kUpdateNoteSeconds = 120;
+static const double kUpdateWaitSeconds = 60;
+
+/// Hive's app has been gone `goneFor` seconds: stop now, unless an update's note (written
+/// `noteAge` seconds ago; negative when there is none) says a new one is on its way.
+static BOOL hiveGoneForGood(double goneFor, double noteAge) {
+    BOOL updating = noteAge >= 0 && noteAge < kUpdateNoteSeconds;
+    return !updating || goneFor >= kUpdateWaitSeconds;
+}
+
+/// A helper Hive started ends with Hive. HIVE_MONITOR_OWNER is the bundle id of the app Hive runs
+/// under (virtual_monitor.rs); once that app has been seen running, its quit (menu, Cmd-Q) or
+/// death (killed, crashed) runs `stop` within a second, so the monitor and the switch go away
+/// with it. During an update it waits for the new app instead, so the windows on the monitor stay
+/// put. Restarting only the agent leaves the app running and changes nothing here. Without
+/// HIVE_MONITOR_OWNER (run by hand) the helper runs until it is stopped.
+static void endWithHive(dispatch_block_t stop) {
+    const char *owner = getenv("HIVE_MONITOR_OWNER");
+    if (!owner || !*owner) return;
+    NSString *bundleID = @(owner);
+    NSString *note = [stateDir() stringByAppendingPathComponent:@"monitor-keep"];
+    static dispatch_source_t timer;
+    __block BOOL seen = NO;
+    __block CFAbsoluteTime goneSince = 0;
+    timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), NSEC_PER_SEC / 2, NSEC_PER_SEC / 10);
+    dispatch_source_set_event_handler(timer, ^{ @autoreleasepool {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if ([NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID].count > 0) {
+            if (goneSince) [NSFileManager.defaultManager removeItemAtPath:note error:nil];  // back after an update
+            seen = YES;
+            goneSince = 0;
+            return;
+        }
+        if (!seen) return;  // an app that was never running here can't end it
+        if (!goneSince) goneSince = now;
+        NSDate *written = [NSFileManager.defaultManager attributesOfItemAtPath:note error:nil].fileModificationDate;
+        if (!hiveGoneForGood(now - goneSince, written ? -written.timeIntervalSinceNow : -1)) return;
+        fprintf(stderr, "hive-monitor: %s quit; stopping\n", bundleID.UTF8String);
+        stop();
+    }});
+    dispatch_resume(timer);
+}
+
 static int runSwitch(void) {
     // One at a time: two would each take the same tap and cancel each other out.
     NSString *dir = stateDir();
@@ -1317,6 +1370,7 @@ static int runSwitch(void) {
     dispatch_source_set_event_handler(interrupt, stop);
     dispatch_resume(term);
     dispatch_resume(interrupt);
+    endWithHive(stop);
     fprintf(stderr, "switch: ready; tap right Option to see the virtual monitor\n");
     [NSApp run];
     return 0;
@@ -1384,6 +1438,10 @@ static int selftest(void) {
     CHECK(inputFrom(0, kCGEventLeftMouseDragged, YES, devices) == FromYou, "a drag while your button is down is yours");
     CHECK(inputFrom(0, kCGEventLeftMouseDragged, NO, devices) == FromHive, "any other drag is Hive's");
     CHECK(inputFrom(0, kCGEventKeyDown, NO, devices) == FromElsewhere, "an event no device sent passes untouched");
+    CHECK(hiveGoneForGood(0.5, -1), "Hive quit (no update note): the monitor stops at once");
+    CHECK(!hiveGoneForGood(5, 20), "Hive gone during an update: the monitor waits for the new app");
+    CHECK(hiveGoneForGood(kUpdateWaitSeconds, 70), "the new app never came: the monitor stops after the wait");
+    CHECK(hiveGoneForGood(0.5, kUpdateNoteSeconds + 1), "an old update note doesn't keep the monitor after a quit");
 #undef CHECK
     if (!failed) printf("ok\n");
     return failed ? 1 : 0;

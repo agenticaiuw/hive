@@ -162,7 +162,10 @@ guard apps.allSatisfy({ $0.isTerminated }) else {
 }
 ' "${installed:-$APP}"
 }
-quit_agent
+# The virtual monitor ends when Hive quits (tools/hive_monitor.m). This note says it's an update,
+# so it waits for the new app and the windows on it stay put; the new app's helpers remove it.
+mkdir -p "$state" && touch "$state/monitor-keep"
+quit_agent || { rm -f "$state/monitor-keep"; exit 1; }
 if ! prior_login=$("$MIGRATOR" commit "$installed" "$APP" "$staged" "$backup"); then
   if [ -n "$installed" ] && [ -d "$installed" ]; then
     original_app="$APP"
