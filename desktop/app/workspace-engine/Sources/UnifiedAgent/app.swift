@@ -129,6 +129,18 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         } else {
             start()
         }
+
+        // Opened by you (Spotlight, Finder, Launchpad), Hive comes up active: show its window. At
+        // login and after an update it starts without activation and stays in the menu bar.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+            if NSApp.isActive { dashboard.show() }
+        }
+    }
+
+    /// Opening Hive while it's running (Spotlight, Finder, the Dock) shows its window, not just the menu.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        dashboard.show()
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
