@@ -127,9 +127,11 @@ launch_without_activation() {
 import AppKit
 let configuration = NSWorkspace.OpenConfiguration()
 configuration.activates = false
+var environment = ["HIVE_STAY_IN_MENU_BAR": "1"]  // an update reopens Hive in the menu bar, without its window
 if let ask = ProcessInfo.processInfo.environment["HIVE_ASK_WORK_SCREEN"] {
-    configuration.environment = ["HIVE_ASK_WORK_SCREEN": ask] // 0: keep the saved work screen
+    environment["HIVE_ASK_WORK_SCREEN"] = ask // 0: keep the saved work screen
 }
+configuration.environment = environment
 var finished = false
 var failed = false
 NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: CommandLine.arguments[1]), configuration: configuration) { _, error in
