@@ -1,7 +1,9 @@
-"""Persistent local lip-reading worker: in-memory camera capture and rolling partial transcripts.
+"""Persistent local lip-reading worker: in-memory camera capture and transcripts a sentence at a time.
 
-The model is FLARE Large (<lipread>/flare), or USR 2.0 Huge (<lipread>/usr2,
-scripts/lipread_usr2.py) with LIPREAD_MODEL=usr2. Commands and events are JSON lines tagged with
+The model is USR 2.0 Huge (<lipread>/usr2, scripts/lipread_usr2.py) when it is installed, else
+FLARE Large (<lipread>/flare); LIPREAD_MODEL=flare|usr2 chooses. Captions come a sentence at a time,
+once your lips stop (lipread_stream.Sentences); LIPREAD_CAPTIONS=drafts shows rolling drafts while
+you talk instead (lipread_stream.Stream). Commands and events are JSON lines tagged with
 a session number. No microphone, MP4 files, network requests or agent actions. The camera is
 opened only for an explicit start command.
 """
@@ -13,7 +15,7 @@ import sys
 import threading
 import time
 
-from lipread_stream import Stream
+from lipread_stream import Sentences, Stream
 
 OUTPUT_LOCK = threading.Lock()
 
@@ -30,7 +32,8 @@ class Recorder:
         self.model = model
         self.stop = threading.Event()
         self.cancelled = False
-        self.stream = Stream(model, self.emit)
+        captions = Stream if os.environ.get('LIPREAD_CAPTIONS') == 'drafts' else Sentences
+        self.stream = captions(model, self.emit)
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -90,7 +93,7 @@ class Recorder:
                     last_framing = crops.framing
                 if crop is None:
                     continue
-                self.stream.feed(crop)
+                self.stream.feed(crop, crops.opening)
                 if self.stream.done.is_set():
                     break
         except Exception as exc:
@@ -114,14 +117,16 @@ class Recorder:
 
 
 def load_model():
-    """FLARE Large, or USR 2.0 Huge with LIPREAD_MODEL=usr2. The worker runs in FLARE's folder
-    with FLARE's Python, which runs USR 2.0's code too. FLARE is the default: on USR 2.0's own
-    demo clip it read the sentence nearly word for word and USR 2.0 didn't (scripts/
-    lipread_usr2.py), so which is better for a given face is measured, not assumed."""
+    """USR 2.0 Huge when it is installed, else FLARE Large; LIPREAD_MODEL=flare|usr2 chooses. The
+    worker runs in FLARE's folder with FLARE's Python, which runs USR 2.0's code too. USR 2.0 read
+    the owner's own video better (scripts/lipread_usr2.py), though FLARE read USR 2.0's demo clip
+    better: which is better for a given face is measured, not assumed."""
     flare = Path(os.environ.get('LIPREAD_FLARE_DIR', Path.cwd()))
-    if os.environ.get('LIPREAD_MODEL') == 'usr2':
+    usr2 = Path(os.environ.get('LIPREAD_USR2_DIR', flare.parent / 'usr2'))
+    choice = os.environ.get('LIPREAD_MODEL') or ('usr2' if (usr2 / 'weights' / 'huge_high_resource_lrs2lrs3vox2avsp.pth').exists() else 'flare')
+    if choice == 'usr2':
         from lipread_usr2 import Usr2
-        return Usr2(os.environ.get('LIPREAD_USR2_DIR', flare.parent / 'usr2'))
+        return Usr2(usr2)
     from lipread_flare import Flare
     return Flare(flare)
 

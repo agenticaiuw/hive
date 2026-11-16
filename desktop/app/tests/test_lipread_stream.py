@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from lipread_stream import Stream, join_overlap
+from lipread_stream import Sentences, Stream, join_overlap
 
 
 class StreamTest(unittest.TestCase):
@@ -111,5 +111,65 @@ class StreamTest(unittest.TestCase):
         stream.finish()
         self.assertTrue(stream.done.wait(2))
         self.assertEqual(events, [{'text':'', 'final':True}])
+
+
+REST, TALK = 0.08, 0.3   # the inner lips' gap over the mouth's width
+
+
+class SentencesTest(unittest.TestCase):
+    """Frames are their own index; the fake model reads a sentence as its first and last frame."""
+
+    def run_session(self, openings, **options):
+        batches, events = [], []
+        def decode(frames, final=False):
+            self.assertTrue(final)
+            batches.append((frames[0], frames[-1]))
+            return f'{frames[0]}-{frames[-1]}'
+        sentences = Sentences(decode, lambda **e: events.append(e), **options)
+        for i, opening in enumerate(openings):
+            sentences.feed(i, opening)
+        sentences.finish()
+        self.assertTrue(sentences.done.wait(2))
+        return batches, events
+
+    def test_each_sentence_is_read_once_when_the_lips_stop(self):
+        # still 0.4 s, talk 1.2 s, still 0.8 s, talk 1 s, still 0.8 s; 0.6 s still ends a sentence
+        openings = [REST] * 10 + [TALK] * 30 + [REST] * 20 + [TALK] * 25 + [REST] * 20
+        batches, events = self.run_session(openings)
+        # 0.5 s (12 frames) of still lips kept around each; the second's lead is what the first left
+        self.assertEqual(batches, [(0, 51), (52, 96)])
+        self.assertEqual(events[0], {'status': 'Reading your lips…', 'final': False})
+        self.assertIn('0-51', [e.get('partial') for e in events])
+        self.assertEqual(events[-1]['text'], '0-51 52-96')
+        self.assertTrue(events[-1]['final'])
+
+    def test_nonstop_talk_is_cut_at_the_longest_sentence(self):
+        batches, events = self.run_session([TALK] * 120, longest=2)
+        self.assertEqual(batches, [(0, 50), (51, 101), (102, 119)])
+        self.assertEqual(events[-1]['text'], '0-50 51-101 102-119')
+
+    def test_still_lips_and_twitches_are_not_read(self):
+        batches, events = self.run_session([REST] * 50 + [TALK] * 3 + [REST] * 50)
+        self.assertEqual(batches, [])
+        self.assertEqual(events[-1], {'text': '', 'final': True})
+
+    def test_without_openings_the_whole_phrase_is_read_at_the_end(self):
+        batches, events = self.run_session([None] * 30)
+        self.assertEqual(batches, [(0, 29)])
+        self.assertEqual(events[-1]['text'], '0-29')
+
+    def test_cancel_drops_the_sentence_being_read(self):
+        entered, release = threading.Event(), threading.Event()
+        events = []
+        def decode(frames, final=False):
+            entered.set(); release.wait(2); return 'stale'
+        sentences = Sentences(decode, lambda **e: events.append(e))
+        for i, opening in enumerate([TALK] * 10 + [REST] * 20):
+            sentences.feed(i, opening)
+        self.assertTrue(entered.wait(2))
+        sentences.cancel(); release.set()
+        self.assertTrue(sentences.done.wait(2))
+        self.assertEqual([e for e in events if 'status' not in e], [])
+
 
 if __name__ == '__main__': unittest.main()
