@@ -18,14 +18,12 @@
   import { onMount } from "svelte";
   import { base } from "$app/paths";
   import {
-    fetchAgents,
     fetchFolder,
     fetchTaskBoard,
     saveFolder,
     saveMemory,
-    sendToAgent,
+    sendToHive,
     startDictation,
-    type AgentChoice,
     type Dictation,
   } from "$lib/dataSource";
   import {
@@ -54,8 +52,6 @@
 
   let board = $state<Board | null>(null);
   let loadError = $state("");
-  let agents = $state<AgentChoice[]>([]);
-  let agent = $state("");
   let text = $state("");
   let sending = $state(false);
   let sent = $state<{ ok: boolean; text: string } | null>(null);
@@ -101,7 +97,6 @@
           .slice(0, 5)
       : [],
   );
-  const chosen = $derived(agents.find((a) => a.id === agent));
   const unfinished = $derived(
     board ? board.tasks.filter((t) => !["done", "dropped"].includes(t.status)).length : 0,
   );
@@ -112,17 +107,6 @@
       loadError = "";
     } catch (error) {
       loadError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function loadAgents() {
-    try {
-      agents = await fetchAgents();
-      if (!agents.some((a) => a.id === agent)) {
-        agent = (agents.find((a) => a.available) ?? agents[0])?.id ?? "";
-      }
-    } catch {
-      agents = [];
     }
   }
 
@@ -157,7 +141,7 @@
   async function send(event?: Event) {
     event?.preventDefault();
     const words = text.trim();
-    if (!words || !chosen?.available || sending) return;
+    if (!words || sending) return;
     sending = true;
     sent = null;
     try {
@@ -169,18 +153,14 @@
         : projectChosen
           ? `For ${projectName}: `
           : "";
-      const answer = await sendToAgent(chosen.id, scope + words);
+      // Everything goes to Hive's agent in the cloud; it's told which device it came from.
+      const answer = await sendToHive(scope + words);
       if (answer.accepted === false) {
-        sent = { ok: false, text: answer.error || `${chosen.name} didn't take it.` };
+        sent = { ok: false, text: answer.error || "Hive didn't take it." };
       } else {
         sent = {
           ok: true,
-          text:
-            answer.accepted === null
-              ? `Sent. ${chosen.name} may already have it; check below before sending it again.`
-              : answer.receiptId?.startsWith("R")
-                ? `${chosen.name} has it (${answer.receiptId})${answer.ahead ? ` after ${answer.ahead} more` : ""}. It plans it into tasks, picks a model for each and starts them; they show below.`
-                : `${chosen.name} has it. Its tasks show up below once it saves them.`,
+          text: answer.accepted === null ? "Sent. Check below before sending it again." : "Sent.",
         };
         text = "";
         setTimeout(refresh, 3000);
@@ -304,11 +284,9 @@
 
   onMount(() => {
     refresh();
-    loadAgents();
     const timer = setInterval(refresh, REFRESH_MS);
     const focus = () => {
       refresh();
-      loadAgents();
     };
     window.addEventListener("focus", focus);
     return () => {
@@ -327,11 +305,6 @@
       <!-- Hive's icon: static/hive.svg links to branding/hive.svg at the repository's root, its only copy. -->
       <img class="brand-mark" src="{base}/hive.svg" alt="Hive" title="Hive" />
       <h1>Hive</h1>
-      <nav class="side-nav" aria-label="Dashboard">
-        <a class="current" href="{base}/" aria-current="page">Tasks</a>
-        <a href="{base}/pc">PC</a>
-        <a href="{base}/hive">⬡ Hive</a>
-      </nav>
     </div>
 
     <label class="search">
@@ -442,6 +415,7 @@
         {/each}
       </ul>
     {/if}
+    <a class="settings-link" href="{base}/settings">Settings</a>
     </div>
   </aside>
 
@@ -529,16 +503,6 @@
         onkeydown={composerKeys}
       ></textarea>
       <div class="composer-row">
-        <label class="agent-pick">
-          <span>To</span>
-          <select bind:value={agent} disabled={!agents.length}>
-            {#each agents as a (a.id)}
-              <option value={a.id} disabled={!a.available}>{a.name} · {a.where}</option>
-            {:else}
-              <option value="">No agent reachable</option>
-            {/each}
-          </select>
-        </label>
         <button
           type="button"
           class="mic"
@@ -559,13 +523,11 @@
             {#if dictation}<span>Listening</span>{/if}
           {/if}
         </button>
-        <button type="submit" disabled={!text.trim() || !chosen?.available || sending}>
+        <button type="submit" disabled={!text.trim() || sending}>
           {sending ? "Sending…" : "Send"}
         </button>
       </div>
-      {#if chosen && !chosen.available && chosen.note}
-        <p class="composer-note">{chosen.note}</p>
-      {:else if sent}
+      {#if sent}
         <p class="composer-note" class:bad={!sent.ok} role="status">{sent.text}</p>
       {/if}
       {#if requests.length}
@@ -767,33 +729,15 @@
     font-weight: var(--w-heavy);
     letter-spacing: -0.01em;
   }
-  .side-nav {
-    flex-basis: 100%;
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 1fr;
-    gap: 2px;
-    margin-top: var(--s3);
-    padding: 3px;
-    border-radius: 9px;
-    border: 1px solid var(--line);
-    background: var(--raise-1);
-  }
-  .side-nav a {
-    padding: 4px 8px;
-    border-radius: 6px;
+  .settings-link {
+    margin-top: auto;
+    padding: var(--s3) var(--s1) 0;
     color: var(--muted);
     font-size: var(--fs-small);
-    text-align: center;
     text-decoration: none;
   }
-  .side-nav a:hover {
+  .settings-link:hover {
     color: var(--ink);
-  }
-  .side-nav a.current {
-    color: var(--ink);
-    background: var(--raise-2);
-    box-shadow: inset 0 1px 0 rgba(255, 244, 228, 0.06);
   }
   .search {
     display: flex;
@@ -1170,16 +1114,6 @@
     align-items: center;
     justify-content: flex-end;
     flex-wrap: wrap;
-  }
-  .composer-row .agent-pick {
-    margin-right: auto;
-  }
-  .agent-pick {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    color: var(--muted);
-    font-size: var(--fs-small);
   }
   select {
     appearance: none;

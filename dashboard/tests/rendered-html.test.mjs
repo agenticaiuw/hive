@@ -136,8 +136,10 @@ test("the home page is the task board: a box to tell an agent, then every task",
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Tell an agent what to do/);
-  assert.match(html, /aria-current="page"[^>]*>Tasks</);
-  assert.doesNotMatch(html, /href="\/voice"/);
+  // One box, one page: no picker for where it goes, no second chat page, pairing under Settings.
+  assert.doesNotMatch(html, />To</);
+  assert.doesNotMatch(html, /href="\/hive"|href="\/pc"|href="\/voice"/);
+  assert.match(html, /href="\/settings"[^>]*>Settings</);
 });
 
 test("serves the app-authenticated dashboard from a public Sites host", async () => {
@@ -338,7 +340,7 @@ test("sends an instruction from the website to Hive's orchestrator through the b
   const response = await postJson(
     worker,
     "https://dashboard.example/api/agents/send",
-    { agent: "hive-cloud", text: "  For hive › Voice: check the dictation socket  " },
+    { agent: "hive-cloud", text: "  For hive › Voice: check the dictation socket  ", from: "phone" },
     { cookie, runtimeEnv },
   );
   assert.equal(response.status, 200);
@@ -347,7 +349,7 @@ test("sends an instruction from the website to Hive's orchestrator through the b
   assert.equal(boardCalls[0].path, "/v1/requests");
   assert.equal(boardCalls[0].init.method, "POST");
   assert.equal(boardCalls[0].init.headers.authorization, "Bearer server-side-board-token");
-  assert.deepEqual(boardCalls[0].body, { text: "For hive › Voice: check the dictation socket", agent: "hive-cloud" });
+  assert.deepEqual(boardCalls[0].body, { text: "For hive › Voice: check the dictation socket", agent: "hive-cloud", from: "phone" });
 
   // Nothing to send to without the board, and nobody but the owner can send.
   const unplugged = await request(worker, "https://dashboard.example/api/agents", { cookie, runtimeEnv: { ...env } });
@@ -1229,38 +1231,7 @@ test("reports scheduled routines as unreadable from the cloud rather than absent
   assert.match(payload.note, /They run on the Mac whether or not anything is watching/);
 });
 
-/* ------------------------- Ask the hive (universal command box) --------- */
-
-test("renders one merged voice+text ask-the-hive box on the hive page", async () => {
-  const worker = await loadWorker();
-  const cookie = await sessionCookie(worker);
-
-  for (const path of ["/hive"]) {
-    const response = await request(worker, `https://dashboard.example${path}`, {
-      cookie,
-    });
-    assert.equal(response.status, 200);
-    const html = await response.text();
-    assert.match(html, /aria-label="Ask the hive"/);
-    assert.match(html, /placeholder="Ask the hive…"/);
-    assert.match(html, /aria-label="Send to the hive"/);
-    // The mic lives in the same box — and it is the ONLY composer: exactly
-    // one input per page, and none of the old second box's markup.
-    assert.match(html, /aria-label="Record a voice command"/);
-    assert.equal(html.match(/placeholder="Ask the hive…"/g).length, 1, path);
-    assert.equal(
-      html.match(/aria-label="Record a voice command"/g).length,
-      1,
-      path,
-    );
-    assert.doesNotMatch(html, /placeholder="Type a command…"/);
-    assert.doesNotMatch(html, /Or speak from this browser/);
-    // The deployed build's honest transport label: this page has no route to
-    // the Mac, so its commands go through the server-held relay key.
-    assert.match(html, />VIA RELAY</);
-    assert.doesNotMatch(html, />LOCAL</);
-  }
-});
+/* ------------------------- Ask the hive (the command module and its routes) --------- */
 
 test("chooses each submission's transport by serving host and labels it honestly", () => {
   // The rule the merged box runs (imported from the same module it uses):
