@@ -32,6 +32,7 @@ FPS = 25
 PROMPTS = Path(__file__).resolve().parent / 'lipread_prompts.txt'
 HELD_OUT = 10       # every tenth sentence only measures
 MARGIN = 0.5        # still lips kept each side of a take, as Hive's captions cut sentences
+CLEAR = '\r\033[K'  # back to the start of the line and clear it: progress rewrites one line
 
 
 def held_out(index):
@@ -318,11 +319,14 @@ def train(args):
                                   weight_decay=0.01)
 
     def measure():
+        """Reads the held-out sentences, printing each as it goes."""
         model.eval()
         wrong = said = 0
-        for t in test:
-            w, n = errors(t['text'], reader(list(t['crops']), final=True))
+        for k, t in enumerate(test, 1):
+            read = reader(list(t['crops']), final=True)
+            w, n = errors(t['text'], read)
             wrong, said = wrong + w, said + n
+            print(f'{CLEAR}    {k:2d}. {w}/{n} wrong  read "{read}"  for "{t["text"]}"', flush=True)
         return wrong / max(said, 1), f'{100 * wrong / max(said, 1):.1f}% ({wrong}/{said} words)'
 
     def loss_of(t, rng):
@@ -348,8 +352,10 @@ def train(args):
                 'frontend': {k: v.detach().cpu().clone() for k, v in frontend.state_dict().items()}}
 
     began = time.monotonic()
+    print(f'{len(learn)} sentences to learn from, {len(test)} held out. Reading the held-out ones before training:',
+          flush=True)
     before, shown = measure()
-    print(f'{len(learn)} sentences to learn from, {len(test)} held out. Before: {shown} wrong.', flush=True)
+    print(f'Before: {shown} wrong.', flush=True)
     best, best_rate, stale = None, before, 0
     rng = np.random.default_rng(0)
     for epoch in range(1, args.epochs + 1):
@@ -368,9 +374,13 @@ def train(args):
                 torch.nn.utils.clip_grad_norm_(learning, 5.0)
                 optimizer.step()
                 optimizer.zero_grad()
+            print(f'{CLEAR}epoch {epoch}: learning from sentence {k} of {len(order)}, loss so far {total / k:.3f} '
+                  f'({time.monotonic() - started:.0f} s)', end='', flush=True)
+        print(f'{CLEAR}epoch {epoch}: learned from {len(order)} sentences, loss {total / len(order):.3f} '
+              f'({time.monotonic() - started:.0f} s). Reading the held-out ones:', flush=True)
         rate, shown = measure()
-        print(f'epoch {epoch}: loss {total / len(order):.3f}, held out {shown} wrong '
-              f'({time.monotonic() - started:.0f} s)', flush=True)
+        print(f'epoch {epoch}: held out {shown} wrong (best so far '
+              f'{100 * min(rate, best_rate):.1f}%, {time.monotonic() - began:.0f} s in all)', flush=True)
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
         if rate < best_rate:
@@ -386,6 +396,14 @@ def train(args):
     out = Path(args.out or home() / 'personal' / 'usr2_adapter.pt')
     best.update({'before': before, 'after': best_rate, 'sentences': len(learn), 'held_out': len(test),
                  'made': time.strftime('%Y-%m-%d %H:%M')})
+    if out.exists():
+        old = torch.load(out, map_location='cpu', weights_only=True)
+        # Measured on the same sentences: keep whichever did better.
+        if (old.get('sentences'), old.get('held_out')) == (len(learn), len(test)) and old.get('after', 1) <= best_rate:
+            print(f'Held out: {100 * best_rate:.1f}% wrong, no better than the saved one\'s '
+                  f'{100 * old["after"]:.1f}%; kept {out}.')
+            return
+        out.replace(out.with_suffix('.previous.pt'))
     torch.save(best, out)
     os.chmod(out, 0o600)
     print(f'Held out: {100 * before:.1f}% of words wrong before, {100 * best_rate:.1f}% after ({took:.0f} min). '
