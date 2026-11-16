@@ -197,7 +197,7 @@ def record(args):
     cv2.namedWindow(window)
     cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
     began, next_frame, kept_at = time.monotonic(), 0.0, 0.0
-    last_good = began
+    last_good, why = began, None
     print(f'{session.recorded()} of {len(session.lines)} recorded so far; q stops, and the next run carries on.',
           flush=True)
     try:
@@ -206,7 +206,7 @@ def record(args):
             now = time.monotonic()
             if not ok:
                 if now - last_good > 3:
-                    print('The camera stopped giving frames.', file=sys.stderr)
+                    why = 'the camera stopped giving frames'
                     break
                 continue
             last_good = now
@@ -227,7 +227,13 @@ def record(args):
                     print(f'  kept {session.kept[-1] + 1:3d}: {session.lines[session.kept[-1]]}', flush=True)
             cv2.imshow(window, draw(frame, session, note))
             key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), 27) or (session.index is None and now - kept_at > 2):
+            if now - began < 3:   # the window takes the keyboard: ignore keys meant for something else
+                continue
+            if key in (ord('q'), 27):
+                why = f'you pressed {"q" if key == ord("q") else "Esc"}'
+                break
+            if session.index is None and now - kept_at > 2:
+                why = 'every sentence is recorded'
                 break
             if key == ord('r'):
                 session.redo()
@@ -240,7 +246,8 @@ def record(args):
         cv2.destroyAllWindows()
         cv2.waitKey(1)
     left = len(session.lines) - session.recorded()
-    print(f'Kept {len(session.kept)} this time; {session.recorded()} of {len(session.lines)} recorded'
+    print(f'Stopped because {why}. Kept {len(session.kept)} this time; '
+          f'{session.recorded()} of {len(session.lines)} recorded'
           + (f', {left} to go.' if left else '. Next: train.'))
 
 
