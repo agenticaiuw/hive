@@ -1,8 +1,8 @@
-# Hive Browser Bridge
+# Hive browser extension
 
-The Browser Bridge lets the authenticated local Mac agent use a browser profile
-that is already signed into websites. Chrome and Safari share the same Manifest
-V3 source in [`src/`](./src).
+Hive's browser extension (Chrome and Safari list it as "Hive") lets the authenticated local Mac
+agent use a browser profile that is already signed into websites. Chrome and Safari share the
+same Manifest V3 source in [`src/`](./src).
 
 ## Two peers
 
@@ -208,31 +208,20 @@ This creates an unpacked directory and ZIP under the ignored
 
 ## Safari setup
 
-The committed Xcode wrapper is in `safari-browser-extension/`. It is generated
-from a compatibility build of the same `browser-extension/src` source. To
-refresh the wrapper after changing shared extension files:
+Hive.app carries the Safari extension inside it (`Contents/PlugIns/Hive.appex`), so there's no
+separate app to install: once Hive.app has run, turn on **Hive** in Safari → Settings → Extensions
+and choose **Always Allow on Every Website**. Hive updates bring new versions of it along.
 
-```bash
-node browser-extension/package.mjs
-xcrun safari-web-extension-converter browser-extension/build/safari \
-  --project-location safari-browser-extension \
-  --app-name "Hive Browser Bridge" \
-  --bundle-identifier com.evanliu.hive.browserbridge \
-  --swift \
-  --copy-resources \
-  --no-open \
-  --no-prompt \
-  --force
-```
+`desktop/app/Makefile` builds it (`make build/Hive.appex`) with
+[`browser/safari/scripts/build-appex.sh`](../safari/scripts/build-appex.sh), which packages this
+folder's source in a copy (Chrome loads `build/chrome`, so a Hive build never touches it) and
+builds the extension target of the Xcode project in `browser/safari/`. Bump `version` in
+`src/manifest.json` with every change: Safari caches the extension's files by version.
 
-Open the Xcode project, select your Apple development team, and run the macOS
-app. Then enable **Hive Browser Bridge** in Safari → Settings →
-Extensions, choose **Always Allow on Every Website**, and configure the same
-loopback URL and token from the extension settings.
-
-Safari requires a signed containing app for distribution. Archive that app in
-Xcode for Developer ID/App Store distribution. Signing credentials are not
-stored in this repository.
+Keep its identifier, `local.personal-agent.Agent.Safari`. A Hive update swaps the whole app,
+which can reset Safari's storage for the extension; the pairing then comes back from the copy
+the extension's native handler keeps in its own container, which is named after that
+identifier.
 
 ## Service-worker behavior
 

@@ -100,13 +100,23 @@ build/Hive.icns: ../../branding/hive.svg build/hive-icon
 	build/hive-icon ../../branding/hive.svg icns build/Hive.tmp.icns
 	mv build/Hive.tmp.icns $@
 
-build/Agent.app: build/agent-unified-host build/workspace-engine build/Hive.icns tools/Agent-Info.plist tools/sign.sh $(call sources,workspace-engine)
+# Hive's Safari extension, carried inside Hive.app so Safari lists it as "Hive" (the same code as
+# the Chrome extension, browser/chrome/src). Keep the identifier: the extension's saved pairing lives
+# in a container named after it (browser/safari/scripts/build-appex.sh).
+build/Hive.appex: ../../browser/safari/scripts/build-appex.sh $(wildcard ../../browser/chrome/src/*) tools/HiveSafari.entitlements tools/sign.sh
+	@mkdir -p build
+	bash ../../browser/safari/scripts/build-appex.sh $@.tmp local.personal-agent.Agent.Safari
+	tools/sign.sh $@.tmp local.personal-agent.Agent.Safari tools/HiveSafari.entitlements
+	rm -rf $@ && mv $@.tmp $@ && touch $@
+
+build/Agent.app: build/agent-unified-host build/workspace-engine build/Hive.icns tools/Agent-Info.plist tools/sign.sh build/Hive.appex $(call sources,workspace-engine)
 	@rm -rf $@.tmp && mkdir -p $@.tmp/Contents/MacOS $@.tmp/Contents/Resources $@.tmp/Contents/Helpers
 	cp build/agent-unified-host $@.tmp/Contents/MacOS/Agent
 	cp build/workspace-engine $@.tmp/Contents/Helpers/workspace-engine
 	tools/sign.sh $@.tmp/Contents/Helpers/workspace-engine local.personal-agent.workspace-engine
 	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
 	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
+	mkdir -p $@.tmp/Contents/PlugIns && cp -R build/Hive.appex $@.tmp/Contents/PlugIns/Hive.appex
 	tools/sign.sh $@.tmp local.personal-agent.Agent
 	codesign --verify --deep --strict $@.tmp
 	rm -rf $@ && mv $@.tmp $@
