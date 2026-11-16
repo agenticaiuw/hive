@@ -385,7 +385,7 @@ enum DashboardAPI {
 
     /// The instruction on the cloud board's queue for Hive's orchestrator (cloud/vm-agent/orchestrator.mjs).
     static func toCloud(_ text: String) -> (Int, Data) {
-        let (status, out) = board("post", "/v1/requests", json(["text": text, "agent": cloudAgent]))
+        let (status, out) = board("post", "/v1/requests", json(["text": text, "agent": cloudAgent, "from": "mac"]))
         let answer = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
         guard status == 200, let id = answer["id"] as? Int else {
             return (502, json(["accepted": false, "error": answer["error"] as? String ?? "Couldn't reach Hive in the cloud."]))

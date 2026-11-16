@@ -22,7 +22,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
   }
   const answer = await askBoard(locals.runtimeEnv, "/v1/requests", {
     method: "POST",
-    body: { text, agent: ORCHESTRATOR.id },
+    // Which device it came from ("web", "phone", "extension"), so the agent knows where you are.
+    body: { text, agent: ORCHESTRATOR.id, from: String(body?.from ?? "web").slice(0, 40) },
   });
   if (!answer.ok) return answer.response;
   return json(

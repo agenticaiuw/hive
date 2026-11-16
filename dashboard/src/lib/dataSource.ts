@@ -576,27 +576,25 @@ async function recordHere(): Promise<{ stop(): Blob }> {
   };
 }
 
-export type AgentChoice = {
-  id: string;
-  name: string;
-  where: string;
-  available: boolean;
-  note?: string;
-};
-
-export async function fetchAgents(): Promise<AgentChoice[]> {
-  const answer = await apiRequest(`${base}/api/agents`);
-  return Array.isArray(answer?.agents) ? answer.agents : [];
+/** Which device this page is on, sent with every instruction so Hive knows where it came from. */
+export function deviceName(): string {
+  if (typeof location === "undefined") return "web";
+  if (location.protocol === "hive:") return "mac";
+  if (location.protocol.endsWith("-extension:")) return "extension";
+  if (/iPhone|iPad|Android/.test(navigator.userAgent)) return "phone";
+  return "web";
 }
 
-/** Hands `text` to an agent. `accepted: null` means it may or may not have started. */
-export async function sendToAgent(
-  agent: string,
+/**
+ * Hands `text` to Hive's agent in the cloud, which plans it and starts the work.
+ * `accepted: null` means it may or may not have been queued.
+ */
+export async function sendToHive(
   text: string,
 ): Promise<{ accepted: boolean | null; receiptId?: string; ahead?: number; error?: string }> {
   return apiRequest(`${base}/api/agents/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent, text }),
+    body: JSON.stringify({ agent: "hive-cloud", text, from: deviceName() }),
   });
 }

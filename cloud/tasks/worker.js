@@ -258,6 +258,8 @@ async function sendRequest(request, env) {
   const words = text(body.text, 4000);
   if (!words) return json({ error: "Say what to do (text)." }, 400);
   const agent = text(body.agent, 40) || "hive-cloud";
+  // The device it was sent from (mac, phone, extension, web, siri) is the message's session.
+  const from = text(body.from, 40) || "web";
   const { project, folder } = scopeOf(words);
   const at = now();
   const [made] = await env.DB.batch([
@@ -267,8 +269,8 @@ async function sendRequest(request, env) {
     ).bind(agent, folder || null, at),
     env.DB.prepare(
       `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
-       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', 'web', ?1, ?2, ?3, 1, NULL, ?3)`,
-    ).bind(project.toLowerCase(), words, at),
+       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', ?4, ?1, ?2, ?3, 1, NULL, ?3)`,
+    ).bind(project.toLowerCase(), words, at, from),
   ]);
   const id = made.results[0].id;
   const ahead = await env.DB.prepare(
@@ -299,10 +301,13 @@ async function takeRequest(request, env) {
   ]);
   const row = taken.results[0];
   if (!row) return json({ request: null });
-  const message = await env.DB.prepare("SELECT project, text, said_at FROM board_messages WHERE machine = 'cloud' AND id = ?1")
+  const message = await env.DB.prepare("SELECT project, text, said_at, session FROM board_messages WHERE machine = 'cloud' AND id = ?1")
     .bind(row.id).first();
   return json({
-    request: { id: row.id, folder: row.folder || "", project: message?.project || "", text: message?.text || "", said_at: message?.said_at },
+    request: {
+      id: row.id, folder: row.folder || "", project: message?.project || "", text: message?.text || "",
+      said_at: message?.said_at, from: message?.session || "web",
+    },
   });
 }
 
