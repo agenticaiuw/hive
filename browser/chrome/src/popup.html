@@ -48,6 +48,32 @@
       </div>
 
       <!--
+        THE ASK BOX, the same one the dashboard, the phone app and Hive's floating window have
+        (ask-hive.js). It starts listening as soon as the popup opens; what the owner says goes to
+        Hive in the cloud with this page attached, so "make this page show just my courses" becomes
+        a page rule Hive writes and every visit applies (page-rules.js).
+      -->
+      <form id="ask-form" class="ask">
+        <label class="visually-hidden" for="ask-text">Ask Hive</label>
+        <textarea id="ask-text" rows="3" maxlength="4000" placeholder="Ask Hive, or say how this page should look…"></textarea>
+        <div class="ask-row">
+          <button id="ask-mic" class="ask-mic" type="button" aria-pressed="false" aria-label="Listen" title="Listen">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+            <span class="ask-listening">Listening</span>
+          </button>
+          <button id="ask-send" class="ask-send" type="submit">Send</button>
+        </div>
+        <p id="ask-note" class="ask-note" role="status" hidden></p>
+        <ul id="ask-rules" class="ask-rules" aria-label="Hive's changes to this site" hidden></ul>
+      </form>
+      <section id="approvals" class="approvals" aria-live="polite" hidden></section>
+      <!-- The old console (the relay bridge's pairing and command box) stays for popup.js, out of
+           sight: every ask goes to Hive in the cloud through the box above. -->
+      <div class="legacy" hidden>
+      <!--
         THE PAGE-ENGINE BANNER. Hidden while the background bridge runs the
         loops (every browser where the background evaluates). When the popup
         measures the background dead (page-engine.js backgroundAliveVerdict)
@@ -110,7 +136,6 @@
 
       <!-- Approval requests other nodes put to this browser. Rendered by
            popup.js from storage; empty and hidden until one arrives. -->
-      <section id="approvals" class="approvals" aria-live="polite" hidden></section>
 
       <form id="command-form" class="command-form">
         <div class="command-row">
@@ -151,6 +176,7 @@
       </form>
 
       <section id="history" class="history" aria-live="polite"></section>
+      </div>
 
       <!-- No Settings button: the settings page is deleted (owner, 2026-08-12)
            and everything it did that survived lives above. -->

@@ -27,6 +27,7 @@ fs.cpSync(sourceDir, safariDir, { recursive: true })
 const entryPoints = [
   ['background.js', 'HiveBrowserBridge'],
   ['popup.js', 'HivePopup'],
+  ['page-rules.js', 'HivePageRules'],
 ]
 
 const entryNames = new Set(entryPoints.map(([entry]) => entry))

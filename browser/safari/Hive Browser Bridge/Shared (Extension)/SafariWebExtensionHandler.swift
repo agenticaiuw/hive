@@ -101,6 +101,9 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             }
             return [ "ok": true, "values": values ]
 
+        case "hive:key":
+            return hiveKey()
+
         case "escrow:clear":
             defaults.removeObject(forKey: escrowDefaultsKey)
             os_log(.default, "Escrow cleared")
@@ -109,6 +112,26 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         default:
             return [ "echo": dict ]
         }
+    }
+
+    /*
+     * THE KEY TO HIVE'S CLOUD, without anyone pasting it. Hive on this Mac writes
+     * ~/.config/hive/extension.json ({"url", "key"}: the cloud board and a key that reaches only
+     * what the extension needs, hive-tasks extension-key), and this appex may read exactly that
+     * one file (tools/HiveSafari.entitlements, a read-only home-relative exception). The sandbox
+     * moves HOME into the appex's container, so the real home comes from the user database.
+     */
+    private func hiveKey() -> [String: Any] {
+        guard let entry = getpwuid(getuid()), let dir = entry.pointee.pw_dir else {
+            return [ "ok": false, "error": "no home folder" ]
+        }
+        let path = String(cString: dir) + "/.config/hive/extension.json"
+        guard let data = FileManager.default.contents(atPath: path),
+              let values = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let key = values["key"] as? String, !key.isEmpty else {
+            return [ "ok": false, "error": "Hive hasn't connected this browser yet" ]
+        }
+        return [ "ok": true, "key": key, "url": values["url"] as? String ?? "" ]
     }
 
 }

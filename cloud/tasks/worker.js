@@ -10,9 +10,32 @@ const DAY = 86400;
 const YEAR = 365 * DAY;
 const COOKIE = "hive_board";
 
+// What the browser extension may call, with its own key (see extensionAllowed). It calls from web
+// pages too (page-rules.js runs in each page), so these answer cross-origin; the key is a bearer
+// token, never a cookie, so "*" lets no page act as the owner.
+const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/page-rules", "/v1/page-rules/off"]);
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  "access-control-max-age": "86400",
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (EXTENSION_PATHS.has(url.pathname)) {
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+      const response = await route(request, env, url);
+      const headers = new Headers(response.headers);
+      for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
+      return new Response(response.body, { status: response.status, headers });
+    }
+    return route(request, env, url);
+  },
+};
+
+async function route(request, env, url) {
     try {
       if (url.pathname === "/v1/sync" && request.method === "POST") return await sync(request, env);
       if (url.pathname === "/v1/login-code" && request.method === "POST") return await loginCode(request, env);
@@ -25,13 +48,17 @@ export default {
       if (url.pathname === "/v1/requests" && request.method === "POST") return await sendRequest(request, env);
       if (url.pathname === "/v1/requests/take" && request.method === "POST") return await takeRequest(request, env);
       if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
+      if (url.pathname === "/v1/requests/state") return await requestState(url, request, env);
+      if (url.pathname === "/v1/extension-key" && request.method === "POST") return await extensionKey(request, env);
+      if (url.pathname === "/v1/page-rules" && request.method === "GET") return await pageRules(url, request, env);
+      if (url.pathname === "/v1/page-rules" && request.method === "POST") return await savePageRule(request, env);
+      if (url.pathname === "/v1/page-rules/off" && request.method === "POST") return await pageRuleOff(request, env);
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
     } catch (error) {
       return json({ error: String((error && error.message) || error) }, 500);
     }
-  },
-};
+}
 
 const now = () => Math.floor(Date.now() / 1000);
 const encode = (text) => new TextEncoder().encode(text);
@@ -167,6 +194,29 @@ async function allowed(request, env) {
   return (await browserAllowed(request, env)) || (await machineAllowed(request, env));
 }
 
+// The browser extension's key: "ext.<name>.<HMAC of ext:<name> under TASKS_TOKEN>". The owner's own
+// machine makes it (hive-tasks extension-key) and hands it to the extension, so the extension never
+// holds the machines' token, and the key only reaches EXTENSION_PATHS.
+async function extensionAllowed(request, env) {
+  const header = request.headers.get("authorization") || "";
+  const [kind, name, mac] = (header.startsWith("Bearer ") ? header.slice(7) : "").split(".");
+  if (kind !== "ext" || !name || !mac || !env.TASKS_TOKEN) return false;
+  return same(mac, await hmac(env.TASKS_TOKEN, `ext:${name}`), env.TASKS_TOKEN);
+}
+
+// POST /v1/extension-key {name}: a machine gets the key for the browser extension on it.
+async function extensionKey(request, env) {
+  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const name = text(body.name, 60).replace(/[^a-z0-9-]/gi, "").toLowerCase();
+  if (!name) return json({ error: "Say which browser (name)." }, 400);
+  return json({ key: `ext.${name}.${await hmac(env.TASKS_TOKEN, `ext:${name}`)}` });
+}
+
+async function anyoneAllowed(request, env) {
+  return (await allowed(request, env)) || (await extensionAllowed(request, env));
+}
+
 // GET /v1/folder?project=hive&key=memory%20retrieval: the folder and every one of its memories.
 async function folder(url, request, env) {
   if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
@@ -253,7 +303,7 @@ export function scopeOf(words) {
 }
 
 async function sendRequest(request, env) {
-  if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const body = await request.json();
   const words = text(body.text, 4000);
   if (!words) return json({ error: "Say what to do (text)." }, 400);
@@ -273,6 +323,13 @@ async function sendRequest(request, env) {
     ).bind(project.toLowerCase(), words, at, from),
   ]);
   const id = made.results[0].id;
+  // Asked on a web page (the browser extension): the page goes along for the agent to read.
+  const page = body.page && typeof body.page === "object" ? body.page : null;
+  const pageUrl = page ? text(page.url, 2000) : "";
+  if (pageUrl) {
+    await env.DB.prepare("INSERT OR REPLACE INTO board_page_asks (request, url, title, outline) VALUES (?1, ?2, ?3, ?4)")
+      .bind(id, pageUrl, text(page.title, 300), text(page.outline, 60000)).run();
+  }
   const ahead = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM board_requests WHERE status IN ('queued', 'planning', 'working') AND id < ?1",
   ).bind(id).first();
@@ -301,14 +358,84 @@ async function takeRequest(request, env) {
   ]);
   const row = taken.results[0];
   if (!row) return json({ request: null });
-  const message = await env.DB.prepare("SELECT project, text, said_at, session FROM board_messages WHERE machine = 'cloud' AND id = ?1")
-    .bind(row.id).first();
+  const [message, asked] = await Promise.all([
+    env.DB.prepare("SELECT project, text, said_at, session FROM board_messages WHERE machine = 'cloud' AND id = ?1").bind(row.id).first(),
+    env.DB.prepare("SELECT url, title, outline FROM board_page_asks WHERE request = ?1").bind(row.id).first(),
+  ]);
   return json({
     request: {
       id: row.id, folder: row.folder || "", project: message?.project || "", text: message?.text || "",
       said_at: message?.said_at, from: message?.session || "web",
+      page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },
   });
+}
+
+// GET /v1/requests/state?id=7: how one request stands, for whoever sent it.
+async function requestState(url, request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const id = Number(url.searchParams.get("id"));
+  if (!Number.isInteger(id) || id < 1) return json({ error: "Say which request (id)." }, 400);
+  const row = await env.DB.prepare("SELECT id, status, outcome, updated_at FROM board_requests WHERE id = ?1").bind(id).first();
+  return row ? json({ request: row }) : json({ error: "No such request." }, 404);
+}
+
+// ---- page rules (the browser extension) -----------------------------------------------------------
+
+const host = (value) => text(value, 200).toLowerCase().replace(/^www\./, "");
+
+// GET /v1/page-rules?host=canvas.wisc.edu: the rules that are on for a site (every site without host).
+async function pageRules(url, request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const site = host(url.searchParams.get("host"));
+  const rows = await env.DB.prepare(
+    `SELECT id, host, path, title, rule, request, on_at FROM board_page_rules
+     WHERE off_at IS NULL AND (?1 = '' OR host = ?1) ORDER BY id`,
+  ).bind(site).all();
+  const rules = rows.results.map((r) => ({ ...r, rule: safeJson(r.rule) }));
+  return json({ rules });
+}
+
+const safeJson = (value) => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+};
+
+// POST /v1/page-rules {host, path, title, rule, request}: Hive's orchestrator saves the rule it wrote.
+// A new rule for the same page replaces the one before it.
+async function savePageRule(request, env) {
+  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const site = host(body.host);
+  const title = text(body.title, 200);
+  const rule = body.rule && typeof body.rule === "object" ? JSON.stringify(body.rule).slice(0, 60000) : "";
+  if (!site || !title || !rule) return json({ error: "Say which site (host), what it does (title) and the rule." }, 400);
+  const path = text(body.path, 500);
+  const at = now();
+  const [, made] = await env.DB.batch([
+    env.DB.prepare("UPDATE board_page_rules SET off_at = ?3 WHERE host = ?1 AND path = ?2 AND off_at IS NULL").bind(site, path, at),
+    env.DB.prepare(
+      `INSERT INTO board_page_rules (id, host, path, title, rule, request, on_at)
+       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, ?3, ?4, ?5, ?6 FROM board_page_rules RETURNING id`,
+    ).bind(site, path, title, rule, Number.isInteger(body.request) ? body.request : null, at),
+  ]);
+  return json({ ok: true, id: made.results[0].id });
+}
+
+// POST /v1/page-rules/off {id} or {host}: puts a page (or a whole site) back the way it was.
+async function pageRuleOff(request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json();
+  const id = Number(body.id);
+  const site = host(body.host);
+  if (!(Number.isInteger(id) && id > 0) && !site) return json({ error: "Say which rule (id) or site (host)." }, 400);
+  const done = await env.DB.prepare(
+    "UPDATE board_page_rules SET off_at = ?3 WHERE off_at IS NULL AND (id = ?1 OR (?1 = 0 AND host = ?2))",
+  ).bind(Number.isInteger(id) ? id : 0, site, now()).run();
+  return json({ ok: true, off: done.meta.changes });
 }
 
 async function updateRequest(request, env) {

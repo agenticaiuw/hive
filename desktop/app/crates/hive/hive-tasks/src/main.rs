@@ -268,7 +268,38 @@ fn sync(quiet: bool) -> Result<String, String> {
         });
     }
     let said = ledger.sync(&cloud)?;
+    extension_key(&cloud);
     Ok(if quiet { String::new() } else { said })
+}
+
+/// The browser extension's key to the cloud board, where Safari's extension reads it
+/// (~/.config/hive/extension.json; SafariWebExtensionHandler.swift "hive:key"), so nobody pastes
+/// one. Made once; the key reaches only what the extension needs (cloud/tasks/worker.js).
+fn extension_key(cloud: &Cloud) {
+    let path = hive_common::paths::home().join(".config/hive/extension.json");
+    if path.exists() {
+        return;
+    }
+    let name = format!("{}-browser", cloud.machine.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
+    let Ok(answer) = cloud.post("/v1/extension-key", &serde_json::json!({ "name": name })) else {
+        return;
+    };
+    let Some(key) = answer.get("key").and_then(|k| k.as_str()) else {
+        return;
+    };
+    let file = serde_json::json!({ "url": cloud.url, "key": key });
+    let tmp = path.with_extension("json.tmp");
+    use std::os::unix::fs::OpenOptionsExt;
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, file.to_string().as_bytes()));
+    if written.is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
 
 /// Opens Hive's dashboard: on the Mac its window in Hive.app (`hive://tasks`), else the board page

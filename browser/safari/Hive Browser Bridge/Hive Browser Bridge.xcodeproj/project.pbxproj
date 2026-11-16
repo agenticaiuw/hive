@@ -18,6 +18,7 @@
 		85BCBAEC301FE074009E2EB5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBAAC301FE074009E2EB5 /* Assets.xcassets */; };
 		85BCBAEE301FE074009E2EB5 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BCBAAE301FE074009E2EB5 /* SafariWebExtensionHandler.swift */; };
 		85BCBB09301FE074009E2EB5 /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB00301FE074009E2EB5 /* popup.js */; };
+		85BCBC11301FE074009E2EB5 /* page-rules.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBC10301FE074009E2EB5 /* page-rules.js */; };
 		85BCBB0A301FE074009E2EB5 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB01301FE074009E2EB5 /* background.js */; };
 		85BCBB0B301FE074009E2EB5 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB02301FE074009E2EB5 /* popup.html */; };
 		85BCBB0E301FE074009E2EB5 /* ui.css in Resources */ = {isa = PBXBuildFile; fileRef = 85BCBB05301FE074009E2EB5 /* ui.css */; };
@@ -64,6 +65,7 @@
 		85BCBADB301FE074009E2EB5 /* Hive Browser Bridge Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Hive Browser Bridge Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		85BCBAE0301FE074009E2EB5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		85BCBB00301FE074009E2EB5 /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = Resources/popup.js; sourceTree = "<group>"; };
+		85BCBC10301FE074009E2EB5 /* page-rules.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "page-rules.js"; path = "Resources/page-rules.js"; sourceTree = "<group>"; };
 		85BCBB01301FE074009E2EB5 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = Resources/background.js; sourceTree = "<group>"; };
 		85BCBB02301FE074009E2EB5 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = Resources/popup.html; sourceTree = "<group>"; };
 		85BCBB05301FE074009E2EB5 /* ui.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = ui.css; path = Resources/ui.css; sourceTree = "<group>"; };
@@ -161,6 +163,7 @@
 			isa = PBXGroup;
 			children = (
 				85BCBB00301FE074009E2EB5 /* popup.js */,
+				85BCBC10301FE074009E2EB5 /* page-rules.js */,
 				85BCBB01301FE074009E2EB5 /* background.js */,
 				85BCBB02301FE074009E2EB5 /* popup.html */,
 				85BCBB05301FE074009E2EB5 /* ui.css */,
@@ -276,6 +279,7 @@
 				85BCBB0B301FE074009E2EB5 /* popup.html in Resources */,
 				85BCBB0F301FE074009E2EB5 /* icons in Resources */,
 				85BCBB09301FE074009E2EB5 /* popup.js in Resources */,
+				85BCBC11301FE074009E2EB5 /* page-rules.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

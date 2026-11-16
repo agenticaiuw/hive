@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Hive",
-  "version": "1.9.0",
-  "description": "Hive's dashboard beside any page, and lets your local Hive agent control explicitly permitted browser tabs on this Mac.",
+  "version": "1.10.0",
+  "description": "Ask Hive from any page, and Hive changes how pages look for you; Hive's dashboard beside any page.",
   "minimum_chrome_version": "121",
   "icons": {
     "16": "icons/icon-16.png",
@@ -12,6 +12,7 @@
     "512": "icons/icon-512.png"
   },
   "permissions": [
+    "activeTab",
     "alarms",
     "storage",
     "tabs",
@@ -22,7 +23,8 @@
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://hive-relay.your-subdomain.workers.dev/*",
-    "https://hive-dashboard.your-subdomain.workers.dev/*"
+    "https://hive-dashboard.your-subdomain.workers.dev/*",
+    "https://hive-tasks.your-subdomain.workers.dev/*"
   ],
   "optional_host_permissions": [
     "http://*/*",
@@ -32,6 +34,18 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "page-rules.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
   "action": {
     "default_title": "Hive",
     "default_popup": "popup.html",
