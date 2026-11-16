@@ -22,6 +22,7 @@ it is installed, as the less bad one; LIPREAD_MODEL=flare picks FLARE.
 """
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -56,10 +57,44 @@ def looping(ids, times=3):
     return None
 
 
+def pieces(text, units):
+    """`text` as USR 2.0's word pieces (indexes into `units`): each word upper-cased after '▁', in
+    the fewest pieces. The model splits text the same way: reading "what's the weather going to be
+    like tomorrow afternoon" it wrote ▁WHAT ' S ▁THE ▁WE A TH ER ... ▁AFTER NO ON, piece for piece."""
+    index = {unit: i for i, unit in enumerate(units)}
+    ids = []
+    for word in re.sub(r"[^a-z0-9' ]+", ' ', text.lower()).upper().split():
+        word = '▁' + word
+        best = [None] * (len(word) + 1)   # best[i]: the fewest pieces spelling word[:i]
+        best[0] = []
+        for i in range(len(word)):
+            if best[i] is None:
+                continue
+            for j in range(i + 1, len(word) + 1):
+                if word[i:j] in index and (best[j] is None or len(best[i]) + 1 < len(best[j])):
+                    best[j] = best[i] + [index[word[i:j]]]
+        ids += best[-1] if best[-1] is not None else [index['<unk>']]
+    return ids
+
+
+def add_personal(model, path):
+    """Merges what lipread_personal.py learned from the owner's own face into the model: low-rank
+    changes to the attention layers' query and value weights, and the video front end's weights."""
+    import torch
+    saved = torch.load(path, map_location='cpu', weights_only=True)
+    modules = dict(model.named_modules())
+    with torch.no_grad():
+        for name, change in saved['lora'].items():
+            linear = modules[name]
+            linear.weight += (change['scale'] * change['b'] @ change['a']).to(linear.weight)
+        model.encoder.frontend_v.load_state_dict(saved['frontend'])
+    return saved
+
+
 class Usr2:
     crop_shape = (88, 88)
 
-    def __init__(self, root):
+    def __init__(self, root, personal=True):
         import torch
         from omegaconf import OmegaConf
         root = Path(root)
@@ -84,6 +119,16 @@ class Usr2:
         backbone.pop('_target_', None)
         self.model = E2E(len(UNIGRAM1000_LIST), SimpleNamespace(**backbone))
         self.model.load_state_dict(state, strict=True)
+        self.name = 'USR 2.0 Huge (2026)'
+        self.personal = None
+        adapter = Path(os.environ.get('LIPREAD_PERSONAL_ADAPTER') or root.parent / 'personal' / 'usr2_adapter.pt')
+        if personal and os.environ.get('LIPREAD_PERSONAL') != '0' and adapter.exists():
+            try:
+                self.personal = add_personal(self.model, adapter)
+                self.name = 'USR 2.0 Huge (2026), fitted to you'
+            except Exception as exc:   # a bad adapter must not stop lip reading
+                print(f'lipread_usr2: not using {adapter}: {type(exc).__name__}: {exc}', file=sys.stderr)
+                self.model.load_state_dict(state, strict=True)
         del state
         frontend = self.model.encoder.frontend_v.frontend3D
         if isinstance(frontend[-1], torch.nn.MaxPool3d) and frontend[-1].kernel_size[0] == 1:
@@ -92,7 +137,6 @@ class Usr2:
         self.tokens = UNIGRAM1000_LIST
         self.subsequent_mask = subsequent_mask
         self.mean_face = root / 'preprocessing/20words_mean_face.npy'
-        self.name = 'USR 2.0 Huge (2026)'
         self.last_seconds = 0
 
     def crops(self):
