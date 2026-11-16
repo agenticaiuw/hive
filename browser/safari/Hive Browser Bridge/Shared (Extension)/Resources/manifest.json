@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Hive Browser Bridge",
-  "version": "1.7.11",
+  "name": "Hive",
+  "version": "1.8.0",
   "description": "Hive's dashboard beside any page, and lets your local Hive agent control explicitly permitted browser tabs on this Mac.",
   "minimum_chrome_version": "121",
   "icons": {
@@ -34,7 +34,7 @@
     ]
   },
   "action": {
-    "default_title": "Hive Browser Bridge",
+    "default_title": "Hive",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
