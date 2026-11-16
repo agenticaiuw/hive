@@ -165,7 +165,10 @@ fn start_switch(helper: &std::path::Path) {
     spawn_detached(helper, &["switch"], log.ok());
 }
 
-/// Runs the helper in a session of its own, so it outlives this process.
+/// Runs the helper in a session of its own, so it outlives this process: restarting the agent
+/// keeps the monitor and the windows on it. It still ends with the app Hive runs under (Hive.app):
+/// LaunchServices names that app in `__CFBundleIdentifier`, and the helper, told it as
+/// HIVE_MONITOR_OWNER, stops when the app quits or is killed (tools/hive_monitor.m).
 fn spawn_detached(helper: &std::path::Path, args: &[&str], log: Option<std::fs::File>) {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -175,6 +178,9 @@ fn spawn_detached(helper: &std::path::Path, args: &[&str], log: Option<std::fs::
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
+    if let Some(owner) = owner_app() {
+        command.env("HIVE_MONITOR_OWNER", owner);
+    }
     unsafe {
         command.pre_exec(|| {
             libc::setsid();
@@ -186,6 +192,13 @@ fn spawn_detached(helper: &std::path::Path, args: &[&str], log: Option<std::fs::
             let _ = child.wait();
         });
     }
+}
+
+/// The bundle id of the app this process runs under, if an app started it.
+fn owner_app() -> Option<String> {
+    std::env::var("__CFBundleIdentifier")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
 }
 
 /// The virtual monitor is wanted: HIVE_VIRTUAL_MONITOR=1/0, else the saved choice.
@@ -218,7 +231,8 @@ pub fn bounds() -> Option<Bounds> {
 }
 
 /// Turns the virtual monitor on if it is off. Its helper keeps running after this process ends,
-/// so the windows on it survive a restart of the app. None if it could not be turned on.
+/// so the windows on it survive a restart of the agent or an update of Hive.app; quitting Hive.app
+/// turns it off. None if it could not be turned on.
 pub fn ensure(timeout: Duration) -> Option<Bounds> {
     if !enabled() {
         return None;
