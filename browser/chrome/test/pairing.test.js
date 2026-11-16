@@ -91,7 +91,7 @@ test('a full pairing stores both credentials under the live storage keys', () =>
   assert.equal(outcome.values.relayEnabled, true)
   assert.equal(outcome.values.deviceToken, 'pdt_x.y')
   assert.equal(outcome.values.relayDeviceId, 'browser-a1b2c3')
-  assert.match(outcome.note, /brain is on/)
+  assert.match(outcome.note, /Hive can work in this browser/)
 
   /*
    * The keys are the contract with background.js's onChanged handlers: every
