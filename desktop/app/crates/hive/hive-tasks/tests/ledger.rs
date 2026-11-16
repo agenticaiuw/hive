@@ -398,7 +398,8 @@ fn hive_agent_requests_go_on_the_board() {
     ledger
         .hive_finished(&other, "interrupted", "maintenance interruption")
         .unwrap();
-    assert_eq!(ledger.show(&other).unwrap()["status"], "waiting");
+    // It resumes on its own after the restart, so it's not on the owner's list.
+    assert_eq!(ledger.show(&other).unwrap()["status"], "open");
     // Hive's turns don't run the hooks (it records requests itself).
     assert!(ledger.board(Some("Hive")).unwrap()["not_split"]
         .as_array()

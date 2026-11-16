@@ -55,8 +55,11 @@ export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' }
 
 /** The sections of the board, in the order they're shown. */
 export const SECTIONS = [
-  { id: 'needs-you', title: 'Needs you', statuses: ['waiting', 'blocked'] },
+  // Only what the owner must do: an agent marks a task waiting when it needs the owner, and says
+  // what in the outcome. Blocked is something else in the way, so it's not the owner's list.
+  { id: 'needs-you', title: 'Needs you', statuses: ['waiting'] },
   { id: 'working', title: 'Working on it', statuses: ['active'] },
+  { id: 'stuck', title: 'Stuck', statuses: ['blocked'] },
   { id: 'not-started', title: 'Not started', statuses: ['open'] },
   { id: 'done', title: 'Done', statuses: ['done', 'dropped'] },
 ];

@@ -1030,11 +1030,11 @@ impl Ledger {
         let (status, fallback) = match ended {
             "done" => ("done", "Done."),
             "stopped" => ("dropped", "Stopped before it finished."),
-            "interrupted" => ("waiting", ""),
+            "interrupted" => ("open", ""),  // it resumes on its own: nothing for the owner
             _ => ("blocked", "It failed."),
         };
         let outcome = match (status, said.trim()) {
-            ("waiting", _) => {
+            ("open", _) => {
                 "Hive restarted in the middle of it; it picks it up again on its own."
             }
             (_, "") => fallback,
@@ -1655,6 +1655,7 @@ impl Ledger {
                  EOF\n\
                  Use [] if it asks for nothing. A standing preference (\"never…\", \"always…\") is {{\"kind\": \"rule\", \"paths\": [\"<globs it applies to, or none for the whole project>\"], ...}} instead of a task. \
                  Put each task in its folder, the part of the project it's about: \"folder\": \"<project › folder>\" (Hive then loads every memory of that folder for you). If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\", \"report\": \"<when done: what you did, where, what's left>\"}}]' | {cmd} report. \
+                 Waiting puts the task on the owner's \"Needs you\" list, so use it only when the owner must do something, and say exactly what in the outcome; anything else in the way is blocked, with what's left in the outcome. \
                  Handing folder work to a subagent, put a line \"Hive folder: <project › folder>\" in its prompt and Hive adds that folder's memories. Save what later agents in a folder must know: {cmd} remember \"<project › folder>\" [note|spec|decision] <<'EOF' (first line the title)."
             ));
             let here = project_key(project);
@@ -1770,7 +1771,7 @@ impl Ledger {
             reason.push_str(&format!("Still open:\n{}\n", task_lines(&open)));
             reason.push_str(&format!(
                 "Finish each, or report it: echo '[{{\"id\": \"T1\", \"status\": \"done\", \"outcome\": \"<what happened>\"}}]' | {cmd} report \
-                 (status waiting if you asked the owner something, blocked if something else is in the way, dropped only if the owner withdrew it)."
+                 (status waiting only if the owner must do something, saying what; blocked if anything else is in the way, saying what's left; dropped only if the owner withdrew it)."
             ));
         }
         Ok(json!({"decision": "block", "reason": reason.trim_end()}))
