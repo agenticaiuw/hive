@@ -710,8 +710,7 @@
 
 <style>
   /* The side runs the full height of the window, like a Mac app's sidebar; the tasks sit in a
-     readable column beside it. In Hive.app the window has no title bar, so both start below the
-     window buttons (html.mac-app, set by dashboard.swift). */
+     readable column beside it. */
   .app {
     display: grid;
     grid-template-columns: 264px minmax(0, 1fr);
@@ -748,9 +747,6 @@
     padding: var(--s5) var(--s3);
     border-right: 1px solid var(--line);
     background: rgba(255, 244, 228, 0.02);
-  }
-  :global(html.mac-app) .side {
-    padding-top: 46px;
   }
   .brand {
     display: flex;
@@ -1012,9 +1008,6 @@
     max-width: 920px;
     margin: 0 auto;
     padding: var(--s6) var(--s6) var(--s7);
-  }
-  :global(html.mac-app) .main {
-    padding-top: 40px;
   }
   .crumbs {
     display: flex;
