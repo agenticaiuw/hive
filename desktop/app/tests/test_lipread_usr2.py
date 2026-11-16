@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from lipread_vision import MESH_TO_68, MouthCrops
+from lipread_usr2 import looping
 import lipread_worker
 
 WEIGHTS = 'huge_high_resource_lrs2lrs3vox2avsp.pth'
@@ -80,11 +81,26 @@ class ModelChoiceTest(unittest.TestCase):
         (self.usr2 / 'weights').mkdir()
         (self.usr2 / 'weights' / WEIGHTS).write_bytes(b'')
 
-    def test_flare_unless_usr2_is_asked_for(self):
-        self.install_usr2()
+    def test_flare_until_usr2_is_installed(self):
         self.assertEqual(lipread_worker.load_model()[0], 'flare')
-        os.environ['LIPREAD_MODEL'] = 'usr2'
+        self.install_usr2()
         self.assertEqual(lipread_worker.load_model(), ('usr2', self.usr2))
+
+    def test_flare_when_asked_for(self):
+        self.install_usr2()
+        os.environ['LIPREAD_MODEL'] = 'flare'
+        self.assertEqual(lipread_worker.load_model()[0], 'flare')
+
+
+class LoopingTest(unittest.TestCase):
+    def test_a_repeated_phrase_keeps_one_copy(self):
+        said = [1, 2, 3, 7, 8, 9]
+        self.assertEqual(looping(said + [7, 8, 9] * 2), said)
+        self.assertEqual(looping([5, 5, 5]), [5])
+
+    def test_no_loop(self):
+        self.assertIsNone(looping([1, 2, 3, 4, 5, 6]))
+        self.assertIsNone(looping([7, 8, 9, 7, 8, 9]))
 
 
 if __name__ == '__main__':

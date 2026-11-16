@@ -10,7 +10,15 @@ On its own README demo (assets/demo.gif, a sentence about USR 2.0) it read "you 
 recognitional 2 significant improved training spaces and robustness through domain shifts" from
 the release's own offline crop, and a little worse from the live crop (MouthCrops); FLARE Large
 read "unified speech recognition 20 significantly improves the trading space and robustness to
-domain shifts". So it is opt-in (LIPREAD_MODEL=usr2) until the two are compared on the user's own video.
+domain shifts".
+
+On the owner's own video (2026-11-16, MacBook Air camera, said aloud) it did better: "what's the
+weather going to be like tomorrow afternoon" word for word (FLARE: "what when going to midnight
+tomorrow afternoon"), and 2 words off on "please open safari and check my email from this morning"
+(FLARE: 5). On eight short commands read off the screen ("set a timer for twenty minutes", ...)
+both did badly: USR 2.0 got 47 of 60 words wrong ("i sat at the table for 20 minutes"), FLARE 50,
+and reading each sentence with 0.5 s more on each side didn't help. So it is Hive's lip reader when
+it is installed, as the less bad one; LIPREAD_MODEL=flare picks FLARE.
 """
 import os
 from pathlib import Path
@@ -35,6 +43,17 @@ def FramePool(pool):
             return x.reshape(b, t, c, *x.shape[-2:]).transpose(1, 2)
 
     return FramePool()
+
+
+def looping(ids, times=3):
+    """If the decoder is saying the same thing over and over (the last few tokens three times in a
+    row), what it said with one copy of them; else None. Greedy decoding loops like this on video it
+    can't read: "... from this morning oh my god oh my god oh my god oh my god"."""
+    for n in range(1, min(10, len(ids) // times) + 1):
+        tail = ids[-n:]
+        if all(ids[-(k + 1) * n:len(ids) - k * n] == tail for k in range(1, times)):
+            return ids[:len(ids) - (times - 1) * n]
+    return None
 
 
 class Usr2:
@@ -100,13 +119,18 @@ class Usr2:
             else:
                 ys = torch.tensor([[self.model.sos]], device=self.device)
                 cache = None
-                for _ in range(min(150, max(8, len(crops)))):
+                ids = []
+                # Speech is about 4 tokens a second (0.16 a frame); half a token a frame is plenty.
+                for _ in range(min(150, max(8, len(crops) // 2))):
                     mask = self.subsequent_mask(ys.size(1), device=self.device).unsqueeze(0)
                     y, cache = self.model.decoder.forward_one_step(ys, mask, features, cache=cache)
                     token = self.model.decoder.out_layer_v(y).argmax(-1, keepdim=True)
                     if token.item() == self.model.eos:
                         break
                     ys = torch.cat([ys, token], dim=1)
-                ids = ys[0, 1:].tolist()
+                    ids.append(token.item())
+                    if looping(ids):
+                        ids = looping(ids)
+                        break
             self.last_seconds = time.monotonic() - began
             return self.words(ids)

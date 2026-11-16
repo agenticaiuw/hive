@@ -12,6 +12,9 @@ class Crops:
                                                    min_detection_confidence=0.6, min_tracking_confidence=0.6)
         self.points = None
         self.framing = 'Looking for your face'
+        # The inner lips' gap over the mouth's width, this frame: about 0.06-0.10 when the mouth is
+        # still and up to 0.5 talking. None without a face. lipread_stream.Sentences reads it.
+        self.opening = None
 
     def close(self):
         self.mesh.close()
@@ -29,10 +32,13 @@ class Crops:
         result = self.mesh.process(rgb)
         if not result.multi_face_landmarks:
             self.reset()
+            self.opening = None
             self.framing = 'Face not visible — adjust the screen or camera'
             return None
         h, w = bgr.shape[:2]
         pts = np.array([(p.x * w, p.y * h) for p in result.multi_face_landmarks[0].landmark], dtype=np.float32)
+        width = np.linalg.norm(pts[61] - pts[291])
+        self.opening = float(np.linalg.norm(pts[13] - pts[14]) / width) if width > 0 else None
         lips = pts[[61, 291, 0, 17]]
         if not ((lips[:, 0] >= 3).all() and (lips[:, 0] < w - 3).all()
                 and (lips[:, 1] >= 3).all() and (lips[:, 1] < h - 3).all()):
