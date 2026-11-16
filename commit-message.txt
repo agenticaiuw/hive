@@ -1,0 +1,8 @@
+Dream fix: a task ended stopped or failed
+
+unfinished: asked what the user meant (speech fragment). Seen 5 times, about 2 minutes lost (2026-11-15T13:08:51 to 2026-11-15T21:17:34).
+Hive's nightly dream: its agent wrote a test that failed on the code as it was, then this fix, in a
+private worktree; hive-dream's gate ran the crate's tests and built the workspace.
+
+Dream-Cluster: unfinished-asked-what-the-user-meant-spe-dcbf0c
+

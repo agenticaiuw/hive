@@ -1,0 +1,207 @@
+$ cargo test --offline --manifest-path /Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/Cargo.toml -p hive-app (60s)
+   Compiling hive-core v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-core)
+   Compiling hive-common v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-common)
+   Compiling hive-tasks v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-tasks)
+   Compiling hive-knowledge v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-knowledge)
+   Compiling hive-mac v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-mac)
+   Compiling hive-codex v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-codex)
+   Compiling hive-workspace v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-workspace)
+   Compiling hive-phone v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-phone)
+   Compiling hive-sidecars v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-sidecars)
+   Compiling hive-app v0.1.0 (/Users/runner/work/_temp/dream/ci/green/desktop/app/crates/hive/hive-app)
+    Finished `test` profile [unoptimized] target(s) in 11.12s
+     Running unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_app-722aae5ac04031c2)
+
+running 8 tests
+test live::tests::a_half_written_line_waits ... ok
+test util::tests::dictation_text ... ok
+test util::tests::one_line_for_the_window ... ok
+test live::tests::events_go_to_a_private_file_per_receipt ... ok
+test util::tests::stems_and_words ... ok
+test util::tests::what_is_read_aloud ... ok
+test util::tests::paste_reports_why_it_couldnt ... ok
+test live::tests::only_the_newest_files_are_kept ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running unittests src/main.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_agent-bd6fefdad819cbca)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/hive-ask.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_ask-876ffd37a541dbfe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/hive-auth-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_auth_mcp-78fb7196cca3e5ab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/hive-phone-mcp.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_phone_mcp-2cf55d48bd53533d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/app.rs (/Users/runner/work/_temp/dream/target/debug/deps/app-20f45f36ab0cbbba)
+
+running 9 tests
+test a_typed_request_is_timed_from_when_it_began ... ok
+test an_unknown_authentication_tool ... ok
+test hive_agent_help ... ok
+test the_apps_menu_lines ... ok
+test the_authentication_tools_in_order ... ok
+test where_the_time_went ... ok
+test where_the_time_went_when_the_reply_was_shown ... ok
+test hive_auth_mcp_serves_its_tools_over_stdio ... ok
+test hive_agent_task_help ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/fn_stop.rs (/Users/runner/work/_temp/dream/target/debug/deps/fn_stop-90f6f1adb39fc4a2)
+
+running 13 tests
+test fn_never_says_it_stops_the_agent ... ok
+test fn_off_quiets_but_keeps_tasks ... ok
+test fn_only_resumes_and_never_closes_the_window ... ok
+test fn_opening_the_card_puts_typing_in_its_text_box ... ok
+test fn_tap_after_takeover_resumes ... ok
+test fn_tap_that_itself_took_over_resumes_too ... ok
+test late_transcript_is_discarded_even_if_reopened ... ok
+test mute_keeps_microphone_off ... ok
+test speak_aloud_off_silences_it_but_still_shows_and_saves_what_it_says ... ok
+test the_text_box_never_takes_the_agents_typing ... ok
+test touching_just_as_it_takes_control_pauses_and_fn_resumes ... ok
+test window_hide_button_hides_it_and_the_work_goes_on ... ok
+test window_x_stops_all_tasks_and_speech ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+     Running tests/hive_ask.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_ask-56870fbe8f4bf761)
+
+running 4 tests
+test a_request_hive_turns_down_exits_5 ... ok
+test a_task_that_needs_you_exits_3_and_can_be_followed_again ... ok
+test without_hive_it_says_so ... ok
+test it_sends_the_request_and_prints_what_hive_does_until_it_ends ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+     Running tests/requests.rs (/Users/runner/work/_temp/dream/target/debug/deps/requests-8bcc4441140be7b6)
+
+running 24 tests
+test a_goal_is_not_resumed_without_codex ... ok
+test a_one_way_step_is_said_as_it_happens_and_the_reply_still_comes ... ok
+test a_task_that_failed_says_sorry ... ok
+test a_task_that_stops_on_purpose_says_why_and_isnt_an_error ... ok
+test active_task_is_not_interrupted ... ok
+test another_programs_request_shows_as_one_short_line ... ok
+test clarification_fragment_is_cleared_by_stop_or_typed_request ... ok
+test events_of_a_replaced_task_are_kept_but_not_shown ... ok
+test context_event_is_forwarded_even_for_an_interrupted_task ... ok
+test expired_request_does_not_start ... ok
+test explicit_resume_uses_the_existing_thread ... ok
+test explicit_goal_rewrite_updates_existing_thread ... ok
+test its_reply_is_said_once_and_the_mac_handed_back ... ok
+test listening_toggle_preserves_session_identity ... ok
+test previously_captured_socket_request_is_not_recaptured ... ok
+test short_acknowledgement_is_captured_without_starting_work ... ok
+test spoken_continuation_keeps_fragment_after_clarification ... ok
+test stop_executes_before_failed_receipt ... ok
+test stop_fences_a_persisted_wait_without_an_in_memory_task ... ok
+test store_failure_fails_closed_before_new_work ... ok
+test the_x_ends_a_requests_live_file_as_stopped ... ok
+test ui_admission_before_start_and_receipt_linked ... ok
+test what_a_request_leads_to_goes_to_its_live_file ... ok
+test what_you_say_is_admitted_on_the_voice_channel ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/sidecar_cut_in.rs (/Users/runner/work/_temp/dream/target/debug/deps/sidecar_cut_in-8bfe63abece6d38d)
+
+running 1 test
+test talking_over_its_voice_stops_it_while_the_agent_is_busy_with_what_you_said ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+     Running tests/startup.rs (/Users/runner/work/_temp/dream/target/debug/deps/startup-86ef1afedf73858d)
+
+running 26 tests
+test a_workspace_that_wont_start_says_so ... ok
+test a_workspace_error_shows_once ... ok
+test a_request_from_the_socket_starts_work ... ok
+test after_an_update_a_paused_request_stays_paused ... ok
+test after_an_update_the_request_carries_on ... ok
+test an_update_restart_stops_tasks_for_maintenance ... ok
+test claims_handoff_in_writable_updates_directory ... ok
+test claims_pending_update_and_detaches ... ok
+test failed_handoff_restores_pending ... ok
+test failed_speech_announces_typed_fallback ... ok
+test hiding_the_workspace_viewer_quiets_the_voice_and_its_words_show_instead ... ok
+test in_a_terminal_it_says_where_the_session_is_saved ... ok
+test lip_reading_chosen_before_is_ready_at_start ... ok
+test non_workspace_mode_keeps_voice ... ok
+test quitting_from_the_menu_is_in_the_log_and_the_journal ... ok
+test shutdown_stops_tasks_and_hands_back_the_mac ... ok
+test speak_aloud_and_the_floating_window_are_on_by_default ... ok
+test speak_aloud_and_the_floating_window_left_off_stay_off_from_the_start ... ok
+test speech_follows_workspace_visibility ... ok
+test the_app_is_told_how_things_are_at_start ... ok
+test the_embedded_workspace_starts_and_its_activity_shows ... ok
+test the_loop_runs_without_waiting_for_speech ... ok
+test the_real_update_runs_in_a_session_of_its_own ... ok
+test the_update_waits_for_the_last_task_to_end ... ok
+test the_window_x_pauses_the_workspace_input ... ok
+test unfinished_work_is_restored_at_start ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.83s
+
+     Running tests/voice_shell.rs (/Users/runner/work/_temp/dream/target/debug/deps/voice_shell-f61a16a373d487c8)
+
+running 25 tests
+test a_look_is_not_taken_while_a_task_works_on_the_mac ... ok
+test a_camera_that_wont_open_says_so_at_once_and_isnt_shown_as_on ... ok
+test captions_show_what_its_doing ... ok
+test dictation_it_cant_type_is_left_on_the_clipboard ... ok
+test fn_and_shift_dictate_until_fn_again ... ok
+test holding_fn_types_what_you_say_into_the_app_in_front ... ok
+test fn_with_another_key_is_a_shortcut_not_dictation ... ok
+test it_looks_at_the_mac_as_you_start_talking_and_says_where_the_time_went ... ok
+test letting_go_of_fn_mid_sentence_types_all_of_it ... ok
+test lip_reading_empty_results_and_errors_are_visible ... ok
+test lip_reading_turns_the_camera_on_until_the_second_tap ... ok
+test on_the_phone_it_works_on_the_phone_alongside_the_mac ... FAILED
+test over_its_voice_its_own_words_are_ignored ... ok
+test saying_continue_carries_on_after_you_take_over ... ok
+test saying_more_right_after_adds_to_the_request ... ok
+test saying_stop_stops_the_task ... ok
+test talking_over_it_stops_its_voice ... ok
+test talking_over_it_stops_its_voice_while_the_agent_is_busy ... ok
+test tapping_fn_turns_listening_on_but_never_off ... ok
+test text_you_add_goes_into_the_conversation_and_says_truthfully_if_it_got_there ... ok
+test the_session_is_saved_what_you_said_and_what_it_did ... ok
+test turning_listening_off_mid_sentence_cancels_unfinished_speech ... ok
+test typed_request_from_caption_is_sent_to_the_agent ... ok
+test with_your_voice_enrolled_someone_elses_isnt_a_task ... ok
+test words_show_up_as_you_talk_and_the_task_goes_to_codex ... ok
+
+failures:
+
+---- on_the_phone_it_works_on_the_phone_alongside_the_mac stdout ----
+
+thread 'on_the_phone_it_works_on_the_phone_alongside_the_mac' (14465) panicked at hive-app/tests/voice_shell.rs:589:5:
+assertion failed: h.agent.tasks.lock().phone.as_ref().is_some_and(|t| t.running())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    on_the_phone_it_works_on_the_phone_alongside_the_mac
+
+test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.14s
+
+error: test failed, to rerun pass `-p hive-app --test voice_shell`

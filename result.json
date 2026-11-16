@@ -1,0 +1,43 @@
+{
+  "head": "a42a87e9320c4e14655f44ec8ed0505214c7f588",
+  "test": "2ecefe7e99df4d150c3aca0a1b8f14ad9ad84bb2",
+  "stage": "green",
+  "red_failed": true,
+  "red_kind": "assertion",
+  "red_summary": "test stop_executes_before_failed_receipt ... ok\ntest stop_fences_a_persisted_wait_without_an_in_memory_task ... ok\ntest store_failure_fails_closed_before_new_work ... ok\ntest the_x_ends_a_requests_live_file_as_stopped ... ok\ntest ui_admission_before_start_and_receipt_linked ... ok\ntest what_a_request_leads_to_goes_to_its_live_file ... ok\ntest what_you_say_is_admitted_on_the_voice_channel ... ok\n\nfailures:\n\n---- spoken_continuation_keeps_fragment_after_clarification stdout ----\n\nthread 'spoken_continuation_keeps_fragment_after_clarification' (10961) panicked at hive-app/tests/requests.rs:420:5:\nassertion `left == right` failed\n  left: \"move it to the left\"\n right: \"And then for this move it to the left\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    spoken_continuation_keeps_fragment_after_clarification\n\ntest result: FAILED. 22 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s\n\nerror: test failed, to rerun pass `-p hive-app --test requests`",
+  "green": {
+    "passed": false,
+    "reasons": [
+      "tests failed: cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-app"
+    ],
+    "warnings": [
+      "no private-terms file: the private term check was skipped"
+    ],
+    "files": [
+      "desktop/app/crates/hive/hive-app/src/shell.rs",
+      "desktop/app/crates/hive/hive-app/tests/requests.rs"
+    ],
+    "test_lines": 38,
+    "code_lines": 21,
+    "packages": [
+      {
+        "Hive": "hive-app"
+      }
+    ],
+    "tests": [
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-app",
+        "ok": false,
+        "seconds": 59.9,
+        "summary": "test talking_over_it_stops_its_voice ... ok\ntest talking_over_it_stops_its_voice_while_the_agent_is_busy ... ok\ntest tapping_fn_turns_listening_on_but_never_off ... ok\ntest text_you_add_goes_into_the_conversation_and_says_truthfully_if_it_got_there ... ok\ntest the_session_is_saved_what_you_said_and_what_it_did ... ok\ntest turning_listening_off_mid_sentence_cancels_unfinished_speech ... ok\ntest typed_request_from_caption_is_sent_to_the_agent ... ok\ntest with_your_voice_enrolled_someone_elses_isnt_a_task ... ok\ntest words_show_up_as_you_talk_and_the_task_goes_to_codex ... ok\n\nfailures:\n\n---- on_the_phone_it_works_on_the_phone_alongside_the_mac stdout ----\n\nthread 'on_the_phone_it_works_on_the_phone_alongside_the_mac' (14465) panicked at hive-app/tests/voice_shell.rs:589:5:\nassertion failed: h.agent.tasks.lock().phone.as_ref().is_some_and(|t| t.running())\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    on_the_phone_it_works_on_the_phone_alongside_the_mac\n\ntest result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.14s\n\nerror: test failed, to rerun pass `-p hive-app --test voice_shell`"
+      }
+    ]
+  },
+  "merge_commit": null,
+  "merged": false,
+  "branch_deleted": true,
+  "reasons": [
+    "gate: tests failed: cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-app"
+  ],
+  "run_url": "https://github.com/agenticaiuw/hive/actions/runs/43841067492"
+}
