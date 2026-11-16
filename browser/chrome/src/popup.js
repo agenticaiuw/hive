@@ -48,8 +48,12 @@ import {
   mergeTranscript,
   speechLang,
 } from './voice-input.js'
+import { initAskHive } from './ask-hive.js'
 
 const api = globalThis.browser ?? globalThis.chrome
+
+// The ask box first, so it's listening before the old console below starts up.
+initAskHive()
 
 /* The standalone console is this same page under ?standalone=1. */
 const CONSOLE_PAGE = 'popup.html?standalone=1'

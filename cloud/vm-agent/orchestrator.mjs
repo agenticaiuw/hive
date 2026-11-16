@@ -151,7 +151,68 @@ export function branchOf(requestId, task) {
  * branch, title, request, key}) → the same plus {branch, files} when it pushed a change (optional:
  * without it code tasks wait for the Mac); now() → seconds; log(line).
  */
+// ---- page rules: the owner asks on a web page, through the browser extension ---------------------
+
+export const PAGE_GUIDE = `You change how a web page looks for the owner. They are on the page outlined below and said
+what they want it to look like. Write a rule their browser extension applies every time the page loads, and answer
+with JSON only, no prose, in this shape:
+{"title": "<what the rule does, a few words, like: Only this semester's 5 courses>",
+ "path": "<the page's path the rule is for, like /, or empty for every page on this site>",
+ "hide": ["<CSS selector of something to hide>", ...],
+ "keep": [{"items": "<CSS selector matching every one of a list's items>", "text": ["<text an item to keep contains>", ...]}],
+ "css": "<extra CSS, or empty>"}
+"keep" hides each matching item that contains none of its texts (case doesn't matter), so a list shows only what the owner
+wants. Use only selectors you can see in the outline, preferring ids and stable class names over generated ones, and
+never hide the page's main content area itself. Decide which items to keep from what the outline shows (course names,
+terms, dates). If the owner wants the page back the way it was, answer {"off": true} and nothing else.`;
+
+/** A rule from the model's answer: only the known fields, each the right type. */
+export function parsePageRule(answer) {
+  const match = /\{[\s\S]*\}/.exec(String(answer || ''));
+  if (!match) throw new Error('the answer had no JSON');
+  const value = JSON.parse(match[0]);
+  if (value.off === true) return { off: true };
+  const strings = list => (Array.isArray(list) ? list.map(x => String(x).trim()).filter(Boolean).slice(0, 60) : []);
+  const rule = {
+    hide: strings(value.hide),
+    keep: (Array.isArray(value.keep) ? value.keep : [])
+      .map(k => ({ items: String(k?.items || '').trim(), text: strings(k?.text) }))
+      .filter(k => k.items && k.text.length).slice(0, 10),
+    css: String(value.css || '').slice(0, 20000),
+  };
+  if (!rule.hide.length && !rule.keep.length && !rule.css.trim()) throw new Error('the rule changes nothing');
+  return { title: String(value.title || 'Page change').trim().slice(0, 120), path: String(value.path ?? '').trim().slice(0, 500), rule };
+}
+
+/** A request asked on a web page: one model call writes the page's rule, and the board keeps it. */
+export async function handlePage(request, { board, ask, log = () => {} }) {
+  const page = request.page;
+  const url = new URL(page.url);
+  const site = url.hostname.replace(/^www\./, '');
+  log(`R${request.id} on ${site}${url.pathname}: ${request.text}`);
+  await board('/v1/requests/update', { id: request.id, status: 'working', project: 'web' });
+  let made;
+  try {
+    made = parsePageRule(await ask(`${PAGE_GUIDE}\n\nThe page: ${page.url}\nIts title: ${page.title || ''}\n` +
+      `The owner said: ${request.text}\n\nThe page's outline (tag#id.classes "text"):\n${page.outline || '(none)'}\n`, MODELS.normal));
+  } catch (error) {
+    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't write the page change: ${error.message}` });
+    return;
+  }
+  if (made.off) {
+    const { off } = await board('/v1/page-rules/off', { host: site });
+    await board('/v1/requests/update', { id: request.id, status: 'done', outcome: `${site} is back to normal (${off} change${off === 1 ? '' : 's'} off).` });
+    return;
+  }
+  const { id } = await board('/v1/page-rules', { host: site, path: made.path, title: made.title, rule: made.rule, request: request.id });
+  await board('/v1/requests/update', {
+    id: request.id, status: 'done',
+    outcome: `${made.title}: on ${site}${made.path || ' (every page)'} from now on (page rule ${id}).`,
+  });
+}
+
 export async function handle(request, deps) {
+  if (request.page?.url && deps.ask) return handlePage(request, deps);
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
   log(`R${request.id}: ${request.text}`);
@@ -280,11 +341,14 @@ function boardClient({ url, token }) {
 }
 
 /** Codex with no tools and a read-only sandbox, for the plan: its last message. */
-function planWithCodex(words) {
+const planWithCodex = words => askCodex(`${PLAN_GUIDE}\n\nThe owner's instruction:\n${words}\n`, PLANNER);
+
+/** One prompt to Codex with no tools and a read-only sandbox: its last message. */
+function askCodex(prompt, choice) {
   const dir = join(homedir(), 'hive-vm-agent', 'state', 'planner');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const args = ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only',
-    '-C', dir, '-m', PLANNER.model, '-c', `model_reasoning_effort="${PLANNER.effort}"`, '-c', 'web_search="disabled"', '-'];
+    '-C', dir, '-m', choice.model, '-c', `model_reasoning_effort="${choice.effort}"`, '-c', 'web_search="disabled"', '-'];
   return new Promise((resolve, reject) => {
     const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${CODEX_HOME}`, '/root/.local/bin/codex', ...args],
       { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -292,7 +356,7 @@ function planWithCodex(words) {
     createInterface({ input: codex.stdout }).on('line', line => lines.push(line));
     let errors = '';
     codex.stderr.on('data', chunk => { errors += chunk; });
-    codex.stdin.end(`${PLAN_GUIDE}\n\nThe owner's instruction:\n${words}\n`);
+    codex.stdin.end(prompt);
     const timer = setTimeout(() => codex.kill('SIGTERM'), 5 * 60_000);
     codex.on('close', status => {
       clearTimeout(timer);
@@ -399,7 +463,7 @@ async function main(argv) {
       log(`couldn't reach the board: ${error.message}`);
     }
     if (request) {
-      await handle(request, { board, plan: planWithCodex, run: runOnVm, code: codeOnVm, log }).catch(async error => {
+      await handle(request, { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log }).catch(async error => {
         log(`R${request.id} failed: ${error.stack || error}`);
         await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `The orchestrator hit an error: ${error.message}` })
           .catch(() => {});

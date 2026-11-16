@@ -198,3 +198,23 @@ test('a code task in a repository the VM can push to runs there and waits for re
   assert.equal(waiting.status, 'waiting');
   assert.match(waiting.outcome, /code change in buckymatch: Hive's cloud agent changes code only in hive/);
 });
+
+test('a request asked on a web page becomes that page\'s rule', async () => {
+  const { handle, parsePageRule } = await import('./orchestrator.mjs');
+  assert.deepEqual(parsePageRule('{"off": true}'), { off: true });
+  assert.throws(() => parsePageRule('{"title":"x"}'), /changes nothing/);
+  const calls = [];
+  const board = async (path, body) => { calls.push([path, body]); return path === '/v1/page-rules' ? { id: 3 } : { off: 1 }; };
+  const ask = async prompt => {
+    assert.match(prompt, /ic-DashboardCard/);
+    return 'Here: {"title":"Only this semester\'s courses","path":"/","hide":["#right-side-wrapper"],' +
+      '"keep":[{"items":".ic-DashboardCard","text":["CS 400","MATH 341"]}],"css":"","extra":1}';
+  };
+  await handle({ id: 9, text: 'just my 5 courses', page: { url: 'https://canvas.wisc.edu/', title: 'Dashboard', outline: 'div.ic-DashboardCard "CS 400"' } },
+    { board, ask, plan: () => { throw new Error('no plan for a page'); } });
+  const saved = calls.find(([path]) => path === '/v1/page-rules')[1];
+  assert.equal(saved.host, 'canvas.wisc.edu');
+  assert.equal(saved.path, '/');
+  assert.deepEqual(saved.rule, { hide: ['#right-side-wrapper'], keep: [{ items: '.ic-DashboardCard', text: ['CS 400', 'MATH 341'] }], css: '' });
+  assert.equal(calls.at(-1)[1].status, 'done');
+});
