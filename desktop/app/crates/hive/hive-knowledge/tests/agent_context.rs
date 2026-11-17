@@ -75,3 +75,31 @@ fn mcp_and_claude_screenshots_render() {
         assert!(render_payload(&image).contains("src=\"data:image/jpeg;base64,QUJD\""));
     }
 }
+
+#[test]
+fn a_resumed_thread_points_to_codex_for_its_history_instead_of_copying_every_turn() {
+    let env = common::Env::new(&[("AGENT_STATE_DIR", "")]);
+    let turn = json!({"id": "t1", "items": [{"type": "agentMessage", "text": "big ".repeat(5000)}]});
+    let resumed = json!({"thread": {"id": "th-1", "path": "/codex/sessions/rollout-th-1.jsonl",
+                                    "preview": "Use the device the request is about", "turns": [turn.clone(), turn]}});
+    let log = ContextLog::new();
+    log.record("thread/resume output", &resumed, None, Some("th-1")).unwrap();
+    let record = std::fs::read_dir(&log.directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    let turns = saved["payload"]["thread"]["turns"].as_str().unwrap();
+    assert!(turns.starts_with("2 earlier turns, not copied here"), "{turns}");
+    assert!(turns.contains("/codex/sessions/rollout-th-1.jsonl"));
+    assert_eq!(saved["payload"]["thread"]["preview"], json!("Use the device the request is about"));
+    assert!(std::fs::metadata(&record).unwrap().len() < 2_000);
+    drop(env);
+
+    // Anything else, and a thread with no turns yet, is kept exactly.
+    let fresh = json!({"thread": {"id": "th-2", "turns": []}});
+    assert_eq!(hive_knowledge::agent_context::without_thread_history(&fresh), fresh);
+    let other = json!({"input": [{"type": "text", "text": "hi"}]});
+    assert_eq!(hive_knowledge::agent_context::without_thread_history(&other), other);
+}
