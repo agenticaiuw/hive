@@ -28,8 +28,8 @@
  *   title: string, status: string, minutes: number|null, value: string, outcome: string,
  *   evidence: string, harness: string, session: string, project: string, projectName: string,
  *   folder: string, report: string, workSeconds: number|null, tokensIn: number|null,
- *   tokensOut: number|null, created: number, updated: number, files: string[],
- *   commits: Commit[]}} Task */
+ *   tokensOut: number|null, created: number, said: number, updated: number, files: string[],
+ *   commits: Commit[], name: string}} Task */
 
 /** @typedef {{hash: string, branch: string, title: string}} Commit */
 /** A standing rule, as the board gives it (normalizeBoard).
@@ -89,11 +89,12 @@ const CODING_HARNESSES = ['claude', 'codex'];
 
 /** The sections of the board, in the order they're shown. */
 export const SECTIONS = [
-  // Only what the owner must do: an agent marks a task waiting when it needs the owner, and says
-  // what in the outcome. Blocked is something else in the way, so it's not the owner's list.
-  { id: 'needs-you', title: 'Needs you', statuses: ['waiting'] },
+  // Everything that goes nowhere without the owner: a task waiting on an answer (the outcome says
+  // what), then a stuck one, which only moves when the owner continues or cancels it. They were two
+  // lists; the owner: "how's this different from needing me? if they're the same thing just
+  // combine them".
+  { id: 'needs-you', title: 'Needs you', statuses: ['waiting', 'blocked'] },
   { id: 'working', title: 'Working on it', statuses: ['active'] },
-  { id: 'stuck', title: 'Stuck', statuses: ['blocked'] },
   { id: 'not-started', title: 'Not started', statuses: ['open'] },
   { id: 'done', title: 'Done', statuses: ['done', 'dropped'] },
 ];
@@ -193,8 +194,55 @@ function toTask(row, machine) {
       .filter((c) => c && typeof c.hash === 'string')
       .map((c) => ({ hash: c.hash, branch: String(c.branch || ''), title: String(c.title || '') })),
     created: seconds(row.created_at ?? row.said_at),
+    said: seconds(row.said_at ?? row.created_at),
     updated: seconds(row.updated_at ?? row.done_at ?? row.created_at ?? row.said_at),
+    name: '',
   };
+}
+
+/** "261117 14:05": a moment as yymmdd hh:mm, in this device's time. @param {number} at seconds */
+export function stamp(at) {
+  const d = new Date(at * 1000);
+  const two = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  return `${two(d.getFullYear() % 100)}${two(d.getMonth() + 1)}${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/**
+ * Names every task for when the owner asked for it (T246): "261117 14:05". The tasks one message
+ * asks for share its minute, so each of those gets a letter in the order they were made:
+ * "261117 14:05a", "261117 14:05b". Unlike T numbers, which each machine counts on its own, a name
+ * is the same task on every machine's board.
+ * @param {Task[]} tasks
+ * @returns {Task[]}
+ */
+export function nameTasks(tasks) {
+  /** @type {Map<number, Task[]>} */
+  const minutes = new Map();
+  for (const task of tasks) {
+    // One with no time keeps its number.
+    if (!(task.said || task.created)) continue;
+    const minute = Math.floor((task.said || task.created) / 60);
+    const group = minutes.get(minute) ?? [];
+    group.push(task);
+    minutes.set(minute, group);
+  }
+  for (const [minute, group] of minutes) {
+    const base = stamp(minute * 60);
+    const ordered = [...group].sort(
+      (a, b) => a.created - b.created || a.machine.localeCompare(b.machine) || Number(a.id) - Number(b.id),
+    );
+    ordered.forEach((task, i) => {
+      task.name = ordered.length > 1 ? base + letters(i) : base;
+    });
+  }
+  return tasks;
+}
+
+/** a, b, … z, aa, ab, … @param {number} i */
+function letters(i) {
+  let out = '';
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(97 + ((n - 1) % 26)) + out;
+  return out;
 }
 
 /**
@@ -239,7 +287,7 @@ export function normalizeBoard(answer) {
     source,
     note: typeof answer?.note === 'string' ? answer.note : '',
     now: seconds(local ? board.generated_at : board.now) || Math.floor(Date.now() / 1000),
-    tasks: /** @type {Task[]} */ (rows.map((/** @type {any} */ r) => toTask(r, machine))),
+    tasks: nameTasks(rows.map((/** @type {any} */ r) => toTask(r, machine))),
     unsplit: unsplit.map((/** @type {any} */ m) => ({
       key: `${m.machine || machine}:${m.id}`,
       id: String(m.id ?? ''),
@@ -443,7 +491,10 @@ export function matches(task, { project = '', folder = '', query = '' } = {}) {
 export function sections(tasks, filter = {}) {
   const shown = tasks.filter((t) => matches(t, filter)).sort((a, b) => b.updated - a.updated);
   return SECTIONS.map((s) => {
-    const all = shown.filter((t) => s.statuses.includes(t.status));
+    // Within a list, its first status first (a question before a stuck task), each newest first.
+    const all = shown
+      .filter((t) => s.statuses.includes(t.status))
+      .sort((a, b) => s.statuses.indexOf(a.status) - s.statuses.indexOf(b.status));
     const limit = s.id === 'done' ? (filter.doneLimit ?? 30) : all.length;
     return { ...s, tasks: all.slice(0, limit), total: all.length };
   });
