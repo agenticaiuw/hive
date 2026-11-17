@@ -574,6 +574,7 @@ fn only_a_real_board_command_is_taken_over() {
 fn harness_notices_are_not_the_owners_messages() {
     use hive_tasks::from_the_owner;
     assert!(from_the_owner("fix the login page"));
+    assert!(!from_the_owner("[Hive, not the owner] This task is stuck, and Hive continues it"));
     assert!(from_the_owner("  <b>bold</b> is fine in a real message"));
     assert!(!from_the_owner(
         "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"

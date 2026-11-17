@@ -39,6 +39,10 @@ export default {
     }
     return route(request, env, url);
   },
+  // Every minute (wrangler.jsonc triggers): stuck tasks get going again without the owner.
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(continueStuck(env));
+  },
 };
 
 async function route(request, env, url) {
@@ -439,7 +443,7 @@ async function takeRequest(request, env) {
     env.DB.prepare(
       `UPDATE board_requests SET status = 'planning', taken_by = ?1, taken_at = ?2, updated_at = ?2
        WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY id LIMIT 1)
-       RETURNING id, folder, follows`,
+       RETURNING id, folder, follows, retry_note`,
     ).bind(by, at, agent),
   ]);
   const row = taken.results[0];
@@ -455,9 +459,11 @@ async function takeRequest(request, env) {
       : null,
   ]);
   // The owner replied in an earlier request's conversation: the agent hears what that one was.
-  const before = earlier
+  // Run again by Hive because its tasks got stuck (continueStuck): its note comes first.
+  const retry = row.retry_note ? `${row.retry_note}\nDon't redo what's already done. The request, as it was:\n` : "";
+  const before = retry + (earlier
     ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\nThe owner now says: `
-    : "";
+    : "");
   return json({
     request: {
       id: row.id, folder: row.folder || "", project: message?.project || "", text: before + (message?.text || ""),
@@ -675,6 +681,9 @@ async function actOnTask(request, env) {
       `UPDATE board_tasks SET status = 'dropped', outcome = 'Cancelled by the owner from the dashboard.',
          cancelled_at = ?3, updated_at = ?3 WHERE machine = ?1 AND id = ?2`,
     ).bind(machine, id, at).run();
+  } else {
+    // The owner just asked it themselves: Hive's own continue (continueStuck) waits on this one.
+    await env.DB.prepare("UPDATE board_tasks SET auto_continued_at = ?3 WHERE machine = ?1 AND id = ?2").bind(machine, id, at).run();
   }
   const said = {
     cancel: `The owner cancelled ${name} from the Hive dashboard. Stop any work on it; it is already marked dropped, so don't report it.`,
@@ -695,6 +704,91 @@ async function actOnTask(request, env) {
     machine, run, agent: task.harness, words: said, from, at, task: id, wake: action === "cancel" ? 0 : 1,
   });
   return json({ ok: true, message, task: action === "cancel" ? { machine, id, status: "dropped" } : undefined });
+}
+
+// ---- stuck tasks get going again by themselves -------------------------------------------------
+
+// The owner: "why tf would it get stuck just for me to click continue? what's the point?" (2026-11-17).
+// A stuck (blocked) task's agent gets a continue from Hive, the way the dashboard's Continue sends
+// one, AUTO_CONTINUES times at most; only then is it the owner's (Needs you). A try counts as taken
+// once the agent reports the task again, or after AUTO_WAIT without a word. The words start with
+// FROM_HIVE, so the agent's board (hive-tasks: from_the_owner, as_said) never takes them for the
+// owner's own. One agent per project at a time, so sessions continued together don't trample each
+// other's files.
+const AUTO_CONTINUES = 2;
+const AUTO_WAIT = 30 * 60;
+const FROM_HIVE = "[Hive, not the owner]";
+
+const autoWords = (tasks, n) => {
+  const one = tasks.length === 1;
+  const list = tasks.map((t) => `T${t.id} ("${t.title}")${t.outcome ? `, stuck on: ${t.outcome}` : ""}`).join("\n- ");
+  return `${FROM_HIVE} ${one ? "This task is" : "These tasks are"} stuck, and Hive continues ${one ? "it" : "them"} so the owner doesn't have to (try ${n} of ${AUTO_CONTINUES}):\n- ${list}\n` +
+    "Get past what's in the way yourself and finish. Do nothing the owner hasn't asked for: no publishing, sending, deleting or spending to get around it. " +
+    "Report each when it ends: done; waiting only if the owner must do something themselves, saying exactly what; dropped if it can't or shouldn't be done, saying why.";
+};
+
+async function continueStuck(env, at = now()) {
+  const stuck = await env.DB.prepare(
+    `SELECT t.machine, t.id, t.title, t.outcome, t.message, t.auto_continues, COALESCE(m.project, '') AS project,
+            COALESCE(t.claimed_harness, m.harness) AS harness, COALESCE(t.claimed_session, m.session) AS session
+     FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
+     WHERE t.status = 'blocked' AND t.cancelled_at IS NULL AND t.auto_continues < ?1
+       AND (t.auto_continued_at IS NULL OR t.updated_at > t.auto_continued_at OR t.auto_continued_at < ?2)
+     ORDER BY t.updated_at LIMIT 200`,
+  ).bind(AUTO_CONTINUES, at - AUTO_WAIT).all();
+  if (!stuck.results.length) return { continued: 0 };
+  // Projects where an agent Hive continued is still at it: the next one there waits its turn.
+  const busy = await env.DB.prepare(
+    `SELECT DISTINCT t.machine, COALESCE(m.project, '') AS project,
+            COALESCE(t.claimed_harness, m.harness) || ':' || COALESCE(t.claimed_session, m.session) AS run
+     FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
+     WHERE t.auto_continued_at >= ?1 AND t.auto_continues > 0 AND t.status IN ('blocked', 'active')`,
+  ).bind(at - AUTO_WAIT).all();
+  const runs = new Map();
+  for (const t of stuck.results) {
+    if (t.machine === "cloud") {
+      const key = `cloud:R${Math.floor(t.id / 100)}`;
+      if (!runs.has(key)) runs.set(key, { machine: "cloud", request: Math.floor(t.id / 100), tasks: [] });
+      runs.get(key).tasks.push(t);
+      continue;
+    }
+    if (!t.session || !t.harness) continue; // no agent to ask: it stays the owner's
+    const run = `${t.harness}:${t.session}`;
+    const key = `${t.machine}:${run}`;
+    if (!runs.has(key)) runs.set(key, { machine: t.machine, run, agent: t.harness, project: t.project, tasks: [] });
+    runs.get(key).tasks.push(t);
+  }
+  const taken = new Set();
+  const statements = [];
+  let continued = 0;
+  for (const r of runs.values()) {
+    const n = Math.max(...r.tasks.map((t) => t.auto_continues)) + 1;
+    const words = autoWords(r.tasks, n);
+    if (r.machine === "cloud") {
+      // Hive in the cloud: the same request runs again, with Hive's note before the owner's words.
+      const again = await env.DB.prepare(
+        `UPDATE board_requests SET status = 'queued', retry_note = ?2, taken_by = NULL, finished_at = NULL, updated_at = ?3
+         WHERE id = ?1 AND status IN ('done', 'failed') RETURNING id`,
+      ).bind(r.request, words, at).first();
+      if (!again) continue; // still going: it may yet move them
+    } else {
+      const place = `${r.machine}:${r.project}`;
+      const others = busy.results.some((b) => b.machine === r.machine && b.project === r.project && b.run !== r.run);
+      if (r.project && (others || taken.has(place))) continue;
+      taken.add(place);
+      await queueMessage(env, { machine: r.machine, run: r.run, agent: r.agent, words, from: "hive", at, task: r.tasks[0].id });
+    }
+    for (const t of r.tasks) {
+      statements.push(
+        env.DB.prepare(
+          "UPDATE board_tasks SET auto_continues = auto_continues + 1, auto_continued_at = ?3 WHERE machine = ?1 AND id = ?2",
+        ).bind(t.machine, t.id, at),
+      );
+    }
+    continued += r.tasks.length;
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return { continued };
 }
 
 // POST /v1/runs/messages/take {machine}: the node takes what's waiting for its agents, each message once.
@@ -920,11 +1014,15 @@ async function board(request, env) {
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
               t.files, t.commits, COALESCE(t.claimed_harness, m.harness) AS harness,
-              COALESCE(t.claimed_session, m.session) AS session, m.project, m.times, m.said_at, t.cancelled_at
+              COALESCE(t.claimed_session, m.session) AS session, m.project, m.times, m.said_at, t.cancelled_at,
+              -- Stuck, but Hive is still continuing it on its own (continueStuck): not the owner's yet.
+              CASE WHEN t.status = 'blocked' AND t.cancelled_at IS NULL
+                     AND (t.machine = 'cloud' OR COALESCE(NULLIF(t.claimed_session, ''), NULLIF(m.session, '')) IS NOT NULL)
+                     AND (t.auto_continues < ?2 OR t.auto_continued_at >= ?3) THEN 1 ELSE 0 END AS retrying
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1
        ORDER BY t.updated_at DESC LIMIT 600`,
-    ).bind(since),
+    ).bind(since, AUTO_CONTINUES, now() - AUTO_WAIT),
     env.DB.prepare(
       `SELECT machine, id, harness, session, project, text, said_at, times FROM board_messages
        WHERE split_at IS NULL AND said_at > ?1 ORDER BY said_at DESC LIMIT 60`,

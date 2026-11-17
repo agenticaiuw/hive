@@ -29,7 +29,7 @@
  *   evidence: string, harness: string, session: string, project: string, projectName: string,
  *   folder: string, report: string, workSeconds: number|null, tokensIn: number|null,
  *   tokensOut: number|null, created: number, said: number, asked: string, updated: number,
- *   files: string[], commits: Commit[]}} Task */
+ *   files: string[], commits: Commit[], retrying: boolean}} Task */
 
 /** @typedef {{hash: string, branch: string, title: string}} Commit */
 /** A standing rule, as the board gives it (normalizeBoard).
@@ -87,16 +87,24 @@ export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' }
 /** The coding agents whose sessions stream to the board as runs (hive-tasks live.rs). */
 const CODING_HARNESSES = ['claude', 'codex'];
 
-/** The sections of the board, in the order they're shown. */
+/**
+ * Whether a task goes nowhere without the owner: one waiting on their answer, or one stuck after
+ * Hive's own tries to continue it are spent (the cloud continues a stuck task by itself first; the
+ * owner: "why tf would it get stuck just for me to click continue? what's the point?").
+ * @param {Task} t
+ */
+export const needsOwner = (t) => t.status === 'waiting' || (t.status === 'blocked' && !t.retrying);
+
+/** The sections of the board, in the order they're shown, each with the tasks it holds (`has`). */
 export const SECTIONS = [
   // Everything that goes nowhere without the owner: a task waiting on an answer (the outcome says
-  // what), then a stuck one, which only moves when the owner continues or cancels it. They were two
-  // lists; the owner: "how's this different from needing me? if they're the same thing just
-  // combine them".
-  { id: 'needs-you', title: 'Needs you', statuses: ['waiting', 'blocked'] },
-  { id: 'working', title: 'Working on it', statuses: ['active'] },
-  { id: 'not-started', title: 'Not started', statuses: ['open'] },
-  { id: 'done', title: 'Done', statuses: ['done', 'dropped'] },
+  // what), then a stuck one Hive couldn't get going. They were two lists; the owner: "how's this
+  // different from needing me? if they're the same thing just combine them".
+  { id: 'needs-you', title: 'Needs you', statuses: ['waiting', 'blocked'], has: needsOwner },
+  // A stuck task Hive is still continuing is being worked on, not the owner's yet.
+  { id: 'working', title: 'Working on it', statuses: ['active', 'blocked'], has: (/** @type {Task} */ t) => t.status === 'active' || (t.status === 'blocked' && t.retrying) },
+  { id: 'not-started', title: 'Not started', statuses: ['open'], has: (/** @type {Task} */ t) => t.status === 'open' },
+  { id: 'done', title: 'Done', statuses: ['done', 'dropped'], has: (/** @type {Task} */ t) => t.status === 'done' || t.status === 'dropped' },
 ];
 
 /**
@@ -198,6 +206,8 @@ function toTask(row, machine) {
     // When the owner asked for it, which is all a task is called by besides its title (T246, T320).
     asked: stamp(seconds(row.said_at ?? row.created_at)),
     updated: seconds(row.updated_at ?? row.done_at ?? row.created_at ?? row.said_at),
+    // Stuck, but Hive in the cloud is still continuing it by itself (the board's retrying).
+    retrying: (text('status') === 'blocked') && Number(row.retrying) === 1,
   };
 }
 
@@ -457,7 +467,7 @@ export function sections(tasks, filter = {}) {
   return SECTIONS.map((s) => {
     // Within a list, its first status first (a question before a stuck task), each newest first.
     const all = shown
-      .filter((t) => s.statuses.includes(t.status))
+      .filter(s.has)
       .sort((a, b) => s.statuses.indexOf(a.status) - s.statuses.indexOf(b.status));
     const limit = s.id === 'done' ? (filter.doneLimit ?? 30) : all.length;
     return { ...s, tasks: all.slice(0, limit), total: all.length };

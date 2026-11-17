@@ -66,6 +66,7 @@ test('a task that has not started or is stuck says why', () => {
   const task = (id) => b.tasks.find((t) => t.id === id);
   assert.equal(reasonFor(task('148'), of.get('mac:148')), 'Its agent is on “Eye typing knows every English word” first.');
   assert.equal(reasonFor(task('168'), of.get('mac:168')), 'Pick one: Rust build folders or Xcode caches');
+  assert.equal(reasonFor({ ...task('168'), status: 'blocked', retrying: true }, of.get('mac:168')), 'Hive is continuing it for you. It was stuck on: Pick one: Rust build folders or Xcode caches');
   assert.equal(reasonFor(task('1301'), of.get('cloud:1301')), 'Hive in the cloud is on an earlier step first.');
 
   const stopped = { ...list.find((a) => a.key === 'mac|claude:eyes'), status: 'idle' };

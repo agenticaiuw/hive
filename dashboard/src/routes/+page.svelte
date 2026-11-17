@@ -36,6 +36,7 @@
     commitUrl,
     cost,
     folderList,
+    needsOwner,
     normalizeBoard,
     normalizeFolder,
     planLimits,
@@ -155,7 +156,7 @@
   const titles = $derived(new Map((board?.tasks ?? []).map((t) => [t.key, t.title])));
   /** A text from `machine` with its task numbers as those tasks' titles. */
   const titled = (text: string, machine: string) => withTitles(text, machine, titles);
-  const needsYou = $derived(board ? board.tasks.filter((t) => t.status === "waiting" || t.status === "blocked").length : 0);
+  const needsYou = $derived(board ? board.tasks.filter(needsOwner).length : 0);
 
   // A coding session's conversation comes from its node's steps, read while it's open; Hive in the
   // cloud's from the board.
@@ -597,7 +598,7 @@
         <span class="when">{ago(task.updated, board?.now ?? 0)}</span>
       {:else}
         <div class="task-actions">
-          {#if task.status === "blocked" || task.status === "open"}
+          {#if (task.status === "blocked" && !task.retrying) || task.status === "open"}
             <button
               type="button"
               class="pill-button"

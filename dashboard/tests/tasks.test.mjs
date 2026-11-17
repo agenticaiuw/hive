@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, rulesByProject, ruleScope, sections, stamp, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, needsOwner, normalizeBoard, normalizeFolder, planLimits, projectName, projects, rulesByProject, ruleScope, sections, stamp, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -44,6 +44,21 @@ test('sections: what needs the owner (a question, then a stuck task) first, then
   ]);
   const hive = sections(normalizeBoard(cloud).tasks, { project: 'hive', query: 'post' });
   assert.deepEqual(hive.flatMap((x) => x.tasks.map((t) => t.key)), ['vm:T1']);
+});
+
+test("a stuck task Hive is still continuing by itself is being worked on, not the owner's", () => {
+  const board = structuredClone(cloud);
+  board.board.tasks[4].retrying = 1;
+  const tasks = normalizeBoard(board).tasks;
+  assert.equal(tasks[4].retrying, true);
+  assert.equal(tasks[0].retrying, false);
+  assert.deepEqual(sections(tasks).map((x) => [x.id, x.tasks.map((t) => t.key)]), [
+    ['needs-you', ['mac:T1']],
+    ['working', ['vm:T1', 'mac:T4']],
+    ['not-started', ['mac:T2']],
+    ['done', ['mac:T3']],
+  ]);
+  assert.deepEqual(tasks.filter(needsOwner).map((t) => t.key), ['mac:T1']);
 });
 
 test("this machine's ledger when the cloud is out of reach", () => {
