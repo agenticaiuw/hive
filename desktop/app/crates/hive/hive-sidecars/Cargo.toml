@@ -3,7 +3,7 @@ name = "hive-sidecars"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "Clients of the model sidecars (listen, speech, voiceprint, lip reading) and the captions overlay"
+description = "Clients of the model sidecars (listen, speech, voiceprint) and the captions overlay"
 
 [dependencies]
 hive-common.workspace = true

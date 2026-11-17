@@ -1,6 +1,6 @@
 # Hive's desktop agent in Rust: the orchestration that python/ used to run. One crate per area so
 # each can be built and tested on its own (`cargo test -p hive-mac`); hive-core holds the state
-# that must survive restarts. ML inference (Parakeet, Kokoro, WeSpeaker, lip reading) stays in
+# that must survive restarts. ML inference (Parakeet, Kokoro, WeSpeaker) stays in
 # Python sidecar processes behind JSON-lines protocols.
 [workspace]
 resolver = "2"

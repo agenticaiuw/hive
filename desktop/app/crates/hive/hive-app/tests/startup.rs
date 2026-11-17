@@ -87,7 +87,6 @@ fn the_app_is_told_how_things_are_at_start() {
         "@@ listening 0",
         "@@ status Typed requests ready; voice input is loading",
         &format!("@@ panel {}", journal.panel_path().display()),
-        "@@ input voice",
         "Working on your screen, with your mouse and keyboard.",
     ] {
         assert!(
@@ -144,18 +143,6 @@ fn a_request_from_the_socket_starts_work() {
     assert_eq!(replies.all(), [json!({"ok": true})]);
     assert_eq!(h.backend.texts(), ["Make the project plan"]);
     assert!(h.host.admits.is_empty()); // the socket saved it already
-}
-
-#[test]
-fn lip_reading_chosen_before_is_ready_at_start() {
-    let h = Harness::app();
-    *support::lock(&h.host.lips_mode) = "lips".into();
-    h.start();
-    h.wait_printed("@@ input lips");
-    assert_eq!(h.host.lips.opened.load(Ordering::SeqCst), 1); // the model warms, the camera stays off
-    assert_eq!(h.host.lips.starts.load(Ordering::SeqCst), 0);
-    h.stop();
-    assert_eq!(h.host.lips.closed.load(Ordering::SeqCst), 1);
 }
 
 #[test]

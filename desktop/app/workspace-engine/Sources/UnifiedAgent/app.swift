@@ -36,8 +36,6 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     let contextItem = NSMenuItem(title: "Show Agent Context", action: #selector(showContext), keyEquivalent: "")
     let clipboardItem = NSMenuItem(title: "Add Clipboard to Context…", action: #selector(addClipboard), keyEquivalent: "")
     let fileItem = NSMenuItem(title: "Add Text File to Context…", action: #selector(addFile), keyEquivalent: "")
-    let voiceItem = NSMenuItem(title: "Voice", action: #selector(chooseVoice), keyEquivalent: "")
-    let lipsItem = NSMenuItem(title: "Lip Reading (camera)", action: #selector(chooseLips), keyEquivalent: "")
     // Checked as the agent says ("@@ speak 1|0", "@@ window 1|0"); it keeps both for the next launch.
     let speakItem = NSMenuItem(title: "Sound (Voice and Chimes)", action: #selector(toggleSpeak), keyEquivalent: "")
     let windowItem = NSMenuItem(title: "Show Floating Window", action: #selector(toggleWindow), keyEquivalent: "")
@@ -47,7 +45,6 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     var contextURL: URL?  // the browser view of every payload, the panel's fallback
     var panelURL: URL?  // this session's panel.json
     lazy var panel = ContextPanel()
-    var camera = false
     var stateDir: URL {
         if let panelURL { return panelURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Personal Agent")
@@ -78,12 +75,6 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(safariItem)
         menu.addItem(.separator())
-        let inputItem = NSMenuItem(title: "Input", action: nil, keyEquivalent: "")
-        let inputMenu = NSMenu()
-        voiceItem.state = .on
-        for choice in [voiceItem, lipsItem] { choice.target = self; inputMenu.addItem(choice) }
-        inputItem.submenu = inputMenu
-        menu.addItem(inputItem)
         speakItem.state = .on
         windowItem.state = .on
         menu.addItem(speakItem)
@@ -277,18 +268,10 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
                 clipboardItem.isEnabled = true
                 fileItem.isEnabled = true
                 if panel.isVisible { panel.load(force: true) }
-            } else if line.hasPrefix("@@ input ") {
-                let lips = line.hasSuffix("lips")
-                lipsItem.state = lips ? .on : .off
-                voiceItem.state = lips ? .off : .on
-                show()
             } else if line.hasPrefix("@@ speak ") {
                 speakItem.state = line.hasSuffix("1") ? .on : .off
             } else if line.hasPrefix("@@ window ") {
                 windowItem.state = line.hasSuffix("1") ? .on : .off
-            } else if line.hasPrefix("@@ camera ") {
-                camera = line.hasSuffix("1")
-                show()
             } else if line.hasPrefix("@@ workspace-resume ") {
 #if canImport(WorkspaceViewer)
                 monitorViewer?.resumeAfterTakeover()
@@ -300,8 +283,8 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     }
 
     // Hive's logo (branding/hive.svg) in the menu bar: its flat-topped gold hexagon and two shine
-    // lines, without the app icon's dark square. A small dot shows while it listens (red),
-    // dictates (orange) or uses the camera (green).
+    // lines, without the app icon's dark square. A small dot shows while it listens (red) or
+    // dictates (orange).
     func hiveIcon(dot: NSColor?) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
@@ -372,19 +355,14 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     func show() {
         let button = item.button
         button?.contentTintColor = nil
-        if camera {
-            button?.image = hiveIcon(dot: .systemGreen)
-            button?.setAccessibilityLabel("Hive: camera on, lip reading")
-        } else if dictating {
+        if dictating {
             button?.image = hiveIcon(dot: .systemOrange)
             button?.setAccessibilityLabel("Hive is dictating")
         } else {
             button?.image = hiveIcon(dot: listening ? .systemRed : nil)
             button?.setAccessibilityLabel(listening ? "Hive is listening" : "Hive")
         }
-        let lips = lipsItem.state == .on
-        toggleItem.title = lips ? (listening ? "Stop Lip Reading (fn)" : "Start Lip Reading (fn)")
-            : (listening ? "Stop Listening (fn)" : "Start Listening (fn)")
+        toggleItem.title = listening ? "Stop Listening (fn)" : "Start Listening (fn)"
     }
 
     // MARK: the log
@@ -494,8 +472,6 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         panel.show(feed: panelURL)  // where you see whether it got there
     }
 
-    @objc func chooseVoice() { input?.write(Data("input voice\n".utf8)) }
-
     // The checkmark changes when the agent says it has (a line it's sent before it's running is dropped).
     @objc func toggleSpeak() { input?.write(Data("speak \(speakItem.state == .on ? "off" : "on")\n".utf8)) }
 
@@ -510,19 +486,6 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { Credentials.showError(error) }
-    }
-
-    @objc func chooseLips() {
-        let alert = NSAlert()
-        alert.messageText = "Lip reading uses the camera"
-        alert.informativeText = "In lip reading mode, tapping fn turns the camera on (the green light, and a caption) until you tap " +
-            "it again. Live words appear in the floating window; the final text becomes your request. Everything is " +
-            "processed on this Mac. macOS asks for camera access the first time. Run scripts/setup-lipread.sh once " +
-            "(4.85 GB model download). Hold-fn dictation still uses the microphone."
-        alert.addButton(withTitle: "Use Lip Reading")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn { input?.write(Data("input lips\n".utf8)) }
     }
 
     @objc func restart() {

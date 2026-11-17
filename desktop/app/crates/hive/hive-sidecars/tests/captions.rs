@@ -80,11 +80,8 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
     captions.listening(true);
     captions.focus(true);
     captions.dictating(false);
-    captions.camera("waiting");
     captions.dismiss();
     captions.hidden(true);
-    captions.framing("Move a little to the left");
-    captions.preview("/9j/4AAQ");
     captions.hearing("open saf");
     captions.say("Opening Safari — “now”.");
     captions.doing("Typing “weather”");
@@ -102,11 +99,8 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
             json!({"listening": true}),
             json!({"focus": true}),
             json!({"dictating": false}),
-            json!({"camera": "waiting"}),
             json!({"dismiss": true}),
             json!({"hidden": true}),
-            json!({"framing": "Move a little to the left"}),
-            json!({"preview": "/9j/4AAQ"}),
             json!({"hearing": "open saf"}),
             json!({"say": "Opening Safari — “now”."}),
             json!({"doing": "Typing “weather”"}),
@@ -120,7 +114,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
         ]
     );
     captions.say("after it closed"); // nothing, and no panic
-    assert_eq!(got(&program).len(), 18);
+    assert_eq!(got(&program).len(), 15);
 }
 
 #[test]

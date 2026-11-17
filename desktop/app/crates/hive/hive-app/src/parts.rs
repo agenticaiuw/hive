@@ -1,5 +1,5 @@
 //! What the voice shell works with, as traits: the sidecar's ears and voice, the floating window,
-//! the helper, the lip reader, Codex, and the rest of the Mac. [`crate::real`] has the real ones;
+//! the helper, Codex, and the rest of the Mac. [`crate::real`] has the real ones;
 //! the tests give fakes (Python's tests used `mock`). Every [`Host`] method defaults to the real
 //! thing, so a fake overrides the ones it needs.
 
@@ -74,10 +74,7 @@ pub trait Captions: Send + Sync {
     fn focus(&self, on: bool) {}
     fn dictating(&self, on: bool) {}
     fn hands_free(&self, on: bool) {}
-    fn camera(&self, state: &str) {}
     fn dismiss(&self) {}
-    fn framing(&self, text: &str) {}
-    fn preview(&self, jpeg: &str) {}
     fn hearing(&self, words: &str) {}
     fn doing(&self, text: &str) {}
     fn thinking(&self, text: &str) {}
@@ -99,19 +96,6 @@ pub trait Mac: Send + Sync {
     fn release_all(&self) -> Result<(), String>;
     /// The helper's socket, which `watch_helper` watches.
     fn socket(&self) -> PathBuf;
-}
-
-/// lipread.py's `LipReader`.
-pub trait Lips: Send + Sync {
-    /// Warms the model without opening the camera.
-    fn open(&self) -> Result<(), String>;
-    fn start(&self) -> Result<(), String>;
-    fn stop(&self) -> Result<String, String>;
-    fn close(&self);
-    /// The current recording's number (events from others are dropped); None if it has none.
-    fn session(&self) -> Option<u64> {
-        None
-    }
 }
 
 /// One request on Codex (agent.py's `CodexTask`).
@@ -277,7 +261,7 @@ impl Console for Stdout {
 }
 
 /// The rest of the Mac: notifications, typing dictation, the virtual monitor, the workspace,
-/// lip reading's settings, the request ledger and the update. Defaults are the real thing.
+/// the request ledger and the update. Defaults are the real thing.
 pub trait Host: Send + Sync {
     fn notify(&self, message: &str, title: &str) {
         crate::util::notify(message, title)
@@ -351,20 +335,6 @@ pub trait Host: Send + Sync {
         on_request: Arc<dyn Fn(LocalRequest) + Send + Sync>,
     ) -> Result<Arc<dyn Closeable>, String> {
         crate::real::local_requests(dir, on_request)
-    }
-
-    // -- lip reading (lipread.py) --
-    fn lips_available(&self) -> (bool, String) {
-        hive_sidecars::lipread::available()
-    }
-    fn lips_mode(&self) -> String {
-        hive_sidecars::lipread::get_mode()
-    }
-    fn set_lips_mode(&self, mode: &str) -> std::io::Result<String> {
-        hive_sidecars::lipread::set_mode(mode)
-    }
-    fn new_lips(&self, on_event: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Lips> {
-        crate::real::new_lips(on_event)
     }
 
     // -- the request ledger (ui_ingress.py) --

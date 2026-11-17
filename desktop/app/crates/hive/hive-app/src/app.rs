@@ -90,8 +90,7 @@ pub fn on_signals() {
 }
 
 /// What a line from Agent.app's menu asks for: "toggle" is the same as tapping fn; "ingest PATH"
-/// adds the text in PATH to the conversation; "input voice|lips" picks how you talk to it;
-/// "speak on|off" is Speak Aloud and "window on|off" Show Floating Window.
+/// adds the text in PATH to the conversation; "speak on|off" is Speak Aloud and "window on|off" Show Floating Window.
 pub fn app_line(line: &str) -> Option<Event> {
     let line = line.trim();
     if line == "toggle" {
@@ -105,7 +104,6 @@ pub fn app_line(line: &str) -> Option<Event> {
     };
     match what {
         "ingest" => Some(Event::Ingest(arg.to_owned())),
-        "input" => Some(Event::Input(arg.to_owned())),
         "speak" => on().map(Event::Speak),
         "window" => on().map(Event::Window),
         _ => None,

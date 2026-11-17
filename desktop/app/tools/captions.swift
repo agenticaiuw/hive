@@ -6,10 +6,6 @@
 //   {"listening": true}             "Listening" in the header, until {"listening": false}
 //   {"dictating": true}             "Dictating" in the header instead, until {"dictating": false}
 //   {"hands_free": true}            the dictation (fn + shift) goes on until fn: "press fn to type it"
-//   {"camera": "on"}                "Camera on · lip reading" in the header, in green ("starting", "waiting":
-//                                   on the way; "off": gone)
-//   {"framing": "Move closer"}      the header while the camera is on
-//   {"preview": "<base64 JPEG>"}    a small camera preview while the camera is on
 //   {"muted": true}                 transcription is muted: the header says so and the mic button is crossed
 //                                   out; the card stays up and the agent keeps working ({"muted": false} undoes it)
 //   {"paused": "Paused — …"}        an amber row (you took over); "" removes it
@@ -23,9 +19,9 @@
 //   {"doing": "Typing “weather”"}   the line under them; "" removes it
 //   {"activity": "…"}               appended to the Activity log
 //   {"active": true}                a task is running: the card stays up with its controls and the log open
-//   {"dismiss": true}               hide the card until listening, the camera or a task starts again
+//   {"dismiss": true}               hide the card until listening, dictating or a task starts again
 //   {"hidden": true}                Show Floating Window is off: the card stays hidden, even when a task starts or
-//                                   updates, except while fn is in use (listening, dictating, the camera); everything
+//                                   updates, except while fn is in use (listening or dictating); everything
 //                                   sent meanwhile is kept, so {"hidden": false} shows it again as it is now
 //   {"clear": true}                 empty the card now (all but the header and the paused row)
 //   {"focus": true}                 typing goes to the entry field (fn opened the card); {"focus": false} gives
@@ -44,7 +40,7 @@
 // except for the entry field: when you click into it, or when fn opens the card ({"focus": true}). The app in
 // front stays in front either way; outside the card, clicks go through.
 //
-//   agent-vhid-captions --snapshot out.png [--activity] [--camera] [--listening|--dictating] [--muted]
+//   agent-vhid-captions --snapshot out.png [--activity] [--listening|--dictating] [--muted]
 //       [--paused TEXT] [--other TEXT] [--hearing TEXT] [--thinking TEXT] "words" ["doing"]
 //                                   draws the card into a PNG instead (tests)
 
@@ -66,7 +62,6 @@ let tertiaryText = NSColor(white: 1, alpha: 0.45)
 let youAccent = srgb(0.42, 0.69, 1.0), youText = srgb(0.87, 0.93, 1.0)
 let otherAccent = srgb(0.78, 0.60, 1.0), otherText = srgb(0.94, 0.90, 1.0)
 let pausedAccent = srgb(1.0, 0.73, 0.26), pausedText = srgb(1.0, 0.90, 0.72)
-let cameraAccent = srgb(0.36, 0.86, 0.50)
 let mutedAccent = srgb(1.0, 0.45, 0.42)
 
 var fontCache: [String: NSFont] = [:]
@@ -383,10 +378,10 @@ final class HoverButton: NSButton {
     }
 }
 
-struct Caps { var paused = 2, other = 3, heard = 3, say = 5, thinking = 3, doing = 1, activity: CGFloat = 140, preview = true }
+struct Caps { var paused = 2, other = 3, heard = 3, say = 5, thinking = 3, doing = 1, activity: CGFloat = 140 }
 
 /// The card. Top to bottom: header (status, mute, hide, close), paused, another agent's request, what you're
-/// saying, the agent's words, its thinking, what it's doing, the camera preview, the activity log, and the
+/// saying, the agent's words, its thinking, what it's doing, the activity log, and the
 /// Activity button with the entry field.
 final class Bubble: NSView {
     let effect = NSVisualEffectView()
@@ -403,14 +398,13 @@ final class Bubble: NSView {
     let say = TextRow(TextStyle(19, .medium, primaryText, kern: -0.2))
     let thinking = TextRow(TextStyle(13, .regular, secondaryText))
     let doing = Section(TextStyle(13, .medium, secondaryText), symbol: "gearshape.fill", accent: tertiaryText, tinted: false)
-    let preview = SymbolView(frame: .zero)
     let activityBox = Box(fill: NSColor(white: 0, alpha: 0.28), stroke: NSColor(white: 1, alpha: 0.07), radius: 10)
     let activityScroll = NSScrollView(frame: .zero)
     let activityView = NSTextView(frame: .zero)
     let detailsButton = HoverButton(frame: .zero)
     let entryBox = Box(fill: NSColor(white: 1, alpha: 0.07), stroke: NSColor(white: 1, alpha: 0.14), radius: 8)
     let entry = NSTextField(string: "")
-    var editing = false, active = false, detailsOpen = false, previewVisible = false
+    var editing = false, active = false, detailsOpen = false
     var muted = false { didSet { refreshMute() } }
     var snapshot = false { didSet { effect.isHidden = snapshot; chrome.fill = chrome.fill.withAlphaComponent(snapshot ? 0.94 : 0.45) } }
     private(set) var dragging = false
@@ -476,13 +470,8 @@ final class Bubble: NSView {
         activityScroll.documentView = activityView
         activityBox.addSubview(activityScroll)
 
-        preview.imageScaling = .scaleProportionallyUpOrDown
-        preview.wantsLayer = true
-        preview.layer?.cornerRadius = 8
-        preview.layer?.masksToBounds = true
-
         for view in [headerIcon, header, muteButton, hideButton, closeButton, paused, other, heard, say, thinking, doing,
-                     preview, activityBox, detailsButton, entryBox] as [NSView] { addSubview(view) }
+                     activityBox, detailsButton, entryBox] as [NSView] { addSubview(view) }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -522,7 +511,7 @@ final class Bubble: NSView {
     }
 
     /// Lays the card out `width` wide and sizes it around its contents, no taller than `maxHeight`: when it
-    /// doesn't fit, the log gets shorter, the preview goes, and the rows show fewer lines (with "…").
+    /// doesn't fit, the log gets shorter and the rows show fewer lines (with "…").
     func layOut(width: CGFloat, maxHeight: CGFloat) {
         let inner = width - 2 * padX
         let full = (paused: paused.lines(width: inner), other: other.lines(width: inner), heard: heard.lines(width: inner),
@@ -532,7 +521,7 @@ final class Bubble: NSView {
             [paused.height(lines: min(full.paused, c.paused)), other.height(lines: min(full.other, c.other)),
              heard.height(lines: min(full.heard, c.heard)), say.height(lines: min(full.say, c.say)),
              thinking.height(lines: min(full.thinking, c.thinking)), doing.height(lines: min(full.doing, c.doing)),
-             previewVisible && c.preview ? 120 : 0, detailsOpen ? c.activity : 0, controls ? 28 : 0]
+             detailsOpen ? c.activity : 0, controls ? 28 : 0]
         }
         func total(_ c: Caps) -> CGFloat {
             let shown = heights(c).filter { $0 > 0 }
@@ -544,10 +533,9 @@ final class Bubble: NSView {
             value = now - 1
             return true
         }
-        let detailsOpen = self.detailsOpen, previewVisible = self.previewVisible
+        let detailsOpen = self.detailsOpen
         let steps: [(inout Caps) -> Bool] = [
             { c in guard detailsOpen, c.activity > 72 else { return false }; c.activity = max(72, c.activity - 16); return true },
-            { c in guard previewVisible, c.preview else { return false }; c.preview = false; return true },
             { lower(&$0.thinking, full.thinking, to: 1) },
             { lower(&$0.say, full.say, to: 3) },
             { lower(&$0.heard, full.heard, to: 2) },
@@ -585,11 +573,6 @@ final class Bubble: NSView {
         put(say.place(x: padX, y: y, width: inner, cap: caps.say))
         put(thinking.place(x: padX, y: y, width: inner, cap: caps.thinking))
         put(doing.place(x: padX, y: y, width: inner, cap: caps.doing))
-        preview.isHidden = !(previewVisible && caps.preview)
-        if !preview.isHidden {
-            preview.frame = NSRect(x: padX, y: y, width: 160, height: 120)
-            put(120)
-        }
         activityBox.isHidden = !(detailsOpen && caps.activity > 0)
         if !activityBox.isHidden {
             activityBox.frame = NSRect(x: padX, y: y, width: inner, height: caps.activity)
@@ -657,19 +640,7 @@ final class InputPanel: NSPanel {
 
 struct Header { let symbol: String, text: String, icon: NSColor, color: NSColor }
 
-func headerLine(camera: String, framing: String, muted: Bool, dictating: Bool, listening: Bool, active: Bool,
-                handsFree: Bool = false) -> Header {
-    switch camera {
-    case "on":
-        return Header(symbol: "video.fill", text: framing.isEmpty ? "Camera on · lip reading · tap fn to send" : framing,
-                      icon: cameraAccent, color: cameraAccent)
-    case "starting":
-        return Header(symbol: "video", text: "Turning the camera on…", icon: cameraAccent, color: secondaryText)
-    case "waiting":
-        return Header(symbol: "video", text: "Waiting for camera access (allow Agent if macOS asks)", icon: cameraAccent,
-                      color: secondaryText)
-    default: break
-    }
+func headerLine(muted: Bool, dictating: Bool, listening: Bool, active: Bool, handsFree: Bool = false) -> Header {
     if muted {
         return Header(symbol: "mic.slash.fill", text: active ? "Transcription muted · the agent keeps working" : "Transcription muted",
                       icon: mutedAccent, color: mutedAccent)
@@ -699,14 +670,14 @@ final class Captions: NSObject {
     var sayQueue: [String] = []
     var heardFade: Timer?
     var otherFade: Timer?
-    var listening = false, dictating = false, handsFree = false, camera = "off", framing = ""
+    var listening = false, dictating = false, handsFree = false
     var dismissedByUser = false
     var visible = false
     /// Show Floating Window is off (the menu, or the – button): hidden except while fn is in use.
     var windowOff = false
-    /// fn opened the card since it was last hidden: listening, dictating or the camera started.
+    /// fn opened the card since it was last hidden: listening or dictating started.
     var fnOpened = false
-    var fnInUse: Bool { listening || dictating || camera != "off" }
+    var fnInUse: Bool { listening || dictating }
 
     override init() {
         super.init()
@@ -756,7 +727,7 @@ final class Captions: NSObject {
         show()
     }
 
-    /// The x: asks for the task to stop and collapses the card until listening, the camera or a task starts again.
+    /// The x: asks for the task to stop and collapses the card until listening, dictating or a task starts again.
     @objc func close() {
         emit(["close": true])
         releaseFocus()
@@ -892,19 +863,6 @@ final class Captions: NSObject {
         if let handsFree = message["hands_free"] as? Bool {
             self.handsFree = handsFree
         }
-        if let camera = message["camera"] as? String {
-            self.camera = camera
-            if camera == "starting" || camera == "on" { dismissedByUser = false }
-            if camera == "starting" { fnOpened = true }
-            if camera != "on" { framing = ""; bubble.previewVisible = false; bubble.preview.image = nil }
-            bubble.editing = camera != "off" || listening
-        }
-        if let value = message["framing"] as? String { framing = value }
-        if camera == "on", let value = message["preview"] as? String,
-           let data = Data(base64Encoded: value), let image = NSImage(data: data) {
-            bubble.preview.image = image
-            bubble.previewVisible = true
-        }
         if let paused = message["paused"] as? String {
             if !tidy(paused).isEmpty && bubble.paused.isBlank { dismissedByUser = false }
             bubble.paused.text = paused
@@ -916,10 +874,10 @@ final class Captions: NSObject {
         if let words = message["hearing"] as? String {
             bubble.heard.text = words
         }
-        if message["hearing"] != nil || message["camera"] != nil {
+        if message["hearing"] != nil {
             heardFade?.invalidate()
             let words = bubble.heard.body.clean
-            if !words.isEmpty && camera != "on" {
+            if !words.isEmpty {
                 heardFade = Timer.scheduledTimer(withTimeInterval: 2.5 + 0.04 * Double(words.count), repeats: false) { _ in
                     self.handle(["hearing": ""])
                 }
@@ -1018,10 +976,10 @@ final class Captions: NSObject {
     }
 
     func show() {
-        let line = headerLine(camera: camera, framing: framing, muted: bubble.muted, dictating: dictating,
-                              listening: listening, active: bubble.active, handsFree: handsFree)
+        let line = headerLine(muted: bubble.muted, dictating: dictating, listening: listening, active: bubble.active,
+                              handsFree: handsFree)
         bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
-        if dismissedByUser || (windowOff && !(fnOpened && fnInUse)) || !(bubble.hasContent || dictating || camera != "off") {
+        if dismissedByUser || (windowOff && !(fnOpened && fnInUse)) || !(bubble.hasContent || dictating) {
             hide(); return
         }
         guard let screen = targetScreen() else {
@@ -1064,7 +1022,7 @@ if args.count >= 3 && args[1] == "--snapshot" {
     let bubble = Bubble(frame: .zero)
     bubble.snapshot = true
     var rest = Array(args[3...])
-    var camera = "off", listening = false, dictating = false
+    var listening = false, dictating = false
     while let flag = rest.first, flag.hasPrefix("--") {
         rest.removeFirst()
         let value = ["--paused", "--other", "--hearing", "--thinking"].contains(flag) && !rest.isEmpty ? rest.removeFirst() : ""
@@ -1074,7 +1032,6 @@ if args.count >= 3 && args[1] == "--snapshot" {
             bubble.editing = true
             bubble.detailsOpen = true
             bubble.activityText = "Plan: Find the meeting date.\n\nTool: read_selected_text()\n\nResult: Team meeting Wednesday at 3 PM."
-        case "--camera": camera = "on"
         case "--listening": listening = true; bubble.editing = true
         case "--dictating": dictating = true
         case "--muted": bubble.muted = true
@@ -1085,8 +1042,7 @@ if args.count >= 3 && args[1] == "--snapshot" {
         default: break
         }
     }
-    let line = headerLine(camera: camera, framing: "", muted: bubble.muted, dictating: dictating, listening: listening,
-                          active: bubble.active)
+    let line = headerLine(muted: bubble.muted, dictating: dictating, listening: listening, active: bubble.active)
     bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
     bubble.say.text = rest.first ?? ""
     bubble.doing.text = rest.count > 1 ? rest[1] : ""
