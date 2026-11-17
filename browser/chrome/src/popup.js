@@ -49,6 +49,7 @@ import {
   speechLang,
 } from './voice-input.js'
 import { initAskHive } from './ask-hive.js'
+import { CLOUD_STATUS_KEY, connectionBadge } from './cloud-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 
@@ -256,8 +257,13 @@ async function decide(prompt, decision) {
   }
 }
 
-function renderStatus(status) {
-  const state = status?.state || 'offline'
+/* The relay's status and the cloud link's, last seen: the status line counts either (connectionBadge). */
+let relaySeen = null
+let cloudSeen = null
+function renderStatus(status = relaySeen, cloud = cloudSeen) {
+  relaySeen = status
+  cloudSeen = cloud
+  const state = connectionBadge(status, cloud).state
   elements.statusDot.className = `dot ${
     state === 'connected' ? 'connected' : state === 'offline' ? 'error' : ''
   }`
@@ -945,7 +951,8 @@ elements.grantPages.addEventListener('click', async () => {
  */
 function onStorageChanged(changes, areaName) {
   if (areaName !== 'local') return
-  if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue)
+  if (changes.bridgeStatus) renderStatus(changes.bridgeStatus.newValue, cloudSeen)
+  if (changes[CLOUD_STATUS_KEY]) renderStatus(relaySeen, changes[CLOUD_STATUS_KEY].newValue)
   /* A fresh pairing must reach a RUNNING page engine at once: its socket may
    * be open under the old relayDeviceId or latched refused by the dead
    * credential, and the owner is watching the brain chip. configChanged
@@ -1002,6 +1009,7 @@ async function refresh() {
     HISTORY_KEY,
     INCLUDE_PAGE_KEY,
     APPROVALS_KEY,
+    CLOUD_STATUS_KEY,
   ])
   const agentConfigured = Boolean(values.agentToken)
   /* One verdict for chip, footer AND setup card — see renderBrain. */
@@ -1010,7 +1018,7 @@ async function refresh() {
     agentConfigured,
   })
   dashboardUrl = dashboardUrlFor(values.agentUrl || DEFAULT_AGENT_URL)
-  renderStatus(values.bridgeStatus)
+  renderStatus(values.bridgeStatus, values[CLOUD_STATUS_KEY])
   renderBrain(brainView)
   renderApprovals(values[APPROVALS_KEY])
   renderHistory(values[HISTORY_KEY])

@@ -114,7 +114,14 @@ import WebKit
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = .black
         window.minSize = NSSize(width: 720, height: 480)
-        window.contentView = web
+        // The page sits in a plain view so full screen can keep it below the menu bar (fullScreen).
+        let holder = NSView()
+        holder.wantsLayer = true
+        holder.layer?.backgroundColor = NSColor(red: 0.063, green: 0.059, blue: 0.051, alpha: 1).cgColor
+        web.autoresizingMask = [.width, .height]
+        holder.addSubview(web)
+        window.contentView = holder
+        web.frame = holder.bounds
         window.isReleasedWhenClosed = false
         window.delegate = self
         // Opens on the desktop the owner is on, and can go full screen (the green button, ⌃⌘F).
@@ -124,6 +131,29 @@ import WebKit
         web.load(URLRequest(url: url))
         self.window = window
         self.web = web
+    }
+
+    /*
+     * In full screen macOS draws the menu bar over the top of the window (and the window has no
+     * title bar to push the page down), so the page's header sat behind it: the owner, 2026-11-17,
+     * "why is it hidden behind the menu bar". In full screen the page starts a menu bar's height
+     * down; out of it the title bar does that.
+     */
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        let screen = window?.screen ?? NSScreen.main
+        let shown = screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0
+        fullScreen(top: max(shown, NSStatusBar.system.thickness, 24))
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        fullScreen(top: 0)
+    }
+
+    private func fullScreen(top: CGFloat) {
+        guard let web, let holder = web.superview else { return }
+        var frame = holder.bounds
+        frame.size.height -= top
+        web.frame = frame  // the holder's origin is bottom-left, so the strip it leaves is the top
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -266,6 +296,8 @@ enum DashboardAPI {
         case ("GET", "/api/agents/run"): return conversation(query)
         case ("POST", "/api/agents/message"): return board("post", "/v1/runs/message", body, thenDeliver: true)
         case ("POST", "/api/tasks/act"): return board("post", "/v1/tasks/act", body, thenDeliver: true)
+        // Turning a standing rule off: the cloud board first, then this Mac's ledger hears it at once.
+        case ("POST", "/api/rules/off"): return board("post", "/v1/rules/off", body, thenSync: true)
         default: return (404, json(["error": "The desktop app doesn't answer \(path) yet."]))
         }
     }
@@ -290,7 +322,7 @@ enum DashboardAPI {
     /// A folder and all its memories, as the cloud board has them (`hive-tasks get /v1/folder`).
     static func folder(_ query: String) -> (Int, Data) {
         var asked = URLComponents()
-        asked.query = query
+        asked.percentEncodedQuery = query  // it arrives encoded; `query =` would encode it twice
         let item = { (name: String) in asked.queryItems?.first(where: { $0.name == name })?.value ?? "" }
         var out = URLComponents()
         out.queryItems = [URLQueryItem(name: "project", value: item("project")), URLQueryItem(name: "key", value: item("key"))]
@@ -300,7 +332,9 @@ enum DashboardAPI {
     /// One agent's conversation (`hive-tasks get /v1/runs?machine&run&tail|after|before`).
     static func conversation(_ query: String) -> (Int, Data) {
         var asked = URLComponents()
-        asked.query = query
+        // It arrives encoded (run=codex%3A…); `query =` encoded it again, so the cloud was asked for
+        // a run named "codex%3A…" and the window said it couldn't load it (2026-11-17).
+        asked.percentEncodedQuery = query
         var out = URLComponents()
         out.queryItems = ["machine", "run", "tail", "after", "before"].compactMap { name in
             asked.queryItems?.first(where: { $0.name == name && !($0.value ?? "").isEmpty })
@@ -486,6 +520,7 @@ enum Dictation {
             if let old = finish() { try? FileManager.default.removeItem(at: old) }
             do {
                 let new = try AVAudioRecorder(url: path, settings: settings)
+                new.isMeteringEnabled = true  // SafariListen hears when you've stopped talking
                 guard new.record(forDuration: 600) else { return "The microphone wouldn't start recording." }
                 recorder = new
                 file = path
@@ -514,6 +549,16 @@ enum Dictation {
         return (200, DashboardAPI.json(["text": reply["text"] as? String ?? ""]))
     }
 
+    /// How loud the microphone is right now (dBFS, -160 silent to 0), while recording.
+    static func level() -> Float? {
+        let read = { () -> Float? in
+            guard let recorder else { return nil }
+            recorder.updateMeters()
+            return recorder.averagePower(forChannel: 0)
+        }
+        return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
+    }
+
     /// Stops recording; the file it made, if it was recording.
     private static func finish() -> URL? {
         let stopNow = {
@@ -537,5 +582,137 @@ enum Dictation {
             return granted
         default: return false
         }
+    }
+}
+
+/// Listening for Hive's Safari popup. Safari gives an extension's popup no way to ask for the
+/// microphone (its speech recognition answers not-allowed before anyone is asked), so the popup asks
+/// Hive, which has it: the extension's handler (SafariWebExtensionHandler hive:listen) posts
+/// `local.hive.safari.listen` with "start:<id>", "stop:<id>" or "cancel:<id>". Hive records with the
+/// composer's Dictation, stops about a second and a half after you stop talking (or when the popup
+/// says stop, or after 8 s if it never heard talking start), reads it with the voice model, and
+/// leaves each step in ~/.config/hive/safari-heard.json
+/// ({id, state: listening, reading, done or error, text, error}), which the extension may read
+/// (hive:heard). Nothing is recorded for longer than a minute.
+final class SafariListen: NSObject {
+    static let shared = SafariListen()
+    static let name = Notification.Name("local.hive.safari.listen")
+    /// Decibels above the room's own noise: louder than `talking` is talking, under `quiet` is not.
+    static let talking: Float = 12
+    static let quiet: Float = 6
+
+    private let queue = DispatchQueue(label: "hive.safari-listen")
+    private var stateDir: URL?
+    private var current: String?  // the id being recorded; touched on `queue` only
+
+    func observe(stateDir: URL) {
+        self.stateDir = stateDir
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(asked(_:)), name: Self.name, object: nil, suspensionBehavior: .deliverImmediately)
+    }
+
+    @objc private func asked(_ note: Notification) {
+        guard let said = note.object as? String, let colon = said.firstIndex(of: ":") else { return }
+        let action = String(said[..<colon])
+        let id = String(said[said.index(after: colon)...])
+        guard !id.isEmpty, id.count <= 80 else { return }
+        queue.async { self.handle(action, id) }
+    }
+
+    private func handle(_ action: String, _ id: String) {
+        switch action {
+        case "start":
+            if current != nil { _ = Dictation.answer(Data(#"{"action":"cancel"}"#.utf8), stateDir: stateDir ?? URL(fileURLWithPath: "/")) }
+            current = id
+            write(["id": id, "state": "listening"])
+            let (status, data) = Dictation.start()
+            guard status == 200 else {
+                current = nil
+                write(["id": id, "state": "error", "error": Self.error(data) ?? "Hive couldn't start listening."])
+                return
+            }
+            tick(id, started: Date(), floor: nil, peak: -160, loud: 0, spoke: nil, quietSince: nil)
+        case "stop":
+            if current == id { finish(id) }
+        case "cancel":
+            guard current == id else { return }
+            current = nil
+            _ = Dictation.answer(Data(#"{"action":"cancel"}"#.utf8), stateDir: stateDir ?? URL(fileURLWithPath: "/"))
+            write(["id": id, "state": "done", "text": ""])
+        default:
+            return
+        }
+    }
+
+    /// Every tenth of a second while it records: has the owner started talking, and stopped? Loud
+    /// is measured against the room: `floor` is the quietest it has been (rising half a decibel a
+    /// second, so a fan that starts is learned). A fixed level failed in the owner's room, whose
+    /// own noise sat between "talking" and "quiet", so it listened the whole minute (2026-11-17).
+    /// `loud` counts the loud tenths: a click (the tap on the popup, a key) is one or two, so
+    /// talking starts at four.
+    private func tick(_ id: String, started: Date, floor: Float?, peak: Float, loud: Int, spoke: Date?, quietSince: Date?) {
+        guard current == id else { return }
+        let now = Date()
+        let level = Dictation.level() ?? -160
+        var floor = floor
+        var peak = peak
+        var loud = loud
+        var spoke = spoke
+        var quietSince = quietSince
+        if level > -120 {  // the meter reads -160 until the first audio arrives
+            floor = min(level, (floor ?? level) + 0.05)
+            peak = max(peak, level)
+            if level > max(floor! + Self.talking, -55) {
+                loud += 1
+                if loud >= 4 { spoke = spoke ?? now }
+                quietSince = nil
+            } else if level < floor! + Self.quiet, spoke != nil {
+                quietSince = quietSince ?? now
+            }
+        }
+        let elapsed = now.timeIntervalSince(started)
+        let heard = ["floor": Int(floor ?? -160), "peak": Int(peak), "loud": loud]
+        if let quietSince, now.timeIntervalSince(quietSince) > 1.5 { return finish(id, heard) }
+        // Never heard it start (it may have begun at once, before the room was learned): read what
+        // there is rather than throw it away.
+        if spoke == nil, elapsed > 8 { return finish(id, heard) }
+        if elapsed > 60 { return finish(id, heard) }
+        queue.asyncAfter(deadline: .now() + 0.1) {
+            self.tick(id, started: started, floor: floor, peak: peak, loud: loud, spoke: spoke, quietSince: quietSince)
+        }
+    }
+
+    /// `levels`: the room's noise and the loudest it got (dBFS), kept with the result for tuning.
+    private func finish(_ id: String, _ levels: [String: Int] = [:]) {
+        current = nil
+        guard let stateDir else { return }
+        write(["id": id, "state": "reading"])
+        let (status, data) = Dictation.stop(stateDir)
+        let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        var out: [String: Any] = ["id": id, "levels": levels]
+        if status == 200 {
+            out["state"] = "done"
+            out["text"] = reply["text"] as? String ?? ""
+        } else {
+            out["state"] = "error"
+            out["error"] = reply["error"] as? String ?? "Hive couldn't read what you said."
+        }
+        write(out)
+    }
+
+    private static func error(_ data: Data) -> String? {
+        ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String
+    }
+
+    /// Only you can read it: it holds what you said.
+    private func write(_ values: [String: Any]) {
+        var values = values
+        values["at"] = Int(Date().timeIntervalSince1970)
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/hive")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("safari-heard.json")
+        guard let data = try? JSONSerialization.data(withJSONObject: values) else { return }
+        try? data.write(to: file, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 }

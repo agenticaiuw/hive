@@ -1,7 +1,7 @@
 // The extension's way in from the cloud (src/cloud-peer.js), against a fake board and a fake browser.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { boardKey, browserKind, CLOUD_STATUS_KEY, runCloudPeer } from '../src/cloud-peer.js'
+import { boardKey, browserKind, CLOUD_STATUS_KEY, connectionBadge, runCloudPeer } from '../src/cloud-peer.js'
 import { BOARD_KEY } from '../src/page-rules-core.js'
 
 function fakeBrowser(stored = {}, native = null) {
@@ -39,6 +39,18 @@ function fakeBoard(answers) {
 const KEY = { url: 'https://board.test', key: 'ext.owner-mac-browser.abc' }
 const command = { commandId: '7', createdAt: new Date().toISOString(), action: { type: 'list_tabs', params: {} } }
 const quick = { delay: async () => {}, retryDelay: () => 0 }
+
+test('the badge is ON when Hive reaches the browser either way, SET only with no way in', () => {
+  const unpaired = { state: 'needs-setup' }
+  // Never paired, but Hive's cloud reaches it with the key Hive gave it: the case that showed SET.
+  assert.equal(connectionBadge(unpaired, { state: 'connected' }).text, 'ON')
+  assert.equal(connectionBadge({ state: 'connected' }, { state: 'off' }).text, 'ON')
+  assert.deepEqual(connectionBadge(unpaired, { state: 'off' }), { state: 'needs-setup', text: 'SET', color: '#B54736' })
+  // The cloud link not heard from yet: no claim either way.
+  assert.equal(connectionBadge(unpaired, undefined).text, '')
+  assert.equal(connectionBadge(unpaired, { state: 'offline' }).text, '!')
+  assert.equal(connectionBadge(unpaired, { state: 'unauthorized' }).state, 'unauthorized')
+})
 
 test('which browser this is, as the cloud knows it', () => {
   assert.equal(browserKind('Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/158.0 Safari/537.36'), 'chrome')
