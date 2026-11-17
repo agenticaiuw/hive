@@ -120,11 +120,13 @@ echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs 
   `/var/lib/hive-credentials` (root only). `hive-cred import < export.csv` takes a Passwords (Mac) or
   Chrome export; `list`, `sites`, `add`, `remove` manage it. The agent's `authenticate` tool types a
   saved login into the field it clicked; the agent never sees the password.
-- The phone: Duo approvals and the phone's passcode are on the owner's phone, which only the Mac can
-  reach. `desktop/hive-bridge.mjs` on the Mac serves the phone's tools (`build/hive-phone-mcp`) on a
-  local socket and forwards it over SSH to `<state>/mac-phone.sock` (`ssh -R`, no network port), and
-  keeps the Mac awake while it runs (`--until 9:30` ends it). `phone-mcp.mjs` connects Codex to it,
-  and when the bridge isn't up it answers with no tools and says why.
+- The phone: the owner's iPhone runs WebDriverAgent inside its relay app, which keeps a connection
+  open to the phone relay Worker in the cloud. `phone-mcp.mjs` talks to that Worker straight from the
+  VM, with its address and key in `<state>/phone-relay.json` (mode 600), so the phone needs nothing
+  from the Mac: Duo approvals and "Hey Siri, ask Hive" tasks run with the Mac asleep or locked. Its
+  `authenticate` asks the relay to unlock (`POST /agent/unlock-now`): the relay keeps the passcode
+  sealed, bound to the phone it was saved for, and types it at the keypad itself, so neither the VM
+  nor the model ever sees it. Without the key file it answers with no tools and says why.
 - Files: the R2 bucket `hive-files` is where Hive's nodes meet. `node desktop/hive-files.mjs send
   <file> --to vm` uploads from the Mac and has the VM fetch it into `~/hive-files`;
   `files.mjs fetch | put | list` is the VM's side (through root's Cloudflare login, by `sudo -n`).

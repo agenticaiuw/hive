@@ -5,7 +5,7 @@
 // its own signed in to the owner's ChatGPT account (HIVE_CODEX_HOME, default /root/.codex-hive). It
 // runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets two
 // tool servers, run as this user: desktop-mcp.mjs, the VM's screen, mouse and keyboard, saved logins
-// and the files sent to Hive; and phone-mcp.mjs, the owner's phone through their Mac (for Duo).
+// and the files sent to Hive; and phone-mcp.mjs, the owner's iPhone through its relay in the cloud (Duo, Siri tasks).
 // Shell commands it might run are read-only. Each step it says goes to stdout and to the task's folder.
 //
 // With --code DIR it works on code instead (Hive's nightly dream): no screen, no phone, no tool
