@@ -16,7 +16,6 @@ use support::{lock, FakeTask, Isolated};
 fn kind(event: Option<Event>) -> Option<String> {
     event.map(|e| match e {
         Event::Ingest(path) => format!("ingest {path}"),
-        Event::Input(mode) => format!("input {mode}"),
         Event::Speak(on) => format!("speak {on}"),
         Event::Window(on) => format!("window {on}"),
         other => other.kind().to_owned(),
@@ -30,11 +29,7 @@ fn the_apps_menu_lines() {
         kind(app_line("ingest /tmp/a b.txt")).as_deref(),
         Some("ingest /tmp/a b.txt")
     );
-    assert_eq!(kind(app_line("input lips")).as_deref(), Some("input lips"));
-    assert_eq!(
-        kind(app_line("input voice")).as_deref(),
-        Some("input voice")
-    );
+    assert_eq!(kind(app_line("input voice")), None); // the Input menu is gone (lip reading was removed)
     assert_eq!(kind(app_line("speak off")).as_deref(), Some("speak false"));
     assert_eq!(kind(app_line("speak on\n")).as_deref(), Some("speak true"));
     assert_eq!(

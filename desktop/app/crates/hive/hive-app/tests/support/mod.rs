@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use hive_app::parts::{
-    Backend, Captions, Closeable, Console, Ears, Host, Lips, LocalRequest, Look, Mac, Mic, OnEvent,
+    Backend, Captions, Closeable, Console, Ears, Host, LocalRequest, Look, Mac, Mic, OnEvent,
     Task, Voice,
 };
 use hive_app::{Parts, VoiceAgent};
@@ -391,17 +391,8 @@ impl Captions for FakeCaptions {
     fn hands_free(&self, on: bool) {
         self.put("hands_free", on)
     }
-    fn camera(&self, state: &str) {
-        self.put("camera", state)
-    }
     fn dismiss(&self) {
         self.put("dismiss", "")
-    }
-    fn framing(&self, text: &str) {
-        self.put("framing", text)
-    }
-    fn preview(&self, jpeg: &str) {
-        self.put("preview", jpeg)
     }
     fn hearing(&self, words: &str) {
         self.put("hearing", words)
@@ -1015,51 +1006,8 @@ impl Backend for FakeBackend {
 
 // -- the rest of the Mac --
 
-/// What the lip reading worker says.
-pub type OnValue = Arc<dyn Fn(Value) + Send + Sync>;
 /// The request socket's requests.
 pub type OnRequest = Arc<dyn Fn(LocalRequest) + Send + Sync>;
-
-/// lipread.LipReader.
-#[derive(Default)]
-pub struct FakeLips {
-    pub opened: AtomicUsize,
-    pub starts: AtomicUsize,
-    pub stopped: AtomicBool,
-    pub closed: AtomicUsize,
-    /// What the worker says once the camera is asked for (the Python tests' Reader.start).
-    pub on_start: Mutex<Vec<Value>>,
-    pub start_error: Mutex<Option<String>>,
-    pub text: Mutex<String>,
-    pub events: Mutex<Option<OnValue>>,
-}
-
-impl Lips for FakeLips {
-    fn open(&self) -> Result<(), String> {
-        self.opened.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-    fn start(&self) -> Result<(), String> {
-        self.starts.fetch_add(1, Ordering::SeqCst);
-        if let Some(error) = lock(&self.start_error).clone() {
-            return Err(error);
-        }
-        let events = lock(&self.events).clone();
-        if let Some(events) = events {
-            for event in lock(&self.on_start).clone() {
-                events(event);
-            }
-        }
-        Ok(())
-    }
-    fn stop(&self) -> Result<String, String> {
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(lock(&self.text).clone())
-    }
-    fn close(&self) {
-        self.closed.fetch_add(1, Ordering::SeqCst);
-    }
-}
 
 /// Something running that's closed at shutdown.
 #[derive(Default)]
@@ -1073,8 +1021,8 @@ impl Closeable for FakeClosable {
     }
 }
 
-/// Notifications, typing, the virtual monitor, the workspace, lip reading's settings, the
-/// request ledger and the update, all pretend.
+/// Notifications, typing, the virtual monitor, the workspace, the request ledger and the
+/// update, all pretend.
 pub struct FakeHost {
     pub notes: Rec<(String, String)>,
     pub pasted: Rec<String>,
@@ -1099,9 +1047,6 @@ pub struct FakeHost {
     pub workspace_errors: Rec<String>,
     pub request_socket: Arc<FakeClosable>,
     pub requests: Mutex<Option<OnRequest>>,
-    pub lips_ok: Mutex<(bool, String)>,
-    pub lips_mode: Mutex<String>,
-    pub lips: Arc<FakeLips>,
     pub admits: Rec<(String, String)>,
     pub admit_error: Mutex<Option<String>>,
     /// `admit` waits here (a busy main loop).
@@ -1138,9 +1083,6 @@ impl FakeHost {
             workspace_errors: Rec::default(),
             request_socket: Arc::new(FakeClosable::default()),
             requests: Mutex::new(None),
-            lips_ok: Mutex::new((true, "fake".into())),
-            lips_mode: Mutex::new("voice".into()),
-            lips: Arc::new(FakeLips::default()),
             admits: Rec::default(),
             admit_error: Mutex::new(None),
             admitting: Gate::new(true),
@@ -1218,20 +1160,6 @@ impl Host for FakeHost {
     ) -> Result<Arc<dyn Closeable>, String> {
         *lock(&self.requests) = Some(on_request);
         Ok(self.request_socket.clone())
-    }
-    fn lips_available(&self) -> (bool, String) {
-        lock(&self.lips_ok).clone()
-    }
-    fn lips_mode(&self) -> String {
-        lock(&self.lips_mode).clone()
-    }
-    fn set_lips_mode(&self, mode: &str) -> std::io::Result<String> {
-        *lock(&self.lips_mode) = mode.to_owned();
-        Ok(mode.to_owned())
-    }
-    fn new_lips(&self, on_event: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Lips> {
-        *lock(&self.lips.events) = Some(on_event);
-        self.lips.clone()
     }
     fn admit(&self, text: &str, channel: &str) -> Result<String, String> {
         self.admitting.pass();

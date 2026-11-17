@@ -1,7 +1,7 @@
 //! The voice agent (python/voice_agent.py's `VoiceAgent`): tap fn and it listens; when you pause,
 //! Codex does what you said, talking you through it. Hold fn and what you say is typed where you
 //! are typing (dictation). One thread runs the event loop ([`VoiceAgent::run`]); the listener, the
-//! voice, the helper, the lip reader and the request socket put events on its queue.
+//! voice, the helper and the request socket put events on its queue.
 
 use crate::parts::{
     Backend, Captions, Closeable, Console, Ears, Host, LocalRequest, Look, Mac, Task, Voice,
@@ -40,9 +40,6 @@ pub enum Event {
     TypedRequest(String),
     LocalRequest(LocalRequest),
     Ingest(String),
-    Input(String),
-    Lips(String, Option<String>, Option<u64>),
-    Camera(Value),
     /// What's heard from now on goes to this dictation, or (None) the agent.
     Route(Option<Arc<Dictation>>),
     Dictated(Arc<Dictation>),
@@ -68,9 +65,6 @@ impl Event {
             Event::TypedRequest(_) => "typed_request",
             Event::LocalRequest(_) => "local_request",
             Event::Ingest(_) => "ingest",
-            Event::Input(_) => "input",
-            Event::Lips(..) => "lips",
-            Event::Camera(_) => "camera",
             Event::Route(_) => "route",
             Event::Dictated(_) => "dictated",
             Event::Speak(_) => "speak",
@@ -310,10 +304,6 @@ pub struct VoiceAgent {
     pub journal_warned: Flag,
     /// The session's runs, live on the board for every node's dashboard (hive_tasks::runs).
     pub runs: Slot<Option<Arc<RunStream>>>,
-    /// "voice" or "lips".
-    pub input_mode: Slot<String>,
-    pub lips: Slot<Option<Arc<dyn crate::parts::Lips>>>,
-    pub lips_generation: Slot<u64>,
     pub embedded_workspace: Slot<Option<Arc<dyn Closeable>>>,
     pub local_requests: Slot<Option<Arc<dyn Closeable>>>,
     /// Where your cursor goes back to when the task ends.
@@ -386,9 +376,6 @@ impl VoiceAgent {
             journal: Slot::new(None),
             journal_warned: Flag::new(false),
             runs: Slot::new(None),
-            input_mode: Slot::new("voice".to_owned()),
-            lips: Slot::new(None),
-            lips_generation: Slot::new(0),
             embedded_workspace: Slot::new(None),
             local_requests: Slot::new(None),
             cursor_home: Slot::new(None),
@@ -693,11 +680,6 @@ impl VoiceAgent {
             journal.touch();
             self.tell("panel", &journal.panel_path().display().to_string()); // the Agent Context panel reads it
         }
-        if self.host.lips_mode() == "lips" {
-            self.set_input("lips", false);
-        } else {
-            self.tell("input", "voice");
-        }
         if !self.app.get() {
             self.out(&format!("Agent context: {}", context.display()));
             if let Some(journal) = self.journal.get() {
@@ -749,11 +731,6 @@ impl VoiceAgent {
             }
             Event::LocalRequest(request) => self.on_local_request(request),
             Event::Ingest(path) => self.start_ingest(&path),
-            Event::Input(mode) => self.set_input(&mode, true),
-            Event::Lips(text, error, generation) => {
-                self.on_lips(&text, error.as_deref(), generation)
-            }
-            Event::Camera(event) => self.on_camera(&event),
             Event::Route(dictation) => {
                 self.dictation.set(dictation);
             }
@@ -1150,233 +1127,10 @@ impl VoiceAgent {
         );
     }
 
-    fn bump_lips_generation(&self) {
-        *self.lips_generation.lock() += 1;
-    }
-
-    fn new_lips(&self) -> Arc<dyn crate::parts::Lips> {
-        let events = Mutex::new(self.events.clone());
-        self.host.new_lips(Arc::new(move |event: Value| {
-            let _ = events
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .send(Event::Camera(event));
-        }))
-    }
-
-    /// Agent menu → Input: Voice (the microphone) or Lip Reading (the camera, while fn is tapped on).
-    pub fn set_input(&self, mode: &str, announce: bool) {
-        let mut mode = mode.to_owned();
-        if mode == "lips" {
-            let (ok, why) = self.host.lips_available();
-            if !ok {
-                self.out(&format!("   ✗ lip reading isn't available: {why}"));
-                self.tell("status", "Lip reading isn't set up: see the log");
-                mode = "voice".into();
-            }
-        }
-        if self.listening.get() {
-            self.set_listening(false);
-        }
-        if mode != "lips" {
-            if let Some(lips) = self.lips.set(None) {
-                lips.close();
-            }
-        }
-        self.input_mode.set(mode.clone());
-        self.bump_lips_generation();
-        let _ = self.host.set_lips_mode(&mode);
-        self.tell("input", &mode);
-        if mode == "lips" && self.app.get() && self.lips.lock().is_none() {
-            let lips = self.new_lips();
-            self.lips.set(Some(lips.clone()));
-            let _ = lips.open(); // warm the model without opening the camera
-        }
-        if announce {
-            self.log("input", &mode, json!({}));
-            self.out(&format!(
-                "   input: {}",
-                if mode == "lips" {
-                    "lip reading (tap fn, mouth it, tap fn)"
-                } else {
-                    "voice"
-                }
-            ));
-        }
-    }
-
-    /// Lip reading mode's tap of fn: the camera on, or off and what it read becomes a request.
-    /// The caption and menu bar icon follow the camera itself (on_camera), not the tap: they say
-    /// "on" only once it is recording.
-    pub fn set_lips(&self, on: bool) {
-        self.listening.set(on);
-        self.ears_listen(self.holding()); // the microphone is only for dictation (holding fn)
-        self.tell("listening", if on { "1" } else { "0" });
-        if on {
-            self.backend.new_session();
-            self.bump_lips_generation();
-            self.captions.hearing("");
-            self.captions.say("");
-            self.captions.camera("starting");
-            let lips = match self.lips.get() {
-                Some(lips) => lips,
-                None => {
-                    let lips = self.new_lips();
-                    self.lips.set(Some(lips.clone()));
-                    lips
-                }
-            };
-            if let Err(e) = lips.start() {
-                self.listening.set(false);
-                self.captions.camera("off");
-                self.tell("listening", "0");
-                self.captions.say(&e);
-                self.out(&format!("   ✗ lip reading: {e}"));
-                return;
-            }
-            self.log("lip reading", "camera requested", json!({}));
-            self.out("📷 turning the camera on: mouth what you want, then tap fn");
-            return;
-        }
-        self.captions.dismiss();
-        self.stop_tasks_for_fn();
-        self.bump_lips_generation();
-        self.captions.camera("off");
-        self.tell("camera", "0");
-        self.log("lip reading", "stopped", json!({}));
-        self.out("   (stopped lip reading)");
-        if let Some(lips) = self.lips.get() {
-            std::thread::spawn(move || {
-                let _ = lips.stop();
-            });
-        }
-    }
-
-    /// What the lip reading worker says about the camera.
-    pub fn on_camera(&self, event: &Value) {
-        if let Some(session) = event.get("session").filter(|s| !s.is_null()) {
-            let current = self.lips.get().and_then(|l| l.session());
-            if Some(session) != current.map(|c| json!(c)).as_ref() {
-                return;
-            }
-        }
-        let reading = || self.listening.get() && self.input_mode.get() == "lips";
-        let text = |key: &str| {
-            event
-                .get(key)
-                .map(hive_knowledge::pyjson::str_of)
-                .unwrap_or_default()
-        };
-        if event.get("framing").is_some() && reading() {
-            self.captions.framing(&text("framing"));
-        }
-        if event.get("preview").is_some() && reading() {
-            self.captions.preview(&text("preview"));
-        }
-        if event.get("partial").is_some() {
-            if reading() {
-                self.captions.doing("");
-                self.captions.hearing(&text("partial"));
-            }
-            return;
-        }
-        if event.get("status").is_some() && reading() {
-            self.captions.doing(&text("status"));
-        }
-        if hive_knowledge::pyjson::truthy(event.get("ready")) {
-            self.log(
-                "lip reading",
-                "model ready",
-                json!({"model": event.get("model"), "device": event.get("device")}),
-            );
-        }
-        let state = match event.get("camera") {
-            None | Some(Value::Null) => {
-                if hive_knowledge::pyjson::truthy(event.get("error")) {
-                    let error = text("error");
-                    self.out(&format!("   ✗ lip reading: {error}"));
-                    if self.input_mode.get() == "lips" {
-                        self.captions.doing("");
-                        self.captions.say(&format!("Lip reading failed: {error}"));
-                        if hive_knowledge::pyjson::truthy(event.get("final")) {
-                            self.captions.camera("off");
-                            self.listening.set(false);
-                            self.tell("listening", "0");
-                        }
-                    }
-                }
-                return;
-            }
-            Some(_) => text("camera"),
-        };
-        let on = state == "on";
-        self.tell("camera", if on { "1" } else { "0" });
-        if state == "failed" {
-            self.captions.camera("off");
-            self.captions
-                .say("Camera couldn't open: allow Agent in Privacy & Security › Camera");
-            let error = event.get("error").map(hive_knowledge::pyjson::str_of);
-            self.log(
-                "lip reading",
-                error.as_deref().unwrap_or("camera failed"),
-                json!({"outcome": "failed"}),
-            );
-            self.out(&format!(
-                "   ✗ lip reading: {}",
-                error.as_deref().unwrap_or("None")
-            ));
-            if reading() {
-                self.listening.set(false);
-                self.tell("listening", "0");
-            }
-            return;
-        }
-        if reading() {
-            self.captions.camera(&state); // "waiting", "on"
-        }
-        if on {
-            self.log("lip reading", "camera on", json!({}));
-            self.out("🟢 📷 camera on");
-        } else if state == "off" {
-            self.log("lip reading", "camera off", json!({}));
-        }
-    }
-
-    pub fn on_lips(&self, text: &str, error: Option<&str>, generation: Option<u64>) {
-        if generation.is_some_and(|g| g != self.lips_generation.get()) {
-            return;
-        }
-        self.captions.doing("");
-        let error = error.filter(|e| !e.is_empty());
-        if error.is_some() || text.is_empty() {
-            self.captions.hearing("");
-            match error {
-                Some(error) => {
-                    self.captions.say(&format!("Lip reading failed: {error}"));
-                    self.log("lip reading", error, json!({"outcome": "failed"}));
-                    self.out(&format!("   ✗ lip reading: {error}"));
-                }
-                None => {
-                    self.captions
-                        .say("Couldn't read your lips. Face the camera and try again.");
-                    self.log("lip reading", "nothing read", json!({"outcome": "empty"}));
-                    self.out("   (couldn't read anything)");
-                }
-            }
-            return;
-        }
-        self.log("lip reading", text, json!({"outcome": "read"}));
-        self.captions.hearing(text);
-        self.on_transcript(text, None, false, false, None);
-    }
-
     /// Toggles listening without replacing the durable Codex conversation.
     pub fn set_listening(&self, on: bool) {
         if on == self.listening.get() {
             return;
-        }
-        if self.input_mode.get() == "lips" {
-            return self.set_lips(on);
         }
         self.listening.set(on);
         if on {
@@ -1638,14 +1392,12 @@ impl VoiceAgent {
                 // fn only ever resumes: it hands a paused task back the mouse and keyboard (even when
                 // this very press is what paused it), or opens the microphone. It never turns
                 // listening off or closes the floating window; the window's mic button mutes, its x
-                // stops. Lip reading is the exception: a second tap ends what you mouthed.
+                // stops.
                 self.drop_dictation();
                 if self.mac_task_running() && self.paused_since.get() != 0.0 {
                     self.resume_control();
                 } else if !self.listening.get() {
                     self.set_listening(true);
-                } else if self.input_mode.get() == "lips" {
-                    self.set_listening(false);
                 }
             }
             Some("other") => {
@@ -1898,8 +1650,6 @@ impl VoiceAgent {
     fn channel(&self, typed: bool) -> &'static str {
         if typed {
             "typed"
-        } else if self.input_mode.get() == "lips" {
-            "lip"
         } else {
             "voice"
         }
@@ -2483,9 +2233,6 @@ impl VoiceAgent {
         }
         self.hand_back();
         self.captions.close();
-        if let Some(lips) = self.lips.get() {
-            lips.close(); // the camera, if on, turns off
-        }
         if let Some(journal) = self.journal.set(None) {
             journal.end();
             session_journal::set_current(None);

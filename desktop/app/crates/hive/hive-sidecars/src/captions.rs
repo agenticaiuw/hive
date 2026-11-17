@@ -139,12 +139,6 @@ impl Captions {
         self.send(json!({"hands_free": on}));
     }
 
-    /// The camera line on top in lip reading mode: "starting", "waiting" (for macOS's permission),
-    /// "on" (it is recording), or "off" (none).
-    pub fn camera(&self, state: &str) {
-        self.send(json!({"camera": state}));
-    }
-
     pub fn dismiss(&self) {
         self.send(json!({"dismiss": true}));
     }
@@ -153,14 +147,6 @@ impl Captions {
     /// use. Everything sent meanwhile is kept, so `hidden(false)` shows it as it is now.
     pub fn hidden(&self, on: bool) {
         self.send(json!({"hidden": on}));
-    }
-
-    pub fn framing(&self, text: &str) {
-        self.send(json!({"framing": text}));
-    }
-
-    pub fn preview(&self, jpeg: &str) {
-        self.send(json!({"preview": jpeg}));
     }
 
     /// What you're saying, as you say it; it fades a little after you stop.

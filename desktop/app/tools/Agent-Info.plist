@@ -29,7 +29,7 @@
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Agent takes what the Mac is playing back out of what the microphone hears, so its own voice or a video isn't taken for you.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Only in lip reading mode, which you choose in the Agent menu: the camera is on from when you tap fn until you tap it again, and the clip is read on this Mac.</string>
+	<string>Only for Hive's eye keyboard: the camera sees where you look on the keyboard, and the video stays on this Mac.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

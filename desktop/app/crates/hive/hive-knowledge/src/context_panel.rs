@@ -39,7 +39,6 @@ pub const CONVERSATION: &[&str] = &[
     "ingest part",
     "ingest done",
     "voice left out",
-    "lip reading",
 ];
 
 pub const NOTICE: &str = "What this app sent to and got from the model, as it happened. It is not \
@@ -281,7 +280,6 @@ fn icon(kind: &str) -> &'static str {
         "dictation" => "✍️",
         "ingest started" | "ingest part" | "ingest done" => "📥",
         "voice left out" => "🔇",
-        "lip reading" => "📷",
         _ => "·",
     }
 }
@@ -299,7 +297,6 @@ fn label(kind: &str) -> String {
         "ingest part" => "Part",
         "ingest done" => "Added text",
         "voice left out" => "Left out its own voice",
-        "lip reading" => "Lip reading",
         other => other,
     }
     .to_string()

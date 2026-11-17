@@ -46,18 +46,6 @@ pub fn write_line(out: &mut impl Write, value: &Value) -> io::Result<()> {
     out.flush()
 }
 
-/// Python's truthiness of a JSON value.
-pub fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
 /// Runs a callback, keeping the thread that calls it alive if it panics.
 pub fn guarded(what: &str, f: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {

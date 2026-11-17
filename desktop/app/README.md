@@ -34,15 +34,14 @@ it and copies the binaries into `build/`. Hive.app runs `build/hive-agent --app`
 | `hive-phone` | The iPhone relay and its tools (`build/phone-status`) |
 | `hive-knowledge` | Knowledge base, cloud archive, task recordings, session journal, Agent Context panel, memory search |
 | `hive-workspace` | The workspace engine's bridge, fence, recovery and updates |
-| `hive-sidecars` | Clients for the Python sidecars (voice, captions, lip reading) |
+| `hive-sidecars` | Clients for the Python sidecars (voice, captions) |
 | `hive-common` | Shared code, such as ingesting text |
 | `hive-core` | The state that must survive restarts: the conversation identity, task recovery, the request ledger, memory and settings |
 
 The models stay Python, in one sidecar process the agent starts: `python/sidecar_voice.py`
 serves Parakeet, Silero VAD, the echo canceller, WeSpeaker and Kokoro over a JSON-lines
-protocol on stdin/stdout. Lip reading stays `scripts/lipread_*.py`. The speed is in the
-inference libraries (MLX, ONNX Runtime, PyTorch), and those are Python-first; what moved to
-Rust is the orchestration around them.
+protocol on stdin/stdout. The speed is in the inference libraries (MLX, ONNX Runtime,
+PyTorch), and those are Python-first; what moved to Rust is the orchestration around them.
 
 Build with `make`; test with `cd crates/hive && cargo test` (or `cargo test -p hive-mac`,
 and so on per crate). The Python tests in `tests/` cover only the model sidecar code.
@@ -483,26 +482,6 @@ panel say *verified*, *sent, not verified* or *failed*. A thread past `COMPACT_A
 compacted, after which the model has a summary, but the saved text stays readable.
 `read_clipboard` used to return the first 8,000 characters and say nothing; now it says how
 long the clipboard is and reads on from an offset. `build/hive-ingest list | read ID [PART]` lists and reads the saved parts.
-
-#### Lip reading (optional)
-
-Agent menu › **Input** › **Lip Reading (camera)**: tap fn and the camera turns on (green
-light, a "📷 Camera on" caption and a camera icon in the menu bar). Words appear in the
-floating window while you mouth your request. Tap fn again to turn the camera off and
-submit the final transcript. Drafts can change as more video arrives; they never trigger
-commands. Voice stays the default, and holding fn still dictates with the microphone.
-
-The local model is [FLARE Large](https://github.com/jxzhanggg/FLARE), released in October
-2026 by researchers including iFLYTEK (MIT code). Its lightweight decoder reports 15.9%
-word error on LRS3; this benchmark is not a guarantee for silently mouthed webcam input.
-Capture and inference run concurrently, using overlapping video windows and Apple GPU
-acceleration when available. This is a full-context model producing rolling drafts,
-not a native causal speech recognizer. Latency depends on hardware and phrase length.
-Frames stay in memory and no microphone input is used for lip reading.
-
-`scripts/setup-lipread.sh` installs the pinned source, isolated Python runtime and verified
-checkpoint (4.85 GB download). macOS asks once for camera access. `LIPREAD_DEVICE=cpu`
-overrides GPU selection. See `hive-sidecars` (the client) and `scripts/lipread_*.py` (the model).
 
 Every context-viewer record carries the session's id, so the two join up.
 

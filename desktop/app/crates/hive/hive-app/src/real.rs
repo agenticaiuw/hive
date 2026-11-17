@@ -1,5 +1,5 @@
 //! The real parts behind [`crate::parts`]: the voice sidecar's ears and voice, the captions
-//! window, the helper, the lip reader and Codex (hive-codex, with the other crates wired into its
+//! window, the helper and Codex (hive-codex, with the other crates wired into its
 //! hooks), plus the workspace, request socket and update processes [`crate::parts::Host`] starts.
 
 use crate::parts::{self, Backend, Closeable, LocalRequest, Look, Mic, OnEvent};
@@ -151,17 +151,8 @@ impl parts::Captions for Window {
     fn hands_free(&self, on: bool) {
         self.0.hands_free(on)
     }
-    fn camera(&self, state: &str) {
-        self.0.camera(state)
-    }
     fn dismiss(&self) {
         self.0.dismiss()
-    }
-    fn framing(&self, text: &str) {
-        self.0.framing(text)
-    }
-    fn preview(&self, jpeg: &str) {
-        self.0.preview(jpeg)
     }
     fn hearing(&self, words: &str) {
         self.0.hearing(words)
@@ -229,37 +220,6 @@ impl parts::Mac for hive_mac::AgentVHID {
     fn socket(&self) -> PathBuf {
         self.socket_path.clone()
     }
-}
-
-// -- lip reading --
-
-/// lipread.LipReader.
-pub struct LipsReader(pub hive_sidecars::LipReader);
-
-impl parts::Lips for LipsReader {
-    fn open(&self) -> Result<(), String> {
-        self.0.open().map_err(|e| e.to_string())
-    }
-    fn start(&self) -> Result<(), String> {
-        self.0.start().map_err(|e| e.to_string())
-    }
-    fn stop(&self) -> Result<String, String> {
-        self.0
-            .stop(hive_sidecars::lipread::STOP_TIMEOUT)
-            .map_err(|e| e.to_string())
-    }
-    fn close(&self) {
-        self.0.close()
-    }
-    fn session(&self) -> Option<u64> {
-        Some(self.0.session())
-    }
-}
-
-pub fn new_lips(on_event: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn parts::Lips> {
-    Arc::new(LipsReader(hive_sidecars::LipReader::new(move |event| {
-        on_event(event)
-    })))
 }
 
 // -- Codex --
