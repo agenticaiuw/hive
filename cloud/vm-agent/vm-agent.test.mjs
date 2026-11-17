@@ -314,6 +314,47 @@ createServer(socket => { socket.on('error', () => {}); socket.end('RFB 003.008\\
   await vnc.recorded(r => r.quit === 'SIGTERM' && r.password !== desk.password);
 });
 
+test("an agent task leaves the owner's browser as it was: its own window, and no closing it after", { timeout: 30_000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-vm-owner-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const browser = standIn(dir, 'browser.mjs');
+  const vnc = standIn(dir, 'vnc.mjs', `
+const { createServer } = await import('node:net');
+createServer(socket => { socket.on('error', () => {}); socket.end('RFB 003.008\\n'); }).listen(Number(process.argv[process.argv.indexOf('-rfbport') + 1]), '127.0.0.1');`);
+  const agent = agentIn(t, { executable: '/nonexistent', desktop: { port: await freePort(), display: ':99', vnc: vnc.path, browser: browser.path } });
+  const pids = [];
+  t.after(() => { for (const pid of pids) try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } });
+
+  // The owner opens Chrome from the VM screen (the taskbar's vm-chrome sends no `by`).
+  assert.equal((await agent.handle('POST', '/desktop/open', {})).owner, true);
+  const owners = await browser.recorded(r => r.quit === null);
+  pids.push(owners.pid);
+  assert.ok(!owners.args.includes('--new-window'));
+
+  // A task starts: it gets a new window of the same browser instead of the owner's page.
+  assert.equal((await agent.handle('POST', '/desktop/open', { by: 'agent' })).owner, true);
+  const tasks = await browser.recorded(r => r.args.includes('--new-window'));
+  pids.push(tasks.pid);
+  assert.ok(tasks.args.includes(owners.args.find(arg => arg.startsWith('--user-data-dir='))), 'the same profile');
+  // Keeping it open later opens nothing more.
+  await agent.handle('POST', '/desktop/open', { by: 'agent', keep: true });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal((await browser.recorded()).pid, tasks.pid);
+
+  // The task ends: the owner's browser stays open.
+  assert.deepEqual(await agent.handle('POST', '/desktop/close', { by: 'agent' }), { open: true, kept: 'the owner opened it' });
+  assert.equal((await agent.handle('GET', '/status')).desktop.open, true);
+  // The owner (or the 30-minute limit) still closes it.
+  assert.deepEqual(await agent.handle('POST', '/desktop/close', {}), { open: false });
+  assert.equal((await agent.handle('GET', '/status')).desktop.open, false);
+
+  // A browser the agent opened itself closes at the end of its task, as before.
+  assert.equal((await agent.handle('POST', '/desktop/open', { by: 'agent' })).owner, false);
+  const own = await browser.recorded(r => r.quit === null && !r.args.includes('--new-window') && r.pid !== owners.pid);
+  pids.push(own.pid);
+  assert.deepEqual(await agent.handle('POST', '/desktop/close', { by: 'agent' }), { open: false });
+  assert.equal((await agent.handle('GET', '/status')).desktop.open, false);
+});
+
 test('a popup window opened from the page shows in the viewer, and its opener again when it closes', { skip: !CHROME && 'no Chromium available', timeout: 60_000 }, async t => {
   const site = await fixtureSite(); t.after(site.close);
   const agent = agentIn(t, {

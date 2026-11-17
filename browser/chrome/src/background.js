@@ -38,12 +38,15 @@ import {
   RELAY_STATUS_KEY,
   STATUS_KEY,
   delay,
+  executeCommand,
   getConfig,
   heartbeat,
   pollOnce,
   updateStatus,
   updateRelayStatus,
 } from './executor.js'
+import { runCloudPeer } from './cloud-peer.js'
+import { BOARD_KEY } from './page-rules-core.js'
 import {
   createMeshSocket,
   decideApproval,
@@ -304,6 +307,22 @@ function startRelayDrain() {
 }
 
 /*
+ * The third peer: Hive's cloud board, where any node's agent sends commands for this browser
+ * (cloud-peer.js). It needs no pairing, only the board key, and runs beside the other two.
+ */
+let activeCloudPeer = null
+
+function startCloudPeer() {
+  if (activeCloudPeer) return activeCloudPeer
+  activeCloudPeer = runCloudPeer({ executeCommand, getConfig })
+    .catch((error) => console.warn(`cloud peer stopped: ${error?.message || error}`))
+    .finally(() => {
+      activeCloudPeer = null
+    })
+  return activeCloudPeer
+}
+
+/*
  * Both peers wake on the same alarm and neither can stop the other: a relay
  * that is unreachable must not keep the Mac loop from starting, and a Mac that
  * is asleep is the case the relay peer exists for.
@@ -322,6 +341,7 @@ function startPeers() {
       void startPolling()
       void startRelayDrain()
     })
+  void startCloudPeer()
   /*
    * THE BACKGROUND ALWAYS WINS THE ENGINE LEASE. Claimed on every evaluation
    * and every alarm: a page engine that sees this fresh claim stands down
@@ -481,6 +501,9 @@ api.storage.onChanged.addListener((changes, areaName) => {
     configRevision += 1
     void startPolling()
   }
+
+  /* The popup just got the board key (from Hive, or set by hand): start listening to the cloud now. */
+  if (changes[BOARD_KEY]?.newValue) void startCloudPeer()
 
   if (RELAY_STORAGE_KEYS.some((key) => changes[key])) {
     configRevision += 1

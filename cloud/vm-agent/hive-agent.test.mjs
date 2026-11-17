@@ -160,7 +160,7 @@ test('every desktop tool asks for its step, and none takes a password', () => {
   assert.ok(TOOLS.some(tool => tool.name === 'authenticate'));
 });
 
-test('Codex runs on its own home with both tool servers, as the VM user, read-only', () => {
+test('Codex runs on its own home with its three tool servers, as the VM user, read-only', () => {
   const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu' });
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
@@ -169,11 +169,14 @@ test('Codex runs on its own home with both tool servers, as the VM user, read-on
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);
   assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', '/usr/bin/node', '/app/phone-mcp.mjs']);
-  for (const name of ['desktop', 'phone']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
+  const browser = JSON.parse(config.find(c => c.startsWith('mcp_servers.browser.args=')).split('=').slice(1).join('='));
+  assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/browser-mcp.mjs']);
+  for (const name of ['desktop', 'phone', 'browser']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
   assert.match(GUIDE, /authenticate/);
   assert.match(GUIDE, /Only approve a request you just\s+caused/);
+  assert.match(GUIDE, /never take over\s+a tab they're on/);
 });
 
 test('Codex events become one line each for the owner', () => {

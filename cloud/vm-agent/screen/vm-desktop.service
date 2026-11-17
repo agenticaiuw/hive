@@ -1,0 +1,14 @@
+[Unit]
+Description=Desktop (openbox, taskbar with Terminal and Chrome) on the VM agent screen :99
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/vm-desktop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

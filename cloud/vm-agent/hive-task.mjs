@@ -3,9 +3,10 @@
 //
 // Codex here is the VM's existing install (the one Devhub runs, in root's home), with a Codex home of
 // its own signed in to the owner's ChatGPT account (HIVE_CODEX_HOME, default /root/.codex-hive). It
-// runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets two
+// runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets three
 // tool servers, run as this user: desktop-mcp.mjs, the VM's screen, mouse and keyboard, saved logins
-// and the files sent to Hive; and phone-mcp.mjs, the owner's iPhone through its relay in the cloud (Duo, Siri tasks).
+// and the files sent to Hive; phone-mcp.mjs, the owner's iPhone through its relay in the cloud (Duo, Siri
+// tasks); and browser-mcp.mjs, the owner's own Safari or Chrome through the board in the cloud.
 // Shell commands it might run are read-only. Each step it says goes to stdout and to the task's folder.
 //
 // With --code DIR it works on code instead (Hive's nightly dream): no screen, no phone, no tool
@@ -44,7 +45,15 @@ the home screen). If the request isn't listed yet, pull down to refresh. Tap App
 for a verification code, type the code the sign-in page on the VM shows, then tap Verify. Then check the VM screen.
 Only approve a request you just
 caused, and do nothing else on the phone. If the phone tools are missing or say the phone isn't reachable, stop
-and say so.`;
+and say so.
+
+The browser tools are the owner's own Safari or Chrome on their Mac, already signed in as them, reached through the
+cloud. Use them when the task is about the owner's own browser or tabs, or for a site the VM's browser isn't signed in
+to and won't let you in (a captcha, a passkey, a new-device check); otherwise use the VM's screen. The owner may be
+using that browser: start with open (it finds their tab for a site) or navigate (it opens a new tab), never take over
+a tab they're on, and pass tab_id from then on. snapshot gives refs for click and type; take a new one after the page
+changes. These tools never type passwords: a sign-in there is the owner's, so say so instead. If they say the browser
+isn't connected, carry on with the VM's screen or say why you can't.`;
 
 export const CODE_GUIDE = `You are Hive's agent, working on code on the owner's cloud VM. There is no screen and no phone
 here: only the folder you were started in and a shell, with the network off. Before each command, say in one line what it
@@ -78,15 +87,18 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   const server = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`, `HIVE_TASK_STEPS=${stepsFile}`,
     node, join(appDir, 'desktop-mcp.mjs')];
   const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, node, join(appDir, 'phone-mcp.mjs')];
+  const browser = ['-n', '-u', user, node, join(appDir, 'browser-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     '-c', 'mcp_servers.desktop.startup_timeout_sec=60', '-c', 'mcp_servers.desktop.tool_timeout_sec=1900', // wait_until waits up to 30 minutes
     '-c', 'mcp_servers.phone.command="sudo"', '-c', `mcp_servers.phone.args=${toml(phone)}`,
     '-c', 'mcp_servers.phone.startup_timeout_sec=30', '-c', 'mcp_servers.phone.tool_timeout_sec=180',
+    '-c', 'mcp_servers.browser.command="sudo"', '-c', `mcp_servers.browser.args=${toml(browser)}`,
+    '-c', 'mcp_servers.browser.startup_timeout_sec=30', '-c', 'mcp_servers.browser.tool_timeout_sec=180', // a command waits up to 150 s
     // Codex asks before running an MCP tool, and with no one to ask (exec) that ask is a refusal, so
-    // Hive's own two servers are approved up front, as the Mac's Hive does (hive-codex agent.rs).
-    '-c', 'mcp_servers.desktop.default_tools_approval_mode="approve"', '-c', 'mcp_servers.phone.default_tools_approval_mode="approve"', '-'];
+    // Hive's own servers are approved up front, as the Mac's Hive does (hive-codex agent.rs).
+    ...['desktop', 'phone', 'browser'].flatMap(name => ['-c', `mcp_servers.${name}.default_tools_approval_mode="approve"`]), '-'];
 }
 
 /** One line for a person, from one of Codex's JSON events; null for the rest. */
@@ -154,7 +166,8 @@ async function main(argv) {
   const status = await new Promise(resolve => codex.on('close', resolve));
   if (!options.keepOpen && !options.code) {
     // Asked, not killed: the browser saves its cookies as it quits, and the worker gets it back.
-    await call(join(stateDir, 'control.sock'), 'POST', '/desktop/close', Buffer.from('{}')).catch(() => {});
+    // One the owner opened (from the VM screen) stays open (agent.mjs).
+    await call(join(stateDir, 'control.sock'), 'POST', '/desktop/close', Buffer.from('{"by":"agent"}')).catch(() => {});
   }
   if (status !== 0) say(`❌ Codex exited with ${status}${errors.trim() ? `: ${errors.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
   else say(`✅ Done. ${last ? '' : '(no report)'}`.trim());

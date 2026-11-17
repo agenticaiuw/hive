@@ -1,0 +1,11 @@
+<applications>
+  <!-- Hive VM agent desktop: the browser fills the screen above the taskbar, without a title bar -->
+  <application class="*hrom*">
+    <decor>no</decor>
+    <maximized>yes</maximized>
+  </application>
+  <application class="Xfce4-terminal">
+    <position force="no"><x>center</x><y>center</y></position>
+    <size><width>960</width><height>600</height></size>
+  </application>
+</applications>

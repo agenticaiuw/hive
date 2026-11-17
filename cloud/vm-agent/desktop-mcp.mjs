@@ -52,8 +52,8 @@ function stopStrayVnc() {
   }
 }
 
-async function controlCall(path) {
-  const { status, body } = await call(join(stateDir, 'control.sock'), 'POST', path, Buffer.from('{}'));
+async function controlCall(path, input = {}) {
+  const { status, body } = await call(join(stateDir, 'control.sock'), 'POST', path, Buffer.from(JSON.stringify(input)));
   if (status >= 300) throw new Error(body?.message ?? body?.error ?? `the worker said ${status}`);
   return body;
 }
@@ -61,8 +61,9 @@ async function controlCall(path) {
 /** Opens the browser for use and connects to the screen, once; later calls reuse it. */
 async function screen() {
   if (vnc) return vnc;
-  await controlCall('/desktop/open');
-  keepOpen ??= setInterval(() => controlCall('/desktop/open').catch(() => {}), 5 * 60_000);
+  // As the agent: if the owner has the browser open, this task gets its own window (agent.mjs).
+  await controlCall('/desktop/open', { by: 'agent' });
+  keepOpen ??= setInterval(() => controlCall('/desktop/open', { by: 'agent', keep: true }).catch(() => {}), 5 * 60_000);
   if (!vncServer || vncServer.exitCode !== null) {
     const { display, auth } = workerDisplay();
     rmSync(vncSocket, { force: true });

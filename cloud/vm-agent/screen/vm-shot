@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+// A picture of the VM agent's screen (Xvfb :99), written to stdout as PNG. The owner's Mac runs it
+// over SSH ("VM Screenshot" app) because Screen Sharing passes the Mac's own screenshot keys
+// (Cmd-Shift-3/4) through to the VM, where nothing takes them. `--window` takes only the window in
+// front. Uses xwd (x11-apps) and xdotool, and builds the PNG itself, so no image library is needed.
+import { execFileSync } from 'node:child_process';
+import { deflateSync, crc32 } from 'node:zlib';
+
+const run = (cmd, args, env) => execFileSync(cmd, args, { env, maxBuffer: 256 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
+
+// Xvfb picks a new auth file each time it starts, so look it up (as vm-screen-share does).
+const xvfb = run('ps', ['-o', 'args=', '-C', 'Xvfb']).toString().split('\n').find((line) => / :99( |$)/.test(line));
+const auth = xvfb?.match(/-auth (\S+)/)?.[1];
+if (!auth) {
+  process.stderr.write("The VM's screen (Xvfb :99) isn't running.\n");
+  process.exit(1);
+}
+const env = { ...process.env, DISPLAY: ':99', XAUTHORITY: auth };
+
+let target = ['-root'];
+if (process.argv.includes('--window')) {
+  try {
+    const id = run('xdotool', ['getactivewindow'], env).toString().trim();
+    if (/^\d+$/.test(id)) target = ['-id', id, '-frame'];
+  } catch {} // Nothing in front: take the whole screen.
+}
+const xwd = run('xwd', ['-silent', ...target], env);
+
+// XWD: a big-endian header of 32-bit fields, a colour map, then the pixels (ZPixmap).
+const field = (i) => xwd.readUInt32BE(i * 4);
+const [headerSize, format, width, height, byteOrder, bitsPerPixel, bytesPerLine] = [0, 2, 4, 5, 7, 11, 12].map(field);
+const [redMask, greenMask, blueMask, colours] = [14, 15, 16, 19].map(field);
+if (format !== 2 || bitsPerPixel !== 32) {
+  process.stderr.write(`Unexpected screen format (format ${format}, ${bitsPerPixel} bits per pixel).\n`);
+  process.exit(1);
+}
+const shift = (mask) => 31 - Math.clz32(mask & -mask);
+const [rs, gs, bs] = [redMask, greenMask, blueMask].map(shift);
+const start = headerSize + colours * 12;
+const row = width * 3 + 1;
+const raw = Buffer.alloc(row * height);
+for (let y = 0; y < height; y++) {
+  for (let x = 0; x < width; x++) {
+    const at = start + y * bytesPerLine + x * 4;
+    const pixel = byteOrder === 0 ? xwd.readUInt32LE(at) : xwd.readUInt32BE(at);
+    const o = y * row + 1 + x * 3;
+    raw[o] = (pixel & redMask) >>> rs;
+    raw[o + 1] = (pixel & greenMask) >>> gs;
+    raw[o + 2] = (pixel & blueMask) >>> bs;
+  }
+}
+
+const chunk = (type, data) => {
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+  const out = Buffer.alloc(body.length + 8);
+  out.writeUInt32BE(data.length, 0);
+  body.copy(out, 4);
+  out.writeUInt32BE(crc32(body), body.length + 4);
+  return out;
+};
+const ihdr = Buffer.alloc(13);
+ihdr.writeUInt32BE(width, 0);
+ihdr.writeUInt32BE(height, 4);
+ihdr[8] = 8; // bits per channel
+ihdr[9] = 2; // RGB
+process.stdout.write(
+  Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]),
+);
