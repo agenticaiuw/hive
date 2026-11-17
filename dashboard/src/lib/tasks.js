@@ -6,8 +6,9 @@
  * board (cloud/tasks). `GET /api/tasks` answers `{source, note?, board}` on every host:
  *
  *   - `source: "cloud"`: `board` is the cloud board, every machine:
- *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder], limits: [limit]}`,
- *     a row carrying its `machine`;
+ *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder], limits: [limit],
+ *     requests: [request], steps: [step]}`, a row carrying its `machine`. `steps` are what Hive's cloud
+ *     agent did on the requests still going or just finished, line by line, as it did them;
  *   - `source: "local"`: the cloud couldn't be reached and `board` is this machine's ledger
  *     (`hive-tasks board --all --json`): `{generated_at, needs_you, in_progress, not_started,
  *     left_open, done, not_split, rules, folders, limits}`, with `note` saying why.
@@ -37,7 +38,10 @@
 /** @typedef {{minutes: number, used: number, resetsAt: number}} LimitWindow */
 
 /** @typedef {{id: string, text: string, project: string, folder: string, status: string,
- *   outcome: string, created: number, updated: number}} Request */
+ *   outcome: string, created: number, updated: number, steps: Step[]}} Request */
+
+/** One thing Hive's cloud agent said or did ("→ click: Open Compose", "💬 …", "✅ Done."), in order.
+ *  @typedef {{n: number, task: number, at: number, text: string}} Step */
 
 /** What each state of an instruction sent to Hive's orchestrator in the cloud reads as. */
 export const REQUEST_WORDS = {
@@ -233,6 +237,15 @@ export function normalizeBoard(answer) {
       outcome: String(r.outcome ?? ''),
       created: seconds(r.created_at),
       updated: seconds(r.updated_at),
+      steps: list(board.steps)
+        .filter((/** @type {any} */ s) => String(s.request) === String(r.id))
+        .map((/** @type {any} */ s) => ({
+          n: Number(s.n) || 0,
+          task: Number(s.task) || 0,
+          at: seconds(s.at),
+          text: String(s.text ?? ''),
+        }))
+        .sort((a, b) => a.n - b.n),
     }))),
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,

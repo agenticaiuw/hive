@@ -5,7 +5,9 @@
 //
 // The queue and the board are the task board Worker (cloud/tasks): it takes the oldest queued request
 // (POST /v1/requests/take), files the plan's tasks on the board under it, and reports every task as
-// it goes (POST /v1/requests/update): its status, the time it took, its tokens and its report. A task
+// it goes (POST /v1/requests/update): its status, the time it took, its tokens and its report. While a
+// task runs, every step its agent prints goes to the board too (POST /v1/requests/steps, a few lines
+// every couple of seconds), so the dashboard shows what the agent is doing as it does it. A task
 // in a folder (a part of a project, "hive › Voice") gets every memory of that folder, in full, and
 // its report is saved back to the folder as a memory.
 //
@@ -215,6 +217,48 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
   });
 }
 
+/**
+ * A task's steps to the board (POST /v1/requests/steps), sent a few at a time every `every` ms so the
+ * dashboard follows the agent live. Sending never holds up or stops the task: lines a post couldn't
+ * deliver go with the next one (at most MOST_UNSENT of them), and `done()` sends what's left.
+ */
+const MOST_UNSENT = 300;
+export function stepSender(board, request, key, { every = 2000, log = () => {}, now = () => Math.floor(Date.now() / 1000) } = {}) {
+  let unsent = [];
+  let timer = null;
+  let sending = Promise.resolve();
+  const flush = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    sending = sending.then(async () => {
+      while (unsent.length) {
+        const steps = unsent.splice(0, 100);
+        try {
+          await board('/v1/requests/steps', { id: request, task: key, steps });
+        } catch (error) {
+          unsent = [...steps, ...unsent].slice(-MOST_UNSENT);
+          log(`couldn't put R${request}'s steps on the board: ${error.message}`);
+          return;
+        }
+      }
+    });
+    return sending;
+  };
+  return {
+    step(line) {
+      const text = String(line ?? '').trim();
+      if (!text) return;
+      unsent.push({ at: now(), text });
+      if (unsent.length > MOST_UNSENT) unsent = unsent.slice(-MOST_UNSENT);
+      if (!timer) timer = setTimeout(flush, every ?? 2000);
+    },
+    async done() {
+      await flush();
+      if (unsent.length) await flush(); // one more try for what a failed post left
+    },
+  };
+}
+
 export async function handle(request, deps) {
   if (request.page?.url && deps.ask) return handlePage(request, deps);
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
@@ -278,14 +322,16 @@ export async function handle(request, deps) {
     const folder = await folderOf(task.folder).catch(() => null);
     log(`  T${request.id * 100 + task.key} ${task.title} → ${task.choice.model} (${task.choice.effort})${coding ? ' on code' : ''}`);
     let result;
+    const steps = stepSender(board, request.id, task.key, { log, every: deps.stepEvery });
     try {
       const brief = taskBrief(task, request, folder, rules);
       result = coding
-        ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key })
-        : await run(brief, task.choice);
+        ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key }, steps.step)
+        : await run(brief, task.choice, steps.step);
     } catch (error) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
     }
+    await steps.done();
     const files = result.files ?? [];
     task.branch = result.branch && files.length ? result.branch : null;
     const where = task.branch
@@ -371,8 +417,9 @@ function askCodex(prompt, choice) {
   });
 }
 
-/** hive-task.mjs with these arguments and the brief on stdin: whether it finished, its report, time and tokens. */
-function runAgent(args, brief) {
+/** hive-task.mjs with these arguments and the brief on stdin: whether it finished, its report, time and tokens.
+ *  Each line it prints after its first goes to `onStep` as it comes. */
+function runAgent(args, brief, onStep = () => {}) {
   const started = Date.now();
   return new Promise(resolve => {
     const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), ...args], { stdio: ['pipe', 'pipe', 'inherit'] });
@@ -381,6 +428,7 @@ function runAgent(args, brief) {
       process.stdout.write(`    ${line}\n`);
       const match = /^Task (\S+) \(/.exec(line);
       if (match && !workDir) workDir = join(process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state'), 'tasks', match[1]);
+      else onStep(line); // "→ click: …", "💬 …", "$ …", "✅ Done.": hive-task.mjs describe()
     });
     agent.stdin.end(JSON.stringify({ text: brief }));
     agent.on('close', status => {
@@ -392,7 +440,7 @@ function runAgent(args, brief) {
 }
 
 /** One task on the VM's screen, with the model picked for it. */
-const runOnVm = (brief, choice) => runAgent(['--model', choice.model, '--effort', choice.effort], brief);
+const runOnVm = (brief, choice, onStep) => runAgent(['--model', choice.model, '--effort', choice.effort], brief, onStep);
 
 // Code work lives in root's /var/lib/hive-orchestrator (like Codex, which runs as root): a clone per
 // repository and a worktree per task. The toolchain and the deploy key are the nightly dream's.
@@ -405,7 +453,7 @@ function asRoot(args) {
 }
 
 /** One code task: a worktree off main, Codex in it with the network off, its change pushed to `branch`. */
-async function codeOnVm(brief, choice, { project, branch, title, request, key }) {
+async function codeOnVm(brief, choice, { project, branch, title, request, key }, onStep) {
   const repo = join(CODE_ROOT, project);
   const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
   const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
@@ -428,7 +476,7 @@ async function codeOnVm(brief, choice, { project, branch, title, request, key })
   try {
     const result = await runAgent(['--code', dir, '--model', choice.model, '--effort', choice.effort,
       '--writable', join(CODE_ROOT, 'target'), '--writable', `${DREAM_ROOT}/cargo`, '--writable', tmp,
-      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])], brief);
+      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])], brief, onStep);
     if (git('-C', dir, 'status', '--porcelain')) {
       git('-C', dir, 'add', '-A');
       git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m',
