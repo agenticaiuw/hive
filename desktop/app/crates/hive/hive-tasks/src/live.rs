@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   version INTEGER NOT NULL DEFAULT 1, -- goes up with each change
   sent INTEGER NOT NULL DEFAULT 0,    -- the version the board has
   updated_at INTEGER NOT NULL DEFAULT 0,
+  cwd TEXT NOT NULL DEFAULT '',       -- the folder it works in (where a message wakes it)
   PRIMARY KEY (harness, session)
 );
 CREATE TABLE IF NOT EXISTS steps (
@@ -78,6 +79,15 @@ impl Live {
         db.busy_timeout(std::time::Duration::from_secs(3)).map_err(err)?;
         db.execute_batch("PRAGMA journal_mode = WAL;").map_err(err)?;
         db.execute_batch(SCHEMA).map_err(err)?;
+        // live.sqlite3 from before sessions knew their folder.
+        let has_cwd = db
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'cwd'")
+            .and_then(|mut s| s.exists([]))
+            .map_err(err)?;
+        if !has_cwd {
+            db.execute_batch("ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''")
+                .map_err(err)?;
+        }
         Ok(Live { db })
     }
 
@@ -141,13 +151,14 @@ impl Live {
             || status != old_status
             || project != old_project;
         tx.execute(
-            "INSERT INTO sessions (harness, session, path, offset, n, title, project, status, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO sessions (harness, session, path, offset, n, title, project, status, updated_at, cwd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?11)
              ON CONFLICT (harness, session) DO UPDATE SET
                path = excluded.path, offset = excluded.offset, n = excluded.n, title = excluded.title,
                project = excluded.project, status = excluded.status, updated_at = excluded.updated_at,
+               cwd = CASE WHEN excluded.cwd = '' THEN cwd ELSE excluded.cwd END,
                version = version + ?10",
-            params![harness, session, path, read_to, n, title, project, status, now(), changed as i64],
+            params![harness, session, path, read_to, n, title, project, status, now(), changed as i64, str_of("cwd")],
         )
         .map_err(err)?;
         tx.commit().map_err(err)?;
@@ -238,13 +249,15 @@ impl Live {
 pub fn note_soon(harness: &str, input: &Value) {
     let changed = Live::open(&live_path()).and_then(|live| live.note(harness, input));
     match changed {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(e) => {
-            eprintln!("hive-tasks: live: {e}");
-            return;
-        }
+        Ok(true) => send_soon(),
+        Ok(false) => {}
+        Err(e) => eprintln!("hive-tasks: live: {e}"),
     }
+}
+
+/// Starts a detached `hive-tasks live-send` (which also takes and hands over this Mac's messages,
+/// inbox.rs, and tells the cloud how they went).
+pub fn send_soon() {
     if Cloud::load().is_none() || std::env::var_os("HIVE_TASKS_NO_SYNC").is_some() {
         return;
     }
@@ -296,7 +309,9 @@ pub fn send_now() -> Result<String, String> {
             break;
         }
     }
-    Ok(format!("{posts} posts"))
+    // The owner's messages for this Mac's agents, and how the last ones went.
+    let delivered = crate::inbox::deliver_now().unwrap_or_else(|e| format!("messages: {e}"));
+    Ok(format!("{posts} posts; {delivered}"))
 }
 
 /// The owner's last message in the transcript's last few megabytes (where a session first seen

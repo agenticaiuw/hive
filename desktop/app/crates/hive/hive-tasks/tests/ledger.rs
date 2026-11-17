@@ -902,3 +902,46 @@ fn codex_plan_limits_are_read_from_its_newest_session() {
     assert!(limits["at"].as_i64().unwrap() > 0);
     assert!(hive_tasks::usage::codex_limits(&home.path().join("nowhere")).is_none());
 }
+
+#[test]
+fn a_session_that_starts_another_sessions_task_takes_it_over_and_a_dashboard_cancel_drops_it() {
+    let f = fixture();
+    f.prompt(MESSAGE);
+    f.ledger
+        .add(1, &json!([
+            {"quote": "fix the login button on mobile", "title": "Fix the login button", "minutes": 10, "value": "high"},
+            {"quote": "the footer is wrong", "title": "Fix the footer", "minutes": 10, "value": "low"}
+        ]))
+        .unwrap();
+
+    // Another session reports T1 active: it's that session's now, and s1's Stop no longer asks about it.
+    let report = |session: &str, body: Value| {
+        f.ledger.hook("claude", &json!({
+            "session_id": session, "cwd": f.cwd, "transcript_path": f.transcript, "hook_event_name": "PreToolUse",
+            "tool_name": "Bash", "tool_input": {"command": format!("hive-tasks report <<'EOF'\n{body}\nEOF")}
+        }))
+        .unwrap()
+    };
+    report("s2", json!([{"id": "T1", "status": "active"}]));
+    let (batch, _) = f.ledger.sync_batch(200).unwrap();
+    let t1 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
+    assert_eq!((t1["claimed_harness"].as_str(), t1["claimed_session"].as_str()), (Some("claude"), Some("s2")));
+    let stop = f.stop(false);
+    let reason = stop["reason"].as_str().unwrap_or("");
+    assert!(!reason.contains("T1 "), "{reason}");
+    assert!(reason.contains("T2"), "{reason}");
+
+    // Handing a task over by name.
+    report("s1", json!([{"id": "T2", "status": "blocked", "outcome": "Handed to s3", "agent": "codex:s3"}]));
+    let (batch, _) = f.ledger.sync_batch(200).unwrap();
+    let t2 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 2).unwrap().clone();
+    assert_eq!(t2["claimed_session"], "s3");
+
+    // The owner cancels T1 from a dashboard: the next sync answer drops it here.
+    assert_eq!(f.ledger.take_cancelled(&json!([1, 99])).unwrap(), 1);
+    assert_eq!(f.ledger.take_cancelled(&json!([1])).unwrap(), 0);
+    let (batch, _) = f.ledger.sync_batch(200).unwrap();
+    let t1 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
+    assert_eq!(t1["status"], "dropped");
+    assert_eq!(t1["outcome"], "Cancelled by the owner from the dashboard.");
+}

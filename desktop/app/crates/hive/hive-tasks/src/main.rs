@@ -37,6 +37,8 @@ hive-tasks sync                 push what changed to the cloud copy (~/.config/h
                                 take in the rules set on other machines (runs by itself after changes)
 hive-tasks live-send            send this Mac's Claude Code and Codex sessions to the board, live
                                 (the hooks start it by themselves)
+hive-tasks deliver              hand this Mac's agents what the owner said to them from a dashboard
+                                (live-send and Hive do it by themselves)
 hive-tasks web                  open Hive's dashboard with every machine's tasks (its window on the Mac)
 ";
 
@@ -111,6 +113,9 @@ fn run(args: &[String]) -> Result<String, String> {
     if cmd == "live-send" {
         return hive_tasks::live::send_now();
     }
+    if cmd == "deliver" {
+        return hive_tasks::inbox::deliver_now();
+    }
     // The cloud copy, for Hive's dashboard window (it answers the same questions the website does).
     if matches!(cmd, "get" | "post") {
         let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
@@ -144,6 +149,8 @@ fn run(args: &[String]) -> Result<String, String> {
             // The session, live on the board (sent from a detached `live-send`).
             hive_tasks::live::note_soon(harness, &input);
             let out = ledger.hook(harness, &input)?;
+            // What the owner said to this session from a dashboard, if anything is waiting for it.
+            let out = hive_tasks::inbox::with_messages(harness, &input, out);
             if input["hook_event_name"] != "PreToolUse" {
                 sync_soon(&path);
             }

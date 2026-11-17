@@ -261,6 +261,11 @@ enum DashboardAPI {
         case ("POST", "/api/folders"): return board("post", "/v1/folders", body)
         case ("POST", "/api/folders/memory"): return board("post", "/v1/folders/memory", body, thenSync: true)
         case ("POST", "/api/dictation"): return Dictation.answer(body, stateDir: stateDir)
+        // Talking to one agent, and acting on a task (cancel, continue, answer): through the cloud,
+        // then this Mac hands over at once whatever is for its own agents (`hive-tasks deliver`).
+        case ("GET", "/api/agents/run"): return conversation(query)
+        case ("POST", "/api/agents/message"): return board("post", "/v1/runs/message", body, thenDeliver: true)
+        case ("POST", "/api/tasks/act"): return board("post", "/v1/tasks/act", body, thenDeliver: true)
         default: return (404, json(["error": "The desktop app doesn't answer \(path) yet."]))
         }
     }
@@ -292,15 +297,28 @@ enum DashboardAPI {
         return board("get", "/v1/folder?" + (out.percentEncodedQuery ?? ""), Data())
     }
 
+    /// One agent's conversation (`hive-tasks get /v1/runs?machine&run&tail|after|before`).
+    static func conversation(_ query: String) -> (Int, Data) {
+        var asked = URLComponents()
+        asked.query = query
+        var out = URLComponents()
+        out.queryItems = ["machine", "run", "tail", "after", "before"].compactMap { name in
+            asked.queryItems?.first(where: { $0.name == name && !($0.value ?? "").isEmpty })
+        }
+        return board("get", "/v1/runs?" + (out.percentEncodedQuery ?? ""), Data())
+    }
+
     /// Asks the cloud board through `hive-tasks get|post` (the machine's sign-in stays with it).
-    /// Everything is kept in the cloud first; `thenSync` has this Mac's ledger take it in now.
-    static func board(_ verb: String, _ path: String, _ body: Data, thenSync: Bool = false) -> (Int, Data) {
+    /// Everything is kept in the cloud first; `thenSync` has this Mac's ledger take it in now, and
+    /// `thenDeliver` hands this Mac's agents what the owner just said to them.
+    static func board(_ verb: String, _ path: String, _ body: Data, thenSync: Bool = false, thenDeliver: Bool = false) -> (Int, Data) {
         let tool = hiveTasks()
         guard let out = run(tool, [verb, path], input: verb == "post" ? body : nil),
               (try? JSONSerialization.jsonObject(with: out)) != nil else {
             return (502, json(["error": "Couldn't reach the cloud board (\(path))."]))
         }
         if thenSync { DispatchQueue.global().async { _ = run(tool, ["sync", "--quiet"], seconds: 60) } }
+        if thenDeliver { DispatchQueue.global().async { _ = run(tool, ["deliver"], seconds: 60) } }
         return (200, out)
     }
 
