@@ -17,6 +17,7 @@
   import { base } from "$app/paths";
   import {
     actOnTask,
+    turnRuleOff,
     fetchConversation,
     fetchFolder,
     fetchTaskBoard,
@@ -36,6 +37,7 @@
     normalizeFolder,
     planLimits,
     projects,
+    ruleScope,
     sections,
   } from "$lib/tasks.js";
   import {
@@ -124,6 +126,10 @@
   let acting = $state<Record<string, string>>({});
   let actNote = $state<Record<string, { ok: boolean; text: string }>>({});
   let answers = $state<Record<string, string>>({});
+  // Turning a standing rule off: the × asks once more, like a task's.
+  let ruleConfirming = $state("");
+  let ruleActing = $state("");
+  let ruleError = $state<Record<string, string>>({});
 
   const agentList = $derived(board ? agents(board) : []);
   const ofTask = $derived(agentOfTask(agentList));
@@ -344,6 +350,28 @@
       actNote[task.key] = { ok: false, text: message(error) };
     } finally {
       delete acting[task.key];
+    }
+  }
+
+  async function askRuleOff(rule: { key: string; machine: string; id: string }) {
+    if (ruleConfirming !== rule.key) {
+      ruleConfirming = rule.key;
+      setTimeout(() => {
+        if (ruleConfirming === rule.key) ruleConfirming = "";
+      }, 4000);
+      return;
+    }
+    ruleConfirming = "";
+    ruleActing = rule.key;
+    delete ruleError[rule.key];
+    try {
+      const answer = await turnRuleOff(rule);
+      if (answer?.error) throw new Error(answer.error);
+      await refresh();
+    } catch (error) {
+      ruleError[rule.key] = message(error);
+    } finally {
+      ruleActing = "";
     }
   }
 
@@ -595,7 +623,14 @@
     {/if}
 
     {#if actNote[task.key]}
-      <p class="act-note" class:bad={!actNote[task.key].ok} role="status">{actNote[task.key].text}</p>
+      {@const holder = ofTask.get(task.key)}
+      <p class="act-note" class:bad={!actNote[task.key].ok} role="status">
+        {actNote[task.key].text}
+        <!-- Where the answer went and what its agent does with it: that agent's conversation (T244). -->
+        {#if actNote[task.key].ok && !inAgent && holder}
+          <button type="button" class="link" onclick={() => openAgent(holder.key)}>See its reply in {holder.title}</button>
+        {/if}
+      </p>
     {/if}
 
     {#if opened === task.key}
@@ -1064,7 +1099,28 @@
                   <summary>Your standing rules <span class="count">{board.rules.length}</span></summary>
                   <ul>
                     {#each board.rules as r (r.key)}
-                      <li title={r.quote ? `You said: “${r.quote}”` : undefined}>{r.text}</li>
+                      <li class="rule">
+                        <div class="rule-text">
+                          <span title={r.quote ? `You said: “${r.quote}”` : undefined}>{r.text}</span>
+                          <span class="rule-scope">{ruleScope(r)}</span>
+                          {#if ruleError[r.key]}<span class="rule-error">{ruleError[r.key]}</span>{/if}
+                        </div>
+                        {#if r.machine}
+                          <button
+                            type="button"
+                            class="x"
+                            class:armed={ruleConfirming === r.key}
+                            disabled={ruleActing === r.key}
+                            aria-label={ruleConfirming === r.key ? "Confirm: turn this rule off" : "Turn this rule off"}
+                            title={ruleConfirming === r.key ? "Click again to turn it off on every machine" : "Turn this rule off"}
+                            onclick={() => askRuleOff(r)}
+                          >
+                            {#if ruleActing === r.key}…{:else if ruleConfirming === r.key}Turn off{:else}
+                              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+                            {/if}
+                          </button>
+                        {/if}
+                      </li>
                     {/each}
                   </ul>
                 </details>
@@ -1809,6 +1865,26 @@
     border-radius: var(--radius);
     color: var(--ink-2);
     font-size: var(--fs-small);
+  }
+
+  .rule {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s2);
+  }
+  .rule-text {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+    overflow-wrap: anywhere;
+  }
+  .rule-scope {
+    color: var(--muted);
+  }
+  .rule-error {
+    color: var(--red);
   }
 
   /* ---- a folder ---- */

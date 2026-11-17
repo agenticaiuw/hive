@@ -289,12 +289,45 @@ export function normalizeBoard(answer) {
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),
+      // The machine whose ledger has it, so it can be turned off there (none on a local board).
+      machine: String(r.machine ?? ''),
       text: String(r.text ?? ''),
       quote: String(r.quote ?? ''),
       project: String(r.project ?? ''),
       projectName: projectName(r.project),
+      paths: rulePaths(r.paths),
+      shown: Number(r.shown) || 0,
     })),
   };
+}
+
+/** A rule's file globs: the cloud keeps them as JSON text, a local board as a list. @param {unknown} paths */
+function rulePaths(paths) {
+  let list = paths;
+  if (typeof paths === 'string') {
+    try {
+      list = JSON.parse(paths);
+    } catch {
+      list = paths ? [paths] : [];
+    }
+  }
+  return Array.isArray(list) ? list.map(String).filter(Boolean) : [];
+}
+
+/**
+ * Where a standing rule applies and when an agent is given it, in one line (hive-tasks' hooks and
+ * the cloud orchestrator's briefs): "hive · whole project · every agent session here, at its start
+ * and after it compacts, and every cloud task" or "hive · web/*.svelte · when an agent first
+ * edits one of these files in a session, and every cloud task · shown 3 times".
+ * @param {{projectName: string, paths: string[], shown: number}} rule
+ */
+export function ruleScope(rule) {
+  const where = rule.paths.length ? rule.paths.join(', ') : 'whole project';
+  const when = rule.paths.length
+    ? 'when an agent first edits one of these files in a session, and in every cloud task'
+    : 'every agent session here, at its start and after it compacts, and every cloud task';
+  const shown = rule.shown ? (rule.shown === 1 ? 'shown once' : `shown ${rule.shown} times`) : '';
+  return [rule.projectName, where, when, shown].filter(Boolean).join(' · ');
 }
 
 /**
@@ -604,7 +637,23 @@ export function estimates(tasks) {
 }
 
 /**
- * Each subscription's windows for the side panel: "Codex · prolite · studio-mac", then "Week 15%,
+ * A plan as its maker sells it, not as its sign-in token spells it: ChatGPT's token says "prolite"
+ * for the plan OpenAI sells as Pro 10x. Claude's plans come already named ("Max 5x").
+ * @type {Record<string, string>}
+ */
+const PLAN_NAMES = {
+  free: 'Free', go: 'Go', plus: 'Plus', prolite: 'Pro 10x', pro: 'Pro', team: 'Team', business: 'Business',
+  enterprise: 'Enterprise', edu: 'Edu',
+};
+
+/** @param {string | null | undefined} plan */
+export function planName(plan) {
+  if (!plan) return '';
+  return PLAN_NAMES[plan.toLowerCase()] ?? plan;
+}
+
+/**
+ * Each subscription's windows for the side panel: "Codex · Pro 10x · studio-mac", then "Week 15%,
  * resets in 4 days" per window. A window whose reset has passed since the harness last wrote it
  * starts over, so it shows 0% and `fresh` (nothing used since, as far as anyone has seen).
  * @param {Limit[]} limits
@@ -624,7 +673,7 @@ export function planLimits(limits, now) {
   return [...latest.values()]
     .map((l) => ({
       key: l.key,
-      who: [HARNESSES[/** @type {keyof typeof HARNESSES} */ (l.harness)] ?? l.harness, l.plan, l.machine]
+      who: [HARNESSES[/** @type {keyof typeof HARNESSES} */ (l.harness)] ?? l.harness, planName(l.plan), l.machine]
         .filter(Boolean)
         .join(' · '),
       home: l.home,

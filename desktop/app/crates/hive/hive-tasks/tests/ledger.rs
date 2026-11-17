@@ -178,6 +178,35 @@ fn an_unchanged_list_blocks_twice_then_lets_the_stop_through_marked_left_open() 
 }
 
 #[test]
+fn a_message_never_split_becomes_one_task_in_the_owners_words() {
+    let f = fixture();
+    // The agent stops twice without splitting it: the third stop goes through, and the message is
+    // kept as one task, quoted whole, shown as left open.
+    f.prompt("hold right, short pause\nthese are way too many shortcuts to remember");
+    assert_eq!(f.stop(false)["decision"], "block");
+    assert_eq!(f.stop(true)["decision"], "block");
+    assert!(f.stop(true).is_null());
+    let board = f.ledger.board(None).unwrap();
+    assert!(board["not_split"].as_array().unwrap().is_empty());
+    let task = &board["left_open"][0];
+    assert_eq!(task["title"], "hold right, short pause");
+    assert_eq!(task["quote"], "hold right, short pause\nthese are way too many shortcuts to remember");
+    assert_eq!(task["outcome"], hive_tasks::SPLIT_LEFT);
+    // A message from a session that ended without a stop waits until it is older than
+    // SPLIT_WITHIN; the sweep (run at every sync) then does the same; a split one is left alone.
+    let g = fixture();
+    g.prompt("login");
+    g.prompt("rename the settings tab");
+    g.ledger.add(2, &json!([])).unwrap();
+    assert!(g.ledger.split_left(hive_tasks::now() - hive_tasks::SPLIT_WITHIN, None).unwrap().is_empty(), "too new");
+    assert_eq!(g.ledger.split_left(hive_tasks::now() + 1, None).unwrap(), vec!["T1 login".to_string()]);
+    assert!(g.ledger.split_left(hive_tasks::now() + 1, None).unwrap().is_empty(), "once");
+    let board = g.ledger.board(None).unwrap();
+    assert!(board["not_split"].as_array().unwrap().is_empty());
+    assert_eq!(board["left_open"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn a_message_queued_while_the_agent_worked_is_caught_from_the_transcript() {
     let f = fixture();
     f.prompt("first thing");
@@ -273,7 +302,10 @@ fn a_rule_reaches_the_agent_when_it_edits_a_matching_file_once_a_session() {
     f.hook("SessionStart", json!({"source": "compact"}));
     assert!(!edit(format!("{}/web/src/Footer.svelte", f.cwd)).is_null());
     assert_eq!(f.ledger.rule_list(None).unwrap()[0]["shown"], 2);
-    f.ledger.rule_off("R1").unwrap();
+    // The owner turns it off from a dashboard: the cloud's sync answer names it, every time.
+    assert_eq!(f.ledger.take_rules_off(&json!([1])).unwrap(), 1);
+    assert_eq!(f.ledger.take_rules_off(&json!([1])).unwrap(), 0, "already off: nothing to change or push");
+    assert_eq!(f.ledger.rule_list(None).unwrap()[0]["active"], false);
     f.hook("SessionStart", json!({"source": "compact"}));
     assert!(
         edit(format!("{}/web/src/Footer.svelte", f.cwd)).is_null(),
@@ -953,4 +985,58 @@ fn a_session_that_starts_another_sessions_task_takes_it_over_and_a_dashboard_can
     let t1 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
     assert_eq!(t1["status"], "dropped");
     assert_eq!(t1["outcome"], "Cancelled by the owner from the dashboard.");
+}
+
+#[test]
+fn limits_from_a_signed_out_account_are_dropped_and_claude_reports_its_own() {
+    use hive_tasks::usage::{codex_signed_in_plan, SignedIn};
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(codex_signed_in_plan(home.path()), SignedIn::Out);
+    // An ID token's middle part is URL-safe base64 of its claims (unpadded).
+    let claims = r#"{"https://api.openai.com/auth":{"chatgpt_plan_type":"prolite"},"sub":"x"}"#;
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut b64 = String::new();
+    for chunk in claims.as_bytes().chunks(3) {
+        let n = chunk.iter().fold(0u32, |a, &b| (a << 8) | b as u32) << (8 * (3 - chunk.len()));
+        for i in 0..=chunk.len() {
+            b64.push(table[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+    let auth = json!({"tokens": {"id_token": format!("e30.{b64}.sig")}});
+    std::fs::write(home.path().join("auth.json"), auth.to_string()).unwrap();
+    assert_eq!(codex_signed_in_plan(home.path()), SignedIn::Plan("prolite".into()));
+    std::fs::write(home.path().join("auth.json"), r#"{"OPENAI_API_KEY":"k"}"#).unwrap();
+    assert_eq!(codex_signed_in_plan(home.path()), SignedIn::Unknown);
+
+    // A home's readings show while their plan is the one signed in there, and go once it isn't.
+    use hive_tasks::{codex_reading, CodexReading};
+    assert_eq!(codex_reading(home.path()), CodexReading::Nothing, "no session logs: nothing to say");
+    let day = home.path().join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let reading = |plan: &str| {
+        format!(r#"{{"timestamp":"2026-11-14T10:00:00.000Z","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"primary":{{"used_percent":94.0,"window_minutes":43200,"resets_at":1795000000}},"plan_type":"{plan}"}}}}}}"#)
+    };
+    std::fs::write(day.join("rollout-a.jsonl"), reading("free")).unwrap();
+    std::fs::write(home.path().join("auth.json"), auth.to_string()).unwrap();
+    assert_eq!(codex_reading(home.path()), CodexReading::Gone, "the free account's readings, Pro signed in now");
+    std::fs::write(day.join("rollout-a.jsonl"), reading("prolite")).unwrap();
+    assert!(matches!(codex_reading(home.path()), CodexReading::Shown(l) if l["plan"] == "prolite"));
+    std::fs::remove_file(home.path().join("auth.json")).unwrap();
+    assert_eq!(codex_reading(home.path()), CodexReading::Gone, "signed out");
+
+    // Claude Code's windows, as the board keeps them, and the plan's name.
+    let windows = hive_tasks::claude_windows(&json!([
+        {"kind": "five_hour", "percentUsed": 23.5, "resetsAt": "2026-11-17T08:00:00Z"},
+        {"kind": "seven_day", "percentUsed": 7, "resetsAt": "2026-11-20T02:00:00.000-06:00"},
+        {"kind": "spend_limit", "percentUsed": 1}
+    ]))
+    .unwrap();
+    assert_eq!(windows, vec![
+        json!({"minutes": 300, "used": 23.5, "resets_at": 1_794_902_400}),
+        json!({"minutes": 10080, "used": 7.0, "resets_at": 1_795_161_600}),
+    ]);
+    assert_eq!(hive_tasks::epoch_of("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(hive_tasks::claude_plan(Some("default_claude_max_5x"), Some("claude_max")).as_deref(), Some("Max 5x"));
+    assert_eq!(hive_tasks::claude_plan(Some("default_claude_max_20x"), None).as_deref(), Some("Max 20x"));
+    assert_eq!(hive_tasks::claude_plan(None, Some("claude_pro")).as_deref(), Some("Pro"));
 }

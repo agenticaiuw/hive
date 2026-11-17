@@ -12,7 +12,12 @@
 //!   (`claude --bg --resume <session> <words>`, `codex exec resume <session> <words>`), and streams
 //!   back to the board like any session (live.rs). Claude Code says it started a copy when the
 //!   session is still open somewhere;
-//! - Hive on this Mac gets it as a request, through its request socket.
+//! - Hive on this Mac gets it as a request, through its request socket;
+//! - a Claude Code session open in an app or terminal shows it as the owner's own message: Hive's
+//!   mod there (desktop/claude-code/hive-board) says the session is open every few seconds and takes
+//!   its messages (`hive-tasks messages`, [`for_open_session`]), and submits each as a prompt, so the
+//!   owner sees their words in the chat. Its hooks and the background wake leave those messages to
+//!   it while it listens (owner, 2026-11-17: "why can't i see my own prompt in claude code?").
 //!
 //! Then the cloud hears how that went (POST /v1/runs/messages/update), so every dashboard shows the
 //! message as delivered, or why not. Taking happens in `hive-tasks deliver` ([`deliver_now`]): after a
@@ -31,6 +36,8 @@ use std::time::Duration;
 /// A session that did something this recently, and says it's working, gets a message at its next
 /// step; one quiet longer than this is woken with it.
 pub const BUSY_FOR: i64 = 600;
+/// A session whose mod said it was open this recently takes its own messages (as prompts).
+pub const LISTEN_FOR: i64 = 45;
 /// How long a woken harness gets to say it couldn't start before the message counts as delivered.
 const START_WAIT: Duration = Duration::from_secs(6);
 
@@ -45,6 +52,10 @@ CREATE TABLE IF NOT EXISTS inbox (
   detail TEXT NOT NULL DEFAULT '',
   reported INTEGER NOT NULL DEFAULT 0,    -- the cloud knows how it went
   at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS listeners (
+  run TEXT PRIMARY KEY,                   -- claude:<session>, open in an app or terminal
+  at INTEGER NOT NULL                     -- when its mod last said so
 );
 ";
 
@@ -238,12 +249,18 @@ impl Inbox {
 
     /// The messages waiting for `run`, now delivered (`how` says how), oldest first.
     pub fn take_for(&self, run: &str, how: &str) -> Result<Vec<String>, String> {
+        self.take_matching(run, how, false)
+    }
+
+    /// As [`Inbox::take_for`]; `cancels_only`: just the ones only for a running session (a cancel),
+    /// which a session's hooks still give it while its mod takes the rest as prompts.
+    fn take_matching(&self, run: &str, how: &str, cancels_only: bool) -> Result<Vec<String>, String> {
         let mut stmt = self
             .db
-            .prepare("SELECT id, text FROM inbox WHERE run = ?1 AND state = 'waiting' ORDER BY id")
+            .prepare("SELECT id, text FROM inbox WHERE run = ?1 AND state = 'waiting' AND (?2 = 0 OR wake = 0) ORDER BY id")
             .map_err(err)?;
         let rows: Vec<(i64, String)> = stmt
-            .query_map([run], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_map(params![run, cancels_only], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(err)?
             .collect::<Result<_, _>>()
             .map_err(err)?;
@@ -251,6 +268,54 @@ impl Inbox {
             self.settle(*id, "delivered", how)?;
         }
         Ok(rows.into_iter().map(|(_, t)| t).collect())
+    }
+
+    /// The session's mod says it is open, now.
+    pub fn listen(&self, run: &str, at: i64) -> Result<(), String> {
+        self.db
+            .execute("INSERT INTO listeners (run, at) VALUES (?1, ?2) ON CONFLICT (run) DO UPDATE SET at = ?2", params![run, at])
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Whether `run`'s mod said it was open within [`LISTEN_FOR`] of `at`.
+    pub fn listened(&self, run: &str, at: i64) -> Result<bool, String> {
+        let last: Option<i64> = self
+            .db
+            .query_row("SELECT at FROM listeners WHERE run = ?1", [run], |r| r.get(0))
+            .optional()
+            .map_err(err)?;
+        Ok(last.is_some_and(|last| at - last < LISTEN_FOR))
+    }
+
+    /// The messages waiting for an open session to show as prompts: `[{id, text}]`, oldest first,
+    /// still waiting until [`Inbox::shown`] says they were submitted (a cancel is left to its hooks).
+    pub fn for_prompts(&self, run: &str) -> Result<Vec<Value>, String> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id, text FROM inbox WHERE run = ?1 AND state = 'waiting' AND wake = 1 ORDER BY id")
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([run], |r| Ok(json!({"id": r.get::<_, i64>(0)?, "text": r.get::<_, String>(1)?})))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        Ok(rows)
+    }
+
+    /// The open session submitted these of its messages as the owner's prompts.
+    pub fn shown(&self, run: &str, ids: &[i64]) -> Result<usize, String> {
+        let mut n = 0;
+        for id in ids {
+            n += self
+                .db
+                .execute(
+                    "UPDATE inbox SET state = 'delivered', detail = ?3, reported = 0 WHERE id = ?1 AND run = ?2 AND state = 'waiting'",
+                    params![id, run, SHOWN],
+                )
+                .map_err(err)?;
+        }
+        Ok(n)
     }
 
     /// Every waiting message: (id, run, agent, text) and what is known of its session.
@@ -335,7 +400,12 @@ pub fn with_messages(harness: &str, input: &Value, out: Value) -> Value {
     } else {
         "Given to the session at its next step."
     };
-    let taken = Inbox::open(&live_path()).and_then(|inbox| inbox.take_for(&format!("{harness}:{session}"), how));
+    let run = format!("{harness}:{session}");
+    let taken = Inbox::open(&live_path()).and_then(|inbox| {
+        // An open session's mod shows its messages as the owner's prompts; its hooks give it only a cancel.
+        let cancels_only = inbox.listened(&run, now())?;
+        inbox.take_matching(&run, how, cancels_only)
+    });
     match taken {
         Ok(texts) if !texts.is_empty() => {
             crate::live::send_soon();
@@ -370,6 +440,16 @@ pub fn deliver_now() -> Result<String, String> {
     let took = cloud.post("/v1/runs/messages/take", &json!({"machine": cloud.machine}))?;
     let kept = inbox.keep(took["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;
     let handed = hand_over(&inbox, now(), &mut wake, &mut to_hive)?;
+    report(&cloud, &inbox)?;
+    drop(lock);
+    Ok(format!("{kept} taken, {handed} handed over"))
+}
+
+/// How a message shown in its open session reads on every dashboard.
+const SHOWN: &str = "Shown in its open Claude Code session as your message.";
+
+/// Tells the cloud how each settled message went, so every dashboard shows it.
+fn report(cloud: &Cloud, inbox: &Inbox) -> Result<(), String> {
     for (id, state, detail) in inbox.unreported()? {
         let status = if state == "delivered" { "delivered" } else { "failed" };
         if cloud
@@ -379,8 +459,30 @@ pub fn deliver_now() -> Result<String, String> {
             inbox.reported(id)?;
         }
     }
-    drop(lock);
-    Ok(format!("{kept} taken, {handed} handed over"))
+    Ok(())
+}
+
+/// `hive-tasks messages <run> [shown <id>...]`, from an open session's mod: says the session is
+/// open, takes this Mac's messages from the cloud, and answers the ones for `run` as `[{id, text}]`;
+/// with `shown`, those were submitted as the owner's prompts, and the cloud hears so.
+pub fn for_open_session(run: &str, shown: &[i64]) -> Result<String, String> {
+    if !run.starts_with("claude:") || run.len() <= "claude:".len() {
+        return Err("Say which open session (claude:<session id>).".into());
+    }
+    let inbox = Inbox::open(&live_path())?;
+    inbox.listen(run, now())?;
+    if !shown.is_empty() {
+        inbox.shown(run, shown)?;
+        if let Some(cloud) = Cloud::load() {
+            report(&cloud, &inbox)?;
+        }
+        return Ok("[]".into());
+    }
+    // Take what the cloud holds for this Mac (others' messages are handed over as usual).
+    if let Err(e) = deliver_now() {
+        eprintln!("hive-tasks: deliver: {e}");
+    }
+    serde_json::to_string(&inbox.for_prompts(run)?).map_err(err)
 }
 
 /// Hands over every waiting message that can go now; how many went.
@@ -392,6 +494,9 @@ pub fn hand_over(
 ) -> Result<usize, String> {
     let mut handed = 0;
     for ((id, run, agent, text, wake_it), seen) in inbox.waiting()? {
+        if wake_it && inbox.listened(&run, at)? {
+            continue; // its open session's mod shows it as the owner's message
+        }
         let (state, detail) = match handover(&agent, &run, &text, wake_it, seen.as_ref(), at) {
             Handover::Wait => continue,
             Handover::Settled(why) => ("delivered", why),
