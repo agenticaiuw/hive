@@ -31,7 +31,7 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     private var dotFrames: [[GazeFeatures]] = []
     private var learned: [([Double], (Double, Double))] = []       // frames from kept words, and the key looked at
     private var pending: (word: String, samples: [GazeSample], features: [[Double]], restAt: (x: Double, y: Double)?)?
-    private var fx = OneEuro(), fy = OneEuro()
+    private var hold = FixationHold()             // the pointer: still while the eyes rest
     private var recent: [(Double, Double)] = []
     private var word: [GazeSample] = [], wordFeatures: [[Double]] = []
     private var history: [(t: Double, x: Double, y: Double)] = []
@@ -223,7 +223,7 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
         guard let cal = calibration else { return }
         if paused { paused = false; statusLabel.text = Self.howTo }
         let (x, y) = cal.map(f.values)
-        keyboard.move(to: (fx(x, f.time), fy(y, f.time)))                // right away; smoothed only at rest
+        keyboard.move(to: hold(x, y, f.time))                            // still while resting, jumps with the eyes
         recent.append((x, y))                         // raw points: the decoder models the noise (a median of
         if recent.count > 1 { recent.removeFirst() }  // 3 made 4% more words wrong in the simulator)
         let mx = recent.map { $0.0 }.sorted()[recent.count / 2], my = recent.map { $0.1 }.sorted()[recent.count / 2]
