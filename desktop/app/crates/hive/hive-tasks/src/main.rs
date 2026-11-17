@@ -42,6 +42,12 @@ hive-tasks web                  open Hive's dashboard with every machine's tasks
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Chrome asking for the extension's board key (chrome_host.rs): one message, one answer.
+    if hive_tasks::chrome_host::started_by_chrome(&args) {
+        let key_file = hive_common::paths::home().join(".config/hive/extension.json");
+        let served = hive_tasks::chrome_host::serve(&mut std::io::stdin(), &mut std::io::stdout(), &key_file);
+        std::process::exit(if served.is_ok() { 0 } else { 1 });
+    }
     let hook = args.first().map(String::as_str) == Some("hook");
     let code = match run(&args) {
         Ok(out) => {
@@ -276,6 +282,10 @@ fn sync(quiet: bool) -> Result<String, String> {
     }
     let said = ledger.sync(&cloud)?;
     extension_key(&cloud);
+    // So the Hive extension in Chrome can ask this program for that key (chrome_host.rs).
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = hive_tasks::chrome_host::install(&exe, &hive_tasks::chrome_host::chrome_dir());
+    }
     Ok(if quiet { String::new() } else { said })
 }
 

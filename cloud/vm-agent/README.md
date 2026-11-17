@@ -115,6 +115,17 @@ echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs 
   owner's clock, `HIVE_OWNER_TZ`), authenticate, list_files and fetch_file. Every tool needs a
   `step`. `vnc.mjs` is the small VNC client underneath. Only printable ASCII, Return and Tab can be
   typed; anything else is refused before a key is pressed (emoji go through a site's picker).
+- The screen (`screen/`, set up with `sudo sh screen/install.sh`): the worker's Xvfb :99 is a small
+  desktop, openbox with a taskbar holding Terminal (xfce4-terminal as `ubuntu`) and Chrome (the
+  sign-in desktop through `ctl.mjs desktop-open`), so the owner can watch the agent and use the VM
+  by hand. A Chrome the owner opened stays theirs: an agent task that starts meanwhile gets a new
+  window of the same browser (its page, a sign-in or a captcha half done, stays under it), and the
+  end of a task closes only a Chrome the agent opened (`by: "agent"` on /desktop/open and close);
+  either way it closes after 30 minutes. `vm-screen-share` shares :99 with x11vnc on loopback port
+  5901 only, for an SSH tunnel from the owner's Mac; its password is one the owner sets. Both are
+  systemd units that look up Xvfb's auth file each start, so they come back after the worker does.
+  `vm-shot [--window]` writes a PNG of the screen to stdout, for screenshots from the Mac (Screen
+  Sharing sends the Mac's Cmd-Shift-3/4 through to the VM, where nothing takes them).
 - Saved logins: `hive-cred.mjs` (installed as the `hive-cred` command, run through sudo) keeps the
   owner's logins encrypted with `systemd-creds` under the VM's machine key, in
   `/var/lib/hive-credentials` (root only). `hive-cred import < export.csv` takes a Passwords (Mac) or
@@ -127,6 +138,14 @@ echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs 
   `authenticate` asks the relay to unlock (`POST /agent/unlock-now`): the relay keeps the passcode
   sealed, bound to the phone it was saved for, and types it at the keypad itself, so neither the VM
   nor the model ever sees it. Without the key file it answers with no tools and says why.
+- The owner's own browser: `browser-mcp.mjs` sends each command (tabs, open, navigate, snapshot,
+  read, click, type, select, scroll, press_key, wait_for, screenshot) to the board Worker's browser
+  mailbox (`/v1/browser/`, `cloud/tasks/browser.js`) with the machines' token from root's hive-tasks
+  config, and the Hive extension in the owner's Safari or Chrome takes it, runs it in that signed-in
+  browser and sends back what came of it (`browser/chrome/src/cloud-peer.js`). The first browser that
+  answers runs the rest of the task's commands. `navigate` opens its own tab unless given one, no tool
+  types a password, and with no browser listening it says so after one 25 s wait and cancels the
+  command, so nothing runs it late. Without the config it answers with no tools.
 - Files: the R2 bucket `hive-files` is where Hive's nodes meet. `node desktop/hive-files.mjs send
   <file> --to vm` uploads from the Mac and has the VM fetch it into `~/hive-files`;
   `files.mjs fetch | put | list` is the VM's side (through root's Cloudflare login, by `sudo -n`).

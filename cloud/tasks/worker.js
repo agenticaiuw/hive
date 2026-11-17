@@ -6,6 +6,9 @@
 // Tables: cloud/knowledge/migrations/0003_task_board.sql onward (the hive-knowledge D1 database).
 // The dashboard also sends instructions here for Hive's orchestrator in the cloud (/v1/requests), and
 // every node's agent sends what it is doing, step by step, so every dashboard shows it live (/v1/runs).
+// Any node reaches the owner's browsers through here too (/v1/browser/, browser.js).
+
+import { browserRoute } from "./browser.js";
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -14,7 +17,7 @@ const COOKIE = "hive_board";
 // What the browser extension may call, with its own key (see extensionAllowed). It calls from web
 // pages too (page-rules.js runs in each page), so these answer cross-origin; the key is a bearer
 // token, never a cookie, so "*" lets no page act as the owner.
-const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/runs", "/v1/page-rules", "/v1/page-rules/off"]);
+const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/runs", "/v1/page-rules", "/v1/page-rules/off", "/v1/browser/next", "/v1/browser/result"]);
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
@@ -56,6 +59,7 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/page-rules" && request.method === "GET") return await pageRules(url, request, env);
       if (url.pathname === "/v1/page-rules" && request.method === "POST") return await savePageRule(request, env);
       if (url.pathname === "/v1/page-rules/off" && request.method === "POST") return await pageRuleOff(request, env);
+      if (url.pathname.startsWith("/v1/browser/")) return await browserRoute(request, env, url, { machineAllowed, extensionAllowed });
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
     } catch (error) {

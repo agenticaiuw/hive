@@ -16,26 +16,10 @@ import {
   outlinePage,
   siteOf,
 } from './page-rules-core.js'
+import { boardKey, browserKind } from './cloud-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const $ = (id) => document.getElementById(id)
-
-const browserName = () => (/Chrome|Chromium|Edg\//.test(navigator.userAgent) ? 'chrome' : 'safari')
-
-async function boardKey() {
-  const got = await api.storage.local.get(BOARD_KEY)
-  if (got[BOARD_KEY]?.key) return got[BOARD_KEY]
-  if (typeof api.runtime?.sendNativeMessage !== 'function') return null
-  try {
-    const answer = await api.runtime.sendNativeMessage('application.id', { type: 'hive:key' })
-    if (answer?.ok && answer.key) {
-      const board = { url: answer.url || BOARD_URL, key: answer.key }
-      await api.storage.local.set({ [BOARD_KEY]: board })
-      return board
-    }
-  } catch {}
-  return null
-}
 
 async function call(board, path, body) {
   const response = await fetch(`${board.url || BOARD_URL}${path}`, {
@@ -133,7 +117,7 @@ export function initAskHive() {
     send.textContent = 'Sending…'
     try {
       const page = await pageOf(tab)
-      const { id } = await call(board, '/v1/requests', { text: words, from: browserName(), page })
+      const { id } = await call(board, '/v1/requests', { text: words, from: browserKind(), page })
       box.value = ''
       say('Sent to Hive.')
       if (page) {

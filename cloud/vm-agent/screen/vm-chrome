@@ -1,0 +1,6 @@
+#!/bin/sh
+# The taskbar's Chrome: the worker's own browser and profile, the one Hive's agent signs in and works
+# in, opened with no remote control (ctl.mjs desktop-open). It closes when you close it or after 30
+# minutes; a Hive agent task that runs meanwhile gets a window of its own and leaves this one open.
+# The reply holds a one-time VNC password, so it is not kept anywhere.
+HIVE_VM_STATE=/home/ubuntu/hive-vm-agent/state exec /usr/local/bin/node /home/ubuntu/hive-vm-agent/app/ctl.mjs desktop-open >/dev/null 2>&1

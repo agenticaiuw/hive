@@ -199,20 +199,32 @@ export function createAgent({
     },
     'POST /view/close': async () => { await closeViewer(); return { open: false }; },
 
-    // The browser as an ordinary one, for the owner by remote desktop (see openDesktop).
-    'POST /desktop/open': async ({ site }) => {
+    // The browser as an ordinary one, for the owner by remote desktop (see openDesktop). `by` is
+    // "agent" from Hive's agent (desktop-mcp.mjs); anyone else is the owner (the VM screen's Chrome
+    // button, vm-post login). An agent task that finds the owner's browser open gets a window of
+    // its own, so the owner's page (a sign-in half done, a captcha) stays as it was under it, and
+    // the end of a task closes only a browser the agent opened. `keep` only keeps it open longer.
+    'POST /desktop/open': async ({ site, by, keep }) => {
       const url = site === undefined ? 'about:blank' : recipe(site).loginUrl;
+      const agent = by === 'agent';
+      let joined = false;
       await closeViewer();
       await exclusive(async () => {
         await desktopClosing;
-        if (desktop) return;
+        if (desktop) { joined = true; return; }
         if (browser) { await browser.close().catch(() => {}); browser = null; }
         desktop = await openDesktop(url);
       });
+      if (!agent) desktop.owner = true;
+      else if (joined && desktop.owner && !keep) newDesktopWindow(url);
       desktop.expiresAt = Date.now() + desktopMinutes * 60_000;
-      return { port: desktop.port, password: desktop.password, expiresAt: desktop.expiresAt };
+      return { port: desktop.port, password: desktop.password, expiresAt: desktop.expiresAt, owner: Boolean(desktop.owner) };
     },
-    'POST /desktop/close': async () => { await closeDesktop(); return { open: false }; },
+    'POST /desktop/close': async ({ by } = {}) => {
+      if (by === 'agent' && desktop?.owner) return { open: true, kept: 'the owner opened it' };
+      await closeDesktop();
+      return { open: false };
+    },
   };
 
   // ---- viewer -------------------------------------------------------------------------------
@@ -477,6 +489,16 @@ export function createAgent({
     state.timer.unref();
     log(`sign-in desktop open on 127.0.0.1:${desktopPort}`);
     return state;
+  }
+
+  // Starting the same browser and profile again hands the command line to the running one, which
+  // opens a new window; the second start then exits.
+  function newDesktopWindow(url) {
+    const args = desktopBrowserArgs({ profileDir: join(stateDir, 'profile'), proxy, url });
+    args.splice(-1, 0, '--new-window');
+    const child = spawn(desktopExecutable ?? findBrowserExecutable(executable), args, { stdio: 'ignore', env: { ...process.env, DISPLAY: display } });
+    child.once('error', () => {});
+    child.unref();
   }
 
   function closeDesktop() {

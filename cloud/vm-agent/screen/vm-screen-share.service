@@ -1,0 +1,14 @@
+[Unit]
+Description=Screen sharing of the VM agent desktop (:99), reachable only through SSH
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/vm-screen-share
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
