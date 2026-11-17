@@ -32,6 +32,9 @@
  *   commits: Commit[]}} Task */
 
 /** @typedef {{hash: string, branch: string, title: string}} Commit */
+/** A standing rule, as the board gives it (normalizeBoard).
+ *  @typedef {{key: string, id: string, machine: string, text: string, quote: string, project: string,
+ *    projectName: string, paths: string[], shown: number}} Rule */
 
 /** @typedef {{project: string, key: string, name: string, about: string, memories: number,
  *   updated: number}} Folder */
@@ -286,7 +289,7 @@ export function normalizeBoard(answer) {
       task: Number(m.task) || 0,
       created_at: seconds(m.created_at),
     })),
-    rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
+    rules: (board.rules ?? []).map((/** @type {any} */ r) => /** @type {Rule} */ ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),
       // The machine whose ledger has it, so it can be turned off there (none on a local board).
@@ -319,15 +322,39 @@ function rulePaths(paths) {
  * the cloud orchestrator's briefs): "hive · whole project · every agent session here, at its start
  * and after it compacts, and every cloud task" or "hive · web/*.svelte · when an agent first
  * edits one of these files in a session, and every cloud task · shown 3 times".
+ * Under its project's heading (the rules page) the project is left out: it's said once, above.
  * @param {{projectName: string, paths: string[], shown: number}} rule
+ * @param {{project?: boolean}} [options]
  */
-export function ruleScope(rule) {
+export function ruleScope(rule, { project = true } = {}) {
   const where = rule.paths.length ? rule.paths.join(', ') : 'whole project';
   const when = rule.paths.length
     ? 'when an agent first edits one of these files in a session, and in every cloud task'
     : 'every agent session here, at its start and after it compacts, and every cloud task';
   const shown = rule.shown ? (rule.shown === 1 ? 'shown once' : `shown ${rule.shown} times`) : '';
-  return [rule.projectName, where, when, shown].filter(Boolean).join(' · ');
+  return [project ? rule.projectName : '', where, when, shown].filter(Boolean).join(' · ');
+}
+
+/**
+ * The standing rules under their projects (T309): projects by name, a rule with no project last,
+ * each project's rules in the order they were made.
+ * @param {Rule[]} rules
+ * @returns {{key: string, name: string, rules: Rule[]}[]}
+ */
+export function rulesByProject(rules) {
+  /** @type {Map<string, {key: string, name: string, rules: Rule[]}>} */
+  const groups = new Map();
+  for (const rule of rules) {
+    let group = groups.get(rule.project);
+    if (!group) {
+      group = { key: rule.project, name: rule.projectName || 'No project', rules: [] };
+      groups.set(rule.project, group);
+    }
+    group.rules.push(rule);
+  }
+  return [...groups.values()].sort(
+    (a, b) => Number(!a.key) - Number(!b.key) || a.name.localeCompare(b.name) || a.key.localeCompare(b.key),
+  );
 }
 
 /**

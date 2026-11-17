@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, ruleScope, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, rulesByProject, ruleScope, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -297,4 +297,21 @@ test('each standing rule says where it applies and when an agent is given it', (
   assert.equal(ruleScope(wide), 'hive · whole project · every agent session here, at its start and after it compacts, and every cloud task');
   assert.deepEqual(files.paths, ['web/**/*.svelte']);
   assert.equal(ruleScope(files), 'hive · web/**/*.svelte · when an agent first edits one of these files in a session, and in every cloud task · shown 3 times');
+});
+
+test('the standing rules sit under their projects, by name, with no project last', () => {
+  const board = normalizeBoard({ board: { rules: [
+    { machine: 'mac', id: 1, project: '', text: 'Anywhere' },
+    { machine: 'mac', id: 2, project: 'github.com/agenticaiuw/hive', paths: '[]', text: 'Keep it clean' },
+    { machine: 'mac', id: 3, project: '/Users/me/buckymatch', text: 'Match fairly' },
+    { machine: 'vm', id: 4, project: 'github.com/agenticaiuw/hive', text: 'Cloud first' },
+  ] } });
+  const groups = rulesByProject(board.rules);
+  assert.deepEqual(groups.map((g) => [g.name, g.rules.map((r) => r.text)]), [
+    ['buckymatch', ['Match fairly']],
+    ['hive', ['Keep it clean', 'Cloud first']],
+    ['No project', ['Anywhere']],
+  ]);
+  // Under its project's heading a rule doesn't name the project again.
+  assert.equal(ruleScope(groups[1].rules[0], { project: false }), 'whole project · every agent session here, at its start and after it compacts, and every cloud task');
 });
