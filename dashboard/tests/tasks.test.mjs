@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, nameTasks, projectName, projects, rulesByProject, ruleScope, sections, stamp, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, rulesByProject, ruleScope, sections, stamp, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -315,16 +315,13 @@ test('the standing rules sit under their projects, by name, with no project last
   assert.equal(ruleScope(groups[1].rules[0], { project: false }), 'whole project · every agent session here, at its start and after it compacts, and every cloud task');
 });
 
-test('a task is named for when the owner asked for it; the tasks of one message get letters', () => {
+test('a task is called by when the owner asked for it, yymmdd hh:mm, and nothing else', () => {
   const at = (h, m, s = 0) => new Date(2026, 10, 17, h, m, s).getTime() / 1000;
-  const task = (machine, id, said, created = said) => ({ machine, id, said, created, name: '' });
-  const tasks = nameTasks([
-    task('mac', '309', at(1, 41, 10), at(1, 42)),
-    task('mac', '306', at(1, 41, 10), at(1, 41, 40)),
-    task('mac', '246', at(0, 5)),
-    task('cloud', '301', at(0, 59, 59)),
-    task('mac', '301', at(0, 59, 1)),
-  ]);
-  assert.deepEqual(tasks.map((t) => t.name), ['261117 01:41b', '261117 01:41a', '261117 00:05', '261117 00:59b', '261117 00:59a']);
+  const b = normalizeBoard({ board: { tasks: [
+    { machine: 'mac', id: 309, title: 'Group the rules', said_at: at(1, 41, 10), created_at: at(1, 42) },
+    { machine: 'mac', id: 306, title: 'Tasks in view', said_at: at(1, 41, 10), created_at: at(1, 41, 40) },
+    { machine: 'mac', id: 7, title: 'No time' },
+  ] } });
+  assert.deepEqual(b.tasks.map((t) => t.asked), ['261117 01:41', '261117 01:41', '']);
   assert.equal(stamp(at(23, 7)), '261117 23:07');
 });

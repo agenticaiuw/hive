@@ -38,20 +38,19 @@ const GOING = ['queued', 'planning', 'working'];
  *   steps: Step[], requests: any[], runs: Run[]}} Agent
  */
 
-/** A task's name, for when the owner asked for it ("261117 14:05a", T246), else "T148". */
-export function taskId(/** @type {{id: string, name?: string}} */ task) {
-  return task.name || `T${String(task.id).replace(/^T/, '')}`;
-}
-
 /**
- * What an agent or the board wrote, with its task numbers ("on T246") as their names, read on the
- * machine it came from (each machine counts its own). A number it doesn't know stays as it is.
+ * What an agent or the board wrote, its task numbers ("on T246", the ledger's own handle, which
+ * each machine counts by itself) as those tasks' titles: the owner sees no code names (T320). A
+ * number it doesn't know stays as it is.
  * @param {string} text
- * @param {string} machine
- * @param {Map<string, string>} names "<machine>:<id>" → name
+ * @param {string} machine where it was written
+ * @param {Map<string, string>} titles "<machine>:<id>" → title
  */
-export function withNames(text, machine, names) {
-  return text.replace(/\bT(\d+)\b/g, (whole, n) => names.get(`${machine}:${n}`) ?? whole);
+export function withTitles(text, machine, titles) {
+  return text.replace(/\bT(\d+)\b/g, (whole, n) => {
+    const title = titles.get(`${machine}:${n}`);
+    return title ? `“${title}”` : whole;
+  });
 }
 
 /**
@@ -180,10 +179,10 @@ export function reasonFor(task, agent) {
   }
   const on = agent.tasks.find((t) => t.status === 'active' && t !== task);
   if (agent.status !== 'idle') {
-    return on ? `Its agent is on ${taskId(on)} first.` : 'Its agent is busy with something else first.';
+    return on ? `Its agent is on “${on.title}” first.` : 'Its agent is busy with something else first.';
   }
   return on
-    ? `Its session stopped while on ${taskId(on)}, before getting here. Continue starts it again.`
+    ? `Its session stopped while on “${on.title}”, before getting here. Continue starts it again.`
     : 'Its session stopped before starting it. Continue starts it again.';
 }
 

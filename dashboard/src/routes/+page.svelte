@@ -51,9 +51,8 @@
     conversation,
     deliveryWords,
     reasonFor,
-    taskId,
     threadConversation,
-    withNames,
+    withTitles,
   } from "$lib/agents.js";
 
   type Board = ReturnType<typeof normalizeBoard>;
@@ -152,10 +151,10 @@
   const folders = $derived(board && project ? folderList(board.tasks, board.folders, project) : []);
   const folderChosen = $derived(folders.find((f) => f.key === folder));
   const limits = $derived(board ? planLimits(board.limits, board.now) : []);
-  /** Each task's name ("261117 14:05a") by "<machine>:<id>", for the T numbers agents write. */
-  const names = $derived(new Map((board?.tasks ?? []).map((t) => [t.key, t.name])));
-  /** A text from `machine` with its task numbers as their names. */
-  const named = (text: string, machine: string) => withNames(text, machine, names);
+  /** Each task's title by "<machine>:<id>", for the task numbers agents write. */
+  const titles = $derived(new Map((board?.tasks ?? []).map((t) => [t.key, t.title])));
+  /** A text from `machine` with its task numbers as those tasks' titles. */
+  const titled = (text: string, machine: string) => withTitles(text, machine, titles);
   const needsYou = $derived(board ? board.tasks.filter((t) => t.status === "waiting" || t.status === "blocked").length : 0);
 
   // A coding session's conversation comes from its node's steps, read while it's open; Hive in the
@@ -581,7 +580,7 @@
 {#snippet taskRow(task: Task, inAgent: boolean)}
   {@const unfinished = !["done", "dropped"].includes(task.status)}
   <!-- Why it waits: its own reason here; the one its agent gives every task it holds is said once, above. -->
-  {@const reason = named(task.status === "blocked" ? reasonFor(task, ofTask.get(task.key)) : task.status === "open" ? task.outcome : "", task.machine)}
+  {@const reason = titled(task.status === "blocked" ? reasonFor(task, ofTask.get(task.key)) : task.status === "open" ? task.outcome : "", task.machine)}
   <li class="task s-{task.status}">
     <div class="task-line">
       <button
@@ -590,7 +589,7 @@
         aria-expanded={opened === task.key}
         onclick={() => (opened = opened === task.key ? "" : task.key)}
       >
-        <span class="tid">{taskId(task)}</span>
+        {#if task.asked}<span class="tid" title="When you asked for it">{task.asked}</span>{/if}
         <span class="tname">{task.title}</span>
         {#if inAgent && task.status === "active"}<span class="now">Working on it</span>{/if}
       </button>
@@ -611,7 +610,7 @@
             class="x"
             class:armed={confirming === task.key}
             disabled={!!acting[task.key]}
-            aria-label={confirming === task.key ? `Confirm: cancel ${taskId(task)}` : `Cancel ${taskId(task)}`}
+            aria-label={confirming === task.key ? `Confirm: cancel “${task.title}”` : `Cancel “${task.title}”`}
             title={confirming === task.key ? "Click again to cancel it" : "Cancel this task"}
             onclick={() => askCancel(task)}
           >
@@ -624,11 +623,11 @@
     </div>
 
     {#if task.status === "waiting"}
-      <p class="task-ask">{named(task.outcome, task.machine) || "Its agent didn't say what it needs. Ask it below."}</p>
+      <p class="task-ask">{titled(task.outcome, task.machine) || "Its agent didn't say what it needs. Ask it below."}</p>
       <form class="answer" onsubmit={(e) => { e.preventDefault(); if ((answers[task.key] ?? "").trim()) act(task, "answer", answers[task.key].trim()); }}>
         <input
           placeholder="Answer…"
-          aria-label="Answer {taskId(task)}"
+          aria-label="Answer “{task.title}”"
           bind:value={answers[task.key]}
           disabled={!!acting[task.key]}
         />
@@ -659,14 +658,14 @@
         {/if}
         {#if task.report}
           <p class="label">Report</p>
-          <p class="report">{named(task.report, task.machine)}</p>
+          <p class="report">{titled(task.report, task.machine)}</p>
         {:else if task.outcome && (task.status === "active" || !unfinished)}
           <p class="label">What happened</p>
-          <p class="report">{named(task.outcome, task.machine)}</p>
+          <p class="report">{titled(task.outcome, task.machine)}</p>
         {/if}
         {#if task.evidence && !task.report}
           <p class="label">Evidence</p>
-          <p class="report">{named(task.evidence, task.machine)}</p>
+          <p class="report">{titled(task.evidence, task.machine)}</p>
         {/if}
         {#if task.commits.length}
           <p class="label">Commits</p>
@@ -881,10 +880,10 @@
                 </div>
               {:else if item.type === "agent"}
                 <div class="msg theirs" class:bad={item.failed}>
-                  <p class="bubble">{named(item.text, agent.machine)}</p>
+                  <p class="bubble">{titled(item.text, agent.machine)}</p>
                 </div>
               {:else if item.type === "note"}
-                <p class="note">{named(item.text, agent.machine)}</p>
+                <p class="note">{titled(item.text, agent.machine)}</p>
               {:else}
                 {@const going = agent.status === "working" && item.key === lastWork && items.at(-1)?.key === item.key}
                 {@const isOpen = openWork[item.key] ?? false}
@@ -934,7 +933,7 @@
                 </h2>
                 {#if !claimsFolded}
                   <div class="claims-body">
-                    {#if waits}<p class="claims-why">Not started yet: {named(reasonFor(waits, agent), agent.machine).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
+                    {#if waits}<p class="claims-why">Not started yet: {titled(reasonFor(waits, agent), agent.machine).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
                     {#if unfinished.length}
                       <ul class="task-list">
                         {#each unfinished as task (task.key)}{@render taskRow(task, true)}{/each}
@@ -1152,7 +1151,7 @@
                 {:else}
                   {#each byAgent(section.tasks, ofTask) as group (group.key)}
                     {@const waits = section.id === "not-started" ? group.tasks.find((t) => !t.outcome) : undefined}
-                    {@render groupHead(group.agent, waits ? named(reasonFor(waits, group.agent ?? undefined), waits.machine) : "")}
+                    {@render groupHead(group.agent, waits ? titled(reasonFor(waits, group.agent ?? undefined), waits.machine) : "")}
                     <ul class="card task-list">
                       {#each group.tasks as task (task.key)}{@render taskRow(task, false)}{/each}
                     </ul>
