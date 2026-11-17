@@ -8,8 +8,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const components = {
   'browser/chrome': 'browser/chrome',
   'browser/safari': 'browser/safari',
-  'cloud/server': 'cloud/server',
-  'cloud/worker': 'cloud/worker',
   'cloud/vm-agent': 'cloud/vm-agent',
   'mobile/ios': 'mobile/ios',
   'desktop': 'desktop',
