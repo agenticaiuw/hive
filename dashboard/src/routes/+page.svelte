@@ -6,10 +6,12 @@
    *
    * On the left, every agent (working first), each with the tasks it holds; then the projects. Open
    * an agent and it's a conversation, like Claude Code: what was asked, what it said, its work in
-   * short lines, and a box at the bottom that talks to it through the cloud wherever it runs. Home
-   * is a box to hand Hive something new, then the tasks: what needs the owner (and the answer box),
-   * what's being worked on, what's stuck and why, what hasn't started and why, and what's done. Every
-   * unfinished task can be continued or cancelled from its row. Nothing is said twice (R17).
+   * short lines, and a box at the bottom that talks to it through the cloud wherever it runs, with
+   * its tasks just above that box so they stay in view (T306). Clicking Hive goes home (T308): a box
+   * to hand Hive something new, then the tasks: what needs the owner (and the answer box), what's
+   * being worked on, what's stuck and why, what hasn't started and why, and what's done. Rules lists
+   * the owner's standing rules under their projects (T307, T309). Every unfinished task can be
+   * continued or cancelled from its row. Nothing is said twice (R17).
    *
    * Keys: ⌘K search, / write, ⌘↵ send, Esc back.
    */
@@ -37,6 +39,7 @@
     normalizeFolder,
     planLimits,
     projects,
+    rulesByProject,
     ruleScope,
     sections,
   } from "$lib/tasks.js";
@@ -118,8 +121,12 @@
   let openWork = $state<Record<string, boolean>>({});
   /** Step lines opened to their full text ("<work key>:<n>"). */
   let openLine = $state<Record<string, boolean>>({});
-  /** An agent's tasks show its first three until the owner asks for all of them. */
+  /** An agent's finished tasks stay folded until the owner asks for them. */
   let allClaims = $state(false);
+  /** The owner can fold an agent's tasks away, above its message box. */
+  let claimsFolded = $state(false);
+  /** The standing rules, under their projects (#/rules). */
+  let rulesOpen = $state(false);
 
   // Acting on a task from its row: the × asks once more before it cancels.
   let confirming = $state("");
@@ -226,6 +233,7 @@
   function readHash() {
     const hit = location.hash.match(/^#\/agent\/(.+)$/);
     agentKey = hit ? decodeURIComponent(hit[1]) : "";
+    rulesOpen = location.hash === "#/rules";
     talkError = "";
     allClaims = false;
   }
@@ -233,6 +241,11 @@
   function openAgent(key: string) {
     sideOpen = false;
     location.hash = `#/agent/${encodeURIComponent(key)}`;
+  }
+
+  function openRules() {
+    sideOpen = false;
+    location.hash = "#/rules";
   }
 
   function goHome() {
@@ -452,7 +465,7 @@
       (agent ? talkBox : composerBox)?.focus();
     } else if (event.key === "Escape" && !typing(event.target)) {
       if (sideOpen) sideOpen = false;
-      else if (agentKey) goHome();
+      else if (agentKey || rulesOpen) goHome();
       else if (opened) opened = "";
       else if (folder) choose(project);
       else if (project) choose("");
@@ -703,6 +716,7 @@
       <button type="button" class="brand-home" onclick={() => choose("")} title="Home">
         <img class="brand-mark" src="{base}/hive.svg" alt="" />
         <span>Hive</span>
+        {#if needsYou}<span class="count warm" title="Needs you">{needsYou}</span>{/if}
       </button>
       <button
         type="button"
@@ -724,10 +738,12 @@
         <input bind:this={searchBox} type="search" placeholder="Search tasks" title="Search tasks (⌘K)" bind:value={query} />
       </label>
 
-      <button type="button" class="nav-row" class:on={!agentKey && !project} onclick={() => choose("")}>
-        <span>Home</span>
-        {#if needsYou}<span class="count warm" title="Needs you">{needsYou}</span>{/if}
-      </button>
+      {#if board?.rules.length}
+        <button type="button" class="nav-row" class:on={rulesOpen} onclick={openRules}>
+          <span>Rules</span>
+          <span class="count">{board.rules.length}</span>
+        </button>
+      {/if}
 
       <p class="side-label">Agents</p>
       {#if !board}
@@ -828,36 +844,18 @@
     {#if agentKey}
       {#if !agent}
         <div class="column">
-          <button type="button" class="back" onclick={goHome}>‹ Home</button>
           <p class="board-note">{board ? "That agent isn't around any more." : "Loading…"}</p>
         </div>
       {:else}
         <div class="column agent-view">
           <!-- Named for what it is and where; what it's on is its first task below, said once. -->
           <header class="agent-head">
-            <button type="button" class="back" onclick={goHome}>‹ Home</button>
             <div class="agent-name">
               <h1>{agent.label}</h1>
               <span class="tag status st-{agent.status}"><span class="dot st-{agent.status}" aria-hidden="true"></span>{STATUS_LABEL[agent.status]}</span>
             </div>
             {#if agent.place}<p class="place">{agent.place}</p>{/if}
           </header>
-
-          {#if agent.tasks.length}
-            {@const waits = agent.tasks.find((t) => t.status === "open" && !t.outcome)}
-            <section class="card claims" aria-labelledby="h-claims">
-              <h2 id="h-claims">Its tasks <span class="count">{agent.tasks.length}</span></h2>
-              {#if waits}<p class="claims-why">Not started yet: {reasonFor(waits, agent).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
-              <ul class="task-list">
-                {#each allClaims ? agent.tasks : agent.tasks.slice(0, 3) as task (task.key)}{@render taskRow(task, true)}{/each}
-              </ul>
-              {#if agent.tasks.length > 3}
-                <button type="button" class="claims-more" onclick={() => (allClaims = !allClaims)}>
-                  {allClaims ? "Show fewer" : `Show all ${agent.tasks.length}`}
-                </button>
-              {/if}
-            </section>
-          {/if}
 
           <section class="convo" aria-label="Conversation" use:followNewest={follow}>
             {#if convo.loading && !items.length && agent.kind !== "cloud"}
@@ -916,6 +914,42 @@
             {/each}
           </section>
 
+          <!-- Its tasks sit just above its message box, so they stay in view at the newest line (T306). -->
+          <div class="dock">
+            {#if agent.tasks.length}
+              {@const unfinished = agent.tasks.filter((t) => !["done", "dropped"].includes(t.status))}
+              {@const finished = agent.tasks.filter((t) => ["done", "dropped"].includes(t.status))}
+              {@const waits = unfinished.find((t) => t.status === "open" && !t.outcome)}
+              <section class="claims" aria-labelledby="h-claims">
+                <h2 id="h-claims">
+                  <button type="button" class="claims-toggle" aria-expanded={!claimsFolded} onclick={() => (claimsFolded = !claimsFolded)}>
+                    <span class="chev" aria-hidden="true">{claimsFolded ? "▸" : "▾"}</span>
+                    Its tasks <span class="count">{agent.tasks.length}</span>
+                  </button>
+                </h2>
+                {#if !claimsFolded}
+                  <div class="claims-body">
+                    {#if waits}<p class="claims-why">Not started yet: {reasonFor(waits, agent).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
+                    {#if unfinished.length}
+                      <ul class="task-list">
+                        {#each unfinished as task (task.key)}{@render taskRow(task, true)}{/each}
+                      </ul>
+                    {/if}
+                    {#if finished.length}
+                      <button type="button" class="claims-more" aria-expanded={allClaims} onclick={() => (allClaims = !allClaims)}>
+                        {allClaims ? "Hide the finished ones" : `Show ${finished.length} finished`}
+                      </button>
+                      {#if allClaims}
+                        <ul class="task-list">
+                          {#each finished as task (task.key)}{@render taskRow(task, true)}{/each}
+                        </ul>
+                      {/if}
+                    {/if}
+                  </div>
+                {/if}
+              </section>
+            {/if}
+
           <form class="talk" onsubmit={say}>
             <label class="visually-hidden" for="talk-text">Message this agent</label>
             <textarea
@@ -931,14 +965,53 @@
             </button>
             {#if talkError}<p class="talk-note bad" role="alert">{talkError}</p>{/if}
           </form>
+          </div>
         </div>
       {/if}
+    {:else if rulesOpen}
+      <div class="column">
+        <h1 class="page-title">Standing rules</h1>
+        {#if !board}
+          <p class="board-note">Loading…</p>
+        {:else if !board.rules.length}
+          <p class="board-note">No standing rules yet.</p>
+        {/if}
+        {#each board ? rulesByProject(board.rules) : [] as group, i (group.key)}
+          <section class="section" aria-labelledby="h-rules-{i}">
+            <h2 id="h-rules-{i}" title={group.key || undefined}>{group.name} <span class="count">{group.rules.length}</span></h2>
+            <ul class="card rule-list">
+              {#each group.rules as r (r.key)}
+                <li class="rule">
+                  <div class="rule-text">
+                    <span title={r.quote ? `You said: “${r.quote}”` : undefined}>{r.text}</span>
+                    <span class="rule-scope">{ruleScope(r, { project: false })}</span>
+                    {#if ruleError[r.key]}<span class="rule-error">{ruleError[r.key]}</span>{/if}
+                  </div>
+                  {#if r.machine}
+                    <button
+                      type="button"
+                      class="x"
+                      class:armed={ruleConfirming === r.key}
+                      disabled={ruleActing === r.key}
+                      aria-label={ruleConfirming === r.key ? "Confirm: turn this rule off" : "Turn this rule off"}
+                      title={ruleConfirming === r.key ? "Click again to turn it off on every machine" : "Turn this rule off"}
+                      onclick={() => askRuleOff(r)}
+                    >
+                      {#if ruleActing === r.key}…{:else if ruleConfirming === r.key}Turn off{:else}
+                        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+                      {/if}
+                    </button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/each}
+      </div>
     {:else}
       <div class="column">
         {#if projectChosen}
           <p class="crumbs">
-            <button type="button" onclick={() => choose("")}>Home</button>
-            <span aria-hidden="true">›</span>
             {#if folderChosen}
               <button type="button" onclick={() => choose(project)}>{projectChosen.name}</button>
               <span aria-hidden="true">›</span>
@@ -1084,47 +1157,14 @@
             {/if}
           {/each}
 
-          {#if board.unsplit.length || board.rules.length}
+          {#if board.unsplit.length}
             <div class="extras">
-              {#if board.unsplit.length}
-                <details class="extra">
-                  <summary>Messages not split into tasks yet <span class="count">{board.unsplit.length}</span></summary>
-                  <ul>
-                    {#each board.unsplit as m (m.key)}<li class="quote">“{m.text}”</li>{/each}
-                  </ul>
-                </details>
-              {/if}
-              {#if board.rules.length}
-                <details class="extra">
-                  <summary>Your standing rules <span class="count">{board.rules.length}</span></summary>
-                  <ul>
-                    {#each board.rules as r (r.key)}
-                      <li class="rule">
-                        <div class="rule-text">
-                          <span title={r.quote ? `You said: “${r.quote}”` : undefined}>{r.text}</span>
-                          <span class="rule-scope">{ruleScope(r)}</span>
-                          {#if ruleError[r.key]}<span class="rule-error">{ruleError[r.key]}</span>{/if}
-                        </div>
-                        {#if r.machine}
-                          <button
-                            type="button"
-                            class="x"
-                            class:armed={ruleConfirming === r.key}
-                            disabled={ruleActing === r.key}
-                            aria-label={ruleConfirming === r.key ? "Confirm: turn this rule off" : "Turn this rule off"}
-                            title={ruleConfirming === r.key ? "Click again to turn it off on every machine" : "Turn this rule off"}
-                            onclick={() => askRuleOff(r)}
-                          >
-                            {#if ruleActing === r.key}…{:else if ruleConfirming === r.key}Turn off{:else}
-                              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
-                            {/if}
-                          </button>
-                        {/if}
-                      </li>
-                    {/each}
-                  </ul>
-                </details>
-              {/if}
+              <details class="extra">
+                <summary>Messages not split into tasks yet <span class="count">{board.unsplit.length}</span></summary>
+                <ul>
+                  {#each board.unsplit as m (m.key)}<li class="quote">“{m.text}”</li>{/each}
+                </ul>
+              </details>
             </div>
           {/if}
         {/if}
@@ -1978,19 +2018,6 @@
     min-height: 100%;
     padding-bottom: 0;
   }
-  .back {
-    align-self: flex-start;
-    margin-bottom: var(--s4);
-    padding: 5px 12px 5px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--line);
-    color: var(--ink-2);
-    font-size: var(--fs-small);
-  }
-  .back:hover {
-    color: var(--ink);
-    border-color: var(--line-strong);
-  }
   .agent-name {
     display: flex;
     flex-wrap: wrap;
@@ -2030,14 +2057,69 @@
     color: var(--muted);
     font-size: var(--fs-small);
   }
+  /* Its tasks and its message box, held at the bottom of the window together. */
+  .dock {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    margin: 0 calc(-1 * var(--s2));
+    padding: var(--s2) 0 var(--s4);
+    background: var(--background);
+    box-shadow: 0 -12px 30px -10px var(--background);
+  }
   .claims {
-    margin-top: var(--s5);
-    padding: var(--s4) 0 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: #161512;
   }
   .claims h2 {
-    padding: 0 16px;
-    margin-bottom: var(--s1);
-    font-size: 1rem;
+    margin: 0;
+    font-size: 0.95rem;
+  }
+  .claims-toggle {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    font: inherit;
+    text-align: left;
+  }
+  .claims-toggle .chev {
+    width: 10px;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+  /* A long list scrolls inside, so the conversation keeps most of the window. */
+  .claims-body {
+    max-height: 38vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+  }
+  .claims-body > .claims-more:first-child {
+    border-top: 0;
+  }
+  .page-title {
+    font-family: var(--display);
+    font-size: clamp(1.5rem, 1.2rem + 1.2vw, 2rem);
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+  }
+  .rule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: var(--s4);
+    color: var(--ink-2);
+    font-size: var(--fs-small);
+  }
+  .brand-home .count {
+    font-family: var(--font-geist-sans), system-ui, sans-serif;
+    letter-spacing: 0;
   }
   .convo {
     display: flex;
@@ -2158,19 +2240,15 @@
     overflow-wrap: anywhere;
   }
   .talk {
-    position: sticky;
-    bottom: 0;
     display: flex;
     flex-wrap: wrap;
     align-items: flex-end;
     gap: var(--s2);
-    margin: 0 calc(-1 * var(--s2));
     padding: var(--s3) var(--s3) var(--s3) var(--s4);
     border: 1px solid var(--line-strong);
     border-radius: 24px;
     background: #1a1815;
-    box-shadow: 0 -12px 30px -10px var(--background), 0 18px 40px -20px rgba(0, 0, 0, 0.9);
-    margin-bottom: var(--s4);
+    box-shadow: 0 18px 40px -20px rgba(0, 0, 0, 0.9);
   }
   .talk:focus-within {
     border-color: rgba(245, 197, 66, 0.35);
@@ -2229,8 +2307,12 @@
     .msg {
       max-width: 92%;
     }
-    .talk {
-      margin: 0 calc(-1 * var(--s1)) var(--s3);
+    .dock {
+      margin: 0 calc(-1 * var(--s1));
+      padding-bottom: var(--s3);
+    }
+    .claims-body {
+      max-height: 28vh;
     }
   }
 </style>
