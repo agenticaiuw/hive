@@ -6,8 +6,8 @@
 // The queue and the board are the task board Worker (cloud/tasks): it takes the oldest queued request
 // (POST /v1/requests/take), files the plan's tasks on the board under it, and reports every task as
 // it goes (POST /v1/requests/update): its status, the time it took, its tokens and its report. While a
-// task runs, every step its agent prints goes to the board too (POST /v1/requests/steps, a few lines
-// every couple of seconds), so the dashboard shows what the agent is doing as it does it. A task
+// task runs, every step its agent prints goes to the board too, as one of the owner's live agent runs
+// (POST /v1/runs, a few lines every couple of seconds), so every dashboard shows what it's doing. A task
 // in a folder (a part of a project, "hive › Voice") gets every memory of that folder, in full, and
 // its report is saved back to the folder as a memory.
 //
@@ -218,43 +218,59 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
 }
 
 /**
- * A task's steps to the board (POST /v1/requests/steps), sent a few at a time every `every` ms so the
- * dashboard follows the agent live. Sending never holds up or stops the task: lines a post couldn't
- * deliver go with the next one (at most MOST_UNSENT of them), and `done()` sends what's left.
+ * A task's run on the board (POST /v1/runs, machine "cloud", named like its task: request*100+key), so
+ * the dashboard on every node follows the agent live. The run shows up as working the moment it starts;
+ * its steps go a few at a time every `every` ms, numbered here so a post sent twice lands once.
+ * Sending never holds up or stops the task: steps a post couldn't deliver go with the next one (at
+ * most MOST_UNSENT of them), and `done(status)` sends what's left with how it ended.
  */
 const MOST_UNSENT = 300;
-export function stepSender(board, request, key, { every = 2000, log = () => {}, now = () => Math.floor(Date.now() / 1000) } = {}) {
+const kindOf = line => (/^→|^\$/.test(line) ? 'action' : /^💬/.test(line) ? 'say' : /^✅/.test(line) ? 'done'
+  : /^❌|^✗/.test(line) ? 'failed' : '');
+export function runSender(board, { request, task, agent = 'cloud', title = '' }, { every = 2000, log = () => {}, now = () => Math.floor(Date.now() / 1000) } = {}) {
+  const run = { machine: 'cloud', run: String(request * 100 + task), agent, title, request, task };
   let unsent = [];
+  let count = 0;
+  let status = null;
+  let ended = false;
+  let shown = false;
   let timer = null;
   let sending = Promise.resolve();
   const flush = () => {
     if (timer) clearTimeout(timer);
     timer = null;
     sending = sending.then(async () => {
-      while (unsent.length) {
-        const steps = unsent.splice(0, 100);
+      if (shown && !unsent.length && (!status || ended)) return; // nothing new to say
+      do {
+        const steps = unsent.slice(0, 100);
+        const last = status && unsent.length <= 100;
         try {
-          await board('/v1/requests/steps', { id: request, task: key, steps });
+          await board('/v1/runs', { ...run, ...(last ? { status } : {}), steps });
         } catch (error) {
-          unsent = [...steps, ...unsent].slice(-MOST_UNSENT);
           log(`couldn't put R${request}'s steps on the board: ${error.message}`);
           return;
         }
-      }
+        const through = steps.at(-1)?.n ?? 0;
+        unsent = unsent.filter(step => step.n > through);
+        shown = true;
+        if (last) ended = true;
+      } while (unsent.length);
     });
     return sending;
   };
+  flush(); // on the board as working right away
   return {
     step(line) {
       const text = String(line ?? '').trim();
       if (!text) return;
-      unsent.push({ at: now(), text });
+      unsent.push({ n: ++count, at: now(), kind: kindOf(text), text });
       if (unsent.length > MOST_UNSENT) unsent = unsent.slice(-MOST_UNSENT);
       if (!timer) timer = setTimeout(flush, every ?? 2000);
     },
-    async done() {
+    async done(how = 'done') {
+      status = how;
       await flush();
-      if (unsent.length) await flush(); // one more try for what a failed post left
+      if (!ended) await flush(); // one more try for what a failed post left
     },
   };
 }
@@ -322,7 +338,8 @@ export async function handle(request, deps) {
     const folder = await folderOf(task.folder).catch(() => null);
     log(`  T${request.id * 100 + task.key} ${task.title} → ${task.choice.model} (${task.choice.effort})${coding ? ' on code' : ''}`);
     let result;
-    const steps = stepSender(board, request.id, task.key, { log, every: deps.stepEvery });
+    const steps = runSender(board, { request: request.id, task: task.key, agent: coding ? 'code' : 'cloud', title: task.title },
+      { log, every: deps.stepEvery });
     try {
       const brief = taskBrief(task, request, folder, rules);
       result = coding
@@ -331,7 +348,7 @@ export async function handle(request, deps) {
     } catch (error) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
     }
-    await steps.done();
+    await steps.done(result.ok ? 'done' : 'failed');
     const files = result.files ?? [];
     task.branch = result.branch && files.length ? result.branch : null;
     const where = task.branch

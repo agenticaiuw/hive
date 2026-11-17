@@ -7,8 +7,9 @@
  *
  *   - `source: "cloud"`: `board` is the cloud board, every machine:
  *     `{now, tasks: [row], unsplit: [message], rules: [rule], folders: [folder], limits: [limit],
- *     requests: [request], steps: [step]}`, a row carrying its `machine`. `steps` are what Hive's cloud
- *     agent did on the requests still going or just finished, line by line, as it did them;
+ *     requests: [request], runs: [run], run_steps: [step]}`, a row carrying its `machine`. `runs` are
+ *     every node's agents at work or just finished (Hive on each Mac, Hive's cloud agent on the VM and
+ *     the phone, each browser extension's own agent), each with its steps, line by line, as it did them;
  *   - `source: "local"`: the cloud couldn't be reached and `board` is this machine's ledger
  *     (`hive-tasks board --all --json`): `{generated_at, needs_you, in_progress, not_started,
  *     left_open, done, not_split, rules, folders, limits}`, with `note` saying why.
@@ -40,8 +41,32 @@
 /** @typedef {{id: string, text: string, project: string, folder: string, status: string,
  *   outcome: string, created: number, updated: number, steps: Step[]}} Request */
 
-/** One thing Hive's cloud agent said or did ("→ click: Open Compose", "💬 …", "✅ Done."), in order.
- *  @typedef {{n: number, task: number, at: number, text: string}} Step */
+/** One thing an agent said or did ("click(x=514, y=421)", "→ click: Open Compose", "💬 …", "Done."), in
+ *  order; `kind` is action, think, say, done or failed when its node knows, and `task` the request's task.
+ *  @typedef {{n: number, task: number, at: number, kind: string, text: string}} Step */
+
+/** One of the owner's agents at work on one node, or just finished: `node` is where, in words. A
+ *  Claude Code or Codex session on one of the owner's Macs is a run too ("claude:<session>", hive-tasks
+ *  live.rs): its `harness` and `session` say which, and `label` reads "Claude Code · hive".
+ *  @typedef {{key: string, machine: string, run: string, agent: string, node: string, label: string,
+ *   title: string, status: string, request: string, task: number, project: string, projectName: string,
+ *   harness: string, session: string, started: number, updated: number, steps: Step[]}} Run */
+
+/** What each state of an agent's run reads as. */
+export const RUN_WORDS = { working: 'Working', done: 'Done', failed: "Didn't finish", stopped: 'Stopped' };
+
+/**
+ * Where a run is happening, in words: "Hive in the cloud", "Chrome extension", "Hive on studio-mac".
+ * @param {string} machine
+ */
+export function nodeName(machine) {
+  if (machine === 'cloud') return 'Hive in the cloud';
+  if (machine.startsWith('ext:')) {
+    const browser = machine.slice(4);
+    return `${browser.charAt(0).toUpperCase()}${browser.slice(1)} extension`;
+  }
+  return machine ? `Hive on ${machine}` : 'Hive';
+}
 
 /** What each state of an instruction sent to Hive's orchestrator in the cloud reads as. */
 export const REQUEST_WORDS = {
@@ -56,6 +81,8 @@ export const REQUEST_WORDS = {
  *   windows: LimitWindow[], at: number}} Limit */
 
 export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' };
+/** The coding agents whose sessions stream to the board as runs (hive-tasks live.rs). */
+const CODING_HARNESSES = ['claude', 'codex'];
 
 /** The sections of the board, in the order they're shown. */
 export const SECTIONS = [
@@ -197,6 +224,7 @@ function toLimit(l, machine) {
  */
 export function normalizeBoard(answer) {
   const source = answer?.source === 'local' ? 'local' : 'cloud';
+  const runs = toRuns(answer?.board ?? {});
   const board = answer?.board ?? {};
   const local = Array.isArray(board.needs_you) || Array.isArray(board.done);
   const machine = local ? 'this machine' : '';
@@ -237,16 +265,14 @@ export function normalizeBoard(answer) {
       outcome: String(r.outcome ?? ''),
       created: seconds(r.created_at),
       updated: seconds(r.updated_at),
-      steps: list(board.steps)
-        .filter((/** @type {any} */ s) => String(s.request) === String(r.id))
-        .map((/** @type {any} */ s) => ({
-          n: Number(s.n) || 0,
-          task: Number(s.task) || 0,
-          at: seconds(s.at),
-          text: String(s.text ?? ''),
-        }))
-        .sort((a, b) => a.n - b.n),
+      // Its tasks' runs, task by task, numbered across the request.
+      steps: runs
+        .filter((run) => run.request === `R${r.id}`)
+        .sort((a, b) => a.task - b.task)
+        .flatMap((run) => run.steps.map((step) => ({ ...step, task: run.task })))
+        .map((step, i) => ({ ...step, n: i + 1 })),
     }))),
+    runs,
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),
@@ -256,6 +282,61 @@ export function normalizeBoard(answer) {
       projectName: projectName(r.project),
     })),
   };
+}
+
+/**
+ * Every node's runs with their steps: still working first, then the latest.
+ * @param {any} board
+ * @returns {Run[]}
+ */
+function toRuns(board) {
+  /** @type {Map<string, Step[]>} */
+  const steps = new Map();
+  for (const s of list(board.run_steps)) {
+    const key = `${s.machine}:${s.run}`;
+    if (!steps.has(key)) steps.set(key, []);
+    steps.get(key)?.push({
+      n: Number(s.n) || 0,
+      task: 0,
+      at: seconds(s.at),
+      kind: String(s.kind ?? ''),
+      text: String(s.text ?? ''),
+    });
+  }
+  return list(board.runs)
+    .map((/** @type {any} */ r) => {
+      const machine = String(r.machine ?? '');
+      const key = `${machine}:${r.run}`;
+      const run = String(r.run ?? '');
+      const agent = String(r.agent ?? '');
+      const coding = CODING_HARNESSES.includes(agent) && run.startsWith(`${agent}:`);
+      const name = projectName(r.project);
+      const own = (steps.get(key) ?? []).sort((x, y) => x.n - y.n);
+      // A session first seen mid-turn has no title yet: the last thing the owner asked it, if shown.
+      const asked = own.filter((step) => step.kind === 'asked').at(-1)?.text ?? '';
+      return {
+        key,
+        machine,
+        run,
+        agent,
+        node: nodeName(machine),
+        label: coding
+          ? [HARNESSES[/** @type {keyof typeof HARNESSES} */ (agent)], name].filter(Boolean).join(' · ')
+          : nodeName(machine),
+        title: String(r.title || asked),
+        project: String(r.project ?? ''),
+        projectName: name,
+        harness: coding ? agent : '',
+        session: coding ? run.slice(agent.length + 1) : '',
+        status: String(r.status ?? 'working'),
+        request: r.request ? `R${r.request}` : '',
+        task: Number(r.task) || 0,
+        started: seconds(r.started_at),
+        updated: seconds(r.updated_at),
+        steps: own,
+      };
+    })
+    .sort((a, b) => Number(b.status === 'working') - Number(a.status === 'working') || b.updated - a.updated);
 }
 
 /**
@@ -406,30 +487,49 @@ export function normalizeFolder(answer) {
 }
 
 /**
- * The agents at work and what each is on: every session with a task marked active, or that the
- * owner wrote to or that reported in the last `recent` seconds with tasks still open.
+ * Which agents are at work: each session with a task under way (or one given it lately), and each
+ * Claude Code or Codex session in the middle of a turn whether or not it has a task of its own (a
+ * side session working on its parent's task, say), from its live run. Each carries its run, if it
+ * streams one, so the owner can open what it's doing.
  * @param {Task[]} tasks
  * @param {number} now
  * @param {number} [recent]
+ * @param {Run[]} [runs]
  */
-export function agentsAtWork(tasks, now, recent = 20 * 60) {
-  /** @type {Map<string, {key: string, harness: string, machine: string, projectName: string,
-   *   session: string, on: Task[], open: Task[], last: number}>} */
+export function agentsAtWork(tasks, now, recent = 20 * 60, runs = []) {
+  /** @typedef {{key: string, harness: string, machine: string, projectName: string, session: string,
+   *   on: Task[], open: Task[], last: number, run: Run | null}} Agent */
+  /** @type {Map<string, Agent>} */
   const by = new Map();
   for (const t of tasks) {
     if (!t.session) continue;
     const key = `${t.machine}:${t.harness}:${t.session}`;
     const a = by.get(key) ?? {
       key, harness: t.harness, machine: t.machine, projectName: t.projectName, session: t.session,
-      on: [], open: [], last: 0,
+      on: [], open: [], last: 0, run: null,
     };
     if (t.status === 'active') a.on.push(t);
     if (t.status === 'open') a.open.push(t);
     a.last = Math.max(a.last, t.updated, t.created);
     by.set(key, a);
   }
+  for (const r of runs) {
+    if (!r.session) continue;
+    const key = `${r.machine}:${r.harness}:${r.session}`;
+    const a = by.get(key) ?? {
+      key, harness: r.harness, machine: r.machine, projectName: r.projectName, session: r.session,
+      on: [], open: [], last: 0, run: null,
+    };
+    a.run = r;
+    if (!a.projectName) a.projectName = r.projectName;
+    if (r.status === 'working') a.last = Math.max(a.last, r.updated);
+    by.set(key, a);
+  }
   return [...by.values()]
-    .filter((a) => a.on.length || (a.open.length && now - a.last <= recent))
+    .filter((a) =>
+      a.on.length
+      || (a.open.length && now - a.last <= recent)
+      || (a.run?.status === 'working' && now - a.run.updated <= recent))
     .sort((a, b) => b.last - a.last);
 }
 
@@ -491,7 +591,7 @@ export function estimates(tasks) {
 }
 
 /**
- * Each subscription's windows for the side panel: "Codex · prolite · evans-mbp", then "Week 15%,
+ * Each subscription's windows for the side panel: "Codex · prolite · studio-mac", then "Week 15%,
  * resets in 4 days" per window. A window whose reset has passed since the harness last wrote it
  * starts over, so it shows 0% and `fresh` (nothing used since, as far as anyone has seen).
  * @param {Limit[]} limits
@@ -568,7 +668,7 @@ export function ago(then, now) {
 }
 
 /**
- * Which agent, machine and project a task came from: "Claude Code · evans-mbp · hive".
+ * Which agent, machine and project a task came from: "Claude Code · studio-mac · hive".
  * @param {{harness: string, machine: string, projectName: string}} task
  */
 export function where(task) {

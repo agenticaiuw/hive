@@ -25,6 +25,7 @@ path = "src/bin/hive-ask.rs"
 hive-common.workspace = true
 hive-codex = { path = "../hive-codex" }
 hive-knowledge = { path = "../hive-knowledge" }
+hive-tasks = { path = "../hive-tasks" }
 hive-mac = { path = "../hive-mac" }
 hive-phone = { path = "../hive-phone" }
 hive-sidecars = { path = "../hive-sidecars" }

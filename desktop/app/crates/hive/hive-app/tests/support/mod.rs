@@ -109,8 +109,8 @@ impl Gate {
 
 static ENV: Mutex<()> = Mutex::new(());
 
-/// A temporary AGENT_STATE_DIR and CODEX_HOME, and none of the workspace's variables, for one
-/// test at a time; put back as they were afterwards.
+/// A temporary AGENT_STATE_DIR and CODEX_HOME, no cloud board, and none of the workspace's
+/// variables, for one test at a time; put back as they were afterwards.
 pub struct Isolated {
     saved: Vec<(String, Option<OsString>)>,
     pub dir: tempfile::TempDir,
@@ -133,6 +133,7 @@ impl Isolated {
         isolated.set("AGENT_STATE_DIR", &state);
         isolated.set("CODEX_HOME", &state);
         isolated.set("AGENT_ENV_FILE", "/dev/null");
+        isolated.set("HIVE_TASKS_CLOUD", "/dev/null"); // no runs posted to the owner's board
         for name in [
             "AGENT_WORKSPACE_ENGINE",
             "AGENT_WORKSPACE_CONNECTION",

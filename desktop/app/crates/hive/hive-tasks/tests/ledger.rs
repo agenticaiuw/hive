@@ -365,7 +365,8 @@ fn installing_keeps_other_hooks_and_is_undone_by_uninstalling() {
             .get("matcher")
             .is_none()
     );
-    assert_eq!(once["hooks"]["PostToolUse"][0]["matcher"], "Bash");
+    // After every tool call: the session's steps go to the board live (live.rs).
+    assert!(once["hooks"]["PostToolUse"][0].get("matcher").is_none());
     assert_eq!(merge_hooks(once, "claude", None), theirs);
     assert_eq!(merge_hooks(json!({}), "claude", None), json!({}));
 }

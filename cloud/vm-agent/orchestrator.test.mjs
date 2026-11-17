@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, scopeOf, stepSender, taskBrief } from './orchestrator.mjs';
+import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, runSender, scopeOf, taskBrief } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -240,11 +240,13 @@ test("a task's steps reach the board while it runs, in order, before the task is
       return { ok: true, report: 'The heading says Example Domain.', seconds: 9, tokensIn: 10, tokensOut: 5 };
     },
   });
-  const sent = calls.filter(c => c.path === '/v1/requests/steps');
-  assert.ok(sent.length >= 2, 'the first step went before the task finished');
-  assert.ok(sent.every(c => c.body.id === 11 && c.body.task === 1));
-  assert.deepEqual(sent.flatMap(c => c.body.steps.map(s => s.text)),
-    ['→ open_url: Open example.com', '💬 The heading says Example Domain.', '✅ Done.']);
+  const sent = calls.filter(c => c.path === '/v1/runs');
+  assert.ok(sent.length >= 2, 'on the board, working, before the task finished');
+  assert.ok(sent.every(c => c.body.machine === 'cloud' && c.body.run === '1101' && c.body.agent === 'cloud'
+    && c.body.request === 11 && c.body.task === 1 && c.body.title === 'Open example.com'));
+  assert.deepEqual(sent.flatMap(c => c.body.steps.map(s => [s.n, s.kind, s.text])),
+    [[1, 'action', '→ open_url: Open example.com'], [2, 'say', '💬 The heading says Example Domain.'], [3, 'done', '✅ Done.']]);
+  assert.deepEqual(sent.map(c => c.body.status ?? null), [...sent.slice(1).map(() => null), 'done']);
   const lastStep = calls.lastIndexOf(sent.at(-1));
   const done = calls.findIndex(c => c.path === '/v1/requests/update' && c.body.tasks?.[0]?.status === 'done');
   assert.ok(lastStep < done, 'every step is on the board before the task shows done');
@@ -254,28 +256,44 @@ test("a board that won't take steps never stops the task, and what it missed goe
   let refuse = true;
   const sent = [];
   const logs = [];
+  const ends = [];
   const board = async (path, body) => {
     if (refuse) throw new Error('fetch failed');
-    sent.push(...body.steps.map(s => s.text));
+    sent.push(...body.steps.map(s => `${s.n} ${s.text}`));
+    if (body.status) ends.push(body.status);
     return { ok: true };
   };
-  const steps = stepSender(board, 12, 2, { every: 1000, log: line => logs.push(line) });
+  const steps = runSender(board, { request: 12, task: 2 }, { every: 1000, log: line => logs.push(line) });
   steps.step('→ click: Compose');
-  await steps.done();
+  await steps.done('failed');
   assert.deepEqual(sent, []);
   assert.match(logs[0], /couldn't put R12's steps on the board: fetch failed/);
   refuse = false;
   steps.step('→ type: Hello');
-  await steps.done();
-  assert.deepEqual(sent, ['→ click: Compose', '→ type: Hello']);
+  await steps.done('failed');
+  assert.deepEqual(sent, ['1 → click: Compose', '2 → type: Hello']);
+  assert.deepEqual(ends, ['failed'], 'how it ended is said once');
 
   // And a request whose board throws on steps still finishes and is reported.
   const { board: good, calls } = fakeBoard();
-  const flaky = async (path, body) => (path === '/v1/requests/steps' ? Promise.reject(new Error('down')) : good(path, body));
+  const flaky = async (path, body) => (path === '/v1/runs' ? Promise.reject(new Error('down')) : good(path, body));
   await handle({ id: 13, text: 'x' }, {
     board: flaky, stepEvery: 1,
     plan: async () => JSON.stringify({ project: '', tasks: [{ title: 'X', quote: 'x', kind: 'screen' }] }),
     run: async (brief, choice, onStep) => { onStep('→ screenshot: Look'); return { ok: true, report: 'Done it.', seconds: 1, tokensIn: 1, tokensOut: 1 }; },
   });
   assert.equal(calls.filter(c => c.path === '/v1/requests/update').at(-1).body.status, 'done');
+});
+
+test("a task's run is on the board, working, before its agent says anything", async () => {
+  const posts = [];
+  const steps = runSender(async (path, body) => { posts.push({ path, body }); return { ok: true }; },
+    { request: 7, task: 3, agent: 'code', title: 'Fix the login page' }, { every: 1000 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(posts, [{ path: '/v1/runs', body: {
+    machine: 'cloud', run: '703', agent: 'code', title: 'Fix the login page', request: 7, task: 3, steps: [],
+  } }]);
+  await steps.done('done');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].body.status, 'done');
 });
