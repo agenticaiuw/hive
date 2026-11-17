@@ -479,7 +479,7 @@ enum DashboardAPI {
             out["accepted"] = true
         } else {
             out["accepted"] = false
-            out["error"] = error == "The personal-agent is already working."
+            out["error"] = error == "Hive is already working."
                 ? "Hive is busy with another task. Send it again when that one's done."
                 : (error ?? "Hive didn't take it.")
         }

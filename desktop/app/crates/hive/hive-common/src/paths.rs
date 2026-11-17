@@ -37,12 +37,27 @@ pub fn sidecar_python() -> PathBuf {
     repo_root().join(".venv/bin/python")
 }
 
-/// The agent's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Personal Agent.
+/// The agent's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Hive.
 pub fn state_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("AGENT_STATE_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir);
     }
-    home().join("Library/Application Support/Personal Agent")
+    state_dir_in(&home())
+}
+
+/// `<home>/Library/Application Support/Hive`, or the folder's old name, `Personal Agent`, on a Mac
+/// that has only that (Hive was called Personal Agent until 2026-11). Once `Hive` exists, an old
+/// `Personal Agent` beside it is ignored: on the owner's Mac it's a link to `Hive`, kept for the
+/// input helper installed as root, which still reads `speak-aloud` through the old name.
+pub fn state_dir_in(home: &Path) -> PathBuf {
+    let support = home.join("Library/Application Support");
+    let hive = support.join("Hive");
+    let legacy = support.join("Personal Agent");
+    if !hive.exists() && legacy.is_dir() {
+        legacy
+    } else {
+        hive
+    }
 }
 
 pub fn home() -> PathBuf {

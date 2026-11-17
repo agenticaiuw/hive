@@ -937,10 +937,18 @@ final class Captions: NSObject {
     /// screen the card was dragged to, otherwise the main one.
     /// Where the card goes: the virtual workspace's display when Hive works there and it's up,
     /// otherwise your screen. Never nowhere: while Hive listens, you see the card.
+    /// ~/Library/Application Support/Hive, or its old name on a Mac that has only that.
+    static func hiveFolder() -> URL {
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        let hive = support.appendingPathComponent("Hive"), old = support.appendingPathComponent("Personal Agent")
+        let has = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+        return !has(hive) && has(old) ? old : hive
+    }
+
     func targetScreen() -> NSScreen? {
         if ProcessInfo.processInfo.environment["AGENT_WORKSPACE_ENGINE"] != nil {
             let state = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ??
-                FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Personal Agent").path
+                Captions.hiveFolder().path
             let path = URL(fileURLWithPath: state).appendingPathComponent("workspace-display-id")
             if let raw = try? String(contentsOf: path, encoding: .utf8),
                let displayID = UInt32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),

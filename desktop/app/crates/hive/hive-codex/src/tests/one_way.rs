@@ -125,7 +125,7 @@ fn codex_s_shell_can_reach_the_internet() {
     let engine = Harness::with(|env, _| env.set("AGENT_WORKSPACE_ENGINE", "true"));
     let params = engine.agent.thread_params().unwrap();
     assert!(params.get("config").is_none());
-    assert_eq!(params["permissions"], "personal-agent");
+    assert_eq!(params["permissions"], "hive");
 }
 
 /// 5708994: the saved conversation is resumed with the same `config`, so its shell is online too.

@@ -16,11 +16,18 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Hive's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Personal Agent
-/// (hive-common's `state_dir`).
+/// Hive's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Hive, or its old
+/// name, Personal Agent, on a Mac that has only that (hive-common's `state_dir`).
 pub fn state_dir() -> PathBuf {
-    env_path("AGENT_STATE_DIR")
-        .unwrap_or_else(|| home().join("Library/Application Support/Personal Agent"))
+    env_path("AGENT_STATE_DIR").unwrap_or_else(|| {
+        let hive = home().join("Library/Application Support/Hive");
+        let legacy = home().join("Library/Application Support/Personal Agent");
+        if !hive.exists() && legacy.is_dir() {
+            legacy
+        } else {
+            hive
+        }
+    })
 }
 
 /// Everything hive-dream writes: `HIVE_DREAM_DIR`, else `<state>/dream`.

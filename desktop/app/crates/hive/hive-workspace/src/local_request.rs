@@ -245,7 +245,7 @@ fn local_request(
                 if matches!(
                     refusal,
                     Some("The request expired before it could start.")
-                        | Some("The personal-agent is already working.")
+                        | Some("Hive is already working.")
                 ) =>
             {
                 "rejected"

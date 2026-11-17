@@ -2,7 +2,7 @@
 //!
 //! Every path is named `<root>/<path inside root>`:
 //! - `state/`       Hive's application support folder (`AGENT_STATE_DIR`, else
-//!                  ~/Library/Application Support/Hive, or Personal Agent before migration)
+//!                  ~/Library/Application Support/Hive, or its old name, Personal Agent)
 //! - `recordings/`  task recordings when they still live outside the state folder (~/Movies/Hive)
 //! - `voiceprint/`  the voiceprint when it still lives in the source checkout (models/voiceprint.npz)
 //!

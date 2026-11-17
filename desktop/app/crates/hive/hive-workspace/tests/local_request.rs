@@ -356,7 +356,7 @@ fn only_explicit_pre_start_refusals_are_rejected() {
         ("Request not accepted; check agent availability.", "unknown"),
         ("Unexpected failure after dispatch", "unknown"),
         ("The request expired before it could start.", "rejected"),
-        ("The personal-agent is already working.", "rejected"),
+        ("Hive is already working.", "rejected"),
     ] {
         let client = background(f.server.path(), json!({"text": "Review the plan"}));
         f.events

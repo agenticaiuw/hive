@@ -24,7 +24,7 @@ pub const USAGE: &str = r#"The session journal: everything said in one run of th
 reviewing and improving the agent later (a self-evolving harness reads these).
 
 Each run of the voice agent (from opening Agent.app to quitting it) is a session, in
-    ~/Library/Application Support/Personal Agent/sessions/<started>-<pid>/
+    ~/Library/Application Support/Hive/sessions/<started>-<pid>/
   journal.jsonl   one JSON object per line, in order: every transcript of what you said and what
                   became of it (a request, "stop", a filler, its own voice, ...), each request with
                   its device and Codex thread, everything the agent did, said and showed, errors,

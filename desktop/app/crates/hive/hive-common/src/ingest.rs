@@ -4,7 +4,7 @@
 //! Only you start it: Agent menu → Add Clipboard to Context… or Add Text File to Context…, after a
 //! confirmation that says how big it is and that it goes to the model (OpenAI, through Codex). The
 //! app writes the text to a private file and sends "ingest <path>" to the voice agent, which
-//!   1. saves it in ~/Library/Application Support/Personal Agent/ingested/<id>.txt (with <id>.json),
+//!   1. saves it in ~/Library/Application Support/Hive/ingested/<id>.txt (with <id>.json),
 //!   2. splits it into parts of about [`CHUNK_CHARS`] characters at paragraph, line or sentence
 //!      breaks ([`hive_core::ingest::split`]),
 //!   3. if it all fits in [`INLINE_TOKENS`], sends each part as its own turn on the session's Codex

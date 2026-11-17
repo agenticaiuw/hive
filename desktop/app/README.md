@@ -1,4 +1,4 @@
-# personal-agent
+# Hive for Mac
 
 Talk to your Mac and it talks back. Tap **fn** in any window and say what you
 want, and a computer agent does the work on screen with a real-looking
@@ -179,7 +179,7 @@ records admission, not task completion, and does not automatically replay tasks.
 To inspect the most recent receipts locally, run:
 
 ```sh
-build/hive-request-ledger "${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}/control"
+build/hive-request-ledger "${AGENT_STATE_DIR:-$HOME/Library/Application Support/Hive}/control"
 ```
 
 The output contains decrypted task text and should be treated as private. If the ledger,
@@ -337,7 +337,7 @@ you.
 #### Durable sessions and visible context
 
 `hive-codex` (with `hive-core` for the thread identity) integrates the staged persistence prototype. The primary
-Codex thread ID lives in `~/Library/Application Support/Personal Agent/codex-thread-id`
+Codex thread ID lives in `~/Library/Application Support/Hive/codex-thread-id`
 (`AGENT_STATE_DIR` overrides the directory). New threads use `ephemeral=false`;
 Codex stores their history in its own state directory. Identity writes use a private
 temporary file, fsync and atomic replacement, with a lock around creation/resumption.

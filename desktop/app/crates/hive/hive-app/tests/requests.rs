@@ -52,7 +52,7 @@ fn active_task_is_not_interrupted() {
     assert!(!ok(&replies));
     assert_eq!(
         replies.all()[0]["error"],
-        "The personal-agent is already working."
+        "Hive is already working."
     );
     assert!(h.backend.tasks.is_empty());
 }

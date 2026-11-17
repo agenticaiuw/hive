@@ -405,10 +405,12 @@ class Server:
 
 
 def state_dir() -> str:
-    """Hive's state folder, as hive_common::state_dir finds it."""
+    """Hive's state folder, as hive_common::state_dir finds it: Hive, or its old name (Personal
+    Agent) on a Mac that has only that."""
+    hive = os.path.expanduser("~/Library/Application Support/Hive")
     legacy = os.path.expanduser("~/Library/Application Support/Personal Agent")
     return os.environ.get("AGENT_STATE_DIR") or (
-        legacy if os.path.isdir(legacy) else os.path.expanduser("~/Library/Application Support/Hive"))
+        legacy if not os.path.exists(hive) and os.path.isdir(legacy) else hive)
 
 
 def protocol_out():
