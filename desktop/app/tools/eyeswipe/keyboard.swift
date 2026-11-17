@@ -1,6 +1,7 @@
 // Hive's eye keyboard on the Mac: type by looking. Double-tap right ⌘ and a see-through keyboard covers the
-// lower part of the screen. The first time, a yellow dot moves across it: follow it with your eyes for about
-// 15 seconds, then look at five dots, and it says how accurate it got. Then just look at the letters of
+// lower part of the screen. The first time, a setup of about 3 minutes: follow a slow yellow dot with your eyes,
+// look at it on every key, keep looking at it while moving your head a little, then on every key again; it says
+// how accurate it got on that last round (dots its map hadn't seen). Then just look at the letters of
 // what you want to write, with no need to wait on a letter, and blink normally after each word: the blink
 // types it into the app in front, and looking up off the keyboard types the last one. A pill shows the word
 // it would type right now. Backspace on your own keyboard fixes mistakes.
@@ -139,11 +140,13 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
             let top = outline.map { Double($0.y) }.max()!, bottom = outline.map { Double($0.y) }.min()!
             guard width > 8 else { return nil }
             opening += (top - bottom) / width / 2
-            var pupil = pupilMark?.pointsInImage(imageSize: size).first.map { (Double($0.x), Double($0.y)) } ?? (cx, cy)
-            if let dark = darkest(outline, luma, stride, w, h) {
-                pupil = ((pupil.0 + 2 * dark.0) / 3, (pupil.1 + 2 * dark.1) / 3)
-                light += dark.2 / 2
-            }
+            // Vision's own pupil point. On the owner's recorded eyes (2026-11-17, light ~56) it was 0.69 keys off
+            // on moving-dot rows the fit hadn't seen and jittered 0.34 keys a frame; the old blend with the
+            // darkest pixels was 1.00 and 0.63 (darkest pixels alone 1.16). The darkest pixels still give the light.
+            let dark = darkest(outline, luma, stride, w, h)
+            if let dark { light += dark.2 / 2 }
+            let pupil = pupilMark?.pointsInImage(imageSize: size).first.map { (Double($0.x), Double($0.y)) }
+                ?? dark.map { ($0.0, $0.1) } ?? (cx, cy)
             eyes.append(((pupil.0 - cx) / width, (pupil.1 - cy) / width, (top - cy) / width, cx, cy))
         }
         let usual = typicalOpen ?? opening
@@ -465,24 +468,50 @@ final class EyeKeyboard {
     var view: KeyboardView!
     var on = false
 
-    // The setup: a dot moves along `route` (follow it), then sits on `checks` one by one (look at each).
+    // The setup, about 3 minutes (it was 20 s; webcam trackers get more accurate with longer calibration,
+    // 1.4 degrees after 5 minutes in a published one, and a key here is about 3 degrees):
+    //  1. a dot moves slowly along `route` (follow it): rows take 6 s, not 3, because the eyes trail a moving
+    //     dot and the owner's misses were bigger along the motion (1.0-1.35 keys) than across it (0.8-1.0);
+    //  2. then `holds`: the dot sits on every key for 2 s; then on four spots while you slowly move your head
+    //     (so the map learns head movement with the eyes kept on one spot, which the moving dot can't teach);
+    //     then on every key again in another order. The second round is the check: how far off it is comes
+    //     from a map that never saw it, and then the map learns it too. The eyes reach a dot 0.6-0.9 s after
+    //     it jumps (camera delay included), so the first 0.9 s of each is skipped.
     static let route: [(from: (Double, Double), to: (Double, Double), seconds: Double)] = [
+        ((0.5, 0.5), (0.5, 0.5), 1.2), ((0.5, 0.5), (9.5, 0.5), 6.0), ((9.5, 0.5), (9.5, 1.5), 1.0),
+        ((9.5, 1.5), (0.5, 1.5), 6.0), ((0.5, 1.5), (0.5, 2.5), 1.0), ((0.5, 2.5), (9.5, 2.5), 6.0),
+        ((9.5, 2.5), (7.5, 3.6), 1.2), ((7.5, 3.6), (2.5, 3.6), 3.4), ((2.5, 3.6), (5.0, 0.5), 2.8)]
+    typealias Route = [(from: (Double, Double), to: (Double, Double), seconds: Double)]
+    /// The 20-second setup's route, for --calib-test on recordings made before 2026-11-17 02:00 (no "route").
+    static let fastRoute: Route = [
         ((0.5, 0.5), (0.5, 0.5), 1.0), ((0.5, 0.5), (9.5, 0.5), 3.0), ((9.5, 0.5), (9.5, 1.5), 0.5),
         ((9.5, 1.5), (0.5, 1.5), 3.0), ((0.5, 1.5), (0.5, 2.5), 0.5), ((0.5, 2.5), (9.5, 2.5), 3.0),
         ((9.5, 2.5), (7.5, 3.6), 0.6), ((7.5, 3.6), (2.5, 3.6), 1.7), ((2.5, 3.6), (5.0, 0.5), 1.4)]
-    static let checks: [(Double, Double)] = [(1.5, 0.5), (8.5, 0.5), (5.0, 1.5), (2.5, 2.5), (7.5, 2.5)]
-    static let checkSeconds = 1.2, checkSettle = 0.5          // the eyes get to a dot 0.3 to 0.5 s after it jumps
+    enum HoldKind { case key, head }
+    static let keyCentres: [(Double, Double)] = ["qwertyuiop", "asdfghjkl", "zxcvbnm.?"].enumerated().flatMap { r, row in
+        row.indices.map { i in ([0, 0.5, 1.0][r] + Double(row.distance(from: row.startIndex, to: i)) + 0.5, Double(r) + 0.5) } }
+    static let holds: [(dot: (Double, Double), seconds: Double, kind: HoldKind, pass: Int)] = {
+        var out: [(dot: (Double, Double), seconds: Double, kind: HoldKind, pass: Int)] = []
+        let snake = [0, 1, 2].flatMap { r -> [(Double, Double)] in
+            let row = keyCentres.filter { $0.1 == Double(r) + 0.5 }; return r == 1 ? row.reversed() : row }
+        out += snake.map { ($0, 2.0, .key, 1) }
+        out += [(1.5, 1.5), (8.5, 1.5), (5.0, 0.5), (5.0, 2.5)].map { ($0, 6.0, .head, 0) }
+        let n = keyCentres.count
+        out += (0..<n).map { (keyCentres[($0 * 11) % n], 2.0, .key, 2) }       // all 28 keys again, jumping around
+        return out
+    }()
+    static let checkSettle = 0.9
     // Head features ([ex, ey, lid, nx, ny, mx, my, iod, ex², ey², nx·ny]: nose against the eyes, where the eyes
     // are in the picture, how far apart) may count only as much as the geometry allows: the head follows a
     // moving dot, so a free fit gave head position ~17 times its real weight and was 2 to 8 keys off on the
     // owner's next setup 25 s later. With these, 1.2 keys (and 1.0 within one setup, as before).
     static let headScales: [Int: Double] = [3: 0.2, 4: 0.2, 5: 0.1, 6: 0.1, 7: 0.04, 10: 0.1]
     static let lambda = 10.0
-    enum Setup { case follow, check(Int) }
+    enum Setup { case follow, hold(Int) }
     var setup: Setup? = nil
     var setupBegan = 0.0, stepBegan = 0.0, tries = 0
     var followFrames: [(f: [Double], t: Double)] = []
-    var checkFrames: [[[Double]]] = []
+    var holdFrames: [[[Double]]] = []
     var fitted: (cal: GazeCalibration, rows: [[Double]], targets: [(Double, Double)], groups: [Int])? = nil
     var setupRows: [[Double]] = [], setupTargets: [(Double, Double)] = [], setupGroups: [Int] = []
     var timer: Timer?
@@ -593,7 +622,7 @@ final class EyeKeyboard {
 
     // MARK: Setup
 
-    static func along(_ t: Double) -> (pos: (Double, Double), leg: Int, into: Double)? {
+    static func along(_ t: Double, _ route: Route = route) -> (pos: (Double, Double), leg: Int, into: Double)? {
         guard t >= 0 else { return nil }
         var t = t
         for (i, leg) in route.enumerated() {
@@ -609,15 +638,15 @@ final class EyeKeyboard {
     func startSetup() {
         setup = .follow
         followFrames = []
-        checkFrames = Array(repeating: [], count: Self.checks.count)
+        holdFrames = Array(repeating: [], count: Self.holds.count)
         fitted = nil
         view.move(to: nil)
         view.words.text = ""
-        say("Follow the yellow dot with your eyes (about 20 seconds). Keep your head still.")
+        say("Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still.")
         let now = ProcessInfo.processInfo.systemUptime
         setupBegan = now + 0.8                 // a moment to find the dot before it moves
         stepBegan = now
-        record(["follow_began": setupBegan])
+        record(["follow_began": setupBegan, "route": "slow"])
         view.show(target: Self.route[0].from)
         timer?.invalidate()
         timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
@@ -643,33 +672,35 @@ final class EyeKeyboard {
                     let f = Self.fitFollow(frames, began: self?.setupBegan ?? 0)
                     DispatchQueue.main.async { self?.fitted = f }
                 }
-                setup = .check(0)
-                stepBegan = now
-                view.show(target: Self.checks[0])
-                say("Now look at each dot until it jumps.")
+                startHold(0, now)
             }
-        case .check(let i):
-            guard now - stepBegan > Self.checkSeconds else { return }
-            if i + 1 < Self.checks.count {
-                setup = .check(i + 1)
-                stepBegan = now
-                view.show(target: Self.checks[i + 1])
-            } else {
-                finishSetup()
-            }
+        case .hold(let i):
+            guard now - stepBegan > Self.holds[i].seconds else { return }
+            if i + 1 < Self.holds.count { startHold(i + 1, now) } else { finishSetup() }
         case nil:
             break
         }
     }
 
+    func startHold(_ i: Int, _ now: Double) {
+        setup = .hold(i)
+        stepBegan = now
+        view.show(target: Self.holds[i].dot)
+        let left = Int(Self.holds[i...].map { $0.seconds }.reduce(0, +).rounded())
+        let h = Self.holds[i]
+        let what = h.kind == .head ? "Keep your eyes on the dot and slowly move your head a little: left, right, up, down."
+            : h.pass == 1 ? "Look at each dot until it jumps." : "Once more: look at each dot until it jumps."
+        say(what + String(format: "  (%d:%02d left)", left / 60, left % 60))
+    }
+
     /// The moving dot's frames to a calibration: the eyes trail the dot a little (and the camera adds its
     /// own delay), so try a few delays and keep the one that fits best.
-    static func fitFollow(_ frames: [(f: [Double], t: Double)], began: Double) -> (GazeCalibration, [[Double]], [(Double, Double)], [Int])? {
+    static func fitFollow(_ frames: [(f: [Double], t: Double)], began: Double, route: Route = route) -> (GazeCalibration, [[Double]], [(Double, Double)], [Int])? {
         var best: (GazeCalibration, [[Double]], [(Double, Double)], [Int], Double)? = nil
-        for lag in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4] {
+        for lag in [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5] {
             var rows: [[Double]] = [], targets: [(Double, Double)] = [], groups: [Int] = []
             for (f, t) in frames {
-                guard let a = along(t - began - lag) else { continue }
+                guard let a = along(t - began - lag, route) else { continue }
                 if a.into < (a.leg == 0 ? 0.5 : 0.3) { continue }                 // finding the dot, catching up at a turn
                 rows.append(f); targets.append(a.pos)
                 groups.append(a.leg * 3 + min(2, Int(3 * a.into / route[a.leg].seconds)))
@@ -683,6 +714,41 @@ final class EyeKeyboard {
         return (b.0, b.1, b.2, b.3)
     }
 
+    /// The setup's map: the moving dot plus every held dot. How far off it is: the second round of keys
+    /// (pass 2) on a map fitted without it, or for recordings with no second round, each dot left out in turn.
+    /// `offs` are the dots' median misses in key widths; `sigma` the frames' spread, for the decoder.
+    static func fitSetup(_ f: (GazeCalibration, [[Double]], [(Double, Double)], [Int]),
+                         _ held: [(dot: (Double, Double), pass: Int, frames: [[Double]])])
+        -> (cal: GazeCalibration, offs: [Double], sigma: (Double, Double), rows: [[Double]], targets: [(Double, Double)], groups: [Int])? {
+        let held = held.filter { $0.frames.count >= 5 }
+        func data(_ use: [Int]) -> ([[Double]], [(Double, Double)], [Int]) {
+            var rows = f.1, targets = f.2, groups = f.3
+            for i in use { for r in held[i].frames { rows.append(r); targets.append(held[i].dot); groups.append(100 + i) } }
+            return (rows, targets, groups)
+        }
+        func fit(_ use: [Int]) -> GazeCalibration? {
+            let d = data(use)
+            return GazeCalibration.fit(rows: d.0, targets: d.1, groups: d.2, lambda: lambda, leaveOut: false, scales: headScales)
+        }
+        let checks = held.indices.filter { held[$0].pass == 2 }
+        let tests: [(GazeCalibration?, [Int])] = checks.isEmpty
+            ? held.indices.map { k in (fit(held.indices.filter { $0 != k }), [k]) }
+            : [(fit(held.indices.filter { held[$0].pass != 2 }), checks)]
+        var offs: [Double] = [], ex = 0.0, ey = 0.0, n = 0.0
+        for (cal, dots) in tests {
+            guard let cal else { continue }
+            for k in dots {
+                let p = held[k].frames.map { cal.map($0) }, d = held[k].dot
+                offs.append(hypot(p.map { $0.0 }.sorted()[p.count / 2] - d.0, p.map { $0.1 }.sorted()[p.count / 2] - d.1))
+                for q in p { ex += (q.0 - d.0) * (q.0 - d.0); ey += (q.1 - d.1) * (q.1 - d.1); n += 1 }
+            }
+        }
+        let all = Array(held.indices)
+        guard let cal = fit(all) else { return nil }
+        let d = data(all)
+        return (cal, offs, n > 0 ? ((ex / n).squareRoot(), (ey / n).squareRoot()) : (0.6, 0.6), d.0, d.1, d.2)
+    }
+
     func finishSetup() {
         guard let f = fitted else {
             if followFrames.count < 60 {
@@ -693,33 +759,35 @@ final class EyeKeyboard {
             return
         }
         stopSetup()
-        // How far off it is, on dots it didn't learn from.
-        var offs: [Double] = [], ex = 0.0, ey = 0.0, n = 0.0
-        var rows = f.rows, targets = f.targets, groups = f.groups
-        for (i, frames) in checkFrames.enumerated() where frames.count >= 3 {
-            let p = frames.map { f.cal.map($0) }
-            let mx = p.map { $0.0 }.sorted()[p.count / 2], my = p.map { $0.1 }.sorted()[p.count / 2]
-            let dot = Self.checks[i]
-            offs.append(hypot(mx - dot.0, my - dot.1))
-            for q in p { ex += (q.0 - dot.0) * (q.0 - dot.0); ey += (q.1 - dot.1) * (q.1 - dot.1); n += 1 }
-            for fr in frames { rows.append(fr); targets.append(dot); groups.append(100 + i) }
+        say("Working out the map…")
+        let held = Self.holds.indices.map { (dot: Self.holds[$0].dot, pass: Self.holds[$0].pass, frames: holdFrames[$0]) }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in        // ~0.1 s: off the main thread
+            let s = Self.fitSetup((f.cal, f.rows, f.targets, f.groups), held)
+            DispatchQueue.main.async { self?.setupFitted(s, f.cal) }
         }
-        let off = offs.isEmpty ? 9 : offs.sorted()[offs.count / 2]
-        emit(["check": ["keys_off": off, "dots": offs, "follow_fit": ["x": f.cal.spread.x, "y": f.cal.spread.y],
-                        "eye_light": camera.eyeLight, "face_size": camera.faceSize, "frames": followFrames.count]])
-        if off > 1.0 && tries < 2 {
-            var why = "Keep your head still and follow the dot closely."
+    }
+
+    func setupFitted(_ s: (cal: GazeCalibration, offs: [Double], sigma: (Double, Double), rows: [[Double]], targets: [(Double, Double)], groups: [Int])?,
+                     _ follow: GazeCalibration) {
+        guard on, setup == nil else { return }                                  // closed (or restarted) meanwhile
+        guard let s else { retrySetup("It couldn't see your eyes. Face the camera with light on your face."); return }
+        let off = s.offs.isEmpty ? 9 : s.offs.sorted()[s.offs.count / 2]
+        emit(["check": ["keys_off": off, "dots": s.offs.map { ($0 * 100).rounded() / 100 },
+                        "follow_fit": ["x": follow.spread.x, "y": follow.spread.y], "eye_light": camera.eyeLight,
+                        "face_size": camera.faceSize, "frames": followFrames.count, "held_frames": holdFrames.map { $0.count }.reduce(0, +)]])
+        // What the dots show is already in the map (it learned every dot); `off` is what's left on dots it
+        // hadn't seen. Typing then re-centres it word by word. Only a setup that's far off is done again.
+        if off > 2.5 {
+            var why = "Keep your head still and look right at each dot."
             if camera.eyeLight < 60 { why = "More light on your face would help (a lamp in front of you)." }
             else if camera.faceSize < 0.07 { why = "Sit a little closer to the camera." }
-            retrySetup(String(format: "That came out %.1f keys off — too far to type well. %@ Again…", off, why))
+            say(String(format: "That came out %.1f keys off — too far to type. %@ Press Esc, then double-tap right ⌘ to do the setup again.", off, why))
             return
         }
-        setupRows = rows; setupTargets = targets; setupGroups = groups
+        setupRows = s.rows; setupTargets = s.targets; setupGroups = s.groups
         learned = []; toLearn = []; shift = (0, 0)
-        let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: Self.lambda,
-                                      leaveOut: false, scales: Self.headScales) ?? f.cal
-        use(cal, sigma: n > 0 ? ((ex / n).squareRoot(), (ey / n).squareRoot()) : (0.6, 0.6))
-        say(String(format: "Accuracy: about %.1f keys off%@. ", off, off > 1 ? " (rough)" : "") + hint())
+        use(s.cal, sigma: s.sigma)
+        say(String(format: "Accuracy: about %.1f keys off on dots it hadn't learned. ", off) + hint())
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.on, self.setup == nil else { return }
             self.say(self.hint())
@@ -776,9 +844,10 @@ final class EyeKeyboard {
             followFrames.append((f.values, seen))
             record(["t": seen, "ft": f.time, "phase": "follow", "f": f.values])
             return
-        case .check(let i):
-            if now - stepBegan > Self.checkSettle { checkFrames[i].append(f.values) }
-            record(["t": seen, "ft": f.time, "phase": "check", "dot": [Self.checks[i].0, Self.checks[i].1], "f": f.values])
+        case .hold(let i):
+            let h = Self.holds[i]
+            if now - stepBegan > Self.checkSettle { holdFrames[i].append(f.values) }
+            record(["t": seen, "ft": f.time, "phase": "check", "dot": [h.dot.0, h.dot.1], "pass": h.pass, "hold": i, "f": f.values])
             return
         case nil:
             break
@@ -802,6 +871,7 @@ final class EyeKeyboard {
             typing = true
             phrase = []; phraseFeatures = []
             segment = 0; restPoint = nil; streamBegun = false
+            if test, testAt < testSentences.count { record(["phrase_began": f.time, "sentence": testSentences[testAt]]) }
         }
         phrase.append(GazeSample(x: mx, y: my, t: f.time))
         phraseFeatures.append(f.values)
@@ -991,40 +1061,46 @@ final class EyeKeyboard {
     /// on the other setups' dots (the head has moved by then, as it does while typing).
     static func calibTest(_ path: String) {
         let lines = (try? String(contentsOfFile: path, encoding: .utf8))?.split(separator: "\n") ?? []
-        var runs: [(began: Double, follow: [(f: [Double], t: Double)], dots: [[Double]: [(f: [Double], t: Double)]])] = []
+        typealias Hold = (key: String, dot: (Double, Double), pass: Int, frames: [(f: [Double], t: Double)])
+        var runs: [(began: Double, route: Route, follow: [(f: [Double], t: Double)], holds: [Hold])] = []
         for line in lines {
             guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
-            if let b = e["follow_began"] as? Double { runs.append((b, [], [:])); continue }
+            if let b = e["follow_began"] as? Double { runs.append((b, e["route"] == nil ? fastRoute : route, [], [])); continue }
             guard !runs.isEmpty, let f = e["f"] as? [Double], let t = e["t"] as? Double else { continue }
-            if e["phase"] as? String == "follow" { runs[runs.count - 1].follow.append((f, t)) }
-            if e["phase"] as? String == "check", let d = e["dot"] as? [Double] { runs[runs.count - 1].dots[d, default: []].append((f, t)) }
+            let r = runs.count - 1
+            if e["phase"] as? String == "follow" { runs[r].follow.append((f, t)) }
+            if e["phase"] as? String == "check", let d = e["dot"] as? [Double] {
+                let key = (e["hold"] as? Int).map { "h\($0)" } ?? "d\(d)"         // older recordings: one hold per dot
+                if let j = runs[r].holds.firstIndex(where: { $0.key == key }) { runs[r].holds[j].frames.append((f, t)) }
+                else { runs[r].holds.append((key, (d[0], d[1]), e["pass"] as? Int ?? 1, [(f, t)])) }
+            }
         }
+        // the eyes take 0.6-0.9 s to get to a dot; older recordings held each dot only 1.2 s
         func settled(_ frames: [(f: [Double], t: Double)]) -> [[Double]] {
-            frames.filter { $0.t - frames[0].t > checkSettle }.map { $0.f }
+            let settle = frames.last!.t - frames[0].t > 1.6 ? checkSettle : 0.5
+            return frames.filter { $0.t - frames[0].t > settle }.map { $0.f }
         }
-        func off(_ cal: GazeCalibration, _ frames: [[Double]], _ dot: [Double]) -> Double {
+        func off(_ cal: GazeCalibration, _ frames: [[Double]], _ dot: (Double, Double)) -> Double {
             let p = frames.map { cal.map($0) }
-            return hypot(p.map { $0.0 }.sorted()[p.count / 2] - dot[0], p.map { $0.1 }.sorted()[p.count / 2] - dot[1])
+            return (hypot(p.map { $0.0 }.sorted()[p.count / 2] - dot.0, p.map { $0.1 }.sorted()[p.count / 2] - dot.1) * 100).rounded() / 100
         }
+        func median(_ v: [Double]) -> Double { v.isEmpty ? 9 : v.sorted()[v.count / 2] }
         var finals: [GazeCalibration?] = []
         for (k, run) in runs.enumerated() {
-            guard let f = fitFollow(run.follow, began: run.began) else { finals.append(nil); continue }
-            var rows = f.1, targets = f.2, groups = f.3, offs: [Double] = []
-            for (i, (dot, frames)) in run.dots.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }).enumerated() {
-                let s = settled(frames)
-                guard s.count >= 3 else { continue }
-                offs.append((off(f.0, s, dot) * 100).rounded() / 100)
-                for r in s { rows.append(r); targets.append((dot[0], dot[1])); groups.append(100 + i) }
-            }
-            finals.append(GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: lambda, leaveOut: false, scales: headScales))
-            emit(["setup": k, "own_dots_keys_off": offs, "follow_fit": [(f.0.spread.x * 100).rounded() / 100, (f.0.spread.y * 100).rounded() / 100]])
+            guard !run.holds.isEmpty, let f = fitFollow(run.follow, began: run.began, route: run.route),
+                  let s = fitSetup(f, run.holds.map { ($0.dot, $0.pass, settled($0.frames)) }) else { finals.append(nil); continue }
+            finals.append(s.cal)
+            let checked = run.holds.filter { $0.pass == 2 }.isEmpty ? run.holds : run.holds.filter { $0.pass == 2 }
+            let before = checked.compactMap { h -> Double? in let s = settled(h.frames); return s.count >= 5 ? off(f.0, s, h.dot) : nil }
+            emit(["setup": k, "dots": s.offs.count, "keys_off": (median(s.offs) * 100).rounded() / 100,
+                  "moving_dot_only_keys_off": median(before), "own_dots": s.offs.map { ($0 * 100).rounded() / 100 },
+                  "follow_fit": [(f.0.spread.x * 100).rounded() / 100, (f.0.spread.y * 100).rounded() / 100]])
         }
         for (a, cal) in finals.enumerated() {
             guard let cal else { continue }
             for (b, run) in runs.enumerated() where b != a {
-                let offs = run.dots.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }).compactMap { dot, frames -> Double? in
-                    let s = settled(frames); return s.count >= 3 ? (off(cal, s, dot) * 100).rounded() / 100 : nil }
-                emit(["fit_on": a, "dots_of": b, "keys_off": offs])
+                let offs = run.holds.compactMap { h -> Double? in let s = settled(h.frames); return s.count >= 5 ? off(cal, s, h.dot) : nil }
+                if !offs.isEmpty { emit(["fit_on": a, "dots_of": b, "keys_off": median(offs), "dots": offs]) }
             }
         }
     }
@@ -1060,6 +1136,7 @@ final class EyeKeyboard {
         testWrong += wrong
         testWords += want.count
         emit(["test_sentence": ["want": want.joined(separator: " "), "got": testGot.joined(separator: " "), "wrong": wrong]])
+        record(["test_sentence": ["want": want.joined(separator: " "), "got": testGot.joined(separator: " "), "wrong": wrong]])
         testGot = []
         testAt += 1
         let rate = 100 * Double(testWrong) / Double(testWords)
@@ -1108,7 +1185,7 @@ struct Main {
             let view = KeyboardView(frame: NSRect(x: 0, y: 0, width: 1470, height: 956))
             view.status.text = keyboard.hint()
             if CommandLine.arguments.contains("--setup") {
-                view.status.text = "Follow the yellow dot with your eyes (about 20 seconds). Keep your head still."
+                view.status.text = "Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still."
                 view.show(target: (4.2, 1.5))
             } else {
                 view.words.text = "can you send me"
