@@ -15,7 +15,7 @@
    *
    * Keys: ⌘K search, / write, ⌘↵ send, Esc back to everything.
    */
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { base } from "$app/paths";
   import {
     fetchFolder,
@@ -29,6 +29,7 @@
   import {
     HARNESSES,
     REQUEST_WORDS,
+    RUN_WORDS,
     STATUS_WORDS,
     agentsAtWork,
     ago,
@@ -46,6 +47,7 @@
 
   type Board = ReturnType<typeof normalizeBoard>;
   type FolderView = ReturnType<typeof normalizeFolder>;
+  type Step = Board["runs"][number]["steps"][number];
 
   const REFRESH_MS = 15_000;
   // While Hive's cloud agent has something queued or underway, the board is read this often, so its
@@ -90,7 +92,7 @@
   const projectChosen = $derived(projectList.find((p) => p.key === project));
   const folders = $derived(board && project ? folderList(board.tasks, board.folders, project) : []);
   const folderChosen = $derived(folders.find((f) => f.key === folder));
-  const working = $derived(board ? agentsAtWork(board.tasks, board.now) : []);
+  const working = $derived(board ? agentsAtWork(board.tasks, board.now, undefined, board.runs) : []);
   const limits = $derived(board ? planLimits(board.limits, board.now) : []);
   // What was sent to Hive in the cloud lately: anything still going, and what ended in the last day.
   const requests = $derived(
@@ -101,7 +103,18 @@
       : [],
   );
   const goingOn = (status: string) => ["queued", "planning", "working"].includes(status);
-  const live = $derived(requests.some((r) => goingOn(r.status)));
+  // Every node's agents at work or just finished (Hive on each Mac, each browser extension's agent,
+  // each Claude Code and Codex session on the owner's Macs); the cloud agent's runs show under the
+  // request they're part of instead.
+  const agentRuns = $derived(board ? board.runs.filter((r) => !r.request).slice(0, 12) : []);
+  // Refreshing fast while something the owner sent is going, or while they watch an agent work. A
+  // coding session's steps open only when the owner opens them, so a quiet page stays quiet.
+  const live = $derived(
+    requests.some((r) => goingOn(r.status)) ||
+      agentRuns.some((r) => r.status === "working" && (!r.session || stepsOpen[r.key])),
+  );
+  /** A step as it reads: the model's **bold** headings without their asterisks. */
+  const plain = (text: string) => text.replace(/\*\*/g, "");
   $effect(() => {
     if (!live) return;
     const fast = setInterval(refresh, LIVE_REFRESH_MS);
@@ -111,6 +124,18 @@
   // A request's steps are open while it's going and closed once it's done, unless the owner opened or
   // closed them: their choice holds across refreshes.
   let stepsOpen = $state<Record<string, boolean>>({});
+  // The run the owner last opened from an agent's card, marked in the list.
+  let watching = $state("");
+
+  /** Opens an agent's live output from its card: its steps open, in view. */
+  async function watch(key: string) {
+    stepsOpen[key] = true;
+    watching = key;
+    sideOpen = false;
+    await tick();
+    document.getElementById(`run-${key}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    refresh();
+  }
 
   /** Keeps a list of steps scrolled to its newest line as lines arrive. */
   function newestInView(node: HTMLElement, _count: number) {
@@ -408,13 +433,19 @@
       <ul class="agents">
         {#each working as a (a.key)}
           {@const on = a.on[0] ?? a.open[0]}
-          <li class="agent" class:busy={a.on.length > 0}>
+          {@const run = a.run}
+          <li class="agent" class:busy={a.on.length > 0 || run?.status === "working"}>
             <span class="pulse" aria-hidden="true"></span>
             <div>
               <p class="who" title="{a.machine} · {ago(a.last, board?.now ?? 0)}">
                 {HARNESSES[a.harness as keyof typeof HARNESSES] ?? a.harness}{#if a.projectName} · {a.projectName}{/if}
               </p>
-              {#if on}<p class="on">{on.title}</p>{/if}
+              {#if on}<p class="on">{on.title}</p>{:else if run?.title}<p class="on">{run.title}</p>{/if}
+              {#if run}
+                <button type="button" class="link watch" onclick={() => watch(run.key)}>
+                  {run.status === "working" ? "See what it's doing" : "See what it did"}
+                </button>
+              {/if}
             </div>
           </li>
         {/each}
@@ -568,25 +599,7 @@
               <span class="said" title={r.outcome || r.text}>{r.text}</span>
               <span class="id">{ago(r.updated, board?.now ?? 0)}</span>
               {#if r.steps.length}
-                {@const going = goingOn(r.status)}
-                <details
-                  class="steps"
-                  open={stepsOpen[r.id] ?? going}
-                  ontoggle={(event) => {
-                    const open = event.currentTarget.open;
-                    if (open !== (stepsOpen[r.id] ?? going)) stepsOpen[r.id] = open;
-                  }}
-                >
-                  <summary>
-                    {going ? "What it's doing" : "What it did"} · {r.steps.length}
-                    {r.steps.length === 1 ? "step" : "steps"}
-                  </summary>
-                  <ol use:newestInView={r.steps.length}>
-                    {#each r.steps as step (step.n)}
-                      <li class:now={going && step === r.steps[r.steps.length - 1]}>{step.text}</li>
-                    {/each}
-                  </ol>
-                </details>
+                {@render stepList(r.id, r.steps, goingOn(r.status))}
               {/if}
             </li>
           {/each}
@@ -594,12 +607,57 @@
       {/if}
     </form>
 
+    {#snippet stepList(key: string, steps: Step[], going: boolean, openFirst: boolean = going)}
+      <details
+        class="steps"
+        open={stepsOpen[key] ?? openFirst}
+        ontoggle={(event) => {
+          const open = event.currentTarget.open;
+          if (open !== (stepsOpen[key] ?? openFirst)) stepsOpen[key] = open;
+        }}
+      >
+        <summary>
+          {going ? "What it's doing" : "What it did"} · {steps.length}
+          {steps.length === 1 ? "step" : "steps"}
+        </summary>
+        <ol use:newestInView={steps.length}>
+          {#each steps as step (step.n)}
+            <li class="{step.kind}" class:now={going && step === steps[steps.length - 1]}>{plain(step.text)}</li>
+          {/each}
+        </ol>
+      </details>
+    {/snippet}
+
     {#if loadError && !board}
       <p class="board-note bad" role="alert">Couldn't load the tasks: {loadError}</p>
     {:else if !board}
       <p class="board-note">Loading the tasks…</p>
     {:else}
       {#if loadError}<p class="board-note bad">Couldn't refresh: {loadError}</p>{/if}
+
+      {#if agentRuns.length}
+        <section class="live-runs" aria-labelledby="h-live">
+          <h2 id="h-live">
+            Your agents, live
+            <span class="n">{agentRuns.filter((r) => r.status === "working").length}</span>
+          </h2>
+          <ul class="requests runs">
+            {#each agentRuns as r (r.key)}
+              <li class="request {r.status}" class:watched={watching === r.key} id="run-{r.key}">
+                <span class="state" title={r.session ? r.node : undefined}>{r.label}</span>
+                <span class="said" title={r.title}>{r.title || "Working"}</span>
+                <span class="id">
+                  {RUN_WORDS[r.status as keyof typeof RUN_WORDS] ?? r.status} · {ago(r.updated, board.now)}
+                </span>
+                {#if r.steps.length}
+                  <!-- A coding session's steps stay shut until opened: there can be many at once. -->
+                  {@render stepList(r.key, r.steps, r.status === "working", r.status === "working" && !r.session)}
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
 
       {#each shown as section (section.id)}
         {#if section.tasks.length || section.id === "needs-you"}
@@ -1315,6 +1373,43 @@
     color: var(--ink);
     font-weight: var(--w-heavy);
   }
+  .request .steps li.think {
+    font-style: italic;
+  }
+  .request .steps li.failed {
+    color: var(--red);
+  }
+  /* The owner's own words in a coding session's run. */
+  .request .steps li.asked {
+    margin-top: 4px;
+    color: var(--ink);
+    font-weight: var(--w-heavy);
+  }
+  .request .steps li.action {
+    font-family: var(--font-geist-mono), monospace;
+    font-size: var(--fs-micro);
+  }
+  .request.watched {
+    scroll-margin-top: var(--s4);
+  }
+  .request.watched .state {
+    outline: 1px solid var(--blue);
+  }
+  .agent .watch {
+    margin-top: 2px;
+    font-size: var(--fs-micro);
+  }
+  .live-runs {
+    margin-bottom: var(--s6);
+  }
+  .requests.runs {
+    padding: 0;
+    border-top: 0;
+    gap: var(--s2);
+  }
+  .request.stopped .state {
+    color: var(--ink-2);
+  }
   .request .said {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1342,6 +1437,7 @@
     margin-bottom: var(--s6);
   }
   .task-section h2,
+  .live-runs h2,
   .task-section summary {
     display: flex;
     align-items: center;

@@ -3,8 +3,9 @@
 // and gets back the rules set on the owner's other machines and the folders and memories made
 // elsewhere (other machines, the dashboard), so an instruction given once reaches every agent.
 // The owner reads all of it on one page (/), signed in by a one-use code from `hive-tasks web`.
-// Tables: cloud/knowledge/migrations/0003_task_board.sql to 0011 (the hive-knowledge D1 database).
-// The dashboard also sends instructions here for Hive's orchestrator in the cloud (/v1/requests).
+// Tables: cloud/knowledge/migrations/0003_task_board.sql onward (the hive-knowledge D1 database).
+// The dashboard also sends instructions here for Hive's orchestrator in the cloud (/v1/requests), and
+// every node's agent sends what it is doing, step by step, so every dashboard shows it live (/v1/runs).
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -13,7 +14,7 @@ const COOKIE = "hive_board";
 // What the browser extension may call, with its own key (see extensionAllowed). It calls from web
 // pages too (page-rules.js runs in each page), so these answer cross-origin; the key is a bearer
 // token, never a cookie, so "*" lets no page act as the owner.
-const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/requests/steps", "/v1/page-rules", "/v1/page-rules/off"]);
+const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/runs", "/v1/page-rules", "/v1/page-rules/off"]);
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
@@ -49,8 +50,8 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/requests/take" && request.method === "POST") return await takeRequest(request, env);
       if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
       if (url.pathname === "/v1/requests/state") return await requestState(url, request, env);
-      if (url.pathname === "/v1/requests/steps" && request.method === "POST") return await saveSteps(request, env);
-      if (url.pathname === "/v1/requests/steps") return await requestSteps(url, request, env);
+      if (url.pathname === "/v1/runs" && request.method === "POST") return await saveRun(request, env);
+      if (url.pathname === "/v1/runs") return await runSteps(url, request, env);
       if (url.pathname === "/v1/extension-key" && request.method === "POST") return await extensionKey(request, env);
       if (url.pathname === "/v1/page-rules" && request.method === "GET") return await pageRules(url, request, env);
       if (url.pathname === "/v1/page-rules" && request.method === "POST") return await savePageRule(request, env);
@@ -213,6 +214,12 @@ async function extensionKey(request, env) {
   const name = text(body.name, 60).replace(/[^a-z0-9-]/gi, "").toLowerCase();
   if (!name) return json({ error: "Say which browser (name)." }, 400);
   return json({ key: `ext.${name}.${await hmac(env.TASKS_TOKEN, `ext:${name}`)}` });
+}
+
+// The browser's name in a valid extension key ("ext.chrome.<mac>" → "chrome"), or null.
+async function extensionName(request, env) {
+  if (!(await extensionAllowed(request, env))) return null;
+  return (request.headers.get("authorization") || "").slice(7).split(".")[1];
 }
 
 async function anyoneAllowed(request, env) {
@@ -382,44 +389,77 @@ async function requestState(url, request, env) {
   return row ? json({ request: row }) : json({ error: "No such request." }, 404);
 }
 
-// What the agent is doing, step by step (board_request_steps, migration 0011): the orchestrator sends
-// each line its agent prints ("→ click: Open Compose", "💬 …", "✅ Done.") a few at a time while a task
-// runs, and the dashboard shows them under the task as they land. A request keeps its first MOST_STEPS.
-const MOST_STEPS = 800;
+// Every node's agent, live (board_runs and board_run_steps, migration 0013). Each node sends what its
+// agent is doing a few steps at a time while it works: Hive on each Mac (hive-tasks/src/runs.rs, from its
+// session journal), Hive's cloud agent on the VM (cloud/vm-agent/orchestrator.mjs, which also drives the
+// phone), the browser extension's own agent (browser/chrome/src/board-runs.js), and each Claude Code and
+// Codex session on the owner's Macs (hive-tasks/src/live.rs, from its hooks). The board hands the
+// recent ones to every dashboard. Steps are numbered by the node, so a post sent twice lands once.
+const RUN_STATUSES = new Set(["working", "done", "failed", "stopped"]);
+// A Claude Code or Codex session is one run however long it goes on (hive-tasks live.rs).
+const MOST_RUN_STEPS = 10_000_000;
 
-// POST /v1/requests/steps {id, task, steps: [{at, text}]}
-async function saveSteps(request, env) {
-  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+// POST /v1/runs {machine, run, agent, title?, project?, status?, request?, task?, steps: [{n, at, kind?, text}]}.
+// A machine names itself; the browser extension's key is always "ext:<its name>".
+async function saveRun(request, env) {
+  const extension = await extensionName(request, env);
+  if (!extension && !(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const body = await request.json();
-  const id = Number(body.id);
-  const task = Number(body.task);
-  if (!Number.isInteger(id) || id < 1 || !Number.isInteger(task) || task < 1 || task > 99) {
-    return json({ error: "Say which request and task (id, task)." }, 400);
-  }
+  const machine = extension ? `ext:${extension}` : text(body.machine, 60);
+  const run = text(body.run, 80);
+  const agent = text(body.agent, 30).toLowerCase();
+  if (!machine || !run || !agent) return json({ error: "Say which machine, run and agent." }, 400);
+  const status = RUN_STATUSES.has(body.status) ? body.status : null;
+  const whole = (value, low, high) => (Number.isInteger(Number(value)) && Number(value) >= low && Number(value) <= high ? Number(value) : null);
+  const request_ = whole(body.request, 1, Number.MAX_SAFE_INTEGER);
+  const task = request_ ? whole(body.task, 1, 99) : null;
   const steps = (Array.isArray(body.steps) ? body.steps : [])
     .slice(0, 100)
-    .map((step) => ({ at: Math.round(Number(step && step.at)) || now(), text: text(step && step.text, 500) }))
-    .filter((step) => step.text);
-  if (!steps.length) return json({ error: "No steps." }, 400);
-  // Each line takes the next number in SQL, so lines sent together keep their order.
-  await env.DB.batch(steps.map((step) => env.DB.prepare(
-    `INSERT OR IGNORE INTO board_request_steps (request, task, n, at, text)
-     SELECT ?1, ?2, COALESCE(MAX(n), 0) + 1, ?3, ?4 FROM board_request_steps WHERE request = ?1
-     HAVING COALESCE(MAX(n), 0) < ?5`,
-  ).bind(id, task, step.at, step.text, MOST_STEPS)));
-  return json({ ok: true });
+    .map((step) => ({
+      n: whole(step && step.n, 1, MOST_RUN_STEPS),
+      at: Math.round(Number(step && step.at)) || now(),
+      kind: text(step && step.kind, 20).toLowerCase(),
+      text: text(step && step.text, 500),
+    }))
+    .filter((step) => step.n && step.text);
+  const at = now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO board_runs (machine, run, agent, title, status, request, task, started_at, updated_at, project)
+       VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'working'), ?6, ?7, ?8, ?8, ?9)
+       ON CONFLICT (machine, run) DO UPDATE SET
+         agent = excluded.agent,
+         title = CASE WHEN excluded.title != '' THEN excluded.title ELSE board_runs.title END,
+         project = CASE WHEN excluded.project != '' THEN excluded.project ELSE board_runs.project END,
+         status = COALESCE(?5, board_runs.status),
+         request = COALESCE(excluded.request, board_runs.request),
+         task = COALESCE(excluded.task, board_runs.task),
+         updated_at = excluded.updated_at`,
+    ).bind(machine, run, agent, text(body.title, 300), status, request_, task, at, text(body.project, 200)),
+    ...steps.map((step) => env.DB.prepare(
+      "INSERT OR IGNORE INTO board_run_steps (machine, run, n, at, kind, text) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    ).bind(machine, run, step.n, step.at, step.kind, step.text)),
+  ]);
+  return json({ ok: true, machine });
 }
 
-// GET /v1/requests/steps?id=7&after=12: the request's steps after number `after`.
-async function requestSteps(url, request, env) {
+// GET /v1/runs?machine=cloud&run=1101&after=12: the run and its steps after number `after`.
+async function runSteps(url, request, env) {
   if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
-  const id = Number(url.searchParams.get("id"));
-  if (!Number.isInteger(id) || id < 1) return json({ error: "Say which request (id)." }, 400);
+  const machine = text(url.searchParams.get("machine"), 60);
+  const run = text(url.searchParams.get("run"), 80);
+  if (!machine || !run) return json({ error: "Say which run (machine, run)." }, 400);
   const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
-  const rows = await env.DB.prepare(
-    "SELECT n, task, at, text FROM board_request_steps WHERE request = ?1 AND n > ?2 ORDER BY n LIMIT 500",
-  ).bind(id, after).all();
-  return json({ steps: rows.results });
+  const [found, steps] = await env.DB.batch([
+    env.DB.prepare(
+      "SELECT machine, run, agent, title, status, request, task, started_at, updated_at, project FROM board_runs WHERE machine = ?1 AND run = ?2",
+    ).bind(machine, run),
+    env.DB.prepare(
+      "SELECT n, at, kind, text FROM board_run_steps WHERE machine = ?1 AND run = ?2 AND n > ?3 ORDER BY n LIMIT 500",
+    ).bind(machine, run, after),
+  ]);
+  if (!found.results.length) return json({ error: "No such run." }, 404);
+  return json({ run: found.results[0], steps: steps.results });
 }
 
 // ---- page rules (the browser extension) -----------------------------------------------------------
@@ -575,7 +615,7 @@ async function board(request, env) {
     return json({ error: "Not signed in." }, 401);
   }
   const since = now() - 14 * DAY;
-  const [tasks, unsplit, rules, folders, limits, requests, steps] = await env.DB.batch([
+  const [tasks, unsplit, rules, folders, limits, requests, runs, steps] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
@@ -602,18 +642,24 @@ async function board(request, env) {
        FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
        ORDER BY r.id DESC LIMIT 20`,
     ),
-    // What the agent is doing on requests still going or just finished: each one's last 200 steps.
+    // Every node's agent: runs that moved in the last half hour or say they're still working (a node
+    // that went quiet mid-run stops showing after 6 hours), and each one's last 200 steps.
     env.DB.prepare(
-      `SELECT request, task, n, at, text FROM (
-         SELECT s.request, s.task, s.n, s.at, s.text, ROW_NUMBER() OVER (PARTITION BY s.request ORDER BY s.n DESC) AS back
-         FROM board_request_steps s JOIN board_requests r ON r.id = s.request
-         WHERE r.status IN ('planning', 'working') OR r.updated_at > ?1)
-       WHERE back <= 200 ORDER BY request, n`,
-    ).bind(now() - 30 * 60),
+      `SELECT machine, run, agent, title, status, request, task, started_at, updated_at, project FROM board_runs
+       WHERE updated_at > ?1 OR (status = 'working' AND updated_at > ?2) ORDER BY updated_at DESC LIMIT 40`,
+    ).bind(now() - 30 * 60, now() - 6 * 3600),
+    env.DB.prepare(
+      `SELECT machine, run, n, at, kind, text FROM (
+         SELECT s.machine, s.run, s.n, s.at, s.kind, s.text,
+                ROW_NUMBER() OVER (PARTITION BY s.machine, s.run ORDER BY s.n DESC) AS back
+         FROM board_run_steps s JOIN board_runs r ON r.machine = s.machine AND r.run = s.run
+         WHERE r.updated_at > ?1 OR (r.status = 'working' AND r.updated_at > ?2))
+       WHERE back <= 200 ORDER BY machine, run, n`,
+    ).bind(now() - 30 * 60, now() - 6 * 3600),
   ]);
   return json({
     now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results,
-    limits: limits.results, requests: requests.results, steps: steps.results,
+    limits: limits.results, requests: requests.results, runs: runs.results, run_steps: steps.results,
   });
 }
 

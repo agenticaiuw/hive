@@ -15,6 +15,7 @@
  * parameter threaded through by the caller.
  */
 import { commandIdentity } from './bridge-core.js'
+import { mirrorRunsToBoard } from './board-runs.js'
 import {
   CONSOLE_SOURCE,
   EXECUTE_TIMEOUT_MS,
@@ -529,13 +530,16 @@ export async function consolePost(config, path, payload, timeoutMs, interpret) {
 
 /*
  * One journal per context incarnation, lazily built over storage.local so a
- * run's trace survives the context being suspended mid-run.
+ * run's trace survives the context being suspended mid-run. Every run it
+ * writes also goes to the owner's board, live (board-runs.js).
  */
 let journalInstance = null
 
 export function executionJournal() {
   if (!journalInstance) {
-    journalInstance = createExecutionJournal({ storage: api.storage.local })
+    journalInstance = mirrorRunsToBoard(createExecutionJournal({ storage: api.storage.local }), {
+      storage: api.storage.local,
+    })
   }
   return journalInstance
 }

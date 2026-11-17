@@ -23,6 +23,8 @@
 //!
 //! A session's history from before Hive first saw it is skipped, not imported.
 
+pub mod live;
+pub mod runs;
 pub mod usage;
 
 use regex::Regex;
@@ -2661,8 +2663,9 @@ fn hook_events(harness: &str) -> Vec<(&'static str, Option<&'static str>, u64)> 
         ("SessionStart", None, 10),
         ("UserPromptSubmit", None, 10),
         ("PreToolUse", edit, 10),
-        // After a command: the commits it made go on the task (Codex: every tool, as above).
-        ("PostToolUse", (harness == "claude").then_some("Bash"), 10),
+        // After every tool: the session's new steps go to the board live (live.rs), and a
+        // command's commits go on the task.
+        ("PostToolUse", None, 10),
         ("Stop", None, 10),
     ]
 }

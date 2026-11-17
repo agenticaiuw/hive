@@ -35,6 +35,8 @@ hive-tasks install|uninstall [--claude] [--codex]
                                 put the hooks into (or take them out of) Claude Code and Codex
 hive-tasks sync                 push what changed to the cloud copy (~/.config/hive/tasks.json) and
                                 take in the rules set on other machines (runs by itself after changes)
+hive-tasks live-send            send this Mac's Claude Code and Codex sessions to the board, live
+                                (the hooks start it by themselves)
 hive-tasks web                  open Hive's dashboard with every machine's tasks (its window on the Mac)
 ";
 
@@ -100,6 +102,9 @@ fn run(args: &[String]) -> Result<String, String> {
     if cmd == "web" {
         return web();
     }
+    if cmd == "live-send" {
+        return hive_tasks::live::send_now();
+    }
     // The cloud copy, for Hive's dashboard window (it answers the same questions the website does).
     if matches!(cmd, "get" | "post") {
         let cloud = Cloud::load().ok_or("No cloud copy set up (~/.config/hive/tasks.json).")?;
@@ -130,6 +135,8 @@ fn run(args: &[String]) -> Result<String, String> {
             if inside_hive() {
                 return Ok(String::new());
             }
+            // The session, live on the board (sent from a detached `live-send`).
+            hive_tasks::live::note_soon(harness, &input);
             let out = ledger.hook(harness, &input)?;
             if input["hook_event_name"] != "PreToolUse" {
                 sync_soon(&path);

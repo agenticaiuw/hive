@@ -12,6 +12,7 @@ use crate::util::{
 };
 use hive_knowledge::session_journal::{self, SessionJournal};
 use hive_knowledge::task_recording::Recorder;
+use hive_tasks::runs::RunStream;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -307,6 +308,8 @@ pub struct VoiceAgent {
     pub stopped: Flag,
     pub journal: Slot<Option<Arc<SessionJournal>>>,
     pub journal_warned: Flag,
+    /// The session's runs, live on the board for every node's dashboard (hive_tasks::runs).
+    pub runs: Slot<Option<Arc<RunStream>>>,
     /// "voice" or "lips".
     pub input_mode: Slot<String>,
     pub lips: Slot<Option<Arc<dyn crate::parts::Lips>>>,
@@ -382,6 +385,7 @@ impl VoiceAgent {
             stopped: Flag::new(false),
             journal: Slot::new(None),
             journal_warned: Flag::new(false),
+            runs: Slot::new(None),
             input_mode: Slot::new("voice".to_owned()),
             lips: Slot::new(None),
             lips_generation: Slot::new(0),
@@ -556,6 +560,9 @@ impl VoiceAgent {
         let Some(journal) = self.journal.get() else {
             return;
         };
+        if let Some(runs) = self.runs.get() {
+            runs.note(kind, text, &fields);
+        }
         journal.add(kind, text, obj(fields));
         if let Some(error) = journal.error() {
             if !self.journal_warned.set(true) {
@@ -580,6 +587,7 @@ impl VoiceAgent {
         match SessionJournal::new(about, None) {
             Ok(journal) => {
                 let journal = Arc::new(journal);
+                self.runs.set(Some(Arc::new(RunStream::start(&journal.id))));
                 session_journal::set_current(Some(journal.clone()));
                 self.journal.set(Some(journal));
             }
@@ -2471,6 +2479,7 @@ impl VoiceAgent {
             journal.end();
             session_journal::set_current(None);
         }
+        self.runs.set(None); // what's left goes to the board
         if let Some(mut watcher) = self.watcher.set(None) {
             watcher.stop();
         }

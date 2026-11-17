@@ -329,6 +329,7 @@ dependencies = [
  "hive-mac",
  "hive-phone",
  "hive-sidecars",
+ "hive-tasks",
  "hive-workspace",
  "libc",
  "regex",

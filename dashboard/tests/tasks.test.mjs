@@ -149,7 +149,7 @@ test('plan limits come from either board and show each window, reset once its ti
       tasks: [],
       limits: [
         {
-          machine: 'evans-mbp', harness: 'codex', home: '~/.codex', plan: 'prolite', at: now - 60,
+          machine: 'studio-mac', harness: 'codex', home: '~/.codex', plan: 'prolite', at: now - 60,
           windows: JSON.stringify([
             { minutes: 300, used: 92.4, resets_at: now + 2 * 3600 },
             { minutes: 10080, used: 15, resets_at: now + 4 * 86400 },
@@ -163,7 +163,7 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.equal(cloud.limits.length, 3);
   const shown = planLimits(cloud.limits, now);
   assert.equal(shown.length, 2); // nothing to show for a harness with no windows
-  assert.equal(shown[0].who, 'Codex · prolite · evans-mbp');
+  assert.equal(shown[0].who, 'Codex · prolite · studio-mac');
   assert.deepEqual(shown[0].windows, [
     { label: '5 h', used: 92.4, fresh: false, resets: 'resets in 2 h' },
     { label: 'Week', used: 15, fresh: false, resets: 'resets in 4 days' },
@@ -189,7 +189,7 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.equal(same[0].windows[0].used, 17);
 });
 
-test("each request sent to Hive in the cloud carries its agent's steps, in order", () => {
+test("each request sent to Hive in the cloud carries its tasks' steps, in order", () => {
   const board = normalizeBoard({
     source: 'cloud',
     board: {
@@ -199,16 +199,85 @@ test("each request sent to Hive in the cloud carries its agent's steps, in order
         { id: 12, text: 'open example.com', status: 'working', created_at: 900, updated_at: 990 },
         { id: 11, text: 'earlier', status: 'done', created_at: 800, updated_at: 850 },
       ],
-      steps: [
-        { request: 12, task: 1, n: 2, at: 995, text: '💬 The heading says Example Domain.' },
-        { request: 12, task: 1, n: 1, at: 991, text: '→ open_url: Open example.com' },
+      runs: [
+        { machine: 'cloud', run: '1202', agent: 'cloud', title: 'Read it', status: 'working', request: 12, task: 2, started_at: 996, updated_at: 997 },
+        { machine: 'cloud', run: '1201', agent: 'cloud', title: 'Open it', status: 'done', request: 12, task: 1, started_at: 990, updated_at: 995 },
+      ],
+      run_steps: [
+        { machine: 'cloud', run: '1201', n: 2, at: 995, kind: 'say', text: '💬 The heading says Example Domain.' },
+        { machine: 'cloud', run: '1202', n: 1, at: 997, kind: 'action', text: '→ read_page' },
+        { machine: 'cloud', run: '1201', n: 1, at: 991, kind: 'action', text: '→ open_url: Open example.com' },
       ],
     },
   });
   const [working, earlier] = board.requests;
-  assert.deepEqual(working.steps.map((s) => [s.n, s.task, s.text]), [
-    [1, 1, '→ open_url: Open example.com'],
-    [2, 1, '💬 The heading says Example Domain.'],
+  assert.deepEqual(working.steps.map((s) => [s.n, s.task, s.kind, s.text]), [
+    [1, 1, 'action', '→ open_url: Open example.com'],
+    [2, 1, 'say', '💬 The heading says Example Domain.'],
+    [3, 2, 'action', '→ read_page'],
   ]);
   assert.deepEqual(earlier.steps, []);
+});
+
+test("every node's agents are on the board live: working first, each with where it runs and its steps", () => {
+  const board = normalizeBoard({
+    source: 'cloud',
+    board: {
+      now: 1000,
+      tasks: [],
+      runs: [
+        { machine: 'studio-mac', run: 's1-2', agent: 'mac', title: 'Open Notes', status: 'done', started_at: 900, updated_at: 990 },
+        { machine: 'ext:chrome', run: 'b-7', agent: 'browser', title: 'Summarize this page', status: 'working', started_at: 950, updated_at: 960 },
+        { machine: 'cloud', run: '1301', agent: 'cloud', title: 'Text Sam', status: 'working', request: 13, task: 1, started_at: 970, updated_at: 980 },
+      ],
+      run_steps: [
+        { machine: 'studio-mac', run: 's1-2', n: 2, at: 989, kind: 'done', text: 'Opened Notes.' },
+        { machine: 'studio-mac', run: 's1-2', n: 1, at: 980, kind: 'action', text: 'click(x=10, y=20)' },
+        { machine: 'ext:chrome', run: 'b-7', n: 1, at: 955, kind: 'action', text: 'read_page: ok' },
+      ],
+    },
+  });
+  assert.deepEqual(board.runs.map((r) => [r.node, r.title, r.status, r.request]), [
+    ['Hive in the cloud', 'Text Sam', 'working', 'R13'],
+    ['Chrome extension', 'Summarize this page', 'working', ''],
+    ['Hive on studio-mac', 'Open Notes', 'done', ''],
+  ]);
+  assert.deepEqual(board.runs[2].steps.map((s) => [s.n, s.kind, s.text]), [
+    [1, 'action', 'click(x=10, y=20)'],
+    [2, 'done', 'Opened Notes.'],
+  ]);
+  assert.deepEqual(normalizeBoard({ source: 'local', board: { done: [] } }).runs, []);
+});
+
+test('a Claude Code or Codex session in a turn is an agent at work, with or without a task of its own', () => {
+  const board = normalizeBoard({
+    source: 'cloud',
+    board: {
+      now: 10_000,
+      tasks: [
+        { machine: 'studio-mac', id: 'T1', title: 'Fix the count', status: 'active', harness: 'claude', session: 's1', project: 'github.com/agenticaiuw/hive', updated_at: 9_000 },
+      ],
+      runs: [
+        // s1 has its task; s2 is a side session working on its parent's task, so has none of its own.
+        { machine: 'studio-mac', run: 'claude:s1', agent: 'claude', title: 'fix the count', project: 'github.com/agenticaiuw/hive', status: 'working', started_at: 9_000, updated_at: 9_990 },
+        { machine: 'studio-mac', run: 'claude:s2', agent: 'claude', title: 'stream the agents', project: 'github.com/agenticaiuw/hive', status: 'working', started_at: 9_000, updated_at: 9_995 },
+        { machine: 'studio-mac', run: 'codex:s3', agent: 'codex', title: '', project: 'buckymatch', status: 'done', started_at: 100, updated_at: 9_900 },
+        { machine: 'studio-mac', run: 'claude:s4', agent: 'claude', title: 'went quiet', project: 'x', status: 'working', started_at: 100, updated_at: 200 },
+      ],
+      run_steps: [
+        { machine: 'studio-mac', run: 'claude:s2', n: 1, at: 9_995, kind: 'action', text: '$ cargo test' },
+        { machine: 'studio-mac', run: 'codex:s3', n: 1, at: 9_800, kind: 'asked', text: 'tidy the tests' },
+      ],
+    },
+  });
+  const s2 = board.runs.find((r) => r.run === 'claude:s2');
+  assert.deepEqual([s2?.label, s2?.harness, s2?.session, s2?.projectName], ['Claude Code · hive', 'claude', 's2', 'hive']);
+  const s3 = board.runs.find((r) => r.run === 'codex:s3');
+  assert.deepEqual([s3?.label, s3?.title], ['Codex · buckymatch', 'tidy the tests']);
+  const agents = agentsAtWork(board.tasks, board.now, undefined, board.runs);
+  assert.deepEqual(agents.map((a) => [a.session, a.on.map((t) => t.id), a.run?.key, a.projectName]), [
+    ['s2', [], 'studio-mac:claude:s2', 'hive'],
+    ['s1', ['T1'], 'studio-mac:claude:s1', 'hive'],
+  ]);
+  assert.deepEqual(agents[0].run?.steps.map((s) => s.text), ['$ cargo test']);
 });
