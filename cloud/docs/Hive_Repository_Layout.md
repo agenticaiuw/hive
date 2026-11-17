@@ -4,9 +4,8 @@
   `browser/safari` is the Safari wrapper that ships inside Hive.app).
 - `cloud/`: everything Hive runs in the cloud. `tasks` is the owner's task board (a Worker), which
   every node reaches every other node through; `knowledge` holds its database's migrations;
-  `hive-cloud` is the private file cloud; `vm-agent` is Hive's agent on the cloud VM;
-  `orchestrator` is the instruction ledger and sync; `dream` runs the nightly review; `shared` is
-  code the browser extension and the cloud share.
+  `hive-cloud` is the private file cloud; `vm-agent` is Hive's agent on the cloud VM; `dream`
+  runs the nightly review; `shared` is code the browser extension and the cloud share.
 - `dashboard/`: Hive's one dashboard. The website, the desktop app, the phone app and the
   extension's side panel all show it.
 - `desktop/`: Hive.app on the Mac and the Mac's tools for reaching the VM.
