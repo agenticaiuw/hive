@@ -116,6 +116,15 @@ fn a_message_is_saved_split_reported_and_only_then_lets_the_agent_stop() {
         .ledger
         .report(&json!([{"id": "T1", "status": "done"}]))
         .is_err());
+    // A task doesn't wait for the owner to try it: built and tested is done.
+    let refused = f
+        .ledger
+        .report(&json!([{"id": "T1", "status": "waiting", "outcome": "Button is 44pt now. Waiting on the owner to try it."}]))
+        .unwrap_err();
+    assert!(refused.contains("report it done"), "{refused}");
+    assert!(hive_tasks::waits_for_a_try("Waiting on the owner to test the keyboard's --test mode on the webcam"));
+    assert!(!hive_tasks::waits_for_a_try("Needs the owner's yes to install it on the iPhone"));
+    assert!(!hive_tasks::waits_for_a_try("Needs the owner to check their email for the sign-in code"));
     f.ledger
         .report(&json!([
             {"id": "T1", "status": "done", "outcome": "Button now 44pt and tappable", "evidence": "commit abc123"},

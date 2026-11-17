@@ -274,7 +274,7 @@ impl Cloud {
                 .map_err(|e| format!("The cloud's answer isn't JSON: {e}")),
             Err(ureq::Error::Status(code, r)) => Err(format!(
                 "The cloud said {code}: {}",
-                clip(&r.into_string().unwrap_or_default(), 200)
+                r.into_string().unwrap_or_default().trim()
             )),
             Err(e) => Err(format!("Couldn't reach the cloud: {e}")),
         }
@@ -487,7 +487,7 @@ impl Ledger {
                 f => f,
             };
             let folder = folder_place(&project, named);
-            checked.push((kind, quote, clip(&title, 200), minutes, value, paths, folder));
+            checked.push((kind, quote, title.trim().to_string(), minutes, value, paths, folder));
         }
         let now = now();
         let mut out = Vec::new();
@@ -584,6 +584,13 @@ impl Ledger {
                     "T{id}: say what happened (outcome) when it's {status}."
                 ));
             }
+            if status == "waiting" && waits_for_a_try(&outcome) {
+                return Err(format!(
+                    "T{id}: a task doesn't wait for the owner to try it (the owner: \"why would me trying it be a \
+                     requirement for this tasks to be done. it should not be.\"). Built and tested is done: report it \
+                     done. Waiting is only for something the owner must do (a decision, a yes, a sign-in, a password)."
+                ));
+            }
             let exists: Option<i64> = self
                 .db
                 .query_row("SELECT id FROM tasks WHERE id = ?1", [id], |r| r.get(0))
@@ -627,7 +634,7 @@ impl Ledger {
                        updated_at = ?6, done_at = CASE WHEN ?2 = 'done' THEN ?6 ELSE NULL END,
                        left_open_at = CASE WHEN ?2 IN ('open', 'active') THEN left_open_at ELSE NULL END
                      WHERE id = ?1",
-                    params![id, status, clip(&outcome, 2000), clip(&evidence, 2000), minutes, now],
+                    params![id, status, outcome, evidence, minutes, now],
                 )
                 .map_err(err)?;
             self.event(
@@ -702,7 +709,7 @@ impl Ledger {
         if !cost.is_empty() {
             text.push_str(&format!("\nCost: {}.", cost.join("; ")));
         }
-        let text = clip(text.trim(), 6000);
+        let text = text.trim().to_string();
         self.db
             .execute("UPDATE tasks SET report = ?2 WHERE id = ?1", params![id, text])
             .map_err(err)?;
@@ -759,7 +766,7 @@ impl Ledger {
         self.db
             .execute(
                 "UPDATE folders SET about = ?3, updated_at = ?4, origin = NULL WHERE project = ?1 AND key = ?2",
-                params![project, name.to_lowercase(), clip(about.trim(), 2000), now()],
+                params![project, name.to_lowercase(), about.trim(), now()],
             )
             .map_err(err)?;
         Ok(format!("{project} › {name}: described."))
@@ -827,13 +834,13 @@ impl Ledger {
             return Err("Nothing to remember (give the memory on stdin; its first line is its title).".into());
         }
         let (title, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
-        let title = clip(title.trim().trim_start_matches('#').trim(), 200);
+        let title = title.trim().trim_start_matches('#').trim().to_string();
         let rest = rest.trim();
         let name = self.ensure_folder(project, name)?;
         self.db
             .execute(
                 "INSERT INTO memories (project, folder, kind, title, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![project, name.to_lowercase(), kind, title, clip(if rest.is_empty() { &title } else { rest }, 60_000), now()],
+                params![project, name.to_lowercase(), kind, title, if rest.is_empty() { title.as_str() } else { rest }, now()],
             )
             .map_err(err)?;
         Ok(format!("Saved to {project} › {name} as a {kind}: {title}"))
@@ -1037,7 +1044,7 @@ impl Ledger {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
-                let title = clip(said.lines().next().unwrap_or(""), 120);
+                let title = said.lines().next().unwrap_or("").trim().to_string();
                 let folder = addressed_folder(&said)
                     .map(|(p, name)| format!("{p} › {name}"))
                     .unwrap_or_default();
@@ -1707,7 +1714,7 @@ impl Ledger {
                  EOF\n\
                  Use [] if it asks for nothing. A standing preference (\"never…\", \"always…\") is {{\"kind\": \"rule\", \"paths\": [\"<globs it applies to, or none for the whole project>\"], ...}} instead of a task. \
                  Put each task in its folder, the part of the project it's about: \"folder\": \"<project › folder>\" (Hive then loads every memory of that folder for you). If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\", \"report\": \"<when done: what you did, where, what's left>\"}}]' | {cmd} report. \
-                 Waiting puts the task on the owner's \"Needs you\" list, so use it only when the owner must do something, and say exactly what in the outcome; anything else in the way is blocked, with what's left in the outcome. \
+                 Waiting puts the task on the owner's \"Needs you\" list, so use it only when the owner must do something, and say exactly what in the outcome (the owner trying what you built is never it: built and tested is done); anything else in the way is blocked, with what's left in the outcome. \
                  Handing folder work to a subagent, put a line \"Hive folder: <project › folder>\" in its prompt and Hive adds that folder's memories. Save what later agents in a folder must know: {cmd} remember \"<project › folder>\" [note|spec|decision] <<'EOF' (first line the title)."
             ));
             let here = project_key(project);
@@ -1824,7 +1831,7 @@ impl Ledger {
             reason.push_str(&format!("Still open:\n{}\n", task_lines(&open)));
             reason.push_str(&format!(
                 "Finish each, or report it: echo '[{{\"id\": \"T1\", \"status\": \"done\", \"outcome\": \"<what happened>\"}}]' | {cmd} report \
-                 (status waiting only if the owner must do something, saying what; blocked if anything else is in the way, saying what's left; dropped only if the owner withdrew it)."
+                 (status waiting only if the owner must do something, saying what, and never just to try it; blocked if anything else is in the way, saying what's left; dropped only if the owner withdrew it)."
             ));
         }
         Ok(json!({"decision": "block", "reason": reason.trim_end()}))
@@ -2400,6 +2407,16 @@ fn shown_path(root: &str, path: &str) -> String {
         Ok(home) if !home.is_empty() && rel.starts_with(&format!("{home}/")) => format!("~{}", &rel[home.len()..]),
         _ => rel,
     }
+}
+
+/// An outcome that waits only for the owner to try, test or confirm what was built.
+pub fn waits_for_a_try(outcome: &str) -> bool {
+    let o = words(outcome);
+    let who = ["owner", "user", "you", "evan"];
+    let tries = ["try", "test"];
+    who.iter().any(|w| tries.iter().any(|t| o.contains(&format!("{w} to {t} ")) || o.ends_with(&format!("{w} to {t}"))
+        || o.contains(&format!("{w} {t}s it")) || o.contains(&format!("{w} {t} it"))))
+        || o.contains("try it out")
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
