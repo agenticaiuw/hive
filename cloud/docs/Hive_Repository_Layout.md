@@ -1,15 +1,18 @@
 # Hive repository layout
 
-Hive is the product name; Hivemind remains the repository and platform name.
-The repository groups its components into four product areas:
+- `browser/`: the browser extension, "Hive" (`browser/chrome` is the source for Chrome and Safari;
+  `browser/safari` is the Safari wrapper that ships inside Hive.app).
+- `cloud/`: everything Hive runs in the cloud. `tasks` is the owner's task board (a Worker), which
+  every node reaches every other node through; `knowledge` holds its database's migrations;
+  `hive-cloud` is the private file cloud; `vm-agent` is Hive's agent on the cloud VM;
+  `orchestrator` is the instruction ledger and sync; `dream` runs the nightly review; `shared` is
+  code the browser extension and the cloud share.
+- `dashboard/`: Hive's one dashboard. The website, the desktop app, the phone app and the
+  extension's side panel all show it.
+- `desktop/`: Hive.app on the Mac and the Mac's tools for reaching the VM.
+- `mobile/`: the iOS app, a shell around the dashboard website.
+- `branding/hive.svg`: Hive's icon, its only copy (the Mac app's `.icns`, the extension's icons and
+  the dashboard all come from it).
 
-- `browser/`: Chrome and Safari extensions.
-- `cloud/`: relay and edge worker.
-- `desktop/`: the desktop app, agent, dashboard, orchestrator and integration tooling.
-- `mobile/`: the iOS application (a Capacitor shell around the dashboard).
-
-Hive's icon is `branding/hive.svg` at the root, its only copy (the Mac app's `.icns`, the Chrome extension's icons and the dashboard all come from it); architecture documentation is in `cloud/docs/`. Device-specific tests and tools are placed with their components. Run `node cloud/tools/check-platform.mjs` to check component paths.
-
-The desktop app was imported as a reviewed snapshot; this layout does not establish live sync, full integration, permission continuity or publication readiness. The mobile agent is still a placeholder; the VM worker (`cloud/vm-agent`) is tested locally but not yet verified against live Discord or X. Imported code and third-party licenses, supported builds, user-state continuity and separate repository history still need verification before publication or retirement of the separate repository.
-
-The optional macOS packaging and migration scripts in `desktop/integration/scripts/` require a selected signing identity and retain backups. Local fixture tests do not establish live permission or login-item continuity. Model and Python environment preparation are separate, opt-in operations; dependency imports do not prove inference or audio hardware behavior.
+Tests sit with their components. `node cloud/tools/check-platform.mjs` checks that the component
+folders are where this page says.

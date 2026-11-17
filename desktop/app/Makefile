@@ -101,8 +101,8 @@ build/Hive.icns: ../../branding/hive.svg build/hive-icon
 	mv build/Hive.tmp.icns $@
 
 # Hive's Safari extension, carried inside Hive.app so Safari lists it as "Hive" (the same code as
-# the Chrome extension, browser/chrome/src). Keep the identifier: the extension's saved pairing lives
-# in a container named after it (browser/safari/scripts/build-appex.sh).
+# the Chrome extension, browser/chrome/src). Keep the identifier: Safari remembers by it that
+# the extension is turned on and which sites it may use (browser/safari/scripts/build-appex.sh).
 build/Hive.appex: ../../browser/safari/scripts/build-appex.sh $(wildcard ../../browser/chrome/src/*) tools/HiveSafari.entitlements tools/sign.sh
 	@mkdir -p build
 	bash ../../browser/safari/scripts/build-appex.sh $@.tmp local.personal-agent.Agent.Safari

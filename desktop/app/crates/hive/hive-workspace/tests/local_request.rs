@@ -220,7 +220,7 @@ fn close_does_not_unlink_replacement() {
 fn persisted_before_dispatch_and_duplicates_never_dispatch() {
     let f = fixture();
     let text = "Prepare the project outline";
-    let source = "mesh:pc1:nmsg_abc";
+    let source = "dashboard:req_abc";
     let client = background(f.server.path(), json!({"text": text, "sourceId": source}));
     let request = f.events.recv_timeout(Duration::from_secs(5)).unwrap();
     let listing = rows(&f.directory);
@@ -261,7 +261,7 @@ fn persisted_before_dispatch_and_duplicates_never_dispatch() {
 #[test]
 fn simultaneous_same_source_dispatches_once() {
     let f = fixture();
-    let source = "mesh:pc1:nmsg_concurrent";
+    let source = "dashboard:req_concurrent";
     let clients: Vec<_> = (0..8)
         .map(|_| {
             background(
@@ -295,7 +295,7 @@ fn crash_after_dispatch_leaves_unknown_without_replay() {
         Arc::new(move |request| sink.lock().unwrap().push(request)),
     )
     .unwrap();
-    let source = "mesh:pc1:nmsg_crash";
+    let source = "dashboard:req_crash";
     let path = server.path().to_path_buf();
     let _lost = std::thread::spawn(move || {
         send_raw(
@@ -431,7 +431,7 @@ fn invalid_source_and_unreadable_key_never_dispatch() {
     assert_eq!(
         call(
             f.server.path(),
-            json!({"text": "valid task", "sourceId": "mesh:pc1:nmsg_bad"})
+            json!({"text": "valid task", "sourceId": "dashboard:req_bad"})
         )["ok"],
         false
     );

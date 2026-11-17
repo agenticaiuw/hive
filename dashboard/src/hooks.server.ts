@@ -6,22 +6,20 @@ import { resolveRuntimeEnv } from "$lib/server/env";
  * The whole gate lives here so the ordering matches the Worker entry it
  * replaces: login/logout first (they must be reachable anonymously), then the
  * public-path allowlist, then the session check. Pages get a 302 to /login,
- * `/api/*` gets a 401 before any relay call is made.
+ * `/api/*` gets a 401 before the task board is asked anything.
  */
 /*
- * The agent and desktop builds ship as static files with no server behind them, so this hook
- * runs only while generating the shell. Its gate would 302 that render to
- * /login and there would be no page at all. Access control for that build is
- * the Mac agent's own loopback session, which is a stronger gate than a
- * pairing code: it is unreachable from the network.
+ * The desktop build ships as static files with no server behind them, so this hook runs only
+ * while generating the shell. Its gate would 302 that render to /login and there would be no page
+ * at all. Hive's Mac app serves that build from hive://app/, which the network can't reach.
  */
-const AGENT_BUILD = ["agent", "desktop"].includes(import.meta.env.VITE_DASHBOARD_BACKEND);
+const DESKTOP_BUILD = import.meta.env.VITE_DASHBOARD_BACKEND === "desktop";
 
 export const handle: Handle = async ({ event, resolve }) => {
   const env = resolveRuntimeEnv(event.platform);
   event.locals.runtimeEnv = env;
 
-  if (AGENT_BUILD) return resolve(event);
+  if (DESKTOP_BUILD) return resolve(event);
 
   const { url, request } = event;
 

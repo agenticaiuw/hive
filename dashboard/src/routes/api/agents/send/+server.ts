@@ -1,6 +1,6 @@
 import { json } from "@sveltejs/kit";
 import type { RequestHandler } from "./$types";
-import { NO_STORE_HEADERS } from "$lib/server/relay";
+import { NO_STORE_HEADERS } from "$lib/server/http";
 import { ORCHESTRATOR } from "$lib/server/agents";
 import { askBoard } from "$lib/server/tasks";
 

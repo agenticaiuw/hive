@@ -1,286 +1,38 @@
 /*
- * THE SHARED IMPURE RUNTIME: everything both engines must do IDENTICALLY.
- *
- * Extracted verbatim from background.js on 2026-08-12, the night Safari was
- * measured refusing to evaluate the background at all (service_worker AND
- * background.scripts) while extension pages kept running. The page engine
- * (page-engine.js) has to carry the bridge when that happens, and "carry the
- * bridge" must mean THIS code — the same config identity, the same heartbeat
- * body, the same validateCommand → runCommand → sanitizeExtraction path — not
- * a fork that drifts. background.js imports these too, so there is exactly
- * one executor whichever context is alive.
- *
- * Identity parity is a load-bearing property of this file: getConfig() builds
- * extensionId from the STORED instanceId, and heartbeat() sends it — so the
- * agent's /browser/status registry and the fleet map show the same Browser
- * Extension node whichever engine produced the heartbeat. Per-incarnation
- * state (the replay ledger, the worker nonce) is a PARAMETER, because each
- * context is its own incarnation; shared identity comes from storage, never
- * from module scope.
- *
- * Everything here assumes an extension context (worker OR extension page):
- * storage, tabs, scripting, action and runtime are all available to both.
+ * Runs one browser command Hive's agents send through the cloud (cloud-peer.js asks the board for
+ * the next one and posts back what this returns): open or pick a tab, read it, click, type, and so
+ * on. Everything a command produces goes through the privacy boundary (sanitizeExtraction) before
+ * it leaves this browser, stamped with where it came from (provenanceFor).
  */
 import {
-  commandIdentity,
+  DEFAULT_TARGET_MODE,
+  TARGET_MODES,
   isScriptableUrl,
   normalizeCommandParams,
-  normalizeConfig,
   originPattern,
   pickTargetTab,
   provenanceFor,
-  retryDelay,
   sanitizeExtraction,
   validateCommand,
   validateNavigationUrl,
 } from './bridge-core.js'
-import { APPROVALS_KEY, approvalBadge } from './approvals.js'
 import { CLOUD_STATUS_KEY, connectionBadge } from './cloud-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 
-export const FETCH_TIMEOUT_MS = 7_000
-/*
- * TWO CADENCES, AND THE SPLIT IS SAFARI'S BUG, NOT A STYLE CHOICE.
- * Safari kills background content that is exercised more often than every
- * ~4 s — a hidden ~30 s resource budget, documented by developers on
- * Apple's forums (thread 756309: 1 s intervals die after 30 calls, 2 s
- * after 15, 3 s after 10; "increasing to 4 seconds… never crashes"),
- * acknowledged by Apple, and still regressing as of OS 26. Our original
- * 750 ms background poll tripped exactly that budget, which is the best
- * explanation on record for this machine's background never surviving.
- * Visible documents (the page engine's popover/console hosts) are ordinary
- * web pages with no such budget, so they keep the fast cadence commands
- * deserve; the background, when Safari deigns to run it, must idle gently.
- */
-export const POLL_INTERVAL_MS = 750
-export const BACKGROUND_POLL_INTERVAL_MS = 5_000
-export const HEARTBEAT_INTERVAL_MS = 12_000
-export const STATUS_KEY = 'bridgeStatus'
-export const RELAY_STATUS_KEY = 'relayStatus'
-export const CONFIG_KEYS = ['agentUrl', 'agentToken', 'deviceName', 'targetMode', 'instanceId']
-
+/* Which tab a command acts in when it doesn't say: the owner's choice, if one is stored. */
 export async function getConfig() {
-  const values = await api.storage.local.get(CONFIG_KEYS)
-  const config = normalizeConfig(values)
-
-  if (!values.instanceId) {
-    values.instanceId = crypto.randomUUID()
-    await api.storage.local.set({ instanceId: values.instanceId })
-  }
-
-  return {
-    ...config,
-    instanceId: values.instanceId,
-    extensionId: `hive-${api.runtime.id}-${values.instanceId}`,
-  }
+  const stored = await api.storage.local.get(['targetMode']).catch(() => ({}))
+  return { targetMode: TARGET_MODES.has(stored.targetMode) ? stored.targetMode : DEFAULT_TARGET_MODE }
 }
 
-export async function request(config, path, options = {}) {
-  return fetch(`${config.agentUrl}${path}`, {
-    ...options,
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${config.agentToken}`,
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...options.headers,
-    },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  })
-}
-
-export async function postJson(config, path, payload) {
-  const response = await request(config, path, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-
-  if (!response.ok) {
-    throw await responseError(response)
-  }
-
-  return response.status === 204 ? null : response.json()
-}
-
-export async function responseError(response) {
-  let detail = ''
-
-  try {
-    const payload = await response.json()
-    detail = payload.error || payload.message || ''
-  } catch {
-    detail = await response.text().catch(() => '')
-  }
-
-  const error = new Error(
-    detail || `Local agent returned HTTP ${response.status}.`,
-  )
-  error.status = response.status
-  return error
-}
-
-export async function currentTabSummary() {
-  const [tab] = await api.tabs.query({ active: true, lastFocusedWindow: true })
-  const all = await api.tabs.query({}).catch(() => [])
-  const scriptable = all.filter((t) => isScriptableUrl(t?.url))
-  return tab
-    ? {
-        tabId: tab.id ?? null,
-        windowId: tab.windowId ?? null,
-        // Origin only — no path/query (fleet metadata, not page content).
-        tabUrl: isScriptableUrl(tab.url) ? new URL(tab.url).origin : '',
-        tabTitle: String(tab.title || '').slice(0, 80),
-        tabCount: scriptable.length,
-      }
-    : {
-        tabId: null,
-        windowId: null,
-        tabUrl: '',
-        tabTitle: '',
-        tabCount: scriptable.length,
-      }
-}
-
-/**
- * One heartbeat, from whichever engine is alive. The IDENTITY comes from
- * config (stored instanceId → stable extensionId) so the fleet map lights up
- * the same node either way; the INCARNATION comes from the caller (nonce +
- * ledger), because "which evaluation of which context is holding the lease"
- * is exactly what the agent uses the nonce to tell apart.
- */
-export async function heartbeat(config, { nonce, ledger }) {
-  const tab = await currentTabSummary()
-  await postJson(config, '/browser/heartbeat', {
-    extensionId: config.extensionId,
-    deviceName: config.deviceName || platformLabel(),
-    browserName: browserLabel(),
-    extensionVersion: api.runtime.getManifest().version,
-    userAgent: globalThis.navigator?.userAgent ?? '',
-    /* The lease protocol: nonce says which incarnation of this worker is
-     * holding the lease, capabilities say what it is safe to hand it. */
-    nonce,
-    capabilities: ['idempotency-ledger', 'privacy-boundary', 'provenance'],
-    ledger: ledger.stats(),
-    ...tab,
-  })
-}
-
-export async function pollOnce(config, { ledger }) {
-  const response = await request(
-    config,
-    `/browser/poll?extensionId=${encodeURIComponent(config.extensionId)}`,
-  )
-
-  if (response.status === 204) return false
-  if (!response.ok) throw await responseError(response)
-
-  const payload = await response.json()
-  const command = payload?.command
-  const identity = commandIdentity(command)
-  let result
-
-  /*
-   * The replay check, before anything touches a tab.
-   *
-   * The sequence this exists for leaves no trace on the agent side: the command
-   * runs, the POST of its result fails all three attempts, and the command is
-   * still queued. Whoever polls next gets it again — and "again" for a click or
-   * a navigate means it happens twice on a real page. The agent cannot rule
-   * that out, because from where it stands a command it never got an answer for
-   * and a command that was never run look identical.
-   */
-  const replayed = ledger.recall(identity)
-  if (replayed) {
-    await postResultWithRetry(config, command?.commandId, {
-      ...replayed.result,
-      extensionId: config.extensionId,
-      replayed: true,
-    })
-    return true
-  }
-
-  try {
-    result = { ok: true, result: await executeCommand(command, config) }
-  } catch (error) {
-    result = { ok: false, error: error?.message || String(error) }
-  }
-
-  /* Recorded before the POST, not after: the POST is the step that fails. */
-  ledger.remember(identity, result)
-
-  await postResultWithRetry(config, command?.commandId, {
-    ...result,
-    extensionId: config.extensionId,
-  })
-  return true
-}
-
-export async function postResultWithRetry(config, commandId, result) {
-  if (!commandId) throw new Error('The browser command is missing its commandId.')
-
-  let lastError
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await postJson(
-        config,
-        `/browser/result/${encodeURIComponent(commandId)}`,
-        result,
-      )
-      return
-    } catch (error) {
-      lastError = error
-      if (attempt < 2) await delay(retryDelay(attempt, 300, 1_200))
-    }
-  }
-  throw lastError
-}
-
-/**
- * One writer for bridgeStatus, shared by both engines. `engine` says which
- * one wrote it — 'background' unless the patch claims otherwise — so a stale
- * page-engine stamp cannot outlive the background taking back over.
- */
-export async function updateStatus(patch) {
-  const current = (await api.storage.local.get(STATUS_KEY))[STATUS_KEY] ?? {}
-  const status = {
-    ...current,
-    ...patch,
-    engine: patch.engine ?? 'background',
-    extensionId: api.runtime.id,
-    updatedAt: new Date().toISOString(),
-  }
-  await api.storage.local.set({ [STATUS_KEY]: status })
-  await refreshBadge(status)
-}
-
-export async function updateRelayStatus(patch) {
-  const current = (await api.storage.local.get(RELAY_STATUS_KEY))[RELAY_STATUS_KEY] ?? {}
-  await api.storage.local.set({
-    [RELAY_STATUS_KEY]: { ...current, ...patch, updatedAt: new Date().toISOString() },
-  })
-}
-
-/**
- * One writer for the toolbar badge, so its two claimants cannot fight.
- *
- * Approvals waiting on the owner outrank connection state: 'ON' is
- * reassurance, a count is a request, and the poll loop repaints the badge
- * often enough that the count falls away on its own once the last card is
- * answered or expires. Everything that changes either input — a status
- * update, a drained approval, a decision — lands here.
- */
-export async function refreshBadge(status = null) {
+/* The toolbar badge: whether Hive reaches this browser through the cloud. */
+export async function refreshBadge() {
   if (!api.action?.setBadgeText) return
-
-  const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY, CLOUD_STATUS_KEY])
-  const current = status ?? stored[STATUS_KEY] ?? {}
-  const badge = approvalBadge(stored[APPROVALS_KEY] ?? []) ?? connectionBadge(current, stored[CLOUD_STATUS_KEY])
-
+  const stored = await api.storage.local.get([CLOUD_STATUS_KEY])
+  const badge = connectionBadge(stored[CLOUD_STATUS_KEY])
   await api.action.setBadgeText({ text: badge.text })
-  if (api.action.setBadgeBackgroundColor) {
-    await api.action.setBadgeBackgroundColor({ color: badge.color })
-  }
+  if (api.action.setBadgeBackgroundColor) await api.action.setBadgeBackgroundColor({ color: badge.color })
 }
 
 /**
@@ -288,19 +40,14 @@ export async function refreshBadge(status = null) {
  * boundary and stamp it with where it came from.
  *
  * The order is the whole point. sanitizeExtraction runs after execution and
- * before the result is handed back to pollOnce, which is the last moment it is
- * still inside Safari: past here it is in a different process with a log, a
- * store and a cloud relay attached, and a credential that reaches the agent has
- * effectively left the machine.
+ * before the result is handed back to the cloud peer, which is the last moment
+ * it is still inside the browser: past here it is in Hive's cloud, and a
+ * credential that reaches it has effectively left the machine.
  */
 export async function executeCommand(command, config) {
   /*
-   * Normalized before the gate, for every source at once: the Mac's poll loop,
-   * mesh mail, an affinity-claimed plan step and the brain's own tool calls all
-   * arrive here. A command that came via the Mac was already filtered by
-   * browserSessions.toWireParams, so this is a no-op for it; the paths that
-   * skip the Mac entirely are the ones that need it, and putting it at the one
-   * seam they share is what stops the next path from forgetting.
+   * Normalized before the gate: the cloud board passes on whatever an agent
+   * sent, so what this browser cannot honour is dropped here.
    *
    * It only removes what cannot be honoured. validateCommand is still the gate
    * and still refuses everything it refused before.
@@ -477,7 +224,7 @@ async function captureTab(tab) {
     url: tab.url ?? '',
     title: tab.title ?? '',
     mimeType: 'image/png',
-    // Data URL can be large; Mac agent should not forward to cloud by default.
+    // The data URL can be large.
     imageDataUrl: dataUrl,
   }
 }
@@ -652,7 +399,7 @@ function waitForTabLoad(tabId, timeoutMs) {
  * Injected into the page (isolated world). Keep pure-page; no chrome.* APIs.
  */
 function runInPage(type, params) {
-  const ATTR = 'data-pendant-ref'
+  const ATTR = 'data-hive-ref'
   const MAX_ELEMENTS = 80
 
   const cssPath = (el) => {
@@ -1019,22 +766,4 @@ function runInPage(type, params) {
   }
 
   throw new Error(`Unsupported browser command: ${type}`)
-}
-
-export function browserLabel() {
-  const userAgent = globalThis.navigator?.userAgent ?? ''
-  if (/Edg\//.test(userAgent)) return 'Microsoft Edge'
-  if (/Firefox\//.test(userAgent)) return 'Firefox'
-  if (/Chrome\//.test(userAgent)) return 'Google Chrome'
-  if (/Safari\//.test(userAgent)) return 'Safari'
-  return 'Web Extension'
-}
-
-export function platformLabel() {
-  const platform = globalThis.navigator?.platform || 'Mac'
-  return `${browserLabel()} on ${platform}`
-}
-
-export function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }

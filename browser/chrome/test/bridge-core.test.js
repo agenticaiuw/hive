@@ -4,17 +4,11 @@ import test from 'node:test'
 import {
   MAX_COMMAND_AGE_MS,
   PRIVACY_RULES,
-  byteLengthOf,
   classifyFieldSensitivity,
-  commandIdentity,
-  createCommandLedger,
   isScriptableUrl,
-  normalizeAgentUrl,
-  normalizeConfig,
   originPattern,
   pickTargetTab,
   provenanceFor,
-  retryDelay,
   sanitizeExtraction,
   validateCommand,
   validateNavigationUrl,
@@ -22,25 +16,6 @@ import {
   withholdMarkupValues,
   withholdSecrets,
 } from '../src/bridge-core.js'
-
-test('agent URLs are restricted to the loopback interface', () => {
-  assert.equal(normalizeAgentUrl('http://127.0.0.1:8000/'), 'http://127.0.0.1:8000')
-  assert.equal(normalizeAgentUrl('http://localhost:9000'), 'http://localhost:9000')
-  assert.throws(() => normalizeAgentUrl('https://example.com'), /must use http/)
-  assert.throws(() => normalizeAgentUrl('http://192.168.1.5:8000'), /must use http/)
-  assert.throws(() => normalizeAgentUrl('http://localhost:8000/api'), /must not contain a path/)
-})
-
-test('config normalization never invents a token and bounds labels', () => {
-  assert.deepEqual(normalizeConfig({}), {
-    agentUrl: 'http://127.0.0.1:8000',
-    agentToken: '',
-    deviceName: '',
-    targetMode: 'last-focused',
-  })
-  assert.equal(normalizeConfig({ targetMode: 'unknown' }).targetMode, 'last-focused')
-  assert.equal(normalizeConfig({ deviceName: 'x'.repeat(100) }).deviceName.length, 80)
-})
 
 test('navigation permits web URLs and rejects privileged schemes', () => {
   assert.equal(validateNavigationUrl('https://example.com/a'), 'https://example.com/a')
@@ -137,21 +112,9 @@ test('target selection honors explicit tab, URL matching, and recency', () => {
   assert.equal(pickTargetTab(tabs, { windowId: 1 })?.id, 1)
 })
 
-test('retry delays back off and remain bounded', () => {
-  assert.equal(retryDelay(0), 750)
-  assert.equal(retryDelay(2), 3_000)
-  assert.equal(retryDelay(99), 15_000)
-})
-
 /*
- * The receiving side has to defend itself, because the sending side cannot be
- * fixed without the owner restarting the agent.
- *
- * Observed 2026-08-07: a live Mac agent, started before the bridge's expiry fix
- * landed, holding three commands queued hours earlier. They would have run the
- * moment this extension next connected — opening tabs in Safari unrelated to
- * anything the owner was doing. An extension reloads with the browser, so this
- * is the half that can be fixed today.
+ * The receiving side defends itself: a command queued hours ago would open tabs
+ * unrelated to anything the owner is doing now.
  */
 test('a command queued long ago is refused rather than run', () => {
   const now = Date.parse('2026-08-07T12:00:00.000Z')
@@ -204,105 +167,15 @@ test('a stale command is refused whatever it asks for, valid or not', () => {
   assert.throws(() => validateCommand(command, now), /Refused/)
 })
 
-/* ==================================================== idempotency ========= */
-
-test('a command is identified by its key, or failing that by its id', () => {
-  assert.equal(commandIdentity({ commandId: 'browser_1' }), 'cmd:browser_1')
-  assert.equal(
-    commandIdentity({ commandId: 'browser_1', idempotencyKey: 'checkout-7' }),
-    'idem:checkout-7',
-  )
-  assert.equal(commandIdentity({}), '')
-  assert.equal(commandIdentity(null), '')
-})
-
-/*
- * The sequence that makes a click happen twice, and why only this side can see
- * it: the command runs, the POST of its result fails all three attempts, and
- * the command is still sitting in the agent's map. From the agent's side "we
- * never heard back" and "it never ran" are the same observation. From here they
- * are not.
- */
-test('a replayed command is answered from the ledger instead of run again', () => {
-  const ledger = createCommandLedger()
-  const key = commandIdentity({ commandId: 'browser_click_1' })
-
-  assert.equal(ledger.recall(key), null, 'nothing is remembered before it runs')
-
-  ledger.remember(key, { ok: true, result: { message: 'Clicked #place-order' } })
-
-  const replay = ledger.recall(key)
-  assert.equal(replay.result.result.message, 'Clicked #place-order')
-})
-
-test('the ledger forgets what can no longer be replayed', () => {
-  const ledger = createCommandLedger({ ttlMs: 1_000 })
-  const key = 'cmd:browser_1'
-  ledger.remember(key, { ok: true, result: {} }, 1_000)
-
-  assert.ok(ledger.recall(key, 1_500))
-  /* Past the TTL. validateCommand already refuses anything older than
-   * MAX_COMMAND_AGE_MS, so no replay can arrive from this far back. */
-  assert.equal(ledger.recall(key, 5_000), null)
-})
-
-/*
- * BYTES, not entries — and the entries are not all the same size, which is the
- * whole reason a count is the wrong unit. A hundred read_page results at 50 KB
- * each is five megabytes while a count-based budget still reads "100 of 500",
- * inside a service worker Safari is free to kill for using too much memory.
- */
-test('the ledger is bounded in bytes', () => {
-  const ledger = createCommandLedger({ maxBytes: 4_000 })
-
-  for (let index = 0; index < 40; index += 1) {
-    ledger.remember(`cmd:browser_${index}`, {
-      ok: true,
-      result: { content: 'x'.repeat(1_000) },
-    })
-  }
-
-  const stats = ledger.stats()
-  assert.ok(stats.bytes <= 4_000, `ledger grew to ${stats.bytes} bytes`)
-  assert.ok(stats.entries > 0, 'it did not simply empty itself')
-})
-
-/*
- * Under pressure the ledger drops the *result* before it drops the *fact*.
- * Forgetting a result costs the caller one repeated read; forgetting that a
- * command ran costs the owner a second click on a real page.
- */
-test('a result too large to keep still leaves the execution on record', () => {
-  const ledger = createCommandLedger({ maxBytes: 500 })
-  const key = 'cmd:browser_huge'
-
-  ledger.remember(key, { ok: true, result: { content: 'x'.repeat(50_000) } })
-
-  const remembered = ledger.recall(key)
-  assert.ok(remembered, 'the command is still known to have run')
-  assert.equal(remembered.stubbed, true)
-  assert.equal(remembered.result.ok, false)
-  assert.match(remembered.result.error, /already ran/)
-  assert.ok(ledger.stats().bytes <= 500)
-})
-
-test('byte length counts bytes, not UTF-16 units', () => {
-  assert.equal(byteLengthOf('abc'), 3)
-  assert.equal(byteLengthOf('€'), 3)
-})
-
 /* ================================================ privacy boundary ======== */
 
 /*
  * The trap this whole mechanism is built around, pinned as its own test.
  *
- * local-agent/redaction.js classifies "The wifi password is hunter2." as
- * secret, and its maskSecretValue — written for a `key: value` shape — hands
- * back "The wifi password is hunter2.: [withheld]". Every character of the
- * secret survives while the caller records action:"withheld".
- * evidenceCapsules.js had to bolt a survivor check on afterwards; here that
- * check is a function, so it can be tested against the exact bad output rather
- * than inferred from a pipeline that happens to pass.
+ * A mask written for a `key: value` shape turns "The wifi password is hunter2."
+ * into "The wifi password is hunter2.: [withheld]": every character of the
+ * secret survives while the result claims it was withheld. The survivor check
+ * is a function, so it is tested against that exact bad output.
  */
 test('the verifier rejects a mask that leaves the secret in place', () => {
   const original = 'The wifi password is hunter2.'

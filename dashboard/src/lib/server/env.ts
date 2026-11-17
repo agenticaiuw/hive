@@ -1,16 +1,13 @@
 import { env as dynamicPrivateEnv } from "$env/dynamic/private";
 
-export type RelayBinding = {
+export type Binding = {
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 };
 
 export type RuntimeEnv = {
-  ASSETS?: RelayBinding;
-  RELAY?: RelayBinding;
-  RELAY_URL?: string;
-  RELAY_API_KEY?: string;
+  ASSETS?: Binding;
   /** The task board Worker (cloud/tasks), as a service binding or by URL, and its machine token. */
-  TASKS?: RelayBinding;
+  TASKS?: Binding;
   TASKS_URL?: string;
   TASKS_TOKEN?: string;
   /** Workers AI: the website's speech model reads dictation (/api/transcribe). */
