@@ -806,6 +806,35 @@ public struct OneEuro {
     }
 }
 
+/// Holds the pointer still while the eyes rest on something: it sits at the mean of the frames since they got
+/// there and moves only once `confirm` frames in a row land more than `radius` keys away (and near each
+/// other). The camera's frame-to-frame noise (about 0.4 keys) doesn't move it; a look elsewhere does, about
+/// two frames later. On the owner's recorded typing it moved 0.18 keys a frame against 0.51 with OneEuro.
+public struct FixationHold {
+    public var radius = 1.2, confirm = 3, keep = 20, yScale = 1.3
+    var fix: [(Double, Double)] = [], next: [(Double, Double)] = [], last = -Double.infinity
+    public init() {}
+    func mean(_ v: [(Double, Double)]) -> (Double, Double) {
+        (v.reduce(0) { $0 + $1.0 } / Double(v.count), v.reduce(0) { $0 + $1.1 } / Double(v.count))
+    }
+    func far(_ a: (Double, Double), _ b: (Double, Double)) -> Bool { hypot(a.0 - b.0, (a.1 - b.1) * yScale) > radius }
+    public mutating func callAsFunction(_ x: Double, _ y: Double, _ t: Double) -> (Double, Double) {
+        let p = (x, y), gap = t - last
+        last = t
+        if fix.isEmpty || gap > 0.3 { fix = [p]; next = []; return p }
+        if !far(p, mean(fix)) {
+            fix.append(p)
+            if fix.count > keep { fix.removeFirst() }
+            next = []
+        } else {
+            if !next.isEmpty && far(p, mean(next)) { next = [] }
+            next.append(p)
+            if next.count >= confirm { fix = next; next = [] }
+        }
+        return mean(fix)
+    }
+}
+
 // MARK: - Calibration: what the camera sees to where on the keyboard you look
 
 /// What one camera frame says about where you're looking, before calibration.
@@ -880,9 +909,15 @@ public struct GazeCalibration {
     /// typed words): fit, drop the fifth that fit worst (blinks, catch-up jumps, looking elsewhere), fit
     /// again. `groups` says which rows belong together: with `leaveOut`, `spread` is how far each group
     /// lands when it's left out of the fit (groups < 0 never are); without, how far rows land from the fit.
+    /// `scales` fixes how far a feature may count, in its own units, instead of how much it varied in these
+    /// rows: for head position, which moves along with a moving dot, so a free fit leans on it far more than
+    /// the geometry allows and is keys off once the head moves a little.
     public static func fit(rows: [[Double]], targets: [(Double, Double)], groups: [Int], lambda: Double = 2.0,
-                           leaveOut: Bool = true) -> GazeCalibration? {
+                           leaveOut: Bool = true, scales: [Int: Double] = [:]) -> GazeCalibration? {
         guard rows.count > 30, rows.count == targets.count, rows.count == groups.count else { return nil }
+        func ridge(_ rows: [[Double]], _ tx: [Double], _ ty: [Double], _ lambda: Double) -> GazeCalibration? {
+            GazeCalibration.ridge(rows, tx, ty, lambda, scales: scales)
+        }
         guard let first = ridge(rows, targets.map { $0.0 }, targets.map { $0.1 }, lambda) else { return nil }
         let err = rows.indices.map { i -> Double in
             let (x, y) = first.map(rows[i]); return hypot(x - targets[i].0, y - targets[i].1) }
@@ -910,11 +945,13 @@ public struct GazeCalibration {
         return cal
     }
 
-    static func ridge(_ rows: [[Double]], _ tx: [Double], _ ty: [Double], _ lambda: Double) -> GazeCalibration? {
+    static func ridge(_ rows: [[Double]], _ tx: [Double], _ ty: [Double], _ lambda: Double,
+                      scales: [Int: Double] = [:]) -> GazeCalibration? {
         guard rows.count > 10 else { return nil }
         let n = rows[0].count
         let mean = (0..<n).map { i in rows.map { $0[i] }.reduce(0, +) / Double(rows.count) }
-        let scale = (0..<n).map { i in max(1e-9, (rows.map { pow($0[i] - mean[i], 2) }.reduce(0, +) / Double(rows.count)).squareRoot()) }
+        let scale = (0..<n).map { i in scales[i] ??
+            max(1e-9, (rows.map { pow($0[i] - mean[i], 2) }.reduce(0, +) / Double(rows.count)).squareRoot()) }
         let z = rows.map { r in [1.0] + (0..<n).map { (r[$0] - mean[$0]) / scale[$0] } }
         func solve(_ t: [Double]) -> [Double] {
             let m = n + 1

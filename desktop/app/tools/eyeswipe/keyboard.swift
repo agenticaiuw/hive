@@ -1,6 +1,6 @@
 // Hive's eye keyboard on the Mac: type by looking. Double-tap right ⌘ and a see-through keyboard covers the
 // lower part of the screen. The first time, a yellow dot moves across it: follow it with your eyes for about
-// 15 seconds, then look at four dots, and it says how accurate it got. Then just look at the letters of
+// 15 seconds, then look at five dots, and it says how accurate it got. Then just look at the letters of
 // what you want to write, with no need to wait on a letter, and blink normally after each word: the blink
 // types it into the app in front, and looking up off the keyboard types the last one. A pill shows the word
 // it would type right now. Backspace on your own keyboard fixes mistakes.
@@ -8,7 +8,9 @@
 //
 // Gaze comes from the Mac's camera through Apple Vision's face landmarks: where the pupils sit in the eyes,
 // how open the lids are, and which way the head points (the nose against the eyes), mapped to the keyboard
-// by the setup. Nothing is saved or sent: the camera runs only while the keyboard is up, and each frame is
+// by the setup, which limits how much head position counts (the head moves with the moving dot, and a free
+// fit was keys off once the head moved). The pointer holds still while the eyes rest (FixationHold). Nothing
+// is saved or sent unless --dump says so: the camera runs only while the keyboard is up, and each frame is
 // dropped once read. Each word (the gaze between two blinks) is decoded by EyeSwipe.swift's EyeSwipeDecoder
 // off the main thread, the live guess by its EyeStream, with the language model in eyeswipe-lm.bin (next to
 // this binary, or --lm).
@@ -17,12 +19,14 @@
 // {"check": {"keys_off": median, "dots": [...]}} (key widths), {"typed": "word", "ms": decode time}, {"phrase": {...}},
 // {"speed": {...}}, {"test": {...}} after a test.
 //
-//   hive-eye-keyboard [--lm path] [--test] [--dump file] [--blink-frames n]
+//   hive-eye-keyboard [--lm path] [--test] [--dump file [--dump-eyes]] [--blink-frames n]
 //       --test: shows sentences to type and counts the wrong words, typing nothing into other apps
 //       --dump: appends each frame's gaze numbers (not pictures) and the setup dot to a file, to tune it
+//       --dump-eyes: also the eyes' part of each frame, grey (file.eyes.bin, described by file.eyes.jsonl)
 //       --blink-frames: closed-eye camera frames that make a blink (default: about 50 ms' worth, at least 2)
 //   hive-eye-keyboard --snapshot out.png [--setup] [--trail]   draws the keyboard into a PNG (tests)
 //   hive-eye-keyboard --test --replay file      types made-up gaze from eyeswipe-sim --write-replay (tests)
+//   hive-eye-keyboard --calib-test dump         the setup's fit on each setup in a --dump, checked on its dots
 //
 // Needs Accessibility (to see right ⌘ and Esc, and to type) and the camera, for the app it runs from.
 
@@ -87,6 +91,8 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 
+    // --dump-eyes: the eyes' part of each frame (grey, as the camera saw it) for tuning the pupil finder offline
+    var eyeDump: (rows: FileHandle, pixels: FileHandle, at: UInt64)? = nil
     var fps = 0.0, msPerFrame = 0.0
     var eyeLight = 0.0, faceSize = 0.0              // for the setup's hints: how bright the eyes, how near
     var lastFrame = 0.0
@@ -103,6 +109,7 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         if lastFrame > 0 { fps += 0.1 * (1 / max(1e-3, time - lastFrame) - fps) }
         lastFrame = time
         guard let face, let marks = face.landmarks else { onLook?(.away(time)); return }
+        if eyeDump != nil { dumpEyes(marks, pixels, time) }
         if let f = features(marks, pixels) {
             onLook?(f.isEmpty ? .closed(time) : .gaze(GazeFeatures(values: f, time: time)))
         } else {
@@ -150,6 +157,36 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         let ex = (eyes[0].ex + eyes[1].ex) / 2, ey = (eyes[0].ey + eyes[1].ey) / 2, lid = (eyes[0].lid + eyes[1].lid) / 2
         let nx = (Double(nose.x) - mx) / iod, ny = (Double(nose.y) - my) / iod
         return [ex, ey, lid, nx, ny, mx / Double(w), my / Double(h), iod / Double(w), ex * ex, ey * ey, nx * ny]
+    }
+
+    /// Writes both eyes' boxes (a little bigger than the outline) to the --dump-eyes files: the pixels, top row
+    /// first, and a line with the camera time, where the box is, the outline and Vision's pupil (y up).
+    func dumpEyes(_ marks: VNFaceLandmarks2D, _ pixels: CVPixelBuffer, _ time: Double) {
+        guard var d = eyeDump else { return }
+        let w = CVPixelBufferGetWidth(pixels), h = CVPixelBufferGetHeight(pixels), size = CGSize(width: w, height: h)
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return }
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0), luma = base.assumingMemoryBound(to: UInt8.self)
+        var eyes: [[String: Any]] = [], bytes = Data()
+        for (outline, pupil) in [(marks.leftEye, marks.leftPupil), (marks.rightEye, marks.rightPupil)] {
+            guard let pts = outline?.pointsInImage(imageSize: size), pts.count >= 6 else { return }
+            let xs = pts.map { Double($0.x) }, ys = pts.map { Double($0.y) }, ew = xs.max()! - xs.min()!
+            let x0 = max(0, Int(xs.min()! - 0.3 * ew)), x1 = min(w - 1, Int(xs.max()! + 0.3 * ew))
+            let y0 = max(0, Int(ys.min()! - 0.35 * ew)), y1 = min(h - 1, Int(ys.max()! + 0.35 * ew))
+            guard x1 > x0 + 4, y1 > y0 + 2 else { return }
+            let at = d.at + UInt64(bytes.count)
+            for y in stride(from: y1, through: y0, by: -1) { bytes.append(luma + (h - 1 - y) * rowBytes + x0, count: x1 - x0 + 1) }
+            var eye: [String: Any] = ["box": [x0, y0, x1, y1], "at": at,
+                                      "outline": pts.flatMap { [(Double($0.x) * 10).rounded() / 10, (Double($0.y) * 10).rounded() / 10] }]
+            if let p = pupil?.pointsInImage(imageSize: size).first { eye["pupil"] = [(Double(p.x) * 10).rounded() / 10, (Double(p.y) * 10).rounded() / 10] }
+            eyes.append(eye)
+        }
+        guard let line = try? JSONSerialization.data(withJSONObject: ["ft": time, "w": w, "h": h, "eyes": eyes]) else { return }
+        d.pixels.write(bytes)
+        d.rows.write(line + Data("\n".utf8))
+        d.at += UInt64(bytes.count)
+        eyeDump = d
     }
 
     /// The middle of the darkest pixels inside the eye outline (the pupil and iris), in image points.
@@ -434,7 +471,13 @@ final class EyeKeyboard {
         ((9.5, 1.5), (0.5, 1.5), 3.0), ((0.5, 1.5), (0.5, 2.5), 0.5), ((0.5, 2.5), (9.5, 2.5), 3.0),
         ((9.5, 2.5), (7.5, 3.6), 0.6), ((7.5, 3.6), (2.5, 3.6), 1.7), ((2.5, 3.6), (5.0, 0.5), 1.4)]
     static let checks: [(Double, Double)] = [(1.5, 0.5), (8.5, 0.5), (5.0, 1.5), (2.5, 2.5), (7.5, 2.5)]
-    static let checkSeconds = 0.95, checkSettle = 0.35
+    static let checkSeconds = 1.2, checkSettle = 0.5          // the eyes get to a dot 0.3 to 0.5 s after it jumps
+    // Head features ([ex, ey, lid, nx, ny, mx, my, iod, ex², ey², nx·ny]: nose against the eyes, where the eyes
+    // are in the picture, how far apart) may count only as much as the geometry allows: the head follows a
+    // moving dot, so a free fit gave head position ~17 times its real weight and was 2 to 8 keys off on the
+    // owner's next setup 25 s later. With these, 1.2 keys (and 1.0 within one setup, as before).
+    static let headScales: [Int: Double] = [3: 0.2, 4: 0.2, 5: 0.1, 6: 0.1, 7: 0.04, 10: 0.1]
+    static let lambda = 10.0
     enum Setup { case follow, check(Int) }
     var setup: Setup? = nil
     var setupBegan = 0.0, stepBegan = 0.0, tries = 0
@@ -448,7 +491,11 @@ final class EyeKeyboard {
     var calibration: GazeCalibration?
     var learned: [([Double], (Double, Double))] = []           // frames from typed words, and the key looked at
     var toLearn: [([Double], (Double, Double))] = []           // the last phrase's, once you didn't fix it
-    var fx = OneEuro(), fy = OneEuro()
+    var hold = FixationHold()                                  // the pointer: still while the eyes rest
+    // The whole map slides when the head moves after the setup (keys off on the owner's second setup). Each
+    // typed word says where the eyes were (on its keys), so the map moves back by half the word's median miss.
+    var shift = (x: 0.0, y: 0.0)
+    let recentering = !CommandLine.arguments.contains("--no-recenter")
     var recent: [(Double, Double)] = [], smoothing = 1
     var typing = false                                         // a phrase is going (on the keyboard since looking up)
     var phrase: [GazeSample] = [], phraseFeatures: [[Double]] = []
@@ -486,6 +533,13 @@ final class EyeKeyboard {
             FileManager.default.createFile(atPath: path, contents: nil)
             dump = FileHandle(forWritingAtPath: path)
             dump?.seekToEndOfFile()
+            if CommandLine.arguments.contains("--dump-eyes") {
+                FileManager.default.createFile(atPath: path + ".eyes.jsonl", contents: nil)
+                FileManager.default.createFile(atPath: path + ".eyes.bin", contents: nil)
+                if let r = FileHandle(forWritingAtPath: path + ".eyes.jsonl"), let p = FileHandle(forWritingAtPath: path + ".eyes.bin") {
+                    camera.eyeDump = (r, p, 0)
+                }
+            }
         }
     }
 
@@ -612,7 +666,7 @@ final class EyeKeyboard {
     /// own delay), so try a few delays and keep the one that fits best.
     static func fitFollow(_ frames: [(f: [Double], t: Double)], began: Double) -> (GazeCalibration, [[Double]], [(Double, Double)], [Int])? {
         var best: (GazeCalibration, [[Double]], [(Double, Double)], [Int], Double)? = nil
-        for lag in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
+        for lag in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4] {
             var rows: [[Double]] = [], targets: [(Double, Double)] = [], groups: [Int] = []
             for (f, t) in frames {
                 guard let a = along(t - began - lag) else { continue }
@@ -620,7 +674,8 @@ final class EyeKeyboard {
                 rows.append(f); targets.append(a.pos)
                 groups.append(a.leg * 3 + min(2, Int(3 * a.into / route[a.leg].seconds)))
             }
-            guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, leaveOut: false) else { continue }
+            guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: lambda,
+                                                leaveOut: false, scales: headScales) else { continue }
             let err = hypot(cal.spread.x, cal.spread.y)
             if best == nil || err < best!.4 { best = (cal, rows, targets, groups, err) }
         }
@@ -660,8 +715,9 @@ final class EyeKeyboard {
             return
         }
         setupRows = rows; setupTargets = targets; setupGroups = groups
-        learned = []; toLearn = []
-        let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, leaveOut: false) ?? f.cal
+        learned = []; toLearn = []; shift = (0, 0)
+        let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: Self.lambda,
+                                      leaveOut: false, scales: Self.headScales) ?? f.cal
         use(cal, sigma: n > 0 ? ((ex / n).squareRoot(), (ey / n).squareRoot()) : (0.6, 0.6))
         say(String(format: "Accuracy: about %.1f keys off%@. ", off, off > 1 ? " (rough)" : "") + hint())
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
@@ -718,24 +774,25 @@ final class EyeKeyboard {
         switch setup {
         case .follow:
             followFrames.append((f.values, seen))
-            record(["t": seen, "phase": "follow", "f": f.values])
+            record(["t": seen, "ft": f.time, "phase": "follow", "f": f.values])
             return
         case .check(let i):
             if now - stepBegan > Self.checkSettle { checkFrames[i].append(f.values) }
-            record(["t": seen, "phase": "check", "dot": [Self.checks[i].0, Self.checks[i].1], "f": f.values])
+            record(["t": seen, "ft": f.time, "phase": "check", "dot": [Self.checks[i].0, Self.checks[i].1], "f": f.values])
             return
         case nil:
             break
         }
         guard let cal = calibration else { return }
         let (x, y) = cal.map(f.values)
-        record(["t": seen, "phase": "type", "f": f.values, "at": [x, y]])
+        record(["t": seen, "ft": f.time, "phase": "type", "f": f.values, "at": [x, y]])
         mapped(x, y, f)
     }
 
     /// A gaze point on the keyboard (key units): the pointer, and the word being looked at.
     func mapped(_ x: Double, _ y: Double, _ f: GazeFeatures) {
-        view.move(to: (fx(x, f.time), fy(y, f.time)))             // the pointer: right away, steadier while resting
+        let x = x + shift.x, y = y + shift.y
+        view.move(to: hold(x, y, f.time))                           // the pointer: still while resting, jumps with the eyes
         recent.append((x, y))                                       // the word: raw points (the decoder models the
         if recent.count > smoothing { recent.removeFirst() }        // noise; a median of 3 made 4% more words wrong)
         let mx = recent.map { $0.0 }.sorted()[recent.count / 2], my = recent.map { $0.1 }.sorted()[recent.count / 2]
@@ -814,6 +871,7 @@ final class EyeKeyboard {
                     if let best {
                         self.phraseWords.append((best.word, start, end, restAt))
                         self.type(best.word, best.shown, ms: ms)
+                        self.recenter(best.word, seg, restAt)
                     }
                     self.nextJob()
                 }
@@ -823,6 +881,20 @@ final class EyeKeyboard {
             if test { testPhrase() }
             nextJob()
         }
+    }
+
+    /// Moves the map back by half the median miss on the keys of the word just typed (at most 0.6 keys a word).
+    func recenter(_ word: String, _ seg: [GazeSample], _ restAt: (x: Double, y: Double)?) {
+        guard recentering, let keys = decoder.align(word, seg, restAt: restAt), keys.count > 2 else { return }
+        var dx: [Double] = [], dy: [Double] = []
+        for i in 1..<(keys.count - 1) where keys[i] >= 0 && keys[i - 1] == keys[i] && keys[i] == keys[i + 1] {
+            let c = EyeLayout.centers[keys[i]]
+            if hypot(seg[i].x - c.x, seg[i].y - c.y) < 2.0 { dx.append(c.x - seg[i].x); dy.append(c.y - seg[i].y) }
+        }
+        guard dx.count >= 4 else { return }
+        let mx = dx.sorted()[dx.count / 2], my = dy.sorted()[dy.count / 2]
+        shift.x += max(-0.6, min(0.6, 0.5 * mx))
+        shift.y += max(-0.6, min(0.6, 0.5 * my))
     }
 
     func off(_ t: Double) {
@@ -867,8 +939,16 @@ final class EyeKeyboard {
             let rows = setupRows + learned.map { $0.0 }, targets = setupTargets + learned.map { $0.1 }
             let groups = setupGroups + learned.map { _ in -1 }
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, leaveOut: false) else { return }
-                DispatchQueue.main.async { if self?.setup == nil { self?.use(cal) } }
+                guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: Self.lambda,
+                                                    leaveOut: false, scales: Self.headScales) else { return }
+                DispatchQueue.main.async {
+                    guard let self, self.setup == nil else { return }
+                    self.use(cal)
+                    let last = self.learned.suffix(150)                // what the new fit still misses on them
+                    guard last.count >= 10 else { self.shift = (0, 0); return }
+                    let dx = last.map { $0.1.0 - cal.map($0.0).0 }.sorted(), dy = last.map { $0.1.1 - cal.map($0.0).1 }.sorted()
+                    self.shift = (dx[dx.count / 2], dy[dy.count / 2])
+                }
             }
         }
     }
@@ -905,6 +985,48 @@ final class EyeKeyboard {
         emit(["replay": ["frames": events.count, "worst_frame_ms": (worst * 10).rounded() / 10, "frames_while_decoding": waits,
                          "word_ms": ["median": ms.isEmpty ? 0 : ms[ms.count / 2].rounded(), "p95": ms.isEmpty ? 0 : ms[ms.count * 95 / 100].rounded(),
                                      "worst": ms.last?.rounded() ?? 0]]])
+    }
+
+    /// --calib-test dump: the setup's fit on each recorded setup in a --dump file, checked on its own dots and
+    /// on the other setups' dots (the head has moved by then, as it does while typing).
+    static func calibTest(_ path: String) {
+        let lines = (try? String(contentsOfFile: path, encoding: .utf8))?.split(separator: "\n") ?? []
+        var runs: [(began: Double, follow: [(f: [Double], t: Double)], dots: [[Double]: [(f: [Double], t: Double)]])] = []
+        for line in lines {
+            guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if let b = e["follow_began"] as? Double { runs.append((b, [], [:])); continue }
+            guard !runs.isEmpty, let f = e["f"] as? [Double], let t = e["t"] as? Double else { continue }
+            if e["phase"] as? String == "follow" { runs[runs.count - 1].follow.append((f, t)) }
+            if e["phase"] as? String == "check", let d = e["dot"] as? [Double] { runs[runs.count - 1].dots[d, default: []].append((f, t)) }
+        }
+        func settled(_ frames: [(f: [Double], t: Double)]) -> [[Double]] {
+            frames.filter { $0.t - frames[0].t > checkSettle }.map { $0.f }
+        }
+        func off(_ cal: GazeCalibration, _ frames: [[Double]], _ dot: [Double]) -> Double {
+            let p = frames.map { cal.map($0) }
+            return hypot(p.map { $0.0 }.sorted()[p.count / 2] - dot[0], p.map { $0.1 }.sorted()[p.count / 2] - dot[1])
+        }
+        var finals: [GazeCalibration?] = []
+        for (k, run) in runs.enumerated() {
+            guard let f = fitFollow(run.follow, began: run.began) else { finals.append(nil); continue }
+            var rows = f.1, targets = f.2, groups = f.3, offs: [Double] = []
+            for (i, (dot, frames)) in run.dots.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }).enumerated() {
+                let s = settled(frames)
+                guard s.count >= 3 else { continue }
+                offs.append((off(f.0, s, dot) * 100).rounded() / 100)
+                for r in s { rows.append(r); targets.append((dot[0], dot[1])); groups.append(100 + i) }
+            }
+            finals.append(GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: lambda, leaveOut: false, scales: headScales))
+            emit(["setup": k, "own_dots_keys_off": offs, "follow_fit": [(f.0.spread.x * 100).rounded() / 100, (f.0.spread.y * 100).rounded() / 100]])
+        }
+        for (a, cal) in finals.enumerated() {
+            guard let cal else { continue }
+            for (b, run) in runs.enumerated() where b != a {
+                let offs = run.dots.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }).compactMap { dot, frames -> Double? in
+                    let s = settled(frames); return s.count >= 3 ? (off(cal, s, dot) * 100).rounded() / 100 : nil }
+                emit(["fit_on": a, "dots_of": b, "keys_off": offs])
+            }
+        }
     }
 
     // Right ⌘ (double-tap opens and closes), Esc (closes), and your own typing, from the event tap.
@@ -999,6 +1121,7 @@ struct Main {
         }
 
         if let path = option("--replay") { keyboard.replay(path); exit(0) }
+        if let path = option("--calib-test") { EyeKeyboard.calibTest(path); exit(0) }
         keyboard.setUpWindow()
         let mask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
         let box = Unmanaged.passUnretained(keyboard).toOpaque()
