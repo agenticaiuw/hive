@@ -87,6 +87,32 @@ fn display(value: &Value, images: &mut Vec<String>) -> Value {
 }
 
 /// The context viewer's folder, `<state>/context` unless given.
+/// A payload carrying a whole Codex thread (`thread/resume` and `thread/start` outputs) with its
+/// past turns swapped for where they are kept in full: Codex's own session file (`thread.path`),
+/// and this log's earlier records, which saved each turn as it happened. Copying every turn on
+/// every resume wrote 650 MB per record and filled the owner's disk (20 GB in three days).
+pub fn without_thread_history(payload: &Value) -> Value {
+    let Some(turns) = payload.pointer("/thread/turns").and_then(Value::as_array) else {
+        return payload.clone();
+    };
+    if turns.is_empty() {
+        return payload.clone();
+    }
+    let mut kept = payload.clone();
+    let path = payload.pointer("/thread/path").and_then(Value::as_str).unwrap_or("");
+    let whole = if path.is_empty() {
+        "Codex's own session file for this thread".to_string()
+    } else {
+        format!("Codex's session file {path}")
+    };
+    kept["thread"]["turns"] = json!(format!(
+        "{} earlier turns, not copied here: every word of them is in {whole}, and each turn is in this \
+         log's earlier records from when it happened.",
+        turns.len()
+    ));
+    kept
+}
+
 pub struct ContextLog {
     pub directory: PathBuf,
     pub index: PathBuf,
@@ -125,6 +151,7 @@ impl ContextLog {
                 .map_err(|e| util::os_error(&e, &self.directory))?;
             let name = format!("{:020}-{}", util::now_ns(), util::uuid_hex());
             journal = session_journal::current();
+            let payload = &without_thread_history(payload);
             let record = json!({"time": util::now(), "kind": kind, "task": task,
                                 "session": journal.as_ref().map(|j| j.id.clone()),
                                 "threadId": thread, "payload": payload});
