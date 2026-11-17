@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, branchOf, handle, outcomeOf, parsePlan, pick, readEvents, scopeOf, taskBrief } from './orchestrator.mjs';
+import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, scopeOf, taskBrief } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -217,4 +217,10 @@ test('a request asked on a web page becomes that page\'s rule', async () => {
   assert.equal(saved.path, '/');
   assert.deepEqual(saved.rule, { hide: ['#right-side-wrapper'], keep: [{ items: '.ic-DashboardCard', text: ['CS 400', 'MATH 341'] }], css: '' });
   assert.equal(calls.at(-1)[1].status, 'done');
+});
+
+test("Hive's Codex plan limits from app-server become the board's limits row", () => {
+  const row = limitsRow({ rateLimits: { planType: 'prolite', primary: { usedPercent: 17, windowDurationMins: 10080, resetsAt: 1795015789 }, secondary: null } }, '~/.codex-hive', 100);
+  assert.deepEqual(row, { harness: 'codex', home: '~/.codex-hive', plan: 'prolite', windows: [{ minutes: 10080, used: 17, resets_at: 1795015789 }], at: 100 });
+  assert.equal(limitsRow(null), null);
 });

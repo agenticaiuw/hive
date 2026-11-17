@@ -485,8 +485,17 @@ export function estimates(tasks) {
  * @param {number} now
  */
 export function planLimits(limits, now) {
-  return limits
-    .filter((l) => l.windows.length)
+  // One subscription seen from two places (the Mac's Codex and Hive's on the VM, signed in to the
+  // same plan) has the same windows resetting at the same moments: show only the latest reading.
+  /** @type {Map<string, Limit>} */
+  const latest = new Map();
+  for (const l of limits.filter((l) => l.windows.length)) {
+    const resets = l.windows.map((w) => w.resetsAt).filter(Boolean).sort().join(',');
+    const id = resets ? `${l.harness}:${l.plan}:${resets}` : l.key;
+    const seen = latest.get(id);
+    if (!seen || (l.at ?? 0) > (seen.at ?? 0)) latest.set(id, l);
+  }
+  return [...latest.values()]
     .map((l) => ({
       key: l.key,
       who: [HARNESSES[/** @type {keyof typeof HARNESSES} */ (l.harness)] ?? l.harness, l.plan, l.machine]
