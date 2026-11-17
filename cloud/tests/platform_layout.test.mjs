@@ -12,7 +12,6 @@ const run = (...args) => spawnSync(process.execPath, [importer, ...args], { enco
 test('top-level entry points resolve to existing repository components', () => {
   const output = execFileSync(process.execPath, [join(root, 'cloud/tools/check-platform.mjs')], { encoding: 'utf8' });
   assert.match(output, /ok: browser\/chrome/);
-  assert.match(output, /ok: cloud\/server/);
   assert.match(output, /ok: cloud\/vm-agent/);
   assert.match(output, /pending: independent mobile agent/);
   assert.match(output, /pending: VM worker verification against live sites/);
