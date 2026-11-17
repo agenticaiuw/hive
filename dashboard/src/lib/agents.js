@@ -17,7 +17,7 @@
  *
  * Plain JavaScript so `node --test` can load it without a build.
  */
-import { HARNESSES, nodeName } from './tasks.js';
+import { HARNESSES, needsOwner, nodeName } from './tasks.js';
 
 /** @typedef {import('./tasks.js').Task} Task */
 /** @typedef {import('./tasks.js').Run} Run */
@@ -142,8 +142,8 @@ export function agents(board) {
   return [...by.values()]
     .map((a) => {
       a.tasks.sort((x, y) => UNFINISHED.indexOf(x.status) - UNFINISHED.indexOf(y.status) || y.updated - x.updated);
-      // Waiting on an answer or stuck: either way it goes nowhere until the owner acts.
-      if (a.tasks.some((t) => t.status === 'waiting' || t.status === 'blocked')) a.status = 'needs-you';
+      // Waiting on an answer, or stuck with Hive's own tries spent: it goes nowhere until the owner acts.
+      if (a.tasks.some(needsOwner)) a.status = 'needs-you';
       // What it's on, in the owner's terms: the task it's doing, never a bare "Working".
       const on = a.tasks.find((t) => t.status === 'active') ?? a.tasks[0];
       a.title = (a.kind === 'cloud' ? a.title : on?.title || a.title) || lastAsked(a.steps) || `${a.label} ${a.place}`;
@@ -168,6 +168,7 @@ export function agentOfTask(/** @type {Agent[]} */ list) {
  * @param {Agent | undefined} agent
  */
 export function reasonFor(task, agent) {
+  if (task.retrying) return `Hive is continuing it for you. It was stuck on: ${task.outcome || "something its agent didn't say"}`;
   if (task.outcome) return task.outcome;
   if (task.status === 'blocked') return "Its agent didn't say what's in the way. Continue asks it.";
   if (!agent) return 'No agent has it yet. Continue hands it to one.';

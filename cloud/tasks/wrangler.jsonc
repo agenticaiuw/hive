@@ -6,6 +6,8 @@
   "main": "worker.js",
   "compatibility_date": "2026-07-31",
   "workers_dev": true,
+  // Every minute: stuck tasks get a continue from Hive (worker.js continueStuck).
+  "triggers": { "crons": ["* * * * *"] },
   "d1_databases": [
     {
       "binding": "DB",

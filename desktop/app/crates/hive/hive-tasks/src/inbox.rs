@@ -180,16 +180,29 @@ pub fn cwd_of_transcript(path: &str) -> String {
     String::new()
 }
 
-/// How the owner's words read to an agent that is mid-turn.
+/// How Hive's own messages start (the cloud's continueStuck: a stuck task continued without the
+/// owner), so no board takes them for the owner's words (`from_the_owner`, [`as_said`]).
+pub const FROM_HIVE: &str = "[Hive, not the owner]";
+
+/// How the owner's words read to an agent that is mid-turn; Hive's own messages, said as Hive's.
 pub fn as_said(texts: &[String]) -> String {
-    let said: Vec<String> = texts.iter().map(|t| t.trim().to_string()).collect();
-    format!(
-        "The owner just sent you {} from the Hive dashboard, in their own words. Read {} and act on {} now:\n{}",
-        if said.len() == 1 { "this message" } else { "these messages" },
-        if said.len() == 1 { "it" } else { "them" },
-        if said.len() == 1 { "it" } else { "them" },
-        said.join("\n---\n"),
-    )
+    let (hive, owner): (Vec<String>, Vec<String>) =
+        texts.iter().map(|t| t.trim().to_string()).partition(|t| t.starts_with(FROM_HIVE));
+    let mut parts = Vec::new();
+    if !owner.is_empty() {
+        let one = owner.len() == 1;
+        parts.push(format!(
+            "The owner just sent you {} from the Hive dashboard, in their own words. Read {} and act on {} now:\n{}",
+            if one { "this message" } else { "these messages" },
+            if one { "it" } else { "them" },
+            if one { "it" } else { "them" },
+            owner.join("\n---\n"),
+        ));
+    }
+    if !hive.is_empty() {
+        parts.push(format!("Hive (not the owner) sends you this; act on it now:\n{}", hive.join("\n---\n")));
+    }
+    parts.join("\n\n")
 }
 
 /// A hook's output with the messages waiting for its session added: to what the model reads after a

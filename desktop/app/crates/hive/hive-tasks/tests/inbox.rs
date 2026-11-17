@@ -65,6 +65,11 @@ fn a_session_whose_folder_was_never_noted_is_found_from_its_transcript() {
 fn the_owners_words_reach_the_model_after_a_tool_or_keep_a_finishing_turn_going() {
     let said = as_said(&["Also check the phone".into()]);
     assert!(said.contains("in their own words") && said.ends_with("Also check the phone"));
+    // Hive continuing a stuck task never reads as the owner's words.
+    let hive = format!("{} This task is stuck, and Hive continues it", hive_tasks::inbox::FROM_HIVE);
+    let both = as_said(&["Also check the phone".into(), hive.clone()]);
+    assert!(both.starts_with("The owner just sent you this message") && both.contains("Hive (not the owner) sends you this"));
+    assert!(!as_said(&[hive.clone()]).contains("The owner just sent") && !as_said(&[hive]).contains("own words"));
 
     let after_tool = merge("PostToolUse", Value::Null, &said);
     assert_eq!(after_tool["hookSpecificOutput"]["hookEventName"], "PostToolUse");

@@ -2150,7 +2150,8 @@ impl Ledger {
 /// as prompts: a background task finishing, another session's message, a side-session or CI event.
 /// Those aren't the owner's words, so they don't go on the board.
 pub fn from_the_owner(prompt: &str) -> bool {
-    const NOTICES: [&str; 6] = [
+    const NOTICES: [&str; 7] = [
+        crate::inbox::FROM_HIVE, // Hive continuing a stuck task (the cloud's continueStuck)
         "<task-notification>",
         "<cross-session-message",
         "<side-sessions-event",
