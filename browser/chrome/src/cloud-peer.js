@@ -118,11 +118,27 @@ export async function deliverMessages(board, onMessage, { fetchImpl = fetch } = 
  * Asks for commands and runs them until `shouldStop()` or the key is refused. Everything it touches
  * comes in `deps`, so node tests drive it with fakes.
  */
+/**
+ * What the toolbar badge and the popup say about reaching Hive. The browser has two ways: the old
+ * paired relay (the bridge status, which says needs-setup when nothing was ever pasted) and the cloud
+ * board, whose key Hive on this Mac hands over by itself. Either one working is "ON"; "SET" only when
+ * neither has a way in; "!" when the way it has fails. Before 2026-11-17 only the relay counted, so a
+ * browser Hive reached fine through the cloud still showed SET.
+ */
+export function connectionBadge(relay = {}, cloud = {}) {
+  const r = relay?.state
+  const c = cloud?.state
+  if (r === 'connected' || c === 'connected') return { state: 'connected', text: 'ON', color: '#078B70' }
+  if ((c === 'off' || !c) && (!r || r === 'needs-setup')) return { state: 'needs-setup', text: c ? 'SET' : '', color: '#B54736' }
+  return { state: c === 'unauthorized' || r === 'unauthorized' ? 'unauthorized' : 'offline', text: '!', color: '#B54736' }
+}
+
 export async function runCloudPeer({
   browserApi = api,
   executeCommand,
   getConfig,
   onMessage = null,
+  onStatus = () => {},
   fetchImpl = fetch,
   kind = browserKind(),
   shouldStop = () => false,
@@ -132,6 +148,7 @@ export async function runCloudPeer({
   const status = (patch) =>
     browserApi.storage.local
       .set({ [CLOUD_STATUS_KEY]: { ...patch, kind, updatedAt: new Date().toISOString() } })
+      .then(() => onStatus(patch))
       .catch(() => {})
   let failures = 0
   while (!shouldStop()) {

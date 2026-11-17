@@ -106,6 +106,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
 
         openLog()
+        SafariListen.shared.observe(stateDir: stateDir)  // Hive's Safari popup asks Hive to listen
 #if canImport(WorkspaceViewer)
         let workspaceSetting = ProcessInfo.processInfo.environment["AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE"]
         let workspaceDefault = (Bundle.main.object(forInfoDictionaryKey: "AgentWorkspaceDefault") as? String) != "0"

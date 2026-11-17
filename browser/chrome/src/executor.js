@@ -35,6 +35,7 @@ import {
   validateNavigationUrl,
 } from './bridge-core.js'
 import { APPROVALS_KEY, approvalBadge } from './approvals.js'
+import { CLOUD_STATUS_KEY, connectionBadge } from './cloud-peer.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 
@@ -272,17 +273,9 @@ export async function updateRelayStatus(patch) {
 export async function refreshBadge(status = null) {
   if (!api.action?.setBadgeText) return
 
-  const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY])
+  const stored = await api.storage.local.get([STATUS_KEY, APPROVALS_KEY, CLOUD_STATUS_KEY])
   const current = status ?? stored[STATUS_KEY] ?? {}
-  const badge = approvalBadge(stored[APPROVALS_KEY] ?? []) ?? {
-    text:
-      current.state === 'connected'
-        ? 'ON'
-        : current.state === 'needs-setup'
-          ? 'SET'
-          : '!',
-    color: current.state === 'connected' ? '#078B70' : '#B54736',
-  }
+  const badge = approvalBadge(stored[APPROVALS_KEY] ?? []) ?? connectionBadge(current, stored[CLOUD_STATUS_KEY])
 
   await api.action.setBadgeText({ text: badge.text })
   if (api.action.setBadgeBackgroundColor) {

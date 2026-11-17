@@ -155,10 +155,92 @@ export function initAskHive() {
       recognition = null
       try { r.stop() } catch {}
     }
+    if (hiveListening) {
+      const { id } = hiveListening
+      hiveListening = null
+      native({ type: 'hive:listen', action: 'cancel', id }).catch(() => {})
+    }
     mic.classList.remove('on')
     mic.setAttribute('aria-pressed', 'false')
   }
+
+  /*
+   * Safari gives an extension's popup no way to ask for the microphone: its speech recognition
+   * answers not-allowed before anyone is asked. So in Safari Hive on this Mac listens instead: the
+   * app's extension handler passes start, stop and cancel to Hive.app, which has the microphone,
+   * stops once the owner stops talking, reads it with Hive's voice model and leaves the words for
+   * this popup (SafariWebExtensionHandler.swift hive:listen and hive:heard; Hive's SafariListen).
+   */
+  const throughHive = browserKind() === 'safari' && typeof api.runtime?.sendNativeMessage === 'function'
+  const native = (message) => api.runtime.sendNativeMessage('application.id', message)
+  let hiveListening = null
+  addEventListener('pagehide', () => stopListening())
+
+  async function listenThroughHive() {
+    if (hiveListening) {
+      // A second tap: done talking, read it now.
+      native({ type: 'hive:listen', action: 'stop', id: hiveListening.id }).catch(() => {})
+      return
+    }
+    const mine = { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`, typed: box.value.trim() }
+    hiveListening = mine
+    mic.classList.add('on')
+    mic.setAttribute('aria-pressed', 'true')
+    say('')
+    const done = () => {
+      if (hiveListening !== mine) return false
+      hiveListening = null
+      mic.classList.remove('on')
+      mic.setAttribute('aria-pressed', 'false')
+      return true
+    }
+    try {
+      const sent = await native({ type: 'hive:listen', action: 'start', id: mine.id })
+      if (!sent?.ok) throw new Error(sent?.error || 'no answer')
+    } catch {
+      if (done()) say('Hive on this Mac couldn\'t listen. Open Hive, or type instead.', true)
+      return
+    }
+    const started = Date.now()
+    let answered = false
+    while (hiveListening === mine) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      let heard = null
+      try {
+        heard = (await native({ type: 'hive:heard' }))?.heard
+      } catch {}
+      if (hiveListening !== mine) return
+      if (heard?.id !== mine.id) {
+        if (!answered && Date.now() - started > 4000 && done()) {
+          say('Hive isn\'t listening. Open Hive from the menu bar, or type instead.', true)
+        }
+        continue
+      }
+      answered = true
+      if (heard.state === 'listening') continue
+      if (heard.state === 'reading') {
+        say('Reading what you said…')
+        continue
+      }
+      if (!done()) return
+      if (heard.state === 'error') {
+        say(heard.error || 'Hive couldn\'t listen. Type instead.', true)
+        return
+      }
+      const words = String(heard.text || '').trim()
+      box.value = [mine.typed, words].filter(Boolean).join(' ')
+      say('')
+      if (words) submit()
+      else say('Didn\'t hear anything. Tap the mic to try again, or type.')
+      return
+    }
+  }
+
   function listen() {
+    if (throughHive) {
+      listenThroughHive()
+      return
+    }
     if (!Recognition) {
       mic.hidden = true
       return
@@ -211,7 +293,7 @@ export function initAskHive() {
     }
   })
   box.addEventListener('input', () => {
-    if (recognition) stopListening()
+    if (recognition || hiveListening) stopListening()
   })
   mic.addEventListener('click', listen)
 

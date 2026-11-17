@@ -42,6 +42,7 @@ import {
   getConfig,
   heartbeat,
   pollOnce,
+  refreshBadge,
   updateStatus,
   updateRelayStatus,
 } from './executor.js'
@@ -319,6 +320,8 @@ function startCloudPeer() {
     getConfig,
     /* A task handed to this browser's agent, or the owner talking to it: its run is that board run. */
     onMessage: (message) => handleConsoleSubmit({ command: message.text, boardRun: message.run }),
+    /* The badge says ON when Hive reaches this browser through the cloud, paired or not. */
+    onStatus: () => refreshBadge().catch(() => {}),
   })
     .catch((error) => console.warn(`cloud peer stopped: ${error?.message || error}`))
     .finally(() => {
