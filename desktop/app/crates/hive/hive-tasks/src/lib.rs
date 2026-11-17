@@ -24,6 +24,7 @@
 //! A session's history from before Hive first saw it is skipped, not imported.
 
 pub mod chrome_host;
+pub mod inbox;
 pub mod live;
 pub mod runs;
 pub mod usage;
@@ -338,7 +339,8 @@ impl Ledger {
         db.busy_timeout(Duration::from_secs(5)).map_err(err)?;
         db.execute_batch(SCHEMA).map_err(err)?;
         // Columns added since the first ledgers: what each task cost, the folder it's in (first
-        // called its part) and its report.
+        // called its part), its report, and the session that took it over from the one that
+        // registered it (claimed_*).
         let has = |column: &str| -> Result<bool, String> {
             db.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1", [column], |r| r.get::<_, i64>(0))
                 .map(|n| n > 0)
@@ -347,7 +349,7 @@ impl Ledger {
         if has("part")? && !has("folder")? {
             db.execute_batch("ALTER TABLE tasks RENAME COLUMN part TO folder").map_err(err)?;
         }
-        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("folder", "TEXT"), ("report", "TEXT"), ("files", "TEXT"), ("commits", "TEXT")] {
+        for (column, kind) in [("work_seconds", "INTEGER"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"), ("folder", "TEXT"), ("report", "TEXT"), ("files", "TEXT"), ("commits", "TEXT"), ("claimed_harness", "TEXT"), ("claimed_session", "TEXT")] {
             if !has(column)? {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {kind}")).map_err(err)?;
             }
@@ -559,6 +561,14 @@ impl Ledger {
     /// on. A task that's done gets a report (the agent's, else its outcome), with what it cost,
     /// kept on the task and in its folder's memories.
     pub fn report(&self, entries: &Value) -> Result<Vec<String>, String> {
+        self.report_by(entries, None)
+    }
+
+    /// [`Ledger::report`] from a session (`by`: its harness and id). A session that reports another
+    /// session's task active takes it over: from then on the task is that session's (it shows under
+    /// that agent, and its Stop hook asks about it). `"agent": "claude:<session>"` on an entry hands
+    /// the task to that session instead.
+    pub fn report_by(&self, entries: &Value, by: Option<(&str, &str)>) -> Result<Vec<String>, String> {
         let list = entries.as_array().ok_or("Give a JSON list of reports.")?;
         let mut checked = Vec::new();
         for e in list {
@@ -585,15 +595,29 @@ impl Ledger {
             let minutes = e.get("minutes").and_then(Value::as_i64);
             let report = str_of(e, "report").trim().to_string();
             let folder = str_of(e, "folder").trim().to_string();
-            checked.push((id, status.to_string(), outcome, evidence, minutes, report, folder));
+            let to = match str_of(e, "agent").trim().split_once(':') {
+                Some((h, s)) if !h.is_empty() && !s.is_empty() => Some((h.to_string(), s.to_string())),
+                Some(_) => return Err(format!("T{id}: agent is \"<harness>:<session>\".")),
+                None => by.filter(|_| status == "active").map(|(h, s)| (h.to_string(), s.to_string())),
+            };
+            checked.push((id, status.to_string(), outcome, evidence, minutes, report, folder, to));
         }
         let now = now();
         let closing: Vec<(i64, String)> = checked.iter().map(|c| (c.0, c.1.clone())).collect();
         self.charge(&closing, now)?;
         let mut out = Vec::new();
-        for (id, status, outcome, evidence, minutes, report, folder) in checked {
+        for (id, status, outcome, evidence, minutes, report, folder, to) in checked {
             if !folder.is_empty() {
                 self.file_in(id, &folder)?;
+            }
+            if let Some((harness, session)) = &to {
+                self.db
+                    .execute(
+                        "UPDATE tasks SET claimed_harness = ?2, claimed_session = ?3 WHERE id = ?1
+                           AND COALESCE(claimed_session, (SELECT session FROM messages WHERE id = tasks.message)) != ?3",
+                        params![id, harness, session],
+                    )
+                    .map_err(err)?;
             }
             self.db
                 .execute(
@@ -1125,7 +1149,7 @@ impl Ledger {
         };
         let payload = json!({
             "messages": rows("SELECT id, harness, session, project, text, said_at, times, split_at FROM messages WHERE id = ?1", "message")?,
-            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, folder, report, files, commits FROM tasks WHERE id = ?1", "task")?,
+            "tasks": rows("SELECT id, message, quote, title, status, minutes, value, outcome, evidence, created_at, updated_at, done_at, left_open_at, work_seconds, tokens_in, tokens_out, folder, report, files, commits, claimed_harness, claimed_session FROM tasks WHERE id = ?1", "task")?,
             "rules": rows("SELECT id, project, paths, text, quote, created_at, active, shown, last_shown_at FROM rules WHERE id = ?1", "rule")?,
             "folders": rows("SELECT id, project, key, name, about, created_at, updated_at FROM folders WHERE id = ?1", "folder")?,
             "memories": rows("SELECT id, project, folder, kind, title, body, task, created_at FROM memories WHERE id = ?1", "memory")?,
@@ -1144,6 +1168,27 @@ impl Ledger {
             stmt.execute(params![kind, id]).map_err(err)?;
         }
         Ok(())
+    }
+
+    /// Tasks the owner cancelled from a dashboard (the cloud's sync answer): dropped here too, so
+    /// no hook asks a session about them again. How many changed.
+    pub fn take_cancelled(&self, ids: &Value) -> Result<usize, String> {
+        let mut changed = 0;
+        for id in ids.as_array().into_iter().flatten().filter_map(Value::as_i64) {
+            let n = self
+                .db
+                .execute(
+                    "UPDATE tasks SET status = 'dropped', outcome = 'Cancelled by the owner from the dashboard.',
+                       updated_at = ?2, left_open_at = NULL WHERE id = ?1 AND status NOT IN ('done', 'dropped')",
+                    params![id, now()],
+                )
+                .map_err(err)?;
+            if n > 0 {
+                self.event(id, "dropped", Some("Cancelled by the owner from the dashboard."))?;
+            }
+            changed += n;
+        }
+        Ok(changed)
     }
 
     /// Takes in the rules set on the owner's other machines (`[{machine, id, project, paths,
@@ -1276,6 +1321,7 @@ impl Ledger {
             let answer = cloud.post("/v1/sync", &payload)?;
             rules = self.take_rules(&answer["rules"])?;
             taken += self.take_folders(&answer)?;
+            self.take_cancelled(&answer["cancelled"])?;
             if let Some(at) = answer["now"].as_i64() {
                 self.db
                     .execute(
@@ -1319,7 +1365,8 @@ impl Ledger {
 
     fn task_rows(&self, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Value>, String> {
         let sql = format!(
-            "SELECT t.id, t.title, t.status, t.quote, t.message, m.session, m.harness, m.project,
+            "SELECT t.id, t.title, t.status, t.quote, t.message, COALESCE(t.claimed_session, m.session),
+                    COALESCE(t.claimed_harness, m.harness), m.project,
                     t.minutes, t.value, t.outcome, t.evidence, t.created_at, t.updated_at, t.done_at,
                     t.left_open_at, m.times, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
                     t.files, t.commits
@@ -1366,7 +1413,8 @@ impl Ledger {
 
     fn open_in_session(&self, harness: &str, session: &str) -> Result<Vec<Value>, String> {
         self.task_rows(
-            "m.harness = ?1 AND m.session = ?2 AND t.status IN ('open', 'active') ORDER BY t.id",
+            "COALESCE(t.claimed_harness, m.harness) = ?1 AND COALESCE(t.claimed_session, m.session) = ?2
+             AND t.status IN ('open', 'active') ORDER BY t.id",
             &[&harness, &session],
         )
     }
@@ -1619,7 +1667,7 @@ impl Ledger {
             "PreToolUse" if matches!(str_of(input, "tool_name"), "Agent" | "Task") => {
                 self.on_subagent(id, input)
             }
-            "PreToolUse" => match self.on_command(input, id)? {
+            "PreToolUse" => match self.on_command(harness, input, id)? {
                 Value::Null => self.on_edit(session, &project, input),
                 done => Ok(done),
             },
@@ -1754,7 +1802,8 @@ impl Ledger {
             self.db
                 .execute(
                     "UPDATE tasks SET left_open_at = COALESCE(left_open_at, ?3) WHERE status IN ('open', 'active')
-                     AND message IN (SELECT id FROM messages WHERE harness = ?1 AND session = ?2)",
+                     AND COALESCE(claimed_harness, (SELECT harness FROM messages WHERE id = tasks.message)) = ?1
+                     AND COALESCE(claimed_session, (SELECT session FROM messages WHERE id = tasks.message)) = ?2",
                     params![harness, session, now()],
                 )
                 .map_err(err)?;
@@ -1810,7 +1859,8 @@ impl Ledger {
         }}))
     }
 
-    fn on_command(&self, input: &Value, project: &str) -> Result<Value, String> {
+    fn on_command(&self, harness: &str, input: &Value, project: &str) -> Result<Value, String> {
+        let by = Some((harness, str_of(input, "session_id"))).filter(|(_, s)| !s.is_empty());
         let Some((command, id, body)) =
             agent_command(input.get("tool_input").unwrap_or(&Value::Null))
         else {
@@ -1823,7 +1873,7 @@ impl Ledger {
             "add" => prefixed(&id, 'M')
                 .and_then(|m| self.add(m, &json()?))
                 .map(|l| l.join("\n")),
-            "report" => json().and_then(|j| self.report(&j)).map(|l| l.join("\n")),
+            "report" => json().and_then(|j| self.report_by(&j, by)).map(|l| l.join("\n")),
             "done" => self
                 .report(&json!([{"id": id, "status": "done", "outcome": body}]))
                 .map(|l| l.join("\n")),
@@ -1920,7 +1970,7 @@ impl Ledger {
             .db
             .prepare(
                 "SELECT t.id, t.files, t.commits FROM tasks t JOIN messages m ON m.id = t.message
-                 WHERE m.session = ?1 AND t.status = 'active'",
+                 WHERE COALESCE(t.claimed_session, m.session) = ?1 AND t.status = 'active'",
             )
             .map_err(err)?;
         type Row = (i64, Option<String>, Option<String>);

@@ -38,7 +38,7 @@
 
 /** @typedef {{minutes: number, used: number, resetsAt: number}} LimitWindow */
 
-/** @typedef {{id: string, text: string, project: string, folder: string, status: string,
+/** @typedef {{id: string, follows: string, text: string, project: string, folder: string, status: string,
  *   outcome: string, created: number, updated: number, steps: Step[]}} Request */
 
 /** One thing an agent said or did ("click(x=514, y=421)", "→ click: Open Compose", "💬 …", "Done."), in
@@ -258,6 +258,8 @@ export function normalizeBoard(answer) {
     limits: /** @type {Limit[]} */ ((board.limits ?? []).map((/** @type {any} */ l) => toLimit(l, machine))),
     requests: /** @type {Request[]} */ ((board.requests ?? []).map((/** @type {any} */ r) => ({
       id: `R${r.id}`,
+      // The request this one follows up on, so a thread reads as one conversation.
+      follows: r.follows ? `R${r.follows}` : '',
       text: String(r.text ?? ''),
       project: String(r.project ?? ''),
       folder: String(r.folder ?? ''),
@@ -273,6 +275,17 @@ export function normalizeBoard(answer) {
         .map((step, i) => ({ ...step, n: i + 1 })),
     }))),
     runs,
+    // What the owner said to each agent from a dashboard, and how each got there.
+    messages: list(board.run_messages).map((/** @type {any} */ m) => ({
+      id: Number(m.id) || 0,
+      machine: String(m.machine ?? ''),
+      run: String(m.run ?? ''),
+      text: String(m.text ?? ''),
+      status: String(m.status ?? 'queued'),
+      detail: String(m.detail ?? ''),
+      task: Number(m.task) || 0,
+      created_at: seconds(m.created_at),
+    })),
     rules: (board.rules ?? []).map((/** @type {any} */ r) => ({
       key: `${r.machine || machine}:${r.id}`,
       id: String(r.id ?? ''),

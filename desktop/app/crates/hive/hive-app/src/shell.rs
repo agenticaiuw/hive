@@ -588,6 +588,17 @@ impl VoiceAgent {
             Ok(journal) => {
                 let journal = Arc::new(journal);
                 self.runs.set(Some(Arc::new(RunStream::start(&journal.id))));
+                // What the owner says to this Mac's agents from any dashboard, handed over every
+                // few seconds while Hive runs (hive_tasks::inbox), wherever it was sent from.
+                static DELIVERING: std::sync::Once = std::sync::Once::new();
+                DELIVERING.call_once(|| {
+                    std::thread::spawn(|| loop {
+                        if let Err(e) = hive_tasks::inbox::deliver_now() {
+                            eprintln!("hive: messages for this Mac's agents: {e}");
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                    });
+                });
                 session_journal::set_current(Some(journal.clone()));
                 self.journal.set(Some(journal));
             }

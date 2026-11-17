@@ -598,3 +598,46 @@ export async function sendToHive(
     body: JSON.stringify({ agent: "hive-cloud", text, from: deviceName() }),
   });
 }
+
+/**
+ * One agent's conversation, `{run, steps, messages}`: its newest steps (`tail`), or the ones after
+ * step `after` while it's open and live.
+ */
+export async function fetchConversation(
+  machine: string,
+  run: string,
+  since: { after?: number; tail?: number } = {},
+): Promise<any> {
+  const query = new URLSearchParams({ machine, run });
+  if (since.after) query.set("after", String(since.after));
+  else query.set("tail", String(since.tail ?? 300));
+  return apiRequest(`${base}/api/agents/run?${query}`);
+}
+
+/**
+ * Says `text` to one agent, through the cloud: `{machine, run}` for an agent on a node, `{request}`
+ * for Hive's cloud agent (a follow-up to that request).
+ */
+export async function sendToAgent(
+  to: { machine: string; run: string } | { request: number },
+  text: string,
+): Promise<any> {
+  return apiRequest(`${base}/api/agents/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...to, text, from: deviceName() }),
+  });
+}
+
+/** Cancels a task, asks its agent to continue it, or answers what it waits on you for. */
+export async function actOnTask(
+  task: { machine: string; id: string },
+  action: "cancel" | "continue" | "answer",
+  text = "",
+): Promise<any> {
+  return apiRequest(`${base}/api/tasks/act`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine: task.machine, id: task.id, action, text, from: deviceName() }),
+  });
+}

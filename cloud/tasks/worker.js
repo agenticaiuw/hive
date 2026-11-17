@@ -18,6 +18,8 @@ const COOKIE = "hive_board";
 // pages too (page-rules.js runs in each page), so these answer cross-origin; the key is a bearer
 // token, never a cookie, so "*" lets no page act as the owner.
 const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/runs", "/v1/page-rules", "/v1/page-rules/off", "/v1/browser/next", "/v1/browser/result"]);
+// The extension talks to the owner's agents and takes the messages for its own agent, with its key.
+for (const path of ["/v1/runs/message", "/v1/runs/messages/take", "/v1/runs/messages/update", "/v1/tasks/act"]) EXTENSION_PATHS.add(path);
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
@@ -54,6 +56,10 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
       if (url.pathname === "/v1/requests/state") return await requestState(url, request, env);
       if (url.pathname === "/v1/runs" && request.method === "POST") return await saveRun(request, env);
+      if (url.pathname === "/v1/runs/message" && request.method === "POST") return await messageRun(request, env);
+      if (url.pathname === "/v1/tasks/act" && request.method === "POST") return await actOnTask(request, env);
+      if (url.pathname === "/v1/runs/messages/take" && request.method === "POST") return await takeRunMessages(request, env);
+      if (url.pathname === "/v1/runs/messages/update" && request.method === "POST") return await updateRunMessage(request, env);
       if (url.pathname === "/v1/runs") return await runSteps(url, request, env);
       if (url.pathname === "/v1/extension-key" && request.method === "POST") return await extensionKey(request, env);
       if (url.pathname === "/v1/page-rules" && request.method === "GET") return await pageRules(url, request, env);
@@ -113,7 +119,7 @@ const MESSAGE_COLUMNS = ["id", "harness", "session", "project", "text", "said_at
 const TASK_COLUMNS = [
   "id", "message", "quote", "title", "status", "minutes", "value", "outcome", "evidence",
   "created_at", "updated_at", "done_at", "left_open_at", "work_seconds", "tokens_in", "tokens_out", "folder",
-  "report", "files", "commits",
+  "report", "files", "commits", "claimed_harness", "claimed_session",
 ];
 const MEMORY_COLUMNS = ["id", "project", "folder", "kind", "title", "body", "task", "created_at"];
 const EVENT_COLUMNS = ["id", "task", "at", "status", "note"];
@@ -159,6 +165,22 @@ function upsert(env, table, columns, machine, row, at) {
   ).bind(...values);
 }
 
+// A task as a machine sends it; one the owner cancelled stays dropped whatever an agent says later
+// (only done goes through), until the machine's ledger hears of the cancel.
+function upsertTask(env, machine, row, at) {
+  const names = ["machine", ...TASK_COLUMNS, "synced_at"];
+  const marks = names.map((_, i) => `?${i + 1}`).join(", ");
+  const kept = (c) =>
+    c === "status" ? "status = CASE WHEN board_tasks.cancelled_at IS NOT NULL AND excluded.status != 'done' THEN 'dropped' ELSE excluded.status END"
+      : c === "outcome" ? "outcome = CASE WHEN board_tasks.cancelled_at IS NOT NULL AND excluded.status != 'done' THEN board_tasks.outcome ELSE excluded.outcome END"
+        : `${c} = excluded.${c}`;
+  const updates = [...TASK_COLUMNS.slice(1), "synced_at"].map(kept).join(", ");
+  const values = [machine, ...TASK_COLUMNS.map((c) => (row[c] === undefined ? null : row[c])), at];
+  return env.DB.prepare(
+    `INSERT INTO board_tasks (${names.join(", ")}) VALUES (${marks}) ON CONFLICT (machine, id) DO UPDATE SET ${updates}`,
+  ).bind(...values);
+}
+
 async function sync(request, env) {
   if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const body = await request.json();
@@ -169,7 +191,7 @@ async function sync(request, env) {
     ...(body.messages || []).map((r) => upsert(env, "board_messages", MESSAGE_COLUMNS, machine, r, at)),
     // A task's folder was first called its part (older hive-tasks still send that).
     ...(body.tasks || []).map((r) =>
-      upsert(env, "board_tasks", TASK_COLUMNS, machine, r.folder === undefined ? { ...r, folder: r.part } : r, at),
+      upsertTask(env, machine, r.folder === undefined ? { ...r, folder: r.part } : r, at),
     ),
     ...(body.rules || []).map((r) => upsert(env, "board_rules", RULE_COLUMNS, machine, r, at)),
     ...(body.folders || []).map((r) => upsertFolder(env, machine, r, at)),
@@ -179,7 +201,7 @@ async function sync(request, env) {
   ];
   for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
   const since = Number(body.since) || 0;
-  const [rules, folders, memories] = await env.DB.batch([
+  const [rules, folders, memories, cancelled] = await env.DB.batch([
     env.DB.prepare(
       "SELECT machine, id, project, paths, text, quote, created_at, active FROM board_rules WHERE machine != ?1",
     ).bind(machine),
@@ -191,8 +213,13 @@ async function sync(request, env) {
       `SELECT machine, id, project, folder, kind, title, body, task, created_at FROM board_memories
        WHERE machine != ?1 AND synced_at >= ?2 ORDER BY synced_at LIMIT 2000`,
     ).bind(machine, since),
+    // Tasks the owner cancelled from a dashboard since the machine last asked: its ledger drops them.
+    env.DB.prepare("SELECT id FROM board_tasks WHERE machine = ?1 AND cancelled_at >= ?2").bind(machine, since),
   ]);
-  return json({ saved: statements.length, now: at, rules: rules.results, folders: folders.results, memories: memories.results });
+  return json({
+    saved: statements.length, now: at, rules: rules.results, folders: folders.results, memories: memories.results,
+    cancelled: cancelled.results.map((r) => r.id),
+  });
 }
 
 // ---- folders -------------------------------------------------------------------------------
@@ -366,18 +393,29 @@ async function takeRequest(request, env) {
     env.DB.prepare(
       `UPDATE board_requests SET status = 'planning', taken_by = ?1, taken_at = ?2, updated_at = ?2
        WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY id LIMIT 1)
-       RETURNING id, folder`,
+       RETURNING id, folder, follows`,
     ).bind(by, at, agent),
   ]);
   const row = taken.results[0];
   if (!row) return json({ request: null });
-  const [message, asked] = await Promise.all([
+  const [message, asked, earlier] = await Promise.all([
     env.DB.prepare("SELECT project, text, said_at, session FROM board_messages WHERE machine = 'cloud' AND id = ?1").bind(row.id).first(),
     env.DB.prepare("SELECT url, title, outline FROM board_page_asks WHERE request = ?1").bind(row.id).first(),
+    row.follows
+      ? env.DB.prepare(
+        `SELECT m.text, r.outcome FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
+         WHERE r.id = ?1`,
+      ).bind(row.follows).first()
+      : null,
   ]);
+  // The owner replied in an earlier request's conversation: the agent hears what that one was.
+  const before = earlier
+    ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\nThe owner now says: `
+    : "";
   return json({
     request: {
-      id: row.id, folder: row.folder || "", project: message?.project || "", text: message?.text || "",
+      id: row.id, folder: row.folder || "", project: message?.project || "", text: before + (message?.text || ""),
+      follows: row.follows || null,
       said_at: message?.said_at, from: message?.session || "web",
       page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },
@@ -402,6 +440,8 @@ async function requestState(url, request, env) {
 const RUN_STATUSES = new Set(["working", "done", "failed", "stopped"]);
 // A Claude Code or Codex session is one run however long it goes on (hive-tasks live.rs).
 const MOST_RUN_STEPS = 10_000_000;
+// The runs every dashboard lists (?1: two days ago, ?2: six hours ago).
+const LISTED_RUNS = "(r.updated_at > ?1 OR (r.status = 'working' AND r.updated_at > ?2))";
 
 // POST /v1/runs {machine, run, agent, title?, project?, status?, request?, task?, steps: [{n, at, kind?, text}]}.
 // A machine names itself; the browser extension's key is always "ext:<its name>".
@@ -447,23 +487,206 @@ async function saveRun(request, env) {
   return json({ ok: true, machine });
 }
 
-// GET /v1/runs?machine=cloud&run=1101&after=12: the run and its steps after number `after`.
+// GET /v1/runs?machine=cloud&run=1101&after=12: the run, its steps after number `after` (500 at most),
+// and what the owner said to it (board_run_messages). `before=900` instead: the 300 steps before that
+// number; `tail=300`: its last 300 steps (an agent's conversation opening on its newest part).
 async function runSteps(url, request, env) {
   if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const machine = text(url.searchParams.get("machine"), 60);
   const run = text(url.searchParams.get("run"), 80);
   if (!machine || !run) return json({ error: "Say which run (machine, run)." }, 400);
   const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
-  const [found, steps] = await env.DB.batch([
+  const before = Math.max(0, Number(url.searchParams.get("before")) || 0);
+  const tail = Math.min(500, Math.max(0, Number(url.searchParams.get("tail")) || 0));
+  const window_ = before || tail
+    ? env.DB.prepare(
+      `SELECT n, at, kind, text FROM (SELECT n, at, kind, text FROM board_run_steps
+         WHERE machine = ?1 AND run = ?2 AND n < ?3 ORDER BY n DESC LIMIT ?4) ORDER BY n`,
+    ).bind(machine, run, before || MOST_RUN_STEPS + 1, before ? 300 : tail)
+    : env.DB.prepare(
+      "SELECT n, at, kind, text FROM board_run_steps WHERE machine = ?1 AND run = ?2 AND n > ?3 ORDER BY n LIMIT 500",
+    ).bind(machine, run, after);
+  const [found, steps, said] = await env.DB.batch([
     env.DB.prepare(
       "SELECT machine, run, agent, title, status, request, task, started_at, updated_at, project FROM board_runs WHERE machine = ?1 AND run = ?2",
     ).bind(machine, run),
+    window_,
     env.DB.prepare(
-      "SELECT n, at, kind, text FROM board_run_steps WHERE machine = ?1 AND run = ?2 AND n > ?3 ORDER BY n LIMIT 500",
-    ).bind(machine, run, after),
+      `SELECT id, text, sender, status, detail, task, created_at, updated_at FROM board_run_messages
+       WHERE machine = ?1 AND run = ?2 ORDER BY id DESC LIMIT 100`,
+    ).bind(machine, run),
   ]);
-  if (!found.results.length) return json({ error: "No such run." }, 404);
-  return json({ run: found.results[0], steps: steps.results });
+  // A session known only from what the owner said in it has no steps yet, but can be talked to.
+  const known = found.results.length ? null : await knownSession(env, machine, run);
+  if (!found.results.length && !known) return json({ error: "No such run." }, 404);
+  return json({
+    run: found.results[0] ?? { machine, run, agent: known.agent, title: "", status: "", request: null, task: null },
+    steps: steps.results,
+    messages: said.results.reverse(),
+  });
+}
+
+// ---- talking to an agent (board_run_messages, migration 0015) --------------------------------------
+
+const MESSAGE_STATUSES = new Set(["delivered", "failed", "queued"]);
+
+// POST /v1/runs/message {machine, run, text, from?}: the owner says something to one of their agents.
+// It waits here until the node that agent is on takes it (/v1/runs/messages/take). {request, text}
+// instead: a reply to Hive's cloud agent about that request, which becomes a follow-up request.
+async function messageRun(request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const words = text(body.text, 8000);
+  if (!words) return json({ error: "Say what to tell the agent (text)." }, 400);
+  const from = text(body.from, 40) || "web";
+  const at = now();
+  const follows = Number(body.request);
+  if (Number.isInteger(follows) && follows > 0) return await followUp(env, follows, words, from);
+  const machine = text(body.machine, 60);
+  const run = text(body.run, 80);
+  if (!machine || !run) return json({ error: "Say which agent (machine and run, or request)." }, 400);
+  const found = (await env.DB.prepare("SELECT agent FROM board_runs WHERE machine = ?1 AND run = ?2").bind(machine, run).first())
+    ?? (await knownSession(env, machine, run));
+  if (!found) return json({ error: "No such agent." }, 404);
+  return json({ ok: true, message: await queueMessage(env, { machine, run, agent: found.agent, words, from, at }) });
+}
+
+// A Claude Code or Codex session the board knows from what the owner said in it or a task it took,
+// though it never reported a run: it can still be talked to ("claude:<session>").
+async function knownSession(env, machine, run) {
+  const [harness, session] = run.split(":");
+  if (!["claude", "codex"].includes(harness) || !session) return null;
+  const seen = await env.DB.prepare(
+    `SELECT 1 FROM board_messages WHERE machine = ?1 AND harness = ?2 AND session = ?3
+     UNION ALL SELECT 1 FROM board_tasks WHERE machine = ?1 AND claimed_harness = ?2 AND claimed_session = ?3
+     LIMIT 1`,
+  ).bind(machine, harness, session).first();
+  return seen ? { agent: harness } : null;
+}
+
+function queueMessage(env, { machine, run, agent, words, from, at, task = null, wake = 1 }) {
+  return env.DB.prepare(
+    `INSERT INTO board_run_messages (machine, run, agent, text, sender, status, task, wake, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?8)
+     RETURNING id, machine, run, text, sender, status, detail, task, created_at, updated_at`,
+  ).bind(machine, run, agent, words, from, task, wake, at).first();
+}
+
+// A message to Hive's cloud agent about an earlier request: a new request that knows what it follows.
+async function followUp(env, follows, words, from) {
+  const at = now();
+  const earlier = await env.DB.prepare(
+    `SELECT r.agent, r.folder, m.project FROM board_requests r
+     LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id WHERE r.id = ?1`,
+  ).bind(follows).first();
+  if (!earlier) return json({ error: "No such request." }, 404);
+  const [made] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at, follows)
+       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3, ?4 FROM board_requests RETURNING id`,
+    ).bind(earlier.agent, earlier.folder, at, follows),
+    env.DB.prepare(
+      `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
+       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', ?4, ?1, ?2, ?3, 1, NULL, ?3)`,
+    ).bind(earlier.project || "", words, at, from),
+  ]);
+  const id = made.results[0].id;
+  const ahead = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM board_requests WHERE status IN ('queued', 'planning', 'working') AND id < ?1",
+  ).bind(id).first();
+  return json({ ok: true, request: id, ahead: ahead.n });
+}
+
+// POST /v1/tasks/act {machine, id, action: cancel|continue|answer, text?, from}: the owner acting on a
+// task from a dashboard. The words go to the agent the task belongs to, through the cloud: a session
+// on a Mac gets them at its next step (or is continued with them), Hive's cloud agent gets a follow-up
+// request. A cancel drops the task here at once and stays (upsertTask); it reaches only a session that
+// is running, so it never starts one just to say stop.
+const TASK_ACTIONS = new Set(["cancel", "continue", "answer"]);
+async function actOnTask(request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const machine = text(body.machine, 80);
+  const id = Number(body.id);
+  const action = TASK_ACTIONS.has(body.action) ? body.action : "";
+  const words = text(body.text, 8000);
+  const from = text(body.from, 40) || "web";
+  if (!machine || !(Number.isInteger(id) && id > 0) || !action) {
+    return json({ error: "Say which task (machine, id) and what to do (cancel, continue or answer)." }, 400);
+  }
+  if (action === "answer" && !words) return json({ error: "Say your answer (text)." }, 400);
+  const task = await env.DB.prepare(
+    `SELECT t.id, t.title, t.status, t.outcome, COALESCE(t.claimed_harness, m.harness) AS harness,
+            COALESCE(t.claimed_session, m.session) AS session
+     FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
+     WHERE t.machine = ?1 AND t.id = ?2`,
+  ).bind(machine, id).first();
+  if (!task) return json({ error: "No such task." }, 404);
+  const at = now();
+  const name = `T${id} ("${task.title}")`;
+  if (action === "cancel") {
+    await env.DB.prepare(
+      `UPDATE board_tasks SET status = 'dropped', outcome = 'Cancelled by the owner from the dashboard.',
+         cancelled_at = ?3, updated_at = ?3 WHERE machine = ?1 AND id = ?2`,
+    ).bind(machine, id, at).run();
+  }
+  const said = {
+    cancel: `The owner cancelled ${name} from the Hive dashboard. Stop any work on it; it is already marked dropped, so don't report it.`,
+    continue: `The owner asks you to continue ${name}${words ? `: ${words}` : "."}`,
+    answer: `The owner answered you on ${name}, which was waiting on them${task.outcome ? ` for: ${task.outcome}` : ""}. Their answer, in their own words: ${words}`,
+  }[action];
+  // Hive's cloud agent: task n of request R is R*100+n.
+  if (machine === "cloud") {
+    if (action === "cancel") return json({ ok: true, task: { machine, id, status: "dropped" } });
+    return await followUp(env, Math.floor(id / 100), said, from);
+  }
+  if (!task.session || !task.harness) {
+    if (action === "cancel") return json({ ok: true, task: { machine, id, status: "dropped" } });
+    return json({ error: "Hive doesn't know which agent has that task." }, 409);
+  }
+  const run = `${task.harness}:${task.session}`;
+  const message = await queueMessage(env, {
+    machine, run, agent: task.harness, words: said, from, at, task: id, wake: action === "cancel" ? 0 : 1,
+  });
+  return json({ ok: true, message, task: action === "cancel" ? { machine, id, status: "dropped" } : undefined });
+}
+
+// POST /v1/runs/messages/take {machine}: the node takes what's waiting for its agents, each message once.
+// One nobody took in a day has failed. The extension's key takes its own browser's messages.
+async function takeRunMessages(request, env) {
+  const extension = await extensionName(request, env);
+  if (!extension && !(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const machine = extension ? `ext:${extension}` : text(body.machine, 60);
+  if (!machine) return json({ error: "Say which machine." }, 400);
+  const at = now();
+  const [, taken] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE board_run_messages SET status = 'failed', detail = 'Nothing on that machine picked it up within a day.',
+         updated_at = ?2 WHERE machine = ?1 AND status = 'queued' AND created_at < ?3`,
+    ).bind(machine, at, at - DAY),
+    env.DB.prepare(
+      `UPDATE board_run_messages SET status = 'taken', updated_at = ?2 WHERE machine = ?1 AND status = 'queued'
+       RETURNING id, run, agent, text, sender, wake, created_at`,
+    ).bind(machine, at),
+  ]);
+  return json({ messages: taken.results.sort((a, b) => a.id - b.id) });
+}
+
+// POST /v1/runs/messages/update {id, status: delivered|failed|queued, detail?}: how handing it over went
+// (queued puts it back for the next take).
+async function updateRunMessage(request, env) {
+  const extension = await extensionName(request, env);
+  if (!extension && !(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const id = Number(body.id);
+  const status = MESSAGE_STATUSES.has(body.status) ? body.status : "";
+  if (!(Number.isInteger(id) && id > 0) || !status) return json({ error: "Say which message (id) and how it went (status)." }, 400);
+  const row = await env.DB.prepare(
+    `UPDATE board_run_messages SET status = ?2, detail = ?3, updated_at = ?4
+     WHERE id = ?1 AND (?5 = '' OR machine = ?5) RETURNING id`,
+  ).bind(id, status, text(body.detail, 300), now(), extension ? `ext:${extension}` : "").first();
+  return row ? json({ ok: true }) : json({ error: "No such message." }, 404);
 }
 
 // ---- page rules (the browser extension) -----------------------------------------------------------
@@ -563,7 +786,7 @@ async function updateRequest(request, env) {
       const folder = text(t.folder, 120);
       const number = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Math.round(Number(v)));
       statements.push(
-        upsert(env, "board_tasks", TASK_COLUMNS, "cloud", {
+        upsertTask(env, "cloud", {
           id: id * 100 + n, message: id, quote: text(t.quote, 2000), title: text(t.title, 300), status,
           minutes: number(t.minutes), value: ["low", "medium", "high"].includes(t.value) ? t.value : null,
           outcome: text(t.outcome, 4000) || null, evidence: text(t.evidence, 4000) || null,
@@ -619,11 +842,12 @@ async function board(request, env) {
     return json({ error: "Not signed in." }, 401);
   }
   const since = now() - 14 * DAY;
-  const [tasks, unsplit, rules, folders, limits, requests, runs, steps] = await env.DB.batch([
+  const [tasks, unsplit, rules, folders, limits, requests, runs, steps, said] = await env.DB.batch([
     env.DB.prepare(
       `SELECT t.machine, t.id, t.message, t.quote, t.title, t.status, t.minutes, t.value, t.outcome, t.evidence,
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
-              t.files, t.commits, m.harness, m.session, m.project, m.times, m.said_at
+              t.files, t.commits, COALESCE(t.claimed_harness, m.harness) AS harness,
+              COALESCE(t.claimed_session, m.session) AS session, m.project, m.times, m.said_at, t.cancelled_at
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1
        ORDER BY t.updated_at DESC LIMIT 600`,
@@ -642,28 +866,35 @@ async function board(request, env) {
     ),
     env.DB.prepare("SELECT machine, harness, home, plan, windows, at, synced_at FROM board_limits ORDER BY machine, harness, home"),
     env.DB.prepare(
-      `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.created_at, r.updated_at, r.finished_at, m.text, m.project
+      `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.created_at, r.updated_at, r.finished_at, r.follows, m.text, m.project
        FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
-       ORDER BY r.id DESC LIMIT 20`,
+       ORDER BY r.id DESC LIMIT 30`,
     ),
-    // Every node's agent: runs that moved in the last half hour or say they're still working (a node
-    // that went quiet mid-run stops showing after 6 hours), and each one's last 200 steps.
+    // Every node's agent: its conversations of the last two days (one still working shows until it has
+    // been quiet 6 hours), how many steps each has, its newest 40 (the rest open with GET /v1/runs) and
+    // what the owner said to it.
     env.DB.prepare(
-      `SELECT machine, run, agent, title, status, request, task, started_at, updated_at, project FROM board_runs
-       WHERE updated_at > ?1 OR (status = 'working' AND updated_at > ?2) ORDER BY updated_at DESC LIMIT 40`,
-    ).bind(now() - 30 * 60, now() - 6 * 3600),
+      `SELECT machine, run, agent, title, status, request, task, started_at, updated_at, project,
+              (SELECT MAX(n) FROM board_run_steps s WHERE s.machine = r.machine AND s.run = r.run) AS step_count
+       FROM board_runs r WHERE ${LISTED_RUNS} ORDER BY updated_at DESC LIMIT 60`,
+    ).bind(now() - 2 * DAY, now() - 6 * 3600),
     env.DB.prepare(
-      `SELECT machine, run, n, at, kind, text FROM (
-         SELECT s.machine, s.run, s.n, s.at, s.kind, s.text,
-                ROW_NUMBER() OVER (PARTITION BY s.machine, s.run ORDER BY s.n DESC) AS back
-         FROM board_run_steps s JOIN board_runs r ON r.machine = s.machine AND r.run = s.run
-         WHERE r.updated_at > ?1 OR (r.status = 'working' AND r.updated_at > ?2))
-       WHERE back <= 200 ORDER BY machine, run, n`,
-    ).bind(now() - 30 * 60, now() - 6 * 3600),
+      `WITH listed AS (
+         SELECT machine, run, (SELECT MAX(n) FROM board_run_steps s WHERE s.machine = r.machine AND s.run = r.run) AS top
+         FROM board_runs r WHERE ${LISTED_RUNS} ORDER BY updated_at DESC LIMIT 60)
+       SELECT s.machine, s.run, s.n, s.at, s.kind, s.text FROM listed l
+       JOIN board_run_steps s ON s.machine = l.machine AND s.run = l.run AND s.n > l.top - 40
+       ORDER BY s.machine, s.run, s.n`,
+    ).bind(now() - 2 * DAY, now() - 6 * 3600),
+    env.DB.prepare(
+      `SELECT id, machine, run, text, sender, status, detail, task, created_at, updated_at FROM board_run_messages
+       WHERE created_at > ?1 ORDER BY id`,
+    ).bind(now() - 2 * DAY),
   ]);
   return json({
     now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results,
     limits: limits.results, requests: requests.results, runs: runs.results, run_steps: steps.results,
+    run_messages: said.results,
   });
 }
 
