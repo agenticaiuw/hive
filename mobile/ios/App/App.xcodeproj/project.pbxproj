@@ -18,6 +18,9 @@
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		A1PENDANT000000000000002 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1PENDANT000000000000004 /* PrivacyInfo.xcprivacy */; };
 		A1PENDANT000000000000005 /* PendantBridgeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1PENDANT000000000000006 /* PendantBridgeViewController.swift */; };
+		A1EYETYPE000000000000001 /* EyeTyping.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EYETYPE000000000000002 /* EyeTyping.swift */; };
+		A1EYETYPE000000000000003 /* EyeSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EYETYPE000000000000004 /* EyeSwipe.swift */; };
+		A1EYETYPE000000000000005 /* eyeswipe-lm.bin in Resources */ = {isa = PBXBuildFile; fileRef = A1EYETYPE000000000000006 /* eyeswipe-lm.bin */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +37,9 @@
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 		A1PENDANT000000000000004 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A1PENDANT000000000000006 /* PendantBridgeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendantBridgeViewController.swift; sourceTree = "<group>"; };
+		A1EYETYPE000000000000002 /* EyeTyping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EyeTyping.swift; sourceTree = "<group>"; };
+		A1EYETYPE000000000000004 /* EyeSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EyeSwipe.swift; path = ../../../desktop/app/tools/eyeswipe/EyeSwipe.swift; sourceTree = SOURCE_ROOT; };
+		A1EYETYPE000000000000006 /* eyeswipe-lm.bin */ = {isa = PBXFileReference; lastKnownFileType = file; name = "eyeswipe-lm.bin"; path = "../../../desktop/app/tools/eyeswipe/eyeswipe-lm.bin"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -72,6 +78,9 @@
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				A1HIVESIRI00000000000002 /* AskHiveIntent.swift */,
 				A1PENDANT000000000000006 /* PendantBridgeViewController.swift */,
+				A1EYETYPE000000000000002 /* EyeTyping.swift */,
+				A1EYETYPE000000000000004 /* EyeSwipe.swift */,
+				A1EYETYPE000000000000006 /* eyeswipe-lm.bin */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
 				504EC3101FED79650016851F /* LaunchScreen.storyboard */,
@@ -154,6 +163,7 @@
 				A1PENDANT000000000000002 /* PrivacyInfo.xcprivacy in Resources */,
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
+				A1EYETYPE000000000000005 /* eyeswipe-lm.bin in Resources */,
 				2FAD9763203C412B000D30F8 /* config.xml in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -168,6 +178,8 @@
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				A1HIVESIRI00000000000001 /* AskHiveIntent.swift in Sources */,
 				A1PENDANT000000000000005 /* PendantBridgeViewController.swift in Sources */,
+				A1EYETYPE000000000000001 /* EyeTyping.swift in Sources */,
+				A1EYETYPE000000000000003 /* EyeSwipe.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

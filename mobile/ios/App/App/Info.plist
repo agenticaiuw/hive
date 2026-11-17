@@ -48,6 +48,19 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Eye typing: the front camera follows where you look on the keyboard. Nothing is recorded or sent; only the words you choose to send.</string>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>eye-typing</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Eye typing</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>eye</string>
+		</dict>
+	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hive needs the microphone so you can speak commands to your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
