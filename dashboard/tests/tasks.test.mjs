@@ -179,4 +179,12 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.deepEqual(normalizeBoard({ board: { tasks: [] } }).limits, []);
   const month = planLimits([{ machine: 'vm', harness: 'codex', home: '~/.codex', plan: 'free', windows: [{ minutes: 43200, used: 94, resets_at: now + 3600 }, { minutes: 4320, used: 1 }] }], now);
   assert.deepEqual(month[0].windows.map(w => w.label), ['Month', '3 days']);
+  // The same plan read on the Mac days ago and by Hive's agent on the VM just now: only the VM's.
+  const same = planLimits([
+    { key: 'mac:codex:~/.codex', machine: 'mac', harness: 'codex', home: '~/.codex', plan: 'prolite', at: now - 3 * 86400, windows: [{ minutes: 10080, used: 15, resetsAt: now + 86400 }] },
+    { key: 'vm:codex:~/.codex-hive', machine: 'vm', harness: 'codex', home: '~/.codex-hive', plan: 'prolite', at: now - 60, windows: [{ minutes: 10080, used: 17, resetsAt: now + 86400 }] },
+  ], now);
+  assert.equal(same.length, 1);
+  assert.equal(same[0].who, 'Codex · prolite · vm');
+  assert.equal(same[0].windows[0].used, 17);
 });

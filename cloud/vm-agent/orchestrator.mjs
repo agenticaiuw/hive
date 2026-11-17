@@ -450,6 +450,58 @@ function syncLedger() {
   } catch {}
 }
 
+/*
+ * Hive's Codex plan limits, live. Its tasks run Codex with --ephemeral, which leaves no session logs,
+ * so hive-tasks (which reads limits from those logs) never saw them and the dashboard kept showing the
+ * Mac's last local run. Codex's own app-server answers account/rateLimits/read from the plan itself,
+ * spending nothing, so the orchestrator asks it every few minutes and puts the answer on the board.
+ */
+const LIMITS_EVERY_MS = 5 * 60_000;
+
+/** The board's limits row (cloud/tasks/worker.js limitRow) from app-server's rateLimits answer. */
+export function limitsRow(result, home = '~/.codex-hive', at = Math.floor(Date.now() / 1000)) {
+  const limits = result?.rateLimits;
+  if (!limits) return null;
+  const windows = [limits.primary, limits.secondary]
+    .filter(w => w && Number.isFinite(w.usedPercent) && Number.isFinite(w.windowDurationMins))
+    .map(w => ({ minutes: w.windowDurationMins, used: w.usedPercent, resets_at: w.resetsAt ?? null }));
+  return { harness: 'codex', home, plan: limits.planType || '', windows, at };
+}
+
+/** Asks `codex app-server` (as root, Hive's Codex home) for its plan limits; null if it doesn't answer. */
+function readCodexLimits() {
+  return new Promise(resolve => {
+    const child = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${CODEX_HOME}`, '/root/.local/bin/codex', 'app-server'],
+      { stdio: ['pipe', 'pipe', 'ignore'] });
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.stdin.end();
+      child.kill('SIGTERM');
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 20_000);
+    child.on('error', () => finish(null));
+    child.on('exit', () => finish(null));
+    createInterface({ input: child.stdout }).on('line', line => {
+      let message; try { message = JSON.parse(line); } catch { return; }
+      if (message.id === 1) {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}\n`);
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'account/rateLimits/read' })}\n`);
+      } else if (message.id === 2) finish(message.result ?? null);
+    });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'hive-orchestrator', version: '1' } } })}\n`);
+  });
+}
+
+async function refreshLimits(board, machine, log) {
+  const row = limitsRow(await readCodexLimits());
+  if (!row) return log("couldn't read Hive's Codex plan limits");
+  await board('/v1/sync', { machine, limits: [row] }).catch(error => log(`couldn't put the plan limits on the board: ${error.message}`));
+}
+
 async function main(argv) {
   const once = argv.includes('--once');
   const config = boardConfig();
@@ -458,7 +510,12 @@ async function main(argv) {
   log(`Hive's orchestrator: taking requests for hive-cloud as ${config.machine}`);
   syncLedger();
   let fresh = true;
+  let limitsAt = 0;
   for (;;) {
+    if (Date.now() - limitsAt > LIMITS_EVERY_MS) {
+      limitsAt = Date.now();
+      await refreshLimits(board, config.machine, log);
+    }
     let request = null;
     try {
       ({ request } = await board('/v1/requests/take', { by: config.machine, agent: 'hive-cloud', fresh }));
