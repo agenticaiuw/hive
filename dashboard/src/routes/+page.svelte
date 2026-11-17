@@ -48,6 +48,9 @@
   type FolderView = ReturnType<typeof normalizeFolder>;
 
   const REFRESH_MS = 15_000;
+  // While Hive's cloud agent has something queued or underway, the board is read this often, so its
+  // steps show up as it takes them.
+  const LIVE_REFRESH_MS = 3_000;
   const KINDS = ["note", "spec", "decision"];
 
   let board = $state<Board | null>(null);
@@ -97,16 +100,43 @@
           .slice(0, 5)
       : [],
   );
+  const goingOn = (status: string) => ["queued", "planning", "working"].includes(status);
+  const live = $derived(requests.some((r) => goingOn(r.status)));
+  $effect(() => {
+    if (!live) return;
+    const fast = setInterval(refresh, LIVE_REFRESH_MS);
+    return () => clearInterval(fast);
+  });
+
+  // A request's steps are open while it's going and closed once it's done, unless the owner opened or
+  // closed them: their choice holds across refreshes.
+  let stepsOpen = $state<Record<string, boolean>>({});
+
+  /** Keeps a list of steps scrolled to its newest line as lines arrive. */
+  function newestInView(node: HTMLElement, _count: number) {
+    node.scrollTop = node.scrollHeight;
+    return {
+      update() {
+        node.scrollTop = node.scrollHeight;
+      },
+    };
+  }
+
   const unfinished = $derived(
     board ? board.tasks.filter((t) => !["done", "dropped"].includes(t.status)).length : 0,
   );
 
+  let refreshing = false;
   async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
     try {
       board = normalizeBoard(await fetchTaskBoard());
       loadError = "";
     } catch (error) {
       loadError = error instanceof Error ? error.message : String(error);
+    } finally {
+      refreshing = false;
     }
   }
 
@@ -537,6 +567,27 @@
               <span class="state">{REQUEST_WORDS[r.status as keyof typeof REQUEST_WORDS] ?? r.status}</span>
               <span class="said" title={r.outcome || r.text}>{r.text}</span>
               <span class="id">{ago(r.updated, board?.now ?? 0)}</span>
+              {#if r.steps.length}
+                {@const going = goingOn(r.status)}
+                <details
+                  class="steps"
+                  open={stepsOpen[r.id] ?? going}
+                  ontoggle={(event) => {
+                    const open = event.currentTarget.open;
+                    if (open !== (stepsOpen[r.id] ?? going)) stepsOpen[r.id] = open;
+                  }}
+                >
+                  <summary>
+                    {going ? "What it's doing" : "What it did"} · {r.steps.length}
+                    {r.steps.length === 1 ? "step" : "steps"}
+                  </summary>
+                  <ol use:newestInView={r.steps.length}>
+                    {#each r.steps as step (step.n)}
+                      <li class:now={going && step === r.steps[r.steps.length - 1]}>{step.text}</li>
+                    {/each}
+                  </ol>
+                </details>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -1234,6 +1285,35 @@
   }
   .request.failed .state {
     color: var(--red);
+  }
+  .request .steps {
+    grid-column: 1 / -1;
+    margin: 2px 0 4px;
+  }
+  .request .steps summary {
+    cursor: pointer;
+    color: var(--ink-2);
+    font-size: var(--fs-small);
+  }
+  .request .steps ol {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 6px 8px;
+    max-height: 14em;
+    overflow-y: auto;
+    border-radius: 8px;
+    background: var(--raise-2);
+    font-size: var(--fs-small);
+    line-height: 1.45;
+  }
+  .request .steps li {
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .request .steps li.now {
+    color: var(--ink);
+    font-weight: var(--w-heavy);
   }
   .request .said {
     overflow: hidden;

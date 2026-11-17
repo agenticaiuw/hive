@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, scopeOf, taskBrief } from './orchestrator.mjs';
+import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, scopeOf, stepSender, taskBrief } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -223,4 +223,59 @@ test("Hive's Codex plan limits from app-server become the board's limits row", (
   const row = limitsRow({ rateLimits: { planType: 'prolite', primary: { usedPercent: 17, windowDurationMins: 10080, resetsAt: 1795015789 }, secondary: null } }, '~/.codex-hive', 100);
   assert.deepEqual(row, { harness: 'codex', home: '~/.codex-hive', plan: 'prolite', windows: [{ minutes: 10080, used: 17, resets_at: 1795015789 }], at: 100 });
   assert.equal(limitsRow(null), null);
+});
+
+test("a task's steps reach the board while it runs, in order, before the task is reported done", async () => {
+  const { board, calls } = fakeBoard();
+  await handle({ id: 11, text: 'open example.com' }, {
+    board,
+    stepEvery: 5,
+    plan: async () => JSON.stringify({ project: '', tasks: [{ title: 'Open example.com', quote: 'open example.com', kind: 'screen' }] }),
+    run: async (brief, choice, onStep) => {
+      onStep('→ open_url: Open example.com');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      onStep('   ');
+      onStep('💬 The heading says Example Domain.');
+      onStep('✅ Done.');
+      return { ok: true, report: 'The heading says Example Domain.', seconds: 9, tokensIn: 10, tokensOut: 5 };
+    },
+  });
+  const sent = calls.filter(c => c.path === '/v1/requests/steps');
+  assert.ok(sent.length >= 2, 'the first step went before the task finished');
+  assert.ok(sent.every(c => c.body.id === 11 && c.body.task === 1));
+  assert.deepEqual(sent.flatMap(c => c.body.steps.map(s => s.text)),
+    ['→ open_url: Open example.com', '💬 The heading says Example Domain.', '✅ Done.']);
+  const lastStep = calls.lastIndexOf(sent.at(-1));
+  const done = calls.findIndex(c => c.path === '/v1/requests/update' && c.body.tasks?.[0]?.status === 'done');
+  assert.ok(lastStep < done, 'every step is on the board before the task shows done');
+});
+
+test("a board that won't take steps never stops the task, and what it missed goes with the next post", async () => {
+  let refuse = true;
+  const sent = [];
+  const logs = [];
+  const board = async (path, body) => {
+    if (refuse) throw new Error('fetch failed');
+    sent.push(...body.steps.map(s => s.text));
+    return { ok: true };
+  };
+  const steps = stepSender(board, 12, 2, { every: 1000, log: line => logs.push(line) });
+  steps.step('→ click: Compose');
+  await steps.done();
+  assert.deepEqual(sent, []);
+  assert.match(logs[0], /couldn't put R12's steps on the board: fetch failed/);
+  refuse = false;
+  steps.step('→ type: Hello');
+  await steps.done();
+  assert.deepEqual(sent, ['→ click: Compose', '→ type: Hello']);
+
+  // And a request whose board throws on steps still finishes and is reported.
+  const { board: good, calls } = fakeBoard();
+  const flaky = async (path, body) => (path === '/v1/requests/steps' ? Promise.reject(new Error('down')) : good(path, body));
+  await handle({ id: 13, text: 'x' }, {
+    board: flaky, stepEvery: 1,
+    plan: async () => JSON.stringify({ project: '', tasks: [{ title: 'X', quote: 'x', kind: 'screen' }] }),
+    run: async (brief, choice, onStep) => { onStep('→ screenshot: Look'); return { ok: true, report: 'Done it.', seconds: 1, tokensIn: 1, tokensOut: 1 }; },
+  });
+  assert.equal(calls.filter(c => c.path === '/v1/requests/update').at(-1).body.status, 'done');
 });

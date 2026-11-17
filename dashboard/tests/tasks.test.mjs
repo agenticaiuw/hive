@@ -188,3 +188,27 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.equal(same[0].who, 'Codex · prolite · vm');
   assert.equal(same[0].windows[0].used, 17);
 });
+
+test("each request sent to Hive in the cloud carries its agent's steps, in order", () => {
+  const board = normalizeBoard({
+    source: 'cloud',
+    board: {
+      now: 1000,
+      tasks: [],
+      requests: [
+        { id: 12, text: 'open example.com', status: 'working', created_at: 900, updated_at: 990 },
+        { id: 11, text: 'earlier', status: 'done', created_at: 800, updated_at: 850 },
+      ],
+      steps: [
+        { request: 12, task: 1, n: 2, at: 995, text: '💬 The heading says Example Domain.' },
+        { request: 12, task: 1, n: 1, at: 991, text: '→ open_url: Open example.com' },
+      ],
+    },
+  });
+  const [working, earlier] = board.requests;
+  assert.deepEqual(working.steps.map((s) => [s.n, s.task, s.text]), [
+    [1, 1, '→ open_url: Open example.com'],
+    [2, 1, '💬 The heading says Example Domain.'],
+  ]);
+  assert.deepEqual(earlier.steps, []);
+});
