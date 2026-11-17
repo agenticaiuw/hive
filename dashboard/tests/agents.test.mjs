@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentOfTask, agents, conversation, line, reasonFor, summary, taskId, threadConversation, withNames } from '../src/lib/agents.js';
+import { agentOfTask, agents, conversation, line, reasonFor, summary, threadConversation, withTitles } from '../src/lib/agents.js';
 import { normalizeBoard } from '../src/lib/tasks.js';
 
 const NOW = 1_794_889_000;
@@ -64,12 +64,12 @@ test('a task that has not started or is stuck says why', () => {
   const list = agents(b);
   const of = agentOfTask(list);
   const task = (id) => b.tasks.find((t) => t.id === id);
-  assert.equal(reasonFor(task('148'), of.get('mac:148')), 'Its agent is on T174 first.');
+  assert.equal(reasonFor(task('148'), of.get('mac:148')), 'Its agent is on “Eye typing knows every English word” first.');
   assert.equal(reasonFor(task('168'), of.get('mac:168')), 'Pick one: Rust build folders or Xcode caches');
   assert.equal(reasonFor(task('1301'), of.get('cloud:1301')), 'Hive in the cloud is on an earlier step first.');
 
   const stopped = { ...list.find((a) => a.key === 'mac|claude:eyes'), status: 'idle' };
-  assert.match(reasonFor(task('148'), stopped), /^Its session stopped while on T174, before getting here/);
+  assert.match(reasonFor(task('148'), stopped), /^Its session stopped while on “Eye typing knows every English word”, before getting here/);
   assert.match(reasonFor({ ...task('148'), session: '' }, undefined), /^No agent has it yet/);
 });
 
@@ -136,10 +136,8 @@ test('tasks group under the agent that holds them, in the order they come', asyn
   ]);
 });
 
-test('task numbers an agent wrote read as their names, on the machine it wrote them', () => {
-  const names = new Map([['mac:246', '261111 22:14'], ['cloud:246', '261116 09:00']]);
-  assert.equal(withNames('Done with T246; T999 is next.', 'mac', names), 'Done with 261111 22:14; T999 is next.');
-  assert.equal(withNames('on T246', 'cloud', names), 'on 261116 09:00');
-  assert.equal(taskId({ id: '7', name: '261117 01:41a' }), '261117 01:41a');
-  assert.equal(taskId({ id: '7' }), 'T7');
+test("task numbers an agent wrote read as those tasks' titles, on the machine it wrote them", () => {
+  const titles = new Map([['mac:246', 'Name tasks by time'], ['cloud:246', 'Post the update']]);
+  assert.equal(withTitles('Done with T246; T999 is next.', 'mac', titles), 'Done with “Name tasks by time”; T999 is next.');
+  assert.equal(withTitles('on T246', 'cloud', titles), 'on “Post the update”');
 });
