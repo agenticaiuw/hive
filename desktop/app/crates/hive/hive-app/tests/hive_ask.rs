@@ -117,7 +117,7 @@ fn a_request_hive_turns_down_exits_5() {
     let state = tempfile::tempdir().unwrap();
     fake_hive(
         state.path(),
-        json!({"ok": false, "error": "The personal-agent is already working."}),
+        json!({"ok": false, "error": "Hive is already working."}),
         vec![],
     );
     let out = hive_ask(state.path(), &["Open Safari"]);

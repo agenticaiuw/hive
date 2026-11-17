@@ -14,10 +14,10 @@ use std::time::Duration;
 pub const PHYSICAL_INPUT_DISABLED: &str =
     "Physical Mac input is disabled while the virtual workspace is active. Use mac.type_text with workspace:{JSON} as instructed.";
 
-/// `~/Library/Application Support/Personal Agent`, which python hard-coded here (it equals
-/// `state_dir()` unless `AGENT_STATE_DIR` is set).
+/// `~/Library/Application Support/Hive`, which python hard-coded here (it equals `state_dir()`
+/// unless `AGENT_STATE_DIR` is set).
 pub fn default_state() -> PathBuf {
-    home().join("Library/Application Support/Personal Agent")
+    hive_common::paths::state_dir_in(&home())
 }
 
 /// Sends one request to the workspace socket (`<state>/control/workspace.sock`) and returns the

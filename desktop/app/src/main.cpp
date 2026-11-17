@@ -43,7 +43,7 @@ void usage() {
                "  --quiet-ms N      how long your hands must be off before the agent takes over (default 400)\n"
                "  --no-sound        no chime on engage/disengage\n"
                "  --sound-setting F Hive's sound switch: no chime while F says off (default: speak-aloud in\n"
-               "                    the owner's ~/Library/Application Support/Personal Agent)\n"
+               "                    the owner's ~/Library/Application Support/Hive)\n"
                "  --verbose         log every physical input event\n"
                "  --dry-run         no root, no virtual devices: log reports instead (for testing)\n"
                "  --no-watch        with --dry-run only: skip watching real input devices\n";
@@ -167,7 +167,11 @@ int main(int argc, char** argv) {
 
   if (o.sound_setting.empty()) {
     if (auto pw = getpwuid(owner_uid); pw && pw->pw_dir) {
-      o.sound_setting = std::string(pw->pw_dir) + "/Library/Application Support/Personal Agent/speak-aloud";
+      // Hive's data folder, or its old name on a Mac that has only that (Hive was Personal Agent).
+      const std::string support = std::string(pw->pw_dir) + "/Library/Application Support/";
+      const bool only_old = access((support + "Hive").c_str(), F_OK) != 0 &&
+                            access((support + "Personal Agent").c_str(), F_OK) == 0;
+      o.sound_setting = support + (only_old ? "Personal Agent" : "Hive") + "/speak-aloud";
     }
   }
 

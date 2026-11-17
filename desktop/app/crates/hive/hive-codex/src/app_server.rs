@@ -120,7 +120,7 @@ impl AppServer {
         std::thread::spawn(move || reader.read(stdout));
         server.request(
             "initialize",
-            json!({"clientInfo": {"name": "personal-agent", "title": "personal-agent voice agent",
+            json!({"clientInfo": {"name": "hive", "title": "Hive voice agent",
                                   "version": "1.0"},
                    "capabilities": {"experimentalApi": true}}), // dynamicTools is experimental
             crate::app_server::DEFAULT_TIMEOUT,

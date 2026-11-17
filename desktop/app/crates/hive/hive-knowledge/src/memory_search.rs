@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// ~/Library/Application Support/Personal Agent/memory/personal-memory.sqlite3 (always the home
-/// folder's, as in Python, not `AGENT_STATE_DIR`'s).
+/// ~/Library/Application Support/Hive/memory/personal-memory.sqlite3 (always the home folder's,
+/// as in Python, not `AGENT_STATE_DIR`'s).
 pub fn default_database() -> PathBuf {
-    hive_common::paths::home()
-        .join("Library/Application Support/Personal Agent/memory/personal-memory.sqlite3")
+    hive_common::paths::state_dir_in(&hive_common::paths::home())
+        .join("memory/personal-memory.sqlite3")
 }
 
 fn re(pattern: &str) -> Regex {

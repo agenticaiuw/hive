@@ -299,7 +299,12 @@ static void bringForward(pid_t pid) {
 static NSString *stateDir(void) {
     const char *dir = getenv("AGENT_STATE_DIR");
     if (dir && *dir) return @(dir);
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Personal Agent"];
+    // Hive's data folder, or its old name on a Mac that has only that (Hive was Personal Agent).
+    NSString *support = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"];
+    NSString *hive = [support stringByAppendingPathComponent:@"Hive"];
+    NSString *old = [support stringByAppendingPathComponent:@"Personal Agent"];
+    NSFileManager *files = [NSFileManager defaultManager];
+    return (![files fileExistsAtPath:hive] && [files fileExistsAtPath:old]) ? old : hive;
 }
 
 /// The beep for a tap that can't switch, unless Hive's sound is off (Agent menu › Sound (Voice and

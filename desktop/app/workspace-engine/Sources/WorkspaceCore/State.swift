@@ -5,16 +5,17 @@ import Darwin
 import Foundation
 
 public enum Paths {
-    /// Hive's state folder: `AGENT_STATE_DIR`, else the older "Personal Agent" folder while it
-    /// exists, else ~/Library/Application Support/Hive.
+    /// Hive's state folder: `AGENT_STATE_DIR`, else ~/Library/Application Support/Hive, or its old
+    /// name, "Personal Agent", on a Mac that has only that.
     public static func stateDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
         if let custom = environment["AGENT_STATE_DIR"], !custom.isEmpty {
             return URL(fileURLWithPath: custom, isDirectory: true)
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let legacy = home.appendingPathComponent("Library/Application Support/Personal Agent", isDirectory: true)
-        if FileManager.default.fileExists(atPath: legacy.path) { return legacy }
-        return home.appendingPathComponent("Library/Application Support/Hive", isDirectory: true)
+        let hive = home.appendingPathComponent("Library/Application Support/Hive", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: hive.path), FileManager.default.fileExists(atPath: legacy.path) { return legacy }
+        return hive
     }
 
     /// The engine's own folder inside the state folder.

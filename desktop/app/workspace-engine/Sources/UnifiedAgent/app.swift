@@ -47,7 +47,10 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     lazy var panel = ContextPanel()
     var stateDir: URL {
         if let panelURL { return panelURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Personal Agent")
+        // ~/Library/Application Support/Hive, or its old name on a Mac that has only that.
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        let hive = support.appendingPathComponent("Hive"), old = support.appendingPathComponent("Personal Agent")
+        return !FileManager.default.fileExists(atPath: hive.path) && FileManager.default.fileExists(atPath: old.path) ? old : hive
     }
     let repository = Bundle.main.object(forInfoDictionaryKey: "AgentRepository") as? String ?? ""
     var agent: Process?

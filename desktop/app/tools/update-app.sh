@@ -8,6 +8,15 @@
 #   tools/update-app.sh --check    only say how the installed and built apps are signed
 #   tools/update-app.sh --check-engine CANDIDATE INSTALLED    inspect engine compatibility only
 set -euo pipefail
+
+# Hive's data folder: AGENT_STATE_DIR, else ~/Library/Application Support/Hive, or its old name
+# (Hive was Personal Agent) on a Mac that has only that.
+hive_state() {
+  local support="$HOME/Library/Application Support"
+  if [[ -n "${AGENT_STATE_DIR:-}" ]]; then printf '%s\n' "$AGENT_STATE_DIR"
+  elif [[ ! -e "$support/Hive" && -d "$support/Personal Agent" ]]; then printf '%s\n' "$support/Personal Agent"
+  else printf '%s\n' "$support/Hive"; fi
+}
 cd "$(dirname "$0")/.."
 APP="$HOME/Applications/Hive.app"
 APPLICATIONS="$HOME/Applications"
@@ -46,7 +55,7 @@ fi
 # The sandboxed agent cannot always consult macOS's signing trust services.
 # Queue the request there; the unsandboxed host builds and verifies before replacing anything.
 if [ "${1:-}" = "--schedule" ]; then
-  state="${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}"
+  state="$(hive_state)"
   mkdir -p "$state/updates"
   umask 077
   printf 'ready\n' > "$state/updates/update-pending.tmp"
@@ -88,7 +97,7 @@ if [ -n "$installed" ] && [ -x "$installed/Contents/Helpers/workspace-engine" ] 
 fi
 
 staged="$APPLICATIONS/.Hive-update-$$"
-state="${AGENT_STATE_DIR:-$HOME/Library/Application Support/Personal Agent}"
+state="$(hive_state)"
 backup="$state/app-backups/previous-$$"
 mkdir -p "$HOME/Applications"
 if [ -e "$staged" ] || [ -L "$staged" ] || [ -e "$backup" ] || [ -L "$backup" ]; then

@@ -151,7 +151,7 @@ impl Agent {
         true
     }
 
-    /// The agent's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Personal Agent.
+    /// The agent's private state: `AGENT_STATE_DIR`, else ~/Library/Application Support/Hive.
     pub fn state_dir(&self) -> PathBuf {
         if let Some(dir) = self.env.get("AGENT_STATE_DIR") {
             return PathBuf::from(dir);
@@ -161,7 +161,7 @@ impl Agent {
             .get("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(hive_common::paths::home);
-        home.join("Library/Application Support/Personal Agent")
+        hive_common::paths::state_dir_in(&home)
     }
 
     /// `CODEX_HOME`, else ~/.codex.
@@ -299,12 +299,12 @@ impl Agent {
             );
             let socket_table = format!("{{{} = \"allow\"}}", py::dumps(&json!(socket), true));
             overrides.extend([
-                "permissions.personal-agent.extends=\":workspace\"".into(),
-                "permissions.personal-agent.network.enabled=true".into(),
-                "permissions.personal-agent.network.domains={\"registry.npmjs.org\" = \"allow\"}"
+                "permissions.hive.extends=\":workspace\"".into(),
+                "permissions.hive.network.enabled=true".into(),
+                "permissions.hive.network.domains={\"registry.npmjs.org\" = \"allow\"}"
                     .into(),
-                format!("permissions.personal-agent.network.unix_sockets={socket_table}"),
-                format!("permissions.personal-agent.workspace_roots={root_table}"),
+                format!("permissions.hive.network.unix_sockets={socket_table}"),
+                format!("permissions.hive.workspace_roots={root_table}"),
                 "features.network_proxy=true".into(),
             ]);
         }
@@ -505,7 +505,7 @@ impl Agent {
             "cwd": self.config.repo.display().to_string(),
         });
         if engine {
-            params["permissions"] = json!("personal-agent");
+            params["permissions"] = json!("hive");
         } else {
             params["sandbox"] = json!("workspace-write");
             // Its shell can reach the internet (curl, gh, wrangler, APIs). Without this the shell is

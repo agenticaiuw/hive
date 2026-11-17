@@ -956,7 +956,7 @@ impl VoiceAgent {
         }
         if self.tasks.get().any_running() {
             (request.reply)(
-                json!({"ok": false, "error": "The personal-agent is already working."}),
+                json!({"ok": false, "error": "Hive is already working."}),
             );
             return;
         }
