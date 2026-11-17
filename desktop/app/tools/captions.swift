@@ -1,12 +1,13 @@
-// Captions for the voice agent: a small dark card, by default near the bottom of the screen, with what
+// Captions for the voice agent: Hive's floating window, a small card in Hive's look (the same as the browser
+// extension's popup), by default near the bottom of the screen, with what
 // the agent says (big), what it's doing and thinking (small), what you're saying, and requests that came
 // from another agent. Drag the card anywhere and it stays there (double-click it to put it back). Reads one
 // JSON object per line on stdin and quits when stdin closes:
 //
-//   {"listening": true}             "Listening" in the header, until {"listening": false}
+//   {"listening": true}             the mic pill says "Listening", in gold, until {"listening": false}
 //   {"dictating": true}             "Dictating" in the header instead, until {"dictating": false}
 //   {"hands_free": true}            the dictation (fn + shift) goes on until fn: "press fn to type it"
-//   {"muted": true}                 transcription is muted: the header says so and the mic button is crossed
+//   {"muted": true}                 transcription is muted: the mic pill says "Muted", in red, and is crossed
 //                                   out; the card stays up and the agent keeps working ({"muted": false} undoes it)
 //   {"paused": "Paused — …"}        an amber row (you took over); "" removes it
 //   {"agent_request": "…"}          a request from another agent, in its own violet "Another agent" row; "" removes it
@@ -29,7 +30,7 @@
 //
 // and writes one JSON object per line on stdout:
 //
-//   {"text": "…"}                   a request typed into the entry field
+//   {"text": "…"}                   a request typed into the entry field (Return or Send)
 //   {"mute": true} / {"mute": false}  the mic button: mute or unmute transcription
 //   {"close": true}                 the x button: stop the task; the card collapses
 //   {"hidden": true}                the – button: the card hides (and stays hidden, as {"hidden": true} above);
@@ -49,52 +50,38 @@ import CoreGraphics
 
 // MARK: - Look
 
-let cardWidth: CGFloat = 540
-let cornerRadius: CGFloat = 16
-let padX: CGFloat = 18, padTop: CGFloat = 10, padBottom: CGFloat = 16, gap: CGFloat = 10
-let headerHeight: CGFloat = 24
-let positionKey = "CaptionsPosition"
-
-func srgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> NSColor { NSColor(srgbRed: r, green: g, blue: b, alpha: 1) }
-let primaryText = NSColor(white: 1, alpha: 0.96)
-let secondaryText = NSColor(white: 1, alpha: 0.66)
-let tertiaryText = NSColor(white: 1, alpha: 0.45)
-let youAccent = srgb(0.42, 0.69, 1.0), youText = srgb(0.87, 0.93, 1.0)
-let otherAccent = srgb(0.78, 0.60, 1.0), otherText = srgb(0.94, 0.90, 1.0)
-let pausedAccent = srgb(1.0, 0.73, 0.26), pausedText = srgb(1.0, 0.90, 0.72)
-let mutedAccent = srgb(1.0, 0.45, 0.42)
-
-var fontCache: [String: NSFont] = [:]
-
-/// Inter at this size and weight: the variable "Inter" family first, then the static optical sizes
-/// ("Inter 18pt" for small text, "Inter 24pt" / "Inter 28pt" for large), the system font only if none load.
-func inter(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
-    let key = "\(size)/\(weight.rawValue)"
-    if let font = fontCache[key] { return font }
-    let families = size >= 24 ? ["Inter", "Inter 28pt", "Inter 24pt", "Inter 18pt"]
-        : size >= 18 ? ["Inter", "Inter 24pt", "Inter 28pt", "Inter 18pt"]
-        : ["Inter", "Inter 18pt", "Inter 24pt"]
-    let w = weight.rawValue  // NSFontManager weights: 3 light, 5 regular, 6 medium, 8 semibold, 9 bold
-    let managerWeight = w >= 0.62 ? 14 : w >= 0.56 ? 11 : w >= 0.4 ? 9 : w >= 0.3 ? 8 : w >= 0.2 ? 6 : w <= -0.4 ? 3 : 5
-    var found: NSFont?
-    for family in families {
-        let descriptor = NSFontDescriptor(fontAttributes: [.family: family,
-                                                           .traits: [NSFontDescriptor.TraitKey.weight: w]])
-        if let font = NSFont(descriptor: descriptor, size: size), font.familyName == family { found = font; break }
-        if let font = NSFontManager.shared.font(withFamily: family, traits: [], weight: managerWeight, size: size) {
-            found = font; break
-        }
+// Hive's look, the same values as the browser extension's popup (browser/chrome/src/ui.css) and the
+// dashboard: warm near-black, honey gold from the icon, and the system font. Gold is for Hive and for the
+// main button; amber and red only say how something is doing.
+enum Palette {
+    static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: a)
     }
-    if found == nil && fontCache.isEmpty {
-        FileHandle.standardError.write(Data("captions: Inter isn't installed; using the system font\n".utf8))
-    }
-    let font = found ?? .systemFont(ofSize: size, weight: weight)
-    fontCache[key] = font
-    return font
+    static func warm(_ alpha: CGFloat) -> NSColor { rgb(255, 244, 228, alpha) }
+    static let ink = rgb(246, 243, 238), ink2 = rgb(189, 182, 170), muted = rgb(149, 141, 129)
+    static let background = rgb(20, 18, 16), panel = rgb(28, 26, 23)
+    static let raise1 = warm(0.04), raise2 = warm(0.07), line = warm(0.085), lineStrong = warm(0.15)
+    static let gold = rgb(245, 197, 66), goldHover = rgb(255, 212, 94), onGold = rgb(29, 21, 5)
+    static let amber = rgb(255, 173, 92), red = rgb(255, 123, 112)
 }
 
-/// One text style: Inter, a colour and a fixed line height, so every line (emoji ones too) is the same height
-/// and a row of n lines is exactly n line heights tall.
+let cardWidth: CGFloat = 540
+let cornerRadius: CGFloat = 14
+let padX: CGFloat = 16, padTop: CGFloat = 12, padBottom: CGFloat = 14, gap: CGFloat = 10
+let headerHeight: CGFloat = 26
+let controlsHeight: CGFloat = 36
+let positionKey = "CaptionsPosition"
+
+/// Hive's icon (branding/hive.svg, built into build/Hive.icns beside this program), as the popup's header has it.
+let hiveLogo: NSImage? = Bundle.main.executableURL.flatMap {
+    NSImage(contentsOf: $0.resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("Hive.icns"))
+}
+
+/// The system font (SF Pro), as the popup uses.
+func uiFont(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont { .systemFont(ofSize: size, weight: weight) }
+
+/// One text style: the system font, a colour and a fixed line height, so every line (emoji ones too) is the
+/// same height and a row of n lines is exactly n line heights tall.
 struct TextStyle {
     let font: NSFont
     var color: NSColor
@@ -102,7 +89,7 @@ struct TextStyle {
     let kern: CGFloat
 
     init(_ size: CGFloat, _ weight: NSFont.Weight, _ color: NSColor, kern: CGFloat = 0) {
-        font = inter(size, weight)
+        font = uiFont(size, weight)
         self.color = color
         lineHeight = ceil(size * 1.3)
         self.kern = kern
@@ -123,18 +110,6 @@ func tidy(_ text: String) -> String {
     var tidied = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\t", with: " ")
     while tidied.contains("\n\n\n") { tidied = tidied.replacingOccurrences(of: "\n\n\n", with: "\n\n") }
     return tidied.trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-func roundedMask(_ radius: CGFloat) -> NSImage {
-    let edge = 2 * radius + 1
-    let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
-        NSColor.black.setFill()
-        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-        return true
-    }
-    image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-    image.resizingMode = .stretch
-    return image
 }
 
 // MARK: - Views
@@ -251,24 +226,26 @@ final class Box: NSView {
 }
 
 /// A row with an icon: either a caption line ("You", "Another agent") over the text, or the icon beside the
-/// text; on a tinted rounded background when `tinted`.
+/// text; on a rounded panel when it has a `fill` (Hive's raised panel, or amber for the paused row).
 final class Section: NSView {
     let body: TextRow
     let caption: TextRow?
     let icon = SymbolView(frame: .zero)
-    let tint: NSColor?
+    let fill: NSColor?, edge: NSColor?
     private let padH: CGFloat, padV: CGFloat
 
-    init(_ style: TextStyle, caption: String? = nil, symbol: String, accent: NSColor, tinted: Bool) {
+    init(_ style: TextStyle, caption: String? = nil, symbol: String, accent: NSColor, fill: NSColor? = nil,
+         edge: NSColor? = nil) {
         body = TextRow(style)
         self.caption = caption.map { label in
             let row = TextRow(TextStyle(11.5, .semibold, accent, kern: 0.2))
             row.text = label
             return row
         }
-        tint = tinted ? accent : nil
-        padH = tinted ? 12 : 0
-        padV = tinted ? 9 : 0
+        self.fill = fill
+        self.edge = edge
+        padH = fill == nil ? 0 : 12
+        padV = fill == nil ? 0 : 9
         super.init(frame: .zero)
         icon.show(symbol, accent, size: caption == nil ? 12 : 10.5)
         addSubview(icon)
@@ -308,26 +285,17 @@ final class Section: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let tint else { return }
+        guard let fill else { return }
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10)
-        tint.withAlphaComponent(0.13).setFill(); path.fill()
-        tint.withAlphaComponent(0.30).setStroke(); path.lineWidth = 1; path.stroke()
+        fill.setFill(); path.fill()
+        if let edge { edge.setStroke(); path.lineWidth = 1; path.stroke() }
     }
 }
 
-/// A borderless button that brightens (with a soft background) under the pointer, works on the first click
-/// and never makes the panel key, so the app in front keeps the keyboard.
-final class HoverButton: NSButton {
-    var restTint = NSColor(white: 1, alpha: 0.5) { didSet { refresh() } }
-    var chip = false  // a faint rounded background even when the pointer isn't over it
-    var label: String? { didSet { refresh() } }
-    var symbol: String? {
-        didSet {
-            image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: label == nil ? 12 : 9, weight: .semibold))
-        }
-    }
-    private var hovering = false
+/// Hover tracking, a first click that works and a panel that never becomes key, so the app in front keeps
+/// the keyboard: what the card's buttons share.
+class CardButton: NSButton {
+    private(set) var hovering = false
     private var tracking: NSTrackingArea?
 
     override init(frame: NSRect) {
@@ -338,7 +306,6 @@ final class HoverButton: NSButton {
         imagePosition = .imageOnly
         focusRingType = .none
         refusesFirstResponder = true
-        refresh()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -358,98 +325,166 @@ final class HoverButton: NSButton {
     override func mouseEntered(with event: NSEvent) { hovering = true; refresh() }
     override func mouseExited(with event: NSEvent) { hovering = false; refresh() }
     func unhover() { if hovering { hovering = false; refresh() } }
+    func refresh() { needsDisplay = true }
 
-    func refresh() {
-        let color = hovering ? NSColor(white: 1, alpha: 0.96) : restTint
-        contentTintColor = color
-        if let label {
-            attributedTitle = NSAttributedString(string: label, attributes: [.font: inter(12, .medium), .foregroundColor: color])
+    /// An SF Symbol in one colour.
+    func symbolImage(_ name: String?, _ color: NSColor, size: CGFloat) -> NSImage? {
+        name.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [color])))
+    }
+}
+
+/// The card's own controls (– hide, x stop): a quiet symbol that brightens, on a soft circle, under the pointer.
+final class HoverButton: CardButton {
+    var symbol: String? { didSet { refresh() } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering {
+            Palette.raise2.setFill()
+            NSBezierPath(ovalIn: bounds).fill()
         }
-        needsDisplay = true
+        guard let image = symbolImage(symbol, hovering ? Palette.ink : Palette.muted, size: 12) else { return }
+        let size = image.size
+        image.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                              width: size.width, height: size.height),
+                   from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+}
+
+/// A pill like the popup's buttons (ui.css): `.outline` is its mic button at rest, `.lit` its mic while it
+/// listens (gold) or, here, while transcription is muted (red), `.primary` its gold Send.
+final class PillButton: CardButton {
+    enum Look { case outline, lit(NSColor), primary }
+    var look = Look.outline { didSet { refresh() } }
+    var label = "" { didSet { refresh() } }
+    var symbol: String? { didSet { refresh() } }
+    var symbolAfter = false  // "Activity ⌄": the chevron follows the word
+
+    private var isPrimary: Bool { if case .primary = look { return true } else { return false } }
+    private var pillFont: NSFont { uiFont(12.5, isPrimary ? .semibold : .medium) }
+    private var symbolSize: CGFloat { label.isEmpty ? 12 : 10 }
+    private var colors: (fill: NSColor, edge: NSColor?, ink: NSColor) {
+        switch look {
+        case .outline: return (hovering ? Palette.raise2 : .clear, Palette.lineStrong, hovering ? Palette.ink : Palette.ink2)
+        case .lit(let color): return (color.withAlphaComponent(hovering ? 0.18 : 0.12), color.withAlphaComponent(0.55), color)
+        case .primary: return (hovering ? Palette.goldHover : Palette.gold, nil, Palette.onGold)
+        }
+    }
+
+    private func measure(_ ink: NSColor) -> (text: NSSize, image: NSImage?, spacing: CGFloat) {
+        let text = label.isEmpty ? NSSize.zero : (label as NSString).size(withAttributes: [.font: pillFont])
+        let image = symbolImage(symbol, ink, size: symbolSize)
+        return (text, image, text.width > 0 && image != nil ? 6 : 0)
+    }
+
+    /// How wide the pill wants to be for its word and symbol.
+    var fittingWidth: CGFloat {
+        let (text, image, spacing) = measure(Palette.ink)
+        let pad: CGFloat = isPrimary ? 16 : label.isEmpty ? 9 : 11
+        return ceil(text.width + (image?.size.width ?? 0) + spacing + 2 * pad)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if hovering || chip {
-            NSColor(white: 1, alpha: hovering ? 0.14 : 0.07).setFill()
-            let radius = chip ? 7 : bounds.height / 2
-            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let (fill, edge, ink) = colors
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        fill.setFill(); path.fill()
+        if let edge { edge.setStroke(); path.lineWidth = 1; path.stroke() }
+        let (text, image, spacing) = measure(ink)
+        let imageSize = image?.size ?? .zero
+        var x = (bounds.width - text.width - imageSize.width - spacing) / 2
+        func drawImage() {
+            guard let image else { return }
+            image.draw(in: NSRect(x: x, y: (bounds.height - imageSize.height) / 2, width: imageSize.width,
+                                  height: imageSize.height),
+                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            x += imageSize.width + spacing
         }
-        super.draw(dirtyRect)
+        if !symbolAfter { drawImage() }
+        if text.width > 0 {
+            (label as NSString).draw(at: NSPoint(x: x, y: (bounds.height - text.height) / 2),
+                                     withAttributes: [.font: pillFont, .foregroundColor: ink])
+            x += text.width + spacing
+        }
+        if symbolAfter { drawImage() }
     }
 }
 
 struct Caps { var paused = 2, other = 3, heard = 3, say = 5, thinking = 3, doing = 1, activity: CGFloat = 140 }
 
-/// The card. Top to bottom: header (status, mute, hide, close), paused, another agent's request, what you're
-/// saying, the agent's words, its thinking, what it's doing, the activity log, and the
-/// Activity button with the entry field.
-final class Bubble: NSView {
-    let effect = NSVisualEffectView()
-    let chrome = Box(fill: NSColor(srgbRed: 0.05, green: 0.05, blue: 0.07, alpha: 0.45),
-                     stroke: NSColor(white: 1, alpha: 0.12), radius: cornerRadius, passesClicks: true)
-    let headerIcon = SymbolView(frame: .zero)
-    let header = TextRow(TextStyle(12, .semibold, secondaryText))
-    let muteButton = HoverButton(frame: .zero)
+/// The card. Top to bottom: header (Hive's logo and name, status, mic, hide, close), paused, another agent's
+/// request, what you're saying, the agent's words, its thinking, what it's doing, the activity log, and the
+/// Activity button with the ask box (the popup's: the entry field and a gold Send).
+final class Bubble: NSView, NSTextFieldDelegate {
+    let chrome = Box(fill: Palette.background.withAlphaComponent(0.97), stroke: Palette.lineStrong, radius: cornerRadius,
+                     passesClicks: true)
+    let logo = NSImageView(frame: .zero)
+    let title = TextRow(TextStyle(15, .semibold, Palette.ink, kern: -0.15))
+    let header = TextRow(TextStyle(12.5, .regular, Palette.ink2))
+    let muteButton = PillButton(frame: .zero)
     let hideButton = HoverButton(frame: .zero)
     let closeButton = HoverButton(frame: .zero)
-    let paused = Section(TextStyle(13.5, .medium, pausedText), symbol: "pause.circle.fill", accent: pausedAccent, tinted: true)
-    let other = Section(TextStyle(15, .regular, otherText), caption: "Another agent", symbol: "cpu", accent: otherAccent, tinted: true)
-    let heard = Section(TextStyle(15, .regular, youText), caption: "You", symbol: "person.fill", accent: youAccent, tinted: true)
-    let say = TextRow(TextStyle(19, .medium, primaryText, kern: -0.2))
-    let thinking = TextRow(TextStyle(13, .regular, secondaryText))
-    let doing = Section(TextStyle(13, .medium, secondaryText), symbol: "gearshape.fill", accent: tertiaryText, tinted: false)
-    let activityBox = Box(fill: NSColor(white: 0, alpha: 0.28), stroke: NSColor(white: 1, alpha: 0.07), radius: 10)
+    let paused = Section(TextStyle(13.5, .medium, Palette.ink), symbol: "pause.circle.fill", accent: Palette.amber,
+                         fill: Palette.amber.withAlphaComponent(0.10), edge: Palette.amber.withAlphaComponent(0.30))
+    let other = Section(TextStyle(15, .regular, Palette.ink), caption: "Another agent", symbol: "cpu", accent: Palette.gold,
+                        fill: Palette.panel, edge: Palette.line)
+    let heard = Section(TextStyle(15, .regular, Palette.ink), caption: "You", symbol: "person.fill", accent: Palette.muted,
+                        fill: Palette.panel, edge: Palette.line)
+    let say = TextRow(TextStyle(19, .medium, Palette.ink, kern: -0.2))
+    let thinking = TextRow(TextStyle(13, .regular, Palette.ink2))
+    let doing = Section(TextStyle(13, .medium, Palette.ink2), symbol: "gearshape.fill", accent: Palette.muted)
+    let activityBox = Box(fill: Palette.panel, stroke: Palette.line, radius: 10)
     let activityScroll = NSScrollView(frame: .zero)
     let activityView = NSTextView(frame: .zero)
-    let detailsButton = HoverButton(frame: .zero)
-    let entryBox = Box(fill: NSColor(white: 1, alpha: 0.07), stroke: NSColor(white: 1, alpha: 0.14), radius: 8)
+    let detailsButton = PillButton(frame: .zero)
+    let entryBox = Box(fill: Palette.panel, stroke: Palette.lineStrong, radius: 12)
     let entry = NSTextField(string: "")
+    let sendButton = PillButton(frame: .zero)
     var editing = false, active = false, detailsOpen = false
     var muted = false { didSet { refreshMute() } }
-    var snapshot = false { didSet { effect.isHidden = snapshot; chrome.fill = chrome.fill.withAlphaComponent(snapshot ? 0.94 : 0.45) } }
+    var listening = false { didSet { refreshMute() } }
     private(set) var dragging = false
     var onMoved: (() -> Void)?
     var onReset: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active  // the app is never active; keep the blur anyway
-        effect.maskImage = roundedMask(cornerRadius)
-        addSubview(effect)
         addSubview(chrome)
 
+        logo.image = hiveLogo
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        logo.isHidden = hiveLogo == nil
+        title.text = "Hive"
         heard.body.keepEnd = true  // while you talk, the latest words matter
         closeButton.symbol = "xmark"
-        closeButton.restTint = NSColor(white: 1, alpha: 0.38)
         closeButton.toolTip = "Stop and close"
         hideButton.symbol = "minus"
-        hideButton.restTint = NSColor(white: 1, alpha: 0.38)
         hideButton.toolTip = "Hide; Hive keeps working"
         hideButton.setAccessibilityLabel("Hide the floating window")
         refreshMute()
         detailsButton.label = "Activity"
-        detailsButton.chip = true
-        detailsButton.imagePosition = .imageTrailing
-        detailsButton.imageHugsTitle = true
-        detailsButton.restTint = secondaryText
+        detailsButton.symbolAfter = true
         setDetailsChevron()
+        sendButton.look = .primary
+        sendButton.label = "Send"
 
         entry.isBordered = false
         entry.isBezeled = false
         entry.drawsBackground = false
         entry.focusRingType = .none
-        entry.font = inter(14)
-        entry.textColor = primaryText
+        entry.font = uiFont(14)
+        entry.textColor = Palette.ink
         entry.placeholderAttributedString = NSAttributedString(string: "Tell an agent what to do…",
-                                                               attributes: [.font: inter(14), .foregroundColor: tertiaryText])
+                                                               attributes: [.font: uiFont(14), .foregroundColor: Palette.muted])
         entry.cell?.usesSingleLineMode = true  // a pasted multi-line text becomes one line that scrolls
         entry.cell?.wraps = false
         entry.cell?.isScrollable = true
         entry.cell?.allowsUndo = true
-        entry.cell?.sendsActionOnEndEditing = false  // only Return sends it, not clicking away mid-sentence
+        entry.cell?.sendsActionOnEndEditing = false  // only Return or Send sends it, not clicking away mid-sentence
+        entry.delegate = self
         entryBox.addSubview(entry)
+        entryBox.addSubview(sendButton)
 
         activityView.isEditable = false
         activityView.isSelectable = false  // so a click in it doesn't take the keyboard
@@ -470,13 +505,21 @@ final class Bubble: NSView {
         activityScroll.documentView = activityView
         activityBox.addSubview(activityScroll)
 
-        for view in [headerIcon, header, muteButton, hideButton, closeButton, paused, other, heard, say, thinking, doing,
+        for view in [logo, title, header, muteButton, hideButton, closeButton, paused, other, heard, say, thinking, doing,
                      activityBox, detailsButton, entryBox] as [NSView] { addSubview(view) }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    // The ask box's edge turns gold while you type in it, as the popup's does (.ask:focus-within).
+    func controlTextDidBeginEditing(_ obj: Notification) { setEntryFocused(true) }
+    func controlTextDidEndEditing(_ obj: Notification) { setEntryFocused(false) }
+    func setEntryFocused(_ focused: Bool) {
+        entryBox.stroke = focused ? Palette.gold.withAlphaComponent(0.4) : Palette.lineStrong
+        entryBox.needsDisplay = true
+    }
 
     var hasContent: Bool {
         editing || active || detailsOpen || muted
@@ -489,13 +532,12 @@ final class Bubble: NSView {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 2
             activityView.textStorage?.setAttributedString(NSAttributedString(string: newValue, attributes: [
-                .font: inter(12), .foregroundColor: NSColor(white: 1, alpha: 0.78), .paragraphStyle: paragraph]))
+                .font: uiFont(12), .foregroundColor: Palette.ink2, .paragraphStyle: paragraph]))
             activityView.scrollToEndOfDocument(nil)
         }
     }
 
-    func setHeader(symbol: String, text: String, icon: NSColor, color: NSColor) {
-        headerIcon.show(symbol, icon, size: 11.5)
+    func setHeader(text: String, color: NSColor) {
         header.style.color = color
         header.text = text
     }
@@ -504,9 +546,12 @@ final class Bubble: NSView {
         detailsButton.symbol = detailsOpen ? "chevron.up" : "chevron.down"
     }
 
+    /// The mic, as the popup's: an outlined pill at rest, gold and saying "Listening" while it listens, red and
+    /// saying "Muted" while transcription is muted.
     private func refreshMute() {
         muteButton.symbol = muted ? "mic.slash.fill" : "mic.fill"
-        muteButton.restTint = muted ? mutedAccent : NSColor(white: 1, alpha: 0.5)
+        muteButton.look = muted ? .lit(Palette.red) : listening ? .lit(Palette.gold) : .outline
+        muteButton.label = muted ? "Muted" : listening ? "Listening" : ""
         muteButton.toolTip = muted ? "Unmute transcription" : "Mute transcription (the agent keeps working)"
     }
 
@@ -521,7 +566,7 @@ final class Bubble: NSView {
             [paused.height(lines: min(full.paused, c.paused)), other.height(lines: min(full.other, c.other)),
              heard.height(lines: min(full.heard, c.heard)), say.height(lines: min(full.say, c.say)),
              thinking.height(lines: min(full.thinking, c.thinking)), doing.height(lines: min(full.doing, c.doing)),
-             detailsOpen ? c.activity : 0, controls ? 28 : 0]
+             detailsOpen ? c.activity : 0, controls ? controlsHeight : 0]
         }
         func total(_ c: Caps) -> CGFloat {
             let shown = heights(c).filter { $0 > 0 }
@@ -553,17 +598,21 @@ final class Bubble: NSView {
         for step in steps { while total(caps) > maxHeight && step(&caps) {} }
 
         setFrameSize(NSSize(width: width, height: total(caps)))
-        effect.frame = bounds
         chrome.frame = bounds
 
-        // The window's own controls (– hide, x stop) together on the right; the mic, about the transcript, apart.
-        closeButton.frame = NSRect(x: width - 34, y: padTop, width: 24, height: 24)
-        hideButton.frame = NSRect(x: closeButton.frame.minX - 26, y: padTop, width: 24, height: 24)
-        muteButton.frame = NSRect(x: hideButton.frame.minX - 34, y: padTop, width: 24, height: 24)
-        headerIcon.frame = NSRect(x: padX, y: padTop + 5, width: 14, height: 14)
-        let headerX = padX + 21
+        // Hive's logo and name, as the popup's header; then what's going on. The window's own controls (– hide,
+        // x stop) together on the right; the mic, about the transcript, apart.
+        closeButton.frame = NSRect(x: width - 12 - 26, y: padTop, width: 26, height: 26)
+        hideButton.frame = NSRect(x: closeButton.frame.minX - 28, y: padTop, width: 26, height: 26)
+        let micWidth = max(muteButton.fittingWidth, 32)
+        muteButton.frame = NSRect(x: hideButton.frame.minX - 10 - micWidth, y: padTop, width: micWidth, height: 26)
+        logo.frame = NSRect(x: padX, y: padTop + 2, width: 22, height: 22)
+        let titleX = logo.isHidden ? padX : padX + 30
+        let titleWidth = ceil(("Hive" as NSString).size(withAttributes: [.font: title.style.font]).width) + 2
+        title.place(x: titleX, y: padTop + (headerHeight - title.height(lines: 1)) / 2, width: titleWidth, cap: 1)
+        let headerX = titleX + titleWidth + 6
         header.place(x: headerX, y: padTop + (headerHeight - header.height(lines: 1)) / 2,
-                     width: muteButton.frame.minX - 8 - headerX, cap: 1)
+                     width: max(0, muteButton.frame.minX - 8 - headerX), cap: 1)
 
         var y = padTop + headerHeight + gap
         func put(_ height: CGFloat) { if height > 0 { y += height + gap } }
@@ -583,10 +632,15 @@ final class Bubble: NSView {
         detailsButton.isHidden = !controls
         entryBox.isHidden = !(controls && editing)
         if controls {
-            detailsButton.frame = NSRect(x: padX, y: y, width: 88, height: 28)
-            entryBox.frame = NSRect(x: padX + 96, y: y, width: inner - 96, height: 28)
+            let detailsWidth = detailsButton.fittingWidth
+            detailsButton.frame = NSRect(x: padX, y: y + (controlsHeight - 30) / 2, width: detailsWidth, height: 30)
+            let boxX = padX + detailsWidth + 8
+            entryBox.frame = NSRect(x: boxX, y: y, width: inner - (boxX - padX), height: controlsHeight)
+            let sendWidth = sendButton.fittingWidth
+            sendButton.frame = NSRect(x: entryBox.frame.width - 4 - sendWidth, y: 4, width: sendWidth, height: controlsHeight - 8)
             let fieldHeight = ceil(entry.intrinsicContentSize.height)
-            entry.frame = NSRect(x: 10, y: (28 - fieldHeight) / 2, width: entryBox.frame.width - 20, height: fieldHeight)
+            entry.frame = NSRect(x: 12, y: (controlsHeight - fieldHeight) / 2, width: sendButton.frame.minX - 8 - 12,
+                                 height: fieldHeight)
         }
         setDetailsChevron()
         needsDisplay = true
@@ -638,19 +692,16 @@ final class InputPanel: NSPanel {
     }
 }
 
-struct Header { let symbol: String, text: String, icon: NSColor, color: NSColor }
+struct Header { let text: String, color: NSColor }
 
+/// What follows "Hive" in the header. The mic pill already says "Listening" or "Muted", so this doesn't.
 func headerLine(muted: Bool, dictating: Bool, listening: Bool, active: Bool, handsFree: Bool = false) -> Header {
-    if muted {
-        return Header(symbol: "mic.slash.fill", text: active ? "Transcription muted · the agent keeps working" : "Transcription muted",
-                      icon: mutedAccent, color: mutedAccent)
-    }
     if dictating {
-        return Header(symbol: "keyboard", text: handsFree ? "Dictating · press fn to type it" : "Dictating · let go of fn to type it",
-                      icon: youAccent, color: secondaryText)
+        return Header(text: handsFree ? "· Dictating, press fn to type it" : "· Dictating, let go of fn to type it",
+                      color: Palette.ink2)
     }
-    if listening { return Header(symbol: "waveform", text: "Listening · the mic button mutes", icon: youAccent, color: secondaryText) }
-    return Header(symbol: "sparkles", text: active ? "Hive · working" : "Hive", icon: tertiaryText, color: tertiaryText)
+    if muted { return Header(text: active ? "· the agent keeps working" : "", color: Palette.ink2) }
+    return Header(text: active && !listening ? "· working" : "", color: Palette.ink2)
 }
 
 /// Where the card goes: its centre x and its bottom edge (or, in the top half of the screen, its top edge),
@@ -694,6 +745,8 @@ final class Captions: NSObject {
         window.contentView = bubble
         bubble.entry.target = self
         bubble.entry.action = #selector(submit)
+        bubble.sendButton.target = self
+        bubble.sendButton.action = #selector(submit)
         bubble.detailsButton.target = self
         bubble.detailsButton.action = #selector(toggleDetails)
         bubble.muteButton.target = self
@@ -853,6 +906,7 @@ final class Captions: NSObject {
         }
         if let listening = message["listening"] as? Bool {
             self.listening = listening
+            bubble.listening = listening
             if listening { dismissedByUser = false; fnOpened = true } else if !bubble.muted { dismissedByUser = true }  // muted: stay up
             bubble.editing = listening
         }
@@ -986,7 +1040,7 @@ final class Captions: NSObject {
     func show() {
         let line = headerLine(muted: bubble.muted, dictating: dictating, listening: listening, active: bubble.active,
                               handsFree: handsFree)
-        bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
+        bubble.setHeader(text: line.text, color: line.color)
         if dismissedByUser || (windowOff && !(fnOpened && fnInUse)) || !(bubble.hasContent || dictating) {
             hide(); return
         }
@@ -1028,7 +1082,6 @@ let args = CommandLine.arguments
 if args.count >= 3 && args[1] == "--snapshot" {
     _ = NSApplication.shared
     let bubble = Bubble(frame: .zero)
-    bubble.snapshot = true
     var rest = Array(args[3...])
     var listening = false, dictating = false
     while let flag = rest.first, flag.hasPrefix("--") {
@@ -1040,7 +1093,7 @@ if args.count >= 3 && args[1] == "--snapshot" {
             bubble.editing = true
             bubble.detailsOpen = true
             bubble.activityText = "Plan: Find the meeting date.\n\nTool: read_selected_text()\n\nResult: Team meeting Wednesday at 3 PM."
-        case "--listening": listening = true; bubble.editing = true
+        case "--listening": listening = true; bubble.listening = true; bubble.editing = true
         case "--dictating": dictating = true
         case "--muted": bubble.muted = true
         case "--paused": bubble.paused.text = value
@@ -1051,7 +1104,7 @@ if args.count >= 3 && args[1] == "--snapshot" {
         }
     }
     let line = headerLine(muted: bubble.muted, dictating: dictating, listening: listening, active: bubble.active)
-    bubble.setHeader(symbol: line.symbol, text: line.text, icon: line.icon, color: line.color)
+    bubble.setHeader(text: line.text, color: line.color)
     bubble.say.text = rest.first ?? ""
     bubble.doing.text = rest.count > 1 ? rest[1] : ""
     bubble.layOut(width: cardWidth, maxHeight: 420)
