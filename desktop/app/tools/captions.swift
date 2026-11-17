@@ -442,7 +442,7 @@ final class Bubble: NSView {
         entry.focusRingType = .none
         entry.font = inter(14)
         entry.textColor = primaryText
-        entry.placeholderAttributedString = NSAttributedString(string: "Type a request and press Return",
+        entry.placeholderAttributedString = NSAttributedString(string: "Tell an agent what to do…",
                                                                attributes: [.font: inter(14), .foregroundColor: tertiaryText])
         entry.cell?.usesSingleLineMode = true  // a pasted multi-line text becomes one line that scrolls
         entry.cell?.wraps = false
