@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, rulesByProject, ruleScope, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, nameTasks, projectName, projects, rulesByProject, ruleScope, sections, stamp, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -34,12 +34,11 @@ test('the cloud board: every machine, the same id on two machines kept apart', (
   assert.equal(where(b.tasks[1]), 'Codex · vm · hive');
 });
 
-test('sections: what needs the owner first, then work, then stuck, then not started, then done', () => {
+test('sections: what needs the owner (a question, then a stuck task) first, then work, then not started, then done', () => {
   const s = sections(normalizeBoard(cloud).tasks);
   assert.deepEqual(s.map((x) => [x.id, x.tasks.map((t) => t.key)]), [
-    ['needs-you', ['mac:T1']],
+    ['needs-you', ['mac:T1', 'mac:T4']],
     ['working', ['vm:T1']],
-    ['stuck', ['mac:T4']],
     ['not-started', ['mac:T2']],
     ['done', ['mac:T3']],
   ]);
@@ -314,4 +313,18 @@ test('the standing rules sit under their projects, by name, with no project last
   ]);
   // Under its project's heading a rule doesn't name the project again.
   assert.equal(ruleScope(groups[1].rules[0], { project: false }), 'whole project · every agent session here, at its start and after it compacts, and every cloud task');
+});
+
+test('a task is named for when the owner asked for it; the tasks of one message get letters', () => {
+  const at = (h, m, s = 0) => new Date(2026, 10, 17, h, m, s).getTime() / 1000;
+  const task = (machine, id, said, created = said) => ({ machine, id, said, created, name: '' });
+  const tasks = nameTasks([
+    task('mac', '309', at(1, 41, 10), at(1, 42)),
+    task('mac', '306', at(1, 41, 10), at(1, 41, 40)),
+    task('mac', '246', at(0, 5)),
+    task('cloud', '301', at(0, 59, 59)),
+    task('mac', '301', at(0, 59, 1)),
+  ]);
+  assert.deepEqual(tasks.map((t) => t.name), ['261117 01:41b', '261117 01:41a', '261117 00:05', '261117 00:59b', '261117 00:59a']);
+  assert.equal(stamp(at(23, 7)), '261117 23:07');
 });

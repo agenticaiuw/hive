@@ -8,8 +8,9 @@
    * an agent and it's a conversation, like Claude Code: what was asked, what it said, its work in
    * short lines, and a box at the bottom that talks to it through the cloud wherever it runs, with
    * its tasks just above that box so they stay in view (T306). Clicking Hive goes home (T308): a box
-   * to hand Hive something new, then the tasks: what needs the owner (and the answer box), what's
-   * being worked on, what's stuck and why, what hasn't started and why, and what's done. Rules lists
+   * to hand Hive something new, then the tasks: what needs the owner (a question and its answer
+   * box, or a stuck task, why, and Continue), what's being worked on, what hasn't started and why,
+   * and what's done. Rules lists
    * the owner's standing rules under their projects (T307, T309). Every unfinished task can be
    * continued or cancelled from its row. Nothing is said twice (R17).
    *
@@ -52,6 +53,7 @@
     reasonFor,
     taskId,
     threadConversation,
+    withNames,
   } from "$lib/agents.js";
 
   type Board = ReturnType<typeof normalizeBoard>;
@@ -68,7 +70,6 @@
   const SECTION_TITLES: Record<string, string> = {
     "needs-you": "Needs you",
     working: "Working",
-    stuck: "Stuck",
     "not-started": "Not started",
     done: "Done",
   };
@@ -151,7 +152,11 @@
   const folders = $derived(board && project ? folderList(board.tasks, board.folders, project) : []);
   const folderChosen = $derived(folders.find((f) => f.key === folder));
   const limits = $derived(board ? planLimits(board.limits, board.now) : []);
-  const needsYou = $derived(board ? board.tasks.filter((t) => t.status === "waiting").length : 0);
+  /** Each task's name ("261117 14:05a") by "<machine>:<id>", for the T numbers agents write. */
+  const names = $derived(new Map((board?.tasks ?? []).map((t) => [t.key, t.name])));
+  /** A text from `machine` with its task numbers as their names. */
+  const named = (text: string, machine: string) => withNames(text, machine, names);
+  const needsYou = $derived(board ? board.tasks.filter((t) => t.status === "waiting" || t.status === "blocked").length : 0);
 
   // A coding session's conversation comes from its node's steps, read while it's open; Hive in the
   // cloud's from the board.
@@ -576,7 +581,7 @@
 {#snippet taskRow(task: Task, inAgent: boolean)}
   {@const unfinished = !["done", "dropped"].includes(task.status)}
   <!-- Why it waits: its own reason here; the one its agent gives every task it holds is said once, above. -->
-  {@const reason = task.status === "blocked" ? reasonFor(task, ofTask.get(task.key)) : task.status === "open" ? task.outcome : ""}
+  {@const reason = named(task.status === "blocked" ? reasonFor(task, ofTask.get(task.key)) : task.status === "open" ? task.outcome : "", task.machine)}
   <li class="task s-{task.status}">
     <div class="task-line">
       <button
@@ -619,7 +624,7 @@
     </div>
 
     {#if task.status === "waiting"}
-      <p class="task-ask">{task.outcome || "Its agent didn't say what it needs. Ask it below."}</p>
+      <p class="task-ask">{named(task.outcome, task.machine) || "Its agent didn't say what it needs. Ask it below."}</p>
       <form class="answer" onsubmit={(e) => { e.preventDefault(); if ((answers[task.key] ?? "").trim()) act(task, "answer", answers[task.key].trim()); }}>
         <input
           placeholder="Answer…"
@@ -654,14 +659,14 @@
         {/if}
         {#if task.report}
           <p class="label">Report</p>
-          <p class="report">{task.report}</p>
+          <p class="report">{named(task.report, task.machine)}</p>
         {:else if task.outcome && (task.status === "active" || !unfinished)}
           <p class="label">What happened</p>
-          <p class="report">{task.outcome}</p>
+          <p class="report">{named(task.outcome, task.machine)}</p>
         {/if}
         {#if task.evidence && !task.report}
           <p class="label">Evidence</p>
-          <p class="report">{task.evidence}</p>
+          <p class="report">{named(task.evidence, task.machine)}</p>
         {/if}
         {#if task.commits.length}
           <p class="label">Commits</p>
@@ -876,10 +881,10 @@
                 </div>
               {:else if item.type === "agent"}
                 <div class="msg theirs" class:bad={item.failed}>
-                  <p class="bubble">{item.text}</p>
+                  <p class="bubble">{named(item.text, agent.machine)}</p>
                 </div>
               {:else if item.type === "note"}
-                <p class="note">{item.text}</p>
+                <p class="note">{named(item.text, agent.machine)}</p>
               {:else}
                 {@const going = agent.status === "working" && item.key === lastWork && items.at(-1)?.key === item.key}
                 {@const isOpen = openWork[item.key] ?? false}
@@ -929,7 +934,7 @@
                 </h2>
                 {#if !claimsFolded}
                   <div class="claims-body">
-                    {#if waits}<p class="claims-why">Not started yet: {reasonFor(waits, agent).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
+                    {#if waits}<p class="claims-why">Not started yet: {named(reasonFor(waits, agent), agent.machine).replace(/^./, (c) => c.toLowerCase())}</p>{/if}
                     {#if unfinished.length}
                       <ul class="task-list">
                         {#each unfinished as task (task.key)}{@render taskRow(task, true)}{/each}
@@ -1147,7 +1152,7 @@
                 {:else}
                   {#each byAgent(section.tasks, ofTask) as group (group.key)}
                     {@const waits = section.id === "not-started" ? group.tasks.find((t) => !t.outcome) : undefined}
-                    {@render groupHead(group.agent, waits ? reasonFor(waits, group.agent ?? undefined) : "")}
+                    {@render groupHead(group.agent, waits ? named(reasonFor(waits, group.agent ?? undefined), waits.machine) : "")}
                     <ul class="card task-list">
                       {#each group.tasks as task (task.key)}{@render taskRow(task, false)}{/each}
                     </ul>

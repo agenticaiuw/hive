@@ -38,9 +38,20 @@ const GOING = ['queued', 'planning', 'working'];
  *   steps: Step[], requests: any[], runs: Run[]}} Agent
  */
 
-/** "T148" for a task's id however the board spells it. */
-export function taskId(/** @type {{id: string}} */ task) {
-  return `T${String(task.id).replace(/^T/, '')}`;
+/** A task's name, for when the owner asked for it ("261117 14:05a", T246), else "T148". */
+export function taskId(/** @type {{id: string, name?: string}} */ task) {
+  return task.name || `T${String(task.id).replace(/^T/, '')}`;
+}
+
+/**
+ * What an agent or the board wrote, with its task numbers ("on T246") as their names, read on the
+ * machine it came from (each machine counts its own). A number it doesn't know stays as it is.
+ * @param {string} text
+ * @param {string} machine
+ * @param {Map<string, string>} names "<machine>:<id>" → name
+ */
+export function withNames(text, machine, names) {
+  return text.replace(/\bT(\d+)\b/g, (whole, n) => names.get(`${machine}:${n}`) ?? whole);
 }
 
 /**
@@ -132,7 +143,8 @@ export function agents(board) {
   return [...by.values()]
     .map((a) => {
       a.tasks.sort((x, y) => UNFINISHED.indexOf(x.status) - UNFINISHED.indexOf(y.status) || y.updated - x.updated);
-      if (a.tasks.some((t) => t.status === 'waiting')) a.status = 'needs-you';
+      // Waiting on an answer or stuck: either way it goes nowhere until the owner acts.
+      if (a.tasks.some((t) => t.status === 'waiting' || t.status === 'blocked')) a.status = 'needs-you';
       // What it's on, in the owner's terms: the task it's doing, never a bare "Working".
       const on = a.tasks.find((t) => t.status === 'active') ?? a.tasks[0];
       a.title = (a.kind === 'cloud' ? a.title : on?.title || a.title) || lastAsked(a.steps) || `${a.label} ${a.place}`;
