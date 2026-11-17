@@ -46,6 +46,9 @@ pub const STATUSES: [&str; 6] = ["open", "active", "done", "waiting", "blocked",
 pub const VALUES: [&str; 3] = ["low", "medium", "high"];
 /// The same open list blocking a stop this many times in a row lets the next stop through.
 pub const MAX_SAME_BLOCKS: i64 = 2;
+/// A message still not split this many seconds after the owner said it becomes one task in their
+/// words (Ledger::split_left): its session ended, or stopped twice without splitting it.
+pub const SPLIT_WITHIN: i64 = 6 * 3600;
 /// A task worth less than this many minutes of work at low value is flagged worth asking about.
 pub const ASK_MINUTES: i64 = 30;
 /// The board's project for what the owner asks Hive's own agent (by voice or typed).
@@ -58,6 +61,9 @@ const MOST_FILES: usize = 200;
 const MOST_COMMITS: usize = 50;
 
 pub const BRIEF_INLINE: usize = 24_000;
+
+/// What a task made by Ledger::split_left says about itself.
+pub const SPLIT_LEFT: &str = "The agent that heard this ended without splitting it into tasks, so Hive kept the whole message as one task in your words. Open it in an agent, or drop it if it asked for nothing.";
 /// What a memory can be.
 pub const MEMORY_KINDS: [&str; 4] = ["note", "spec", "decision", "report"];
 
@@ -553,6 +559,51 @@ impl Ledger {
         // Everything the folders know, loaded in full for the agent about to work in them.
         for (p, name) in places {
             out.push(self.folder_brief(&p, &name)?);
+        }
+        Ok(out)
+    }
+
+    /// Every message that has waited unsplit since before `before` (or the ones named) becomes one
+    /// task in the owner's own words, shown as left open, so no message sits on the board as never
+    /// split. The agent that heard it ended without registering what it asks for. Returns the tasks.
+    pub fn split_left(&self, before: i64, only: Option<&[i64]>) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id, text FROM messages WHERE split_at IS NULL AND said_at < ?1 ORDER BY id")
+            .map_err(err)?;
+        let waiting: Vec<(i64, String)> = stmt
+            .query_map([before], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        let at = now();
+        let mut out = Vec::new();
+        for (message, text) in waiting {
+            if only.is_some_and(|ids| !ids.contains(&message)) {
+                continue;
+            }
+            let said = text.trim();
+            if said.is_empty() {
+                self.db
+                    .execute("UPDATE messages SET split_at = ?2 WHERE id = ?1", params![message, at])
+                    .map_err(err)?;
+                continue;
+            }
+            let first = said.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(said);
+            let title = clip(first, 200);
+            self.db
+                .execute(
+                    "INSERT INTO tasks (message, quote, title, outcome, created_at, updated_at, left_open_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)",
+                    params![message, said, title, SPLIT_LEFT, at],
+                )
+                .map_err(err)?;
+            let id = self.db.last_insert_rowid();
+            self.event(id, "open", Some(SPLIT_LEFT))?;
+            self.db
+                .execute("UPDATE messages SET split_at = ?2 WHERE id = ?1", params![message, at])
+                .map_err(err)?;
+            out.push(format!("T{id} {title}"));
         }
         Ok(out)
     }
@@ -1199,6 +1250,20 @@ impl Ledger {
         Ok(changed)
     }
 
+    /// Turns off this machine's rules the owner turned off from a dashboard (the sync answer's
+    /// `rules_off`, rule ids), so no agent here is given them again. One already off is left as it
+    /// is, so hearing it again on every sync changes nothing.
+    pub fn take_rules_off(&self, ids: &Value) -> Result<usize, String> {
+        let mut changed = 0;
+        for id in ids.as_array().into_iter().flatten().filter_map(Value::as_i64) {
+            changed += self
+                .db
+                .execute("UPDATE rules SET active = 0 WHERE id = ?1 AND active = 1", [id])
+                .map_err(err)?;
+        }
+        Ok(changed)
+    }
+
     /// Takes in the rules set on the owner's other machines (`[{machine, id, project, paths,
     /// text, quote, created_at, active}]`), so they reach agents here as well. A rule turned off
     /// here stays off.
@@ -1316,10 +1381,13 @@ impl Ledger {
         let mut pushed = 0;
         let mut rules = 0;
         let mut taken = 0;
+        self.split_left(now() - SPLIT_WITHIN, None)?;
         for _ in 0..50 {
             let (mut payload, keys) = self.sync_batch(200)?;
             payload["machine"] = json!(cloud.machine);
-            payload["limits"] = json!(plan_limits());
+            let (limits, gone) = plan_limits_and_gone();
+            payload["limits"] = json!(limits);
+            payload["limits_gone"] = json!(gone);
             let since: Option<String> = self
                 .db
                 .query_row("SELECT value FROM meta WHERE key = 'pulled_at'", [], |r| r.get(0))
@@ -1330,6 +1398,7 @@ impl Ledger {
             rules = self.take_rules(&answer["rules"])?;
             taken += self.take_folders(&answer)?;
             self.take_cancelled(&answer["cancelled"])?;
+            self.take_rules_off(&answer["rules_off"])?;
             if let Some(at) = answer["now"].as_i64() {
                 self.db
                     .execute(
@@ -1806,7 +1875,15 @@ impl Ledger {
             )
             .map_err(err)?;
         if count > MAX_SAME_BLOCKS {
-            // Reminded twice with nothing changed: let it stop, and show the tasks as left open.
+            // Reminded twice with nothing changed: let it stop, keep each message it never split as
+            // one task in the owner's words, and show the tasks as left open.
+            let ids: Vec<i64> = unsplit
+                .iter()
+                .filter_map(|m| m["id"].as_str()?.trim_start_matches('M').parse().ok())
+                .collect();
+            if !ids.is_empty() {
+                self.split_left(i64::MAX, Some(&ids))?;
+            }
             self.db
                 .execute(
                     "UPDATE tasks SET left_open_at = COALESCE(left_open_at, ?3) WHERE status IN ('open', 'active')
@@ -2351,24 +2428,162 @@ pub fn render_board(board: &Value) -> String {
     out
 }
 
-/// This machine's Codex plan limits, one entry per Codex home (yours, and Hive's own agent's on
-/// the VM), as {harness, home, plan, windows: [{minutes, used, resets_at}], at}.
+/// This machine's plan limits as {harness, home, plan, windows: [{minutes, used, resets_at}], at}:
+/// one entry per Codex home (yours, and Hive's own agent's on the VM) and Claude's, when Claude
+/// Code has reported it (`hive-tasks claude-limits`, from the hive-board mod). A Codex home's
+/// reading is left out when it came from an account that is no longer signed in there.
 pub fn plan_limits() -> Vec<Value> {
+    plan_limits_and_gone().0
+}
+
+fn claude_limits_file() -> PathBuf {
+    hive_common::paths::home().join(".config/hive/claude-limits.json")
+}
+
+/// Claude's plan windows as Claude Code last reported them, if it has.
+fn claude_limits() -> Option<Value> {
+    let text = std::fs::read_to_string(claude_limits_file()).ok()?;
+    serde_json::from_str::<Value>(&text).ok().filter(|v| v["windows"].as_array().is_some_and(|w| !w.is_empty()))
+}
+
+/// Saves Claude's plan windows as Claude Code reported them ([{kind, percentUsed, resetsAt}],
+/// `five_hour` and `seven_day`), with the plan this Mac's Claude Code is signed in to.
+pub fn save_claude_limits(reported: &Value) -> Result<String, String> {
+    let windows = claude_windows(reported)?;
+    if windows.is_empty() {
+        return Ok("No five-hour or weekly window in that; nothing saved.".into());
+    }
+    let account = std::fs::read_to_string(hive_common::paths::home().join(".claude.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|v| v["oauthAccount"].clone())
+        .unwrap_or(Value::Null);
+    let entry = json!({
+        "harness": "claude",
+        "home": "~/.claude",
+        "plan": claude_plan(account["organizationRateLimitTier"].as_str(), account["organizationType"].as_str()),
+        "windows": windows,
+        "at": now(),
+    });
+    let file = claude_limits_file();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, entry.to_string()).and_then(|_| std::fs::rename(&tmp, &file)).map_err(|e| e.to_string())?;
+    Ok(format!("Saved Claude's {} plan windows.", entry["windows"].as_array().map_or(0, Vec::len)))
+}
+
+/// Claude Code's windows ([{kind, percentUsed, resetsAt}]) as the board keeps them
+/// ([{minutes, used, resets_at}]): the five-hour and weekly ones.
+pub fn claude_windows(reported: &Value) -> Result<Vec<Value>, String> {
+    Ok(reported
+        .as_array()
+        .ok_or("Give a JSON list of Claude Code's rate-limit windows.")?
+        .iter()
+        .filter_map(|w| {
+            let minutes = match w["kind"].as_str()? {
+                "five_hour" => 300,
+                "seven_day" => 10080,
+                _ => return None,
+            };
+            let resets_at = w["resetsAt"].as_str().and_then(epoch_of);
+            Some(json!({"minutes": minutes, "used": w["percentUsed"].as_f64(), "resets_at": resets_at}))
+        })
+        .collect())
+}
+
+/// The plan's name as the owner knows it: "Max 5x", "Max 20x", "Pro".
+pub fn claude_plan(tier: Option<&str>, kind: Option<&str>) -> Option<String> {
+    let tier = tier.unwrap_or("");
+    for (part, name) in [("max_20x", "Max 20x"), ("max_5x", "Max 5x")] {
+        if tier.contains(part) {
+            return Some(name.into());
+        }
+    }
+    let kind = kind?.strip_prefix("claude_").unwrap_or(kind?);
+    let mut letters = kind.chars();
+    letters.next().map(|first| first.to_uppercase().chain(letters).collect())
+}
+
+/// Seconds since 1970 for an ISO 8601 UTC time ("2026-11-17T08:00:00Z", with or without
+/// fractions or an offset).
+pub fn epoch_of(iso: &str) -> Option<i64> {
+    let (date, rest) = iso.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let clock: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+    let mut t = clock.split(':').map(|p| p.parse::<i64>().ok());
+    let (h, min, sec) = (t.next()??, t.next()??, t.next().flatten().unwrap_or(0));
+    let after = &rest[clock.len()..];
+    let after = after.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match after.chars().next() {
+        Some(sign @ ('+' | '-')) => {
+            let digits: String = after[1..].chars().filter(char::is_ascii_digit).collect();
+            let (oh, om) = (digits.get(0..2)?.parse::<i64>().ok()?, digits.get(2..4).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0));
+            let o = oh * 3600 + om * 60;
+            if sign == '+' { o } else { -o }
+        }
+        _ => 0,
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + min * 60 + sec - offset)
+}
+
+/// What one Codex home has to show for the limits rows.
+#[derive(Debug, PartialEq)]
+pub enum CodexReading {
+    /// Its plan's latest windows, from its newest session logs.
+    Shown(Value),
+    /// Readings from an account no longer signed in there (signed out, or another plan since):
+    /// their row leaves the board.
+    Gone,
+    /// No readings (no session logs, as Hive's ephemeral Codex runs leave none): nothing is said.
+    Nothing,
+}
+
+pub fn codex_reading(home: &Path) -> CodexReading {
+    let Some(limits) = usage::codex_limits(home) else {
+        return CodexReading::Nothing;
+    };
+    match usage::codex_signed_in_plan(home) {
+        usage::SignedIn::Out => CodexReading::Gone,
+        usage::SignedIn::Plan(now) if limits["plan"].as_str().is_some_and(|then| then != now) => CodexReading::Gone,
+        _ => CodexReading::Shown(limits),
+    }
+}
+
+/// The limits to show, and the board ids (`codex:~/.codex`) of readings that must go: a sync sends
+/// both, and the board deletes only those named (another writer, such as Hive's orchestrator on the
+/// VM, keeps its own rows).
+pub fn plan_limits_and_gone() -> (Vec<Value>, Vec<String>) {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut homes: Vec<String> = std::env::var("CODEX_HOME").into_iter().filter(|h| !h.is_empty()).collect();
     for dir in [".codex", ".codex-hive"] {
         homes.push(format!("{home}/{dir}"));
     }
     homes.dedup();
-    homes
-        .iter()
-        .filter_map(|h| {
-            let mut limits = usage::codex_limits(Path::new(h))?;
-            limits["harness"] = json!("codex");
-            limits["home"] = json!(h.strip_prefix(&home).map(|rest| format!("~{rest}")).unwrap_or_else(|| h.clone()));
-            Some(limits)
-        })
-        .collect()
+    let (mut shown, mut gone) = (Vec::new(), Vec::new());
+    for h in &homes {
+        let short = h.strip_prefix(&home).map(|rest| format!("~{rest}")).unwrap_or_else(|| h.clone());
+        match codex_reading(Path::new(h)) {
+            CodexReading::Shown(mut limits) => {
+                limits["harness"] = json!("codex");
+                limits["home"] = json!(short);
+                shown.push(limits);
+            }
+            CodexReading::Gone => gone.push(format!("codex:{short}")),
+            CodexReading::Nothing => {}
+        }
+    }
+    shown.extend(claude_limits());
+    (shown, gone)
 }
 
 /// A JSON list kept as text (a task's files or commits); empty when there's none.

@@ -165,6 +165,58 @@ fn newest_rollouts(sessions: &Path, most: usize) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Who a Codex home is signed in as, as far as its plan goes.
+#[derive(Debug, PartialEq)]
+pub enum SignedIn {
+    /// No auth.json: nobody.
+    Out,
+    /// A ChatGPT sign-in on this plan ("prolite", "free", ...).
+    Plan(String),
+    /// Signed in some way that doesn't say a plan (an API key).
+    Unknown,
+}
+
+/// The plan of the account a Codex home is signed in to now, from its auth.json's ID token (the
+/// `chatgpt_plan_type` claim); nothing secret is kept or shown.
+pub fn codex_signed_in_plan(home: &Path) -> SignedIn {
+    let Ok(text) = std::fs::read_to_string(home.join("auth.json")) else {
+        return SignedIn::Out;
+    };
+    let plan = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|auth| auth.pointer("/tokens/id_token").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|token| token.split('.').nth(1).and_then(base64url))
+        .and_then(|claims| serde_json::from_slice::<Value>(&claims).ok())
+        .and_then(|claims| {
+            claims.get("https://api.openai.com/auth")?.get("chatgpt_plan_type")?.as_str().map(str::to_owned)
+        });
+    plan.map_or(SignedIn::Unknown, SignedIn::Plan)
+}
+
+/// Decodes unpadded (or padded) URL-safe base64.
+fn base64url(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// The last `rate_limits` in a rollout, read from its last 1 MB.
 fn last_limits(path: &Path) -> Option<Value> {
     use std::io::{Read, Seek, SeekFrom};

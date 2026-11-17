@@ -61,12 +61,45 @@ async function refresh($: EngineInterface): Promise<void> {
   }
 }
 
+// What the owner says to this session from a Hive dashboard (an answer to a task waiting on them, a
+// message in its conversation) shows here as their own message: while someone has the session open,
+// Hive leaves this session's messages to this mod, which submits each as a prompt (hive T245: "why
+// can't i see my own prompt in claude code?"). Closed, Hive wakes a background copy with them instead.
+const MESSAGES = 'exec "$HOME/.local/bin/hive-tasks" messages "$@"'
+let taking = false
+
+async function takeMessages($: EngineInterface): Promise<void> {
+  if (taking) return
+  taking = true
+  try {
+    if ((await $.session.surfaces()).length === 0) return // nobody can see it: Hive wakes it instead
+    const run = `claude:${await $.session.id()}`
+    const got = await $.process.run(['/bin/sh', '-c', MESSAGES, 'hive-tasks', run], { timeoutMs: 20000 })
+    if (got.exitCode !== 0) return
+    const waiting = JSON.parse(got.stdout || '[]') as { id: number; text: string }[]
+    const shown: string[] = []
+    for (const m of waiting) {
+      const answer = await $.prompt.submit({ text: m.text, asUser: true })
+      if (!('deny' in answer)) shown.push(String(m.id))
+    }
+    if (shown.length) {
+      await $.process.run(['/bin/sh', '-c', MESSAGES, 'hive-tasks', run, 'shown', ...shown], { timeoutMs: 20000 })
+    }
+  } catch {
+    // The next poll tries again; nothing was marked shown.
+  } finally {
+    taking = false
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'hive-board', description: "Show Hive's task board beside the chat" })
     void $.ui.open({ id: PANE, title: 'Hive tasks' })
     void refresh($)
     $.clock.every(20000, () => refresh($))
+    void takeMessages($)
+    $.clock.every(10000, () => takeMessages($))
     return next(e)
   })
 
@@ -74,6 +107,18 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: 'Hive tasks' })
     await refresh($)
     return { text: "Hive's task board is open beside the chat." }
+  })
+
+  // The Claude plan's windows (5 hours, week) as each response reports them, for the dashboard's
+  // limits rows: hive-tasks keeps the latest reading and sends it with the board (hive T237).
+  on('session.measure', async ($, e, next) => {
+    if (e.changed.includes('rateLimits') && e.rateLimits.length) {
+      const report = 'exec "$HOME/.local/bin/hive-tasks" claude-limits "$1"'
+      void $.process
+        .run(['/bin/sh', '-c', report, 'hive-tasks', JSON.stringify(e.rateLimits)], { timeoutMs: 15000 })
+        .catch(() => undefined)
+    }
+    return next(e)
   })
 
   // A new instruction becomes tasks as the turn starts; show them without waiting for the timer.
@@ -88,14 +133,14 @@ export const register: Register = on => {
     const short = (p: string) => p.replace(/^github\.com\//, '').split('/').pop() || p
     const line = (t: BoardTask, color: string, showProject = false) => (
       <Box flexDirection="column" marginBottom={1}>
-        <Text wrap="truncate-end">
+        <Text wrap="wrap">
           <Text color={color}>● </Text>
           <Text dimColor>{t.id} </Text>
           {t.title}
           {showProject ? <Text dimColor> · {short(t.project)}</Text> : null}
         </Text>
         {t.outcome ? (
-          <Text dimColor wrap="truncate-end">
+          <Text dimColor wrap="wrap">
             {'  '}
             {t.outcome}
           </Text>
@@ -116,7 +161,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text dimColor wrap="truncate-end">
+        <Text dimColor wrap="wrap">
           {b.project ? short(b.project) : 'Hive tasks'}
           {b.readAt ? ' · every machine' : ' · reading…'}
         </Text>

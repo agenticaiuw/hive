@@ -630,6 +630,15 @@ export async function sendToAgent(
 }
 
 /** Cancels a task, asks its agent to continue it, or answers what it waits on you for. */
+/** Turns a standing rule off on every machine (POST /api/rules/off → the board's /v1/rules/off). */
+export async function turnRuleOff(rule: { machine: string; id: string }): Promise<any> {
+  return apiRequest(`${base}/api/rules/off`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine: rule.machine, id: rule.id }),
+  });
+}
+
 export async function actOnTask(
   task: { machine: string; id: string },
   action: "cancel" | "continue" | "answer",

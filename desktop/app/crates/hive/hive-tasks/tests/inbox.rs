@@ -132,6 +132,40 @@ fn messages_are_kept_once_handed_over_and_reported_once() {
 }
 
 #[test]
+fn an_open_session_shows_its_messages_as_the_owners_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("live.sqlite3");
+    let live = Live::open(&path).unwrap();
+    live.note("claude", &json!({"session_id": "open", "hook_event_name": "Stop", "cwd": "/w/open", "transcript_path": "/nope"})).unwrap();
+    let inbox = Inbox::open(&path).unwrap();
+    let at = hive_tasks::now();
+    inbox.listen("claude:open", at).unwrap();
+    inbox
+        .keep(&[
+            json!({"id": 1, "run": "claude:open", "agent": "claude", "text": "my answer"}),
+            json!({"id": 2, "run": "claude:open", "agent": "claude", "text": "stop T9", "wake": 0}),
+        ])
+        .unwrap();
+    // No background copy is started while it listens: its mod takes the message.
+    let mut woken = 0;
+    let handed = hand_over(&inbox, at, &mut |_: &str, _: &[String], _: &str| { woken += 1; Ok(String::new()) }, &mut |_: i64, _: &str| Ok(String::new())).unwrap();
+    assert_eq!((handed, woken), (1, 0), "only the cancel settles (nothing running to stop)");
+    assert_eq!(inbox.for_prompts("claude:open").unwrap(), vec![json!({"id": 1, "text": "my answer"})]);
+    assert_eq!(inbox.for_prompts("claude:open").unwrap().len(), 1, "waiting until it says it showed it");
+    assert_eq!(inbox.shown("claude:open", &[1]).unwrap(), 1);
+    assert!(inbox.for_prompts("claude:open").unwrap().is_empty());
+    let report = inbox.unreported().unwrap();
+    assert!(report.iter().any(|(id, state, detail)| *id == 1 && state == "delivered" && detail.contains("as your message")), "{report:?}");
+
+    // Once its mod stops saying so (the app closed), a message wakes it as before.
+    assert!(inbox.listened("claude:open", at).unwrap());
+    assert!(!inbox.listened("claude:open", at + hive_tasks::inbox::LISTEN_FOR).unwrap());
+    inbox.keep(&[json!({"id": 3, "run": "claude:open", "agent": "claude", "text": "later"})]).unwrap();
+    let handed = hand_over(&inbox, at + 600, &mut |_: &str, _: &[String], _: &str| { woken += 1; Ok(String::new()) }, &mut |_: i64, _: &str| Ok(String::new())).unwrap();
+    assert_eq!((handed, woken), (1, 1));
+}
+
+#[test]
 fn a_harness_that_stops_at_once_says_why() {
     assert!(woke("codex", "Started\n").is_ok());
     assert!(woke("claude", "hive-exit:0\n").is_ok());

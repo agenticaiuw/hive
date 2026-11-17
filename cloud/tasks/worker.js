@@ -19,7 +19,7 @@ const COOKIE = "hive_board";
 // token, never a cookie, so "*" lets no page act as the owner.
 const EXTENSION_PATHS = new Set(["/v1/requests", "/v1/requests/state", "/v1/runs", "/v1/page-rules", "/v1/page-rules/off", "/v1/browser/next", "/v1/browser/result"]);
 // The extension talks to the owner's agents and takes the messages for its own agent, with its key.
-for (const path of ["/v1/runs/message", "/v1/runs/messages/take", "/v1/runs/messages/update", "/v1/tasks/act"]) EXTENSION_PATHS.add(path);
+for (const path of ["/v1/runs/message", "/v1/runs/messages/take", "/v1/runs/messages/update", "/v1/tasks/act", "/v1/rules/off"]) EXTENSION_PATHS.add(path);
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
@@ -49,6 +49,7 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/board") return await board(request, env);
       if (url.pathname === "/v1/folder") return await folder(url, request, env);
       if (url.pathname === "/v1/rules") return await projectRules(url, request, env);
+      if (url.pathname === "/v1/rules/off" && request.method === "POST") return await ruleOff(request, env);
       if (url.pathname === "/v1/folders" && request.method === "POST") return await saveFolder(request, env);
       if (url.pathname === "/v1/folders/memory" && request.method === "POST") return await saveMemory(request, env);
       if (url.pathname === "/v1/requests" && request.method === "POST") return await sendRequest(request, env);
@@ -165,6 +166,19 @@ function upsert(env, table, columns, machine, row, at) {
   ).bind(...values);
 }
 
+// A rule as a machine sends it; one the owner turned off from a dashboard stays off whatever the
+// machine says, until its ledger hears of it (the sync answer's rules_off).
+function upsertRule(env, machine, row, at) {
+  const names = ["machine", ...RULE_COLUMNS, "synced_at"];
+  const marks = names.map((_, i) => `?${i + 1}`).join(", ");
+  const kept = (c) => (c === "active" ? "active = CASE WHEN board_rules.off_at IS NOT NULL THEN 0 ELSE excluded.active END" : `${c} = excluded.${c}`);
+  const updates = [...RULE_COLUMNS.slice(1), "synced_at"].map(kept).join(", ");
+  const values = [machine, ...RULE_COLUMNS.map((c) => (row[c] === undefined ? null : row[c])), at];
+  return env.DB.prepare(
+    `INSERT INTO board_rules (${names.join(", ")}) VALUES (${marks}) ON CONFLICT (machine, id) DO UPDATE SET ${updates}`,
+  ).bind(...values);
+}
+
 // A task as a machine sends it; one the owner cancelled stays dropped whatever an agent says later
 // (only done goes through), until the machine's ledger hears of the cancel.
 function upsertTask(env, machine, row, at) {
@@ -193,15 +207,26 @@ async function sync(request, env) {
     ...(body.tasks || []).map((r) =>
       upsertTask(env, machine, r.folder === undefined ? { ...r, folder: r.part } : r, at),
     ),
-    ...(body.rules || []).map((r) => upsert(env, "board_rules", RULE_COLUMNS, machine, r, at)),
+    ...(body.rules || []).map((r) => upsertRule(env, machine, r, at)),
     ...(body.folders || []).map((r) => upsertFolder(env, machine, r, at)),
     ...(body.memories || []).map((r) => upsert(env, "board_memories", MEMORY_COLUMNS, machine, r, at)),
     ...(body.events || []).map((r) => upsert(env, "board_task_events", EVENT_COLUMNS, machine, r, at)),
     ...(body.limits || []).slice(0, 10).map((r) => upsert(env, "board_limits", LIMIT_COLUMNS, machine, limitRow(r), at)),
   ];
+  // Readings from an account no longer signed in on the machine (signed out, or another plan now)
+  // leave the board: hive-tasks names them (limits_gone, "codex:~/.codex"). Only those named go, since
+  // a machine's rows have more than one writer (Hive's orchestrator puts its own Codex's on the VM's).
+  if (Array.isArray(body.limits_gone) && body.limits_gone.length) {
+    const reported = new Set((body.limits || []).map((r) => limitRow(r).id));
+    const gone = body.limits_gone.slice(0, 10).map((id) => text(id, 260)).filter((id) => id && !reported.has(id));
+    statements.push(
+      env.DB.prepare("DELETE FROM board_limits WHERE machine = ?1 AND id IN (SELECT value FROM json_each(?2))")
+        .bind(machine, JSON.stringify(gone)),
+    );
+  }
   for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
   const since = Number(body.since) || 0;
-  const [rules, folders, memories, cancelled] = await env.DB.batch([
+  const [rules, folders, memories, cancelled, rulesOff] = await env.DB.batch([
     env.DB.prepare(
       "SELECT machine, id, project, paths, text, quote, created_at, active FROM board_rules WHERE machine != ?1",
     ).bind(machine),
@@ -215,11 +240,32 @@ async function sync(request, env) {
     ).bind(machine, since),
     // Tasks the owner cancelled from a dashboard since the machine last asked: its ledger drops them.
     env.DB.prepare("SELECT id FROM board_tasks WHERE machine = ?1 AND cancelled_at >= ?2").bind(machine, since),
+    // This machine's rules the owner turned off from a dashboard: its ledger turns them off (a rule
+    // already off there is left alone, so this is safe to send every time).
+    env.DB.prepare("SELECT id FROM board_rules WHERE machine = ?1 AND off_at IS NOT NULL").bind(machine),
   ]);
   return json({
     saved: statements.length, now: at, rules: rules.results, folders: folders.results, memories: memories.results,
-    cancelled: cancelled.results.map((r) => r.id),
+    cancelled: cancelled.results.map((r) => r.id), rules_off: rulesOff.results.map((r) => r.id),
   });
+}
+
+// POST /v1/rules/off {machine, id}: the owner turning a standing rule off from a dashboard. The same
+// rule set on more than one machine (the same words) goes off everywhere; each machine's ledger turns
+// its copy off on its next sync, and the cloud agent's briefs (GET /v1/rules) leave it out at once.
+async function ruleOff(request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const machine = text(body.machine, 80);
+  const id = Number(String(body.id ?? "").replace(/^R/i, ""));
+  if (!machine || !(Number.isInteger(id) && id > 0)) return json({ error: "Say which rule (machine, id)." }, 400);
+  const rule = await env.DB.prepare("SELECT text FROM board_rules WHERE machine = ?1 AND id = ?2").bind(machine, id).first();
+  if (!rule) return json({ error: "No such rule." }, 404);
+  const at = now();
+  const off = await env.DB.prepare(
+    "UPDATE board_rules SET active = 0, off_at = COALESCE(off_at, ?3) WHERE (machine = ?1 AND id = ?2) OR text = ?4",
+  ).bind(machine, id, at, rule.text).run();
+  return json({ ok: true, rule: { machine, id, active: false }, turned_off: off.meta?.changes ?? 1 });
 }
 
 // ---- folders -------------------------------------------------------------------------------
@@ -801,9 +847,36 @@ async function updateRequest(request, env) {
       }
     }
   }
+  // A request that ends without tasks (a page change from the browser extension, a plan that
+  // failed) is still something the owner asked for: it becomes one task in their words with how it
+  // ended, so no message waits on the board as never split (2026-11-17).
+  const ended = body.status === "done" || body.status === "failed";
+  if (ended && !tasks.length) {
+    const message = await env.DB.prepare(
+      "SELECT text, said_at FROM board_messages WHERE machine = 'cloud' AND id = ?1 AND split_at IS NULL",
+    ).bind(id).first();
+    if (message) statements.push(...endedAlone(env, id, message, body.status, text(body.outcome, 4000), at));
+  }
   if (!statements.length) return json({ error: "Nothing to change." }, 400);
   await env.DB.batch(statements);
   return json({ ok: true });
+}
+
+/** The one task of a cloud request that ended without tasks (updateRequest), and its message split. */
+function endedAlone(env, id, message, status, outcome, at) {
+  const words = String(message.text || "").trim();
+  const title = words.split("\n").map((l) => l.trim()).find(Boolean) || `Request R${id}`;
+  return [
+    env.DB.prepare("UPDATE board_messages SET split_at = COALESCE(split_at, ?2), synced_at = ?2 WHERE machine = 'cloud' AND id = ?1")
+      .bind(id, at),
+    upsertTask(env, "cloud", {
+      id: id * 100 + 1, message: id, quote: words.slice(0, 2000), title: title.slice(0, 300),
+      status: status === "done" ? "done" : "blocked", minutes: null, value: null,
+      outcome: outcome || (status === "done" ? "Done." : "It didn't finish."), evidence: null,
+      created_at: Number(message.said_at) || at, updated_at: at, done_at: status === "done" ? at : null, left_open_at: null,
+      work_seconds: null, tokens_in: null, tokens_out: null, folder: null, report: null, files: null, commits: null,
+    }, at),
+  ];
 }
 
 // ---- the owner's browser -------------------------------------------------------------------

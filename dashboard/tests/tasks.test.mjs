@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, sections, where } from '../src/lib/tasks.js';
+import { agentsAtWork, ago, byFolder, commitUrl, cost, estimates, folderList, normalizeBoard, normalizeFolder, planLimits, projectName, projects, ruleScope, sections, where } from '../src/lib/tasks.js';
 
 const cloud = {
   source: 'cloud',
@@ -163,7 +163,7 @@ test('plan limits come from either board and show each window, reset once its ti
   assert.equal(cloud.limits.length, 3);
   const shown = planLimits(cloud.limits, now);
   assert.equal(shown.length, 2); // nothing to show for a harness with no windows
-  assert.equal(shown[0].who, 'Codex · prolite · studio-mac');
+  assert.equal(shown[0].who, 'Codex · Pro 10x · studio-mac');
   assert.deepEqual(shown[0].windows, [
     { label: '5 h', used: 92.4, fresh: false, resets: 'resets in 2 h' },
     { label: 'Week', used: 15, fresh: false, resets: 'resets in 4 days' },
@@ -185,8 +185,13 @@ test('plan limits come from either board and show each window, reset once its ti
     { key: 'vm:codex:~/.codex-hive', machine: 'vm', harness: 'codex', home: '~/.codex-hive', plan: 'prolite', at: now - 60, windows: [{ minutes: 10080, used: 17, resetsAt: now + 86400 }] },
   ], now);
   assert.equal(same.length, 1);
-  assert.equal(same[0].who, 'Codex · prolite · vm');
+  assert.equal(same[0].who, 'Codex · Pro 10x · vm');
   assert.equal(same[0].windows[0].used, 17);
+
+  // Claude Code reports its own plan's windows (hive-tasks claude-limits), already named.
+  const claude = planLimits([{ machine: 'mac', harness: 'claude', home: '~/.claude', plan: 'Max 5x', windows: [{ minutes: 300, used: 41, resetsAt: now + 7200 }] }], now);
+  assert.equal(claude[0].who, 'Claude Code · Max 5x · mac');
+  assert.deepEqual(claude[0].windows, [{ label: '5 h', used: 41, fresh: false, resets: 'resets in 2 h' }]);
 });
 
 test("each request sent to Hive in the cloud carries its tasks' steps, in order", () => {
@@ -280,4 +285,16 @@ test('a Claude Code or Codex session in a turn is an agent at work, with or with
     ['s1', ['T1'], 'studio-mac:claude:s1', 'hive'],
   ]);
   assert.deepEqual(agents[0].run?.steps.map((s) => s.text), ['$ cargo test']);
+});
+
+test('each standing rule says where it applies and when an agent is given it', () => {
+  const board = normalizeBoard({ board: { rules: [
+    { machine: 'mac', id: 2, project: 'github.com/agenticaiuw/hive', paths: '[]', text: 'Keep it clean', shown: 0 },
+    { machine: 'vm', id: 9, project: 'github.com/agenticaiuw/hive', paths: '["web/**/*.svelte"]', text: 'Use the Button', shown: 3 },
+  ] } });
+  const [wide, files] = board.rules;
+  assert.deepEqual([wide.machine, wide.id, wide.paths], ['mac', '2', []]);
+  assert.equal(ruleScope(wide), 'hive · whole project · every agent session here, at its start and after it compacts, and every cloud task');
+  assert.deepEqual(files.paths, ['web/**/*.svelte']);
+  assert.equal(ruleScope(files), 'hive · web/**/*.svelte · when an agent first edits one of these files in a session, and in every cloud task · shown 3 times');
 });

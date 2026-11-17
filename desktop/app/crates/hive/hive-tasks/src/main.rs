@@ -23,7 +23,10 @@ hive-tasks board --cloud        every machine's board from the cloud copy, as JS
 hive-tasks show T<n>|M<n>|R<n>  one task's report, a message and its tasks, or a rule
 hive-tasks rules [--all]        the owner's rules, where each applies and how often it was shown
 hive-tasks rule-off R<n>        stop applying a rule
-hive-tasks limits               this machine's Codex plan limits (each window's share used, when it resets)
+hive-tasks limits               this machine's Codex and Claude plan limits (each window's share used, when
+                                it resets)
+hive-tasks claude-limits '<json>'   save Claude's plan windows as Claude Code reported them (a list of
+                                {kind, percentUsed, resetsAt}); the next sync puts them on the board
 hive-tasks folders [--all] [--json]   this project's folders (--all: every project's)
 hive-tasks folder \"<project › folder>\" [--json]   everything in a folder: what it's for and all
                                 its memories, in full
@@ -39,6 +42,10 @@ hive-tasks live-send            send this Mac's Claude Code and Codex sessions t
                                 (the hooks start it by themselves)
 hive-tasks deliver              hand this Mac's agents what the owner said to them from a dashboard
                                 (live-send and Hive do it by themselves)
+hive-tasks messages claude:<session> [shown <id>...]
+                                for Hive's mod in an open Claude Code session: say it's open and
+                                take its messages as [{id, text}] to show as the owner's prompts
+                                (shown: those went in)
 hive-tasks web                  open Hive's dashboard with every machine's tasks (its window on the Mac)
 ";
 
@@ -115,6 +122,14 @@ fn run(args: &[String]) -> Result<String, String> {
     }
     if cmd == "deliver" {
         return hive_tasks::inbox::deliver_now();
+    }
+    if cmd == "messages" {
+        let shown: Vec<i64> = if arg(2) == "shown" {
+            args.iter().skip(3).filter_map(|id| id.parse().ok()).collect()
+        } else {
+            Vec::new()
+        };
+        return hive_tasks::inbox::for_open_session(arg(1), &shown);
     }
     // The cloud copy, for Hive's dashboard window (it answers the same questions the website does).
     if matches!(cmd, "get" | "post") {
@@ -210,6 +225,12 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "limits" => {
             serde_json::to_string_pretty(&hive_tasks::plan_limits()).map_err(|e| e.to_string())
+        }
+        "claude-limits" => {
+            let windows: Value = serde_json::from_str(arg(1)).map_err(|e| format!("That isn't JSON: {e}"))?;
+            let saved = hive_tasks::save_claude_limits(&windows)?;
+            sync_soon(&path);
+            Ok(saved)
         }
         "folders" => {
             let project = (!flag("--all")).then(|| project_key(&here()));
