@@ -804,10 +804,7 @@ hr {
 }
 
 #brain-mini small {
-  max-width: 92px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* ---- The ask box (ask-hive.js): the dashboard's composer, in the popup ---------------------- */

@@ -57,7 +57,7 @@ async function refresh($: EngineInterface): Promise<void> {
     await update($, board, () => next)
   } catch (err) {
     const said = err instanceof Error ? err.message : String(err)
-    await update($, board, old => ({ ...old, error: said.slice(0, 300) }))
+    await update($, board, old => ({ ...old, error: said }))
   }
 }
 

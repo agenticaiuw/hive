@@ -939,7 +939,7 @@ const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&g
 const ago=t=>{if(!t)return"";const s=data.now-t;return s<90?"just now":s<5400?Math.round(s/60)+" min ago":s<129600?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"};
 const short=p=>String(p||"").replace(/^github\\.com\\//,"").replace(/^\\/Users\\/[^/]+\\//,"~/");
 function card(t){const worth=t.value==="low"&&(t.minutes||0)>=30;return '<div class="card"><div class="title">'+esc(t.title)+'</div>'+
- '<div class="quote">“'+esc(t.quote.length>400?t.quote.slice(0,400)+"…":t.quote)+'”</div>'+
+ '<div class="quote">“'+esc(t.quote)+'”</div>'+
  (t.outcome?'<div class="outcome">'+esc(t.outcome)+'</div>':"")+
  '<div class="meta"><span class="tag">'+esc(t.harness||"")+' · '+esc(t.machine)+'</span><span>'+esc(short(t.project))+'</span>'+
  (t.minutes!=null?'<span>~'+t.minutes+' min</span>':"")+(t.value?'<span>'+esc(t.value)+' value</span>':"")+
@@ -957,7 +957,7 @@ function render(){const all=data.tasks.filter(t=>!project||t.project===project);
   section("In progress",by("active"),"No agent is working on anything.")+
   section("Not started",notStarted,"Nothing queued.")+
   section("Left open by an agent",left,"No agent stopped with work unfinished.")+
-  (unsplit.length?'<h2>Not split into tasks yet · '+unsplit.length+'</h2>'+unsplit.map(m=>'<div class="card"><div class="quote">“'+esc(m.text.slice(0,500))+'”</div><div class="meta"><span class="tag">'+esc(m.harness)+' · '+esc(m.machine)+'</span><span>'+esc(short(m.project))+'</span><span>'+ago(m.said_at)+'</span></div></div>').join(""):"")+
+  (unsplit.length?'<h2>Not split into tasks yet · '+unsplit.length+'</h2>'+unsplit.map(m=>'<div class="card"><div class="quote">“'+esc(m.text)+'”</div><div class="meta"><span class="tag">'+esc(m.harness)+' · '+esc(m.machine)+'</span><span>'+esc(short(m.project))+'</span><span>'+ago(m.said_at)+'</span></div></div>').join(""):"")+
   section("Done (last 2 weeks)",[...by("done"),...by("dropped")].sort((a,b)=>b.updated_at-a.updated_at).slice(0,40),"Nothing finished yet.")+
   '<h2>Your rules · '+data.rules.length+'</h2>'+(data.rules.length?data.rules.filter(r=>!project||r.project===project).map(r=>'<div class="card"><div class="title">'+esc(r.text)+'</div><div class="quote">“'+esc(r.quote)+'”</div><div class="meta"><span>'+esc(short(r.project))+'</span><span>'+(JSON.parse(r.paths||"[]").join(", ")||"whole project")+'</span><span>shown '+r.shown+'×</span></div></div>').join(""):'<div class="empty">No standing rules yet.</div>');
 }

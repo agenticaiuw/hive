@@ -184,7 +184,7 @@ export function deliveryWords(/** @type {{status: string, detail?: string}} */ m
 }
 
 /**
- * @typedef {{verb: string, target: string, group: string, failed?: boolean, n?: number}} Line
+ * @typedef {{verb: string, target: string, group: string, failed?: boolean, n?: number, full?: string}} Line
  * @typedef {{type: 'owner', key: string, at: number, text: string, state?: string, detail?: string, about?: string}
  *   | {type: 'agent', key: string, at: number, text: string, failed?: boolean}
  *   | {type: 'note', key: string, at: number, text: string}
@@ -302,6 +302,18 @@ const HIDDEN = /^(ToolSearch|update_plan|wrap_up|TodoWrite|TaskCreate|TaskUpdate
  * @returns {Line | null}
  */
 export function line(step) {
+  const l = label(step);
+  if (!l) return null;
+  // The line is short; `full` keeps the whole step so the owner can open it (nothing is ever cut off).
+  const text = String(step.text ?? '').trim();
+  return text === `${l.verb} ${l.target}`.trim() || text === l.target ? l : { ...l, full: text };
+}
+
+/**
+ * @param {{kind: string, text: string}} step
+ * @returns {Line | null}
+ */
+function label(step) {
   const text = String(step.text ?? '').trim();
   if (!text) return null;
   if (step.kind === 'failed') return { verb: 'Failed:', target: clip(firstLine(text)), group: 'failed', failed: true };
@@ -407,8 +419,9 @@ function firstLine(/** @type {string} */ text) {
   return text.trim().split('\n')[0].trim();
 }
 
+/** Whitespace folded to single spaces; never shortened (the page wraps it). */
 function oneLine(/** @type {string} */ text = '') {
-  return clip(String(text).replace(/\s+/g, ' ').trim(), 140);
+  return String(text).replace(/\s+/g, ' ').trim();
 }
 
 function clip(/** @type {string} */ text, most = 90) {
