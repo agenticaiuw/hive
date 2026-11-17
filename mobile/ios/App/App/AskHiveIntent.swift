@@ -56,6 +56,13 @@ struct HiveShortcuts: AppShortcutsProvider {
                 "\(.applicationName)",
             ]
         )
+        AppShortcut(
+            intent: EyeType(),
+            phrases: [
+                "Eye type with \(.applicationName)",
+                "\(.applicationName) eye typing",
+            ]
+        )
     }
 }
 
