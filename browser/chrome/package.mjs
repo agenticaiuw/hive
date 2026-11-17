@@ -83,6 +83,13 @@ for (const platformDir of [chromeDir, safariDir]) {
      */
     delete manifest.side_panel
     manifest.permissions = manifest.permissions.filter((name) => name !== 'sidePanel')
+    /*
+     * Safari hands runtime.sendNativeMessage only to extensions that ask for nativeMessaging: without
+     * it the API isn't there at all, so the popup never got its key to Hive's cloud from the app
+     * ("hive:key") and the pairing escrow did nothing (2026-11-16). Chrome has no native host for
+     * this extension, so only Safari asks.
+     */
+    if (!manifest.permissions.includes('nativeMessaging')) manifest.permissions.push('nativeMessaging')
     fs.rmSync(path.join(platformDir, 'sidepanel.html'), { force: true })
     delete manifest.background.service_worker
     manifest.background.scripts = ['background.js']
