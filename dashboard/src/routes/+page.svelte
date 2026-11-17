@@ -114,6 +114,8 @@
   /** What the owner just sent, shown at once until the agent's conversation has it. */
   let pending = $state<{ target: string; text: string; at: number }[]>([]);
   let openWork = $state<Record<string, boolean>>({});
+  /** Step lines opened to their full text ("<work key>:<n>"). */
+  let openLine = $state<Record<string, boolean>>({});
   /** An agent's tasks show its first three until the owner asks for all of them. */
   let allClaims = $state(false);
 
@@ -576,7 +578,7 @@
     </div>
 
     {#if task.status === "waiting"}
-      <p class="task-ask" class:clamp={opened !== task.key}>{task.outcome || "Its agent didn't say what it needs. Ask it below."}</p>
+      <p class="task-ask">{task.outcome || "Its agent didn't say what it needs. Ask it below."}</p>
       <form class="answer" onsubmit={(e) => { e.preventDefault(); if ((answers[task.key] ?? "").trim()) act(task, "answer", answers[task.key].trim()); }}>
         <input
           placeholder="Answer…"
@@ -589,7 +591,7 @@
         </button>
       </form>
     {:else if reason}
-      <p class="reason" class:clamp={opened !== task.key}>{reason}</p>
+      <p class="reason">{reason}</p>
     {/if}
 
     {#if actNote[task.key]}
@@ -856,7 +858,18 @@
                   {#if isOpen}
                     <ol class="work-lines">
                       {#each item.lines as l (l.n)}
-                        <li class:failed={l.failed}><span class="verb">{l.verb}</span> <span class="target">{l.target}</span></li>
+                        {@const lineKey = `${item.key}:${l.n}`}
+                        <li class:failed={l.failed}>
+                          {#if l.full}
+                            <!-- A step's line is short; the whole of it is a click away. -->
+                            <button type="button" class="line-more" aria-expanded={!!openLine[lineKey]} onclick={() => (openLine[lineKey] = !openLine[lineKey])}>
+                              <span class="verb">{l.verb}</span> <span class="target">{l.target}</span>
+                            </button>
+                            {#if openLine[lineKey]}<pre class="line-full">{l.full}</pre>{/if}
+                          {:else}
+                            <span class="verb">{l.verb}</span> <span class="target">{l.target}</span>
+                          {/if}
+                        </li>
                       {/each}
                     </ol>
                   {:else if going}
@@ -1247,16 +1260,12 @@
     min-width: 0;
   }
   .agent-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     color: var(--ink);
     font-size: 0.875rem;
   }
   .agent-meta {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     color: var(--muted);
     font-size: 0.75rem;
   }
@@ -1341,9 +1350,7 @@
   .limits .who {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .window {
     display: flex;
@@ -1658,13 +1665,6 @@
     color: var(--ink-2);
     font-size: var(--fs-small);
   }
-  .clamp {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    overflow: hidden;
-  }
   .answer {
     display: flex;
     gap: 8px;
@@ -1886,9 +1886,7 @@
   .mtitle {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .mbody {
     padding: 4px 4px 10px;
@@ -2061,6 +2059,27 @@
   }
   .work-lines .failed .verb {
     color: var(--red);
+  }
+  .line-more {
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+  }
+  .line-more:hover .target {
+    color: var(--ink-2);
+  }
+  .line-full {
+    margin: 4px 0 6px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--card-hover);
+    color: var(--ink-2);
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .talk {
     position: sticky;

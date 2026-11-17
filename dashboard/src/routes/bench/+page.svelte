@@ -1410,9 +1410,7 @@
 
   .bn-heard-title {
     font-size: var(--fs-body);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   .bn-heard-when {

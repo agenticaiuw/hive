@@ -112,8 +112,11 @@ test('Hive in the cloud reads as one thread: each request, its steps, and how it
   assert.equal(items[3].lines[0].verb, 'Navigate:');
 });
 
-test('step lines are short and plain', () => {
-  assert.deepEqual(line({ kind: 'action', text: 'Search for "fetchTaskBoard" in src' }), { verb: 'Searched for', target: '"fetchTaskBoard"', group: 'search' });
+test('step lines are short and plain, and keep the whole step to open', () => {
+  assert.deepEqual(line({ kind: 'action', text: 'Search for "fetchTaskBoard" in src' }),
+    { verb: 'Searched for', target: '"fetchTaskBoard"', group: 'search', full: 'Search for "fetchTaskBoard" in src' });
+  assert.equal(line({ kind: 'action', text: `$ ${'x'.repeat(200)}` }).full, `$ ${'x'.repeat(200)}`, 'nothing is cut off for good');
+  assert.equal(line({ kind: 'say', text: 'Done' }).full, undefined, 'a line that is already whole has nothing more to show');
   assert.deepEqual(line({ kind: 'action', text: 'Open https://developer.apple.com/documentation/xctest' }).target, 'developer.apple.com/documentation/xctest');
   assert.equal(line({ kind: 'action', text: 'update_plan: advance=true' }), null);
   assert.equal(line({ kind: 'action', text: 'mcp__Claude_Browser__browser_batch: actions=[…]' }).verb, 'Browser batch:');
