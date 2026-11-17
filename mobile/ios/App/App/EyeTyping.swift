@@ -4,7 +4,7 @@ import UIKit
 
 /*
  * Eye typing on the phone: a big keyboard fills the screen (sideways) and the front camera follows where you
- * look. Look at each letter of a word, then blink slowly: the word is typed. Look away and nothing is typed.
+ * look. Look at each letter of a word, then blink normally: the word is typed. Look away and nothing is typed.
  * The first time, you look at a few dots so it learns your eyes; every word you keep tunes it a bit more.
  * The words are decoded on the phone by EyeSwipe.swift (shared with the Mac keyboard,
  * desktop/app/tools/eyeswipe) with its language model, eyeswipe-lm.bin. The buttons above are tapped:
@@ -16,8 +16,8 @@ import UIKit
  */
 final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     private enum Seen { case gaze(GazeFeatures), closed(Double), away(Double) }
-    static let slowBlink = 0.35, lookAwayResets = 0.7
-    static let howTo = "Look at each letter of a word, then blink slowly to type it."
+    static let blinkSeconds = 0.03, lookAwayResets = 0.7      // a normal blink: eyes shut for 2 frames (3 at 60 a second)
+    static let howTo = "Look at each letter of a word, then blink to type it."
 
     private let session = ARSession()
     private var decoder: EyeSwipeDecoder?
@@ -30,12 +30,16 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     private var calibrating: (index: Int, began: TimeInterval, frames: [[GazeFeatures]])?
     private var dotFrames: [[GazeFeatures]] = []
     private var learned: [([Double], (Double, Double))] = []       // frames from kept words, and the key looked at
-    private var pending: (word: String, samples: [GazeSample], features: [[Double]], rest: Int)?
+    private var pending: (word: String, samples: [GazeSample], features: [[Double]], restAt: (x: Double, y: Double)?)?
     private var fx = OneEuro(), fy = OneEuro()
     private var recent: [(Double, Double)] = []
     private var word: [GazeSample] = [], wordFeatures: [[Double]] = []
     private var history: [(t: Double, x: Double, y: Double)] = []
-    private var settle: (x: Double, y: Double)?, restCount = 0
+    private var restAt: (x: Double, y: Double)?               // where the eyes closed at the last blink
+    // Words are worked out one at a time off the main thread (no frame waits on them).
+    private var queued: [(got: [GazeSample], features: [[Double]], restAt: (x: Double, y: Double)?)] = []
+    private var busy = false
+    private let work = DispatchQueue(label: "hive.eye-typing.decode", qos: .userInteractive)
     private var closedSince: Double?, blinkDone = false
     private var offSince: Double?, paused = false
     private var words: [String] = []              // as typed ("Hello", "world", ".")
@@ -151,6 +155,8 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
             let l = face.blendShapes[.eyeBlinkLeft]?.doubleValue ?? 0, r = face.blendShapes[.eyeBlinkRight]?.doubleValue ?? 0
             if l + r > 1.1 {
                 seen = .closed(time)
+            } else if l + r > 0.9 {
+                return                                  // lids on the way down or up: not a gaze sample
             } else if let f = features(face, frame.camera.transform) {
                 seen = .gaze(GazeFeatures(values: f, time: time))
             } else {
@@ -189,7 +195,8 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
         }
     }
 
-    private static func onKeys(_ x: Double, _ y: Double) -> Bool { x >= -0.6 && x <= 10.6 && y >= -0.4 && y <= 3.4 }
+    // A margin of most of a key: gaze a little off on the top row isn't looking away.
+    private static func onKeys(_ x: Double, _ y: Double) -> Bool { x >= -1.0 && x <= 11.0 && y >= -0.8 && y <= 3.5 }
 
     private func take(_ f: GazeFeatures) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -217,16 +224,13 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
         if paused { paused = false; statusLabel.text = Self.howTo }
         let (x, y) = cal.map(f.values)
         keyboard.move(to: (fx(x, f.time), fy(y, f.time)))                // right away; smoothed only at rest
-        recent.append((x, y))
-        if recent.count > 3 { recent.removeFirst() }
+        recent.append((x, y))                         // raw points: the decoder models the noise (a median of
+        if recent.count > 1 { recent.removeFirst() }  // 3 made 4% more words wrong in the simulator)
         let mx = recent.map { $0.0 }.sorted()[recent.count / 2], my = recent.map { $0.1 }.sorted()[recent.count / 2]
         history.append((f.time, mx, my))
         while let first = history.first, f.time - first.t > 1.2 { history.removeFirst() }
         if Self.onKeys(mx, my) {
             offSince = nil
-            if let s = settle {                       // still resting where the last word ended?
-                if hypot(mx - s.x, my - s.y) < 1.2 && restCount == word.count { restCount += 1 } else { settle = nil }
-            }
             word.append(GazeSample(x: mx, y: my, t: f.time))
             wordFeatures.append(f.values)
             keyboard.addTrail((mx, my))
@@ -239,7 +243,7 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     private func closed(_ t: Double) {
         guard calibrating == nil, calibration != nil else { return }
         guard let since = closedSince else { closedSince = t; blinkDone = false; return }
-        if !blinkDone && t - since >= Self.slowBlink {
+        if !blinkDone && t - since >= Self.blinkSeconds {
             blinkDone = true
             blinked(startedAt: since)
         }
@@ -257,23 +261,32 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     private func resetWord() {
         word = []
         wordFeatures = []
-        settle = nil
-        restCount = 0
+        restAt = nil
         keyboard.clearTrail()
     }
 
-    /// A slow blink: the word looked across is typed.
+    /// A blink: the word looked across since the last one is typed. The eyes open about where they closed,
+    /// so the next word starts resting there (the decoder finds where it really starts).
     private func blinked(startedAt start: Double) {
-        let aimed = history.filter { $0.t >= start - 0.5 && $0.t <= start - 0.1 }
-        let kept = word.enumerated().filter { $0.element.t < start - 0.1 }           // not the lids coming down
-        let got = kept.map { $0.element }, features = kept.map { wordFeatures[$0.offset] }
-        let rest = min(restCount, got.count)
+        let aimed = history.filter { $0.t >= start - 0.2 && $0.t < start }        // the last letter, held to the blink
+        var got = word, features = wordFeatures
+        let rest = restAt
         resetWord()
-        guard got.count - rest >= 3 else { return }
-        finishWord(got, features, rest: rest)
-        if !aimed.isEmpty {                       // the eyes open where they closed: not the next word's first letter yet
-            settle = (aimed.map { $0.x }.sorted()[aimed.count / 2], aimed.map { $0.y }.sorted()[aimed.count / 2])
+        if !aimed.isEmpty { restAt = (aimed.map { $0.x }.sorted()[aimed.count / 2], aimed.map { $0.y }.sorted()[aimed.count / 2]) }
+        guard got.count > 1, let decoder else { return }
+        let rate = Double(got.count - 1) / max(1e-3, got.last!.t - got.first!.t)
+        let dwell = max(3, Int((decoder.settings.minFixation * rate).rounded()))
+        let moved = rest.map { p in got.filter { hypot($0.x - p.x, $0.y - p.y) > 1.0 }.count } ?? got.count
+        guard moved >= dwell else { return }                  // only resting (or a second blink): no word
+        var from = 0                                          // a long rest before the word only costs time
+        if let p = rest {
+            while from < got.count, hypot(got[from].x - p.x, got[from].y - p.y) < 0.8 { from += 1 }
+            from = max(0, from - 6)
         }
+        if got.count - from > Int(8 * rate) { from = got.count - Int(8 * rate) }
+        got = Array(got[from...]); features = Array(features[from...])
+        queued.append((got, features, rest))
+        nextWord()
     }
 
     @objc private func recalibrate() { startCalibration() }
@@ -305,7 +318,8 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
     /// The last word stood (another came after it, or it was swapped for the right one): where its letters
     /// are is where the eyes were, so those frames tune the calibration.
     private func learnFromLastWord() {
-        guard let p = pending, let decoder, let keys = decoder.align(p.word, p.samples, rest: p.rest) else { pending = nil; return }
+        guard !busy else { return }                           // the decoder is busy with the next word
+        guard let p = pending, let decoder, let keys = decoder.align(p.word, p.samples, restAt: p.restAt) else { pending = nil; return }
         pending = nil
         for i in 1..<max(1, keys.count - 1) where keys[i] >= 0 && keys[i - 1] == keys[i] && keys[i] == keys[i + 1] {
             let c = EyeLayout.centers[keys[i]]
@@ -317,18 +331,28 @@ final class EyeTypingViewController: UIViewController, ARSessionDelegate {
 
     // MARK: Words
 
-    private func finishWord(_ got: [GazeSample], _ features: [[Double]], rest: Int) {
-        guard let decoder else { return }
-        learnFromLastWord()
+    private func nextWord() {
+        guard !busy, !queued.isEmpty, let decoder else { return }
+        let (got, features, restAt) = queued.removeFirst()
+        learnFromLastWord()                                   // the word before stood
         let last = words.last
         let previous: String? = last == nil || last == "." || last == "?" ? nil : last!.lowercased()
-        let found = decoder.decode(got, previous: previous, count: 4, rest: rest)
-        guard let best = found.first else { return }
-        lastCandidates = found
-        words.append(best.shown)
-        pending = (best.word, got, features, rest)
-        tick.impactOccurred()
-        refresh()
+        busy = true
+        work.async { [weak self] in
+            let found = decoder.decode(got, previous: previous, count: 4, restAt: restAt)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                if let best = found.first {
+                    self.lastCandidates = found
+                    self.words.append(best.shown)
+                    self.pending = (best.word, got, features, restAt)
+                    self.tick.impactOccurred()
+                    self.refresh()
+                }
+                self.nextWord()
+            }
+        }
     }
 
     @objc private func alternative(_ sender: UIButton) {
