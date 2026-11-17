@@ -32,6 +32,14 @@ public enum EyeLayout {
         return c
     }()
     public static let index: [Character: Int] = Dictionary(uniqueKeysWithValues: keys.enumerated().map { ($1, $0) })
+    /// The space bar under the keys, for typing without breaks: looking at it between words is optional,
+    /// and tells where a word ends. Its middle line, in key units.
+    public static let space = (x0: 2.5, x1: 7.5, y: 3.6)
+
+    /// How far a point is from the space bar's middle line, in key units.
+    public static func spaceOffset(_ x: Double, _ y: Double) -> (Double, Double) {
+        (x < space.x0 ? x - space.x0 : (x > space.x1 ? x - space.x1 : 0), y - space.y)
+    }
 
     /// The keys a word's path goes through, doubled letters once; nil if a letter isn't on the keyboard.
     public static func path(_ word: String) -> [Int]? {
@@ -117,6 +125,33 @@ public final class EyeLM {
         if order.count > 8 { cache[order.removeFirst()] = nil }
         return out
     }
+
+    private var pairs: [Int: (left: Float, kept: [Int: Float])] = [:]
+
+    /// ln P(word | the word before), one pair at a time (for typing without breaks, where many different
+    /// words before are in play at once); nil before = a sentence starts.
+    public func score(_ word: Int, after previous: Int?) -> Float {
+        let block: Int? = previous == nil ? 0 : (previous! < contexts ? previous! + 1 : nil)
+        guard let b = block else { return unigram[word] }
+        if pairs[b] == nil {
+            if pairs.count > 2048 { pairs = [:] }
+            let size = 4 + 3 * keep
+            var kept: [Int: Float] = [:], keptUni: Float = 0, left: Float = 0
+            blocks.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                let p = raw.baseAddress!.advanced(by: b * size)
+                left = Float(max(1e-6, Double(p.loadUnaligned(as: Float32.self))))
+                for k in 0..<keep {
+                    let q = p.advanced(by: 4 + 3 * k)
+                    let w = Int(q.load(as: UInt8.self)) | Int(q.advanced(by: 1).load(as: UInt8.self)) << 8
+                    kept[w] = -Float(q.advanced(by: 2).load(as: UInt8.self)) / 8
+                    keptUni += exp(unigram[w])
+                }
+            }
+            pairs[b] = (log(left / max(1e-6, 1 - keptUni)), kept)
+        }
+        let e = pairs[b]!
+        return e.kept[word] ?? unigram[word] + e.left
+    }
 }
 
 public final class EyeSwipeDecoder {
@@ -124,6 +159,7 @@ public final class EyeSwipeDecoder {
         public var sigma = 0.6             // how far gaze lands from the key looked at, in key widths
         public var sigmaY: Double? = nil   // the same up and down, in key heights, if it differs
         public var outlier = 0.05          // share of samples that can be anywhere (blinks, the glance to start)
+        public var restSpread = 1.25       // after a blink, how loosely the eyes reopen where they closed (x sigma)
         public var minFixation = 0.13      // seconds each key has to hold the gaze (shorter: glances add letters)
         public var lmWeight = 0.8          // the language model's weight against the gaze
         public var gazeTemperature = 4.0   // samples in one fixation aren't independent: divide their evidence
@@ -224,13 +260,14 @@ public final class EyeSwipeDecoder {
 
     /// The likeliest words for this gaze path, best first. `previous` is the word typed before ("." or nil
     /// when a sentence starts).
-    public func decode(_ samples: [GazeSample], previous: String?, count: Int = 5, rest: Int = 0) -> [Candidate] {
+    public func decode(_ samples: [GazeSample], previous: String?, count: Int = 5, rest: Int = 0,
+                       restAt: (x: Double, y: Double)? = nil) -> [Candidate] {
         guard !samples.isEmpty else { return [] }
         let s = settings
         let rate = samples.count > 1 ? Double(samples.count - 1) / max(1e-3, samples.last!.t - samples.first!.t) : 30
         let dwell = max(1, Int((s.minFixation * rate).rounded()))
         let emit = emissions(samples, shift: (0, 0))
-        let pre = restPrefix(emit, samples.count, rest)
+        let pre = restAt.map { restPrefix(samples, at: $0) } ?? restPrefix(emit, samples.count, rest)
 
         let lmScores: [Float]
         if previous == nil || previous == "." || previous == "?" {
@@ -254,7 +291,7 @@ public final class EyeSwipeDecoder {
         best.sort { $0.total > $1.total }
         var shifts = [Int: (Double, Double)]()
         for (p, _) in best.prefix(s.refine) {
-            let (score, shift) = shifted(path(p), samples, dwell, rest: rest)
+            let (score, shift) = shifted(path(p), samples, dwell, rest: rest, restAt: restAt)
             if score > gaze[p]! { gaze[p] = score; shifts[p] = shift }
         }
         var out: [Candidate] = []
@@ -358,7 +395,7 @@ public final class EyeSwipeDecoder {
 
     /// Which key each sample was on, for this word (indexes into EyeLayout.centers; -1 while still resting
     /// before it), or nil if the word can't fit the samples. Used to tune the calibration with words that were typed.
-    public func align(_ word: String, _ samples: [GazeSample], rest: Int = 0) -> [Int]? {
+    public func align(_ word: String, _ samples: [GazeSample], rest: Int = 0, restAt: (x: Double, y: Double)? = nil) -> [Int]? {
         guard samples.count > 1, let path = EyeLayout.path(word) else { return nil }
         let rate = Double(samples.count - 1) / max(1e-3, samples.last!.t - samples.first!.t)
         let dwell = max(1, Int((settings.minFixation * rate).rounded()))
@@ -366,7 +403,8 @@ public final class EyeSwipeDecoder {
         var at = [Int](repeating: 0, count: samples.count)
         let emit = emissions(samples, shift: (0, 0))
         let v = at.withUnsafeMutableBufferPointer {
-            viterbi(path, emit, samples.count, dwell, back: $0.baseAddress, pre: restPrefix(emit, samples.count, rest))
+            viterbi(path, emit, samples.count, dwell, back: $0.baseAddress,
+                    pre: restAt.map { restPrefix(samples, at: $0) } ?? restPrefix(emit, samples.count, rest))
         }
         return v > -.infinity ? at.map { $0 < 0 ? -1 : path[$0] } : nil
     }
@@ -386,6 +424,22 @@ public final class EyeSwipeDecoder {
             }
         }
         return e
+    }
+
+    // Before the word, after a blink: the eyes open where the blink closed them (the last word's last key)
+    // and stay a moment. Any number of the first samples may be that rest, scored around the point where
+    // the gaze was just before the blink, so the decoder itself finds where the word starts.
+    func restPrefix(_ samples: [GazeSample], at p: (x: Double, y: Double)) -> [Double] {
+        let s = settings, count = samples.count, sx = s.sigma * s.restSpread, sy = (s.sigmaY ?? s.sigma) * s.restSpread
+        let norm = 1 / (2 * Double.pi * sx * sy), anywhere = s.outlier / ((EyeLayout.width + 2) * (EyeLayout.height + 2))
+        var pre = [Double](repeating: -.infinity, count: count + 1)
+        pre[0] = 0
+        guard count > 1 else { return pre }
+        for t in 1..<count {
+            let dx = (samples[t - 1].x - p.x) / sx, dy = (samples[t - 1].y - p.y) / sy
+            pre[t] = pre[t - 1] + log((1 - s.outlier) * norm * exp(-(dx * dx + dy * dy) / 2) + anywhere)
+        }
+        return pre
     }
 
     // Before the word: the samples while the eyes still rest where the last word ended (they open where the
@@ -448,14 +502,16 @@ public final class EyeSwipeDecoder {
 
     // The path's score when the whole gaze path may be shifted: line up, move by the average miss (pulled
     // toward no shift), line up again.
-    func shifted(_ path: [Int], _ samples: [GazeSample], _ dwell: Int, rest: Int = 0) -> (Double, (Double, Double)) {
+    func shifted(_ path: [Int], _ samples: [GazeSample], _ dwell: Int, rest: Int = 0,
+                 restAt: (x: Double, y: Double)? = nil) -> (Double, (Double, Double)) {
         let s = settings, keys = EyeLayout.centers
+        let fixed = restAt.map { restPrefix(samples, at: $0) }       // the rest point drifted with the gaze: no shift
         var shift = (0.0, 0.0), score = -Double.infinity
         var at = [Int](repeating: 0, count: samples.count)
         for _ in 0..<2 {
             let emit = emissions(samples, shift: shift)
             let v = at.withUnsafeMutableBufferPointer {
-                viterbi(path, emit, samples.count, dwell, back: $0.baseAddress, pre: restPrefix(emit, samples.count, rest))
+                viterbi(path, emit, samples.count, dwell, back: $0.baseAddress, pre: fixed ?? restPrefix(emit, samples.count, rest))
             }
             guard v > -.infinity else { break }
             var sx = 0.0, sy = 0.0, used = 0.0
@@ -468,11 +524,268 @@ public final class EyeSwipeDecoder {
             let pull = s.sigma * s.sigma / (s.shiftSigma * s.shiftSigma) * s.gazeTemperature
             shift = (sx / (used + pull), sy / (used + pull))
             let e2 = emissions(samples, shift: shift)
-            let v2 = viterbi(path, e2, samples.count, dwell, back: nil, pre: restPrefix(e2, samples.count, rest))
+            let v2 = viterbi(path, e2, samples.count, dwell, back: nil, pre: fixed ?? restPrefix(e2, samples.count, rest))
             let prior = (shift.0 * shift.0 + shift.1 * shift.1) / (2 * s.shiftSigma * s.shiftSigma) * s.gazeTemperature
             score = max(score, v2 - prior)
         }
         return (score, shift)
+    }
+}
+
+// MARK: - Typing without stopping between words
+
+/// Eye typing with no break between words: gaze samples go in one at a time while the eyes go from letter
+/// to letter and word to word, and a word comes out as soon as every guess still in the running agrees on
+/// it. It's EyeSwipeDecoder's line-up (each key holds the gaze a short fixation, samples blur around their
+/// key) run over the whole key tree at once: where a word can end, a guess may start the next word, paying
+/// that word's language-model score after the word before it.
+public final class EyeStream {
+    public struct Settings {
+        public var beam = 10.0             // guesses this far behind the best are dropped (gaze/temperature units)
+        public var maxGuesses = 2500       // and never more than this many
+        public var wordStarts = 8          // word endings per sample that may start a next word
+        public var wordPenalty = 0.0       // per word: more makes fewer, longer words
+        public var noSpace = 0.0           // cost of going on to the next word without a look at the space bar
+        public init() {}
+    }
+    /// A word that came out, and the samples it covers (start...end, counted from begin()).
+    public struct Word { public let word: String, shown: String, start: Int, end: Int }
+
+    public let decoder: EyeSwipeDecoder
+    public var settings = Settings()
+    // The guesses: a tree node, how many samples into its key (up to dwell - 1), score, words so far, last word.
+    var node: [Int32] = [], sub: [Int8] = [], score: [Double] = [], hist: [Int32] = [], last: [Int32] = []
+    // Words guessed so far, as a tree: word id, the record before, how many words, its last sample.
+    var recWord: [Int32] = [], recPrev: [Int32] = [], recDepth: [Int32] = [], recEnd: [Int32] = []
+    var given = 0                          // how many agreed words were handed out
+    var start: Int32 = -1                  // the word before the first: -1 a sentence starts, -2 unknown
+    var dwell = 3
+    var best = -Double.infinity            // last sample's best pruning score
+    var restAt: (x: Double, y: Double)? = nil  // where the eyes rest before the first word (they open there)
+    public private(set) var count = 0      // samples since begin()
+    let tops: [Int32]
+    let space: Int32                       // the space bar's node (one past the tree)
+    let rest: Int32                        // resting where the eyes opened, before the first word (two past)
+    let lookahead: [Double]                // ln P of the commonest word at or below each node, for pruning
+
+    public init(decoder: EyeSwipeDecoder) {
+        self.decoder = decoder
+        var t: [Int32] = [], v = 0
+        while v < decoder.nodeKey.count { t.append(Int32(v)); v = decoder.nodeEnd[v] }
+        tops = t
+        let n = decoder.nodeKey.count, lm = decoder.lm
+        space = Int32(n)
+        rest = Int32(n + 1)
+        var below = [Double](repeating: -.infinity, count: n + 2)
+        for v in stride(from: n - 1, through: 0, by: -1) {
+            if decoder.nodePath[v] >= 0 {
+                for w in decoder.pathWords[decoder.nodePath[v]] {
+                    below[v] = max(below[v], w >= lm.words.count ? EyeSwipeDecoder.punctuation[w - lm.words.count].1 : Double(lm.unigram[w]))
+                }
+            }
+            if decoder.nodeParent[v] >= 0 { below[decoder.nodeParent[v]] = max(below[decoder.nodeParent[v]], below[v]) }
+        }
+        below[n] = t.map { below[Int($0)] }.max() ?? 0
+        below[n + 1] = below[n]
+        lookahead = below
+    }
+
+    /// Start over. `previous` is the word typed before (nil or "." when a sentence starts, "" if unknown),
+    /// `rate` the samples a second, `resting` where the eyes open after the blink that ended the last word
+    /// (the samples there aren't the next word's first letter, whatever key it is).
+    public func begin(previous: String?, rate: Double, resting: (x: Double, y: Double)? = nil) {
+        node = []; sub = []; score = []; hist = []; last = []
+        restAt = resting
+        recWord = []; recPrev = []; recDepth = []; recEnd = []
+        given = 0; count = 0; best = -.infinity
+        dwell = max(1, min(7, Int((decoder.settings.minFixation * rate).rounded())))
+        if let p = previous?.lowercased(), p != ".", p != "?" {
+            start = decoder.lm.id[p].map { Int32($0) } ?? -2
+        } else {
+            start = -1
+        }
+    }
+
+    func lmScore(_ w: Int, after prev: Int32) -> Double {
+        let lm = decoder.lm
+        if w >= lm.words.count { return EyeSwipeDecoder.punctuation[w - lm.words.count].1 }
+        if prev == -2 { return Double(lm.unigram[w]) }
+        if prev < 0 || Int(prev) >= lm.words.count { return Double(lm.score(w, after: nil)) }
+        return Double(lm.score(w, after: Int(prev)))
+    }
+
+    /// One more gaze sample; returns the words everyone now agrees on, in order.
+    public func push(_ g: GazeSample) -> [Word] {
+        let s = decoder.settings, keys = EyeLayout.centers, k = keys.count
+        let sx = s.sigma, sy = s.sigmaY ?? s.sigma
+        let norm = 1 / (2 * Double.pi * sx * sy), anywhere = s.outlier / ((EyeLayout.width + 2) * (EyeLayout.height + 2))
+        var e = [Double](repeating: 0, count: k + 2)
+        var top = -Double.infinity
+        for j in 0...(k + 1) {
+            if j == k + 1 && restAt == nil { e[j] = -.infinity; continue }
+            var (dx, dy) = j < k ? (g.x - keys[j].x, g.y - keys[j].y)
+                : (j == k ? EyeLayout.spaceOffset(g.x, g.y) : (g.x - restAt!.x, g.y - restAt!.y))
+            dx /= sx; dy /= sy
+            e[j] = log((1 - s.outlier) * norm * exp(-(dx * dx + dy * dy) / 2) + anywhere) / s.gazeTemperature
+            top = max(top, e[j])
+        }
+        let w8 = s.lmWeight, d = decoder, last1 = Int8(dwell - 1)
+        var nNode: [Int32] = [], nSub: [Int8] = [], nScore: [Double] = [], nHist: [Int32] = [], nLast: [Int32] = []
+        let guess = max(64, node.count * 3)
+        nNode.reserveCapacity(guess); nSub.reserveCapacity(guess); nScore.reserveCapacity(guess)
+        nHist.reserveCapacity(guess); nLast.reserveCapacity(guess)
+        var at: [Int: Int32] = [:]
+        at.reserveCapacity(guess)
+        let floor = count == 0 ? -Double.infinity : best + top - settings.beam
+        func add(_ v: Int32, _ i: Int8, _ sc: Double, _ h: Int32, _ l: Int32) {
+            if sc + w8 * lookahead[Int(v)] < floor { return }
+            let key = (Int(v) &* 16 &+ Int(i)) &* 262_144 &+ Int(l &+ 2)
+            if let j = at[key] {
+                if sc > nScore[Int(j)] { nScore[Int(j)] = sc; nHist[Int(j)] = h }
+            } else {
+                at[key] = Int32(nNode.count)
+                nNode.append(v); nSub.append(i); nScore.append(sc); nHist.append(h); nLast.append(l)
+            }
+        }
+        if count == 0 {
+            for c in tops { add(c, 0, e[d.nodeKey[Int(c)]], -1, start) }
+            if restAt != nil { add(rest, 0, e[k + 1], -1, start) }
+        } else {
+            var ends: [Int: (Double, Int32)] = [:]              // word id -> best score with it, its words before
+            let spaceLast = Int8(max(0, dwell - 2)), sp = Int(space)
+            for j in 0..<node.count {
+                let v = Int(node[j]), i = sub[j], sc = score[j], h = hist[j], l = last[j]
+                if v == Int(rest) {                                              // still resting: stay, or start
+                    add(rest, 0, sc + e[k + 1], h, l)
+                    for c in tops { add(c, 0, sc + e[d.nodeKey[Int(c)]], h, l) }
+                    continue
+                }
+                if v == sp {                                                     // on the space bar
+                    if i < spaceLast { add(space, i + 1, sc + e[k], h, l); continue }
+                    add(space, i, sc + e[k], h, l)
+                    for c in tops { add(c, 0, sc + e[d.nodeKey[Int(c)]], h, l) }
+                    continue
+                }
+                let here = sc + e[d.nodeKey[v]]
+                if i < last1 { add(Int32(v), i + 1, here, h, l); continue }
+                add(Int32(v), i, here, h, l)                                     // stay on the key
+                var c = v + 1
+                while c < d.nodeEnd[v] {                                         // on to the next key
+                    add(Int32(c), 0, sc + e[d.nodeKey[c]], h, l)
+                    c = d.nodeEnd[c]
+                }
+                if d.nodePath[v] >= 0 {                                          // a word can end here
+                    for w in d.pathWords[d.nodePath[v]] {
+                        let total = sc + w8 * lmScore(w, after: l) - settings.wordPenalty
+                        if total > (ends[w]?.0 ?? -.infinity) { ends[w] = (total, h) }
+                    }
+                }
+            }
+            for (w, (total, h)) in ends.sorted(by: { $0.value.0 > $1.value.0 }).prefix(settings.wordStarts) {
+                let r = Int32(recWord.count)
+                recWord.append(Int32(w)); recPrev.append(h)
+                recDepth.append(h < 0 ? 1 : recDepth[Int(h)] + 1); recEnd.append(Int32(count - 1))
+                for c in tops { add(c, 0, total - settings.noSpace + e[d.nodeKey[Int(c)]], r, Int32(w)) }
+                add(space, 0, total + e[k], r, Int32(w))                         // or a look at the space bar first
+            }
+        }
+        count += 1
+        // Keep the guesses near the best, at most maxGuesses.
+        var prune = [Double](repeating: 0, count: nNode.count)
+        var b = -Double.infinity
+        for j in 0..<nNode.count { prune[j] = nScore[j] + w8 * lookahead[Int(nNode[j])]; b = max(b, prune[j]) }
+        var cut = b - settings.beam
+        if nNode.count > settings.maxGuesses {
+            cut = max(cut, prune.sorted(by: >)[settings.maxGuesses - 1])
+        }
+        node = []; sub = []; score = []; hist = []; last = []
+        for j in 0..<nNode.count where prune[j] >= cut {
+            node.append(nNode[j]); sub.append(nSub[j]); score.append(nScore[j]); hist.append(nHist[j]); last.append(nLast[j])
+        }
+        best = b
+        return agreed()
+    }
+
+    func words(_ r: Int32, after done: Int) -> [Word] {
+        var out: [Word] = [], r = r
+        while r >= 0, Int(recDepth[Int(r)]) > done {
+            let p = recPrev[Int(r)]
+            let (word, shown) = decoder.text(Int(recWord[Int(r)]))
+            out.append(Word(word: word, shown: shown, start: p >= 0 ? Int(recEnd[Int(p)]) + 1 : 0, end: Int(recEnd[Int(r)])))
+            r = p
+        }
+        return out.reversed()
+    }
+
+    /// The words every guess still in the running shares, not handed out yet.
+    func agreed() -> [Word] {
+        guard var common = hist.first else { return [] }
+        var seen = Set<Int32>()
+        for h in hist where h != common && seen.insert(h).inserted {
+            var a = common, b = h
+            while a != b {
+                if a < 0 || b < 0 { a = -1; break }
+                let da = recDepth[Int(a)], db = recDepth[Int(b)]
+                if da >= db { a = recPrev[Int(a)] }
+                if db >= da { b = recPrev[Int(b)] }
+            }
+            common = a
+            if common < 0 || Int(recDepth[Int(common)]) <= given { return [] }
+        }
+        guard common >= 0, Int(recDepth[Int(common)]) > given else { return [] }
+        let out = words(common, after: given)
+        given = Int(recDepth[Int(common)])
+        return out
+    }
+
+    /// The likeliest words so far that aren't agreed yet (to show, greyed).
+    public func tentative() -> [String] {
+        var b = -1, bs = -Double.infinity
+        for j in 0..<node.count where score[j] > bs { bs = score[j]; b = j }
+        guard b >= 0 else { return [] }
+        return words(hist[b], after: given).map { $0.shown }
+    }
+
+    /// The likeliest first word if it ended now: the live guess while one word is looked at (with
+    /// settings.wordStarts 0, the stream holds just that one word).
+    public func guess() -> String? {
+        var bs = -Double.infinity, bw = -1
+        for j in 0..<node.count where node[j] < space && hist[j] < 0 && Int(sub[j]) == dwell - 1
+            && decoder.nodePath[Int(node[j])] >= 0 {
+            for w in decoder.pathWords[decoder.nodePath[Int(node[j])]] {
+                let total = score[j] + decoder.settings.lmWeight * lmScore(w, after: last[j])
+                if total > bs { bs = total; bw = w }
+            }
+        }
+        return bw >= 0 ? decoder.text(bw).shown : nil
+    }
+
+    /// The eyes left the keyboard: the likeliest ending, everything not handed out yet. Then begin() again.
+    public func finish() -> [Word] {
+        var bs = -Double.infinity, bw = -1, bh: Int32 = -1
+        var spaceBest = -Double.infinity, spaceHist: Int32 = -1
+        for j in 0..<node.count where node[j] == space && score[j] > spaceBest { spaceBest = score[j]; spaceHist = hist[j] }
+        for j in 0..<node.count where node[j] < space && Int(sub[j]) == dwell - 1 && decoder.nodePath[Int(node[j])] >= 0 {
+            for w in decoder.pathWords[decoder.nodePath[Int(node[j])]] {
+                let total = score[j] + decoder.settings.lmWeight * lmScore(w, after: last[j]) - settings.wordPenalty
+                if total > bs { bs = total; bw = w; bh = hist[j] }
+            }
+        }
+        var out: [Word]
+        if spaceBest > bs && spaceHist >= 0 {
+            out = words(spaceHist, after: given)
+        } else if bw >= 0 {
+            out = words(bh, after: given)
+            let (word, shown) = decoder.text(bw)
+            out.append(Word(word: word, shown: shown, start: bh >= 0 ? Int(recEnd[Int(bh)]) + 1 : 0, end: count - 1))
+        } else {
+            var b = -1, s = -Double.infinity
+            for j in 0..<node.count where score[j] > s { s = score[j]; b = j }
+            out = b >= 0 ? words(hist[b], after: given) : []
+        }
+        node = []; sub = []; score = []; hist = []; last = []
+        count = 0
+        return out
     }
 }
 
@@ -560,6 +873,40 @@ public struct GazeCalibration {
             }
         }
         cal.spread = count > 0 ? ((ex / count).squareRoot(), (ey / count).squareRoot()) : (1, 1)
+        return cal
+    }
+
+    /// Ridge regression from rows of features to where the eyes were (a moving dot's path, dots, keys of
+    /// typed words): fit, drop the fifth that fit worst (blinks, catch-up jumps, looking elsewhere), fit
+    /// again. `groups` says which rows belong together: with `leaveOut`, `spread` is how far each group
+    /// lands when it's left out of the fit (groups < 0 never are); without, how far rows land from the fit.
+    public static func fit(rows: [[Double]], targets: [(Double, Double)], groups: [Int], lambda: Double = 2.0,
+                           leaveOut: Bool = true) -> GazeCalibration? {
+        guard rows.count > 30, rows.count == targets.count, rows.count == groups.count else { return nil }
+        guard let first = ridge(rows, targets.map { $0.0 }, targets.map { $0.1 }, lambda) else { return nil }
+        let err = rows.indices.map { i -> Double in
+            let (x, y) = first.map(rows[i]); return hypot(x - targets[i].0, y - targets[i].1) }
+        let cut = err.sorted()[min(err.count - 1, Int(Double(err.count) * 0.8))]
+        let keep = rows.indices.filter { err[$0] <= cut }
+        let r = keep.map { rows[$0] }, t = keep.map { targets[$0] }, g = keep.map { groups[$0] }
+        guard var cal = ridge(r, t.map { $0.0 }, t.map { $0.1 }, lambda) else { return nil }
+        var ex = 0.0, ey = 0.0, n = 0.0
+        if leaveOut {
+            for k in Set(g) where k >= 0 {
+                let others = g.indices.filter { g[$0] != k }
+                guard let c = ridge(others.map { r[$0] }, others.map { t[$0].0 }, others.map { t[$0].1 }, lambda) else { continue }
+                for i in g.indices where g[i] == k {
+                    let (px, py) = c.map(r[i])
+                    ex += (px - t[i].0) * (px - t[i].0); ey += (py - t[i].1) * (py - t[i].1); n += 1
+                }
+            }
+        } else {
+            for i in r.indices {
+                let (px, py) = cal.map(r[i])
+                ex += (px - t[i].0) * (px - t[i].0); ey += (py - t[i].1) * (py - t[i].1); n += 1
+            }
+        }
+        cal.spread = n > 0 ? ((ex / n).squareRoot(), (ey / n).squareRoot()) : (1, 1)
         return cal
     }
 
