@@ -392,6 +392,21 @@ fn tool_results_become_codex_replies() {
     assert_eq!(tools(2), ["lookup", "save"]);
     assert!(tools(0).contains(&"batch".to_owned()));
     assert!(tools(1).contains(&"tap".to_owned()));
+
+    // Tools that aren't a device (the owner's other agents) come after the devices.
+    use hive_common::tools::ToolNamespace;
+    let h = Harness::with_hooks(
+        |_, _| {},
+        |hooks| {
+            let (mac, phone, agents) = (FakeTool::new("mac"), FakeTool::new("phone"), FakeTool::new("agents"));
+            hooks.device_tools = Arc::new(move || {
+                vec![agents.clone() as Arc<dyn ToolNamespace>, mac.clone(), phone.clone()]
+            });
+        },
+    );
+    let specs = h.agent.tool_specs();
+    let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["mac", "phone", "agents", "knowledge"]);
 }
 
 #[test]

@@ -178,3 +178,52 @@ test('an unreachable cloud is retried after a pause, and the status says so mean
   assert.deepEqual(pauses, [1000])
   assert.equal(browserApi.data[CLOUD_STATUS_KEY].state, 'connected')
 })
+
+test("what was said to this browser's agent goes to it, and the board hears whether it was handed over", async () => {
+  const browserApi = fakeBrowser({ [BOARD_KEY]: KEY })
+  let stop = false
+  const board = fakeBoard([
+    { status: 200, body: { messages: [{ id: 4, run: 'handoff-1', agent: 'browser', text: 'Find my Canvas grades', sender: 'mac' }, { id: 5, run: 'r9', agent: 'browser', text: 'and email them', sender: 'web' }] } },
+    { status: 200, body: { ok: true } },
+    { status: 200, body: { ok: true } },
+    () => {
+      stop = true
+      return { status: 200, body: { command: null } }
+    },
+  ])
+  const handed = []
+  await runCloudPeer({
+    browserApi,
+    fetchImpl: board.fetchImpl,
+    kind: 'chrome',
+    getConfig: async () => ({}),
+    executeCommand: async () => ({}),
+    onMessage: async (message) => {
+      handed.push([message.run, message.text])
+      return message.id === 4 ? { ok: true, id: 'local-1' } : { ok: false, needsSetup: true }
+    },
+    shouldStop: () => stop,
+    ...quick,
+  })
+  assert.deepEqual(handed, [['handoff-1', 'Find my Canvas grades'], ['r9', 'and email them']])
+  assert.deepEqual(board.calls[0], { path: '/v1/runs/messages/take', method: 'POST', auth: `Bearer ${KEY.key}`, body: {} })
+  assert.deepEqual(board.calls[1].body, { id: 4, status: 'delivered', detail: 'Handed to the browser agent.' })
+  assert.equal(board.calls[2].body.status, 'failed')
+  assert.match(board.calls[2].body.detail, /nothing to think with/)
+  assert.equal(board.calls[3].path, '/v1/browser/next?browser=chrome&wait=20', 'then it asks for commands as before')
+})
+
+test("a board that can't hand out messages doesn't stop the browser's commands", async () => {
+  const browserApi = fakeBrowser({ [BOARD_KEY]: KEY })
+  let stop = false
+  const board = fakeBoard([
+    { status: 404, body: { error: 'Not found' } },
+    () => {
+      stop = true
+      return { status: 200, body: { command: null } }
+    },
+  ])
+  await runCloudPeer({ browserApi, fetchImpl: board.fetchImpl, kind: 'safari', getConfig: async () => ({}), executeCommand: async () => ({}), onMessage: async () => ({ ok: true }), shouldStop: () => stop, ...quick })
+  assert.deepEqual(board.calls.map((c) => c.path), ['/v1/runs/messages/take', '/v1/browser/next?browser=safari&wait=20'])
+  assert.equal(browserApi.data[CLOUD_STATUS_KEY].state, 'connected')
+})

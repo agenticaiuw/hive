@@ -595,7 +595,12 @@ export async function recordRunToHive(runId, phase) {
   }
 }
 
-export async function handleConsoleSubmit({ command, page }) {
+/**
+ * A command for this browser's own agent: typed in the popup, or (`boardRun`) a message on one of the
+ * owner's board runs, from another agent handing it a task or the owner talking to this agent from a
+ * dashboard (cloud-peer.js). Its run then lands in that board run (board-runs.js link).
+ */
+export async function handleConsoleSubmit({ command, page, boardRun }) {
   const text = String(command ?? '').trim()
   if (!text) return { ok: false, error: 'Type a command first.' }
 
@@ -609,6 +614,7 @@ export async function handleConsoleSubmit({ command, page }) {
   if (!config.agentToken && !brain.ok) return { ok: false, needsSetup: true }
 
   const id = crypto.randomUUID()
+  if (boardRun) await executionJournal().link?.(id, boardRun)
   const scrubbedPage = scrubPageContext(page)
   await withHistory((history) =>
     appendHistory(history, newHistoryEntry({ id, command: text, page: scrubbedPage })),

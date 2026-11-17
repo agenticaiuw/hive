@@ -480,11 +480,13 @@ impl hive_phone::PhoneAuthenticator for PhonePasscode {
     }
 }
 
-/// agent.py's `device_tools()`: `{"mac": MacTools(), "phone": PhoneTools()}`.
+/// agent.py's `device_tools()`: `{"mac": MacTools(), "phone": PhoneTools()}`, and the owner's other
+/// agents it hands tasks to through the cloud (`agents.hand_off`, hive_tasks::handoff).
 pub fn device_tools() -> Vec<Arc<dyn ToolNamespace>> {
     vec![
         Arc::new(hive_mac::MacTools::new()),
         Arc::new(hive_phone::PhoneTools::new().with_authenticator(Arc::new(PhonePasscode))),
+        Arc::new(hive_tasks::handoff::HandOff::new()),
     ]
 }
 

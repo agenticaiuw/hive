@@ -93,3 +93,30 @@ test('with no board key yet, runs go on and nothing is sent', async () => {
   assert.equal(board.posts.length, 0)
   assert.equal((await journal.getStatus()).runs[0].state, 'failed')
 })
+
+test('a task handed to this browser lands in the run it came on, numbered on from its last step', async () => {
+  const storage = fakeStorage({ [BOARD_KEY]: { url: 'https://board.test', key: 'ext.mac-browser.abc' } })
+  const board = fakeBoard()
+  const journal = mirrorRunsToBoard(createExecutionJournal({ storage }), { storage, fetchImpl: board.fetchImpl })
+
+  // The first message on a run the Mac made for it: steps from 1, under the board's run id, its title kept.
+  await journal.link('local-a', 'handoff-7')
+  await journal.beginRun({ runId: 'local-a', command: 'Find my Canvas grades' })
+  await journal.recordStep('local-a', { tool: 'navigate', ok: true, summary: 'canvas.test' })
+  await journal.finishRun('local-a', { state: 'finished', verdict: 'achieved', headline: 'A in CS 400.' })
+  await journal.settled()
+  assert.ok(board.posts.every((p) => p.body.run === 'handoff-7' && p.body.title === ''))
+  assert.equal(board.posts[0].body.status, 'working')
+  assert.equal(board.posts.at(-1).body.status, 'done')
+
+  // The owner says more on that run, from a new context: it carries on at step 3 and works again.
+  const later = mirrorRunsToBoard(createExecutionJournal({ storage }), { storage, fetchImpl: board.fetchImpl })
+  board.posts.length = 0
+  await later.link('local-b', 'handoff-7')
+  await later.beginRun({ runId: 'local-b', command: 'and email them to me' })
+  await later.recordStep('local-b', { tool: 'read_page', ok: true, summary: 'grades' })
+  await later.settled()
+  assert.equal(board.posts[0].body.status, 'working')
+  assert.deepEqual(board.posts.flatMap((p) => p.body.steps.map((s) => [s.n, s.text])), [[3, 'read_page: grades']])
+  assert.ok(board.posts.every((p) => p.body.run === 'handoff-7'))
+})
