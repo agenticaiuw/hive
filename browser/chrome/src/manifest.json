@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hive",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Ask Hive from any page, and Hive changes how pages look for you; Hive's dashboard beside any page.",
   "minimum_chrome_version": "121",
   "icons": {

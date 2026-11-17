@@ -314,7 +314,12 @@ let activeCloudPeer = null
 
 function startCloudPeer() {
   if (activeCloudPeer) return activeCloudPeer
-  activeCloudPeer = runCloudPeer({ executeCommand, getConfig })
+  activeCloudPeer = runCloudPeer({
+    executeCommand,
+    getConfig,
+    /* A task handed to this browser's agent, or the owner talking to it: its run is that board run. */
+    onMessage: (message) => handleConsoleSubmit({ command: message.text, boardRun: message.run }),
+  })
     .catch((error) => console.warn(`cloud peer stopped: ${error?.message || error}`))
     .finally(() => {
       activeCloudPeer = null

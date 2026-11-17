@@ -24,6 +24,7 @@
 //! A session's history from before Hive first saw it is skipped, not imported.
 
 pub mod chrome_host;
+pub mod handoff;
 pub mod inbox;
 pub mod live;
 pub mod runs;

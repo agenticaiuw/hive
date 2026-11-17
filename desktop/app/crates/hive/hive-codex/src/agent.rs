@@ -455,7 +455,8 @@ impl Agent {
     }
 
     /// Both devices' tools, as Codex's dynamic tools: the model calls them as `mac.click`,
-    /// `phone.tap` etc. Always the same, so they stay in the prompt cache from task to task.
+    /// `phone.tap` etc., then any that aren't a device (`agents.hand_off`, the owner's other agents
+    /// through the cloud). Always the same, so they stay in the prompt cache from task to task.
     pub fn tool_specs(&self) -> Vec<Value> {
         let tools = (self.hooks.device_tools)();
         let mut specs: Vec<Value> = prompts::DEVICES
@@ -463,6 +464,8 @@ impl Agent {
             .filter_map(|(device, _)| tools.iter().find(|t| t.namespace() == *device))
             .map(|t| namespace_spec(t.as_ref()))
             .collect();
+        let device = |t: &Arc<dyn ToolNamespace>| prompts::DEVICES.iter().any(|(d, _)| *d == t.namespace());
+        specs.extend(tools.iter().filter(|t| !device(t)).map(|t| namespace_spec(t.as_ref())));
         for t in &tools {
             t.close();
         }
