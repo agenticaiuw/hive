@@ -10,11 +10,6 @@
  * once, marked running before it acts, so nothing here can run it twice. Safari stops this worker
  * when it likes; the background's alarm starts the loop again, and a command nobody took within 90 s
  * expires in the cloud instead of running late.
- *
- * Before each ask it also takes what was said to this browser's own agent (POST /v1/runs/messages/take):
- * a task another agent handed it (Hive on the Mac, the VM) or the owner talking to it from a dashboard.
- * Each goes to the agent (`onMessage`, console-engine.js handleConsoleSubmit), which reports its steps
- * in that message's run, and the board hears whether it was handed over.
  */
 import { BOARD_KEY, BOARD_URL } from './page-rules-core.js'
 
@@ -84,60 +79,25 @@ export async function boardCall(board, path, body, { fetchImpl = fetch, timeoutM
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Takes the messages waiting for this browser's agent, hands each to `onMessage` and tells the board
- * how that went. The board hands each message out once; how many there were.
+ * What the toolbar badge and the popup say about reaching Hive through the cloud board: "ON" while the
+ * board answers, "SET" while there is no key yet (Hive on this Mac hands one over), "!" when the board
+ * can't be reached or refuses the key.
  */
-export async function deliverMessages(board, onMessage, { fetchImpl = fetch } = {}) {
-  const { messages = [] } = await boardCall(board, '/v1/runs/messages/take', {}, { fetchImpl })
-  for (const message of messages) {
-    let outcome
-    try {
-      const answer = await onMessage(message)
-      outcome =
-        answer?.ok === false
-          ? {
-              status: 'failed',
-              detail:
-                answer.error ||
-                (answer.needsSetup
-                  ? "This browser's agent has nothing to think with: no brain of its own and no Mac agent."
-                  : 'The agent turned it down.'),
-            }
-          : { status: 'delivered', detail: 'Handed to the browser agent.' }
-    } catch (error) {
-      outcome = { status: 'failed', detail: error?.message || String(error) }
-    }
-    await boardCall(board, '/v1/runs/messages/update', { id: message.id, ...outcome }, { fetchImpl }).catch((error) =>
-      console.warn(`hive board: message ${message.id} wasn't marked ${outcome.status}: ${error?.message || error}`),
-    )
-  }
-  return messages.length
+export function connectionBadge(cloud = {}) {
+  const c = cloud?.state
+  if (c === 'connected') return { state: 'connected', text: 'ON', color: '#078B70' }
+  if (c === 'off' || !c) return { state: 'needs-setup', text: c ? 'SET' : '', color: '#B54736' }
+  return { state: c === 'unauthorized' ? 'unauthorized' : 'offline', text: '!', color: '#B54736' }
 }
 
 /**
  * Asks for commands and runs them until `shouldStop()` or the key is refused. Everything it touches
  * comes in `deps`, so node tests drive it with fakes.
  */
-/**
- * What the toolbar badge and the popup say about reaching Hive. The browser has two ways: the old
- * paired relay (the bridge status, which says needs-setup when nothing was ever pasted) and the cloud
- * board, whose key Hive on this Mac hands over by itself. Either one working is "ON"; "SET" only when
- * neither has a way in; "!" when the way it has fails. Before 2026-11-17 only the relay counted, so a
- * browser Hive reached fine through the cloud still showed SET.
- */
-export function connectionBadge(relay = {}, cloud = {}) {
-  const r = relay?.state
-  const c = cloud?.state
-  if (r === 'connected' || c === 'connected') return { state: 'connected', text: 'ON', color: '#078B70' }
-  if ((c === 'off' || !c) && (!r || r === 'needs-setup')) return { state: 'needs-setup', text: c ? 'SET' : '', color: '#B54736' }
-  return { state: c === 'unauthorized' || r === 'unauthorized' ? 'unauthorized' : 'offline', text: '!', color: '#B54736' }
-}
-
 export async function runCloudPeer({
   browserApi = api,
   executeCommand,
   getConfig,
-  onMessage = null,
   onStatus = () => {},
   fetchImpl = fetch,
   kind = browserKind(),
@@ -158,14 +118,6 @@ export async function runCloudPeer({
       return
     }
     try {
-      if (onMessage) {
-        try {
-          await deliverMessages(board, onMessage, { fetchImpl })
-        } catch (error) {
-          /* Only a refused key stops the loop; anything else waits for the next round. */
-          if (error?.status === 401) throw error
-        }
-      }
       const { command } = await boardCall(board, `/v1/browser/next?browser=${kind}&wait=${ASK_WAIT_S}`, undefined, {
         fetchImpl,
         timeoutMs: ASK_TIMEOUT_MS,

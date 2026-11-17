@@ -460,7 +460,7 @@ enum DashboardAPI {
     }
 
     /// One request through Hive's request socket: a JSON line out, a JSON line back
-    /// (`{ok, receiptId?, status?, error?}`), read the way desktop/local-request.mjs reads it.
+    /// (`{ok, receiptId?, status?, error?}`).
     static func toHive(_ text: String, socket path: String) -> [String: Any] {
         let notRunning: [String: Any] = ["accepted": false, "error": "Hive isn't running on this Mac, so it can't take a request."]
         let unknown: [String: Any] = ["accepted": NSNull(), "error": "No answer from Hive; it may have started anyway."]

@@ -127,7 +127,6 @@ pub const FORBIDDEN_PATHS: &[(&str, &str)] = &[
     ("cloud/vm-agent/posts.mjs", "the VM poster's approval flow"),
     ("cloud/vm-agent/poster.mjs", "the VM poster's approval flow"),
     ("cloud/vm-agent/hive-cred.mjs", "credentials"),
-    ("cloud/server/approval*", "the VM poster's approval flow"),
     (
         "desktop/app/crates/hive/hive-core/src/request_ledger.rs",
         "the one-way quote check",

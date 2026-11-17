@@ -7,7 +7,7 @@
     "ios": "npm run ios:sync && npx cap open ios",
     "ios:sync": "npm run build:ios && npx cap sync ios && node ../cloud/shared/hiveCloud.mjs fill ios/App/App",
     "ios:archive": "bash scripts/archive-ios.sh",
-    "ios:testflight": "PENDANT_UPLOAD_TESTFLIGHT=1 bash scripts/archive-ios.sh"
+    "ios:testflight": "HIVE_UPLOAD_TESTFLIGHT=1 bash scripts/archive-ios.sh"
   },
   "dependencies": {
     "@capacitor/cli": "^8.4.2",

@@ -5,10 +5,8 @@
 #
 #   browser/safari/scripts/build-appex.sh OUT.appex BUNDLE_ID
 #
-# BUNDLE_ID must start with Hive.app's own identifier, and must stay the same across releases: a
-# Hive update swaps the whole app bundle, which can reset Safari's storage for the extension, and the
-# pairing then comes back from the copy SafariWebExtensionHandler.swift keeps in the extension's own
-# container, which is named by BUNDLE_ID.
+# BUNDLE_ID must start with Hive.app's own identifier, and must stay the same across releases: Safari
+# remembers by it that the extension is turned on and which sites it may use.
 #
 # The result is unsigned; the caller signs it (desktop/app/Makefile).
 set -euo pipefail

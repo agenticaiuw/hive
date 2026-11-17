@@ -86,8 +86,8 @@ for (const platformDir of [chromeDir, safariDir]) {
     /*
      * Safari hands runtime.sendNativeMessage only to extensions that ask for nativeMessaging: without
      * it the API isn't there at all, so the popup never got its key to Hive's cloud from the app
-     * ("hive:key") and the pairing escrow did nothing (2026-11-16). Chrome has no native host for
-     * this extension, so only Safari asks.
+     * ("hive:key") (2026-11-16). Chrome gets its key from its own native host
+     * (hive.board_key) and asks for it in the source manifest.
      */
     if (!manifest.permissions.includes('nativeMessaging')) manifest.permissions.push('nativeMessaging')
     fs.rmSync(path.join(platformDir, 'sidepanel.html'), { force: true })

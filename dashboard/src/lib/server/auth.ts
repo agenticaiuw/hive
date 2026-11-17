@@ -1,12 +1,16 @@
 /**
- * Pairing-code session auth for the dashboard
- * hand-written Worker entry (`worker/index.ts`). Every constant, status code,
+ * Access-key session auth for the dashboard. Every constant, status code,
  * header and comparison here is load-bearing: the deployed dashboard is a
  * public URL that gates itself, and the test-suite asserts the exact bytes.
  */
 import type { RuntimeEnv } from "./env";
 
-const SESSION_COOKIE = "__Host-pendant_session";
+const SESSION_COOKIE = "__Host-hive_session";
+/*
+ * The cookie's name before 2026-11-17. A session signed in under it is still read, so nobody is
+ * signed out by the rename; it lasts at most SESSION_TTL_SECONDS, so after 2026-12-17 this can go.
+ */
+const OLD_SESSION_COOKIE = "__Host-pendant_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const MIN_ACCESS_KEY_LENGTH = 16;
 const MIN_SESSION_SECRET_LENGTH = 32;
@@ -72,10 +76,12 @@ export async function login(
 }
 
 export function logout(request: Request): Response {
-  return redirectWithCookie(
+  const response = redirectWithCookie(
     new URL("/login", request.url),
     `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
   );
+  response.headers.append("Set-Cookie", `${OLD_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+  return response;
 }
 
 export async function hasValidSession(
@@ -89,11 +95,9 @@ export async function hasValidSession(
   // Raw string parsing, not a cookie API: the token is unpadded base64url and
   // must not be re-decoded on the way in or out.
   const cookies = request.headers.get("cookie") || "";
-  const token = cookies
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-    ?.slice(SESSION_COOKIE.length + 1);
+  const cookieParts = cookies.split(";").map((part) => part.trim());
+  const named = (name: string) => cookieParts.find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
+  const token = named(SESSION_COOKIE) || named(OLD_SESSION_COOKIE);
 
   if (!token) {
     return false;

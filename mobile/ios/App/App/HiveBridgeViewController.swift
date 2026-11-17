@@ -6,7 +6,7 @@ import WebKit
 /// origin over https and deny anything else (a third-party iframe, an injected
 /// frame, a downgraded http load). Every other `WKUIDelegate` responsibility is
 /// forwarded to Capacitor untouched.
-final class PendantMediaCaptureUIDelegate: NSObject, WKUIDelegate {
+final class HiveMediaCaptureUIDelegate: NSObject, WKUIDelegate {
     private let wrapped: WKUIDelegate
     /// The only origin this app is allowed to hand the microphone to: the host of
     /// `server.url` in capacitor.config.json, which the build points at the owner's
@@ -97,14 +97,14 @@ final class PendantMediaCaptureUIDelegate: NSObject, WKUIDelegate {
     }
 }
 
-@objc(PendantBridgeViewController)
-final class PendantBridgeViewController: CAPBridgeViewController {
+@objc(HiveBridgeViewController)
+final class HiveBridgeViewController: CAPBridgeViewController {
     /// `WKWebView.uiDelegate` is weak, so the wrapper has to be retained here.
-    private var mediaCaptureDelegate: PendantMediaCaptureUIDelegate?
+    private var mediaCaptureDelegate: HiveMediaCaptureUIDelegate?
 
     override func capacitorDidLoad() {
         if let webView = webView, let capacitorDelegate = webView.uiDelegate {
-            let delegate = PendantMediaCaptureUIDelegate(wrapping: capacitorDelegate,
+            let delegate = HiveMediaCaptureUIDelegate(wrapping: capacitorDelegate,
                                                          dashboardHost: bridge?.config.serverURL.host ?? "")
             mediaCaptureDelegate = delegate
             webView.uiDelegate = delegate

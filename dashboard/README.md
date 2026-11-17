@@ -7,8 +7,7 @@ dashboard; a surface that needs one hosts this folder's build.
 Its home page (`/`) is the task board: every task the owner has given any agent (Claude Code,
 Codex, Hive) on any machine, saved by `hive-tasks` and synced to the cloud board (`cloud/tasks`),
 with a box to hand an agent the next one. What needs the owner comes first, then what's being
-worked on, what hasn't started, and what's done. `/hive`
-and `/pc` are as before.
+worked on, what hasn't started, and what's done.
 
 ## One app, every host
 
@@ -16,8 +15,7 @@ and `/pc` are as before.
 | --- | --- | --- | --- |
 | Hive's Mac app | `npm run build:desktop` → `build-desktop/` (`make build/dashboard` in `desktop/app` copies it to `desktop/app/build/dashboard`) | `hive://app/` in Hive.app's Dashboard window | the window itself (`desktop/app/workspace-engine/Sources/UnifiedAgent/dashboard.swift`) |
 | Website | `npm run build` → `.svelte-kit/cloudflare` | the `hive-dashboard` Worker | this app's server routes |
-| Phone, browser extension | next: the desktop build, hosted the same way | | |
-| Old Mac agent | `npm run build:agent` → `build-agent/` | `http://127.0.0.1:8000/dashboard` | the Python agent's routes |
+| Phone app, browser extension side panel | the website, loaded in the app's web view or the side panel | the `hive-dashboard` Worker | this app's server routes |
 
 Every host answers the same task routes, so the pages never branch on where they run:
 
@@ -28,20 +26,18 @@ Every host answers the same task routes, so the pages never branch on where they
 - `POST /api/agents/send` with `{agent, text}` → `{accepted: true | false | null, receiptId?,
   error?}`. `null` means it may have started.
 
-In the Mac app, the agent is Hive itself, through its request socket. On the website, `/api/tasks`
-reads the board through the `TASKS` service binding with the `TASKS_TOKEN` secret, and sending
-isn't wired yet.
+In the Mac app, the agent is Hive itself, through its request socket. On the website, the routes
+reach the board through the `TASKS` service binding with the `TASKS_TOKEN` secret.
 
-`src/lib/dataSource.ts` is the only file that knows which backend the pipeline views talk to.
-The task routes are the same everywhere, so they need no switch.
+`src/lib/dataSource.ts` is the one data layer; the routes are the same everywhere, so it needs no
+switch.
 
 ## Authentication
 
-`src/hooks.server.ts` reproduces the Worker gate exactly: an HMAC-signed
-`__Host-pendant_session` cookie with a 30-day TTL, `POST /api/auth/login` and
-`POST /api/auth/logout` handled before any session check, `/login` plus static
-assets public, page requests redirected to `/login?returnTo=…`, and `/api/*`
-answered with a 401 before any relay call.
+`src/hooks.server.ts` is the gate: an HMAC-signed `__Host-hive_session` cookie with a 30-day
+TTL, `POST /api/auth/login` and `POST /api/auth/logout` handled before any session check,
+`/login` plus static assets public, page requests redirected to `/login?returnTo=…`, and `/api/*`
+answered with a 401 before the board is asked anything.
 
 Set `DASHBOARD_ACCESS_KEY` to a random value of at least 16 characters and
 `DASHBOARD_SESSION_SECRET` to an independent random value of at least 32
@@ -54,8 +50,7 @@ SvelteKit's server-only dynamic private env before being stashed on
 `event.locals.runtimeEnv`. Worker bindings take precedence. Vite reads the one
 repo-root `.env`; the shared `PAIRING_CODE` / `SESSION_SECRET` names are mapped
 server-side to the dashboard auth names, and no credential is copied into a
-`VITE_*` variable. If there is no `RELAY` service binding, the relay helpers use
-`fetch(RELAY_URL + path)`.
+`VITE_*` variable. Without the `TASKS` service binding the board is reached by `TASKS_URL`.
 
 ## Local development
 
@@ -65,10 +60,9 @@ npm run dev
 ```
 
 `vite dev` emulates the Worker bindings through Wrangler against the `local`
-environment in `wrangler.jsonc` — same vars, no service binding, because the
-remote relay Worker cannot be stood up locally. Put the values described in
-the repository's `.env.example` in the single repo-root `.env`; Vite loads them
-only into the server environment and the relay falls back to `RELAY_URL`.
+environment in `wrangler.jsonc` — same vars, no service binding. Put the values described in
+the repository's `.env.example` in the single repo-root `.env`; Vite loads them only into the
+server environment.
 
 ## Deploy
 
@@ -76,12 +70,10 @@ only into the server environment and the relay falls back to `RELAY_URL`.
 npm run deploy:cloudflare
 ```
 
-Deploys the `hive-dashboard` Worker with the `RELAY` service binding to
-`hive-relay` and the `TASKS` binding to `hive-tasks`. The secrets are never in
-`wrangler.jsonc`:
+Deploys the `hive-dashboard` Worker with the `TASKS` binding to `hive-tasks`. The secrets are
+never in `wrangler.jsonc`:
 
 ```bash
-wrangler secret put RELAY_API_KEY
 wrangler secret put DASHBOARD_ACCESS_KEY
 wrangler secret put DASHBOARD_SESSION_SECRET
 wrangler secret put TASKS_TOKEN   # the task board's machine token (hive-tasks' cloud token)

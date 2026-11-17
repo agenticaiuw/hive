@@ -1,12 +1,10 @@
-export const DEFAULT_AGENT_URL = 'http://127.0.0.1:8000'
 export const DEFAULT_TARGET_MODE = 'last-focused'
 export const MAX_SELECTOR_LENGTH = 2_000
 export const MAX_TEXT_LENGTH = 50_000
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost'])
-const TARGET_MODES = new Set(['last-focused', 'current-active', 'new-tab'])
+export const TARGET_MODES = new Set(['last-focused', 'current-active', 'new-tab'])
 
-/** Commands the extension can execute. Keep in sync with background.js. */
+/** Commands the extension can execute. Keep in sync with executor.js. */
 export const COMMAND_TYPES = new Set([
   'navigate',
   'click',
@@ -36,65 +34,6 @@ const READ_MODES = new Set([
   'forms',
   'landmarks',
 ])
-
-/*
- * The MAC agent's URL, and only ever the Mac agent's.
- *
- * This deliberately did NOT grow an https branch when the extension learned to
- * talk to the relay directly. The value returned here is the base URL that
- * background.js sends `Authorization: Bearer <agentToken>` to, and agentToken
- * is the Mac's credential — so a single field accepting both origins is a
- * single field that can aim either credential at either host, silently, since
- * both hosts answer a wrong token with the same 401. The relay peer has its
- * own field, its own allowlist and its own token in relay-peer.js
- * (normalizeRelayUrl); one credential is bound to each, and a misconfiguration
- * costs a failed request instead of a leaked token.
- *
- * The two endpoints are not interchangeable in any case: the Mac serves
- * /browser/poll and /plan, the relay serves /v1/node/*. Pointing this at the
- * relay would produce a poller 404ing forever against a host now holding the
- * Mac's token.
- */
-export function normalizeAgentUrl(value) {
-  const candidate = String(value ?? '').trim() || DEFAULT_AGENT_URL
-  let url
-
-  try {
-    url = new URL(candidate)
-  } catch {
-    throw new Error('Agent URL must be a valid URL.')
-  }
-
-  if (url.protocol !== 'http:' || !LOOPBACK_HOSTS.has(url.hostname)) {
-    throw new Error(
-      'Agent URL must use http://127.0.0.1 or http://localhost. ' +
-        'The relay is reached through the relay peer (relayUrl), not this field.',
-    )
-  }
-
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error('Agent URL cannot contain credentials, a query, or a hash.')
-  }
-
-  if (url.pathname !== '/' && url.pathname !== '') {
-    throw new Error('Agent URL must not contain a path.')
-  }
-
-  return url.origin
-}
-
-export function normalizeConfig(values = {}) {
-  const targetMode = TARGET_MODES.has(values.targetMode)
-    ? values.targetMode
-    : DEFAULT_TARGET_MODE
-
-  return {
-    agentUrl: normalizeAgentUrl(values.agentUrl),
-    agentToken: String(values.agentToken ?? '').trim(),
-    deviceName: String(values.deviceName ?? '').trim().slice(0, 80),
-    targetMode,
-  }
-}
 
 export function validateNavigationUrl(value) {
   let url
@@ -201,7 +140,7 @@ export function normalizeCommandParams(params) {
 
 export function validateCommand(command, now = Date.now()) {
   if (!command || typeof command !== 'object') {
-    throw new Error('The local agent sent an invalid browser command.')
+    throw new Error('Hive sent an invalid browser command.')
   }
 
   /* Checked before the action is inspected: a stale command should be refused
@@ -359,166 +298,6 @@ export function truncateTitle(title, max = 80) {
   const text = String(title ?? '').replace(/\s+/g, ' ').trim()
   if (text.length <= max) return text
   return `${text.slice(0, max - 1)}…`
-}
-
-export function retryDelay(attempt, baseMs = 750, maximumMs = 15_000) {
-  const boundedAttempt = Math.max(0, Math.min(Number(attempt) || 0, 8))
-  return Math.min(maximumMs, baseMs * 2 ** boundedAttempt)
-}
-
-/* ===================================================================== *
- * Idempotency: a retried command must not act twice.
- * ===================================================================== */
-
-/**
- * The identity a replay would arrive under.
- *
- * The agent's own lease expires at 45s and its caller gives up at 45s, so the
- * dangerous sequence is entirely invisible from the agent's side: the extension
- * runs `click`, the POST of the result fails (postResultWithRetry gives up after
- * three attempts), and the command is still sitting in the agent's map. Anything
- * that hands it out again — a re-poll, a redelivery, an agent that decided to
- * retry — makes the same click happen a second time. The agent cannot tell
- * whether the first one landed; only the side that ran it can.
- *
- * An explicit idempotencyKey lets a caller declare two enqueues to be the same
- * act. Without one the commandId is still a perfectly good identity for the
- * replay case, which is the case that actually bites.
- */
-export function commandIdentity(command) {
-  const declared = String(command?.idempotencyKey ?? '').trim()
-  if (declared) return `idem:${declared.slice(0, 200)}`
-
-  const commandId = String(command?.commandId ?? '').trim()
-  return commandId ? `cmd:${commandId}` : ''
-}
-
-const TEXT_ENCODER = new TextEncoder()
-
-export function byteLengthOf(value) {
-  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? ''
-  return TEXT_ENCODER.encode(text).length
-}
-
-/*
- * Bounded in BYTES, not in entries.
- *
- * A count cap is a budget written in the wrong unit: a hundred `read_page`
- * results at 50 KB each is five megabytes while the counter still reads
- * "100 of 500". This store lives in a service worker that Safari is free to
- * kill, so the cost of being wrong is the whole bridge going quiet.
- */
-const LEDGER_MAX_BYTES = 128 * 1024
-
-/*
- * Nothing older than this can be replayed: validateCommand above refuses any
- * command whose createdAt is more than MAX_COMMAND_AGE_MS in the past, so a
- * ledger entry older than a few multiples of that can never be consulted again.
- * Age eviction runs before byte eviction so the store sheds dead weight before
- * it sheds anything that could still stop a double action.
- */
-const LEDGER_TTL_MS = 5 * MAX_COMMAND_AGE_MS
-
-/**
- * Remember what this extension has already done, so a replay is answered rather
- * than re-executed.
- *
- * Under byte pressure a full entry is first downgraded to a stub — the fact of
- * execution, without the result — because forgetting the *result* costs the
- * caller one repeated read, while forgetting the *execution* costs the owner a
- * second click on a real page. Only when stubs alone still exceed the budget is
- * an entry dropped, oldest first.
- */
-export function createCommandLedger({
-  maxBytes = LEDGER_MAX_BYTES,
-  ttlMs = LEDGER_TTL_MS,
-} = {}) {
-  /* Insertion-ordered, so "oldest" is just the first key. */
-  const entries = new Map()
-  let bytes = 0
-
-  const sizeOf = (entry) => byteLengthOf(entry.result) + byteLengthOf(entry.key) + 64
-
-  const drop = (key) => {
-    const entry = entries.get(key)
-    if (!entry) return
-    bytes -= entry.bytes
-    entries.delete(key)
-  }
-
-  const stub = (entry) => {
-    if (entry.stubbed) return false
-    bytes -= entry.bytes
-    entry.result = {
-      ok: false,
-      error:
-        'This command already ran in the browser. Its result was dropped to stay ' +
-        'inside the extension result budget; re-running it was refused because ' +
-        'the first run may have changed the page.',
-    }
-    entry.stubbed = true
-    entry.bytes = sizeOf(entry)
-    bytes += entry.bytes
-    return true
-  }
-
-  const reclaim = (now) => {
-    for (const [key, entry] of entries) {
-      if (now - entry.storedAt > ttlMs) drop(key)
-    }
-
-    /* Each pass strictly shrinks the store, so both loops terminate. */
-    for (const entry of entries.values()) {
-      if (bytes <= maxBytes) break
-      stub(entry)
-    }
-
-    for (const key of [...entries.keys()]) {
-      if (bytes <= maxBytes) break
-      drop(key)
-    }
-  }
-
-  return {
-    recall(key, now = Date.now()) {
-      if (!key) return null
-      const entry = entries.get(key)
-      if (!entry) return null
-      if (now - entry.storedAt > ttlMs) {
-        drop(key)
-        return null
-      }
-      return entry
-    },
-
-    remember(key, result, now = Date.now()) {
-      if (!key) return null
-      drop(key)
-      const entry = { key, result, storedAt: now, stubbed: false, bytes: 0 }
-      entry.bytes = sizeOf(entry)
-      /* A single result larger than the whole budget is stubbed on arrival
-       * rather than refused: the fact that it ran is the part worth keeping. */
-      if (entry.bytes > maxBytes) {
-        entries.set(key, entry)
-        bytes += entry.bytes
-        stub(entry)
-      } else {
-        entries.set(key, entry)
-        bytes += entry.bytes
-      }
-      reclaim(now)
-      return entries.get(key) ?? null
-    },
-
-    stats() {
-      return { entries: entries.size, bytes, maxBytes, ttlMs }
-    },
-
-    clear() {
-      entries.clear()
-      bytes = 0
-    },
-  }
 }
 
 /* ===================================================================== *
@@ -958,8 +737,8 @@ export function provenanceFor({ command, tab, result, locator, now = Date.now() 
  * The last thing that runs before a result crosses out of the browser.
  *
  * Everything here is deliberately after execution and before the POST: the
- * agent is a different process with its own log, its own store and a cloud
- * relay attached, so a value that reaches it has effectively left the machine.
+ * result goes to Hive's cloud, so a value that reaches it has effectively left
+ * the machine.
  */
 export function sanitizeExtraction(result, { rules = PRIVACY_RULES } = {}) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) {

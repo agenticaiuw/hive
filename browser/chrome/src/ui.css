@@ -1,8 +1,8 @@
 /*
- * Hive's browser extension: the popup, its pop-out console and the setup card.
- * Hive's colours, the same as its dashboard and Mac app (dashboard/src/globals.css):
- * warm near-black and honey gold from the icon. Gold is for Hive and for the main
- * button; green, amber and red only say how something is doing.
+ * Hive's browser extension popup. Hive's colours, the same as its dashboard and Mac app
+ * (dashboard/src/globals.css): warm near-black and honey gold from the icon. Gold is for Hive and
+ * for the main button; green, amber and red only say how something is doing. Hive's floating window
+ * on the Mac (desktop/app/tools/captions.swift) draws the same card with the same values.
  */
 :root {
   color-scheme: dark;
@@ -11,20 +11,15 @@
   --muted: #958d81;
   --background: #141210;
   --panel: #1c1a17;
-  --field: #110f0d;
   --raise-1: rgba(255, 244, 228, 0.04);
   --raise-2: rgba(255, 244, 228, 0.07);
-  --line: rgba(255, 244, 228, 0.09);
-  --line-strong: rgba(255, 244, 228, 0.16);
+  --line: rgba(255, 244, 228, 0.085);
+  --line-strong: rgba(255, 244, 228, 0.15);
   --gold: #f5c542;
   --gold-hover: #ffd45e;
   --gold-soft: rgba(245, 197, 66, 0.12);
   --on-gold: #1d1505;
-  --green: #7ad8a0;
-  --amber: #ffad5c;
-  --amber-soft: rgba(255, 173, 92, 0.1);
   --red: #ff7b70;
-  --red-soft: rgba(255, 123, 112, 0.1);
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, ui-sans-serif,
     sans-serif;
@@ -45,31 +40,22 @@ body {
   background: var(--background);
 }
 
-main {
-  width: min(680px, calc(100% - 32px));
-  margin: 32px auto;
-}
-
 .popup {
   width: 360px;
-  margin: 0;
   padding: 16px;
 }
 
-.eyebrow {
-  margin: 0 0 8px;
-  color: var(--gold);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
-h1 {
-  margin: 0;
-  font-size: clamp(28px, 6vw, 44px);
-  font-weight: 600;
-  letter-spacing: -0.03em;
+.brand-logo {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
 }
 
 h2 {
@@ -77,122 +63,7 @@ h2 {
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.01em;
-}
-
-p {
-  color: var(--ink-2);
-  line-height: 1.5;
-}
-
-.card {
-  margin-top: 20px;
-  padding: 20px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--panel);
-}
-
-.status-row,
-.button-row,
-.permission-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.status-row,
-.permission-row {
-  justify-content: space-between;
-}
-
-.button-row {
-  flex-wrap: wrap;
-  margin-top: 14px;
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--amber);
-}
-
-.dot.connected {
-  background: var(--green);
-}
-
-.dot.error {
-  background: var(--red);
-}
-
-.status-copy {
-  flex: 1;
-}
-
-.status-copy strong,
-.status-copy small {
-  display: block;
-}
-
-.status-copy small,
-.meta,
-.help {
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-label {
-  display: block;
-  margin-top: 14px;
-  color: var(--ink-2);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-label.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-label.checkbox input {
-  width: auto;
-  margin-top: 0;
-}
-
-input,
-select {
-  width: 100%;
-  margin-top: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  outline: none;
-  background: var(--field);
-  color: var(--ink);
-  font: inherit;
-}
-
-input::placeholder {
-  color: var(--muted);
-}
-
-select {
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 26px;
-  background: var(--field)
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23958d81' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
-    no-repeat right 9px center / 9px;
-  cursor: pointer;
-}
-
-input:focus,
-select:focus {
-  border-color: rgba(245, 197, 66, 0.55);
-  box-shadow: 0 0 0 3px rgba(245, 197, 66, 0.12);
+  white-space: nowrap;
 }
 
 button {
@@ -211,603 +82,27 @@ button:hover {
   background: var(--raise-2);
 }
 
-button.primary {
-  border-color: transparent;
-  background: var(--gold);
-  color: var(--on-gold);
-}
-
-button.primary:hover {
-  background: var(--gold-hover);
-}
-
-button.danger {
-  border-color: rgba(255, 123, 112, 0.4);
-  color: var(--red);
-}
-
 button:disabled {
   cursor: wait;
   opacity: 0.5;
 }
 
-.notice {
-  min-height: 0;
-  margin: 10px 0 0;
-  color: var(--green);
-  font-size: 12px;
-}
-
-.notice:empty {
-  display: none;
-}
-
-.notice.error {
-  color: var(--red);
-}
-
-/*
- * The setup card's COMPACT state: credentials stored, brain not live yet.
- * The code box and its row disappear — the owner just pasted the code and
- * must not be asked for it again (measured live 2026-08-12) — leaving the
- * one-line "Starting the brain…" and, underneath, the escape hatch back to
- * the full card for the stored-but-dead-credential case.
- */
-.setup-compact input,
-.setup-compact .setup-row,
-.setup-compact .setup-help {
-  display: none;
-}
-
-.setup-repair {
-  min-height: 0;
-  margin-top: 6px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.setup-repair:hover {
-  background: none;
-  color: var(--ink);
-}
-
-/* The page-engine banner: amber, like every "this needs your awareness"
- * state — the bridge works, but it lives and dies with this document. */
-.engine-note {
-  margin: 12px 0 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 173, 92, 0.35);
-  border-radius: 8px;
-  background: var(--amber-soft);
-  color: var(--amber);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-code {
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-
-hr {
-  margin: 16px 0;
-  border: 0;
-  border-top: 1px solid var(--line);
-}
-
-.privacy {
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: var(--panel);
-  color: var(--ink-2);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-/* ===== Popup command console ===== */
-
-.popup-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.brand-logo {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-}
-
-.status-mini {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--raise-1);
-  color: var(--ink-2);
-  font-size: 11px;
-  font-weight: 550;
-}
-
-.status-mini[hidden] {
-  display: none;
-}
-
-.status-mini small {
-  font-size: inherit;
-}
-
-.header-tools {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-}
-
-/* The pop-out pin: quiet until hovered, like the status text beside it. */
-.icon-button {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  min-height: 28px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-}
-
-/* `display: grid` above would otherwise beat the UA's [hidden] rule — and
- * popup.js hides this control on the standalone console, which IS the
- * pop-out. */
-.icon-button[hidden] {
-  display: none;
-}
-
-.icon-button:hover {
-  background: var(--raise-2);
-  color: var(--ink);
-}
-
-/* ===== Setup card =====
- * The deleted settings page, reduced to its one real act: code in, Connect.
- * Sized for the 400px popover — the lifetime select and the button share a
- * row so the card stays three lines tall. */
-
-.setup {
-  margin-top: 14px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel);
-}
-
-.setup-title {
-  margin: 0;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.setup-help {
-  margin: 4px 0 10px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.setup-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.setup-lifetime {
-  flex: 1;
-  margin-top: 0;
-  font-size: 11px;
-  font-weight: 550;
-  color: var(--muted);
-}
-
-.setup-lifetime select {
-  margin-top: 4px;
-}
-
-.setup-row button {
-  flex: 0 0 auto;
-  min-height: 34px;
-  padding: 0 16px;
-}
-
-.setup .notice {
-  margin-top: 8px;
-}
-
+/* Shown only while Hive reaches this browser and the pages grant is missing (popup.js). */
 .grant-pages {
   width: 100%;
   margin-top: 12px;
 }
 
-.command-form {
-  margin-top: 14px;
-}
-
-.command-form[hidden] {
-  display: none;
-}
-
-.command-row {
-  display: flex;
-  align-items: stretch;
-  gap: 6px;
-  padding: 4px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--field);
-}
-
-.command-row:focus-within {
-  border-color: rgba(245, 197, 66, 0.55);
-}
-
-.command-row input {
-  flex: 1;
-  margin-top: 0;
-  padding: 6px 4px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.command-row input:focus {
-  box-shadow: none;
-}
-
-.command-row button {
-  flex: 0 0 auto;
-}
-
-/* ===== Mic =====
- * Same grammar as the dashboard's CommandBox mic: idle shows the mic glyph,
- * a live session swaps it for the stop square and pulses. */
-
-.mic-button {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  padding: 0;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-}
-
-.mic-button:hover {
-  color: var(--ink);
-}
-
-.mic-button .mic-stop-glyph {
-  display: none;
-}
-
-.mic-button.is-listening {
-  background: var(--red-soft);
-  color: var(--red);
-  animation: mic-pulse 1.6s ease-in-out infinite;
-}
-
-.mic-button.is-listening .mic-glyph {
-  display: none;
-}
-
-.mic-button.is-listening .mic-stop-glyph {
-  display: block;
-}
-
-.mic-button:disabled {
-  cursor: not-allowed;
-}
-
-@keyframes mic-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 123, 112, 0.28);
-  }
-  50% {
-    box-shadow: 0 0 0 5px rgba(255, 123, 112, 0);
-  }
-}
-
-.check-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  color: var(--ink-2);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.check-row input {
-  width: auto;
-  margin: 0;
-  accent-color: var(--gold);
-}
-
-.command-form .notice {
-  margin-top: 8px;
-}
-
-.history {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 320px;
-  margin-top: 12px;
-  overflow-y: auto;
-}
-
-.history:empty,
-.history[hidden] {
-  display: none;
-}
-
-.entry {
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-}
-
-.entry-command {
-  margin: 0;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.entry-chip {
-  display: inline-block;
-  margin-right: 8px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: rgba(122, 216, 160, 0.12);
-  color: var(--green);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.entry-parked .entry-chip {
-  background: var(--amber-soft);
-  color: var(--amber);
-}
-
-.entry-failed .entry-chip,
-.entry-refused .entry-chip,
-.entry-denied .entry-chip,
-.entry-lost .entry-chip {
-  background: var(--red-soft);
-  color: var(--red);
-}
-
-.entry-working .entry-chip {
-  background: var(--gold-soft);
-  color: var(--gold);
-}
-
-.entry-headline {
-  margin: 6px 0 0;
-  color: var(--ink-2);
-  font-size: 13px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.entry-detail {
-  max-height: 120px;
-  margin: 6px 0 0;
-  overflow: auto;
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.entry-link {
-  display: inline-block;
-  margin-top: 8px;
-  color: var(--gold);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-/*
- * The parked plan's own Approve/Deny. Same shape as .approval-actions on
- * purpose: this is the same question in the same popup, and there is no reason
- * for the owner to learn two layouts for "decide this".
- */
-.entry-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.entry-actions button {
-  flex: 1;
-}
-
-.entry-actions button:disabled {
-  cursor: not-allowed;
-}
-
-/* Why this one cannot be decided here — expired, or parked without its steps. */
-.entry-note {
-  margin: 8px 0 0;
-  color: var(--amber);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-/* ===== Approval cards =====
- * Amber, like every parked-waiting-for-you state here, and ABOVE the command
- * box: a question someone else is blocked on outranks a box for asking new
- * ones. */
-
-.approvals {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.approvals[hidden] {
-  display: none;
-}
-
-.approval {
-  padding: 12px 14px;
-  border: 1px solid rgba(255, 173, 92, 0.35);
-  border-radius: 10px;
-  background: var(--amber-soft);
-}
-
-.approval-summary {
-  margin: 0;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.approval-chip {
-  display: inline-block;
-  margin-right: 8px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--amber-soft);
-  color: var(--amber);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-  text-transform: lowercase;
-}
-
-.approval-detail {
-  margin: 6px 0 0;
-  color: var(--ink-2);
-  font-size: 12px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.approval-clock {
-  margin: 6px 0 0;
-  color: var(--amber);
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.03em;
-}
-
-.approval-clock.expired {
-  color: var(--red);
-}
-
-.approval-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.approval-actions button {
-  flex: 1;
-}
-
-.approval-decided,
-.approval-expired {
-  opacity: 0.65;
-}
-
-.approval-expired .approval-chip {
-  background: var(--red-soft);
-  color: var(--red);
-}
-
-.approval button:disabled {
-  cursor: not-allowed;
-}
-
 /* The Dashboard button: one quiet full-width row at the foot of the popup. */
-.popup > .button-row {
+.button-row {
+  display: flex;
   margin-top: 12px;
 }
 
-.popup > .button-row button {
+.button-row button {
   flex: 1;
 }
 
-/* ===== Standalone console =====
- * popup.html?standalone=1 puts .standalone on <body>: the same DOM as the
- * popover, given room. The column stays readable rather than stretching edge
- * to edge, and the history becomes the flexible region so a tall window shows
- * more outcomes instead of more empty footer. */
-
-.standalone {
-  min-width: 360px;
-}
-
-.standalone .popup {
-  display: flex;
-  flex-direction: column;
-  width: min(560px, 100%);
-  min-height: 100vh;
-  margin: 0 auto;
-  padding: 20px;
-}
-
-.standalone .history {
-  flex: 1 1 auto;
-  max-height: none;
-  min-height: 60px;
-}
-
-/*
- * Two status chips share the header (bridge + brain). The chips shrink and the
- * title does not: which brain is in use is a glance, the product name is a
- * heading, and a heading that reflows every time a peer changes state reads as
- * the layout breaking.
- */
-.popup-header .eyebrow,
-.popup-header h2 {
-  white-space: nowrap;
-}
-
-#brain-mini small {
-  overflow-wrap: anywhere;
-}
-
-/* ---- The ask box (ask-hive.js): the dashboard's composer, in the popup ---------------------- */
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -816,25 +111,22 @@ hr {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
-.legacy[hidden],
-.header-tools .status-mini {
-  display: none !important;
-}
+
+/* ---- The ask box (ask-hive.js): the dashboard's composer, in the popup ---------------------- */
 .ask {
   display: grid;
   gap: 10px;
   padding: 10px 10px 8px;
   border-radius: 14px;
-  background: #1c1a17;
-  border: 1px solid rgba(255, 244, 228, 0.15);
-  box-shadow: inset 0 1px 0 rgba(255, 244, 228, 0.04), 0 16px 40px -24px rgba(0, 0, 0, 0.8);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  box-shadow: inset 0 1px 0 var(--raise-1), 0 16px 40px -24px rgba(0, 0, 0, 0.8);
 }
 .ask:focus-within {
   border-color: rgba(245, 197, 66, 0.4);
 }
 .ask textarea {
   width: 100%;
-  box-sizing: border-box;
   resize: none;
   border: 0;
   outline: none;
@@ -845,7 +137,7 @@ hr {
   line-height: 1.4;
 }
 .ask textarea::placeholder {
-  color: #958d81;
+  color: var(--muted);
 }
 .ask-row {
   display: flex;
@@ -858,20 +150,20 @@ hr {
   align-items: center;
   gap: 6px;
   height: 32px;
+  min-height: 0;
   padding: 0 10px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 244, 228, 0.15);
+  border: 1px solid var(--line-strong);
   background: transparent;
   color: var(--ink-2);
-  cursor: pointer;
 }
 .ask-mic .ask-listening {
   display: none;
 }
 .ask-mic.on {
   border-color: rgba(245, 197, 66, 0.55);
-  background: rgba(245, 197, 66, 0.12);
-  color: #f5c542;
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 .ask-mic.on .ask-listening {
   display: inline;
@@ -886,13 +178,16 @@ hr {
 }
 .ask-send {
   height: 32px;
+  min-height: 0;
   padding: 0 16px;
   border-radius: 999px;
   border: 0;
-  background: #f5c542;
-  color: #1d1505;
+  background: var(--gold);
+  color: var(--on-gold);
   font-weight: 650;
-  cursor: pointer;
+}
+.ask-send:hover {
+  background: var(--gold-hover);
 }
 .ask-send:disabled {
   opacity: 0.5;
@@ -902,16 +197,17 @@ hr {
   margin: 0;
   color: var(--ink-2);
   font-size: 0.8125rem;
+  line-height: 1.5;
 }
 .ask-note.bad {
-  color: #ff7b70;
+  color: var(--red);
 }
 .ask-rules {
   display: grid;
   gap: 4px;
   margin: 0;
   padding: 8px 0 0;
-  border-top: 1px solid rgba(255, 244, 228, 0.085);
+  border-top: 1px solid var(--line);
   list-style: none;
 }
 .ask-rules li {
@@ -924,11 +220,12 @@ hr {
 }
 .ask-rules button {
   flex: none;
+  min-height: 0;
   padding: 2px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 244, 228, 0.15);
+  border: 1px solid var(--line-strong);
   background: transparent;
   color: var(--ink-2);
   font-size: 0.75rem;
-  cursor: pointer;
+  font-weight: 400;
 }

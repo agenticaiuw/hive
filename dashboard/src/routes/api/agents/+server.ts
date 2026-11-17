@@ -1,6 +1,6 @@
 import { json } from "@sveltejs/kit";
 import type { RequestHandler } from "./$types";
-import { NO_STORE_HEADERS } from "$lib/server/relay";
+import { NO_STORE_HEADERS } from "$lib/server/http";
 import { NOT_CONNECTED, ORCHESTRATOR, boardConnected } from "$lib/server/agents";
 
 export const prerender = false;
