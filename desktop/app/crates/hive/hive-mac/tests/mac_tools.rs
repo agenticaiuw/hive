@@ -559,6 +559,56 @@ fn wait_for_control_waits_for_the_hand_back() {
 }
 
 #[test]
+fn repeated_wait_for_control_after_timeout_notifies_once_until_hand_back() {
+    let s = setup(true);
+    assert_eq!(s.tools.take().unwrap(), None);
+    s.helper.raw("human keyboard");
+
+    for _ in 0..3 {
+        let res = s
+            .tools
+            .call("wait_for_control", &json!({"timeout_seconds": 0}))
+            .unwrap();
+        assert!(is_error(&res), "{res}");
+    }
+    assert_eq!(s.system.notifications.lock().unwrap().len(), 1);
+
+    s.helper.raw("engage");
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 0}))
+        .unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert!(s.tools.holding());
+}
+
+#[test]
+fn wait_for_control_notifies_again_after_another_takeover() {
+    let s = setup(true);
+    assert_eq!(s.tools.take().unwrap(), None);
+    s.helper.raw("human keyboard");
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 0}))
+        .unwrap();
+    assert!(is_error(&res));
+
+    s.helper.raw("engage");
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 0}))
+        .unwrap();
+    assert!(!is_error(&res));
+    s.helper.raw("human mouse");
+    let res = s
+        .tools
+        .call("wait_for_control", &json!({"timeout_seconds": 0}))
+        .unwrap();
+    assert!(is_error(&res));
+    assert_eq!(s.system.notifications.lock().unwrap().len(), 2);
+}
+
+#[test]
 fn clipboard_and_unknown_tools() {
     let s = setup(true);
     *s.system.clipboard.lock().unwrap() = b"copied words".to_vec();
