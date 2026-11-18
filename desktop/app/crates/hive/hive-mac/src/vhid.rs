@@ -666,6 +666,13 @@ impl AgentVHID {
                     if fields.get("state") == Some("engaged") {
                         break Ok(true);
                     }
+                    if fields.get("state") == Some("disengaged")
+                        && fields.get("reason") == Some("watcher_unavailable")
+                    {
+                        break Err(VhidError::NotAllowed(
+                            "the safety watcher isn't working".into(),
+                        ));
+                    }
                 }
                 Err(Broken(e, _)) if timed_out(&e) => break Ok(false),
                 Err(Broken(e, _)) => break Err(e),
@@ -1493,6 +1500,44 @@ mod tests {
         assert_eq!(fmt0(640.4), "640");
         assert_eq!(fmt0(2.5), "2");
         assert_eq!(fmt0(3.5), "4");
+    }
+
+    #[test]
+    fn wait_engaged_stops_when_watcher_becomes_unavailable() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let helper = std::thread::spawn(move || {
+            let (mut status, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(status.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(request, "status\n");
+            status
+                .write_all(b"ok state=disengaged reason=trackpad\n")
+                .unwrap();
+
+            let (mut watch, _) = listener.accept().unwrap();
+            request.clear();
+            BufReader::new(watch.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(request, "watch\n");
+            watch
+                .write_all(b"ok watching\nevent state=disengaged reason=watcher_unavailable\n")
+                .unwrap();
+        });
+        let mac = AgentVHID::new(socket, 1.0, false);
+        let result = mac.wait_engaged(Some(Duration::from_secs(5)), false);
+        helper.join().unwrap();
+        assert!(
+            matches!(result, Err(VhidError::NotAllowed(_))),
+            "{result:?}"
+        );
     }
 
     #[test]
