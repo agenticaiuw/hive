@@ -1,0 +1,52 @@
+$ cargo test --offline --manifest-path /Users/runner/work/_temp/dream/ci/red/desktop/app/crates/hive/Cargo.toml -p hive-mac (11s)
+   Compiling serde_core v1.0.229
+   Compiling indexmap v2.14.2
+   Compiling smallvec v1.16.5
+   Compiling once_cell v1.21.4
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.41.1
+   Compiling serde_json v1.0.154
+   Compiling hive-core v0.1.0 (/Users/runner/work/_temp/dream/ci/red/desktop/app/crates/hive/hive-core)
+   Compiling hive-common v0.1.0 (/Users/runner/work/_temp/dream/ci/red/desktop/app/crates/hive/hive-common)
+   Compiling hive-mac v0.1.0 (/Users/runner/work/_temp/dream/ci/red/desktop/app/crates/hive/hive-mac)
+    Finished `test` profile [unoptimized] target(s) in 10.41s
+     Running unittests src/lib.rs (/Users/runner/work/_temp/dream/target/debug/deps/hive_mac-09304bbecdd35509)
+
+running 21 tests
+test activity::tests::private_apps_and_pages_are_logged_by_app_only ... ok
+test desktop::tests::addresses_lose_their_query ... ok
+test activity::tests::local_day_is_a_date ... ok
+test desktop::tests::many_tabs_are_cut_off ... ok
+test desktop::tests::no_browser_open_means_no_apple_events ... ok
+test desktop::tests::tabs_from_the_script ... ok
+test desktop::tests::the_front_is_the_app_its_window_and_a_browsers_page ... ok
+test desktop::tests::windows_and_tabs_read_front_to_back ... ok
+test activity::tests::a_line_only_when_the_front_changes ... ok
+test tools::tests::finds_phrases_and_lines ... ok
+test tools::tests::tool_list_matches_python ... ok
+test vhid::tests::chars ... ok
+test vhid::tests::combos ... ok
+test vhid::tests::helper_unavailable ... ok
+test vhid::tests::replies ... ok
+test vhid::tests::rounding_and_formatting_match_python ... ok
+test vhid::tests::screenshot_coordinates ... ok
+test vhid::tests::took_over_means_a_human_touched_something ... ok
+test vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable ... FAILED
+test desktop::tests::window_list_reads ... ok
+test process::tests::runs_feeds_and_times_out ... ok
+
+failures:
+
+---- vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable stdout ----
+
+thread 'vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable' (10015) panicked at hive-mac/src/vhid.rs:1530:9:
+Err(HelperUnavailable("agent-vhid-helper closed the connection"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable
+
+test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p hive-mac --lib`

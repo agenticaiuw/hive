@@ -1,0 +1,44 @@
+{
+  "head": "f45a8afba4bb65774ddcb2b94948ca688d6b952b",
+  "test": "72f6ecd88582db2a57681639bab37a33e0ff8072",
+  "stage": "green",
+  "red_failed": true,
+  "red_kind": "assertion",
+  "red_summary": "test vhid::tests::combos ... ok\ntest vhid::tests::helper_unavailable ... ok\ntest vhid::tests::replies ... ok\ntest vhid::tests::rounding_and_formatting_match_python ... ok\ntest vhid::tests::screenshot_coordinates ... ok\ntest vhid::tests::took_over_means_a_human_touched_something ... ok\ntest vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable ... FAILED\ntest desktop::tests::window_list_reads ... ok\ntest process::tests::runs_feeds_and_times_out ... ok\n\nfailures:\n\n---- vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable stdout ----\n\nthread 'vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable' (10015) panicked at hive-mac/src/vhid.rs:1530:9:\nErr(HelperUnavailable(\"agent-vhid-helper closed the connection\"))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    vhid::tests::wait_engaged_stops_when_watcher_becomes_unavailable\n\ntest result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s\n\nerror: test failed, to rerun pass `-p hive-mac --lib`",
+  "green": {
+    "passed": true,
+    "reasons": [],
+    "warnings": [
+      "no private-terms file: the private term check was skipped"
+    ],
+    "files": [
+      "desktop/app/crates/hive/hive-mac/src/vhid.rs"
+    ],
+    "test_lines": 35,
+    "code_lines": 7,
+    "packages": [
+      {
+        "Hive": "hive-mac"
+      }
+    ],
+    "tests": [
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-mac",
+        "ok": true,
+        "seconds": 23.4,
+        "summary": "116 passed, 0 failed, 0 ignored in 11 test binaries"
+      },
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml --workspace --no-run",
+        "ok": true,
+        "seconds": 36.4,
+        "summary": "compiled"
+      }
+    ]
+  },
+  "merge_commit": "e107a6e04afedf659da8247c08a348710f6a9c14",
+  "merged": true,
+  "branch_deleted": true,
+  "reasons": [],
+  "run_url": "https://github.com/agenticaiuw/hive/actions/runs/44279767460"
+}
