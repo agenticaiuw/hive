@@ -382,6 +382,18 @@ fn actions_after_a_takeover_carry_on_without_the_screen() {
 }
 
 #[test]
+fn trackpad_takeover_clears_the_agents_hold() {
+    let s = setup(true);
+    assert_eq!(s.tools.take().unwrap(), None);
+    assert!(s.tools.holding());
+
+    s.helper.raw("human trackpad");
+    s.tools.took_over();
+
+    assert!(!s.tools.holding(), "the user now has the mouse and keyboard");
+}
+
+#[test]
 fn the_mouse_and_keyboard_are_taken_only_for_a_screen_action() {
     let s = setup(false);
     s.tools.call("screenshot", &json!({})).unwrap();

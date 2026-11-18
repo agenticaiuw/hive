@@ -489,6 +489,7 @@ impl Control {
     /// The agent let go of the mouse and keyboard, or the user took them: the user's cursor goes
     /// back where it was on their screen and their app back in front. The agent's are noted.
     fn give_back(&self) {
+        lock(&self.state).holding = false;
         if self.release_shared() {
             return;
         }
