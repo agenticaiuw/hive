@@ -1,0 +1,45 @@
+{
+  "head": "960e9a2a3c13d58da503a9af6a5d67d347ff1076",
+  "test": "de9d67a24094b3ab2c8ff51bac177f31dd369047",
+  "stage": "green",
+  "red_failed": true,
+  "red_kind": "assertion",
+  "red_summary": "test tools_take_no_secret_arguments_and_are_not_batchable ... ok\ntest trackpad_takeover_clears_the_agents_hold ... ok\ntest wait_for_control_reports_unavailable_watcher ... ok\ntest switch_window_moves_the_window_onto_the_virtual_monitor ... ok\ntest whole_selection_goes_to_tool_result ... ok\ntest wait_for_control_waits_for_the_hand_back ... ok\ntest switch_window_falls_back_to_the_window_menu ... ok\n\nfailures:\n\n---- repeated_wait_for_control_after_timeout_notifies_once_until_hand_back stdout ----\n\nthread 'repeated_wait_for_control_after_timeout_notifies_once_until_hand_back' (11502) panicked at hive-mac/tests/mac_tools.rs:574:5:\nassertion `left == right` failed\n  left: 3\n right: 1\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    repeated_wait_for_control_after_timeout_notifies_once_until_hand_back\n\ntest result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s\n\nerror: test failed, to rerun pass `-p hive-mac --test mac_tools`",
+  "green": {
+    "passed": true,
+    "reasons": [],
+    "warnings": [
+      "no private-terms file: the private term check was skipped"
+    ],
+    "files": [
+      "desktop/app/crates/hive/hive-mac/src/tools.rs",
+      "desktop/app/crates/hive/hive-mac/tests/mac_tools.rs"
+    ],
+    "test_lines": 45,
+    "code_lines": 17,
+    "packages": [
+      {
+        "Hive": "hive-mac"
+      }
+    ],
+    "tests": [
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-mac",
+        "ok": true,
+        "seconds": 21.2,
+        "summary": "118 passed, 0 failed, 0 ignored in 11 test binaries"
+      },
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml --workspace --no-run",
+        "ok": true,
+        "seconds": 44.4,
+        "summary": "compiled"
+      }
+    ]
+  },
+  "merge_commit": "334d7a38b13378d46f4f90bb4695be0e5639c4a7",
+  "merged": true,
+  "branch_deleted": true,
+  "reasons": [],
+  "run_url": "https://github.com/agenticaiuw/hive/actions/runs/44280845339"
+}

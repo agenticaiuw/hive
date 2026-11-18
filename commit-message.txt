@@ -1,0 +1,8 @@
+Dream fix: the same call three or more times in a row
+
+repeat_calls: wait_for_control called 3 or more times in a row. Seen 2 times, about 2 minutes lost (2026-11-17T21:48:42 to 2026-11-18T03:48:42).
+Hive's nightly dream: its agent wrote a test that failed on the code as it was, then this fix, in a
+private worktree; hive-dream's gate ran the crate's tests and built the workspace.
+
+Dream-Cluster: repeat-calls-wait-for-control-called-3-o-003901
+
