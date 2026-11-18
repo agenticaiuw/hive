@@ -1,0 +1,45 @@
+{
+  "head": "ddac6ba47d098e45b85b3a70dfe0aae61eb7bda5",
+  "test": "696ec6fe9a86b0b73c10915484232635ba24b1cd",
+  "stage": "green",
+  "red_failed": true,
+  "red_kind": "assertion",
+  "red_summary": "test the_mouse_and_keyboard_are_taken_only_for_a_screen_action ... ok\ntest the_namespace_is_mac ... ok\ntest tools_take_no_secret_arguments_and_are_not_batchable ... ok\ntest trackpad_takeover_clears_the_agents_hold ... FAILED\ntest wait_for_control_reports_unavailable_watcher ... ok\ntest switch_window_moves_the_window_onto_the_virtual_monitor ... ok\ntest whole_selection_goes_to_tool_result ... ok\ntest wait_for_control_waits_for_the_hand_back ... ok\ntest switch_window_falls_back_to_the_window_menu ... ok\n\nfailures:\n\n---- trackpad_takeover_clears_the_agents_hold stdout ----\n\nthread 'trackpad_takeover_clears_the_agents_hold' (10418) panicked at hive-mac/tests/mac_tools.rs:393:5:\nthe user now has the mouse and keyboard\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    trackpad_takeover_clears_the_agents_hold\n\ntest result: FAILED. 34 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.18s\n\nerror: test failed, to rerun pass `-p hive-mac --test mac_tools`",
+  "green": {
+    "passed": true,
+    "reasons": [],
+    "warnings": [
+      "no private-terms file: the private term check was skipped"
+    ],
+    "files": [
+      "desktop/app/crates/hive/hive-mac/src/tools.rs",
+      "desktop/app/crates/hive/hive-mac/tests/mac_tools.rs"
+    ],
+    "test_lines": 9,
+    "code_lines": 1,
+    "packages": [
+      {
+        "Hive": "hive-mac"
+      }
+    ],
+    "tests": [
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml -p hive-mac",
+        "ok": true,
+        "seconds": 17.8,
+        "summary": "115 passed, 0 failed, 0 ignored in 11 test binaries"
+      },
+      {
+        "command": "cargo test --offline --manifest-path <worktree>/desktop/app/crates/hive/Cargo.toml --workspace --no-run",
+        "ok": true,
+        "seconds": 37.6,
+        "summary": "compiled"
+      }
+    ]
+  },
+  "merge_commit": "4792614a9ad58e607d8f9ce7790a5ee22c2a6816",
+  "merged": true,
+  "branch_deleted": true,
+  "reasons": [],
+  "run_url": "https://github.com/agenticaiuw/hive/actions/runs/44278730187"
+}
