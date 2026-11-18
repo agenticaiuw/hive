@@ -384,6 +384,7 @@ struct Control {
 
 struct Holding {
     last_act: Option<Instant>,
+    notified_waiting: bool,
     /// The agent asked for the mouse and keyboard and hasn't let go of them.
     holding: bool,
     /// This task hasn't had control yet: a takeover before it doesn't count.
@@ -588,6 +589,7 @@ impl MacTools {
             acting: Mutex::new(()),
             state: Mutex::new(Holding {
                 last_act: None,
+                notified_waiting: false,
                 holding: false,
                 fresh: true,
             }),
@@ -629,6 +631,7 @@ impl MacTools {
     pub fn take(&self) -> Result<Option<String>, VhidError> {
         if self.control.hold_shared() {
             if self.engage_shared()? {
+                lock(&self.control.state).notified_waiting = false;
                 return Ok(None);
             }
             self.control.release_shared();
@@ -643,6 +646,7 @@ impl MacTools {
             other => other,
         };
         if why_not.is_none() {
+            lock(&self.control.state).notified_waiting = false;
             self.control.back_to_agent();
         }
         Ok(why_not)
@@ -760,6 +764,7 @@ impl MacTools {
         s.holding = true;
         s.fresh = false;
         s.last_act = Some(Instant::now());
+        s.notified_waiting = false;
     }
 
     /// Whether the agent holds the mouse and keyboard (it asked for them and hasn't let go).
@@ -1154,9 +1159,15 @@ impl MacTools {
                     // nothing waits for fn here: take() already waited for the user's hands
                     return Ok(self.not_now("busy"));
                 }
-                self.system.notify(
-                    "Hive needs the screen. Press fn when it can have the mouse and keyboard.",
-                );
+                let notify = {
+                    let mut state = lock(&self.control.state);
+                    !std::mem::replace(&mut state.notified_waiting, true)
+                };
+                if notify {
+                    self.system.notify(
+                        "Hive needs the screen. Press fn when it can have the mouse and keyboard.",
+                    );
+                }
                 let wait = Duration::try_from_secs_f64(timeout.max(0.0)).unwrap_or(Duration::MAX);
                 if self
                     .mac
