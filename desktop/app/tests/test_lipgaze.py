@@ -337,16 +337,18 @@ class ServerTest(unittest.TestCase):
                 stream.write(json.dumps({"gaze": [t, x, y]}).encode() + b"\n")
         stream.write(b"not json\n")
         stream.write(json.dumps({"on": False}).encode() + b"\n")
-        stream.seek(0)
-        out = io.StringIO()
-        server = lipgaze.Server(Lips(), out)
-        server.crops = StandInMouth()
-        server.listen(stream)
-        server.run()
-        said = [json.loads(line) for line in out.getvalue().splitlines()]
-        self.assertEqual([m["text"] for m in said], ["the pat"])
-        self.assertEqual(said[0]["gaze_points"], len(path))
-        self.assertLess(said[0]["from"], said[0]["to"])            # when, for the keyboard to learn the gaze from
+        for gaze_in_search, want in ((False, "the bat"), (True, "the pat")):
+            stream.seek(0)
+            out = io.StringIO()
+            server = lipgaze.Server(Lips(), out)
+            server.GAZE_IN_SEARCH = gaze_in_search                 # off: the lips' best ("bat" by a little)
+            server.crops = StandInMouth()
+            server.listen(stream)
+            server.run()
+            said = [json.loads(line) for line in out.getvalue().splitlines()]
+            self.assertEqual([m["text"] for m in said], [want])
+            self.assertEqual(said[0]["gaze_points"], len(path))
+            self.assertLess(said[0]["from"], said[0]["to"])        # when, for the keyboard to learn the gaze from
 
     def test_record_keeps_each_take(self):
         import io

@@ -1,8 +1,10 @@
 // Hive's eye keyboard on the Mac: type by saying it, with the eyes confirming. Double-tap right ⌘ and a
-// see-through keyboard covers the lower part of the screen. Say a sentence while glancing across its letters
-// (no need to land on them; no blinks, no space bar; as slowly as you like): the lip reader reads the mouth,
-// the rough gaze sweep picks between words that look alike on the lips, and the sentence is typed into the
-// app in front once you look up over the top of the screen (or after 8 s of a still mouth). The line in the keyboard's
+// see-through keyboard covers the lower part of the screen. Look at the keys and say a sentence (no voice,
+// no blinks, no space bar): the lip reader reads the mouth (fitted to the owner's face from practice), and
+// the sentence is typed into the app in front once you look up over the top of the screen (or after 8 s of a
+// still mouth). The eyes say when a sentence starts and ends, and in practice glancing across the letters
+// teaches the gaze map. The gaze isn't in the word search for now (lipgaze.py GAZE_IN_SEARCH says why), so
+// typing needn't hunt for letters, which is what made it slow. The line in the keyboard's
 // bottom row shows the practice sentence or what was typed, so reading it keeps the eyes on the keyboard;
 // gaze there isn't part of the swipe. Esc closes it.
 //
@@ -909,7 +911,7 @@ final class EyeKeyboard {
 
     static let howTo = "Look at each letter (no need to wait on it), blink after each word, look up when done. Esc closes."
 
-    static let lipsHowTo = "Say a sentence, slowly is fine, glancing across its letters. Then look up over the screen to type it. Esc closes."
+    static let lipsHowTo = "Look at the keys and say a sentence. Then look up over the screen to type it. Esc closes."
 
     func hint() -> String {
         if lipsMode {
