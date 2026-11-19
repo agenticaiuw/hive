@@ -365,12 +365,16 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(folder).glob("*.npz")), ["0000.npz"])
             (Path(folder) / "0000.npz").rename(Path(folder) / "0007.npz")       # takes moved or kept: the next is 0008
             self.assertEqual(lipgaze.Server(Lips(), io.StringIO(), record=folder).taken, 8)
-            result = json.loads(log.getvalue().splitlines()[0])
+            logged = [json.loads(line) for line in log.getvalue().splitlines()]
+            # Each sentence's end is logged when it happens (and why), what was read once it's read.
+            self.assertEqual([(m.get("cut"), m["ended_by"]) for m in logged if "cut" in m], [(1, "end")])
+            self.assertEqual([m["ended_by"] for m in logged if "too_short" in m], ["end"])
+            result = next(m for m in logged if "lips" in m)
             self.assertEqual((result["take"], result["meant"], result["lips"], result["wrong"]["lips"]),
                              (1, "the bat", "the bat", 0))
             take = np.load(Path(folder) / "0007.npz")
             self.assertEqual(take["crops"].shape[1:], (88, 88))
-            self.assertEqual(str(take["meant"]), "The bat!")
+            self.assertEqual((str(take["meant"]), str(take["lips"]), str(take["ended_by"])), ("The bat!", "the bat", "end"))
 
 
 if __name__ == "__main__":

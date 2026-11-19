@@ -481,6 +481,7 @@ class Cutter:
         self.first = self.last = None
         self.moved = 0
         self.openings = []
+        self.why = None           # why the last sentence ended: 'pause', 'longest', or finish()'s reason
 
     def threshold(self):
         if len(self.openings) < 25:
@@ -507,10 +508,12 @@ class Cutter:
                 self.base += drop
             return None
         if index - self.last >= self.pause or index - self.first >= self.longest:
+            self.why = 'pause' if index - self.last >= self.pause else 'longest'
             return self.cut(index + 1)
         return None
 
-    def finish(self):
+    def finish(self, why='end'):
+        self.why = why
         return self.cut(self.count) if self.first is not None else None
 
     def cut(self, end):
@@ -553,11 +556,18 @@ class Server:
     and each gaze point on the keyboard, both in camera time; each sentence comes back as {"text"} to type.
     With `record`, each sentence's mouth crops, gaze and what was read are kept in that folder (no face
     pictures, just the 88 x 88 mouth), practice sentences are shown to say ({"prompt", "number"}), and each
-    take ends with {"take": n}; what was read goes to stderr, not the screen."""
+    take ends with {"take": n}; what was read goes to stderr, not the screen.
+
+    Sentences are read behind, one at a time: in practice the take is kept and the next sentence shows the
+    moment a sentence ends. (The owner's first long take, 2026-11-19, took 25 s to read, and the next
+    sentence only came after it: it looked stuck.)"""
 
     def __init__(self, lips, out, settings=GazeSettings(), record=None, prompts=None):
         import collections
+        import queue
         self.lips, self.out, self.settings = lips, out, settings
+        self.jobs = queue.Queue()
+        self.saying = threading.Lock()
         self.crops = lips.crops() if hasattr(lips, 'crops') else None
         self.gaze = collections.deque(maxlen=30 * 60)
         self.frames = collections.deque(maxlen=30 * 20)  # a backlog of 20 s at most while a sentence is read
@@ -575,8 +585,13 @@ class Server:
         self.cutter = None
 
     def say(self, **message):
-        self.out.write(json.dumps(message) + '\n')
-        self.out.flush()
+        with self.saying:
+            self.out.write(json.dumps(message) + '\n')
+            self.out.flush()
+
+    @staticmethod
+    def log(**message):
+        print(json.dumps(message), file=sys.stderr, flush=True)
 
     def next_prompt(self):
         if self.prompts:
@@ -592,8 +607,8 @@ class Server:
                     self.frames.append((float(m['frame']['t']), m['pixels']))
                     self.ready.notify()
             elif 'end' in m or m.get('on') is False:
-                with self.ready:
-                    self.frames.append((None, None))     # the eyes left the keys, or it closed: finish the sentence
+                with self.ready:                        # the eyes left the keys, or it closed: finish the sentence
+                    self.frames.append((None, 'end' if 'end' in m else 'closed'))
                     self.ready.notify()
         with self.ready:
             self.closed = True
@@ -602,6 +617,8 @@ class Server:
     def run(self):
         times = []
         last_crop = None
+        worker = threading.Thread(target=self.work, daemon=True)
+        worker.start()
         self.next_prompt()
         while True:
             with self.ready:
@@ -612,9 +629,9 @@ class Server:
                 t, pixels = self.frames.popleft()
             if t is None:
                 if self.cutter is not None:
-                    part = self.cutter.finish()
+                    part = self.cutter.finish(pixels)
                     if part:
-                        self.read(part)
+                        self.ended(part, self.cutter.why)
                 continue
             if self.cutter is None:
                 times.append(t)
@@ -627,24 +644,63 @@ class Server:
                 last_crop = crop
             part = self.cutter.feed(t, crop if crop is not None else last_crop, self.crops.opening)
             if part:
-                self.read(part)
+                self.ended(part, self.cutter.why)
+        self.jobs.put(None)                            # the keyboard is gone: read what's left, then stop
+        worker.join()
 
-    def read(self, part):
-        import time
+    def work(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            try:
+                self.read(*job)
+            except Exception as e:                     # one bad sentence mustn't stop the reading
+                self.log(read_failed=repr(e))
+
+    def ended(self, part, why):
+        """A sentence has ended (`why`: 'end' the eyes left the keys, 'pause' a still mouth, 'longest',
+        'closed'). In practice its take is kept and the next sentence shown now; it is read behind."""
         part = [p for p in part if p[1] is not None]
         if len(part) < 12:
             return
-        began = time.monotonic()
         t0, t1 = part[0][0], part[-1][0]
-        samples = [(x, y) for t, x, y in list(self.gaze) if t0 <= t <= t1]
-        crops = np.stack([p[1] for p in part])
-        openings = [p[2] for p in part]
-        times, kept, spoken = squeeze([p[0] for p in part], list(crops), openings)
-        if self.record and self.prompt and spoken < 0.15 * len(normalise(self.prompt).split()):
+        gaze = np.array([g for g in list(self.gaze) if t0 - 1 <= g[0] <= t1 + 1]).reshape(-1, 3)
+        _, _, spoken = squeeze([p[0] for p in part], [p[1] for p in part], [p[2] for p in part])
+        info = {'ended_by': why, 'seconds': round(t1 - t0, 2), 'spoken': round(spoken, 2), 'from': t0, 'to': t1}
+        if not self.record:
+            self.jobs.put((part, gaze, None, None, info))
+            return
+        if self.prompt and spoken < 0.15 * len(normalise(self.prompt).split()):
             # Practice: far too short for the sentence (looked up early, or a cough): same sentence again.
-            print(json.dumps({'too_short': round(spoken, 2), 'meant': self.prompt}), file=sys.stderr, flush=True)
+            self.log(too_short=round(spoken, 2), meant=self.prompt, **info)
             self.say(status='That was shorter than the sentence: say all of it, then look up above the keys.')
             return
+        number, prompt = self.taken, self.prompt
+        self.taken += 1
+        self.keep(number, part, gaze, prompt, info)    # kept now; what was read is added once it's read
+        self.log(cut=number + 1, meant=prompt, **info)
+        # What was read stays off the screen ({"take"}: the keyboard shows only the next sentence to say,
+        # since a read-back looked like a second sentence to say); it goes to the log and the take's file.
+        self.say(take=number + 1)
+        self.next_prompt()
+        self.jobs.put((part, gaze, number, prompt, info))
+
+    def keep(self, number, part, gaze, prompt, info, lips='', fused=''):
+        path = self.record / f'{number:04d}.npz'
+        temporary = path.with_name(path.stem + '.writing.npz')
+        np.savez_compressed(temporary, crops=np.stack([p[1] for p in part]), times=np.array([p[0] for p in part]),
+                            openings=np.array([np.nan if p[2] is None else p[2] for p in part]),
+                            gaze=gaze, meant=prompt or '', lips=lips, fused=fused,
+                            ended_by=info['ended_by'], spoken=info['spoken'])
+        os.replace(temporary, path)
+
+    def read(self, part, gaze, number, prompt, info):
+        import time
+        began = time.monotonic()
+        t0, t1 = part[0][0], part[-1][0]
+        samples = [(x, y) for t, x, y in gaze if t0 <= t <= t1]
+        times, kept, _ = squeeze([p[0] for p in part], [p[1] for p in part], [p[2] for p in part])
         features = self.lips.encode(at_fps(times, kept))
         scorer = GazeScorer(samples, self.settings, self.shift)
         fused = fused_search(self.lips, features, scorer)
@@ -653,27 +709,18 @@ class Server:
             self.shift = fused[0][2]
         message = {'text': text, 'seconds': round(t1 - t0, 2), 'gaze_points': len(samples),
                    'ms': round(1000 * (time.monotonic() - began))}
-        if self.record:
-            alone = fused_search(self.lips, features, scorer, use_gaze=False)
-            message['lips'] = alone[0][0] if alone else ''
-            if self.prompt:
-                meant = normalise(self.prompt)
-                message['meant'] = meant
-                message['wrong'] = {'lips': word_errors(message['lips'], meant), 'fused': word_errors(text, meant),
-                                    'words': len(meant.split())}
-            gaze = np.array([g for g in list(self.gaze) if t0 - 1 <= g[0] <= t1 + 1]).reshape(-1, 3)
-            np.savez_compressed(self.record / f'{self.taken:04d}.npz', crops=crops,
-                                times=np.array([p[0] for p in part]),
-                                openings=np.array([np.nan if o is None else o for o in openings]),
-                                gaze=gaze, meant=self.prompt or '', lips=message['lips'], fused=text)
-            self.taken += 1
-            # What was read stays off the screen ({"take"}: the keyboard shows only the next sentence to say,
-            # since a read-back looked like a second sentence to say); it goes to the log and the take's file.
-            print(json.dumps({'take': self.taken, **message}), file=sys.stderr, flush=True)
-            self.say(take=self.taken)
-            self.next_prompt()
-        else:
+        if number is None:
             self.say(**message)
+            return
+        alone = fused_search(self.lips, features, scorer, use_gaze=False)
+        message['lips'] = alone[0][0] if alone else ''
+        if prompt:
+            meant = normalise(prompt)
+            message['meant'] = meant
+            message['wrong'] = {'lips': word_errors(message['lips'], meant), 'fused': word_errors(text, meant),
+                                'words': len(meant.split())}
+        self.keep(number, part, gaze, prompt, info, lips=message['lips'], fused=text)
+        self.log(take=number + 1, **message, ended_by=info['ended_by'])
 
 
 def normalise(text):
@@ -686,7 +733,7 @@ def evaluate(recording, model_root, settings=GazeSettings()):
     lips = Usr2Lips(model_root)
     totals = {'lips': 0, 'fused': 0, 'words': 0}
     shift = (0.0, 0.0)
-    for path in sorted(Path(recording).glob('*.npz')):
+    for path in sorted(p for p in Path(recording).glob('*.npz') if p.stem.isdigit()):
         take = np.load(path)
         meant = str(take['meant'])
         times, gaze = take['times'], take['gaze']
@@ -765,6 +812,7 @@ def main():
         server.say(status='Loading the lip reader…')
         server.lips = Usr2Lips(args.model)
         server.crops = server.lips.crops()
+        server.crops(np.zeros((320, 320, 3), np.uint8))   # the mouth finder starts now, not on the first sentence
         # The GPU's first read takes about 14 s while it builds its kernels: do it now, not on the first sentence.
         fused_search(server.lips, server.lips.encode([np.full((88, 88), 110, np.uint8)] * 50), GazeScorer([]))
         server.say(ready=True)
