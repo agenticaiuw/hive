@@ -316,15 +316,21 @@ class ServerTest(unittest.TestCase):
                 stream.write(json.dumps({"frame": {"t": i / 30, "w": 2, "h": 2}}).encode() + b"\n")
                 stream.write(bytes([level]) * 4)
             stream.seek(0)
-            out = io.StringIO()
-            server = lipgaze.Server(Lips(), out, record=folder, prompts=["The bat!"])
+            out, log = io.StringIO(), io.StringIO()
+            server = lipgaze.Server(Lips(), out, record=folder, prompts=["The bat!", "A cat."])
             server.crops = StandInMouth()
             server.listen(stream)
-            server.run()
+            real, sys.stderr = sys.stderr, log
+            try:
+                server.run()
+            finally:
+                sys.stderr = real
             said = [json.loads(line) for line in out.getvalue().splitlines()]
-            self.assertEqual(said[0], {"prompt": "The bat!"})
-            result = said[1]["result"]
-            self.assertEqual((result["meant"], result["lips"], result["wrong"]["lips"]), ("the bat", "the bat", 0))
+            # The screen gets only sentences to say and the end of each take, never what was read.
+            self.assertEqual(said, [{"prompt": "The bat!", "number": 1}, {"take": 1}, {"prompt": "A cat.", "number": 2}])
+            result = json.loads(log.getvalue())
+            self.assertEqual((result["take"], result["meant"], result["lips"], result["wrong"]["lips"]),
+                             (1, "the bat", "the bat", 0))
             take = np.load(Path(folder) / "0000.npz")
             self.assertEqual(take["crops"].shape[1:], (88, 88))
             self.assertEqual(str(take["meant"]), "The bat!")
