@@ -28,9 +28,16 @@
 //   hive-eye-keyboard --snapshot out.png [--setup] [--trail]   draws the keyboard into a PNG (tests)
 //   hive-eye-keyboard --test --replay file      types made-up gaze from eyeswipe-sim --write-replay (tests)
 //   hive-eye-keyboard --calib-test dump         the setup's fit on each setup in a --dump, checked on its dots
+//   hive-eye-keyboard --lips [--lips-record DIR]   lip reading types the words, the gaze only confirms them:
+//       say a sentence while glancing across its letters (they don't have to land on the keys); no blinks, no
+//       space bar; it types the sentence once your mouth has been still for 0.6 s. Runs scripts/lipgaze.py serve
+//       (USR 2.0, set up by scripts/setup-lipgaze.sh; --lips-python and --lips-script to point elsewhere).
+//       --lips-record DIR: shows practice sentences to say, keeps each take's mouth crops and gaze in DIR and
+//       types nothing (lipgaze.py eval DIR reads them again, lips alone against lips + eyes)
 //
 // Needs Accessibility (to see right ⌘ and Esc, and to type) and the camera, for the app it runs from.
 
+import Accelerate
 import AppKit
 import AVFoundation
 import Vision
@@ -41,6 +48,8 @@ let rightCommandDown: UInt64 = 0x10              // NX_DEVICERCMDKEYMASK
 let tapSeconds = 0.25, doubleTapSeconds = 0.45
 let lookUpFinishes = 0.3                         // off the keyboard this long types the last word
 let ourEvents: Int64 = 0x4876_6B62               // marks the keys we type, to tell them from yours
+
+let lipsMode = CommandLine.arguments.contains("--lips")
 
 /// What one camera frame says: where the eyes point, eyes closed, or no face (looking away).
 enum Look { case gaze(GazeFeatures), closed(Double), away(Double) }
@@ -66,6 +75,9 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let queue = DispatchQueue(label: "eye-camera")
     var onLook: ((Look) -> Void)?
     var typicalOpen: Double? = nil                // how open the eyes usually are, to tell a closed eye
+    var onFace: ((Double, Data) -> Void)?         // --lips: each frame's face, grey, faceSide x faceSide, top row first
+    static let faceSide = 320
+    var faceBox: (x: Double, y: Double, side: Double)? = nil
 
     func start() -> Bool {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
@@ -109,6 +121,9 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         msPerFrame += 0.1 * ((now - began) * 1000 - msPerFrame)
         if lastFrame > 0 { fps += 0.1 * (1 / max(1e-3, time - lastFrame) - fps) }
         lastFrame = time
+        if let onFace {
+            if let face, let crop = faceCrop(face.boundingBox, pixels) { onFace(time, crop) } else { faceBox = nil }
+        }
         guard let face, let marks = face.landmarks else { onLook?(.away(time)); return }
         if eyeDump != nil { dumpEyes(marks, pixels, time) }
         if let f = features(marks, pixels) {
@@ -160,6 +175,36 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         let ex = (eyes[0].ex + eyes[1].ex) / 2, ey = (eyes[0].ey + eyes[1].ey) / 2, lid = (eyes[0].lid + eyes[1].lid) / 2
         let nx = (Double(nose.x) - mx) / iod, ny = (Double(nose.y) - my) / iod
         return [ex, ey, lid, nx, ny, mx / Double(w), my / Double(h), iod / Double(w), ex * ex, ey * ey, nx * ny]
+    }
+
+    /// A square 1.6 times Vision's face box from the camera's grey (the luma plane), scaled to faceSide. The
+    /// square follows the face smoothly: the lip reader finds the mouth in it frame to frame, and a box that
+    /// jumped about with Vision's would shake the mouth crop.
+    func faceCrop(_ box: CGRect, _ pixels: CVPixelBuffer) -> Data? {
+        let w = CVPixelBufferGetWidthOfPlane(pixels, 0), h = CVPixelBufferGetHeightOfPlane(pixels, 0)
+        let side = min(Double(min(w, h)), 1.6 * max(Double(box.width) * Double(w), Double(box.height) * Double(h)))
+        let cx = Double(box.midX) * Double(w), cy = (1 - Double(box.midY)) * Double(h)       // Vision's y goes up
+        if let b = faceBox, abs(b.x - cx) < 0.25 * b.side, abs(b.y - cy) < 0.25 * b.side, abs(b.side - side) < 0.25 * b.side {
+            faceBox = (b.x + 0.2 * (cx - b.x), b.y + 0.2 * (cy - b.y), b.side + 0.1 * (side - b.side))
+        } else {
+            faceBox = (cx, cy, side)
+        }
+        let b = faceBox!, n = Self.faceSide
+        let s = Int(b.side)
+        guard s >= 64 else { return nil }
+        let x0 = max(0, min(w - s, Int(b.x - b.side / 2))), y0 = max(0, min(h - s, Int(b.y - b.side / 2)))
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return nil }
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+        var src = vImage_Buffer(data: base.advanced(by: y0 * rowBytes + x0), height: vImagePixelCount(s),
+                                width: vImagePixelCount(s), rowBytes: rowBytes)
+        var out = Data(count: n * n)
+        let error = out.withUnsafeMutableBytes { raw -> vImage_Error in
+            var dst = vImage_Buffer(data: raw.baseAddress, height: vImagePixelCount(n), width: vImagePixelCount(n), rowBytes: n)
+            return vImageScale_Planar8(&src, &dst, nil, vImage_Flags(kvImageHighQualityResampling))
+        }
+        return error == kvImageNoError ? out : nil
     }
 
     /// Writes both eyes' boxes (a little bigger than the outline) to the --dump-eyes files: the pixels, top row
@@ -216,6 +261,89 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         let mean = inside.reduce(0.0) { $0 + Double($1.2) } / Double(inside.count)     // how well lit the eye is
         return sw > 0 ? (sx / sw, sy / sw, mean) : nil
+    }
+}
+
+// MARK: - Lip reading (--lips)
+
+/// scripts/lipgaze.py serve in its own process: USR 2.0 reads the mouth and the gaze confirms the words.
+/// It gets each frame's face (grey) and each gaze point on the keyboard, both in camera time, and answers
+/// with a line of JSON per event: {"status"}, {"ready"}, {"text"} (a sentence to type), {"prompt"} and
+/// {"result"} (--lips-record), {"error"}.
+final class LipReader {
+    let process = Process()
+    let input = Pipe(), output = Pipe()
+    let writes = DispatchQueue(label: "hive.eye-keyboard.lips")
+    let lock = NSLock()
+    var backlog = 0                          // frames waiting to be written: past 30 the newest are dropped
+    var running = false
+    var buffer = Data()
+    var onMessage: (([String: Any]) -> Void)?
+    let python: String, script: String
+
+    init() {
+        let here = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+        let state = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ?? NSHomeDirectory() + "/Library/Application Support/Hive"
+        python = option("--lips-python") ?? state + "/lipgaze/.venv/bin/python"
+        script = option("--lips-script") ?? here.appendingPathComponent("../scripts/lipgaze.py").standardizedFileURL.path
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [script, "serve"] + (option("--lips-record").map { ["--record", $0] } ?? [])
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.standardError
+    }
+
+    /// Why it can't run, or nil.
+    var missing: String? {
+        if !FileManager.default.isExecutableFile(atPath: python) { return "Lip reading isn't set up (scripts/setup-lipgaze.sh)" }
+        if !FileManager.default.fileExists(atPath: script) { return "Can't find lipgaze.py at \(script)" }
+        return nil
+    }
+
+    func start() throws {
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else { return }
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                self.running = false
+                DispatchQueue.main.async { self.onMessage?(["gone": true]) }
+                return
+            }
+            self.buffer.append(data)
+            while let end = self.buffer.firstIndex(of: 10) {
+                let line = self.buffer.subdata(in: self.buffer.startIndex..<end)
+                self.buffer.removeSubrange(self.buffer.startIndex...end)
+                if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                    DispatchQueue.main.async { self.onMessage?(message) }
+                }
+            }
+        }
+        try process.run()
+        running = true
+    }
+
+    func send(_ header: [String: Any], body: Data? = nil) {
+        guard running, var data = try? JSONSerialization.data(withJSONObject: header) else { return }
+        data.append(10)
+        if let body {
+            lock.lock()
+            let full = backlog > 30
+            if !full { backlog += 1 }
+            lock.unlock()
+            if full { return }
+            data.append(body)
+        }
+        writes.async {
+            do { try self.input.fileHandleForWriting.write(contentsOf: data) } catch { self.running = false }
+            if body != nil { self.lock.lock(); self.backlog -= 1; self.lock.unlock() }
+        }
+    }
+
+    func stop() {
+        running = false
+        try? input.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
     }
 }
 
@@ -381,7 +509,7 @@ final class KeyboardView: NSView {
     static func hot(_ x: Double, _ y: Double) -> Int? {
         guard onKeyboard(x, y) else { return nil }
         let (sx, sy) = EyeLayout.spaceOffset(x, y)
-        if y > 3.1 && hypot(sx, sy) < 0.9 { return 100 }
+        if !lipsMode && y > 3.1 && hypot(sx, sy) < 0.9 { return 100 }
         return EyeLayout.centers.indices.min { a, b in
             hypot(EyeLayout.centers[a].x - x, EyeLayout.centers[a].y - y) < hypot(EyeLayout.centers[b].x - x, EyeLayout.centers[b].y - y) }
     }
@@ -444,7 +572,7 @@ final class KeyboardView: NSView {
             label(String(ch).uppercased(), keyFont, NSColor(white: 1, alpha: 0.92), centeredIn: k)
         }
         let sp = spaceRect
-        if sp.intersects(dirty) {
+        if !lipsMode && sp.intersects(dirty) {                          // lip reading: the mouth says where words end
             NSColor(white: 1, alpha: 0.07).setFill()
             let shape = NSBezierPath(roundedRect: sp, xRadius: 18, yRadius: 18)
             shape.fill()
@@ -549,6 +677,10 @@ final class EyeKeyboard {
                          "thanks for helping me with the project", "do you want to grab lunch after class"]
     var testAt = 0, testGot: [String] = [], testWrong = 0, testWords = 0
     var replaying = false, decodeMs: [Double] = []
+    // --lips: the lip reader, started the first time the keyboard opens
+    var lips: LipReader? = nil
+    var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil
+    var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
 
     init(decoder: EyeSwipeDecoder, test: Bool) {
         self.decoder = decoder
@@ -584,11 +716,25 @@ final class EyeKeyboard {
         view = KeyboardView(frame: NSRect(origin: .zero, size: screen.size))
         panel.contentView = view
         camera.onLook = { [weak self] look in DispatchQueue.main.async { self?.look(look) } }
+        if lipsMode {
+            camera.onFace = { [weak self] t, face in
+                guard let self, self.lipsListening, let lips = self.lips else { return }
+                lips.send(["frame": ["t": t, "w": GazeCamera.faceSide, "h": GazeCamera.faceSide]], body: face)
+            }
+        }
     }
 
     static let howTo = "Look at each letter (no need to wait on it), blink after each word, look up when done. Esc closes."
 
+    static let lipsHowTo = "Say a sentence while glancing across its letters (no need to land on them). Stop talking to type it. Esc closes."
+
     func hint() -> String {
+        if lipsMode {
+            if let problem = lipsProblem { return problem }
+            if !lipsReady { return "Loading the lip reader…" }
+            if let p = lipsPrompt { return "Say:  \(p)   — glancing across its letters" }
+            return Self.lipsHowTo
+        }
         if test, testAt < testSentences.count { return "Type:  \(testSentences[testAt])   — then look up" }
         return Self.howTo
     }
@@ -611,9 +757,14 @@ final class EyeKeyboard {
             panel.orderFrontRegardless()
             typing = false
             view.words.text = ""
+            if lipsMode { startLips() }
             if calibration == nil { tries = 0; startSetup() } else { say(hint()) }
         } else {
             if typing { finishPhrase() }
+            if lipsMode {                                          // the sentence being said, if any, still comes
+                lipsListening = false
+                lips?.send(["on": false])
+            }
             camera.stop()
             panel.orderOut(nil)
             stopSetup()
@@ -815,12 +966,14 @@ final class EyeKeyboard {
 
     func look(_ l: Look) {
         guard on else { return }
+        lipsListening = lipsMode && setup == nil && calibration != nil
         switch l {
         case .gaze(let f):
             closedFrames = 0; closedAt = nil
             gaze(f)
         case .closed(let t):                                   // eyes shut: a normal blink ends the word
             record(["t": t, "phase": "closed"])
+            if lipsMode { break }                                  // lip reading: blinks are just blinks
             if closedAt == nil { closedAt = t }
             closedFrames += 1
             if closedFrames == blinkFrames, typing, setup == nil { endWord(closedAt: closedAt) }
@@ -861,6 +1014,13 @@ final class EyeKeyboard {
     /// A gaze point on the keyboard (key units): the pointer, and the word being looked at.
     func mapped(_ x: Double, _ y: Double, _ f: GazeFeatures) {
         let x = x + shift.x, y = y + shift.y
+        if lipsMode {                                               // the lip reader does the words: it gets the gaze
+            view.move(to: hold(x, y, f.time))
+            guard onKeyboard(x, y) else { off(f.time); return }
+            offSince = nil
+            lips?.send(["gaze": [f.time, x, y]])
+            return
+        }
         view.move(to: hold(x, y, f.time))                           // the pointer: still while resting, jumps with the eyes
         recent.append((x, y))                                       // the word: raw points (the decoder models the
         if recent.count > smoothing { recent.removeFirst() }        // noise; a median of 3 made 4% more words wrong)
@@ -951,6 +1111,51 @@ final class EyeKeyboard {
             if test { testPhrase() }
             nextJob()
         }
+    }
+
+    func startLips() {
+        guard lips == nil else { return }
+        let reader = LipReader()
+        if let why = reader.missing { lipsProblem = why; return }
+        reader.onMessage = { [weak self] m in self?.heard(m) }
+        do {
+            try reader.start()
+            lips = reader
+            lipsProblem = nil
+            lipsReady = false
+        } catch {
+            lipsProblem = "The lip reader didn't start: \(error.localizedDescription)"
+        }
+    }
+
+    /// A message from the lip reader (on the main thread).
+    func heard(_ m: [String: Any]) {
+        let showing = on && setup == nil
+        if m["gone"] != nil {
+            lips = nil
+            lipsReady = false
+            lipsProblem = "The lip reader stopped (its log is on stderr). Esc and open again to restart it."
+        }
+        if let e = m["error"] as? String { lipsProblem = e }
+        if let status = m["status"] as? String, showing { say(status) }
+        if m["ready"] != nil { lipsReady = true }
+        if let p = m["prompt"] as? String { lipsPrompt = p }
+        if let text = m["text"] as? String {
+            emit(["typed": text, "ms": m["ms"] ?? 0, "seconds": m["seconds"] ?? 0, "gaze_points": m["gaze_points"] ?? 0])
+            if !text.isEmpty {
+                NSSound(named: "Pop")?.play()
+                for word in text.split(separator: " ") { typer.put(String(word), live: true) }
+                typer.put(".", live: true)                          // the mouth stopped: the sentence ends
+                view.words.text = text
+            }
+        }
+        if let r = m["result"] as? [String: Any] {
+            emit(["lips_result": r])
+            NSSound(named: "Pop")?.play()
+            let wrong = r["wrong"] as? [String: Any]
+            view.words.text = "lips: \(r["lips"] ?? "")  (\(wrong?["lips"] ?? "?") wrong)   with eyes: \(r["text"] ?? "")  (\(wrong?["fused"] ?? "?") wrong)"
+        }
+        if showing, m["status"] == nil, m["text"] == nil { say(hint()) }
     }
 
     /// Moves the map back by half the median miss on the keys of the word just typed (at most 0.6 keys a word).
@@ -1177,19 +1382,21 @@ struct Main {
             FileHandle.standardError.write(Data("hive-eye-keyboard: can't read the language model at \(lmPath)\n".utf8))
             exit(1)
         }
+        if lipsMode { signal(SIGPIPE, SIG_IGN) }                        // the lip reader quitting mustn't take us down
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let keyboard = EyeKeyboard(decoder: EyeSwipeDecoder(lm: lm), test: CommandLine.arguments.contains("--test"))
 
         if let out = option("--snapshot") {                                   // draw it into a PNG and stop
             let view = KeyboardView(frame: NSRect(x: 0, y: 0, width: 1470, height: 956))
+            keyboard.lipsReady = true
             view.status.text = keyboard.hint()
             if CommandLine.arguments.contains("--setup") {
                 view.status.text = "Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still."
                 view.show(target: (4.2, 1.5))
             } else {
                 view.words.text = "can you send me"
-                view.move(to: (5.6, 3.55))
+                view.move(to: lipsMode ? (5.6, 1.5) : (5.6, 3.55))
             }
             let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
             view.cacheDisplay(in: view.bounds, to: rep)
