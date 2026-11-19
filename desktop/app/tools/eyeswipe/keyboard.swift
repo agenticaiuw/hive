@@ -34,6 +34,11 @@
 // {"speed": {...}}, {"test": {...}} after a test, {"calibration": {...}} for --check-calibration.
 //
 //   hive-eye-keyboard [--lips-record DIR] [--new-setup] [--calibration path] [--dump file [--dump-eyes]]
+//       --lips-record DIR also records each time it's open into <state>/lipgaze/sessions/<date time>/ (kept on
+//       this Mac): screen.mov (the screen with the Mac's sound and the microphone), camera.mov (the camera as it
+//       saw you), events.jsonl (every frame's gaze numbers, where they landed and where the dot was drawn; what
+//       was shown, every message from the lip reader, all with times), events.jsonl.eyes.* (the eyes' pixels)
+//       and lipreader.log. --no-session-recording turns it off; --record-sessions turns it on without practice.
 //       --dump: appends each frame's gaze numbers (not pictures) and the setup dot to a file, to tune it
 //       --dump-eyes: also the eyes' part of each frame, grey (file.eyes.bin, described by file.eyes.jsonl)
 //   hive-eye-keyboard --check-calibration [--calibration path]
@@ -43,12 +48,15 @@
 //   hive-eye-keyboard --snapshot out.png [--setup] [--trail] [--blinks] [--lips-record x]   draws it into a PNG (tests)
 //   hive-eye-keyboard --test --replay file      types made-up gaze from eyeswipe-sim --write-replay (tests)
 //   hive-eye-keyboard --calib-test dump         the setup's fit on each setup in a --dump, checked on its dots
+//   hive-eye-keyboard --lips-record DIR --session-test SECONDS   opens for SECONDS without a key, records the
+//       session, closes and quits once its movies are written (checks the recording; the keys aren't watched)
 //
 // Needs Accessibility (to see right ⌘ and Esc, and to type) and the camera, for the app it runs from.
 
 import Accelerate
 import AppKit
 import AVFoundation
+@preconcurrency import ScreenCaptureKit
 import Vision
 
 let rightCommandKey: Int64 = 54                  // kVK_RightCommand
@@ -108,6 +116,44 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         return true
     }
 
+    // Session recording: the camera's frames as it saw them. `videoURL` starts a movie with the next frame
+    // (its first frame is at camera time `onVideoStart`'s); both are only touched on `queue`.
+    var videoURL: URL? = nil
+    var video: (writer: AVAssetWriter, input: AVAssetWriterInput)? = nil
+    var onVideoStart: ((Double, Int, Int) -> Void)?
+
+    /// Records the camera into `url` from the next frame on, or (nil) finishes the movie being recorded.
+    func record(to url: URL?) {
+        queue.async {
+            if let v = self.video {
+                v.input.markAsFinished()
+                let writer = v.writer
+                writer.finishWriting { _ = writer }
+                self.video = nil
+            }
+            self.videoURL = url
+        }
+    }
+
+    func writeVideo(_ buffer: CMSampleBuffer, _ pixels: CVPixelBuffer, _ time: Double) {
+        if let url = videoURL {
+            videoURL = nil
+            let w = CVPixelBufferGetWidth(pixels), h = CVPixelBufferGetHeight(pixels)
+            guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return }
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+                AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 12_000_000, AVVideoMaxKeyFrameIntervalKey: 30]])
+            input.expectsMediaDataInRealTime = true
+            guard writer.canAdd(input) else { return }
+            writer.add(input)
+            guard writer.startWriting() else { return }
+            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(buffer))
+            video = (writer, input)
+            onVideoStart?(time, w, h)
+        }
+        if let v = video, v.input.isReadyForMoreMediaData { v.input.append(buffer) }
+    }
+
     func stop() {
         queue.async {
             self.session.stopRunning()
@@ -126,6 +172,7 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let began = ProcessInfo.processInfo.systemUptime
         let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        if video != nil || videoURL != nil { writeVideo(sampleBuffer, pixels, time) }
         let request = VNDetectFaceLandmarksRequest()
         try? VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up).perform([request])
         let face = request.results?.max(by: { $0.boundingBox.width < $1.boundingBox.width })
@@ -276,6 +323,84 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
+// MARK: - Session recording (--lips-record)
+
+/// The screen as it looked, with what the Mac played and the microphone (owner's rule: screen recordings
+/// always have the Mac's sound), into a movie by ScreenCaptureKit. `note` gets what happened to it.
+final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegate {
+    let url: URL
+    let note: ([String: Any]) -> Void
+    var stream: SCStream?
+    var output: SCRecordingOutput?
+    var keep: ScreenRecorder?                   // itself, from stop() until the movie is written
+
+    init(url: URL, note: @escaping ([String: Any]) -> Void) { self.url = url; self.note = note }
+
+    func start(microphone: Bool = true) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+            guard let content, let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                    ?? content.displays.first else {
+                self.note(["event": "screen_failed", "why": error?.localizedDescription ?? "no display"])
+                return
+            }
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            let scale = min(1.5, Double(filter.pointPixelScale))
+            config.width = Int(Double(display.width) * scale)
+            config.height = Int(Double(display.height) * scale)
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+            config.showsCursor = true
+            config.capturesAudio = true
+            config.sampleRate = 48_000
+            config.channelCount = 2
+            config.captureMicrophone = microphone
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            let recording = SCRecordingOutputConfiguration()
+            recording.outputURL = self.url
+            recording.outputFileType = .mov
+            recording.videoCodecType = .h264
+            let output = SCRecordingOutput(configuration: recording, delegate: self)
+            do { try stream.addRecordingOutput(output) } catch {
+                self.note(["event": "screen_failed", "why": error.localizedDescription])
+                return
+            }
+            self.stream = stream
+            self.output = output
+            stream.startCapture { error in
+                if let error {
+                    self.note(["event": "screen_failed", "why": error.localizedDescription, "microphone": microphone])
+                    self.stream = nil
+                    self.output = nil
+                    if microphone { self.start(microphone: false) }     // the microphone may be what was refused
+                } else {
+                    self.note(["event": "screen_capturing", "microphone": microphone, "width": config.width,
+                               "height": config.height, "path": self.url.path])
+                }
+            }
+        }
+    }
+
+    func stop() {
+        guard let stream else { return }
+        keep = self
+        stream.stopCapture { _ in }
+        self.stream = nil
+    }
+
+    func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) { note(["event": "screen_started"]) }
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        note(["event": "screen_saved", "path": url.path])
+        keep = nil
+    }
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
+        note(["event": "screen_failed", "why": error.localizedDescription])
+        keep = nil
+    }
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        note(["event": "screen_stopped", "why": error.localizedDescription])
+    }
+}
+
 // MARK: - Lip reading (--lips)
 
 /// scripts/lipgaze.py serve in its own process: USR 2.0 reads the mouth and the gaze confirms the words.
@@ -284,7 +409,8 @@ final class GazeCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 /// {"result"} (--lips-record), {"error"}.
 final class LipReader {
     let process = Process()
-    let input = Pipe(), output = Pipe()
+    let input = Pipe(), output = Pipe(), errors = Pipe()
+    var logCopy: FileHandle? = nil           // the session's lipreader.log (under `lock`)
     let writes = DispatchQueue(label: "hive.eye-keyboard.lips")
     let lock = NSLock()
     var backlog = 0                          // frames waiting to be written: past 30 the newest are dropped
@@ -302,7 +428,21 @@ final class LipReader {
         process.arguments = [script, "serve"] + (option("--lips-record").map { ["--record", $0] } ?? [])
         process.standardInput = input
         process.standardOutput = output
-        process.standardError = FileHandle.standardError
+        process.standardError = errors
+    }
+
+    /// Its log also goes into `url` (nil: only to stderr again).
+    func copyLog(to url: URL?) {
+        var file: FileHandle? = nil
+        if let url {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            file = FileHandle(forWritingAtPath: url.path)
+        }
+        lock.lock()
+        let old = logCopy
+        logCopy = file
+        lock.unlock()
+        try? old?.close()
     }
 
     /// Why it can't run, or nil.
@@ -313,6 +453,15 @@ final class LipReader {
     }
 
     func start() throws {
+        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil; return }
+            FileHandle.standardError.write(data)
+            guard let self else { return }
+            self.lock.lock()
+            self.logCopy?.write(data)
+            self.lock.unlock()
+        }
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
             let data = handle.availableData
@@ -699,6 +848,11 @@ final class EyeKeyboard {
     var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil, lipsNumber = 0
     var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
     var lipsEnded = false                                      // {"end"} sent since the eyes left the keyboard
+    // Session recording (--lips-record, or --record-sessions): see startSessionRecording.
+    let recordsSessions = option("--dump") == nil && !CommandLine.arguments.contains("--no-session-recording")
+        && ((lipsMode && option("--lips-record") != nil) || CommandLine.arguments.contains("--record-sessions"))
+    var sessionFolder: URL? = nil
+    var screenRecorder: ScreenRecorder? = nil
     static let keysEnd = 3.25                                  // below this (in key rows) is the line, not keys
 
     init(decoder: EyeSwipeDecoder, test: Bool) {
@@ -760,11 +914,90 @@ final class EyeKeyboard {
         return Self.howTo
     }
 
-    func say(_ text: String) { view.status.text = text }
+    func say(_ text: String) {
+        if text != view.status.text { note(["event": "status", "text": text]) }
+        view.status.text = text
+    }
 
     func record(_ object: [String: Any]) {
         guard let dump, let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         dump.write(data + Data("\n".utf8))
+    }
+
+    /// An event in the session's events.jsonl, at uptime `t` (the camera's clock) unless it has one.
+    func note(_ object: [String: Any]) {
+        var object = object
+        if object["t"] == nil { object["t"] = ProcessInfo.processInfo.systemUptime }
+        record(object)
+    }
+
+    /// Records this time the keyboard is open, to study it afterwards (owner, 2026-11-19: everything, so the
+    /// whole system can be fixed from what really happened). A folder under <state>/lipgaze/sessions gets the
+    /// screen with the Mac's sound and the microphone, the camera as it saw you, every frame's gaze, the eyes'
+    /// pixels, everything shown and every message from the lip reader. Kept on this Mac.
+    func startSessionRecording() {
+        guard recordsSessions, sessionFolder == nil else { return }
+        let state = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ?? NSHomeDirectory() + "/Library/Application Support/Hive"
+        let format = DateFormatter()
+        format.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        let folder = URL(fileURLWithPath: state + "/lipgaze/sessions/" + format.string(from: Date()), isDirectory: true)
+        do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) } catch {
+            FileHandle.standardError.write(Data("hive-eye-keyboard: can't record the session: \(error)\n".utf8))
+            return
+        }
+        sessionFolder = folder
+        let events = folder.appendingPathComponent("events.jsonl").path
+        for path in [events, events + ".eyes.jsonl", events + ".eyes.bin"] { FileManager.default.createFile(atPath: path, contents: nil) }
+        dump = FileHandle(forWritingAtPath: events)
+        if let rows = FileHandle(forWritingAtPath: events + ".eyes.jsonl"), let pixels = FileHandle(forWritingAtPath: events + ".eyes.bin") {
+            camera.queue.async { self.camera.eyeDump = (rows, pixels, 0) }
+        }
+        lips?.copyLog(to: folder.appendingPathComponent("lipreader.log"))
+        let corners = [(0.0, 0.0), (10.0, 0.0), (0.0, KeyboardView.rows)].map { k -> [Double] in
+            let p = view.point(k)
+            return [Double(p.x), Double(p.y)]
+        }
+        note(["event": "session", "folder": folder.path, "arguments": CommandLine.arguments,
+              "screen": [Double(view.bounds.width), Double(view.bounds.height)],
+              "keys_on_screen": ["(0,0)": corners[0], "(10,0)": corners[1], "(0,rows)": corners[2],
+                                 "note": "screen points from the top left; key units: x across, y down rows"],
+              "keys_end": Self.keysEnd, "look_up_finishes": lookUpFinishes,
+              "calibration": calibration.map { ["spread": [$0.spread.x, $0.spread.y]] } ?? [:],
+              "shift": [shift.x, shift.y]])
+        // The movies take about 100 MB a minute: below 5 GB free they're left out (the rest is still kept).
+        let free = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage ?? Int64.max
+        if free < 5_000_000_000 {
+            note(["event": "movies_skipped", "why": "less than 5 GB free on the disk", "free_bytes": free])
+            FileHandle.standardError.write(Data("hive-eye-keyboard: under 5 GB free, so no screen or camera movie this time\n".utf8))
+            return
+        }
+        camera.onVideoStart = { [weak self] t, w, h in
+            DispatchQueue.main.async { self?.note(["event": "camera_started", "ft": t, "width": w, "height": h]) }
+        }
+        camera.record(to: folder.appendingPathComponent("camera.mov"))
+        let screen = ScreenRecorder(url: folder.appendingPathComponent("screen.mov")) { [weak self] m in
+            DispatchQueue.main.async { self?.note(m) }
+        }
+        screenRecorder = screen
+        screen.start()
+        FileHandle.standardError.write(Data("hive-eye-keyboard: recording this session in \(folder.path)\n".utf8))
+    }
+
+    func stopSessionRecording() {
+        guard sessionFolder != nil else { return }
+        note(["event": "session_end"])
+        camera.record(to: nil)
+        screenRecorder?.stop()
+        screenRecorder = nil
+        camera.queue.async {
+            if let d = self.camera.eyeDump { try? d.rows.close(); try? d.pixels.close() }
+            self.camera.eyeDump = nil
+        }
+        lips?.copyLog(to: nil)
+        // The screen recorder's last events (its movie written) still come in a moment: the file stays open
+        // until the next session opens its own.
+        sessionFolder = nil
     }
 
     func toggle() {
@@ -779,6 +1012,7 @@ final class EyeKeyboard {
             typing = false
             view.words.text = ""
             if lipsMode { startLips() }
+            startSessionRecording()
             if calibration == nil { tries = 0; startSetup() } else { say(hint()); showPrompt() }
         } else {
             if typing { finishPhrase() }
@@ -786,6 +1020,7 @@ final class EyeKeyboard {
                 lipsListening = false
                 lips?.send(["on": false])
             }
+            stopSessionRecording()
             camera.stop()
             panel.orderOut(nil)
             stopSetup()
@@ -1083,6 +1318,7 @@ final class EyeKeyboard {
             if closedFrames == blinkFrames, typing, setup == nil { endWord(closedAt: closedAt) }
         case .away(let t):
             closedFrames = 0; closedAt = nil
+            record(["t": t + (clock ?? 0), "ft": t, "phase": "away"])
             off(t)
         }
         let now = ProcessInfo.processInfo.systemUptime
@@ -1114,7 +1350,7 @@ final class EyeKeyboard {
             calibration = nil; tries = 0; startSetup(); return
         }
         let (x, y) = cal.map(f.values)
-        record(["t": seen, "ft": f.time, "phase": "type", "f": f.values, "at": [x, y]])
+        if !lipsMode { record(["t": seen, "ft": f.time, "phase": "type", "f": f.values, "at": [x, y]]) }
         mapped(x, y, f)
     }
 
@@ -1122,7 +1358,10 @@ final class EyeKeyboard {
     func mapped(_ x: Double, _ y: Double, _ f: GazeFeatures) {
         let x = x + shift.x, y = y + shift.y
         if lipsMode {                                               // the lip reader does the words: it gets the gaze
-            view.move(to: hold(x, y, f.time))
+            let shown = hold(x, y, f.time)
+            view.move(to: shown)
+            record(["t": f.time + (clock ?? 0), "ft": f.time, "phase": "lips", "f": f.values, "at": [x, y],
+                    "dot": [shown.0, shown.1], "shift": [shift.x, shift.y]])
             guard onKeyboard(x, y) else { off(f.time); return }
             offSince = nil
             lipsEnded = false
@@ -1238,6 +1477,7 @@ final class EyeKeyboard {
 
     /// A message from the lip reader (on the main thread).
     func heard(_ m: [String: Any]) {
+        note(["event": "lips", "message": m])
         let showing = on && setup == nil
         if m["gone"] != nil {
             lips = nil
@@ -1269,6 +1509,7 @@ final class EyeKeyboard {
     /// there in practice (owner, 2026-11-19: a read-back there looked like a second sentence to say).
     func showPrompt() {
         guard lipsMode, let p = lipsPrompt, on, setup == nil else { return }
+        if view.words.text != p { note(["event": "prompt", "text": p, "number": lipsNumber]) }
         view.words.text = p
     }
 
@@ -1294,6 +1535,7 @@ final class EyeKeyboard {
         if lipsMode, lipsListening, !lipsEnded, t - offSince! > lookUpFinishes {
             lipsEnded = true
             lips?.send(["end": t])
+            note(["event": "end_sent", "ft": t, "off_since": offSince!])
         }
         if typing && t - offSince! > lookUpFinishes { finishPhrase() }
     }
@@ -1538,6 +1780,21 @@ struct Main {
             }
         }
         keyboard.setUpWindow()
+        // The lip reader loads now, not when the keyboard first opens: loading it on the GPU then stopped the
+        // camera for 12.8 s of the owner's first sentence (2026-11-19, 01:05:15.8-01:05:28.6).
+        if lipsMode { keyboard.startLips() }
+        if let seconds = option("--session-test").flatMap(Double.init) {
+            AVCaptureDevice.requestAccess(for: .video) { _ in
+                DispatchQueue.main.async {
+                    keyboard.toggle()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                        keyboard.toggle()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { keyboard.lips?.process.terminate(); exit(0) }
+                    }
+                }
+            }
+            app.run()
+        }
         let mask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
         let box = Unmanaged.passUnretained(keyboard).toOpaque()
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
