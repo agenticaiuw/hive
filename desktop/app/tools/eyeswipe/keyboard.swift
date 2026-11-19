@@ -1513,14 +1513,11 @@ final class EyeKeyboard {
             showPrompt()
         }
         if m["take"] != nil { NSSound(named: "Pop")?.play() }      // heard; what it read is in the log, not on screen
-        // Practice: the sentence shown is what was meant, so learn the map from its gaze. Not from what was typed
-        // (real use): replaying the owner's 17 sentences, 2026-11-19, learning from the wrong sentence each time got
-        // past the line-up check 12 times and made the map worse (1.99 keys off -> 1.13, against 0.97 learning from
-        // the right one; last 6: 1.94 vs 1.19), and while the lips are mostly wrong most typed text is wrong. The
-        // map gets the head's moves from the head pose it was fitted with, and from each practice sentence.
-        if m["take"] != nil, let from = m["from"] as? Double, let to = m["to"] as? Double,
-           let words = m["meant"] as? String, !words.isEmpty {
-            learnSentence(words, from: from, to: to)
+        // Learn the map from the sentence's gaze: in practice from the sentence shown, else from what was typed,
+        // but only if the gaze backs it (see typedFits: typed text is often wrong while the lips are).
+        if let from = m["from"] as? Double, let to = m["to"] as? Double,
+           let words = (m["take"] != nil ? m["meant"] : m["text"]) as? String, !words.isEmpty {
+            learnSentence(words, from: from, to: to, typed: m["take"] == nil)
         }
         if let text = m["text"] as? String {
             emit(["typed": text, "ms": m["ms"] ?? 0, "seconds": m["seconds"] ?? 0, "gaze_points": m["gaze_points"] ?? 0])
@@ -1612,15 +1609,17 @@ final class EyeKeyboard {
     /// whole path's drift found too); the frames held on a key join `learned` and the map is fitted again,
     /// so it follows the head as it moves (owner, 2026-11-19: telling people not to move their heads isn't
     /// acceptable). Only when most of the gaze lines up: a sentence read wrong mustn't teach it.
-    func learnSentence(_ text: String, from: Double, to: Double) {
+    func learnSentence(_ text: String, from: Double, to: Double, typed: Bool = false) {
         let frames = sentenceGaze.filter { $0.t >= from - 0.3 && $0.t <= to + 0.3 }
         sentenceGaze.removeAll { $0.t <= to }
         guard frames.count >= 20, !replaying, setup == nil else { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let (add, a) = Self.sentenceRows(text, frames)
+            let margin = typed ? Self.typedFits(text, frames) : nil
+            let (add, a) = typed && !(margin.map { $0 >= Self.typedMargin } ?? false) ? ([], nil) : Self.sentenceRows(text, frames)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.note(["event": "learn_sentence", "text": text, "frames": frames.count, "kept": add.count,
+                self.note(["event": "learn_sentence", "text": text, "typed": typed, "margin": margin ?? -1e9,
+                           "frames": frames.count, "kept": add.count,
                            "on_keys": a?.onKeys ?? 0, "reached": a?.reached ?? 0, "drift": a.map { [$0.shift.x, $0.shift.y] } ?? []])
                 guard add.count >= 10 else { return }
                 self.learned += add
@@ -1631,6 +1630,36 @@ final class EyeKeyboard {
     }
 
     typealias GazeFrame = (t: Double, f: [Double], x: Double, y: Double)
+
+    /// How much better the gaze follows the typed text's keys than the best of 20 sentences about as long (the
+    /// practice sentences): nil if it can't be lined up. Typed text teaches the map only at typedMargin or more.
+    /// Replaying the owner's session, 2026-11-19 (17 sentences, both the setup's map and the corrected one):
+    /// the sentence meant came out 10 or more ahead 5-6 times, the next sentence's words (standing in for
+    /// wrong typed text) never (the best of 33 was +0.2); learning from every wrong sentence instead made the
+    /// map worse (1.99 keys off -> 1.13, against 0.97 from the right ones).
+    static func typedFits(_ text: String, _ frames: [GazeFrame]) -> Double? {
+        let xy = frames.map { (x: $0.x, y: $0.y) }
+        guard let mine = SentenceAlign.score(text, xy), let n = SentenceAlign.path(text)?.count else { return nil }
+        let own = text.lowercased().split(separator: " ").joined(separator: " ")
+        let others = decoys.filter { $0.text != own }.sorted { (abs($0.keys - n), $0.text) < (abs($1.keys - n), $1.text) }
+        let best = others.prefix(20).compactMap { SentenceAlign.score($0.text, xy) }.max()
+        return best.map { mine - $0 }
+    }
+
+    static let typedMargin = 10.0
+
+    /// The practice sentences (scripts/lipgaze_prompts.txt), with how many keys each sweeps.
+    static let decoys: [(text: String, keys: Int)] = {
+        let here = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+        let path = option("--lips-script").map { URL(fileURLWithPath: $0).deletingLastPathComponent()
+            .appendingPathComponent("lipgaze_prompts.txt").path }
+            ?? here.appendingPathComponent("../scripts/lipgaze_prompts.txt").standardizedFileURL.path
+        let lines = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n")
+        return lines.compactMap { line in
+            let text = line.lowercased().split(separator: " ").joined(separator: " ")
+            return SentenceAlign.path(text).map { (text, $0.count) }
+        }
+    }()
 
     /// A known sentence's frames held on one of its keys (three frames in a row, within 1.8 keys once the
     /// path's drift is taken off), each with that key's centre; none unless 60% of the gaze lines up and it
@@ -1735,10 +1764,14 @@ final class EyeKeyboard {
             // HIVE_REPLAY_WRONG=1: learn from the next sentence's words instead (typed text that came out wrong).
             let wrong = ProcessInfo.processInfo.environment["HIVE_REPLAY_WRONG"] != nil
             let text = wrong ? cuts[(cuts.firstIndex { $0.from == cut.from }! + 1) % cuts.count].meant : cut.meant
-            let (add, a) = Self.sentenceRows(text, now)
-            print(String(format: "%-40@ setup map %.2f keys off, learning %.2f; drift left (%+.2f, %+.2f), on keys %.0f%%, reached %.0f%%, learned %d",
+            // HIVE_REPLAY_TYPED=1: as typed text (real use), learnt only if the gaze backs it (typedFits).
+            let typed = ProcessInfo.processInfo.environment["HIVE_REPLAY_TYPED"] != nil
+            let margin = typed ? Self.typedFits(text, now) : nil
+            let (add, a) = typed && !(margin.map { $0 >= Self.typedMargin } ?? false) ? ([], nil) : Self.sentenceRows(text, now)
+            print(String(format: "%-40@ setup map %.2f keys off, learning %.2f; drift left (%+.2f, %+.2f), on keys %.0f%%, reached %.0f%%, learned %d%@",
                          String(cut.meant.prefix(40)) as NSString, m0, m1, a?.shift.x ?? .nan, a?.shift.y ?? .nan,
-                         100 * (a?.onKeys ?? 0), 100 * (a?.reached ?? 0), add.count))
+                         100 * (a?.onKeys ?? 0), 100 * (a?.reached ?? 0), add.count,
+                         (margin.map { String(format: ", margin %+.1f", $0) } ?? "") as NSString))
             guard add.count >= 10 else { continue }
             learned += add
             if learned.count > Self.learnedMost { learned.removeFirst(learned.count - Self.learnedMost) }

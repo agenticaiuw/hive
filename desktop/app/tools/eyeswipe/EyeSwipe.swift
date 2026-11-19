@@ -76,14 +76,49 @@ public enum SentenceAlign {
                              off: Double = -6, range: Double = 3.5)
         -> (keys: [Int], shift: (x: Double, y: Double), onKeys: Double, reached: Double)? {
         guard let path = path(text), samples.count >= 2 * path.count else { return nil }
-        let T = samples.count, K = path.count, centers = path.map { EyeLayout.centers[$0] }
-        let norm = -log(2 * Double.pi * sigma * sigma), s2 = 2 * sigma * sigma
+        let fit = Fit(path, samples, sigma, off), best = fit.bestShift(range)
+        let T = samples.count, K = path.count
+        var back = [UInt8](repeating: 0, count: T * K)
+        let (_, last) = back.withUnsafeMutableBufferPointer { fit.run(best.x, best.y, $0.baseAddress) }
+        var keys = [Int](repeating: -1, count: T), j = last
+        for t in stride(from: T - 1, through: 0, by: -1) {
+            let on = fit.emit(t, j, best.x, best.y) > off
+            keys[t] = on ? path[j] : -1
+            if t > 0 && back[t * K + j] == 1 { j -= 1 }
+        }
+        let onKeys = Double(keys.filter { $0 >= 0 }.count) / Double(T)
+        return (keys, (best.x, best.y), onKeys, Double(last + 1) / Double(K))
+    }
+
+    /// How well the gaze follows the sentence's keys in order at its best shift: a log score, comparable only
+    /// between sentences scored on the same samples. nil if it can't be lined up.
+    public static func score(_ text: String, _ samples: [(x: Double, y: Double)], sigma: Double = 0.7,
+                             off: Double = -6, range: Double = 3.5) -> Double? {
+        guard let path = path(text), samples.count >= 2 * path.count else { return nil }
+        return Fit(path, samples, sigma, off).bestShift(range).score
+    }
+
+    /// One sentence's keys against one gaze path: a monotonic Viterbi (each sample on the key it's at or the
+    /// next one), the samples moved by a shift.
+    struct Fit {
+        let samples: [(x: Double, y: Double)], centers: [(x: Double, y: Double)], norm: Double, s2: Double, off: Double
+
+        init(_ path: [Int], _ samples: [(x: Double, y: Double)], _ sigma: Double, _ off: Double) {
+            self.samples = samples
+            centers = path.map { EyeLayout.centers[$0] }
+            norm = -log(2 * Double.pi * sigma * sigma)
+            s2 = 2 * sigma * sigma
+            self.off = off
+        }
+
         func emit(_ t: Int, _ j: Int, _ sx: Double, _ sy: Double) -> Double {
             let dx = samples[t].x - sx - centers[j].x, dy = samples[t].y - sy - centers[j].y
             return max(norm - (dx * dx + dy * dy) / s2, off)
         }
-        // Best score over the path's keys at the last sample; with `back`, which key each sample is on.
+
+        /// Best score over the path's keys at the last sample; with `back`, which key each sample is on.
         func run(_ sx: Double, _ sy: Double, _ back: UnsafeMutablePointer<UInt8>?) -> (Double, Int) {
+            let T = samples.count, K = centers.count
             var prev = [Double](repeating: -.infinity, count: K), cur = prev
             prev[0] = emit(0, 0, sx, sy)
             for t in 1..<T {
@@ -98,31 +133,26 @@ public enum SentenceAlign {
             for j in 1..<K where prev[j] > prev[best] { best = j }
             return (prev[best], best)
         }
-        var best = (score: -Double.infinity, x: 0.0, y: 0.0)
-        for step in [0.5, 0.25] {                            // a coarse grid, then finer around the best
-            let around = step == 0.5 ? (0.0, 0.0) : (best.x, best.y), reach = step == 0.5 ? range : 0.5
-            var dx = -reach
-            while dx <= reach + 1e-9 {
-                var dy = -reach
-                while dy <= reach + 1e-9 {
-                    let (sx, sy) = (around.0 + dx, around.1 + dy)
-                    let v = run(sx, sy, nil).0 - (sx * sx + sy * sy) / 50   // a faint pull towards no shift
-                    if v > best.score { best = (v, sx, sy) }
-                    dy += step
+
+        /// The shift that fits best: a coarse grid, then finer around the best.
+        func bestShift(_ range: Double) -> (score: Double, x: Double, y: Double) {
+            var best = (score: -Double.infinity, x: 0.0, y: 0.0)
+            for step in [0.5, 0.25] {
+                let around = step == 0.5 ? (0.0, 0.0) : (best.x, best.y), reach = step == 0.5 ? range : 0.5
+                var dx = -reach
+                while dx <= reach + 1e-9 {
+                    var dy = -reach
+                    while dy <= reach + 1e-9 {
+                        let (sx, sy) = (around.0 + dx, around.1 + dy)
+                        let v = run(sx, sy, nil).0 - (sx * sx + sy * sy) / 50   // a faint pull towards no shift
+                        if v > best.score { best = (v, sx, sy) }
+                        dy += step
+                    }
+                    dx += step
                 }
-                dx += step
             }
+            return best
         }
-        var back = [UInt8](repeating: 0, count: T * K)
-        let (_, last) = back.withUnsafeMutableBufferPointer { run(best.x, best.y, $0.baseAddress) }
-        var keys = [Int](repeating: -1, count: T), j = last
-        for t in stride(from: T - 1, through: 0, by: -1) {
-            let on = emit(t, j, best.x, best.y) > off
-            keys[t] = on ? path[j] : -1
-            if t > 0 && back[t * K + j] == 1 { j -= 1 }
-        }
-        let onKeys = Double(keys.filter { $0 >= 0 }.count) / Double(T)
-        return (keys, (best.x, best.y), onKeys, Double(last + 1) / Double(K))
     }
 }
 

@@ -204,19 +204,21 @@ class Fitter:
             p.requires_grad_(False)
 
     def read(self, take, w=1.0):
-        """(lips alone, lips n-best picked by the gaze)."""
+        """What each way of reading makes of a take: lips alone, the lips' n-best picked by the gaze, and the
+        gaze inside the search (what lipgaze serve types)."""
         features = self.lips.encode(list(take['frames']))
         scorer = GazeScorer(take['gaze'])
         nbest = fused_search(self.lips, features, scorer, use_gaze=False)
         alone = nbest[0][0] if nbest else ''
         if not take['gaze'] or not nbest:
-            return alone, alone
+            return {'lips': alone, 'pick': alone, 'fused': alone}
         s = scorer.s
 
         def total(r):
             keys = key_path(r[0])
             return r[1].lips + w * s.weight / s.temperature * scorer.best_shift(keys)[0] if keys else -np.inf
-        return alone, max(nbest, key=total)[0]
+        fused = fused_search(self.lips, features, scorer)
+        return {'lips': alone, 'pick': max(nbest, key=total)[0], 'fused': fused[0][0] if fused else ''}
 
     def snapshot(self, **info):
         return {'lora': {n: {'a': l.a.detach().cpu().clone(), 'b': l.b.detach().cpu().clone(), 'scale': l.scale}
@@ -259,7 +261,9 @@ def main():
         print(f'saved {out}')
         return
     folds = [use[k::a.folds] for k in range(a.folds)]
-    tally = {k: 0 for k in ('before', 'before_gaze', 'after', 'after_gaze', 'words')}
+    ways = ('lips', 'pick', 'fused')
+    tally = {(when, way): 0 for when in ('before', 'fitted') for way in ways}
+    words = 0
     for k, test in enumerate(folds):
         learn = [t for t in use if t not in test]
         fit.reset()
@@ -267,18 +271,18 @@ def main():
         print(f'fold {k + 1}: fitting to {len(learn)} takes, reading {len(test)}', flush=True)
         fit.train(learn, epochs=a.epochs, lr=a.lr)
         after = [fit.read(t) for t in test]
-        for t, (b, bg), (f, fg) in zip(test, before, after):
-            n = len(t['words'].split())
-            e = [word_errors(x, t['words']) for x in (b, bg, f, fg)]
-            for key, v in zip(('before', 'before_gaze', 'after', 'after_gaze'), e):
-                tally[key] += v
-            tally['words'] += n
-            print(f"  {t['words']}\n     before: {b} ({e[0]}) / with gaze: {bg} ({e[1]})\n"
-                  f"     fitted: {f} ({e[2]}) / with gaze: {fg} ({e[3]})", flush=True)
-    n = max(1, tally['words'])
-    print(f"{tally['words']} words, % wrong: lips {100 * tally['before'] / n:.1f}, lips + gaze pick "
-          f"{100 * tally['before_gaze'] / n:.1f}; fitted {100 * tally['after'] / n:.1f}, fitted + gaze pick "
-          f"{100 * tally['after_gaze'] / n:.1f}  ({(time.monotonic() - began) / 60:.0f} min)")
+        for t, b, f in zip(test, before, after):
+            words += len(t['words'].split())
+            print(f"  {t['words']}")
+            for when, got in (('before', b), ('fitted', f)):
+                e = {way: word_errors(got[way], t['words']) for way in ways}
+                for way in ways:
+                    tally[when, way] += e[way]
+                print(f"     {when}: " + ' / '.join(f"{way} {got[way]} ({e[way]})" for way in ways), flush=True)
+    n = max(1, words)
+    print(f"{words} words, % wrong: " + '; '.join(
+        f"{when} " + ', '.join(f"{way} {100 * tally[when, way] / n:.1f}" for way in ways) for when in ('before', 'fitted'))
+        + f"  ({(time.monotonic() - began) / 60:.0f} min)")
 
 
 if __name__ == '__main__':

@@ -91,6 +91,22 @@ class GazeScorerTest(unittest.TestCase):
             last = keys[-1] if keys else last
         self.assertAlmostEqual(scorer.final(state), scorer.score(key_path("can you send")), places=9)
 
+    def test_many_at_once_equals_one_by_one(self):
+        rng = np.random.default_rng(7)
+        scorer = GazeScorer(swipe("open the terminal", 0.8, rng))
+        starts = [None, scorer.extend(None, key_path("open")), scorer.extend(None, key_path("op"))]
+        pieces = [key_path(p) for p in ["▁THE", "N", "▁TERM", "'"]]
+        states = [st for st in starts for _ in pieces]
+        keys = [k for _ in starts for k in pieces]
+        many = scorer.extend_many(states, keys)
+        for st, k, got in zip(states, keys, many):
+            want = scorer.extend(st, k)
+            if want is None:
+                self.assertIsNone(got)
+            else:
+                np.testing.assert_array_equal(got, want)
+        self.assertEqual(scorer.bound_many(many), [scorer.bound(st) for st in many])
+
     def test_rough_swipe_tells_lip_lookalikes_apart(self):
         """p, b and m look the same on the lips and sit far apart on the keyboard."""
         rng = np.random.default_rng(1)
