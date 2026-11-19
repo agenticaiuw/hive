@@ -233,28 +233,54 @@ class CutterTest(unittest.TestCase):
                 parts.append((part[0][1], part[-1][1]))
         return parts
 
-    def test_cuts_like_the_offline_cut_once_the_mouth_has_stopped(self):
-        openings = [0.05] * 40 + [0.3] * 30 + [0.05] * 40
+    def test_cuts_like_the_offline_cut_once_the_mouth_has_been_still_3_s(self):
+        openings = [0.05] * 40 + [0.3] * 30 + [0.05] * 100
         self.assertEqual(self.feed(lipgaze.Cutter(30), openings), [("crop25", "crop84")])
 
-    def test_short_closures_stay_in_one_sentence_and_twitches_are_dropped(self):
-        talk = [0.3] * 20 + [0.05] * 8 + [0.3] * 20           # lips shut for a quarter second mid-sentence
-        twitch = [0.05] * 40 + [0.3] * 3 + [0.05] * 40
-        parts = self.feed(lipgaze.Cutter(30), [0.05] * 40 + talk + [0.05] * 40 + twitch)
-        self.assertEqual(parts, [("crop25", "crop102")])
+    def test_slow_speech_stays_one_sentence_and_twitches_are_dropped(self):
+        talk = [0.3] * 20 + [0.05] * 45 + [0.3] * 20          # lips still 1.5 s between words: slow, swiping
+        twitch = [0.05] * 40 + [0.3] * 3 + [0.05] * 100
+        parts = self.feed(lipgaze.Cutter(30), [0.05] * 40 + talk + [0.05] * 100 + twitch)
+        self.assertEqual(parts, [("crop25", "crop139")])
 
     def test_two_sentences_and_finish(self):
         cutter = lipgaze.Cutter(30)
-        parts = self.feed(cutter, [0.05] * 30 + [0.3] * 20 + [0.05] * 30 + [0.3] * 20)
-        self.assertEqual(len(parts), 1)
+        parts = self.feed(cutter, [0.05] * 30 + [0.3] * 20 + [0.05] * 100 + [0.3] * 20)
+        self.assertEqual(parts, [("crop15", "crop64")])
         last = cutter.finish()
-        self.assertEqual((last[0][1], last[-1][1]), ("crop65", "crop99"))
+        self.assertEqual((last[0][1], last[-1][1]), ("crop135", "crop169"))
         self.assertIsNone(cutter.finish())
+
+    def test_finish_ends_it_mid_pause(self):                 # the eyes left the keys: no waiting on the mouth
+        cutter = lipgaze.Cutter(30)
+        self.assertEqual(self.feed(cutter, [0.05] * 30 + [0.3] * 20 + [0.05] * 20), [])
+        last = cutter.finish()
+        self.assertEqual((last[0][1], last[-1][1]), ("crop15", "crop64"))
 
     def test_long_talk_is_cut_at_the_longest(self):
         parts = self.feed(lipgaze.Cutter(30, longest=4), [0.05] * 20 + [0.3] * 200)
         self.assertGreaterEqual(len(parts), 1)
         self.assertLessEqual(len(parts), 2)
+
+
+class SqueezeTest(unittest.TestCase):
+    def test_pauses_inside_are_shortened_and_the_ends_kept(self):
+        openings = [0.05] * 15 + [0.3] * 20 + [0.05] * 60 + [0.3] * 20 + [0.05] * 15   # a 2 s pause inside
+        times = [i / 30 for i in range(len(openings))]
+        kept_t, kept, spoken = lipgaze.squeeze(times, list(range(len(openings))), openings)
+        gaps = np.diff(kept_t)
+        self.assertTrue(np.all(gaps > 0))
+        self.assertLess(gaps.max(), 0.05)                                    # no hole left where the pause was
+        self.assertEqual((kept[0], kept[-1]), (0, len(openings) - 1))        # the still margins stay
+        pause = sum(1 for i in kept if 35 <= i < 95) / 30
+        self.assertAlmostEqual(pause, 0.3, delta=0.05)
+        self.assertAlmostEqual(spoken, (19 + 1 + 19) / 30 + 0.3, delta=0.05)
+
+    def test_nothing_to_squeeze(self):
+        openings = [0.05] * 10 + [0.3] * 10 + [0.05] * 10
+        times = [i / 30 for i in range(30)]
+        kept_t, kept, _ = lipgaze.squeeze(times, list(range(30)), openings)
+        self.assertEqual((kept_t, kept), (times, list(range(30))))
 
 
 class StandInMouth:
@@ -312,12 +338,16 @@ class ServerTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             stream = io.BytesIO()
-            for i, level in enumerate([12] * 40 + [77] * 30 + [12] * 40):
+            levels = [12] * 40 + [77] * 30 + [12] * 20 + [12] * 40 + [77] * 9 + [12] * 20
+            for i, level in enumerate(levels):
                 stream.write(json.dumps({"frame": {"t": i / 30, "w": 2, "h": 2}}).encode() + b"\n")
                 stream.write(bytes([level]) * 4)
+                if i in (89, len(levels) - 1):                  # the eyes leave the keys
+                    stream.write(json.dumps({"end": i / 30}).encode() + b"\n")
             stream.seek(0)
             out, log = io.StringIO(), io.StringIO()
-            server = lipgaze.Server(Lips(), out, record=folder, prompts=["The bat!", "A cat."])
+            server = lipgaze.Server(Lips(), out, record=folder,
+                                    prompts=["The bat!", "a cat sat on the mat in the hat all day"])
             server.crops = StandInMouth()
             server.listen(stream)
             real, sys.stderr = sys.stderr, log
@@ -327,11 +357,18 @@ class ServerTest(unittest.TestCase):
                 sys.stderr = real
             said = [json.loads(line) for line in out.getvalue().splitlines()]
             # The screen gets only sentences to say and the end of each take, never what was read.
-            self.assertEqual(said, [{"prompt": "The bat!", "number": 1}, {"take": 1}, {"prompt": "A cat.", "number": 2}])
-            result = json.loads(log.getvalue())
+            # The second take (0.3 s for ten words) is far too short: no take, the same sentence stays.
+            self.assertEqual(said[:3], [{"prompt": "The bat!", "number": 1}, {"take": 1},
+                                        {"prompt": "a cat sat on the mat in the hat all day", "number": 2}])
+            self.assertEqual(list(said[3]), ["status"])
+            self.assertEqual(len(said), 4)
+            self.assertEqual(sorted(p.name for p in Path(folder).glob("*.npz")), ["0000.npz"])
+            (Path(folder) / "0000.npz").rename(Path(folder) / "0007.npz")       # takes moved or kept: the next is 0008
+            self.assertEqual(lipgaze.Server(Lips(), io.StringIO(), record=folder).taken, 8)
+            result = json.loads(log.getvalue().splitlines()[0])
             self.assertEqual((result["take"], result["meant"], result["lips"], result["wrong"]["lips"]),
                              (1, "the bat", "the bat", 0))
-            take = np.load(Path(folder) / "0000.npz")
+            take = np.load(Path(folder) / "0007.npz")
             self.assertEqual(take["crops"].shape[1:], (88, 88))
             self.assertEqual(str(take["meant"]), "The bat!")
 

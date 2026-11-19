@@ -1,6 +1,8 @@
 """Lip reading confirmed by a rough eye swipe: you say a sentence and glance across its letters on the
-eye keyboard at the same time. No blinks between words, no space bar; the sentence ends when your
-mouth stops (0.6 s still).
+eye keyboard at the same time, as slowly as you like. No blinks between words, no space bar; the
+sentence ends when your eyes leave the keyboard (look up above the keys), or after 3 s of a still mouth.
+Swiping while speaking slows speech down, with the lips still for a second or more between words, so
+a still mouth doesn't end a sentence; those pauses are shortened before the mouth is read.
 
 The lips carry the words. USR 2.0 Huge (github.com/ahaliassos/usr2, MIT) reads the mouth video, and
 its decoder proposes word pieces one at a time. The gaze doesn't have to land on keys: each guess is
@@ -413,6 +415,44 @@ def speaking(openings, fps, *, moving=0.15, most=0.2, margin=0.5):
     return max(0, moving_at[0] - pad), min(len(openings), moving_at[-1] + pad + 1)
 
 
+def squeeze(times, crops, openings, *, keep=0.3, moving=0.15, most=0.2):
+    """A sentence's pauses shortened to `keep` seconds before it's read: speaking while swiping leaves the
+    mouth still for a second or more between words, unlike the videos USR 2.0 learned from, and over
+    seconds of a still mouth it makes up words. Returns the frames kept, their times with the cut pauses
+    taken out, and how long the mouth was moving (first to last moving frame, pauses shortened). Frames
+    with no mouth found count as still."""
+    times = [float(t) for t in times]
+    known = [o for o in openings if o is not None and not np.isnan(o)]
+    if len(times) < 3 or not known:
+        return times, list(crops), 0.0
+    rest = sorted(known)[len(known) // 10]
+    bar = min(most, max(moving, 2 * rest))
+    still = [o is None or np.isnan(o) or o <= bar for o in openings]
+    cuts, i = [], 0                                  # (from, to): frames strictly between are dropped
+    while i < len(still):
+        if not still[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(still) and still[j + 1]:
+            j += 1
+        if i > 0 and j < len(still) - 1 and times[j] - times[i] > keep:      # a pause inside the sentence
+            cuts.append((times[i] + keep / 2, times[j] - keep / 2))
+        i = j + 1
+    out_t, out_c, out_still, shift, k = [], [], [], 0.0, 0
+    for t, c, quiet in zip(times, crops, still):
+        while k < len(cuts) and t >= cuts[k][1]:
+            shift += cuts[k][1] - cuts[k][0]
+            k += 1
+        if k < len(cuts) and cuts[k][0] < t < cuts[k][1]:
+            continue
+        out_t.append(t - shift)
+        out_c.append(c)
+        out_still.append(quiet)
+    moving_at = [t for t, quiet in zip(out_t, out_still) if not quiet]
+    return out_t, out_c, (moving_at[-1] - moving_at[0]) if moving_at else 0.0
+
+
 def word_errors(said, meant):
     a, b = said.split(), meant.split()
     row = list(range(len(b) + 1))
@@ -426,12 +466,13 @@ def word_errors(said, meant):
 
 
 class Cutter:
-    """Cuts the camera stream into sentences: a sentence ends once the mouth has been still for `pause`
-    (inside a sentence lips close for at most about 0.25 s), or after `longest`. Each sentence keeps
-    `margin` of still frames on each side (with 0.3 s USR 2.0 lost first words, and given seconds of a
-    closed mouth it made up words). feed() returns a finished sentence's frames, or None."""
+    """Cuts the camera stream into sentences: a sentence ends with finish() (the keyboard says the eyes
+    left the keys), once the mouth has been still for `pause`, or after `longest`. The pause is long: with
+    0.6 s, speaking slowly while swiping cut sentences after a word or two (owner, 2026-11-19). Each
+    sentence keeps `margin` of still frames on each side (with 0.3 s USR 2.0 lost first words, and given
+    seconds of a closed mouth it made up words). feed() returns a finished sentence's frames, or None."""
 
-    def __init__(self, fps=30, *, pause=0.6, margin=0.5, longest=12, moving=0.15, most=0.2):
+    def __init__(self, fps=30, *, pause=3.0, margin=0.5, longest=30, moving=0.15, most=0.2):
         self.fps = fps
         self.pause, self.margin, self.longest = int(pause * fps), int(margin * fps), int(longest * fps)
         self.moving, self.most = moving, most
@@ -529,7 +570,8 @@ class Server:
         self.taken = 0
         if self.record:
             self.record.mkdir(parents=True, exist_ok=True)
-            self.taken = len(list(self.record.glob('*.npz')))
+            # After the last take kept (not how many: a take moved out mustn't get written over).
+            self.taken = max((int(f.stem) for f in self.record.glob('*.npz') if f.stem.isdigit()), default=-1) + 1
         self.cutter = None
 
     def say(self, **message):
@@ -549,9 +591,9 @@ class Server:
                 with self.ready:
                     self.frames.append((float(m['frame']['t']), m['pixels']))
                     self.ready.notify()
-            elif m.get('on') is False:
+            elif 'end' in m or m.get('on') is False:
                 with self.ready:
-                    self.frames.append((None, None))     # the keyboard closed: finish the sentence
+                    self.frames.append((None, None))     # the eyes left the keys, or it closed: finish the sentence
                     self.ready.notify()
         with self.ready:
             self.closed = True
@@ -596,7 +638,14 @@ class Server:
         t0, t1 = part[0][0], part[-1][0]
         samples = [(x, y) for t, x, y in list(self.gaze) if t0 <= t <= t1]
         crops = np.stack([p[1] for p in part])
-        features = self.lips.encode(at_fps([p[0] for p in part], list(crops)))
+        openings = [p[2] for p in part]
+        times, kept, spoken = squeeze([p[0] for p in part], list(crops), openings)
+        if self.record and self.prompt and spoken < 0.15 * len(normalise(self.prompt).split()):
+            # Practice: far too short for the sentence (looked up early, or a cough): same sentence again.
+            print(json.dumps({'too_short': round(spoken, 2), 'meant': self.prompt}), file=sys.stderr, flush=True)
+            self.say(status='That was shorter than the sentence: say all of it, then look up above the keys.')
+            return
+        features = self.lips.encode(at_fps(times, kept))
         scorer = GazeScorer(samples, self.settings, self.shift)
         fused = fused_search(self.lips, features, scorer)
         text = fused[0][0] if fused else ''
@@ -615,7 +664,7 @@ class Server:
             gaze = np.array([g for g in list(self.gaze) if t0 - 1 <= g[0] <= t1 + 1]).reshape(-1, 3)
             np.savez_compressed(self.record / f'{self.taken:04d}.npz', crops=crops,
                                 times=np.array([p[0] for p in part]),
-                                openings=np.array([np.nan if p[2] is None else p[2] for p in part]),
+                                openings=np.array([np.nan if o is None else o for o in openings]),
                                 gaze=gaze, meant=self.prompt or '', lips=message['lips'], fused=text)
             self.taken += 1
             # What was read stays off the screen ({"take"}: the keyboard shows only the next sentence to say,
@@ -642,7 +691,8 @@ def evaluate(recording, model_root, settings=GazeSettings()):
         meant = str(take['meant'])
         times, gaze = take['times'], take['gaze']
         samples = [(x, y) for t, x, y in gaze if times[0] <= t <= times[-1]]
-        features = lips.encode(at_fps(times, list(take['crops'])))
+        kept_times, kept, _ = squeeze(times, list(take['crops']), list(take['openings']))
+        features = lips.encode(at_fps(kept_times, kept))
         scorer = GazeScorer(samples, settings, shift)
         alone = fused_search(lips, features, scorer, use_gaze=False)
         fused = fused_search(lips, features, scorer)
