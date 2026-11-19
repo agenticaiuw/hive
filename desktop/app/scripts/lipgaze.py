@@ -126,6 +126,36 @@ class GazeScorer:
             L = C + enter
         return L
 
+    def extend_many(self, states, keys):
+        """extend() for many paths at once (the same numbers): states, each L or None, and the keys each sweeps."""
+        T, d = self.T, self.s.dwell
+        out = list(states)
+        if T == 0:
+            return [np.zeros(0) if len(k) else st for st, k in zip(states, keys)]
+        for i in range(max((len(k) for k in keys), default=0)):
+            rows = [j for j, k in enumerate(keys) if len(k) > i]
+            C = np.cumsum(self.emit[:, [keys[j][i] for j in rows]].T, axis=1)
+            Cprev = np.concatenate([np.zeros((len(rows), 1)), C[:, :-1]], axis=1)
+            A = np.stack([self.lead[:T] if out[j] is None else np.concatenate([[-np.inf], out[j][:-1]]) for j in rows])
+            M = np.maximum.accumulate(A - Cprev, axis=1)
+            enter = np.full((len(rows), T), -np.inf)
+            enter[:, d - 1:] = M[:, :T - d + 1]
+            L = C + enter
+            for r, j in enumerate(rows):
+                out[j] = L[r]
+        return out
+
+    def bound_many(self, states):
+        """bound() for many states."""
+        if not self.T:
+            return [self.rest[0] if st is None else 0.0 for st in states]
+        have = [j for j, st in enumerate(states) if st is not None]
+        out = [self.rest[0]] * len(states)
+        if have:
+            for j, v in zip(have, (np.stack([states[j] for j in have]) + self.rest[None, 1:]).max(axis=1)):
+                out[j] = float(v)
+        return out
+
     def bound(self, state):
         """The most this path could still score once finished: its keys so far, then the best keys for the rest."""
         if state is None:
@@ -248,7 +278,7 @@ def fused_search(lips, features, scorer, *, beam=10, per_guess=30, longest=150, 
             more = [(b, tok) for b, tok in pairs if tok != eos]
             if more:
                 grown = dict(zip(more, ctc.extend([guesses[b].ctc for b, _ in more], [t for _, t in more])))
-        options = []
+        grow = []                                   # (guess, piece, lips score, keys, ctc state) to extend
         for b, tok in pairs:
             g = guesses[b]
             lp = g.lips + (1 - lam) * float(logp[b, tok])
@@ -266,13 +296,14 @@ def fused_search(lips, features, scorer, *, beam=10, per_guess=30, longest=150, 
                 lp += lam * (state_ctc[2] - g.ctc[2])
             if not np.isfinite(lp):
                 continue
-            keys = key_path(units[tok], g.last)
-            if use_gaze:
-                state = scorer.extend(g.state, keys)
-                gaze = scorer.bound(state)
-            else:
-                state, gaze = None, 0.0                 # lips alone: no gaze work in the loop
-            options.append((lp + w * gaze, b, tok, lp, state, keys, state_ctc))
+            grow.append((b, tok, lp, key_path(units[tok], g.last), state_ctc))
+        if use_gaze:                                # all the guesses' gaze at once (a third of the time, one by one)
+            states = scorer.extend_many([guesses[b].state for b, _, _, _, _ in grow], [k for _, _, _, k, _ in grow])
+            gazes = scorer.bound_many(states)
+        else:
+            states, gazes = [None] * len(grow), [0.0] * len(grow)   # lips alone: no gaze work in the loop
+        options = [(lp + w * gaze, b, tok, lp, state, keys, state_ctc)
+                   for (b, tok, lp, keys, state_ctc), state, gaze in zip(grow, states, gazes)]
         if not options:
             break
         options.sort(key=lambda o: -o[0])
@@ -759,7 +790,7 @@ class Server:
         message = {'text': text, 'seconds': round(t1 - t0, 2), 'gaze_points': len(samples),
                    'ms': round(1000 * (time.monotonic() - began))}
         if number is None:
-            message.update({'from': t0, 'to': t1})   # when it was said (logged; the keyboard learns its map from practice only)
+            message.update({'from': t0, 'to': t1})   # the keyboard corrects its map from it if the gaze backs the text
             self.say(**message)
             return
         alone = fused_search(self.lips, features, scorer, use_gaze=False)
