@@ -364,6 +364,9 @@ class Usr2Lips:
         # The owner's own face (lipgaze_fit.py fit), merged into the weights: reads as fast as before.
         adapter = root.parent / 'usr2_adapter.pt'
         self.personal = add_personal(self.model, adapter) if personal and adapter.exists() else None
+        if self.personal:
+            print(f"lipgaze: fitted to the owner's {self.personal.get('takes', '?')} practice takes "
+                  f"({self.personal.get('made', '?')})", file=sys.stderr, flush=True)
         self.model.eval().to(self.device)
         self.units = list(UNIGRAM1000_LIST)
         self.eos = self.model.eos
@@ -614,6 +617,11 @@ class Server:
     moment a sentence ends. (The owner's first long take, 2026-11-19, took 25 s to read, and the next
     sentence only came after it: it looked stuck.)"""
 
+    # Typing takes the lips' best guess, the gaze not in the search: on the owner's takes held out from the
+    # personal fit, 2026-11-19 (76 words), gaze in the search got 92% of words wrong, lips alone 93%, the gaze
+    # picking from the lips' 10 best 91% (before the fit: 124%, 105%, 105%), and it made each sentence wait 3x
+    # as long (1.8 s against 0.6 s a take). It comes back once lipgaze_fit.py test says it helps.
+    GAZE_IN_SEARCH = False
     # Seconds of mouth movement per word a take needs before the keyboard learns from it: the owner's
     # whole takes, 2026-11-19, moved 0.51 to 1.37 s a word; the ones cut short 0.18 to 0.34.
     LEARN_SPOKEN = 0.4
@@ -783,9 +791,12 @@ class Server:
         times, kept, _ = squeeze([p[0] for p in part], [p[1] for p in part], [p[2] for p in part])
         features = self.lips.encode(at_fps(times, kept))
         scorer = GazeScorer(samples, self.settings, self.shift)
-        fused = fused_search(self.lips, features, scorer)
-        text = fused[0][0] if fused else ''
-        if fused and samples:
+        alone = fused_search(self.lips, features, scorer, use_gaze=False)
+        # Practice reads it both ways (logged, to measure); typing waits only for the one it types.
+        fused = fused_search(self.lips, features, scorer) if self.GAZE_IN_SEARCH or number is not None else None
+        typed = fused if self.GAZE_IN_SEARCH else alone
+        text = typed[0][0] if typed else ''
+        if self.GAZE_IN_SEARCH and fused and samples:
             self.shift = fused[0][2]
         message = {'text': text, 'seconds': round(t1 - t0, 2), 'gaze_points': len(samples),
                    'ms': round(1000 * (time.monotonic() - began))}
@@ -793,14 +804,14 @@ class Server:
             message.update({'from': t0, 'to': t1})   # the keyboard corrects its map from it if the gaze backs the text
             self.say(**message)
             return
-        alone = fused_search(self.lips, features, scorer, use_gaze=False)
         message['lips'] = alone[0][0] if alone else ''
+        message['fused'] = fused[0][0] if fused else ''
         if prompt:
             meant = normalise(prompt)
             message['meant'] = meant
-            message['wrong'] = {'lips': word_errors(message['lips'], meant), 'fused': word_errors(text, meant),
-                                'words': len(meant.split())}
-        self.keep(number, part, gaze, prompt, info, lips=message['lips'], fused=text)
+            message['wrong'] = {'lips': word_errors(message['lips'], meant),
+                                'fused': word_errors(message['fused'], meant), 'words': len(meant.split())}
+        self.keep(number, part, gaze, prompt, info, lips=message['lips'], fused=message['fused'])
         self.log(take=number + 1, **message, ended_by=info['ended_by'])
 
 
