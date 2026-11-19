@@ -256,7 +256,7 @@ def fused_search(lips, features, scorer, *, beam=10, per_guess=30, longest=150, 
                 if g.ids:
                     if ctc is not None:
                         lp += lam * (ctc.final(g.ctc) - g.ctc[2])
-                    gaze = scorer.final(g.state)
+                    gaze = scorer.final(g.state) if use_gaze else 0.0
                     if np.isfinite(lp):
                         finished.append(Guess(ids=g.ids, lips=lp, state=g.state, last=g.last, keys=g.keys,
                                               total=lp + w * gaze, gaze=gaze))
@@ -267,8 +267,11 @@ def fused_search(lips, features, scorer, *, beam=10, per_guess=30, longest=150, 
             if not np.isfinite(lp):
                 continue
             keys = key_path(units[tok], g.last)
-            state = scorer.extend(g.state, keys)
-            gaze = scorer.bound(state)
+            if use_gaze:
+                state = scorer.extend(g.state, keys)
+                gaze = scorer.bound(state)
+            else:
+                state, gaze = None, 0.0                 # lips alone: no gaze work in the loop
             options.append((lp + w * gaze, b, tok, lp, state, keys, state_ctc))
         if not options:
             break
@@ -300,7 +303,7 @@ class Usr2Lips:
     """USR 2.0 Huge, video only, its attention decoder one piece at a time for a beam."""
     crop_shape = (88, 88)
 
-    def __init__(self, root):
+    def __init__(self, root, personal=True):
         import torch
         from omegaconf import OmegaConf
         root = Path(root)
@@ -327,6 +330,9 @@ class Usr2Lips:
         frontend = self.model.encoder.frontend_v.frontend3D
         if isinstance(frontend[-1], torch.nn.MaxPool3d) and frontend[-1].kernel_size[0] == 1:
             frontend[-1] = frame_pool(frontend[-1])     # Apple's GPU can't run a 3-D max pool
+        # The owner's own face (lipgaze_fit.py fit), merged into the weights: reads as fast as before.
+        adapter = root.parent / 'usr2_adapter.pt'
+        self.personal = add_personal(self.model, adapter) if personal and adapter.exists() else None
         self.model.eval().to(self.device)
         self.units = list(UNIGRAM1000_LIST)
         self.eos = self.model.eos
@@ -372,6 +378,20 @@ class Usr2Lips:
     def words(self, ids):
         text = ''.join(self.units[i] for i in ids).replace('▁', ' ').replace('<unk>', '')
         return ' '.join(text.split()).lower()
+
+
+def add_personal(model, path):
+    """Adds a fit saved by lipgaze_fit.py into the model's own weights: the low-rank changes to the
+    attention layers' query and value weights, and the video front end's weights. Returns what was saved."""
+    import torch
+    saved = torch.load(path, map_location='cpu', weights_only=True)
+    modules = dict(model.named_modules())
+    with torch.no_grad():
+        for name, change in saved['lora'].items():
+            linear = modules[name]
+            linear.weight += (change['scale'] * change['b'] @ change['a']).to(linear.weight)
+        model.encoder.frontend_v.load_state_dict(saved['frontend'])
+    return saved
 
 
 def at_fps(times, frames, fps=25):
@@ -468,11 +488,12 @@ def word_errors(said, meant):
 class Cutter:
     """Cuts the camera stream into sentences: a sentence ends with finish() (the keyboard says the eyes
     left the keys), once the mouth has been still for `pause`, or after `longest`. The pause is long: with
-    0.6 s, speaking slowly while swiping cut sentences after a word or two (owner, 2026-11-19). Each
+    0.6 s, speaking slowly while swiping cut sentences after a word or two, and with 3 s the owner's first
+    take, 2026-11-19, ended after "put these" (they paused up to 5 s mid-sentence finding letters). Each
     sentence keeps `margin` of still frames on each side (with 0.3 s USR 2.0 lost first words, and given
     seconds of a closed mouth it made up words). feed() returns a finished sentence's frames, or None."""
 
-    def __init__(self, fps=30, *, pause=3.0, margin=0.5, longest=30, moving=0.15, most=0.2):
+    def __init__(self, fps=30, *, pause=8.0, margin=0.5, longest=30, moving=0.15, most=0.2):
         self.fps = fps
         self.pause, self.margin, self.longest = int(pause * fps), int(margin * fps), int(longest * fps)
         self.moving, self.most = moving, most
@@ -562,6 +583,10 @@ class Server:
     moment a sentence ends. (The owner's first long take, 2026-11-19, took 25 s to read, and the next
     sentence only came after it: it looked stuck.)"""
 
+    # Seconds of mouth movement per word a take needs before the keyboard learns from it: the owner's
+    # whole takes, 2026-11-19, moved 0.51 to 1.37 s a word; the ones cut short 0.18 to 0.34.
+    LEARN_SPOKEN = 0.4
+
     def __init__(self, lips, out, settings=GazeSettings(), record=None, prompts=None):
         import collections
         import queue
@@ -583,6 +608,22 @@ class Server:
             # After the last take kept (not how many: a take moved out mustn't get written over).
             self.taken = max((int(f.stem) for f in self.record.glob('*.npz') if f.stem.isdigit()), default=-1) + 1
         self.cutter = None
+        # Practice: a new sentence is read first (the eyes on the line below the keys, no gaze sent, the
+        # lips maybe moving along), and listening starts once the eyes have been on the keys a moment.
+        self.armed = not self.prompts
+        self.arm_after = -math.inf
+
+    ARM_POINTS, ARM_SPAN = 12, 0.6      # gaze points on the keys within this many seconds: they've begun
+
+    def arm(self, t):
+        """Practice: whether the eyes have come to the keys since the sentence was shown (up to camera time t)."""
+        if not self.armed:
+            seen = [g[0] for g in list(self.gaze) if self.arm_after < g[0] <= t + 0.05]
+            if len(seen) >= self.ARM_POINTS and seen[-1] - seen[-self.ARM_POINTS] <= self.ARM_SPAN:
+                self.armed = True
+                self.say(listening=True)
+                self.log(listening=round(t, 2), number=self.taken + 1)
+        return self.armed
 
     def say(self, **message):
         with self.saying:
@@ -642,7 +683,8 @@ class Server:
             crop = self.crops(np.repeat(pixels[:, :, None], 3, axis=2))   # grey to BGR
             if crop is not None:
                 last_crop = crop
-            part = self.cutter.feed(t, crop if crop is not None else last_crop, self.crops.opening)
+            opening = self.crops.opening if self.arm(t) else None   # still reading: the mouth doesn't count
+            part = self.cutter.feed(t, crop if crop is not None else last_crop, opening)
             if part:
                 self.ended(part, self.cutter.why)
         self.jobs.put(None)                            # the keyboard is gone: read what's left, then stop
@@ -667,6 +709,8 @@ class Server:
         t0, t1 = part[0][0], part[-1][0]
         gaze = np.array([g for g in list(self.gaze) if t0 - 1 <= g[0] <= t1 + 1]).reshape(-1, 3)
         _, _, spoken = squeeze([p[0] for p in part], [p[1] for p in part], [p[2] for p in part])
+        if self.prompts:
+            self.armed, self.arm_after = False, t1     # the next sentence (or this one again) is read first
         info = {'ended_by': why, 'seconds': round(t1 - t0, 2), 'spoken': round(spoken, 2), 'from': t0, 'to': t1}
         if not self.record:
             self.jobs.put((part, gaze, None, None, info))
@@ -682,7 +726,12 @@ class Server:
         self.log(cut=number + 1, meant=prompt, **info)
         # What was read stays off the screen ({"take"}: the keyboard shows only the next sentence to say,
         # since a read-back looked like a second sentence to say); it goes to the log and the take's file.
-        self.say(take=number + 1)
+        take = {'take': number + 1}
+        if spoken >= self.LEARN_SPOKEN * len(normalise(prompt or '').split()):
+            # The keyboard lines the gaze up with the sentence meant and corrects its map from it (the
+            # head moves; R47). Not when cut short: the prompt's later words were never swept.
+            take.update({'meant': normalise(prompt or ''), 'from': t0, 'to': t1})
+        self.say(**take)
         self.next_prompt()
         self.jobs.put((part, gaze, number, prompt, info))
 
@@ -710,6 +759,7 @@ class Server:
         message = {'text': text, 'seconds': round(t1 - t0, 2), 'gaze_points': len(samples),
                    'ms': round(1000 * (time.monotonic() - began))}
         if number is None:
+            message.update({'from': t0, 'to': t1})   # when it was said (logged; the keyboard learns its map from practice only)
             self.say(**message)
             return
         alone = fused_search(self.lips, features, scorer, use_gaze=False)
