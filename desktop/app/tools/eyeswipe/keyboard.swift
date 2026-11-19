@@ -2,7 +2,7 @@
 // see-through keyboard covers the lower part of the screen. Say a sentence while glancing across its letters
 // (no need to land on them; no blinks, no space bar; as slowly as you like): the lip reader reads the mouth,
 // the rough gaze sweep picks between words that look alike on the lips, and the sentence is typed into the
-// app in front once you look up off the keyboard (or after 3 s of a still mouth). The line in the keyboard's
+// app in front once you look up over the top of the screen (or after 8 s of a still mouth). The line in the keyboard's
 // bottom row shows the practice sentence or what was typed, so reading it keeps the eyes on the keyboard;
 // gaze there isn't part of the swipe. Esc closes it.
 //
@@ -48,6 +48,8 @@
 //   hive-eye-keyboard --snapshot out.png [--setup] [--trail] [--blinks] [--lips-record x]   draws it into a PNG (tests)
 //   hive-eye-keyboard --test --replay file      types made-up gaze from eyeswipe-sim --write-replay (tests)
 //   hive-eye-keyboard --calib-test dump         the setup's fit on each setup in a --dump, checked on its dots
+//   hive-eye-keyboard --learn-replay SESSION [--calibration copy]   a recorded practice session through the
+//       map's learning from each sentence: how far off the gaze was with it, against the setup's map alone
 //   hive-eye-keyboard --lips-record DIR --session-test SECONDS   opens for SECONDS without a key, records the
 //       session, closes and quits once its movies are written (checks the recording; the keys aren't watched)
 //
@@ -833,6 +835,7 @@ final class EyeKeyboard {
     var jobs: [Job] = [], busy = false
     let work = DispatchQueue(label: "hive.eye-keyboard.decode", qos: .userInteractive)
     var offSince: Double? = nil
+    var aboveSince: Double? = nil                              // lips: gaze well above the screen since
     var lastTap = 0.0, downAt = 0.0
     var lastSpeedReport = 0.0
     var dump: FileHandle? = nil
@@ -848,12 +851,19 @@ final class EyeKeyboard {
     var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil, lipsNumber = 0
     var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
     var lipsEnded = false                                      // {"end"} sent since the eyes left the keyboard
+    var lipsHeard = false                                      // practice: the lip reader is listening for this sentence
+    // Lips: the last 90 s of gaze on the keys (camera time, features, where the map put it), so each sentence,
+    // once its words are known, teaches the map where the eyes really were (learnSentence).
+    var sentenceGaze: [(t: Double, f: [Double], x: Double, y: Double)] = []
+    static let learnedMost = 3000                              // learned frames kept (about 15 sentences)
     // Session recording (--lips-record, or --record-sessions): see startSessionRecording.
     let recordsSessions = option("--dump") == nil && !CommandLine.arguments.contains("--no-session-recording")
         && ((lipsMode && option("--lips-record") != nil) || CommandLine.arguments.contains("--record-sessions"))
     var sessionFolder: URL? = nil
     var screenRecorder: ScreenRecorder? = nil
     static let keysEnd = 3.25                                  // below this (in key rows) is the line, not keys
+    static let lipsLookUp = -2.5                               // lips: above this (key rows) is over the screen
+    static let lipsAwayFinishes = 1.5                          // lips: seconds off the keys that end a sentence too
 
     init(decoder: EyeSwipeDecoder, test: Bool) {
         self.decoder = decoder
@@ -899,14 +909,17 @@ final class EyeKeyboard {
 
     static let howTo = "Look at each letter (no need to wait on it), blink after each word, look up when done. Esc closes."
 
-    static let lipsHowTo = "Say a sentence, slowly is fine, glancing across its letters. Then look up to type it. Esc closes."
+    static let lipsHowTo = "Say a sentence, slowly is fine, glancing across its letters. Then look up over the screen to type it. Esc closes."
 
     func hint() -> String {
         if lipsMode {
             if let problem = lipsProblem { return problem }
             if !lipsReady { return "Loading the lip reader…" }
             if lipsPrompt != nil {
-                return "Practice \(lipsNumber): say the blue sentence, slowly is fine, glancing across its letters. Then look up. Esc to finish."
+                if lipsHeard {
+                    return "Listening: say it, slowly is fine, glancing across its letters. Then look up over the screen. Esc to finish."
+                }
+                return "Practice \(lipsNumber): read the blue sentence, then look at the keys and say it. Esc to finish."
             }
             return Self.lipsHowTo
         }
@@ -1050,7 +1063,7 @@ final class EyeKeyboard {
         fitted = nil
         view.move(to: nil)
         view.words.text = ""
-        say("Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still.")
+        say("Setup, about 3 minutes: follow the yellow dot with your eyes.")
         let now = ProcessInfo.processInfo.systemUptime
         setupBegan = now + 0.8                 // a moment to find the dot before it moves
         stepBegan = now
@@ -1186,7 +1199,7 @@ final class EyeKeyboard {
         // What the dots show is already in the map (it learned every dot); `off` is what's left on dots it
         // hadn't seen. Typing then re-centres it word by word. Only a setup that's far off is done again.
         if off > 2.5 {
-            var why = "Keep your head still and look right at each dot."
+            var why = "Look right at each dot."
             if camera.eyeLight < 60 { why = "More light on your face would help (a lamp in front of you)." }
             else if camera.faceSize < 0.07 { why = "Sit a little closer to the camera." }
             say(String(format: "That came out %.1f keys off — too far to type. %@ Press Esc, then double-tap right ⌘ to do the setup again.", off, why))
@@ -1362,10 +1375,15 @@ final class EyeKeyboard {
             view.move(to: shown)
             record(["t": f.time + (clock ?? 0), "ft": f.time, "phase": "lips", "f": f.values, "at": [x, y],
                     "dot": [shown.0, shown.1], "shift": [shift.x, shift.y]])
+            aboveSince = y < Self.lipsLookUp ? (aboveSince ?? f.time) : nil
             guard onKeyboard(x, y) else { off(f.time); return }
             offSince = nil
             lipsEnded = false
-            if y < Self.keysEnd { lips?.send(["gaze": [f.time, x, y]]) }   // below the keys is reading the line
+            if y < Self.keysEnd {                                       // below the keys is reading the line
+                lips?.send(["gaze": [f.time, x, y]])
+                sentenceGaze.append((f.time, f.values, x, y))
+                if sentenceGaze.count > 2700 { sentenceGaze.removeFirst(sentenceGaze.count - 2700) }
+            }
             return
         }
         view.move(to: hold(x, y, f.time))                           // the pointer: still while resting, jumps with the eyes
@@ -1487,12 +1505,23 @@ final class EyeKeyboard {
         if let e = m["error"] as? String { lipsProblem = e }
         if let status = m["status"] as? String, showing { say(status) }
         if m["ready"] != nil { lipsReady = true }
+        if m["listening"] != nil { lipsHeard = true; NSSound(named: "Tink")?.play() }
         if let p = m["prompt"] as? String {
+            lipsHeard = false
             lipsPrompt = p
             lipsNumber = m["number"] as? Int ?? lipsNumber + 1
             showPrompt()
         }
         if m["take"] != nil { NSSound(named: "Pop")?.play() }      // heard; what it read is in the log, not on screen
+        // Practice: the sentence shown is what was meant, so learn the map from its gaze. Not from what was typed
+        // (real use): replaying the owner's 17 sentences, 2026-11-19, learning from the wrong sentence each time got
+        // past the line-up check 12 times and made the map worse (1.99 keys off -> 1.13, against 0.97 learning from
+        // the right one; last 6: 1.94 vs 1.19), and while the lips are mostly wrong most typed text is wrong. The
+        // map gets the head's moves from the head pose it was fitted with, and from each practice sentence.
+        if m["take"] != nil, let from = m["from"] as? Double, let to = m["to"] as? Double,
+           let words = m["meant"] as? String, !words.isEmpty {
+            learnSentence(words, from: from, to: to)
+        }
         if let text = m["text"] as? String {
             emit(["typed": text, "ms": m["ms"] ?? 0, "seconds": m["seconds"] ?? 0, "gaze_points": m["gaze_points"] ?? 0])
             if !text.isEmpty {
@@ -1530,9 +1559,13 @@ final class EyeKeyboard {
     func off(_ t: Double) {
         offSince = offSince ?? t
         if t - offSince! > 0.5 { view.move(to: nil) }
-        // Lips: the eyes leaving the keyboard ends the sentence (not the mouth stopping: speaking slowly while
-        // swiping leaves it still between words). Once per look away.
-        if lipsMode, lipsListening, !lipsEnded, t - offSince! > lookUpFinishes {
+        // Lips: looking up over the top of the screen ends the sentence (not the mouth stopping: speaking
+        // slowly while swiping leaves it still between words), or the eyes off the keys for a while. Just
+        // off the top isn't enough: in the owner's session, 2026-11-19, four of five sentences ended early
+        // there while they looked at top-row keys with the map drifted (the dot 1.6 to 1.9 rows up, the
+        // screen's top 1.3 rows up), against 6 to 8.5 rows for the one real look up. Once per look away.
+        let lookedUp = aboveSince.map { t - $0 > lookUpFinishes } ?? false
+        if lipsMode, lipsListening, !lipsEnded, lookedUp || t - offSince! > Self.lipsAwayFinishes {
             lipsEnded = true
             lips?.send(["end": t])
             note(["event": "end_sent", "ft": t, "off_since": offSince!])
@@ -1561,7 +1594,7 @@ final class EyeKeyboard {
         emit(["phrase": ["samples": phrase.count, "words": phraseWords.map { $0.word }]])
         // The phrase before this one stood (you didn't fix it): its frames tune the calibration.
         learned += toLearn
-        if learned.count > 600 { learned.removeFirst(learned.count - 600) }
+        if learned.count > Self.learnedMost { learned.removeFirst(learned.count - Self.learnedMost) }
         toLearn = []
         for w in phraseWords where w.end < phrase.count && w.end - w.start >= 3 {
             let part = Array(phrase[w.start...w.end])
@@ -1572,23 +1605,147 @@ final class EyeKeyboard {
             }
         }
         phraseWords = []
+        refit()
+    }
+
+    /// Lips: the gaze of a sentence whose words are now known, lined up with its keys (SentenceAlign, the
+    /// whole path's drift found too); the frames held on a key join `learned` and the map is fitted again,
+    /// so it follows the head as it moves (owner, 2026-11-19: telling people not to move their heads isn't
+    /// acceptable). Only when most of the gaze lines up: a sentence read wrong mustn't teach it.
+    func learnSentence(_ text: String, from: Double, to: Double) {
+        let frames = sentenceGaze.filter { $0.t >= from - 0.3 && $0.t <= to + 0.3 }
+        sentenceGaze.removeAll { $0.t <= to }
+        guard frames.count >= 20, !replaying, setup == nil else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let (add, a) = Self.sentenceRows(text, frames)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.note(["event": "learn_sentence", "text": text, "frames": frames.count, "kept": add.count,
+                           "on_keys": a?.onKeys ?? 0, "reached": a?.reached ?? 0, "drift": a.map { [$0.shift.x, $0.shift.y] } ?? []])
+                guard add.count >= 10 else { return }
+                self.learned += add
+                if self.learned.count > Self.learnedMost { self.learned.removeFirst(self.learned.count - Self.learnedMost) }
+                self.refit()
+            }
+        }
+    }
+
+    typealias GazeFrame = (t: Double, f: [Double], x: Double, y: Double)
+
+    /// A known sentence's frames held on one of its keys (three frames in a row, within 1.8 keys once the
+    /// path's drift is taken off), each with that key's centre; none unless 60% of the gaze lines up and it
+    /// gets through 85% of the sentence's keys (a take cut short, shown the whole sentence, would teach it
+    /// wrong: the owner's first take, 2026-11-19, moved the map 1.75 keys the wrong way).
+    static func sentenceRows(_ text: String, _ frames: [GazeFrame])
+        -> ([([Double], (Double, Double))], (keys: [Int], shift: (x: Double, y: Double), onKeys: Double, reached: Double)?) {
+        let a = SentenceAlign.align(text, frames.map { ($0.x, $0.y) })
+        var add: [([Double], (Double, Double))] = []
+        if let a, a.onKeys >= 0.6, a.reached >= 0.85 {
+            for i in 1..<(frames.count - 1) where a.keys[i] >= 0 && a.keys[i - 1] == a.keys[i] && a.keys[i] == a.keys[i + 1] {
+                let c = EyeLayout.centers[a.keys[i]]
+                if hypot(frames[i].x - a.shift.x - c.x, frames[i].y - a.shift.y - c.y) < 1.8 { add.append((frames[i].f, (c.x, c.y))) }
+            }
+        }
+        return (add, a)
+    }
+
+    /// The map fitted on the setup plus the learned frames, and the shift that's left: the median of what it
+    /// still misses on the latest 150 learned (the head may have moved since the older ones).
+    static func refitted(_ setup: (rows: [[Double]], targets: [(Double, Double)], groups: [Int]),
+                         _ learned: [([Double], (Double, Double))]) -> (cal: GazeCalibration, shift: (x: Double, y: Double))? {
+        let rows = setup.rows + learned.map { $0.0 }, targets = setup.targets + learned.map { $0.1 }
+        let groups = setup.groups + learned.map { _ in -1 }
+        guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: lambda,
+                                            leaveOut: false, scales: headScales) else { return nil }
+        let last = learned.suffix(150)
+        guard last.count >= 10 else { return (cal, (0, 0)) }
+        let dx = last.map { $0.1.0 - cal.map($0.0).0 }.sorted(), dy = last.map { $0.1.1 - cal.map($0.0).1 }.sorted()
+        // Little learned yet: trust it less (one sentence read wrong mustn't throw the map off).
+        let w = min(1, Double(learned.count) / 300)
+        return (cal, (w * dx[dx.count / 2], w * dy[dy.count / 2]))
+    }
+
+    /// The map fitted again on the setup plus what typing taught it (refitted), off the main thread.
+    func refit() {
         if !learned.isEmpty && !replaying {
-            let rows = setupRows + learned.map { $0.0 }, targets = setupTargets + learned.map { $0.1 }
-            let groups = setupGroups + learned.map { _ in -1 }
+            let setup = (setupRows, setupTargets, setupGroups), learned = self.learned
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let cal = GazeCalibration.fit(rows: rows, targets: targets, groups: groups, lambda: Self.lambda,
-                                                    leaveOut: false, scales: Self.headScales) else { return }
+                guard let (cal, shift) = Self.refitted(setup, learned) else { return }
                 DispatchQueue.main.async {
                     guard let self, self.setup == nil else { return }
                     self.use(cal)
-                    let last = self.learned.suffix(150)                // what the new fit still misses on them
-                    guard last.count >= 10 else { self.shift = (0, 0); self.saveCalibration(); return }
-                    let dx = last.map { $0.1.0 - cal.map($0.0).0 }.sorted(), dy = last.map { $0.1.1 - cal.map($0.0).1 }.sorted()
-                    self.shift = (dx[dx.count / 2], dy[dy.count / 2])
+                    self.shift = shift
+                    self.note(["event": "refit", "learned": self.learned.count, "shift": [self.shift.x, self.shift.y]])
                     self.saveCalibration()
                 }
             }
         }
+    }
+
+    /// --learn-replay SESSION: a recorded practice session (sessions/<date time>/) through the learning above, one
+    /// sentence at a time, as it would have gone: each sentence's gaze mapped by the map as it stood then, how
+    /// far that sat from the keys it lined up with, then learned. Against the saved setup's map alone. Saves
+    /// nothing (start it with --calibration pointing at a copy taken before the session to replay it fairly).
+    func learnReplay(_ folder: String) {
+        func lines(_ name: String) -> [[String: Any]] {
+            ((try? String(contentsOfFile: folder + "/" + name, encoding: .utf8)) ?? "").split(separator: "\n")
+                .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        }
+        let rows: [(t: Double, f: [Double])] = lines("events.jsonl").compactMap { r in
+            guard r["phase"] as? String == "lips", let t = r["ft"] as? Double, let f = r["f"] as? [Double] else { return nil }
+            return (t, f)
+        }
+        let cuts: [(meant: String, from: Double, to: Double)] = lines("lipreader.log").compactMap { c in
+            guard c["cut"] != nil, let m = c["meant"] as? String, let a = c["from"] as? Double, let b = c["to"] as? Double else { return nil }
+            return (m, a, b)
+        }
+        guard let first = calibration else { print("no saved setup to start from"); return }
+        let setup = (setupRows, setupTargets, setupGroups)
+        var cal = first, shift = self.shift, learned = self.learned
+        func median(_ v: [Double]) -> Double { v.isEmpty ? .nan : v.sorted()[v.count / 2] }
+        // How far a sentence's gaze, as `map` put it, sat from the keys it lined up with (drift not taken off).
+        func miss(_ text: String, _ frames: [GazeFrame]) -> Double? {
+            guard let a = SentenceAlign.align(text, frames.map { ($0.x, $0.y) }) else { return nil }
+            let d = frames.indices.filter { a.keys[$0] >= 0 }.map { i -> Double in
+                let c = EyeLayout.centers[a.keys[i]]; return hypot(frames[i].x - c.x, frames[i].y - c.y) }
+            return median(d)
+        }
+        var before: [Double] = [], after: [Double] = []
+        // HIVE_REPLAY_GAZE=<file>: each sentence's gaze both ways, as JSON lines, to try decoders on.
+        let dump = ProcessInfo.processInfo.environment["HIVE_REPLAY_GAZE"].map { path -> FileHandle? in
+            FileManager.default.createFile(atPath: path, contents: nil); return FileHandle(forWritingAtPath: path) } ?? nil
+        defer { try? dump?.close() }
+        for cut in cuts {
+            let mine = rows.filter { $0.t >= cut.from - 0.3 && $0.t <= cut.to + 0.3 }
+            func frames(_ c: GazeCalibration, _ s: (x: Double, y: Double)) -> [GazeFrame] {
+                mine.compactMap { r in
+                    let (x, y) = c.map(r.f)
+                    let p = (x + s.x, y + s.y)
+                    return onKeyboard(p.0, p.1) && p.1 < Self.keysEnd ? (r.t, r.f, p.0, p.1) : nil
+                }
+            }
+            let old = frames(first, self.shift), now = frames(cal, shift)
+            guard now.count >= 20, let m0 = miss(cut.meant, old), let m1 = miss(cut.meant, now) else { continue }
+            if let dump = dump, let line = try? JSONSerialization.data(withJSONObject: [
+                "meant": cut.meant, "from": cut.from, "to": cut.to,
+                "old": old.map { [$0.t, $0.x, $0.y] }, "now": now.map { [$0.t, $0.x, $0.y] }]) {
+                dump.write(line); dump.write(Data("\n".utf8))
+            }
+            before.append(m0); after.append(m1)
+            // HIVE_REPLAY_WRONG=1: learn from the next sentence's words instead (typed text that came out wrong).
+            let wrong = ProcessInfo.processInfo.environment["HIVE_REPLAY_WRONG"] != nil
+            let text = wrong ? cuts[(cuts.firstIndex { $0.from == cut.from }! + 1) % cuts.count].meant : cut.meant
+            let (add, a) = Self.sentenceRows(text, now)
+            print(String(format: "%-40@ setup map %.2f keys off, learning %.2f; drift left (%+.2f, %+.2f), on keys %.0f%%, reached %.0f%%, learned %d",
+                         String(cut.meant.prefix(40)) as NSString, m0, m1, a?.shift.x ?? .nan, a?.shift.y ?? .nan,
+                         100 * (a?.onKeys ?? 0), 100 * (a?.reached ?? 0), add.count))
+            guard add.count >= 10 else { continue }
+            learned += add
+            if learned.count > Self.learnedMost { learned.removeFirst(learned.count - Self.learnedMost) }
+            if let r = Self.refitted(setup, learned) { cal = r.cal; shift = r.shift }
+        }
+        print(String(format: "%d sentences: setup map alone %.2f keys off (median), learning from each sentence %.2f; last 6: %.2f vs %.2f",
+                     before.count, median(before), median(after), median(Array(before.suffix(6))), median(Array(after.suffix(6)))))
     }
 
     /// --replay: made-up gaze from `eyeswipe-sim --write-replay` (lines {"sentence"}, {"x", "y"}, {"closed"},
@@ -1757,7 +1914,7 @@ struct Main {
             if practice { keyboard.lipsPrompt = "print two copies of this page"; keyboard.lipsNumber = 1 }
             view.status.text = keyboard.hint()
             if CommandLine.arguments.contains("--setup") {
-                view.status.text = "Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still."
+                view.status.text = "Setup, about 3 minutes: follow the yellow dot with your eyes."
                 view.show(target: (4.2, 1.5))
             } else {
                 view.words.text = keyboard.lipsPrompt ?? "can you send me"
@@ -1779,6 +1936,7 @@ struct Main {
                 FileHandle.standardError.write(Data("hive-eye-keyboard: can't read the saved setup at \(EyeKeyboard.calibrationFile)\n".utf8))
             }
         }
+        if let folder = option("--learn-replay") { keyboard.learnReplay(folder); exit(0) }
         keyboard.setUpWindow()
         // The lip reader loads now, not when the keyboard first opens: loading it on the GPU then stopped the
         // camera for 12.8 s of the owner's first sentence (2026-11-19, 01:05:15.8-01:05:28.6).

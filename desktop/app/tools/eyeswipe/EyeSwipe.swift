@@ -52,6 +52,80 @@ public enum EyeLayout {
     }
 }
 
+/// Lines a whole sentence's gaze up with its keys once the sentence is known (practice shows it; otherwise
+/// what was typed), so the map can learn where the eyes really were. Each sample sits on the sentence's next
+/// key or the same one, or counts as off (a glance elsewhere, a saccade), and the whole path may sit off by a
+/// shift (the map drifts as the head moves: 1.5 to 3.5 keys by the end of the owner's session, 2026-11-19).
+/// The path may stop early (a sentence cut short). On that session, a map refitted after every sentence on
+/// the frames this finds was 1.0 key off on the next sentence, against 1.8 for the setup's map alone.
+public enum SentenceAlign {
+    /// The sentence's keys in order, doubled letters once (words that can't be typed are left out).
+    public static func path(_ text: String) -> [Int]? {
+        var out: [Int] = []
+        for word in text.lowercased().split(separator: " ") {
+            guard let p = EyeLayout.path(String(word)) else { continue }
+            for k in p where out.last != k { out.append(k) }
+        }
+        return out.count >= 2 ? out : nil
+    }
+
+    /// The key each sample looked at (-1: off), the shift of the whole gaze path that fits best (subtract it
+    /// from a sample to get where it looked), the share of samples on keys, and how far along the sentence's
+    /// keys the gaze got (1: to the last key). nil if it can't be lined up.
+    public static func align(_ text: String, _ samples: [(x: Double, y: Double)], sigma: Double = 0.7,
+                             off: Double = -6, range: Double = 3.5)
+        -> (keys: [Int], shift: (x: Double, y: Double), onKeys: Double, reached: Double)? {
+        guard let path = path(text), samples.count >= 2 * path.count else { return nil }
+        let T = samples.count, K = path.count, centers = path.map { EyeLayout.centers[$0] }
+        let norm = -log(2 * Double.pi * sigma * sigma), s2 = 2 * sigma * sigma
+        func emit(_ t: Int, _ j: Int, _ sx: Double, _ sy: Double) -> Double {
+            let dx = samples[t].x - sx - centers[j].x, dy = samples[t].y - sy - centers[j].y
+            return max(norm - (dx * dx + dy * dy) / s2, off)
+        }
+        // Best score over the path's keys at the last sample; with `back`, which key each sample is on.
+        func run(_ sx: Double, _ sy: Double, _ back: UnsafeMutablePointer<UInt8>?) -> (Double, Int) {
+            var prev = [Double](repeating: -.infinity, count: K), cur = prev
+            prev[0] = emit(0, 0, sx, sy)
+            for t in 1..<T {
+                for j in 0..<K {
+                    let stay = prev[j], move = j > 0 ? prev[j - 1] : -.infinity
+                    cur[j] = max(stay, move) + emit(t, j, sx, sy)
+                    back?[t * K + j] = move > stay ? 1 : 0
+                }
+                swap(&prev, &cur)
+            }
+            var best = 0
+            for j in 1..<K where prev[j] > prev[best] { best = j }
+            return (prev[best], best)
+        }
+        var best = (score: -Double.infinity, x: 0.0, y: 0.0)
+        for step in [0.5, 0.25] {                            // a coarse grid, then finer around the best
+            let around = step == 0.5 ? (0.0, 0.0) : (best.x, best.y), reach = step == 0.5 ? range : 0.5
+            var dx = -reach
+            while dx <= reach + 1e-9 {
+                var dy = -reach
+                while dy <= reach + 1e-9 {
+                    let (sx, sy) = (around.0 + dx, around.1 + dy)
+                    let v = run(sx, sy, nil).0 - (sx * sx + sy * sy) / 50   // a faint pull towards no shift
+                    if v > best.score { best = (v, sx, sy) }
+                    dy += step
+                }
+                dx += step
+            }
+        }
+        var back = [UInt8](repeating: 0, count: T * K)
+        let (_, last) = back.withUnsafeMutableBufferPointer { run(best.x, best.y, $0.baseAddress) }
+        var keys = [Int](repeating: -1, count: T), j = last
+        for t in stride(from: T - 1, through: 0, by: -1) {
+            let on = emit(t, j, best.x, best.y) > off
+            keys[t] = on ? path[j] : -1
+            if t > 0 && back[t * K + j] == 1 { j -= 1 }
+        }
+        let onKeys = Double(keys.filter { $0 >= 0 }.count) / Double(T)
+        return (keys, (best.x, best.y), onKeys, Double(last + 1) / Double(K))
+    }
+}
+
 /// The word-pair language model (see scripts/eyeswipe_build_lm.py for the file layout).
 public final class EyeLM {
     public let words: [String]        // lowercase, as swiped ("don't")
@@ -811,7 +885,11 @@ public struct OneEuro {
 /// other). The camera's frame-to-frame noise (about 0.4 keys) doesn't move it; a look elsewhere does, about
 /// two frames later. On the owner's recorded typing it moved 0.18 keys a frame against 0.51 with OneEuro.
 public struct FixationHold {
-    public var radius = 1.2, confirm = 3, keep = 20, yScale = 1.3
+    // Radius 1.8 (was 1.2): the camera's gaze wanders slowly (an average of 4 frames still drifts past a
+    // key), so it's the radius that stops the jumps. On the owner's setup holds, 2026-11-19, the dot
+    // jumped more than half a key 0.19 times a second (0.36 at 1.2) and 0.94 (1.36) while typing
+    // sentences, the same 100 ms (median) to follow a look elsewhere, and as quick onto the next key.
+    public var radius = 1.8, confirm = 3, keep = 20, yScale = 1.3
     var fix: [(Double, Double)] = [], next: [(Double, Double)] = [], last = -Double.infinity
     public init() {}
     func mean(_ v: [(Double, Double)]) -> (Double, Double) {
