@@ -1,39 +1,46 @@
-// Hive's eye keyboard on the Mac: type by looking. Double-tap right ⌘ and a see-through keyboard covers the
-// lower part of the screen. The first time, a setup of about 3 minutes: follow a slow yellow dot with your eyes,
-// look at it on every key, keep looking at it while moving your head a little, then on every key again; it says
-// how accurate it got on that last round (dots its map hadn't seen). Then just look at the letters of
-// what you want to write, with no need to wait on a letter, and blink normally after each word: the blink
-// types it into the app in front, and looking up off the keyboard types the last one. A pill shows the word
-// it would type right now. Backspace on your own keyboard fixes mistakes.
-// Esc closes it. Every word typed tunes it to your eyes a little more.
+// Hive's eye keyboard on the Mac: type by saying it, with the eyes confirming. Double-tap right ⌘ and a
+// see-through keyboard covers the lower part of the screen. Say a sentence while glancing across its letters
+// (no need to land on them; no blinks, no space bar): the lip reader reads the mouth, the rough gaze sweep
+// picks between words that look alike on the lips, and the sentence is typed into the app in front once the
+// mouth has been still for 0.6 s. Esc closes it.
+//
+// The eye setup (about 3 minutes: follow a slow yellow dot with your eyes, look at it on every key, keep
+// looking at it while moving your head a little, then on every key again; it says how accurate it got on that
+// last round) is done once: it's saved as numbers (no pictures) in eye-calibration.json in Hive's state folder,
+// readable only by you, and every later start uses it. --new-setup does it again; --calibration path keeps it
+// elsewhere; --check-calibration says what's saved and whether it reads back the same.
 //
 // Gaze comes from the Mac's camera through Apple Vision's face landmarks: where the pupils sit in the eyes,
 // how open the lids are, and which way the head points (the nose against the eyes), mapped to the keyboard
 // by the setup, which limits how much head position counts (the head moves with the moving dot, and a free
-// fit was keys off once the head moved). The pointer holds still while the eyes rest (FixationHold). Nothing
-// is saved or sent unless --dump says so: the camera runs only while the keyboard is up, and each frame is
-// dropped once read. Each word (the gaze between two blinks) is decoded by EyeSwipe.swift's EyeSwipeDecoder
-// off the main thread, the live guess by its EyeStream, with the language model in eyeswipe-lm.bin (next to
-// this binary, or --lm).
+// fit was keys off once the head moved). The pointer holds still while the eyes rest (FixationHold). Apart
+// from the setup, nothing is saved or sent unless --dump or --lips-record says so: the camera runs only while
+// the keyboard is up, and each frame is dropped once read.
+//
+// Lip reading runs scripts/lipgaze.py serve (USR 2.0, set up by scripts/setup-lipgaze.sh; --lips-python and
+// --lips-script to point elsewhere). --lips-record DIR is practice: the line above the keys shows the one
+// sentence to say, each take's mouth crops and gaze are kept in DIR, what was read goes to the log only, and
+// nothing is typed (lipgaze.py eval DIR reads them again, lips alone against lips + eyes).
+//
+// --blinks is the older blink typing: look at each letter and blink after each word; the blink types it, and
+// looking up off the keyboard types the last one. Each word (the gaze between two blinks) is decoded by
+// EyeSwipe.swift's EyeSwipeDecoder off the main thread, the live guess by its EyeStream, with the language model
+// in eyeswipe-lm.bin (next to this binary, or --lm); every word typed tunes the setup a little more.
 //
 // Writes one JSON object per line on stdout: {"on": true|false}, {"setup": {"x": spread, "y": spread}},
 // {"check": {"keys_off": median, "dots": [...]}} (key widths), {"typed": "word", "ms": decode time}, {"phrase": {...}},
-// {"speed": {...}}, {"test": {...}} after a test.
+// {"speed": {...}}, {"test": {...}} after a test, {"calibration": {...}} for --check-calibration.
 //
-//   hive-eye-keyboard [--lm path] [--test] [--dump file [--dump-eyes]] [--blink-frames n]
-//       --test: shows sentences to type and counts the wrong words, typing nothing into other apps
+//   hive-eye-keyboard [--lips-record DIR] [--new-setup] [--calibration path] [--dump file [--dump-eyes]]
 //       --dump: appends each frame's gaze numbers (not pictures) and the setup dot to a file, to tune it
 //       --dump-eyes: also the eyes' part of each frame, grey (file.eyes.bin, described by file.eyes.jsonl)
+//   hive-eye-keyboard --check-calibration [--calibration path]
+//   hive-eye-keyboard --blinks [--lm path] [--test] [--blink-frames n]
+//       --test: shows sentences to type and counts the wrong words, typing nothing into other apps
 //       --blink-frames: closed-eye camera frames that make a blink (default: about 50 ms' worth, at least 2)
-//   hive-eye-keyboard --snapshot out.png [--setup] [--trail]   draws the keyboard into a PNG (tests)
+//   hive-eye-keyboard --snapshot out.png [--setup] [--trail] [--blinks] [--lips-record x]   draws it into a PNG (tests)
 //   hive-eye-keyboard --test --replay file      types made-up gaze from eyeswipe-sim --write-replay (tests)
 //   hive-eye-keyboard --calib-test dump         the setup's fit on each setup in a --dump, checked on its dots
-//   hive-eye-keyboard --lips [--lips-record DIR]   lip reading types the words, the gaze only confirms them:
-//       say a sentence while glancing across its letters (they don't have to land on the keys); no blinks, no
-//       space bar; it types the sentence once your mouth has been still for 0.6 s. Runs scripts/lipgaze.py serve
-//       (USR 2.0, set up by scripts/setup-lipgaze.sh; --lips-python and --lips-script to point elsewhere).
-//       --lips-record DIR: shows practice sentences to say, keeps each take's mouth crops and gaze in DIR and
-//       types nothing (lipgaze.py eval DIR reads them again, lips alone against lips + eyes)
 //
 // Needs Accessibility (to see right ⌘ and Esc, and to type) and the camera, for the app it runs from.
 
@@ -49,7 +56,10 @@ let tapSeconds = 0.25, doubleTapSeconds = 0.45
 let lookUpFinishes = 0.3                         // off the keyboard this long types the last word
 let ourEvents: Int64 = 0x4876_6B62               // marks the keys we type, to tell them from yours
 
-let lipsMode = CommandLine.arguments.contains("--lips")
+// Lips + eyes is the keyboard (owner, 2026-11-19: "only eye tracking plus lip reading"). Blink typing is kept
+// only behind --blinks and for its own tests (--test, --replay, --calib-test). --lips is still accepted.
+let blinkTyping = ["--blinks", "--test", "--replay", "--calib-test"].contains { CommandLine.arguments.contains($0) }
+let lipsMode = !blinkTyping
 
 /// What one camera frame says: where the eyes point, eyes closed, or no face (looking away).
 enum Look { case gaze(GazeFeatures), closed(Double), away(Double) }
@@ -679,7 +689,7 @@ final class EyeKeyboard {
     var replaying = false, decodeMs: [Double] = []
     // --lips: the lip reader, started the first time the keyboard opens
     var lips: LipReader? = nil
-    var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil
+    var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil, lipsNumber = 0
     var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
 
     init(decoder: EyeSwipeDecoder, test: Bool) {
@@ -732,7 +742,9 @@ final class EyeKeyboard {
         if lipsMode {
             if let problem = lipsProblem { return problem }
             if !lipsReady { return "Loading the lip reader…" }
-            if let p = lipsPrompt { return "Say:  \(p)   — glancing across its letters" }
+            if lipsPrompt != nil {
+                return "Practice \(lipsNumber): say the blue sentence while glancing across its letters, then stop talking. Esc to finish."
+            }
             return Self.lipsHowTo
         }
         if test, testAt < testSentences.count { return "Type:  \(testSentences[testAt])   — then look up" }
@@ -758,7 +770,7 @@ final class EyeKeyboard {
             typing = false
             view.words.text = ""
             if lipsMode { startLips() }
-            if calibration == nil { tries = 0; startSetup() } else { say(hint()) }
+            if calibration == nil { tries = 0; startSetup() } else { say(hint()); showPrompt() }
         } else {
             if typing { finishPhrase() }
             if lipsMode {                                          // the sentence being said, if any, still comes
@@ -768,6 +780,7 @@ final class EyeKeyboard {
             camera.stop()
             panel.orderOut(nil)
             stopSetup()
+            saveCalibration()
         }
     }
 
@@ -938,7 +951,9 @@ final class EyeKeyboard {
         setupRows = s.rows; setupTargets = s.targets; setupGroups = s.groups
         learned = []; toLearn = []; shift = (0, 0)
         use(s.cal, sigma: s.sigma)
-        say(String(format: "Accuracy: about %.1f keys off on dots it hadn't learned. ", off) + hint())
+        saveCalibration()
+        say(String(format: "Accuracy: about %.1f keys off on dots it hadn't learned. Saved: no setup next time. ", off) + hint())
+        showPrompt()
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.on, self.setup == nil else { return }
             self.say(self.hint())
@@ -960,6 +975,86 @@ final class EyeKeyboard {
             decoder.settings.sigma = min(1.2, max(0.35, s.0))
             decoder.settings.sigmaY = min(1.0, max(0.3, s.1))
         }
+    }
+
+    // MARK: Saved setup
+
+    // The setup is done once and kept (owner, 2026-11-19: "do not make me calibrate the eye tracking typing
+    // again"): the map, the decoder's spread, the setup's frames (so typed words keep tuning it on top of them)
+    // and the drift correction, as numbers (no pictures), readable only by you. --new-setup does it again.
+    static let calibrationFile = option("--calibration")
+        ?? (ProcessInfo.processInfo.environment["AGENT_STATE_DIR"] ?? NSHomeDirectory() + "/Library/Application Support/Hive")
+            + "/eye-calibration.json"
+
+    func calibrationJSON() -> Data? {
+        guard let cal = calibration else { return nil }
+        let object: [String: Any] = [
+            "saved": ISO8601DateFormatter().string(from: Date()),
+            "map": ["mean": cal.mean, "scale": cal.scale, "wx": cal.wx, "wy": cal.wy, "spread": [cal.spread.x, cal.spread.y]],
+            "sigma": [decoder.settings.sigma, decoder.settings.sigmaY],
+            "shift": [shift.x, shift.y],
+            "setup": ["rows": setupRows, "targets": setupTargets.map { [$0.0, $0.1] }, "groups": setupGroups],
+            "learned": learned.map { ["f": $0.0, "at": [$0.1.0, $0.1.1]] as [String: Any] },
+        ]
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// Writes the setup to `calibrationFile` (off the main thread; a few hundred kB).
+    func saveCalibration() {
+        guard !replaying, let data = calibrationJSON() else { return }
+        let path = Self.calibrationFile
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
+                                                        withIntermediateDirectories: true)
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            } catch {
+                FileHandle.standardError.write(Data("hive-eye-keyboard: couldn't save the setup to \(path): \(error)\n".utf8))
+            }
+        }
+    }
+
+    /// Takes up a saved setup; false if there's none (or it can't be read).
+    func loadCalibration(_ data: Data) -> Bool {
+        guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let m = o["map"] as? [String: Any], let mean = m["mean"] as? [Double], let scale = m["scale"] as? [Double],
+              let wx = m["wx"] as? [Double], let wy = m["wy"] as? [Double], let spread = m["spread"] as? [Double],
+              !mean.isEmpty, scale.count == mean.count, wx.count == mean.count + 1, wy.count == mean.count + 1,
+              spread.count == 2 else { return false }
+        if let setup = o["setup"] as? [String: Any], let rows = setup["rows"] as? [[Double]],
+           let targets = setup["targets"] as? [[Double]], let groups = setup["groups"] as? [Int],
+           rows.count == targets.count, rows.count == groups.count, targets.allSatisfy({ $0.count == 2 }),
+           rows.allSatisfy({ $0.count == mean.count }) {
+            setupRows = rows; setupTargets = targets.map { ($0[0], $0[1]) }; setupGroups = groups
+        }
+        learned = (o["learned"] as? [[String: Any]] ?? []).compactMap { w in
+            guard let f = w["f"] as? [Double], let at = w["at"] as? [Double], f.count == mean.count, at.count == 2 else { return nil }
+            return (f, (at[0], at[1]))
+        }
+        if let s = o["shift"] as? [Double], s.count == 2 { shift = (s[0], s[1]) }
+        let sigma = (o["sigma"] as? [Double]).flatMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
+        use(GazeCalibration(mean: mean, scale: scale, wx: wx, wy: wy, spread: (spread[0], spread[1])), sigma: sigma)
+        return true
+    }
+
+    /// --check-calibration: reads the saved setup, writes it out and reads it back the same, and says what's in it.
+    static func checkCalibration(_ keyboard: EyeKeyboard) -> Bool {
+        guard let data = FileManager.default.contents(atPath: calibrationFile), keyboard.loadCalibration(data),
+              let first = keyboard.calibration, let again = keyboard.calibrationJSON() else {
+            emit(["calibration": ["path": calibrationFile, "usable": false]])
+            return false
+        }
+        let rows = keyboard.setupRows.count, sigma = (keyboard.decoder.settings.sigma, keyboard.decoder.settings.sigmaY)
+        let probe = keyboard.setupRows.first ?? first.mean
+        let same = keyboard.loadCalibration(again) && keyboard.calibration.map {
+            hypot($0.map(probe).0 - first.map(probe).0, $0.map(probe).1 - first.map(probe).1) < 1e-9 } == true
+            && keyboard.setupRows.count == rows && keyboard.decoder.settings.sigma == sigma.0
+        let saved = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["saved"] ?? ""
+        emit(["calibration": ["path": calibrationFile, "usable": same, "saved": saved, "features": first.mean.count,
+                              "setup_frames": rows, "learned_frames": keyboard.learned.count,
+                              "spread": [first.spread.x, first.spread.y], "shift": [keyboard.shift.x, keyboard.shift.y]]])
+        return same
     }
 
     // MARK: Looking
@@ -1006,6 +1101,9 @@ final class EyeKeyboard {
             break
         }
         guard let cal = calibration else { return }
+        guard cal.mean.count == f.values.count else {                  // saved by a build that read the eyes differently
+            calibration = nil; tries = 0; startSetup(); return
+        }
         let (x, y) = cal.map(f.values)
         record(["t": seen, "ft": f.time, "phase": "type", "f": f.values, "at": [x, y]])
         mapped(x, y, f)
@@ -1139,7 +1237,12 @@ final class EyeKeyboard {
         if let e = m["error"] as? String { lipsProblem = e }
         if let status = m["status"] as? String, showing { say(status) }
         if m["ready"] != nil { lipsReady = true }
-        if let p = m["prompt"] as? String { lipsPrompt = p }
+        if let p = m["prompt"] as? String {
+            lipsPrompt = p
+            lipsNumber = m["number"] as? Int ?? lipsNumber + 1
+            showPrompt()
+        }
+        if m["take"] != nil { NSSound(named: "Pop")?.play() }      // heard; what it read is in the log, not on screen
         if let text = m["text"] as? String {
             emit(["typed": text, "ms": m["ms"] ?? 0, "seconds": m["seconds"] ?? 0, "gaze_points": m["gaze_points"] ?? 0])
             if !text.isEmpty {
@@ -1149,13 +1252,14 @@ final class EyeKeyboard {
                 view.words.text = text
             }
         }
-        if let r = m["result"] as? [String: Any] {
-            emit(["lips_result": r])
-            NSSound(named: "Pop")?.play()
-            let wrong = r["wrong"] as? [String: Any]
-            view.words.text = "lips: \(r["lips"] ?? "")  (\(wrong?["lips"] ?? "?") wrong)   with eyes: \(r["text"] ?? "")  (\(wrong?["fused"] ?? "?") wrong)"
-        }
         if showing, m["status"] == nil, m["text"] == nil { say(hint()) }
+    }
+
+    /// Practice (--lips-record): the one sentence to say, in the big line above the keys. Nothing else goes
+    /// there in practice (owner, 2026-11-19: a read-back there looked like a second sentence to say).
+    func showPrompt() {
+        guard lipsMode, let p = lipsPrompt, on, setup == nil else { return }
+        view.words.text = p
     }
 
     /// Moves the map back by half the median miss on the keys of the word just typed (at most 0.6 keys a word).
@@ -1220,9 +1324,10 @@ final class EyeKeyboard {
                     guard let self, self.setup == nil else { return }
                     self.use(cal)
                     let last = self.learned.suffix(150)                // what the new fit still misses on them
-                    guard last.count >= 10 else { self.shift = (0, 0); return }
+                    guard last.count >= 10 else { self.shift = (0, 0); self.saveCalibration(); return }
                     let dx = last.map { $0.1.0 - cal.map($0.0).0 }.sorted(), dy = last.map { $0.1.1 - cal.map($0.0).1 }.sorted()
                     self.shift = (dx[dx.count / 2], dy[dy.count / 2])
+                    self.saveCalibration()
                 }
             }
         }
@@ -1390,12 +1495,14 @@ struct Main {
         if let out = option("--snapshot") {                                   // draw it into a PNG and stop
             let view = KeyboardView(frame: NSRect(x: 0, y: 0, width: 1470, height: 956))
             keyboard.lipsReady = true
+            let practice = lipsMode && option("--lips-record") != nil
+            if practice { keyboard.lipsPrompt = "print two copies of this page"; keyboard.lipsNumber = 1 }
             view.status.text = keyboard.hint()
             if CommandLine.arguments.contains("--setup") {
                 view.status.text = "Setup, about 3 minutes: follow the yellow dot with your eyes. Keep your head still."
                 view.show(target: (4.2, 1.5))
             } else {
-                view.words.text = "can you send me"
+                view.words.text = keyboard.lipsPrompt ?? "can you send me"
                 view.move(to: lipsMode ? (5.6, 1.5) : (5.6, 3.55))
             }
             let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
@@ -1406,6 +1513,14 @@ struct Main {
 
         if let path = option("--replay") { keyboard.replay(path); exit(0) }
         if let path = option("--calib-test") { EyeKeyboard.calibTest(path); exit(0) }
+        if CommandLine.arguments.contains("--check-calibration") { exit(EyeKeyboard.checkCalibration(keyboard) ? 0 : 1) }
+        if !CommandLine.arguments.contains("--new-setup"), let data = FileManager.default.contents(atPath: EyeKeyboard.calibrationFile) {
+            if keyboard.loadCalibration(data) {
+                FileHandle.standardError.write(Data("hive-eye-keyboard: using the saved setup (\(EyeKeyboard.calibrationFile))\n".utf8))
+            } else {
+                FileHandle.standardError.write(Data("hive-eye-keyboard: can't read the saved setup at \(EyeKeyboard.calibrationFile)\n".utf8))
+            }
+        }
         keyboard.setUpWindow()
         let mask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
         let box = Unmanaged.passUnretained(keyboard).toOpaque()

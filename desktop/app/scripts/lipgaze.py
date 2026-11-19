@@ -511,7 +511,8 @@ class Server:
     """lipgaze.py serve: the eye keyboard (hive-eye-keyboard --lips) sends each camera frame's face, grey,
     and each gaze point on the keyboard, both in camera time; each sentence comes back as {"text"} to type.
     With `record`, each sentence's mouth crops, gaze and what was read are kept in that folder (no face
-    pictures, just the 88 x 88 mouth), and practice sentences are shown to say ({"prompt"})."""
+    pictures, just the 88 x 88 mouth), practice sentences are shown to say ({"prompt", "number"}), and each
+    take ends with {"take": n}; what was read goes to stderr, not the screen."""
 
     def __init__(self, lips, out, settings=GazeSettings(), record=None, prompts=None):
         import collections
@@ -538,7 +539,7 @@ class Server:
     def next_prompt(self):
         if self.prompts:
             self.prompt = self.prompts[self.taken % len(self.prompts)]
-            self.say(prompt=self.prompt)
+            self.say(prompt=self.prompt, number=self.taken + 1)
 
     def listen(self, stream):
         for m in read_messages(stream):
@@ -617,7 +618,10 @@ class Server:
                                 openings=np.array([np.nan if p[2] is None else p[2] for p in part]),
                                 gaze=gaze, meant=self.prompt or '', lips=message['lips'], fused=text)
             self.taken += 1
-            self.say(result=message)
+            # What was read stays off the screen ({"take"}: the keyboard shows only the next sentence to say,
+            # since a read-back looked like a second sentence to say); it goes to the log and the take's file.
+            print(json.dumps({'take': self.taken, **message}), file=sys.stderr, flush=True)
+            self.say(take=self.taken)
             self.next_prompt()
         else:
             self.say(**message)
