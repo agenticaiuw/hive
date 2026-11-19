@@ -1,8 +1,10 @@
 // Hive's eye keyboard on the Mac: type by saying it, with the eyes confirming. Double-tap right ⌘ and a
 // see-through keyboard covers the lower part of the screen. Say a sentence while glancing across its letters
-// (no need to land on them; no blinks, no space bar): the lip reader reads the mouth, the rough gaze sweep
-// picks between words that look alike on the lips, and the sentence is typed into the app in front once the
-// mouth has been still for 0.6 s. Esc closes it.
+// (no need to land on them; no blinks, no space bar; as slowly as you like): the lip reader reads the mouth,
+// the rough gaze sweep picks between words that look alike on the lips, and the sentence is typed into the
+// app in front once you look up off the keyboard (or after 3 s of a still mouth). The line in the keyboard's
+// bottom row shows the practice sentence or what was typed, so reading it keeps the eyes on the keyboard;
+// gaze there isn't part of the swipe. Esc closes it.
 //
 // The eye setup (about 3 minutes: follow a slow yellow dot with your eyes, look at it on every key, keep
 // looking at it while moving your head a little, then on every key again; it says how accurate it got on that
@@ -18,7 +20,7 @@
 // the keyboard is up, and each frame is dropped once read.
 //
 // Lip reading runs scripts/lipgaze.py serve (USR 2.0, set up by scripts/setup-lipgaze.sh; --lips-python and
-// --lips-script to point elsewhere). --lips-record DIR is practice: the line above the keys shows the one
+// --lips-script to point elsewhere). --lips-record DIR is practice: the line under the keys shows the one
 // sentence to say, each take's mouth crops and gaze are kept in DIR, what was read goes to the log only, and
 // nothing is typed (lipgaze.py eval DIR reads them again, lips alone against lips + eyes).
 //
@@ -490,7 +492,12 @@ final class KeyboardView: NSView {
 
     func layoutPills() {
         status.frame = NSRect(x: bounds.width * 0.1, y: bounds.height * 0.02, width: bounds.width * 0.8, height: 52)
-        words.frame = NSRect(x: bounds.width * 0.05, y: keyboardRect.minY - 84, width: bounds.width * 0.9, height: 72)
+        if lipsMode {          // in the space bar's old row, so reading it keeps the eyes on the keyboard
+            let top = point((0, EyeKeyboard.keysEnd)).y, bottom = point((0, Self.rows - 0.05)).y
+            words.frame = NSRect(x: bounds.width * 0.05, y: top, width: bounds.width * 0.9, height: bottom - top)
+        } else {
+            words.frame = NSRect(x: bounds.width * 0.05, y: keyboardRect.minY - 84, width: bounds.width * 0.9, height: 72)
+        }
     }
 
     var keyboardRect: NSRect {
@@ -517,7 +524,7 @@ final class KeyboardView: NSView {
 
     /// The key (or 100: the space bar) nearest a point, if it's on the keyboard.
     static func hot(_ x: Double, _ y: Double) -> Int? {
-        guard onKeyboard(x, y) else { return nil }
+        guard onKeyboard(x, y), !(lipsMode && y > EyeKeyboard.keysEnd) else { return nil }   // reading the line below the keys
         let (sx, sy) = EyeLayout.spaceOffset(x, y)
         if !lipsMode && y > 3.1 && hypot(sx, sy) < 0.9 { return 100 }
         return EyeLayout.centers.indices.min { a, b in
@@ -691,6 +698,8 @@ final class EyeKeyboard {
     var lips: LipReader? = nil
     var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil, lipsNumber = 0
     var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
+    var lipsEnded = false                                      // {"end"} sent since the eyes left the keyboard
+    static let keysEnd = 3.25                                  // below this (in key rows) is the line, not keys
 
     init(decoder: EyeSwipeDecoder, test: Bool) {
         self.decoder = decoder
@@ -736,14 +745,14 @@ final class EyeKeyboard {
 
     static let howTo = "Look at each letter (no need to wait on it), blink after each word, look up when done. Esc closes."
 
-    static let lipsHowTo = "Say a sentence while glancing across its letters (no need to land on them). Stop talking to type it. Esc closes."
+    static let lipsHowTo = "Say a sentence, slowly is fine, glancing across its letters. Then look up to type it. Esc closes."
 
     func hint() -> String {
         if lipsMode {
             if let problem = lipsProblem { return problem }
             if !lipsReady { return "Loading the lip reader…" }
             if lipsPrompt != nil {
-                return "Practice \(lipsNumber): say the blue sentence while glancing across its letters, then stop talking. Esc to finish."
+                return "Practice \(lipsNumber): say the blue sentence, slowly is fine, glancing across its letters. Then look up. Esc to finish."
             }
             return Self.lipsHowTo
         }
@@ -1116,7 +1125,8 @@ final class EyeKeyboard {
             view.move(to: hold(x, y, f.time))
             guard onKeyboard(x, y) else { off(f.time); return }
             offSince = nil
-            lips?.send(["gaze": [f.time, x, y]])
+            lipsEnded = false
+            if y < Self.keysEnd { lips?.send(["gaze": [f.time, x, y]]) }   // below the keys is reading the line
             return
         }
         view.move(to: hold(x, y, f.time))                           // the pointer: still while resting, jumps with the eyes
@@ -1279,6 +1289,12 @@ final class EyeKeyboard {
     func off(_ t: Double) {
         offSince = offSince ?? t
         if t - offSince! > 0.5 { view.move(to: nil) }
+        // Lips: the eyes leaving the keyboard ends the sentence (not the mouth stopping: speaking slowly while
+        // swiping leaves it still between words). Once per look away.
+        if lipsMode, lipsListening, !lipsEnded, t - offSince! > lookUpFinishes {
+            lipsEnded = true
+            lips?.send(["end": t])
+        }
         if typing && t - offSince! > lookUpFinishes { finishPhrase() }
     }
 
