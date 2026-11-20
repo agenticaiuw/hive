@@ -84,6 +84,48 @@ fn first_text(res: &Value) -> String {
         .to_string()
 }
 
+#[test]
+fn cancelled_engage_does_not_wait_for_a_later_hand_back() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("helper.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let helper = std::thread::spawn(move || {
+        let (mut commands, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(commands.try_clone().unwrap());
+        for (expected, reply) in [
+            ("status\n", "ok state=disengaged reason=released_by_agent\n"),
+            ("engage\n", "ok\n"),
+            ("status\n", "ok state=arming reason=engage_requested\n"),
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line, expected);
+            commands.write_all(reply.as_bytes()).unwrap();
+        }
+        let (mut watch, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(watch.try_clone().unwrap()).read_line(&mut line).unwrap();
+        assert_eq!(line, "watch\n");
+        watch.write_all(b"ok watching\nevent state=disengaged reason=engage_cancelled_by_trackpad\nevent state=engaged reason=engaged\n").unwrap();
+        line.clear();
+        if reader.read_line(&mut line).unwrap() > 0 {
+            assert_eq!(line, "status\n");
+            commands.write_all(b"ok state=disengaged reason=engage_cancelled_by_trackpad\n").unwrap();
+        }
+    });
+    let tools = MacTools::with(
+        hive_mac::AgentVHID::new(socket, 1.0, false),
+        FakeSystem::new(),
+    );
+    let result = tools.take();
+    tools.close();
+    helper.join().unwrap();
+    assert_eq!(result.unwrap(), Some("engage_cancelled_by_trackpad".into()));
+}
+
 // --- MacBatchTest ---
 
 #[test]

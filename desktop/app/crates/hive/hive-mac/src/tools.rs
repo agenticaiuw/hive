@@ -737,9 +737,13 @@ impl MacTools {
         }
         if state == "arming" {
             self.control.remember_user();
-            if self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
-                have(false);
-                return Ok(None);
+            match self.mac.wait_for_attempt(ENGAGE_WAIT)? {
+                crate::vhid::EngageWait::Engaged => {
+                    have(false);
+                    return Ok(None);
+                }
+                crate::vhid::EngageWait::Cancelled(reason) => return Ok(Some(reason)),
+                crate::vhid::EngageWait::TimedOut => {}
             }
             reason = self.mac.status()?.get("reason").unwrap_or("").to_string();
         } else if reason == "watcher_unavailable" {
@@ -749,9 +753,13 @@ impl MacTools {
             self.control.remember_user();
             self.mac.engage()?;
             lock(&self.control.state).fresh = false;
-            if self.mac.wait_engaged(Some(ENGAGE_WAIT), false)? {
-                have(true);
-                return Ok(None);
+            match self.mac.wait_for_attempt(ENGAGE_WAIT)? {
+                crate::vhid::EngageWait::Engaged => {
+                    have(true);
+                    return Ok(None);
+                }
+                crate::vhid::EngageWait::Cancelled(reason) => return Ok(Some(reason)),
+                crate::vhid::EngageWait::TimedOut => {}
             }
             reason = self.mac.status()?.get("reason").unwrap_or("").to_string();
             if reason.is_empty() {
