@@ -20,6 +20,9 @@
 //! 4. The new agent confirms the release once it has run for two minutes. One that starts a third
 //!    time without that puts the previous files back and stops, so the app starts the old agent.
 //! What happened is said on the board (POST /v1/nodes/report) for the dashboard.
+//!
+//! A club member's Mac asks the club's board instead, with the member's key (tasks.json `releases`,
+//! lib.rs Cloud::release_source), so every member's Mac runs the same Hive as the owner's.
 
 use crate::{node, Cloud};
 use base64::Engine as _;
@@ -391,6 +394,8 @@ pub fn put_in_when_idle(hive: &Path, cloud: &Cloud, idle: &dyn Fn() -> bool, wai
 /// `idle` is None to put the release in without waiting; `over_any` puts it in over a build made by
 /// hand or one this Mac gave up on.
 fn look(hive: &Path, cloud: &Cloud, idle: Option<(&dyn Fn() -> bool, Duration)>, over_any: bool) -> Result<Outcome, String> {
+    // A club member's Mac takes the club's releases and reports there (lib.rs Cloud::release_source).
+    let cloud = &cloud.release_source();
     let answer = cloud.get("/v1/releases/latest?kind=mac")?;
     let release = &answer["release"];
     let Some(version) = release["version"].as_str().map(str::to_string) else {
@@ -663,7 +668,7 @@ mod tests {
                 let _ = stream.write_all(&answer);
             }
         });
-        (Cloud { url, token: "t".into(), machine: "test-mac".into() }, seen)
+        (Cloud { url, token: "t".into(), machine: "test-mac".into(), releases: None }, seen)
     }
 
     #[test]
@@ -687,6 +692,31 @@ mod tests {
         assert!(seen.contains("Updated from dev to abcdef123456; Hive runs it from its next start."), "{seen}");
         // A release that started badly three times went back; asked again, it goes in again.
         assert_eq!(on_start(root, "abcdef123456"), Start::Run { confirm: Some("abcdef123456".into()) });
+    }
+
+    #[test]
+    fn a_club_members_mac_takes_the_clubs_releases_and_reports_there() {
+        if node::VERSION != "dev" {
+            return; // built as a release: the hand build this is about isn't this one
+        }
+        let dir = hive_with_old_build();
+        let root = dir.path();
+        let files = release_with_agent("abcdef123456", "abcdef123456").files;
+        let (club, seen) = board(pack("mac", Some("abcdef123456"), arch(), &files), "abcdef123456");
+        // Its own board isn't there at all: everything about releases goes to the club's.
+        let config = json!({ "url": "http://127.0.0.1:9/", "token": "own", "machine": "test-mac",
+            "releases": { "url": format!("{}/", club.url), "token": format!("club.alice.{}", "a".repeat(64)) } });
+        let cloud = Cloud::from_config(&config).unwrap();
+        assert_eq!(cloud.url, "http://127.0.0.1:9");
+        assert_eq!(cloud.release_source().url, club.url);
+        assert_eq!(now(root, &cloud).unwrap(), Outcome::PutIn { from: "dev".into(), to: "abcdef123456".into() });
+        let seen = seen.lock().unwrap().join("\n");
+        assert!(seen.contains("/v1/releases/get?kind=mac&version=abcdef123456"), "{seen}");
+        assert!(seen.contains("Updated from dev to abcdef123456"), "{seen}");
+        // Without `releases`, the board itself is where releases come from.
+        let plain = Cloud::from_config(&json!({ "url": club.url, "token": "t", "machine": "m" })).unwrap();
+        assert_eq!(plain.release_source().url, club.url);
+        assert!(Cloud::from_config(&json!({ "url": "", "token": "t" })).is_none());
     }
 
     #[test]

@@ -18,7 +18,9 @@ hive-cloud recover <url>     # a device with only the recovery code
 `deploy` uploads `worker.js` through the Cloudflare API, keeps chunks in an R2 bucket named
 `<name>-chunks` when R2 is on for the account (else in Durable Objects), claims the new cloud
 for this Mac, and prints a recovery code. The recovery code is the only way back in if every
-device is lost; keep it somewhere safe. `deploy --update` replaces the code and keeps the data.
+device is lost; keep it somewhere safe. `deploy --update` replaces the code and keeps the data. Both keep
+the Cloudflare token in the Keychain, so `watch` (which Hive runs) puts each newer Hive's cloud code on it
+by itself; `disconnect` forgets the token.
 
 ## What goes up
 

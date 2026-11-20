@@ -110,6 +110,7 @@ pub fn disconnect() -> Result<String, String> {
     let secrets = Secrets::system();
     secrets.delete(&host, "device-token");
     secrets.delete(&host, "account-key");
+    crate::deploy::Kept::forget(&secrets, &host);
     let dir = crate::config::cloud_dir();
     for name in ["config.json", "sync.sqlite3", "sync.sqlite3-wal", "sync.sqlite3-shm", "status.json"] {
         let _ = std::fs::remove_file(dir.join(name));

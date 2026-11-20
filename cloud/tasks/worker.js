@@ -17,9 +17,9 @@
 import { browserRoute } from "./browser.js";
 import { knowledgeRoute } from "./knowledge.js";
 import { macRoute } from "./mac.js";
-import { nodeList, nodeOf, nodesRoute, sawNode, tooOld, versionHeaders } from "./nodes.js";
+import { memberNode, nodeList, nodeOf, nodesRoute, sawNode, tooOld, versionHeaders } from "./nodes.js";
 import { phoneAllowed, phoneRoute, rememberOrigin } from "./phone.js";
-import { clubRoute } from "./club.js";
+import { clubRoute, memberOf } from "./club.js";
 import { teamRoute } from "./team.js";
 
 // Hive Phone's relay: one Durable Object per phone (wrangler.jsonc PHONE).
@@ -109,7 +109,7 @@ async function route(request, env, url) {
       if (url.pathname.startsWith("/v1/mac/")) return await macRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/team/")) return await teamRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/club/")) return await clubRoute(request, env, url, { allowed, newRequest, teamRoute });
-      if (url.pathname.startsWith("/v1/nodes") || url.pathname.startsWith("/v1/releases")) return await nodesRoute(request, env, url, { machineAllowed, anyoneAllowed });
+      if (url.pathname.startsWith("/v1/nodes") || url.pathname.startsWith("/v1/releases")) return await nodesRoute(request, env, url, { machineAllowed, anyoneAllowed, memberOf: clubMember });
       if (url.pathname.startsWith("/v1/phone/")) return await phoneRoute(request, env, url, { machineAllowed, allowed });
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
@@ -347,14 +347,24 @@ async function anyoneAllowed(request, env) {
   return (await allowed(request, env)) || (await extensionAllowed(request, env));
 }
 
+// The club member a call is signed in as (club.js), or null.
+function clubMember(request, env) {
+  return memberOf(request, env, now());
+}
+
 // Writes down what a node runs, for a call that's signed in: a machine as any kind of node, the
-// extension's key only as the extension.
+// extension's key only as the extension, and a club member's key as one of their own devices (nodes.js
+// memberNode), never as the board.
 async function noteNode(request, env, node) {
   try {
     const signed = (await machineAllowed(request, env))
       || (node.kind === "extension" && (await extensionAllowed(request, env)))
       || (node.kind === "phone" && (await phoneAllowed(request, env)));
-    if (!signed) return;
+    if (!signed) {
+      const member = node.kind !== "board" && (await clubMember(request, env));
+      if (member) await sawNode(env, { ...node, name: memberNode(member.name, node.name) });
+      return;
+    }
     await sawNode(env, node);
     // The address it was reached by goes into the phone's pairing (phone.js).
     if (node.kind !== "phone") await rememberOrigin(env, new URL(request.url).origin);

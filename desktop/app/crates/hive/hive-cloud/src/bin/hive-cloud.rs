@@ -1,5 +1,5 @@
 //! hive-cloud: set up, sync and check the owner's private Hive Cloud.
-use hive_cloud::config::{cloud_dir, now_ms, Config};
+use hive_cloud::config::{cloud_dir, now_ms, Config, Secrets};
 use hive_cloud::deploy::{self, Cloudflare, Plan};
 use hive_cloud::sync::{self, Engine, PushOptions};
 use hive_cloud::{crypto, enroll, scan};
@@ -17,6 +17,8 @@ Set up
                          Cloudflare Workers\") from CLOUDFLARE_API_TOKEN or asks for it.
   deploy --update [--name N]
                          Replace the cloud's code with this version; keeps all data.
+                         Either keeps the token in the Keychain, so `watch` puts each newer
+                         Hive's cloud code on it by itself; `disconnect` forgets it.
   claim <url>            Become the owner of a Hive Cloud you deployed yourself (wrangler).
                          Reads the claim secret from HIVE_CLOUD_CLAIM_SECRET or asks for it.
   invite [--minutes M]   Make a one-use link (default 15 minutes) for another device.
@@ -225,6 +227,8 @@ fn cmd_deploy(args: &[String]) -> Result<(), String> {
         let bucket = (health["storage"] == "r2").then(|| format!("{script}-chunks"));
         cf.upload(&account.id, &script, bucket.as_deref(), None)?;
         let health = deploy::wait_healthy(&url, Duration::from_secs(60))?;
+        deploy::Kept { token: cf.token().to_string(), account: account.id.clone(), script: script.clone() }
+            .save(&Secrets::system(), &sync::host_of(&url))?;
         println!("Updated {url} to Hive Cloud {}.", health["version"].as_str().unwrap_or("?"));
         return Ok(());
     }
@@ -252,6 +256,8 @@ fn cmd_deploy(args: &[String]) -> Result<(), String> {
     println!("Uploaded. Waiting for {url} to answer…");
     deploy::wait_healthy(&url, Duration::from_secs(120))?;
     let (config, code) = enroll::claim(&url, &claim_secret)?;
+    deploy::Kept { token: cf.token().to_string(), account: plan.account.id.clone(), script: script.clone() }
+        .save(&Secrets::system(), &sync::host_of(&url))?;
     println!("Your Hive Cloud is at {url}");
     println!("This device ({}) is connected as {}.", config.device_name, config.device_id);
     print_recovery(&code);
@@ -373,6 +379,8 @@ fn cmd_sync(cmd: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+const CLOUD_CODE_EVERY: Duration = Duration::from_secs(6 * 3600);
+
 fn cmd_watch(args: &[String]) -> Result<(), String> {
     let every: u64 = opt(args, "--every").map(|s| s.parse().map_err(|_| "--every takes seconds")).transpose()?.unwrap_or(60);
     let parent: Option<i32> = opt(args, "--parent").map(|s| s.parse().map_err(|_| "--parent takes a process ID")).transpose()?;
@@ -384,7 +392,17 @@ fn cmd_watch(args: &[String]) -> Result<(), String> {
     let nudge = cloud_dir().join("nudge");
     let stamp = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let mut failures = 0u32;
+    // The cloud's own code follows this Hive's (deploy.rs keep_current): looked at now and every six hours.
+    let mut looked: Option<Instant> = None;
     loop {
+        if looked.is_none_or(|at| at.elapsed() >= CLOUD_CODE_EVERY) {
+            looked = Some(Instant::now());
+            match deploy::keep_current(&engine.config.url, &Secrets::system()) {
+                Ok(Some(done)) => println!("[{}] {done}", now_ms() / 1000),
+                Ok(None) => {}
+                Err(e) => println!("[{}] cloud code: {e}", now_ms() / 1000),
+            }
+        }
         let seen = stamp(&nudge);
         let (status, result) = engine.run_once(&opts);
         let state = status["state"].as_str().unwrap_or("?").to_string();
