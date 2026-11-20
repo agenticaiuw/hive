@@ -195,16 +195,29 @@ with JSON only, no prose, in this shape:
  "keep": [{"items": "<CSS selector matching every one of a list's items>", "text": ["<text an item to keep contains>", ...]}],
  "css": "<extra CSS, or empty>",
  "go": "<a path on this site to open instead of this page, or empty>",
- "add": [{"after": "<CSS selector of the element the link goes after (or \"before\" instead)>", "text": "<the link's words>", "href": "<a path on this site>"}]}
+ "add": [{"after": "<CSS selector of the element the link goes after (or \"before\" instead)>", "text": "<the link's words>", "href": "<a path on this site>"}],
+ "frames": "<CSS applied inside every frame of the page, or empty>"}
 "keep" hides each matching item that contains none of its texts (case doesn't matter), so a list shows only what the owner
 wants. Prefer selectors you can see in the outline, ids and stable class names over generated ones, and never hide the
 page's main content area itself. The outline of a long page is cut short (repeated items are summed up in one line
 each), so on a well-known site (YouTube, Canvas, Reddit, ...) you may also use selectors and attributes you know it
 uses, like ytd-rich-shelf-renderer[is-shorts]. Decide which items to keep from what the outline shows (course names,
-terms, dates). Frames inside the page (iframe) are not in the outline and a rule's CSS can't reach into them, but it can
-style the iframe element itself. Something the owner puts in full screen is drawn above the page, outside the styles
-of the elements around it, so style the full-screen element itself too, with its own rule for each of :fullscreen and
-:-webkit-full-screen (a selector list with one the browser doesn't know is dropped whole).
+terms, dates). An iframe is one line in the outline ([frame from <site>]): "css" styles the iframe element, never what's
+inside it. "frames" is CSS applied inside every frame of the page (a document viewer like Canvas's, an embedded player),
+and each frame the extension could reach is outlined after the page, under "--- inside a frame from <site>": style what's
+in a frame with "frames", by selectors from its outline. A filter on an element applies to everything inside it, iframes
+too, and a child's filter: none can't undo it. Something the owner puts in full screen is drawn above the page, outside
+the styles of the elements around it (a filter on html no longer reaches it), so style the full-screen element itself
+too, with its own rule for each of :fullscreen and
+:-webkit-full-screen (a selector list with one the browser doesn't know is dropped whole). When something inside a frame
+goes full screen, the iframe element is the page's full-screen element, and the frame has its own.
+Dark mode on a page with a frame (Canvas's file viewer): darken the frame from inside with "frames": html, body and its
+bars, margins and panels get dark backgrounds and light text (pure black, #000, when the owner wants it truly dark), the
+document's pages (their canvas, img or page elements) filter: invert(1) hue-rotate(180deg), and its own full screen too
+(:fullscreen, :-webkit-full-screen, ::backdrop). Then the page must leave that frame as it is: when "css" inverts html or
+the frame's container, invert the iframe element once more so the two cancel, and give the iframe element filter: none
+!important in full screen (iframe:fullscreen, iframe:-webkit-full-screen). A frame with no outline of its own can't be
+reached: turn it dark from the page by inverting the iframe element, in full screen too.
 "go" sends this page on to another page of the same site the moment it opens ("open YouTube on my subscriptions":
 path "/", go "/feed/subscriptions"); it needs the rule's path, and it also works when the site changes pages without
 loading one. Each "add" puts a link to a page of the same site next to an element: <a class="hive-added"> holding only
@@ -246,6 +259,8 @@ function ruleFrom(value) {
       .filter(k => k.items && k.text.length).slice(0, 10),
     css: String(value?.css || '').slice(0, 20000),
   };
+  const frames = String(value?.frames || '').slice(0, 20000);
+  if (frames.trim()) rule.frames = frames;
   const go = String(value?.go || '').trim().slice(0, 500);
   const add = (Array.isArray(value?.add) ? value.add : []).map(a => {
     const where = a?.after ? 'after' : 'before';
@@ -255,7 +270,7 @@ function ruleFrom(value) {
   if (add.length) rule.add = add;
   const path = String(value?.path ?? '').trim().slice(0, 500);
   if (go && !path) throw new Error('"go" needs the path of the page it sends on');
-  if (!rule.hide.length && !rule.keep.length && !rule.css.trim() && !go && !add.length) throw new Error('the rule changes nothing');
+  if (!rule.hide.length && !rule.keep.length && !rule.css.trim() && !rule.frames && !go && !add.length) throw new Error('the rule changes nothing');
   return { title: String(value?.title || 'Page change').trim().slice(0, 120), path, rule };
 }
 

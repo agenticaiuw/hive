@@ -5,7 +5,9 @@
  * owner just made here is still with Hive, it keeps asking, so the page changes the moment Hive's
  * rule lands, without a reload. A rule can also send the page on to another page of the site (go) and
  * add links (add); sites like YouTube change pages without loading one, so a change of address
- * applies the new page's rules too.
+ * applies the new page's rules too. It runs in each frame of the page as well (a document viewer
+ * from another site, like Canvas's canvadocs PDF viewer): there it applies only the rules' "frames"
+ * CSS, the rules of the page the frame is in.
  */
 import {
   BOARD_KEY,
@@ -13,18 +15,28 @@ import {
   RULES_KEY,
   WAITING_KEY,
   boardUrl,
+  frameStyleFor,
   goFor,
   keeps,
   linksFor,
   rulesFor,
   siteOf,
   styleFor,
+  topSiteOf,
   validSelector,
 } from './page-rules-core.js'
 import { nodeHeaders } from './version.js'
 
 const api = globalThis.browser ?? globalThis.chrome
-const site = siteOf(location.hostname)
+const inFrame = (() => {
+  try {
+    return window.top !== window
+  } catch {
+    return true
+  }
+})()
+/* In a frame, the site of the page it's in: Canvas's viewer frame is canvadocs, its rules Canvas's. */
+const site = (inFrame && topSiteOf(location.ancestorOrigins, document.referrer)) || siteOf(location.hostname)
 const STYLE_ID = 'hive-page-rules'
 const HIDDEN = 'data-hive-hidden'
 const ADDED = 'data-hive-add'
@@ -127,12 +139,9 @@ function showAll() {
   }
 }
 
-function apply(rules) {
-  siteRules = rules
-  current = rulesFor(rules, location.pathname)
-  if (goOn()) return
+/** This page's style sheet from the rules ('' takes it away). */
+function setStyle(css) {
   let style = document.getElementById(STYLE_ID)
-  const css = styleFor(current)
   if (css) {
     if (!style) {
       style = document.createElement('style')
@@ -143,6 +152,13 @@ function apply(rules) {
   } else if (style) {
     style.remove()
   }
+}
+
+function apply(rules) {
+  siteRules = rules
+  current = rulesFor(rules, location.pathname)
+  if (goOn()) return
+  setStyle(styleFor(current))
   showAll()
   links = linksFor(current, location.href)
   const watching = links.length || current.some((r) => (r.rule?.keep || []).length)
@@ -217,8 +233,42 @@ async function follow() {
   }
 }
 
+/*
+ * In a frame only the rules' "frames" CSS applies: hiding, keeping, sending on and adding are the
+ * page's, and the page keeps the rules fresh from the cloud, so a frame just follows storage. A rule
+ * for one path needs the page's path, which a frame from another site can't read: the background
+ * says the tab's address; without it, only the whole site's rules apply.
+ */
+let pagePath
+
+async function framePath() {
+  if (pagePath !== undefined) return pagePath
+  pagePath = null
+  try {
+    const answer = await api.runtime.sendMessage({ type: 'hive:page' })
+    const url = new URL(String(answer?.url || ''))
+    if (siteOf(url.hostname) === site) pagePath = url.pathname
+  } catch {}
+  return pagePath
+}
+
+async function applyInFrame(rules) {
+  const framed = (Array.isArray(rules) ? rules : []).filter((r) => r.rule?.frames)
+  const path = framed.some((r) => r.path) ? await framePath() : null
+  setStyle(frameStyleFor(path === null ? framed.filter((r) => !r.path) : rulesFor(framed, path)))
+}
+
+async function startInFrame() {
+  const { rules } = await stored()
+  await applyInFrame(rules[site] || [])
+  api.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[RULES_KEY]) applyInFrame((changes[RULES_KEY].newValue || {})[site] || [])
+  })
+}
+
 async function start() {
   if (!api?.storage?.local) return
+  if (inFrame) return startInFrame()
   const { rules } = await stored()
   apply(rules[site] || [])
   api.storage.onChanged.addListener((changes, area) => {

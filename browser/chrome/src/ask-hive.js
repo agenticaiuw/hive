@@ -49,13 +49,34 @@ async function activeTab() {
   return tab || null
 }
 
+/**
+ * The page for Hive: its address, title and outline, with the outline of each frame inside it the
+ * extension can reach (a document viewer like Canvas's, from another site) after the page's own,
+ * so a rule can style inside it ("frames"). The board keeps up to 60,000 characters of it.
+ */
 async function pageOf(tab) {
   if (!tab?.url || !/^https?:/.test(tab.url)) return null
   let outline = ''
   try {
-    const [result] = await api.scripting.executeScript({ target: { tabId: tab.id }, func: outlinePage })
-    outline = String(result?.result || '')
+    const results = await api.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: outlinePage,
+      args: [40000, 8000],
+    })
+    const top = results.find((r) => r.frameId === 0)
+    const frames = results
+      .filter((r) => r.frameId !== 0 && String(r.result || '').split('\n').length > 2)
+      .sort((a, b) => String(b.result).length - String(a.result).length)
+      .slice(0, 2)
+      .map((r) => String(r.result))
+    outline = [String(top?.result || ''), ...frames].join('\n').slice(0, 58000)
   } catch {}
+  if (!outline) {
+    try {
+      const [result] = await api.scripting.executeScript({ target: { tabId: tab.id }, func: outlinePage })
+      outline = String(result?.result || '')
+    } catch {}
+  }
   return { url: tab.url, title: tab.title || '', outline }
 }
 

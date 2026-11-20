@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { goFor, keeps, linksFor, outlinePage, rulesFor, siteOf, styleFor, validSelector } from '../src/page-rules-core.js'
+import { frameStyleFor, goFor, keeps, linksFor, outlinePage, rulesFor, siteOf, styleFor, topSiteOf, validSelector } from '../src/page-rules-core.js'
 
 test('a page gets its own rules and the whole site\'s', () => {
   const rules = [{ id: 1, path: '/', rule: {} }, { id: 2, path: '', rule: {} }, { id: 3, path: '/courses', rule: {} }]
@@ -23,9 +23,9 @@ test('keep leaves only the items that name what the owner wants', () => {
 
 // The owner (2026-11-17): "remove these shorts from my subscriptions page" came back "the rule changes nothing": the
 // outline was cut at 50,000 characters inside the first rows of videos, before the Shorts shelf.
-function fakeElement(tag, { id = '', classes = [], attrs = {}, text = '', children = [] } = {}) {
+function fakeElement(tag, { id = '', classes = [], attrs = {}, text = '', children = [], src = '' } = {}) {
   const el = {
-    tagName: tag.toUpperCase(), id, classList: classes, children,
+    tagName: tag.toUpperCase(), id, classList: classes, children, src,
     childNodes: text ? [{ nodeType: 3, textContent: text }, ...children] : children,
     attributes: Object.entries({ ...attrs, ...(id ? { id } : {}), ...(classes.length ? { class: classes.join(' ') } : {}) }).map(([name, value]) => ({ name, value })),
     getAttribute: (name) => attrs[name] ?? null,
@@ -83,4 +83,41 @@ test('add gives checked links on the same site, each with its own key', () => {
     { key: '7-0', where: 'after', anchor: 'ytd-mini-guide-entry-renderer:has(a[href="/feed/subscriptions"])', text: 'Watch later', href: 'https://www.youtube.com/playlist?list=WL' },
     { key: '7-3', where: 'before', anchor: '#y', text: 'Liked', href: 'https://www.youtube.com/playlist?list=LL' },
   ])
+})
+
+// The owner (2026-11-19), on Canvas's PDF viewer (a canvadocs iframe): "i want truly dark mode, and also, when i make a
+// doc full screen it should stay dark mode as well". The outline didn't show the iframe and no CSS reached inside it.
+test('frames get the rules\' frames CSS, under the site of the page they are in', () => {
+  const rules = [
+    { id: 1, path: '', rule: { css: 'html { filter: invert(1) }', frames: 'html, body { background: #000 !important; }' } },
+    { id: 2, path: '/courses/1/files/2', rule: { frames: '.Page canvas { filter: invert(1); }' } },
+    { id: 3, path: '', rule: { hide: ['#footer'] } },
+  ]
+  assert.equal(frameStyleFor(rules), 'html, body { background: #000 !important; }\n.Page canvas { filter: invert(1); }')
+  assert.equal(frameStyleFor(rules.slice(2)), '')
+  assert.doesNotMatch(styleFor(rules), /background: #000/, "the page itself doesn't get the frames CSS")
+  assert.equal(topSiteOf(['https://www.canvas.wisc.edu'], ''), 'canvas.wisc.edu')
+  assert.equal(topSiteOf(['https://canvas.wisc.edu', 'https://ads.example'], ''), 'ads.example', 'the top page is the last ancestor')
+  assert.equal(topSiteOf(undefined, 'https://canvas.wisc.edu/courses/1/files/2?wrap=1'), 'canvas.wisc.edu')
+  assert.equal(topSiteOf([], ''), '')
+})
+
+test('the outline names each iframe and where it is from; a frame outlines itself under a heading', () => {
+  const preview = fakeElement('div', { id: 'doc_preview', children: [
+    fakeElement('iframe', { id: 'doc_preview_frame', src: 'https://canvas.wisc.edu/api/v1/canvadoc_session?blob=x', children: [fakeElement('p', { text: 'never' })] }),
+  ] })
+  globalThis.document = { body: fakeElement('body', { children: [preview] }) }
+  try {
+    const outline = outlinePage(12000)
+    assert.match(outline, /div#doc_preview\n  iframe#doc_preview_frame \[frame from canvas\.wisc\.edu\]/)
+    assert.doesNotMatch(outline, /never|blob/)
+    globalThis.window = { top: {} }
+    globalThis.location = { hostname: 'canvadocs-iad-prod.instructure.com' }
+    assert.equal(outlinePage(12000), '', 'a frame outlines itself only when asked for frames')
+    assert.match(outlinePage(40000, 8000), /^--- inside a frame from canvadocs-iad-prod\.instructure\.com \(styled by the rule's "frames" CSS\) ---\ndiv#doc_preview/)
+  } finally {
+    delete globalThis.document
+    delete globalThis.window
+    delete globalThis.location
+  }
 })

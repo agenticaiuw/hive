@@ -18,10 +18,11 @@ let activeCloudPeer = null
 let running = 0
 const checkForNewCode = newCodeWatcher({ busy: () => running > 0 })
 
-async function runCommand(command) {
+/* The config (which tab a command acts in) comes from cloud-peer.js with the command: pass it on. */
+async function runCommand(command, config) {
   running += 1
   try {
-    return await executeCommand(command)
+    return await executeCommand(command, config)
   } finally {
     running -= 1
   }
@@ -64,6 +65,13 @@ api.alarms.onAlarm.addListener((alarm) => {
 api.storage.onChanged.addListener((changes, areaName) => {
   /* The popup just got the board key (from Hive, or set by hand): start listening to the cloud now. */
   if (areaName === 'local' && changes[BOARD_KEY]?.newValue) void startCloudPeer()
+})
+
+/* A frame inside a page (page-rules.js in a document viewer from another site) asks which page it's in. */
+api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== 'hive:page') return false
+  sendResponse({ url: sender.tab?.url || '' })
+  return false
 })
 
 /* Evaluated on every worker start, not just install or browser start. */

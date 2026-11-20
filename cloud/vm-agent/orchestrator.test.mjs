@@ -324,6 +324,31 @@ test('a page request sees the rules already on for the site, so a follow-up adds
   assert.equal(calls.find(([p]) => p === '/v1/page-rules')[1].rule.css, css);
 });
 
+// The owner (2026-11-19), on Canvas's PDF viewer: "i want truly dark mode, and also, when i make a doc full screen it
+// should stay dark mode as well whether it's the doc itself its margins the bars, whatever..." came back "The document
+// viewer is inside an iframe, so the extension cannot style its document". Frames are reachable now: "frames" CSS.
+test('a page rule can style inside the page\'s frames, and the guide says how, full screen included', async () => {
+  const { handle, pagePrompt, parsePageRule } = await import('./orchestrator.mjs');
+  const frames = 'html, body, .Toolbar { background: #000 !important; } .Page canvas { filter: invert(1) hue-rotate(180deg); }';
+  assert.equal(parsePageRule(JSON.stringify({ title: 'Dark viewer', path: '', frames })).rules[0].rule.frames, frames, 'a frames-only rule changes something');
+  assert.equal(parsePageRule(JSON.stringify({ title: 'Dark', path: '', css: 'html { color: red }' })).rules[0].rule.frames, undefined);
+  const outline = 'div#doc_preview\n  iframe#doc_preview_frame [frame from canvas.wisc.edu]\n--- inside a frame from canvadocs.instructure.com (styled by the rule\'s "frames" CSS) ---\ndiv.Toolbar';
+  const prompt = pagePrompt({ text: 'truly dark mode, full screen too' }, { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Syllabus', outline });
+  assert.match(prompt, /"frames": "<CSS applied inside every frame of the page/);
+  assert.match(prompt, /inside a frame from canvadocs\.instructure\.com/);
+  assert.match(prompt, /invert the iframe element once more so the two cancel/);
+  assert.match(prompt, /iframe:fullscreen, iframe:-webkit-full-screen/);
+  assert.doesNotMatch(prompt, /can't reach into them/);
+
+  const calls = [];
+  const board = async (path, body) => { calls.push([path, body]); return path === '/v1/page-rules' ? { id: 9 } : { rules: [] }; };
+  await handle({ id: 18, text: 'truly dark mode, full screen too', page: { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Syllabus', outline } },
+    { board, ask: async () => JSON.stringify({ title: 'Truly dark, viewer and full screen', path: '', css: 'iframe:fullscreen { filter: none !important; }', frames }) });
+  const saved = calls.find(([p]) => p === '/v1/page-rules')[1];
+  assert.equal(saved.rule.frames, frames);
+  assert.equal(calls.at(-1)[1].status, 'done');
+});
+
 test('an answer that changes nothing is asked once more, and one that cannot says exactly why', async () => {
   const { handle } = await import('./orchestrator.mjs');
   const page = { url: 'https://www.youtube.com/feed/subscriptions', title: 'Subscriptions', outline: 'ytd-browse#browse' };
