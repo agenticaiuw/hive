@@ -157,8 +157,14 @@ button:disabled {
   background: transparent;
   color: var(--ink-2);
 }
-.ask-mic .ask-listening {
+.ask-mic .ask-listening,
+.ask-mic .ask-muted,
+.ask-mic .ask-mic-slash {
   display: none;
+}
+.ask-mic.muted .ask-muted,
+.ask-mic.muted .ask-mic-slash {
+  display: inline;
 }
 .ask-mic.on {
   border-color: rgba(245, 197, 66, 0.55);
@@ -192,6 +198,15 @@ button:disabled {
 .ask-send:disabled {
   opacity: 0.5;
   cursor: default;
+}
+/* What was just sent, in the owner's words. */
+.ask-said {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--gold);
+  color: var(--ink);
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 .ask-note {
   margin: 0;

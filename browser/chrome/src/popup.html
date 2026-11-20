@@ -27,11 +27,14 @@
             <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
               <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" />
               <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path class="ask-mic-slash" d="M4 3.5l16 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
             </svg>
             <span class="ask-listening">Listening</span>
+            <span class="ask-muted">Muted</span>
           </button>
           <button id="ask-send" class="ask-send" type="submit">Send</button>
         </div>
+        <p id="ask-said" class="ask-said" hidden></p>
         <p id="ask-note" class="ask-note" role="status" hidden></p>
         <ul id="ask-rules" class="ask-rules" aria-label="Hive's changes to this site" hidden></ul>
       </form>

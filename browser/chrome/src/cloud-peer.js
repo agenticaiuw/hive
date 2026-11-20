@@ -11,7 +11,8 @@
  * when it likes; the background's alarm starts the loop again, and a command nobody took within 90 s
  * expires in the cloud instead of running late.
  */
-import { BOARD_KEY, BOARD_URL } from './page-rules-core.js'
+import { BOARD_KEY, NO_BOARD, boardUrl } from './page-rules-core.js'
+import { nodeHeaders } from './version.js'
 
 export const ASK_WAIT_S = 20
 /* Longer than the held ask, so only a dead connection times out. */
@@ -36,12 +37,12 @@ export const NATIVE_HOST = { safari: 'application.id', chrome: 'hive.board_key' 
  */
 export async function boardKey(browserApi = api, kind = browserKind()) {
   const got = await browserApi.storage.local.get(BOARD_KEY)
-  if (got[BOARD_KEY]?.key) return got[BOARD_KEY]
+  if (got[BOARD_KEY]?.key && boardUrl(got[BOARD_KEY])) return got[BOARD_KEY]
   if (typeof browserApi.runtime?.sendNativeMessage !== 'function') return null
   try {
     const answer = await browserApi.runtime.sendNativeMessage(NATIVE_HOST[kind] ?? NATIVE_HOST.safari, { type: 'hive:key' })
-    if (answer?.ok && answer.key) {
-      const board = { url: answer.url || BOARD_URL, key: answer.key }
+    if (answer?.ok && answer.key && boardUrl(answer)) {
+      const board = { url: boardUrl(answer), key: answer.key }
       await browserApi.storage.local.set({ [BOARD_KEY]: board })
       return board
     }
@@ -56,14 +57,19 @@ export class CloudError extends Error {
   }
 }
 
-/** One call to the board with the extension's key. */
+/** The browser a board key is for: "ext.chrome.<mac>" → "chrome". */
+export const keyName = (key) => String(key || '').split('.')[1] || 'browser'
+
+/** One call to the board with the extension's key, saying what this extension runs (version.js). */
 export async function boardCall(board, path, body, { fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
+  const base = boardUrl(board)
+  if (!base) throw new CloudError(NO_BOARD, 0)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetchImpl(`${board.url || BOARD_URL}${path}`, {
+    const response = await fetchImpl(`${base}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { authorization: `Bearer ${board.key}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${board.key}`, 'content-type': 'application/json', ...nodeHeaders(keyName(board.key)) },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
       signal: controller.signal,

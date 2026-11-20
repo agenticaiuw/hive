@@ -1,8 +1,8 @@
 // The extension's way in from the cloud (src/cloud-peer.js), against a fake board and a fake browser.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { boardKey, browserKind, CLOUD_STATUS_KEY, connectionBadge, runCloudPeer } from '../src/cloud-peer.js'
-import { BOARD_KEY } from '../src/page-rules-core.js'
+import { boardCall, boardKey, browserKind, CLOUD_STATUS_KEY, CloudError, connectionBadge, runCloudPeer } from '../src/cloud-peer.js'
+import { BOARD_KEY, NO_BOARD } from '../src/page-rules-core.js'
 
 function fakeBrowser(stored = {}, native = null) {
   const data = { ...stored }
@@ -186,4 +186,19 @@ test('an unreachable cloud is retried after a pause, and the status says so mean
   assert.deepEqual(states, ['offline'])
   assert.deepEqual(pauses, [1000])
   assert.equal(browserApi.data[CLOUD_STATUS_KEY].state, 'connected')
+})
+
+test("without the board's address from Hive the extension calls nobody: no guessed host ever gets its key", async () => {
+  let fetched = 0
+  const fetchImpl = async () => { fetched += 1; return new Response('{}') }
+  await assert.rejects(boardCall({ key: 'ext.chrome.k' }, '/v1/board', undefined, { fetchImpl }), (e) => e instanceof CloudError && e.message === NO_BOARD)
+  assert.equal(fetched, 0)
+  const store = { [BOARD_KEY]: { key: 'ext.chrome.k' } }
+  const asked = []
+  const browserApi = {
+    storage: { local: { get: async (k) => ({ [k]: store[k] }), set: async (v) => Object.assign(store, v) } },
+    runtime: { sendNativeMessage: async (host, message) => { asked.push(host); return { ok: true, key: 'ext.chrome.k2', url: '' } } },
+  }
+  assert.equal(await boardKey(browserApi, 'chrome'), null, 'a key with no address is no connection')
+  assert.deepEqual(asked, ['hive.board_key'], 'a kept key with no address asks Hive again')
 })

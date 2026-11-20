@@ -8,16 +8,29 @@
 import { runCloudPeer } from './cloud-peer.js'
 import { executeCommand, getConfig, refreshBadge } from './executor.js'
 import { BOARD_KEY } from './page-rules-core.js'
+import { newCodeWatcher, noteLoadedCode } from './version.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const WAKE_ALARM = 'hive-wake'
 
 let activeCloudPeer = null
+/* Commands running now: new code on disk waits for them (version.js). */
+let running = 0
+const checkForNewCode = newCodeWatcher({ busy: () => running > 0 })
+
+async function runCommand(command) {
+  running += 1
+  try {
+    return await executeCommand(command)
+  } finally {
+    running -= 1
+  }
+}
 
 function startCloudPeer() {
   if (activeCloudPeer) return activeCloudPeer
   activeCloudPeer = runCloudPeer({
-    executeCommand,
+    executeCommand: runCommand,
     getConfig,
     /* The badge says ON while Hive reaches this browser through the cloud. */
     onStatus: () => refreshBadge().catch(() => {}),
@@ -34,10 +47,19 @@ async function wake() {
   void startCloudPeer()
 }
 
-api.runtime.onInstalled.addListener(() => void wake())
-api.runtime.onStartup.addListener(() => void wake())
+/* Installed, reloaded or the browser started: this is the code now loaded (version.js). */
+api.runtime.onInstalled.addListener(() => {
+  void noteLoadedCode().catch(() => {})
+  void wake()
+})
+api.runtime.onStartup.addListener(() => {
+  void noteLoadedCode().catch(() => {})
+  void wake()
+})
 api.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === WAKE_ALARM) void startCloudPeer()
+  if (alarm.name !== WAKE_ALARM) return
+  void startCloudPeer()
+  void checkForNewCode().catch(() => {})
 })
 api.storage.onChanged.addListener((changes, areaName) => {
   /* The popup just got the board key (from Hive, or set by hand): start listening to the cloud now. */
