@@ -16,7 +16,8 @@ cd "$(dirname "$0")"
 
 make -s
 
-# First run only: the Python packages and the models (Parakeet 2.4 GB, Kokoro 350 MB, Silero VAD 2 MB).
+# First run only: the Python packages and the models (Parakeet 2.4 GB, Kokoro 350 MB, Silero VAD 2 MB,
+# Moonshine tiny 28 MB).
 if [ ! -x .venv/bin/python ] || [ requirements.txt -nt .venv/.installed ]; then
   echo "Setting up .venv..."
   [ -x .venv/bin/python ] || python3 -m venv .venv
@@ -38,6 +39,7 @@ done
 
 .venv/bin/python python/listen.py --download  # Parakeet and Silero VAD, once
 .venv/bin/python python/voiceprint.py --download  # WeSpeaker, which tells your voice from others, once
+.venv/bin/python python/wake.py --download  # Moonshine tiny, which hears "hive" and "bye", once
 make -s build/hive-agent build/hive-auth-mcp build/hive-vhid  # the agent (Rust, crates/hive); rebuilt after a change
 
 if [ "${1:-}" = "--enroll" ]; then

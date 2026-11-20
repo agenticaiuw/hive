@@ -193,6 +193,19 @@ fn it_says_you_started_talking_before_any_words() {
 }
 
 #[test]
+fn it_says_which_wake_word_you_said() {
+    let fake = start(&[]);
+    let ears = fake.sidecar.ears();
+    let woken: Record<String> = record();
+    let into = woken.clone();
+    ears.set_on_wake(move |word| into.lock().unwrap().push(word.to_owned()));
+    fake.fake(json!({"wake": "hive"}));
+    fake.fake(json!({"wake": "bye"}));
+    wait_for("the wake words", 5.0, || woken.lock().unwrap().len() == 2);
+    assert_eq!(*woken.lock().unwrap(), ["hive", "bye"]);
+}
+
+#[test]
 fn cut_ends_what_you_were_saying_and_then_runs_after_it() {
     let fake = start(&[]);
     let ears = fake.sidecar.ears();

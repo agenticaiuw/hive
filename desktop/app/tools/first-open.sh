@@ -87,6 +87,10 @@ if [ ! -f "$app/models/.downloaded" ] || [ "$lock" -nt "$app/models/.downloaded"
   "$python" "$app/python/voiceprint.py" --download
   touch "$app/models/.downloaded"
 fi
+if [ ! -f "$app/models/wake/tokens.txt" ]; then
+  step "Downloading what hears \"hive\" and \"bye\" (Moonshine tiny, 28 MB)"
+  "$python" "$app/python/wake.py" --download
+fi
 
 # 4. Codex, and its sign-in.
 mkdir -p "$root/bin"

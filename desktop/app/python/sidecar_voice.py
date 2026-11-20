@@ -11,7 +11,10 @@ voice doesn't start a sentence while you're talking (may_speak), and it learns i
 rendering Kokoro straight into the voiceprint model. Both rules came from the Python voice agent
 (python/voice_agent.py, now crates/hive).
 
-    .venv/bin/python python/sidecar_voice.py [--listening] [--no-speak] [--no-voiceprint]
+    .venv/bin/python python/sidecar_voice.py [--listening] [--no-speak] [--no-voiceprint] [--no-wake]
+
+The wake words "hive" and "bye" are heard by a model of their own (python/wake.py), listening or
+not: while it isn't listening the microphone stays open for them alone (--no-wake: closed).
 
 It reads its settings (TTS_VOICE, LISTEN_PAUSE, STT_MODEL, VOICE_MATCH, ...) from its environment:
 the agent loads .env before starting it.
@@ -32,6 +35,7 @@ stdout, one JSON object per line:
   {"event": "text", "text": "...", "final": true, "heard_times": {"stopped": 0.9, "decided": 0.1,
       "written": 0.0}}                  all of it; heard_times are seconds before this line was written
   {"event": "speech"}                   on_speech: you've talked long enough that it isn't a cough
+  {"event": "wake", "word": "hive"}     a wake word ("hive", "bye") said on its own; it isn't text too
   {"event": "ignored", "seconds": 1.2, "similarity": 0.1, "heard_machine": false}
   {"event": "then", "id": 7}
   {"event": "talking", "on": true}      Ears.talking changed
@@ -262,6 +266,13 @@ class Server:
         self.emit("ignored", seconds=float(seconds), similarity=float(similarity),
                   heard_machine=bool(getattr(voiceprint, "heard_machine", False)))
 
+    def on_wake(self, word: str):
+        """A wake word said on its own (listen.Ears' wake). Dictating, it's just a word you said."""
+        if self._listener is not None:
+            self.on_text(word.capitalize() + ".", True)
+            return
+        self.emit("wake", word=word)
+
     def on_talking(self, on: bool):
         if self._listener is not None:
             return  # the agent hears where talking stands when the listener lets go
@@ -352,6 +363,7 @@ class Server:
         self.ears, self.voice = ears, voice
         ears.on_speech = self.on_speech
         ears.on_ignored = self.on_ignored
+        ears.on_wake = self.on_wake
 
     def hello(self, echo: float):
         self.emit("hello", pid=os.getpid(), speak=self.voice is not None,
@@ -578,9 +590,16 @@ def main(argv: list[str]) -> int:
     if "--no-speak" not in argv:
         voice = reporting_voice(speech.Voice, server)(may_speak=server.may_speak, on_play=server.on_play)
     server.voice = voice  # (the ears may ask deaf() as soon as they hear anything)
+    wake_words = None
+    if "--no-wake" not in argv:
+        try:
+            import wake
+            wake_words = wake.WakeWords()
+        except Exception as e:  # (voice works without them; the microphone closes while muted)
+            print(f"   ✗ wake words (hive, bye): {e}")
     ears = reporting_ears(listen.Ears, server)(server.on_text, deaf=server.deaf,
                                                voiceprint=None if "--no-voiceprint" in argv else Voiceprint(),
-                                               listening="--listening" in argv)
+                                               listening="--listening" in argv, wake=wake_words)
     server.attach(ears, voice)
     dictation = os.path.join(state_dir(), "dictation.sock")
     try:
