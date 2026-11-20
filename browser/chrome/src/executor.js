@@ -45,6 +45,9 @@ export async function refreshBadge() {
  * credential that reaches it has effectively left the machine.
  */
 export async function executeCommand(command, config) {
+  // A caller that forgets the config (background.js once did, and every Safari read, snapshot and
+  // screenshot failed on config.targetMode, 2026-11-19) still gets the owner's choice.
+  config ??= await getConfig()
   /*
    * Normalized before the gate: the cloud board passes on whatever an agent
    * sent, so what this browser cannot honour is dropped here.

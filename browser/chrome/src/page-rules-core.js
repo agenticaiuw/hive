@@ -9,11 +9,15 @@
  *     keep: [{ items: "selector", text: ["..."] }],  of these items, only those containing a text stay
  *     css:  "...",                                   any other style
  *     go:   "/feed/subscriptions",                   this page opens that page of the same site instead
- *     add:  [{ after: "selector", text: "Watch later", href: "/playlist?list=WL" }] }
+ *     add:  [{ after: "selector", text: "Watch later", href: "/playlist?list=WL" }],
  *                                                    a link (a.hive-added, styled by css) after or
  *                                                    before ("before": "selector") an element
+ *     frames: "..." }                                style inside every frame of the page (a document
+ *                                                    viewer, an embedded player), wherever it's from
  * (2026-11-17: the owner asked YouTube to open on Subscriptions and show Watch later in the sidebar,
- * and a rule could only hide and style, so Hive had to say it couldn't.)
+ * and a rule could only hide and style, so Hive had to say it couldn't. 2026-11-19: the owner asked
+ * for Canvas's PDF viewer to be truly dark, full screen too; it's a canvadocs iframe, a rule's CSS
+ * stopped at it and the outline didn't even show it, so Hive said it couldn't: hence frames.)
  *
  * Everything here is pure, so node tests can run it; page-rules.js and ask-hive.js own the DOM.
  */
@@ -70,6 +74,24 @@ export function styleFor(rules) {
     if (rule.css) parts.push(String(rule.css))
   }
   return parts.join('\n')
+}
+
+/** The style sheet a frame inside the page gets from these rules: their "frames" CSS. */
+export function frameStyleFor(rules) {
+  return rules.map((r) => r.rule?.frames).filter(Boolean).map(String).join('\n')
+}
+
+/**
+ * The site of the page a frame is in (its rules are that page's): the top page's host, from the
+ * frame's location.ancestorOrigins (the top one is last), else its referrer; '' when neither says.
+ */
+export function topSiteOf(ancestorOrigins, referrer) {
+  const top = ancestorOrigins?.length ? ancestorOrigins[ancestorOrigins.length - 1] : referrer
+  try {
+    return siteOf(new URL(String(top || '')).hostname)
+  } catch {
+    return ''
+  }
 }
 
 /** Whether a selector is safe to put in a style sheet (no braces to break out of the rule). */
@@ -129,12 +151,30 @@ export function keeps(itemText, texts) {
  * `tag#id.class.class[attr] "its own text"`. A list of many alike items (a feed, a grid of cards)
  * shows its first two in full and every other one as a single line with its text, so a long page
  * still fits and what's further down it (YouTube's Shorts shelf below the first videos) is in it.
- * A custom element's own attributes are named, since sites mark kinds with them (is-shorts).
+ * A custom element's own attributes are named, since sites mark kinds with them (is-shorts). An
+ * iframe is one line naming the site it's from; run in every frame (ask-hive.js, allFrames) with
+ * frameChars, a frame outlines itself too, under a heading naming its site, and the top page's
+ * outline comes back as before.
  * This function runs inside the page (ask-hive.js passes it to scripting.executeScript), so it must
  * not use anything from this module.
  */
-export function outlinePage(maxChars = 50000) {
-  const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'TEMPLATE', 'IFRAME', 'LINK', 'META'])
+export function outlinePage(maxChars = 50000, frameChars = 0) {
+  let inFrame = false
+  try {
+    inFrame = typeof window !== 'undefined' && window.top !== window
+  } catch {
+    inFrame = true
+  }
+  if (inFrame && !frameChars) return ''
+  if (inFrame) maxChars = frameChars
+  const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'TEMPLATE', 'LINK', 'META'])
+  const hostOf = (address) => {
+    try {
+      return new URL(String(address || '')).hostname
+    } catch {
+      return ''
+    }
+  }
   const lines = []
   let size = 0
   const clean = (t, n) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, n)
@@ -161,6 +201,12 @@ export function outlinePage(maxChars = 50000) {
   }
   const walk = (el, depth) => {
     if (size > maxChars || !shown(el)) return
+    if (el.tagName === 'IFRAME' || el.tagName === 'EMBED' || el.tagName === 'OBJECT') {
+      const from = hostOf(el.src || el.data || el.getAttribute('src') || el.getAttribute('data'))
+      const type = el.getAttribute('type') || ''
+      push(`${head(el, depth)}${from ? ` [frame from ${from}]` : ''}${type ? ` [${type.slice(0, 40)}]` : ''}`)
+      return
+    }
     const text = ownText(el)
     const label = el.getAttribute('aria-label') || ''
     const named = el.id || classesOf(el).length || attrsOf(el).length || text || label
@@ -184,6 +230,7 @@ export function outlinePage(maxChars = 50000) {
       } else walk(child, next)
     }
   }
+  if (inFrame) push(`--- inside a frame from ${location.hostname} (styled by the rule's "frames" CSS) ---`)
   if (document.body) walk(document.body, 0)
   return lines.join('\n').slice(0, maxChars)
 }
