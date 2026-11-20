@@ -28,7 +28,8 @@ case "$1 $2" in
   "python install") mkdir -p "$UV_PYTHON_INSTALL_DIR/cpython-3.14.7" ;;
   "venv --quiet")
     dir="\${@: -1}"; mkdir -p "$dir/bin"
-    printf '#!/bin/bash\\nif [ "$1" = -c ]; then echo 3.14.7; else echo "ran $*" >> "%s"; fi\\n' "$UV_LOG" > "$dir/bin/python"
+    # Its python logs what it runs; the wake-word download leaves its model as the real one does.
+    printf '#!/bin/bash\\nif [ "$1" = -c ]; then echo 3.14.7; else echo "ran $*" >> "%s"; case "$1" in */wake.py) d="$(dirname "$1")/../models/wake"; mkdir -p "$d"; : > "$d/tokens.txt" ;; esac; fi\\n' "$UV_LOG" > "$dir/bin/python"
     chmod +x "$dir/bin/python" ;;
   "pip sync") ;;
 esac
@@ -90,6 +91,7 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     assert.match(first, /step: Getting Python 3\.14\.7\n/);
     assert.match(first, /step: Installing the voice packages \(2 of them/);
     assert.match(first, /step: Downloading what hears you/);
+    assert.match(first, /step: Downloading what hears "hive" and "bye"/);
     assert.match(first, /\nready\n$/);
     assert.ok(existsSync(join(root, 'desktop/app/build/hive-agent')));
     assert.ok(existsSync(join(root, 'cloud/knowledge/migrations/0001_init.sql')));
@@ -99,6 +101,7 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     assert.match(calls, /pip sync --quiet --python .*\.venv\/bin\/python .*requirements\.lock/);
     assert.match(calls, /ran .*python\/listen\.py --download/);
     assert.match(calls, /ran .*python\/voiceprint\.py --download/);
+    assert.match(calls, /ran .*python\/wake\.py --download/);
 
     // Opening again only checks.
     assert.equal(run(), 'ready\n');
