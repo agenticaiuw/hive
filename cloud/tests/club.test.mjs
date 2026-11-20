@@ -191,10 +191,12 @@ test("a member connects their Mac with a one-use code from the club page; the Ma
   env.DB.db.prepare('UPDATE club_device_codes SET expires_at = 1').run();
   assert.equal((await call('POST', '/v1/club/devices/connect', { code: late }, 'nobody')).status, 403);
 
-  // Letting the member go stops their Macs too.
+  // Letting the member go stops their Macs too, and their devices leave the board's list; others' stay.
+  env.DB.db.prepare("INSERT INTO board_nodes (kind, name, version, seen_at, changed_at) VALUES ('mac', 'alice@macbook', 'x', 1, 1), ('mac', 'alicex@mac', 'x', 1, 1), ('mac', 'owner-mbp', 'x', 1, 1)").run();
   await call('POST', '/v1/club/members/remove', { name: 'alice' });
   assert.equal((await call('GET', '/v1/club/me', undefined, mac.body.key)).status, 401);
   assert.equal(env.DB.db.prepare('SELECT COUNT(*) AS n FROM club_device_keys').get().n, 0);
+  assert.deepEqual(env.DB.db.prepare('SELECT name FROM board_nodes ORDER BY name').all().map((r) => r.name), ['alicex@mac', 'owner-mbp']);
 });
 
 test("over the dashboard's service binding, the club's links carry the board's public address", async () => {
