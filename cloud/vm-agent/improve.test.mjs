@@ -111,14 +111,25 @@ test("a job on the Mac is followed to its end, through a restart that leaves a s
   assert.match(macFailures(job), /^On the owner's Mac \(macOS\).*error\[E0425\]/);
 });
 
-test("a job on the Mac that runs past its time comes back as timed out; one the Mac refuses to start throws", async () => {
+test("a job on the Mac that runs past its time comes back as timed out; one the Mac is too busy for waits its turn, then throws", async () => {
   let t = 0;
   const { call } = fakeMac(Array(50).fill({ state: 'waiting' }));
   const job = await onTheMac(call, { action: 'install', commit: 'a'.repeat(40) }, { wait: 10, every: 1, sleep: async () => { t += 4; }, now: () => t });
   assert.equal(job.timedOut, true);
   assert.equal(job.state, 'waiting');
   const busy = async () => ({ content: [{ type: 'text', text: 'Failed: this Mac is still on job check-9-9' }], isError: true });
-  await assert.rejects(onTheMac(busy, { action: 'check', branch: 'hive/improve-x' }, { sleep: async () => {} }), /still on job check-9-9/);
+  let u = 0;
+  await assert.rejects(onTheMac(busy, { action: 'check', branch: 'hive/improve-x' }, { wait: 10, every: 1, sleep: async () => { u += 4; }, now: () => u }), /still on job check-9-9/);
+  const refused = async () => ({ content: [{ type: 'text', text: 'Failed: check takes the branch' }], isError: true });
+  await assert.rejects(onTheMac(refused, { action: 'check', branch: 'x' }, { sleep: async () => assert.fail('a refusal is not waited on') }), /check takes the branch/);
+  // Busy twice, then the Mac takes it and it runs to its end.
+  const { call: free, calls } = fakeMac([{ state: 'passed' }]);
+  let tries = 0;
+  const queued = async (name, args) => (args.action !== 'status' && tries++ < 2 ? busy() : free(name, args));
+  const job2 = await onTheMac(queued, { action: 'check', branch: 'hive/improve-y' }, { sleep: async () => {} });
+  assert.equal(job2.state, 'passed');
+  assert.equal(tries, 3);
+  assert.equal(calls.length, 2, 'started once, then one status');
 });
 
 test("after an install, the Mac counts as running the change only once Hive there answers as that version", async () => {
