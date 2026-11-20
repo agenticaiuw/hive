@@ -6,6 +6,7 @@
 //   node cloud/release.mjs mac [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]
 //   node cloud/release.mjs board [--from DIR] [--dry-run]
 //   node cloud/release.mjs phone [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]
+//   node cloud/release.mjs site [--from DIR] [--dry-run]
 //
 // The code is the repository's last commit (git archive HEAD), so uncommitted work never goes out;
 // --from DIR takes a tree laid out like the repository instead (a checked export). `board` applies
@@ -17,6 +18,8 @@
 // `phone` builds Hive Phone (mobile/relay/build.mjs), an unsigned IPA the board offers as a SideStore
 // source (/v1/phone/source.json); SideStore on each member's iPhone signs it and offers each newer one.
 // Its sources unchanged since the newest phone release, nothing is built or published.
+// `site` builds the dashboard website (the hive-dashboard Worker, dashboard/) and deploys it, as
+// `npm run deploy:cloudflare` does; its secrets stay in Cloudflare, never here.
 // The board's address and key are this machine's hive-tasks config (~/.config/hive/tasks.json),
 // never printed.
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -247,13 +250,48 @@ function releaseBoard({ from, dryRun }) {
   }
 }
 
+/** What the dashboard website is built from: its version is theirs. */
+export const SITE_SOURCES = ['dashboard/src', 'dashboard/static', 'dashboard/package.json', 'dashboard/package-lock.json',
+  'dashboard/svelte.config.js', 'dashboard/vite.config.ts', 'dashboard/tsconfig.json', 'dashboard/wrangler.jsonc', 'branding'];
+
+/** The dashboard website built and deployed from `from` (an export laid out like the repository) or HEAD. */
+function releaseSite({ from, dryRun }) {
+  const root = from ? resolve(from) : committed(['dashboard', 'branding']); // its icon links to branding/
+  if (from && root === resolve(REPO)) throw new Error('--from takes an export, not the repository itself');
+  try {
+    const version = bundleVersion(sourceFiles(root, SITE_SOURCES));
+    console.log(`site ${version}: the dashboard website${from ? ` from ${from}` : ' from HEAD'}`);
+    if (dryRun) return;
+    const dir = join(root, 'dashboard');
+    // The bundler comes from this repository's installs, never fetched for a release.
+    const have = join(REPO, 'dashboard', 'node_modules'), need = join(dir, 'node_modules');
+    if (!existsSync(need)) {
+      if (!existsSync(have)) throw new Error('dashboard has no node_modules here to build with');
+      symlinkSync(have, need);
+    }
+    const env = { ...process.env };
+    delete env.DASHBOARD_TARGET; // the Worker, not the Mac window's build
+    const shown = r => `${r.stdout}\n${r.stderr}`.replace(/https:\/\/\S+/g, '<site>').split('\n').filter(l => l.trim() && !/WARNING|^\s*[└┌├│]/.test(l)).slice(-3).join('\n');
+    const build = spawnSync('npm', ['run', 'build', '--silent'], { cwd: dir, env, encoding: 'utf8', maxBuffer: 64 << 20 });
+    if (build.status !== 0) throw new Error(`the build failed:\n${`${build.stdout}\n${build.stderr}`.trim().split('\n').slice(-15).join('\n')}`);
+    const wrangler = (process.env.WRANGLER ?? 'npx wrangler').split(' ');
+    const deploy = spawnSync(wrangler[0], [...wrangler.slice(1), 'deploy', '--env='], { cwd: dir, env, encoding: 'utf8', maxBuffer: 16 << 20 });
+    // Wrangler prints the website's address; only its last lines, without it, are shown.
+    if (deploy.status !== 0) throw new Error(`wrangler deploy failed:\n${shown(deploy)}`);
+    console.log(shown(deploy));
+    console.log(`deployed site ${version}`);
+  } finally {
+    if (!from) rmSync(root, { recursive: true, force: true });
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [kind, ...rest] = process.argv.slice(2);
   const option = name => { const i = rest.indexOf(name); return i < 0 ? undefined : rest[i + 1]; };
   const opts = { from: option('--from'), notes: option('--notes') ?? '', dryRun: rest.includes('--dry-run'), out: option('--out') };
-  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone };
+  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone, site: releaseSite };
   if (!known[kind]) {
-    console.error('usage: node cloud/release.mjs vm|mac|board|phone [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]');
+    console.error('usage: node cloud/release.mjs vm|mac|board|phone|site [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]');
     process.exit(64);
   }
   try {
