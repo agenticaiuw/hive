@@ -66,6 +66,7 @@ function fakeBoard(states) {
   const posted = [];
   const board = async (path, body) => {
     if (path === '/v1/requests') { posted.push(body); return { ok: true, id: 9, ahead: 0 }; }
+    if (path === '/v1/runs/message') { posted.push({ path, ...body }); return { ok: true, request: 9, ahead: 0 }; }
     if (path === '/v1/requests/state?id=9') return { request: { id: 9, ...(states.length > 1 ? states.shift() : states[0]) } };
     throw new Error(`unexpected ${path}`);
   };
@@ -86,6 +87,20 @@ test('task goes to the VM agent through the cloud, says an agent sent it, and wa
   await handOff(plain.board, 'check the X composer', quick);
   assert.equal(plain.posted[0].text, '[Hive on the Mac, not the owner] check the X composer');
   await assert.rejects(handOff(plain.board, '  ', quick), /say what/);
+});
+
+// The owner (2026-11-20): "why can't i view all of the turns as you do that is clearly a bug". Each
+// hand-off about one job was a request of its own, so a conversation of its own on the dashboard.
+test('more about the same work follows its request, so it shows in that conversation', async () => {
+  const { board, posted } = fakeBoard([{ status: 'done', outcome: 'Reposted.' }]);
+  const said = [];
+  const request = await handOff(board, 'For hive › cloud/vm-agent: post it again with the fixed video', { ...quick, follows: 7, say: line => said.push(line) });
+  assert.deepEqual(posted, [{
+    path: '/v1/runs/message', request: 7, from: 'mac',
+    text: 'For hive › cloud/vm-agent: [Hive on the Mac, not the owner] post it again with the fixed video',
+  }]);
+  assert.equal(request.id, 9);
+  assert.match(said[0], /request 9, following 7/);
 });
 
 test('task stops waiting when its time is up and says how to look again', async () => {

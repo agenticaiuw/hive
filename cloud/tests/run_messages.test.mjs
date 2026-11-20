@@ -106,6 +106,13 @@ test('a reply to Hive in the cloud becomes a follow-up request that knows what i
   assert.match(taken.text, /The owner now says: Draft a reply to the second one$/);
   const board = (await call('GET', '/v1/board')).body;
   assert.equal(board.requests.find((r) => r.id === reply.body.request).follows, first);
+
+  // Hive on the Mac handing over more of the same work: its words aren't introduced as the owner's.
+  await call('POST', '/v1/requests/update', { id: taken.id, status: 'done', outcome: 'Drafted' });
+  const more = await call('POST', '/v1/runs/message', { request: taken.id, text: 'For hive › mail: [Hive on the Mac, not the owner] Send the draft', from: 'mac' });
+  const next = (await call('POST', '/v1/requests/take', { by: 'vm' })).body.request;
+  assert.equal(next.id, more.body.request);
+  assert.match(next.text, /which ended: Drafted\.\nNow: For hive › mail: \[Hive on the Mac, not the owner\] Send the draft$/);
 });
 
 const NOW = Math.floor(Date.now() / 1000);

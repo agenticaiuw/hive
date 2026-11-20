@@ -515,8 +515,11 @@ async function takeRequest(request, env) {
   // The owner replied in an earlier request's conversation: the agent hears what that one was.
   // Run again by Hive because its tasks got stuck (continueStuck): its note comes first.
   const retry = row.retry_note ? `${row.retry_note}\nDon't redo what's already done. The request, as it was:\n` : "";
+  // Hive on the Mac handing over more of the same work (vm-post.mjs task --follows) says so in its
+  // words ("[Hive on the Mac, not the owner]"): they aren't introduced as the owner's.
+  const handed = /^(?:For [^\n:]{1,250}: )?\[Hive on the Mac\b/.test(message?.text || "");
   const before = retry + (earlier
-    ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\nThe owner now says: `
+    ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\n${handed ? "Now" : "The owner now says"}: `
     : "");
   return json({
     request: {
