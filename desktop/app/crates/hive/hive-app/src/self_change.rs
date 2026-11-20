@@ -356,9 +356,15 @@ impl SelfChange {
     }
 
     /// A worktree of `commit` beside the jobs, with the bundlers' installs from this folder.
+    /// Where a job's worktree goes: a folder with no space in its path (the state folder is under
+    /// "Application Support", and not every build tool takes a space).
+    fn work_root(&self) -> PathBuf {
+        std::env::temp_dir().join("hive-self-change")
+    }
+
     fn worktree(&self, job: &str, commit: &str) -> Result<PathBuf, String> {
-        let dir = self.jobs.join("work").join(job);
-        let _ = std::fs::create_dir_all(dir.parent().unwrap_or(&self.jobs));
+        let dir = self.work_root().join(job);
+        let _ = std::fs::create_dir_all(self.work_root());
         let _ = self.git(&["worktree", "prune"]);
         self.git(&["worktree", "add", "--quiet", "--detach", &dir.display().to_string(), commit])?;
         for part in ["dashboard", "browser/chrome"] {
