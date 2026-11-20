@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
-  partsOf, readNeed, SELF_GUIDE, blockers, othersHold, conflictBrief, CONFLICT_MARKER, leaksIn, secretValues,
+  partsOf, readNeed, SELF_GUIDE, blockers, othersHold, conflictBrief, CONFLICT_MARKER, landOnMain, leaksIn, secretValues,
 } from './improve.mjs';
 
 test('a need is read once, and only with both what and why', () => {
@@ -85,6 +85,68 @@ test('what landed, in one line', () => {
   assert.equal(landedLine({ commit: '0123456789abcdef', files: ['a.mjs'], live: ['the VM'] }), '0123456789 on main (1 file: a.mjs); live on the VM');
   assert.equal(landedLine({ commit: 'ffffffffffff', files: ['1', '2', '3', '4', '5', '6', '7'], live: [] }),
     'ffffffffff on main (7 files: 1, 2, 3, 4, 5, 6, …)');
+});
+
+// No repository is changed: the fake models the ref shared by two worktrees, and records when
+// the tested worktree is actually rebased. A fetch need not move origin/main for main to be ahead.
+function landing({ base = 'old', main = 'old', race = false, reject = false, conflict = false, pass = true } = {}) {
+  const calls = [];
+  const git = async (...args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse') return args[1] === 'HEAD' ? 'landed' : main;
+    if (args[0] === 'rebase' && args[1] !== '--abort' && conflict) {
+      throw Object.assign(new Error('Command failed: git rebase'), { stderr: 'CONFLICT in file.mjs' });
+    }
+    if (args[0] === 'push') {
+      if (race) { main = 'new'; race = false; throw new Error('non-fast-forward'); }
+      if (reject) throw Object.assign(new Error('Command failed: sudo git push'), { stderr: 'remote: permission denied' });
+    }
+    return '';
+  };
+  const run = () => landOnMain(git, { base, test: async next => {
+    calls.push(['test', next]);
+    return { ok: pass, failures: 'a regression failed' };
+  } });
+  return { calls, run };
+}
+
+test('landing rebases when another worktree already moved the shared main ref before fetch', async () => {
+  const { calls, run } = landing({ main: 'new' });
+  assert.equal(await run(), 'landed');
+  assert.deepEqual(calls, [
+    ['fetch', '--quiet', 'origin', 'main'], ['rev-parse', 'origin/main'],
+    ['rebase', '--quiet', 'new'], ['test', 'new'],
+    ['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], ['rev-parse', 'HEAD'],
+  ]);
+});
+
+test('landing fetches and retests when main moves during push, without force', async () => {
+  const { calls, run } = landing({ race: true });
+  assert.equal(await run(), 'landed');
+  assert.deepEqual(calls.filter(c => c[0] === 'test'), [['test', 'new']]);
+  assert.deepEqual(calls.filter(c => c[0] === 'push'), [
+    ['push', '--quiet', 'origin', 'HEAD:refs/heads/main'],
+    ['push', '--quiet', 'origin', 'HEAD:refs/heads/main'],
+  ]);
+});
+
+test('an unchanged main needs no rebase; conflicts and failed tests never push', async () => {
+  const unchanged = landing();
+  await unchanged.run();
+  assert.ok(!unchanged.calls.some(c => ['rebase', 'test'].includes(c[0])));
+  const conflict = landing({ main: 'new', conflict: true });
+  await assert.rejects(conflict.run(), error => error.conflict && /CONFLICT in file.mjs/.test(error.message));
+  assert.deepEqual(conflict.calls.at(-1), ['rebase', '--abort']);
+  assert.ok(!conflict.calls.some(c => c[0] === 'push'));
+  const failed = landing({ main: 'new', pass: false });
+  await assert.rejects(failed.run(), /tests failed on main as it is now:\na regression failed/);
+  assert.ok(!failed.calls.some(c => c[0] === 'push'));
+});
+
+test('a rejected landing reports Git\'s reason, not just the command, after bounded retries', async () => {
+  const { calls, run } = landing({ reject: true });
+  await assert.rejects(run(), { message: "main wouldn't take it: remote: permission denied" });
+  assert.equal(calls.filter(c => c[0] === 'push').length, 3);
 });
 
 /** A Mac whose hive_self job answers `states` in turn, one per status asked; `drop` statuses go unanswered first. */

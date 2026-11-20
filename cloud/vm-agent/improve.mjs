@@ -228,6 +228,36 @@ export function conflictBrief(files) {
 /** Git's conflict markers left in a file's text. */
 export const CONFLICT_MARKER = /^(<<<<<<<|>>>>>>>)( |$)/m;
 
+/**
+ * Land a tested change, with git scoped to its worktree. `base` is the commit it was built on,
+ * not origin/main read just before fetching: worktrees share that ref, so another task's fetch
+ * or push may already have moved it. Test again after each rebase, before trying to push.
+ */
+export async function landOnMain(git, { base, committer = [], test }) {
+  // execFile's first message line is only the command. Keep Git's reason so a continuation can
+  // tell a race from a permission failure without guessing from the command it ran.
+  const reason = error => String(error.stderr || error.message).trim().slice(-2000);
+  for (let attempt = 1; ; attempt++) {
+    await git('fetch', '--quiet', 'origin', 'main');
+    const next = await git('rev-parse', 'origin/main');
+    if (next !== base) {
+      try { await git(...committer, 'rebase', '--quiet', next); } catch (error) {
+        await git('rebase', '--abort').catch(() => {});
+        throw Object.assign(new Error(`it no longer applies to main, which changed meanwhile (${reason(error)})`), { conflict: true });
+      }
+      base = next;
+      const again = await test(base);
+      if (!again.ok) throw new Error(`its tests failed on main as it is now:\n${again.failures}`);
+    }
+    try {
+      await git('push', '--quiet', 'origin', 'HEAD:refs/heads/main');
+      return await git('rev-parse', 'HEAD');
+    } catch (error) {
+      if (attempt >= 3) throw new Error(`main wouldn't take it: ${reason(error)}`);
+    }
+  }
+}
+
 // The names of settings that hold secrets.
 const SECRET_NAME = /TOKEN|KEY|SECRET|PASS|AUTH|CREDENTIAL|COOKIE|CODE/i;
 

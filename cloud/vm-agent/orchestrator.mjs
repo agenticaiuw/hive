@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, leaksIn,
+  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, landOnMain, leaksIn,
   macFailures, macRunning, MOST_CONFLICTS, MOST_FIXES, MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed,
   secretValues, SELF_GUIDE,
 } from './improve.mjs';
@@ -941,7 +941,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
   const started = Date.now();
   const tokens = { tokensIn: 0, tokensOut: 0 };
   const end = (ok, text, more = {}) => ({ ok, report: text, ...more, ...tokens, seconds: Math.round((Date.now() - started) / 1000) });
-  await inRepo(repo, async () => {
+  let base = await inRepo(repo, async () => {
     try { await asRoot(['test', '-d', join(repo, '.git')]); } catch {
       await asRoot(['mkdir', '-p', '-m', '700', CODE_ROOT]);
       await git('clone', '--quiet', REPOS.hive, repo);
@@ -950,6 +950,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     try { await git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
     await git('-C', repo, 'worktree', 'prune');
     await git('-C', repo, 'worktree', 'add', '--quiet', '-B', branch, dir, 'origin/main');
+    return git('-C', dir, 'rev-parse', 'HEAD');
   });
   await asRoot(['mkdir', '-p', join(CODE_ROOT, 'target'), join(tmp, 'home'), join(tmp, 'state')]);
   const env = {
@@ -968,7 +969,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
   };
   const changed = async () => {
     await git('-C', dir, 'add', '-A');
-    return (await git('-C', dir, 'diff', '--cached', '--name-only', 'origin/main')).split('\n').filter(Boolean);
+    return (await git('-C', dir, 'diff', '--cached', '--name-only', base)).split('\n').filter(Boolean);
   };
   // The repository is public: a change asked for keeps the asker's words off its commit.
   const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${asked ? `Asked for on the board.` : need.why.slice(0, 1500)}\n\n`
@@ -1001,7 +1002,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       if (!result.ok) return end(false, `The code agent stopped before it finished: ${outcomeOf(result.report, 'no report')}`);
       files = await changed();
       if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
-      if (leaksIn(await git('-C', dir, 'diff', '--cached', 'origin/main'), secrets)) {
+      if (leaksIn(await git('-C', dir, 'diff', '--cached', base), secrets)) {
         return end(false, "The change held a secret from the VM (a key or token), so Hive threw it away: nothing of it was pushed.");
       }
       await team?.('/v1/team/claim', { agent: label, paths: files, note: need.what.slice(0, 120), minutes: 240 }).catch(() => {});
@@ -1059,24 +1060,13 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     commit = await inRepo(repo, async () => {
       if (!committed) await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
       committed = true;
-      for (let attempt = 1; ; attempt++) {
-        const base = await git('-C', dir, 'rev-parse', 'origin/main');
-        await git('-C', dir, 'fetch', '--quiet', 'origin', 'main');
-        if (await git('-C', dir, 'rev-parse', 'origin/main') !== base) {
-          try { await git('-C', dir, ...COMMITTER, 'rebase', '--quiet', 'origin/main'); } catch (error) {
-            await git('-C', dir, 'rebase', '--abort').catch(() => {});
-            throw Object.assign(new Error(`it no longer applies to main, which changed meanwhile (${error.message.split('\n')[0]})`), { conflict: true });
-          }
-          const again = await gateOnVm(dir, await changed(), tmp);
-          if (!again.ok) throw new Error(`its tests failed on main as it is now:\n${again.failures}`);
-        }
-        try {
-          await git('-C', dir, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main');
-          return git('-C', dir, 'rev-parse', 'HEAD');
-        } catch (error) {
-          if (attempt >= 3) throw new Error(`main wouldn't take it: ${error.message.split('\n')[0]}`);
-        }
-      }
+      return landOnMain((...args) => git('-C', dir, ...args), {
+        base, committer: COMMITTER,
+        test: async next => {
+          base = next;
+          return gateOnVm(dir, await changed(), tmp);
+        },
+      });
     }).catch(error => ({ error }));
     if (!commit.error?.conflict || conflicts >= MOST_CONFLICTS || signal?.aborted) break;
     // Main moved under the change and it no longer applies: it goes onto main as it is now, and the same
@@ -1084,6 +1074,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     const clashing = await inRepo(repo, async () => {
       const mine = await git('-C', dir, 'rev-parse', 'HEAD');
       await git('-C', dir, 'reset', '--quiet', '--hard', 'origin/main');
+      base = await git('-C', dir, 'rev-parse', 'HEAD');
       try {
         await git('-C', dir, 'cherry-pick', '--no-commit', mine);
         return [];
