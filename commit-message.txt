@@ -1,0 +1,8 @@
+Dream fix: the user had the mouse and keyboard while a task needed them
+
+takeover: the user had the mouse and keyboard while a task needed the screen. Seen 9 times, about 5 minutes lost (2026-11-19T18:29:07 to 2026-11-20T01:34:12).
+Hive's nightly dream: its agent wrote a test that failed on the code as it was, then this fix, in a
+private worktree; hive-dream's gate ran the crate's tests and built the workspace.
+
+Dream-Cluster: takeover-the-user-had-the-mouse-and-keyb-a8436e
+
