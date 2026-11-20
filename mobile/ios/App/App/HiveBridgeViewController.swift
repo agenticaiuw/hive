@@ -2,20 +2,17 @@ import Capacitor
 import WebKit
 
 /// Capacitor's own `WKUIDelegate` grants every media-capture request from every
-/// origin. The web UI is loaded remotely now, so narrow that to the dashboard
-/// origin over https and deny anything else (a third-party iframe, an injected
-/// frame, a downgraded http load). Every other `WKUIDelegate` responsibility is
-/// forwarded to Capacitor untouched.
+/// origin. The web UI is loaded remotely, so narrow that to the member's dashboard:
+/// the page the app is showing, over https, on a workers.dev host (what
+/// capacitor.config.json allowNavigation lets the app show), asked by that page
+/// itself. Anything else (a third-party iframe, an injected frame, a downgraded
+/// http load, a page that isn't a dashboard) is denied. Every other `WKUIDelegate`
+/// responsibility is forwarded to Capacitor untouched.
 final class HiveMediaCaptureUIDelegate: NSObject, WKUIDelegate {
     private let wrapped: WKUIDelegate
-    /// The only origin this app is allowed to hand the microphone to: the host of
-    /// `server.url` in capacitor.config.json, which the build points at the owner's
-    /// own Hive cloud. Empty (so nothing is granted) when the config has no host.
-    private let dashboardHost: String
 
-    init(wrapping wrapped: WKUIDelegate, dashboardHost: String) {
+    init(wrapping wrapped: WKUIDelegate) {
         self.wrapped = wrapped
-        self.dashboardHost = dashboardHost.lowercased()
         super.init()
     }
 
@@ -24,10 +21,13 @@ final class HiveMediaCaptureUIDelegate: NSObject, WKUIDelegate {
                  initiatedByFrame frame: WKFrameInfo,
                  type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        let isDashboardOrigin = origin.`protocol`.lowercased() == "https"
-            && !dashboardHost.isEmpty
-            && origin.host.lowercased() == dashboardHost
-        decisionHandler(isDashboardOrigin ? .grant : .deny)
+        let host = origin.host.lowercased()
+        let isDashboard = origin.`protocol`.lowercased() == "https"
+            && frame.isMainFrame
+            && host == webView.url?.host?.lowercased()
+            && host.hasSuffix(".workers.dev")
+            && host.split(separator: ".").count == 4
+        decisionHandler(isDashboard ? .grant : .deny)
     }
 
     // MARK: - Pass-through
@@ -104,8 +104,7 @@ final class HiveBridgeViewController: CAPBridgeViewController {
 
     override func capacitorDidLoad() {
         if let webView = webView, let capacitorDelegate = webView.uiDelegate {
-            let delegate = HiveMediaCaptureUIDelegate(wrapping: capacitorDelegate,
-                                                         dashboardHost: bridge?.config.serverURL.host ?? "")
+            let delegate = HiveMediaCaptureUIDelegate(wrapping: capacitorDelegate)
             mediaCaptureDelegate = delegate
             webView.uiDelegate = delegate
         }

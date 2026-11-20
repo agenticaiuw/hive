@@ -1,23 +1,143 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="utf-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Hive</title>
     <!--
-      Static shell only. On device the Capacitor WKWebView loads the remote
-      dashboard directly (capacitor.config.json server.url) and falls back to
-      offline.html (server.errorPath) when the network is down — this page is
-      never what the app shows. It exists so the web bundle has a valid entry
-      point and so anyone opening it in a plain browser lands on the dashboard.
+      The app's start page. It opens the member's own Hive dashboard, whose address it asks for once
+      and keeps on the phone (localStorage), so the app carries nobody's address. offline.html, shown
+      when the dashboard can't load, goes back to the same address.
     -->
-    <meta http-equiv="refresh" content="0; url=https://hive-dashboard.your-subdomain.workers.dev/" />
+<style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #111318;
+        --muted: #5b6172;
+        --accent: #2f6feb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d0f14;
+          --fg: #f2f4f8;
+          --muted: #9aa3b8;
+          --accent: #6f9bff;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        text-align: center;
+      }
+      main {
+        max-width: 22rem;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.35rem;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+      }
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0.85rem 2rem;
+        font: inherit;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+      }
+      button:active {
+        opacity: 0.7;
+      }
+      input {
+        width: 100%;
+        margin: 0 0 1rem;
+        padding: 0.8rem 1rem;
+        border: 1px solid var(--muted);
+        border-radius: 12px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        text-align: center;
+      }
+      a {
+        color: var(--accent);
+      }
+      .note {
+        min-height: 1.5em;
+        margin: 1rem 0 0;
+      }
+    </style>
   </head>
   <body>
-    <p>
-      Hive lives at
-      <a href="https://hive-dashboard.your-subdomain.workers.dev/">hive-dashboard.your-subdomain.workers.dev</a>.
-    </p>
+    <main>
+      <h1>Open your Hive</h1>
+      <p>Your Hive dashboard's address, as it shows in your browser.</p>
+      <form id="open" novalidate>
+        <input id="address" type="text" inputmode="url" autocomplete="url" autocapitalize="off" spellcheck="false"
+          placeholder="hive-dashboard.your-subdomain.workers.dev" required />
+        <button type="submit">Open</button>
+      </form>
+      <p class="note" id="note" role="status"></p>
+    </main>
+    <script>
+      var KEY = 'hive.dashboard'
+      // A Hive dashboard is <worker>.<account>.workers.dev over https: the shape capacitor.config.json's
+      // allowNavigation ("*.*.workers.dev") keeps inside the app.
+      function dashboard(text) {
+        var t = String(text || '').trim()
+        if (!t) return null
+        if (!/^[a-z]+:\/\//i.test(t)) t = 'https://' + t
+        try {
+          var url = new URL(t)
+          return url.protocol === 'https:' && /^[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev$/i.test(url.hostname) ? url.origin + '/' : null
+        } catch (e) {
+          return null
+        }
+      }
+      function saved() {
+        try {
+          return localStorage.getItem(KEY)
+        } catch (e) {
+          return null
+        }
+      }
+      if (/[?&]forget\b/.test(location.search)) {
+        try {
+          localStorage.removeItem(KEY)
+        } catch (e) {}
+      } else if (dashboard(saved())) {
+        location.replace(dashboard(saved()))
+      }
+      document.getElementById('open').addEventListener('submit', function (event) {
+        event.preventDefault()
+        var address = dashboard(document.getElementById('address').value)
+        if (!address) {
+          document.getElementById('note').textContent = "That isn't a Hive dashboard address. It ends in workers.dev."
+          return
+        }
+        try {
+          localStorage.setItem(KEY, address)
+        } catch (e) {}
+        location.replace(address)
+      })
+    </script>
   </body>
 </html>
