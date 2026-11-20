@@ -1,6 +1,7 @@
 // The teammate download: tools/carry.mjs fills Hive.app with a Mac release, the voice files, uv and
 // Codex; tools/first-open.sh, run from inside the app, fills a Hive folder from them. Stand-ins replace
-// uv, Python and Codex, and the Kokoro files are already there, so nothing is downloaded.
+// uv, Python and Codex, and the Kokoro files are already there, so nothing is downloaded. On Linux,
+// cp stands in for the Mac's ditto, preserving the modes and times first-open.sh relies on.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -64,6 +65,9 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     write(join(source, 'desktop/app/tools/first-open.sh'), readFileSync(FIRST_OPEN), 0o755);
     const uv = join(dir, 'tools/uv');
     write(uv, FAKE_UV, 0o755);
+    if (process.platform !== 'darwin') {
+      write(join(dir, 'tools/ditto'), '#!/bin/sh\nexec cp -pR "$@"\n', 0o755);
+    }
     const codex = join(dir, 'codex-native');
     write(join(codex, 'bin/codex'), '#!/bin/sh\n[ "$1 $2" = "login status" ] && exit 0\necho codex "$@"\n', 0o755);
     write(join(codex, 'codex-path/rg'), '#!/bin/sh\n', 0o755);
@@ -85,7 +89,9 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     // First open: the Kokoro files are there already, so nothing is fetched.
     const root = join(dir, 'Application Support/Hive/install');
     for (const f of ['kokoro-v1.0.onnx', 'voices-v1.0.bin']) write(join(root, 'desktop/app/models', f), 'model');
-    const run = () => execFileSync('/bin/bash', [join(carried, 'first-open.sh'), root], { encoding: 'utf8', env: { ...process.env, UV_LOG: log } });
+    const run = () => execFileSync('/bin/bash', [join(carried, 'first-open.sh'), root], {
+      encoding: 'utf8', env: { ...process.env, UV_LOG: log, PATH: `${join(dir, 'tools')}:${process.env.PATH}` },
+    });
     const first = run();
     assert.match(first, /step: Putting Hive's agent and tools in place\n/);
     assert.match(first, /step: Getting Python 3\.14\.7\n/);
@@ -94,6 +100,7 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     assert.match(first, /step: Downloading what hears "hive" and "bye"/);
     assert.match(first, /\nready\n$/);
     assert.ok(existsSync(join(root, 'desktop/app/build/hive-agent')));
+    assert.equal(execFileSync(join(root, 'desktop/app/build/hive-agent'), { encoding: 'utf8' }), 'agent\n');
     assert.ok(existsSync(join(root, 'cloud/knowledge/migrations/0001_init.sql')));
     assert.equal(readlinkSync(join(root, 'bin/codex')), join(app, 'Contents/Helpers/codex/bin/codex'));
     const calls = readFileSync(log, 'utf8');

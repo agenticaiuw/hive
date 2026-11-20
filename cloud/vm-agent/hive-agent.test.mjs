@@ -220,6 +220,9 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.match(GUIDE, /Only approve a request you just\s+caused/);
   assert.match(GUIDE, /never take over\s+a tab they're on/);
   assert.match(GUIDE, /look it up there first/);
+  assert.match(GUIDE, /knowledge.get_request/);
+  assert.match(GUIDE, /request.follows/);
+  assert.match(GUIDE, /next_offset until it is null/);
   assert.match(GUIDE, /mac tools are the owner's own Mac/);
   assert.match(GUIDE, /"One-way:" and quotes the\s+owner's exact words/);
   // The owner (2026-11-19): "before, hive did the bulk write when i asked it to create songs on ableton. why is it
