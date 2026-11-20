@@ -227,9 +227,8 @@ fn cmd_deploy(args: &[String]) -> Result<(), String> {
         let bucket = (health["storage"] == "r2").then(|| format!("{script}-chunks"));
         cf.upload(&account.id, &script, bucket.as_deref(), None)?;
         let health = deploy::wait_healthy(&url, Duration::from_secs(60))?;
-        deploy::Kept { token: cf.token().to_string(), account: account.id.clone(), script: script.clone() }
-            .save(&Secrets::system(), &sync::host_of(&url))?;
         println!("Updated {url} to Hive Cloud {}.", health["version"].as_str().unwrap_or("?"));
+        keep_for_updates(&cf, &account.id, &script, &url);
         return Ok(());
     }
     if exists {
@@ -256,13 +255,21 @@ fn cmd_deploy(args: &[String]) -> Result<(), String> {
     println!("Uploaded. Waiting for {url} to answer…");
     deploy::wait_healthy(&url, Duration::from_secs(120))?;
     let (config, code) = enroll::claim(&url, &claim_secret)?;
-    deploy::Kept { token: cf.token().to_string(), account: plan.account.id.clone(), script: script.clone() }
-        .save(&Secrets::system(), &sync::host_of(&url))?;
     println!("Your Hive Cloud is at {url}");
     println!("This device ({}) is connected as {}.", config.device_name, config.device_id);
     print_recovery(&code);
+    keep_for_updates(&cf, &plan.account.id, &script, &url);
     println!("Next: `hive-cloud sync` uploads this device's Hive data; `hive-cloud invite` adds another device.");
     Ok(())
+}
+
+/// Keeps what updating the cloud takes (deploy.rs Kept), so `watch` keeps its code current. The cloud is
+/// up either way: a Keychain that refuses only means updates stay by hand (`deploy --update`).
+fn keep_for_updates(cf: &Cloudflare, account: &str, script: &str, url: &str) {
+    let kept = deploy::Kept { token: cf.token().to_string(), account: account.to_string(), script: script.to_string() };
+    if let Err(e) = kept.save(&Secrets::system(), &sync::host_of(url)) {
+        println!("Couldn't keep the Cloudflare token ({e}), so this cloud's code won't update by itself; `deploy --update` does it.");
+    }
 }
 
 fn cmd_claim(args: &[String]) -> Result<(), String> {
