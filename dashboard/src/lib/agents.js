@@ -13,7 +13,7 @@
  * The VM's newest one is always in the list, first and never folded away (the owner, 2026-11-17: "i
  * still can't see the agent that's on vm FIX THIS NOW!"): `pinned`.
  *
- * Each row says what it is, where, whether it's working or needs the owner, its newest line, and
+ * Each row says what it is, where, whether it's working, stuck or needs the owner, its newest line, and
  * every unfinished task it holds ("an easy way to see all the active agents and also all of the tasks
  * an agent is claiming"). A conversation is what the owner said (with how each message got there),
  * what the agent said, and its work in between folded into one line per stretch ("Ran 3 commands and
@@ -31,7 +31,7 @@ import { HARNESSES, needsOwner, nodeName } from './tasks.js';
 const VM = 'on the VM';
 /** The statuses a task an agent holds can be in until it ends. */
 const UNFINISHED = ['waiting', 'active', 'blocked', 'open'];
-/** A run that hasn't moved in this long isn't working any more, whatever it last said. */
+/** After twenty minutes without recorded progress, work may be stuck. Times are in seconds. */
 const QUIET = 20 * 60;
 /** An agent with nothing left to do stays in the list this long after its last step. */
 const RECENT = 24 * 3600;
@@ -40,7 +40,7 @@ const GOING = ['queued', 'planning', 'working'];
 /**
  * @typedef {{key: string, kind: 'session'|'hive'|'browser'|'cloud', vm?: boolean, pinned?: boolean, machine: string, run: string,
  *   request: number, harness: string, session: string, label: string, place: string, title: string,
- *   status: 'needs-you'|'working'|'idle', updated: number, latest: string, tasks: Task[],
+ *   status: 'needs-you'|'stuck'|'working'|'idle', updated: number, latest: string, tasks: Task[],
  *   steps: Step[], requests: any[], runs: Run[]}} Agent
  */
 
@@ -60,7 +60,7 @@ export function withTitles(text, machine, titles) {
 }
 
 /**
- * Every agent worth showing: needing the owner first, then working, then the rest, newest first.
+ * Every agent worth showing: needing the owner first, then stuck, working and the rest, newest first.
  * @param {{now: number, tasks: Task[], runs: Run[], requests: any[]}} board
  * @returns {Agent[]}
  */
@@ -145,22 +145,51 @@ export function agents(board) {
     a?.tasks.push(t);
   }
 
-  const order = { 'needs-you': 0, working: 1, idle: 2 };
+  const order = { 'needs-you': 0, stuck: 1, working: 2, idle: 3 };
   const list = [...by.values()]
     .map((a) => {
       a.tasks.sort((x, y) => UNFINISHED.indexOf(x.status) - UNFINISHED.indexOf(y.status) || y.updated - x.updated);
-      // Waiting on an answer, or stuck with Hive's own tries spent: it goes nowhere until the owner acts.
-      if (a.tasks.some(needsOwner)) a.status = 'needs-you';
+      if (a.kind === 'cloud') {
+        // A follow-up must not hide an earlier request that still has work left.
+        const states = a.requests.map((r) => {
+          const tasks = board.tasks.filter((t) => t.machine === 'cloud'
+            && `R${Math.floor(Number(String(t.id).replace(/^T/, '')) / 100)}` === r.id);
+          return requestStatus(r, tasks, a.runs.filter((run) => run.request === r.id), now);
+        });
+        a.status = states.includes('stuck') ? 'stuck' : states.includes('working') ? 'working' : 'idle';
+      }
+      // Only a task waiting on an answer needs the owner; Hive keeps trying blocked work itself.
+      if (a.status !== 'stuck' && a.tasks.some(needsOwner)) a.status = 'needs-you';
       // What it's on, in the owner's terms: the task it's doing, never a bare "Working".
       const on = a.tasks.find((t) => t.status === 'active') ?? a.tasks[0];
       a.title = (a.kind === 'cloud' ? a.title : on?.title || a.title) || lastAsked(a.steps) || `${a.label} ${a.place}`;
       return a;
     })
     .sort((x, y) => order[x.status] - order[y.status] || y.updated - x.updated);
-  // The VM's agent: the one working or needing the owner, else the newest, first and always shown.
+  // The VM's agent: the one needing attention or working, else the newest, first and always shown.
   const vm = list.find((a) => a.vm);
   if (vm) vm.pinned = true;
   return [...(vm ? [vm] : []), ...list.filter((a) => a !== vm && (a.status !== 'idle' || a.tasks.length || now - a.updated <= RECENT))];
+}
+
+/**
+ * A blocked task is stuck even while Hive retries it. Otherwise an unfinished request is stuck
+ * after twenty minutes without a request update, task update or run step. A run's refreshed
+ * timestamp alone is not progress. Finished requests do not grow stale.
+ * @param {any} request
+ * @param {Task[]} tasks
+ * @param {Run[]} runs
+ * @param {number} now
+ * @returns {'stuck'|'working'|'idle'}
+ */
+function requestStatus(request, tasks, runs, now) {
+  if (['done', 'dropped', 'cancelled'].includes(request.status)) return 'idle';
+  if (request.status === 'blocked' || tasks.some((t) => t.status === 'blocked')) return 'stuck';
+  if (!GOING.includes(request.status)) return 'idle';
+  const progress = Math.max(request.created || 0, request.updated || 0,
+    ...tasks.map((t) => t.updated),
+    ...runs.flatMap((run) => [run.started, ...run.steps.map((step) => step.at)]));
+  return progress > 0 && now - progress >= QUIET ? 'stuck' : 'working';
 }
 
 /** Each unfinished task's agent, by the task's key. */
