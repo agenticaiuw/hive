@@ -79,4 +79,17 @@ test('the owner stops a request: one not taken ends at once; one being worked on
   assert.ok(asked.stop_at > 0);
   await call('POST', '/v1/requests/update', { id: working, status: 'failed', outcome: 'Stopped by the owner.' });
   assert.deepEqual((await call('POST', '/v1/requests/stop', { id: working })).body, { ok: true, stopping: 0, ended: 0 }, 'a finished one stays as it ended');
+  // Stopped while it was being planned, so it had no tasks: its one task is dropped, not stuck, and
+  // Hive's continue for stuck tasks leaves it alone (requests 76 and 77, 2026-11-20).
+  const lone = (await call('GET', '/v1/board')).body.tasks.find((t) => t.machine === 'cloud' && t.id === working * 100 + 1);
+  assert.deepEqual([lone?.status, lone?.outcome], ['dropped', 'Stopped by the owner.']);
+});
+
+test("a request that failed on its own is still stuck, so Hive continues it; a stopped one isn't", async () => {
+  const { call } = setup();
+  const failed = (await call('POST', '/v1/requests', { text: 'open Notes', from: 'mac' })).body.id;
+  await call('POST', '/v1/requests/take', { by: 'vm', agent: 'hive-cloud' });
+  await call('POST', '/v1/requests/update', { id: failed, status: 'failed', outcome: "Couldn't plan it: no answer" });
+  const lone = (await call('GET', '/v1/board')).body.tasks.find((t) => t.machine === 'cloud' && t.id === failed * 100 + 1);
+  assert.equal(lone?.status, 'blocked');
 });

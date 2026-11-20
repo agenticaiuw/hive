@@ -13,7 +13,7 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
-import { Lease } from './devices.mjs';
+import { endWithTask, Lease } from './devices.mjs';
 import { boardClient, boardConfig } from './orchestrator.mjs';
 
 export const OFFLINE = "The owner's Mac isn't connected: Hive isn't running there or the Mac is offline, so the mac tools "
@@ -90,7 +90,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try { board = boardClient(boardConfig()); } catch {}
   const label = process.env.HIVE_TASK_LABEL || 'a task started by hand';
   const state = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
-  const answer = server({ board, label, turn: new Lease(join(state, 'devices.sock'), 'mac', label) });
+  const turn = new Lease(join(state, 'devices.sock'), 'mac', label);
+  endWithTask(turn);
+  const answer = server({ board, label, turn });
   createInterface({ input: process.stdin }).on('line', async line => {
     let message; try { message = JSON.parse(line); } catch { return; }
     const out = await answer(message);

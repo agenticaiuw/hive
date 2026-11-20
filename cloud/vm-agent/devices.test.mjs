@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Devices, Lease, PHONE_IDLE_MS, serveDevices } from './devices.mjs';
+import { EventEmitter } from 'node:events';
+import { Devices, endWithTask, Lease, PHONE_IDLE_MS, serveDevices } from './devices.mjs';
 
 const client = task => { const said = []; return { task, said, send: m => said.push(m) }; };
 const ops = c => c.said.map(m => m.op);
@@ -111,4 +112,56 @@ test('a task that waits too long gives up in words, and a turn granted after tha
 test('with no orchestrator serving turns, a task started by hand goes ahead', async () => {
   const lease = new Lease('/nonexistent/devices.sock', 'screen', 'by hand');
   assert.equal(await lease.use(async () => 'did it'), 'did it');
+});
+
+test("a task that ended gives back its turns even if its tool server is still running (request 74's Mac)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-devices-'));
+  const path = join(dir, 'devices.sock');
+  const logs = [];
+  const served = serveDevices(path, { tickMs: 60_000, log: line => logs.push(line) });
+  try {
+    // R74-1's tool server took the Mac and never went away; R78-1 waits behind it.
+    const stale = new Lease(path, 'mac', 'R74-1');
+    await stale.use(async () => {});
+    const waits = [];
+    const next = new Lease(path, 'mac', 'R78-1', { onWait: m => waits.push(m) });
+    const got = next.use(async () => 'clicked');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(waits[0]?.holder, 'R74-1');
+    assert.deepEqual(served.release('R74-1'), ['mac']);
+    assert.equal(await got, 'clicked');
+    assert.deepEqual(served.devices.state().mac, { holder: 'R78-1', waiting: [] });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(stale.held, false, 'the stale server is told its turn is over');
+    assert.match(logs.at(-1), /R74-1 ended still holding the mac/);
+    assert.deepEqual(served.release('R74-1'), [], 'nothing left to give back');
+    stale.close(); next.close();
+  } finally {
+    await served.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('release also takes an ended task out of the lines it waited in', () => {
+  const d = new Devices();
+  const [a, b, c] = [client('R74-1'), client('R75-1'), client('R78-1')];
+  d.take('mac', a); d.take('mac', b); d.take('mac', c);
+  assert.deepEqual(d.release('R75-1'), []);
+  assert.deepEqual(d.state().mac, { holder: 'R74-1', waiting: ['R78-1'] });
+  assert.deepEqual(d.release('R74-1'), ['mac']);
+  assert.deepEqual(ops(a), ['granted', 'revoked']);
+  assert.deepEqual(d.state().mac, { holder: 'R78-1', waiting: [] });
+});
+
+test('a tool server ends with its task: stdin closing or SIGTERM gives the turn back and exits', () => {
+  for (const how of ['end', 'close', 'SIGTERM', 'SIGHUP']) {
+    const input = new EventEmitter();
+    const signals = new EventEmitter();
+    const lease = { closed: 0, close() { this.closed += 1; } };
+    const exits = [];
+    endWithTask(lease, { input, signals, exit: code => exits.push(code) });
+    (how.startsWith('SIG') ? signals : input).emit(how);
+    input.emit('close');
+    assert.deepEqual([lease.closed, exits], [1, [0]], how);
+  }
 });

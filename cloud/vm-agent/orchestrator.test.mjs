@@ -420,6 +420,20 @@ test("a task's needs are earlier tasks only, renumbered when the planner's empty
 const gate = () => { let open; const shut = new Promise(resolve => { open = resolve; }); return { shut, open }; };
 const pause = () => new Promise(resolve => setImmediate(resolve));
 
+test('when a task ends, its turns at the devices are given back, stopped or not', async () => {
+  const { board } = fakeBoard();
+  const released = [];
+  await handle({ id: 74, text: 'Create 8 bars of jazz in Ableton' }, {
+    board,
+    stepEvery: 1,
+    labels: new Map(),
+    release: label => released.push(label),
+    plan: async () => JSON.stringify({ tasks: [{ title: 'Make the jazz', quote: 'x', kind: 'screen' }] }),
+    run: async () => ({ ok: false, report: 'Stopped (SIGTERM)', seconds: 1 }),
+  });
+  assert.deepEqual(released, ['R74-1']);
+});
+
 test("tasks that need nothing run at once, a task that needs another starts when it's done, and one whose need failed never starts", async () => {
   const { board, calls } = fakeBoard();
   const gates = { 'Find the form': gate(), 'Look up the deadline': gate(), 'Check the price': gate() };

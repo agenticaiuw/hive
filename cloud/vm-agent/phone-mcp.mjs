@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
-import { Lease } from './devices.mjs';
+import { endWithTask, Lease } from './devices.mjs';
 import { boardConfig } from './browser-mcp.mjs';
 
 const STATE = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
@@ -375,5 +375,6 @@ function serve(handle) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   let phone = null;
   try { phone = new Phone(relayConfig()); } catch {}
+  endWithTask(TURN);
   serve(phone ? message => answer(phone, message) : async message => offlineAnswer(message));
 }

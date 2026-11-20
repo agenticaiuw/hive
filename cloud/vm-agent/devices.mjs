@@ -77,6 +77,24 @@ export class Devices {
     for (const device of this.turns.keys()) this.free(device, client);
   }
 
+  /**
+   * Gives back every turn a task held and takes it out of every line, once the task has ended. A
+   * backstop for a tool server that outlives its task: on 2026-11-20 the owner stopped request 74,
+   * its Codex ended, but its Mac tool server kept running with the Mac's turn, and every later Mac
+   * request waited "for «R74-1»" behind a task that no longer existed. Returns the devices freed.
+   */
+  release(task) {
+    const freed = [];
+    for (const [device, turn] of this.turns) {
+      const leaving = [turn.holder, ...turn.line].filter(w => w && w.client.task === task).map(w => w.client);
+      for (const client of leaving) {
+        if (turn.holder?.client === client) { client.send({ op: 'revoked', device }); freed.push(device); }
+        this.free(device, client);
+      }
+    }
+    return freed;
+  }
+
   /** The phone's holder has been idle too long while another task waits: the next one gets it. */
   check(device) {
     const turn = this.turns.get(device);
@@ -132,6 +150,12 @@ export function serveDevices(path, { devices = new Devices(), tickMs = 5000, log
   return {
     devices,
     server,
+    /** The task with this label ended: its turns go to the next in line (Devices.release). */
+    release: task => {
+      const freed = devices.release(task);
+      if (freed.length) log(`devices: ${task} ended still holding the ${freed.join(' and ')}; given back: ${JSON.stringify(devices.state())}`);
+      return freed;
+    },
     close: () => new Promise(resolve => { clearInterval(timer); server.close(() => resolve()); }),
   };
 }
@@ -222,4 +246,23 @@ export class Lease {
     this.socket = null;
     this.held = false;
   }
+}
+
+/**
+ * A tool server ends with its task: when Codex goes away its stdin closes (or it gets SIGTERM or
+ * SIGHUP), and the server gives its turn back and exits. Without this the open turn socket kept a
+ * stopped task's Mac tool server alive, holding the Mac (2026-11-20, request 74).
+ */
+export function endWithTask(lease, { input = process.stdin, exit = code => process.exit(code), signals = process } = {}) {
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    try { lease.close(); } catch {}
+    exit(0);
+  };
+  input.on('end', end);
+  input.on('close', end);
+  for (const signal of ['SIGTERM', 'SIGHUP']) signals.on(signal, end);
+  return end;
 }
