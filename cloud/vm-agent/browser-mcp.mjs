@@ -63,9 +63,13 @@ export const TOOLS = [
   tool('snapshot', "The buttons, links and fields on a tab, each with a ref for click, type, select, scroll and press_key. "
     + 'Take a new one after the page changes: refs only last until then.',
   { tab_id: tabId, max_elements: { type: 'integer', minimum: 1, maximum: 400 } }),
-  tool('read', "A tab's text. mode: text (default), main_text, forms, landmarks or html. With ref or selector, only that part.",
+  tool('read', "A tab's text. mode: text (default), main_text, forms, landmarks or html. With ref or selector, only that part. "
+    + 'A long page (an API answer, a big table) comes in pieces of up to max_chars: the result says when there is more and '
+    + 'the offset to read the next piece from.',
     { tab_id: tabId, mode: { type: 'string', enum: ['text', 'main_text', 'forms', 'landmarks', 'html'] },
-      max_chars: { type: 'integer', minimum: 1, maximum: 50_000 }, ref, selector }),
+      max_chars: { type: 'integer', minimum: 1, maximum: 50_000 },
+      offset: { type: 'integer', minimum: 0, description: 'Where to start reading, in characters (0 by default): the "more" line of the last piece gives it.' },
+      ref, selector }),
   tool('click', 'Click a button, link or field.', { tab_id: tabId, ref, selector }),
   tool('type', 'Put text into a field (replacing what is there). submit: true also submits its form. Not for passwords.',
     { tab_id: tabId, ref, selector, text: { type: 'string' }, submit: { type: 'boolean' } }, ['text']),
@@ -100,7 +104,7 @@ export function commandFor(name, args = {}) {
     if (params.tabId === undefined) params.newTab = true;
   }
   if (name === 'snapshot') copy('max_elements', 'maxElements');
-  if (name === 'read') { copy('mode'); copy('max_chars', 'maxChars'); }
+  if (name === 'read') { copy('mode'); copy('max_chars', 'maxChars'); copy('offset'); }
   if (name === 'type') { copy('text'); if (args.submit === true) params.submit = true; }
   if (name === 'select') { copy('value'); copy('label'); }
   if (name === 'scroll') copy('block');
@@ -206,7 +210,15 @@ export function describeResult(type, result, browser) {
     });
     return [text(`${where(result)} ${by}\n${rows.length ? rows.join('\n') : 'Nothing to click or type into.'}`)];
   }
-  if (type === 'read_page') return [text(`${where(result)} ${by}\n${result.content ?? ''}`)];
+  if (type === 'read_page') {
+    const content = String(result.content ?? '');
+    const from = Number(result.offset) || 0;
+    const part = Number.isInteger(result.total) && (from > 0 || Number.isInteger(result.next))
+      ? ` characters ${from}–${from + content.length} of ${result.total}` : '';
+    const more = Number.isInteger(result.next)
+      ? `\n[${result.total - result.next} more characters: read again with offset ${result.next}]` : '';
+    return [text(`${where(result)} ${by}${part}\n${content}${more}`)];
+  }
   if (type === 'capture') {
     const data = /^data:image\/png;base64,(.+)$/.exec(String(result.imageDataUrl ?? ''))?.[1];
     if (!data) return [text(`${where(result)} ${by}: the browser sent no picture.`)];

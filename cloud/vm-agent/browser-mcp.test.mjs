@@ -99,6 +99,26 @@ test('a screenshot comes back as a picture', async () => {
   assert.deepEqual(board.calls[0].body.action, { type: 'capture', params: { tabId: 2 } });
 });
 
+// 2026-11-19: a grades run read a Canvas API answer (CHEM 103 assignment_groups) and it stopped at 50,000 characters
+// with no way to get the rest.
+test('a long page comes in pieces: the read says how much is left and where the next piece starts', async () => {
+  assert.deepEqual(commandFor('read', { step: 's', tab_id: 4, max_chars: 50000, offset: 50000 }),
+    { type: 'read_page', params: { tabId: 4, maxChars: 50000, offset: 50000 } });
+  const board = fakeBoard([
+    done(1, { tabId: 4, title: 'api', content: 'x'.repeat(10), total: 25, offset: 0, next: 10 }),
+    done(2, { tabId: 4, title: 'api', content: 'y'.repeat(15), total: 25, offset: 10 }),
+    done(3, { tabId: 4, title: 'short', content: 'all of it', total: 9, offset: 0 }),
+  ]);
+  const browser = new Browser(config, { fetcher: board.fetcher });
+  const first = (await answer(browser, call(1, 'read', { tab_id: 4, max_chars: 10 }))).result.content[0].text;
+  assert.match(first, /characters 0–10 of 25\n/);
+  assert.match(first, /\[15 more characters: read again with offset 10\]$/);
+  const last = (await answer(browser, call(2, 'read', { tab_id: 4, offset: 10 }))).result.content[0].text;
+  assert.match(last, /characters 10–25 of 25\ny+$/);
+  const whole = (await answer(browser, call(3, 'read', { tab_id: 4 }))).result.content[0].text;
+  assert.doesNotMatch(whole, /characters|more characters/);
+});
+
 test('it reads the board key from the hive-tasks config, and without one still starts with no tools', () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-mcp-'));
   try {

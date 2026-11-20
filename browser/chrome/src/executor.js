@@ -89,7 +89,7 @@ async function runCommand(type, params, config) {
     return { result: await listTabs(params), tab: null }
   }
 
-  const tab = await selectTargetTab(params, config.targetMode)
+  const tab = await selectTargetTab(params, config.targetMode, type)
   await assertPageAccess(tab)
 
   if (type === 'capture') {
@@ -322,9 +322,39 @@ async function activateTab(params, _config) {
   }
 }
 
-async function selectTargetTab(params, targetMode) {
+/*
+ * Safari gives a tab a new id when some pages load in it (2026-11-19: right after navigate opened a
+ * Canvas API page in a tab, reading that tab by its id failed with "Invalid call to tabs.get(). Tab
+ * not found."). A tab asked for by an id that's gone is the one that replaced it, when the browser
+ * said so (tabs.onReplaced); else, for a command that only looks, the active tab, whose id the
+ * result names; anything that acts gets an error naming the active tab instead of a guess.
+ */
+const replacedTabs = new Map()
+api?.tabs?.onReplaced?.addListener?.((added, removed) => replacedTabs.set(removed, added))
+const ONLY_LOOKS = new Set(['read_page', 'snapshot', 'capture', 'wait_for'])
+
+async function tabById(tabId, type) {
+  let id = tabId
+  for (let hops = 0; hops < 10; hops++) {
+    try {
+      return await api.tabs.get(id)
+    } catch {}
+    if (!replacedTabs.has(id)) break
+    id = replacedTabs.get(id)
+  }
+  const [active] = await api.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [])
+  if (active && ONLY_LOOKS.has(type)) return active
+  throw new Error(
+    `Tab ${tabId} is gone: the browser closed it or gave it a new id when a page loaded in it.` +
+      (active
+        ? ` The active tab is now ${active.id} (${String(active.url || '').slice(0, 160)}); tabs lists them all.`
+        : ' tabs lists the open ones.'),
+  )
+}
+
+async function selectTargetTab(params, targetMode, type = '') {
   if (Number.isInteger(params.tabId)) {
-    return api.tabs.get(params.tabId)
+    return tabById(params.tabId, type)
   }
 
   let tabs
@@ -709,6 +739,17 @@ function runInPage(type, params) {
       Math.min(Number(params.maxChars) || 12_000, 50_000),
     )
     const mode = String(params.mode || 'text')
+    /*
+     * A long page (a Canvas API answer of 100,000+ characters) comes in pieces: offset is where this
+     * piece starts, and `next` where the following one does, until the last.
+     */
+    const start = Math.max(0, Math.floor(Number(params.offset) || 0))
+    const piece = (text) => {
+      const all = String(text ?? '')
+      const content = all.slice(start, start + maximum)
+      const end = start + content.length
+      return { content, total: all.length, offset: start, ...(end < all.length ? { next: end } : {}) }
+    }
 
     if (params.selector || params.ref) {
       const element = resolveElement()
@@ -718,7 +759,7 @@ function runInPage(type, params) {
           : element.innerText || element.textContent || ''
       return {
         message: 'Read selected content',
-        content: String(content ?? '').slice(0, maximum),
+        ...piece(content),
         title: document.title,
         mode,
       }
@@ -762,7 +803,7 @@ function runInPage(type, params) {
 
     return {
       message: `Read page (${mode})`,
-      content: String(content ?? '').slice(0, maximum),
+      ...piece(content),
       title: document.title,
       mode,
     }
