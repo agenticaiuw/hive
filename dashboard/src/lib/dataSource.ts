@@ -72,6 +72,29 @@ export async function savePhonePasscode(body: { passcode?: string; consent?: boo
   });
 }
 
+/* The club (cloud/tasks/club.js): who may ask Hive to change itself, and the invite link each signs in with. */
+export type ClubMember = { name: string; max_agents: number; joined: boolean; going: number; invited: boolean; seen_at: number | null };
+
+export async function fetchClub(): Promise<{ members: ClubMember[] }> {
+  return apiRequest(`${base}/api/club/members`);
+}
+
+export async function inviteMember(name: string): Promise<{ name: string; max_agents: number; link: string; expires_in: number }> {
+  return apiRequest(`${base}/api/club/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function removeMember(name: string) {
+  return apiRequest(`${base}/api/club/members/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
 /*
  * Voice-to-text for the composer. In Hive's window the app records you and Hive's own speech
  * model (the one that hears you when you tap fn) reads it; in a browser the page records you and

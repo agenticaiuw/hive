@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
-  partsOf, readNeed, SELF_GUIDE, blockers, othersHold,
+  partsOf, readNeed, SELF_GUIDE, blockers, othersHold, conflictBrief, CONFLICT_MARKER, leaksIn, secretValues,
 } from './improve.mjs';
 
 test('a need is read once, and only with both what and why', () => {
@@ -160,4 +160,25 @@ test('a change waits to land only for agents that leased its files before it did
   assert.equal(othersHold(leases, 'R2-1'), "Other agents are changing these files of Hive's now; leave them alone unless your change needs them (if it does, say so in your report):\n"
     + '- cloud/tasks/worker.js: R1-1 (stuck requests)\n- README.md: R3-1');
   assert.equal(othersHold([], 'R2-1'), '');
+});
+
+test('main moved under a change: its agent hears which files to resolve; leftover markers are found', () => {
+  const brief = conflictBrief(['cloud/tasks/worker.js', 'README.md']);
+  assert.match(brief, /on main as it is now, and these files have git's conflict markers .* cloud\/tasks\/worker\.js, README\.md\. Resolve each one/);
+  assert.match(brief, /Never commit, rebase or change git settings\.$/);
+  assert.doesNotMatch(conflictBrief([]), /conflict markers/);
+  assert.ok(CONFLICT_MARKER.test('a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> 1234567 mine\n'));
+  assert.ok(!CONFLICT_MARKER.test('the brief says (<<<<<<< ======= >>>>>>>) mid-line'));
+});
+
+test("a change carrying one of the VM's secrets is thrown away; paths and short words aren't secrets", () => {
+  const secrets = secretValues({
+    env: { HIVE_TASKS_TOKEN: 'tok_0123456789abcdef', PATH: '/usr/bin:/bin:/usr/local/bin/extra', SHORT_KEY: 'abc', HOME_KEY: '/root/.codex-hive/keys' },
+    json: [{ url: 'https://board.your-subdomain.workers.dev', token: 'machine-0123456789abcdef', machine: 'vm' },
+      { tokens: { access_token: 'eyJhbGciOiJSUzI1NiJ9.payload.sig', refresh_token: 'rt_abcdefghijklmnop' }, auth_mode: 'chatgpt' }],
+  });
+  assert.deepEqual(secrets.sort(), ['eyJhbGciOiJSUzI1NiJ9.payload.sig', 'https://board.your-subdomain.workers.dev', 'machine-0123456789abcdef', 'rt_abcdefghijklmnop', 'tok_0123456789abcdef'].sort());
+  assert.equal(leaksIn('+const board = "machine-0123456789abcdef";', secrets), 1);
+  assert.equal(leaksIn('+-----BEGIN OPENSSH PRIVATE KEY-----', secrets), 1);
+  assert.equal(leaksIn('+const home = "/root/.codex-hive";', secrets), 0);
 });

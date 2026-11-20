@@ -11,13 +11,15 @@
 // through here (/v1/mac/, mac.js). Each node says what code it runs on every call, and gets the newest
 // release for it to update to (/v1/nodes, /v1/releases, nodes.js). The owner's iPhone is reached here
 // too: Hive Phone on it keeps a WebSocket open to the board, and agents' calls go down it (/v1/phone/,
-// phone.js). Hive's agents message each other and lease files here (/v1/team/, team.js).
+// phone.js). Hive's agents message each other and lease files here (/v1/team/, team.js), and club members
+// sign in here to have Hive change itself (/v1/club/, club.js).
 
 import { browserRoute } from "./browser.js";
 import { knowledgeRoute } from "./knowledge.js";
 import { macRoute } from "./mac.js";
 import { nodeList, nodeOf, nodesRoute, sawNode, tooOld, versionHeaders } from "./nodes.js";
 import { phoneAllowed, phoneRoute, rememberOrigin } from "./phone.js";
+import { clubRoute } from "./club.js";
 import { teamRoute } from "./team.js";
 
 // Hive Phone's relay: one Durable Object per phone (wrangler.jsonc PHONE).
@@ -106,6 +108,7 @@ async function route(request, env, url) {
       if (url.pathname.startsWith("/v1/knowledge/")) return await knowledgeRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/mac/")) return await macRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/team/")) return await teamRoute(request, env, url, { machineAllowed });
+      if (url.pathname.startsWith("/v1/club/")) return await clubRoute(request, env, url, { allowed, newRequest, teamRoute });
       if (url.pathname.startsWith("/v1/nodes") || url.pathname.startsWith("/v1/releases")) return await nodesRoute(request, env, url, { machineAllowed, anyoneAllowed });
       if (url.pathname.startsWith("/v1/phone/")) return await phoneRoute(request, env, url, { machineAllowed, allowed });
       if (url.pathname === "/") return await page(request, env);
@@ -467,14 +470,15 @@ async function sendRequest(request, env) {
   return json({ ok: true, id, ahead: ahead.n });
 }
 
-// A new request to Hive's agent on the VM, with its words as a board message: its id.
-async function newRequest(env, { words, agent, from, at }) {
+// A new request to Hive's agent on the VM, with its words as a board message: its id. `member`: the club
+// member who asked (club.js), whose request Hive runs only as a change to its own code.
+async function newRequest(env, { words, agent, from, at, member = null, follows = null }) {
   const { project, folder } = scopeOf(words);
   const [made] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at)
-       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3 FROM board_requests RETURNING id`,
-    ).bind(agent, folder || null, at),
+      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at, member, follows)
+       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3, ?4, ?5 FROM board_requests RETURNING id`,
+    ).bind(agent, folder || null, at, member, follows),
     env.DB.prepare(
       `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
        VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', ?4, ?1, ?2, ?3, 1, NULL, ?3)`,
@@ -495,6 +499,7 @@ async function takeRequest(request, env) {
   if (!by) return json({ error: "Say who is taking it (by)." }, 400);
   const agent = text(body.agent, 40) || "hive-cloud";
   const at = now();
+  // The owner's requests go before the club's (club.js), oldest first in each.
   const [, , taken] = await env.DB.batch([
     // What this orchestrator held when it last stopped goes on: back in the queue, first in line, with a
     // note of what happened, MOST_RESTARTS times at most a request; after that it ends there.
@@ -509,8 +514,8 @@ async function takeRequest(request, env) {
     ).bind(by, at, body.fresh ? 1 : 0, RESTARTED),
     env.DB.prepare(
       `UPDATE board_requests SET status = 'planning', taken_by = ?1, taken_at = ?2, updated_at = ?2
-       WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY id LIMIT 1)
-       RETURNING id, folder, follows, retry_note`,
+       WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY member IS NOT NULL, id LIMIT 1)
+       RETURNING id, folder, follows, retry_note, member`,
     ).bind(by, at, agent),
   ]);
   const row = taken.results[0];
@@ -533,12 +538,12 @@ async function takeRequest(request, env) {
   const before = retry + (older.length
     ? `Earlier in this conversation, oldest first:\n${older.map((r) => `- R${r.id} ("${clip(r.text || "", WORDS_BEFORE)}"), which ended: ${r.outcome || "no outcome recorded"}`).join("\n")}\n`
     : "") + (earlier
-    ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\n${handed ? "Now" : "The owner now says"}: `
+    ? `This follows the ${row.member ? "club's" : "owner's"} earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\n${handed ? "Now" : row.member ? `Club member ${row.member} now says` : "The owner now says"}: `
     : "");
   return json({
     request: {
       id: row.id, folder: row.folder || "", project: message?.project || "", text: before + (message?.text || ""),
-      follows: row.follows || null, retry: Boolean(row.retry_note),
+      follows: row.follows || null, retry: Boolean(row.retry_note), member: row.member || null,
       said_at: message?.said_at, from: message?.session || "web",
       page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },
@@ -1234,7 +1239,7 @@ async function board(request, env) {
     ),
     env.DB.prepare("SELECT machine, harness, home, plan, windows, at, synced_at FROM board_limits ORDER BY machine, harness, home"),
     env.DB.prepare(
-      `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.created_at, r.updated_at, r.finished_at, r.follows, m.text, m.project
+      `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.created_at, r.updated_at, r.finished_at, r.follows, r.member, m.text, m.project
        FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
        ORDER BY r.id DESC LIMIT 30`,
     ),

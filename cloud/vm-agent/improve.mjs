@@ -9,7 +9,9 @@
 //   2. tests the change here (gateTests) and, for the Mac's parts, on the Mac (hive_self check, which
 //      builds the whole Mac release: onTheMac), handing the failures back to the agent until it passes
 //      (fixBrief, at most MOST_FIXES tries);
-//   3. lands it on main, fast-forward, and puts it live where it runs (partsOf): a VM release the
+//   3. lands it on main, fast-forward (when main moved under it and it no longer applies, the same agent
+//      resolves where the two meet, conflictBrief, and it's tested again), never carrying a secret from
+//      the VM (leaksIn), and puts it live where it runs (partsOf): a VM release the
 //      updater puts in at once when only what tasks start changed, the board, the dashboard website
 //      (hive_self site), the Mac (hive_self install: a Mac release, put in on the owner's Mac once Hive
 //      is idle);
@@ -208,6 +210,46 @@ export function othersHold(leases, me) {
   if (!others.length) return '';
   return `Other agents are changing these files of Hive's now; leave them alone unless your change needs them (if it does, say so in your report):\n`
     + others.map(l => `- ${l.path}: ${l.agent}${l.note ? ` (${l.note})` : ''}`).join('\n');
+}
+
+// How many times a change is put on main again, with its agent resolving where it meets what landed
+// meanwhile, before it gives up.
+export const MOST_CONFLICTS = 2;
+
+/** The code agent's brief when main moved under its change: the change is on main as it is now, and these
+ *  files have git's conflict markers where the two meet. */
+export function conflictBrief(files) {
+  return `While you worked, other changes landed on main, and yours no longer applied as it was. It's in this worktree again, `
+    + `on main as it is now${files.length ? `, and these files have git's conflict markers (<<<<<<< ======= >>>>>>>) where yours meets `
+    + `what landed: ${files.join(', ')}. Resolve each one, keeping what landed and what your change does` : ''}. `
+    + `Then run the tests again. Never commit, rebase or change git settings.`;
+}
+
+/** Git's conflict markers left in a file's text. */
+export const CONFLICT_MARKER = /^(<<<<<<<|>>>>>>>)( |$)/m;
+
+// The names of settings that hold secrets.
+const SECRET_NAME = /TOKEN|KEY|SECRET|PASS|AUTH|CREDENTIAL|COOKIE|CODE/i;
+
+/**
+ * The secret values on this machine a change must never carry into the public repository: those of
+ * environment variables named like secrets, and every string in the given JSON files (the board's config,
+ * Codex's sign-in). Paths and short words are left out: they're not secrets, and code names them.
+ */
+export function secretValues({ env = {}, json = [] } = {}) {
+  const found = new Set();
+  for (const [name, value] of Object.entries(env)) if (SECRET_NAME.test(name) && typeof value === 'string') found.add(value);
+  const walk = value => {
+    if (typeof value === 'string') found.add(value);
+    else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+  };
+  json.forEach(walk);
+  return [...found].filter(value => value.length >= 16 && !value.startsWith('/'));
+}
+
+/** How many secrets a change's diff holds (any of `secrets`, or a private key): one is enough to throw it away. */
+export function leaksIn(diff, secrets) {
+  return secrets.filter(secret => diff.includes(secret)).length + (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(diff) ? 1 : 0);
 }
 
 /** One line for the board on what landed, and where it went live. */
