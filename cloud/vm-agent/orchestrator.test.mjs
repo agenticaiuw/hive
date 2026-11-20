@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, Slots, branchOf, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
+import { MODELS, Slots, branchOf, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, planWords, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -28,6 +28,19 @@ test("the planner's answer is read as checked JSON, prose around it or not", () 
   assert.equal(plan.tasks[1].value, 'medium');
   assert.throws(() => parsePlan('no idea'), /JSON/);
   assert.throws(() => parsePlan('{"tasks": []}'), /no tasks/);
+});
+
+test("Hive's own note about stuck tasks is planned as those tasks, not as no tasks", () => {
+  const note = '[Hive, not the owner] This task is stuck, and Hive continues it so the owner doesn\'t have to (try 8):\n' +
+    '- T133 ("Try the Hive Safari extension on Canvas")\nThis is Hive\'s note, not a new request: register no tasks for it.';
+  const words = planWords({ text: note, from: 'mac' });
+  assert.match(words, /^\(This is Hive's own note, not the owner's words: .*Plan exactly one task for each task it lists/);
+  assert.ok(words.endsWith(note), 'the note itself comes along');
+  // A cloud request run again keeps being planned from the owner's words that follow the note.
+  const retried = `${note}\nDon't redo what's already done. The request, as it was:\nOpen Canvas`;
+  assert.equal(planWords({ text: retried, from: 'web', retry: true }), retried);
+  assert.equal(planWords({ text: 'Open Canvas', from: 'mac' }), "(Said to Hive on the owner's Mac.) Open Canvas");
+  assert.equal(planWords({ text: 'Open Canvas', from: 'web' }), 'Open Canvas');
 });
 
 test("a subagent gets its task, the owner's words and every memory of its folder in full", () => {

@@ -521,7 +521,7 @@ async function takeRequest(request, env) {
   return json({
     request: {
       id: row.id, folder: row.folder || "", project: message?.project || "", text: before + (message?.text || ""),
-      follows: row.follows || null,
+      follows: row.follows || null, retry: Boolean(row.retry_note),
       said_at: message?.said_at, from: message?.session || "web",
       page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },

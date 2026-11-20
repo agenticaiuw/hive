@@ -463,6 +463,47 @@ pub struct CloudJob {
     changed: Condvar,
 }
 
+/// The Mac's tasks that a note of Hive's own continues (the board's continueStuck sends it to Hive
+/// here, which hands it to the cloud agent): its "- T133 (…" lines.
+pub fn continued_tasks(note: &str) -> Vec<String> {
+    if !note.trim_start().starts_with(hive_tasks::inbox::FROM_HIVE) {
+        return Vec::new();
+    }
+    note.lines()
+        .filter_map(|line| {
+            let digits: String = line.trim().strip_prefix("- T")?.chars().take_while(char::is_ascii_digit).collect();
+            (!digits.is_empty()).then(|| format!("T{digits}"))
+        })
+        .collect()
+}
+
+/// How those tasks ended, for the Mac's board: done when the cloud agent finished them, otherwise
+/// still blocked, with why (the board tries them again later). Nothing for any other request.
+pub fn continued_report(note: &str, kind: &str, text: &str) -> Option<Value> {
+    let ids = continued_tasks(note);
+    if ids.is_empty() {
+        return None;
+    }
+    let status = if kind == "done" { "done" } else { "blocked" };
+    let outcome = if text.trim().is_empty() { "It stopped before it finished." } else { text.trim() };
+    Some(Value::Array(
+        ids.into_iter().map(|id| json!({"id": id, "status": status, "outcome": outcome})).collect(),
+    ))
+}
+
+/// The Mac's tasks a note of Hive's own continued get how the cloud agent's run ended. Before this,
+/// nothing told them, so they stayed stuck and were sent again (2026-11-20: T133 at try 8).
+fn report_continued(note: &str, kind: &str, text: &str) {
+    let Some(report) = continued_report(note, kind, text) else {
+        return;
+    };
+    let path = hive_common::state_dir().join("tasks/tasks.sqlite3");
+    match hive_tasks::Ledger::open(&path).and_then(|board| board.report(&report)) {
+        Ok(_) => hive_tasks::sync_soon(&path),
+        Err(error) => eprintln!("hive: the continued tasks' end didn't reach the board: {error}"),
+    }
+}
+
 /// How a request ended, read from its state: the event, its text, and its reply.
 fn end_of(state: &Value, said: Option<&str>) -> Option<(&'static str, String, Option<String>)> {
     let request = &state["request"];
@@ -598,6 +639,7 @@ impl CloudJob {
                     reached = Instant::now();
                     self.show(&state, &mut seen, &mut planned, &mut said);
                     if let Some((kind, text, reply)) = end_of(&state, said.as_deref()) {
+                        report_continued(&self.text, kind, &text);
                         let ended = if kind == "done" { "" } else { text.as_str() };
                         self.finish(kind, &text, reply, ended, true);
                         break;
@@ -827,5 +869,35 @@ impl parts::Task for CloudJob {
             Mode::Local => self.local.ended(),
             _ => self.st().ended.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod continued {
+    use super::*;
+
+    const NOTE: &str = "[Hive, not the owner] These tasks are stuck, and Hive continues them so the owner doesn't have to (try 8):\n\
+- T95 (\"fn only shows the window\"), stuck on: no device\n\
+- T133 (\"Try the Hive Safari extension on Canvas\")\n\
+Get past what's in the way yourself and finish.";
+
+    #[test]
+    fn the_tasks_a_note_of_hives_continues() {
+        assert_eq!(continued_tasks(NOTE), ["T95", "T133"]);
+        assert!(continued_tasks("- T95 (\"the owner's own words\")").is_empty());
+    }
+
+    #[test]
+    fn they_end_as_the_cloud_agents_run_ended() {
+        assert_eq!(
+            continued_report(NOTE, "done", "Opened Canvas and put it back.").unwrap(),
+            json!([{"id": "T95", "status": "done", "outcome": "Opened Canvas and put it back."},
+                   {"id": "T133", "status": "done", "outcome": "Opened Canvas and put it back."}])
+        );
+        assert_eq!(
+            continued_report(NOTE, "failed", "Couldn't plan it: the planner didn't answer with JSON").unwrap()[1],
+            json!({"id": "T133", "status": "blocked", "outcome": "Couldn't plan it: the planner didn't answer with JSON"})
+        );
+        assert!(continued_report("Open Safari.", "done", "Done.").is_none());
     }
 }

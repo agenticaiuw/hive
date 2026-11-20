@@ -80,6 +80,27 @@ what they find or make; [] when it stands alone. Tasks that need nothing run at 
 If the instruction starts "For <project> › <folder>: ", every task is in that project and folder.
 Don't add tasks the owner didn't ask for, and keep their words in quote exactly.`;
 
+/** How Hive's own messages start (the board's continueStuck), as hive-tasks' inbox::FROM_HIVE. */
+export const FROM_HIVE = '[Hive, not the owner]';
+
+/**
+ * What the planner reads for a request. Hive on the Mac hands Hive's own note about its stuck tasks
+ * here as a request; read as an instruction, its "register no tasks for it" (meant for an agent's own
+ * board) left the plan empty, so the stuck tasks were never continued (R44, R48, R79: "Couldn't plan
+ * it: the plan has no tasks"). It's planned as the tasks it lists, one each. A cloud request run again
+ * (retry) is planned from the owner's words that come with the note, as before.
+ */
+export function planWords(request) {
+  if (!request.retry && request.text.trimStart().startsWith(FROM_HIVE)) {
+    return '(This is Hive\'s own note, not the owner\'s words: tasks it lists got stuck and Hive continues them. ' +
+      'Plan exactly one task for each task it lists, to finish that task, titled and quoted with that task\'s title, ' +
+      'its brief saying what was in the way and that the agent gets past it and finishes, doing nothing the owner ' +
+      'hasn\'t asked for. The note\'s "register no tasks for it" is for an agent\'s own board, not for this plan.)\n' +
+      request.text;
+  }
+  return request.from === 'mac' ? `(Said to Hive on the owner's Mac.) ${request.text}` : request.text;
+}
+
 /** The plan in the planner's answer: its JSON, checked, with at most MOST_TASKS tasks. */
 export function parsePlan(answer) {
   const start = answer.indexOf('{');
@@ -459,7 +480,7 @@ async function handleWork(request, deps, signal) {
   log(`R${request.id}: ${request.text}`);
   let planned;
   try {
-    planned = parsePlan(await plan(request.from === 'mac' ? `(Said to Hive on the owner's Mac.) ${request.text}` : request.text));
+    planned = parsePlan(await plan(planWords(request)));
   } catch (error) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't plan it: ${error.message}` });
     return;
