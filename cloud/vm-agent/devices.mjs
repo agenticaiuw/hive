@@ -122,10 +122,15 @@ export function serveDevices(path, { devices = new Devices(), tickMs = 5000, log
   const server = createServer(socket => {
     // onEvent(task, message) hears each answer a task gets (queued, granted, revoked), for its run's steps.
     const client = { task: '', send: message => {
-      if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
+      if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(message)}\n`, () => {});
       try { onEvent(client.task, message); } catch {}
     } };
-    createInterface({ input: socket }).on('line', line => {
+    // readline passes the socket's errors on to itself, and an error nobody hears ends the process:
+    // on 2026-11-20 the owner stopped request 100, its Mac tool server's socket was already gone, the
+    // "your turn is over" written to it failed with EPIPE, and the orchestrator crashed with every request
+    // it was working on (101 ended "The orchestrator restarted before it finished this.").
+    const lines = createInterface({ input: socket });
+    lines.on('line', line => {
       let message; try { message = JSON.parse(line); } catch { return; }
       if (typeof message.task === 'string' && message.task) client.task = message.task.slice(0, 200);
       if (message.op === 'take') devices.take(message.device, client);
@@ -143,6 +148,7 @@ export function serveDevices(path, { devices = new Devices(), tickMs = 5000, log
     };
     socket.on('close', gone);
     socket.on('error', gone);
+    lines.on('error', gone);
   });
   server.listen(path, () => { try { chmodSync(path, 0o600); } catch {} });
   const timer = setInterval(() => devices.tick(), tickMs);
@@ -180,7 +186,12 @@ export class Lease {
       socket.once('connect', () => resolve(socket));
       socket.once('error', reject);
       socket.on('close', () => { this.held = false; this.socket = null; this.settle?.(new Error('the orchestrator went away')); });
-      createInterface({ input: socket }).on('line', line => {
+      // readline passes the socket's errors on to itself, and an error nobody hears ends the process:
+    // on 2026-11-20 the owner stopped request 100, its Mac tool server's socket was already gone, the
+    // "your turn is over" written to it failed with EPIPE, and the orchestrator crashed with every request
+    // it was working on (101 ended "The orchestrator restarted before it finished this.").
+    const lines = createInterface({ input: socket });
+    lines.on('line', line => {
         let message; try { message = JSON.parse(line); } catch { return; }
         if (message.device !== this.device) return;
         if (message.op === 'granted') {
