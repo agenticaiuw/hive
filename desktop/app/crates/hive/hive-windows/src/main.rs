@@ -148,14 +148,20 @@ fn open_link(places: &Places, link: &str) -> i32 {
 /// Looks for the club's newer release now and then and puts it in. One runs at a time; it stops when
 /// Hive.exe is replaced under it (set up again, or updated), and the new one carries on.
 fn background(places: &Places) -> i32 {
+    let exe = places.exe();
+    let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+    let ours = stamp(&exe);
     let Some(_lock) = lock(places, Duration::from_secs(60)) else { return 0 };
+    // Replaced while it waited its turn (an update or a new setup): it's the old program, and the one
+    // that replaced it starts the new one.
+    if stamp(&exe) != ours {
+        places.log(&format!("{VERSION} was replaced before it started; the new one carries on"));
+        return 0;
+    }
     clean_old(&places.install);
     places.log(&format!("{VERSION} running in the background"));
     let seconds = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
     let (first, every) = (seconds("HIVE_UPDATE_FIRST_LOOK_S", 60), seconds("HIVE_UPDATE_EVERY_S", 600));
-    let exe = places.exe();
-    let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
-    let ours = stamp(&exe);
     let mut config = stamp(&places.config());
     let mut next = Instant::now() + Duration::from_secs(first);
     loop {

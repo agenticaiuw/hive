@@ -309,8 +309,8 @@ pub enum Outcome {
 }
 
 /// Asks the board for the newest windows release and, when it isn't `running`, puts it in. A
-/// network failure is tried again at the next look; a download that fails its checks is given up on
-/// (and said on the board), so it's never downloaded again. `ran` runs a program with `--version`.
+/// network failure, or an old Hive.exe in the way, is tried again at the next look; a download that
+/// fails its checks is given up on (and said on the board), so it's never downloaded again. `ran` runs a program with `--version`.
 pub fn look(places: &Places, running: &str, ran: &dyn Fn(&Path) -> Result<String, String>) -> Result<Outcome, String> {
     let config = read_config(&places.config())?;
     let machine = config.get("machine").and_then(Value::as_str).map(str::to_string).unwrap_or_else(machine_name);
@@ -333,12 +333,18 @@ pub fn look(places: &Places, running: &str, ran: &dyn Fn(&Path) -> Result<String
         }
     };
     let expected = release["sha256"].as_str().unwrap_or_default().to_lowercase();
-    if let Err(why) = check(&new, &expected, header.as_deref(), &to, ran).and_then(|_| swap(&places.install)) {
+    if let Err(why) = check(&new, &expected, header.as_deref(), &to, ran) {
         let _ = std::fs::remove_file(&new);
         give_up(places, &to);
         let note = format!("Didn't update to {to}: {why}");
         let _ = source.post_json("/v1/nodes/report", &json!({ "kind": "windows", "name": machine, "note": note }));
         return Err(note);
+    }
+    // The release is fine; what stops it going in is this PC's (an old Hive.exe still running), so
+    // it's tried again at the next look.
+    if let Err(why) = swap(&places.install) {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!("Didn't put in {to} yet: {why}"));
     }
     let note = format!("Updated from {running} to {to}.");
     let _ = source.post_json("/v1/nodes/report", &json!({ "kind": "windows", "name": machine, "version": to, "note": note }));
@@ -598,6 +604,22 @@ mod tests {
             // Given up on: never downloaded again.
             assert_eq!(look(&places, "aaaaaaaaaaaa", &|_| unreachable!()).unwrap(), Outcome::Current);
         }
+    }
+
+    #[test]
+    fn a_release_an_old_running_program_keeps_out_is_tried_again_not_given_up_on() {
+        let (_dir, places) = places();
+        let (url, _) = release_board("bbbbbbbbbbbb", b"MZ the newer Hive.exe".to_vec(), None);
+        connect(&places, &url);
+        std::fs::write(places.exe(), b"MZ the running Hive.exe").unwrap();
+        // A Hive.old.exe that can't be removed, as when the program it was is still running.
+        std::fs::create_dir_all(places.install.join(OLD_EXE).join("in use")).unwrap();
+        let ran = |_: &Path| Ok("bbbbbbbbbbbb".to_string());
+        assert!(look(&places, "aaaaaaaaaaaa", &ran).unwrap_err().contains("Didn't put in bbbbbbbbbbbb yet"));
+        assert_eq!(std::fs::read(places.exe()).unwrap(), b"MZ the running Hive.exe");
+        assert!(gave_up(&places).is_empty() && !places.install.join(NEW_EXE).exists());
+        std::fs::remove_dir_all(places.install.join(OLD_EXE)).unwrap();
+        assert!(matches!(look(&places, "aaaaaaaaaaaa", &ran).unwrap(), Outcome::PutIn { .. }));
     }
 
     #[test]
