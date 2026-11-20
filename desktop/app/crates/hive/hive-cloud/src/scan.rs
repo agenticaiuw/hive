@@ -75,7 +75,7 @@ pub fn state_exclusion(rel: &str) -> Option<&'static str> {
     match top {
         "cloud" => return Some("sync settings and keys (stay on this device)"),
         "authentication" => return Some("credentials (never uploaded)"),
-        "app-backups" | "updates" => return Some("app builds (reinstalled, not restored)"),
+        "app-backups" | "app-backups.noindex" | "updates" => return Some("app builds (reinstalled, not restored)"),
         "lipread" => return Some("model weights (downloaded, not personal data)"),
         _ => {}
     }

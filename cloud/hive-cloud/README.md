@@ -36,7 +36,7 @@ Left out, each with its reason, counted in `hive-cloud status` and listed by
 | `authentication/`, `control/request-ledger.key` | credentials, never uploaded |
 | `cloud/` | this device's sync settings and keys |
 | `lipread/` | model weights, downloaded again rather than restored |
-| `app-backups/`, `updates/` | app builds, reinstalled rather than restored |
+| `app-backups.noindex/`, `updates/` | app builds, reinstalled rather than restored |
 | `dream/target`, `dream/worktrees`, `dream/tmp` | build output |
 
 Lock files, sockets, SQLite `-wal`/`-shm`/`-journal` files, `*.tmp` and `.DS_Store` are skipped.
