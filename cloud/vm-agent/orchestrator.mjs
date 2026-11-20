@@ -34,8 +34,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, landOnMain, leaksIn,
-  macFailures, macRunning, MOST_CONFLICTS, MOST_FIXES, MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed,
+  againBrief, askedBrief, blockers, checkDashboard, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, landOnMain, leaksIn,
+  macFailures, macRunning, MOST_CONFLICTS, MOST_FIXES, MOST_LEASE_WAIT_MS, MOST_ROUNDS, needsMacCheck, onTheMac, othersHold, partsOf, readNeed,
   secretValues, SELF_GUIDE,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
@@ -889,13 +889,18 @@ async function secretsOnVm() {
 }
 
 /** The tests of a change (improve.mjs gateTests), run in its worktree: whether they passed and, if not, what failed. */
-async function gateOnVm(dir, files, tmp) {
-  const have = (await asRoot(['git', '-C', dir, 'ls-files', '*.test.mjs'])).split('\n').filter(Boolean);
+export async function gateOnVm(dir, files, tmp, { list = asRoot, execute = exec } = {}) {
+  const have = (await list(['git', '-C', dir, 'ls-files', '*.test.mjs'])).split('\n').filter(Boolean);
   const tests = gateTests(files, have);
-  if (!tests.length) return { ok: true, tests };
   try {
-    await exec('sudo', ['-n', 'env', '-i', '-C', dir, `PATH=${process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`, `HOME=${join(tmp, 'home')}`,
-      'LANG=C.UTF-8', 'HIVE_UPDATE_CHECK=1', process.execPath, '--test', ...tests], { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 64 << 20 });
+    const run = (cwd, command, args) => execute('sudo', ['-n', 'env', '-i', '-C', cwd,
+      `PATH=${process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`, `HOME=${join(tmp, 'home')}`,
+      'LANG=C.UTF-8', 'HIVE_UPDATE_CHECK=1', command, ...args], { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 64 << 20 });
+    if (tests.length) await run(dir, process.execPath, ['--test', ...tests]);
+    if (partsOf(files).site) {
+      await checkDashboard((command, args) => run(join(dir, 'dashboard'), command, args));
+      tests.push(...have.filter(f => /^dashboard\/tests\/[^/]+\.test\.mjs$/.test(f)));
+    }
     return { ok: true, tests };
   } catch (error) {
     const said = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
@@ -926,9 +931,10 @@ const MAC_INSTALL_MS = 7 * 3600_000;
  * the change's tests run until they pass (at most MOST_FIXES tries), and it lands on main and goes live
  * where it runs: a VM release (the updater puts it in), the board (deployed from the owner's Mac when this
  * VM has no Cloudflare sign-in), the dashboard website (from the owner's Mac), the Mac. Hive on the Mac builds only on
- * macOS, so a change to it is also built and tested on the owner's Mac (hive_self check, on the change's
+ * macOS, so a change to its native parts is also built and tested on the owner's Mac (hive_self check, on the change's
  * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
- * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
+ * there is idle (hive_self install). The shared dashboard's two outputs are tested on Linux; only
+ * native changes wait on their branch for a Mac check. A Mac release still needs a connected Mac.
  */
 async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null, board = null, asked = false }, onStep) {
   const repo = join(CODE_ROOT, 'hive');
@@ -1016,9 +1022,9 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       let failures = gate.failures;
       if (gate.ok) {
         onStep(`✅ ${gate.tests.length} test file${gate.tests.length === 1 ? '' : 's'} passed`);
-        if (!partsOf(files).mac) break;
+        if (!needsMacCheck(files)) break;
         // Hive on the Mac builds only on macOS: the owner's Mac builds and tests it, from the branch.
-        const touched = files.filter(f => /^(desktop|browser|dashboard|branding)\//.test(f));
+        const touched = files.filter(f => /^(desktop|browser|branding)\//.test(f));
         const which = `${touched.slice(0, 4).join(', ')}${touched.length > 4 ? ', …' : ''}`;
         mac ??= board ? await connectedMac(board).catch(() => null) : null;
         await pushBranch();
@@ -1160,6 +1166,8 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     if (parts.mac) {
       // The Mac publishes a release of main as it now is and puts it in once Hive there is idle; the task
       // runs again only once the Mac runs it, since the task needed it there.
+      mac ??= board ? await connectedMac(board).catch(() => null) : null;
+      if (!mac) return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but no Mac is connected to put it live there.`, ...notes].join('\n\n'), { commit, files, live });
       onStep(`$ Publishing Hive for the Mac and putting it in on the owner's Mac once Hive there is idle`);
       let job;
       try {
@@ -1177,6 +1185,9 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
           { commit, files, live });
       }
       live.push('the Mac');
+    }
+    if (parts.site && !live.includes('the dashboard website')) {
+      return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but the dashboard website isn't running it.`, ...notes].join('\n\n'), { commit, files, live });
     }
     return end(true, [result.report, ...notes].filter(Boolean).join('\n\n'), { commit, files, live });
   } finally {

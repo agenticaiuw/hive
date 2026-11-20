@@ -1,6 +1,41 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, Slots, branchOf, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, planWords, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
+import { MODELS, Slots, branchOf, gateOnVm, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, planWords, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
+
+test('the VM gate runs dashboard builds in the change worktree and reports their failures', async () => {
+  const have = ['cloud/shared/privacy.test.mjs', 'dashboard/tests/agents.test.mjs', 'dashboard/tests/stuck-requests.test.mjs'];
+  const list = async () => have.join('\n');
+  const calls = [];
+  const execute = async (command, args) => {
+    assert.equal(command, 'sudo');
+    calls.push(args);
+  };
+  const files = ['dashboard/src/lib/agents.js'];
+  const passed = await gateOnVm('/change', files, '/scratch', { list, execute });
+  assert.deepEqual(passed, { ok: true, tests: have });
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls[0].slice(-3), [process.execPath, '--test', have[0]]);
+  for (const args of calls.slice(1)) {
+    assert.equal(args[args.indexOf('-C') + 1], '/change/dashboard');
+    assert.ok(args.includes('HOME=/scratch/home'));
+  }
+  assert.deepEqual(calls[1].slice(-4), ['npm', 'ci', '--no-audit', '--no-fund']);
+  assert.deepEqual(calls[2].slice(-3), ['npm', 'test', '--silent']);
+  assert.deepEqual(calls[3].slice(-4), ['npm', 'run', 'build:desktop', '--silent']);
+
+  for (const failAt of [2, 3, 4]) {
+    let count = 0;
+    const failed = await gateOnVm('/change', files, '/scratch', { list, execute: async () => {
+      if (++count === failAt) throw Object.assign(new Error('command failed'), { stderr: 'Error: dashboard check failed' });
+    } });
+    assert.equal(failed.ok, false);
+    assert.match(failed.failures, /Error: dashboard check failed/);
+    assert.equal(count, failAt);
+  }
+  calls.length = 0;
+  await gateOnVm('/change', ['README.md'], '/scratch', { list, execute });
+  assert.equal(calls.length, 1, 'unrelated changes do not install or build the dashboard');
+});
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });

@@ -6,7 +6,8 @@
 // improve_hive (knowledge-mcp.mjs), which writes what's missing to the task's need file. After the
 // run, the orchestrator reads it (readNeed) and, instead of ending the task:
 //   1. has a code agent change Hive in a worktree off main (SELF_GUIDE, improveBrief);
-//   2. tests the change here (gateTests) and, for the Mac's parts, on the Mac (hive_self check, which
+//   2. tests the change here (gateTests, and both dashboard outputs with checkDashboard) and, for
+//      the Mac's native parts, on the Mac (hive_self check, which
 //      builds the whole Mac release: onTheMac), handing the failures back to the agent until it passes
 //      (fixBrief, at most MOST_FIXES tries);
 //   3. lands it on main, fast-forward (when main moved under it and it no longer applies, the same agent
@@ -111,8 +112,23 @@ export function partsOf(files) {
   };
 }
 
+/** The shared dashboard builds on Linux, including the static files the Mac embeds. Changing
+ *  native parts still needs a Mac check; shipping the dashboard to the Mac still needs a Mac release. */
+export function needsMacCheck(files) {
+  return partsOf(files.filter(f => !f.startsWith('dashboard/'))).mac;
+}
+
+/** Test both dashboard outputs before landing. Install from its lockfile in this worktree; the
+ *  Worker's tests must run before the desktop build replaces SvelteKit's generated files. */
+export async function checkDashboard(run) {
+  await run('npm', ['ci', '--no-audit', '--no-fund']);
+  await run('npm', ['test', '--silent']);
+  await run('npm', ['run', 'build:desktop', '--silent']);
+}
+
 /** The tests run here before a change lands: the privacy test always, and the tests of each part it touched
- *  that run on Linux. `have` lists the repository's test files. */
+ *  that run without installs. The dashboard runs separately through checkDashboard, with its builds
+ *  and dependencies. `have` lists the repository's test files. */
 export function gateTests(files, have) {
   const parts = partsOf(files);
   const pick = re => have.filter(f => re.test(f));

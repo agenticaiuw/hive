@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
   partsOf, readNeed, SELF_GUIDE, blockers, othersHold, conflictBrief, CONFLICT_MARKER, landOnMain, leaksIn, secretValues,
+  checkDashboard, needsMacCheck,
 } from './improve.mjs';
 
 test('a need is read once, and only with both what and why', () => {
@@ -56,7 +57,38 @@ test('the gate runs the privacy test always, and the tests of each part a change
     ['cloud/shared/ownerDetails.test.mjs', 'cloud/shared/privacy.test.mjs', 'cloud/tests/board.test.mjs']);
   assert.deepEqual(gateTests(['README.md'], have), ['cloud/shared/privacy.test.mjs']);
   assert.ok(!gateTests(['dashboard/src/tasks.mjs', 'dashboard/src/tasks.test.mjs'], have).includes('dashboard/src/tasks.test.mjs'),
-    "the dashboard's tests need its installs, which the VM doesn't have");
+    "the dashboard's tests run separately after installing dependencies and building the Worker");
+});
+
+test('dashboard changes can be checked on Linux and still ship to the website and Mac', () => {
+  const files = ['dashboard/src/lib/agents.js', 'dashboard/tests/agents.test.mjs', 'dashboard/tests/stuck-requests.test.mjs'];
+  assert.equal(needsMacCheck(files), false);
+  assert.equal(partsOf(files).mac, true);
+  assert.equal(partsOf(files).site, true);
+  for (const file of ['desktop/app/crates/hive/hive-app/src/cloud_brain.rs', 'desktop/app/Makefile', 'browser/chrome/src/app.js', 'branding/icon.svg']) {
+    assert.equal(needsMacCheck([...files, file]), true, file);
+  }
+});
+
+test('the dashboard gate installs locked dependencies, tests the Worker, then builds the Mac output', async () => {
+  const calls = [];
+  await checkDashboard(async (command, args) => calls.push([command, ...args]));
+  assert.deepEqual(calls, [
+    ['npm', 'ci', '--no-audit', '--no-fund'],
+    ['npm', 'test', '--silent'],
+    ['npm', 'run', 'build:desktop', '--silent'],
+  ]);
+});
+
+test('a failed install, dashboard test or desktop build stops the gate', async () => {
+  for (let fail = 1; fail <= 3; fail++) {
+    let calls = 0;
+    const error = new Error('dashboard check failed');
+    await assert.rejects(checkDashboard(async () => {
+      if (++calls === fail) throw error;
+    }), e => e === error);
+    assert.equal(calls, fail, 'no later step runs after a failure');
+  }
 });
 
 test("the code agent's briefs carry what the task needed, and the task's run again carries what changed", () => {
