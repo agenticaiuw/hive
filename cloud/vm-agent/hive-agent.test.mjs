@@ -212,7 +212,9 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.throws(() => codexArgs({ model: 'm', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s', improveFile: '/x y' }), /unsupported/);
   assert.match(GUIDE, /improve_hive/);
   const mac = JSON.parse(config.find(c => c.startsWith('mcp_servers.mac.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/mac-mcp.mjs']);
+  assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_FILES_DIR=/f', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/mac-mcp.mjs']);
+  assert.equal(mac.find(arg => arg.startsWith('HIVE_FILES_DIR=')), desktop.find(arg => arg.startsWith('HIVE_FILES_DIR=')),
+    'Mac transfers land where the desktop tools look for files');
   for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
