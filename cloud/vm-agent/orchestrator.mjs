@@ -883,7 +883,7 @@ const MAC_INSTALL_MS = 7 * 3600_000;
  * Hive changing itself so a task can go on: a code agent changes Hive in a worktree off main (SELF_GUIDE),
  * the change's tests run until they pass (at most MOST_FIXES tries), and it lands on main and goes live
  * where it runs: a VM release (the updater puts it in), the board (deployed from the owner's Mac when this
- * VM has no Cloudflare sign-in), the Mac. Hive on the Mac builds only on
+ * VM has no Cloudflare sign-in), the dashboard website (from the owner's Mac), the Mac. Hive on the Mac builds only on
  * macOS, so a change to it is also built and tested on the owner's Mac (hive_self check, on the change's
  * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
  * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
@@ -1041,6 +1041,18 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         else notes.push("The VM release is published; the VM puts it in once it's idle (it changes the orchestrator itself).");
       } catch (error) {
         note(`The VM release didn't publish: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
+      }
+    }
+    if (parts.site) {
+      // The dashboard website deploys with a Cloudflare sign-in, which the owner's Mac has (hive_self site).
+      mac ??= board ? await connectedMac(board).catch(() => null) : null;
+      if (mac) {
+        onStep(`$ Deploying the dashboard website from the owner's Mac`);
+        const job = await onTheMac(onMac, { action: 'site', commit }, { wait: MAC_CHECK_MS }).catch(error => ({ state: 'failed', failures: error.message }));
+        if (job.state === 'deployed') live.push('the dashboard website');
+        else note(`The dashboard website didn't deploy: ${job.timedOut ? 'the Mac was still on it' : job.failures || 'no reason given'}`);
+      } else {
+        note("The dashboard website didn't deploy: no Mac is connected to deploy it from");
       }
     }
     // The task runs again only where its change is live: a board without it would answer the task as before.

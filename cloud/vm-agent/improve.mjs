@@ -10,8 +10,9 @@
 //      builds the whole Mac release: onTheMac), handing the failures back to the agent until it passes
 //      (fixBrief, at most MOST_FIXES tries);
 //   3. lands it on main, fast-forward, and puts it live where it runs (partsOf): a VM release the
-//      updater puts in at once when only what tasks start changed, the board, the Mac (hive_self
-//      install: a Mac release, put in on the owner's Mac once Hive is idle);
+//      updater puts in at once when only what tasks start changed, the board, the dashboard website
+//      (hive_self site), the Mac (hive_self install: a Mac release, put in on the owner's Mac once Hive
+//      is idle);
 //   4. runs the task again with the change (againBrief), at most MOST_ROUNDS changes a task.
 // The pure parts are here, with their tests (improve.test.mjs); the git, test and deploy steps are the
 // orchestrator's (orchestrator.mjs improveOnVm).
@@ -89,6 +90,7 @@ export function partsOf(files) {
     vm: any(/^cloud\/vm-agent\//),
     board: any(/^cloud\/(tasks|knowledge\/migrations|shared)\//),
     mac: any(/^(desktop|browser|dashboard|branding)\//),
+    site: any(/^dashboard\//),
     cloudTests: any(/^cloud\/(tasks|knowledge|shared|tests)\//),
   };
 }

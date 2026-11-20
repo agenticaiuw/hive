@@ -14,6 +14,8 @@
 //!   {action: "board", commit}    the change landed on main and touches the board: the board deployed
 //!                                from that commit (cloud/release.mjs board), with this Mac's own Cloudflare
 //!                                sign-in, for a VM that has none
+//!   {action: "site", commit}     the change landed on main and touches the dashboard: the dashboard
+//!                                website deployed from that commit (cloud/release.mjs site), the same way
 //!   {action: "status", job}      how a job stands, and the release this Mac's Hive runs now
 //!
 //! A job runs in the background (a build takes minutes; one call on the Mac is held for six at most),
@@ -193,12 +195,12 @@ impl SelfChange {
                     self.start("check", json!({ "branch": branch }))
                 }
             }
-            action @ ("install" | "board") => {
+            action @ ("install" | "board" | "site") => {
                 let commit = args["commit"].as_str().unwrap_or("").trim().to_lowercase();
                 if !valid_commit(&commit) {
                     Err(format!("{action} takes the full id of the commit on main"))
-                } else if action == "board" {
-                    self.start("board", json!({ "commit": commit }))
+                } else if action != "install" {
+                    self.start(action, json!({ "commit": commit }))
                 } else {
                     let notes: String = args["notes"].as_str().unwrap_or("").chars().take(200).collect();
                     self.start("install", json!({ "commit": commit, "notes": notes }))
@@ -211,7 +213,7 @@ impl SelfChange {
                     j
                 })
             }
-            _ => Err("hive_self takes action check, install, board or status".to_string()),
+            _ => Err("hive_self takes action check, install, board, site or status".to_string()),
         };
         match answer {
             Ok(v) => json!({ "content": [{ "type": "text", "text": v.to_string() }] }),
@@ -257,9 +259,9 @@ impl SelfChange {
         let spawned = std::thread::Builder::new().name("hive-self".into()).spawn(move || {
             let mut job = started;
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match job["action"].as_str() {
-                    Some("check") => me.run_check(&mut job),
-                    Some("board") => me.run_board(&mut job),
+                match job["action"].as_str().unwrap_or("").to_string().as_str() {
+                    "check" => me.run_check(&mut job),
+                    what @ ("board" | "site") => me.run_deploy(&mut job, what),
                     _ => me.run_install(&mut job),
                 }
             }));
@@ -426,25 +428,27 @@ impl SelfChange {
         Ok(())
     }
 
-    /// The board deployed from a commit on main, as the owner deploys it from here.
-    fn run_board(&self, job: &mut Value) -> Result<(), String> {
+    /// The board, or the dashboard website ("site"), deployed from a commit on main, as the owner deploys
+    /// it from here.
+    fn run_deploy(&self, job: &mut Value, what: &str) -> Result<(), String> {
         let commit = job["commit"].as_str().unwrap_or("").to_string();
         self.git(&["fetch", "--quiet", "origin", "main"])?;
         if self.git(&["merge-base", "--is-ancestor", &commit, "refs/remotes/origin/main"]).is_err() {
             return Err(format!("{commit} isn't on main"));
         }
-        let dir = self.worktree(job["id"].as_str().unwrap_or("board"), &commit)?;
+        let dir = self.worktree(job["id"].as_str().unwrap_or(what), &commit)?;
         let started = Instant::now();
-        let args = [self.repo.join("cloud/release.mjs").display().to_string(), "board".into(), "--from".into(), dir.display().to_string()];
+        let args = [self.repo.join("cloud/release.mjs").display().to_string(), what.into(), "--from".into(), dir.display().to_string()];
         let (ok, said) = self.run(&dir, "node", &args, STEP_LIMIT);
         self.drop_worktree(&dir);
-        self.step(job, "Deploying the board", ok, started);
+        let name = if what == "site" { "the dashboard website" } else { "the board" };
+        self.step(job, &format!("Deploying {name}"), ok, started);
         if !ok {
-            return Err(format!("the board didn't deploy:\n{}", tail(&said)));
+            return Err(format!("{name} didn't deploy:\n{}", tail(&said)));
         }
         let version = said
             .lines()
-            .find_map(|l| l.trim().strip_prefix("deployed board ").map(|v| v.trim().to_string()))
+            .find_map(|l| l.trim().strip_prefix(&format!("deployed {what} ")).map(|v| v.trim().to_string()))
             .filter(|v| !v.is_empty())
             .ok_or_else(|| format!("the deploy didn't say it deployed:\n{}", tail(&said)))?;
         job["state"] = json!("deployed");
@@ -605,12 +609,12 @@ mod tests {
         assert_eq!(status["running"], hive_tasks::node::VERSION);
         let none = me.call(&json!({ "action": "status", "job": "../../etc/passwd" }));
         assert_eq!(none["isError"], json!(true));
-        for action in ["install", "board"] {
+        for action in ["install", "board", "site"] {
             let short = me.call(&json!({ "action": action, "commit": "abc123" }));
             assert_eq!(short["isError"], json!(true), "{action} takes a full commit id");
             assert!(short["content"][0]["text"].as_str().unwrap().contains(&format!("{action} takes the full id")));
         }
         let unknown = me.call(&json!({ "action": "shell", "command": "ls" }));
-        assert!(unknown["content"][0]["text"].as_str().unwrap().contains("check, install, board or status"));
+        assert!(unknown["content"][0]["text"].as_str().unwrap().contains("check, install, board, site or status"));
     }
 }

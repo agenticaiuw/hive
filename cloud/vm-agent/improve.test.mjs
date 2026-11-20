@@ -31,10 +31,12 @@ test('a need is read once, and only with both what and why', () => {
 });
 
 test('where a change lives decides where it is tested and put live', () => {
-  assert.deepEqual(partsOf(['cloud/vm-agent/mac-mcp.mjs']), { vm: true, board: false, mac: false, cloudTests: false });
-  assert.deepEqual(partsOf(['cloud/tasks/mac.js', 'cloud/knowledge/migrations/0030_x.sql']), { vm: false, board: true, mac: false, cloudTests: true });
+  assert.deepEqual(partsOf(['cloud/vm-agent/mac-mcp.mjs']), { vm: true, board: false, mac: false, site: false, cloudTests: false });
+  assert.deepEqual(partsOf(['cloud/tasks/mac.js', 'cloud/knowledge/migrations/0030_x.sql']), { vm: false, board: true, mac: false, site: false, cloudTests: true });
   assert.equal(partsOf(['desktop/app/crates/hive/hive-app/src/cloud_brain.rs']).mac, true);
-  assert.equal(partsOf(['dashboard/src/routes/+page.svelte']).mac, true);
+  assert.equal(partsOf(['dashboard/src/routes/+page.svelte']).mac, true, "the Mac window's dashboard");
+  assert.equal(partsOf(['dashboard/src/routes/+page.svelte']).site, true, 'the dashboard website');
+  assert.equal(partsOf(['desktop/vm-post.mjs']).site, false);
   assert.equal(partsOf(['cloud/tests/board.test.mjs']).board, false, 'a board test alone deploys nothing');
   assert.equal(partsOf(['cloud/tests/board.test.mjs']).cloudTests, true);
 });
