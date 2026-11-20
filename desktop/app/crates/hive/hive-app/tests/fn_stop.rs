@@ -103,6 +103,44 @@ fn dash_puts_the_window_away_and_stops_listening_but_the_agent_keeps_working() {
 }
 
 #[test]
+fn saying_hive_brings_the_window_back_and_listens_like_fn() {
+    let (h, mac, _) = make_agent();
+    h.agent.on_overlay("hidden", Some(true)); // put away with the –
+    assert!(!h.agent.listening.get());
+    h.agent.on_wake("hive");
+    assert!(setting(FLOATING_WINDOW), "“hive” turns Show Floating Window back on");
+    assert_eq!(h.captions.of("hidden"), ["true", "false"]);
+    assert!(h.has_printed("🪟 floating window shown (“hive”)"));
+    assert!(h.agent.listening.get(), "and opens the microphone");
+    assert_eq!(h.captions.of("listening"), ["false", "true"]);
+    assert_eq!(mac.stop_count(), 0);
+}
+
+#[test]
+fn saying_bye_puts_the_window_away_and_stops_listening_but_the_agent_keeps_working() {
+    let (h, mac, phone) = make_agent();
+    h.agent.on_wake("bye");
+    assert!(!setting(FLOATING_WINDOW));
+    assert_eq!(h.captions.of("hidden"), ["true"]);
+    assert!(!h.agent.listening.get(), "a window that's gone doesn't keep listening");
+    assert_eq!(h.captions.of("listening"), ["false"]);
+    assert!(h.has_printed("🫥 floating window hidden (“bye”); Hive keeps working, and fn still opens it"));
+    assert_eq!(mac.stop_count(), 0, "the agent keeps working");
+    assert_eq!(phone.stop_count(), 0);
+    no_request(&h); // "bye" isn't a request
+}
+
+#[test]
+fn saying_bye_while_muted_still_puts_the_window_away() {
+    let (h, mac, _) = make_agent();
+    h.agent.on_overlay("muted", Some(true));
+    h.agent.on_wake("bye");
+    assert!(!setting(FLOATING_WINDOW));
+    assert!(!h.agent.listening.get());
+    assert_eq!(mac.stop_count(), 0);
+}
+
+#[test]
 fn showing_the_window_from_the_menu_leaves_the_microphone_alone() {
     let h = Harness::new();
     h.agent.on_overlay("hidden", Some(false));

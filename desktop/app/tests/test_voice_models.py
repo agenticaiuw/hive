@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(ROOT, "python"))
 import listen  # noqa: E402
 import mic  # noqa: E402
 import voiceprint  # noqa: E402
+import wake  # noqa: E402
 
 SPEECH = tempfile.mkdtemp(prefix="voice-speech-")
 EARS = None  # loading Parakeet takes a few seconds; the tests share it
@@ -115,6 +116,67 @@ def who(utterance: listen.Utterance) -> tuple[float, float]:
     values = [h.window[0] for h in utterance.kept if h.speech]
     return (sum(np.isclose(values, 0.1)) * listen.WINDOW / listen.RATE,
             sum(np.isclose(values, 0.2)) * listen.WINDOW / listen.RATE)
+
+
+class WakeTest(unittest.TestCase):
+    """The wake words, "hive" and "bye", are heard by their own model (python/wake.py), not
+    Parakeet, listening or not, muted or not (the owner, 2026-11-20: "make sure hive and bye are
+    wakewords and not using the same transcription model and it works when the mic is muted in the
+    floating window as well"). Nothing else heard while it isn't listening goes anywhere."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_ears()
+        if not wake.downloaded():
+            raise unittest.SkipTest("models/wake isn't downloaded; ./voice.sh does it")
+        cls.words = wake.WakeWords()
+
+    def setUp(self):
+        self.heard: list[tuple[str, bool]] = []
+        self.woken: list[str] = []
+        self.spoke = 0
+        EARS.on_text = lambda text, final: self.heard.append((text, final))
+        EARS.on_speech = lambda: setattr(self, "spoke", self.spoke + 1)
+        EARS.on_ignored = lambda seconds, similarity: None
+        EARS.on_wake = self.woken.append
+        EARS.deaf = lambda: False
+        EARS.voiceprint = None
+        EARS.wake = self.words
+        EARS.listen(False)  # muted, or the window put away
+        self.addCleanup(setattr, EARS, "wake", None)
+        self.addCleanup(EARS.listen, True)
+
+    def settle(self):
+        time.sleep(1.5)  # the last of it reaches the transcribing thread
+
+    def test_hive_and_bye_on_their_own_while_muted(self):
+        listen_to(speech("Hive.", "Karen"))
+        listen_to(speech("Bye.", "Daniel"))
+        wait_for(lambda: len(self.woken) == 2, "both wake words", timeout=10)
+        self.assertEqual(self.woken, ["hive", "bye"])
+        self.assertEqual((self.heard, self.spoke), ([], 0), "nothing heard while muted goes to the agent")
+
+    def test_other_words_and_talk_do_nothing_while_muted(self):
+        for said in ("Hi.", "Five.", "The hive.", "Okay.",
+                     "I was telling my friend about the hive we saw at the farm last weekend."):
+            listen_to(speech(said))
+        self.settle()
+        self.assertEqual((self.woken, self.heard, self.spoke), ([], [], 0))
+
+    def test_listening_a_wake_word_is_a_wake_word_and_not_text(self):
+        EARS.listen(True)
+        listen_to(speech("Bye.", "Daniel"))
+        wait_for(lambda: self.woken, "the wake word", timeout=10)
+        self.settle()
+        self.assertEqual(self.woken, ["bye"])
+        self.assertFalse([text for text, final in self.heard if final], "Parakeet never writes it down")
+
+    def test_listening_everything_else_is_written_down(self):
+        EARS.listen(True)
+        listen_to(speech("Open Safari and find the weather."))
+        wait_for(lambda: any(final for _, final in self.heard), "the final text")
+        self.assertEqual(self.woken, [])
+        self.assertIn("safari", " ".join(text for text, final in self.heard if final).lower())
 
 
 class EarsTest(unittest.TestCase):

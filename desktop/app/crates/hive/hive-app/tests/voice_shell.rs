@@ -296,6 +296,26 @@ fn hold_fn(h: &Harness) {
 }
 
 #[test]
+fn a_wake_word_while_holding_fn_is_just_a_word_you_dictated() {
+    let h = listening(Setup {
+        app: true,
+        ..Setup::default()
+    });
+    hold_fn(&h);
+    h.agent.woken("bye");
+    wait_for("the word in the dictation", 5.0, || {
+        h.captions.of("hearing").iter().any(|w| w.contains("Bye."))
+    });
+    h.wait_printed("@@ dictating 1");
+    h.helper_event(&[("fn", "up")]);
+    wait_for("the dictation to be typed", 5.0, || {
+        !h.host.pasted.is_empty()
+    });
+    assert_eq!(h.host.pasted.all()[0].trim(), "Bye.");
+    assert!(h.captions.of("hidden").is_empty(), "the window stays");
+}
+
+#[test]
 fn holding_fn_types_what_you_say_into_the_app_in_front() {
     let h = listening(Setup {
         app: true,

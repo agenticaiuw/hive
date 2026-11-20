@@ -35,6 +35,8 @@ pub enum Event {
     Task(Arc<dyn Task>, String, String),
     WorkspaceActivity(String, String),
     Ignored(f64, f64),
+    /// A wake word ("hive", "bye") said on its own, heard by its own model.
+    Wake(String),
     Toggle,
     Overlay(String, Option<bool>),
     TypedRequest(String),
@@ -60,6 +62,7 @@ impl Event {
             Event::Task(..) => "task",
             Event::WorkspaceActivity(..) => "workspace_activity",
             Event::Ignored(..) => "ignored",
+            Event::Wake(_) => "wake",
             Event::Toggle => "toggle",
             Event::Overlay(..) => "overlay",
             Event::TypedRequest(_) => "typed_request",
@@ -446,6 +449,11 @@ impl VoiceAgent {
         self.put(Event::Heard(text.to_owned(), final_, times));
     }
 
+    /// From the listener's thread: a wake word ("hive", "bye") said on its own, listening or not.
+    pub fn woken(&self, word: &str) {
+        self.put(Event::Wake(word.to_owned()));
+    }
+
     /// From the listener's thread: someone who isn't you talked (your voiceprint didn't match).
     pub fn ignored(&self, seconds: f64, similarity: f64) {
         self.put(Event::Ignored(seconds, similarity));
@@ -723,6 +731,7 @@ impl VoiceAgent {
                 }
             }
             Event::Ignored(seconds, similarity) => self.on_ignored(seconds, similarity),
+            Event::Wake(word) => self.on_wake(&word),
             Event::Toggle => self.set_listening(!self.listening.get()),
             Event::Overlay(kind, value) => self.on_overlay(&kind, value),
             Event::TypedRequest(text) => {
@@ -1340,6 +1349,53 @@ impl VoiceAgent {
         }
     }
 
+    /// What fn does, and saying "hive": the floating window comes up and it listens.
+    fn show_and_listen(&self, from: &str) {
+        if !util::setting(util::FLOATING_WINDOW) {
+            self.set_window(true, from); // the – hid it: fn brings it back (the owner's rule)
+        }
+        if !self.listening.get() {
+            self.set_listening(true);
+        } else {
+            // Already listening: fn still brings the card up (it may have faded or been put
+            // away with the –) and gives its entry field the keyboard.
+            self.captions.listening(true);
+            self.captions.focus(!self.agent_has_control());
+        }
+    }
+
+    /// The wake words, heard by their own model whether it's listening or muted or not (the owner,
+    /// 2026-11-20: "i need a wakeword "hive" to show the floating window and also when i say "bye"
+    /// then it's gone"): "hive" does what fn does, "bye" what the card's – does. The agent keeps
+    /// working either way.
+    pub fn on_wake(&self, word: &str) {
+        if self.dictation.lock().is_some() || self.holding() {
+            // fn is down: it's just a word you said
+            let mut said = word[..1].to_uppercase() + &word[1..];
+            said.push('.');
+            self.on_heard(&said, true, None);
+            return;
+        }
+        match word {
+            "hive" => {
+                self.log(
+                    "wake word",
+                    word,
+                    json!({"outcome": "window shown, listening"}),
+                );
+                self.out("🐝 heard “hive”");
+                self.show_and_listen("“hive”");
+            }
+            "bye" => {
+                self.log("wake word", word, json!({"outcome": "window put away"}));
+                self.out("👋 heard “bye”");
+                self.set_window(false, "“bye”");
+                self.set_listening(false);
+            }
+            _ => {}
+        }
+    }
+
     /// The saved request's state, if the Mac's task has one.
     fn save_recovery(&self, status: &str, failed: &str) {
         let Some(task) = self.task() else { return };
@@ -1396,17 +1452,7 @@ impl VoiceAgent {
                 // does), never turns listening off and never closes the window; the window's mic
                 // button mutes, its x stops.
                 self.drop_dictation();
-                if !util::setting(util::FLOATING_WINDOW) {
-                    self.set_window(true, "fn"); // the – hid it: fn brings it back (the owner's rule)
-                }
-                if !self.listening.get() {
-                    self.set_listening(true);
-                } else {
-                    // Already listening: fn still brings the card up (it may have faded or been put
-                    // away with the –) and gives its entry field the keyboard.
-                    self.captions.listening(true);
-                    self.captions.focus(!self.agent_has_control());
-                }
+                self.show_and_listen("fn");
             }
             Some("other") => {
                 // fn+arrow, fn+delete, ...: a shortcut

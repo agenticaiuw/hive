@@ -32,6 +32,7 @@ pub const ECHO: f64 = 0.3;
 type TextFn = Arc<dyn Fn(&str, bool) + Send + Sync>;
 type SpeechFn = Arc<dyn Fn() + Send + Sync>;
 type IgnoredFn = Arc<dyn Fn(f64, f64) + Send + Sync>;
+type WakeFn = Arc<dyn Fn(&str) + Send + Sync>;
 type PlayFn = Arc<dyn Fn(&str) + Send + Sync>;
 type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
 type Then = Box<dyn FnOnce() + Send>;
@@ -98,6 +99,7 @@ impl Microphone {
 struct Callbacks {
     on_text: Option<TextFn>,
     on_speech: Option<SpeechFn>,
+    on_wake: Option<WakeFn>,
     on_ignored: Option<IgnoredFn>,
     on_play: Option<PlayFn>,
 }
@@ -146,6 +148,7 @@ enum Dispatch {
         times: Option<BTreeMap<String, Instant>>,
     },
     Speech,
+    Wake(String),
     Ignored {
         seconds: f64,
         similarity: f64,
@@ -449,6 +452,13 @@ impl Ears {
         lock(&self.inner.callbacks).on_speech = Some(Arc::new(f));
     }
 
+    /// on_wake(word): a wake word, "hive" or "bye", said on its own, listening or not. Its own
+    /// model hears them (python/wake.py), never Parakeet, and the word doesn't come as text too;
+    /// while it isn't listening the microphone stays open for them alone.
+    pub fn set_on_wake(&self, f: impl Fn(&str) + Send + Sync + 'static) {
+        lock(&self.inner.callbacks).on_wake = Some(Arc::new(f));
+    }
+
     /// on_ignored(seconds, similarity): someone who isn't you talked (or its own voice: see
     /// [`Voiceprint::heard_machine`], set just before).
     pub fn set_on_ignored(&self, f: impl Fn(f64, f64) + Send + Sync + 'static) {
@@ -748,6 +758,7 @@ fn read_events(inner: Arc<Inner>, stdout: ChildStdout, tx: Sender<Dispatch>) {
                 })
             }
             "speech" => Some(Dispatch::Speech),
+            "wake" => Some(Dispatch::Wake(text_of(&field("word")))),
             "ignored" => Some(Dispatch::Ignored {
                 seconds: number("seconds"),
                 similarity: number("similarity"),
@@ -866,6 +877,12 @@ fn dispatch(inner: Arc<Inner>, rx: Receiver<Dispatch>) {
                 let on_speech = lock(&inner.callbacks).on_speech.clone();
                 if let Some(on_speech) = on_speech {
                     guarded("on_speech", || on_speech());
+                }
+            }
+            Dispatch::Wake(word) => {
+                let on_wake = lock(&inner.callbacks).on_wake.clone();
+                if let Some(on_wake) = on_wake {
+                    guarded("on_wake", || on_wake(&word));
                 }
             }
             Dispatch::Ignored {

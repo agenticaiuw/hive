@@ -122,6 +122,8 @@ pub fn wire_voice(sidecar: &hive_sidecars::VoiceSidecar, agent: &Arc<VoiceAgent>
     ears.set_on_text(move |text, final_| on_text(&|a| a.heard(text, final_)));
     let on_speech = with.clone();
     ears.set_on_speech(move || on_speech(&|a| a.cut_in()));
+    let on_wake = with.clone();
+    ears.set_on_wake(move |word| on_wake(&|a| a.woken(word)));
     let on_ignored = with.clone();
     ears.set_on_ignored(move |seconds, similarity| on_ignored(&|a| a.ignored(seconds, similarity)));
     if let Some(voice) = sidecar.voice() {

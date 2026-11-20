@@ -79,6 +79,7 @@ class FakeEars:
     def __init__(self, on_text, deaf=lambda: False, voiceprint=None, listening=True):
         self.on_text, self.deaf, self.voiceprint, self.listening = on_text, deaf, voiceprint, listening
         self.on_speech = lambda: None
+        self.on_wake = lambda word: None
         self.on_ignored = lambda seconds, similarity: None
         self.model, self.error = "fake", os.environ.get("FAKE_EARS_ERROR") or None
         self.mic_level = 0.0
@@ -143,6 +144,8 @@ class FakeServer(sidecar_voice.Server):
         ears = self.ears
         if message.get("speech"):
             ears.on_speech()
+        if message.get("wake"):  # a wake word said on its own: {"wake": "hive"}
+            ears.on_wake(message["wake"])
         if "hear" in message:
             ears.hear(message["hear"], bool(message.get("final")))
         if "ignored" in message:

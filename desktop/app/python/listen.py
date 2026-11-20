@@ -67,6 +67,7 @@ DEFAULT_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
 FINAL_MODEL = "mlx-community/Qwen3-ASR-1.7B-8bit"  # what --download-final gets
 VOCABULARY = ["Codex", "Claude", "ChatGPT", "Kokoro", "Parakeet", "Superwhisper", "iPhone", "macOS",
               "PowerPoint", "Safari", "Finder"]  # words the final model is told you may say
+WAKE_LONGEST = 2.0  # seconds of speech: anything longer is talk, not a wake word, and isn't checked for one
 VAD_MODEL = os.path.join(ROOT, "models", "silero_vad.onnx")
 VAD_URL = "https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 
@@ -130,6 +131,7 @@ class Utterance:
         self.similarity = 1.0
         self.others = 0  # phrases left out
         self.ignored: list[tuple[float, float]] = []  # theirs, to report: (seconds of speech, similarity)
+        self.for_wake = False  # begun while not listening: only the wake word counts (Ears)
         for heard in start:
             self.add(heard)
 
@@ -274,6 +276,12 @@ class Ears:
     you're saying without stopping, and calls then() once its words have gone to on_text, so
     what comes after can go somewhere else (dictation).
 
+    wake (python/wake.py's WakeWords, a model of its own) hears the wake words, "hive" and "bye":
+    with it the microphone stays open while it isn't listening too (muted). Everything said that's
+    no longer than WAKE_LONGEST goes to it first, listening or not; a wake word goes to
+    on_wake(word) and never to Parakeet. Anything else said while it isn't listening goes nowhere
+    (no on_text, no on_speech, no words as you go).
+
     With a voiceprint (python/voiceprint.py) you've enrolled, other voices are left out, phrase
     by phrase (Utterance): nothing shows or is written down until it's sure it's you, and each
     bit of someone else is passed to on_ignored(seconds, similarity) instead.
@@ -281,9 +289,11 @@ class Ears:
     Parakeet altogether (enrolling only needs the audio)."""
 
     def __init__(self, on_text, mic: bool = True, deaf=lambda: False, voiceprint=None, words: bool = True,
-                 listening: bool = True):
+                 listening: bool = True, wake=None):
         self.on_text = on_text
         self.listening = listening
+        self.wake = wake  # WakeWords: the microphone stays open for them while it isn't listening
+        self.on_wake = lambda word: None
         self.on_speech = lambda: None
         self.on_ignored = lambda seconds, similarity: None
         self.on_utterance = None
@@ -316,7 +326,7 @@ class Ears:
         else:
             self._ready.set()
         threading.Thread(target=self._segmenter, daemon=True).start()
-        self.microphone = Microphone(self.feed, active=listening) if mic else None  # last: it starts feeding at once
+        self.microphone = Microphone(self.feed, active=listening or wake is not None) if mic else None  # last: it starts feeding at once
 
     # -- for the voice agent --
 
@@ -348,7 +358,7 @@ class Ears:
         if not on:
             self.cut()
         if self.microphone:
-            self.microphone.set_active(on)
+            self.microphone.set_active(on or self.wake is not None)
 
     def cut(self, then=None):
         """What you're saying ends here, after what's already been heard, as if you'd paused.
@@ -357,7 +367,7 @@ class Ears:
 
     def feed(self, block: np.ndarray, playing: bool = False):
         """playing: the Mac was playing something, so what's left of its echo may sound like speech."""
-        if self.listening:
+        if self.listening or self.wake is not None:
             self._blocks.put((block, playing))
 
     def _gate(self) -> float:
@@ -445,14 +455,16 @@ class Ears:
                     start[:-run] = [h._replace(speech=False) for h in start[:-run]]  # only the run is speech yet
                     with self._lock:
                         utterance = Utterance(start, self._judge if self._checks_voices() else None)
+                        utterance.for_wake = not self.listening  # heard only for the wake words
                         self._capture, self._live_text = utterance.kept, ""
                 else:
                     with self._lock:
                         utterance.add(heard)
-                while utterance.ignored:
-                    self.on_ignored(*utterance.ignored.pop(0))
-                self.talking = utterance.talking
-                if not announced and utterance.speech * WINDOW / RATE >= MIN_SPEECH:
+                self._report_ignored(utterance)
+                self.talking = utterance.talking and not utterance.for_wake  # muted: Hive's voice doesn't wait for you
+                if not announced and utterance.for_wake:
+                    announced = utterance.speech * WINDOW / RATE >= MIN_SPEECH  # no words as you go, no cut-in
+                elif not announced and utterance.speech * WINDOW / RATE >= MIN_SPEECH:
                     announced = True
                     with self._lock:
                         self._you = True
@@ -469,10 +481,16 @@ class Ears:
                 self._wrap_up(done)
             self._wake.set()
 
+    def _report_ignored(self, utterance: Utterance):
+        """Someone else's phrases go to on_ignored, except while it only waits for the wake words."""
+        while utterance.ignored:
+            seconds, similarity = utterance.ignored.pop(0)
+            if not utterance.for_wake:
+                self.on_ignored(seconds, similarity)
+
     def _close(self, utterance: Utterance, cut: bool = False):
         utterance.end(cut)
-        while utterance.ignored:
-            self.on_ignored(*utterance.ignored.pop(0))
+        self._report_ignored(utterance)
         with self._lock:
             self._capture, self._you = None, False
         self.talking = False
@@ -483,20 +501,43 @@ class Ears:
         said = done.speech * WINDOW / RATE
         if said < MIN_SPEECH:
             return
+        short = self.wake is not None and said <= WAKE_LONGEST
+        if done.for_wake and not short:
+            return  # talk, not a wake word: not read, not kept
         if done.judge:  # all of it together decides too, not just each phrase
             matched, similarity = self._judge(done.your_speech(MOST_CHECKED))
             if not matched:
-                self.on_ignored(said, similarity)
+                if not done.for_wake:
+                    self.on_ignored(said, similarity)
                 return
         self._levels.extend(done.levels)
         samples = done.samples
         if cut:
             samples = np.concatenate([samples, np.zeros(int(LEAD_IN * RATE), np.float32)])
+        if short and self._woke(samples):
+            return
+        if done.for_wake:
+            return  # muted: what isn't a wake word goes nowhere
         if self.on_utterance:
             self.on_utterance(samples)
         if self.words:
             now = time.monotonic()
             self._finished.put((samples, {"stopped": now - done.quiet * WINDOW / RATE, "decided": now}))
+
+    def _woke(self, samples: np.ndarray) -> bool:
+        """Was it a wake word? It goes to on_wake(word), after what was said before it."""
+        try:
+            word = self.wake.heard(samples)
+        except Exception as e:  # never in the way of what you're saying
+            print(f"   ✗ wake words: {e}", flush=True)
+            return False
+        if not word:
+            return False
+        if self.words:
+            self._finished.put(("wake", word))  # in order, on the transcribing thread
+        else:
+            self.on_wake(word)
+        return True
 
     # -- the worker thread: Parakeet --
 
@@ -583,6 +624,8 @@ class Ears:
                 finished = self._finished.get()
                 if callable(finished):
                     finished()  # cut()'s then
+                elif isinstance(finished[0], str):  # ("wake", word): it isn't written down
+                    self.on_wake(finished[1])
                 else:
                     samples, times = finished
                     text = self._read_final(samples)
