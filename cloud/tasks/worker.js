@@ -11,13 +11,14 @@
 // through here (/v1/mac/, mac.js). Each node says what code it runs on every call, and gets the newest
 // release for it to update to (/v1/nodes, /v1/releases, nodes.js). The owner's iPhone is reached here
 // too: Hive Phone on it keeps a WebSocket open to the board, and agents' calls go down it (/v1/phone/,
-// phone.js).
+// phone.js). Hive's agents message each other and lease files here (/v1/team/, team.js).
 
 import { browserRoute } from "./browser.js";
 import { knowledgeRoute } from "./knowledge.js";
 import { macRoute } from "./mac.js";
 import { nodeList, nodeOf, nodesRoute, sawNode, tooOld, versionHeaders } from "./nodes.js";
 import { phoneAllowed, phoneRoute, rememberOrigin } from "./phone.js";
+import { teamRoute } from "./team.js";
 
 // Hive Phone's relay: one Durable Object per phone (wrangler.jsonc PHONE).
 export { PhoneRelay } from "./phone.js";
@@ -104,6 +105,7 @@ async function route(request, env, url) {
       if (url.pathname.startsWith("/v1/browser/")) return await browserRoute(request, env, url, { machineAllowed, extensionAllowed });
       if (url.pathname.startsWith("/v1/knowledge/")) return await knowledgeRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/mac/")) return await macRoute(request, env, url, { machineAllowed });
+      if (url.pathname.startsWith("/v1/team/")) return await teamRoute(request, env, url, { machineAllowed });
       if (url.pathname.startsWith("/v1/nodes") || url.pathname.startsWith("/v1/releases")) return await nodesRoute(request, env, url, { machineAllowed, anyoneAllowed });
       if (url.pathname.startsWith("/v1/phone/")) return await phoneRoute(request, env, url, { machineAllowed, allowed });
       if (url.pathname === "/") return await page(request, env);

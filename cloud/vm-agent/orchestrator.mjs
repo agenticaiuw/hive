@@ -34,8 +34,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES, MOST_ROUNDS, onTheMac,
-  partsOf, readNeed, SELF_GUIDE,
+  againBrief, askedBrief, blockers, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES,
+  MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed, SELF_GUIDE,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
 import { nodeHeaders } from './version.mjs';
@@ -634,6 +634,7 @@ async function handleWork(request, deps, signal) {
     } finally {
       deps.labels?.delete(label);
       deps.release?.(label); // its turns at the devices, even if a tool server outlived it
+      await board('/v1/team/release', { agent: label }).catch(() => {}); // and its leases on files
     }
     await steps.done(signal.aborted ? 'stopped' : result.ok ? 'done' : 'failed');
     const files = result.files ?? [];
@@ -963,14 +964,21 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
   });
   let mac;
   const onMac = (name, args) => callMac(board, mac, name, args, { request });
+  // Other agents changing Hive at the same time (the board's /v1/team/): the code agent hears which files
+  // they hold, this change leases the files it touches, and it lands only once the agents that leased
+  // them first let go (improve.mjs blockers). The task's end lets go of its leases (handleWork).
+  const team = board && label ? board : null;
+  const claims = async paths => (team ? (await team(`/v1/team/claims${paths ? `?paths=${encodeURIComponent(paths.join(','))}` : ''}`).catch(() => ({}))).leases ?? [] : []);
   try {
-    let result = await agent(`${SELF_GUIDE}\n\n${asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report })}`);
+    const held = othersHold(await claims(), label);
+    let result = await agent([SELF_GUIDE, asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report }), held].filter(Boolean).join('\n\n'));
     let files = [];
     for (let tries = 1; ; tries++) {
       if (signal?.aborted) return end(false, 'Stopped by the owner before the change landed.');
       if (!result.ok) return end(false, `The code agent stopped before it finished: ${outcomeOf(result.report, 'no report')}`);
       files = await changed();
       if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
+      await team?.('/v1/team/claim', { agent: label, paths: files, note: need.what.slice(0, 120), minutes: 240 }).catch(() => {});
       onStep(`$ Testing Hive's change (${files.length} file${files.length === 1 ? '' : 's'})`);
       const gate = await gateOnVm(dir, files, tmp);
       let failures = gate.failures;
@@ -1004,6 +1012,19 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       result = await agent(fixBrief(failures));
     }
     const parts = partsOf(files);
+    // Not while an agent that leased one of these files first still holds it.
+    for (let until = Date.now() + MOST_LEASE_WAIT_MS, said = ''; team;) {
+      const waiting = blockers(await claims(files), label);
+      if (!waiting.length) break;
+      const who = [...new Set(waiting.map(l => `${l.agent} (${l.path})`))].join(', ');
+      if (signal?.aborted || Date.now() > until) {
+        await pushBranch().catch(() => {});
+        return end(false, signal?.aborted ? 'Stopped by the owner before the change landed.'
+          : `The change passed its tests but didn't land: ${who} still held its files after ${MOST_LEASE_WAIT_MS / 60_000} minutes. It's on branch ${branch}.`);
+      }
+      if (who !== said) onStep(`$ Waiting to land until ${(said = who)} lets go`);
+      await new Promise(resolve => setTimeout(resolve, 30_000));
+    }
     // Onto main as it is now: rebased, tested again if main moved, then a fast-forward push.
     const commit = await inRepo(repo, async () => {
       if (!committed) await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
