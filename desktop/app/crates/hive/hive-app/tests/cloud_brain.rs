@@ -58,6 +58,7 @@ struct FakeTools {
     calls: Mutex<Vec<(String, Value, String)>>,
     words: Mutex<String>,
     took_over: Mutex<usize>,
+    new_tasks: Mutex<usize>,
 }
 
 impl ToolNamespace for FakeTools {
@@ -87,6 +88,9 @@ impl ToolNamespace for FakeTools {
     }
     fn took_over(&self) {
         *lock(&self.took_over) += 1;
+    }
+    fn new_task(&self) {
+        *lock(&self.new_tasks) += 1;
     }
 }
 
@@ -178,6 +182,26 @@ fn a_one_way_step_is_said_only_when_the_tools_took_it_and_a_failure_comes_back_a
     );
     // A call for a request this Mac doesn't follow (asked from the phone) runs all the same.
     assert_eq!(lock(&tools.calls).len(), 3);
+}
+
+#[test]
+fn each_new_request_starts_the_macs_tools_fresh_so_an_old_takeover_doesnt_block_it() {
+    // The owner's words: "i'm not using my keyboard, why does hive says keyboard is currently in use".
+    // The tools outlive requests; the helper keeps the last takeover's reason ("keyboard") until it
+    // engages again, so a new request must not inherit it.
+    let board = FakeBoard::new(|_, _, _| Ok(json!({"ok": true})));
+    let tools = Arc::new(FakeTools::default());
+    let mac = peer(board, tools.clone());
+    let call = |id: i64, request: i64| {
+        mac.run(&json!({"id": id, "name": "screenshot", "arguments": {}, "request": request}));
+    };
+    call(1, 20);
+    call(2, 20);
+    assert_eq!(*lock(&tools.new_tasks), 1, "one request, one task");
+    call(3, 21);
+    assert_eq!(*lock(&tools.new_tasks), 2, "the next request starts fresh");
+    mac.run(&json!({"id": 4, "name": "screenshot", "arguments": {}}));
+    assert_eq!(*lock(&tools.new_tasks), 2, "a call for no request changes nothing");
 }
 
 #[test]

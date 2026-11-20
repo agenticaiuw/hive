@@ -382,6 +382,19 @@ fn actions_after_a_takeover_carry_on_without_the_screen() {
 }
 
 #[test]
+fn a_new_task_isnt_blocked_by_a_takeover_from_the_last_one() {
+    let s = setup(true);
+    assert_eq!(s.tools.take().unwrap(), None); // the last task had the mouse and keyboard
+    s.helper.raw("human keyboard"); // and the owner took them
+    assert_eq!(s.tools.take().unwrap().as_deref(), Some("keyboard"));
+    // The owner asks for something new: its first screen step asks the helper again instead of
+    // saying the keyboard is in use.
+    s.tools.new_task();
+    assert_eq!(s.tools.take().unwrap(), None);
+    assert!(s.helper.raw("status").contains("state=engaged"));
+}
+
+#[test]
 fn trackpad_takeover_clears_the_agents_hold() {
     let s = setup(true);
     assert_eq!(s.tools.take().unwrap(), None);
