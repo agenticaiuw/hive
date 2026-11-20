@@ -14,6 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { nodeHeaders } from './version.mjs';
 
 export const OFFLINE = "The owner's browser isn't reachable: this VM doesn't have the board's key "
   + '(/root/.config/hive/tasks.json), so the browser tools are unavailable.';
@@ -116,7 +117,7 @@ export function boardConfig(env = process.env) {
   if (typeof config.url !== 'string' || !/^https?:\/\//.test(config.url) || !config.token) {
     throw new Error('the board config has no url or token');
   }
-  return { url: config.url.replace(/\/+$/, ''), token: String(config.token) };
+  return { url: config.url.replace(/\/+$/, ''), token: String(config.token), machine: config.machine || 'vm' };
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -135,7 +136,8 @@ export class Browser {
     try {
       response = await this.fetch(this.config.url + path, {
         method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout((WAIT_S + 15) * 1000),
-        headers: { authorization: `Bearer ${this.config.token}`, 'content-type': 'application/json', 'user-agent': 'hive-vm-browser' },
+        headers: { authorization: `Bearer ${this.config.token}`, 'content-type': 'application/json', 'user-agent': 'hive-vm-browser',
+          ...nodeHeaders(this.config.machine || 'vm') },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (error) {

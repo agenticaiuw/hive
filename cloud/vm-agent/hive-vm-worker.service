@@ -1,0 +1,16 @@
+# The posting worker (server.mjs) on its own virtual display, so an update can restart it when its
+# code changes (updater.mjs) and it comes back after a reboot.
+[Unit]
+Description=Hive VM posting worker (server.mjs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+Environment=HOME=/home/ubuntu
+ExecStart=/bin/sh /home/ubuntu/hive-vm-agent/app/run-worker.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

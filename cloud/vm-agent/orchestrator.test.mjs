@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MODELS, branchOf, handle, limitsRow, outcomeOf, parsePlan, pick, readEvents, runSender, scopeOf, taskBrief } from './orchestrator.mjs';
+import { MODELS, Slots, branchOf, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
 
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
@@ -20,7 +20,7 @@ test("the planner's answer is read as checked JSON, prose around it or not", () 
   assert.equal(plan.tasks.length, 2);
   assert.deepEqual(plan.tasks[0], {
     title: 'Check the board', quote: 'check the board', brief: 'Open it.', folder: 'hive   Task board',
-    kind: 'screen', difficulty: 'easy', minutes: 5, value: 'high',
+    kind: 'screen', difficulty: 'easy', minutes: 5, value: 'high', needs: [],
   });
   assert.equal(plan.tasks[1].kind, 'screen');
   assert.equal(plan.tasks[1].difficulty, 'normal');
@@ -41,6 +41,7 @@ test("a subagent gets its task, the owner's words and every memory of its folder
   );
   assert.match(brief, /^Check the socket answers\./);
   assert.match(brief, /The owner's words: "check the dictation socket"/);
+  assert.match(brief, /The whole message this came from, word for word[^\n]*\nFor hive › Voice: check the dictation socket/);
   assert.match(brief, /What the folder is for: Speech in and out/);
   assert.match(brief, /all 2, in full/);
   assert.match(brief, /### Socket \(spec\)\nOne JSON line in, one out\./);
@@ -175,7 +176,9 @@ test('a code task in a repository the VM can push to runs there and waits for re
   });
   assert.equal(coded.length, 1);
   assert.deepEqual(coded[0].choice, { rating: 'hard', ...MODELS.hard });
-  assert.deepEqual(coded[0].where, { project: 'hive', branch: 'hive/r7-1-fix-the-reader', title: 'Fix the reader!', request: 7, key: 1 });
+  const { signal, ...where } = coded[0].where;
+  assert.deepEqual(where, { project: 'hive', branch: 'hive/r7-1-fix-the-reader', title: 'Fix the reader!', request: 7, key: 1, label: 'R7-1' });
+  assert.equal(signal.aborted, false, 'the owner stopping the request stops its agent');
   assert.match(coded[0].brief, /- Never push to main \(the owner said: "no main"\)/);
   const updates = calls.filter(c => c.path === '/v1/requests/update').map(c => c.body);
   const task = updates.flatMap(u => u.tasks ?? []).at(-1);
@@ -296,4 +299,206 @@ test("a task's run is on the board, working, before its agent says anything", as
   await steps.done('done');
   assert.equal(posts.length, 2);
   assert.equal(posts[1].body.status, 'done');
+});
+
+// The owner (2026-11-17): "why did this task on browser failed and also the previous task when i asked it to make it
+// remain dark mode as i make the doc full screen on canvas?" Both came back "the rule changes nothing".
+test('a page request sees the rules already on for the site, so a follow-up adds to the one it means', async () => {
+  const { handle, pagePrompt } = await import('./orchestrator.mjs');
+  const dark = { id: 7, host: 'canvas.wisc.edu', path: '', title: 'Dark document previews', rule: { hide: [], keep: [], css: '#doc_preview { filter: invert(1) hue-rotate(180deg); }' } };
+  const prompt = pagePrompt({ text: 'Make sure it works when I put the file in full screen as well.' }, { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Lab 5', outline: 'div#doc_preview' }, [dark]);
+  assert.match(prompt, /rule 7, "Dark document previews", path "" \(every page\): .*#doc_preview \{ filter: invert/);
+  assert.match(prompt, /write the whole rule: what it already does plus the change/);
+  assert.match(prompt, /:fullscreen and\n?:-webkit-full-screen/);
+
+  const calls = [];
+  const board = async (path, body) => {
+    calls.push([path, body]);
+    if (path.startsWith('/v1/page-rules?host=')) return { rules: [dark] };
+    return path === '/v1/page-rules' ? { id: 8 } : {};
+  };
+  const css = '#doc_preview { filter: invert(1) hue-rotate(180deg); } #doc_preview iframe:fullscreen { filter: invert(1) hue-rotate(180deg); }';
+  await handle({ id: 17, text: 'Make sure it works when I put the file in full screen as well.', page: { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Lab 5', outline: 'div#doc_preview' } },
+    { board, ask: async p => (assert.match(p, /rule 7/), JSON.stringify({ title: 'Dark documents, in full screen too', path: '', css })) });
+  assert.ok(calls.some(([p]) => p === '/v1/page-rules?host=canvas.wisc.edu'));
+  assert.equal(calls.find(([p]) => p === '/v1/page-rules')[1].rule.css, css);
+});
+
+test('an answer that changes nothing is asked once more, and one that cannot says exactly why', async () => {
+  const { handle } = await import('./orchestrator.mjs');
+  const page = { url: 'https://www.youtube.com/feed/subscriptions', title: 'Subscriptions', outline: 'ytd-browse#browse' };
+  let asked = 0;
+  const run = async answers => {
+    const calls = [];
+    const board = async (path, body) => { calls.push([path, body]); return path === '/v1/page-rules' ? { id: 9 } : { rules: [] }; };
+    asked = 0;
+    await handle({ id: 19, text: 'remove these shorts from my subscriptions page', page }, { board, ask: async prompt => answers[asked++](prompt) });
+    return calls.filter(([p]) => p === '/v1/requests/update').at(-1)[1];
+  };
+  const fixed = await run([
+    () => '{"title":"Hide Shorts","hide":[],"keep":[],"css":""}',
+    prompt => (assert.match(prompt, /refused \(the rule changes nothing\)/), '{"title":"Hide Shorts","path":"/feed/subscriptions","hide":["ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])"]}'),
+  ]);
+  assert.equal(asked, 2);
+  assert.equal(fixed.status, 'done');
+  assert.match(fixed.outcome, /^Hide Shorts: on youtube\.com\/feed\/subscriptions from now on \(page rule 9\)\.$/);
+
+  const cannot = await run([() => '{"cannot": "The video player draws inside a frame from another site, which a page rule can\'t reach."}']);
+  assert.equal(asked, 1);
+  assert.equal(cannot.status, 'failed');
+  assert.equal(cannot.outcome, "Couldn't change the page: The video player draws inside a frame from another site, which a page rule can't reach.");
+});
+
+test('a page ask can send the page on and add a link, with a rule per path (YouTube: Subscriptions, Watch later)', async () => {
+  const { handle, parsePageRule } = await import('./orchestrator.mjs');
+  assert.throws(() => parsePageRule('{"title":"x","go":"/feed/subscriptions"}'), /needs the path/);
+  assert.throws(() => parsePageRule('{"rules":[{"path":"/","css":"a{}"},{"path":"/","hide":["b"]}]}'), /same path/);
+  const saves = [];
+  let id = 20;
+  const board = async (path, body) => {
+    if (path === '/v1/page-rules') { saves.push(body); return { id: ++id }; }
+    if (path.startsWith('/v1/page-rules?')) return { rules: [] };
+    return {};
+  };
+  const ask = async () => JSON.stringify({ rules: [
+    { title: 'Sidebar: no Home, Watch later', path: '', hide: ['ytd-mini-guide-entry-renderer:has(a[href="/"])'],
+      add: [{ after: 'ytd-mini-guide-entry-renderer:has(a[href="/feed/subscriptions"])', text: 'Watch later', href: '/playlist?list=WL', onclick: 'x' }],
+      css: 'a.hive-added { display: block }' },
+    { title: 'Open on Subscriptions', path: '/', go: '/feed/subscriptions' },
+  ] });
+  const updates = [];
+  const wrapped = async (path, body) => { if (path === '/v1/requests/update') updates.push(body); return board(path, body); };
+  await handle({ id: 30, text: 'open on subscriptions, no home, watch later under subscriptions', page: { url: 'https://www.youtube.com/', title: 'YouTube', outline: '' } },
+    { board: wrapped, ask, plan: () => { throw new Error('no plan for a page'); } });
+  assert.equal(saves.length, 2);
+  assert.deepEqual(saves[0].rule.add, [{ after: 'ytd-mini-guide-entry-renderer:has(a[href="/feed/subscriptions"])', text: 'Watch later', href: '/playlist?list=WL' }]);
+  assert.equal(saves[0].path, '');
+  assert.equal(saves[1].rule.go, '/feed/subscriptions');
+  assert.equal(saves[1].path, '/');
+  assert.equal(updates.at(-1).status, 'done');
+  assert.match(updates.at(-1).outcome, /Sidebar: no Home, Watch later: on youtube\.com \(every page\) from now on \(page rule 21\)\. Open on Subscriptions: on youtube\.com\/ from now on \(page rule 22\)\./);
+});
+
+test("a task's needs are earlier tasks only, renumbered when the planner's empty ones are dropped", () => {
+  const plan = parsePlan(JSON.stringify({ tasks: [
+    { title: 'Find the form', quote: 'find it' },
+    { title: '', quote: '' },
+    { title: 'Fill it in', quote: 'fill it', needs: [1, 3, 4, 'x'] },
+    { title: 'Tell me', quote: 'tell me', needs: [3, 1, 3] },
+    { title: 'Look something up', quote: 'look', needs: 'none' },
+  ] }));
+  assert.deepEqual(plan.tasks.map(t => [t.title, t.needs]), [
+    ['Find the form', []], ['Fill it in', [1]], ['Tell me', [1, 2]], ['Look something up', []],
+  ]);
+});
+
+const gate = () => { let open; const shut = new Promise(resolve => { open = resolve; }); return { shut, open }; };
+const pause = () => new Promise(resolve => setImmediate(resolve));
+
+test("tasks that need nothing run at once, a task that needs another starts when it's done, and one whose need failed never starts", async () => {
+  const { board, calls } = fakeBoard();
+  const gates = { 'Find the form': gate(), 'Look up the deadline': gate(), 'Check the price': gate() };
+  const started = [];
+  const going = handle({ id: 40, text: 'x' }, {
+    board,
+    stepEvery: 1,
+    labels: new Map(),
+    plan: async () => JSON.stringify({ tasks: [
+      { title: 'Find the form', quote: 'a', kind: 'screen' },
+      { title: 'Look up the deadline', quote: 'b', kind: 'answer' },
+      { title: 'Fill it in', quote: 'c', kind: 'screen', needs: [1] },
+      { title: 'Check the price', quote: 'd', kind: 'answer' },
+      { title: 'Email me the total', quote: 'e', kind: 'answer', needs: [3, 4] },
+    ] }),
+    run: async (brief, choice, step, { label, title }) => {
+      started.push([title, label]);
+      if (title === 'Fill it in') return { ok: false, report: 'The form was closed.', seconds: 1 };
+      await gates[title].shut;
+      return { ok: true, report: `${title}: done.`, seconds: 1 };
+    },
+  });
+  await pause(); await pause(); await pause();
+  assert.deepEqual(started.map(([t]) => t), ['Find the form', 'Look up the deadline', 'Check the price']);
+  assert.deepEqual(started[0], ['Find the form', labelOf(40, 1)]);
+  gates['Look up the deadline'].open();
+  gates['Check the price'].open();
+  await pause(); await pause();
+  assert.equal(started.length, 3, 'Fill it in waits for Find the form');
+  gates['Find the form'].open();
+  await going;
+  assert.deepEqual(started.map(([t]) => t), ['Find the form', 'Look up the deadline', 'Check the price', 'Fill it in']);
+  const last = key => calls.filter(c => c.path === '/v1/requests/update').flatMap(c => c.body.tasks ?? []).filter(t => t.key === key).at(-1);
+  assert.equal(last(3).status, 'blocked');
+  assert.equal(last(5).status, 'blocked');
+  assert.equal(last(5).outcome, 'Not started: it needs «Fill it in» first, which stopped before it finished.');
+  assert.equal(calls.filter(c => c.path === '/v1/requests/update').at(-1).body.outcome,
+    '3 of 5 done; Fill it in (blocked), Email me the total (blocked).');
+});
+
+test('the owner stopping a request stops its running agents, and its tasks not started yet never start', async () => {
+  const { board: base, calls } = fakeBoard();
+  let stopAt = null;
+  const board = async (path, body) => (path === '/v1/requests/state?id=41' ? { request: { id: 41, stop_at: stopAt } } : base(path, body));
+  const started = [];
+  const going = handle({ id: 41, text: 'x', from: 'mac' }, {
+    board, stepEvery: 1, stopEvery: 2,
+    plan: async () => JSON.stringify({ tasks: [
+      { title: 'Open Notes on the Mac', quote: 'a', kind: 'mac' },
+      { title: 'Write the list', quote: 'b', kind: 'mac', needs: [1] },
+    ] }),
+    run: (brief, choice, step, { title, signal }) => {
+      started.push(title);
+      return new Promise(resolve => signal.addEventListener('abort', () => resolve({ ok: false, report: 'Stopped (SIGTERM)', seconds: 1 })));
+    },
+  });
+  await pause(); await pause();
+  assert.deepEqual(started, ['Open Notes on the Mac']);
+  stopAt = 1234;
+  await going;
+  assert.deepEqual(started, ['Open Notes on the Mac'], 'the second never starts');
+  const updates = calls.filter(c => c.path === '/v1/requests/update');
+  const last = key => updates.flatMap(c => c.body.tasks ?? []).filter(t => t.key === key).at(-1);
+  assert.deepEqual([last(1).status, last(1).outcome], ['dropped', 'Stopped by the owner.']);
+  assert.deepEqual([last(2).status, last(2).outcome], ['dropped', 'Stopped by the owner.']);
+  assert.deepEqual([updates.at(-1).body.status, updates.at(-1).body.outcome], ['failed', 'Stopped by the owner.']);
+  const run = calls.filter(c => c.path === '/v1/runs').at(-1).body;
+  assert.equal(run.status, 'stopped');
+});
+
+test('no more tasks work at once than the slots allow, across requests, first come first served', async () => {
+  const slots = new Slots(2);
+  let working = 0;
+  let most = 0;
+  const order = [];
+  const job = name => slots.with(async () => {
+    working += 1; most = Math.max(most, working); order.push(name);
+    await pause(); await pause();
+    working -= 1;
+  });
+  await Promise.all(['a', 'b', 'c', 'd', 'e'].map(job));
+  assert.equal(most, 2);
+  assert.deepEqual(order, ['a', 'b', 'c', 'd', 'e']);
+  await assert.rejects(slots.with(async () => { throw new Error('boom'); }), /boom/);
+  assert.equal(slots.used, 0, 'a task that throws gives its slot back');
+});
+
+test("a task waiting for the screen or the phone says for whom, in its own run", () => {
+  const said = [];
+  const labels = new Map([
+    ['R40-1', { title: 'Find the form', step: line => said.push(['R40-1', line]) }],
+    ['R41-2', { title: 'Book the room', step: line => said.push(['R41-2', line]) }],
+  ]);
+  const show = (label, message) => { const s = turnStep(labels, label, message); if (s) s.task.step(s.text); };
+  show('R41-2', { op: 'queued', device: 'screen', holder: 'R40-1', ahead: 0 });
+  show('R41-2', { op: 'queued', device: 'phone', holder: 'R40-1 closing', ahead: 2 });
+  show('R41-2', { op: 'granted', device: 'screen', waited_ms: 42_400 });
+  show('R40-1', { op: 'granted', device: 'phone', waited_ms: 0 });
+  show('R40-1', { op: 'revoked', device: 'phone' });
+  show('by hand', { op: 'queued', device: 'screen', holder: 'R40-1' });
+  assert.deepEqual(said, [
+    ['R41-2', "⏳ Waiting for the VM's screen: «Find the form» is using it."],
+    ['R41-2', "⏳ Waiting for the owner's iPhone: «Find the form» is using it (2 more ahead of this one)."],
+    ['R41-2', "Got the VM's screen after 42 s."],
+    ['R40-1', "Gave the owner's iPhone to the task waiting for it; this one waits in line for its next call."],
+  ]);
 });

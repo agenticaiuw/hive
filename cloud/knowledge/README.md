@@ -9,8 +9,10 @@ top-level README, "Design principles", and `desktop/app/README.md`, "Knowledge b
   `cf d1 migrations apply <database id> --dir cloud/knowledge/migrations`.
 - Add a numbered migration for any schema change; never edit an applied one.
 
-Today only the desktop agent reaches it, through the signed-in Cloudflare CLI. The phone and VM
-agents will need an HTTP route to it in `cloud/worker`.
+The desktop agent reaches it through the signed-in Cloudflare CLI. Every other node reaches it
+through the board: `POST /v1/knowledge/lookup` and `POST /v1/knowledge/save` (`cloud/tasks/knowledge.js`,
+with the machines' token), which keep the desktop agent's rules. Hive's agent on the VM, and the
+phone tasks it runs, use them through `cloud/vm-agent/knowledge-mcp.mjs`.
 
 This is separate from the `product_memory_*` tables in `cloud/worker/schema.sql`, which belong to
 the record synchronization prototype and are not wired to live nodes.

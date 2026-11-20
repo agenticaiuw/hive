@@ -4,20 +4,31 @@
 // connection open to). Nothing here goes through the Mac: Hive's cloud agent reaches the phone on its
 // own, so "Hey Siri, ask Hive…" from across the room works with the Mac asleep or locked.
 //
-// The relay's address and key are <state>/phone-relay.json ({"url", "token"}, mode 600), read when
-// needed and never printed. Unlocking is the relay's own: it keeps the passcode sealed and types it at
-// the phone's passcode keypad itself (POST /agent/unlock-now), so the passcode never reaches this
-// process or the model. When the file isn't there it still answers, with no tools and a note saying
-// so, so the task can say why it can't use the phone instead of failing to start.
+// The relay is the board's own (cloud/tasks/phone.js, /v1/phone): Hive Phone (mobile/relay) on the
+// iPhone keeps a WebSocket open to it, and this reaches it with the board's address and key, the ones
+// every tool here uses (/root/.config/hive/tasks.json). A phone still on a relay of its own is reached
+// there instead: <state>/phone-relay.json ({"url", "token"}, mode 600). Either is read when needed and
+// never printed. Unlocking is the relay's: it keeps the passcode sealed and types it at the phone's
+// passcode screen itself (POST …/agent/unlock-now), so the passcode never reaches this process or the
+// model. With neither, it still answers, with no tools and a note saying so, so the task can say why
+// it can't use the phone instead of failing to start.
+//
+// Several of Hive's tasks can run at once, but the phone is one: a call waits for this task's turn at
+// it (devices.mjs, served by the orchestrator; HIVE_TASK_LABEL names the task). The turn passes to a
+// task waiting for the phone after a minute without a phone call, and comes back in line for the next.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
+import { Lease } from './devices.mjs';
+import { boardConfig } from './browser-mcp.mjs';
 
 const STATE = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
 const CONFIG = join(STATE, 'phone-relay.json');
-export const OFFLINE = "The owner's phone isn't reachable: Hive's cloud doesn't have the phone relay's key "
-  + '(<state>/phone-relay.json), so the phone tools are unavailable.';
+export const OFFLINE = "The owner's phone isn't reachable: this VM has neither the board's address and key "
+  + '(/root/.config/hive/tasks.json) nor a phone relay of its own, so the phone tools are unavailable.';
+export const HIVE_PHONE_DOWN = "Hive Phone isn't connected: it has to be open on the iPhone (it reconnects by itself while it's "
+  + "open). The owner opens it when they next have the phone in hand; if it isn't paired yet, they copy the pairing from the dashboard first.";
 const RELAY_DOWN = "The iPhone isn't connected to its relay. Its WebDriverAgent relay app (WebDriverAgentRunner-Runner) "
   + 'has to be open on the phone; the owner reopens it when they next have the phone in hand.';
 
@@ -113,12 +124,21 @@ export function pngSize(png) {
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
 }
 
-export function relayConfig(file = CONFIG) {
-  const value = JSON.parse(readFileSync(file, 'utf8'));
+/** Where the phone is: its own relay when this VM has one (phone-relay.json), else the board's. */
+export function relayConfig(file = CONFIG, board = boardConfig) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const { url, token } = board();
+    return { url: `${url}/v1/phone`, token, down: HIVE_PHONE_DOWN };
+  }
+  const value = JSON.parse(text);
   if (typeof value.url !== 'string' || !/^https:\/\//.test(value.url) || typeof value.token !== 'string' || !value.token) {
     throw new Error('phone-relay.json needs {"url": "https://…", "token": "…"}');
   }
-  return { url: value.url.replace(/\/+$/, ''), token: value.token };
+  return { url: value.url.replace(/\/+$/, ''), token: value.token, down: RELAY_DOWN };
 }
 
 export class Phone {
@@ -149,7 +169,7 @@ export class Phone {
     const { ok, value } = await this.raw(`/api${path}`, method, body, timeout);
     const failure = value?.value?.error ? (value.value.message || value.value.error) : (!ok ? (value.error || 'Phone command failed') : null);
     if (failure) {
-      if (/offline|disconnected|not connected|unavailable|timed out/i.test(String(failure))) throw new Error(RELAY_DOWN);
+      if (/offline|disconnected|not connected|unavailable|timed out/i.test(String(failure))) throw new Error(this.config.down ?? RELAY_DOWN);
       throw new Error(String(failure).split('\n')[0].slice(0, 300));
     }
     return value;
@@ -317,7 +337,10 @@ export async function callTool(phone, name, args = {}) {
   }
 }
 
-export async function answer(phone, message) {
+const TURN = new Lease(join(STATE, 'devices.sock'), 'phone', process.env.HIVE_TASK_LABEL || 'a task started by hand',
+  { waitMs: 10 * 60_000 });
+
+export async function answer(phone, message, turn = TURN) {
   if (message.id === undefined || message.id === null) return null;
   const reply = result => ({ jsonrpc: '2.0', id: message.id, result });
   switch (message.method) {
@@ -329,7 +352,7 @@ export async function answer(phone, message) {
     case 'ping': return reply({});
     case 'tools/call':
       try {
-        return reply({ content: await callTool(phone, message.params?.name, message.params?.arguments ?? {}) });
+        return reply({ content: await turn.use(() => callTool(phone, message.params?.name, message.params?.arguments ?? {})) });
       } catch (error) {
         return reply({ content: [{ type: 'text', text: error.message }], isError: true });
       }

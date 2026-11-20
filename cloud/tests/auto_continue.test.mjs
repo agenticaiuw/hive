@@ -58,11 +58,12 @@ const task = (id, msg, status, updated, extra = {}) => ({
 });
 const sync = (call, messages, tasks, machine = 'evans-mac') => call('POST', '/v1/sync', { machine, messages, tasks });
 
-test("a stuck task's session is continued by Hive, in Hive's words, twice at most", async () => {
-  const { call, tick, take, row, boardTask } = setup();
+test("a stuck task's session is continued by Hive, in Hive's words, again and again, waiting longer each time", async () => {
+  const { env, call, tick, take, row, boardTask } = setup();
   await sync(call, [message(1, 's1')], [task(1, 1, 'blocked', NOW() - 60)]);
+  const lastTry = (ago, n) => env.DB.db.prepare('UPDATE board_tasks SET auto_continued_at = ?, auto_continues = COALESCE(?, auto_continues) WHERE id = 1').run(NOW() - ago, n ?? null);
 
-  // Stuck, but not the owner's yet: Hive is on it.
+  // Stuck, but never the owner's: Hive is on it.
   assert.equal((await boardTask(1)).retrying, 1);
 
   await tick();
@@ -72,49 +73,48 @@ test("a stuck task's session is continued by Hive, in Hive's words, twice at mos
   assert.equal(first.sender, 'hive');
   assert.match(first.text, /^\[Hive, not the owner\] This task is stuck/);
   assert.match(first.text, /T1 \("Task 1"\), stuck on: The tests need a database/);
-  assert.match(first.text, /try 1 of 2/);
+  assert.match(first.text, /\(try 1\)/);
+  assert.match(first.text, /register no tasks for it/);
+  assert.match(first.text, /"why" \(exactly why it stopped\) and "need" \(exactly what the owner must do\)/);
   assert.equal(row(1).auto_continues, 1);
 
-  // Nothing new from its agent: no second message on the next tick.
+  // Nothing on the next tick, nor when its agent says it's stuck again at once: 20 minutes first.
   await tick();
   assert.deepEqual(await take(), []);
-
-  // Its agent took it up and got stuck again: the second try.
   await sync(call, [], [task(1, 1, 'blocked', NOW() + 5)]);
   await tick();
+  assert.deepEqual(await take(), []);
+  lastTry(21 * 60);
+  await tick();
   const [second] = await take();
-  assert.match(second.text, /try 2 of 2/);
+  assert.match(second.text, /\(try 2\)/);
   assert.equal(row(1).auto_continues, 2);
 
-  // Stuck a third time: Hive stops, and once its last try is old it's the owner's.
-  await sync(call, [], [task(1, 1, 'blocked', NOW() + 10)]);
+  // Then 40 minutes, and so on, never more than about 10.7 hours, and never a last try.
+  lastTry(39 * 60);
   await tick();
   assert.deepEqual(await take(), []);
-  assert.equal((await boardTask(1)).retrying, 1); // the last try is still fresh
+  lastTry(41 * 60);
+  await tick();
+  assert.equal((await take()).length, 1);
+  lastTry(10 * 3600, 9);
+  await tick();
+  assert.deepEqual(await take(), []);
+  lastTry(11 * 3600);
+  await tick();
+  assert.match((await take())[0].text, /\(try 10\)/);
+  assert.equal((await boardTask(1)).retrying, 1);
 });
 
-test('after its tries are spent, or with no agent to ask, a stuck task is the owner\'s', async () => {
-  const { env, call, tick, take, boardTask } = setup();
-  await sync(call, [message(1, 's1'), { ...message(2, ''), harness: '', session: '' }], [
-    task(1, 1, 'blocked', NOW() - 60),
-    task(2, 2, 'blocked', NOW() - 60),
-  ]);
-  env.DB.db.prepare('UPDATE board_tasks SET auto_continues = 2, auto_continued_at = ? WHERE id = 1').run(NOW() - 3600);
+test("a stuck task with no agent to ask isn't continued, and nor is one that came from Hive's own words", async () => {
+  const { call, tick, take, boardTask } = setup();
+  await sync(call, [
+    { ...message(2, ''), harness: '', session: '' },
+    { ...message(3, 's3'), text: '[Hive, not the owner] This task is stuck, and Hive continues it' },
+  ], [task(2, 2, 'blocked', NOW() - 60), task(3, 3, 'blocked', NOW() - 60)]);
   await tick();
   assert.deepEqual(await take(), []);
-  assert.equal((await boardTask(1)).retrying, 0);
   assert.equal((await boardTask(2)).retrying, 0);
-});
-
-test("a session that hasn't answered in half an hour gets its next try", async () => {
-  const { env, call, tick, take, row } = setup();
-  await sync(call, [message(1, 's1')], [task(1, 1, 'blocked', NOW() - 7200)]);
-  await tick();
-  assert.equal((await take()).length, 1);
-  env.DB.db.prepare('UPDATE board_tasks SET auto_continued_at = ? WHERE id = 1').run(NOW() - 31 * 60);
-  await tick();
-  assert.equal((await take()).length, 1);
-  assert.equal(row(1).auto_continues, 2);
 });
 
 test("a session's stuck tasks go in one message, and one session per project at a time", async () => {

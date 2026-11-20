@@ -131,13 +131,14 @@ echo "Open enroll.wisc.edu and tell me what is in my cart" | node hive-task.mjs 
   `/var/lib/hive-credentials` (root only). `hive-cred import < export.csv` takes a Passwords (Mac) or
   Chrome export; `list`, `sites`, `add`, `remove` manage it. The agent's `authenticate` tool types a
   saved login into the field it clicked; the agent never sees the password.
-- The phone: the owner's iPhone runs WebDriverAgent inside its relay app, which keeps a connection
-  open to the phone relay Worker in the cloud. `phone-mcp.mjs` talks to that Worker straight from the
-  VM, with its address and key in `<state>/phone-relay.json` (mode 600), so the phone needs nothing
+- The phone: the iPhone runs Hive Phone (`mobile/relay`), which keeps a connection open to the
+  board's phone relay (`/v1/phone/`, `cloud/tasks/phone.js`). `phone-mcp.mjs` talks to it straight
+  from the VM with the machines' token from root's hive-tasks config, or to a relay of the owner's own
+  when `<state>/phone-relay.json` (mode 600) names one, so the phone needs nothing
   from the Mac: Duo approvals and "Hey Siri, ask Hive" tasks run with the Mac asleep or locked. Its
   `authenticate` asks the relay to unlock (`POST /agent/unlock-now`): the relay keeps the passcode
   sealed, bound to the phone it was saved for, and types it at the keypad itself, so neither the VM
-  nor the model ever sees it. Without the key file it answers with no tools and says why.
+  nor the model ever sees it. With no board and no relay file it answers with no tools and says why.
 - The owner's own browser: `browser-mcp.mjs` sends each command (tabs, open, navigate, snapshot,
   read, click, type, select, scroll, press_key, wait_for, screenshot) to the board Worker's browser
   mailbox (`/v1/browser/`, `cloud/tasks/browser.js`) with the machines' token from root's hive-tasks

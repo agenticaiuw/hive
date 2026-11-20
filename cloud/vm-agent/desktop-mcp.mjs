@@ -8,9 +8,16 @@
 // Every tool takes `step`: one short sentence saying what it is about to do, which goes to the
 // task log, the way Hive on the Mac says each step before it does it.
 //
-// Env: HIVE_VM_STATE (the worker's state folder), HIVE_FILES_DIR (where fetched files land).
+// Several of Hive's tasks can run at once, but the screen is one: the first tool call that needs it
+// waits for this task's turn (devices.mjs, served by the orchestrator) and the turn lasts until this
+// server ends, when it closes the browser it opened (unless HIVE_KEEP_OPEN=1) before the next task
+// gets the screen. Listing and fetching files need no turn.
+//
+// Env: HIVE_VM_STATE (the worker's state folder), HIVE_FILES_DIR (where fetched files land),
+// HIVE_TASK_STEPS (the task's steps.log), HIVE_TASK_LABEL (the task, as the orchestrator knows it),
+// HIVE_KEEP_OPEN.
 import { execFile, spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -18,12 +25,22 @@ import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
 import { encodePng, untypable, Vnc } from './vnc.mjs';
 import { fetchFile, filesDir, listRemote } from './files.mjs';
+import { Lease } from './devices.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const stateDir = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
 const vncSocket = join(stateDir, 'agent-vnc.sock');
 const stepLog = process.env.HIVE_TASK_STEPS;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// This task's turn at the screen; marks in its folder tell hive-task.mjs whether it used the screen
+// and whether the browser was closed after it.
+const turn = new Lease(join(stateDir, 'devices.sock'), 'screen', process.env.HIVE_TASK_LABEL || 'a task started by hand', {
+  onWait: m => record('wait for the screen', { step: `${m.holder} is using the VM's screen; waiting for it` }),
+});
+const OFF_SCREEN = new Set(['list_files', 'fetch_file']);
+let usedScreen = false;
+const mark = name => { if (stepLog) try { writeFileSync(join(dirname(stepLog), name), ''); } catch {} };
 
 // ---- the screen ---------------------------------------------------------------------------
 
@@ -61,6 +78,7 @@ async function controlCall(path, input = {}) {
 /** Opens the browser for use and connects to the screen, once; later calls reuse it. */
 async function screen() {
   if (vnc) return vnc;
+  if (!usedScreen) { usedScreen = true; mark('screen-used'); }
   // As the agent: if the owner has the browser open, this task gets its own window (agent.mjs).
   await controlCall('/desktop/open', { by: 'agent' });
   keepOpen ??= setInterval(() => controlCall('/desktop/open', { by: 'agent', keep: true }).catch(() => {}), 5 * 60_000);
@@ -108,6 +126,40 @@ const xy = { x: { type: 'number', description: 'Screen pixels from the left' }, 
 const tool = (name, description, properties = {}, required = []) =>
   ({ name, description, inputSchema: { type: 'object', properties: { step, ...properties }, required: ['step', ...required], additionalProperties: false } });
 
+// What each action does on the screen, without looking afterwards: its note. The tools of the same
+// name and batch both use them.
+const ACTIONS = {
+  click: async (s, a) => { await s.click(a.x, a.y, { button: a.button ?? 'left', count: a.count ?? 1 }); await sleep(600); return `Clicked at (${s.x}, ${s.y}).`; },
+  drag: async (s, a) => { await s.drag(a.x, a.y, a.to_x, a.to_y); await sleep(500); return 'Dragged.'; },
+  scroll: async (s, a) => { await s.scroll(a.x, a.y, a.amount); await sleep(500); return 'Scrolled.'; },
+  type_text: async (s, a) => { await s.type(String(a.text)); await sleep(500); return `Typed ${[...String(a.text)].length} characters.`; },
+  press_key: async (s, a) => { await s.press(a.keys); await sleep(600); return `Pressed ${a.keys}.`; },
+  wait: async (s, a) => { await sleep(Math.max(1, Math.min(60, Number(a.seconds) || 1)) * 1000); return 'Waited.'; },
+};
+export const BATCHABLE = Object.keys(ACTIONS);
+const MOST_STEPS = 20;
+
+/**
+ * A batch's steps, each {tool, ...its arguments}, run in order with `run(tool, args)` (the owner, 2026-11-19:
+ * the agent doing "each note one by one ... that's wildly inefficient"). Every step is checked before
+ * any runs, and the first that fails stops it: {notes, failed}.
+ */
+export async function runBatch(steps, run) {
+  if (!Array.isArray(steps) || !steps.length) throw new Error(`steps is a list of 1 to ${MOST_STEPS} actions`);
+  if (steps.length > MOST_STEPS) throw new Error(`at most ${MOST_STEPS} steps in one batch, not ${steps.length}; nothing was done`);
+  steps.forEach((s, i) => {
+    if (!s || !BATCHABLE.includes(s.tool)) throw new Error(`step ${i + 1}'s tool is one of ${BATCHABLE.join(', ')}; nothing was done`);
+    if (s.tool === 'type_text' && untypable(String(s.text ?? '')).length) {
+      throw new Error(`step ${i + 1} has characters the VM keyboard can't type (${untypable(String(s.text)).join(' ')}); nothing was done`);
+    }
+  });
+  const notes = [];
+  for (const [i, { tool, ...args }] of steps.entries()) {
+    try { notes.push(await run(tool, args)); } catch (error) { return { notes, failed: `Step ${i + 1} (${tool}) failed: ${error.message}` }; }
+  }
+  return { notes };
+}
+
 export const TOOLS = [
   tool('screenshot', 'See the VM screen now (1440x900). Coordinates in the other tools are pixels of this picture.'),
   tool('zoom', 'See part of the screen enlarged, to read small text exactly.', {
@@ -144,6 +196,14 @@ export const TOOLS = [
   tool('fetch_file', 'Bring a file from Hive\'s cloud storage onto the VM, so a file picker can open it. Returns its path on the VM.', {
     key: { type: 'string', description: 'The file\'s key in Hive\'s cloud storage, as list_files shows it' },
   }, ['key']),
+  tool('batch', 'Do several actions in a row and get one screenshot at the end. Use it whenever you already know the next steps '
+    + '(a form\'s fields, a run of clicks and keys you can see the places for): each separate call costs the owner seconds. Each step is '
+    + `{"tool": name, ...that tool's arguments}, the tool being one of ${BATCHABLE.join(', ')}. For example: `
+    + '[{"tool": "click", "x": 640, "y": 60}, {"tool": "type_text", "text": "weather\\n"}]. Stops at the first step that fails. '
+    + 'Its step says what the whole batch does.', {
+    steps: { type: 'array', minItems: 1, maxItems: MOST_STEPS, items: {
+      type: 'object', properties: { tool: { type: 'string', enum: BATCHABLE } }, required: ['tool'] } },
+  }, ['steps']),
 ];
 
 function record(name, args) {
@@ -178,6 +238,10 @@ export function parseOwnerTime(text, now = new Date(), zone = ownerZone) {
 
 export async function runTool(name, args) {
   record(name, args);
+  return OFF_SCREEN.has(name) ? act(name, args) : turn.use(() => act(name, args));
+}
+
+async function act(name, args) {
   switch (name) {
     case 'screenshot': { const s = await screen(); return look(s, `The screen, ${s.width}x${s.height}.`); }
     case 'zoom': {
@@ -186,12 +250,16 @@ export async function runTool(name, args) {
       return [{ type: 'text', text: `(${args.x}, ${args.y}) ${args.width}x${args.height}, enlarged ${Math.max(1, Math.min(4, Math.round(scale)))}x.` },
         { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }];
     }
-    case 'click': { const s = await screen(); await s.click(args.x, args.y, { button: args.button ?? 'left', count: args.count ?? 1 }); await sleep(600); return look(s, `Clicked at (${s.x}, ${s.y}).`); }
-    case 'drag': { const s = await screen(); await s.drag(args.x, args.y, args.to_x, args.to_y); await sleep(500); return look(s, 'Dragged.'); }
-    case 'scroll': { const s = await screen(); await s.scroll(args.x, args.y, args.amount); await sleep(500); return look(s, 'Scrolled.'); }
-    case 'type_text': { const s = await screen(); await s.type(String(args.text)); await sleep(500); return look(s, `Typed ${[...String(args.text)].length} characters.`); }
-    case 'press_key': { const s = await screen(); await s.press(args.keys); await sleep(600); return look(s, `Pressed ${args.keys}.`); }
-    case 'wait': { const s = await screen(); await sleep(Math.max(1, Math.min(60, Number(args.seconds) || 1)) * 1000); return look(s, 'Waited.'); }
+    case 'click': case 'drag': case 'scroll': case 'type_text': case 'press_key': case 'wait': {
+      const s = await screen(); return look(s, await ACTIONS[name](s, args));
+    }
+    case 'batch': {
+      let s;
+      const { notes, failed } = await runBatch(args.steps, async (tool, a) => ACTIONS[tool](s ??= await screen(), a));
+      s ??= await screen();
+      if (!failed) return look(s, `Did all ${notes.length} steps.`);
+      return { content: await look(s, `${failed.replace(/\.$/, '')}. ${notes.length ? `The ${notes.length} before it were done.` : 'Nothing was done.'}`), isError: true };
+    }
     case 'wait_until': {
       const at = parseOwnerTime(String(args.time));
       if (!at) throw new Error(`couldn't read the time "${args.time}"; give it like "8:45:00 AM"`);
@@ -243,8 +311,19 @@ function walk(dir) {
   });
 }
 
-async function shutdown() {
+let ending = null;
+function shutdown() {
+  ending ??= end();
+  return ending;
+}
+
+async function end() {
   clearInterval(keepOpen);
+  // Asked, not killed: the browser saves its cookies as it quits, and the worker gets it back. One the
+  // owner opened (from the VM screen) stays open (agent.mjs). Done before the screen goes to the next task.
+  if (usedScreen && process.env.HIVE_KEEP_OPEN !== '1') {
+    await Promise.race([controlCall('/desktop/close', { by: 'agent' }).then(() => mark('screen-closed')).catch(() => {}), sleep(15_000)]);
+  }
   await vnc?.close();
   if (vncServer && vncServer.exitCode === null) {
     // x11vnc can ignore a polite stop; it holds nothing worth saving.
@@ -254,6 +333,7 @@ async function shutdown() {
     if (vncServer.exitCode === null) vncServer.kill('SIGKILL');
   }
   rmSync(vncSocket, { force: true });
+  turn.close();
   process.exit(0);
 }
 
@@ -267,11 +347,15 @@ export async function answer(message) {
     case 'initialize':
       return reply({ protocolVersion: params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} },
         serverInfo: { name: 'hive-vm-desktop', version: '1.0.0' },
-        instructions: 'The VM\'s own screen, mouse and keyboard. Say each step in `step` before doing it. Look at the screenshot after every action before the next one.' });
+        instructions: 'The VM\'s own screen, mouse and keyboard. Say each step in `step` before doing it. Look at the screenshot an action returns '
+          + 'before deciding what comes next; when you already know the next several actions, do them in one batch.' });
     case 'ping': return reply({});
     case 'tools/list': return reply({ tools: TOOLS });
     case 'tools/call':
-      try { return reply({ content: await runTool(params?.name, params?.arguments ?? {}) }); } catch (error) {
+      try {
+        const out = await runTool(params?.name, params?.arguments ?? {});
+        return reply(Array.isArray(out) ? { content: out } : out);
+      } catch (error) {
         return reply({ content: [{ type: 'text', text: `Failed: ${error.message}` }], isError: true });
       }
     default: return { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${method}` } };

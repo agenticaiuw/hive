@@ -10,8 +10,8 @@ import { inflateSync } from 'node:zlib';
 import { Vnc, charKeysym, comboKeysyms, encodePng, untypable } from './vnc.mjs';
 import { checkKey, contentType, localPath } from './files.mjs';
 import { hostOf, loginsFromCsv, merge, parseCsv, pick } from './hive-cred.mjs';
-import { TOOLS, parseOwnerTime } from './desktop-mcp.mjs';
-import { CODE_GUIDE, GUIDE, codeArgs, codexArgs, describe } from './hive-task.mjs';
+import { BATCHABLE, TOOLS, parseOwnerTime, runBatch } from './desktop-mcp.mjs';
+import { CODE_GUIDE, GUIDE, closeAfter, codeArgs, codexArgs, describe, ownRun } from './hive-task.mjs';
 import { OFFLINE, offlineAnswer } from './phone-mcp.mjs';
 
 const tempDir = t => { const dir = mkdtempSync(join(tmpdir(), 'hive-agent-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
@@ -160,7 +160,35 @@ test('every desktop tool asks for its step, and none takes a password', () => {
   assert.ok(TOOLS.some(tool => tool.name === 'authenticate'));
 });
 
-test('Codex runs on its own home with its three tool servers, as the VM user, read-only', () => {
+// The owner (2026-11-19), after the cloud agent entered an Ableton song one note per call: "that's wildly
+// inefficient". The VM's screen gets the Mac's batch too: several actions, one call, one screenshot.
+test('the VM screen batches actions, checks every step first and stops at the first that fails', async () => {
+  const batch = TOOLS.find(tool => tool.name === 'batch');
+  assert.deepEqual(batch.inputSchema.required, ['step', 'steps']);
+  assert.deepEqual(batch.inputSchema.properties.steps.items.properties.tool.enum, BATCHABLE);
+  assert.deepEqual(BATCHABLE, ['click', 'drag', 'scroll', 'type_text', 'press_key', 'wait']);
+
+  const ran = [];
+  const run = async (tool, args) => { ran.push([tool, args]); if (args.fail) throw new Error('the screen went away'); return `${tool} done`; };
+  assert.deepEqual(await runBatch([{ tool: 'click', x: 1, y: 2 }, { tool: 'type_text', text: 'hi\n' }], run), { notes: ['click done', 'type_text done'] });
+  assert.deepEqual(ran, [['click', { x: 1, y: 2 }], ['type_text', { text: 'hi\n' }]], 'in order, each with its own arguments');
+
+  ran.length = 0;
+  const stopped = await runBatch([{ tool: 'press_key', keys: 'Tab' }, { tool: 'click', x: 5, y: 5, fail: true }, { tool: 'click', x: 9, y: 9 }], run);
+  assert.equal(stopped.failed, 'Step 2 (click) failed: the screen went away');
+  assert.deepEqual(stopped.notes, ['press_key done']);
+  assert.equal(ran.length, 2, 'nothing after the failed step runs');
+
+  ran.length = 0;
+  await assert.rejects(runBatch([{ tool: 'click', x: 1, y: 1 }, { tool: 'authenticate', site: 'x' }], run), /step 2's tool is one of/);
+  await assert.rejects(runBatch([{ tool: 'click', x: 1, y: 1 }, { tool: 'batch', steps: [] }], run), /step 2's tool/);
+  await assert.rejects(runBatch([{ tool: 'click', x: 1, y: 1 }, { tool: 'type_text', text: 'café' }], run), /can't type/);
+  await assert.rejects(runBatch(Array.from({ length: 21 }, () => ({ tool: 'wait', seconds: 1 })), run), /at most 20/);
+  await assert.rejects(runBatch([], run), /1 to 20/);
+  assert.equal(ran.length, 0, 'a bad batch does nothing at all');
+});
+
+test('Codex runs on its own home with its five tool servers, as the VM user, read-only', () => {
   const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu' });
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
@@ -168,15 +196,40 @@ test('Codex runs on its own home with its three tool servers, as the VM user, re
   const desktop = JSON.parse(config.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);
-  assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', '/usr/bin/node', '/app/phone-mcp.mjs']);
+  assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/phone-mcp.mjs']);
+  assert.ok(desktop.includes('HIVE_TASK_LABEL=vm-task') && !desktop.includes('HIVE_KEEP_OPEN=1'));
+  const kept = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', label: 'R40-1', keepOpen: true });
+  const keptDesktop = JSON.parse(kept.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
+  assert.ok(keptDesktop.includes('HIVE_TASK_LABEL=R40-1') && keptDesktop.includes('HIVE_KEEP_OPEN=1'));
+  assert.throws(() => codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s', label: 'R1 && x' }), /unsupported/);
   const browser = JSON.parse(config.find(c => c.startsWith('mcp_servers.browser.args=')).split('=').slice(1).join('='));
   assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/browser-mcp.mjs']);
-  for (const name of ['desktop', 'phone', 'browser']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
+  const knowledge = JSON.parse(config.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
+  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', '/usr/bin/node', '/app/knowledge-mcp.mjs']);
+  const mac = JSON.parse(config.find(c => c.startsWith('mcp_servers.mac.args=')).split('=').slice(1).join('='));
+  assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/mac-mcp.mjs']);
+  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
   assert.match(GUIDE, /authenticate/);
   assert.match(GUIDE, /Only approve a request you just\s+caused/);
   assert.match(GUIDE, /never take over\s+a tab they're on/);
+  assert.match(GUIDE, /look it up there first/);
+  assert.match(GUIDE, /mac tools are the owner's own Mac/);
+  assert.match(GUIDE, /"One-way:" and quotes the\s+owner's exact words/);
+  // The owner (2026-11-19): "before, hive did the bulk write when i asked it to create songs on ableton. why is it
+  // this time it did each note one by one". The Mac's own agent batched; the cloud agent, told to look after
+  // every action and never told about batch, made each note its own ~5 s call through the cloud.
+  assert.match(GUIDE, /do\s+them in one mac batch call/);
+  assert.match(GUIDE, /every note of a chord/);
+  assert.match(GUIDE, /do them in one batch call instead of a call each/);
+  // Owner, 2026-11-19: "why does it still seem so slow when i tried to have it operate ableton?" A bare
+  // "zoom first" sent the agent zooming Ableton's piano roll for 7 calls; the Mac has no zoom tool.
+  assert.doesNotMatch(GUIDE, /Zoom first/);
+  assert.match(GUIDE, /The Mac has no zoom tool/);
+  assert.match(GUIDE, /never spend calls adjusting them/);
+  assert.match(GUIDE, /Stacks for chords, Rhythm for\s+drums/);
+  assert.doesNotMatch(GUIDE, /Look at the screenshot every action\s+returns before the next action/);
 });
 
 test('Codex events become one line each for the owner', () => {
@@ -184,6 +237,10 @@ test('Codex events become one line each for the owner', () => {
   assert.equal(describe({ type: 'item.completed', item: { type: 'agent_message', text: 'Done.' } }), '💬 Done.');
   assert.match(describe({ type: 'item.completed', item: { type: 'mcp_tool_call', tool: 'type_text', result: { content: [{ type: 'text', text: 'Failed: no' }] } } }), /✗ Failed: no/);
   assert.equal(describe({ type: 'item.completed', item: { type: 'mcp_tool_call', tool: 'click', result: { content: [{ type: 'text', text: 'ok' }] } } }), null);
+  // A tool that answers isError comes back as failed with error null: its reason is in the result.
+  assert.equal(describe({ type: 'item.completed', item: { type: 'mcp_tool_call', tool: 'batch', status: 'failed', error: null,
+    result: { content: [{ type: 'text', text: 'Step 1 (open_app) failed: the owner is\nusing the keyboard.' }, { type: 'image', data: 'x' }] } } }),
+    '  ✗ batch failed: Step 1 (open_app) failed: the owner is using the keyboard.');
   assert.equal(describe({ type: 'turn.started' }), null);
 });
 
@@ -212,4 +269,53 @@ test('a code task gets Codex\'s own sandbox, its folders writable, the env for i
   assert.throws(() => codeArgs({ model: 'm', effort: 'high', codeDir: '/w; rm -rf /' }), /unsupported/);
   assert.match(CODE_GUIDE, /network off/);
   assert.match(CODE_GUIDE, /Never commit, push/);
+});
+
+// The owner (2026-11-17): "the cloud should be saving all of the logs and data and active processes".
+test('a job started on the VM by itself is its own run on the board, live, from what it was asked to how it ended', async () => {
+  const posts = [];
+  const board = async (path, body) => { posts.push({ path, body }); return { ok: true }; };
+  const run = ownRun('2026-11-18T03-53-18-172Z', 'Post the thread on X\nwith both videos', { env: {}, connect: () => board });
+  run.step('→ click: Compose');
+  run.step('💬 Posted it.');
+  await run.done('done');
+  assert.ok(posts.every(p => p.path === '/v1/runs'));
+  const first = posts[0].body;
+  assert.equal(first.machine, 'cloud');
+  assert.equal(first.run, 'vm-2026-11-18T03-53-18-172Z');
+  assert.equal(first.agent, 'hive');
+  assert.equal(first.title, 'Post the thread on X');
+  assert.equal(first.request, undefined, 'no request: nothing else posts it');
+  const steps = posts.flatMap(p => p.body.steps);
+  assert.deepEqual(steps.map(s => [s.n, s.kind, s.text]), [
+    [1, 'asked', 'Post the thread on X\nwith both videos'], [2, 'action', '→ click: Compose'], [3, 'say', '💬 Posted it.'],
+  ]);
+  assert.equal(posts.at(-1).body.status, 'done');
+});
+
+test("a job the orchestrator runs doesn't post a second run, and a board it can't reach doesn't stop the job", () => {
+  assert.equal(ownRun('x', 'Task', { env: { HIVE_RUN_SENT: '1' }, connect: () => { throw new Error('not used'); } }), null);
+  const logs = [];
+  assert.equal(ownRun('x', 'Task', { env: {}, connect: () => { throw new Error('no board config'); }, log: line => logs.push(line) }), null);
+  assert.match(logs[0], /couldn't reach the board: no board config/);
+});
+
+test("a task that used the screen closes what it opened when it ends, in its turn; one that didn't leaves it alone", async () => {
+  const lease = () => { const said = []; return { said, ready: async () => said.push('ready'), close: () => said.push('close') }; };
+  const files = new Set(['/w/screen-used']);
+  const exists = path => files.has(path);
+  let closed = 0;
+  const close = async () => { closed += 1; };
+  const turn = lease();
+  assert.equal(await closeAfter('/w', '/s', 'R40-1', { exists, close, lease: turn }), true);
+  assert.deepEqual(turn.said, ['ready', 'close']);
+  assert.equal(closed, 1);
+  files.add('/w/screen-closed'); // its tool server already closed it
+  assert.equal(await closeAfter('/w', '/s', 'R40-1', { exists, close, lease: lease() }), false);
+  assert.equal(await closeAfter('/x', '/s', 'R40-2', { exists, close, lease: lease() }), false, 'never used the screen');
+  const busy = lease();
+  busy.ready = async () => { throw new Error('another task'); };
+  assert.equal(await closeAfter('/w2', '/s', 'R40-3', { exists: path => path === '/w2/screen-used', close, lease: busy }), false);
+  assert.deepEqual(busy.said, ['close']);
+  assert.equal(closed, 1);
 });
