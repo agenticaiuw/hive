@@ -43,13 +43,14 @@ export async function transferFile(args, command, { fetch = fetchFile, put = put
     script = `test -f ${quote(macPath)} || exit 1\ncf r2 objects put ${quote(key)} --bucket-name ${quote(BUCKET)} --file ${quote(macPath)} --content-type ${quote(contentType(macPath))}`;
   } else {
     // Check the destination before downloading. Link a completed temporary file into place so a
-    // failed download cannot leave a partial destination or overwrite an existing file.
+    // failed download cannot leave a partial destination or overwrite an existing file. Use
+    // cf's Node runtime to link the exact path: ln can link inside a directory created mid-download.
     script = `target=${quote(macPath)}
 if [ -e "$target" ] || [ -L "$target" ]; then echo 'Destination already exists' >&2; exit 1; fi
 stage=$(/usr/bin/mktemp -d ${quote(posix.dirname(macPath) + '/.hive-transfer.XXXXXX')})
 trap '/bin/rm -f "$stage/file"; /bin/rmdir "$stage"' EXIT
 cf r2 objects get ${quote(key)} --bucket-name ${quote(BUCKET)} > "$stage/file"
-/bin/ln -n "$stage/file" "$target"`;
+node -e 'require("node:fs").linkSync(process.argv[1], process.argv[2])' "$stage/file" "$target"`;
     await put(vmPath, key);
   }
   const result = await command({ command: `set -e\numask 077\n${CF}${script}`, irreversible: false, step, timeout_seconds: 240 });

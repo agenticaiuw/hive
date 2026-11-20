@@ -27,7 +27,7 @@ test('VM to Mac uploads first and creates a new file only after the download suc
   assert.deepEqual(calls[0], ['/files/recording.mov', key]);
   assert.match(calls[1].command, /Destination already exists/);
   assert.match(calls[1].command, /cf r2 objects get .* > "\$stage\/file"/);
-  assert.match(calls[1].command, /\/bin\/ln -n "\$stage\/file" "\$target"/);
+  assert.match(calls[1].command, /linkSync.* "\$stage\/file" "\$target"/);
   assert.doesNotMatch(calls[1].command, /rm.*target/);
 });
 
@@ -72,6 +72,7 @@ test('the command workflow copies a 109 MB recording both ways without clobberin
     await writeFile(join(bin, 'cf'), `#!/bin/sh
 if [ "$3" = put ]; then cp "$8" "$CLOUD_FILE"; else
   if [ "$FAIL_DOWNLOAD" = 1 ]; then printf partial; exit 1; fi
+  if [ -n "$RACE_TARGET" ]; then mkdir "$RACE_TARGET"; fi
   cat "$CLOUD_FILE"
 fi
 `, { mode: 0o700 });
@@ -85,10 +86,12 @@ fi
     const vm = join(dir, 'vm.mov');
     const mac = join(dir, 'mac.mov');
     let fail = false;
+    let raceTarget = '';
     const run = async ({ command }) => {
       try {
         await promisify(execFile)('/bin/sh', ['-c', command], { cwd: dir,
-          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLOUD_FILE: cloud, FAIL_DOWNLOAD: fail ? '1' : '0' } });
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLOUD_FILE: cloud,
+            FAIL_DOWNLOAD: fail ? '1' : '0', RACE_TARGET: raceTarget } });
         return ok;
       } catch { return failed; }
     };
@@ -115,6 +118,12 @@ fi
     assert.equal((await transferFile({ direction: 'to_mac', vm_path: vm, mac_path: mac, step }, run, deps)).isError, true);
     assert.deepEqual(await readdir(mac), [], 'an existing directory is not used as the destination');
     await rm(mac, { recursive: true });
+    raceTarget = mac;
+    assert.equal((await transferFile({ direction: 'to_mac', vm_path: vm, mac_path: mac, step }, run, deps)).isError, true,
+      'a destination created during the download is refused');
+    assert.deepEqual(await readdir(mac), [], 'a new directory is not used as the destination either');
+    await rm(mac, { recursive: true });
+    raceTarget = '';
     fail = true;
     assert.equal((await transferFile({ direction: 'to_mac', vm_path: vm, mac_path: mac, step }, run, deps)).isError, true);
     await assert.rejects(stat(mac), { code: 'ENOENT' });
