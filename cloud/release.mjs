@@ -139,9 +139,12 @@ async function releaseMac({ from, notes, dryRun, out }) {
     }
     const bins = hiveBins(readFileSync(join(app, 'Makefile'), 'utf8'));
     // Built knowing its version, in its own target folder; the paths built into the binaries name
-    // no one's home or this export (--remap-path-prefix).
+    // no one's home or this export (--remap-path-prefix). The flags go to cargo one by one
+    // (CARGO_ENCODED_RUSTFLAGS), since a path may have a space ("Application Support").
+    const flags = [...(process.env.RUSTFLAGS ?? '').split(' ').filter(Boolean), `--remap-path-prefix=${homedir()}=/home`, `--remap-path-prefix=${root}=/hive`];
     const env = { ...process.env, HIVE_VERSION: version, CARGO_TARGET_DIR: join(REPO, 'desktop/app/crates/hive/target/mac-release'),
-      RUSTFLAGS: [process.env.RUSTFLAGS, `--remap-path-prefix=${homedir()}=/home`, `--remap-path-prefix=${root}=/hive`].filter(Boolean).join(' ') };
+      CARGO_ENCODED_RUSTFLAGS: flags.join('\x1f') };
+    delete env.RUSTFLAGS;
     console.log(`mac ${version}: building ${bins.length} Rust tools, ${MAC_TOOLS.length} others, the dashboard and the extension${from ? ` from ${from}` : ' from HEAD'}`);
     const make = spawnSync('make', ['-B', '-s', '-C', app, 'build/.hive-built', ...MAC_TOOLS.map(t => `build/${t}`), 'build/dashboard'], { env, encoding: 'utf8', maxBuffer: 64 << 20 });
     if (make.status !== 0) throw new Error(`the build failed:\n${`${make.stdout}\n${make.stderr}`.trim().split('\n').slice(-15).join('\n')}`);
