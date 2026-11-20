@@ -34,8 +34,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, askedBrief, blockers, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES,
-  MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed, SELF_GUIDE,
+  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, leaksIn,
+  macFailures, macRunning, MOST_CONFLICTS, MOST_FIXES, MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed,
+  secretValues, SELF_GUIDE,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
 import { nodeHeaders } from './version.mjs';
@@ -96,6 +97,11 @@ export const FROM_HIVE = '[Hive, not the owner]';
  * (retry) is planned from the owner's words that come with the note, as before.
  */
 export function planWords(request) {
+  // A club member's request (cloud/tasks/club.js) is a change to Hive's own code, and nothing else.
+  if (request.member) {
+    return `(Club member ${request.member} asked this, not the owner: it is a change to Hive's own code. Plan only code tasks ` +
+      `in the hive project, one for each separate change it asks for.) ${request.text}`;
+  }
   if (!request.retry && request.text.trimStart().startsWith(FROM_HIVE)) {
     return '(This is Hive\'s own note, not the owner\'s words: tasks it lists got stuck and Hive continues them. ' +
       'Plan exactly one task for each task it lists, to finish that task, titled and quoted with that task\'s title, ' +
@@ -144,7 +150,7 @@ export function scopeOf(words) {
 
 /** What the subagent is told: the task, the owner's words, their rules, and every memory of its folder in full. */
 export function taskBrief(task, request, folder, rules = []) {
-  const parts = [task.brief || task.title, `The owner's words: "${task.quote || request.text}"`];
+  const parts = [task.brief || task.title, `${request.member ? `Club member ${request.member}'s` : "The owner's"} words: "${task.quote || request.text}"`];
   // The planner's quote is a piece of the message; the rest of it (text to post word for word, say) must
   // still reach the task, so the whole message always comes along.
   if (task.quote && request.text && task.quote.trim() !== request.text.trim()) {
@@ -559,7 +565,11 @@ async function handleWork(request, deps, signal) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: STOPPED });
     return;
   }
-  const project = (request.project || scope.project || planned.project || '').toLowerCase();
+  // A club member's request is only ever a change to Hive's code (cloud/tasks/club.js): whatever the
+  // planner said, every task is a code task in Hive, which Hive makes, tests and lands itself
+  // (changeHive), so a member never reaches the owner's Mac, phone, browsers or accounts.
+  if (request.member) for (const t of planned.tasks) t.kind = 'code';
+  const project = request.member ? 'hive' : (request.project || scope.project || planned.project || '').toLowerCase();
   const folderName = request.folder || scope.folder;
 
   // Folders and their memories, read once a request. A folder the planner names is used only if it
@@ -869,6 +879,15 @@ const IMPROVER = MODELS.hardest;
 const APP_DIR = here;
 const GATE_MS = 10 * 60_000;
 
+/** The secrets on this VM (improve.mjs secretValues): the orchestrator's settings, the board's config and Codex's sign-in. */
+async function secretsOnVm() {
+  const json = [];
+  for (const file of ['/root/.config/hive/tasks.json', join(CODEX_HOME, 'auth.json')]) {
+    try { json.push(JSON.parse(await asRoot(['cat', file]))); } catch {}
+  }
+  return secretValues({ env: process.env, json });
+}
+
 /** The tests of a change (improve.mjs gateTests), run in its worktree: whether they passed and, if not, what failed. */
 async function gateOnVm(dir, files, tmp) {
   const have = (await asRoot(['git', '-C', dir, 'ls-files', '*.test.mjs'])).split('\n').filter(Boolean);
@@ -970,17 +989,29 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
   const team = board && label ? board : null;
   const claims = async paths => (team ? (await team(`/v1/team/claims${paths ? `?paths=${encodeURIComponent(paths.join(','))}` : ''}`).catch(() => ({}))).leases ?? [] : []);
   try {
+    // Secrets on this VM, which a change never carries into the public repository (improve.mjs leaksIn).
+    const secrets = await secretsOnVm();
     const held = othersHold(await claims(), label);
     let result = await agent([SELF_GUIDE, asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report }), held].filter(Boolean).join('\n\n'));
     let files = [];
+    let commit;
+    for (let conflicts = 0; ; conflicts++) {
     for (let tries = 1; ; tries++) {
       if (signal?.aborted) return end(false, 'Stopped by the owner before the change landed.');
       if (!result.ok) return end(false, `The code agent stopped before it finished: ${outcomeOf(result.report, 'no report')}`);
       files = await changed();
       if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
+      if (leaksIn(await git('-C', dir, 'diff', '--cached', 'origin/main'), secrets)) {
+        return end(false, "The change held a secret from the VM (a key or token), so Hive threw it away: nothing of it was pushed.");
+      }
       await team?.('/v1/team/claim', { agent: label, paths: files, note: need.what.slice(0, 120), minutes: 240 }).catch(() => {});
+      // Where main's changes met this one and the agent hasn't resolved them yet.
+      const marked = (await git('-C', dir, 'grep', '--cached', '-l', '-E', CONFLICT_MARKER.source, '--', ...files).catch(() => ''))
+        .split('\n').filter(Boolean);
       onStep(`$ Testing Hive's change (${files.length} file${files.length === 1 ? '' : 's'})`);
-      const gate = await gateOnVm(dir, files, tmp);
+      const gate = marked.length
+        ? { ok: false, failures: `Git's conflict markers are still in ${marked.join(', ')}: resolve them, keeping what landed and what your change does.` }
+        : await gateOnVm(dir, files, tmp);
       let failures = gate.failures;
       if (gate.ok) {
         onStep(`✅ ${gate.tests.length} test file${gate.tests.length === 1 ? '' : 's'} passed`);
@@ -1011,7 +1042,6 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       if (tries >= MOST_FIXES) return end(false, `Hive's tests still failed after ${MOST_FIXES} tries:\n${failures}`);
       result = await agent(fixBrief(failures));
     }
-    const parts = partsOf(files);
     // Not while an agent that leased one of these files first still holds it.
     for (let until = Date.now() + MOST_LEASE_WAIT_MS, said = ''; team;) {
       const waiting = blockers(await claims(files), label);
@@ -1026,15 +1056,16 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       await new Promise(resolve => setTimeout(resolve, 30_000));
     }
     // Onto main as it is now: rebased, tested again if main moved, then a fast-forward push.
-    const commit = await inRepo(repo, async () => {
+    commit = await inRepo(repo, async () => {
       if (!committed) await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
+      committed = true;
       for (let attempt = 1; ; attempt++) {
         const base = await git('-C', dir, 'rev-parse', 'origin/main');
         await git('-C', dir, 'fetch', '--quiet', 'origin', 'main');
         if (await git('-C', dir, 'rev-parse', 'origin/main') !== base) {
           try { await git('-C', dir, ...COMMITTER, 'rebase', '--quiet', 'origin/main'); } catch (error) {
             await git('-C', dir, 'rebase', '--abort').catch(() => {});
-            throw new Error(`it no longer applies to main, which changed meanwhile (${error.message.split('\n')[0]})`);
+            throw Object.assign(new Error(`it no longer applies to main, which changed meanwhile (${error.message.split('\n')[0]})`), { conflict: true });
           }
           const again = await gateOnVm(dir, await changed(), tmp);
           if (!again.ok) throw new Error(`its tests failed on main as it is now:\n${again.failures}`);
@@ -1047,7 +1078,26 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         }
       }
     }).catch(error => ({ error }));
+    if (!commit.error?.conflict || conflicts >= MOST_CONFLICTS || signal?.aborted) break;
+    // Main moved under the change and it no longer applies: it goes onto main as it is now, and the same
+    // agent resolves where the two meet; then it's tested again, from the top.
+    const clashing = await inRepo(repo, async () => {
+      const mine = await git('-C', dir, 'rev-parse', 'HEAD');
+      await git('-C', dir, 'reset', '--quiet', '--hard', 'origin/main');
+      try {
+        await git('-C', dir, 'cherry-pick', '--no-commit', mine);
+        return [];
+      } catch {
+        return (await git('-C', dir, 'diff', '--name-only', '--diff-filter=U')).split('\n').filter(Boolean);
+      }
+    }).catch(error => ({ error }));
+    if (clashing.error) break;
+    committed = false;
+    onStep(`$ Main moved under the change; putting it on main as it is now${clashing.length ? ` and resolving ${clashing.join(', ')}` : ''}`);
+    if (clashing.length) result = await agent(conflictBrief(clashing));
+    }
     if (commit.error) return end(false, `The change passed its tests but didn't land: ${commit.error.message}`);
+    const parts = partsOf(files);
     onStep(`✅ On main: ${commit.slice(0, 10)}`);
     const live = [];
     const notes = [];

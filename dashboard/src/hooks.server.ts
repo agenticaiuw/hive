@@ -37,6 +37,9 @@ export const handle: Handle = async ({ event, resolve }) => {
     url.pathname === "/hive.svg" ||
     url.pathname === "/og.png" ||
     url.pathname.startsWith("/assets/") ||
+    // The club's page signs its members in itself, with their own invite and key (routes/club).
+    url.pathname === "/club" ||
+    url.pathname.startsWith("/club/") ||
     // SvelteKit's immutable build output.
     url.pathname.startsWith("/_app/");
 

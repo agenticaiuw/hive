@@ -23,8 +23,12 @@
     turnRuleOff,
     fetchConversation,
     fetchFolder,
+    fetchClub,
     fetchPhone,
     fetchTaskBoard,
+    inviteMember,
+    removeMember,
+    type ClubMember,
     pairPhone,
     saveFolder,
     savePhonePasscode,
@@ -288,6 +292,55 @@
     const passcode = phonePass;
     phonePass = "";
     await phoneAct({ passcode, consent: true }, "Saved. Hive unlocks the iPhone with it when a task needs the phone.");
+  }
+
+  // The club (cloud/tasks/club.js): members ask Hive to change itself from the club page, each signed in
+  // once with the invite link made here, which the owner hands them.
+  let club = $state<ClubMember[]>([]);
+  let clubName = $state("");
+  let clubNote = $state("");
+  let clubLink = $state<{ name: string; link: string } | null>(null);
+
+  async function loadClub() {
+    try {
+      club = (await fetchClub()).members;
+    } catch (error) {
+      clubNote = message(error);
+    }
+  }
+
+  async function invite(name: string) {
+    clubNote = "";
+    try {
+      const made = await inviteMember(name);
+      clubLink = { name: made.name, link: made.link };
+      clubName = "";
+      clubNote = `${made.name}'s invite link works once, for 7 days.`;
+    } catch (error) {
+      clubNote = message(error);
+    }
+    await loadClub();
+  }
+
+  async function copyInvite() {
+    if (!clubLink) return;
+    try {
+      await navigator.clipboard.writeText(clubLink.link);
+      clubNote = `Copied ${clubLink.name}'s invite link.`;
+    } catch (error) {
+      clubNote = message(error);
+    }
+  }
+
+  async function letGo(name: string) {
+    clubNote = "";
+    try {
+      await removeMember(name);
+      if (clubLink?.name === name) clubLink = null;
+    } catch (error) {
+      clubNote = message(error);
+    }
+    await loadClub();
   }
 
   let refreshing = false;
@@ -941,6 +994,27 @@
               <button type="button" class="phone-btn quiet" onclick={() => phoneAct({ remove: true }, "Forgot the passcode.")}>Forget the passcode</button>
             {/if}
             {#if phoneNote}<p class="phone-note" role="status">{phoneNote}</p>{/if}
+          </div>
+        </details>
+        <!-- The club (cloud/tasks/club.js): who may ask Hive to change itself, from the club page. -->
+        <details class="phone" ontoggle={(e) => (e.currentTarget as HTMLDetailsElement).open && loadClub()}>
+          <summary>Club</summary>
+          <div class="phone-body">
+            {#each club as m (m.name)}
+              <div class="club-member">
+                <span>{m.name}</span>
+                <span class="used">{m.joined ? `${m.going} of ${m.max_agents} going` : m.invited ? "invited" : "invite lapsed"}</span>
+                {#if !m.joined}<button type="button" class="phone-btn quiet" onclick={() => invite(m.name)}>New link</button>{/if}
+                <button type="button" class="phone-btn quiet" onclick={() => letGo(m.name)}>Remove</button>
+              </div>
+            {/each}
+            <form class="phone-pass" onsubmit={(e) => { e.preventDefault(); invite(clubName); }}>
+              <input placeholder="Member's name" aria-label="Member's name" autocomplete="off" bind:value={clubName} />
+              <button type="submit" class="phone-btn" disabled={!clubName.trim()}>Invite</button>
+            </form>
+            {#if clubLink}<button type="button" class="phone-btn" onclick={copyInvite}>Copy {clubLink.name}'s invite link</button>{/if}
+            <a class="phone-link" href="{base}/club">Open the club page</a>
+            {#if clubNote}<p class="phone-note" role="status">{clubNote}</p>{/if}
           </div>
         </details>
         <a class="settings-link" href="{base}/settings">Settings</a>
@@ -1619,6 +1693,18 @@
     font: inherit;
     font-size: 0.72rem;
     cursor: pointer;
+  }
+  .club-member {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .club-member > span:first-child {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .phone-btn.quiet {
     color: var(--muted);

@@ -17,6 +17,10 @@
 // A lease is advisory and lapses (an agent that died lets go by itself); an agent claims again to keep
 // it. Hive's own landing honors them (orchestrator.mjs improveOnVm): a change waits while another live
 // agent holds one of its files exclusively. Tables: cloud/knowledge/migrations/0024_team.sql.
+//
+// A club member (club.js) reaches these as /v1/club/team/... with their own key, as themselves: they
+// send, read, claim and let go only as their name or "<name>:<agent>" (one of their own agents), see only
+// the club's running tasks, and no notes on leases but their own.
 
 export const DEFAULT_MINUTES = 60;
 export const MOST_MINUTES = 24 * 60;
@@ -81,8 +85,11 @@ export function overlaps(a, b) {
   return fa.startsWith(fb) || fb.startsWith(fa);
 }
 
-export async function teamRoute(request, env, url, { machineAllowed }, { clock = () => Date.now() } = {}) {
-  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+export async function teamRoute(request, env, url, { machineAllowed, member = null }, { clock = () => Date.now() } = {}) {
+  if (!member && !(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  // A member acts only as themselves or one of their own agents.
+  const mine = (name) => !member || name === member || name.startsWith(`${member}:`);
+  const notMine = () => json({ error: `As a club member you act as ${member} or ${member}:<your agent>.` }, 403);
   const now = Math.floor(clock() / 1000);
   const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
   const repo = nameOf(body.repo ?? url.searchParams.get("repo")) || "hive";
@@ -92,6 +99,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
     const to = nameOf(body.to);
     const words = text(body.text, MOST_TEXT);
     if (!from || !to || !words) return json({ error: "Say who it's from, who it's to and what it says (from, to, text)." }, 400);
+    if (!mine(from)) return notMine();
     const req = Number.isSafeInteger(body.request) && body.request > 0 ? body.request : null;
     const row = await env.DB.prepare(
       "INSERT INTO team_messages (sender, recipient, text, request, at) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
@@ -102,6 +110,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
   if (url.pathname === "/v1/team/inbox" && request.method === "GET") {
     const agent = nameOf(url.searchParams.get("agent"));
     if (!agent) return json({ error: "Say whose inbox (agent)." }, 400);
+    if (!mine(agent)) return notMine();
     const { results } = await env.DB.prepare(
       `SELECT id, sender AS "from", recipient AS "to", text, request, at FROM team_messages m
        WHERE (recipient = ?1 OR recipient = 'all') AND sender <> ?1
@@ -117,8 +126,9 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
   if (url.pathname === "/v1/team/agents" && request.method === "GET") {
     const { results: runs } = await env.DB.prepare(
       `SELECT machine, run, agent, title, request, task, updated_at FROM board_runs
-       WHERE status = 'working' AND updated_at > ?1 ORDER BY started_at`,
-    ).bind(now - ACTIVE_S).all();
+       WHERE status = 'working' AND updated_at > ?1
+         AND (?2 = 0 OR request IN (SELECT id FROM board_requests WHERE member IS NOT NULL)) ORDER BY started_at`,
+    ).bind(now - ACTIVE_S, member ? 1 : 0).all();
     const { results: leases } = await env.DB.prepare(
       "SELECT agent, path, exclusive, note, expires_at FROM team_leases WHERE repo = ?1 AND expires_at > ?2 ORDER BY at",
     ).bind(repo, now).all();
@@ -129,7 +139,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
     }
     for (const l of leases) {
       if (!agents.has(l.agent)) agents.set(l.agent, { name: l.agent, kind: "", title: "", request: null, files: [], seen: null });
-      agents.get(l.agent).files.push({ path: l.path, exclusive: Boolean(l.exclusive), note: l.note, expires_in: l.expires_at - now });
+      agents.get(l.agent).files.push({ path: l.path, exclusive: Boolean(l.exclusive), note: mine(l.agent) ? l.note : "", expires_in: l.expires_at - now });
     }
     return json({ agents: [...agents.values()] });
   }
@@ -138,6 +148,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
     const agent = nameOf(body.agent);
     const paths = [...new Set((Array.isArray(body.paths) ? body.paths : []).map(pathOf).filter(Boolean))].slice(0, MOST_PATHS);
     if (!agent || !paths.length) return json({ error: "Say who claims and which files (agent, paths)." }, 400);
+    if (!mine(agent)) return notMine();
     const exclusive = body.exclusive === false ? 0 : 1;
     const minutes = Math.min(Math.max(Number(body.minutes) || DEFAULT_MINUTES, 1), MOST_MINUTES);
     const note = text(body.note, 300);
@@ -149,7 +160,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
     for (const path of paths) {
       const against = held.filter((h) => (exclusive || h.exclusive) && overlaps(path, h.path));
       if (against.length) {
-        for (const h of against) conflicts.push({ path, holder: h.agent, held: h.path, note: h.note, expires_in: h.expires_at - now });
+        for (const h of against) conflicts.push({ path, holder: h.agent, held: h.path, note: mine(h.agent) ? h.note : "", expires_in: h.expires_at - now });
       } else claimed.push(path);
     }
     if (claimed.length) {
@@ -164,6 +175,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
   if (url.pathname === "/v1/team/release" && request.method === "POST") {
     const agent = nameOf(body.agent);
     if (!agent) return json({ error: "Say whose leases (agent)." }, 400);
+    if (!mine(agent)) return notMine();
     const paths = (Array.isArray(body.paths) ? body.paths : []).map(pathOf).filter(Boolean);
     const result = paths.length
       ? await env.DB.batch(paths.map((path) => env.DB.prepare("DELETE FROM team_leases WHERE repo = ?1 AND agent = ?2 AND path = ?3").bind(repo, agent, path)))
@@ -178,7 +190,7 @@ export async function teamRoute(request, env, url, { machineAllowed }, { clock =
     const over = (url.searchParams.get("paths") || "").split(",").map(pathOf).filter(Boolean);
     const leases = results
       .filter((l) => !over.length || over.some((p) => overlaps(p, l.path)))
-      .map((l) => ({ agent: l.agent, path: l.path, exclusive: Boolean(l.exclusive), note: l.note, held_for: now - l.at, expires_in: l.expires_at - now }));
+      .map((l) => ({ agent: l.agent, path: l.path, exclusive: Boolean(l.exclusive), note: mine(l.agent) ? l.note : "", held_for: now - l.at, expires_in: l.expires_at - now }));
     return json({ leases });
   }
 
