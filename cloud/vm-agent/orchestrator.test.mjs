@@ -554,3 +554,97 @@ test("a task waiting for the screen or the phone says for whom, in its own run",
     ['R40-1', "Gave the owner's iPhone to the task waiting for it; this one waits in line for its next call."],
   ]);
 });
+
+test('a task Hive itself stands in the way of has Hive change itself, then runs again with the change', async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const improveDir = mkdtempSync(join(tmpdir(), 'hive-improve-'));
+  try {
+    const { board, calls } = fakeBoard();
+    const briefs = [];
+    const asked = [];
+    await handle({ id: 9, text: 'send the video to the VM' }, {
+      board, now: () => 1000, stepEvery: 1, improveDir,
+      plan: async () => JSON.stringify({ project: 'hive', tasks: [{ title: 'Send the video to the VM', quote: 'send the video to the VM', kind: 'mac', difficulty: 'normal' }] }),
+      run: async (brief, choice, step, { improveFile }) => {
+        briefs.push(brief);
+        assert.equal(improveFile, join(improveDir, `r9-1-${briefs.length - 1}.json`), 'a need file a run');
+        if (briefs.length === 1) {
+          writeFileSync(improveFile, JSON.stringify({ what: 'Run shell commands on the Mac', why: 'Only a command can copy the file.' }));
+          return { ok: true, report: 'Hive has no Mac shell; asked for one.', seconds: 5, tokensIn: 10, tokensOut: 1 };
+        }
+        return { ok: true, report: 'Sent it with hive-files.', seconds: 7, tokensIn: 20, tokensOut: 2 };
+      },
+      improve: async (need, where, step) => {
+        asked.push({ need, where });
+        step('$ Testing Hive\'s change (2 files)');
+        return { ok: true, commit: 'abcdef0123456789', files: ['cloud/vm-agent/mac-mcp.mjs', 'cloud/vm-agent/mac-mcp.test.mjs'], live: ['the VM'], report: 'Added shell.', seconds: 60, tokensIn: 100, tokensOut: 10 };
+      },
+    });
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].need.what, 'Run shell commands on the Mac');
+    assert.equal(asked[0].where.request, 9);
+    assert.equal(asked[0].where.key, 1);
+    assert.equal(asked[0].where.round, 0);
+    assert.match(asked[0].where.report, /no Mac shell/);
+    assert.equal(briefs.length, 2);
+    assert.match(briefs[1], /Hive just changed itself for this task, because it couldn't run shell commands on the Mac:\nabcdef0123 on main \(2 files: .*\); live on the VM/);
+    const last = calls.filter(c => c.path === '/v1/requests/update').at(-1).body;
+    assert.equal(last.status, 'done');
+    const task = calls.filter(c => c.path === '/v1/requests/update' && c.body.tasks).at(-1).body.tasks[0];
+    assert.equal(task.status, 'done');
+    assert.equal(task.report, 'Sent it with hive-files.');
+    assert.equal(task.work_seconds, 72, 'both runs and the change');
+    assert.equal(task.tokens_in, 130);
+    const steps = calls.filter(c => c.path === '/v1/runs').flatMap(c => c.body.steps ?? []).map(s => s.text);
+    assert.ok(steps.includes('🛠 Hive is changing itself: Run shell commands on the Mac'));
+    assert.ok(steps.some(s => /^✅ Hive changed itself: abcdef0123 on main/.test(s)));
+  } finally {
+    rmSync(improveDir, { recursive: true, force: true });
+  }
+});
+
+test("a change Hive couldn't make, or one change too many, ends the task with exactly why", async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const improveDir = mkdtempSync(join(tmpdir(), 'hive-improve-'));
+  const plan = async () => JSON.stringify({ project: 'hive', tasks: [{ title: 'Do it', quote: 'do it', kind: 'screen', difficulty: 'normal' }] });
+  const asking = async (brief, choice, step, { improveFile }) => {
+    writeFileSync(improveFile, JSON.stringify({ what: 'Read PDFs.', why: 'The page is a PDF.' }));
+    return { ok: true, report: 'Asked.', seconds: 1 };
+  };
+  const taskOf = calls => calls.filter(c => c.path === '/v1/requests/update' && c.body.tasks).at(-1).body.tasks[0];
+  try {
+    const first = fakeBoard();
+    await handle({ id: 10, text: 'do it' }, {
+      board: first.board, now: () => 1000, stepEvery: 1, improveDir, plan, run: asking,
+      improve: async () => ({ ok: false, report: "Hive's tests still failed after 3 tries" }),
+    });
+    assert.equal(taskOf(first.calls).status, 'blocked');
+    assert.match(taskOf(first.calls).report, /Hive couldn't change itself so it can Read PDFs: Hive's tests still failed after 3 tries/);
+
+    const second = fakeBoard();
+    let changes = 0;
+    let runs = 0;
+    await handle({ id: 11, text: 'do it' }, {
+      board: second.board, now: () => 1000, stepEvery: 1, improveDir, plan,
+      run: async (...args) => { runs++; return asking(...args); },
+      improve: async () => { changes++; return { ok: true, commit: '0000000000ff', files: ['a.mjs'], live: [], report: '' }; },
+    });
+    assert.equal(changes, 2, 'MOST_ROUNDS changes, no more');
+    assert.equal(runs, 3);
+    assert.equal(taskOf(second.calls).status, 'blocked');
+    assert.match(taskOf(second.calls).report, /already changed itself 2 times for this task/);
+
+    const third = fakeBoard();
+    await handle({ id: 12, text: 'do it' }, {
+      board: third.board, now: () => 1000, stepEvery: 1, plan,
+      run: async (brief, choice, step, { improveFile }) => { assert.equal(improveFile, '', 'no improve: no need file'); return { ok: true, report: 'Done.', seconds: 1 }; },
+    });
+    assert.equal(taskOf(third.calls).status, 'done');
+  } finally {
+    rmSync(improveDir, { recursive: true, force: true });
+  }
+});

@@ -253,7 +253,7 @@ async function main(argv) {
     if (!(wait >= 0)) throw new Error('--wait is a number of minutes');
     const id = Number(rest[0]);
     if (command === 'state' && !(Number.isInteger(id) && id > 0)) throw new Error('usage: vm-post.mjs state <id>');
-    const request = command === 'task' ? await handOff(board, readFileSync(0, 'utf8'), { wait }) : await follow(board, id);
+    const request = command === 'task' ? await handOff(board, readFileSync(0, 'utf8'), { wait }) : await follow(board, id, { wait: at < 0 ? 0 : wait });
     process.exitCode = { done: 0, failed: 1 }[request.status] ?? 3;
     return;
   }
