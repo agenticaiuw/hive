@@ -98,7 +98,13 @@ fi
 
 staged="$APPLICATIONS/.Hive-update-$$"
 state="$(hive_state)"
-backup="$state/app-backups/previous-$$"
+# ".noindex": Spotlight skips the folder, so a search for "hive" finds Hive.app, not these old copies
+# of it (2026-11-19: the top hit was a backup).
+backup="$state/app-backups.noindex/previous-$$"
+if [ -d "$state/app-backups" ] && [ ! -e "$state/app-backups.noindex" ]; then
+  mv "$state/app-backups" "$state/app-backups.noindex"
+fi
+mkdir -p "$state/app-backups.noindex"
 mkdir -p "$HOME/Applications"
 if [ -e "$staged" ] || [ -L "$staged" ] || [ -e "$backup" ] || [ -L "$backup" ]; then
   echo 'Update stopped: staging or backup path already exists.' >&2
