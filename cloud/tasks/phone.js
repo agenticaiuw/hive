@@ -97,7 +97,9 @@ export function forgetOrigin() {
   remembered = null;
 }
 
-async function boardOrigin(env, url) {
+/** The board's public address: the one a call came in on, unless that was the dashboard's service binding
+ * (https://hive-tasks), then the one Macs and the VM call it on (board_settings). */
+export async function boardOrigin(env, url) {
   if (url.hostname.includes(".")) return url.origin;
   const row = await env.DB.prepare("SELECT value FROM board_settings WHERE key = 'origin'").first();
   return row?.value ?? null;

@@ -159,3 +159,54 @@ test('a member messages and leases files only as themselves, and sees no notes o
   const owner = (await call('GET', '/v1/team/agents')).body.agents;
   assert.deepEqual(owner.map((a) => [a.name, a.title]), [['R5-1', 'Pay the rent'], ['alice:codex', '']], 'the owner sees it all');
 });
+
+test("a member connects their Mac with a one-use code from the club page; the Mac's key works as theirs until they're let go", async () => {
+  const { env, call, join } = setup();
+  const key = await join('alice');
+  assert.equal((await call('POST', '/v1/club/devices/code', {}, 'nobody')).status, 401);
+  const made = (await call('POST', '/v1/club/devices/code', {}, key)).body;
+  assert.match(made.code, /^[0-9a-f]{32}$/);
+  assert.equal(made.link, `hive://club/connect?board=${encodeURIComponent('https://board.test')}&code=${made.code}`);
+  assert.equal(made.expires_in, 600);
+
+  assert.equal((await call('POST', '/v1/club/devices/connect', { code: 'nope' }, 'nobody')).status, 400);
+  const mac = await call('POST', '/v1/club/devices/connect', { code: made.code, device: 'alices-macbook' }, 'nobody');
+  assert.equal(mac.status, 200);
+  assert.equal(mac.body.name, 'alice');
+  assert.equal(mac.body.board, 'https://board.test');
+  assert.match(mac.body.key, /^club\.alice\.[0-9a-f]{64}$/);
+  assert.notEqual(mac.body.key, key);
+  assert.equal((await call('POST', '/v1/club/devices/connect', { code: made.code }, 'nobody')).status, 403, 'once');
+
+  // The Mac's key is the member's: it sees their devices and takes the club's releases, nothing of the owner's.
+  assert.equal((await call('GET', '/v1/club/me', undefined, mac.body.key)).body.name, 'alice');
+  assert.equal((await call('GET', '/v1/club/devices', undefined, mac.body.key)).body.me, 'alice');
+  assert.equal((await call('GET', '/v1/board', undefined, mac.body.key)).status, 401);
+  assert.equal((await call('GET', '/v1/club/me', undefined, key)).body.name, 'alice', "the browser's key still works too");
+
+  // A code that waited too long doesn't connect anything.
+  const late = (await call('POST', '/v1/club/devices/code', {}, key)).body.code;
+  env.DB.db.prepare('UPDATE club_device_codes SET expires_at = 1').run();
+  assert.equal((await call('POST', '/v1/club/devices/connect', { code: late }, 'nobody')).status, 403);
+
+  // Letting the member go stops their Macs too.
+  await call('POST', '/v1/club/members/remove', { name: 'alice' });
+  assert.equal((await call('GET', '/v1/club/me', undefined, mac.body.key)).status, 401);
+  assert.equal(env.DB.db.prepare('SELECT COUNT(*) AS n FROM club_device_keys').get().n, 0);
+});
+
+test("over the dashboard's service binding, the club's links carry the board's public address", async () => {
+  const { env, join } = setup();
+  const key = await join('bob');
+  const viaBinding = async (path) => {
+    const response = await worker.fetch(new Request(`https://hive-tasks${path}`, {
+      method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: '{}',
+    }), env);
+    return { status: response.status, body: await response.json() };
+  };
+  assert.equal((await viaBinding('/v1/club/devices/code')).status, 503, "it doesn't know its address yet");
+  env.DB.db.prepare("INSERT INTO board_settings (key, value, updated_at) VALUES ('origin', 'https://board.example.com', 1)").run();
+  const made = await viaBinding('/v1/club/devices/code');
+  assert.equal(made.status, 200);
+  assert.ok(made.body.link.startsWith(`hive://club/connect?board=${encodeURIComponent('https://board.example.com')}&code=`));
+});

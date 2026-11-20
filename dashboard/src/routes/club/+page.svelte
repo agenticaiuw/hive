@@ -6,6 +6,8 @@
    * as they happen. Members see the club's requests, who's working on which files, and their messages;
    * nothing of the owner's own board. Their own devices that take the club's releases show with the
    * commit each runs (cloud/tasks/nodes.js), and Hive Phone's updates come from the board's SideStore source.
+   * Connect this Mac opens Hive on the member's Mac with a one-use code, which Hive trades for the Mac's own
+   * key (club.js /v1/club/devices/code and /connect), so that Mac takes the club's releases too.
    */
   /* eslint-disable @typescript-eslint/no-explicit-any -- The board answers schemaless JSON here. */
   import { onMount } from "svelte";
@@ -26,6 +28,9 @@
   let said = $state("");
   let devices = $state<any | null>(null);
   let devicesAt = 0;
+  let onMac = $state(false);
+  let connecting = $state(false);
+  let connectNote = $state("");
 
   const KIND: Record<string, string> = { mac: "Mac", vm: "VM", phone: "iPhone", extension: "Browser" };
   const short = (commit: unknown, release: unknown) =>
@@ -50,6 +55,21 @@
       signedIn = true;
     } catch (error) {
       if (signedIn !== false) note = (error as Error).message;
+    }
+  }
+
+  async function connectMac() {
+    connecting = true;
+    connectNote = "";
+    try {
+      const { link } = await api("devices/code", {});
+      window.location.href = link;
+      connectNote = "Hive opens on this Mac and connects it; it shows here within a few minutes. If nothing opens, get Hive for Mac first.";
+      devicesAt = 0;
+    } catch (error) {
+      connectNote = (error as Error).message;
+    } finally {
+      connecting = false;
     }
   }
 
@@ -148,6 +168,7 @@
   };
 
   onMount(() => {
+    onMac = /Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints < 2;
     const url = new URL(window.location.href);
     const given = url.searchParams.get("invite");
     if (given) {
@@ -299,9 +320,13 @@
                 </li>
               {/each}
             </ul>
+            {#if onMac}
+              <button type="button" class="link" onclick={connectMac} disabled={connecting}>{connecting ? "Connecting…" : "Connect this Mac"}</button>
+            {/if}
             {#if devices.phone_source}
               <a class="phone" href={`sidestore://source?url=${encodeURIComponent(devices.phone_source)}`}>Get Hive Phone in SideStore</a>
             {/if}
+            {#if connectNote}<p class="empty">{connectNote}</p>{/if}
           </section>
         {/if}
       </aside>
@@ -312,6 +337,15 @@
 </main>
 
 <style>
+  button.link {
+    display: block;
+    margin-top: 8px;
+    padding: 0;
+    background: transparent;
+    color: var(--gold);
+    font-size: var(--fs-small);
+    font-weight: var(--w-normal);
+  }
   .phone {
     display: inline-block;
     margin-top: 8px;

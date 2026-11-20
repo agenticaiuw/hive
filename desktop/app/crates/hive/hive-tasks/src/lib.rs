@@ -27,6 +27,7 @@
 //! A session's history from before Hive first saw it is skipped, not imported.
 
 pub mod chrome_host;
+pub mod club;
 pub mod handoff;
 pub mod inbox;
 pub mod live;
@@ -240,11 +241,33 @@ pub struct Cloud {
 
 impl Cloud {
     pub fn load() -> Option<Cloud> {
-        let path = std::env::var_os("HIVE_TASKS_CLOUD")
+        Self::from_config(&Self::config()?)
+    }
+
+    /// ~/.config/hive/tasks.json, or `HIVE_TASKS_CLOUD`.
+    pub fn config_path() -> PathBuf {
+        std::env::var_os("HIVE_TASKS_CLOUD")
             .map(PathBuf::from)
-            .unwrap_or_else(|| hive_common::paths::home().join(".config/hive/tasks.json"));
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        Self::from_config(&v)
+            .unwrap_or_else(|| hive_common::paths::home().join(".config/hive/tasks.json"))
+    }
+
+    fn config() -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(Self::config_path()).ok()?).ok()
+    }
+
+    /// Where this Mac takes Hive's releases from (`release_source`), also when tasks.json names only
+    /// `releases`: a club member's Mac connected from the club page (club.rs) has no board of its own.
+    pub fn load_release_source() -> Option<Cloud> {
+        Self::release_source_of(&Self::config()?)
+    }
+
+    /// A tasks.json's contents as where its Mac takes releases from (`load_release_source`).
+    pub fn release_source_of(v: &Value) -> Option<Cloud> {
+        if let Some(cloud) = Self::from_config(v) {
+            return Some(cloud.release_source());
+        }
+        let r = v.get("releases")?;
+        Self::from_config(&json!({ "url": str_of(r, "url"), "token": str_of(r, "token"), "machine": str_of(v, "machine") }))
     }
 
     /// A tasks.json's contents as a Cloud (`load`), naming this Mac by its host name when it doesn't say.

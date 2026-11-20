@@ -20,6 +20,7 @@ typed into the app in front when you let go: dictation. Listening and speaking r
     hive-agent --task \"make a new note in Notes that says buy milk\"
     hive-agent --version
     hive-agent --update
+    hive-agent --join-club <board> <code>   (Hive.app runs it for the club page's Connect this Mac)
 
   tap fn                   it listens (the microphone opens), continuing the conversation; while
                            you have the mouse and keyboard during a task, it hands them back
@@ -170,7 +171,7 @@ fn update_now() -> i32 {
         eprintln!("hive-agent --update puts a release into the Hive folder it runs from (desktop/app/build/hive-agent).");
         return 1;
     };
-    let Some(cloud) = hive_tasks::Cloud::load() else {
+    let Some(cloud) = hive_tasks::Cloud::load_release_source() else {
         eprintln!("This Mac isn't connected to a Hive board yet, so there's no release to get.");
         return 1;
     };
@@ -185,6 +186,32 @@ fn update_now() -> i32 {
         }
         Err(why) => {
             eprintln!("Didn't update: {why}");
+            1
+        }
+    }
+}
+
+/// `hive-agent --join-club <board> <code>`: Hive.app runs it for a hive://club/connect link the member
+/// said yes to; this Mac takes the club's releases from then on (hive_tasks::club). It prints one line
+/// for the app to show.
+fn join_club(args: &[String]) -> i32 {
+    hive_tasks::node::set_kind("mac");
+    let (Some(board), Some(code)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: hive-agent --join-club <board> <code>");
+        return 2;
+    };
+    let device = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    match hive_tasks::club::join(&hive_tasks::Cloud::config_path(), board, code, &device) {
+        Ok(joined) => {
+            println!("This Mac is {}'s now and takes Hive's updates from the club.", joined.member);
+            0
+        }
+        Err(why) => {
+            println!("{why}");
             1
         }
     }
@@ -208,6 +235,9 @@ pub fn main(argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "--update") {
         return update_now();
     }
+    if let Some(at) = argv.iter().position(|a| a == "--join-club") {
+        return join_club(&argv[at + 1..]);
+    }
     if let Some(at) = argv.iter().position(|a| a == "--task") {
         return task_main(&argv[at + 1..]);
     }
@@ -226,7 +256,7 @@ pub fn main(argv: &[String]) -> i32 {
         match hive_tasks::update::on_start(hive, hive_tasks::node::VERSION) {
             hive_tasks::update::Start::RolledBack(note) => {
                 hive_common::say(format!("⏏  {note}"));
-                if let Some(cloud) = hive_tasks::Cloud::load() {
+                if let Some(cloud) = hive_tasks::Cloud::load_release_source() {
                     hive_tasks::update::report(&cloud, &note);
                 }
                 return 75;

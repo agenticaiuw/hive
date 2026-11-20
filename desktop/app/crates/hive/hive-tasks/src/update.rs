@@ -467,7 +467,8 @@ pub fn watch(hive: PathBuf, confirm_release: Option<String>, idle: Box<dyn Fn() 
             std::thread::sleep(Duration::from_secs(60));
         }
         loop {
-            if let Some(cloud) = Cloud::load() {
+            // tasks.json is read each time: a Mac connected from the club page meanwhile takes the club's.
+            if let Some(cloud) = Cloud::load_release_source() {
                 match once(&hive, &cloud, &*idle, Duration::from_secs(3600)) {
                     Ok(Outcome::PutIn { to, .. }) => {
                         restart(&format!("restart to run Hive {to}"));

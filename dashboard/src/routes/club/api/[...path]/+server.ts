@@ -14,7 +14,7 @@ export const prerender = false;
 const COOKIE = "__Host-hive_club";
 const YEAR = 365 * 86400;
 const GETS = new Set(["me", "board", "devices", "team/inbox", "team/agents", "team/claims"]);
-const POSTS = new Set(["requests", "stop", "team/send", "team/claim", "team/release"]);
+const POSTS = new Set(["requests", "stop", "devices/code", "team/send", "team/claim", "team/release"]);
 
 const answer = (value: unknown, status = 200, headers: Record<string, string> = {}) =>
   json(value, { status, headers: { ...NO_STORE_HEADERS, ...headers } });

@@ -70,6 +70,8 @@ test("a member signs in on the club page with their invite and reaches only the 
   assert.equal(asked.at(-1).path, "/v1/club/team/inbox?agent=alice");
   await call(w, "/club/api/devices", { cookie });
   assert.equal(asked.at(-1).path, "/v1/club/devices", "their own devices on the club's releases");
+  await call(w, "/club/api/devices/code", { method: "POST", body: {}, cookie });
+  assert.equal(asked.at(-1).path, "/v1/club/devices/code", "a one-use code that connects their Mac");
   const busy = await call(w, "/club/api/requests", { method: "POST", body: { text: "a dark theme" }, cookie });
   assert.equal(busy.status, 429, "the board's own answer");
   assert.match((await busy.json()).error, /3 changes going/);
