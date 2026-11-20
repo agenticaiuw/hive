@@ -34,8 +34,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, MOST_FIXES, MOST_ROUNDS, partsOf, readNeed, SELF_GUIDE,
+  againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES, MOST_ROUNDS, onTheMac,
+  partsOf, readNeed, SELF_GUIDE,
 } from './improve.mjs';
+import { callMac, connectedMac } from './mac-mcp.mjs';
 import { nodeHeaders } from './version.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -498,7 +500,7 @@ export async function runImproving(brief, { task, request, label, signal, step }
     step(`🛠 Hive is changing itself: ${need.what}`);
     let change;
     try {
-      change = await improve(need, { title: task.title, brief, report: result.report ?? '', request: request.id, key: task.key, round, label, signal }, step);
+      change = await improve(need, { title: task.title, brief, report: result.report ?? '', request: request.id, key: task.key, round, label, signal, board: deps.board }, step);
     } catch (error) {
       change = { ok: false, report: error.message };
     }
@@ -860,13 +862,20 @@ async function vmOn(version, { wait = 3 * 60_000, every = 5000 } = {}) {
   }
 }
 
+// How long the owner's Mac may take to build and test a change (the whole Mac release, from scratch in a
+// worktree), and to publish one and put it in (the build, then up to six hours for Hive to be idle).
+const MAC_CHECK_MS = 90 * 60_000;
+const MAC_INSTALL_MS = 7 * 3600_000;
+
 /**
  * Hive changing itself so a task can go on: a code agent changes Hive in a worktree off main (SELF_GUIDE),
  * the change's tests run until they pass (at most MOST_FIXES tries), and it lands on main and goes live
- * where it runs: a VM release (the updater puts it in), the board. A change to Hive on the Mac can't be
- * built or tested here: it goes to a branch for review instead of main, and the task doesn't go on.
+ * where it runs: a VM release (the updater puts it in), the board, the Mac. Hive on the Mac builds only on
+ * macOS, so a change to it is also built and tested on the owner's Mac (hive_self check, on the change's
+ * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
+ * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
  */
-async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null }, onStep) {
+async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null, board = null }, onStep) {
   const repo = join(CODE_ROOT, 'hive');
   const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
   const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
@@ -906,6 +915,18 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     await git('-C', dir, 'add', '-A');
     return (await git('-C', dir, 'diff', '--cached', '--name-only', 'origin/main')).split('\n').filter(Boolean);
   };
+  const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${need.why.slice(0, 1500)}\n\n`
+    + `Hive's cloud agent (${IMPROVER.model}, ${IMPROVER.effort} effort), for task T${request * 100 + key} (request R${request}), tested on the VM.`;
+  // The change as it stands, committed on its branch and pushed, for the Mac to build: the first time a
+  // commit, after a fix the same commit amended.
+  let committed = false;
+  const pushBranch = () => inRepo(repo, async () => {
+    await git('-C', dir, ...COMMITTER, 'commit', '--quiet', ...(committed ? ['--amend', '--no-edit'] : ['-m', message]));
+    committed = true;
+    await git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+  });
+  let mac;
+  const onMac = (name, args) => callMac(board, mac, name, args, { request });
   try {
     let result = await agent(`${SELF_GUIDE}\n\n${improveBrief(need, { title, brief, report })}`);
     let files = [];
@@ -916,29 +937,40 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
       onStep(`$ Testing Hive's change (${files.length} file${files.length === 1 ? '' : 's'})`);
       const gate = await gateOnVm(dir, files, tmp);
+      let failures = gate.failures;
       if (gate.ok) {
         onStep(`✅ ${gate.tests.length} test file${gate.tests.length === 1 ? '' : 's'} passed`);
-        break;
+        if (!partsOf(files).mac) break;
+        // Hive on the Mac builds only on macOS: the owner's Mac builds and tests it, from the branch.
+        const touched = files.filter(f => /^(desktop|browser|dashboard|branding)\//.test(f));
+        const which = `${touched.slice(0, 4).join(', ')}${touched.length > 4 ? ', …' : ''}`;
+        mac ??= board ? await connectedMac(board).catch(() => null) : null;
+        await pushBranch();
+        if (!mac) return end(false, `The change touches Hive on the Mac (${which}), which builds only on macOS, and no Mac is connected to build and test it on, so it's on branch ${branch}, not on main.`);
+        onStep(`$ Building and testing Hive's change on the owner's Mac`);
+        let job;
+        try {
+          job = await onTheMac(onMac, { action: 'check', branch }, { wait: MAC_CHECK_MS });
+        } catch (error) {
+          return end(false, `The owner's Mac couldn't test the change (${error.message}), so it's on branch ${branch}, not on main.`);
+        }
+        if (job.state === 'passed') {
+          onStep(`✅ It builds and passes its tests on the Mac`);
+          break;
+        }
+        if (job.timedOut) return end(false, `The Mac's test of the change didn't finish within ${MAC_CHECK_MS / 60_000} minutes, so it's on branch ${branch}, not on main.`);
+        failures = macFailures(job);
+        onStep(`✗ The change failed on the Mac (try ${tries} of ${MOST_FIXES})`);
+      } else {
+        onStep(`✗ Hive's tests failed on the change (try ${tries} of ${MOST_FIXES})`);
       }
-      onStep(`✗ Hive's tests failed on the change (try ${tries} of ${MOST_FIXES})`);
-      if (tries >= MOST_FIXES) return end(false, `Hive's tests still failed after ${MOST_FIXES} tries:\n${gate.failures}`);
-      result = await agent(fixBrief(gate.failures));
+      if (tries >= MOST_FIXES) return end(false, `Hive's tests still failed after ${MOST_FIXES} tries:\n${failures}`);
+      result = await agent(fixBrief(failures));
     }
-    const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${need.why.slice(0, 1500)}\n\n`
-      + `Hive's cloud agent (${IMPROVER.model}, ${IMPROVER.effort} effort), for task T${request * 100 + key} (request R${request}), tested on the VM.`;
     const parts = partsOf(files);
-    if (parts.mac) {
-      // Hive on the Mac builds only on macOS: nothing here can test it, so it waits for review.
-      await inRepo(repo, async () => {
-        await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
-        await git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
-      });
-      const mac = files.filter(f => /^(desktop|browser|dashboard|branding)\//.test(f));
-      return end(false, `The change touches Hive on the Mac (${mac.slice(0, 4).join(', ')}${mac.length > 4 ? ', …' : ''}), which can't be built or tested from the VM, so it's on branch ${branch} for review, not on main.`);
-    }
     // Onto main as it is now: rebased, tested again if main moved, then a fast-forward push.
     const commit = await inRepo(repo, async () => {
-      await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
+      if (!committed) await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
       for (let attempt = 1; ; attempt++) {
         const base = await git('-C', dir, 'rev-parse', 'origin/main');
         await git('-C', dir, 'fetch', '--quiet', 'origin', 'main');
@@ -982,6 +1014,27 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       } catch (error) {
         notes.push(`The VM release didn't publish: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
       }
+    }
+    if (parts.mac) {
+      // The Mac publishes a release of main as it now is and puts it in once Hive there is idle; the task
+      // runs again only once the Mac runs it, since the task needed it there.
+      onStep(`$ Publishing Hive for the Mac and putting it in on the owner's Mac once Hive there is idle`);
+      let job;
+      try {
+        job = await onTheMac(onMac, { action: 'install', commit, notes: need.what.slice(0, 200) }, { wait: MAC_INSTALL_MS });
+      } catch (error) {
+        job = { state: 'failed', failures: error.message };
+      }
+      const on = job.state === 'installed' && await macRunning(onMac, job);
+      if (!on) {
+        const why = job.state === 'failed' ? `it didn't go in: ${job.failures || 'no reason given'}`
+          : job.state === 'installed' ? `Hive ${job.version} went in, but the Mac didn't come back running it`
+            : job.timedOut ? `the Mac was still on it after ${MAC_INSTALL_MS / 3600_000} hours`
+              : `Hive ${job.version ?? ''} is published, but it isn't in on the Mac yet: ${job.here || 'no reason given'}`;
+        return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but on the owner's Mac ${why}.`, ...notes].join('\n\n'),
+          { commit, files, live });
+      }
+      live.push('the Mac');
     }
     return end(true, [result.report, ...notes].filter(Boolean).join('\n\n'), { commit, files, live });
   } finally {

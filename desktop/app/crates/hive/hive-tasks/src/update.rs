@@ -371,26 +371,34 @@ pub fn once(hive: &Path, cloud: &Cloud, idle: &dyn Fn() -> bool, wait: Duration)
     if node::VERSION == "dev" {
         return Ok(Outcome::Current);
     }
-    look(hive, cloud, Some((idle, wait)))
+    look(hive, cloud, Some((idle, wait)), false)
 }
 
 /// `hive-agent --update`: puts the newest release in now, over a build made by hand too (that's how a
 /// Mac set up by hand joins releases, and from then on updates itself) or one this Mac gave up on.
 /// Hive runs it from its next start; a release agent running now puts it in again once it's idle.
 pub fn now(hive: &Path, cloud: &Cloud) -> Result<Outcome, String> {
-    look(hive, cloud, None)
+    look(hive, cloud, None, false)
 }
 
-/// `idle` is None to put the release in without waiting.
-fn look(hive: &Path, cloud: &Cloud, idle: Option<(&dyn Fn() -> bool, Duration)>) -> Result<Outcome, String> {
+/// The newest release, over a build made by hand too, once Hive is idle: Hive changing itself puts in
+/// the release it just made of its own change (hive-app self_change.rs), so the task that needed it
+/// can go on with it. `wait` long at most; the release stays staged if Hive wasn't idle by then.
+pub fn put_in_when_idle(hive: &Path, cloud: &Cloud, idle: &dyn Fn() -> bool, wait: Duration) -> Result<Outcome, String> {
+    look(hive, cloud, Some((idle, wait)), true)
+}
+
+/// `idle` is None to put the release in without waiting; `over_any` puts it in over a build made by
+/// hand or one this Mac gave up on.
+fn look(hive: &Path, cloud: &Cloud, idle: Option<(&dyn Fn() -> bool, Duration)>, over_any: bool) -> Result<Outcome, String> {
     let answer = cloud.get("/v1/releases/latest?kind=mac")?;
     let release = &answer["release"];
     let Some(version) = release["version"].as_str().map(str::to_string) else {
         return Ok(Outcome::Current);
     };
     let wanted = match idle {
-        Some(_) => node::wants_update(Some(&version)) && !gave_up_on(hive, &version),
-        None => version != node::VERSION,
+        Some(_) if !over_any => node::wants_update(Some(&version)) && !gave_up_on(hive, &version),
+        _ => version != node::VERSION,
     };
     if !wanted {
         return Ok(Outcome::Current);

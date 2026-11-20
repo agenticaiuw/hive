@@ -46,6 +46,15 @@ test("the Mac's own tools are listed, and a call comes back as the Mac tool's re
   assert.equal(calls.filter(c => c.path === '/v1/mac/status?tools=1').length, 1, 'the Mac is found once a task');
 });
 
+test("a task can call only the tools the Mac listed, never Hive's own change jobs on the Mac", async () => {
+  const { board, calls } = fakeBoard({ answer: { result: { content: [] } } });
+  const answer = server({ board, label: 'R12-1' });
+  const out = await answer({ id: 3, method: 'tools/call', params: { name: 'hive_self', arguments: { action: 'install', commit: 'f'.repeat(40) } } });
+  assert.equal(out.result.isError, true);
+  assert.match(out.result.content[0].text, /the Mac has no tool hive_self/);
+  assert.ok(!calls.some(c => c.path === '/v1/mac/calls'), 'never sent to the Mac');
+});
+
 test("with no Mac connected there are no tools and a call says why; a failed call says what failed", async () => {
   const none = server({ board: fakeBoard({ macs: [] }).board, label: 'R1-1' });
   assert.equal((await none({ id: 1, method: 'initialize', params: {} })).result.instructions, OFFLINE);

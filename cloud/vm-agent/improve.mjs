@@ -6,10 +6,12 @@
 // improve_hive (knowledge-mcp.mjs), which writes what's missing to the task's need file. After the
 // run, the orchestrator reads it (readNeed) and, instead of ending the task:
 //   1. has a code agent change Hive in a worktree off main (SELF_GUIDE, improveBrief);
-//   2. tests the change here (gateTests) and, for the Mac's parts, on the Mac (hive_self check),
-//      handing the failures back to the agent until it passes (fixBrief, at most MOST_FIXES tries);
+//   2. tests the change here (gateTests) and, for the Mac's parts, on the Mac (hive_self check, which
+//      builds the whole Mac release: onTheMac), handing the failures back to the agent until it passes
+//      (fixBrief, at most MOST_FIXES tries);
 //   3. lands it on main, fast-forward, and puts it live where it runs (partsOf): a VM release the
-//      updater puts in at once when only what tasks start changed, the board, the Mac (hive_self install);
+//      updater puts in at once when only what tasks start changed, the board, the Mac (hive_self
+//      install: a Mac release, put in on the owner's Mac once Hive is idle);
 //   4. runs the task again with the change (againBrief), at most MOST_ROUNDS changes a task.
 // The pure parts are here, with their tests (improve.test.mjs); the git, test and deploy steps are the
 // orchestrator's (orchestrator.mjs improveOnVm).
@@ -109,6 +111,57 @@ export function failuresOf(output) {
   const lines = String(output).split('\n');
   const keep = lines.filter(l => /✖|not ok|Error|expected|actual|failed|error:/i.test(l));
   return (keep.length ? keep : lines).slice(-80).join('\n').slice(-6000);
+}
+
+/**
+ * A hive_self job on the owner's Mac (hive-app self_change.rs), followed to its end: `call(name, args)`
+ * makes one call on the Mac (mac-mcp.mjs callMac). The job starts, then its status is asked every
+ * `every` while it's running (or, for an install, waiting for Hive to be idle), `wait` at most. A status
+ * the Mac didn't answer (Hive restarting onto the release it just put in) is asked again. What it ended
+ * as: {state, failures?, version?, here?, running, timedOut?}.
+ */
+export async function onTheMac(call, args, { wait = 90 * 60_000, every = 30_000, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, onState = () => {} } = {}) {
+  const said = result => {
+    const text = result?.content?.[0]?.text ?? '';
+    if (result?.isError) throw new Error(text.replace(/^Failed: /, '') || 'the Mac said no');
+    return JSON.parse(text);
+  };
+  const started = said(await call('hive_self', args));
+  const until = now() + wait;
+  let last = started;
+  for (;;) {
+    await sleep(every);
+    try {
+      last = said(await call('hive_self', { action: 'status', job: started.job }));
+      onState(last);
+    } catch (error) {
+      if (now() > until) throw error;
+      continue;
+    }
+    if (!['running', 'waiting'].includes(last.state)) return last;
+    if (now() > until) return { ...last, timedOut: true };
+  }
+}
+
+/** After an install, whether Hive on the Mac came back running the release it put in: its status, asked
+ *  every `every` for `wait` at most, says which version answered (Hive restarts onto it once it's idle). */
+export async function macRunning(call, job, { wait = 5 * 60_000, every = 15_000, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now } = {}) {
+  if (!job?.version) return false;
+  if (job.running === job.version) return true;
+  const until = now() + wait;
+  while (now() <= until) {
+    await sleep(every);
+    try {
+      const result = await call('hive_self', { action: 'status', job: job.id });
+      if (!result?.isError && JSON.parse(result?.content?.[0]?.text ?? '{}').running === job.version) return true;
+    } catch {}
+  }
+  return false;
+}
+
+/** The Mac's account of a failed check, for the code agent: which step, and what it said. */
+export function macFailures(job) {
+  return `On the owner's Mac (macOS), where Hive on the Mac builds: ${job.failures || 'the check failed'}`;
 }
 
 /** One line for the board on what landed, and where it went live. */

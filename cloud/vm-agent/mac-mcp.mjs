@@ -73,6 +73,10 @@ export function server({ board, label = '', turn = null }) {
       case 'tools/call': {
         const found = await find();
         if (!found) return reply({ content: [{ type: 'text', text: board ? OFFLINE : NO_BOARD }], isError: true });
+        // Only the tools the Mac listed: its other calls (hive_self, Hive changing itself) are the orchestrator's.
+        if (!found.tools.some(t => t?.name === message.params?.name)) {
+          return reply({ content: [{ type: 'text', text: `Failed: the Mac has no tool ${message.params?.name ?? ''}.` }], isError: true });
+        }
         const run = () => callMac(board, found, message.params?.name, message.params?.arguments ?? {}, { request: requestOf(label) });
         try {
           return reply(await (turn ? turn.use(run) : run()));

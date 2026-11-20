@@ -104,6 +104,8 @@ pub struct MacPeer {
     stopped: AtomicBool,
     /// The request the last call was for: a call for another one begins a new task on the tools.
     request: Mutex<Option<i64>>,
+    /// Hive changing itself (self_change.rs): the orchestrator's `hive_self` calls, never a tool's.
+    self_change: Mutex<Option<Arc<crate::self_change::SelfChange>>>,
 }
 
 impl MacPeer {
@@ -122,7 +124,13 @@ impl MacPeer {
             quiet_since: Mutex::new(Instant::now()),
             stopped: AtomicBool::new(false),
             request: Mutex::new(None),
+            self_change: Mutex::new(None),
         })
+    }
+
+    /// The orchestrator's `hive_self` calls go to `changer` (app.rs gives it the Hive folder).
+    pub fn set_self_change(&self, changer: Arc<crate::self_change::SelfChange>) {
+        *lock(&self.self_change) = Some(changer);
     }
 
     /// Serves the cloud agent's calls in the background until [`MacPeer::stop`].
@@ -215,6 +223,26 @@ impl MacPeer {
     /// Runs one call with the Mac's tools and posts what came of it. A step for a request this Mac
     /// follows is shown on it as it happens, and a one-way step the tools took is said aloud.
     pub fn run(&self, call: &Value) {
+        // Hive changing itself: a job's start or status, answered at once. It isn't the cloud agent
+        // working on this Mac, so it doesn't keep Hive from being idle (an install waits for that).
+        if call["name"].as_str() == Some(crate::self_change::NAME) {
+            let changer = lock(&self.self_change).clone();
+            let result = match changer {
+                Some(changer) => changer.call(call.get("arguments").unwrap_or(&Value::Null)),
+                None => json!({"content": [{"type": "text", "text":
+                    "Failed: this Mac's Hive doesn't run from a Hive folder, so it can't change itself."}], "isError": true}),
+            };
+            let body = json!({"id": call["id"].as_i64().unwrap_or(0), "result": result});
+            for attempt in 0..3 {
+                if self.board.post("/v1/mac/result", &body).is_ok() {
+                    break;
+                }
+                if attempt < 2 {
+                    self.pause(self.pace.retry);
+                }
+            }
+            return;
+        }
         *lock(&self.last_call) = Some(Instant::now());
         self.in_call.store(true, Ordering::SeqCst);
         let id = call["id"].as_i64().unwrap_or(0);
