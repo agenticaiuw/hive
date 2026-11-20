@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changedFiles, inFlight, needsRestart, orchestratorHealthy, update, workerFiles } from './updater.mjs';
+import { changedFiles, inFlight, needsRestart, orchestratorHealthy, releaseSource, update, workerFiles } from './updater.mjs';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { appVersion, bundleVersion, nodeHeaders, pack, unpack, PROTOCOL } from './version.mjs';
 import { pathToFileURL } from 'node:url';
@@ -215,4 +215,15 @@ test('what needs a restart: the orchestrator and what it imports, old or new; th
   assert.equal(needsRestart(appDir, next, ['agent.mjs']), true, "the worker's");
   assert.equal(needsRestart(appDir, next, ['hive-update.timer']), true);
   assert.equal(needsRestart(appDir, next, ['hive-task.mjs', 'desktop-mcp.mjs', 'updater.mjs']), false);
+});
+
+test("a club member's VM takes the club's releases with the member's key; anyone else's, its own board's", () => {
+  const key = `club.alice.${'a'.repeat(64)}`;
+  assert.deepEqual(releaseSource({ url: 'https://own.example/', token: 'own', machine: 'alice-vm', releases: { url: 'https://club.example//', token: key } }),
+    { url: 'https://club.example', token: key, machine: 'alice-vm' });
+  assert.deepEqual(releaseSource({ url: 'https://own.example/', token: 'own' }), { url: 'https://own.example', token: 'own', machine: 'vm' });
+  // Half a club source is no source: the VM stays on its own board.
+  assert.deepEqual(releaseSource({ url: 'https://own.example', token: 'own', releases: { url: 'https://club.example' } }),
+    { url: 'https://own.example', token: 'own', machine: 'vm' });
+  assert.throws(() => releaseSource({ token: 'own' }), /no url or token/);
 });

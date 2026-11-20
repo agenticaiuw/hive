@@ -364,4 +364,18 @@ test("the side panel shows what each node runs: the board, then each VM, Mac and
     ['Mac', '334b5fa', '', '', false],
   ]);
   assert.deepEqual(toNodes(null, now), [], 'a board that sent no nodes shows none');
+  // Releases that say their commit read as that commit, whatever kind of node or whose it is.
+  const c1 = '1c9d302fe699bcf74d7f5b264e4a241e7d4dab86', c2 = 'de21530aaaabbbbccccddddeeeeffff000011112';
+  const one = toNodes({
+    board: { version: 'b0a4d1c2e3f4', commit: c2 },
+    nodes: [
+      { kind: 'mac', name: 'alice@macbook', version: '9c1b2a3d4e5f', commit: c1, seen_at: now * 1000, current: false, latest: '0d0e0f1a2b3c', latest_commit: c2 },
+      { kind: 'vm', name: 'badger-vm', version: '0d0e0f1a2b3c', commit: 'not a commit', seen_at: now * 1000, current: true, latest: '0d0e0f1a2b3c', latest_commit: null },
+    ],
+  }, now);
+  assert.deepEqual(one.map((n) => [n.label, n.version, n.release, n.latest, n.state]), [
+    ['Board', 'de21530', 'b0a4d1c', '', ''],
+    ['Mac alice@macbook', '1c9d302', '9c1b2a3', 'de21530', 'behind'],
+    ['VM badger-vm', '0d0e0f1', '0d0e0f1', '0d0e0f1', 'current'],
+  ]);
 });

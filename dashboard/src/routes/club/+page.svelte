@@ -4,7 +4,8 @@
    * owner sent them, then asks Hive to change itself. Hive on its VM does each request as changes to its
    * own code, in its own worktree, tested, landed and put live on everyone's devices; the steps show here
    * as they happen. Members see the club's requests, who's working on which files, and their messages;
-   * nothing of the owner's own board.
+   * nothing of the owner's own board. Their own devices that take the club's releases show with the
+   * commit each runs (cloud/tasks/nodes.js), and Hive Phone's updates come from the board's SideStore source.
    */
   /* eslint-disable @typescript-eslint/no-explicit-any -- The board answers schemaless JSON here. */
   import { onMount } from "svelte";
@@ -23,6 +24,12 @@
   let sending = $state(false);
   let to = $state("all");
   let said = $state("");
+  let devices = $state<any | null>(null);
+  let devicesAt = 0;
+
+  const KIND: Record<string, string> = { mac: "Mac", vm: "VM", phone: "iPhone", extension: "Browser" };
+  const short = (commit: unknown, release: unknown) =>
+    typeof commit === "string" && /^[0-9a-f]{40}$/.test(commit) ? commit.slice(0, 7) : String(release ?? "").slice(0, 12);
 
   async function api(path: string, body?: unknown) {
     const response = await fetch(`${base}/club/api/${path}`, {
@@ -48,6 +55,10 @@
 
   async function loadTeam() {
     if (!signedIn || !board) return;
+    if (Date.now() - devicesAt > 60_000) {
+      devicesAt = Date.now();
+      devices = await api("devices").catch(() => devices);
+    }
     try {
       agents = (await api("team/agents")).agents ?? [];
       const fresh = (await api(`team/inbox?agent=${encodeURIComponent(board.me)}`)).messages ?? [];
@@ -270,6 +281,29 @@
             {/each}
           </ul>
         </section>
+
+        {#if devices}
+          <section class="card">
+            <h2>Your devices</h2>
+            {#if !devices.nodes.filter((n: any) => n.kind !== "cli").length}
+              <p class="empty">None of your devices take the club's updates yet.</p>
+            {/if}
+            <ul class="members">
+              {#each devices.nodes.filter((n: any) => n.kind !== "cli") as n (`${n.kind}:${n.name}`)}
+                <li title={n.note || ""}>
+                  <strong>{KIND[n.kind] ?? n.kind} {n.name}</strong>
+                  <span class="count">
+                    {short(n.commit, n.version)}{#if n.current === false} → {short(n.latest_commit, n.latest)}{/if}
+                    · {n.current === true ? "up to date" : n.current === false ? "updating when idle" : n.version === "dev" ? "built by hand" : "nothing published"}
+                  </span>
+                </li>
+              {/each}
+            </ul>
+            {#if devices.phone_source}
+              <a class="phone" href={`sidestore://source?url=${encodeURIComponent(devices.phone_source)}`}>Get Hive Phone in SideStore</a>
+            {/if}
+          </section>
+        {/if}
       </aside>
     </div>
   {:else}
@@ -278,6 +312,12 @@
 </main>
 
 <style>
+  .phone {
+    display: inline-block;
+    margin-top: 8px;
+    color: var(--gold);
+    font-size: var(--fs-small);
+  }
   .club {
     min-height: 100vh;
     background: var(--background);

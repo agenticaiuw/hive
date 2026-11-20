@@ -227,10 +227,15 @@ CREATE INDEX IF NOT EXISTS messages_session ON messages (harness, session);
 
 /// Where the owner's cloud copy is and how this machine signs in to it: ~/.config/hive/tasks.json
 /// (or `HIVE_TASKS_CLOUD`), `{"url", "token", "machine"}`. No file, no cloud copy.
+///
+/// It may also say where Hive's releases come from, `"releases": {"url", "token"}`: a club member's Hive
+/// keeps its tasks on its own board and takes the club's releases with the member's club key
+/// (cloud/tasks/club.js), so every member's devices run the same Hive (update.rs).
 pub struct Cloud {
     pub url: String,
     token: String,
     pub machine: String,
+    releases: Option<(String, String)>,
 }
 
 impl Cloud {
@@ -239,12 +244,22 @@ impl Cloud {
             .map(PathBuf::from)
             .unwrap_or_else(|| hive_common::paths::home().join(".config/hive/tasks.json"));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        let url = str_of(&v, "url").trim_end_matches('/').to_string();
-        let token = str_of(&v, "token").to_string();
+        Self::from_config(&v)
+    }
+
+    /// A tasks.json's contents as a Cloud (`load`), naming this Mac by its host name when it doesn't say.
+    pub fn from_config(v: &Value) -> Option<Cloud> {
+        let url = str_of(v, "url").trim_end_matches('/').to_string();
+        let token = str_of(v, "token").to_string();
         if url.is_empty() || token.is_empty() {
             return None;
         }
-        let machine = match str_of(&v, "machine") {
+        let releases = v.get("releases").and_then(|r| {
+            let url = str_of(r, "url").trim_end_matches('/').to_string();
+            let token = str_of(r, "token").to_string();
+            (!url.is_empty() && !token.is_empty()).then_some((url, token))
+        });
+        let machine = match str_of(v, "machine") {
             "" => std::process::Command::new("hostname")
                 .arg("-s")
                 .output()
@@ -256,7 +271,15 @@ impl Cloud {
             url,
             token,
             machine,
+            releases,
         })
+    }
+
+    /// Where this machine takes Hive's releases from and says what it runs: the club's board when
+    /// tasks.json names one (`releases`), else this board.
+    pub fn release_source(&self) -> Cloud {
+        let (url, token) = self.releases.clone().unwrap_or_else(|| (self.url.clone(), self.token.clone()));
+        Cloud { url, token, machine: self.machine.clone(), releases: None }
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, String> {

@@ -18,12 +18,17 @@
 //                                                 theirs are going: {id, ahead}
 //   POST /v1/club/stop {id}                       member: stops one of their own requests
 //   GET  /v1/club/board                           member: the club's requests, their tasks and live steps
+//   GET  /v1/club/devices                         member: their own devices on Hive's releases (nodes.js),
+//                                                 each against the newest release of its kind, and where
+//                                                 Hive Phone's updates come from (SideStore)
 //   /v1/club/team/...                             member: messages and file leases (team.js), as themselves
 //
 // How many at once (the knowledge base's "Club collaboration" decision): a member runs at most
 // max_agents requests at a time (DEFAULT_AGENTS unless the owner says otherwise); the planner splits each
 // into tasks, one agent each; the VM's slots (orchestrator.mjs MOST_REQUESTS, MOST_RUNNING) cap them all.
 // Tables: cloud/knowledge/migrations/0025_club.sql.
+
+import { nodeList } from "./nodes.js";
 
 export const DEFAULT_AGENTS = 3;
 export const MOST_AGENTS = 8;
@@ -198,6 +203,20 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
       me: member.name, now,
       requests: requests.results.map((r) => ({ ...r, text: String(r.text || "").replace(/^For hive: /, "") })),
       tasks: tasks.results, runs: runs.results, steps: steps.results.reverse(), members: members.results,
+    });
+  }
+
+  if (path === "/v1/club/devices" && request.method === "GET") {
+    // A member's Mac and VM take the club's releases with their key (hive-tasks update.rs, vm-agent
+    // updater.mjs: tasks.json's `releases`), and say here what they run, under the member's name.
+    const list = await nodeList(env, { member: member.name });
+    const phone = list.releases.some((r) => r.kind === "phone");
+    return json({
+      me: member.name,
+      nodes: list.nodes.map((n) => ({ ...n, name: n.name.slice(member.name.length + 1) })),
+      releases: list.releases.filter((r) => r.kind !== "board").map(({ kind, version, commit, published_at }) => ({ kind, version, commit, published_at })),
+      board: list.board,
+      phone_source: phone ? `${url.origin}/v1/phone/source.json` : null,
     });
   }
 

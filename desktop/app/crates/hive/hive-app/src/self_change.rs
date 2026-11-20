@@ -16,6 +16,9 @@
 //!                                sign-in, for a VM that has none
 //!   {action: "site", commit}     the change landed on main and touches the dashboard: the dashboard
 //!                                website deployed from that commit (cloud/release.mjs site), the same way
+//!   {action: "phone", commit}    the change landed on main and touches Hive Phone: it built (Xcode, so on
+//!                                a Mac) and published from that commit (cloud/release.mjs phone), which
+//!                                SideStore then offers on every member's iPhone
 //!   {action: "status", job}      how a job stands, and the release this Mac's Hive runs now
 //!
 //! A job runs in the background (a build takes minutes; one call on the Mac is held for six at most),
@@ -195,7 +198,7 @@ impl SelfChange {
                     self.start("check", json!({ "branch": branch }))
                 }
             }
-            action @ ("install" | "board" | "site") => {
+            action @ ("install" | "board" | "site" | "phone") => {
                 let commit = args["commit"].as_str().unwrap_or("").trim().to_lowercase();
                 if !valid_commit(&commit) {
                     Err(format!("{action} takes the full id of the commit on main"))
@@ -213,7 +216,7 @@ impl SelfChange {
                     j
                 })
             }
-            _ => Err("hive_self takes action check, install, board, site or status".to_string()),
+            _ => Err("hive_self takes action check, install, board, site, phone or status".to_string()),
         };
         match answer {
             Ok(v) => json!({ "content": [{ "type": "text", "text": v.to_string() }] }),
@@ -261,7 +264,7 @@ impl SelfChange {
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job["action"].as_str().unwrap_or("").to_string().as_str() {
                     "check" => me.run_check(&mut job),
-                    what @ ("board" | "site") => me.run_deploy(&mut job, what),
+                    what @ ("board" | "site" | "phone") => me.run_deploy(&mut job, what),
                     _ => me.run_install(&mut job),
                 }
             }));
@@ -428,8 +431,8 @@ impl SelfChange {
         Ok(())
     }
 
-    /// The board, or the dashboard website ("site"), deployed from a commit on main, as the owner deploys
-    /// it from here.
+    /// The board, the dashboard website ("site") or Hive Phone deployed from a commit on main, as the owner
+    /// deploys it from here. Hive Phone's release is published; one already of these sources stays.
     fn run_deploy(&self, job: &mut Value, what: &str) -> Result<(), String> {
         let commit = job["commit"].as_str().unwrap_or("").to_string();
         self.git(&["fetch", "--quiet", "origin", "main"])?;
@@ -441,15 +444,18 @@ impl SelfChange {
         let args = [self.repo.join("cloud/release.mjs").display().to_string(), what.into(), "--from".into(), dir.display().to_string()];
         let (ok, said) = self.run(&dir, "node", &args, STEP_LIMIT);
         self.drop_worktree(&dir);
-        let name = if what == "site" { "the dashboard website" } else { "the board" };
+        let name = match what {
+            "site" => "the dashboard website",
+            "phone" => "Hive Phone",
+            _ => "the board",
+        };
         self.step(job, &format!("Deploying {name}"), ok, started);
         if !ok {
             return Err(format!("{name} didn't deploy:\n{}", tail(&said)));
         }
         let version = said
             .lines()
-            .find_map(|l| l.trim().strip_prefix(&format!("deployed {what} ")).map(|v| v.trim().to_string()))
-            .filter(|v| !v.is_empty())
+            .find_map(|l| deployed_version(l, what))
             .ok_or_else(|| format!("the deploy didn't say it deployed:\n{}", tail(&said)))?;
         job["state"] = json!("deployed");
         job["version"] = json!(version);
@@ -515,6 +521,18 @@ impl SelfChange {
         }
         Ok(())
     }
+}
+
+/// The version a deploy's line says went out: "deployed board 9c1b…", "published phone 2026.1120.0815-9c1b…",
+/// or, for Hive Phone, the release already of these sources ("phone: 2026… is already these sources").
+fn deployed_version(line: &str, what: &str) -> Option<String> {
+    let line = line.trim();
+    let version = line
+        .strip_prefix(&format!("deployed {what} "))
+        .or_else(|| line.strip_prefix(&format!("published {what} ")).map(|v| v.split(';').next().unwrap_or("")))
+        .or_else(|| line.strip_prefix(&format!("{what}: ")).and_then(|v| v.strip_suffix(" is already these sources; nothing to publish")))?;
+    let version = version.trim();
+    (!version.is_empty() && !version.contains(' ')).then(|| version.to_string())
 }
 
 #[cfg(test)]
@@ -609,12 +627,27 @@ mod tests {
         assert_eq!(status["running"], hive_tasks::node::VERSION);
         let none = me.call(&json!({ "action": "status", "job": "../../etc/passwd" }));
         assert_eq!(none["isError"], json!(true));
-        for action in ["install", "board", "site"] {
+        for action in ["install", "board", "site", "phone"] {
             let short = me.call(&json!({ "action": action, "commit": "abc123" }));
             assert_eq!(short["isError"], json!(true), "{action} takes a full commit id");
             assert!(short["content"][0]["text"].as_str().unwrap().contains(&format!("{action} takes the full id")));
         }
         let unknown = me.call(&json!({ "action": "shell", "command": "ls" }));
-        assert!(unknown["content"][0]["text"].as_str().unwrap().contains("check, install, board, site or status"));
+        assert!(unknown["content"][0]["text"].as_str().unwrap().contains("check, install, board, site, phone or status"));
+    }
+
+    #[test]
+    fn a_deploy_says_what_went_out() {
+        assert_eq!(deployed_version("deployed board 9c1b2a3d4e5f", "board").as_deref(), Some("9c1b2a3d4e5f"));
+        assert_eq!(deployed_version("deployed site 9c1b2a3d4e5f", "board"), None);
+        assert_eq!(
+            deployed_version("published phone 2026.1120.815-9c1b2a3d4e5f; SideStore offers it on every member's iPhone", "phone").as_deref(),
+            Some("2026.1120.815-9c1b2a3d4e5f")
+        );
+        assert_eq!(
+            deployed_version("phone: 2026.1120.815-9c1b2a3d4e5f is already these sources; nothing to publish", "phone").as_deref(),
+            Some("2026.1120.815-9c1b2a3d4e5f")
+        );
+        assert_eq!(deployed_version("phone 2026.1120.815-9c1b: 30.1 MB IPA from HEAD", "phone"), None);
     }
 }

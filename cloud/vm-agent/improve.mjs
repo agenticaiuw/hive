@@ -105,6 +105,8 @@ export function partsOf(files) {
     board: any(/^cloud\/(tasks|knowledge\/migrations|shared)\//),
     mac: any(/^(desktop|browser|dashboard|branding)\//),
     site: any(/^dashboard\//),
+    // Hive Phone's sources (cloud/release.mjs PHONE_SOURCES): built on the Mac, offered by SideStore.
+    phone: any(/^(mobile\/relay\/(WebDriverAgent|icon)\/|mobile\/relay\/build\.mjs$|cloud\/shared\/(ownerDetails|hiveCloud)\.mjs$)/),
     cloudTests: any(/^cloud\/(tasks|knowledge|shared|tests)\//),
   };
 }

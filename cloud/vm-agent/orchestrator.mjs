@@ -1140,6 +1140,19 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         note("The dashboard website didn't deploy: no Mac is connected to deploy it from");
       }
     }
+    if (parts.phone) {
+      // Hive Phone builds on a Mac (Xcode), so the owner's Mac builds and publishes it; SideStore then offers it
+      // on every member's iPhone that has the board's source (cloud/tasks/phone.js).
+      mac ??= board ? await connectedMac(board).catch(() => null) : null;
+      if (mac) {
+        onStep(`$ Publishing Hive Phone from the owner's Mac`);
+        const job = await onTheMac(onMac, { action: 'phone', commit }, { wait: MAC_CHECK_MS }).catch(error => ({ state: 'failed', failures: error.message }));
+        if (job.state === 'deployed') live.push('Hive Phone (SideStore offers it on each iPhone)');
+        else note(`Hive Phone didn't publish: ${job.timedOut ? 'the Mac was still on it' : job.failures || 'no reason given'}`);
+      } else {
+        note("Hive Phone didn't publish: no Mac is connected to build it on");
+      }
+    }
     // The task runs again only where its change is live: a board without it would answer the task as before.
     if (parts.board && !live.includes('the board')) {
       return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but the board isn't running it.`, ...notes].join('\n\n'), { commit, files, live });

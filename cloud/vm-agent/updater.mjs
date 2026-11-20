@@ -291,13 +291,20 @@ export function boardFor({ url, token, machine }, version) {
   };
 }
 
+/** Where this VM takes releases from and says what it runs: the board in its tasks.json, or the club's
+ *  board when it names one (`releases: {url, token}`, a club member's VM signed in with the member's club
+ *  key, cloud/tasks/club.js), so every member's VM runs the same Hive as the owner's. */
+export function releaseSource(c) {
+  if (!c?.url || !c?.token) throw new Error('the board config has no url or token');
+  const from = c.releases?.url && c.releases?.token ? c.releases : c;
+  return { url: String(from.url).replace(/\/+$/, ''), token: from.token, machine: c.machine || 'vm' };
+}
+
 function config() {
   const text = process.env.HIVE_TASKS_CONFIG
     ? readFileSync(process.env.HIVE_TASKS_CONFIG, 'utf8')
     : execFileSync('sudo', ['-n', 'cat', '/root/.config/hive/tasks.json'], { encoding: 'utf8' });
-  const c = JSON.parse(text);
-  if (!c.url || !c.token) throw new Error('the board config has no url or token');
-  return { url: String(c.url).replace(/\/+$/, ''), token: c.token, machine: c.machine || 'vm' };
+  return releaseSource(JSON.parse(text));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

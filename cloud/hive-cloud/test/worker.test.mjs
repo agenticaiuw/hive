@@ -35,7 +35,8 @@ test('health works before and after the claim, and reports no secrets', async ()
   const { cloud: c2 } = await claimed();
   res = await c2.call('GET', '/v1/health');
   assert.equal(res.data.claimed, true);
-  assert.deepEqual(Object.keys(res.data).sort(), ['claimed', 'ok', 'service', 'storage', 'version']);
+  assert.deepEqual(Object.keys(res.data).sort(), ['claimed', 'code', 'ok', 'service', 'storage', 'version']);
+  assert.equal(res.data.code, null, 'a Worker uploaded without its code version says none (hive-cloud deploy.rs code_version)');
 });
 
 test('only the holder of the claim secret can claim, and only once', async () => {

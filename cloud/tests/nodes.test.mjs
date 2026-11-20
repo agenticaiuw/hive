@@ -158,3 +158,45 @@ test("every node's copy of the routes number matches cloud/shared/protocol.json"
     assert.equal(Number(pattern.exec(readFileSync(at, 'utf8'))?.[1]), protocol, file);
   }
 });
+
+test("one version: releases say their commit, and a club member's devices take the same releases with the member's key", async () => {
+  const { env, call } = setup();
+  env.HIVE_COMMIT = 'b'.repeat(40);
+  const commit = 'a'.repeat(40);
+  const bytes = Buffer.from('the Mac build');
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  assert.equal((await call('POST', `/v1/releases?kind=mac&version=9c1b2a3d4e5f&protocol=1&sha256=${sha}&commit=abc`, { raw: bytes })).status, 400,
+    "a commit is the full id of one");
+  const sent = await call('POST', `/v1/releases?kind=mac&version=9c1b2a3d4e5f&protocol=1&sha256=${sha}&commit=${commit}`, { raw: bytes });
+  assert.equal(sent.body.release.commit, commit);
+
+  const { invite } = (await call('POST', '/v1/club/members', { body: { name: 'alice' } })).body;
+  const key = (await call('POST', '/v1/club/join', { body: { invite }, auth: '' })).body.key;
+  const alice = `Bearer ${key}`;
+  // Alice's Mac reads the club's releases with her key, but never publishes one or reads the board's.
+  const newest = await call('GET', '/v1/releases/latest?kind=mac', { auth: alice, node: 'mac:macbook', version: '3f2a9b8c7d6e', protocol: 1 });
+  assert.equal(newest.status, 200);
+  assert.equal(newest.body.release.commit, commit);
+  assert.equal((await call('GET', '/v1/releases/get?kind=mac&version=9c1b2a3d4e5f', { auth: alice })).body, 'the Mac build');
+  assert.equal((await call('GET', '/v1/releases/latest?kind=board', { auth: alice })).status, 401);
+  assert.equal((await call('POST', `/v1/releases?kind=mac&version=9c1b2a3d4e5f&protocol=1&sha256=${sha}`, { raw: bytes, auth: alice })).status, 401);
+  assert.equal((await call('GET', '/v1/releases/latest?kind=mac', { auth: `Bearer club.alice.${'0'.repeat(64)}` })).status, 401);
+  // What her devices run is written down under her name, whatever they call themselves.
+  await call('POST', '/v1/nodes/report', { auth: alice, body: { kind: 'mac', name: 'macbook', version: '9c1b2a3d4e5f', note: 'Updated from 3f2a9b8c7d6e to 9c1b2a3d4e5f.' } });
+  await call('POST', '/v1/nodes/report', { auth: alice, body: { kind: 'vm', name: 'bob@vm', note: 'Up to date.' } });
+  assert.equal((await call('POST', '/v1/nodes/report', { auth: alice, body: { kind: 'board', name: 'x' } })).status, 400);
+  await call('GET', '/v1/club/me', { auth: alice, node: 'vm:own-vm', version: 'dev', protocol: 1 });
+  await call('GET', '/v1/requests/state?id=1', { node: 'mac:owner-mbp', version: '9c1b2a3d4e5f', protocol: 1 });
+  assert.deepEqual(nodes(env), ['mac:alice@macbook 9c1b2a3d4e5f p1', 'mac:owner-mbp 9c1b2a3d4e5f p1', 'vm:alice@bob-vm unknown pnull', 'vm:alice@own-vm dev p1']);
+
+  // The owner sees every device as the commit it runs; Alice sees only hers, by the names they gave.
+  const all = (await call('GET', '/v1/nodes')).body;
+  assert.equal(all.board.commit, 'b'.repeat(40));
+  assert.deepEqual(all.nodes.filter((n) => n.kind === 'mac').map((n) => [n.name, n.commit, n.latest_commit, n.current]),
+    [['alice@macbook', commit, commit, true], ['owner-mbp', commit, commit, true]]);
+  const mine = (await call('GET', '/v1/club/devices', { auth: alice })).body;
+  assert.deepEqual(mine.nodes.map((n) => `${n.kind}:${n.name}`), ['mac:macbook', 'vm:bob-vm', 'vm:own-vm']);
+  assert.deepEqual(mine.releases.map((r) => [r.kind, r.commit]), [['mac', commit]]);
+  assert.equal(mine.phone_source, null, 'no Hive Phone release yet');
+  assert.equal((await call('GET', '/v1/club/devices')).status, 401, "the owner's machines aren't a member");
+});

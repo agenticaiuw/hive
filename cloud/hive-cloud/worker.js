@@ -110,6 +110,8 @@ export class Account {
       return json({
         ok: true, service: 'hive-cloud', version: VERSION, claimed: this.claimed(),
         storage: this.env.BLOBS ? 'r2' : 'durable-objects',
+        // Which code this is (hive-cloud deploy.rs code_version): a device on newer code updates it.
+        code: this.env.HIVE_CLOUD_CODE || null,
       });
     }
     if (path === '/v1/claim' && method === 'POST') return this.claim(await body(request));

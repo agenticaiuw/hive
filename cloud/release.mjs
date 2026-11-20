@@ -20,11 +20,13 @@
 // Its sources unchanged since the newest phone release, nothing is built or published.
 // `site` builds the dashboard website (the hive-dashboard Worker, dashboard/) and deploys it, as
 // `npm run deploy:cloudflare` does; its secrets stay in Cloudflare, never here.
+// Every release and the board's deploy say the commit on main they were built from (HEAD, or --from's
+// when it's a checkout of one), so all of Hive's nodes read as one version (cloud/tasks/nodes.js).
 // The board's address and key are this machine's hive-tasks config (~/.config/hive/tasks.json),
 // never printed.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { arch, homedir, platform, tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,15 +58,29 @@ function committed(paths) {
   return dir;
 }
 
+/** The commit a release is built from: HEAD of the repository, or of `from` when that's the top of a
+ *  checkout (the Mac's worktree of a commit on main); '' for an export that isn't one. */
+export function commitOf(from) {
+  const at = from ? resolve(from) : REPO;
+  const git = args => execFileSync('git', ['-C', at, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    if (realpathSync(git(['rev-parse', '--show-toplevel'])) !== realpathSync(at)) return '';
+    return git(['rev-parse', '--verify', 'HEAD^{commit}']);
+  } catch {
+    return '';
+  }
+}
+
 function board() {
   const c = JSON.parse(readFileSync(join(homedir(), '.config', 'hive', 'tasks.json'), 'utf8'));
   if (!c.url || !c.token) throw new Error("this machine's hive-tasks config has no board url or token");
   return { url: String(c.url).replace(/\/+$/, ''), token: c.token, machine: c.machine || 'mac' };
 }
 
-async function publish(kind, { bytes, version, sha256 }, notes) {
+async function publish(kind, { bytes, version, sha256 }, notes, from) {
   const { url, token, machine } = board();
-  const query = new URLSearchParams({ kind, version, protocol: String(PROTOCOL), sha256, notes });
+  const commit = commitOf(from);
+  const query = new URLSearchParams({ kind, version, protocol: String(PROTOCOL), sha256, notes, ...(commit ? { commit } : {}) });
   const response = await fetch(`${url}/v1/releases?${query}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream', 'content-length': String(bytes.length),
@@ -83,7 +99,7 @@ async function releaseVm({ from, notes, dryRun }) {
     const packed = pack('vm', files);
     console.log(`vm ${packed.version}: ${files.length} files, ${(packed.bytes.length / 1024).toFixed(0)} KB${from ? ` from ${from}` : ' from HEAD'}`);
     if (dryRun) return;
-    const release = await publish('vm', packed, notes);
+    const release = await publish('vm', packed, notes, from);
     console.log(`published vm ${release.version}; every VM puts it in within a few minutes of being idle`);
   } finally {
     if (!from) rmSync(root, { recursive: true, force: true });
@@ -169,7 +185,7 @@ async function releaseMac({ from, notes, dryRun, out }) {
     console.log(`mac ${version} (${arch()}): ${files.length} files, ${(packed.bytes.length / 1024 / 1024).toFixed(1)} MB, none of the owner's details`);
     if (out) writeFileSync(out, packed.bytes);
     if (dryRun) return packed;
-    const release = await publish('mac', packed, notes);
+    const release = await publish('mac', packed, notes, from);
     console.log(`published mac ${release.version}; every Mac on a release puts it in once Hive is idle`);
     return packed;
   } finally {
@@ -216,7 +232,7 @@ async function releasePhone({ from, notes, dryRun, out }) {
     console.log(`phone ${version}: ${(bytes.length / 1024 / 1024).toFixed(1)} MB IPA${from ? ` from ${from}` : ' from HEAD'}, none of the owner's details`);
     if (out) writeFileSync(out, bytes);
     if (dryRun) return { bytes, version, sha256 };
-    const release = await publish('phone', { bytes, version, sha256 }, notes);
+    const release = await publish('phone', { bytes, version, sha256 }, notes, from);
     console.log(`published phone ${release.version}; SideStore offers it on every member's iPhone`);
     return { bytes, version, sha256 };
   } finally {
@@ -243,7 +259,8 @@ function releaseBoard({ from, dryRun }) {
       return said;
     };
     if (db) console.log(run(['d1', 'migrations', 'apply', db, '--remote']));
-    console.log(run(['deploy', '--var', `HIVE_VERSION:${version}`]));
+    const commit = commitOf(from);
+    console.log(run(['deploy', '--var', `HIVE_VERSION:${version}`, ...(commit ? ['--var', `HIVE_COMMIT:${commit}`] : [])]));
     console.log(`deployed board ${version}`);
   } finally {
     if (!from) rmSync(root, { recursive: true, force: true });

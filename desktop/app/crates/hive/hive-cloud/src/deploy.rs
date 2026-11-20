@@ -19,6 +19,13 @@ pub struct Cloudflare {
     agent: ureq::Agent,
 }
 
+impl Cloudflare {
+    /// The token it signs in with: kept so the cloud can be updated later (Kept).
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -148,6 +155,8 @@ impl Cloudflare {
         let mut bindings = vec![
             json!({ "type": "durable_object_namespace", "name": "ACCOUNT", "class_name": "Account" }),
             json!({ "type": "durable_object_namespace", "name": "SHARD", "class_name": "BlobShard" }),
+            // Which code this is, for its health check (code_version, keep_current).
+            json!({ "type": "plain_text", "name": "HIVE_CLOUD_CODE", "text": code_version() }),
         ];
         if let Some(b) = bucket {
             bindings.push(json!({ "type": "r2_bucket", "name": "BLOBS", "bucket_name": b }));
@@ -202,6 +211,67 @@ fn read(res: ureq::Response) -> String {
     text
 }
 
+/// The Worker's code as this build carries it, the first 12 hex of its sha256. Each upload gives it to the
+/// Worker (HIVE_CLOUD_CODE) and its health check says it, so a device on a newer Hive can tell its cloud
+/// runs older code (keep_current).
+pub fn code_version() -> String {
+    crypto::sha256_hex(WORKER_JS.as_bytes())[..12].to_string()
+}
+
+/// Whether the Hive Cloud whose health check said `health` runs other code than this build carries.
+pub fn behind(health: &Value) -> bool {
+    health["service"] == "hive-cloud" && health["code"].as_str() != Some(code_version().as_str())
+}
+
+/// What updating a Hive Cloud takes, kept in the Keychain beside its device keys when it's deployed from
+/// this device (the owner, 2026-11-20: every member's devices get each update, "their own cloud server"
+/// among them): the Cloudflare token it was deployed with, its account and its Worker's name.
+pub struct Kept {
+    pub token: String,
+    pub account: String,
+    pub script: String,
+}
+
+const KEPT: [&str; 3] = ["cloudflare-token", "cloudflare-account", "cloudflare-script"];
+
+impl Kept {
+    pub fn save(&self, secrets: &crate::config::Secrets, host: &str) -> Result<(), String> {
+        for (name, value) in KEPT.iter().zip([&self.token, &self.account, &self.script]) {
+            secrets.set(host, name, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn load(secrets: &crate::config::Secrets, host: &str) -> Option<Kept> {
+        let [token, account, script] = KEPT.map(|name| secrets.get(host, name).ok().filter(|v| !v.is_empty()));
+        Some(Kept { token: token?, account: account?, script: script? })
+    }
+
+    pub fn forget(secrets: &crate::config::Secrets, host: &str) {
+        for name in KEPT {
+            secrets.delete(host, name);
+        }
+    }
+}
+
+/// Puts this build's Worker code on the Hive Cloud at `url` when it runs older code, with what was kept
+/// when it was deployed from here; its data and secrets stay. Some(what happened) when it updated it,
+/// None when there was nothing to do; an error when it's behind and this device can't update it.
+pub fn keep_current(url: &str, secrets: &crate::config::Secrets) -> Result<Option<String>, String> {
+    let health = crate::api::Client::new(url, None)?.get("/v1/health").map_err(|e| format!("{url} didn't answer: {e}"))?;
+    if !behind(&health) {
+        return Ok(None);
+    }
+    let kept = Kept::load(secrets, &crate::sync::host_of(url))
+        .ok_or_else(|| format!("{url} runs older code, and this device didn't deploy it, so it can't update it"))?;
+    let cf = Cloudflare::new(kept.token);
+    // Keep the storage it already uses: switching would strand the chunks already stored.
+    let bucket = (health["storage"] == "r2").then(|| format!("{}-chunks", kept.script));
+    cf.upload(&kept.account, &kept.script, bucket.as_deref(), None)?;
+    wait_healthy(url, Duration::from_secs(60))?;
+    Ok(Some(format!("Updated {url} to this Hive's cloud code ({}).", code_version())))
+}
+
 /// Wait until a new Worker answers its health check (a new workers.dev name can take a minute).
 /// One answer isn't enough: a new Worker reaches Cloudflare's servers one by one, so it waits for
 /// several in a row.
@@ -225,5 +295,70 @@ pub fn wait_healthy(url: &str, timeout: Duration) -> Result<Value, String> {
             Ok(v) => return Err(format!("{url} answered, but not as a Hive Cloud: {v}")),
             Err(e) => return Err(format!("{url} did not come up: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Secrets;
+    use std::io::{BufRead as _, Write as _};
+
+    /// A stand-in Hive Cloud answering its health check with `health`, once per call.
+    fn cloud(health: Value) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let body = health.to_string();
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn the_cloud_says_which_code_it_runs_and_a_newer_hive_knows_it_is_behind() {
+        let code = code_version();
+        assert_eq!(code.len(), 12);
+        assert!(code.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(code, code_version(), "the same code is the same version");
+        assert!(WORKER_JS.contains("code: this.env.HIVE_CLOUD_CODE"), "its health check says it");
+        assert!(!behind(&json!({ "service": "hive-cloud", "code": code })));
+        assert!(behind(&json!({ "service": "hive-cloud", "code": "000000000000" })));
+        assert!(behind(&json!({ "service": "hive-cloud", "version": "1.0.0" })), "one from before it said its code");
+        assert!(!behind(&json!({ "service": "something else" })));
+    }
+
+    #[test]
+    fn what_updating_takes_is_kept_beside_the_device_keys_and_forgotten_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Secrets::Files(dir.path().to_path_buf());
+        assert!(Kept::load(&secrets, "cloud.example").is_none());
+        Kept { token: "cf-token_1".into(), account: "0123abcd".into(), script: "hive-cloud".into() }.save(&secrets, "cloud.example").unwrap();
+        let kept = Kept::load(&secrets, "cloud.example").unwrap();
+        assert_eq!((kept.token.as_str(), kept.account.as_str(), kept.script.as_str()), ("cf-token_1", "0123abcd", "hive-cloud"));
+        assert!(Kept::load(&secrets, "other.example").is_none());
+        Kept::forget(&secrets, "cloud.example");
+        assert!(Kept::load(&secrets, "cloud.example").is_none());
+    }
+
+    #[test]
+    fn a_cloud_on_this_code_is_left_alone_and_one_behind_needs_what_was_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Secrets::Files(dir.path().to_path_buf());
+        let current = cloud(json!({ "ok": true, "service": "hive-cloud", "code": code_version(), "storage": "r2" }));
+        assert_eq!(keep_current(&current, &secrets).unwrap(), None);
+        let old = cloud(json!({ "ok": true, "service": "hive-cloud", "version": "1.0.0", "storage": "r2" }));
+        let why = keep_current(&old, &secrets).unwrap_err();
+        assert!(why.contains("runs older code") && why.contains("didn't deploy it"), "{why}");
     }
 }

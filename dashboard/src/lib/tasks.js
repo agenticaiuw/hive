@@ -245,19 +245,24 @@ function toLimit(l, machine) {
 
 const NODE_KINDS = /** @type {Record<string, string>} */ ({ board: 'Board', vm: 'VM', mac: 'Mac', phone: 'Phone' });
 const SHORT = (/** @type {string} */ v) => (/^[0-9a-f]{12}$/.test(v) ? v.slice(0, 7) : v);
+/** A commit on main, short, or '' when there's none. */
+const COMMIT = (/** @type {unknown} */ c) => (typeof c === 'string' && /^[0-9a-f]{40}$/.test(c) ? c.slice(0, 7) : '');
 
 /**
  * Hive's nodes and what each runs (cloud/tasks/nodes.js), for the side panel: the board itself, then
  * each VM, Mac, browser and phone. The hive-tasks command on each machine isn't a node of its own.
  * `state` is "current", "behind" (a newer release is out for it), "old" (on routes the board no
  * longer serves), "dev" (built by hand, so it's never replaced by a release) or "" (nothing published
- * for its kind); `away` when it hasn't called for 10 minutes.
+ * for its kind); `away` when it hasn't called for 10 minutes. Its version is the commit on main its
+ * release was built from when the board knows it (one numbering for every kind of node), else the
+ * release's own hash; `release` is that hash either way.
  * @param {any} list
  * @param {number} now seconds
  */
 export function toNodes(list, now) {
   if (!list || !Array.isArray(list.nodes)) return [];
-  const board = { key: 'board', kind: 'board', label: 'Board', version: SHORT(String(list.board?.version ?? 'dev')), latest: '', state: '', note: '', away: false };
+  const boardRelease = SHORT(String(list.board?.version ?? 'dev'));
+  const board = { key: 'board', kind: 'board', label: 'Board', version: COMMIT(list.board?.commit) || boardRelease, release: boardRelease, latest: '', state: '', note: '', away: false };
   const rows = list.nodes
     .filter((/** @type {any} */ n) => n.kind !== 'cli')
     .map((/** @type {any} */ n) => {
@@ -272,8 +277,9 @@ export function toNodes(list, now) {
         key: `${kind}:${name}`,
         kind,
         label,
-        version: SHORT(String(n.version ?? '')),
-        latest: n.latest ? SHORT(String(n.latest)) : '',
+        version: COMMIT(n.commit) || SHORT(String(n.version ?? '')),
+        release: SHORT(String(n.version ?? '')),
+        latest: COMMIT(n.latest_commit) || (n.latest ? SHORT(String(n.latest)) : ''),
         state,
         note: String(n.note ?? ''),
         away: now - Math.floor(Number(n.seen_at) / 1000) > 600,
