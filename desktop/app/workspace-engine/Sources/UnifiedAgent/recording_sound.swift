@@ -133,8 +133,13 @@ final class RecordingSound: NSObject, SCStreamOutput, @unchecked Sendable {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
     }
 
+    /// Read from the file every time. URL.resourceValues caches a value in the URL until a run loop
+    /// turn clears it, and this queue has no run loop: the recording's size read that way stayed at
+    /// its first value, so after two minutes every recording looked stopped and its sound was thrown
+    /// away (2026-11-19, the owner's 7½-minute "Screen Recording 2026-11-19 at 22.19.28": "there's
+    /// no sound why?"). Recordings under two minutes were saved before that mattered.
     private func size(_ url: URL) -> Int64 {
-        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1)
+        ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? -1
     }
 
     /// On every change in either folder, and each second.
