@@ -750,6 +750,14 @@ impl MacTools {
         self.control.let_go();
     }
 
+    /// A new request from the owner: a takeover from before it doesn't count (the helper still
+    /// says "keyboard" from the last one until it engages again), so its first screen step asks again.
+    pub fn new_task(&self) {
+        let mut s = lock(&self.control.state);
+        s.fresh = true;
+        s.notified_waiting = false;
+    }
+
     /// The user just took the mouse and keyboard (the helper said so). On the virtual monitor
     /// their cursor and app come straight back to their screen; the agent goes on.
     /// Doesn't wait for a step in progress (that step may be waiting for the user's hands).
@@ -1531,6 +1539,9 @@ impl ToolNamespace for MacTools {
     }
     fn set_words(&self, words: &str) {
         MacTools::set_words(self, words);
+    }
+    fn new_task(&self) {
+        MacTools::new_task(self);
     }
     fn let_go(&self) {
         MacTools::let_go(self);

@@ -28,6 +28,9 @@ pub trait ToolNamespace: Send + Sync {
     /// What the user asked for in this conversation lately (CodexTask's `words`): a step marked
     /// one-way must quote it ([`crate::mcp::check_step`]). Set for each task.
     fn set_words(&self, _words: &str) {}
+    /// A new request from the owner begins: a takeover from before it doesn't count, so its first
+    /// screen step asks for the mouse and keyboard again (once the owner's hands are off them).
+    fn new_task(&self) {}
     /// Hands the mouse and keyboard back while the agent works without the screen (a shell command).
     fn let_go(&self) {}
     /// The user handed the screen back (fn, or "continue"): the tools hold it as if just used.

@@ -102,6 +102,8 @@ pub struct MacPeer {
     in_call: AtomicBool,
     quiet_since: Mutex<Instant>,
     stopped: AtomicBool,
+    /// The request the last call was for: a call for another one begins a new task on the tools.
+    request: Mutex<Option<i64>>,
 }
 
 impl MacPeer {
@@ -119,6 +121,7 @@ impl MacPeer {
             in_call: AtomicBool::new(false),
             quiet_since: Mutex::new(Instant::now()),
             stopped: AtomicBool::new(false),
+            request: Mutex::new(None),
         })
     }
 
@@ -231,6 +234,15 @@ impl MacPeer {
             }
         }
         let tools = self.tools();
+        // The tools live as long as Hive does; a new request mustn't inherit the last one's takeover
+        // (the helper keeps saying "keyboard" until it engages again).
+        if let Some(request) = call["request"].as_i64() {
+            let mut last = lock(&self.request);
+            if *last != Some(request) {
+                *last = Some(request);
+                tools.new_task();
+            }
+        }
         // What the owner said for this request: a one-way step must quote it (hive-mac's check_step).
         tools.set_words(call["words"].as_str().unwrap_or(""));
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools.call(name, &args)));
