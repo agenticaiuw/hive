@@ -88,21 +88,21 @@ export const HARNESSES = { claude: 'Claude Code', codex: 'Codex', hive: 'Hive' }
 const CODING_HARNESSES = ['claude', 'codex'];
 
 /**
- * Whether a task goes nowhere without the owner: one waiting on their answer, or one stuck after
- * Hive's own tries to continue it are spent (the cloud continues a stuck task by itself first; the
- * owner: "why tf would it get stuck just for me to click continue? what's the point?").
+ * Whether a task goes nowhere without the owner: only one its agent stopped on with the exact
+ * reason and what it needs from them (waiting). A stuck one is Hive's: the cloud keeps continuing it
+ * (the owner: "if they must stop they must provide an exact reason of why they stopped and what
+ * exactly do they need me for or else they'd just keep going").
  * @param {Task} t
  */
-export const needsOwner = (t) => t.status === 'waiting' || (t.status === 'blocked' && !t.retrying);
+export const needsOwner = (t) => t.status === 'waiting';
 
 /** The sections of the board, in the order they're shown, each with the tasks it holds (`has`). */
 export const SECTIONS = [
-  // Everything that goes nowhere without the owner: a task waiting on an answer (the outcome says
-  // what), then a stuck one Hive couldn't get going. They were two lists; the owner: "how's this
-  // different from needing me? if they're the same thing just combine them".
-  { id: 'needs-you', title: 'Needs you', statuses: ['waiting', 'blocked'], has: needsOwner },
-  // A stuck task Hive is still continuing is being worked on, not the owner's yet.
-  { id: 'working', title: 'Working on it', statuses: ['active', 'blocked'], has: (/** @type {Task} */ t) => t.status === 'active' || (t.status === 'blocked' && t.retrying) },
+  // What goes nowhere without the owner: a task waiting on them, its outcome saying why it stopped
+  // and exactly what it needs.
+  { id: 'needs-you', title: 'Needs you', statuses: ['waiting'], has: needsOwner },
+  // A stuck task is still being worked on: Hive keeps continuing it.
+  { id: 'working', title: 'Working on it', statuses: ['active', 'blocked'], has: (/** @type {Task} */ t) => t.status === 'active' || t.status === 'blocked' },
   { id: 'not-started', title: 'Not started', statuses: ['open'], has: (/** @type {Task} */ t) => t.status === 'open' },
   { id: 'done', title: 'Done', statuses: ['done', 'dropped'], has: (/** @type {Task} */ t) => t.status === 'done' || t.status === 'dropped' },
 ];
@@ -243,6 +243,45 @@ function toLimit(l, machine) {
   };
 }
 
+const NODE_KINDS = /** @type {Record<string, string>} */ ({ board: 'Board', vm: 'VM', mac: 'Mac', phone: 'Phone' });
+const SHORT = (/** @type {string} */ v) => (/^[0-9a-f]{12}$/.test(v) ? v.slice(0, 7) : v);
+
+/**
+ * Hive's nodes and what each runs (cloud/tasks/nodes.js), for the side panel: the board itself, then
+ * each VM, Mac, browser and phone. The hive-tasks command on each machine isn't a node of its own.
+ * `state` is "current", "behind" (a newer release is out for it), "old" (on routes the board no
+ * longer serves), "dev" (built by hand, so it's never replaced by a release) or "" (nothing published
+ * for its kind); `away` when it hasn't called for 10 minutes.
+ * @param {any} list
+ * @param {number} now seconds
+ */
+export function toNodes(list, now) {
+  if (!list || !Array.isArray(list.nodes)) return [];
+  const board = { key: 'board', kind: 'board', label: 'Board', version: SHORT(String(list.board?.version ?? 'dev')), latest: '', state: '', note: '', away: false };
+  const rows = list.nodes
+    .filter((/** @type {any} */ n) => n.kind !== 'cli')
+    .map((/** @type {any} */ n) => {
+      const kind = String(n.kind);
+      const name = String(n.name ?? '');
+      const kindName = NODE_KINDS[kind] ?? kind;
+      // A machine named after its kind ("vm", "mac") is just "VM", "Mac": the name would only repeat it.
+      const label = kind === 'extension' ? name.charAt(0).toUpperCase() + name.slice(1)
+        : !name || name.toLowerCase() === kindName.toLowerCase() ? kindName : `${kindName} ${name}`;
+      const state = n.old_protocol ? 'old' : n.version === 'dev' ? 'dev' : n.current === true ? 'current' : n.current === false ? 'behind' : '';
+      return {
+        key: `${kind}:${name}`,
+        kind,
+        label,
+        version: SHORT(String(n.version ?? '')),
+        latest: n.latest ? SHORT(String(n.latest)) : '',
+        state,
+        note: String(n.note ?? ''),
+        away: now - Math.floor(Number(n.seen_at) / 1000) > 600,
+      };
+    });
+  return [board, ...rows];
+}
+
 /**
  * The board in one shape, from either source.
  * @param {any} answer `GET /api/tasks`'s JSON
@@ -281,6 +320,7 @@ export function normalizeBoard(answer) {
       updated: seconds(f.updated_at),
     }))),
     limits: /** @type {Limit[]} */ ((board.limits ?? []).map((/** @type {any} */ l) => toLimit(l, machine))),
+    nodes: toNodes(board.nodes, seconds(board.now) || Math.floor(Date.now() / 1000)),
     requests: /** @type {Request[]} */ ((board.requests ?? []).map((/** @type {any} */ r) => ({
       id: `R${r.id}`,
       // The request this one follows up on, so a thread reads as one conversation.

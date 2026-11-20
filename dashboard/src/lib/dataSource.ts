@@ -55,6 +55,23 @@ export async function saveMemory(memory: {
   });
 }
 
+/* The owner's iPhone (cloud/tasks/phone.js): whether Hive Phone is connected, its pairing, its passcode. */
+export async function fetchPhone(): Promise<{ connected: boolean; version: string | null; passcode: boolean; paused: boolean }> {
+  return apiRequest(`${base}/api/phone`);
+}
+
+export async function pairPhone(): Promise<{ pairing: string; source: string; sidestore: string }> {
+  return apiRequest(`${base}/api/phone/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+}
+
+export async function savePhonePasscode(body: { passcode?: string; consent?: boolean; remove?: boolean; retry?: boolean }) {
+  return apiRequest(`${base}/api/phone/passcode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 /*
  * Voice-to-text for the composer. In Hive's window the app records you and Hive's own speech
  * model (the one that hears you when you tap fn) reads it; in a browser the page records you and

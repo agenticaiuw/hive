@@ -9,7 +9,7 @@
    * short lines, and a box at the bottom that talks to it through the cloud wherever it runs, with
    * its tasks just above that box so they stay in view (T306). Clicking Hive goes home (T308): a box
    * to hand Hive something new, then the tasks: what needs the owner (a question and its answer
-   * box, or a stuck task, why, and Continue), what's being worked on, what hasn't started and why,
+   * box, saying why it stopped and what it needs), what's being worked on, what hasn't started and why,
    * and what's done. Rules lists
    * the owner's standing rules under their projects (T307, T309). Every unfinished task can be
    * continued or cancelled from its row. Nothing is said twice (R17).
@@ -23,8 +23,11 @@
     turnRuleOff,
     fetchConversation,
     fetchFolder,
+    fetchPhone,
     fetchTaskBoard,
+    pairPhone,
     saveFolder,
+    savePhonePasscode,
     saveMemory,
     sendToAgent,
     sendToHive,
@@ -141,8 +144,9 @@
 
   const agentList = $derived(board ? agents(board) : []);
   const ofTask = $derived(agentOfTask(agentList));
-  const activeAgents = $derived(agentList.filter((a) => a.status !== "idle"));
-  const earlierAgents = $derived(agentList.filter((a) => a.status === "idle"));
+  // The VM's agent is pinned: always in view, never folded under Earlier.
+  const activeAgents = $derived(agentList.filter((a) => a.status !== "idle" || a.pinned));
+  const earlierAgents = $derived(agentList.filter((a) => a.status === "idle" && !a.pinned));
   const agent = $derived(agentList.find((a) => a.key === agentKey) ?? null);
   const shown = $derived(
     board ? sections(board.tasks, { project, folder, query, doneLimit: showAllDone ? 500 : 12 }) : [],
@@ -217,8 +221,73 @@
     };
   });
 
+  const NODE_STATE: Record<string, (n: any) => string> = {
+    current: () => "On the newest release",
+    behind: (n) => `Updates to ${n.latest} by itself when it's idle`,
+    old: () => "On routes the board no longer serves; it updates itself when it's idle",
+    dev: () => "Built by hand, so releases never replace it",
+    "": () => "Nothing published for it yet",
+  };
+  function nodeTitle(n: any) {
+    return [NODE_STATE[n.state]?.(n), n.away ? "Not heard from in 10 minutes" : "", n.note].filter(Boolean).join(" · ");
+  }
+
   function message(error: unknown) {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  // The owner's iPhone (cloud/tasks/phone.js), read when its section is opened.
+  type PhoneState = { connected: boolean; version: string | null; passcode: boolean; paused: boolean };
+  let phone = $state<PhoneState | null>(null);
+  let phoneNote = $state("");
+  let phoneGet = $state("");
+  let phonePass = $state("");
+
+  async function loadPhone() {
+    try {
+      phone = await fetchPhone();
+    } catch (error) {
+      phoneNote = message(error);
+    }
+  }
+
+  // Copies the pairing, which Hive Phone reads from the clipboard when it opens (from the Mac, the
+  // clipboard reaches the iPhone by Universal Clipboard). The write starts inside the tap, which is
+  // the only time Safari allows it, and fills in when the board answers.
+  async function connectPhone() {
+    phoneNote = "";
+    const asked = pairPhone();
+    asked.catch(() => {});
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({ "text/plain": asked.then((p) => new Blob([p.pairing], { type: "text/plain" })) }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText((await asked).pairing);
+      }
+      phoneGet = (await asked).sidestore;
+      phoneNote = "Copied. Open Hive Phone on the iPhone and it connects.";
+    } catch (error) {
+      phoneNote = message(error);
+    }
+  }
+
+  async function phoneAct(body: Parameters<typeof savePhonePasscode>[0], done: string) {
+    try {
+      await savePhonePasscode(body);
+      phoneNote = done;
+    } catch (error) {
+      phoneNote = message(error);
+    }
+    await loadPhone();
+  }
+
+  async function savePasscode(event: Event) {
+    event.preventDefault();
+    const passcode = phonePass;
+    phonePass = "";
+    await phoneAct({ passcode, consent: true }, "Saved. Hive unlocks the iPhone with it when a task needs the phone.");
   }
 
   let refreshing = false;
@@ -598,13 +667,15 @@
         <span class="when">{ago(task.updated, board?.now ?? 0)}</span>
       {:else}
         <div class="task-actions">
-          {#if (task.status === "blocked" && !task.retrying) || task.status === "open"}
+          <!-- No Continue for a stuck task: Hive keeps continuing it, and one that needs the owner
+               says exactly why and what (the owner, 2026-11-17). A task nobody started can be. -->
+          {#if task.status === "open"}
             <button
               type="button"
               class="pill-button"
               disabled={!!acting[task.key]}
               onclick={() => act(task, "continue")}
-            >{acting[task.key] === "continue" ? "Asking…" : "Continue"}</button>
+            >{acting[task.key] === "continue" ? "Starting…" : "Start"}</button>
           {/if}
           <button
             type="button"
@@ -818,6 +889,18 @@
       {/if}
 
       <div class="side-foot">
+        {#if board?.nodes?.length}
+          <!-- What each node runs (cloud/tasks/nodes.js): one behind updates itself when it's idle. -->
+          <ul class="limits nodes" aria-label="What each node runs">
+            {#each board.nodes as n (n.key)}
+              <li class:away={n.away} title={nodeTitle(n)}>
+                <span class="dot node-{n.state || 'none'}" aria-hidden="true"></span>
+                <span class="who">{n.label}</span>
+                <span class="used">{n.version}{#if n.state === "behind"} → {n.latest}{/if}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if limits.length}
           <ul class="limits" aria-label="Plan limits">
             {#each limits as l (l.key)}
@@ -840,6 +923,25 @@
             {/each}
           </ul>
         {/if}
+        <!-- Hive Phone (mobile/relay): pairing it, getting it, and the passcode Hive unlocks with. -->
+        <details class="phone" ontoggle={(e) => (e.currentTarget as HTMLDetailsElement).open && loadPhone()}>
+          <summary>iPhone</summary>
+          <div class="phone-body">
+            <button type="button" class="phone-btn" onclick={connectPhone}>Connect an iPhone</button>
+            {#if phoneGet}<a class="phone-link" href={phoneGet}>Get Hive Phone in SideStore</a>{/if}
+            {#if phone?.connected && !phone.passcode}
+              <form class="phone-pass" onsubmit={savePasscode}>
+                <input type="password" inputmode="numeric" autocomplete="off" placeholder="iPhone passcode" aria-label="iPhone passcode" bind:value={phonePass} />
+                <button type="submit" class="phone-btn" disabled={!phonePass}>Let Hive unlock with it</button>
+              </form>
+            {:else if phone?.paused}
+              <button type="button" class="phone-btn" onclick={() => phoneAct({ retry: true, consent: true }, "Hive may try unlocking once more.")}>Allow another unlock try</button>
+            {:else if phone?.passcode}
+              <button type="button" class="phone-btn quiet" onclick={() => phoneAct({ remove: true }, "Forgot the passcode.")}>Forget the passcode</button>
+            {/if}
+            {#if phoneNote}<p class="phone-note" role="status">{phoneNote}</p>{/if}
+          </div>
+        </details>
         <a class="settings-link" href="{base}/settings">Settings</a>
       </div>
     </div>
@@ -1477,6 +1579,53 @@
   .used {
     min-width: 28px;
     font-variant-numeric: tabular-nums;
+  }
+  .nodes li.away {
+    opacity: 0.55;
+  }
+  .dot.node-current {
+    background: var(--green);
+  }
+  .dot.node-behind,
+  .dot.node-old {
+    background: var(--amber);
+  }
+  .phone summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.72rem;
+  }
+  .phone-body {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding-top: 8px;
+  }
+  .phone-pass {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+  }
+  .phone-pass input {
+    width: 100%;
+    font: inherit;
+    font-size: 0.8rem;
+  }
+  .phone-btn {
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .phone-btn.quiet {
+    color: var(--muted);
+  }
+  .phone-link,
+  .phone-note {
+    font-size: 0.72rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
   }
   .settings-link {
     color: var(--muted);
