@@ -870,7 +870,8 @@ const MAC_INSTALL_MS = 7 * 3600_000;
 /**
  * Hive changing itself so a task can go on: a code agent changes Hive in a worktree off main (SELF_GUIDE),
  * the change's tests run until they pass (at most MOST_FIXES tries), and it lands on main and goes live
- * where it runs: a VM release (the updater puts it in), the board, the Mac. Hive on the Mac builds only on
+ * where it runs: a VM release (the updater puts it in), the board (deployed from the owner's Mac when this
+ * VM has no Cloudflare sign-in), the Mac. Hive on the Mac builds only on
  * macOS, so a change to it is also built and tested on the owner's Mac (hive_self check, on the change's
  * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
  * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
@@ -994,13 +995,28 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     onStep(`✅ On main: ${commit.slice(0, 10)}`);
     const live = [];
     const notes = [];
+    const note = text => { notes.push(text); onStep(`✗ ${text}`); };
     if (parts.board) {
+      // From here when this VM has a Cloudflare sign-in; otherwise the owner's Mac deploys the same commit
+      // with its own (hive_self board).
+      let here = '';
       try {
         await exec('sudo', ['-n', 'env', 'HOME=/root', 'WRANGLER=wrangler', process.execPath, join(dir, 'cloud', 'release.mjs'), 'board'],
           { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 16 << 20 });
         live.push('the board');
       } catch (error) {
-        notes.push(`The board didn't deploy: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
+        here = String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ');
+      }
+      if (here) {
+        mac ??= board ? await connectedMac(board).catch(() => null) : null;
+        if (mac) {
+          onStep(`$ Deploying the board from the owner's Mac (this VM can't: ${here.slice(0, 200)})`);
+          const job = await onTheMac(onMac, { action: 'board', commit }, { wait: MAC_CHECK_MS }).catch(error => ({ state: 'failed', failures: error.message }));
+          if (job.state === 'deployed') live.push('the board');
+          else note(`The board didn't deploy from the Mac either: ${job.timedOut ? 'it was still on it' : job.failures || 'no reason given'}`);
+        } else {
+          note(`The board didn't deploy: ${here}; and no Mac is connected to deploy it from`);
+        }
       }
     }
     if (parts.vm) {
@@ -1012,8 +1028,12 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         if (version && await vmOn(version)) live.push('the VM');
         else notes.push("The VM release is published; the VM puts it in once it's idle (it changes the orchestrator itself).");
       } catch (error) {
-        notes.push(`The VM release didn't publish: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
+        note(`The VM release didn't publish: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
       }
+    }
+    // The task runs again only where its change is live: a board without it would answer the task as before.
+    if (parts.board && !live.includes('the board')) {
+      return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but the board isn't running it.`, ...notes].join('\n\n'), { commit, files, live });
     }
     if (parts.mac) {
       // The Mac publishes a release of main as it now is and puts it in once Hive there is idle; the task
