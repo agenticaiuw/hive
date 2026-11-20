@@ -853,7 +853,9 @@ final class EyeKeyboard {
     var lipsReady = false, lipsProblem: String? = nil, lipsPrompt: String? = nil, lipsNumber = 0
     var lipsListening = false                                  // frames go to it only while typing (read on the camera queue)
     var lipsEnded = false                                      // {"end"} sent since the eyes left the keyboard
-    var lipsHeard = false                                      // practice: the lip reader is listening for this sentence
+    var lipsHeard = false                                      // practice: recording this sentence (its reading time is up)
+    var lipsAgain = false                                      // practice: the same sentence again (the last try was too short)
+    var readUntil: Double? = nil, readCount = 0                // practice: the sentence is being read until (uptime)
     // Lips: the last 90 s of gaze on the keys (camera time, features, where the map put it), so each sentence,
     // once its words are known, teaches the map where the eyes really were (learnSentence).
     var sentenceGaze: [(t: Double, f: [Double], x: Double, y: Double)] = []
@@ -919,9 +921,11 @@ final class EyeKeyboard {
             if !lipsReady { return "Loading the lip reader…" }
             if lipsPrompt != nil {
                 if lipsHeard {
-                    return "Listening: say it, slowly is fine, glancing across its letters. Then look up over the screen. Esc to finish."
+                    return "Recording: say it, slowly is fine, glancing across its letters. Then look up over the screen. Esc to finish."
                 }
-                return "Practice \(lipsNumber): read the blue sentence, then look at the keys and say it. Esc to finish."
+                let left = Int((readUntil.map { $0 - ProcessInfo.processInfo.systemUptime } ?? 0).rounded(.up))
+                let first = lipsAgain ? "That was shorter than the sentence: read it again" : "Practice \(lipsNumber): read the blue sentence"
+                return "\(first). Recording starts in \(max(1, left))… Esc to finish."
             }
             return Self.lipsHowTo
         }
@@ -1211,11 +1215,12 @@ final class EyeKeyboard {
         learned = []; toLearn = []; shift = (0, 0)
         use(s.cal, sigma: s.sigma)
         saveCalibration()
-        say(String(format: "Accuracy: about %.1f keys off on dots it hadn't learned. Saved: no setup next time. ", off) + hint())
-        showPrompt()
+        let practice = lipsMode && lipsPrompt != nil                  // its sentence and reading time come after this
+        say(String(format: "Accuracy: about %.1f keys off on dots it hadn't learned. Saved: no setup next time. ", off) + (practice ? "" : hint()))
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.on, self.setup == nil else { return }
             self.say(self.hint())
+            self.showPrompt()
         }
     }
 
@@ -1507,9 +1512,9 @@ final class EyeKeyboard {
         if let e = m["error"] as? String { lipsProblem = e }
         if let status = m["status"] as? String, showing { say(status) }
         if m["ready"] != nil { lipsReady = true }
-        if m["listening"] != nil { lipsHeard = true; NSSound(named: "Tink")?.play() }
         if let p = m["prompt"] as? String {
             lipsHeard = false
+            lipsAgain = m["again"] != nil
             lipsPrompt = p
             lipsNumber = m["number"] as? Int ?? lipsNumber + 1
             showPrompt()
@@ -1539,6 +1544,39 @@ final class EyeKeyboard {
         guard lipsMode, let p = lipsPrompt, on, setup == nil else { return }
         if view.words.text != p { note(["event": "prompt", "text": p, "number": lipsNumber]) }
         view.words.text = p
+        readFirst(p)
+    }
+
+    /// Practice: a fixed time to read the sentence, counted down in the hint, then the Tink and {"go"}: the
+    /// mouth counts from there (owner, 2026-11-19: "let me read the sentence first, wait a few seconds, and
+    /// then start recording"; telling from the gaze when they'd finished reading wasn't reliable).
+    func readFirst(_ sentence: String) {
+        readCount += 1
+        lipsHeard = false
+        readUntil = ProcessInfo.processInfo.systemUptime + Self.readSeconds(sentence)
+        countDown(readCount)
+    }
+
+    /// 3 s for a few words, up to 5 s for a long sentence.
+    static func readSeconds(_ sentence: String) -> Double {
+        max(3, min(5, 1.5 + 0.35 * Double(sentence.split(separator: " ").count)))
+    }
+
+    func countDown(_ count: Int) {
+        guard count == readCount, on, setup == nil, let until = readUntil else { return }
+        let now = ProcessInfo.processInfo.systemUptime, left = until - now
+        if left <= 0.02 {
+            readUntil = nil
+            lipsHeard = true
+            lips?.send(["go": now])
+            note(["event": "recording", "number": lipsNumber])
+            NSSound(named: "Tink")?.play()
+            say(hint())
+            return
+        }
+        say(hint())
+        let toNextSecond = left - (left.rounded(.up) - 1)            // when the number shown drops
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.03, toNextSecond)) { [weak self] in self?.countDown(count) }
     }
 
     /// Moves the map back by half the median miss on the keys of the word just typed (at most 0.6 keys a word).

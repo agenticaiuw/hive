@@ -365,8 +365,10 @@ class ServerTest(unittest.TestCase):
             for i, level in enumerate(levels):
                 stream.write(json.dumps({"frame": {"t": i / 30, "w": 2, "h": 2}}).encode() + b"\n")
                 stream.write(bytes([level]) * 4)
-                if 30 <= i < 75 or 100 <= i < 150:              # the eyes on the keys (after reading)
+                if 30 <= i < 75 or 100 <= i < 150:              # the eyes on the keys
                     stream.write(json.dumps({"gaze": [i / 30, 3.0, 1.0]}).encode() + b"\n")
+                if i in (30, 100):                              # each sentence read: the keyboard says go
+                    stream.write(json.dumps({"go": i / 30}).encode() + b"\n")
                 if i in (89, len(levels) - 1):                  # the eyes leave the keys
                     stream.write(json.dumps({"end": i / 30}).encode() + b"\n")
             stream.seek(0)
@@ -381,19 +383,19 @@ class ServerTest(unittest.TestCase):
             finally:
                 sys.stderr = real
             said = [json.loads(line) for line in out.getvalue().splitlines()]
-            # Each sentence is read first: listening starts once the eyes are on the keys, then the take.
-            self.assertEqual([list(m)[0] for m in said], ["prompt", "listening", "take", "prompt", "listening", "status"])
-            said = [m for m in said if "listening" not in m]
             # The screen gets only sentences to say and the end of each take, never what was read.
-            # The second take (0.3 s for ten words) is far too short: no take, the same sentence stays.
-            self.assertEqual([said[0], said[2]], [{"prompt": "The bat!", "number": 1},
-                                                  {"prompt": "a cat sat on the mat in the hat all day", "number": 2}])
+            # The second take (0.3 s for ten words) is far too short: no take, the same sentence again
+            # (read again first).
+            self.assertEqual([list(m)[0] for m in said], ["prompt", "take", "prompt", "prompt"])
+            self.assertEqual([said[0], said[2], said[3]],
+                             [{"prompt": "The bat!", "number": 1},
+                              {"prompt": "a cat sat on the mat in the hat all day", "number": 2},
+                              {"prompt": "a cat sat on the mat in the hat all day", "number": 2, "again": "short"}])
             # The take's end says which sentence was meant and when (camera time), for the keyboard to
             # correct its gaze map from.
             self.assertEqual((said[1]["take"], said[1]["meant"]), (1, "the bat"))
             self.assertLess(said[1]["from"], said[1]["to"])
             self.assertLessEqual(said[1]["to"], 90 / 30)
-            self.assertEqual(list(said[3]), ["status"])
             self.assertEqual(len(said), 4)
             self.assertEqual(sorted(p.name for p in Path(folder).glob("*.npz")), ["0000.npz"])
             (Path(folder) / "0000.npz").rename(Path(folder) / "0007.npz")       # takes moved or kept: the next is 0008
@@ -424,8 +426,10 @@ class ServerTest(unittest.TestCase):
             for i, level in enumerate(levels):
                 stream.write(json.dumps({"frame": {"t": i / 30, "w": 2, "h": 2}}).encode() + b"\n")
                 stream.write(bytes([level]) * 4)
-                if 100 <= i < 150:                              # the eyes come to the keys only to say it
+                if 40 <= i < 70 or 100 <= i < 150:              # eyes on the keys while reading don't start it
                     stream.write(json.dumps({"gaze": [i / 30, 3.0, 1.0]}).encode() + b"\n")
+                if i == 100:                                    # the reading time is up: the keyboard says go
+                    stream.write(json.dumps({"go": i / 30}).encode() + b"\n")
                 if i == 160:
                     stream.write(json.dumps({"end": i / 30}).encode() + b"\n")
             stream.seek(0)
@@ -440,6 +444,44 @@ class ServerTest(unittest.TestCase):
             take = np.load(Path(folder) / "0000.npz")
             self.assertGreaterEqual(take["times"][0], 95 / 30)       # from just before saying it, not the reading
             self.assertLessEqual(take["times"][-1], 161 / 30)
+
+    def test_a_long_still_mouth_on_the_keys_doesnt_end_the_take(self):
+        # The owner's take, 2026-11-19: a 0.23 s gap as the camera started read as 21 fps, and the still-mouth
+        # pause cut the sentence after 5.4 s while they found letters. Only the eyes end it now.
+        import io
+        import json
+        import tempfile
+
+        class Lips(StandInLips):
+            def encode(self, crops):
+                return len(crops)
+
+        with tempfile.TemporaryDirectory() as folder:
+            stream = io.BytesIO()
+            levels = [12] * 40 + [77] * 30 + [12] * 360 + [77] * 30 + [12] * 30    # 12 s still between words
+            times = [i / 30 + (0.2 if i > 1 else 0) for i in range(len(levels))]   # the start-up hiccup
+            for i, (t, level) in enumerate(zip(times, levels)):
+                stream.write(json.dumps({"frame": {"t": t, "w": 2, "h": 2}}).encode() + b"\n")
+                stream.write(bytes([level]) * 4)
+                if i == 30:
+                    stream.write(json.dumps({"go": t}).encode() + b"\n")
+                if i == len(levels) - 10:
+                    stream.write(json.dumps({"end": t}).encode() + b"\n")
+            stream.seek(0)
+            server = lipgaze.Server(Lips(), io.StringIO(), record=folder, prompts=["The bat sat on the mat today"])
+            server.crops = StandInMouth()
+            server.listen(stream)
+            real, sys.stderr = sys.stderr, io.StringIO()
+            try:
+                server.run()
+            finally:
+                sys.stderr = real
+            self.assertEqual(server.cutter.fps, 30)
+            self.assertEqual(sorted(p.name for p in Path(folder).glob("*.npz")), ["0000.npz"])
+            take = np.load(Path(folder) / "0000.npz")
+            self.assertEqual(str(take["ended_by"]), "end")
+            self.assertLess(take["times"][0], times[40])          # both words in the one take
+            self.assertGreater(take["times"][-1], times[430])
 
 
 if __name__ == "__main__":
