@@ -88,10 +88,10 @@ fn reg_query(key: &str, value: Option<&str>) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-fn wait_for(what: &str, seconds: u64, mut done: impl FnMut() -> bool) {
+fn wait_for(what: &str, seconds: u64, mut done: impl FnMut() -> bool, log: impl Fn() -> String) {
     let start = Instant::now();
     while !done() {
-        assert!(start.elapsed() < Duration::from_secs(seconds), "{what} didn't happen within {seconds} s");
+        assert!(start.elapsed() < Duration::from_secs(seconds), "{what} didn't happen within {seconds} s; Hive's log:\n{}", log());
         std::thread::sleep(Duration::from_millis(500));
     }
 }
@@ -146,16 +146,18 @@ fn a_members_pc_sets_hive_up_connects_and_puts_in_the_clubs_newer_release_by_its
     assert_eq!(config["releases"]["url"], url.as_str());
 
     // The background Hive sees the club's newer release and puts it in by itself.
-    wait_for("the newer release going in", 180, || version_of(&installed) == new_v);
+    let log = || std::fs::read_to_string(home.join("hive.log")).unwrap_or_default();
+    wait_for("the newer release going in", 180, || version_of(&installed) == new_v, log);
     let calls = seen.lock().unwrap().join("\n");
     assert!(calls.contains(&format!("Updated from {old_v} to {new_v}.")), "{calls}");
     assert!(calls.contains("/v1/releases/latest?kind=windows windows:"), "{calls}");
     // The new one started and removed the old one.
-    wait_for("the new release starting", 90, || !install.join("Hive.old.exe").exists());
-    let log = std::fs::read_to_string(home.join("hive.log")).unwrap();
-    assert!(log.contains(&format!("{new_v} running in the background")), "{log}");
+    let started = format!("{new_v} running in the background");
+    wait_for("the new release starting", 120, || log().contains(&started) && !install.join("Hive.old.exe").exists(), log);
+    let log = log();
     let (_, said) = run(&installed, &["--update-now"], &env, dir.path());
     assert!(said.contains("Current"), "{said}");
+    assert!(!home.join("gave-up.json").exists(), "nothing was given up on: {log}");
 
     let _ = Command::new("taskkill").args(["/F", "/IM", "Hive.exe"]).output();
 }
