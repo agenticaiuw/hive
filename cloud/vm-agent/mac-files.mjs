@@ -53,8 +53,18 @@ cf r2 objects get ${quote(key)} --bucket-name ${quote(BUCKET)} > "$stage/file"
 node -e 'require("node:fs").linkSync(process.argv[1], process.argv[2])' "$stage/file" "$target"`;
     await put(vmPath, key);
   }
-  const result = await command({ command: `set -e\numask 077\n${CF}${script}`, irreversible: false, step, timeout_seconds: 240 });
-  if (result.isError) return result;
+  // A lost reply does not mean the copy failed. Keep its key so the agent can inspect what
+  // finished before trying again; only the VM upload is known to have completed at this point.
+  const recovery = direction === 'to_vm'
+    ? `The Mac may have uploaded to cloud key ${key}. Inspect that key before retrying.`
+    : `The VM file was uploaded to cloud key ${key}. Inspect the Mac destination ${macPath} before retrying.`;
+  let result;
+  try {
+    result = await command({ command: `set -e\numask 077\n${CF}${script}`, irreversible: false, step, timeout_seconds: 240 });
+  } catch (error) {
+    throw new Error(`The Mac's transfer result was not received: ${error.message}. ${recovery}`);
+  }
+  if (result.isError) return { ...result, content: [...result.content, { type: 'text', text: recovery }] };
   let local = vmPath;
   if (direction === 'to_vm') {
     try { local = await fetch(key); }
