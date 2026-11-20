@@ -157,7 +157,9 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   // HIVE_IMPROVE_FILE (set by the orchestrator) gives the agent improve_hive: what it writes there has Hive change itself.
   const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, `HIVE_TASK_LABEL=${label}`,
     ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), node, join(appDir, 'knowledge-mcp.mjs')];
-  const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'mac-mcp.mjs')];
+  // Mac transfers must land in the same folder the desktop tools list and attach files from.
+  const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`,
+    `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
