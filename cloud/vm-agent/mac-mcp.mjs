@@ -37,18 +37,29 @@ export async function connectedMac(board) {
 /** One call on the Mac, waiting for what came of it: the Mac tool's own MCP result. */
 export async function callMac(board, mac, name, args, { request = null, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now } = {}) {
   const started = now();
-  let { call } = await board('/v1/mac/calls', { name, arguments: args ?? {}, mac: mac?.name ?? '', request, wait: WAIT_S });
-  while (call && (call.status === 'queued' || call.status === 'running')) {
-    if (now() - started > MOST_MS) {
-      await board('/v1/mac/cancel', { id: call.id }).catch(() => {});
-      return { content: [{ type: 'text', text: `Failed: the Mac didn't answer within ${MOST_MS / 60_000} minutes.` }], isError: true };
+  let call, id;
+  // Losing a reply, even while submitting, does not undo an action. Keep the last known call id
+  // so the agent can inspect it instead of sending an irreversible command a second time.
+  const failed = (reason, uncertain = true) => ({ content: [{ type: 'text', text: `Failed: ${reason}` + (uncertain
+    ? ` The Mac call${id == null ? '' : ` ${id}`} may still run or may already have run. Inspect the outcome before retrying. Do not retry an uncertain send.`
+    : '') }], isError: true });
+  try {
+    ({ call } = await board('/v1/mac/calls', { name, arguments: args ?? {}, mac: mac?.name ?? '', request, wait: WAIT_S }));
+    id = call?.id;
+    while (call && (call.status === 'queued' || call.status === 'running')) {
+      if (now() - started > MOST_MS) {
+        const cancelled = await board('/v1/mac/cancel', { id }).catch(() => null);
+        return failed(`the Mac didn't answer within ${MOST_MS / 60_000} minutes.`, !cancelled?.cancelled);
+      }
+      ({ call } = await board(`/v1/mac/calls?id=${id}&wait=${WAIT_S}`));
+      if (!call) break;
+      if (call.status === 'queued' || call.status === 'running') await sleep(10);
     }
-    ({ call } = await board(`/v1/mac/calls?id=${call.id}&wait=${WAIT_S}`));
-    if (!call) break;
-    if (call.status === 'queued' || call.status === 'running') await sleep(10);
+  } catch (error) {
+    return failed(error.message);
   }
   if (call?.result) return call.result;
-  return { content: [{ type: 'text', text: `Failed: ${call?.error ?? 'the board lost the call'}` }], isError: true };
+  return failed(call?.error ?? 'the board lost the call', !['expired', 'cancelled'].includes(call?.status));
 }
 
 export function server({ board, label = '', turn = null, files = undefined }) {
