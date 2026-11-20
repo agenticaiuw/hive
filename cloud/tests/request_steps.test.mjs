@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../tasks/worker.js';
+import { callTool } from '../vm-agent/knowledge-mcp.mjs';
+import { boardClient } from '../vm-agent/orchestrator.mjs';
 
 const MIGRATIONS = new URL('../knowledge/migrations/', import.meta.url);
 
@@ -161,4 +163,44 @@ test('request context requires machine authentication and valid IDs and offsets'
   const missing = await call('GET', '/v1/requests/context?id=R999');
   assert.equal(missing.status, 404);
   assert.equal(missing.body.error, 'No such request.');
+});
+
+test('the history tool reads through the board client before and after the history route is deployed', async t => {
+  const { call, env } = setup();
+  const words = 'First LINE.\n  Second line, exactly.';
+  const page = { url: 'https://example.test/source', title: 'Source', outline: 'Saved PAGE text.' };
+  const id = (await call('POST', '/v1/requests', { text: words, from: 'mac', page })).body.id;
+  await call('POST', '/v1/requests/update', { id, status: 'done', outcome: 'Saved result', tasks: [
+    { key: 1, title: 'Read', quote: words, status: 'done', outcome: 'Task result' },
+  ] });
+  for (let start = 1; start <= 501; start += 100) {
+    await call('POST', '/v1/runs', { machine: 'cloud', run: 'source', agent: 'cloud', request: id,
+      steps: Array.from({ length: Math.min(100, 502 - start) }, (_, i) => ({ n: start + i, text: `Saved line ${start + i}` })) });
+  }
+  let deployed = false;
+  t.mock.method(globalThis, 'fetch', async (input, options) => {
+    const url = new URL(input);
+    assert.equal(url.origin, 'https://board.test');
+    if (!deployed && url.pathname === '/v1/requests/context') url.pathname = '/missing-route';
+    return worker.fetch(new Request(url, options), env);
+  });
+  const board = boardClient({ url: 'https://board.test', token: 'machine-token' });
+  const retrieve = async offset => {
+    const text = await callTool(board, 'get_request', { id: `R${id}`, offset });
+    return JSON.parse(text.slice(text.indexOf('\n') + 1));
+  };
+  const older = await retrieve(0);
+  assert.equal(older.request.text, words);
+  assert.equal(older.tasks[0].outcome, 'Task result');
+  assert.equal(older.steps[0].text, 'Saved line 1', 'the oldest material, not the dashboard tail');
+  assert.ok(older.limitations.length > 0);
+  const last = await retrieve(500);
+  assert.deepEqual(last.steps.map(s => s.text), ['Saved line 501']);
+  assert.equal(last.next_offset, null);
+  deployed = true;
+  const current = await retrieve(0);
+  assert.equal(current.request.text, words);
+  assert.deepEqual(current.page, page);
+  assert.equal(current.limitations, undefined);
+  assert.equal(current.next_offset, 50);
 });

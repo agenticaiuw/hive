@@ -114,3 +114,88 @@ test('get_request rejects bad IDs and offsets before calling the board and repor
   assert.equal(offline.result.isError, true);
   assert.equal(offline.result.content[0].text, OFFLINE);
 });
+
+test('get_request reads an older board after a route 404, including run pages and original words', async () => {
+  const calls = [];
+  const words = 'Original WORDS.\n  Keep this spacing.\nSource: /tmp/sample.txt';
+  const allSteps = Array.from({ length: 551 }, (_, i) => ({ n: i + 1, text: `Source line ${i + 1}` }));
+  const board = async path => {
+    calls.push(path);
+    const url = new URL(path, 'https://board.test');
+    if (url.pathname === '/v1/requests/context') throw new Error('the board said 404');
+    if (path === '/v1/requests/state?id=7') return { request: { id: 7, status: 'done', outcome: 'Saved outcome' } };
+    if (path === '/v1/board') return {
+      requests: [{ id: 8, text: 'Unrelated' }, { id: 7, text: words, follows: 6 }],
+      tasks: [{ machine: 'cloud', id: 701, message: 7, quote: words, outcome: 'Task result' },
+        { machine: 'other', id: 701, message: 7 }, { machine: 'cloud', id: 801, message: 8 }],
+      runs: [{ machine: 'mac-test', run: 'source & notes', request: 7 }, { machine: 'cloud', run: '701', request: 7 },
+        { machine: 'cloud', run: '801', request: 8 }],
+      run_steps: [{ machine: 'cloud', run: '701', n: 551, text: 'Only the newest step' }],
+      run_messages: [{ id: 1, machine: 'cloud', run: '701', text: 'Earlier words' },
+        { id: 2, machine: 'cloud', run: '701', text: 'Follow-up words' },
+        { id: 3, machine: 'cloud', run: '801', text: 'Unrelated message' }],
+    };
+    assert.equal(url.pathname, '/v1/runs');
+    const machine = url.searchParams.get('machine'), run = url.searchParams.get('run');
+    if (machine === 'mac-test') {
+      assert.equal(run, 'source & notes');
+      return { run: { request: 7 }, steps: [{ n: 1, text: 'Mac material' }], messages: [] };
+    }
+    assert.equal(run, '701');
+    const after = Number(url.searchParams.get('after'));
+    return { run: { request: 7 }, steps: allSteps.filter(s => s.n > after).slice(0, 500),
+      messages: [{ id: 2, text: 'Follow-up words' }] };
+  };
+  const retrieve = async offset => {
+    const text = await callTool(board, 'get_request', { id: 'r7', offset });
+    return JSON.parse(text.slice(text.indexOf('\n') + 1));
+  };
+  const first = await retrieve(0);
+  assert.deepEqual(first.request, { id: 7, text: words, follows: 6, status: 'done', outcome: 'Saved outcome' });
+  assert.equal(first.tasks.length, 1);
+  assert.equal(first.tasks[0].key, 1);
+  assert.equal(first.tasks[0].quote, words);
+  assert.deepEqual(first.steps.map(s => s.text), allSteps.slice(0, 50).map(s => s.text));
+  assert.deepEqual(first.messages.map(m => m.text), ['Earlier words', 'Follow-up words']);
+  assert.equal(first.next_offset, 50);
+  assert.match(first.limitations.join(' '), /not the full archive.*page material is unavailable.*Older runs and messages may be missing/);
+  assert.equal('page' in first, false, 'unavailable page material is not reported as absent');
+  const collected = [...first.steps];
+  let offset = first.next_offset;
+  while (offset !== null) {
+    const page = await retrieve(offset);
+    collected.push(...page.steps);
+    offset = page.next_offset;
+  }
+  assert.deepEqual(collected.map(s => s.text), [...allSteps.map(s => s.text), 'Mac material']);
+  assert.ok(calls.includes('/v1/runs?machine=cloud&run=701&after=500'));
+});
+
+test('get_request does not use partial history for missing requests, auth errors or server failures', async () => {
+  for (const message of ['No such request.', 'Not signed in.', 'the board said 500', 'fetch failed']) {
+    const calls = [];
+    await assert.rejects(callTool(async path => { calls.push(path); throw new Error(message); }, 'get_request', { id: 7 }),
+      error => error.message === message);
+    assert.deepEqual(calls, ['/v1/requests/context?id=7&offset=0']);
+  }
+});
+
+test('an older board distinguishes a missing request from one outside its recent list', async () => {
+  for (const exists of [false, true]) {
+    const calls = [];
+    const board = async path => {
+      calls.push(path);
+      if (path.startsWith('/v1/requests/context')) throw new Error('the board said 404');
+      if (path === '/v1/requests/state?id=7') {
+        if (!exists) throw new Error('No such request.');
+        return { request: { id: 7, status: 'done' } };
+      }
+      assert.equal(path, '/v1/board');
+      return { requests: [] };
+    };
+    await assert.rejects(callTool(board, 'get_request', { id: 'R7' }), exists
+      ? /R7 exists.*recent request list no longer includes it.*deploy/
+      : /No such request/);
+    assert.equal(calls.includes('/v1/board'), exists);
+  }
+});
