@@ -65,7 +65,44 @@ test("with no Mac connected there are no tools and a call says why; a failed cal
 
   const { board } = fakeBoard({ answer: { status: 'lost', error: 'The Mac took it but never answered.' } });
   const out = await callMac(board, await connectedMac(board), 'click', { x: 1, y: 2 });
-  assert.deepEqual(out, { content: [{ type: 'text', text: 'Failed: The Mac took it but never answered.' }], isError: true });
+  assert.equal(out.isError, true);
+  assert.match(out.content[0].text, /The Mac took it but never answered/);
+  assert.match(out.content[0].text, /call 5.*may still run or may already have run/);
+  assert.match(out.content[0].text, /before retrying/);
+});
+
+test('a lost command reply keeps its call id when known and never submits the command again', async () => {
+  for (const failure of ['submit', 'poll', 'missing']) {
+    const calls = [];
+    const board = async (path, body) => {
+      calls.push({ path, body });
+      if (path === '/v1/mac/calls') {
+        if (failure === 'submit') throw new Error('reply lost');
+        return { call: { id: 17, status: 'running' } };
+      }
+      if (failure === 'poll') throw new Error('reply lost');
+      return { call: null };
+    };
+    const args = { command: 'send-message', irreversible: true, step: 'One-way: sending (you said: "send the message").' };
+    const out = await callMac(board, { name: 'test-mac' }, 'run_command', args);
+    assert.equal(out.isError, true);
+    const message = out.content[0].text;
+    assert.match(message, /may still run or may already have run/);
+    assert.match(message, /Inspect.*before retrying/);
+    assert.match(message, /Do not retry an uncertain send/);
+    assert.match(message, failure === 'missing' ? /the board lost the call/ : /reply lost/);
+    if (failure !== 'submit') assert.match(message, /call 17/);
+    assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 1);
+    assert.ok(!message.includes(args.command), 'the recovery message need not repeat command contents');
+  }
+});
+
+test('a command that expired or was cancelled before being taken is reported as not run', async () => {
+  for (const status of ['expired', 'cancelled']) {
+    const { board } = fakeBoard({ answer: { status, error: 'No Mac took it.' } });
+    const out = await callMac(board, { name: 'test-mac' }, 'run_command', {});
+    assert.deepEqual(out, { content: [{ type: 'text', text: 'Failed: No Mac took it.' }], isError: true });
+  }
 });
 
 test('a call the Mac never answers is given up on and cancelled, with the reason', async () => {
@@ -74,7 +111,34 @@ test('a call the Mac never answers is given up on and cancelled, with the reason
   const out = await callMac(board, { name: 'owner-mbp' }, 'wait', {}, { now: () => (t += 60_000), sleep: async () => {} });
   assert.equal(out.isError, true);
   assert.match(out.content[0].text, /didn't answer within 6 minutes/);
+  assert.match(out.content[0].text, /call 5.*may still run or may already have run/);
+  assert.match(out.content[0].text, /before retrying/);
   assert.deepEqual(calls.at(-1), { path: '/v1/mac/cancel', body: { id: 5 } });
+});
+
+test('confirmed cancellation before the Mac takes a timed out call removes the uncertainty', async () => {
+  const { board } = fakeBoard({ polls: 1e9 });
+  let t = 0;
+  const out = await callMac(async (path, body) => path === '/v1/mac/cancel' ? { cancelled: 1 } : board(path, body),
+    { name: 'test-mac' }, 'run_command', {}, { now: () => (t += 60_000), sleep: async () => {} });
+  assert.equal(out.isError, true);
+  assert.match(out.content[0].text, /didn't answer within 6 minutes/);
+  assert.doesNotMatch(out.content[0].text, /may still run/);
+});
+
+test('a lost transfer reply returns both the Mac call id and the cloud key for recovery', async () => {
+  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }] });
+  const answer = server({ board: async (path, body) => {
+    if (path.startsWith('/v1/mac/calls?id=')) throw new Error('reply lost');
+    return board(path, body);
+  }, label: 'R42-1', files: { uuid: () => 'copy-id', fetch: () => assert.fail('must not fetch an uncertain copy') } });
+  const out = await answer({ id: 1, method: 'tools/call', params: { name: 'transfer_file', arguments: {
+    direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.',
+  } } });
+  assert.equal(out.result.isError, true);
+  assert.match(out.result.content[0].text, /call 5.*may still run or may already have run/);
+  assert.match(out.result.content[1].text, /transfers\/copy-id\/clip.mov/);
+  assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 1);
 });
 
 test('commands and transfers use the same Mac lease and board-supplied request words', async () => {
