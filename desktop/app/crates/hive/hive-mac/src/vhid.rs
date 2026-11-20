@@ -492,6 +492,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) enum EngageWait {
+    Engaged,
+    Cancelled(String),
+    TimedOut,
+}
+
 /// Human-like mouse, keyboard and screen control. All coordinates are screen points.
 pub struct AgentVHID {
     pub socket_path: PathBuf,
@@ -632,8 +638,33 @@ impl AgentVHID {
     /// Blocks until control has passed to the agent: after engage(), once the human's hands are
     /// off. Ok(false) on timeout. `None` waits as long as it takes.
     pub fn wait_engaged(&self, timeout: Option<Duration>, announce: bool) -> Result<bool> {
-        if self.is_engaged()? {
-            return Ok(true);
+        Ok(matches!(
+            self.wait_for_engage(timeout, announce, false)?,
+            EngageWait::Engaged
+        ))
+    }
+
+    pub(crate) fn wait_for_attempt(&self, timeout: Duration) -> Result<EngageWait> {
+        self.wait_for_engage(Some(timeout), false, true)
+    }
+
+    fn wait_for_engage(
+        &self,
+        timeout: Option<Duration>,
+        announce: bool,
+        stop_on_cancel: bool,
+    ) -> Result<EngageWait> {
+        let status = self.status()?;
+        if status.get("state") == Some("engaged") {
+            return Ok(EngageWait::Engaged);
+        }
+        if stop_on_cancel && status.get("state") == Some("disengaged") {
+            if let Some(reason) = status
+                .get("reason")
+                .filter(|r| r.starts_with("engage_cancelled"))
+            {
+                return Ok(EngageWait::Cancelled(reason.to_string()));
+            }
         }
         if announce {
             eprintln!("[agent-vhid] waiting for control: keep your hands off the keyboard, trackpad and mouse");
@@ -642,7 +673,7 @@ impl AgentVHID {
         let timed_out = |e: &VhidError| matches!(e, VhidError::Io(m) if m == "timed out");
         let mut conn = match Connection::open(&self.socket_path, timeout) {
             Ok(c) => c,
-            Err(Broken(e, _)) if timed_out(&e) => return Ok(false),
+            Err(Broken(e, _)) if timed_out(&e) => return Ok(EngageWait::TimedOut),
             Err(Broken(e, _)) => return Err(e),
         };
         let mut first = true;
@@ -650,7 +681,7 @@ impl AgentVHID {
             if let Some(deadline) = deadline {
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
-                    break Ok(false);
+                    break Ok(EngageWait::TimedOut);
                 }
                 conn.set_timeout(left);
             }
@@ -664,7 +695,15 @@ impl AgentVHID {
                 Ok(line) => {
                     let fields = Fields::parse(line.strip_prefix("event ").unwrap_or(&line));
                     if fields.get("state") == Some("engaged") {
-                        break Ok(true);
+                        break Ok(EngageWait::Engaged);
+                    }
+                    if stop_on_cancel && fields.get("state") == Some("disengaged") {
+                        if let Some(reason) = fields
+                            .get("reason")
+                            .filter(|r| r.starts_with("engage_cancelled"))
+                        {
+                            break Ok(EngageWait::Cancelled(reason.to_string()));
+                        }
                     }
                     if fields.get("state") == Some("disengaged")
                         && fields.get("reason") == Some("watcher_unavailable")
@@ -674,7 +713,7 @@ impl AgentVHID {
                         ));
                     }
                 }
-                Err(Broken(e, _)) if timed_out(&e) => break Ok(false),
+                Err(Broken(e, _)) if timed_out(&e) => break Ok(EngageWait::TimedOut),
                 Err(Broken(e, _)) => break Err(e),
             }
         };
