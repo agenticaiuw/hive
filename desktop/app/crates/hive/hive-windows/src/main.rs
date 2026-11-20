@@ -151,9 +151,9 @@ fn background(places: &Places) -> i32 {
     let exe = places.exe();
     let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
     let ours = stamp(&exe);
-    let Some(_lock) = lock(places, Duration::from_secs(60)) else { return 0 };
-    // Replaced while it waited its turn (an update or a new setup): it's the old program, and the one
+    // Replaced while it waits its turn (an update or a new setup), it's the old program, and the one
     // that replaced it starts the new one.
+    let Some(_lock) = lock(places, Duration::from_secs(60), &|| stamp(&exe) != ours) else { return 0 };
     if stamp(&exe) != ours {
         places.log(&format!("{VERSION} was replaced before it started; the new one carries on"));
         return 0;
@@ -164,8 +164,13 @@ fn background(places: &Places) -> i32 {
     let (first, every) = (seconds("HIVE_UPDATE_FIRST_LOOK_S", 60), seconds("HIVE_UPDATE_EVERY_S", 600));
     let mut config = stamp(&places.config());
     let mut next = Instant::now() + Duration::from_secs(first);
+    let old = places.install.join(OLD_EXE);
     loop {
         std::thread::sleep(Duration::from_secs(2));
+        // The program an update replaced, once nothing runs it.
+        if old.exists() {
+            clean_old(&places.install);
+        }
         if stamp(&exe) != ours {
             places.log("Hive.exe was replaced; the new one carries on");
             start_background(&exe);
@@ -316,9 +321,9 @@ fn register(exe: &Path) -> Result<(), String> {
 }
 
 /// One background Hive at a time: a file only one can hold open (released when it stops). A new one
-/// waits up to `wait` for the one it replaces to stop.
+/// waits up to `wait` for the one it replaces to stop, unless it's `replaced` meanwhile.
 #[cfg(windows)]
-fn lock(places: &Places, wait: Duration) -> Option<std::fs::File> {
+fn lock(places: &Places, wait: Duration, replaced: &dyn Fn() -> bool) -> Option<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt as _;
     let _ = std::fs::create_dir_all(&places.home);
     let start = Instant::now();
@@ -327,7 +332,7 @@ fn lock(places: &Places, wait: Duration) -> Option<std::fs::File> {
         if let Ok(file) = held {
             return Some(file);
         }
-        if start.elapsed() > wait {
+        if start.elapsed() > wait || replaced() {
             return None;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -352,6 +357,6 @@ fn register(_exe: &Path) -> Result<(), String> {
     Ok(())
 }
 #[cfg(not(windows))]
-fn lock(_places: &Places, _wait: Duration) -> Option<std::fs::File> {
+fn lock(_places: &Places, _wait: Duration, _replaced: &dyn Fn() -> bool) -> Option<std::fs::File> {
     None
 }
