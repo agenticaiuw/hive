@@ -35,6 +35,12 @@
 //   GET  /v1/club/download/mac/about              member: {download: {version, size, published_at} | null},
 //                                                 which a member's Hive.app updates itself to (hive-tasks
 //                                                 app_update.rs)
+//   GET  /v1/club/download/windows                member: Hive for Windows (Hive.exe), the newest windows
+//                                                 release (nodes.js; built on GitHub's Windows machines by
+//                                                 .github/workflows/windows.yml, published by `node
+//                                                 cloud/release.mjs windows`): open it and it sets itself
+//                                                 up, connects with Connect this PC and updates itself
+//                                                 (desktop/app/crates/hive/hive-windows)
 //   /v1/club/team/...                             member: messages and file leases (team.js), as themselves
 //
 // How many at once (the knowledge base's "Club collaboration" decision): a member runs at most
@@ -42,7 +48,7 @@
 // into tasks, one agent each; the VM's slots (orchestrator.mjs MOST_REQUESTS, MOST_RUNNING) cap them all.
 // Tables: cloud/knowledge/migrations/0025_club.sql, 0027_club_devices.sql.
 
-import { nodeList } from "./nodes.js";
+import { latestReleases, nodeList } from "./nodes.js";
 import { boardOrigin } from "./phone.js";
 
 export const DEFAULT_AGENTS = 3;
@@ -284,6 +290,21 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
         "content-type": "application/x-apple-diskimage",
         ...(object.size ? { "content-length": String(object.size) } : {}),
         "content-disposition": 'attachment; filename="Hive.dmg"',
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  if (path === "/v1/club/download/windows" && request.method === "GET") {
+    const newest = (await latestReleases(env, { fresh: true })).get("windows");
+    const object = newest && env.RELEASES ? await env.RELEASES.get(`windows/${newest.version}`) : null;
+    if (!object) return json({ error: "There's no Hive for Windows to download yet." }, 404);
+    return new Response(object.body, {
+      headers: {
+        "content-type": "application/vnd.microsoft.portable-executable",
+        "content-length": String(newest.size),
+        "content-disposition": 'attachment; filename="Hive.exe"',
+        "x-hive-sha256": newest.sha256,
         "cache-control": "no-store",
       },
     });

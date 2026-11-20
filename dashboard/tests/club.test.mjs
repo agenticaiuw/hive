@@ -30,6 +30,9 @@ const env = {
       if (path === "/v1/club/download/mac") {
         return new Response("a notarized disk image", { headers: { "content-type": "application/x-apple-diskimage", "content-length": "22" } });
       }
+      if (path === "/v1/club/download/windows") {
+        return new Response("MZ Hive.exe", { headers: { "content-type": "application/octet-stream", "content-length": "11" } });
+      }
       return Response.json({ me: "alice", requests: [] });
     },
   },
@@ -82,6 +85,12 @@ test("a member signs in on the club page with their invite and reaches only the 
   assert.equal(dmg.headers.get("content-length"), "22");
   assert.equal(await dmg.text(), "a notarized disk image", "the file itself, passed through");
   assert.equal((await call(w, "/club/api/download/mac")).status, 401, "not for someone not signed in");
+  const exe = await call(w, "/club/api/download/windows", { cookie });
+  assert.equal(asked.at(-1).path, "/v1/club/download/windows", "Hive for Windows, as the member");
+  assert.equal(exe.headers.get("content-disposition"), 'attachment; filename="Hive.exe"');
+  assert.equal(exe.headers.get("content-type"), "application/vnd.microsoft.portable-executable");
+  assert.equal(await exe.text(), "MZ Hive.exe");
+  assert.equal((await call(w, "/club/api/download/windows")).status, 401, "not for someone not signed in");
   const busy = await call(w, "/club/api/requests", { method: "POST", body: { text: "a dark theme" }, cookie });
   assert.equal(busy.status, 429, "the board's own answer");
   assert.match((await busy.json()).error, /3 changes going/);

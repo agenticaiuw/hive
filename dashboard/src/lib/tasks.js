@@ -243,7 +243,7 @@ function toLimit(l, machine) {
   };
 }
 
-const NODE_KINDS = /** @type {Record<string, string>} */ ({ board: 'Board', vm: 'VM', mac: 'Mac', phone: 'Phone' });
+const NODE_KINDS = /** @type {Record<string, string>} */ ({ board: 'Board', vm: 'VM', mac: 'Mac', windows: 'Windows PC', phone: 'Phone' });
 const SHORT = (/** @type {string} */ v) => (/^[0-9a-f]{12}$/.test(v) ? v.slice(0, 7) : v);
 /** A commit on main, short, or '' when there's none. */
 const COMMIT = (/** @type {unknown} */ c) => (typeof c === 'string' && /^[0-9a-f]{40}$/.test(c) ? c.slice(0, 7) : '');

@@ -1,0 +1,103 @@
+# Hive for Windows (desktop/app/crates/hive/hive-windows) is built and checked on GitHub's Windows
+# machines, since nothing of the club's builds Windows programs. Every push to main that changes it
+# runs its tests and, on this fresh Windows, the whole of what a member does: two real builds of
+# Hive.exe, the older one opened from Downloads (it sets itself up), connected with a Connect this PC
+# link, and the newer one put in by the background Hive itself (tests/on_windows.rs).
+#
+# `node cloud/release.mjs windows` runs it for a commit on main with the release's version built in,
+# takes the Hive.exe it uploads and publishes it on the board, from which members' PCs update
+# themselves (cloud/tasks/nodes.js) and the club page offers it (club.js /v1/club/download/windows).
+# Nothing here holds a key: the board's stays on the Mac that publishes.
+name: Hive for Windows
+run-name: ${{ inputs.version && format('Hive for Windows {0}', inputs.version) || 'Hive for Windows check' }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/app/crates/hive/hive-windows/**'
+      - 'desktop/app/crates/hive/Cargo.lock'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The release's version, built in (cloud/release.mjs windows)"
+        required: false
+        type: string
+      commit:
+        description: 'The commit on main to build'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ inputs.version || github.sha }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: '1.91.0'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop/app/crates/hive
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/app/crates/hive/target
+          key: windows-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/app/crates/hive/Cargo.lock') }}
+
+      - name: Tests
+        run: cargo test -p hive-windows --locked
+
+      - name: Two builds of Hive.exe
+        run: |
+          mkdir -p "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          HIVE_VERSION=check0000old cargo build -p hive-windows --release --locked
+          cp target/release/Hive.exe "$RUNNER_TEMP/old/Hive.exe"
+          HIVE_VERSION=check0000new cargo build -p hive-windows --release --locked
+          cp target/release/Hive.exe "$RUNNER_TEMP/new/Hive.exe"
+
+      - name: A member sets it up, connects, and it updates itself
+        run: |
+          export HIVE_TEST_OLD_EXE="$RUNNER_TEMP/old/Hive.exe" HIVE_TEST_NEW_EXE="$RUNNER_TEMP/new/Hive.exe"
+          cargo test -p hive-windows --locked --test on_windows -- --ignored --nocapture
+
+      - name: The release
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[a-z0-9][a-z0-9.-]{3,39}$ ]] || { echo "not a release version: $VERSION"; exit 1; }
+          HIVE_VERSION="$VERSION" cargo build -p hive-windows --release --locked
+          mkdir -p "$RUNNER_TEMP/release"
+          cp target/release/Hive.exe "$RUNNER_TEMP/release/Hive.exe"
+          said="$("$RUNNER_TEMP/release/Hive.exe" --version | tr -d '\r')"
+          [ "$said" = "$VERSION" ] || { echo "Hive.exe says it's $said, not $VERSION"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.version != ''
+        with:
+          name: hive-windows-${{ inputs.version }}
+          path: ${{ runner.temp }}/release/Hive.exe
+          if-no-files-found: error
+          retention-days: 7

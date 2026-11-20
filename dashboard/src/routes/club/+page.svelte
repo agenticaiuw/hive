@@ -9,6 +9,8 @@
    * Connect this Mac opens Hive on the member's Mac with a one-use code, which Hive trades for the Mac's own
    * key (club.js /v1/club/devices/code and /connect), so that Mac takes the club's releases too. Get Hive
    * for Mac downloads the notarized app (club.js /v1/club/download/mac), which sets itself up when opened.
+   * On a Windows PC the same are Get Hive for Windows (Hive.exe, the newest windows release: club.js
+   * /v1/club/download/windows) and Connect this PC (the same one-use code; hive-windows opens the link).
    */
   /* eslint-disable @typescript-eslint/no-explicit-any -- The board answers schemaless JSON here. */
   import { onMount } from "svelte";
@@ -30,10 +32,11 @@
   let devices = $state<any | null>(null);
   let devicesAt = 0;
   let onMac = $state(false);
+  let onWindows = $state(false);
   let connecting = $state(false);
   let connectNote = $state("");
 
-  const KIND: Record<string, string> = { mac: "Mac", vm: "VM", phone: "iPhone", extension: "Browser" };
+  const KIND: Record<string, string> = { mac: "Mac", windows: "Windows", vm: "VM", phone: "iPhone", extension: "Browser" };
   const short = (commit: unknown, release: unknown) =>
     typeof commit === "string" && /^[0-9a-f]{40}$/.test(commit) ? commit.slice(0, 7) : String(release ?? "").slice(0, 12);
 
@@ -59,13 +62,15 @@
     }
   }
 
-  async function connectMac() {
+  async function connectDevice() {
     connecting = true;
     connectNote = "";
     try {
       const { link } = await api("devices/code", {});
       window.location.href = link;
-      connectNote = "Hive opens on this Mac and connects it; it shows here within a few minutes. If nothing opens, get Hive for Mac first.";
+      connectNote = onWindows
+        ? "Hive opens on this PC and asks to connect it; it shows here within a minute. If nothing opens, get Hive for Windows first."
+        : "Hive opens on this Mac and connects it; it shows here within a few minutes. If nothing opens, get Hive for Mac first.";
       devicesAt = 0;
     } catch (error) {
       connectNote = (error as Error).message;
@@ -170,6 +175,7 @@
 
   onMount(() => {
     onMac = /Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints < 2;
+    onWindows = /Windows NT/.test(navigator.userAgent);
     const url = new URL(window.location.href);
     const given = url.searchParams.get("invite");
     if (given) {
@@ -325,7 +331,11 @@
               <a class="phone" href="/club/api/download/mac" download="Hive.dmg">Get Hive for Mac{devices.mac_download.size ? ` (${Math.round(devices.mac_download.size / 1048576)} MB)` : ""}</a>
             {/if}
             {#if onMac}
-              <button type="button" class="link" onclick={connectMac} disabled={connecting}>{connecting ? "Connecting…" : "Connect this Mac"}</button>
+              <button type="button" class="link" onclick={connectDevice} disabled={connecting}>{connecting ? "Connecting…" : "Connect this Mac"}</button>
+            {/if}
+            {#if onWindows && devices.releases?.some((r: any) => r.kind === "windows")}
+              <a class="phone" href="/club/api/download/windows" download="Hive.exe">Get Hive for Windows</a>
+              <button type="button" class="link" onclick={connectDevice} disabled={connecting}>{connecting ? "Connecting…" : "Connect this PC"}</button>
             {/if}
             {#if devices.phone_source}
               <a class="phone" href={`sidestore://source?url=${encodeURIComponent(devices.phone_source)}`}>Get Hive Phone in SideStore</a>

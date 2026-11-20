@@ -10,12 +10,17 @@ export const prerender = false;
  * (POST join {invite}) becomes their own key, kept in an HttpOnly cookie and sent to the board on each
  * call, so the page never holds it and the machines' token never leaves this server for a member.
  * Only the club's own routes go through; everything else of the owner's stays behind the owner's sign-in.
- * GET download/mac is Hive for Mac itself (Hive.dmg), passed through as the board sends it.
+ * GET download/mac is Hive for Mac itself (Hive.dmg), and GET download/windows Hive for Windows
+ * (Hive.exe), passed through as the board sends them.
  */
 const COOKIE = "__Host-hive_club";
 const YEAR = 365 * 86400;
 const GETS = new Set(["me", "board", "devices", "team/inbox", "team/agents", "team/claims"]);
 const POSTS = new Set(["requests", "stop", "devices/code", "team/send", "team/claim", "team/release"]);
+const DOWNLOADS: Record<string, { type: string; name: string }> = {
+  "download/mac": { type: "application/x-apple-diskimage", name: "Hive.dmg" },
+  "download/windows": { type: "application/vnd.microsoft.portable-executable", name: "Hive.exe" },
+};
 
 const answer = (value: unknown, status = 200, headers: Record<string, string> = {}) =>
   json(value, { status, headers: { ...NO_STORE_HEADERS, ...headers } });
@@ -31,13 +36,14 @@ function keyOf(request: Request): string {
 }
 
 export const GET: RequestHandler = async ({ locals, params, request, url }) => {
-  if (!GETS.has(params.path) && params.path !== "download/mac") return answer({ error: "Not found" }, 404);
+  const download = DOWNLOADS[params.path];
+  if (!GETS.has(params.path) && !download) return answer({ error: "Not found" }, 404);
   const key = keyOf(request);
   if (!key) return answer({ error: "Sign in with the invite link the club's owner sent you." }, 401);
-  if (params.path === "download/mac") {
-    const file = await boardFile(locals.runtimeEnv, "/v1/club/download/mac", key);
+  if (download) {
+    const file = await boardFile(locals.runtimeEnv, `/v1/club/${params.path}`, key);
     if (!file.ok) return file;
-    const headers: Record<string, string> = { ...NO_STORE_HEADERS, "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="Hive.dmg"' };
+    const headers: Record<string, string> = { ...NO_STORE_HEADERS, "content-type": download.type, "content-disposition": `attachment; filename="${download.name}"` };
     const length = file.headers.get("content-length");
     if (length) headers["content-length"] = length;
     return new Response(file.body, { headers });

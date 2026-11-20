@@ -2,8 +2,8 @@
 // between nodes. A node on old code finds out only when a route answers differently.").
 //
 // Every node says who it is and what code it runs on each call: x-hive-node ("vm:badger-vm",
-// "mac:owner-mbp", "extension:chrome"), x-hive-version (its release, or "dev" for a build made by
-// hand) and x-hive-protocol (the board routes it was written against). The board keeps the latest of
+// "mac:owner-mbp", "windows:alices-pc", "extension:chrome"), x-hive-version (its release, or "dev"
+// for a build made by hand) and x-hive-protocol (the board routes it was written against). The board keeps the latest of
 // each (board_nodes), answers every call with its own protocol and the newest release published for
 // that kind of node (x-hive-protocol, x-hive-latest), and refuses a node whose protocol is older than
 // it serves with 426 and what to do, so old code finds out on its first call.
@@ -24,7 +24,7 @@
 export const PROTOCOL = 1;
 export const MIN_PROTOCOL = 1;
 
-export const KINDS = new Set(["board", "vm", "mac", "cli", "extension", "phone"]);
+export const KINDS = new Set(["board", "vm", "mac", "windows", "cli", "extension", "phone"]);
 // A workers.dev upload is capped at 100 MB; the Mac app zipped is well under.
 const MOST_BYTES = 95 * 1024 * 1024;
 // A node is written down at most once a minute unless what it runs changed.
@@ -204,7 +204,7 @@ async function publish(request, env, url, auth) {
   const protocol = Number(url.searchParams.get("protocol"));
   const commit = String(url.searchParams.get("commit") ?? "").toLowerCase();
   const size = Number(request.headers.get("content-length"));
-  if (!KINDS.has(kind) || kind === "board") return json({ error: "Say which kind of node (vm, mac, cli, extension, phone)." }, 400);
+  if (!KINDS.has(kind) || kind === "board") return json({ error: "Say which kind of node (vm, mac, windows, cli, extension, phone)." }, 400);
   if (!/^[a-z0-9][a-z0-9.-]{3,39}$/.test(version) || version.startsWith("dev")) return json({ error: "A release needs a version (4 to 40 of a-z, 0-9, '.', '-'), not dev." }, 400);
   if (!/^[0-9a-f]{64}$/.test(sha256)) return json({ error: "Give the release's sha256 (64 hex)." }, 400);
   if (!Number.isInteger(protocol) || protocol < 1) return json({ error: "Say which board routes it was written for (protocol)." }, 400);
