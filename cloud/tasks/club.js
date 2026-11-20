@@ -144,6 +144,8 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
       await env.DB.batch([
         env.DB.prepare("DELETE FROM club_device_keys WHERE member = ?1").bind(name),
         env.DB.prepare("DELETE FROM club_device_codes WHERE member = ?1").bind(name),
+        // Their devices leave the board's list of nodes (nodes.js memberNode names them "<member>@…").
+        env.DB.prepare("DELETE FROM board_nodes WHERE kind != 'board' AND substr(name, 1, length(?1) + 1) = ?1 || '@'").bind(name),
       ]);
       return json({ name, removed: gone.meta.changes });
     }
