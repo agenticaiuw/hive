@@ -205,7 +205,7 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   const browser = JSON.parse(config.find(c => c.startsWith('mcp_servers.browser.args=')).split('=').slice(1).join('='));
   assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/browser-mcp.mjs']);
   const knowledge = JSON.parse(config.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', '/usr/bin/node', '/app/knowledge-mcp.mjs']);
+  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/knowledge-mcp.mjs'], 'its name, for the team tools');
   const improving = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', improveFile: '/s/r7/improve-1.json' });
   const improvingKnowledge = JSON.parse(improving.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
   assert.ok(improvingKnowledge.includes('HIVE_IMPROVE_FILE=/s/r7/improve-1.json'), 'the orchestrator\'s file reaches improve_hive');

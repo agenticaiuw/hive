@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
-  partsOf, readNeed, SELF_GUIDE,
+  partsOf, readNeed, SELF_GUIDE, blockers, othersHold,
 } from './improve.mjs';
 
 test('a need is read once, and only with both what and why', () => {
@@ -142,4 +142,22 @@ test("after an install, the Mac counts as running the change only once Hive ther
   let t = 0;
   const never = async () => ({ content: [{ type: 'text', text: JSON.stringify({ running: '1.1' }) }] });
   assert.equal(await macRunning(never, { id: 'i', version: '1.2', running: '1.1' }, { wait: 10, every: 1, sleep: async () => { t += 3; }, now: () => t }), false);
+});
+
+test('a change waits to land only for agents that leased its files before it did, so two never wait on each other', () => {
+  const leases = [
+    { agent: 'R1-1', path: 'cloud/tasks/worker.js', exclusive: true, held_for: 600, note: 'stuck requests' },
+    { agent: 'R2-1', path: 'cloud/tasks/worker.js', exclusive: true, held_for: 300 },
+    { agent: 'R2-1', path: 'dashboard/', exclusive: true, held_for: 100 },
+    { agent: 'R3-1', path: 'README.md', exclusive: false, held_for: 900 },
+  ];
+  assert.deepEqual(blockers(leases, 'R2-1').map(l => l.agent), ['R1-1'], 'R1-1 was first; a shared lease blocks nobody');
+  assert.deepEqual(blockers(leases, 'R1-1'), [], 'the first goes first');
+  assert.deepEqual(blockers(leases, 'R9-1').map(l => l.agent), ['R1-1', 'R2-1', 'R2-1'], 'one with no lease of its own waits for every holder');
+  const tie = [{ agent: 'R5-1', exclusive: true, held_for: 10 }, { agent: 'R4-1', exclusive: true, held_for: 10 }];
+  assert.deepEqual(blockers(tie, 'R5-1').map(l => l.agent), ['R4-1']);
+  assert.deepEqual(blockers(tie, 'R4-1'), []);
+  assert.equal(othersHold(leases, 'R2-1'), "Other agents are changing these files of Hive's now; leave them alone unless your change needs them (if it does, say so in your report):\n"
+    + '- cloud/tasks/worker.js: R1-1 (stuck requests)\n- README.md: R3-1');
+  assert.equal(othersHold([], 'R2-1'), '');
 });

@@ -189,6 +189,27 @@ export function macFailures(job) {
   return `On the owner's Mac (macOS), where Hive on the Mac builds: ${job.failures || 'the check failed'}`;
 }
 
+// How long a change waits to land while an agent that leased one of its files first still holds it.
+export const MOST_LEASE_WAIT_MS = 30 * 60_000;
+
+/**
+ * The leases a change must wait for before it lands (the board's /v1/team/claims over its files): another
+ * agent's exclusive lease taken before this change's own (`me`'s oldest lease; ties by name). The younger
+ * of two goes second, so two changes holding each other's files never wait on each other for ever.
+ */
+export function blockers(leases, me) {
+  const mine = leases.filter(l => l.agent === me).reduce((age, l) => Math.max(age, l.held_for ?? 0), -1);
+  return leases.filter(l => l.agent !== me && l.exclusive && ((l.held_for ?? 0) > mine || ((l.held_for ?? 0) === mine && l.agent < me)));
+}
+
+/** For a code agent's brief: the files other agents hold now. */
+export function othersHold(leases, me) {
+  const others = leases.filter(l => l.agent !== me);
+  if (!others.length) return '';
+  return `Other agents are changing these files of Hive's now; leave them alone unless your change needs them (if it does, say so in your report):\n`
+    + others.map(l => `- ${l.path}: ${l.agent}${l.note ? ` (${l.note})` : ''}`).join('\n');
+}
+
 /** One line for the board on what landed, and where it went live. */
 export function landedLine({ commit, files, live }) {
   const where = live.length ? `; live on ${live.join(', ')}` : '';
