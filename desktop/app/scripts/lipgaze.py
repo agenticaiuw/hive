@@ -1,8 +1,8 @@
 """Lip reading confirmed by a rough eye swipe: you say a sentence and glance across its letters on the
 eye keyboard at the same time, as slowly as you like. No blinks between words, no space bar; the
-sentence ends when your eyes leave the keyboard (look up above the keys), or after 3 s of a still mouth.
-Swiping while speaking slows speech down, with the lips still for a second or more between words, so
-a still mouth doesn't end a sentence; those pauses are shortened before the mouth is read.
+sentence ends when your eyes leave the keyboard (look up above the keys). Swiping while speaking slows
+speech down, with the lips still for seconds between words while you find letters, so a still mouth
+doesn't end a sentence; those pauses are shortened before the mouth is read.
 
 The lips carry the words. USR 2.0 Huge (github.com/ahaliassos/usr2, MIT) reads the mouth video, and
 its decoder proposes word pieces one at a time. The gaze doesn't have to land on keys: each guess is
@@ -521,7 +521,8 @@ def word_errors(said, meant):
 
 class Cutter:
     """Cuts the camera stream into sentences: a sentence ends with finish() (the keyboard says the eyes
-    left the keys), once the mouth has been still for `pause`, or after `longest`. The pause is long: with
+    left the keys), once the mouth has been still for `pause` (None: never, as the keyboard's serve has it),
+    or after `longest`. The pause is long: with
     0.6 s, speaking slowly while swiping cut sentences after a word or two, and with 3 s the owner's first
     take, 2026-11-19, ended after "put these" (they paused up to 5 s mid-sentence finding letters). Each
     sentence keeps `margin` of still frames on each side (with 0.3 s USR 2.0 lost first words, and given
@@ -529,7 +530,8 @@ class Cutter:
 
     def __init__(self, fps=30, *, pause=8.0, margin=0.5, longest=30, moving=0.15, most=0.2):
         self.fps = fps
-        self.pause, self.margin, self.longest = int(pause * fps), int(margin * fps), int(longest * fps)
+        self.pause = int(pause * fps) if pause else math.inf     # None: a still mouth never ends it
+        self.margin, self.longest = int(margin * fps), int(longest * fps)
         self.moving, self.most = moving, most
         self.frames = []          # (t, crop, opening) from index self.base on
         self.base = self.count = 0
@@ -610,7 +612,8 @@ class Server:
     """lipgaze.py serve: the eye keyboard (hive-eye-keyboard --lips) sends each camera frame's face, grey,
     and each gaze point on the keyboard, both in camera time; each sentence comes back as {"text"} to type.
     With `record`, each sentence's mouth crops, gaze and what was read are kept in that folder (no face
-    pictures, just the 88 x 88 mouth), practice sentences are shown to say ({"prompt", "number"}), and each
+    pictures, just the 88 x 88 mouth), practice sentences are shown to say ({"prompt", "number"}, with
+    "again" when the last try was too short), the keyboard says {"go"} once it has been read, and each
     take ends with {"take": n}; what was read goes to stderr, not the screen.
 
     Sentences are read behind, one at a time: in practice the take is kept and the next sentence shows the
@@ -647,22 +650,11 @@ class Server:
             # After the last take kept (not how many: a take moved out mustn't get written over).
             self.taken = max((int(f.stem) for f in self.record.glob('*.npz') if f.stem.isdigit()), default=-1) + 1
         self.cutter = None
-        # Practice: a new sentence is read first (the eyes on the line below the keys, no gaze sent, the
-        # lips maybe moving along), and listening starts once the eyes have been on the keys a moment.
+        # Practice: a new sentence is read first, and the mouth counts only once the keyboard says {"go"}, a
+        # few seconds after it showed the sentence (owner, 2026-11-19: "let me read the sentence first, wait
+        # a few seconds, and then start recording"; telling from the gaze when they'd finished reading
+        # wasn't reliable).
         self.armed = not self.prompts
-        self.arm_after = -math.inf
-
-    ARM_POINTS, ARM_SPAN = 12, 0.6      # gaze points on the keys within this many seconds: they've begun
-
-    def arm(self, t):
-        """Practice: whether the eyes have come to the keys since the sentence was shown (up to camera time t)."""
-        if not self.armed:
-            seen = [g[0] for g in list(self.gaze) if self.arm_after < g[0] <= t + 0.05]
-            if len(seen) >= self.ARM_POINTS and seen[-1] - seen[-self.ARM_POINTS] <= self.ARM_SPAN:
-                self.armed = True
-                self.say(listening=True)
-                self.log(listening=round(t, 2), number=self.taken + 1)
-        return self.armed
 
     def say(self, **message):
         with self.saying:
@@ -686,6 +678,10 @@ class Server:
                 with self.ready:
                     self.frames.append((float(m['frame']['t']), m['pixels']))
                     self.ready.notify()
+            elif 'go' in m:
+                with self.ready:                        # practice: the sentence has been read, record from here
+                    self.frames.append((None, 'go'))
+                    self.ready.notify()
             elif 'end' in m or m.get('on') is False:
                 with self.ready:                        # the eyes left the keys, or it closed: finish the sentence
                     self.frames.append((None, 'end' if 'end' in m else 'closed'))
@@ -708,21 +704,32 @@ class Server:
                     break
                 t, pixels = self.frames.popleft()
             if t is None:
+                if pixels == 'go':
+                    if not self.armed:
+                        self.armed = True
+                        self.log(recording=self.taken + 1)
+                    continue
                 if self.cutter is not None:
                     part = self.cutter.finish(pixels)
                     if part:
                         self.ended(part, self.cutter.why)
+                if self.prompts and pixels == 'closed':
+                    self.armed = False                  # closed: the sentence is read again when it opens
                 continue
             if self.cutter is None:
                 times.append(t)
                 if len(times) < 15:
                     continue
-                fps = max(10, min(60, round((len(times) - 1) / max(1e-3, times[-1] - times[0]))))
-                self.cutter = Cutter(fps)
+                # The typical gap between frames: one 0.23 s hiccup as the camera started (owner, 2026-11-19)
+                # made an average say 21 fps for 30, and the 8 s pause cut a sentence after 5.4 s.
+                fps = max(10, min(60, round(1 / max(1e-3, float(np.median(np.diff(times)))))))
+                # The eyes end a sentence (looking up, or off the keys): a still mouth while they're on the
+                # keys is finding letters, never the end.
+                self.cutter = Cutter(fps, pause=None)
             crop = self.crops(np.repeat(pixels[:, :, None], 3, axis=2))   # grey to BGR
             if crop is not None:
                 last_crop = crop
-            opening = self.crops.opening if self.arm(t) else None   # still reading: the mouth doesn't count
+            opening = self.crops.opening if self.armed else None   # still reading: the mouth doesn't count
             part = self.cutter.feed(t, crop if crop is not None else last_crop, opening)
             if part:
                 self.ended(part, self.cutter.why)
@@ -749,7 +756,7 @@ class Server:
         gaze = np.array([g for g in list(self.gaze) if t0 - 1 <= g[0] <= t1 + 1]).reshape(-1, 3)
         _, _, spoken = squeeze([p[0] for p in part], [p[1] for p in part], [p[2] for p in part])
         if self.prompts:
-            self.armed, self.arm_after = False, t1     # the next sentence (or this one again) is read first
+            self.armed = False                         # the next sentence (or this one again) is read first
         info = {'ended_by': why, 'seconds': round(t1 - t0, 2), 'spoken': round(spoken, 2), 'from': t0, 'to': t1}
         if not self.record:
             self.jobs.put((part, gaze, None, None, info))
@@ -757,7 +764,7 @@ class Server:
         if self.prompt and spoken < 0.15 * len(normalise(self.prompt).split()):
             # Practice: far too short for the sentence (looked up early, or a cough): same sentence again.
             self.log(too_short=round(spoken, 2), meant=self.prompt, **info)
-            self.say(status='That was shorter than the sentence: say all of it, then look up above the keys.')
+            self.say(prompt=self.prompt, number=self.taken + 1, again='short')   # read it again, then say all of it
             return
         number, prompt = self.taken, self.prompt
         self.taken += 1
