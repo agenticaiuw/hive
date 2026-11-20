@@ -18,6 +18,9 @@
 //! - PreToolUse on a file edit shows the rules whose paths match that file, once a session, so a
 //!   rule reaches the agent exactly when it applies instead of sitting in a text file that may or
 //!   may not be loaded.
+//! - An agent's own board command (`hive-tasks add M3 <<'EOF' …`) runs as an ordinary command.
+//!   PreToolUse does it in the command's place only when the harness's sandbox would keep the
+//!   command from writing the ledger (`runs_sandboxed`).
 //! - SessionStart puts this session's open tasks back after compaction, and names the project's
 //!   open tasks from other sessions and its project-wide rules.
 //!
@@ -587,7 +590,7 @@ impl Ledger {
                     .map_err(err)?;
                 let id = self.db.last_insert_rowid();
                 self.event(id, "open", None)?;
-                out.push(format!("T{id} {title}"));
+                out.push(format!("T{id} registered: {title}"));
             }
         }
         self.db
@@ -1971,9 +1974,6 @@ impl Ledger {
         Ok(json!({"decision": "block", "reason": reason.trim_end()}))
     }
 
-    /// An agent's `hive-tasks add|report|done|rule-off`, done here rather than by the command:
-    /// the hook runs outside the harness's sandbox, which may not let the command write the
-    /// ledger. The agent gets the result in place of running it.
     /// A subagent handed work in a folder (its prompt has a line "Hive folder: hive › memory
     /// retrieval") starts with every memory of that folder added to its prompt.
     fn on_subagent(&self, project: &str, input: &Value) -> Result<Value, String> {
@@ -2001,6 +2001,12 @@ impl Ledger {
         }}))
     }
 
+    /// An agent's own `hive-tasks add|report|done|rule-off|folder|remember` runs as an ordinary
+    /// command: it prints what happened, or fails with why, and knows its session from the
+    /// harness's environment (`session_from_env`). Only when the harness will run it in a sandbox,
+    /// which may not let it write the ledger, does the hook (which runs outside the sandbox) do it
+    /// here. Claude Code then runs a command that just prints the result (or the error, exiting 1),
+    /// so the call reads like any other; Codex is told the result in place of running it.
     fn on_command(&self, harness: &str, input: &Value, project: &str) -> Result<Value, String> {
         let by = Some((harness, str_of(input, "session_id"))).filter(|(_, s)| !s.is_empty());
         let Some((command, id, body)) =
@@ -2008,6 +2014,9 @@ impl Ledger {
         else {
             return Ok(Value::Null);
         };
+        if !runs_sandboxed(harness, input) {
+            return Ok(Value::Null);
+        }
         let json = || {
             serde_json::from_str::<Value>(body.trim()).map_err(|e| format!("That isn't JSON: {e}"))
         };
@@ -2030,9 +2039,24 @@ impl Ledger {
                 }),
             _ => self.rule_off(&id),
         };
+        if harness == "claude" {
+            let quoted = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+            let shown = match result {
+                Ok(said) => format!("printf '%s\\n' {}", quoted(&said)),
+                Err(e) => format!("printf '%s\\n' {} >&2; exit 1", quoted(&e)),
+            };
+            let mut updated = input.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+            updated["command"] = json!(shown);
+            return Ok(json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "Claude Code's sandbox can't write Hive's board, so Hive's hook ran this board command outside it; the call prints what happened.",
+                "updatedInput": updated,
+            }}));
+        }
         let reason = match result {
-            Ok(said) => format!("Hive did this for you (no need to run it): {said}"),
-            Err(e) => format!("Hive couldn't do that: {e} Fix it and run the command again."),
+            Ok(said) => format!("Codex's sandbox can't write Hive's board, so Hive's hook ran this command for you (don't run it again): {said}"),
+            Err(e) => format!("Codex's sandbox can't write Hive's board, so Hive's hook ran this command for you, and it failed: {e} Fix it and run the command again."),
         };
         Ok(json!({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2311,6 +2335,93 @@ pub fn agent_command(tool_input: &Value) -> Option<(String, String, String)> {
         return None;
     }
     Some((command, id, body))
+}
+
+/// Whether the harness will run this tool call's command in a sandbox, which may keep it from
+/// writing the ledger. Claude Code: its settings turn the sandbox on (`sandbox.enabled`) and the
+/// call didn't ask to skip it. Codex: the session's newest turn isn't in danger-full-access (a
+/// rollout that doesn't say counts as sandboxed, as Codex's default is).
+pub fn runs_sandboxed(harness: &str, input: &Value) -> bool {
+    match harness {
+        "claude" => {
+            if input.pointer("/tool_input/dangerouslyDisableSandbox") == Some(&Value::Bool(true)) {
+                return false;
+            }
+            let user = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| hive_common::paths::home().join(".claude"));
+            let managed = if cfg!(target_os = "macos") {
+                Path::new("/Library/Application Support/ClaudeCode")
+            } else {
+                Path::new("/etc/claude-code")
+            };
+            claude_sandbox_on(Path::new(str_of(input, "cwd")), &user, managed)
+        }
+        "codex" => codex_sandbox(str_of(input, "transcript_path")).is_none_or(|s| s != "danger-full-access"),
+        _ => false,
+    }
+}
+
+/// Claude Code's `sandbox.enabled`, from the settings that decide it, strongest first: managed
+/// (`managed`/managed-settings.json), the project's (`.claude/settings.local.json`, then
+/// `.claude/settings.json`, nearest folder first from `cwd` up) and the user's (`user`/settings.json).
+/// Off when none says.
+pub fn claude_sandbox_on(cwd: &Path, user: &Path, managed: &Path) -> bool {
+    let mut files = vec![managed.join("managed-settings.json")];
+    for dir in cwd.ancestors() {
+        files.push(dir.join(".claude/settings.local.json"));
+        files.push(dir.join(".claude/settings.json"));
+    }
+    files.push(user.join("settings.json"));
+    files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .find_map(|s| s.pointer("/sandbox/enabled").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// The sandbox Codex runs the session's commands in ("danger-full-access", "workspace-write",
+/// "read-only"), from the newest turn_context in its rollout: its last 4 MB, else all of it.
+pub fn codex_sandbox(transcript: &str) -> Option<String> {
+    const NEEDLE: &str = "\"type\":\"turn_context\"";
+    let policy = |line: &str| {
+        let v: Value = serde_json::from_str(line).ok()?;
+        (v["type"] == "turn_context")
+            .then(|| v.pointer("/payload/sandbox_policy/type")?.as_str().map(str::to_string))
+            .flatten()
+    };
+    let mut file = std::fs::File::open(transcript).ok()?;
+    let size = file.metadata().ok()?.len();
+    let from = size.saturating_sub(4 << 20);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    if let Some(found) = tail.lines().rev().filter(|l| l.contains(NEEDLE)).find_map(policy) {
+        return Some(found);
+    }
+    if from == 0 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(0)).ok()?;
+    BufReader::new(file.take(from))
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| l.contains(NEEDLE))
+        .filter_map(|l| policy(&l))
+        .last()
+}
+
+/// The agent session a `hive-tasks` command runs in, as (harness, session id), from what the
+/// harness puts in its commands' environment (`get` reads a variable): Codex's CODEX_THREAD_ID or
+/// Claude Code's CLAUDE_CODE_SESSION_ID, the same ids their hooks are given. Codex comes first: one
+/// started from a Claude Code session still has that session's id in its environment. A report run
+/// from a session takes over the tasks it starts (`Ledger::report_by`).
+pub fn session_from_env(get: impl Fn(&str) -> Option<String>) -> Option<(&'static str, String)> {
+    [("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID")]
+        .into_iter()
+        .find_map(|(harness, var)| get(var).filter(|s| !s.trim().is_empty()).map(|s| (harness, s.trim().to_string())))
 }
 
 /// A project's short name, the same on every machine and on the web: the repository's name for

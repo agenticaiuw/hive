@@ -2,7 +2,8 @@
 //! from dropping them (see the library's docs).
 
 use hive_tasks::{
-    default_path, folder_place, project_key, project_of, render_board, sync_soon, Cloud, Ledger,
+    default_path, folder_place, project_key, project_of, render_board, session_from_env, sync_soon,
+    Cloud, Ledger,
 };
 use serde_json::Value;
 use std::io::Read;
@@ -75,7 +76,9 @@ fn main() {
             if e.contains("readonly database") || e.contains("unable to open database") {
                 eprintln!(
                     "A sandbox may be keeping this from writing the board. Run the hive-tasks \
-                     command on its own (not chained with other commands) and Hive's hook does it."
+                     command on its own (not chained with other commands): when the harness's \
+                     sandbox is on, Hive's hook runs it outside the sandbox. If it still fails, run \
+                     it with the sandbox off."
                 );
             }
             1
@@ -143,6 +146,9 @@ fn run(args: &[String]) -> Result<String, String> {
     }
     let path = default_path();
     let ledger = Ledger::open(&path)?;
+    // The agent session this runs in (its harness's environment says), so a report from it takes
+    // over the tasks it starts; Hive's own agents put their requests on the board themselves.
+    let by = || if inside_hive() { None } else { session_from_env(|v| std::env::var(v).ok()) };
     let here = || {
         project_of(
             &std::env::current_dir()
@@ -185,14 +191,14 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(out)
         }
         "report" => {
-            let out = ledger.report(&stdin_json()?)?.join("\n");
+            let out = ledger.report_by(&stdin_json()?, by().as_ref().map(|(h, s)| (*h, s.as_str())))?.join("\n");
             sync_soon(&path);
             Ok(out)
         }
         "done" => {
             let outcome = args.get(2..).unwrap_or_default().join(" ");
             let report = serde_json::json!([{"id": arg(1), "status": "done", "outcome": outcome}]);
-            let out = ledger.report(&report)?.join("\n");
+            let out = ledger.report_by(&report, by().as_ref().map(|(h, s)| (*h, s.as_str())))?.join("\n");
             sync_soon(&path);
             Ok(out)
         }

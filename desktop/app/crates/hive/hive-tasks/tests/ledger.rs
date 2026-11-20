@@ -43,6 +43,12 @@ impl Fixture {
     fn stop(&self, active: bool) -> Value {
         self.hook("Stop", json!({"stop_hook_active": active}))
     }
+    /// Claude Code's sandbox on or off for the project (its .claude/settings.json).
+    fn claude_sandbox(&self, on: bool) {
+        let dir = std::path::Path::new(&self.cwd).join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({"sandbox": {"enabled": on}}).to_string()).unwrap();
+    }
     fn append(&self, line: Value) {
         let mut f = std::fs::OpenOptions::new()
             .append(true)
@@ -50,6 +56,17 @@ impl Fixture {
             .unwrap();
         writeln!(f, "{line}").unwrap();
     }
+}
+
+/// Runs the command a PreToolUse hook put in place of the agent's (Claude Code in its sandbox):
+/// what it printed (stdout, else stderr) and whether it exited 0.
+fn run_shown(out: &Value) -> (String, bool) {
+    let hook = &out["hookSpecificOutput"];
+    assert_eq!(hook["permissionDecision"], "allow", "{out}");
+    let command = hook["updatedInput"]["command"].as_str().expect("a command in place of the agent's");
+    let ran = std::process::Command::new("sh").args(["-c", command]).output().unwrap();
+    let said = if ran.stdout.is_empty() { ran.stderr } else { ran.stdout };
+    (String::from_utf8_lossy(&said).trim_end().to_string(), ran.status.success())
 }
 
 const MESSAGE: &str = "fix the login button on mobile, and also the footer is wrong. never use red text anywhere in the UI";
@@ -96,8 +113,8 @@ fn a_message_is_saved_split_reported_and_only_then_lets_the_agent_stop() {
     assert_eq!(
         added,
         vec![
-            "T1 Fix the mobile login button",
-            "T2 Fix the footer",
+            "T1 registered: Fix the mobile login button",
+            "T2 registered: Fix the footer",
             "R1 rule (web/**): No red text in the UI"
         ]
     );
@@ -511,7 +528,7 @@ fn changes_queue_for_the_cloud_and_other_machines_rules_apply_here() {
 }
 
 #[test]
-fn the_hook_does_an_agents_board_commands_itself() {
+fn in_a_codex_sandbox_the_hook_does_an_agents_board_commands_itself() {
     let dir = tempfile::tempdir().unwrap();
     let ledger = Ledger::open(&dir.path().join("t.sqlite3")).unwrap();
     let (m, _) = ledger
@@ -542,7 +559,7 @@ fn the_hook_does_an_agents_board_commands_itself() {
         out["permissionDecisionReason"]
             .as_str()
             .unwrap()
-            .contains("T1 Fix login"),
+            .contains("T1 registered: Fix login"),
         "{out}"
     );
     let reported = hook(
@@ -551,7 +568,7 @@ fn the_hook_does_an_agents_board_commands_itself() {
     assert!(reported.to_string().contains("T1 done"), "{reported}");
     assert_eq!(ledger.show("T1").unwrap()["outcome"], "It's fixed");
     let bad = hook("hive-tasks report <<'EOF'\nnot json\nEOF");
-    assert!(bad.to_string().contains("couldn't"), "{bad}");
+    assert!(bad.to_string().contains("it failed: That isn't JSON"), "{bad}");
     // Other commands run as usual.
     assert!(hook("cargo test").is_null());
     assert!(hive_tasks::agent_command(
@@ -713,7 +730,7 @@ fn a_folder_keeps_its_memories_and_every_agent_put_on_it_gets_all_of_them() {
         .ledger
         .add(1, &json!([{"quote": "make memory retrieval faster", "title": "Faster retrieval", "folder": "Memory retrieval"}]))
         .unwrap();
-    assert_eq!(added[0], "T1 Faster retrieval");
+    assert_eq!(added[0], "T1 registered: Faster retrieval");
     assert!(added[1].contains("\"project › Memory retrieval\": no memories yet"), "{added:?}");
     f.ledger.remember("project", "memory retrieval", "spec", "# Ranking\nRecent facts first, then by match.").unwrap();
     f.ledger.remember("project", "Memory Retrieval", "decision", "No embeddings on the Mac").unwrap();
@@ -873,15 +890,16 @@ fn an_agents_folder_commands_are_done_by_the_hook() {
     );
     assert_eq!(cmd("hive-tasks folder Voice && rm -rf x"), None);
     let f = fixture();
+    f.claude_sandbox(true);
     let out = f.hook(
         "PreToolUse",
         json!({"tool_name": "Bash", "tool_input": {"command": "hive-tasks remember \"Voice\" decision <<'EOF'\nOn device\nKeep it local.\nEOF"}}),
     );
-    let said = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
-    assert!(said.contains("Saved to project › Voice as a decision: On device"), "{said}");
+    let (said, ok) = run_shown(&out);
+    assert!(ok && said.contains("Saved to project › Voice as a decision: On device"), "{said}");
     let out = f.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "hive-tasks folder Voice"}}));
-    let said = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
-    assert!(said.contains("Keep it local."), "{said}");
+    let (said, ok) = run_shown(&out);
+    assert!(ok && said.contains("Keep it local."), "{said}");
 }
 
 #[test]
@@ -967,13 +985,8 @@ fn a_session_that_starts_another_sessions_task_takes_it_over_and_a_dashboard_can
         .unwrap();
 
     // Another session reports T1 active: it's that session's now, and s1's Stop no longer asks about it.
-    let report = |session: &str, body: Value| {
-        f.ledger.hook("claude", &json!({
-            "session_id": session, "cwd": f.cwd, "transcript_path": f.transcript, "hook_event_name": "PreToolUse",
-            "tool_name": "Bash", "tool_input": {"command": format!("hive-tasks report <<'EOF'\n{body}\nEOF")}
-        }))
-        .unwrap()
-    };
+    // (`hive-tasks report` run in a session reports as that session: hive_tasks::session_from_env.)
+    let report = |session: &str, body: Value| f.ledger.report_by(&body, Some(("claude", session))).unwrap();
     report("s2", json!([{"id": "T1", "status": "active"}]));
     let (batch, _) = f.ledger.sync_batch(200).unwrap();
     let t1 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
@@ -1050,4 +1063,172 @@ fn limits_from_a_signed_out_account_are_dropped_and_claude_reports_its_own() {
     assert_eq!(hive_tasks::claude_plan(Some("default_claude_max_5x"), Some("claude_max")).as_deref(), Some("Max 5x"));
     assert_eq!(hive_tasks::claude_plan(Some("default_claude_max_20x"), None).as_deref(), Some("Max 20x"));
     assert_eq!(hive_tasks::claude_plan(None, Some("claude_pro")).as_deref(), Some("Pro"));
+}
+
+#[test]
+fn a_board_command_runs_itself_unless_claude_codes_sandbox_is_on() {
+    let f = fixture();
+    f.prompt(MESSAGE);
+    let bash = |tool_input: Value| f.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": tool_input}));
+    let add = "hive-tasks add M1 <<'EOF'\n[{\"quote\": \"fix the login button on mobile\", \"title\": \"Fix the login button\"}]\nEOF";
+    // Sandbox off: the hook leaves the call alone (no block, no hook error) and does nothing itself;
+    // the command registers the task and prints what happened.
+    f.claude_sandbox(false);
+    assert!(bash(json!({"command": add, "description": "Register tasks"})).is_null());
+    assert!(f.ledger.show("T1").is_err(), "the hook must not have done it too");
+    // A call that asks to skip the sandbox runs itself too.
+    f.claude_sandbox(true);
+    assert!(bash(json!({"command": add, "dangerouslyDisableSandbox": true})).is_null());
+    assert!(f.ledger.show("T1").is_err());
+
+    // In the sandbox the hook does it, and the call runs a command that prints what happened,
+    // exiting 0 (allowed, not denied: nothing shows as a hook error).
+    let out = bash(json!({"command": add, "description": "Register tasks"}));
+    assert_eq!(out["hookSpecificOutput"]["updatedInput"]["description"], "Register tasks");
+    let (said, ok) = run_shown(&out);
+    assert!(ok && said == "T1 registered: Fix the login button", "{said}");
+    assert_eq!(f.ledger.show("T1").unwrap()["title"], "Fix the login button");
+    // The owner's words survive the shell, quotes and all.
+    let out = bash(json!({"command": "hive-tasks remember \"Voice\" <<'EOF'\nDon't use 'red' text\nEOF"}));
+    let (said, ok) = run_shown(&out);
+    assert!(ok && said.contains("Don't use 'red' text"), "{said}");
+    // A mistake is an ordinary failed command: the reason on stderr, exit 1.
+    let out = bash(json!({"command": "echo 'not json' | hive-tasks report"}));
+    let (said, ok) = run_shown(&out);
+    assert!(!ok && said.starts_with("That isn't JSON"), "{said}");
+    let out = bash(json!({"command": "hive-tasks add M1 <<'EOF'\n[{\"quote\": \"words never said\", \"title\": \"X\"}]\nEOF"}));
+    let (said, ok) = run_shown(&out);
+    assert!(!ok && said.contains("quote isn't in M1"), "{said}");
+}
+
+#[test]
+fn codex_in_full_access_runs_board_commands_itself() {
+    use hive_tasks::{codex_sandbox, runs_sandboxed};
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("t.sqlite3")).unwrap();
+    let (m, _) = ledger.save_message("codex", "s1", "p", "Fix the login page", 1, false).unwrap();
+    let rollout = dir.path().join("rollout.jsonl");
+    let turn = |sandbox: &str| {
+        json!({"timestamp": "2026-11-20T00:00:00.000Z", "type": "turn_context",
+               "payload": {"cwd": "/tmp", "approval_policy": "never", "sandbox_policy": {"type": sandbox}}})
+        .to_string()
+    };
+    let said = |text: &str| json!({"type": "response_item", "payload": {"type": "message", "content": [{"text": text}]}}).to_string();
+    let input = |command: &str, transcript: &std::path::Path| {
+        json!({"hook_event_name": "PreToolUse", "session_id": "s1", "cwd": "/tmp", "transcript_path": transcript,
+               "tool_name": "Bash", "tool_input": {"command": command}})
+    };
+    let add = format!("hive-tasks add M{m} <<'EOF'\n[{{\"quote\": \"Fix the login page\", \"title\": \"Fix login\"}}]\nEOF");
+
+    // The newest turn is in full access: the command runs itself.
+    std::fs::write(&rollout, format!("{}\n{}\n{}\n", turn("workspace-write"), turn("danger-full-access"),
+        said("a message quoting \"type\":\"turn_context\" isn't one"))).unwrap();
+    assert_eq!(codex_sandbox(rollout.to_str().unwrap()).as_deref(), Some("danger-full-access"));
+    assert!(!runs_sandboxed("codex", &input(&add, &rollout)));
+    assert!(ledger.hook("codex", &input(&add, &rollout)).unwrap().is_null());
+    assert!(ledger.show("T1").is_err());
+
+    // Back in the sandbox (a later turn): the hook does it and tells Codex the result.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+    writeln!(f, "{}", turn("workspace-write")).unwrap();
+    let out = ledger.hook("codex", &input(&add, &rollout)).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.contains("sandbox") && reason.contains("T1 registered: Fix login"), "{reason}");
+
+    // A rollout with no turn in its last 4 MB is read whole.
+    let long = dir.path().join("long.jsonl");
+    let filler = said(&"x".repeat(1000));
+    let mut text = turn("danger-full-access") + "\n";
+    for _ in 0..5000 {
+        text.push_str(&filler);
+        text.push('\n');
+    }
+    std::fs::write(&long, text).unwrap();
+    assert_eq!(codex_sandbox(long.to_str().unwrap()).as_deref(), Some("danger-full-access"));
+    // No rollout to read: sandboxed, as Codex is by default.
+    assert!(runs_sandboxed("codex", &input(&add, &dir.path().join("missing.jsonl"))));
+}
+
+#[test]
+fn claude_codes_sandbox_setting_is_read_strongest_first() {
+    use hive_tasks::claude_sandbox_on;
+    let dir = tempfile::tempdir().unwrap();
+    let (user, managed, repo) = (dir.path().join("user"), dir.path().join("managed"), dir.path().join("repo"));
+    let cwd = repo.join("src");
+    for d in [&user, &managed, &cwd, &repo.join(".claude")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let set = |file: std::path::PathBuf, on: bool| {
+        std::fs::write(file, json!({"permissions": {}, "sandbox": {"enabled": on}}).to_string()).unwrap()
+    };
+    assert!(!claude_sandbox_on(&cwd, &user, &managed), "off when nothing says");
+    set(user.join("settings.json"), true);
+    assert!(claude_sandbox_on(&cwd, &user, &managed));
+    set(repo.join(".claude/settings.json"), false);
+    assert!(!claude_sandbox_on(&cwd, &user, &managed), "the project's beats the user's");
+    set(repo.join(".claude/settings.local.json"), true);
+    assert!(claude_sandbox_on(&cwd, &user, &managed), "the local file beats the project's");
+    set(managed.join("managed-settings.json"), false);
+    assert!(!claude_sandbox_on(&cwd, &user, &managed), "managed settings beat all");
+}
+
+#[test]
+fn a_command_knows_its_session_from_its_harness() {
+    use hive_tasks::session_from_env;
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |k: &str| pairs.iter().find(|(name, _)| *name == k).map(|(_, v)| v.to_string())
+    };
+    assert_eq!(session_from_env(env(&[("CLAUDE_CODE_SESSION_ID", "abc")])), Some(("claude", "abc".into())));
+    assert_eq!(session_from_env(env(&[("CODEX_THREAD_ID", "t-1")])), Some(("codex", "t-1".into())));
+    // Codex started from a Claude Code session: its commands are Codex's.
+    assert_eq!(
+        session_from_env(env(&[("CLAUDE_CODE_SESSION_ID", "abc"), ("CODEX_THREAD_ID", "t-1")])),
+        Some(("codex", "t-1".into()))
+    );
+    assert_eq!(session_from_env(env(&[("CLAUDE_CODE_SESSION_ID", " ")])), None);
+    assert_eq!(session_from_env(env(&[])), None);
+}
+
+/// The installed command, run the way an agent runs it: it says what happened on stdout and exits
+/// 0, or says why on stderr and exits 1; a report from a session takes over the task it starts.
+#[test]
+fn the_command_itself_says_what_happened_or_fails_with_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("tasks.sqlite3");
+    Ledger::open(&db).unwrap().save_message("claude", "s1", "p", MESSAGE, 1, false).unwrap();
+    let run = |args: &[&str], stdin: &str, session: &str| {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hive-tasks"))
+            .args(args)
+            .current_dir(dir.path())
+            // Never this machine's real board or cloud copy.
+            .env("HIVE_TASKS_DB", &db)
+            .env("HOME", dir.path())
+            .env("HIVE_TASKS_CLOUD", dir.path().join("no-cloud.json"))
+            .env("HIVE_TASKS_NO_SYNC", "1")
+            .env_remove("HIVE_TASKS_OFF")
+            .env_remove("CODEX_THREAD_ID")
+            .env("CLAUDE_CODE_SESSION_ID", session)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = |b: Vec<u8>| String::from_utf8_lossy(&b).trim_end().to_string();
+        (out.status.code(), text(out.stdout), text(out.stderr))
+    };
+    let (code, said, _) = run(&["add", "M1"], r#"[{"quote": "fix the login button on mobile", "title": "Fix the login button"}]"#, "s1");
+    assert_eq!((code, said.as_str()), (Some(0), "T1 registered: Fix the login button"));
+    let (code, said, why) = run(&["add", "M1"], "not json", "s1");
+    assert!(code == Some(1) && said.is_empty() && why.starts_with("Stdin isn't JSON"), "{why}");
+    let (code, _, why) = run(&["add", "M1"], r#"[{"quote": "words never said", "title": "X"}]"#, "s1");
+    assert!(code == Some(1) && why.contains("quote isn't in M1"), "{why}");
+    let (code, said, _) = run(&["report"], r#"[{"id": "T1", "status": "active"}]"#, "s2");
+    assert_eq!((code, said.as_str()), (Some(0), "T1 active"));
+    let (batch, _) = Ledger::open(&db).unwrap().sync_batch(200).unwrap();
+    let t1 = batch["tasks"].as_array().unwrap().iter().find(|t| t["id"] == 1).unwrap().clone();
+    assert_eq!((t1["claimed_harness"].as_str(), t1["claimed_session"].as_str()), (Some("claude"), Some("s2")));
 }
