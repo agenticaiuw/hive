@@ -6,7 +6,7 @@
 //! Every coordinate is a pixel in the screenshot images these tools return. The tools take the
 //! mouse and keyboard only for screen actions and let go of them when the agent turns to other work
 //! (the shell, thinking), so the user can use their Mac meanwhile. When the user touches a key, the
-//! trackpad or a mouse while the agent has them, screen actions stop until they press fn; the tools
+//! trackpad or a mouse while the agent has them, screen actions stop until they say "continue"; the tools
 //! tell the model to carry on with work that doesn't need the screen.
 //!
 //! Every action that changes something carries a `step`: one sentence, shown to the user, of what it
@@ -218,8 +218,8 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "wait_for_control",
             "description": "Use when a tool says the user has the mouse and keyboard and the screen is the only \
-                            way forward (do everything else first). Waits until they hand it back (they press fn or \
-                            say \"continue\"), then returns a fresh screenshot.",
+                            way forward (do everything else first). Waits until they hand it back (they say \
+                            \"continue\"), then returns a fresh screenshot.",
             "inputSchema": {"type": "object", "properties": {
                 "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 600, "default": 120},
             }},
@@ -795,7 +795,7 @@ impl MacTools {
                 "is using them"
             };
             return error_text(format!(
-                "The user {how} the mouse and keyboard ({}), so screen actions wait until they press fn. Don't stop \
+                "The user {how} the mouse and keyboard ({}), so screen actions wait until they say \"continue\". Don't stop \
                  working: carry on with everything that doesn't need the screen (the shell, files, APIs, reading \
                  what you already have). Call wait_for_control only when the screen is the one way forward, then \
                  look at the new screenshot before acting; things may have changed.",
@@ -1156,7 +1156,7 @@ impl MacTools {
                     }
                 }
                 if self.control.sharing() {
-                    // nothing waits for fn here: take() already waited for the user's hands
+                    // nothing waits for "continue" here: take() already waited for the user's hands
                     return Ok(self.not_now("busy"));
                 }
                 let notify = {
@@ -1165,7 +1165,7 @@ impl MacTools {
                 };
                 if notify {
                     self.system.notify(
-                        "Hive needs the screen. Press fn when it can have the mouse and keyboard.",
+                        "Hive needs the screen. Say “continue” when it can have the mouse and keyboard.",
                     );
                 }
                 let wait = Duration::try_from_secs_f64(timeout.max(0.0)).unwrap_or(Duration::MAX);

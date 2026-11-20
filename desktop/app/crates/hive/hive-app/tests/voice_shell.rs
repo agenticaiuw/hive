@@ -235,11 +235,12 @@ fn tapping_fn_turns_listening_on_but_never_off() {
     }); // and tells Agent.app's menu bar
     h.tap_fn();
     sleep(0.3);
-    assert_eq!(h.captions.of("listening"), ["true"]); // still listening: fn never turns it off
+    // still listening: fn never turns it off, it only brings the card back up
+    assert_eq!(h.captions.of("listening"), ["true", "true"]);
     assert!(h.captions.of("dismiss").is_empty()); // and never closes the window
     h.agent.put(Event::Toggle); // the menu turns it off
     wait_for("it to stop listening", 5.0, || {
-        h.captions.of("listening") == ["true", "false"]
+        h.captions.of("listening") == ["true", "true", "false"]
     });
     assert_eq!(
         h.printed()
@@ -261,7 +262,7 @@ fn tapping_fn_turns_listening_on_but_never_off() {
             == 2
     });
     assert!(h.ears.listening_now());
-    assert_eq!(h.captions.of("listening"), ["true", "false", "true"]);
+    assert_eq!(h.captions.of("listening"), ["true", "true", "false", "true"]);
     h.agent.heard("Open", false);
     h.say("Open Safari.");
     wait_for("codex", 5.0, || !h.backend.tasks.is_empty());

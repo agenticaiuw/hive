@@ -10,6 +10,7 @@
 //!   FAKE_CODEX_SECONDS  how long the "work" takes (default 0.3); "60,0.3" for each turn in turn
 //!                       (the last for the rest)
 //!   FAKE_CODEX_REPLY    the final message
+//!   FAKE_CODEX_CONTEXT  tokens each turn reports in thread/tokenUsage/updated (none if unset)
 //!
 //! Like Codex, it refuses a turn on a thread whose last turn hasn't ended.
 
@@ -206,6 +207,15 @@ impl Fake {
         let n: usize = turn_id.split('-').nth(1).unwrap().parse().unwrap();
         if flag.wait(Self::seconds(n)) {
             return self.end(thread_id, turn_id, "interrupted");
+        }
+        if let Some(tokens) = env("FAKE_CODEX_CONTEXT").and_then(|t| t.parse::<i64>().ok()) {
+            self.emit(
+                "thread/tokenUsage/updated",
+                merged(
+                    &ids,
+                    &json!({"tokenUsage": {"last": {"inputTokens": tokens, "outputTokens": 10}}}),
+                ),
+            );
         }
         let text =
             std::env::var("FAKE_CODEX_REPLY").unwrap_or_else(|_| "Calculator shows 408.".into());

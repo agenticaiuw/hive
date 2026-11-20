@@ -172,27 +172,22 @@ fn server_crash_reconnects_the_same_thread_without_replaying_request() {
 }
 
 #[test]
-fn new_application_and_server_process_resume_same_conversation() {
+fn a_new_application_process_starts_the_next_request_on_a_thread_of_its_own() {
     let h = Harness::new();
     let first = worker(&h, &[]);
     let second = worker(&h, &[("TEST_PROMPT", "follow-up")]);
     assert_eq!(first.final_.as_deref(), Some("Synthetic success"));
     assert_eq!(second.final_.as_deref(), Some("Synthetic success"));
-    assert_eq!(second.thread, first.thread);
-    assert_eq!(with(&h, "started").len(), 1);
-    assert_eq!(
-        with(&h, "resumed")
-            .iter()
-            .map(|e| e["resumed"].clone())
-            .collect::<Vec<_>>(),
-        [json!(first.thread)]
-    );
+    assert_ne!(second.thread, first.thread);
+    assert_eq!(with(&h, "started").len(), 2);
+    assert!(with(&h, "resumed").is_empty());
     let turns = with(&h, "prompt");
-    assert!(turns[1]["prior_prompts"][0]
-        .as_str()
-        .unwrap()
-        .contains("first request"));
+    assert!(turns[1]["prior_prompts"]
+        .as_array()
+        .is_none_or(|prior| prior.is_empty()));
     assert_eq!(turns[1]["tools"], json!(["mac", "phone", "knowledge"]));
+    let saved = std::fs::read_to_string(h.path().join("codex-thread-id")).unwrap();
+    assert_eq!(Some(saved.trim()), second.thread.as_deref()); // recovery resumes the latest
     let records = h.context.all();
     let requests: Vec<_> = records
         .iter()
@@ -203,12 +198,12 @@ fn new_application_and_server_process_resume_same_conversation() {
         requests[0].payload["input"][1]["url"],
         "data:image/png;base64,QUJD"
     );
-    assert_eq!(requests[1].thread, first.thread); // the context is filed under the resumed thread
-    assert!(records.iter().any(|r| r.kind == "thread/resume output"));
+    assert_eq!(requests[1].thread, second.thread);
+    assert!(records.iter().any(|r| r.kind == "thread/start output"));
 }
 
 #[test]
-fn workspace_mode_resumes_same_thread_without_physical_screenshot() {
+fn workspace_mode_requests_send_no_physical_screenshot() {
     let h = Harness::new();
     let first = worker(&h, &[("AGENT_WORKSPACE_ENGINE", "/synthetic/engine")]);
     let second = worker(
@@ -218,16 +213,9 @@ fn workspace_mode_resumes_same_thread_without_physical_screenshot() {
             ("TEST_PROMPT", "workspace follow-up"),
         ],
     );
-    assert_eq!(first.thread, second.thread);
+    assert_ne!(first.thread, second.thread);
     assert_eq!(second.final_.as_deref(), Some("Synthetic success"));
-    assert_eq!(with(&h, "started").len(), 1);
-    assert_eq!(
-        with(&h, "resumed")
-            .iter()
-            .map(|e| e["resumed"].clone())
-            .collect::<Vec<_>>(),
-        [json!(first.thread)]
-    );
+    assert_eq!(with(&h, "started").len(), 2);
     let requests: Vec<_> = h
         .context
         .all()
@@ -241,20 +229,13 @@ fn workspace_mode_resumes_same_thread_without_physical_screenshot() {
 }
 
 #[test]
-fn failed_resume_is_reported_and_never_starts_or_runs_a_turn() {
+fn a_new_request_never_resumes_the_saved_conversation() {
     let h = Harness::new();
     let first = worker(&h, &[]);
-    let failed = worker(&h, &[("FAKE_CODEX_RESUME_ERROR", "1")]);
-    assert!(failed.final_.is_none());
-    assert!(
-        failed.error.contains("Conversation was not replaced"),
-        "{}",
-        failed.error
-    );
-    assert!(failed.events.iter().any(|(kind, _)| kind == "failed"));
-    assert_eq!(with(&h, "started").len(), 1);
-    assert_eq!(with(&h, "prompt").len(), 1);
+    let second = worker(&h, &[("FAKE_CODEX_RESUME_ERROR", "1")]); // a resume would fail
+    assert_eq!(second.final_.as_deref(), Some("Synthetic success"));
+    assert_ne!(second.thread, first.thread);
+    assert!(with(&h, "resumed").is_empty());
     let saved = std::fs::read_to_string(h.path().join("codex-thread-id")).unwrap();
-    assert_eq!(Some(saved.trim()), first.thread.as_deref());
-    assert_eq!(worker(&h, &[]).thread, first.thread);
+    assert_eq!(Some(saved.trim()), second.thread.as_deref());
 }

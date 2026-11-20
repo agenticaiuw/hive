@@ -16,7 +16,8 @@ use hive_mac::vhid::{temp_file, VhidError};
 use hive_mac::{AgentVHID, RealMac, System};
 
 // Plain dictionary words, so TextEdit's autocorrect has nothing to change.
-const SENTENCE: &str = "Hello, World! The quick brown fox jumps over the lazy dog. 1234567890 !@#$%^&*()";
+const SENTENCE: &str =
+    "Hello, World! The quick brown fox jumps over the lazy dog. 1234567890 !@#$%^&*()";
 
 fn io(e: std::io::Error) -> VhidError {
     VhidError::Io(e.to_string())
@@ -64,7 +65,11 @@ fn run() -> Result<u8, VhidError> {
 
         // 2. Keyboard: type into a scratch file and save it
         let path = temp_file("agent-vhid-demo-", ".txt", b"").map_err(io)?;
-        let opened = Command::new("open").arg("-e").arg(&path).status().map_err(io)?;
+        let opened = Command::new("open")
+            .arg("-e")
+            .arg(&path)
+            .status()
+            .map_err(io)?;
         if !opened.success() {
             return Err(VhidError::Io(format!("open exited with {opened}")));
         }
@@ -74,7 +79,10 @@ fn run() -> Result<u8, VhidError> {
         pause(0.8);
         mac.key("cmd+w")?;
         let saved = std::fs::read_to_string(&path).map_err(io)?;
-        println!("  typed and saved: {}", if saved == SENTENCE { "OK" } else { "MISMATCH" });
+        println!(
+            "  typed and saved: {}",
+            if saved == SENTENCE { "OK" } else { "MISMATCH" }
+        );
         if saved != SENTENCE {
             println!("    expected {SENTENCE:?}\n    got      {saved:?}");
         }

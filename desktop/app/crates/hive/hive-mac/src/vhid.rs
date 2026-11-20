@@ -40,7 +40,7 @@ pub fn ocr_tool() -> PathBuf {
 pub const HUMAN_SOURCES: [&str; 4] = ["keyboard", "trackpad", "mouse", "mouse_button"];
 
 /// You took the mouse and keyboard: by touching them while the agent had control, or just as it
-/// was taking control ("engage_cancelled_by_trackpad"). Either way fn hands control back.
+/// was taking control ("engage_cancelled_by_trackpad"). Either way saying "continue" hands control back.
 pub fn took_over(reason: Option<&str>) -> bool {
     let reason = reason.unwrap_or("");
     HUMAN_SOURCES.contains(&reason) || reason.starts_with("engage_cancelled")

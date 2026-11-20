@@ -104,6 +104,10 @@ if [ -e "$staged" ] || [ -L "$staged" ] || [ -e "$backup" ] || [ -L "$backup" ];
   echo 'Update stopped: staging or backup path already exists.' >&2
   exit 1
 fi
+# The app holds no folder of its own (a download carries nobody's): it runs Hive from the clone
+# written down here (workspace-engine app.swift findRepository; hive-workspace restart.rs).
+mkdir -p "$(hive_state)"
+printf '%s\n' "$PWD" > "$(hive_state)/repository"
 ditto "$candidate" "$staged"
 codesign --verify --deep --strict "$staged"
 

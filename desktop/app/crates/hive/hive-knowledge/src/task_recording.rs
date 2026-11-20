@@ -2,7 +2,7 @@
 //! doing (python/task_recording.py).
 //!
 //! While any task runs, the whole screen is recorded (macOS screencapture, with the cursor and
-//! clicks) into ~/Movies/Hive/<date time> <request>/screen.mov. Next to it:
+//! clicks) into ~/Library/Application Support/Hive/recordings/<date time> <request>/screen.mov. Next to it:
 //!
 //!   timeline.jsonl  one line per event, each with the wall-clock time ("t") and the seconds into
 //!                   the video ("video"): Hive's own lines, its status line, who has the mouse and
@@ -31,11 +31,18 @@ static ANSI: LazyLock<Regex> =
 static NOT_WORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^\w\- ]+").expect("valid pattern"));
 
-/// Where recordings go: `HIVE_RECORDINGS`, else ~/Movies/Hive.
+/// Where recordings go: `HIVE_RECORDINGS`, else <state>/recordings.
 pub fn folder() -> PathBuf {
     match std::env::var_os("HIVE_RECORDINGS").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => hive_common::paths::home().join("Movies").join("Hive"),
+        None => {
+            let legacy = hive_common::paths::home().join("Movies/Hive");
+            if legacy.exists() {
+                legacy
+            } else {
+                hive_common::state_dir().join("recordings")
+            }
+        }
     }
 }
 

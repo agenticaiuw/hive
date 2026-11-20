@@ -12,6 +12,12 @@
 //   vm-post.mjs vpn [status|down]            UW-Madison's VPN for the VM's browser (vpn.sh): you sign in
 //   vm-post.mjs where discord [server-id]    list your servers, or one server's channels
 //   vm-post.mjs send --to <name|channel-link|x> [--file path]... [--text "..."]   (or text on stdin)
+//   vm-post.mjs run '<shell command>'        run a command on the VM (as ubuntu); its output and exit code
+//   vm-post.mjs task [--wait minutes]        hand Hive's agent on the VM the task given on stdin, through the
+//                                            cloud: it shows on every dashboard as an agent the owner can open
+//                                            and talk to; waits (20 min) and prints how it ended. Files go
+//                                            first with hive-files.mjs send <file> --to vm (~/hive-files there)
+//   vm-post.mjs state <id>                   how a task handed to the VM stands
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -57,6 +63,55 @@ export function sshRunner(config) {
     });
     child.stdin.end(input === undefined ? '' : Buffer.isBuffer(input) ? input : JSON.stringify(input));
   });
+}
+
+// The VM by the address in vm-agent.json, the one way to it (~/.ssh/config's entry is another machine).
+export const runArgs = (config, command) => [...sshArgs(config), command];
+
+// Work for Hive's agent on the VM goes through the cloud, never straight over SSH (the owner's rule: every
+// node reaches every other through the cloud). It's a request on the board, which the orchestrator on the
+// VM takes, so every dashboard lists it as one of the owner's agents, live, and the owner can talk to it
+// there; a task run over SSH showed nowhere (2026-11-17: "why can't i see the virtual machine agent").
+// The words say an agent sent it, not the owner; a "For <project> › <folder>: " start stays first.
+export const BOARD_CONFIG = join(homedir(), '.config', 'hive', 'tasks.json');
+export const FROM_THE_MAC = '[Hive on the Mac, not the owner] ';
+export function boardClient({ url, token }, fetcher = fetch) {
+  return async (path, body) => {
+    const headers = { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) };
+    const response = await fetcher(`${url.replace(/\/$/, '')}${path}`, body ? { method: 'POST', headers, body: JSON.stringify(body) } : { headers });
+    const answer = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(answer.error ?? `the board answered ${response.status}`);
+    return answer;
+  };
+}
+export const handedWords = words => {
+  const scope = /^For [^\n:]{1,250}: /.exec(words);
+  return scope ? `${scope[0]}${FROM_THE_MAC}${words.slice(scope[0].length)}` : `${FROM_THE_MAC}${words}`;
+};
+export async function handOff(board, words, { wait = 20 * 60_000, every = 5000, say = console.log, sleep = ms => new Promise(done => setTimeout(done, ms)), clock = Date.now } = {}) {
+  const text = words.trim();
+  if (!text) throw new Error('say what the VM agent should do, on stdin');
+  const { id } = await board('/v1/requests', { text: handedWords(text), from: 'mac' });
+  say(`Hive's agent on the VM has it (request ${id}); every dashboard shows it as Hive in the cloud.`);
+  return follow(board, id, { wait, every, say, sleep, clock });
+}
+export async function follow(board, id, { wait = 0, every = 5000, say = console.log, sleep = ms => new Promise(done => setTimeout(done, ms)), clock = Date.now } = {}) {
+  const until = clock() + wait;
+  let last = '';
+  for (;;) {
+    const { request } = await board(`/v1/requests/state?id=${id}`);
+    if (request.status === 'done' || request.status === 'failed') {
+      say(`${request.status === 'done' ? 'Done' : "Didn't finish"}: ${request.outcome ?? ''}`.trim());
+      return request;
+    }
+    if (request.status !== last) say(`… ${request.status}`);
+    last = request.status;
+    if (clock() >= until) {
+      say(`Still ${last}. See how it stands with: node ~/hive/desktop/vm-post.mjs state ${id}`);
+      return request;
+    }
+    await sleep(every);
+  }
 }
 
 // Native confirmation: the exact words and destination, Cancel as the default button.
@@ -185,6 +240,23 @@ async function main(argv) {
     process.exitCode = status ?? 1;
     return;
   }
+  if (command === 'run') {
+    if (!rest.length) throw new Error("usage: vm-post.mjs run '<shell command>'");
+    const { status } = spawnSync('ssh', runArgs(config, rest.join(' ')), { stdio: 'inherit' });
+    process.exitCode = status ?? 255;
+    return;
+  }
+  if (command === 'task' || command === 'state') {
+    const board = boardClient(JSON.parse(readFileSync(BOARD_CONFIG, 'utf8')));
+    const at = rest.indexOf('--wait');
+    const wait = (at < 0 ? 20 : Number(rest[at + 1])) * 60_000;
+    if (!(wait >= 0)) throw new Error('--wait is a number of minutes');
+    const id = Number(rest[0]);
+    if (command === 'state' && !(Number.isInteger(id) && id > 0)) throw new Error('usage: vm-post.mjs state <id>');
+    const request = command === 'task' ? await handOff(board, readFileSync(0, 'utf8'), { wait }) : await follow(board, id);
+    process.exitCode = { done: 0, failed: 1 }[request.status] ?? 3;
+    return;
+  }
   if (command === 'screenshot') {
     const shot = await run('screenshot');
     const file = resolve(rest[0] ?? join(homedir(), '.hivemind', 'vm-agent', 'screenshot.jpg'));
@@ -207,7 +279,7 @@ async function main(argv) {
     process.exitCode = { sent: 0, cancelled: 1, needs_login: 3, unknown: 4 }[result.status] ?? 5;
     return;
   }
-  throw new Error('usage: vm-post.mjs <status|check|login|view|watch|where|send|list|cancel|screenshot|vpn> ...');
+  throw new Error('usage: vm-post.mjs <status|check|login|view|watch|where|send|list|cancel|screenshot|vpn|run|task|state> ...');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

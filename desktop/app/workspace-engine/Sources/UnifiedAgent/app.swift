@@ -6,9 +6,10 @@
 // log (~/Library/Logs/Agent.log), Restart and Quit; Restart and Quit are written in the log and the
 // session journal, so a quit isn't taken for a crash.
 //
-// It runs `build/hive-agent --app` (Rust, crates/hive) from the folder it was built in
-// (AgentRepository in its Info.plist), and starts it again if it stops. The voice models run in a
-// Python sidecar it starts itself (python/sidecar_voice.py). To macOS the voice agent is part of this app, so
+// It runs `build/hive-agent --app` (Rust, crates/hive) from the folder ./install.sh wrote down
+// (findRepository: nothing about this Mac is built into the app), and starts it again if it stops.
+// The voice models run in a Python sidecar it starts itself (python/sidecar_voice.py). To macOS
+// the voice agent is part of this app, so
 // the Microphone, Screen & System Audio Recording and Accessibility permissions are asked for, and
 // given, as "Agent".
 //
@@ -45,14 +46,54 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
     var contextURL: URL?  // the browser view of every payload, the panel's fallback
     var panelURL: URL?  // this session's panel.json
     lazy var panel = ContextPanel()
+    /// Puts the Mac's sound into Shift-Command-5 screen recordings (recording_sound.swift).
+    lazy var recordingSound = RecordingSound(log: { [weak self] text in DispatchQueue.main.async { self?.write(text) } })
     var stateDir: URL {
         if let panelURL { return panelURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
+        if let custom = ProcessInfo.processInfo.environment["AGENT_STATE_DIR"], !custom.isEmpty { return URL(fileURLWithPath: custom) }
         // ~/Library/Application Support/Hive, or its old name on a Mac that has only that.
         let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         let hive = support.appendingPathComponent("Hive"), old = support.appendingPathComponent("Personal Agent")
         return !FileManager.default.fileExists(atPath: hive.path) && FileManager.default.fileExists(atPath: old.path) ? old : hive
     }
-    let repository = Bundle.main.object(forInfoDictionaryKey: "AgentRepository") as? String ?? ""
+    /// The folder Hive runs from (desktop/app in a clone: its build/ and python/). None is built into
+    /// the app, so a download carries nobody's folder: HIVE_REPO when set, else the one ./install.sh
+    /// wrote down (`repository` in Hive's data folder), else the clone this app was built
+    /// in when it runs from there (build/Agent.app); "" when there's none.
+    let repository = AgentApp.findRepository()
+
+    static func findRepository(environment: [String: String] = ProcessInfo.processInfo.environment,
+                               home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                               bundle: URL = Bundle.main.bundleURL) -> String {
+        func clone(_ path: String) -> String? {
+            let folder = (path.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
+            var isFolder: ObjCBool = false
+            let looks = FileManager.default.fileExists(atPath: folder + "/crates/hive", isDirectory: &isFolder) && isFolder.boolValue
+            return !folder.isEmpty && looks ? folder : nil
+        }
+        if let set = environment["HIVE_REPO"], let found = clone(set) { return found }
+        // In Hive's data folder, or its old name on a Mac that has only that (stateDir).
+        for folder in ["Hive", "Personal Agent"] {
+            let note = home.appendingPathComponent("Library/Application Support/\(folder)/repository")
+            if let text = try? String(contentsOf: note, encoding: .utf8), let found = clone(text) { return found }
+        }
+        // A downloaded Hive.app carries a teammate's whole setup (tools/carry.mjs) and fills the
+        // Hive folder in its data folder from it (tools/first-open.sh, run by prepare()).
+        if FileManager.default.fileExists(atPath: bundle.appendingPathComponent(carriedSetup).path) {
+            return home.appendingPathComponent("Library/Application Support/Hive/install/desktop/app").path
+        }
+        return clone(bundle.deletingLastPathComponent().deletingLastPathComponent().path) ?? ""
+    }
+    static let carriedSetup = "Contents/Resources/hive/first-open.sh"
+    /// The Hive folder a downloaded app set up (repository's desktop/app is two below it), else nil.
+    var installRoot: String? {
+        guard repository.hasSuffix("/install/desktop/app"),
+              FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent(AgentApp.carriedSetup).path)
+        else { return nil }
+        return ((repository as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+    }
+    var prepared = false  // first-open.sh said "ready" since the app opened
+    var preparing: Process?
     var agent: Process?
     var input: FileHandle?
     var output = Data()  // what the agent printed, up to the end of the last whole line
@@ -110,6 +151,7 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
         openLog()
         SafariListen.shared.observe(stateDir: stateDir)  // Hive's Safari popup asks Hive to listen
+        recordingSound.start()
 #if canImport(WorkspaceViewer)
         let workspaceSetting = ProcessInfo.processInfo.environment["AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE"]
         let workspaceDefault = (Bundle.main.object(forInfoDictionaryKey: "AgentWorkspaceDefault") as? String) != "0"
@@ -163,9 +205,71 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
 
     // MARK: the voice agent
 
+    /// A downloaded app sets up its Hive folder first (tools/first-open.sh): each "step: …" it prints
+    /// shows in the menu, and the agent starts once it says "ready". Most opens it only checks.
+    func prepare(_ root: String) {
+        guard preparing == nil else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [Bundle.main.bundleURL.appendingPathComponent(AgentApp.carriedSetup).path, root]
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stdout
+        var pending = Data(), ready = false, failure: String?
+        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.write(String(decoding: data, as: UTF8.self))
+                pending.append(data)
+                while let end = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                    let line = String(decoding: pending[pending.startIndex..<end], as: UTF8.self)
+                    pending.removeSubrange(pending.startIndex...end)
+                    if line.hasPrefix("step: ") { self.statusLine.title = String(line.dropFirst(6)) + "…" }
+                    else if line.hasPrefix("error: ") { failure = String(line.dropFirst(7)) }
+                    else if line == "ready" { ready = true }
+                }
+            }
+        }
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                stdout.fileHandleForReading.readabilityHandler = nil
+                self.preparing = nil
+                if ready && process.terminationStatus == 0 {
+                    self.prepared = true
+                    self.start()
+                    return
+                }
+                // Most often the network: it keeps trying, and the menu says why meanwhile.
+                self.statusLine.title = "Setting up stopped: \(failure ?? "exit \(process.terminationStatus)"); trying again in a minute"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                    if let self, !self.quitting { self.prepare(root) }
+                }
+            }
+        }
+        write("--- setting up \(root) \(Date())\n")
+        statusLine.title = "Setting up Hive…"
+        do {
+            try process.run()
+            preparing = process
+        } catch {
+            statusLine.title = "Couldn't set up Hive: \(error.localizedDescription)"
+        }
+    }
+
     func start() {
+        if let root = installRoot, !prepared {
+            prepare(root)
+            return
+        }
         starts = starts.filter { $0.timeIntervalSinceNow > -120 } + [Date()]
         let agentPath = repository + "/build/hive-agent"
+        guard !repository.isEmpty else {
+            statusLine.title = "Not set up: run ./install.sh in Hive's desktop/app folder"
+            return
+        }
         guard FileManager.default.isExecutableFile(atPath: agentPath) else {
             statusLine.title = "Not set up: run ./voice.sh once in \(repository)"
             return
@@ -177,6 +281,11 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         var environment = ProcessInfo.processInfo.environment
         // Opened at login, it gets launchd's short PATH; codex and Homebrew's tools live further out.
         environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+        environment["HIVE_REPO"] = repository  // the agent and its tools find build/, python/ and .venv here
+        if let root = installRoot {
+            // A downloaded app's Codex (first-open.sh links it in bin/) and Hive's own tools come first.
+            environment["PATH"] = "\(root)/bin:\(repository)/build:" + environment["PATH"]!
+        }
 #if canImport(WorkspaceViewer)
         if monitorViewer != nil {
             environment["AGENT_WORKSPACE_ENGINE"] = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/workspace-engine").path

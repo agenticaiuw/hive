@@ -1,4 +1,4 @@
-//! The task recordings: `~/Movies/Hive/<folder>/timeline.jsonl` (`t` local time, `video` seconds
+//! The task recordings: `~/Library/Application Support/Hive/recordings/<folder>/timeline.jsonl` (`t` local time, `video` seconds
 //! into screen.mov, `kind` hive / control / status / mac / recording). The same reading the
 //! 2026-11-13 review of the recordings did: takeovers, waits for the screen, failed
 //! calls, repeats, endings, and the agent clicking the x on Hive's own floating window.

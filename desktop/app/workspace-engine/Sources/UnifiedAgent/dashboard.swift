@@ -11,6 +11,9 @@
 //   GET  /api/folder         ?project&key: a folder and all its memories, from the cloud board
 //   POST /api/folders        {project, name, about?}: makes a folder (on the cloud board)
 //   POST /api/folders/memory {project, folder, kind, title, body}: a memory for the folder
+//   GET  /api/phone          the owner's iPhone on the cloud board: Hive Phone connected, a passcode saved
+//   POST /api/phone/pair     the pairing Hive Phone reads from the clipboard (Universal Clipboard from here)
+//   POST /api/phone/passcode {passcode, consent} | {remove} | {retry, consent}: sealed on the cloud board
 //   POST /api/dictation      {action: start|stop|cancel}: this window records you; on stop, Hive's
 //                            voice process reads it with the model that hears you ({text})
 //
@@ -298,6 +301,11 @@ enum DashboardAPI {
         case ("POST", "/api/tasks/act"): return board("post", "/v1/tasks/act", body, thenDeliver: true)
         // Turning a standing rule off: the cloud board first, then this Mac's ledger hears it at once.
         case ("POST", "/api/rules/off"): return board("post", "/v1/rules/off", body, thenSync: true)
+        // The owner's iPhone on the board (cloud/tasks/phone.js): whether Hive Phone is connected,
+        // the pairing it reads from the clipboard, and the passcode it unlocks with.
+        case ("GET", "/api/phone"): return board("get", "/v1/phone/health", Data())
+        case ("POST", "/api/phone/pair"): return board("post", "/v1/phone/pair", body)
+        case ("POST", "/api/phone/passcode"): return board("post", "/v1/phone/agent/unlock", body)
         default: return (404, json(["error": "The desktop app doesn't answer \(path) yet."]))
         }
     }
@@ -520,7 +528,6 @@ enum Dictation {
             if let old = finish() { try? FileManager.default.removeItem(at: old) }
             do {
                 let new = try AVAudioRecorder(url: path, settings: settings)
-                new.isMeteringEnabled = true  // SafariListen hears when you've stopped talking
                 guard new.record(forDuration: 600) else { return "The microphone wouldn't start recording." }
                 recorder = new
                 file = path
@@ -547,16 +554,6 @@ enum Dictation {
         }
         if let error = reply["error"] as? String { return (502, DashboardAPI.json(["error": error])) }
         return (200, DashboardAPI.json(["text": reply["text"] as? String ?? ""]))
-    }
-
-    /// How loud the microphone is right now (dBFS, -160 silent to 0), while recording.
-    static func level() -> Float? {
-        let read = { () -> Float? in
-            guard let recorder else { return nil }
-            recorder.updateMeters()
-            return recorder.averagePower(forChannel: 0)
-        }
-        return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
     }
 
     /// Stops recording; the file it made, if it was recording.
@@ -588,22 +585,20 @@ enum Dictation {
 /// Listening for Hive's Safari popup. Safari gives an extension's popup no way to ask for the
 /// microphone (its speech recognition answers not-allowed before anyone is asked), so the popup asks
 /// Hive, which has it: the extension's handler (SafariWebExtensionHandler hive:listen) posts
-/// `local.hive.safari.listen` with "start:<id>", "stop:<id>" or "cancel:<id>". Hive records with the
-/// composer's Dictation, stops about a second and a half after you stop talking (or when the popup
-/// says stop, or after 8 s if it never heard talking start), reads it with the voice model, and
-/// leaves each step in ~/.config/hive/safari-heard.json
-/// ({id, state: listening, reading, done or error, text, error}), which the extension may read
-/// (hive:heard). Nothing is recorded for longer than a minute.
+/// `local.hive.safari.listen` with "start:<id>", "stop:<id>" or "cancel:<id>". Hive listens the way
+/// the floating window does: Hive's voice process (python/sidecar_voice.py, `{"listen": true}` on
+/// `<state>/dictation.sock`) hears you with the same models, pause and voiceprint, and sends the
+/// words as you say them and then all of it, none of which reaches the agent. Each step is left in
+/// ~/.config/hive/safari-heard.json ({id, state: listening (with the words so far), done or error,
+/// text, error}), which the extension may read (hive:heard). It stops when you stop talking, when
+/// the popup says stop, after 8 s if you never started, and after a minute at most.
 final class SafariListen: NSObject {
     static let shared = SafariListen()
     static let name = Notification.Name("local.hive.safari.listen")
-    /// Decibels above the room's own noise: louder than `talking` is talking, under `quiet` is not.
-    static let talking: Float = 12
-    static let quiet: Float = 6
 
     private let queue = DispatchQueue(label: "hive.safari-listen")
     private var stateDir: URL?
-    private var current: String?  // the id being recorded; touched on `queue` only
+    private var current: (id: String, fd: Int32)?  // the listen going on; touched on `queue` only
 
     func observe(stateDir: URL) {
         self.stateDir = stateDir
@@ -622,86 +617,93 @@ final class SafariListen: NSObject {
     private func handle(_ action: String, _ id: String) {
         switch action {
         case "start":
-            if current != nil { _ = Dictation.answer(Data(#"{"action":"cancel"}"#.utf8), stateDir: stateDir ?? URL(fileURLWithPath: "/")) }
-            current = id
-            write(["id": id, "state": "listening"])
-            let (status, data) = Dictation.start()
-            guard status == 200 else {
+            if let old = current {
                 current = nil
-                write(["id": id, "state": "error", "error": Self.error(data) ?? "Hive couldn't start listening."])
+                shutdown(old.fd, SHUT_RDWR)  // its reader closes it
+            }
+            write(["id": id, "state": "listening"])
+            guard let stateDir,
+                  let fd = Self.open(socket: stateDir.appendingPathComponent("dictation.sock").path),
+                  Self.send(fd, ["listen": true]) else {
+                write(["id": id, "state": "error", "error": "Hive's voice isn't running, so it can't listen. Reopen Hive, or type instead."])
                 return
             }
-            tick(id, started: Date(), floor: nil, peak: -160, loud: 0, spoke: nil, quietSince: nil)
+            current = (id, fd)
+            Thread.detachNewThread { self.follow(id, fd) }
         case "stop":
-            if current == id { finish(id) }
+            if let now = current, now.id == id { _ = Self.send(now.fd, ["stop": true]) }
         case "cancel":
-            guard current == id else { return }
+            guard let now = current, now.id == id else { return }
             current = nil
-            _ = Dictation.answer(Data(#"{"action":"cancel"}"#.utf8), stateDir: stateDir ?? URL(fileURLWithPath: "/"))
+            shutdown(now.fd, SHUT_RDWR)  // hanging up cancels; nothing heard goes anywhere
             write(["id": id, "state": "done", "text": ""])
         default:
             return
         }
     }
 
-    /// Every tenth of a second while it records: has the owner started talking, and stopped? Loud
-    /// is measured against the room: `floor` is the quietest it has been (rising half a decibel a
-    /// second, so a fan that starts is learned). A fixed level failed in the owner's room, whose
-    /// own noise sat between "talking" and "quiet", so it listened the whole minute (2026-11-17).
-    /// `loud` counts the loud tenths: a click (the tap on the popup, a key) is one or two, so
-    /// talking starts at four.
-    private func tick(_ id: String, started: Date, floor: Float?, peak: Float, loud: Int, spoke: Date?, quietSince: Date?) {
-        guard current == id else { return }
-        let now = Date()
-        let level = Dictation.level() ?? -160
-        var floor = floor
-        var peak = peak
-        var loud = loud
-        var spoke = spoke
-        var quietSince = quietSince
-        if level > -120 {  // the meter reads -160 until the first audio arrives
-            floor = min(level, (floor ?? level) + 0.05)
-            peak = max(peak, level)
-            if level > max(floor! + Self.talking, -55) {
-                loud += 1
-                if loud >= 4 { spoke = spoke ?? now }
-                quietSince = nil
-            } else if level < floor! + Self.quiet, spoke != nil {
-                quietSince = quietSince ?? now
+    /// Reads the voice process's lines for listen `id` until its last one or until it hangs up.
+    private func follow(_ id: String, _ fd: Int32) {
+        // Closed on `queue`, after `current` lets go of it, so a stop never writes to a reused fd.
+        defer { queue.async { close(fd) } }
+        var pending = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &buffer, buffer.count)
+            if n <= 0 { break }
+            pending.append(buffer, count: n)
+            while let end = pending.firstIndex(of: 0x0A) {
+                let line = pending[pending.startIndex..<end]
+                pending.removeSubrange(pending.startIndex...end)
+                guard let said = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
+                if let error = said["error"] as? String {
+                    return finish(id, ["state": "error", "error": error])
+                }
+                if said["done"] as? Bool == true {
+                    return finish(id, ["state": "done", "text": said["text"] as? String ?? ""])
+                }
+                if let draft = said["draft"] as? String {
+                    queue.async {
+                        guard self.current?.id == id else { return }
+                        self.write(["id": id, "state": "listening", "text": draft])
+                    }
+                }
             }
         }
-        let elapsed = now.timeIntervalSince(started)
-        let heard = ["floor": Int(floor ?? -160), "peak": Int(peak), "loud": loud]
-        if let quietSince, now.timeIntervalSince(quietSince) > 1.5 { return finish(id, heard) }
-        // Never heard it start (it may have begun at once, before the room was learned): read what
-        // there is rather than throw it away.
-        if spoke == nil, elapsed > 8 { return finish(id, heard) }
-        if elapsed > 60 { return finish(id, heard) }
-        queue.asyncAfter(deadline: .now() + 0.1) {
-            self.tick(id, started: started, floor: floor, peak: peak, loud: loud, spoke: spoke, quietSince: quietSince)
+        finish(id, ["state": "error", "error": "Hive's voice stopped before it heard you. Try again, or type instead."])
+    }
+
+    private func finish(_ id: String, _ values: [String: Any]) {
+        queue.async {
+            guard self.current?.id == id else { return }  // cancelled, or another listen began
+            self.current = nil
+            self.write(values.merging(["id": id]) { a, _ in a })
         }
     }
 
-    /// `levels`: the room's noise and the loudest it got (dBFS), kept with the result for tuning.
-    private func finish(_ id: String, _ levels: [String: Int] = [:]) {
-        current = nil
-        guard let stateDir else { return }
-        write(["id": id, "state": "reading"])
-        let (status, data) = Dictation.stop(stateDir)
-        let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        var out: [String: Any] = ["id": id, "levels": levels]
-        if status == 200 {
-            out["state"] = "done"
-            out["text"] = reply["text"] as? String ?? ""
-        } else {
-            out["state"] = "error"
-            out["error"] = reply["error"] as? String ?? "Hive couldn't read what you said."
+    private static func open(socket path: String) -> Int32? {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { close(fd); return nil }
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
         }
-        write(out)
+        guard connected == 0 else { close(fd); return nil }
+        var never = Int32(1)  // a hung-up voice process mustn't kill Hive with SIGPIPE
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &never, socklen_t(MemoryLayout<Int32>.size))
+        return fd
     }
 
-    private static func error(_ data: Data) -> String? {
-        ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String
+    private static func send(_ fd: Int32, _ message: [String: Any]) -> Bool {
+        var line = DashboardAPI.json(message)
+        line.append(0x0A)
+        return line.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, line.count) } == line.count
     }
 
     /// Only you can read it: it holds what you said.

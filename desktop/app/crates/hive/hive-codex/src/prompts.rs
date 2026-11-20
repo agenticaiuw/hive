@@ -95,11 +95,18 @@ pub const RULES: &str = "You are the user's agent on their own Mac and iPhone: d
 
 /// With every request: the long-running conversation keeps the tool list it started with, which has
 /// no `step`, and the model sends it anyway when told to.
+/// Added to a mouse, keyboard or tap call's result when it came without a `step`.
+pub const STEP_MISSING: &str = "(That call had no `step`. Give every mouse, keyboard and tap call, and each batch, a `step`: one short sentence the user sees on the card as you act.)";
+
 pub const STEP_HINT: &str = "Steps: give every mouse, keyboard and tap call (and each batch) a `step`, even where the tool doesn't list it; a step that can't be undone starts \"One-way:\" and quotes the user's words.\n";
 
 pub const REQUEST: &str = "{focus} The user's request, for you to carry out on the device yourself (a question about how to do something means: do it for them):\n\n    \"{task}\"\n{previous}";
 
 pub const SIGN_IN_RULES: &str = "\nSigning in: this is the user's own Mac and iPhone, and they have authorized you to sign in to any site or app their task needs. A login page, a saved-password prompt or a Duo/2FA approval is never a blocker and never a reason to stop or to ask them. Sign in yourself: click the username or password field so Safari offers the saved login and choose it. When macOS asks for the Mac password to allow AutoFill, Passwords or a passkey (\"Enter Password…\"), click its password field, then call mac.authenticate, or, if that tool is not in your list, mac.batch with steps [{\"tool\": \"authenticate\"}]: it types the saved Mac password into the focused field and presses Return. You never see the password and never need to search for an authentication tool; those two calls are it. For Duo or any sign-in approval sent to the phone, look at the iPhone with phone.screenshot, open the Duo notification or app and tap Approve (Duo Push is preferred over codes); if the iPhone asks for its passcode, call phone.authenticate, or phone.batch with steps [{\"tool\": \"authenticate\"}]. If a sign-in step fails, look at the screen and try another practical way (another saved login, the Passwords app, \"Send Me a Push\" again) before giving up. Signing in is not sending messages or paying; the user's limits on those still apply.";
+
+/// The user's cloud VM and its own Hive agent: the one way there (the agent once guessed ~/.ssh/config's
+/// one host, another machine, and timed out), and through the cloud, so the user sees that agent too.
+pub const VM_RULES: &str = "\nThe user's cloud VM has its own Hive agent, with a browser signed in to their accounts, for work that doesn't need this Mac's screen (posting from their accounts, long web work). Hand it a task through the cloud: `node ~/hive/desktop/vm-post.mjs task` with the task on stdin, the user's own words for anything it sends as them; it prints how it ended, and the user sees that agent on their dashboard. Send the files it needs first: `node ~/hive/desktop/hive-files.mjs send <file> --to vm`. For a quick look at the VM: `node ~/hive/desktop/vm-post.mjs run '<command>'`. Reach the VM only these ways; ~/.ssh/config's host is a different machine.";
 
 pub const FOCUS_MAC: &str = "Use the device the request is about. When it doesn't say, use the Mac, unless the request needs something only the phone has (one of its apps, or what's on it).";
 
@@ -113,7 +120,7 @@ pub const WORKSPACE_RULES: &str = "\nFor Mac tasks, use the workspace MCP tools 
 
 pub const VIRTUAL_MONITOR_RULES: &str = "\nYour Mac tools work on the virtual monitor: a second screen beside the user's own. Screenshots show it, and mac.click, mac.type_text and mac.press_key use the real mouse and keyboard there, so every control behaves as it does for a person. mac.open_app puts the app's window on it. Do all Mac work there with these tools.";
 
-pub const OWN_SCREEN_RULES: &str = "\nYour Mac tools work on the user's own screen with their real mouse and keyboard, and they can watch you. You hold the mouse and keyboard only while you use them, and the user can take them back by touching the trackpad or keyboard. Then keep working on whatever doesn't need the screen (the shell, files, APIs), and call mac.wait_for_control only when the screen is the one way forward; they press fn to hand it back.";
+pub const OWN_SCREEN_RULES: &str = "\nYour Mac tools work on the user's own screen with their real mouse and keyboard, and they can watch you. You hold the mouse and keyboard only while you use them, and the user can take them back by touching the trackpad or keyboard. Then keep working on whatever doesn't need the screen (the shell, files, APIs), and call mac.wait_for_control only when the screen is the one way forward; they say \"continue\" to hand it back.";
 
 pub const MEMORY_UNAVAILABLE: &str =
     "\nAutomatic personal memory unavailable; continue without it and report the limitation.\n";
@@ -172,5 +179,21 @@ mod tests {
         assert!(STEP_HINT.ends_with("quotes the user's words.\n"));
         assert!(REASSESS_BLOCKED
             .contains("that is the right place to stop: don't find another way to do it."));
+    }
+
+    // 2026-11-17: the agent ssh'ed to ~/.ssh/config's one host (another machine) for the VM and timed
+    // out; it reaches the VM through vm-post.mjs, and hands it work through the cloud.
+    #[test]
+    fn the_vm_has_one_way_in() {
+        assert!(VM_RULES.contains("vm-post.mjs task"));
+        assert!(VM_RULES.contains("hive-files.mjs send <file> --to vm"));
+        assert!(VM_RULES.contains("~/.ssh/config's host is a different machine"));
+    }
+
+    // The owner (2026-11-17): fn only brings up the floating window to record, nothing else.
+    #[test]
+    fn fn_never_hands_the_screen_back() {
+        assert!(!OWN_SCREEN_RULES.contains("fn"));
+        assert!(OWN_SCREEN_RULES.contains("say \"continue\""));
     }
 }

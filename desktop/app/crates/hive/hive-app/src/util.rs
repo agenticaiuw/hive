@@ -39,7 +39,7 @@ pub const FILLERS: [&str; 11] = [
 pub const FOLLOW_UP: f64 = 8.0;
 /// The captions while you have the mouse and keyboard during a task.
 pub const TOOK_OVER: &str =
-    "You have the mouse and keyboard. The agent keeps working without the screen; press fn to hand them back.";
+    "You have the mouse and keyboard. The agent keeps working without the screen; say “continue” to hand them back.";
 pub const CANT_HEAR_THE_MAC: &str = "   It can't hear what the Mac is playing ({}), so it stops listening while it \
      talks, and a video playing out loud could be taken for you. Allow {} under System Settings › Privacy & \
      Security › Screen & System Audio Recording, then restart it.";

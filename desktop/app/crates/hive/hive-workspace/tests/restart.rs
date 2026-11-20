@@ -33,9 +33,13 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(app.join("Contents")).unwrap();
     write_plist(
         &app.join("Contents/Info.plist"),
-        &json!({"CFBundleIdentifier": IDENTIFIER, "AgentRepository": repo.display().to_string()}),
+        &json!({"CFBundleIdentifier": IDENTIFIER}),
     )
     .unwrap();
+    // What install.sh writes down: the folder the app runs Hive from (it's not in the app).
+    let support = root.join("Library/Application Support/Hive");
+    std::fs::create_dir_all(&support).unwrap();
+    std::fs::write(support.join("repository"), format!("{}\n", repo.display())).unwrap();
     std::fs::write(app.join("old"), "old app").unwrap();
     std::fs::create_dir_all(stage.join("Agent.app")).unwrap();
     std::fs::write(stage.join("Agent.app/new"), "new app").unwrap();
@@ -315,4 +319,20 @@ fn preflight_requires_the_python_environment_and_a_real_bundle() {
         .unwrap_err()
         .contains("Python environment"));
     assert!(preflight(&f.repo, &f.root.join("missing.app")).is_err());
+}
+
+#[test]
+fn the_installed_app_belongs_to_the_clone_install_sh_wrote_down() {
+    let f = fixture();
+    assert_eq!(hive_workspace::restart::recorded_repository(&f.app).as_deref(), Some(f.repo.as_path()));
+    let info = std::fs::read_to_string(f.app.join("Contents/Info.plist")).unwrap();
+    assert!(!info.contains(&f.repo.display().to_string()), "the app holds no folder of its own");
+    std::fs::write(f.root.join("Library/Application Support/Hive/repository"), "/elsewhere/hive\n").unwrap();
+    assert!(preflight(&f.repo, &f.app).unwrap_err().contains("does not match"));
+    // A Mac whose data folder still has its old name keeps the note there (install.sh hive_state).
+    std::fs::remove_dir_all(f.root.join("Library/Application Support/Hive")).unwrap();
+    let old = f.root.join("Library/Application Support/Personal Agent");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("repository"), format!("{}\n", f.repo.display())).unwrap();
+    assert_eq!(hive_workspace::restart::recorded_repository(&f.app).as_deref(), Some(f.repo.as_path()));
 }

@@ -8,10 +8,18 @@ use crate::session_journal;
 use crate::util::{self, Local};
 use regex::Regex;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 static LOCK: Mutex<()> = Mutex::new(());
+
+/// How many records the index lists, newest first.
+pub const INDEXED: usize = 500;
+
+/// Each folder's newest records as the index lists them (page, label), read from disk once.
+static NEWEST: LazyLock<Mutex<HashMap<PathBuf, Vec<(String, String)>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static IMAGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\A(?:data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+)\z")
@@ -135,6 +143,31 @@ impl ContextLog {
         ContextLog { directory, index }
     }
 
+    /// The newest records already in the folder (not `except`, the one being written), newest
+    /// first: their small labels, never their payloads.
+    fn newest_on_disk(&self, except: &str) -> Vec<(String, String)> {
+        let mut pages: Vec<String> = util::listing(&self.directory)
+            .iter()
+            .map(|p| util::file_name(p))
+            .filter(|n| {
+                n.starts_with(|c: char| c.is_ascii_digit())
+                    && n.ends_with(".html")
+                    && !n.starts_with(except)
+            })
+            .collect();
+        pages.sort_unstable_by(|a, b| b.cmp(a));
+        pages.truncate(INDEXED);
+        pages
+            .into_iter()
+            .map(|page| {
+                let stem = page.trim_end_matches(".html").to_owned();
+                let title = std::fs::read_to_string(self.directory.join(format!("{stem}.title")))
+                    .unwrap_or(stem);
+                (page, title)
+            })
+            .collect()
+    }
+
     /// Saves one payload (`<time ns>-<uuid>.json`, `.html` and `.title`), tagged with this
     /// process's session, and rewrites the index. Returns the index's path.
     pub fn record(
@@ -171,35 +204,23 @@ impl ContextLog {
                 title.push_str(&format!(" · {thread}"));
             }
             write(format!("{name}.title"), &title)?;
-            // Read small labels, not historical screenshot payloads, for the index.
+            // The newest records, kept in memory: reading every label for each record took 0.6 s
+            // once the folder held 28k of them, and Codex's messages queued behind it.
+            let mut newest = NEWEST.lock().unwrap_or_else(|e| e.into_inner());
+            let shown = newest
+                .entry(self.directory.clone())
+                .or_insert_with(|| self.newest_on_disk(&name));
+            shown.insert(0, (format!("{name}.html"), title));
+            shown.truncate(INDEXED);
             let mut links = String::new();
-            let mut pages: Vec<PathBuf> = util::listing(&self.directory)
-                .into_iter()
-                .filter(|p| {
-                    let n = util::file_name(p);
-                    n.starts_with(|c: char| c.is_ascii_digit()) && n.ends_with(".html")
-                })
-                .collect();
-            pages.reverse();
-            for entry in pages {
-                let label = entry.with_extension("title");
-                let title = match label.exists() {
-                    true => {
-                        std::fs::read_to_string(&label).map_err(|e| util::os_error(&e, &label))?
-                    }
-                    false => entry
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                };
+            for (page, title) in shown.iter() {
                 links.push_str(&format!(
-                    "<li><a href=\"{}\">{}</a></li>",
-                    util::file_name(&entry),
-                    util::escape(&title)
+                    "<li><a href=\"{page}\">{}</a></li>",
+                    util::escape(title)
                 ));
             }
             let body = format!(
-                "<p><a href=\"../sessions/index.html\">Sessions: everything you said and the agent did, one run of the app at a time</a></p><p>Exact app-visible instructions, requests, screenshots, tool inputs/outputs and server events, newest first. This is an event history, not hidden reasoning or a reconstruction of the model’s current context after compaction. The index refreshes every 5 seconds.</p><ol>{links}</ol>"
+                "<p><a href=\"../sessions/index.html\">Sessions: everything you said and the agent did, one run of the app at a time</a></p><p>Exact app-visible instructions, requests, screenshots, tool inputs/outputs and server events, newest first (the newest {INDEXED}; every record is in this folder). This is an event history, not hidden reasoning or a reconstruction of the model’s current context after compaction. The index refreshes every 5 seconds.</p><ol>{links}</ol>"
             );
             util::atomic_write(&self.index, &page("Agent context", &body, true))
                 .map_err(|e| e.to_string())?;

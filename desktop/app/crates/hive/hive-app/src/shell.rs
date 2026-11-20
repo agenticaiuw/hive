@@ -1296,26 +1296,30 @@ impl VoiceAgent {
             self.live_event(
                 "mac",
                 "paused",
-                "The user took the mouse and keyboard. Steps that need the screen wait until fn or \
-                 “continue” hands them back; the rest goes on.",
+                "The user took the mouse and keyboard. Steps that need the screen wait until they say \
+                 “continue”; the rest goes on.",
             );
             self.out(
-                "⏸  you have the mouse and keyboard; the agent keeps working without the screen. Press fn or say \
+                "⏸  you have the mouse and keyboard; the agent keeps working without the screen. Say or type \
                  “continue” to hand them back (or say something new).",
             );
         }
     }
 
-    /// The floating window's buttons: the x stops the agent; the mic mutes what it hears; the –
-    /// hides the window (Show Floating Window off) while the task and the voice carry on.
+    /// The floating window's buttons: the x stops the agent and the microphone; the mic mutes what
+    /// it hears; the – puts the window away (Show Floating Window off) and turns the microphone off
+    /// while the task carries on. fn brings the window and the microphone back after either.
     pub fn on_overlay(&self, kind: &str, value: Option<bool>) {
         if kind == "close" {
+            // The x closes the agent: the task stops and listening ends, so the next fn opens a fresh
+            // one (the owner's rule; before, listening stayed on and that fn did nothing).
             self.out("✋ stopped from the window's x");
             self.stop_tasks_for_fn();
             self.captions.paused("");
             self.captions.agent_request("");
             self.paused_since.set(0.0);
             self.pause_announced.set(false);
+            self.set_listening(false);
         } else if kind == "mute" {
             self.muted.set(value.unwrap_or(false));
             self.ears_listen(self.listening.get() || self.holding());
@@ -1326,7 +1330,13 @@ impl VoiceAgent {
                 "🎙  transcription on"
             });
         } else if kind == "hidden" {
-            self.set_window(!value.unwrap_or(true), "the card's –");
+            let hide = value.unwrap_or(true);
+            self.set_window(!hide, "the card's –");
+            if hide {
+                // A window that's gone doesn't keep listening (the owner's rule); the agent keeps
+                // working, and fn brings the window and the microphone back.
+                self.set_listening(false);
+            }
         }
     }
 
@@ -1337,15 +1347,6 @@ impl VoiceAgent {
         if let Err(error) = self.backend.recovery_finish(&id, status) {
             self.out(&format!("{failed}: {error}"));
         }
-    }
-
-    /// fn while you have control of a running task: the agent takes it back once your hands are off.
-    pub fn resume_control(&self) {
-        self.out("▶️  fn: handing control back to the agent (hands off the keyboard and trackpad)");
-        self.captions
-            .paused("Resuming once your hands are off the keyboard and trackpad…");
-        self.save_recovery("active", "Could not save the resume state"); // the same as saying "continue"
-        self.take_control();
     }
 
     pub fn on_helper(&self, event: &BTreeMap<String, String>) {
@@ -1389,15 +1390,22 @@ impl VoiceAgent {
                 self.dictate_hands_free(); // fn, then shift
             }
             Some("tap") => {
-                // fn only ever resumes: it hands a paused task back the mouse and keyboard (even when
-                // this very press is what paused it), or opens the microphone. It never turns
-                // listening off or closes the floating window; the window's mic button mutes, its x
-                // stops.
+                // fn only brings up the floating window and starts recording (the owner, 2026-11-17:
+                // "fn should only be to show up the floating window to start recording nothing
+                // else"). It never hands a paused task the mouse and keyboard (saying "continue"
+                // does), never turns listening off and never closes the window; the window's mic
+                // button mutes, its x stops.
                 self.drop_dictation();
-                if self.mac_task_running() && self.paused_since.get() != 0.0 {
-                    self.resume_control();
-                } else if !self.listening.get() {
+                if !util::setting(util::FLOATING_WINDOW) {
+                    self.set_window(true, "fn"); // the – hid it: fn brings it back (the owner's rule)
+                }
+                if !self.listening.get() {
                     self.set_listening(true);
+                } else {
+                    // Already listening: fn still brings the card up (it may have faded or been put
+                    // away with the –) and gives its entry field the keyboard.
+                    self.captions.listening(true);
+                    self.captions.focus(!self.agent_has_control());
                 }
             }
             Some("other") => {
@@ -1435,7 +1443,7 @@ impl VoiceAgent {
                 && self.paused_since.get() == 0.0 =>
             {
                 // You have the mouse and keyboard. The task keeps working on what doesn't need the
-                // screen (the shell, files, APIs); its screen actions wait until you press fn.
+                // screen (the shell, files, APIs); its screen actions wait until you say "continue".
                 self.paused_since.set(now());
                 if self.mac_task_running() {
                     self.captions.paused(TOOK_OVER);
@@ -1945,7 +1953,7 @@ impl VoiceAgent {
         self.live_receipts.lock().remove(device);
     }
 
-    /// You handed the screen back (fn, or "continue"): the agent has the mouse and keyboard again,
+    /// You handed the screen back (you said "continue"): the agent has the mouse and keyboard again,
     /// and lets go of them if it doesn't use them for a while (the Mac tools' `handed_back`).
     pub fn take_control(&self) {
         self.prepare_screen();

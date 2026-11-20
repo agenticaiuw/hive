@@ -103,3 +103,26 @@ fn a_resumed_thread_points_to_codex_for_its_history_instead_of_copying_every_tur
     let other = json!({"input": [{"type": "text", "text": "hi"}]});
     assert_eq!(hive_knowledge::agent_context::without_thread_history(&other), other);
 }
+
+#[test]
+fn the_index_lists_the_newest_records_without_reading_every_label() {
+    let env = common::Env::new(&[("AGENT_STATE_DIR", "")]);
+    let log = ContextLog::new();
+    std::fs::create_dir_all(&log.directory).unwrap();
+    let total = hive_knowledge::agent_context::INDEXED + 100;
+    for n in 0..total {
+        let stem = format!("{:020}-old", 1_000 + n);
+        std::fs::write(log.directory.join(format!("{stem}.html")), "x").unwrap();
+        std::fs::write(log.directory.join(format!("{stem}.title")), format!("old record {n}")).unwrap();
+    }
+    log.record("tool input", &json!({"n": 1}), None, None).unwrap();
+    log.record("tool output", &json!({"n": 2}), None, None).unwrap();
+    let index = std::fs::read_to_string(&log.index).unwrap();
+    assert_eq!(index.matches("<li>").count(), hive_knowledge::agent_context::INDEXED);
+    let (output, input) = (index.find("· tool output<").unwrap(), index.find("· tool input<").unwrap());
+    assert!(output < input, "newest first");
+    assert!(index.contains(&format!("old record {}<", total - 1)));
+    assert!(!index.contains("old record 0<")); // past the newest 500: still on disk, not listed
+    assert!(log.directory.join(format!("{:020}-old.html", 1_000)).exists());
+    drop(env);
+}

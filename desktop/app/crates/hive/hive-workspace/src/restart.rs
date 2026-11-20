@@ -205,13 +205,9 @@ pub fn prepare(repo: &Path, run: Runner) -> Result<PathBuf, String> {
     ] {
         std::fs::write(stage.join(format!("{name}.swift")), source).map_err(|e| e.to_string())?;
     }
-    let mut info = read_plist(&repo.join("tools/Agent-Info.plist"))?;
-    info.as_object_mut()
-        .ok_or("Agent-Info.plist is not a dictionary")?
-        .insert(
-            "AgentRepository".into(),
-            Value::String(repo.display().to_string()),
-        );
+    // The folder it runs from isn't in the app (the app finds the one install.sh wrote down), so
+    // the plist goes in as it is.
+    let info = read_plist(&repo.join("tools/Agent-Info.plist"))?;
     write_plist(&bundle.join("Contents/Info.plist"), &info)?;
     let cache = stage.join("module-cache");
     for (source, target) in [
@@ -255,6 +251,24 @@ pub fn prepare(repo: &Path, run: Runner) -> Result<PathBuf, String> {
     Ok(stage)
 }
 
+/// The folder the installed app runs Hive from: the one install.sh wrote down in the Hive folder of
+/// the home it's installed under (`<home>/Applications/Hive.app`), as the app itself reads it
+/// (workspace-engine app.swift findRepository).
+pub fn recorded_repository(app: &Path) -> Option<PathBuf> {
+    let home = match app.parent() {
+        Some(apps) if apps.file_name().is_some_and(|n| n == "Applications") && apps.parent().is_some_and(|h| h != Path::new("/")) => {
+            apps.parent().unwrap().to_path_buf()
+        }
+        _ => hive_common::paths::home(),
+    };
+    // In Hive's data folder, or its old name on a Mac that has only that (hive_common::paths).
+    ["Hive", "Personal Agent"].iter().find_map(|folder| {
+        let text = std::fs::read_to_string(home.join("Library/Application Support").join(folder).join("repository")).ok()?;
+        let path = text.trim();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    })
+}
+
 pub fn preflight(repo: &Path, app: &Path) -> Result<(), String> {
     let is_link = app
         .symlink_metadata()
@@ -268,7 +282,7 @@ pub fn preflight(repo: &Path, app: &Path) -> Result<(), String> {
     }
     let info = read_plist(&app.join("Contents/Info.plist"))?;
     if info.get("CFBundleIdentifier").and_then(Value::as_str) != Some(IDENTIFIER)
-        || info.get("AgentRepository").and_then(Value::as_str) != Some(&repo.display().to_string())
+        || recorded_repository(app).as_deref() != Some(repo)
     {
         return Err("Installed bundle identity/repository does not match".into());
     }

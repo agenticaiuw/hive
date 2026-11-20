@@ -174,7 +174,7 @@ impl Captions {
         self.send(json!({"agent_request": text}));
     }
 
-    /// Why the agent is paused and how to let it go on (press fn); "" removes it.
+    /// Why the agent is paused and how to let it go on (say "continue"); "" removes it.
     pub fn paused(&self, text: &str) {
         self.send(json!({"paused": text}));
     }

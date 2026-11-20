@@ -27,7 +27,9 @@ pub mod chrome_host;
 pub mod handoff;
 pub mod inbox;
 pub mod live;
+pub mod node;
 pub mod runs;
+pub mod update;
 pub mod usage;
 
 use regex::Regex;
@@ -255,33 +257,74 @@ impl Cloud {
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
-        let answer = ureq::post(&format!("{}{path}", self.url))
-            .set("authorization", &format!("Bearer {}", self.token))
-            .set("user-agent", "hive-tasks")
+        let answer = self
+            .signed(ureq::post(&format!("{}{path}", self.url)))
             .timeout(Duration::from_secs(20))
             .send_json(body);
         Self::answer(answer)
     }
 
+    /// Signed in as this machine, saying which node it is and what it runs (node.rs).
+    fn signed(&self, request: ureq::Request) -> ureq::Request {
+        let mut request = request
+            .set("authorization", &format!("Bearer {}", self.token))
+            .set("user-agent", "hive-tasks");
+        for (name, value) in node::headers(&self.machine) {
+            request = request.set(name, &value);
+        }
+        request
+    }
+
     /// `GET path` on the cloud copy, signed in as this machine.
     pub fn get(&self, path: &str) -> Result<Value, String> {
-        let answer = ureq::get(&format!("{}{path}", self.url))
-            .set("authorization", &format!("Bearer {}", self.token))
-            .set("user-agent", "hive-tasks")
-            .timeout(Duration::from_secs(10))
+        self.get_for(path, 10)
+    }
+
+    /// `GET path`, given `seconds` to answer: for a page the cloud holds open until something comes
+    /// (hive-app's cloud_brain asking for the Mac's next call with `wait=20`).
+    pub fn get_for(&self, path: &str, seconds: u64) -> Result<Value, String> {
+        let answer = self
+            .signed(ureq::get(&format!("{}{path}", self.url)))
+            .timeout(Duration::from_secs(seconds))
             .call();
         Self::answer(answer)
     }
 
+    /// `GET path` as bytes (a release, update.rs), given `seconds` to arrive whole.
+    pub fn get_bytes(&self, path: &str, seconds: u64) -> Result<Vec<u8>, String> {
+        let answer = self
+            .signed(ureq::get(&format!("{}{path}", self.url)))
+            .timeout(Duration::from_secs(seconds))
+            .call();
+        match answer {
+            Ok(r) => {
+                node::saw_latest(r.header("x-hive-latest"));
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut r.into_reader().take(200 << 20), &mut bytes)
+                    .map_err(|e| format!("The release didn't arrive whole: {e}"))?;
+                Ok(bytes)
+            }
+            Err(e) => Err(Self::answer(Err(e)).err().unwrap_or_default()),
+        }
+    }
+
     fn answer(answer: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
         match answer {
-            Ok(r) => r
-                .into_json()
-                .map_err(|e| format!("The cloud's answer isn't JSON: {e}")),
-            Err(ureq::Error::Status(code, r)) => Err(format!(
-                "The cloud said {code}: {}",
-                r.into_string().unwrap_or_default().trim()
-            )),
+            Ok(r) => {
+                node::saw_latest(r.header("x-hive-latest"));
+                r.into_json()
+                    .map_err(|e| format!("The cloud's answer isn't JSON: {e}"))
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                node::saw_latest(r.header("x-hive-latest"));
+                let body = r.into_string().unwrap_or_default();
+                // The board's own words when it gave them (a 426 says this Hive is older than it).
+                let said = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_else(|| body.trim().to_string());
+                Err(format!("The cloud said {code}: {said}"))
+            }
             Err(e) => Err(format!("Couldn't reach the cloud: {e}")),
         }
     }
@@ -629,7 +672,21 @@ impl Ledger {
             if !STATUSES.contains(&status) {
                 return Err(format!("T{id}: status is one of {}.", STATUSES.join(", ")));
             }
-            let outcome = str_of(e, "outcome").trim().to_string();
+            let mut outcome = str_of(e, "outcome").trim().to_string();
+            if status == "waiting" {
+                // The owner (2026-11-17): "if they must stop they must provide an exact reason of why
+                // they stopped and what exactly do they need me for or else they'd just keep going".
+                let why = str_of(e, "why").trim().trim_end_matches('.');
+                let need = str_of(e, "need").trim();
+                if why.is_empty() || need.is_empty() {
+                    return Err(format!(
+                        "T{id}: waiting puts it on the owner's \"Needs you\" list, so say \"why\" (exactly why you \
+                         stopped) and \"need\" (exactly what the owner must do, and where). If nothing needs the owner, \
+                         don't stop: keep going, or report it blocked with what's in the way and Hive keeps continuing it."
+                    ));
+                }
+                outcome = format!("Stopped because {why}. Needs from you: {need}");
+            }
             if !matches!(status, "open" | "active") && outcome.is_empty() {
                 return Err(format!(
                     "T{id}: say what happened (outcome) when it's {status}."
@@ -1783,7 +1840,7 @@ impl Ledger {
                  EOF\n\
                  Use [] if it asks for nothing. A standing preference (\"never…\", \"always…\") is {{\"kind\": \"rule\", \"paths\": [\"<globs it applies to, or none for the whole project>\"], ...}} instead of a task. \
                  Put each task in its folder, the part of the project it's about: \"folder\": \"<project › folder>\" (Hive then loads every memory of that folder for you). If a task is low value but long, ask the owner before doing it. As you start each task, report it active (echo '[{{\"id\": \"T1\", \"status\": \"active\"}}]' | {cmd} report). As each task ends, report it: echo '[{{\"id\": \"T1\", \"status\": \"done|waiting|blocked|dropped\", \"outcome\": \"<what happened>\", \"report\": \"<when done: what you did, where, what's left>\"}}]' | {cmd} report. \
-                 Waiting puts the task on the owner's \"Needs you\" list, so use it only when the owner must do something, and say exactly what in the outcome (the owner trying what you built is never it: built and tested is done); anything else in the way is blocked, with what's left in the outcome. \
+                 Stop for the owner only when they must do something themselves: report it waiting with \"why\" (exactly why you stopped) and \"need\" (exactly what they must do, and where), which put it on their \"Needs you\" list (the owner trying what you built is never it: built and tested is done). Anything else in the way: keep going; if you can't, it's blocked, with what's in the way in the outcome, and Hive keeps continuing it. \
                  Handing folder work to a subagent, put a line \"Hive folder: <project › folder>\" in its prompt and Hive adds that folder's memories. Save what later agents in a folder must know: {cmd} remember \"<project › folder>\" [note|spec|decision] <<'EOF' (first line the title)."
             ));
             let here = project_key(project);

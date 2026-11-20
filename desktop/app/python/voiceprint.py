@@ -8,7 +8,7 @@ that come out alike for the same voice. You teach it yours once:
     ./voice.sh --enroll                              # read a few sentences aloud
     .venv/bin/python python/voiceprint.py --forget   # back to hearing everyone
 
-Your voiceprint stays on this Mac, in models/voiceprint.npz. Enrolling again (with another
+Your voiceprint stays on this Mac, in Hive application support (older installations may still use models/voiceprint.npz). Enrolling again (with another
 microphone, say) adds to it. VOICE_MATCH is how alike a sentence has to sound to count as you:
 0.4 by default (your own voice scores around 0.6-0.9, other people's under 0.3); lower it if it
 ignores you, raise it if it still hears others; 0 turns it off. A word or two gets a little more leeway.
@@ -30,7 +30,12 @@ RATE = 16000
 REPO = "Wespeaker/wespeaker-voxceleb-resnet34-LM"
 REVISION = "f0c48c298fd835726c27956a5d617bad7115627e"
 MODEL_FILE = "voxceleb_resnet34_LM.onnx"
-PRINTS = os.path.join(ROOT, "models", "voiceprint.npz")
+LEGACY_PRINTS = os.path.join(ROOT, "models", "voiceprint.npz")
+legacy_state = os.path.expanduser("~/Library/Application Support/Personal Agent")
+hive_state = os.path.expanduser("~/Library/Application Support/Hive")
+STATE_DIR = os.environ.get("AGENT_STATE_DIR") or (legacy_state if not os.path.exists(hive_state) and os.path.isdir(legacy_state) else hive_state)
+STATE_PRINTS = os.path.join(STATE_DIR, "voiceprint.npz")
+PRINTS = STATE_PRINTS if os.path.isfile(STATE_PRINTS) or not os.path.isfile(LEGACY_PRINTS) else LEGACY_PRINTS
 MATCH = 0.4
 MIN_AUDIO = 0.25  # seconds of speech it needs to say anything at all
 FULL = 1.5  # seconds of speech for a steady voiceprint; shorter ones are rougher...
@@ -89,7 +94,9 @@ class Voiceprint:
                 import kaldi_native_fbank  # noqa: F401
                 import onnxruntime
                 from huggingface_hub import hf_hub_download
-                model = hf_hub_download(REPO, MODEL_FILE, revision=REVISION, local_files_only=True)
+                bundled = os.path.join(ROOT, "models", "wespeaker", MODEL_FILE)
+                model = bundled if os.path.isfile(bundled) else hf_hub_download(
+                    REPO, MODEL_FILE, revision=REVISION, local_files_only=True)
                 options = onnxruntime.SessionOptions()
                 options.inter_op_num_threads, options.intra_op_num_threads = 1, 2
                 self._session = onnxruntime.InferenceSession(model, options, providers=["CPUExecutionProvider"])
@@ -129,6 +136,7 @@ class Voiceprint:
         return self.threshold - SHORT_SLACK * short
 
     def matches(self, samples: np.ndarray) -> tuple[bool, float]:
+        self.heard_machine = False  # each result describes this clip, including early returns
         if not self.checks or len(samples) < MIN_AUDIO * RATE or not self.ready():
             return True, 1.0
         seconds = len(samples) / RATE
@@ -223,7 +231,7 @@ def enroll() -> int:
         return 1
     voiceprint.add(clips)
     print(f"\nGot it. From now on the voice agent only listens to you ({len(voiceprint.prints)} voiceprint"
-          f"{'s' if len(voiceprint.prints) > 1 else ''} in models/voiceprint.npz).", flush=True)
+          f"{'s' if len(voiceprint.prints) > 1 else ''}).", flush=True)
     return 0
 
 

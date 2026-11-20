@@ -1,26 +1,31 @@
-//! A conversation (agent.py's `Session`): the requests from when you tap fn to talk are turns on
-//! one Codex thread, so each has the ones before it in context: what you said, what it saw and
-//! did, and what it answered. Codex compacts the thread when it gets long.
+//! A conversation (agent.py's `Session`): each new request gets a Codex thread of its own, told
+//! in words what was asked lately and what came of it ([`RECAP`] requests). One long thread for
+//! every request (as Hive had from 2026-11-08) grew to ~110k tokens, 29 full-size screenshots
+//! among them, that even compaction kept; once the model's cache of it lapsed after a few idle
+//! minutes, the first step of the next request waited 20-30 s for it to be read again. A fresh
+//! thread is ~23k tokens: a few seconds even uncached. The exception: a request that comes within
+//! [`WARM_SECONDS`] of the last one's end, while that thread is under [`SMALL_TOKENS`], continues
+//! it, since the cache still holds it and it sees what was just done ("play it").
 //!
-//! The thread's identity (`codex-thread-id` in the state folder) survives app and server
-//! restarts: hive-core's [`ResumableThread`] resumes it, and only a missing identity starts a new
-//! one. A thread takes one turn at a time. A request that replaces one being stopped waits a
-//! moment for Codex to end that turn. One for the other device while a turn is under way (the
-//! phone while the Mac works) gets a thread of its own, told what was said so far, and the
-//! session's thread is told what came of it with its next request.
+//! The current thread's identity (`codex-thread-id` in the state folder) survives app and server
+//! restarts, so recovery resumes an interrupted task's thread with hive-core's
+//! [`ResumableThread`]. A thread takes one turn at a time. A request that replaces one being
+//! stopped waits a moment for Codex to end that turn. One for the other device while a turn is
+//! under way (the phone while the Mac works) gets a thread of its own too, and the session's
+//! thread is told what came of it with its next request.
 //!
-//! [`Session::prepare`] starts the thread before the first request: Codex gets its connection to
-//! the model ready when a thread starts, and the first request on a thread started a few seconds
-//! earlier gets its first words 1 to 2.5 s sooner.
+//! [`Session::prepare`] starts the next request's thread when listening starts: Codex gets its
+//! connection to the model ready when a thread starts, and the first request on a thread started
+//! a few seconds earlier gets its first words 1 to 2.5 s sooner.
 
 use crate::agent::Agent;
 use crate::app_server::{same_server, OnMessage, OnToolCall, Server, DEFAULT_TIMEOUT};
 use crate::prompts;
 use crate::py;
 use crate::task::CodexTask;
-use crate::util::{lock, AgentError, Event};
+use crate::util::{lock, monotonic, AgentError, Event};
 use hive_core::thread_identity::{
-    validate_identity, IdentityError, ResumableThread, SessionTransport,
+    atomic_write, validate_identity, IdentityError, ResumableThread, SessionTransport,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -67,7 +72,36 @@ struct Inner {
     server: Option<Arc<dyn Server>>,
     /// The session's thread on `server`.
     thread: Option<String>,
+    /// A thread [`Session::prepare`] started on `server` for the next request (not saved yet).
+    spare: Option<String>,
     closed: bool,
+}
+
+/// How many of the requests before a new one its thread is told about.
+pub const RECAP: usize = 6;
+
+/// A new request that comes within this many seconds of the last one's end goes on that one's
+/// thread while it's small: Codex's prompt cache still holds it (2026-11-17: warm one to three
+/// minutes after a request, cold eight minutes after), so the first step is as quick as on a fresh
+/// thread, and it sees what was just done ("play it", "no, the other one").
+pub const WARM_SECONDS: f64 = 240.0;
+/// ...and that thread is under this many tokens. A fresh one is about 23k; past this every step
+/// slows (8–12 s each at 120k) and a compaction comes closer (one lost the step narration).
+pub const SMALL_TOKENS: i64 = 60_000;
+
+/// Whether a new request continues the last one's thread (see [`WARM_SECONDS`]). A size Codex
+/// hasn't reported counts as not small.
+fn keeps_going(inner: &Inner, last: Option<&Arc<CodexTask>>) -> bool {
+    let Some(last) = last else { return false };
+    if inner.thread.is_none() || last.running() {
+        return false;
+    }
+    let s = last.st();
+    let ended = s.began + s.elapsed;
+    s.started
+        && s.context > 0
+        && s.context < SMALL_TOKENS
+        && monotonic() - ended < WARM_SECONDS
 }
 
 /// One conversation. Make it with [`Session::new`] (or use the agent's: [`Agent::session`]).
@@ -155,7 +189,6 @@ impl Session {
         };
         let mut inner = lock(&self.inner);
         if inner.closed
-            || inner.thread.is_some()
             || inner
                 .server
                 .as_ref()
@@ -163,17 +196,71 @@ impl Session {
         {
             return;
         }
+        inner.server = Some(server.clone());
+        if inner.spare.is_some() {
+            return;
+        }
         let Ok(params) = agent.thread_params() else {
             return;
         };
-        // The first request tries again, and says what's wrong.
-        let Ok(thread) = self.connect(&agent, &mut inner, &server, &params) else {
-            return;
-        };
-        inner.server = Some(server.clone());
-        inner.thread = Some(thread.clone());
+        // The request starts one itself if this fails, and says what's wrong.
+        if let Ok(thread) = self.start_thread(&agent, &server, &params) {
+            inner.spare = Some(thread);
+        }
+    }
+
+    /// A new thread on `server` (not saved as the session's).
+    fn start_thread(
+        &self,
+        agent: &Agent,
+        server: &Arc<dyn Server>,
+        params: &Value,
+    ) -> Result<String, AgentError> {
+        let mut options = params.clone();
+        options["ephemeral"] = json!(false);
+        self.observe(agent, "thread/start input", &options, None);
+        let result = server.request("thread/start", options, DEFAULT_TIMEOUT)?;
+        let thread = result
+            .get("thread")
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::Value("'thread'".into()))?;
+        let thread = validate_identity(thread)
+            .map_err(|e| AgentError::Resume(e.to_string()))?
+            .to_owned();
+        self.observe(agent, "thread/start output", &result, Some(&thread));
+        Ok(thread)
+    }
+
+    /// For the context inspector (a failure is kept for `context_error`).
+    fn observe(&self, agent: &Agent, kind: &str, payload: &Value, thread: Option<&str>) {
+        let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            agent.hooks.context.record(kind, payload, None, thread)
+        }))
+        .unwrap_or_else(|panic| Err(crate::util::panic_text(&*panic)));
+        if let Err(error) = recorded {
+            *lock(&self.context_error) = Some(error);
+        }
+    }
+
+    /// Makes `thread` the session's (saved, so recovery can resume it), letting go of the one
+    /// before.
+    fn adopt(
+        &self,
+        inner: &mut Inner,
+        server: &Arc<dyn Server>,
+        thread: &str,
+    ) -> Result<(), AgentError> {
+        atomic_write(&self.state_path(), format!("{thread}\n").as_bytes())
+            .map_err(|e| AgentError::Os(e.to_string()))?;
+        inner.identity = None; // the next resume reads the new identity
+        if let Some(old) = inner.thread.take().filter(|old| old != thread) {
+            forget(server.as_ref(), &old);
+        }
         let (on_message, on_tool_call) = self.handlers();
-        server.attach(&thread, on_message, on_tool_call);
+        server.attach(thread, on_message, on_tool_call);
+        inner.thread = Some(thread.to_owned());
+        Ok(())
     }
 
     /// Ends it: unsubscribes from its thread (in the background: prepare() may still be at it).
@@ -186,6 +273,11 @@ impl Session {
         let (server, thread) = {
             let mut inner = lock(&self.inner);
             inner.closed = true;
+            if let (Some(server), Some(spare)) = (inner.server.clone(), inner.spare.take()) {
+                if server.alive() {
+                    forget(server.as_ref(), &spare);
+                }
+            }
             (inner.server.clone(), inner.thread.take())
         };
         if let (Some(server), Some(thread)) = (server, thread) {
@@ -333,8 +425,13 @@ impl Session {
             .iter()
             .position(|t| Arc::ptr_eq(t, task))
             .ok_or_else(|| AgentError::Value("the request is not in this conversation".into()))?;
+        let start = if everything {
+            index.saturating_sub(RECAP)
+        } else {
+            0
+        };
         let mut lines = Vec::new();
-        for t in &tasks[..index] {
+        for t in &tasks[start..index] {
             if everything || !(t.on_thread() || t.told()) {
                 lines.push(format!(
                     "  They asked: {}",
@@ -414,11 +511,13 @@ impl TaskSession for Session {
                 // the first request, or Codex restarted
                 inner.server = Some(server.clone());
                 inner.thread = None;
+                inner.spare = None;
                 *lock(&self.owner) = None;
                 self.idle.set();
             }
             lock(&self.owner).clone()
         };
+        let last = owner.clone();
         if owner.is_some_and(|o| !o.running()) {
             self.idle.wait(Some(10.0)); // it was stopped: Codex ends its turn in a moment
         }
@@ -449,7 +548,22 @@ impl TaskSession for Session {
                 *lock(&self.owner) = Some(task.clone());
                 task.set_on_thread(true);
                 self.idle.clear();
-                if inner.thread.is_none() {
+                let fresh = expected_thread.is_none() && !keeps_going(&inner, last.as_ref());
+                if fresh {
+                    // A new request: a thread of its own (the one prepare() started, if any).
+                    let started = match inner.spare.take() {
+                        Some(spare) => Ok(spare),
+                        None => self.start_thread(&agent, server, &params),
+                    };
+                    let adopted =
+                        started.and_then(|thread| self.adopt(&mut inner, server, &thread));
+                    if let Err(error) = adopted {
+                        *lock(&self.owner) = None;
+                        task.set_on_thread(false);
+                        self.idle.set();
+                        return Err(error);
+                    }
+                } else if inner.thread.is_none() {
                     // Attach before resume: an active goal may emit its next turn or request a
                     // tool as soon as the persisted thread loads.
                     let mut preattached = None;
@@ -479,7 +593,7 @@ impl TaskSession for Session {
                 }
                 let thread = inner.thread.clone().unwrap_or_default();
                 drop(inner);
-                return Ok((thread, self.said_before(task, false)?));
+                return Ok((thread, self.said_before(task, fresh)?));
             }
             drop(inner);
             self.said_before(task, true)?

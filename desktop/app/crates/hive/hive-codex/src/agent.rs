@@ -136,9 +136,8 @@ impl Agent {
         }
     }
 
-    /// Compatibility entry point: prepares the durable conversation when listening starts (false,
-    /// doing nothing, while one of its requests is running). Listening toggles never reset the
-    /// conversation's identity, including after a restart.
+    /// When listening starts, gets the next request's thread ready (false, doing nothing, while
+    /// one of its requests is running).
     pub fn new_session(&self) -> bool {
         if let Some(claude) = &self.claude {
             return claude.new_session();
@@ -497,6 +496,7 @@ impl Agent {
             )));
             rules.push_str(prompts::SIGN_IN_RULES);
         }
+        rules.push_str(prompts::VM_RULES);
         // Applied on resume as well, so the long-running conversation builds the knowledge base too.
         rules.push_str(&self.hooks.knowledge.rules());
         let mut params = json!({

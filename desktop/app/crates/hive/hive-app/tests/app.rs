@@ -197,6 +197,13 @@ fn hive_agent_help() {
 }
 
 #[test]
+fn hive_agent_says_which_release_it_is() {
+    // What the updater asks a new release's agent before putting it in (hive_tasks::update::stage).
+    assert_eq!(hive_agent(&["--version"]), (true, format!("{}\n", hive_tasks::node::VERSION)));
+    assert!(USAGE.contains("hive-agent --version"));
+}
+
+#[test]
 fn hive_agent_task_help() {
     assert_eq!(
         hive_agent(&["--task", "--help"]),

@@ -115,7 +115,7 @@ build/Agent.app: build/agent-unified-host build/workspace-engine build/Hive.icns
 	cp build/workspace-engine $@.tmp/Contents/Helpers/workspace-engine
 	tools/sign.sh $@.tmp/Contents/Helpers/workspace-engine local.personal-agent.workspace-engine
 	cp build/Hive.icns $@.tmp/Contents/Resources/Hive.icns
-	sed 's|@REPO@|$(CURDIR)|' tools/Agent-Info.plist > $@.tmp/Contents/Info.plist
+	cp tools/Agent-Info.plist $@.tmp/Contents/Info.plist
 	mkdir -p $@.tmp/Contents/PlugIns && cp -R build/Hive.appex $@.tmp/Contents/PlugIns/Hive.appex
 	tools/sign.sh $@.tmp local.personal-agent.Agent
 	codesign --verify --deep --strict $@.tmp

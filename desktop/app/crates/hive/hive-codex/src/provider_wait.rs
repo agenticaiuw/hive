@@ -1,5 +1,5 @@
-//! Bounded provider availability checks through the user's configured HTTPS proxy
-//! (python/provider_wait.py).
+//! Bounded provider availability checks, made the way Codex connects: through the HTTPS proxy
+//! when one is set, directly when none is.
 //!
 //! `<state>/provider-wait.json` (`{"version": 1, "identity", "checks", "next", "resolved"?}`, with
 //! `provider-wait.json.lock` beside it) records the wait for one saved request, so a restart
@@ -12,9 +12,10 @@ use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-pub const INTERVAL_SECONDS: f64 = 300.0;
+/// Often enough that a task carries on within half a minute of ChatGPT coming back.
+pub const INTERVAL_SECONDS: f64 = 30.0;
 /// No more than 24 hours of checks.
-pub const MAX_CHECKS: i64 = 288;
+pub const MAX_CHECKS: i64 = 2880;
 
 /// What `reserve` decided (Python's `{'state': ...}`).
 #[derive(Debug, Clone, PartialEq)]
@@ -221,17 +222,30 @@ pub fn workspace_is_open(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Probes chatgpt.com only via the configured HTTPS proxy; never falls back to a direct
-/// connection. The proxy is `https_proxy` (any `*_proxy` variable turns the system settings off,
-/// as in Python's `urllib.request.getproxies()`), else the system's HTTPS proxy.
+/// Probes chatgpt.com the way Codex reaches it: through the HTTPS proxy when one is set (and
+/// never around it, since Codex wouldn't go around it either), directly when none is. The proxy
+/// is `https_proxy` (any `*_proxy` variable turns the system settings off, as in Python's
+/// `urllib.request.getproxies()`), else the system's HTTPS proxy.
 pub fn reachable(env: &Env) -> bool {
-    let Some(proxy) = https_proxy(env) else {
-        return false;
-    };
-    let Some((host, port)) = proxy_address(&proxy) else {
-        return false;
-    };
-    probe(&host, port)
+    match https_proxy(env) {
+        None => probe(None),
+        Some(proxy) => match proxy_address(&proxy) {
+            Some((host, port)) => probe(Some((&host, port))),
+            None => false,
+        },
+    }
+}
+
+/// How the checks reach ChatGPT, for the wait's message: "through the proxy at host:port" or
+/// "directly".
+pub fn route(env: &Env) -> String {
+    match https_proxy(env) {
+        None => "directly".into(),
+        Some(proxy) => match proxy_address(&proxy) {
+            Some((host, port)) => format!("through the proxy at {host}:{port}"),
+            None => format!("through the proxy {proxy}, which Hive can't use"),
+        },
+    }
 }
 
 /// `http://host[:port]` without credentials, as (host, port); None for anything else.
@@ -268,20 +282,22 @@ pub(crate) fn proxy_address(proxy: &str) -> Option<(String, u16)> {
     Some((host.to_lowercase(), port))
 }
 
-fn probe(host: &str, port: u16) -> bool {
-    let address = if host.contains(':') {
-        format!("http://[{host}]:{port}")
-    } else {
-        format!("http://{host}:{port}")
-    };
-    let Ok(proxy) = ureq::Proxy::new(address) else {
-        return false;
-    };
-    let agent = ureq::AgentBuilder::new()
-        .proxy(proxy)
+fn probe(proxy: Option<(&str, u16)>) -> bool {
+    let mut builder = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(8))
-        .redirects(0)
-        .build();
+        .redirects(0);
+    if let Some((host, port)) = proxy {
+        let address = if host.contains(':') {
+            format!("http://[{host}]:{port}")
+        } else {
+            format!("http://{host}:{port}")
+        };
+        let Ok(proxy) = ureq::Proxy::new(address) else {
+            return false;
+        };
+        builder = builder.proxy(proxy);
+    }
+    let agent = builder.build();
     match agent.head("https://chatgpt.com/").call() {
         Ok(response) => (200..400).contains(&response.status()),
         Err(_) => false,
@@ -402,7 +418,7 @@ mod tests {
         );
         assert_eq!(
             reserve(dir, "one", Some(101.0), true).unwrap(),
-            Some(Reservation::Waiting { delay: 299.0 })
+            Some(Reservation::Waiting { delay: 29.0 })
         );
         assert!(exists(dir, "one").unwrap());
         assert_eq!(
@@ -413,7 +429,7 @@ mod tests {
         assert!(!exists(dir, "one").unwrap());
         assert_eq!(
             reserve(dir, "one", Some(401.0), true).unwrap(),
-            Some(Reservation::Waiting { delay: 299.0 })
+            Some(Reservation::Waiting { delay: 29.0 })
         );
         assert!(exists(dir, "one").unwrap());
     }
@@ -455,13 +471,15 @@ mod tests {
     }
 
     #[test]
-    fn never_attempts_direct_network_when_proxy_missing() {
-        // (Python checked that no connection was made; here no proxy means no address to use.)
+    fn checks_directly_when_no_proxy_is_set() {
         assert_eq!(proxy_address(""), None);
         let env = Env::default();
         env.set("https_proxy", "");
         env.set("no_proxy", "localhost");
         assert_eq!(https_proxy(&env), None); // a *_proxy variable means the system settings aren't read
+        assert_eq!(route(&env), "directly"); // as Codex connects, not "never" as before
+        env.set("https_proxy", "http://127.0.0.1:7769");
+        assert_eq!(route(&env), "through the proxy at 127.0.0.1:7769");
     }
 
     #[test]
@@ -484,6 +502,15 @@ mod tests {
         let env = Env::default();
         env.set("https_proxy", "http://127.0.0.1:7769");
         assert_eq!(https_proxy(&env).as_deref(), Some("http://127.0.0.1:7769"));
+    }
+
+    /// A live check against chatgpt.com, with this machine's proxy settings (or none, with
+    /// `https_proxy=` empty): `cargo test -p hive-codex live_probe -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_probe() {
+        let env = Env::default();
+        assert!(reachable(&env), "chatgpt.com unreachable {}", route(&env));
     }
 
     #[test]

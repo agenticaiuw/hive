@@ -725,6 +725,30 @@ fn tool_records_exact_arguments_result_and_call_id() {
 }
 
 #[test]
+fn an_action_without_a_step_is_reminded_to_give_one() {
+    let h = Harness::new();
+    let (task, _) = h.task("test");
+    let done = json!({"content": [{"type": "text", "text": "Clicked."}]});
+    with_tools(&task, &[("mac", FakeTool::new("mac").returning(Ok(done)))]);
+    let texts = |reply: &Value| -> Vec<String> {
+        reply["contentItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["text"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let bare = task.call_tool(&json!({"namespace": "mac", "tool": "batch",
+                                      "arguments": {"steps": [{"tool": "click", "x": 1, "y": 2}]}}));
+    assert_eq!(texts(&bare), ["Clicked.", prompts::STEP_MISSING]);
+    let said = task.call_tool(&json!({"namespace": "mac", "tool": "click",
+                                      "arguments": {"x": 1, "y": 2, "step": "Open the drum rack."}}));
+    assert_eq!(texts(&said), ["Clicked."]);
+    let look = task.call_tool(&json!({"namespace": "mac", "tool": "screenshot", "arguments": {}}));
+    assert_eq!(texts(&look), ["Clicked."]); // looking needs no step
+}
+
+#[test]
 fn tool_exception_is_visible_in_the_exact_error_reply() {
     let h = Harness::new();
     let (task, _) = h.task("test");
@@ -818,12 +842,12 @@ fn session_task(h: &Harness, session: &Arc<Session>, text: &str) -> Arc<CodexTas
 }
 
 #[test]
-fn server_replacement_resumes_without_replaying_primary_summaries() {
+fn the_next_request_starts_its_own_thread_told_what_came_before() {
     let h = Harness::new();
     let session = identity(&h);
     let (one, two) = (
         FakeServer::identity(None, None),
-        FakeServer::identity(None, None),
+        FakeServer::identity(None, Some("thread-456")),
     );
     let first = session_task(&h, &session, "first");
     let (thread, _) = session
@@ -831,19 +855,19 @@ fn server_replacement_resumes_without_replaying_primary_summaries() {
         .unwrap();
     session.release(&first);
     let second = session_task(&h, &session, "second");
-    let (resumed, earlier) = session
+    let (next, earlier) = session
         .thread_for(&second, &two.dyn_(), json!({}), None)
         .unwrap();
-    assert_eq!(thread, resumed);
-    assert_eq!(earlier, "");
-    assert_eq!(
-        *lock(&two.calls),
-        [("thread/resume".to_owned(), json!({"threadId": thread}))]
-    );
+    assert_eq!(thread, "thread-123");
+    assert_eq!(next, "thread-456");
+    assert!(earlier.contains("They asked: \"first\""), "{earlier}");
+    assert_eq!(two.methods(), ["thread/start"]);
+    let saved = std::fs::read_to_string(h.path().join("thread-id")).unwrap();
+    assert_eq!(saved.trim(), "thread-456"); // what recovery resumes
 }
 
 #[test]
-fn prepare_failure_is_retried_as_resume_not_start() {
+fn prepare_failure_is_tried_again_by_the_request_and_keeps_the_saved_thread() {
     let h = Harness::new();
     std::fs::write(h.path().join("thread-id"), "thread-existing").unwrap();
     let session = identity(&h);
@@ -852,12 +876,14 @@ fn prepare_failure_is_retried_as_resume_not_start() {
     h.agent.codex_server().unwrap(); // Codex is running
     session.prepare_now();
     let task = session_task(&h, &session, "test");
-    resume_error(
-        session
-            .thread_for(&task, &server.dyn_(), json!({}), None)
-            .map(|(t, _)| t),
-    );
-    assert_eq!(server.methods(), ["thread/resume", "thread/resume"]);
+    let error = session
+        .thread_for(&task, &server.dyn_(), json!({}), None)
+        .unwrap_err();
+    assert!(error.to_string().contains("offline"), "{error}");
+    assert_eq!(server.methods(), ["thread/start", "thread/start"]);
+    let saved = std::fs::read_to_string(h.path().join("thread-id")).unwrap();
+    assert_eq!(saved, "thread-existing");
+    assert!(!task.on_thread());
 }
 
 #[test]
@@ -876,15 +902,15 @@ fn closed_session_does_not_start_thread() {
 }
 
 #[test]
-fn the_conversation_prepared_before_a_request_is_its_thread() {
-    // (Not in the Python tests: prepare() connects the saved identity before the first request.)
+fn the_thread_prepared_before_a_request_is_its_thread() {
+    // (Not in the Python tests: prepare() starts the next request's thread as listening begins.)
     let h = Harness::new();
     let session = identity(&h);
     let server = FakeServer::identity(None, None);
     h.serve(&server);
     h.agent.codex_server().unwrap();
     session.prepare_now();
-    assert_eq!(session.thread().as_deref(), Some("thread-123"));
+    assert_eq!(session.thread(), None); // not the session's until a request takes it
     let task = session_task(&h, &session, "test");
     let (thread, _) = session
         .thread_for(&task, &server.dyn_(), json!({}), None)
@@ -892,4 +918,6 @@ fn the_conversation_prepared_before_a_request_is_its_thread() {
     assert_eq!(thread, "thread-123");
     assert_eq!(server.methods(), ["thread/start"]);
     assert!(task.on_thread());
+    let saved = std::fs::read_to_string(h.path().join("thread-id")).unwrap();
+    assert_eq!(saved.trim(), "thread-123");
 }

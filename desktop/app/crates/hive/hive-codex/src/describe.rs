@@ -24,6 +24,9 @@ pub fn doing(item: &Value) -> String {
     let arg = |key: &str| a.get(key).map(py::str_of).unwrap_or_default();
     let quoted = |key: &str| format!("“{}”", py::strip(py::chars(&arg(key), 40)));
     let tool = item.get("tool");
+    if tool.and_then(Value::as_str) == Some("batch") {
+        return batch_doing(a.get("steps"));
+    }
     if tool.and_then(Value::as_str) == Some("click") && clicks(a.get("clicks")) == 2 {
         return "Double-clicking".into();
     }
@@ -53,6 +56,50 @@ pub fn doing(item: &Value) -> String {
         }
     };
     phrase
+}
+
+/// A batch the agent gave no `step`, in words from its own actions ('Clicking, then typing
+/// “Drill”, then pressing return…'), so the card never just says "Batch".
+fn batch_doing(steps: Option<&Value>) -> String {
+    let steps = steps.and_then(Value::as_array).cloned().unwrap_or_default();
+    let phrases: Vec<String> = steps
+        .iter()
+        .filter(|s| !matches!(s.get("tool").and_then(Value::as_str), Some("wait" | "screenshot")))
+        .take(3)
+        .map(|s| doing(&serde_json::json!({"tool": s.get("tool"), "arguments": s})))
+        .collect();
+    let Some((first, rest)) = phrases.split_first() else {
+        return "Working".into();
+    };
+    let mut said = first.clone();
+    for phrase in rest {
+        let mut chars = phrase.chars();
+        let lowered: String = chars
+            .next()
+            .map(|c| c.to_lowercase().chain(chars).collect())
+            .unwrap_or_default();
+        said.push_str(", then ");
+        said.push_str(&lowered);
+    }
+    let acting = steps
+        .iter()
+        .filter(|s| !matches!(s.get("tool").and_then(Value::as_str), Some("wait" | "screenshot")))
+        .count();
+    if acting > phrases.len() {
+        said.push('…');
+    }
+    said
+}
+
+/// Whether a call acts on the screen, so the user should see a `step` for it.
+pub fn acts(tool: Option<&str>) -> bool {
+    matches!(
+        tool,
+        Some(
+            "click" | "double_click" | "move_mouse" | "drag" | "scroll" | "type_text" | "press_key"
+                | "open_app" | "switch_window" | "batch" | "tap" | "swipe" | "tap_element"
+        )
+    )
 }
 
 /// `int(a.get("clicks", 1) or 1)`.
@@ -256,6 +303,20 @@ mod tests {
             "Clicking"
         );
         assert_eq!(doing(&json!({"tool": "tap_element"})), "Tap element");
+        // a batch with no step says what its actions do, not "Batch"
+        let batch = json!({"tool": "batch", "arguments": {"steps": [
+            {"tool": "click", "x": 1, "y": 2}, {"tool": "wait", "seconds": 1},
+            {"tool": "type_text", "text": "Drill 16 Bars"}, {"tool": "press_key", "keys": "return"},
+            {"tool": "click", "x": 3, "y": 4}]}});
+        assert_eq!(
+            doing(&batch),
+            "Clicking, then typing “Drill 16 Bars”, then pressing return…"
+        );
+        assert_eq!(
+            doing(&json!({"tool": "batch", "arguments": {"step": "Save the set.", "steps": []}})),
+            "Save the set."
+        );
+        assert_eq!(doing(&json!({"tool": "batch", "arguments": {}})), "Working");
         assert_eq!(doing(&json!({})), "Working");
         // tests/test_tools.py: DesktopTest.test_codex_knows_the_new_tools
         assert_eq!(

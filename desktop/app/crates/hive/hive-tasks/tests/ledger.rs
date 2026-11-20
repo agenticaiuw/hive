@@ -119,16 +119,22 @@ fn a_message_is_saved_split_reported_and_only_then_lets_the_agent_stop() {
     // A task doesn't wait for the owner to try it: built and tested is done.
     let refused = f
         .ledger
-        .report(&json!([{"id": "T1", "status": "waiting", "outcome": "Button is 44pt now. Waiting on the owner to try it."}]))
+        .report(&json!([{"id": "T1", "status": "waiting", "why": "Button is 44pt now", "need": "Waiting on the owner to try it."}]))
         .unwrap_err();
     assert!(refused.contains("report it done"), "{refused}");
+    // Waiting needs the exact reason and the exact ask; without them the agent keeps going.
+    let vague = f
+        .ledger
+        .report(&json!([{"id": "T2", "status": "waiting", "outcome": "Need input from the owner"}]))
+        .unwrap_err();
+    assert!(vague.contains("\"why\"") && vague.contains("keep going"), "{vague}");
     assert!(hive_tasks::waits_for_a_try("Waiting on the owner to test the keyboard's --test mode on the webcam"));
     assert!(!hive_tasks::waits_for_a_try("Needs the owner's yes to install it on the iPhone"));
     assert!(!hive_tasks::waits_for_a_try("Needs the owner to check their email for the sign-in code"));
     f.ledger
         .report(&json!([
             {"id": "T1", "status": "done", "outcome": "Button now 44pt and tappable", "evidence": "commit abc123"},
-            {"id": "T2", "status": "waiting", "outcome": "Asked which footer link is wrong"}
+            {"id": "T2", "status": "waiting", "why": "The page has three footer links and the ask names none", "need": "Say which footer link is wrong"}
         ]))
         .unwrap();
     assert!(
@@ -138,6 +144,10 @@ fn a_message_is_saved_split_reported_and_only_then_lets_the_agent_stop() {
 
     let board = f.ledger.board(None).unwrap();
     assert_eq!(board["needs_you"][0]["id"], "T2");
+    assert_eq!(
+        board["needs_you"][0]["outcome"],
+        "Stopped because The page has three footer links and the ask names none. Needs from you: Say which footer link is wrong"
+    );
     assert_eq!(
         board["needs_you"][0]["worth_asking"], true,
         "low value, 45 minutes"

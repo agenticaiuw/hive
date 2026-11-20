@@ -2,7 +2,9 @@
 //! controller app (the WebDriverAgent relay app, WebDriverAgentRunner-Runner), which keeps a connection open to a
 //! Cloudflare Worker; this asks that Worker. `PHONE_RELAY` is the relay's folder: `endpoint.txt` has
 //! its address, `private/secrets.json` its CONTROL_TOKEN (read when needed, never printed or passed
-//! on a command line).
+//! on a command line). Without it, a phone running Hive Phone (mobile/relay) is reached through the
+//! board's own relay (cloud/tasks/phone.js, `<board>/v1/phone`), with the board key in this Mac's
+//! cloud config (~/.config/hive/tasks.json, or `HIVE_TASKS_CLOUD`), read the same way.
 
 use serde_json::{json, Value};
 use std::ffi::{CStr, CString};
@@ -10,6 +12,9 @@ use std::fmt;
 use std::sync::Mutex;
 
 pub const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), open the WebDriverAgent relay app (WebDriverAgentRunner-Runner), then try again.";
+/// The same through the board's relay, where the phone runs Hive Phone.
+pub const HIVE_PHONE_OFFLINE: &str =
+    "The iPhone isn't connected to Hive. On the iPhone (unlocked), open Hive Phone, then try again.";
 
 /// press_home on a locked iPhone (see [`Phone::home`]); it's also the line in Agent.log and the
 /// session journal (the task's error event).
@@ -72,6 +77,8 @@ struct State {
 pub struct Phone {
     pub folder: String,
     pub base: String,
+    /// This Mac's cloud config, when the phone is reached through the board's relay.
+    pub cloud: Option<String>,
     transport: Box<dyn Transport>,
     state: Mutex<State>,
 }
@@ -86,7 +93,7 @@ fn strerror(e: &std::io::Error) -> String {
 }
 
 impl Phone {
-    /// `folder`, else `PHONE_RELAY`. `PhoneError` when it isn't set up.
+    /// `folder`, else `PHONE_RELAY`, else the board's relay. `PhoneError` when none is set up.
     pub fn new(folder: Option<&str>) -> Result<Phone, PhoneError> {
         Phone::with_transport(folder, Box::new(CoreTransport))
     }
@@ -100,7 +107,16 @@ impl Phone {
             .or_else(|| std::env::var("PHONE_RELAY").ok())
             .unwrap_or_default();
         if folder.is_empty() {
-            return err("Phone control isn't set up: PHONE_RELAY (in .env) isn't set.");
+            if let Some((base, cloud)) = board_relay() {
+                return Ok(Phone {
+                    folder,
+                    base,
+                    cloud: Some(cloud),
+                    transport,
+                    state: Mutex::new(State::default()),
+                });
+            }
+            return err("Phone control isn't set up: PHONE_RELAY (in .env) isn't set, and this Mac has no cloud board (~/.config/hive/tasks.json).");
         }
         let base = match std::fs::read_to_string(format!("{folder}/endpoint.txt")) {
             Ok(text) => text.trim().trim_end_matches('/').to_string(),
@@ -114,12 +130,17 @@ impl Phone {
         Ok(Phone {
             folder,
             base,
+            cloud: None,
             transport,
             state: Mutex::new(State::default()),
         })
     }
 
     fn secrets(&self) -> Option<Value> {
+        if let Some(cloud) = &self.cloud {
+            let config: Value = serde_json::from_slice(&std::fs::read(cloud).ok()?).ok()?;
+            return Some(json!({"token": config["token"]}));
+        }
         let bytes = std::fs::read(format!("{}/private/secrets.json", self.folder)).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
@@ -145,7 +166,7 @@ impl Phone {
         sensitive: bool,
     ) -> Result<Value, PhoneError> {
         let session = self.state.lock().unwrap().session.clone();
-        let payload = json!({"operation": operation, "folder": self.folder, "base": self.base,
+        let payload = json!({"operation": operation, "folder": self.folder, "base": self.base, "cloud": self.cloud,
                              "session": session, "path": path, "method": method,
                              "body": body, "sensitive": sensitive});
         let Some(mut response) = self.transport.call(&payload) else {
@@ -437,6 +458,26 @@ impl Phone {
     }
 }
 
+/// The board's relay for Hive Phone: `<board>/v1/phone` and the config file its key is in, when
+/// this Mac has a cloud board (`HIVE_TASKS_CLOUD`, else ~/.config/hive/tasks.json, `{"url", "token"}`).
+fn board_relay() -> Option<(String, String)> {
+    let path = std::env::var("HIVE_TASKS_CLOUD")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            hive_common::paths::home()
+                .join(".config/hive/tasks.json")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let url = config["url"].as_str()?.trim().trim_end_matches('/');
+    if url.is_empty() || config["token"].as_str().is_none_or(str::is_empty) {
+        return None;
+    }
+    Some((format!("{url}/v1/phone"), path))
+}
+
 /// Python's `\w` for str patterns: letters, digits and the underscore.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -455,6 +496,7 @@ pub fn status_line() -> (i32, String) {
     };
     match phone.connected() {
         Ok(true) => {}
+        Ok(false) if phone.cloud.is_some() => return (1, HIVE_PHONE_OFFLINE.to_string()),
         Ok(false) => return (1, OFFLINE.to_string()),
         Err(e) => return (1, e.0),
     }

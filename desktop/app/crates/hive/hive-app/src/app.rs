@@ -18,6 +18,8 @@ typed into the app in front when you let go: dictation. Listening and speaking r
 
     hive-agent [--no-speak] [--app]
     hive-agent --task \"make a new note in Notes that says buy milk\"
+    hive-agent --version
+    hive-agent --update
 
   tap fn                   it listens (the microphone opens), continuing the conversation; while
                            you have the mouse and keyboard during a task, it hands them back
@@ -49,7 +51,10 @@ Needs agent-vhid-helper running: ./install.sh has the Mac start it, ./voice.sh s
 and off like fn, and \"@@ listening 1|0\", \"@@ dictating 1|0\" and \"@@ status TEXT\" lines on stdout are
 for its menu bar.
 
---task runs one request and exits (0 when it finished, 1 if not, 130 on Ctrl-C).
+--task runs one request and exits (0 when it finished, 1 if not, 130 on Ctrl-C). --version says which
+release this is (\"dev\" for a build made by hand). Run by Hive.app, it puts in new releases by itself
+while Hive is idle (hive_tasks::update). --update puts the newest release in now, over a build made by
+hand too, so this Mac updates itself from then on; Hive runs it from its next start.
 ";
 
 pub const TASK_USAGE: &str = "Give your Mac or iPhone a task in plain English; Codex does it with the real mouse and keyboard,
@@ -157,6 +162,34 @@ pub fn read_app(agent: Arc<Mutex<Option<Weak<VoiceAgent>>>>) {
 }
 
 /// `hive-agent`'s main.
+/// `hive-agent --update`: the newest Mac release goes in now (hive_tasks::update::now).
+fn update_now() -> i32 {
+    use hive_tasks::update::{self, Outcome};
+    hive_tasks::node::set_kind("mac");
+    let Some(hive) = update::hive_folder() else {
+        eprintln!("hive-agent --update puts a release into the Hive folder it runs from (desktop/app/build/hive-agent).");
+        return 1;
+    };
+    let Some(cloud) = hive_tasks::Cloud::load() else {
+        eprintln!("This Mac isn't connected to a Hive board yet, so there's no release to get.");
+        return 1;
+    };
+    match update::now(&hive, &cloud) {
+        Ok(Outcome::PutIn { from, to }) => {
+            println!("Hive {to} is in (this was {from}); Hive runs it from its next start.");
+            0
+        }
+        Ok(_) => {
+            println!("Hive is on the newest release ({}).", hive_tasks::node::VERSION);
+            0
+        }
+        Err(why) => {
+            eprintln!("Didn't update: {why}");
+            1
+        }
+    }
+}
+
 pub fn main(argv: &[String]) -> i32 {
     // The virtual workspace engine only when it's asked for at launch
     // (AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE=1). Hive.app's workspace build passes AGENT_WORKSPACE_ENGINE by
@@ -166,14 +199,41 @@ pub fn main(argv: &[String]) -> i32 {
     if std::env::var("AGENT_EXPERIMENTAL_VIRTUAL_WORKSPACE").as_deref() != Ok("1") {
         std::env::remove_var("AGENT_WORKSPACE_ENGINE");
     }
+    // The release this build is (HIVE_VERSION when built, "dev" by hand): the updater asks a new
+    // release's agent this before putting it in (hive_tasks::update).
+    if argv.iter().any(|a| a == "--version") {
+        println!("{}", hive_tasks::node::VERSION);
+        return 0;
+    }
+    if argv.iter().any(|a| a == "--update") {
+        return update_now();
+    }
     if let Some(at) = argv.iter().position(|a| a == "--task") {
         return task_main(&argv[at + 1..]);
     }
+    // Every board call from here on says it's this Mac's Hive (hive_tasks::node).
+    hive_tasks::node::set_kind("mac");
     if argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return 0;
     }
     let app = argv.iter().any(|a| a == "--app");
+    // A release the updater just put in that keeps stopping goes back to the one before, and this
+    // agent stops so Hive.app starts that one (hive_tasks::update).
+    let hive = if app { hive_tasks::update::hive_folder() } else { None };
+    let mut confirm_release = None;
+    if let Some(hive) = &hive {
+        match hive_tasks::update::on_start(hive, hive_tasks::node::VERSION) {
+            hive_tasks::update::Start::RolledBack(note) => {
+                hive_common::say(format!("⏏  {note}"));
+                if let Some(cloud) = hive_tasks::Cloud::load() {
+                    hive_tasks::update::report(&cloud, &note);
+                }
+                return 75;
+            }
+            hive_tasks::update::Start::Run { confirm } => confirm_release = confirm,
+        }
+    }
     if let Err(error) = hive_common::settings::load(None) {
         eprintln!("{error}");
         return 1;
@@ -232,12 +292,15 @@ pub fn main(argv: &[String]) -> i32 {
         ),
     };
     let window = Arc::new(Window(hive_sidecars::Captions::new(true)));
+    // The brain is Hive's cloud agent, and this Mac serves its calls (owner, 2026-11-18: "the design
+    // goal is a cloud brain driving the Mac"); the Mac's own Codex is what's left when it can't.
+    let (backend, peer) = crate::cloud_brain::backend(Arc::new(Codex(codex.clone())));
     let agent = VoiceAgent::new(Parts {
         ears,
         voice,
         captions: window.clone(),
         mac: mac.clone(),
-        backend: Arc::new(Codex(codex.clone())),
+        backend,
         host: Arc::new(RealHost),
         console,
         app,
@@ -256,9 +319,43 @@ pub fn main(argv: &[String]) -> i32 {
         move || alive.upgrade().is_some(),
     );
     *target.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&agent));
+    if let Some(hive) = hive {
+        // New releases go in only while Hive is idle: no task, not listening or dictating, nothing
+        // said lately, and no call of the cloud agent's on this Mac lately.
+        let (quiet, peer_quiet) = (Arc::downgrade(&agent), peer.clone());
+        let idle = Box::new(move || {
+            let Some(agent) = quiet.upgrade() else { return false };
+            let said_lately = agent
+                .said
+                .lock()
+                .last()
+                .is_some_and(|(when, _)| crate::util::now() - when < hive_tasks::update::QUIET.as_secs_f64());
+            !agent.tasks.lock().any()
+                && !agent.listening.get()
+                && agent.held.lock().is_none()
+                && agent.dictation.lock().is_none()
+                && !said_lately
+                && peer_quiet.as_ref().is_none_or(|p| p.quiet_for(hive_tasks::update::QUIET))
+        });
+        let stopping = Arc::downgrade(&agent);
+        let restart = Box::new(move |what: &str| {
+            if let Some(agent) = stopping.upgrade() {
+                agent.note_menu_stop(what);
+            }
+            // As the menu's Restart does: Hive.app starts the agent again, now the new one.
+            // SAFETY: kill and getpid have no memory effects.
+            unsafe {
+                libc::kill(libc::getpid(), libc::SIGTERM);
+            }
+        });
+        hive_tasks::update::watch(hive, confirm_release, idle, restart);
+    }
     on_signals(); // a script may start us with Ctrl-C ignored
     agent.run();
     agent.shutdown();
+    if let Some(peer) = peer {
+        peer.stop();
+    }
     codex.stop_server();
     if let Some(sidecar) = sidecar {
         sidecar.close();
