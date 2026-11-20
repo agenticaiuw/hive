@@ -94,7 +94,7 @@ fi
 
 # 4. Codex, and its sign-in.
 mkdir -p "$root/bin"
-ln -sfn "$contents/Helpers/codex/bin/codex" "$root/bin/codex"
+ln -sfn "$contents/Resources/codex/bin/codex" "$root/bin/codex"
 if ! "$root/bin/codex" login status >/dev/null 2>&1; then
   step "Sign in to ChatGPT in the browser window that opened, for Codex"
   "$root/bin/codex" login </dev/null

@@ -12,7 +12,9 @@
 //     first-open.sh               fills the Hive folder in Hive's data folder from all this
 //     VERSION                     the release's version and the voice files' hash
 //   Contents/Helpers/uv        gets Python and the voice packages on first open
-//   Contents/Helpers/codex/    the owner's Codex (its native build: bin/codex and what it brings)
+//   Contents/Resources/codex/  the owner's Codex (its native build: bin/codex and what it brings; in
+//                              Resources, since Helpers may hold only signed programs and it brings a
+//                              codex-package.json it reads next to them)
 //
 //   node tools/carry.mjs <Hive.app> --release <mac release file> --source <export of the commit>
 //                        [--uv <uv>] [--codex <folder of codex's native build>]
@@ -88,8 +90,9 @@ export function carry({ app, release, source, uv, codex }) {
   mkdirSync(helpers, { recursive: true });
   cpSync(realpathSync(uv), join(helpers, 'uv'));
   chmodSync(join(helpers, 'uv'), 0o755);
-  rmSync(join(helpers, 'codex'), { recursive: true, force: true });
-  cpSync(codex, join(helpers, 'codex'), { recursive: true, dereference: true });
+  const codexAt = join(contents, 'Resources', 'codex');
+  rmSync(codexAt, { recursive: true, force: true });
+  cpSync(codex, codexAt, { recursive: true, dereference: true });
   return { version, files: files.length + voice.length, python };
 }
 
