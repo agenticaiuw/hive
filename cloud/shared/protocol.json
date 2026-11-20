@@ -1,0 +1,4 @@
+{
+  "protocol": 1,
+  "about": "The board's routes as Hive's nodes see them (cloud/tasks/nodes.js PROTOCOL). Every node carries its own copy; cloud/tests/nodes.test.mjs checks they all match this."
+}

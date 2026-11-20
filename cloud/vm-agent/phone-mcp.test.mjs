@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Phone, answer, visibleElements, pngSize } from './phone-mcp.mjs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { HIVE_PHONE_DOWN, Phone, answer, relayConfig, visibleElements, pngSize } from './phone-mcp.mjs';
 
 const XML = `<?xml version="1.0"?><AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Clock" label="Clock" visible="true" x="0" y="0" width="390" height="844">
 <XCUIElementTypeButton type="XCUIElementTypeButton" name="Add" label="Add" enabled="true" visible="true" x="340" y="50" width="40" height="40"/>
@@ -83,4 +86,35 @@ test('tools/list has the phone tools the guides name', async () => {
   const out = await answer(new Phone({ url: 'https://relay.example', token: 'k' }), { id: 4, method: 'tools/list' });
   const names = out.result.tools.map(t => t.name);
   for (const name of ['authenticate', 'open_app', 'screenshot', 'tap', 'elements', 'type_text', 'press_home']) assert.ok(names.includes(name));
+});
+
+test("each phone call takes the phone's turn, so two tasks never tap it at once", async () => {
+  const used = [];
+  const turn = { use: async fn => { used.push('take'); try { return await fn(); } finally { used.push('give'); } } };
+  const { fetcher } = fakeRelay({ 'POST /agent/unlock-now': () => { used.push('call'); return [200, { unlocked: true }]; } });
+  const phone = new Phone({ url: 'https://relay.example', token: 'k' }, fetcher);
+  await answer(phone, { id: 9, method: 'tools/call', params: { name: 'authenticate', arguments: {} } }, turn);
+  assert.deepEqual(used.slice(0, 2), ['take', 'call']);
+  assert.equal(used.at(-1), 'give');
+  const listed = await answer(phone, { id: 10, method: 'tools/list' }, turn);
+  assert.ok(listed.result.tools.length);
+  assert.equal(used.filter(u => u === 'take').length, 1, 'listing the tools takes no turn');
+});
+
+test("the phone is reached through the board, unless this VM has a relay of its own", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'phone-relay-'));
+  const board = () => ({ url: 'https://board.example', token: 'machine-token' });
+  const viaBoard = relayConfig(join(dir, 'phone-relay.json'), board);
+  assert.deepEqual(viaBoard, { url: 'https://board.example/v1/phone', token: 'machine-token', down: HIVE_PHONE_DOWN });
+  writeFileSync(join(dir, 'phone-relay.json'), JSON.stringify({ url: 'https://relay.example/', token: 'relay-key' }));
+  const own = relayConfig(join(dir, 'phone-relay.json'), board);
+  assert.equal(own.url, 'https://relay.example');
+  assert.equal(own.token, 'relay-key');
+  rmSync(dir, { recursive: true, force: true });
+
+  // Through the board, a phone that isn't connected is Hive Phone not being open, said so.
+  const { calls, fetcher } = fakeRelay({ 'GET /v1/phone/api/status': [503, { error: "phone offline: Hive Phone isn't connected" }] });
+  const phone = new Phone(viaBoard, fetcher);
+  await assert.rejects(phone.wda('/status'), (error) => error.message === HIVE_PHONE_DOWN);
+  assert.equal(calls[0].auth, 'Bearer machine-token');
 });

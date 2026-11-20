@@ -25,12 +25,15 @@
 //
 // The board's address and token are root's hive-tasks config (/root/.config/hive/tasks.json), read
 // with sudo like Codex is run; nothing of them is written anywhere else.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { serveDevices } from './devices.mjs';
+import { nodeHeaders } from './version.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -43,11 +46,14 @@ export const MODELS = {
 };
 export const PLANNER = { model: 'gpt-6.1-terra', effort: 'low' };
 const RATINGS = Object.keys(MODELS);
-const KINDS = ['screen', 'answer', 'code'];
+const KINDS = ['screen', 'mac', 'answer', 'code'];
 const MOST_TASKS = 8;
 /** Repositories Hive's cloud agent changes code in: project → origin (the dream's deploy key pushes to it). */
 export const REPOS = { hive: 'git@github.com:agenticaiuw/hive.git' };
 const POLL_MS = 5000;
+// Requests taken at once, and tasks working at once across all of them (each is a Codex run).
+const MOST_REQUESTS = Number(process.env.HIVE_MOST_REQUESTS) || 3;
+const MOST_RUNNING = Number(process.env.HIVE_MOST_TASKS) || 4;
 
 /** The model and effort for a planned task: its rating's, and never less than `hard` for code. */
 export function pick(task) {
@@ -62,12 +68,15 @@ export const PLAN_GUIDE = `You are Hive's orchestrator. The owner sent the instr
  "tasks": [{"title": "<one line, an imperative>", "quote": "<the owner's exact words for this task>",
             "brief": "<what the agent doing it must do and how to tell it is done, in a few sentences>",
             "folder": "<the part of the project it belongs to, or empty>",
-            "kind": "screen|answer|code", "difficulty": "easy|normal|hard|hardest",
-            "minutes": <estimate>, "value": "low|medium|high"}]}
-kind: screen = done in a web browser (signing in, reading or filling pages, sending as the owner); answer = only
-needs an answer or a lookup; code = changes code in a repository.
+            "kind": "screen|mac|answer|code", "difficulty": "easy|normal|hard|hardest",
+            "minutes": <estimate>, "value": "low|medium|high", "needs": [<task numbers>]}]}
+kind: screen = done in a web browser (signing in, reading or filling pages, sending as the owner); mac = done on the
+owner's own Mac (its apps, its files, what's on its screen); answer = only needs an answer or a lookup; code = changes
+code in a repository. An instruction said on the owner's Mac about "this", "here" or their screen is about the Mac.
 difficulty: easy = one quick lookup or step; normal = a few steps; hard = many steps or real judgment;
 hardest = long, open-ended or high-stakes work. Rate honestly: the rating picks the agent's model.
+needs: the numbers (1 for the first task in your list) of earlier tasks this one can't start before, because it uses
+what they find or make; [] when it stands alone. Tasks that need nothing run at the same time.
 If the instruction starts "For <project> › <folder>: ", every task is in that project and folder.
 Don't add tasks the owner didn't ask for, and keep their words in quote exactly.`;
 
@@ -78,7 +87,10 @@ export function parsePlan(answer) {
   if (start < 0 || end <= start) throw new Error("the planner didn't answer with JSON");
   const plan = JSON.parse(answer.slice(start, end + 1));
   const line = (value, most) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, most);
-  const tasks = (Array.isArray(plan.tasks) ? plan.tasks : []).slice(0, MOST_TASKS).map(t => ({
+  const given = (Array.isArray(plan.tasks) ? plan.tasks : []).slice(0, MOST_TASKS);
+  const tasks = given.map((t, i) => ({
+    at: i + 1,
+    needs: (Array.isArray(t.needs) ? t.needs : []).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= i),
     title: line(t.title, 200),
     quote: line(t.quote, 1000),
     brief: String(t.brief ?? '').trim().slice(0, 4000),
@@ -89,6 +101,12 @@ export function parsePlan(answer) {
     value: ['low', 'medium', 'high'].includes(t.value) ? t.value : 'medium',
   })).filter(t => t.title || t.quote);
   if (!tasks.length) throw new Error('the plan has no tasks');
+  // needs as numbers of the tasks kept (1 for the first), only earlier ones, so there are no loops.
+  const kept = new Map(tasks.map((t, i) => [t.at, i + 1]));
+  for (const t of tasks) {
+    t.needs = [...new Set(t.needs.map(n => kept.get(n)).filter(Boolean))].sort((a, b) => a - b);
+    delete t.at;
+  }
   return { project: line(plan.project, 60).toLowerCase(), tasks };
 }
 
@@ -101,10 +119,19 @@ export function scopeOf(words) {
 /** What the subagent is told: the task, the owner's words, their rules, and every memory of its folder in full. */
 export function taskBrief(task, request, folder, rules = []) {
   const parts = [task.brief || task.title, `The owner's words: "${task.quote || request.text}"`];
+  // The planner's quote is a piece of the message; the rest of it (text to post word for word, say) must
+  // still reach the task, so the whole message always comes along.
+  if (task.quote && request.text && task.quote.trim() !== request.text.trim()) {
+    parts.push(`The whole message this came from, word for word (any exact words in it are used exactly as written):\n${request.text}`);
+  }
   if (request.from === 'siri') {
     parts.push('The owner said this to Siri on their iPhone, likely from across the room through AirPods, so do it on the ' +
       'iPhone with the phone tools: if it is locked, unlock it first with authenticate (it types the saved passcode itself), ' +
       'then do the task there and say what you did.');
+  } else if (request.from === 'mac') {
+    parts.push("The owner said this to Hive on their Mac, where they are now. For anything on their computer (its apps, " +
+      'its files, what is on its screen; "this", "here" and "my screen" mean the Mac\'s) use the mac tools, which drive ' +
+      "that Mac through the cloud; use the VM's screen only for web work the Mac isn't needed for.");
   } else if (request.from && request.from !== 'web') parts.push(`The owner sent this from their ${request.from}.`);
   if (rules.length) {
     parts.push(`The owner's standing rules for this project; follow every one:\n${rules.map(r => {
@@ -166,43 +193,108 @@ with JSON only, no prose, in this shape:
  "path": "<the page's path the rule is for, like /, or empty for every page on this site>",
  "hide": ["<CSS selector of something to hide>", ...],
  "keep": [{"items": "<CSS selector matching every one of a list's items>", "text": ["<text an item to keep contains>", ...]}],
- "css": "<extra CSS, or empty>"}
+ "css": "<extra CSS, or empty>",
+ "go": "<a path on this site to open instead of this page, or empty>",
+ "add": [{"after": "<CSS selector of the element the link goes after (or \"before\" instead)>", "text": "<the link's words>", "href": "<a path on this site>"}]}
 "keep" hides each matching item that contains none of its texts (case doesn't matter), so a list shows only what the owner
-wants. Use only selectors you can see in the outline, preferring ids and stable class names over generated ones, and
-never hide the page's main content area itself. Decide which items to keep from what the outline shows (course names,
-terms, dates). If the owner wants the page back the way it was, answer {"off": true} and nothing else.`;
+wants. Prefer selectors you can see in the outline, ids and stable class names over generated ones, and never hide the
+page's main content area itself. The outline of a long page is cut short (repeated items are summed up in one line
+each), so on a well-known site (YouTube, Canvas, Reddit, ...) you may also use selectors and attributes you know it
+uses, like ytd-rich-shelf-renderer[is-shorts]. Decide which items to keep from what the outline shows (course names,
+terms, dates). Frames inside the page (iframe) are not in the outline and a rule's CSS can't reach into them, but it can
+style the iframe element itself. Something the owner puts in full screen is drawn above the page, outside the styles
+of the elements around it, so style the full-screen element itself too, with its own rule for each of :fullscreen and
+:-webkit-full-screen (a selector list with one the browser doesn't know is dropped whole).
+"go" sends this page on to another page of the same site the moment it opens ("open YouTube on my subscriptions":
+path "/", go "/feed/subscriptions"); it needs the rule's path, and it also works when the site changes pages without
+loading one. Each "add" puts a link to a page of the same site next to an element: <a class="hive-added"> holding only
+its text, in the colour and font of the words in the element it's next to. Style the rest in "css" (a.hive-added, or
+a.hive-added[href*="..."] for one of several: size, spacing, layout) so it sits like the items around it, its icon
+drawn with ::before (an emoji, or an inline SVG as a data: URL). Don't use the site's CSS variables (they change and
+may not exist); set color or font only with !important, when the owner asked for them. Leave "go" and "add" out when
+the owner didn't ask to go somewhere or for something new on the page.
+When what they asked needs rules for different paths (a sidebar change on every page, and a page that sends you on),
+answer {"rules": [<rule>, <rule>]}, each in the shape above with its own title and path, one per path.
+The changes already on for this site are listed below. A new rule for the same path replaces the one there, so when the
+owner adds to or adjusts one of them, write the whole rule: what it already does plus the change.
+If the owner wants the page back the way it was, answer {"off": true} and nothing else. If you can't write a rule that
+does what they asked, answer {"cannot": "<the exact reason, in a sentence the owner understands>"} and nothing else.`;
 
-/** A rule from the model's answer: only the known fields, each the right type. */
+/**
+ * The rules in the model's answer, only the known fields, each the right type: {off}, {cannot}, or
+ * {rules: [{title, path, rule}, ...]}. An answer can hold one rule or {"rules": [...]}, one per path
+ * (YouTube's sidebar on every page and "open on Subscriptions" for / are two).
+ */
 export function parsePageRule(answer) {
   const match = /\{[\s\S]*\}/.exec(String(answer || ''));
   if (!match) throw new Error('the answer had no JSON');
   const value = JSON.parse(match[0]);
   if (value.off === true) return { off: true };
-  const strings = list => (Array.isArray(list) ? list.map(x => String(x).trim()).filter(Boolean).slice(0, 60) : []);
-  const rule = {
-    hide: strings(value.hide),
-    keep: (Array.isArray(value.keep) ? value.keep : [])
-      .map(k => ({ items: String(k?.items || '').trim(), text: strings(k?.text) }))
-      .filter(k => k.items && k.text.length).slice(0, 10),
-    css: String(value.css || '').slice(0, 20000),
-  };
-  if (!rule.hide.length && !rule.keep.length && !rule.css.trim()) throw new Error('the rule changes nothing');
-  return { title: String(value.title || 'Page change').trim().slice(0, 120), path: String(value.path ?? '').trim().slice(0, 500), rule };
+  if (typeof value.cannot === 'string' && value.cannot.trim()) return { cannot: value.cannot.trim().slice(0, 500) };
+  const rules = (Array.isArray(value.rules) ? value.rules.slice(0, 5) : [value]).map(ruleFrom);
+  if (!rules.length) throw new Error('the rule changes nothing');
+  if (new Set(rules.map(r => r.path)).size < rules.length) throw new Error('two rules for the same path: make them one');
+  return { rules };
 }
 
-/** A request asked on a web page: one model call writes the page's rule, and the board keeps it. */
+function ruleFrom(value) {
+  const strings = list => (Array.isArray(list) ? list.map(x => String(x).trim()).filter(Boolean).slice(0, 60) : []);
+  const rule = {
+    hide: strings(value?.hide),
+    keep: (Array.isArray(value?.keep) ? value.keep : [])
+      .map(k => ({ items: String(k?.items || '').trim(), text: strings(k?.text) }))
+      .filter(k => k.items && k.text.length).slice(0, 10),
+    css: String(value?.css || '').slice(0, 20000),
+  };
+  const go = String(value?.go || '').trim().slice(0, 500);
+  const add = (Array.isArray(value?.add) ? value.add : []).map(a => {
+    const where = a?.after ? 'after' : 'before';
+    return { [where]: String(a?.[where] || '').trim(), text: String(a?.text || '').trim().slice(0, 80), href: String(a?.href || '').trim().slice(0, 500) };
+  }).filter(a => (a.after || a.before) && a.text && a.href).slice(0, 10);
+  if (go) rule.go = go;
+  if (add.length) rule.add = add;
+  const path = String(value?.path ?? '').trim().slice(0, 500);
+  if (go && !path) throw new Error('"go" needs the path of the page it sends on');
+  if (!rule.hide.length && !rule.keep.length && !rule.css.trim() && !go && !add.length) throw new Error('the rule changes nothing');
+  return { title: String(value?.title || 'Page change').trim().slice(0, 120), path, rule };
+}
+
+/** What the model is given for a page request: the guide, the page, what the owner said, the site's rules on now. */
+export function pagePrompt(request, page, current = []) {
+  const on = current.length
+    ? current.map(r => `- rule ${r.id}, "${r.title}", path ${JSON.stringify(r.path || '')}${r.path ? '' : ' (every page)'}: ${JSON.stringify(r.rule)}`).join('\n')
+    : '(none)';
+  return `${PAGE_GUIDE}\n\nThe page: ${page.url}\nIts title: ${page.title || ''}\nThe owner said: ${request.text}\n\n` +
+    `The changes already on for this site:\n${on}\n\nThe page's outline (tag#id.classes "text"):\n${page.outline || '(none)'}\n`;
+}
+
+/** A request asked on a web page: a model call writes the page's rule (one retry), and the board keeps it. */
 export async function handlePage(request, { board, ask, log = () => {} }) {
   const page = request.page;
   const url = new URL(page.url);
   const site = url.hostname.replace(/^www\./, '');
   log(`R${request.id} on ${site}${url.pathname}: ${request.text}`);
   await board('/v1/requests/update', { id: request.id, status: 'working', project: 'web' });
+  // What's already on for the site, so "make it work in full screen as well" adds to the rule it means.
+  const { rules: current = [] } = await board(`/v1/page-rules?host=${encodeURIComponent(site)}`).catch(() => ({}));
+  const prompt = pagePrompt(request, page, current);
   let made;
   try {
-    made = parsePageRule(await ask(`${PAGE_GUIDE}\n\nThe page: ${page.url}\nIts title: ${page.title || ''}\n` +
-      `The owner said: ${request.text}\n\nThe page's outline (tag#id.classes "text"):\n${page.outline || '(none)'}\n`, MODELS.normal));
+    let answer = await ask(prompt, MODELS.normal);
+    try {
+      made = parsePageRule(answer);
+    } catch (error) {
+      // Once more, told what was wrong with the answer, before the owner hears it didn't work.
+      answer = await ask(`${prompt}\nYour last answer was refused (${error.message}):\n${String(answer).slice(0, 2000)}\n` +
+        'Answer again: a rule that changes the page, or {"cannot": "<the exact reason>"}.\n', MODELS.normal);
+      made = parsePageRule(answer);
+    }
   } catch (error) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't write the page change: ${error.message}` });
+    return;
+  }
+  if (made.cannot) {
+    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't change the page: ${made.cannot}` });
     return;
   }
   if (made.off) {
@@ -210,11 +302,12 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
     await board('/v1/requests/update', { id: request.id, status: 'done', outcome: `${site} is back to normal (${off} change${off === 1 ? '' : 's'} off).` });
     return;
   }
-  const { id } = await board('/v1/page-rules', { host: site, path: made.path, title: made.title, rule: made.rule, request: request.id });
-  await board('/v1/requests/update', {
-    id: request.id, status: 'done',
-    outcome: `${made.title}: on ${site}${made.path || ' (every page)'} from now on (page rule ${id}).`,
-  });
+  const saved = [];
+  for (const r of made.rules) {
+    const { id } = await board('/v1/page-rules', { host: site, path: r.path, title: r.title, rule: r.rule, request: request.id });
+    saved.push(`${r.title}: on ${site}${r.path || ' (every page)'} from now on (page rule ${id}).`);
+  }
+  await board('/v1/requests/update', { id: request.id, status: 'done', outcome: saved.join(' ') });
 }
 
 /**
@@ -227,8 +320,11 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
 const MOST_UNSENT = 300;
 const kindOf = line => (/^→|^\$/.test(line) ? 'action' : /^💬/.test(line) ? 'say' : /^✅/.test(line) ? 'done'
   : /^❌|^✗/.test(line) ? 'failed' : '');
-export function runSender(board, { request, task, agent = 'cloud', title = '' }, { every = 2000, log = () => {}, now = () => Math.floor(Date.now() / 1000) } = {}) {
-  const run = { machine: 'cloud', run: String(request * 100 + task), agent, title, request, task };
+export function runSender(board, { request, task, run: name, agent = 'cloud', title = '' }, { every = 2000, log = () => {}, now = () => Math.floor(Date.now() / 1000) } = {}) {
+  // A job started on the VM some other way (hive-task.mjs by itself) names its own run and has no request.
+  const run = request
+    ? { machine: 'cloud', run: String(request * 100 + task), agent, title, request, task }
+    : { machine: 'cloud', run: String(name), agent, title };
   let unsent = [];
   let count = 0;
   let status = null;
@@ -247,7 +343,7 @@ export function runSender(board, { request, task, agent = 'cloud', title = '' },
         try {
           await board('/v1/runs', { ...run, ...(last ? { status } : {}), steps });
         } catch (error) {
-          log(`couldn't put R${request}'s steps on the board: ${error.message}`);
+          log(`couldn't put ${request ? `R${request}` : run.run}'s steps on the board: ${error.message}`);
           return;
         }
         const through = steps.at(-1)?.n ?? 0;
@@ -260,10 +356,10 @@ export function runSender(board, { request, task, agent = 'cloud', title = '' },
   };
   flush(); // on the board as working right away
   return {
-    step(line) {
+    step(line, kind) {
       const text = String(line ?? '').trim();
       if (!text) return;
-      unsent.push({ n: ++count, at: now(), kind: kindOf(text), text });
+      unsent.push({ n: ++count, at: now(), kind: kind ?? kindOf(text), text });
       if (unsent.length > MOST_UNSENT) unsent = unsent.slice(-MOST_UNSENT);
       if (!timer) timer = setTimeout(flush, every ?? 2000);
     },
@@ -275,16 +371,86 @@ export function runSender(board, { request, task, agent = 'cloud', title = '' },
   };
 }
 
+/** Which task a tool server is working for, on the VM (hive-task.mjs HIVE_TASK_LABEL). */
+export const labelOf = (request, key) => `R${request}-${key}`;
+
+/** A task whose needs didn't get done: not started, and exactly why. */
+export function unmetOutcome(unmet) {
+  const names = unmet.map(t => `«${t.title}»`).join(' and ');
+  const review = unmet.filter(t => t.status === 'waiting' && t.branch);
+  if (review.length === unmet.length) {
+    return { status: 'waiting', outcome: `Not started: it builds on ${names}, waiting for your review on ${review.map(t => `branch ${t.branch}`).join(' and ')}. Merge ${review.length === 1 ? 'it' : 'them'} and it can run.` };
+  }
+  const waiting = unmet.filter(t => t.status === 'waiting');
+  if (waiting.length === unmet.length) {
+    return { status: 'waiting', outcome: `Not started: it builds on ${names}, which ${unmet.length === 1 ? 'waits' : 'wait'} for a coding agent on the Mac.` };
+  }
+  return { status: 'blocked', outcome: `Not started: it needs ${names} first, which stopped before ${unmet.length === 1 ? 'it' : 'they'} finished.` };
+}
+
+/** At most `size` at a time; the rest wait their turn, first come first served. */
+export class Slots {
+  constructor(size) {
+    this.size = Math.max(1, size);
+    this.used = 0;
+    this.line = [];
+  }
+
+  async with(fn) {
+    if (this.used < this.size) this.used += 1;
+    else await new Promise(resolve => this.line.push(resolve)); // handed its slot by the one that ends
+    try {
+      return await fn();
+    } finally {
+      const next = this.line.shift();
+      if (next) next(); else this.used -= 1;
+    }
+  }
+}
+
 export async function handle(request, deps) {
   if (request.page?.url && deps.ask) return handlePage(request, deps);
+  const stopping = watchStop(request, deps);
+  try {
+    return await handleWork(request, deps, stopping.signal);
+  } finally {
+    stopping.end();
+  }
+}
+
+export const STOPPED = 'Stopped by the owner.';
+
+/**
+ * The owner stopping a request (POST /v1/requests/stop: the x on Hive's window on the Mac, whose
+ * agent thinks here), looked for every few seconds while it runs: its agents are stopped and its
+ * tasks not started yet don't start.
+ */
+export function watchStop(request, { board, log = () => {}, stopEvery = 4000 }) {
+  const controller = new AbortController();
+  const timer = setInterval(async () => {
+    const state = await board(`/v1/requests/state?id=${request.id}`).catch(() => null);
+    if (state?.request?.stop_at && !controller.signal.aborted) {
+      log(`R${request.id}: the owner stopped it`);
+      controller.abort();
+    }
+  }, stopEvery);
+  timer.unref?.();
+  return { signal: controller.signal, end: () => clearInterval(timer) };
+}
+
+async function handleWork(request, deps, signal) {
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
   log(`R${request.id}: ${request.text}`);
   let planned;
   try {
-    planned = parsePlan(await plan(request.text));
+    planned = parsePlan(await plan(request.from === 'mac' ? `(Said to Hive on the owner's Mac.) ${request.text}` : request.text));
   } catch (error) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't plan it: ${error.message}` });
+    return;
+  }
+  if (signal.aborted) {
+    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: STOPPED });
     return;
   }
   const project = (request.project || scope.project || planned.project || '').toLowerCase();
@@ -293,15 +459,16 @@ export async function handle(request, deps) {
   // Folders and their memories, read once a request. A folder the planner names is used only if it
   // already exists (the owner makes folders; a guess shouldn't), the one the owner sent from always.
   const folders = new Map();
-  const folderOf = async name => {
-    if (!name || !project) return null;
+  const folderOf = name => {
+    if (!name || !project) return Promise.resolve(null);
     const key = name.toLowerCase();
     if (!folders.has(key)) {
-      const answer = await board(`/v1/folder?project=${encodeURIComponent(project)}&key=${encodeURIComponent(key)}`);
-      folders.set(key, {
+      const reading = board(`/v1/folder?project=${encodeURIComponent(project)}&key=${encodeURIComponent(key)}`).then(answer => ({
         ...answer.folder, name: answer.folder?.name || name, project, memories: answer.memories ?? [],
         exists: Boolean(answer.folder?.created_at),
-      });
+      }));
+      reading.catch(() => folders.delete(key)); // a failed read is tried again by the next task
+      folders.set(key, reading);
     }
     return folders.get(key);
   };
@@ -323,32 +490,40 @@ export async function handle(request, deps) {
   });
   await board('/v1/requests/update', { id: request.id, status: 'working', project, tasks: tasks.map(row) });
 
-  for (const task of tasks) {
+  // Each task starts once the tasks it needs are done; the rest run side by side (at most `slots` at
+  // a time across every request), and only tasks that need the same device take turns at it.
+  const slots = deps.slots ?? { with: fn => fn() };
+  const update = task => board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
+  const work = async task => {
     const coding = task.kind === 'code';
     if (coding && !(code && REPOS[project])) {
       task.status = 'waiting';
       task.outcome = project && code
         ? `A code change in ${project}: Hive's cloud agent changes code only in ${Object.keys(REPOS).join(', ')}, so it waits for a coding agent on the Mac.`
         : "A code change: it waits for a coding agent on the Mac.";
-      await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
-      continue;
+      await update(task);
+      return;
     }
     task.status = 'active';
-    await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
+    await update(task);
     const folder = await folderOf(task.folder).catch(() => null);
     log(`  T${request.id * 100 + task.key} ${task.title} → ${task.choice.model} (${task.choice.effort})${coding ? ' on code' : ''}`);
     let result;
     const steps = runSender(board, { request: request.id, task: task.key, agent: coding ? 'code' : 'cloud', title: task.title },
       { log, every: deps.stepEvery });
+    const label = labelOf(request.id, task.key);
+    deps.labels?.set(label, { title: task.title, step: steps.step });
     try {
       const brief = taskBrief(task, request, folder, rules);
       result = coding
-        ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key }, steps.step)
-        : await run(brief, task.choice, steps.step);
+        ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key, label, signal }, steps.step)
+        : await run(brief, task.choice, steps.step, { label, title: task.title, signal });
     } catch (error) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
+    } finally {
+      deps.labels?.delete(label);
     }
-    await steps.done(result.ok ? 'done' : 'failed');
+    await steps.done(signal.aborted ? 'stopped' : result.ok ? 'done' : 'failed');
     const files = result.files ?? [];
     task.branch = result.branch && files.length ? result.branch : null;
     const where = task.branch
@@ -363,19 +538,51 @@ export async function handle(request, deps) {
         : outcomeOf(result.report, result.ok ? 'Done.' : `The agent stopped before it finished${where ? ` (${where})` : ''}.`),
       seconds: result.seconds, tokensIn: result.tokensIn, tokensOut: result.tokensOut,
     });
-    await board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
+    if (signal.aborted && task.status !== 'done') Object.assign(task, { status: 'dropped', outcome: STOPPED });
+    await update(task);
     if (folder && task.report) {
       await board('/v1/folders/memory', {
         project, folder: folder.name, kind: 'report', title: `Report: ${task.title}`, body: task.report,
       }).catch(() => {});
     }
+  };
+  const ended = new Map();
+  for (const task of tasks) {
+    ended.set(task.key, (async () => {
+      await Promise.all(task.needs.map(n => ended.get(n)));
+      if (signal.aborted) {
+        Object.assign(task, { status: 'dropped', outcome: STOPPED });
+        await update(task).catch(() => {});
+        return;
+      }
+      const unmet = task.needs.map(n => tasks[n - 1]).filter(t => t.status !== 'done');
+      if (unmet.length) {
+        Object.assign(task, unmetOutcome(unmet));
+        await update(task).catch(() => {});
+        return;
+      }
+      try {
+        await slots.with(() => (signal.aborted
+          ? update(Object.assign(task, { status: 'dropped', outcome: STOPPED }))
+          : work(task)));
+      } catch (error) {
+        log(`  T${request.id * 100 + task.key} failed: ${error.stack || error}`);
+        Object.assign(task, { status: 'blocked', outcome: `The orchestrator hit an error: ${error.message}` });
+        await update(task).catch(() => {});
+      }
+    })());
   }
+  await Promise.all(ended.values());
 
   const done = tasks.filter(t => t.status === 'done').length;
   const left = tasks.filter(t => t.status !== 'done');
   const outcome = left.length
     ? `${done} of ${tasks.length} done; ${left.map(t => `${t.title} (${t.branch ? `${t.status}, on ${t.branch}` : t.status})`).join(', ')}.`
     : tasks.length === 1 ? outcomeOf(tasks[0].report, 'Done.') : `All ${tasks.length} tasks done.`;
+  if (signal.aborted) {
+    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: done ? `${STOPPED.slice(0, -1)} (${done} of ${tasks.length} done).` : STOPPED });
+    return;
+  }
   const failed = tasks.every(t => t.status === 'blocked');
   await board('/v1/requests/update', { id: request.id, status: failed ? 'failed' : 'done', outcome });
 }
@@ -384,7 +591,7 @@ export async function handle(request, deps) {
 
 const CODEX_HOME = process.env.HIVE_CODEX_HOME ?? '/root/.codex-hive';
 
-function boardConfig() {
+export function boardConfig() {
   const text = process.env.HIVE_TASKS_CONFIG
     ? readFileSync(process.env.HIVE_TASKS_CONFIG, 'utf8')
     : execFileSync('sudo', ['-n', 'cat', '/root/.config/hive/tasks.json'], { encoding: 'utf8' });
@@ -393,11 +600,13 @@ function boardConfig() {
   return { url: String(config.url).replace(/\/+$/, ''), token: config.token, machine: config.machine || 'vm' };
 }
 
-function boardClient({ url, token }) {
+// Every call says which VM this is and what code it runs (version.mjs), so the board can tell it
+// when it's on routes the board no longer serves, and the dashboard shows what each node runs.
+export function boardClient({ url, token, machine = 'vm' }) {
   return async (path, body) => {
     const response = await fetch(`${url}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'user-agent': 'hive-orchestrator' },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'user-agent': 'hive-orchestrator', ...nodeHeaders(machine) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });
@@ -436,19 +645,27 @@ function askCodex(prompt, choice) {
 
 /** hive-task.mjs with these arguments and the brief on stdin: whether it finished, its report, time and tokens.
  *  Each line it prints after its first goes to `onStep` as it comes. */
-function runAgent(args, brief, onStep = () => {}) {
+function runAgent(args, brief, onStep = () => {}, label = '', signal = null) {
   const started = Date.now();
   return new Promise(resolve => {
-    const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), ...args], { stdio: ['pipe', 'pipe', 'inherit'] });
+    // Its steps reach the board as this request's run (runSender), so it doesn't post a run of its own.
+    // Its label is whose turn it is when its tool servers ask for the screen or the phone.
+    const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), ...args],
+      { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, HIVE_RUN_SENT: '1', ...(label ? { HIVE_TASK_LABEL: label } : {}) } });
     let workDir = '';
     createInterface({ input: agent.stdout }).on('line', line => {
-      process.stdout.write(`    ${line}\n`);
+      process.stdout.write(`    ${label ? `${label} ` : ''}${line}\n`);
       const match = /^Task (\S+) \(/.exec(line);
       if (match && !workDir) workDir = join(process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state'), 'tasks', match[1]);
       else onStep(line); // "→ click: …", "💬 …", "$ …", "✅ Done.": hive-task.mjs describe()
     });
     agent.stdin.end(JSON.stringify({ text: brief }));
+    // The owner stopped the request: hive-task.mjs stops its Codex and says so on the board.
+    const stop = () => agent.kill('SIGTERM');
+    if (signal?.aborted) stop();
+    else signal?.addEventListener('abort', stop, { once: true });
     agent.on('close', status => {
+      signal?.removeEventListener('abort', stop);
       let events = { report: '', tokensIn: 0, tokensOut: 0 };
       try { events = readEvents(readFileSync(join(workDir, 'events.jsonl'), 'utf8').split('\n')); } catch {}
       resolve({ ok: status === 0, ...events, seconds: Math.round((Date.now() - started) / 1000) });
@@ -457,7 +674,8 @@ function runAgent(args, brief, onStep = () => {}) {
 }
 
 /** One task on the VM's screen, with the model picked for it. */
-const runOnVm = (brief, choice, onStep) => runAgent(['--model', choice.model, '--effort', choice.effort], brief, onStep);
+const runOnVm = (brief, choice, onStep, { label = '', signal = null } = {}) =>
+  runAgent(['--model', choice.model, '--effort', choice.effort], brief, onStep, label, signal);
 
 // Code work lives in root's /var/lib/hive-orchestrator (like Codex, which runs as root): a clone per
 // repository and a worktree per task. The toolchain and the deploy key are the nightly dream's.
@@ -465,26 +683,40 @@ const CODE_ROOT = process.env.HIVE_CODE_ROOT ?? '/var/lib/hive-orchestrator';
 const DREAM_ROOT = '/var/lib/hive-dream';
 const COMMITTER = ['-c', "user.name=Hive's cloud agent", '-c', 'user.email=hive@agent.invalid'];
 
-function asRoot(args) {
-  return execFileSync('sudo', ['-n', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10 * 60_000 }).trim();
+const exec = promisify(execFile);
+const asRoot = async args => (await exec('sudo', ['-n', ...args], { encoding: 'utf8', timeout: 10 * 60_000, maxBuffer: 16 << 20 })).stdout.trim();
+
+// One git job at a time in a repository's clone (fetch, worktrees, commits, pushes), so code tasks
+// side by side don't trip on each other's locks; their agents still work at the same time.
+const repoTurns = new Map();
+function inRepo(repo, fn) {
+  const before = repoTurns.get(repo) ?? Promise.resolve();
+  const mine = before.then(fn, fn);
+  const settled = mine.catch(() => {});
+  repoTurns.set(repo, settled);
+  settled.then(() => { if (repoTurns.get(repo) === settled) repoTurns.delete(repo); });
+  return mine;
 }
 
 /** One code task: a worktree off main, Codex in it with the network off, its change pushed to `branch`. */
-async function codeOnVm(brief, choice, { project, branch, title, request, key }, onStep) {
+async function codeOnVm(brief, choice, { project, branch, title, request, key, label = '', signal = null }, onStep) {
   const repo = join(CODE_ROOT, project);
   const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
   const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
-  try { asRoot(['test', '-d', join(repo, '.git')]); } catch {
-    asRoot(['mkdir', '-p', '-m', '700', CODE_ROOT]);
-    git('clone', '--quiet', REPOS[project], repo);
-  }
-  git('-C', repo, 'fetch', '--quiet', 'origin', 'main');
   const dir = join(CODE_ROOT, 'work', `r${request}-${key}`);
-  try { git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
-  git('-C', repo, 'worktree', 'prune');
-  git('-C', repo, 'worktree', 'add', '--quiet', '-B', branch, dir, 'origin/main');
-  const tmp = join(CODE_ROOT, 'tmp');
-  asRoot(['mkdir', '-p', join(CODE_ROOT, 'target'), join(tmp, 'home'), join(tmp, 'state')]);
+  // Its own home and state, so tasks side by side don't share them.
+  const tmp = join(CODE_ROOT, 'tmp', `r${request}-${key}`);
+  await inRepo(repo, async () => {
+    try { await asRoot(['test', '-d', join(repo, '.git')]); } catch {
+      await asRoot(['mkdir', '-p', '-m', '700', CODE_ROOT]);
+      await git('clone', '--quiet', REPOS[project], repo);
+    }
+    await git('-C', repo, 'fetch', '--quiet', 'origin', 'main');
+    try { await git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
+    await git('-C', repo, 'worktree', 'prune');
+    await git('-C', repo, 'worktree', 'add', '--quiet', '-B', branch, dir, 'origin/main');
+  });
+  await asRoot(['mkdir', '-p', join(CODE_ROOT, 'target'), join(tmp, 'home'), join(tmp, 'state')]);
   const env = {
     HOME: join(tmp, 'home'), AGENT_STATE_DIR: join(tmp, 'state'), HIVE_RECORD: '0',
     CARGO_HOME: `${DREAM_ROOT}/cargo`, RUSTUP_HOME: `${DREAM_ROOT}/rustup`, PATH: `${DREAM_ROOT}/cargo/bin:/usr/local/bin:/usr/bin:/bin`,
@@ -493,26 +725,39 @@ async function codeOnVm(brief, choice, { project, branch, title, request, key },
   try {
     const result = await runAgent(['--code', dir, '--model', choice.model, '--effort', choice.effort,
       '--writable', join(CODE_ROOT, 'target'), '--writable', `${DREAM_ROOT}/cargo`, '--writable', tmp,
-      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])], brief, onStep);
-    if (git('-C', dir, 'status', '--porcelain')) {
-      git('-C', dir, 'add', '-A');
-      git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m',
-        `${title}\n\nHive's cloud agent (${choice.model}, ${choice.effort} effort), for the owner's request R${request}, task T${request * 100 + key}.`);
-    }
-    const files = git('-C', dir, 'diff', '--name-only', 'origin/main', 'HEAD').split('\n').filter(Boolean);
-    if (!files.length) return { ...result, files };
-    git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
-    return { ...result, branch, files };
+      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])], brief, onStep, label, signal);
+    // Stopped by the owner: what it did so far isn't committed or pushed.
+    if (signal?.aborted) return { ...result, ok: false, files: [] };
+    return await inRepo(repo, async () => {
+      if (await git('-C', dir, 'status', '--porcelain')) {
+        await git('-C', dir, 'add', '-A');
+        await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m',
+          `${title}\n\nHive's cloud agent (${choice.model}, ${choice.effort} effort), for the owner's request R${request}, task T${request * 100 + key}.`);
+      }
+      const files = (await git('-C', dir, 'diff', '--name-only', 'origin/main', 'HEAD')).split('\n').filter(Boolean);
+      if (!files.length) return { ...result, files };
+      await git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+      return { ...result, branch, files };
+    });
   } finally {
-    try { git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
+    await inRepo(repo, () => git('-C', repo, 'worktree', 'remove', '--force', dir)).catch(() => {});
+    await asRoot(['rm', '-rf', '--', tmp]).catch(() => {}); // its own scratch home, made above
   }
 }
 
-/** The VM's ledger syncs, which also sends this machine's Codex plan limits (Hive's home among them). */
+/** The VM's ledger syncs, which also sends this machine's Codex plan limits (Hive's home among them).
+ *  One at a time: a request that ends while one runs gets one more after it. */
+let syncing = null;
+let syncAgain = false;
 function syncLedger() {
-  try {
-    execFileSync('sudo', ['-n', 'env', 'HOME=/root', '/root/.local/bin/hive-tasks', 'sync'], { stdio: 'ignore', timeout: 60_000 });
-  } catch {}
+  if (syncing) { syncAgain = true; return syncing; }
+  syncing = (async () => {
+    do {
+      syncAgain = false;
+      await exec('sudo', ['-n', 'env', 'HOME=/root', '/root/.local/bin/hive-tasks', 'sync'], { timeout: 60_000 }).catch(() => {});
+    } while (syncAgain);
+  })().finally(() => { syncing = null; });
+  return syncing;
 }
 
 /*
@@ -567,12 +812,46 @@ async function refreshLimits(board, machine, log) {
   await board('/v1/sync', { machine, limits: [row] }).catch(error => log(`couldn't put the plan limits on the board: ${error.message}`));
 }
 
+const DEVICE_NAMES = { screen: "the VM's screen", phone: "the owner's iPhone", mac: "the owner's Mac" };
+
+/** A device turn's news as a step in the waiting task's run: who it waits for, and when it got it. */
+export function turnStep(labels, label, message) {
+  const own = name => labels.get(String(name ?? '').replace(/ closing$/, ''));
+  const task = own(label);
+  const what = DEVICE_NAMES[message.device] ?? message.device;
+  if (!task) return null;
+  if (message.op === 'queued') {
+    const holder = own(message.holder)?.title ?? message.holder ?? 'another task';
+    const more = message.ahead ? ` (${message.ahead} more ahead of this one)` : '';
+    return { task, text: `⏳ Waiting for ${what}: «${holder}» is using it${more}.` };
+  }
+  if (message.op === 'granted' && message.waited_ms >= 1000) {
+    return { task, text: `Got ${what} after ${Math.round(message.waited_ms / 1000)} s.` };
+  }
+  if (message.op === 'revoked') return { task, text: `Gave ${what} to the task waiting for it; this one waits in line for its next call.` };
+  return null;
+}
+
 async function main(argv) {
   const once = argv.includes('--once');
   const config = boardConfig();
   const board = boardClient(config);
   const log = line => console.log(`${new Date().toISOString()} ${line}`);
-  log(`Hive's orchestrator: taking requests for hive-cloud as ${config.machine}`);
+  log(`Hive's orchestrator: taking requests for hive-cloud as ${config.machine}, up to ${MOST_REQUESTS} at once, ${MOST_RUNNING} tasks working`);
+  // Turns at the screen and the phone, for the tasks' tool servers (devices.mjs).
+  const labels = new Map();
+  const stateDir = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const devices = serveDevices(join(stateDir, 'devices.sock'), {
+    log,
+    onEvent: (label, message) => {
+      const step = turnStep(labels, label, message);
+      if (step) step.task.step(step.text);
+    },
+  });
+  const slots = new Slots(MOST_RUNNING);
+  const deps = { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels };
+  const running = new Map();
   syncLedger();
   let fresh = true;
   let limitsAt = 0;
@@ -582,23 +861,41 @@ async function main(argv) {
       await refreshLimits(board, config.machine, log);
     }
     let request = null;
-    try {
-      ({ request } = await board('/v1/requests/take', { by: config.machine, agent: 'hive-cloud', fresh }));
-      fresh = false;
-    } catch (error) {
-      log(`couldn't reach the board: ${error.message}`);
+    if (running.size < MOST_REQUESTS) {
+      try {
+        ({ request } = await board('/v1/requests/take', { by: config.machine, agent: 'hive-cloud', fresh }));
+        fresh = false;
+      } catch (error) {
+        log(`couldn't reach the board: ${error.message}`);
+      }
     }
     if (request) {
-      await handle(request, { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log }).catch(async error => {
-        log(`R${request.id} failed: ${error.stack || error}`);
-        await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `The orchestrator hit an error: ${error.message}` })
+      const taken = request;
+      // A reply to a request still working here waits for it: it builds on how that one ends.
+      const earlier = taken.follows ? running.get(taken.follows) : null;
+      const going = (async () => {
+        if (earlier) {
+          log(`R${taken.id} follows R${taken.follows}, still working: it starts after it`);
+          await earlier;
+        }
+        await handle(taken, deps);
+      })().catch(async error => {
+        log(`R${taken.id} failed: ${error.stack || error}`);
+        await board('/v1/requests/update', { id: taken.id, status: 'failed', outcome: `The orchestrator hit an error: ${error.message}` })
           .catch(() => {});
+      }).finally(() => {
+        running.delete(taken.id);
+        syncLedger();
       });
-      syncLedger();
+      running.set(taken.id, going);
       continue;
     }
-    if (once) return;
-    await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    if (once && !running.size) {
+      await devices.close();
+      await syncing;
+      return;
+    }
+    await Promise.race([new Promise(resolve => setTimeout(resolve, POLL_MS)), ...running.values()]);
   }
 }
 

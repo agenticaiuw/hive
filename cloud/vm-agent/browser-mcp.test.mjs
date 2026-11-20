@@ -104,7 +104,7 @@ test('it reads the board key from the hive-tasks config, and without one still s
   try {
     const file = join(dir, 'tasks.json');
     writeFileSync(file, JSON.stringify({ url: 'https://board.test/', token: 't', machine: 'vm' }));
-    assert.deepEqual(boardConfig({ HIVE_TASKS_CONFIG: file }), { url: 'https://board.test', token: 't' });
+    assert.deepEqual(boardConfig({ HIVE_TASKS_CONFIG: file }), { url: 'https://board.test', token: 't', machine: 'vm' });
     writeFileSync(file, JSON.stringify({ url: 'https://board.test' }));
     assert.throws(() => boardConfig({ HIVE_TASKS_CONFIG: file }), /no url or token/);
   } finally {

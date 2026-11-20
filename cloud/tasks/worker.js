@@ -6,9 +6,21 @@
 // Tables: cloud/knowledge/migrations/0003_task_board.sql onward (the hive-knowledge D1 database).
 // The dashboard also sends instructions here for Hive's orchestrator in the cloud (/v1/requests), and
 // every node's agent sends what it is doing, step by step, so every dashboard shows it live (/v1/runs).
-// Any node reaches the owner's browsers through here too (/v1/browser/, browser.js).
+// Any node reaches the owner's browsers through here too (/v1/browser/, browser.js), and the owner's
+// knowledge base (/v1/knowledge/, knowledge.js), and Hive's agent in the cloud drives the owner's Macs
+// through here (/v1/mac/, mac.js). Each node says what code it runs on every call, and gets the newest
+// release for it to update to (/v1/nodes, /v1/releases, nodes.js). The owner's iPhone is reached here
+// too: Hive Phone on it keeps a WebSocket open to the board, and agents' calls go down it (/v1/phone/,
+// phone.js).
 
 import { browserRoute } from "./browser.js";
+import { knowledgeRoute } from "./knowledge.js";
+import { macRoute } from "./mac.js";
+import { nodeList, nodeOf, nodesRoute, sawNode, tooOld, versionHeaders } from "./nodes.js";
+import { phoneAllowed, phoneRoute, rememberOrigin } from "./phone.js";
+
+// Hive Phone's relay: one Durable Object per phone (wrangler.jsonc PHONE).
+export { PhoneRelay } from "./phone.js";
 
 const DAY = 86400;
 const YEAR = 365 * DAY;
@@ -23,21 +35,38 @@ for (const path of ["/v1/runs/message", "/v1/runs/messages/take", "/v1/runs/mess
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type",
+  "access-control-allow-headers": "authorization, content-type, x-hive-node, x-hive-version, x-hive-protocol",
+  "access-control-expose-headers": "x-hive-protocol, x-hive-latest",
   "access-control-max-age": "86400",
 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (EXTENSION_PATHS.has(url.pathname)) {
-      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-      const response = await route(request, env, url);
-      const headers = new Headers(response.headers);
-      for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
-      return new Response(response.body, { status: response.status, headers });
+    const extension = EXTENSION_PATHS.has(url.pathname);
+    if (extension && request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    // A node that says what it runs (nodes.js): one on routes the board no longer serves is told so
+    // at once; every answer carries the board's routes and the newest release for that node.
+    const node = nodeOf(request);
+    const refused = tooOld(node, url);
+    const response = refused ?? (await route(request, env, url));
+    // A WebSocket (Hive Phone's, phone.js) goes back as it is: its answer can't be copied.
+    if (response.status === 101) {
+      if (node) await noteNode(request, env, node);
+      return response;
     }
-    return route(request, env, url);
+    if (!extension && !node) return response;
+    const headers = new Headers(response.headers);
+    if (extension) for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
+    if (node) {
+      for (const [k, v] of Object.entries(await versionHeaders(env, node))) headers.set(k, v);
+      if (!refused) {
+        const noted = noteNode(request, env, node);
+        if (ctx?.waitUntil) ctx.waitUntil(noted);
+        else await noted;
+      }
+    }
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
   // Every minute (wrangler.jsonc triggers): stuck tasks get going again without the owner.
   async scheduled(_event, env, ctx) {
@@ -60,6 +89,7 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/requests/take" && request.method === "POST") return await takeRequest(request, env);
       if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
       if (url.pathname === "/v1/requests/state") return await requestState(url, request, env);
+      if (url.pathname === "/v1/requests/stop" && request.method === "POST") return await stopRequest(request, env);
       if (url.pathname === "/v1/runs" && request.method === "POST") return await saveRun(request, env);
       if (url.pathname === "/v1/runs/message" && request.method === "POST") return await messageRun(request, env);
       if (url.pathname === "/v1/tasks/act" && request.method === "POST") return await actOnTask(request, env);
@@ -71,6 +101,10 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/page-rules" && request.method === "POST") return await savePageRule(request, env);
       if (url.pathname === "/v1/page-rules/off" && request.method === "POST") return await pageRuleOff(request, env);
       if (url.pathname.startsWith("/v1/browser/")) return await browserRoute(request, env, url, { machineAllowed, extensionAllowed });
+      if (url.pathname.startsWith("/v1/knowledge/")) return await knowledgeRoute(request, env, url, { machineAllowed });
+      if (url.pathname.startsWith("/v1/mac/")) return await macRoute(request, env, url, { machineAllowed });
+      if (url.pathname.startsWith("/v1/nodes") || url.pathname.startsWith("/v1/releases")) return await nodesRoute(request, env, url, { machineAllowed, anyoneAllowed });
+      if (url.pathname.startsWith("/v1/phone/")) return await phoneRoute(request, env, url, { machineAllowed, allowed });
       if (url.pathname === "/") return await page(request, env);
       return new Response("Not found", { status: 404 });
     } catch (error) {
@@ -307,6 +341,22 @@ async function anyoneAllowed(request, env) {
   return (await allowed(request, env)) || (await extensionAllowed(request, env));
 }
 
+// Writes down what a node runs, for a call that's signed in: a machine as any kind of node, the
+// extension's key only as the extension.
+async function noteNode(request, env, node) {
+  try {
+    const signed = (await machineAllowed(request, env))
+      || (node.kind === "extension" && (await extensionAllowed(request, env)))
+      || (node.kind === "phone" && (await phoneAllowed(request, env)));
+    if (!signed) return;
+    await sawNode(env, node);
+    // The address it was reached by goes into the phone's pairing (phone.js).
+    if (node.kind !== "phone") await rememberOrigin(env, new URL(request.url).origin);
+  } catch {
+    // What a node runs is only shown on the dashboard; a failed write never fails the call.
+  }
+}
+
 // GET /v1/folder?project=hive&key=memory%20retrieval: the folder and every one of its memories.
 async function folder(url, request, env) {
   if (!(await allowed(request, env))) return json({ error: "Not signed in." }, 401);
@@ -400,19 +450,7 @@ async function sendRequest(request, env) {
   const agent = text(body.agent, 40) || "hive-cloud";
   // The device it was sent from (mac, phone, extension, web, siri) is the message's session.
   const from = text(body.from, 40) || "web";
-  const { project, folder } = scopeOf(words);
-  const at = now();
-  const [made] = await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at)
-       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3 FROM board_requests RETURNING id`,
-    ).bind(agent, folder || null, at),
-    env.DB.prepare(
-      `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
-       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', ?4, ?1, ?2, ?3, 1, NULL, ?3)`,
-    ).bind(project.toLowerCase(), words, at, from),
-  ]);
-  const id = made.results[0].id;
+  const id = await newRequest(env, { words, agent, from, at: now() });
   // Asked on a web page (the browser extension): the page goes along for the agent to read.
   const page = body.page && typeof body.page === "object" ? body.page : null;
   const pageUrl = page ? text(page.url, 2000) : "";
@@ -424,6 +462,22 @@ async function sendRequest(request, env) {
     "SELECT COUNT(*) AS n FROM board_requests WHERE status IN ('queued', 'planning', 'working') AND id < ?1",
   ).bind(id).first();
   return json({ ok: true, id, ahead: ahead.n });
+}
+
+// A new request to Hive's agent on the VM, with its words as a board message: its id.
+async function newRequest(env, { words, agent, from, at }) {
+  const { project, folder } = scopeOf(words);
+  const [made] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO board_requests (id, agent, folder, status, created_at, updated_at)
+       SELECT COALESCE(MAX(id), 0) + 1, ?1, ?2, 'queued', ?3, ?3 FROM board_requests RETURNING id`,
+    ).bind(agent, folder || null, at),
+    env.DB.prepare(
+      `INSERT INTO board_messages (machine, id, harness, session, project, text, said_at, times, split_at, synced_at)
+       VALUES ('cloud', (SELECT MAX(id) FROM board_requests), 'hive', ?4, ?1, ?2, ?3, 1, NULL, ?3)`,
+    ).bind(project.toLowerCase(), words, at, from),
+  ]);
+  return made.results[0].id;
 }
 
 async function takeRequest(request, env) {
@@ -479,8 +533,44 @@ async function requestState(url, request, env) {
   if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const id = Number(url.searchParams.get("id"));
   if (!Number.isInteger(id) || id < 1) return json({ error: "Say which request (id)." }, 400);
-  const row = await env.DB.prepare("SELECT id, status, outcome, updated_at FROM board_requests WHERE id = ?1").bind(id).first();
-  return row ? json({ request: row }) : json({ error: "No such request." }, 404);
+  const row = await env.DB.prepare("SELECT id, status, outcome, updated_at, stop_at FROM board_requests WHERE id = ?1").bind(id).first();
+  if (!row) return json({ error: "No such request." }, 404);
+  if (url.searchParams.get("steps") !== "1") return json({ request: row });
+  // With its tasks and their runs' latest steps, for a node that shows the request as it goes (Hive
+  // on the Mac, which sent the owner's words here): each step once, by its run and number.
+  const [tasks, steps] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT id - ?1 * 100 AS key, title, status, outcome FROM board_tasks
+       WHERE machine = 'cloud' AND id > ?1 * 100 AND id < ?1 * 100 + 100 ORDER BY id`,
+    ).bind(id),
+    env.DB.prepare(
+      `SELECT s.run, s.n, s.at, s.kind, s.text FROM board_run_steps s
+       JOIN board_runs r ON r.machine = s.machine AND r.run = s.run
+       WHERE r.machine = 'cloud' AND r.request = ?1 ORDER BY s.at DESC, s.n DESC LIMIT 60`,
+    ).bind(id),
+  ]);
+  return json({ request: row, tasks: tasks.results, steps: steps.results.reverse() });
+}
+
+// POST /v1/requests/stop {id}: the owner stops a request to Hive's cloud agent (the x on Hive's window on
+// the Mac, whose agent thinks in the cloud). One no agent has taken yet ends here; the orchestrator
+// stops the agents of one it's working on when it next looks (requestState's stop_at) and ends it.
+async function stopRequest(request, env) {
+  if (!(await anyoneAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const body = await request.json().catch(() => ({}));
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id < 1) return json({ error: "Say which request (id)." }, 400);
+  const at = now();
+  const [asked, ended] = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE board_requests SET stop_at = COALESCE(stop_at, ?2), updated_at = ?2 WHERE id = ?1 AND status IN ('queued', 'planning', 'working')",
+    ).bind(id, at),
+    env.DB.prepare(
+      `UPDATE board_requests SET status = 'failed', outcome = 'Stopped by the owner before it started.', finished_at = ?2, updated_at = ?2
+       WHERE id = ?1 AND status = 'queued'`,
+    ).bind(id, at),
+  ]);
+  return json({ ok: true, stopping: asked.meta.changes, ended: ended.meta.changes });
 }
 
 // Every node's agent, live (board_runs and board_run_steps, migration 0013). Each node sends what its
@@ -515,7 +605,7 @@ async function saveRun(request, env) {
       n: whole(step && step.n, 1, MOST_RUN_STEPS),
       at: Math.round(Number(step && step.at)) || now(),
       kind: text(step && step.kind, 20).toLowerCase(),
-      text: text(step && step.text, 500),
+      text: text(step && step.text, 4000), // an agent's whole report, not its first lines
     }))
     .filter((step) => step.n && step.text);
   const at = now();
@@ -597,10 +687,22 @@ async function messageRun(request, env) {
   const machine = text(body.machine, 60);
   const run = text(body.run, 80);
   if (!machine || !run) return json({ error: "Say which agent (machine and run, or request)." }, 400);
-  const found = (await env.DB.prepare("SELECT agent FROM board_runs WHERE machine = ?1 AND run = ?2").bind(machine, run).first())
+  const found = (await env.DB.prepare("SELECT agent, title FROM board_runs WHERE machine = ?1 AND run = ?2").bind(machine, run).first())
     ?? (await knownSession(env, machine, run));
   if (!found) return json({ error: "No such agent." }, 404);
-  return json({ ok: true, message: await queueMessage(env, { machine, run, agent: found.agent, words, from, at }) });
+  const message = await queueMessage(env, { machine, run, agent: found.agent, words, from, at });
+  // A job Hive's agent on the VM ran by itself (hive-task.mjs, run "vm-<id>") takes no messages: what
+  // the owner says to it goes to Hive on the VM as a new request, which says which job it's about.
+  if (machine === "cloud" && run.startsWith("vm-")) {
+    const id = await newRequest(env, {
+      words: `${words}\n\n(Said about the VM job “${found.title || run}”.)`, agent: "hive-cloud", from, at,
+    });
+    const detail = `Hive on the VM took it as a new request (${id})`;
+    await env.DB.prepare("UPDATE board_run_messages SET status = 'delivered', detail = ?2, updated_at = ?3 WHERE id = ?1")
+      .bind(message.id, detail, at).run();
+    return json({ ok: true, request: id, message: { ...message, status: "delivered", detail } });
+  }
+  return json({ ok: true, message });
 }
 
 // A Claude Code or Codex session the board knows from what the owner said in it or a task it took,
@@ -708,23 +810,31 @@ async function actOnTask(request, env) {
 
 // ---- stuck tasks get going again by themselves -------------------------------------------------
 
-// The owner: "why tf would it get stuck just for me to click continue? what's the point?" (2026-11-17).
-// A stuck (blocked) task's agent gets a continue from Hive, the way the dashboard's Continue sends
-// one, AUTO_CONTINUES times at most; only then is it the owner's (Needs you). A try counts as taken
-// once the agent reports the task again, or after AUTO_WAIT without a word. The words start with
-// FROM_HIVE, so the agent's board (hive-tasks: from_the_owner, as_said) never takes them for the
-// owner's own. One agent per project at a time, so sessions continued together don't trample each
-// other's files.
-const AUTO_CONTINUES = 2;
-const AUTO_WAIT = 30 * 60;
+// The owner: "why tf would it get stuck just for me to click continue? what's the point?" and then
+// "if they must stop they must provide an exact reason of why they stopped and what exactly do they
+// need me for or else they'd just keep going" (2026-11-17). So a stuck (blocked) task is never the
+// owner's: Hive keeps sending its agent a continue, the way the dashboard used to, waiting a little
+// longer each time (AUTO_STEP, doubled per try up to AUTO_LONGEST) so an agent that's stuck for good
+// isn't asked every minute. Only a task reported waiting, with why it stopped and exactly what the
+// owner must do (hive-tasks report checks both), is the owner's. The words start with FROM_HIVE, so
+// the agent's board (hive-tasks: from_the_owner) never takes them for the owner's own, and a task
+// that came from such words is never continued (2026-11-17: continues that became new tasks, which got
+// stuck and were continued in turn, put 400+ tasks on Needs you). One agent per project at a time, so
+// sessions continued together don't trample each other's files.
+const AUTO_STEP = 10 * 60;
+const AUTO_LONGEST = 6; // the wait stops doubling at AUTO_STEP << 6 (about 10.7 hours)
 const FROM_HIVE = "[Hive, not the owner]";
+// How long after its last try a task gets the next one (SQL, for a row `t`).
+const NEXT_TRY = `t.auto_continued_at + (${AUTO_STEP} << MIN(t.auto_continues, ${AUTO_LONGEST}))`;
 
 const autoWords = (tasks, n) => {
   const one = tasks.length === 1;
   const list = tasks.map((t) => `T${t.id} ("${t.title}")${t.outcome ? `, stuck on: ${t.outcome}` : ""}`).join("\n- ");
-  return `${FROM_HIVE} ${one ? "This task is" : "These tasks are"} stuck, and Hive continues ${one ? "it" : "them"} so the owner doesn't have to (try ${n} of ${AUTO_CONTINUES}):\n- ${list}\n` +
+  return `${FROM_HIVE} ${one ? "This task is" : "These tasks are"} stuck, and Hive continues ${one ? "it" : "them"} so the owner doesn't have to (try ${n}):\n- ${list}\n` +
     "Get past what's in the way yourself and finish. Do nothing the owner hasn't asked for: no publishing, sending, deleting or spending to get around it. " +
-    "Report each when it ends: done; waiting only if the owner must do something themselves, saying exactly what; dropped if it can't or shouldn't be done, saying why.";
+    "This is Hive's note, not a new request: register no tasks for it. " +
+    "Report each when it ends: done; dropped if it can't or shouldn't be done, saying why; waiting only if the owner must do something themselves, " +
+    'with "why" (exactly why it stopped) and "need" (exactly what the owner must do). Anything else, keep going.';
 };
 
 async function continueStuck(env, at = now()) {
@@ -732,10 +842,11 @@ async function continueStuck(env, at = now()) {
     `SELECT t.machine, t.id, t.title, t.outcome, t.message, t.auto_continues, COALESCE(m.project, '') AS project,
             COALESCE(t.claimed_harness, m.harness) AS harness, COALESCE(t.claimed_session, m.session) AS session
      FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
-     WHERE t.status = 'blocked' AND t.cancelled_at IS NULL AND t.auto_continues < ?1
-       AND (t.auto_continued_at IS NULL OR t.updated_at > t.auto_continued_at OR t.auto_continued_at < ?2)
+     WHERE t.status = 'blocked' AND t.cancelled_at IS NULL
+       AND (t.auto_continued_at IS NULL OR ${NEXT_TRY} <= ?1)
+       AND COALESCE(m.text, '') NOT LIKE '${FROM_HIVE}%'
      ORDER BY t.updated_at LIMIT 200`,
-  ).bind(AUTO_CONTINUES, at - AUTO_WAIT).all();
+  ).bind(at).all();
   if (!stuck.results.length) return { continued: 0 };
   // Projects where an agent Hive continued is still at it: the next one there waits its turn.
   const busy = await env.DB.prepare(
@@ -743,7 +854,7 @@ async function continueStuck(env, at = now()) {
             COALESCE(t.claimed_harness, m.harness) || ':' || COALESCE(t.claimed_session, m.session) AS run
      FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
      WHERE t.auto_continued_at >= ?1 AND t.auto_continues > 0 AND t.status IN ('blocked', 'active')`,
-  ).bind(at - AUTO_WAIT).all();
+  ).bind(at - AUTO_STEP * 3).all();
   const runs = new Map();
   for (const t of stuck.results) {
     if (t.machine === "cloud") {
@@ -1015,14 +1126,14 @@ async function board(request, env) {
               t.created_at, t.updated_at, t.done_at, t.left_open_at, t.work_seconds, t.tokens_in, t.tokens_out, t.folder, t.report,
               t.files, t.commits, COALESCE(t.claimed_harness, m.harness) AS harness,
               COALESCE(t.claimed_session, m.session) AS session, m.project, m.times, m.said_at, t.cancelled_at,
-              -- Stuck, but Hive is still continuing it on its own (continueStuck): not the owner's yet.
+              -- Stuck, and Hive keeps continuing it on its own (continueStuck): never the owner's.
               CASE WHEN t.status = 'blocked' AND t.cancelled_at IS NULL
                      AND (t.machine = 'cloud' OR COALESCE(NULLIF(t.claimed_session, ''), NULLIF(m.session, '')) IS NOT NULL)
-                     AND (t.auto_continues < ?2 OR t.auto_continued_at >= ?3) THEN 1 ELSE 0 END AS retrying
+                     THEN 1 ELSE 0 END AS retrying
        FROM board_tasks t LEFT JOIN board_messages m ON m.machine = t.machine AND m.id = t.message
        WHERE t.status NOT IN ('done', 'dropped') OR t.updated_at > ?1
        ORDER BY t.updated_at DESC LIMIT 600`,
-    ).bind(since, AUTO_CONTINUES, now() - AUTO_WAIT),
+    ).bind(since),
     env.DB.prepare(
       `SELECT machine, id, harness, session, project, text, said_at, times FROM board_messages
        WHERE split_at IS NULL AND said_at > ?1 ORDER BY said_at DESC LIMIT 60`,
@@ -1066,6 +1177,8 @@ async function board(request, env) {
     now: now(), tasks: tasks.results, unsplit: unsplit.results, rules: rules.results, folders: folders.results,
     limits: limits.results, requests: requests.results, runs: runs.results, run_steps: steps.results,
     run_messages: said.results,
+    // What each node runs (nodes.js); the board answers without it if that read fails.
+    nodes: await nodeList(env).catch(() => null),
   });
 }
 

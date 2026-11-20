@@ -8,6 +8,12 @@
   "workers_dev": true,
   // Every minute: stuck tasks get a continue from Hive (worker.js continueStuck).
   "triggers": { "crons": ["* * * * *"] },
+  // Each node's releases (nodes.js, published by cloud/release.mjs), under <kind>/<version>.
+  "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "hive-releases" }],
+  // Hive Phone's relay (phone.js): one Durable Object per phone holds its WebSocket and its sealed
+  // passcode.
+  "durable_objects": { "bindings": [{ "name": "PHONE", "class_name": "PhoneRelay" }] },
+  "migrations": [{ "tag": "phone-relay", "new_sqlite_classes": ["PhoneRelay"] }],
   "d1_databases": [
     {
       "binding": "DB",

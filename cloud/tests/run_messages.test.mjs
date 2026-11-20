@@ -198,3 +198,22 @@ test('a session the board knows only from what the owner said in it can still be
   assert.equal((await call('POST', '/v1/runs/message', { machine: 'evans-mac', run: 'claude:stranger', text: 'hi' })).status, 404);
   assert.equal((await call('POST', '/v1/runs/message', { machine: 'evans-mac', run: 'mac:quiet', text: 'hi' })).status, 404);
 });
+
+// A job Hive's agent on the VM ran by itself (hive-task.mjs, run "vm-<id>") reads no messages once it
+// has ended: what the owner says to it reaches Hive on the VM as a new request about that job.
+test('a message to a VM job becomes a new request to Hive on the VM, and reads as delivered', async () => {
+  const { call } = setup();
+  await call('POST', '/v1/runs', { machine: 'cloud', run: 'vm-2026-11-18T03-53-18-172Z', agent: 'hive', title: 'Post the thread on X', status: 'done', steps: [] });
+  const sent = await call('POST', '/v1/runs/message', { machine: 'cloud', run: 'vm-2026-11-18T03-53-18-172Z', text: 'Use this shorter wording: hi', from: 'web' });
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.status, 'delivered');
+  assert.match(sent.body.message.detail, /new request \(\d+\)/);
+  const board = (await call('GET', '/v1/board')).body;
+  const request = board.requests.find((r) => r.id === sent.body.request);
+  assert.equal(request.status, 'queued');
+  assert.equal(request.agent, 'hive-cloud');
+  assert.match(request.text, /^Use this shorter wording: hi\n\n\(Said about the VM job “Post the thread on X”\.\)$/);
+  assert.equal(board.run_messages[0].status, 'delivered');
+  // Nothing waits for a VM that would never take it.
+  assert.deepEqual((await call('POST', '/v1/runs/messages/take', { machine: 'cloud' })).body.messages, []);
+});

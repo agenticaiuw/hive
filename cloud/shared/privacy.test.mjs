@@ -5,6 +5,7 @@
 //   - no personal mail addresses (gmail, iCloud, a university's) beyond the public ones listed here
 //   - no real home folders in paths, and no Xcode "Created by <name>" headers
 //   - Apple private-relay addresses only as numbered fixtures
+//   - no Apple team IDs (the archive script reads the team from the Mac's signing certificate)
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -61,6 +62,11 @@ const RULES = [
     why: 'an Xcode file header names its author',
     find: /^\/\/ +Created by [^\n]+ on \d/gm,
     allowed: () => false,
+  },
+  {
+    why: "an Apple team ID names the owner's developer account; scripts read it from the Mac's signing certificate",
+    find: /DEVELOPMENT_TEAM\s*=\s*"?([A-Z0-9]{10})\b|<key>teamID<\/key>\s*<string>([A-Z0-9]{10})<|\bHIVE_APPLE_TEAM_ID:-([A-Z0-9]{10})\b|\(`([A-Z0-9]{10})`\)/g,
+    allowed: m => [m[1], m[2], m[3], m[4]].some(v => v && /^X+$/.test(v)),
   },
   {
     why: 'an Apple private-relay address is a real person; use sender<n>@privaterelay.appleid.com',
