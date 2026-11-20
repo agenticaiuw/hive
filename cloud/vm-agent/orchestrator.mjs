@@ -537,6 +537,7 @@ async function handleWork(request, deps, signal) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
     } finally {
       deps.labels?.delete(label);
+      deps.release?.(label); // its turns at the devices, even if a tool server outlived it
     }
     await steps.done(signal.aborted ? 'stopped' : result.ok ? 'done' : 'failed');
     const files = result.files ?? [];
@@ -865,7 +866,7 @@ async function main(argv) {
     },
   });
   const slots = new Slots(MOST_RUNNING);
-  const deps = { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels };
+  const deps = { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels, release: devices.release };
   const running = new Map();
   syncLedger();
   let fresh = true;

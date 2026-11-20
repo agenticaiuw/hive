@@ -845,6 +845,7 @@ async function continueStuck(env, at = now()) {
      WHERE t.status = 'blocked' AND t.cancelled_at IS NULL
        AND (t.auto_continued_at IS NULL OR ${NEXT_TRY} <= ?1)
        AND COALESCE(m.text, '') NOT LIKE '${FROM_HIVE}%'
+       AND NOT (t.machine = 'cloud' AND EXISTS (SELECT 1 FROM board_requests r WHERE r.id = t.message AND r.stop_at IS NOT NULL))
      ORDER BY t.updated_at LIMIT 200`,
   ).bind(at).all();
   if (!stuck.results.length) return { continued: 0 };
@@ -1060,7 +1061,10 @@ async function updateRequest(request, env) {
     const message = await env.DB.prepare(
       "SELECT text, said_at FROM board_messages WHERE machine = 'cloud' AND id = ?1 AND split_at IS NULL",
     ).bind(id).first();
-    if (message) statements.push(...endedAlone(env, id, message, body.status, text(body.outcome, 4000), at));
+    // Stopped by the owner (stop_at): dropped, not stuck. As "blocked" it went to continueStuck, which
+    // started the very request the owner had just stopped again (2026-11-20, requests 76 and 77).
+    const stopped = await env.DB.prepare("SELECT stop_at FROM board_requests WHERE id = ?1").bind(id).first();
+    if (message) statements.push(...endedAlone(env, id, message, body.status, text(body.outcome, 4000), at, Boolean(stopped?.stop_at)));
   }
   if (!statements.length) return json({ error: "Nothing to change." }, 400);
   await env.DB.batch(statements);
@@ -1068,7 +1072,8 @@ async function updateRequest(request, env) {
 }
 
 /** The one task of a cloud request that ended without tasks (updateRequest), and its message split. */
-function endedAlone(env, id, message, status, outcome, at) {
+function endedAlone(env, id, message, status, outcome, at, stopped = false) {
+  const state = status === "done" ? "done" : stopped ? "dropped" : "blocked";
   const words = String(message.text || "").trim();
   const title = words.split("\n").map((l) => l.trim()).find(Boolean) || `Request R${id}`;
   return [
@@ -1076,9 +1081,9 @@ function endedAlone(env, id, message, status, outcome, at) {
       .bind(id, at),
     upsertTask(env, "cloud", {
       id: id * 100 + 1, message: id, quote: words.slice(0, 2000), title: title.slice(0, 300),
-      status: status === "done" ? "done" : "blocked", minutes: null, value: null,
-      outcome: outcome || (status === "done" ? "Done." : "It didn't finish."), evidence: null,
-      created_at: Number(message.said_at) || at, updated_at: at, done_at: status === "done" ? at : null, left_open_at: null,
+      status: state, minutes: null, value: null,
+      outcome: outcome || (state === "done" ? "Done." : state === "dropped" ? "Stopped by the owner." : "It didn't finish."), evidence: null,
+      created_at: Number(message.said_at) || at, updated_at: at, done_at: state === "blocked" ? null : at, left_open_at: null,
       work_seconds: null, tokens_in: null, tokens_out: null, folder: null, report: null, files: null, commits: null,
     }, at),
   ];
