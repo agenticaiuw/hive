@@ -78,8 +78,13 @@ export async function update({
     writeFileSync(join(next, '.release'), release.version);
   }
 
-  // 4. Only when nothing runs, since restarting the orchestrator ends what it started.
-  const running = busy();
+  // 4. A restart of the orchestrator ends what it started, so a release that changes its code (or the
+  // posting worker's, or a unit) goes in only when nothing runs and no request is in flight. One that
+  // changes only what each task starts afresh (hive-task.mjs, the tool servers) goes in now, with no
+  // restart: the next task runs it, which is how a change Hive makes to itself reaches the task that asked.
+  const changed = changedFiles(appDir, next);
+  const restarting = needsRestart(appDir, next, changed);
+  const running = restarting ? [...busy(), ...inFlight(stateDir)] : [];
   if (running.length) {
     if (state.waiting !== release.version) {
       writeJson(statePath, { ...state, waiting: release.version });
@@ -87,13 +92,18 @@ export async function update({
     }
     return { outcome: 'waiting', current, running };
   }
-  const changed = changedFiles(appDir, next);
   rmSync(join(next, '.release'), { force: true });
   writeFileSync(join(next, 'VERSION'), `${release.version}\n`);
   const previous = prevDir(appDir);
   rmSync(previous, { recursive: true, force: true });
   renameSync(appDir, previous);
   renameSync(next, appDir);
+  if (!restarting) {
+    writeJson(statePath, {});
+    const notes = release.notes ? `; release notes: ${release.notes}` : '';
+    await report(`Updated from ${current} to ${release.version} with no restart (only what each task starts changed)${notes}.`, release.version);
+    return { outcome: 'updated', current: release.version, from: current, changed, restarted: false };
+  }
   const installed = units(appDir, changed);
   restart({ worker: changed.some(f => workerFiles(appDir).has(f)) });
 
@@ -152,17 +162,40 @@ export function changedFiles(appDir, next) {
   return out.sort();
 }
 
-/** server.mjs and every script it imports: the posting worker's code. */
-export function workerFiles(appDir) {
+/** `start` and every script it imports (./name.mjs), in `appDir`. */
+function importsOf(appDir, start) {
   const seen = new Set();
   const visit = name => {
     if (seen.has(name) || !existsSync(join(appDir, name))) return;
     seen.add(name);
-    for (const [, dep] of readFileSync(join(appDir, name), 'utf8').matchAll(/from\s+['"]\.\/([\w.-]+\.mjs)['"]/g)) visit(dep);
+    for (const [, dep] of readFileSync(join(appDir, name), 'utf8').matchAll(/(?:from|import)\s+['"]\.\/([\w.-]+\.mjs)['"]/g)) visit(dep);
   };
-  visit('server.mjs');
+  visit(start);
+  return seen;
+}
+
+/** server.mjs and every script it imports: the posting worker's code. */
+export function workerFiles(appDir) {
+  const seen = importsOf(appDir, 'server.mjs');
   if (seen.size) seen.add('viewer.html');
   return seen;
+}
+
+/** orchestrator.mjs and every script it imports: what a running orchestrator holds. */
+export const orchestratorFiles = appDir => importsOf(appDir, 'orchestrator.mjs');
+
+/** Whether putting `changed` in needs a restart: the orchestrator's or the worker's code, old or new, or a unit. */
+export function needsRestart(appDir, next, changed) {
+  const held = new Set([...orchestratorFiles(appDir), ...orchestratorFiles(next), ...workerFiles(appDir), ...workerFiles(next), ...UNITS]);
+  return changed.some(f => held.has(f));
+}
+
+/** The requests the orchestrator is working on (state/requests.json, which it keeps), in words; a file
+ *  older than six hours is from an orchestrator that's gone. */
+export function inFlight(stateDir, now = Date.now()) {
+  const state = readJson(join(stateDir, 'requests.json'));
+  if (!Array.isArray(state.ids) || !(now - Number(state.at) < 6 * 3600_000)) return [];
+  return state.ids.map(id => `request R${id}`);
 }
 
 /** Tasks, plans and Codex runs on this VM right now, in words; empty when it's idle. */

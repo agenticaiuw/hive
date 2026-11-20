@@ -10,7 +10,13 @@
 // reads it and never printed. HIVE_TASK_FILE is the task's task.txt (its first line is what the fact
 // is saved with); HIVE_KNOWLEDGE_DEVICE names the device ("vm" unless set). Without the board config
 // it still answers, with no tools and a note saying why.
-import { readFileSync } from 'node:fs';
+//
+// It also carries improve_hive when HIVE_IMPROVE_FILE is set (hive-task.mjs sets it for the tasks the
+// orchestrator runs): the agent asks Hive to change its own code so it can do what the task needs,
+// instead of working around a missing capability through the screen. The ask is written to that file;
+// the orchestrator (self-improve.mjs) changes Hive, puts the change live and runs the task again.
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { boardClient, boardConfig } from './orchestrator.mjs';
 
@@ -56,6 +62,38 @@ export const TOOLS = [
   },
 ];
 
+export const IMPROVE = {
+  name: 'improve_hive',
+  description: "Ask Hive to change its own code when it can't do what this task needs: a tool it lacks (no way to run "
+    + 'a command or move a file between machines), a tool that is broken, or a step it keeps failing at for a reason in '
+    + "Hive itself. Hive writes the change, tests it, puts it live on its machines and runs this task again with it. Use "
+    + 'this instead of working around the gap by clicking through apps to do what a tool should, and instead of asking '
+    + "the owner. Not for the outside world (a site that's down, a login that's missing). After calling it, stop: end "
+    + 'with a short report of what you did so far and what was missing.',
+  inputSchema: { type: 'object', properties: {
+    step,
+    what: { type: 'string', description: 'What Hive should be able to do, in general: "send a file from the Mac to the VM", "run a shell command on the Mac".' },
+    why: { type: 'string', description: 'What you were doing, what you tried and exactly what failed.' },
+  }, required: ['what', 'why'] },
+};
+
+/** The task's ask for Hive to change itself, written where the orchestrator looks after the run. */
+export function askToImprove(file, args, at = Date.now()) {
+  const what = String(args.what ?? '').trim().slice(0, 500);
+  const why = String(args.why ?? '').trim().slice(0, 4000);
+  if (!what || !why) throw new Error('Say what Hive should be able to do (what) and why (why).');
+  if (!file) throw new Error("Hive can't change itself from this task.");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ what, why, at })}\n`);
+  return `Asked. Hive will change itself so it can ${what.replace(/[.\s]+$/, '')}, test it, put it live and run this task `
+    + 'again with the change. Stop now: end with a short report of what you did so far and what was missing.';
+}
+
+/** The tools this server lists: the knowledge tools when the board is reachable, improve_hive when the task may ask. */
+export function toolsFor(board, context = {}) {
+  return [...(board ? TOOLS : []), ...(context.improveFile ? [IMPROVE] : [])];
+}
+
 /** What the task is, for the facts it saves: the first line of its task.txt, or nothing. */
 export function taskLine(env = process.env, read = path => readFileSync(path, 'utf8')) {
   if (!env.HIVE_TASK_FILE) return '';
@@ -67,7 +105,9 @@ export function taskLine(env = process.env, read = path => readFileSync(path, 'u
 }
 
 /** One tool call: the board's words for the agent. */
-export async function callTool(board, name, args = {}, { task = '', device = 'vm' } = {}) {
+export async function callTool(board, name, args = {}, { task = '', device = 'vm', improveFile = '' } = {}) {
+  if (name === 'improve_hive') return askToImprove(improveFile, args);
+  if (!board) throw new Error(OFFLINE);
   if (name === 'lookup') {
     const answer = await board('/v1/knowledge/lookup', {
       query: String(args.query ?? ''), subject: String(args.subject ?? ''), include_outdated: args.include_outdated === true,
@@ -89,10 +129,10 @@ export async function answer(board, message, context) {
       return reply({ protocolVersion: message.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} },
         serverInfo: { name: 'knowledge', version: '1.0' },
         instructions: board ? "The owner's knowledge base in the cloud: look facts up, save new ones." : OFFLINE });
-    case 'tools/list': return reply({ tools: board ? TOOLS : [] });
+    case 'tools/list': return reply({ tools: toolsFor(board, context) });
     case 'ping': return reply({});
     case 'tools/call':
-      if (!board) return reply({ content: [{ type: 'text', text: OFFLINE }], isError: true });
+      if (!board && message.params?.name !== 'improve_hive') return reply({ content: [{ type: 'text', text: OFFLINE }], isError: true });
       try {
         return reply({ content: [{ type: 'text', text: await callTool(board, message.params?.name, message.params?.arguments ?? {}, context) }] });
       } catch (error) {
@@ -105,7 +145,8 @@ export async function answer(board, message, context) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   let board = null;
   try { board = boardClient(boardConfig()); } catch {}
-  const context = { task: taskLine(), device: (process.env.HIVE_KNOWLEDGE_DEVICE || 'vm').slice(0, 40) };
+  const context = { task: taskLine(), device: (process.env.HIVE_KNOWLEDGE_DEVICE || 'vm').slice(0, 40),
+    improveFile: process.env.HIVE_IMPROVE_FILE || '' };
   createInterface({ input: process.stdin }).on('line', async line => {
     let message; try { message = JSON.parse(line); } catch { return; }
     const out = await answer(board, message, context);

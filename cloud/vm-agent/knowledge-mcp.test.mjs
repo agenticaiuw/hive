@@ -1,7 +1,10 @@
 // The VM's knowledge tools (knowledge-mcp.mjs): the Mac's two tools, answered by the board.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OFFLINE, TOOLS, answer, callTool, taskLine } from './knowledge-mcp.mjs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OFFLINE, TOOLS, answer, askToImprove, callTool, taskLine, toolsFor } from './knowledge-mcp.mjs';
 
 function fakeBoard(replies) {
   const calls = [];
@@ -52,4 +55,29 @@ test('the task a fact is saved with is the first line of task.txt', () => {
   assert.equal(taskLine({ HIVE_TASK_FILE: '/t' }, () => '\n  Register for the fair  \nmore'), 'Register for the fair');
   assert.equal(taskLine({}, () => 'x'), '');
   assert.equal(taskLine({ HIVE_TASK_FILE: '/t' }, () => { throw new Error('gone'); }), '');
+});
+
+test('improve_hive: listed only when the orchestrator gave the task a file, and writes the ask there', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-improve-'));
+  try {
+    const file = join(dir, 'need', 'improve.json');
+    assert.deepEqual(toolsFor(async () => ({})).map(t => t.name), ['lookup', 'save']);
+    assert.deepEqual(toolsFor(async () => ({}), { improveFile: file }).map(t => t.name), ['lookup', 'save', 'improve_hive']);
+    assert.deepEqual(toolsFor(null, { improveFile: file }).map(t => t.name), ['improve_hive'], 'it works without the board key');
+    const called = await answer(null, { id: 4, method: 'tools/call', params: { name: 'improve_hive',
+      arguments: { step: 'Asking Hive for a Mac shell', what: 'run a command on the Mac.', why: 'Mac tools have no shell; Finder took 40 clicks.' } } },
+    { improveFile: file });
+    assert.equal(called.result.isError, undefined);
+    assert.match(called.result.content[0].text, /^Asked\. Hive will change itself so it can run a command on the Mac, test it/);
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(saved.what, 'run a command on the Mac.');
+    assert.match(saved.why, /no shell/);
+    assert.ok(saved.at > 0);
+    assert.throws(() => askToImprove(file, { what: 'x' }), /why/);
+    assert.throws(() => askToImprove('', { what: 'x', why: 'y' }), /can't change itself/);
+    const refused = await answer(null, { id: 5, method: 'tools/call', params: { name: 'improve_hive', arguments: { what: 'x', why: 'y' } } }, {});
+    assert.equal(refused.result.isError, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

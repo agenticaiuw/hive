@@ -88,7 +88,14 @@ fit on screen, and never spend calls adjusting them to see better. In a music ap
 parts with its own tools for that (in Ableton Live 12, a MIDI clip's Generate panel: Stacks for chords, Rhythm for
 drums; Transform to vary them) and place notes by hand only for what they can't make. Give every mac call its step; one that can't be undone (sending, deleting, buying) starts "One-way:" and quotes the
 owner's exact words for it, or the Mac refuses it. If the owner takes the mouse and keyboard, the Mac's tools say so: wait for them or carry on
-without the screen, never fight them. If the mac tools are missing or say the Mac isn't connected, say so.`;
+without the screen, never fight them. If the mac tools are missing or say the Mac isn't connected, say so.
+
+When Hive itself is what stands in the way, change Hive: a tool it lacks (no way to run a command on a machine or move a
+file between machines), a tool of its own that is broken, or a step that keeps failing for a reason in Hive. Call
+knowledge.improve_hive with what's missing and why, then stop with a short report of what you did so far. Hive changes
+its own code, tests it, puts it live and runs this task again with the change. Don't work around the gap by clicking
+through apps to do what a tool should, and don't ask the owner for it. It isn't for the outside world: a site that's
+down or a login that's missing is not Hive's to change.`;
 
 export const CODE_GUIDE = `You are Hive's agent, working on code on the owner's cloud VM. There is no screen and no phone
 here: only the folder you were started in and a shell, with the network off. Before each command, say in one line what it
@@ -119,8 +126,8 @@ export function codeArgs({ model, effort, codeDir, writable = [], env = [] }) {
  * screen or the phone (devices.mjs); `keepOpen` leaves the browser open after it.
  */
 export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label = 'vm-task', keepOpen = false,
-  node = process.execPath, user = process.env.USER ?? 'ubuntu' }) {
-  for (const value of [model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label, node, user]) {
+  improveFile = '', node = process.execPath, user = process.env.USER ?? 'ubuntu' }) {
+  for (const value of [model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label, node, user, ...(improveFile ? [improveFile] : [])]) {
     if (!SAFE.test(value)) throw new Error(`unsupported characters in "${value}"`);
   }
   const toml = value => JSON.stringify(value); // TOML basic strings and arrays of them read like JSON
@@ -128,7 +135,9 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     `HIVE_TASK_LABEL=${label}`, ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), node, join(appDir, 'desktop-mcp.mjs')];
   const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'phone-mcp.mjs')];
   const browser = ['-n', '-u', user, node, join(appDir, 'browser-mcp.mjs')];
-  const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, node, join(appDir, 'knowledge-mcp.mjs')];
+  // HIVE_IMPROVE_FILE (set by the orchestrator) gives the agent improve_hive: what it writes there has Hive change itself.
+  const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`,
+    ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), node, join(appDir, 'knowledge-mcp.mjs')];
   const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
@@ -244,7 +253,8 @@ async function main(argv) {
   if (!SAFE.test(codexHome)) throw new Error('unsupported HIVE_CODEX_HOME');
   const args = options.code
     ? codeArgs({ ...options, codeDir: options.code })
-    : codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile, label: taskLabel(id) });
+    : codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile, label: taskLabel(id),
+      improveFile: process.env.HIVE_IMPROVE_FILE ?? '' });
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`, '/root/.local/bin/codex', ...args],
     { stdio: ['pipe', 'pipe', 'pipe'] });
   // Stopped from outside (ssh hung up, a kill): the board says so instead of showing it working.

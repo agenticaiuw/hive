@@ -26,13 +26,16 @@
 // The board's address and token are root's hive-tasks config (/root/.config/hive/tasks.json), read
 // with sudo like Codex is run; nothing of them is written anywhere else.
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
+import {
+  againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, MOST_FIXES, MOST_ROUNDS, partsOf, readNeed, SELF_GUIDE,
+} from './improve.mjs';
 import { nodeHeaders } from './version.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -474,6 +477,42 @@ export function watchStop(request, { board, log = () => {}, stopEvery = 4000 }) 
   return { signal: controller.signal, end: () => clearInterval(timer) };
 }
 
+/** One screen task, changing Hive on the way when Hive itself is what's in its way (improve.mjs): the
+ *  task asks for the change with improve_hive and stops; Hive changes, tests and lands itself
+ *  (deps.improve), and the task runs again with the change, at most MOST_ROUNDS changes. Without
+ *  deps.improve or deps.improveDir it's one run, as before. Time and tokens add up across the runs. */
+export async function runImproving(brief, { task, request, label, signal, step }, deps) {
+  const { run, improve, improveDir } = deps;
+  const total = { seconds: 0, tokensIn: 0, tokensOut: 0 };
+  const add = r => { for (const k of Object.keys(total)) total[k] += r?.[k] ?? 0; };
+  for (let round = 0; ; round++) {
+    const improveFile = improve && improveDir ? join(improveDir, `r${request.id}-${task.key}-${round}.json`) : '';
+    const result = await run(brief, task.choice, step, { label, title: task.title, signal, improveFile });
+    add(result);
+    const need = readNeed(improveFile);
+    if (!need || signal.aborted) return { ...result, ...total };
+    if (round >= MOST_ROUNDS) {
+      return { ...result, ...total, ok: false,
+        report: [result.report, `Hive needed to change itself again (${need.what}), but it already changed itself ${MOST_ROUNDS} times for this task.`].filter(Boolean).join('\n\n') };
+    }
+    step(`🛠 Hive is changing itself: ${need.what}`);
+    let change;
+    try {
+      change = await improve(need, { title: task.title, brief, report: result.report ?? '', request: request.id, key: task.key, round, label, signal }, step);
+    } catch (error) {
+      change = { ok: false, report: error.message };
+    }
+    add(change);
+    if (!change.ok || signal.aborted) {
+      return { ...result, ...total, ok: false,
+        report: [result.report, `Hive couldn't change itself so it can ${need.what.replace(/[.\s]+$/, '')}: ${change.report || 'no report'}`].filter(Boolean).join('\n\n') };
+    }
+    const landed = landedLine(change);
+    step(`✅ Hive changed itself: ${landed}`);
+    brief = againBrief(brief, need, landed);
+  }
+}
+
 async function handleWork(request, deps, signal) {
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
@@ -553,7 +592,7 @@ async function handleWork(request, deps, signal) {
       const brief = taskBrief(task, request, folder, rules);
       result = coding
         ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key, label, signal }, steps.step)
-        : await run(brief, task.choice, steps.step, { label, title: task.title, signal });
+        : await runImproving(brief, { task, request, label, signal, step: steps.step }, deps);
     } catch (error) {
       result = { ok: false, report: `The agent couldn't start: ${error.message}`, seconds: 0, tokensIn: 0, tokensOut: 0 };
     } finally {
@@ -682,13 +721,13 @@ function askCodex(prompt, choice) {
 
 /** hive-task.mjs with these arguments and the brief on stdin: whether it finished, its report, time and tokens.
  *  Each line it prints after its first goes to `onStep` as it comes. */
-function runAgent(args, brief, onStep = () => {}, label = '', signal = null) {
+function runAgent(args, brief, onStep = () => {}, label = '', signal = null, env = {}) {
   const started = Date.now();
   return new Promise(resolve => {
     // Its steps reach the board as this request's run (runSender), so it doesn't post a run of its own.
     // Its label is whose turn it is when its tool servers ask for the screen or the phone.
     const agent = spawn(process.execPath, [join(here, 'hive-task.mjs'), ...args],
-      { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, HIVE_RUN_SENT: '1', ...(label ? { HIVE_TASK_LABEL: label } : {}) } });
+      { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, HIVE_RUN_SENT: '1', ...(label ? { HIVE_TASK_LABEL: label } : {}), ...env } });
     let workDir = '';
     createInterface({ input: agent.stdout }).on('line', line => {
       process.stdout.write(`    ${label ? `${label} ` : ''}${line}\n`);
@@ -710,9 +749,11 @@ function runAgent(args, brief, onStep = () => {}, label = '', signal = null) {
   });
 }
 
-/** One task on the VM's screen, with the model picked for it. */
-const runOnVm = (brief, choice, onStep, { label = '', signal = null } = {}) =>
-  runAgent(['--model', choice.model, '--effort', choice.effort], brief, onStep, label, signal);
+/** One task on the VM's screen, with the model picked for it. What it asks Hive to change about itself
+ *  (knowledge-mcp.mjs improve_hive) goes to `improveFile`. */
+const runOnVm = (brief, choice, onStep, { label = '', signal = null, improveFile = '' } = {}) =>
+  runAgent(['--model', choice.model, '--effort', choice.effort], brief, onStep, label, signal,
+    improveFile ? { HIVE_IMPROVE_FILE: improveFile } : {});
 
 // Code work lives in root's /var/lib/hive-orchestrator (like Codex, which runs as root): a clone per
 // repository and a worktree per task. The toolchain and the deploy key are the nightly dream's.
@@ -779,6 +820,173 @@ async function codeOnVm(brief, choice, { project, branch, title, request, key, l
   } finally {
     await inRepo(repo, () => git('-C', repo, 'worktree', 'remove', '--force', dir)).catch(() => {});
     await asRoot(['rm', '-rf', '--', tmp]).catch(() => {}); // its own scratch home, made above
+  }
+}
+
+// ---- Hive changing itself (improve.mjs) ---------------------------------------------------------
+
+// The code agent that changes Hive: a change lands on main and goes live without the owner's review,
+// so it gets the strongest model. Its tests run as the updater's do (updater.mjs checkRelease): away
+// from this VM's state and keys, with HIVE_UPDATE_CHECK set.
+const IMPROVER = MODELS.hardest;
+const APP_DIR = here;
+const GATE_MS = 10 * 60_000;
+
+/** The tests of a change (improve.mjs gateTests), run in its worktree: whether they passed and, if not, what failed. */
+async function gateOnVm(dir, files, tmp) {
+  const have = (await asRoot(['git', '-C', dir, 'ls-files', '*.test.mjs'])).split('\n').filter(Boolean);
+  const tests = gateTests(files, have);
+  if (!tests.length) return { ok: true, tests };
+  try {
+    await exec('sudo', ['-n', 'env', '-i', '-C', dir, `PATH=${process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`, `HOME=${join(tmp, 'home')}`,
+      'LANG=C.UTF-8', 'HIVE_UPDATE_CHECK=1', process.execPath, '--test', ...tests], { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 64 << 20 });
+    return { ok: true, tests };
+  } catch (error) {
+    const said = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
+    return { ok: false, tests, failures: error.killed ? `The tests took longer than ${GATE_MS / 60_000} minutes.\n${failuresOf(said)}` : failuresOf(said) };
+  }
+}
+
+/** The VM's app folder on this release, or the time ran out (the updater puts a release in within a minute
+ *  when only what tasks start changed; a change to the orchestrator waits for it to be idle). */
+async function vmOn(version, { wait = 3 * 60_000, every = 5000 } = {}) {
+  const until = Date.now() + wait;
+  for (;;) {
+    let now = '';
+    try { now = readFileSync(join(APP_DIR, 'VERSION'), 'utf8').trim(); } catch {}
+    if (now === version) return true;
+    if (Date.now() > until) return false;
+    await new Promise(resolve => setTimeout(resolve, every));
+  }
+}
+
+/**
+ * Hive changing itself so a task can go on: a code agent changes Hive in a worktree off main (SELF_GUIDE),
+ * the change's tests run until they pass (at most MOST_FIXES tries), and it lands on main and goes live
+ * where it runs: a VM release (the updater puts it in), the board. A change to Hive on the Mac can't be
+ * built or tested here: it goes to a branch for review instead of main, and the task doesn't go on.
+ */
+async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null }, onStep) {
+  const repo = join(CODE_ROOT, 'hive');
+  const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
+  const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
+  const name = `improve-r${request}-${key}-${round + 1}`;
+  const dir = join(CODE_ROOT, 'work', name);
+  const tmp = join(CODE_ROOT, 'tmp', name);
+  const branch = `hive/${name}`;
+  const started = Date.now();
+  const tokens = { tokensIn: 0, tokensOut: 0 };
+  const end = (ok, text, more = {}) => ({ ok, report: text, ...more, ...tokens, seconds: Math.round((Date.now() - started) / 1000) });
+  await inRepo(repo, async () => {
+    try { await asRoot(['test', '-d', join(repo, '.git')]); } catch {
+      await asRoot(['mkdir', '-p', '-m', '700', CODE_ROOT]);
+      await git('clone', '--quiet', REPOS.hive, repo);
+    }
+    await git('-C', repo, 'fetch', '--quiet', 'origin', 'main');
+    try { await git('-C', repo, 'worktree', 'remove', '--force', dir); } catch {}
+    await git('-C', repo, 'worktree', 'prune');
+    await git('-C', repo, 'worktree', 'add', '--quiet', '-B', branch, dir, 'origin/main');
+  });
+  await asRoot(['mkdir', '-p', join(CODE_ROOT, 'target'), join(tmp, 'home'), join(tmp, 'state')]);
+  const env = {
+    HOME: join(tmp, 'home'), AGENT_STATE_DIR: join(tmp, 'state'), HIVE_RECORD: '0', HIVE_UPDATE_CHECK: '1',
+    CARGO_HOME: `${DREAM_ROOT}/cargo`, RUSTUP_HOME: `${DREAM_ROOT}/rustup`, PATH: `${DREAM_ROOT}/cargo/bin:/usr/local/bin:/usr/bin:/bin`,
+    CARGO_TARGET_DIR: join(CODE_ROOT, 'target'), CARGO_INCREMENTAL: '0', CARGO_NET_OFFLINE: 'true', CARGO_TERM_COLOR: 'never',
+  };
+  const agentArgs = ['--code', dir, '--model', IMPROVER.model, '--effort', IMPROVER.effort,
+    '--writable', join(CODE_ROOT, 'target'), '--writable', `${DREAM_ROOT}/cargo`, '--writable', tmp,
+    ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])];
+  const agent = async text => {
+    const result = await runAgent(agentArgs, text, onStep, label, signal);
+    tokens.tokensIn += result.tokensIn ?? 0;
+    tokens.tokensOut += result.tokensOut ?? 0;
+    return result;
+  };
+  const changed = async () => {
+    await git('-C', dir, 'add', '-A');
+    return (await git('-C', dir, 'diff', '--cached', '--name-only', 'origin/main')).split('\n').filter(Boolean);
+  };
+  try {
+    let result = await agent(`${SELF_GUIDE}\n\n${improveBrief(need, { title, brief, report })}`);
+    let files = [];
+    for (let tries = 1; ; tries++) {
+      if (signal?.aborted) return end(false, 'Stopped by the owner before the change landed.');
+      if (!result.ok) return end(false, `The code agent stopped before it finished: ${outcomeOf(result.report, 'no report')}`);
+      files = await changed();
+      if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
+      onStep(`$ Testing Hive's change (${files.length} file${files.length === 1 ? '' : 's'})`);
+      const gate = await gateOnVm(dir, files, tmp);
+      if (gate.ok) {
+        onStep(`✅ ${gate.tests.length} test file${gate.tests.length === 1 ? '' : 's'} passed`);
+        break;
+      }
+      onStep(`✗ Hive's tests failed on the change (try ${tries} of ${MOST_FIXES})`);
+      if (tries >= MOST_FIXES) return end(false, `Hive's tests still failed after ${MOST_FIXES} tries:\n${gate.failures}`);
+      result = await agent(fixBrief(gate.failures));
+    }
+    const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${need.why.slice(0, 1500)}\n\n`
+      + `Hive's cloud agent (${IMPROVER.model}, ${IMPROVER.effort} effort), for task T${request * 100 + key} (request R${request}), tested on the VM.`;
+    const parts = partsOf(files);
+    if (parts.mac) {
+      // Hive on the Mac builds only on macOS: nothing here can test it, so it waits for review.
+      await inRepo(repo, async () => {
+        await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
+        await git('-C', dir, 'push', '--quiet', '--force', 'origin', `HEAD:refs/heads/${branch}`);
+      });
+      const mac = files.filter(f => /^(desktop|browser|dashboard|branding)\//.test(f));
+      return end(false, `The change touches Hive on the Mac (${mac.slice(0, 4).join(', ')}${mac.length > 4 ? ', …' : ''}), which can't be built or tested from the VM, so it's on branch ${branch} for review, not on main.`);
+    }
+    // Onto main as it is now: rebased, tested again if main moved, then a fast-forward push.
+    const commit = await inRepo(repo, async () => {
+      await git('-C', dir, ...COMMITTER, 'commit', '--quiet', '-m', message);
+      for (let attempt = 1; ; attempt++) {
+        const base = await git('-C', dir, 'rev-parse', 'origin/main');
+        await git('-C', dir, 'fetch', '--quiet', 'origin', 'main');
+        if (await git('-C', dir, 'rev-parse', 'origin/main') !== base) {
+          try { await git('-C', dir, ...COMMITTER, 'rebase', '--quiet', 'origin/main'); } catch (error) {
+            await git('-C', dir, 'rebase', '--abort').catch(() => {});
+            throw new Error(`it no longer applies to main, which changed meanwhile (${error.message.split('\n')[0]})`);
+          }
+          const again = await gateOnVm(dir, await changed(), tmp);
+          if (!again.ok) throw new Error(`its tests failed on main as it is now:\n${again.failures}`);
+        }
+        try {
+          await git('-C', dir, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main');
+          return git('-C', dir, 'rev-parse', 'HEAD');
+        } catch (error) {
+          if (attempt >= 3) throw new Error(`main wouldn't take it: ${error.message.split('\n')[0]}`);
+        }
+      }
+    }).catch(error => ({ error }));
+    if (commit.error) return end(false, `The change passed its tests but didn't land: ${commit.error.message}`);
+    onStep(`✅ On main: ${commit.slice(0, 10)}`);
+    const live = [];
+    const notes = [];
+    if (parts.board) {
+      try {
+        await exec('sudo', ['-n', 'env', 'HOME=/root', 'WRANGLER=wrangler', process.execPath, join(dir, 'cloud', 'release.mjs'), 'board'],
+          { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 16 << 20 });
+        live.push('the board');
+      } catch (error) {
+        notes.push(`The board didn't deploy: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
+      }
+    }
+    if (parts.vm) {
+      try {
+        const said = (await exec('sudo', ['-n', 'env', 'HOME=/root', process.execPath, join(dir, 'cloud', 'release.mjs'), 'vm',
+          '--notes', need.what.slice(0, 200)], { encoding: 'utf8', timeout: GATE_MS, maxBuffer: 16 << 20 })).stdout;
+        const version = /published vm (\S+)/.exec(said)?.[1];
+        await asRoot(['systemctl', 'start', '--no-block', 'hive-update.service']).catch(() => {});
+        if (version && await vmOn(version)) live.push('the VM');
+        else notes.push("The VM release is published; the VM puts it in once it's idle (it changes the orchestrator itself).");
+      } catch (error) {
+        notes.push(`The VM release didn't publish: ${String(error.stderr || error.message).trim().split('\n').slice(-2).join(' ')}`);
+      }
+    }
+    return end(true, [result.report, ...notes].filter(Boolean).join('\n\n'), { commit, files, live });
+  } finally {
+    await inRepo(repo, () => git('-C', repo, 'worktree', 'remove', '--force', dir)).catch(() => {});
+    await asRoot(['rm', '-rf', '--', tmp]).catch(() => {});
   }
 }
 
@@ -887,8 +1095,27 @@ async function main(argv) {
     },
   });
   const slots = new Slots(MOST_RUNNING);
-  const deps = { board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels, release: devices.release };
+  // What a task asks Hive to change about itself lands here (knowledge-mcp.mjs, as root, writes it; this reads and removes it).
+  const improveDir = join(stateDir, 'improve');
+  mkdirSync(improveDir, { recursive: true, mode: 0o700 });
+  const deps = {
+    board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels, release: devices.release,
+    improve: improveOnVm, improveDir,
+  };
   const running = new Map();
+  // The requests in flight, for the updater (updater.mjs inFlight): it never restarts this mid-request.
+  let notedAt = 0;
+  const noteRunning = () => {
+    notedAt = Date.now();
+    const file = join(stateDir, 'requests.json');
+    try {
+      writeFileSync(`${file}.tmp`, JSON.stringify({ ids: [...running.keys()], at: notedAt }));
+      renameSync(`${file}.tmp`, file);
+    } catch (error) {
+      log(`couldn't note the requests in flight: ${error.message}`);
+    }
+  };
+  noteRunning();
   syncLedger();
   let fresh = true;
   let limitsAt = 0;
@@ -922,11 +1149,14 @@ async function main(argv) {
           .catch(() => {});
       }).finally(() => {
         running.delete(taken.id);
+        noteRunning();
         syncLedger();
       });
       running.set(taken.id, going);
+      noteRunning();
       continue;
     }
+    if (running.size && Date.now() - notedAt > 30 * 60_000) noteRunning(); // still fresh for the updater
     if (once && !running.size) {
       await devices.close();
       await syncing;
