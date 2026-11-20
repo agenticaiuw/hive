@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { endWithTask, Lease } from './devices.mjs';
+import { TRANSFER_TOOL, transferFile } from './mac-files.mjs';
 import { boardClient, boardConfig } from './orchestrator.mjs';
 
 export const OFFLINE = "The owner's Mac isn't connected: Hive isn't running there or the Mac is offline, so the mac tools "
@@ -50,7 +51,7 @@ export async function callMac(board, mac, name, args, { request = null, sleep = 
   return { content: [{ type: 'text', text: `Failed: ${call?.error ?? 'the board lost the call'}` }], isError: true };
 }
 
-export function server({ board, label = '', turn = null }) {
+export function server({ board, label = '', turn = null, files = undefined }) {
   let mac;
   const find = async () => {
     if (mac === undefined) mac = board ? await connectedMac(board).catch(() => null) : null;
@@ -68,16 +69,24 @@ export function server({ board, label = '', turn = null }) {
             ? `${found.about || "The owner's Mac"} (${found.name}), reached through the cloud: their own computer, which they may be using.`
             : OFFLINE });
       }
-      case 'tools/list': return reply({ tools: (await find())?.tools ?? [] });
+      case 'tools/list': {
+        const tools = (await find())?.tools ?? [];
+        return reply({ tools: tools.some(t => t.name === 'run_command') ? [...tools, TRANSFER_TOOL] : tools });
+      }
       case 'ping': return reply({});
       case 'tools/call': {
         const found = await find();
         if (!found) return reply({ content: [{ type: 'text', text: board ? OFFLINE : NO_BOARD }], isError: true });
-        // Only the tools the Mac listed: its other calls (hive_self, Hive changing itself) are the orchestrator's.
-        if (!found.tools.some(t => t?.name === message.params?.name)) {
+        // Transfers compose its command tool with cloud storage. Everything else must be listed
+        // by the Mac; hive_self (Hive changing itself) remains the orchestrator's call.
+        const transfer = message.params?.name === 'transfer_file' && found.tools.some(t => t.name === 'run_command');
+        if (!transfer && !found.tools.some(t => t?.name === message.params?.name)) {
           return reply({ content: [{ type: 'text', text: `Failed: the Mac has no tool ${message.params?.name ?? ''}.` }], isError: true });
         }
-        const run = () => callMac(board, found, message.params?.name, message.params?.arguments ?? {}, { request: requestOf(label) });
+        const call = (name, args) => callMac(board, found, name, args, { request: requestOf(label) });
+        const run = () => transfer
+          ? transferFile(message.params?.arguments ?? {}, args => call('run_command', args), files)
+          : call(message.params?.name, message.params?.arguments ?? {});
         try {
           return reply(await (turn ? turn.use(run) : run()));
         } catch (error) {

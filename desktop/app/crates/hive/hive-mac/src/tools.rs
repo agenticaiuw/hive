@@ -48,7 +48,7 @@ pub const USER_STILL: Duration = Duration::from_millis(1500);
 /// How long a step on the virtual monitor waits for the user's hands to be still.
 pub const SHARE_WAIT: Duration = Duration::from_secs(60);
 
-pub const ABOUT: &str = "The user's Mac: see the screen and use the real mouse and keyboard.";
+pub const ABOUT: &str = "The user's Mac: run commands, see the screen and use the real mouse and keyboard.";
 
 pub const BATCHABLE: [&str; 8] = [
     "click",
@@ -81,7 +81,7 @@ pub const NEW_WINDOW_APPS: [&str; 7] = [
 ];
 
 pub const INSTRUCTIONS: &str = "Use this Mac like a person: look with screenshot, act with click, type_text and \
-     press_key (or several at once with batch). Coordinates are screenshot pixels. If a tool says the user has the \
+     press_key (or several at once with batch). For shell and file work use run_command without the screen. Coordinates are screenshot pixels. If a tool says the user has the \
      mouse and keyboard, keep doing the work that doesn't need the screen, and call wait_for_control only when the \
      screen is the one way forward. Give every action a `step` saying what it does; one that can't be undone \
      starts with \"One-way:\" and quotes the user's words asking for it.";
@@ -116,11 +116,27 @@ pub fn authenticate_tool() -> Value {
     })
 }
 
-/// The Mac's tools, MCP-style, in python/mac_mcp.py's order (batch last).
+/// The Mac's tools, MCP-style: run_command first, then python/mac_mcp.py's order (batch last).
 pub fn tools() -> Vec<Value> {
     let look = look_schema();
     let step = step_schema();
     vec![
+        json!({
+            "name": "run_command",
+            "description": "Run a shell command on the user's Mac without taking the mouse or keyboard. \
+                Uses /bin/zsh with the login environment; cwd defaults to the user's home. \
+                Returns exit_code, stdout, stderr, truncated and timed_out. No interactive input or background jobs. \
+                Output is limited to 64 KiB per stream; use cloud file transfer for files. \
+                As with screen actions, classify the entire command: irreversible=true for deleting, sending, \
+                publishing or other effects that cannot be undone. Such a step must start One-way: and quote \
+                the user's exact words asking for it. Do not retry an uncertain send.",
+            "inputSchema": {"type": "object", "properties": {
+                "command": {"type": "string", "maxLength": 32000},
+                "cwd": {"type": "string", "description": "Absolute working directory on the Mac"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 240, "default": 120},
+                "irreversible": {"type": "boolean"}, "step": step,
+            }, "required": ["command", "irreversible", "step"], "additionalProperties": false},
+        }),
         read_selected_text_tool(),
         authenticate_tool(),
         json!({
@@ -995,8 +1011,51 @@ impl MacTools {
         Ok(())
     }
 
+    /// The agent classifies command effects just as it does screen actions. Require that decision
+    /// explicitly, and use the same request words check before starting even a shell.
+    fn run_command(&self, a: &Value) -> Value {
+        let Some(command) = a["command"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 32000) else {
+            return error_text("Give a nonempty command of at most 32000 bytes.");
+        };
+        let Some(irreversible) = a["irreversible"].as_bool() else {
+            return error_text("Say whether the command is irreversible (true or false).");
+        };
+        let Some(step) = a["step"].as_str().filter(|s| !s.trim().is_empty()) else {
+            return error_text("Give a step saying what this command does.");
+        };
+        if irreversible && !step.trim_start().to_lowercase().starts_with("one-way:") {
+            return error_text("Refused: an irreversible command needs a One-way: step quoting the user's exact words.");
+        }
+        if let Some(refused) = self.check_step(a) { return refused; }
+        let seconds = match a.get("timeout_seconds") {
+            None => 120,
+            Some(v) => match v.as_u64().filter(|n| (1..=240).contains(n)) {
+                Some(n) => n,
+                None => return error_text("timeout_seconds must be an integer from 1 to 240."),
+            },
+        };
+        let cwd = match a.get("cwd") {
+            Some(Value::String(s)) if std::path::Path::new(s).is_absolute() => PathBuf::from(s),
+            None => match std::env::var_os("HOME") {
+                Some(home) => PathBuf::from(home),
+                None => return error_text("The Mac has no home directory; give cwd."),
+            },
+            _ => return error_text("cwd must be an absolute directory on the Mac."),
+        };
+        match crate::command::run("/bin/zsh", command, &cwd, Duration::from_secs(seconds)) {
+            Ok(out) => result(vec![text(json!({
+                "exit_code": out.code, "stdout": out.stdout, "stderr": out.stderr,
+                "truncated": out.truncated, "timed_out": out.timed_out,
+            }).to_string())], out.timed_out || out.code != Some(0)),
+            Err(error) => error_text(format!("Could not run the command: {error}")),
+        }
+    }
+
     /// Runs one tool (MacTools.call). `Err` is what Python let escape as an exception.
     pub fn call_tool(&self, name: &str, a: &Value) -> Result<Value, String> {
+        if name == "run_command" {
+            return Ok(self.run_command(a));
+        }
         if name == "read_selected_text" {
             if truthy(a) {
                 return Ok(error_text("This tool takes no arguments."));
@@ -1641,16 +1700,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_matches_python() {
+    fn tool_list_prepends_run_command_to_python_order() {
         let names: Vec<String> = tools()
             .iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 19);
-        assert_eq!(
-            names.first().map(String::as_str),
-            Some("read_selected_text")
-        );
+        assert_eq!(names.len(), 20);
+        assert_eq!(names.first().map(String::as_str), Some("run_command"));
+        assert_eq!(names.get(1).map(String::as_str), Some("read_selected_text"));
         assert_eq!(names.last().map(String::as_str), Some("batch"));
         let batch = tools().pop().unwrap();
         assert!(batch["description"]

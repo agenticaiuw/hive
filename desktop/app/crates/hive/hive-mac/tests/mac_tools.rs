@@ -644,7 +644,7 @@ fn the_namespace_is_mac() {
     assert_eq!(s.tools.namespace(), "mac");
     assert_eq!(
         s.tools.about(),
-        "The user's Mac: see the screen and use the real mouse and keyboard."
+        "The user's Mac: run commands, see the screen and use the real mouse and keyboard."
     );
     let names: Vec<_> = s
         .tools
@@ -653,6 +653,7 @@ fn the_namespace_is_mac() {
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
     assert!(names.contains(&"windows".to_string()) && names.contains(&"switch_window".to_string()));
+    assert!(names.contains(&"run_command".to_string()));
 }
 
 #[test]
@@ -671,7 +672,7 @@ fn the_mcp_server_lists_and_calls_the_tools() {
     let listed = server
         .handle(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
         .unwrap();
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 20);
     let called = server
         .handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                         "params": {"name": "press_key", "arguments": {"keys": "escape", "screenshot": false}}}))
@@ -1022,4 +1023,55 @@ fn on_the_virtual_monitor_a_touch_mid_step_says_to_look_and_go_on() {
         .to_string()
         .contains("wait until they say"));
     assert!(!s.tools.not_now("busy").to_string().contains("wait until they say"));
+}
+
+#[test]
+fn commands_check_one_way_words_before_starting_and_leave_the_mouse_alone() {
+    let s = setup(false);
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("old-draft");
+    std::fs::write(&marker, "draft").unwrap();
+    let args = json!({"command": "/bin/rm old-draft", "cwd": dir.path().to_str().unwrap(),
+        "irreversible": true, "step": "One-way: doing it (you said: \"remove the old draft\")."});
+    assert!(is_error(&s.tools.call("run_command", &args).unwrap()));
+    assert!(marker.exists(), "no shell starts without the owner's words");
+    ToolNamespace::set_words(&s.tools, "read the old draft");
+    assert!(is_error(&s.tools.call("run_command", &args).unwrap()));
+    assert!(marker.exists(), "a quote from another request cannot authorize the command");
+    ToolNamespace::set_words(&s.tools, "remove the old draft");
+    let mut unquoted = args.clone();
+    unquoted["step"] = json!("One-way: removing the old draft.");
+    assert!(is_error(&s.tools.call("run_command", &unquoted).unwrap()));
+    assert!(marker.exists(), "marking a step one-way does not replace quoting the owner");
+    let mut missing = args.clone();
+    missing["step"] = json!("Removing the old draft.");
+    assert!(is_error(&s.tools.call("run_command", &missing).unwrap()));
+    assert!(marker.exists());
+    let res = s.tools.call("run_command", &args).unwrap();
+    assert!(!is_error(&res), "{res}");
+    assert!(!marker.exists(), "the authorized deletion ran");
+    assert!(s.helper.lines().is_empty(), "a shell never engages the mouse or keyboard");
+}
+
+#[test]
+fn command_arguments_and_exit_status_are_not_silently_ignored() {
+    let s = setup(false);
+    let args = json!({"command": "printf hello; printf problem >&2; exit 7", "cwd": "/tmp",
+        "irreversible": false, "step": "Checking the command output."});
+    let res = s.tools.call("run_command", &args).unwrap();
+    assert!(is_error(&res));
+    let out: Value = serde_json::from_str(&first_text(&res)).unwrap();
+    assert_eq!(out["exit_code"], 7);
+    assert_eq!(out["stdout"], "hello");
+    assert_eq!(out["stderr"], "problem");
+    for (key, value) in [("irreversible", Value::Null), ("step", json!("")),
+        ("timeout_seconds", json!(241)), ("cwd", json!("relative"))] {
+        let mut bad = args.clone();
+        bad[key] = value;
+        assert!(is_error(&s.tools.call("run_command", &bad).unwrap()));
+    }
+    let mut one_way = args;
+    one_way["step"] = json!("One-way: sending without a quote");
+    assert!(first_text(&s.tools.call("run_command", &one_way).unwrap()).starts_with("Refused:"),
+        "the step is checked even if irreversible was incorrectly false");
 }
