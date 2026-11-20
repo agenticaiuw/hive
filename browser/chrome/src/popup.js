@@ -5,8 +5,9 @@
  * dashboard beside the page.
  */
 import { initAskHive } from './ask-hive.js'
-import { CLOUD_STATUS_KEY, connectionBadge } from './cloud-peer.js'
+import { CLOUD_STATUS_KEY, boardKey, connectionBadge } from './cloud-peer.js'
 import { openHiveDashboard } from './dashboard-panel.js'
+import { NO_BOARD, dashboardUrl } from './page-rules-core.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const WEBSITE_ORIGINS = ['http://*/*', 'https://*/*']
@@ -55,14 +56,23 @@ $('grant-pages').addEventListener('click', async () => {
 
 /* ===== Hive's dashboard =====
  * The website's dashboard in Chrome's side panel beside this page, or a tab where there is none.
- * The window id is read now, since sidePanel.open must run inside the click's gesture. */
+ * The window id and the dashboard's address (beside the board Hive connected this browser to) are
+ * read now, since sidePanel.open must run inside the click's gesture. */
 let currentWindowId = null
+let currentDashboard = ''
 void Promise.resolve(api.windows?.getCurrent?.())
   .then((win) => {
     currentWindowId = win?.id ?? null
   })
   .catch(() => {})
+void boardKey()
+  .then((board) => {
+    currentDashboard = dashboardUrl(board)
+  })
+  .catch(() => {})
 
 $('open-dashboard').addEventListener('click', () => {
-  void openHiveDashboard(api, currentWindowId)
+  void openHiveDashboard(api, currentWindowId, currentDashboard).then((opened) => {
+    if (opened === 'none') $('open-dashboard').title = NO_BOARD
+  })
 })

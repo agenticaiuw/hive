@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hive",
-  "version": "1.15.0",
+  "version": "1.18.1",
   "description": "Ask Hive from any page, and Hive changes how pages look for you; Hive's dashboard beside any page.",
   "minimum_chrome_version": "121",
   "icons": {
@@ -21,8 +21,7 @@
     "nativeMessaging"
   ],
   "host_permissions": [
-    "https://hive-dashboard.your-subdomain.workers.dev/*",
-    "https://hive-tasks.your-subdomain.workers.dev/*"
+    "https://*.workers.dev/*"
   ],
   "optional_host_permissions": [
     "http://*/*",

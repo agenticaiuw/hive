@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fillSubdomain, hiveCloudSubdomain, rewriteTree } from '../../cloud/shared/hiveCloud.mjs'
+import { ownerDetails } from '../../cloud/shared/ownerDetails.mjs'
 
 const browserExtensionDir = path.dirname(fileURLToPath(import.meta.url))
 const sourceDir = path.join(browserExtensionDir, 'src')
@@ -28,6 +28,7 @@ const entryPoints = [
   ['background.js', 'HiveBrowserBridge'],
   ['popup.js', 'HivePopup'],
   ['page-rules.js', 'HivePageRules'],
+  ['sidepanel.js', 'HiveSidePanel'],
 ]
 
 const entryNames = new Set(entryPoints.map(([entry]) => entry))
@@ -91,6 +92,7 @@ for (const platformDir of [chromeDir, safariDir]) {
      */
     if (!manifest.permissions.includes('nativeMessaging')) manifest.permissions.push('nativeMessaging')
     fs.rmSync(path.join(platformDir, 'sidepanel.html'), { force: true })
+    fs.rmSync(path.join(platformDir, 'sidepanel.js'), { force: true })
     delete manifest.background.service_worker
     manifest.background.scripts = ['background.js']
     /*
@@ -105,15 +107,14 @@ for (const platformDir of [chromeDir, safariDir]) {
 }
 
 /*
- * The source names Hive's Workers under the placeholder subdomain (`your-subdomain`); the build
- * points them at the Cloudflare account of whoever runs this Hive (cloud/shared/hiveCloud.mjs), so
- * nobody's account is in the repository.
+ * The extension carries no cloud address, nobody's home folder and no account name: it gets its
+ * board's address from Hive on the Mac with its key (page-rules-core.js boardUrl), so the same build
+ * works for anyone and can be published. A build that picked up this machine's details stops here.
  */
-const subdomain = hiveCloudSubdomain()
-if (subdomain) {
-  for (const platformDir of [chromeDir, safariDir]) rewriteTree(platformDir, (text) => fillSubdomain(text, subdomain))
-} else {
-  console.warn('No Hive cloud set up on this machine (~/.config/hive/tasks.json): the build keeps the placeholder Worker addresses.')
+const found = ownerDetails([chromeDir, safariDir])
+if (found.length) {
+  for (const { file, what } of found) console.error(`${path.relative(outputDir, file)} holds ${what}`)
+  throw new Error("the build holds this machine's owner's details; see above")
 }
 
 execFileSync(

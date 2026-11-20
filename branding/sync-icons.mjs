@@ -11,6 +11,7 @@
  *   - browser extension icons (16/32/48/128/512), Chrome and Safari
  *   - the Safari extension's container app: AppIcon.appiconset, LargeIcon, the window's Icon.png
  *   - the iOS app's AppIcon
+ *   - Hive Phone's icon (mobile/relay/icon) and the one its SideStore source shows (cloud/tasks/phone-icon.js)
  *   - favicon.svg for the mobile web app (public/, and dist/ and the iOS web bundle when built)
  *
  * iOS icons are square and opaque (iOS rounds the corners itself), so they're drawn from the
@@ -69,6 +70,19 @@ try {
 
   /* --- iOS app --- */
   draw(1024, path.join(repo, 'mobile/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png'), { ios: true })
+
+  /* --- Hive Phone, the relay app (mobile/relay/build.mjs puts these in it), and the icon its
+     SideStore source shows, which the board serves (cloud/tasks/phone.js) --- */
+  draw(120, path.join(repo, 'mobile/relay/icon/AppIcon60x60@2x.png'), { ios: true })
+  draw(180, path.join(repo, 'mobile/relay/icon/AppIcon60x60@3x.png'), { ios: true })
+  const sourceIcon = path.join(tmp, 'phone-icon.png')
+  draw(180, sourceIcon, { ios: true })
+  written.pop()
+  fs.writeFileSync(path.join(repo, 'cloud/tasks/phone-icon.js'),
+    '// DERIVED from branding/hive.svg by branding/sync-icons.mjs; never edit by hand.\n'
+    + '// Hive Phone\'s icon in its SideStore source (cloud/tasks/phone.js, GET /v1/phone/icon.png), 180 px.\n'
+    + `export const ICON_PNG_BASE64 = "${fs.readFileSync(sourceIcon).toString('base64')}";\n`)
+  written.push('cloud/tasks/phone-icon.js (180)')
 
   /* --- favicons: the svg itself --- */
   for (const destination of [

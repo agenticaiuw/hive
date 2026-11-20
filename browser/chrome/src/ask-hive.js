@@ -1,6 +1,7 @@
 /*
  * The popup's ask box: the same one the dashboard, the phone app and Hive's floating window have.
- * Opening the popup starts listening right away; when the owner stops talking, what they said goes to
+ * Opening the popup starts listening right away (unless the mic was muted: a tap while it listens
+ * mutes it, another listens again); when the owner stops talking, what they said goes to
  * Hive in the cloud with the page they're on (its address, title and an outline of it), so "when I
  * come to this page, show just my five courses" becomes a page rule Hive writes and the page applies
  * (page-rules.js). Anything else they ask goes to Hive like any other request, from this browser.
@@ -10,21 +11,31 @@
  */
 import {
   BOARD_KEY,
-  BOARD_URL,
+  NO_BOARD,
   RULES_KEY,
   WAITING_KEY,
   outlinePage,
+  boardUrl,
   siteOf,
 } from './page-rules-core.js'
-import { boardKey, browserKind } from './cloud-peer.js'
+import { boardKey, browserKind, keyName } from './cloud-peer.js'
+import { nodeHeaders } from './version.js'
 
 const api = globalThis.browser ?? globalThis.chrome
 const $ = (id) => document.getElementById(id)
+// What's in the box, kept while the popup is closed (the owner, 2026-11-17: typing something,
+// hiding the popup and opening it again lost what was typed). Cleared once it's sent.
+export const DRAFT_KEY = 'hiveAskDraft'
+// The mic's mute, kept while the popup is closed: a muted popup opens without listening until the
+// mic is tapped again (the owner, 2026-11-18: "why am i not able to mute the mic on the browser popup").
+export const MUTED_KEY = 'hiveAskMuted'
 
 async function call(board, path, body) {
-  const response = await fetch(`${board.url || BOARD_URL}${path}`, {
+  const base = boardUrl(board)
+  if (!base) throw new Error(NO_BOARD)
+  const response = await fetch(`${base}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { authorization: `Bearer ${board.key}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${board.key}`, 'content-type': 'application/json', ...nodeHeaders(keyName(board.key)) },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: 'no-store',
   })
@@ -55,16 +66,26 @@ export function initAskHive() {
   const mic = $('ask-mic')
   const send = $('ask-send')
   const note = $('ask-note')
+  const said = $('ask-said')
   const list = $('ask-rules')
   let board = null
   let tab = null
   let recognition = null
   let heard = ''
+  let muted = false
 
   const say = (text, bad = false) => {
     note.textContent = text
     note.classList.toggle('bad', bad)
     note.hidden = !text
+  }
+  // Every change to the box goes through here, so closing the popup never loses it.
+  const fill = (text) => {
+    box.value = text
+    keepDraft()
+  }
+  function keepDraft() {
+    Promise.resolve(api.storage.local.set({ [DRAFT_KEY]: box.value })).catch(() => {})
   }
 
   async function showRules() {
@@ -118,7 +139,10 @@ export function initAskHive() {
     try {
       const page = await pageOf(tab)
       const { id } = await call(board, '/v1/requests', { text: words, from: browserKind(), page })
-      box.value = ''
+      fill('')
+      // What you asked stays on screen, like your words on the floating window's card.
+      said.textContent = words
+      said.hidden = false
       say('Sent to Hive.')
       if (page) {
         const site = siteOf(new URL(page.url).hostname)
@@ -149,27 +173,56 @@ export function initAskHive() {
   }
 
   const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition
-  function stopListening() {
+  /** The mic button says what a tap does: mute while it listens, listen again while muted. */
+  function showMic(on) {
+    mic.classList.toggle('on', on)
+    mic.classList.toggle('muted', !on && muted)
+    mic.setAttribute('aria-pressed', on ? 'true' : 'false')
+    const label = on ? 'Mute' : muted ? 'Muted: tap to listen' : 'Listen'
+    mic.setAttribute('aria-label', label)
+    mic.title = label
+  }
+  /** Stops listening. `drop` (a mute) throws away what the browser hadn't handed over yet. */
+  function stopListening(drop = false) {
     if (recognition) {
       const r = recognition
       recognition = null
-      try { r.stop() } catch {}
+      try { drop ? r.abort() : r.stop() } catch {}
     }
     if (hiveListening) {
       const { id } = hiveListening
       hiveListening = null
       native({ type: 'hive:listen', action: 'cancel', id }).catch(() => {})
     }
-    mic.classList.remove('on')
-    mic.setAttribute('aria-pressed', 'false')
+    showMic(false)
+  }
+  function setMuted(on) {
+    muted = on
+    Promise.resolve(api.storage.local.set({ [MUTED_KEY]: on })).catch(() => {})
+  }
+  /*
+   * A tap while it listens mutes it: it stops hearing at once, nothing is sent, and the words
+   * already in the box stay there to send or change. It stays muted, even in the next popup,
+   * until the mic is tapped again. (Send is how to send what was said before it stops by itself.)
+   */
+  function tapMic() {
+    if (recognition || hiveListening) {
+      setMuted(true)
+      stopListening(true)
+      say('Muted. Tap the mic to listen again.')
+      return
+    }
+    setMuted(false)
+    listen()
   }
 
   /*
    * Safari gives an extension's popup no way to ask for the microphone: its speech recognition
    * answers not-allowed before anyone is asked. So in Safari Hive on this Mac listens instead: the
-   * app's extension handler passes start, stop and cancel to Hive.app, which has the microphone,
-   * stops once the owner stops talking, reads it with Hive's voice model and leaves the words for
-   * this popup (SafariWebExtensionHandler.swift hive:listen and hive:heard; Hive's SafariListen).
+   * app's extension handler passes start, stop and cancel to Hive.app, which has the microphone and
+   * listens the way the floating window does: the words show here as Hive hears them, and once the
+   * owner stops talking all of it is sent (SafariWebExtensionHandler.swift hive:listen and
+   * hive:heard; Hive's SafariListen and sidecar_voice.py listen_for).
    */
   const throughHive = browserKind() === 'safari' && typeof api.runtime?.sendNativeMessage === 'function'
   const native = (message) => api.runtime.sendNativeMessage('application.id', message)
@@ -177,21 +230,15 @@ export function initAskHive() {
   addEventListener('pagehide', () => stopListening())
 
   async function listenThroughHive() {
-    if (hiveListening) {
-      // A second tap: done talking, read it now.
-      native({ type: 'hive:listen', action: 'stop', id: hiveListening.id }).catch(() => {})
-      return
-    }
+    if (hiveListening) return
     const mine = { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`, typed: box.value.trim() }
     hiveListening = mine
-    mic.classList.add('on')
-    mic.setAttribute('aria-pressed', 'true')
+    showMic(true)
     say('')
     const done = () => {
       if (hiveListening !== mine) return false
       hiveListening = null
-      mic.classList.remove('on')
-      mic.setAttribute('aria-pressed', 'false')
+      showMic(false)
       return true
     }
     try {
@@ -217,7 +264,11 @@ export function initAskHive() {
         continue
       }
       answered = true
-      if (heard.state === 'listening') continue
+      if (heard.state === 'listening') {
+        // The words so far, as Hive hears them: the floating window's live text, here.
+        if (heard.text) fill([mine.typed, heard.text].filter(Boolean).join(' '))
+        continue
+      }
       if (heard.state === 'reading') {
         say('Reading what you said…')
         continue
@@ -228,7 +279,7 @@ export function initAskHive() {
         return
       }
       const words = String(heard.text || '').trim()
-      box.value = [mine.typed, words].filter(Boolean).join(' ')
+      fill([mine.typed, words].filter(Boolean).join(' '))
       say('')
       if (words) submit()
       else say('Didn\'t hear anything. Tap the mic to try again, or type.')
@@ -245,10 +296,7 @@ export function initAskHive() {
       mic.hidden = true
       return
     }
-    if (recognition) {
-      stopListening()
-      return
-    }
+    if (recognition) return
     const r = new Recognition()
     recognition = r
     r.lang = navigator.language || 'en-US'
@@ -260,7 +308,7 @@ export function initAskHive() {
       let text = ''
       for (const result of event.results) text += result[0].transcript
       heard = text.trim()
-      box.value = [typed, heard].filter(Boolean).join(' ')
+      fill([typed, heard].filter(Boolean).join(' '))
     }
     r.onerror = (event) => {
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') say('Allow the microphone for Hive, or type instead.', true)
@@ -272,8 +320,7 @@ export function initAskHive() {
       // Like the floating window: when the owner stops talking, it goes.
       if (finished && heard) submit()
     }
-    mic.classList.add('on')
-    mic.setAttribute('aria-pressed', 'true')
+    showMic(true)
     say('')
     try {
       r.start()
@@ -293,14 +340,25 @@ export function initAskHive() {
     }
   })
   box.addEventListener('input', () => {
+    keepDraft()
     if (recognition || hiveListening) stopListening()
   })
-  mic.addEventListener('click', listen)
+  mic.addEventListener('click', tapMic)
 
   ;(async () => {
     tab = await activeTab().catch(() => null)
     board = await boardKey()
     showRules()
   })()
-  listen()
+  // What was typed before the popup closed comes back first; then it listens, adding to it, unless
+  // the mic was muted.
+  ;(async () => {
+    try {
+      const draft = (await api.storage.local.get(DRAFT_KEY))[DRAFT_KEY]
+      if (typeof draft === 'string' && draft.trim() && !box.value) box.value = draft
+      muted = (await api.storage.local.get(MUTED_KEY))[MUTED_KEY] === true
+    } catch {}
+    if (muted) showMic(false)
+    else listen()
+  })()
 }
