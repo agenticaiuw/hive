@@ -129,10 +129,11 @@ export function failuresOf(output) {
 
 /**
  * A hive_self job on the owner's Mac (hive-app self_change.rs), followed to its end: `call(name, args)`
- * makes one call on the Mac (mac-mcp.mjs callMac). The job starts, then its status is asked every
- * `every` while it's running (or, for an install, waiting for Hive to be idle), `wait` at most. A status
- * the Mac didn't answer (Hive restarting onto the release it just put in) is asked again. What it ended
- * as: {state, failures?, version?, here?, running, timedOut?}.
+ * makes one call on the Mac (mac-mcp.mjs callMac). The job starts (once the Mac is through with another
+ * change's job: it runs one at a time), then its status is asked every `every` while it's running (or,
+ * for an install, waiting for Hive to be idle), `wait` at most in all. A status the Mac didn't answer
+ * (Hive restarting onto the release it just put in) is asked again. What it ended as:
+ * {state, failures?, version?, here?, running, timedOut?}.
  */
 export async function onTheMac(call, args, { wait = 90 * 60_000, every = 30_000, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, onState = () => {} } = {}) {
   const said = result => {
@@ -140,8 +141,18 @@ export async function onTheMac(call, args, { wait = 90 * 60_000, every = 30_000,
     if (result?.isError) throw new Error(text.replace(/^Failed: /, '') || 'the Mac said no');
     return JSON.parse(text);
   };
-  const started = said(await call('hive_self', args));
   const until = now() + wait;
+  let started;
+  for (;;) {
+    try {
+      started = said(await call('hive_self', args));
+      break;
+    } catch (error) {
+      // Another change's job (two requests changing Hive at once): this one waits its turn.
+      if (!/still on job/.test(error.message) || now() > until) throw error;
+      await sleep(every);
+    }
+  }
   let last = started;
   for (;;) {
     await sleep(every);
