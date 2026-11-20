@@ -26,6 +26,7 @@
 //!
 //! A session's history from before Hive first saw it is skipped, not imported.
 
+pub mod app_update;
 pub mod chrome_host;
 pub mod club;
 pub mod handoff;
@@ -355,6 +356,36 @@ impl Cloud {
             }
             Err(e) => Err(Self::answer(Err(e)).err().unwrap_or_default()),
         }
+    }
+
+    /// `GET path` into the file at `to` (Hive.dmg, app_update.rs), given `seconds` to arrive whole and
+    /// `most` bytes at most. Returns how many came.
+    pub fn get_file(&self, path: &str, to: &Path, seconds: u64, most: u64) -> Result<u64, String> {
+        let answer = self
+            .signed(ureq::get(&format!("{}{path}", self.url)))
+            .timeout(Duration::from_secs(seconds))
+            .call();
+        match answer {
+            Ok(r) => {
+                node::saw_latest(r.header("x-hive-latest"));
+                let mut file = std::fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+                let came = std::io::copy(&mut r.into_reader().take(most + 1), &mut file)
+                    .and_then(|n| file.sync_all().map(|_| n))
+                    .map_err(|e| format!("it didn't arrive whole: {e}"))?;
+                if came > most {
+                    let _ = std::fs::remove_file(to);
+                    return Err(format!("it's bigger than {} MB", most >> 20));
+                }
+                Ok(came)
+            }
+            Err(e) => Err(Self::answer(Err(e)).err().unwrap_or_default()),
+        }
+    }
+
+    /// Whether this is a club's board, signed in with a member's key (club.rs), not a board of this
+    /// Mac's own.
+    pub fn is_club(&self) -> bool {
+        self.token.starts_with("club.")
     }
 
     fn answer(answer: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {

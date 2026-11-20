@@ -7,6 +7,7 @@ use crate::shell::{Event, Parts, VoiceAgent, INTERRUPTED};
 use hive_mac::AgentVHID;
 use std::io::BufRead;
 use std::sync::atomic::Ordering;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 pub const USAGE: &str = "Talk to your Mac. Tap fn and it listens, showing the words as you say them (Parakeet,
@@ -54,7 +55,8 @@ for its menu bar.
 
 --task runs one request and exits (0 when it finished, 1 if not, 130 on Ctrl-C). --version says which
 release this is (\"dev\" for a build made by hand). Run by Hive.app, it puts in new releases by itself
-while Hive is idle (hive_tasks::update). --update puts the newest release in now, over a build made by
+while Hive is idle (hive_tasks::update), and a downloaded Hive.app's newer download once it's on a club
+(hive_tasks::app_update). --update puts the newest release in now, over a build made by
 hand too, so this Mac updates itself from then on; Hive runs it from its next start.
 ";
 
@@ -384,8 +386,20 @@ pub fn main(argv: &[String]) -> i32 {
             let jobs = hive_common::state_dir().join("self-change");
             peer.set_self_change(crate::self_change::SelfChange::new(hive.clone(), jobs, idle.clone(), restart.clone()));
         }
+        // A downloaded Hive.app (HIVE_APP, its own path) takes the club's newer download too, then
+        // reopens itself as the new one ("@@ relaunch").
+        let telling = Arc::downgrade(&agent);
+        let app = std::env::var_os("HIVE_APP").map(PathBuf::from).filter(|p| hive_tasks::app_update::carried(p).is_some()).map(|path| {
+            let reopen: Box<dyn Fn(&str) + Send> = Box::new(move |what: &str| {
+                if let Some(agent) = telling.upgrade() {
+                    agent.note_menu_stop(what);
+                    agent.tell("relaunch", what);
+                }
+            });
+            (path, reopen)
+        });
         let (idle_now, restart_now) = (idle.clone(), restart.clone());
-        hive_tasks::update::watch(hive, confirm_release, Box::new(move || idle_now()), Box::new(move |what: &str| restart_now(what)));
+        hive_tasks::update::watch(hive, confirm_release, Box::new(move || idle_now()), Box::new(move |what: &str| restart_now(what)), app);
     }
     on_signals(); // a script may start us with Ctrl-C ignored
     agent.run();

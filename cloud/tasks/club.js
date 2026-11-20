@@ -32,6 +32,9 @@
 //                                                 sets itself up (tools/release.sh builds it, `node
 //                                                 cloud/release.mjs download` puts it in RELEASES); the
 //                                                 devices answer says which (mac_download)
+//   GET  /v1/club/download/mac/about              member: {download: {version, size, published_at} | null},
+//                                                 which a member's Hive.app updates itself to (hive-tasks
+//                                                 app_update.rs)
 //   /v1/club/team/...                             member: messages and file leases (team.js), as themselves
 //
 // How many at once (the knowledge base's "Club collaboration" decision): a member runs at most
@@ -267,6 +270,10 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
       phone_source: phone && origin ? `${origin}/v1/phone/source.json` : null,
       mac_download: await macDownload(env),
     });
+  }
+
+  if (path === "/v1/club/download/mac/about" && request.method === "GET") {
+    return json({ download: await macDownload(env) });
   }
 
   if (path === "/v1/club/download/mac" && request.method === "GET") {
