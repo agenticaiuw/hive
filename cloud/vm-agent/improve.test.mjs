@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  MOST_FIXES, MOST_ROUNDS, againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, partsOf, readNeed, SELF_GUIDE,
+  MOST_FIXES, MOST_ROUNDS, againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
+  partsOf, readNeed, SELF_GUIDE,
 } from './improve.mjs';
 
 test('a need is read once, and only with both what and why', () => {
@@ -80,4 +81,50 @@ test('what landed, in one line', () => {
   assert.equal(landedLine({ commit: '0123456789abcdef', files: ['a.mjs'], live: ['the VM'] }), '0123456789 on main (1 file: a.mjs); live on the VM');
   assert.equal(landedLine({ commit: 'ffffffffffff', files: ['1', '2', '3', '4', '5', '6', '7'], live: [] }),
     'ffffffffff on main (7 files: 1, 2, 3, 4, 5, 6, …)');
+});
+
+/** A Mac whose hive_self job answers `states` in turn, one per status asked; `drop` statuses go unanswered first. */
+function fakeMac(states, { drop = 0 } = {}) {
+  const calls = [];
+  const said = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+  const call = async (name, args) => {
+    calls.push({ name, args });
+    if (args.action !== 'status') return said({ job: 'check-1-2', state: 'running' });
+    if (drop-- > 0) return { content: [{ type: 'text', text: "Failed: the Mac didn't answer." }], isError: true };
+    return said({ id: 'check-1-2', ...states.shift() });
+  };
+  return { call, calls };
+}
+
+test("a job on the Mac is followed to its end, through a restart that leaves a status unanswered", async () => {
+  const { call, calls } = fakeMac([{ state: 'running' }, { state: 'failed', failures: 'cargo check: error[E0425]' }], { drop: 1 });
+  const seen = [];
+  const job = await onTheMac(call, { action: 'check', branch: 'hive/improve-r1-1-1' }, { sleep: async () => {}, onState: j => seen.push(j.state) });
+  assert.equal(job.state, 'failed');
+  assert.deepEqual(calls[0], { name: 'hive_self', args: { action: 'check', branch: 'hive/improve-r1-1-1' } });
+  assert.deepEqual(calls.slice(1).map(c => c.args), Array(3).fill({ action: 'status', job: 'check-1-2' }));
+  assert.deepEqual(seen, ['running', 'failed']);
+  assert.match(macFailures(job), /^On the owner's Mac \(macOS\).*error\[E0425\]/);
+});
+
+test("a job on the Mac that runs past its time comes back as timed out; one the Mac refuses to start throws", async () => {
+  let t = 0;
+  const { call } = fakeMac(Array(50).fill({ state: 'waiting' }));
+  const job = await onTheMac(call, { action: 'install', commit: 'a'.repeat(40) }, { wait: 10, every: 1, sleep: async () => { t += 4; }, now: () => t });
+  assert.equal(job.timedOut, true);
+  assert.equal(job.state, 'waiting');
+  const busy = async () => ({ content: [{ type: 'text', text: 'Failed: this Mac is still on job check-9-9' }], isError: true });
+  await assert.rejects(onTheMac(busy, { action: 'check', branch: 'hive/improve-x' }, { sleep: async () => {} }), /still on job check-9-9/);
+});
+
+test("after an install, the Mac counts as running the change only once Hive there answers as that version", async () => {
+  assert.equal(await macRunning(async () => { throw new Error('not asked'); }, { id: 'i', version: '1.2', running: '1.2' }), true);
+  assert.equal(await macRunning(async () => { throw new Error('not asked'); }, { id: 'i' }), false, 'no version: nothing went in');
+  const answers = [{ isError: true, content: [{ type: 'text', text: 'Failed: restarting' }] },
+    { content: [{ type: 'text', text: JSON.stringify({ running: '1.1' }) }] },
+    { content: [{ type: 'text', text: JSON.stringify({ running: '1.2' }) }] }];
+  assert.equal(await macRunning(async () => answers.shift(), { id: 'i', version: '1.2', running: '1.1' }, { sleep: async () => {} }), true);
+  let t = 0;
+  const never = async () => ({ content: [{ type: 'text', text: JSON.stringify({ running: '1.1' }) }] });
+  assert.equal(await macRunning(never, { id: 'i', version: '1.2', running: '1.1' }, { wait: 10, every: 1, sleep: async () => { t += 3; }, now: () => t }), false);
 });

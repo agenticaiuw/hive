@@ -323,7 +323,7 @@ pub fn main(argv: &[String]) -> i32 {
         // New releases go in only while Hive is idle: no task, not listening or dictating, nothing
         // said lately, and no call of the cloud agent's on this Mac lately.
         let (quiet, peer_quiet) = (Arc::downgrade(&agent), peer.clone());
-        let idle = Box::new(move || {
+        let idle: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
             let Some(agent) = quiet.upgrade() else { return false };
             let said_lately = agent
                 .said
@@ -338,7 +338,7 @@ pub fn main(argv: &[String]) -> i32 {
                 && peer_quiet.as_ref().is_none_or(|p| p.quiet_for(hive_tasks::update::QUIET))
         });
         let stopping = Arc::downgrade(&agent);
-        let restart = Box::new(move |what: &str| {
+        let restart: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |what: &str| {
             if let Some(agent) = stopping.upgrade() {
                 agent.note_menu_stop(what);
             }
@@ -348,7 +348,14 @@ pub fn main(argv: &[String]) -> i32 {
                 libc::kill(libc::getpid(), libc::SIGTERM);
             }
         });
-        hive_tasks::update::watch(hive, confirm_release, idle, restart);
+        // Hive changing itself: the cloud agent's change to Hive on the Mac is tested, built and put
+        // in here, when idle as a release is (self_change.rs).
+        if let Some(peer) = &peer {
+            let jobs = hive_common::state_dir().join("self-change");
+            peer.set_self_change(crate::self_change::SelfChange::new(hive.clone(), jobs, idle.clone(), restart.clone()));
+        }
+        let (idle_now, restart_now) = (idle.clone(), restart.clone());
+        hive_tasks::update::watch(hive, confirm_release, Box::new(move || idle_now()), Box::new(move |what: &str| restart_now(what)));
     }
     on_signals(); // a script may start us with Ctrl-C ignored
     agent.run();
