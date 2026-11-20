@@ -7,7 +7,11 @@
  *   - a Claude Code or Codex session on one of the owner's Macs ("claude:<session>"), from its run,
  *     or from the tasks it holds when it never streamed a run;
  *   - Hive on a Mac, or a browser extension's own agent, from its run;
- *   - Hive in the cloud: one conversation per thread of requests, a follow-up joined to what it follows.
+ *   - Hive on the VM (the owner's cloud VM, machine "cloud"): one conversation per thread of requests,
+ *     a follow-up joined to what it follows, and one per job it ran by itself (run "vm-<id>").
+ *
+ * The VM's newest one is always in the list, first and never folded away (the owner, 2026-11-17: "i
+ * still can't see the agent that's on vm FIX THIS NOW!"): `pinned`.
  *
  * Each row says what it is, where, whether it's working or needs the owner, its newest line, and
  * every unfinished task it holds ("an easy way to see all the active agents and also all of the tasks
@@ -23,6 +27,8 @@ import { HARNESSES, needsOwner, nodeName } from './tasks.js';
 /** @typedef {import('./tasks.js').Run} Run */
 /** @typedef {import('./tasks.js').Step} Step */
 
+/** Where Hive's agent on the owner's cloud VM is, as a row says it. */
+const VM = 'on the VM';
 /** The statuses a task an agent holds can be in until it ends. */
 const UNFINISHED = ['waiting', 'active', 'blocked', 'open'];
 /** A run that hasn't moved in this long isn't working any more, whatever it last said. */
@@ -32,7 +38,7 @@ const RECENT = 24 * 3600;
 const GOING = ['queued', 'planning', 'working'];
 
 /**
- * @typedef {{key: string, kind: 'session'|'hive'|'browser'|'cloud', machine: string, run: string,
+ * @typedef {{key: string, kind: 'session'|'hive'|'browser'|'cloud', vm?: boolean, pinned?: boolean, machine: string, run: string,
  *   request: number, harness: string, session: string, label: string, place: string, title: string,
  *   status: 'needs-you'|'working'|'idle', updated: number, latest: string, tasks: Task[],
  *   steps: Step[], requests: any[], runs: Run[]}} Agent
@@ -86,8 +92,8 @@ export function agents(board) {
   for (const r of [...requests.values()].sort((a, b) => a.created - b.created)) {
     const root = rootOf(r.id);
     const a = row(`cloud|${root}`, () => ({
-      kind: 'cloud', machine: 'cloud', run: '', request: 0, harness: 'hive', session: '',
-      label: 'Hive', place: 'in the cloud', title: requests.get(root)?.text ?? r.text,
+      kind: 'cloud', vm: true, machine: 'cloud', run: '', request: 0, harness: 'hive', session: '',
+      label: 'Hive', place: VM, title: requests.get(root)?.text ?? r.text,
     }));
     a.requests.push(r);
     a.request = Number(String(r.id).replace(/^R/, '')) || a.request;
@@ -107,11 +113,12 @@ export function agents(board) {
       continue;
     }
     const kind = run.session ? 'session' : run.machine.startsWith('ext:') ? 'browser' : 'hive';
+    const vm = kind === 'hive' && run.machine === 'cloud';
     const a = row(`${run.machine}|${run.run}`, () => ({
-      kind, machine: run.machine, run: run.run, request: 0, harness: run.harness, session: run.session,
+      kind, vm, machine: run.machine, run: run.run, request: 0, harness: run.harness, session: run.session,
       label: kind === 'session' ? HARNESSES[/** @type {keyof typeof HARNESSES} */ (run.harness)] ?? run.harness
         : kind === 'browser' ? nodeName(run.machine) : 'Hive',
-      place: placeOf(run.projectName, run.machine, kind),
+      place: vm ? VM : placeOf(run.projectName, run.machine, kind),
       title: oneLine(run.title),
     }));
     a.runs.push(run);
@@ -139,7 +146,7 @@ export function agents(board) {
   }
 
   const order = { 'needs-you': 0, working: 1, idle: 2 };
-  return [...by.values()]
+  const list = [...by.values()]
     .map((a) => {
       a.tasks.sort((x, y) => UNFINISHED.indexOf(x.status) - UNFINISHED.indexOf(y.status) || y.updated - x.updated);
       // Waiting on an answer, or stuck with Hive's own tries spent: it goes nowhere until the owner acts.
@@ -149,8 +156,11 @@ export function agents(board) {
       a.title = (a.kind === 'cloud' ? a.title : on?.title || a.title) || lastAsked(a.steps) || `${a.label} ${a.place}`;
       return a;
     })
-    .filter((a) => a.status !== 'idle' || a.tasks.length || now - a.updated <= RECENT)
     .sort((x, y) => order[x.status] - order[y.status] || y.updated - x.updated);
+  // The VM's agent: the one working or needing the owner, else the newest, first and always shown.
+  const vm = list.find((a) => a.vm);
+  if (vm) vm.pinned = true;
+  return [...(vm ? [vm] : []), ...list.filter((a) => a !== vm && (a.status !== 'idle' || a.tasks.length || now - a.updated <= RECENT))];
 }
 
 /** Each unfinished task's agent, by the task's key. */
@@ -170,21 +180,21 @@ export function agentOfTask(/** @type {Agent[]} */ list) {
 export function reasonFor(task, agent) {
   if (task.retrying) return `Hive is continuing it for you. It was stuck on: ${task.outcome || "something its agent didn't say"}`;
   if (task.outcome) return task.outcome;
-  if (task.status === 'blocked') return "Its agent didn't say what's in the way. Continue asks it.";
-  if (!agent) return 'No agent has it yet. Continue hands it to one.';
+  if (task.status === 'blocked') return "Stuck, and its agent didn't say on what.";
+  if (!agent) return 'No agent has it yet. Start hands it to one.';
   if (agent.kind === 'cloud') {
     const r = agent.requests.at(-1);
-    if (r?.status === 'queued') return "Hive in the cloud hasn't picked it up yet.";
-    if (GOING.includes(r?.status)) return 'Hive in the cloud is on an earlier step first.';
-    return 'Hive in the cloud stopped before it got here. Continue asks it again.';
+    if (r?.status === 'queued') return "Hive on the VM hasn't picked it up yet.";
+    if (GOING.includes(r?.status)) return 'Hive on the VM is on an earlier step first.';
+    return 'Hive on the VM stopped before it got here. Start asks it again.';
   }
   const on = agent.tasks.find((t) => t.status === 'active' && t !== task);
   if (agent.status !== 'idle') {
     return on ? `Its agent is on “${on.title}” first.` : 'Its agent is busy with something else first.';
   }
   return on
-    ? `Its session stopped while on “${on.title}”, before getting here. Continue starts it again.`
-    : 'Its session stopped before starting it. Continue starts it again.';
+    ? `Its session stopped while on “${on.title}”, before getting here. Start starts it again.`
+    : 'Its session stopped before starting it. Start starts it again.';
 }
 
 /** How a message to an agent is getting there, in words. */

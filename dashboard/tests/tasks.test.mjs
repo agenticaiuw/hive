@@ -34,11 +34,11 @@ test('the cloud board: every machine, the same id on two machines kept apart', (
   assert.equal(where(b.tasks[1]), 'Codex · vm · hive');
 });
 
-test('sections: what needs the owner (a question, then a stuck task) first, then work, then not started, then done', () => {
+test('sections: what needs the owner (a task that said why it stopped and what it needs) first, then work (a stuck one too: Hive keeps at it), then not started, then done', () => {
   const s = sections(normalizeBoard(cloud).tasks);
   assert.deepEqual(s.map((x) => [x.id, x.tasks.map((t) => t.key)]), [
-    ['needs-you', ['mac:T1', 'mac:T4']],
-    ['working', ['vm:T1']],
+    ['needs-you', ['mac:T1']],
+    ['working', ['vm:T1', 'mac:T4']],
     ['not-started', ['mac:T2']],
     ['done', ['mac:T3']],
   ]);
@@ -339,4 +339,29 @@ test('a task is called by when the owner asked for it, yymmdd hh:mm, and nothing
   ] } });
   assert.deepEqual(b.tasks.map((t) => t.asked), ['261117 01:41', '261117 01:41', '']);
   assert.equal(stamp(at(23, 7)), '261117 23:07');
+});
+
+test("the side panel shows what each node runs: the board, then each VM, Mac and browser, never the hive-tasks command; a hand build is never behind", async () => {
+  const { toNodes } = await import('../src/lib/tasks.js');
+  const now = 2_000_000;
+  const list = {
+    board: { version: 'b0a4d1c2e3f4' },
+    nodes: [
+      { kind: 'cli', name: 'owner-mbp', version: 'dev', seen_at: now * 1000, current: null },
+      { kind: 'extension', name: 'chrome', version: '1.17.0', seen_at: now * 1000, current: null, note: '' },
+      { kind: 'mac', name: 'owner-mbp', version: 'dev', seen_at: (now - 3600) * 1000, current: false, latest: '9c1b2a3d4e5f' },
+      { kind: 'vm', name: 'badger-vm', version: '9c1b2a3d4e5f', seen_at: now * 1000, current: true, latest: '9c1b2a3d4e5f', note: 'Updated from 3f2a9b8c7d6e to 9c1b2a3d4e5f.' },
+      { kind: 'vm', name: 'old-vm', version: '3f2a9b8c7d6e', seen_at: now * 1000, current: false, latest: '9c1b2a3d4e5f', old_protocol: true },
+      { kind: 'mac', name: 'mac', version: '334b5fadce0c', seen_at: now * 1000, current: null },
+    ],
+  };
+  assert.deepEqual(toNodes(list, now).map((n) => [n.label, n.version, n.state, n.latest, n.away]), [
+    ['Board', 'b0a4d1c', '', '', false],
+    ['Chrome', '1.17.0', '', '', false],
+    ['Mac owner-mbp', 'dev', 'dev', '9c1b2a3', true],
+    ['VM badger-vm', '9c1b2a3', 'current', '9c1b2a3', false],
+    ['VM old-vm', '3f2a9b8', 'old', '9c1b2a3', false],
+    ['Mac', '334b5fa', '', '', false],
+  ]);
+  assert.deepEqual(toNodes(null, now), [], 'a board that sent no nodes shows none');
 });

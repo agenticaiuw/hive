@@ -40,8 +40,8 @@ function board() {
 test('every agent is one row with the tasks it holds: the one needing the owner first, never a bare "Working"', () => {
   const list = agents(board());
   assert.deepEqual(list.map((a) => [a.key, a.status]), [
+    ['cloud|R12', 'working'], // the VM's agent, pinned first
     ['mac|claude:disk', 'needs-you'],
-    ['cloud|R12', 'working'],
     ['mac|claude:eyes', 'working'],
   ]);
   const eyes = list.find((a) => a.key === 'mac|claude:eyes');
@@ -67,7 +67,7 @@ test('a task that has not started or is stuck says why', () => {
   assert.equal(reasonFor(task('148'), of.get('mac:148')), 'Its agent is on “Eye typing knows every English word” first.');
   assert.equal(reasonFor(task('168'), of.get('mac:168')), 'Pick one: Rust build folders or Xcode caches');
   assert.equal(reasonFor({ ...task('168'), status: 'blocked', retrying: true }, of.get('mac:168')), 'Hive is continuing it for you. It was stuck on: Pick one: Rust build folders or Xcode caches');
-  assert.equal(reasonFor(task('1301'), of.get('cloud:1301')), 'Hive in the cloud is on an earlier step first.');
+  assert.equal(reasonFor(task('1301'), of.get('cloud:1301')), 'Hive on the VM is on an earlier step first.');
 
   const stopped = { ...list.find((a) => a.key === 'mac|claude:eyes'), status: 'idle' };
   assert.match(reasonFor(task('148'), stopped), /^Its session stopped while on “Eye typing knows every English word”, before getting here/);
@@ -141,4 +141,38 @@ test("task numbers an agent wrote read as those tasks' titles, on the machine it
   const titles = new Map([['mac:246', 'Name tasks by time'], ['cloud:246', 'Post the update']]);
   assert.equal(withTitles('Done with T246; T999 is next.', 'mac', titles), 'Done with “Name tasks by time”; T999 is next.');
   assert.equal(withTitles('on T246', 'cloud', titles), 'on “Post the update”');
+});
+
+// The owner (2026-11-17): "i still can't see the agent that's on vm FIX THIS NOW!"
+test("the VM's agent is always in the list, first and pinned, even when a job it ran by itself ended a day ago", () => {
+  const b = board();
+  b.requests = [];
+  b.tasks = b.tasks.filter((t) => t.machine !== 'cloud');
+  b.runs = [
+    ...b.runs.filter((r) => r.machine !== 'cloud'),
+    { machine: 'cloud', run: 'vm-2026-11-18T03-53-18-172Z', agent: 'hive', harness: 'hive', session: '', title: 'Post the thread on X', status: 'done', updated: NOW - 30 * 3600, steps: [
+      { n: 1, at: NOW - 31 * 3600, kind: 'asked', text: 'Post the thread on X' },
+      { n: 2, at: NOW - 30 * 3600, kind: 'say', text: '💬 X refused it: the post is 56 characters over.' },
+    ] },
+  ];
+  const list = agents(b);
+  const vm = list[0];
+  assert.equal(vm.key, 'cloud|vm-2026-11-18T03-53-18-172Z');
+  assert.deepEqual([vm.label, vm.place, vm.status, vm.pinned, vm.vm], ['Hive', 'on the VM', 'idle', true, true]);
+  assert.equal(vm.title, 'Post the thread on X');
+  assert.equal(list.filter((a) => a.pinned).length, 1, 'one pinned row');
+});
+
+test("a VM job that is working is the pinned one, over a newer one that ended", () => {
+  const b = board();
+  b.requests = [];
+  b.tasks = b.tasks.filter((t) => t.machine !== 'cloud');
+  b.runs = [
+    ...b.runs.filter((r) => r.machine !== 'cloud'),
+    { machine: 'cloud', run: 'vm-new', agent: 'hive', harness: 'hive', session: '', title: 'Ended', status: 'done', updated: NOW - 10, steps: [] },
+    { machine: 'cloud', run: 'vm-old', agent: 'hive', harness: 'hive', session: '', title: 'Still going', status: 'working', updated: NOW - 60, steps: [] },
+  ];
+  const list = agents(b);
+  assert.equal(list[0].key, 'cloud|vm-old');
+  assert.equal(list.find((a) => a.key === 'cloud|vm-new').pinned, undefined);
 });
