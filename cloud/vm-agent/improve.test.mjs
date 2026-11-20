@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  MOST_FIXES, MOST_ROUNDS, againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
+  MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
   partsOf, readNeed, SELF_GUIDE,
 } from './improve.mjs';
 
@@ -63,6 +63,8 @@ test("the code agent's briefs carry what the task needed, and the task's run aga
   assert.match(brief, /The task: Send the video to the VM/);
   assert.match(brief, /don't do the task; change Hive/);
   assert.doesNotMatch(improveBrief(need), /The task:/);
+  const asked = askedBrief({ what: 'Show stuck requests', why: 'make it show stuck ones' }, { brief: 'Find where the board lists requests.' });
+  assert.match(asked, /^Change Hive as asked: Show stuck requests\n\nIn the asker's words: make it show stuck ones\n\nThe task's brief:\nFind where/);
   assert.match(SELF_GUIDE, /Never commit, push/);
   assert.match(SELF_GUIDE, /repository is public/);
   assert.match(fixBrief('✖ mac-mcp shell\nexpected 1'), /didn't pass Hive's tests[\s\S]*expected 1/);

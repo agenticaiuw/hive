@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES, MOST_ROUNDS, onTheMac,
+  againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, MOST_FIXES, MOST_ROUNDS, onTheMac,
   partsOf, readNeed, SELF_GUIDE,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
@@ -527,6 +527,23 @@ export async function runImproving(brief, { task, request, label, signal, step }
   }
 }
 
+/** A code task in Hive's own repository: Hive changes itself as asked (deps.improve with `asked`), and
+ *  the task is done once the change is on main and live where it runs. */
+export async function changeHive(brief, { task, request, label, signal, step }, deps) {
+  const need = { what: task.title, why: task.quote || task.title };
+  step(`🛠 Hive is changing itself: ${need.what}`);
+  let change;
+  try {
+    change = await deps.improve(need, { title: task.title, brief, report: '', request: request.id, key: task.key, round: 0, label, signal, board: deps.board, asked: true }, step);
+  } catch (error) {
+    change = { ok: false, report: error.message };
+  }
+  if (!change.ok) return { ...change, ok: false, report: change.report || 'Hive couldn\'t change itself, and said nothing about why.' };
+  const landed = landedLine(change);
+  step(`✅ Hive changed itself: ${landed}`);
+  return { ...change, report: [change.report, `Landed: ${landed}.`].filter(Boolean).join('\n\n') };
+}
+
 async function handleWork(request, deps, signal) {
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
@@ -585,7 +602,10 @@ async function handleWork(request, deps, signal) {
   const update = task => board('/v1/requests/update', { id: request.id, tasks: [row(task)] });
   const work = async task => {
     const coding = task.kind === 'code';
-    if (coding && !(code && REPOS[project])) {
+    // Hive builds Hive: a change to Hive's own code is made, tested, landed and put live by Hive itself
+    // (changeHive), the way it changes itself when a task needs it to; changes elsewhere wait for review.
+    const selfChange = coding && project === 'hive' && Boolean(deps.improve);
+    if (coding && !selfChange && !(code && REPOS[project])) {
       task.status = 'waiting';
       task.outcome = project && code
         ? `A code change in ${project}: Hive's cloud agent changes code only in ${Object.keys(REPOS).join(', ')}, so it waits for a coding agent on the Mac.`
@@ -604,7 +624,9 @@ async function handleWork(request, deps, signal) {
     deps.labels?.set(label, { title: task.title, step: steps.step });
     try {
       const brief = taskBrief(task, request, folder, rules);
-      result = coding
+      result = selfChange
+        ? await changeHive(brief, { task, request, label, signal, step: steps.step }, deps)
+        : coding
         ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key, label, signal }, steps.step)
         : await runImproving(brief, { task, request, label, signal, step: steps.step }, deps);
     } catch (error) {
@@ -888,7 +910,7 @@ const MAC_INSTALL_MS = 7 * 3600_000;
  * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
  * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
  */
-async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null, board = null }, onStep) {
+async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null, board = null, asked = false }, onStep) {
   const repo = join(CODE_ROOT, 'hive');
   const ssh = `ssh -i ${DREAM_ROOT}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${DREAM_ROOT}/known_hosts -o StrictHostKeyChecking=yes`;
   const git = (...args) => asRoot(['git', '-c', `core.sshCommand=${ssh}`, ...args]);
@@ -928,7 +950,8 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     await git('-C', dir, 'add', '-A');
     return (await git('-C', dir, 'diff', '--cached', '--name-only', 'origin/main')).split('\n').filter(Boolean);
   };
-  const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${need.why.slice(0, 1500)}\n\n`
+  // The repository is public: a change asked for keeps the asker's words off its commit.
+  const message = `Hive changes itself: ${need.what.replace(/[.\s]+$/, '').slice(0, 60)}\n\n${asked ? `Asked for on the board.` : need.why.slice(0, 1500)}\n\n`
     + `Hive's cloud agent (${IMPROVER.model}, ${IMPROVER.effort} effort), for task T${request * 100 + key} (request R${request}), tested on the VM.`;
   // The change as it stands, committed on its branch and pushed, for the Mac to build: the first time a
   // commit, after a fix the same commit amended.
@@ -941,7 +964,7 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
   let mac;
   const onMac = (name, args) => callMac(board, mac, name, args, { request });
   try {
-    let result = await agent(`${SELF_GUIDE}\n\n${improveBrief(need, { title, brief, report })}`);
+    let result = await agent(`${SELF_GUIDE}\n\n${asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report })}`);
     let files = [];
     for (let tries = 1; ; tries++) {
       if (signal?.aborted) return end(false, 'Stopped by the owner before the change landed.');

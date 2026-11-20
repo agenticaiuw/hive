@@ -14,6 +14,8 @@
 //      (hive_self site), the Mac (hive_self install: a Mac release, put in on the owner's Mac once Hive
 //      is idle);
 //   4. runs the task again with the change (againBrief), at most MOST_ROUNDS changes a task.
+// A code task in Hive's own repository goes the same way (askedBrief, orchestrator.mjs changeHive): Hive
+// builds Hive, so what someone asks Hive to change in itself lands and goes live like a change it needed.
 // The pure parts are here, with their tests (improve.test.mjs); the git, test and deploy steps are the
 // orchestrator's (orchestrator.mjs improveOnVm).
 import { readFileSync, rmSync } from 'node:fs';
@@ -37,7 +39,7 @@ export function readNeed(file, { read = path => readFileSync(path, 'utf8'), remo
   }
 }
 
-export const SELF_GUIDE = `You are Hive's agent, changing Hive's own code so that Hive can do what one of its tasks needed.
+export const SELF_GUIDE = `You are Hive's agent, changing Hive's own code: so that Hive can do what one of its tasks needed, or as asked.
 You are in a worktree of Hive's repository off main, with a shell and the network off. Before each command, say in one
 line what it is for. Make the change Hive needs, the smallest that does it well, in Hive's own style: the files' comments
 say why the code is the way it is, in plain words; keep them true. Add or change tests beside the code you change, and run
@@ -70,6 +72,16 @@ export function improveBrief(need, { title = '', brief = '', report = '' } = {})
     title && `The task: ${title}`,
     report && `What the task did before it stopped:\n${report.slice(0, 3000)}`,
     brief && `The task's brief, for what it was trying to do (don't do the task; change Hive so the task can):\n${brief.slice(0, 4000)}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+/** The code agent's brief when the change to Hive is itself what was asked (a code task in Hive's own
+ *  repository: Hive builds Hive). */
+export function askedBrief(need, { brief = '' } = {}) {
+  return [
+    `Change Hive as asked: ${need.what}`,
+    `In the asker's words: ${need.why}`,
+    brief && `The task's brief:\n${brief.slice(0, 4000)}`,
   ].filter(Boolean).join('\n\n');
 }
 
