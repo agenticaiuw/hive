@@ -338,11 +338,13 @@ fn a_phone_error_is_an_error_result_not_a_failure() {
 fn phone_relay_not_set_is_reported_by_the_call() {
     let _guard = env_lock();
     std::env::remove_var("PHONE_RELAY");
+    std::env::set_var("HIVE_TASKS_CLOUD", "/nonexistent-cloud-config.json");
     let result = PhoneTools::new().call("screenshot", &json!({})).unwrap();
+    std::env::remove_var("HIVE_TASKS_CLOUD");
     assert!(is_error(&result));
     assert_eq!(
         texts(&result),
-        "Phone control isn't set up: PHONE_RELAY (in .env) isn't set."
+        "Phone control isn't set up: PHONE_RELAY (in .env) isn't set, and this Mac has no cloud board (~/.config/hive/tasks.json)."
     );
     let missing = Phone::new(Some("/nonexistent-relay-folder")).err().unwrap();
     assert_eq!(
@@ -990,6 +992,41 @@ fn tap_element_fallback_and_invalid_id() {
         .relay_calls()
         .iter()
         .any(|(_, path, _)| path.contains("../../bad")));
+}
+
+#[test]
+fn without_phone_relay_the_phone_is_reached_through_the_board() {
+    let fixture = CurlFixture::new();
+    let cloud = fixture.file("tasks.json");
+    std::fs::write(
+        &cloud,
+        json!({"url": "http://fixture.invalid/", "token": "synthetic-token-1234", "machine": "mac"}).to_string(),
+    )
+    .unwrap();
+    std::env::remove_var("PHONE_RELAY");
+    std::env::set_var("HIVE_TASKS_CLOUD", &cloud);
+    let phone = Phone::new(None);
+    std::env::remove_var("HIVE_TASKS_CLOUD");
+    let phone = phone.unwrap();
+    assert_eq!(phone.base, "http://fixture.invalid/v1/phone");
+    assert_eq!(phone.cloud.as_deref(), cloud.to_str());
+    fixture.answer_as_relay(false);
+    let res = PhoneTools::with_phone(phone)
+        .with_settle(Duration::from_millis(1))
+        .call("tap", &json!({"x": 1, "y": 1}))
+        .unwrap();
+    assert!(is_error(&res));
+    assert!(texts(&res).contains("open Hive Phone"), "{}", texts(&res));
+    // The board's key went in curl's config, never its arguments; every call went to the board's relay.
+    let args = std::fs::read_to_string(fixture.file("calls.args")).unwrap();
+    let config = std::fs::read_to_string(fixture.file("calls.stdin")).unwrap();
+    assert!(!args.contains("synthetic-token-1234"));
+    assert!(config.contains("Authorization: Bearer synthetic-token-1234"));
+    assert!(!fixture.relay_calls().is_empty());
+    assert!(fixture
+        .relay_calls()
+        .iter()
+        .all(|(_, path, _)| path.starts_with("/v1/phone/")));
 }
 
 #[test]

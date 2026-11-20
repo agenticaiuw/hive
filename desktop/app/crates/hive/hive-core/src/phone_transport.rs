@@ -9,6 +9,34 @@ use std::{
 };
 
 const OFFLINE: &str = "The iPhone isn't connected to its relay. On the iPhone (unlocked), open the WebDriverAgent relay app (WebDriverAgentRunner-Runner), then try again.";
+const HIVE_PHONE_OFFLINE: &str =
+    "The iPhone isn't connected to Hive. On the iPhone (unlocked), open Hive Phone, then try again.";
+
+/// The relay's key: `cloud` (this Mac's cloud config; the board's relay) or the relay folder's
+/// CONTROL_TOKEN. Read when needed, never passed on a command line.
+fn relay_token(input: &Value) -> Result<String, String> {
+    if let Some(cloud) = input["cloud"].as_str() {
+        let config: Value = serde_json::from_slice(
+            &std::fs::read(cloud).map_err(|_| "Can't read this Mac's cloud board config")?,
+        )
+        .map_err(|_| "Can't read this Mac's cloud board config")?;
+        return config["token"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| "This Mac's cloud board config has no key".to_string());
+    }
+    let folder = input["folder"].as_str().ok_or("Missing relay folder")?;
+    let secrets: Value = serde_json::from_slice(
+        &std::fs::read(format!("{folder}/private/secrets.json"))
+            .map_err(|_| "Can't read the phone relay credentials")?,
+    )
+    .map_err(|_| "Can't read the phone relay credentials")?;
+    secrets["CONTROL_TOKEN"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Can't read the phone relay credentials".to_string())
+}
 
 fn request(
     input: &Value,
@@ -17,16 +45,8 @@ fn request(
     body: &Value,
     sensitive: bool,
 ) -> Result<Value, String> {
-    let folder = input["folder"].as_str().ok_or("Missing relay folder")?;
     let base = input["base"].as_str().ok_or("Missing relay endpoint")?;
-    let secrets: Value = serde_json::from_slice(
-        &std::fs::read(format!("{folder}/private/secrets.json"))
-            .map_err(|_| "Can't read the phone relay credentials")?,
-    )
-    .map_err(|_| "Can't read the phone relay credentials")?;
-    let token = secrets["CONTROL_TOKEN"]
-        .as_str()
-        .ok_or("Can't read the phone relay credentials")?;
+    let token = relay_token(input)?;
     let mut config = format!(
         "header = {}\n",
         serde_json::to_string(&format!("Authorization: Bearer {token}")).unwrap()
@@ -114,7 +134,7 @@ fn request(
             continue;
         }
         if status == "503" {
-            return Err(OFFLINE.into());
+            return Err(if input["cloud"].is_string() { HIVE_PHONE_OFFLINE } else { OFFLINE }.into());
         }
         if status == "504" {
             return Err("The iPhone didn't answer in time. Is it unlocked, with its controller app running?".into());
@@ -236,7 +256,14 @@ fn visible_elements(input: &Value, body: &Value) -> Result<Value, String> {
         .as_str()
         .ok_or("Invalid phone accessibility source")?
         .to_string();
-    if let Some(folder) = input["folder"].as_str() {
+    if input["cloud"].is_string() {
+        if let Ok(token) = relay_token(input) {
+            if token.chars().count() >= 16 {
+                source = source.replace(&token, "[hidden]");
+            }
+        }
+    }
+    if let Some(folder) = input["folder"].as_str().filter(|f| !f.is_empty()) {
         if let Ok(bytes) = std::fs::read(format!("{folder}/private/secrets.json")) {
             if let Ok(Value::Object(secrets)) = serde_json::from_slice::<Value>(&bytes) {
                 for secret in secrets

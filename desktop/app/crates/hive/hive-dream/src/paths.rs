@@ -35,9 +35,18 @@ pub fn dream_dir() -> PathBuf {
     env_path("HIVE_DREAM_DIR").unwrap_or_else(|| state_dir().join("dream"))
 }
 
-/// The task recordings: `HIVE_RECORDINGS_DIR`, else ~/Movies/Hive.
+/// The task recordings: `HIVE_RECORDINGS_DIR`, else <state>/recordings.
 pub fn recordings_dir() -> PathBuf {
-    env_path("HIVE_RECORDINGS_DIR").unwrap_or_else(|| home().join("Movies/Hive"))
+    env_path("HIVE_RECORDINGS_DIR")
+        .or_else(|| env_path("HIVE_RECORDINGS"))
+        .unwrap_or_else(|| {
+            let legacy = home().join("Movies/Hive");
+            if legacy.exists() {
+                legacy
+            } else {
+                state_dir().join("recordings")
+            }
+        })
 }
 
 /// `HIVE_AGENT_LOG`, else ~/Library/Logs/Agent.log.

@@ -139,42 +139,83 @@ fn tasks_share_one_codex() {
 }
 
 #[test]
-fn requests_in_a_session_are_turns_on_one_thread() {
+fn each_request_gets_its_own_thread_told_what_came_before() {
     let c = Codex::new(&[]);
     c.task().wait();
     c.task_on("No, the other one", "phone").wait();
     let turns = c.turns();
     let (first, second) = (&turns[0], &turns[1]);
-    assert_eq!(second["thread"], first["thread"]); // so it has the first request in context
-    assert!(second["prompt"]
-        .as_str()
-        .unwrap()
-        .starts_with(prompts::FOCUS_PHONE)); // nothing more to tell it
+    assert_ne!(second["thread"], first["thread"]); // a short context: quick even when uncached
+    let prompt = second["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with(prompts::SAID_BEFORE));
+    assert!(prompt.contains("They asked: \"open Maps\""), "{prompt}");
+    assert!(prompt.contains(prompts::FOCUS_PHONE));
     assert!(!first["prompt"].as_str().unwrap().contains("How to work"));
 }
 
 #[test]
-fn tapping_fn_keeps_the_durable_session() {
-    let c = Codex::new(&[]);
+fn a_quick_follow_up_continues_a_small_thread() {
+    // Codex reports 30k tokens: small, and the next request comes right away (cache still warm).
+    let c = Codex::new(&[("FAKE_CODEX_CONTEXT", "30000")]);
     c.task().wait();
-    assert!(c.h.agent.new_session());
-    c.task().wait();
+    c.task_on("now play it", "phone").wait();
     let turns = c.turns();
     assert_eq!(turns[1]["thread"], turns[0]["thread"]);
+    let prompt = turns[1]["prompt"].as_str().unwrap();
+    assert!(!prompt.contains("They asked: \"open Maps\""), "{prompt}"); // it's on the thread
     assert_eq!(c.started().len(), 1);
 }
 
 #[test]
-fn tapping_fn_prepares_without_replacing_a_ready_thread() {
+fn a_follow_up_to_a_big_thread_starts_fresh() {
+    let c = Codex::new(&[("FAKE_CODEX_CONTEXT", "90000")]);
+    c.task().wait();
+    c.task_on("now play it", "phone").wait();
+    let turns = c.turns();
+    assert_ne!(turns[1]["thread"], turns[0]["thread"]);
+    assert!(turns[1]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("They asked: \"open Maps\""));
+}
+
+#[test]
+fn a_request_after_the_cache_has_cooled_starts_fresh() {
+    let c = Codex::new(&[("FAKE_CODEX_CONTEXT", "30000")]);
+    let first = c.task();
+    first.wait();
+    first.st().began -= crate::session::WARM_SECONDS + 1.0; // it ended over four minutes ago
+    c.task_on("now play it", "phone").wait();
+    let turns = c.turns();
+    assert_ne!(turns[1]["thread"], turns[0]["thread"]);
+}
+
+#[test]
+fn tapping_fn_starts_the_next_requests_thread_ahead() {
+    let c = Codex::new(&[]);
+    c.task().wait();
+    assert!(c.h.agent.new_session());
+    until(5.0, || c.started().len() == 2);
+    c.task().wait();
+    let turns = c.turns();
+    assert_ne!(turns[1]["thread"], turns[0]["thread"]);
+    assert_eq!(turns[1]["thread"], c.started()[1]); // the one started as listening began
+    assert_eq!(c.started().len(), 2);
+}
+
+#[test]
+fn tapping_fn_twice_starts_one_thread_ahead() {
     let c = Codex::new(&[]);
     c.task().wait(); // Codex is running
+    c.h.agent.new_session();
+    until(5.0, || c.started().len() == 2);
     c.h.agent.new_session();
     c.task().wait();
     assert_eq!(
         c.turns().last().unwrap()["thread"],
         *c.started().last().unwrap()
     );
-    assert_eq!(c.started().len(), 1);
+    assert_eq!(c.started().len(), 2);
 }
 
 #[test]
@@ -268,9 +309,8 @@ fn fast_tier() {
     c.task().wait();
     assert_eq!(c.turns()[0]["tier"], "priority");
     c.h.agent.env.set("AGENT_FAST", "");
-    c.h.agent.new_session(); // listening keeps the saved thread and its tier
-    c.task().wait();
-    assert_eq!(c.turns()[1]["tier"], "priority");
+    c.task().wait(); // the next request's thread has the setting as it is now
+    assert_ne!(c.turns()[1]["tier"], "priority");
 }
 
 #[test]
@@ -295,7 +335,7 @@ fn a_request_that_replaces_a_stopped_one_waits_for_its_turn_to_end() {
     );
     let turns = c.turns();
     assert_eq!(turns.len(), 2);
-    assert_eq!(turns[1]["thread"], turns[0]["thread"]);
+    assert_ne!(turns[1]["thread"], turns[0]["thread"]);
 }
 
 #[test]
@@ -316,10 +356,10 @@ fn a_request_while_the_thread_is_busy_gets_its_own_and_is_told_later() {
     mac.stop();
     c.task_on("now do it again", "mac").wait();
     let again = c.turns().pop().unwrap();
-    assert_eq!(again["thread"], on_mac["thread"]);
+    assert_ne!(again["thread"], on_mac["thread"]); // a new request: a thread of its own
     let prompt = again["prompt"].as_str().unwrap();
+    assert!(prompt.contains("They asked: \"open Notes\""), "{prompt}");
     assert!(prompt.contains("They asked: \"open Maps\"\n  You: \"Done on the phone.\""));
-    assert!(!prompt.contains("open Notes")); // it was on this thread
 }
 
 #[test]

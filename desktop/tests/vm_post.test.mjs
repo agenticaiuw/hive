@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClient, resolveDestination } from '../vm-post.mjs';
+import { boardClient, createClient, follow, handOff, resolveDestination, runArgs } from '../vm-post.mjs';
 
 // A stand-in for the VM worker that records what the Mac asked it to do.
 function fakeVm({ loginState = 'signed_in' } = {}) {
@@ -49,4 +49,66 @@ test('destinations resolve from names, channel links and x', () => {
   assert.deepEqual(resolveDestination(config, 'x'), { platform: 'x', destination: 'post' });
   assert.equal(resolveDestination(config, post.destination).platform, 'discord');
   assert.throws(() => resolveDestination(config, 'nowhere'), /unknown destination/);
+});
+
+// The Mac agent once ssh'ed to ~/.ssh/config's one entry (another machine) and timed out
+// (2026-11-17); run goes to the VM in vm-agent.json.
+test('run reaches the VM in vm-agent.json', () => {
+  const config = { ssh: { host: 'vm.example', user: 'ubuntu', identityFile: '/k' }, remoteDir: '/home/ubuntu/hive-vm-agent/app', node: '/usr/local/bin/node' };
+  const run = runArgs(config, 'ls ~/hive-files');
+  assert.equal(run.at(-2), 'ubuntu@vm.example');
+  assert.equal(run.at(-1), 'ls ~/hive-files');
+  assert.deepEqual(run.slice(0, 2), ['-i', '/k']);
+});
+
+// A board in the cloud: requests, and how each one goes as the VM's orchestrator works on it.
+function fakeBoard(states) {
+  const posted = [];
+  const board = async (path, body) => {
+    if (path === '/v1/requests') { posted.push(body); return { ok: true, id: 9, ahead: 0 }; }
+    if (path === '/v1/requests/state?id=9') return { request: { id: 9, ...(states.length > 1 ? states.shift() : states[0]) } };
+    throw new Error(`unexpected ${path}`);
+  };
+  return { board, posted };
+}
+const quick = { every: 0, sleep: async () => {}, say: () => {} };
+
+// The owner (2026-11-17): "why can't i see the virtual machine agent from this window?" A task run
+// over SSH never reached the board; handed through the cloud, it's an agent on every dashboard.
+test('task goes to the VM agent through the cloud, says an agent sent it, and waits for how it ended', async () => {
+  const { board, posted } = fakeBoard([{ status: 'queued' }, { status: 'working' }, { status: 'done', outcome: 'Posted the thread.' }]);
+  const said = [];
+  const request = await handOff(board, 'For hive › cloud/vm-agent: post the thread on X\n', { ...quick, wait: 60_000, say: line => said.push(line) });
+  assert.deepEqual(posted, [{ text: 'For hive › cloud/vm-agent: [Hive on the Mac, not the owner] post the thread on X', from: 'mac' }]);
+  assert.equal(request.status, 'done');
+  assert.deepEqual(said.slice(1), ['… queued', '… working', 'Done: Posted the thread.']);
+  const plain = fakeBoard([{ status: 'done', outcome: '' }]);
+  await handOff(plain.board, 'check the X composer', quick);
+  assert.equal(plain.posted[0].text, '[Hive on the Mac, not the owner] check the X composer');
+  await assert.rejects(handOff(plain.board, '  ', quick), /say what/);
+});
+
+test('task stops waiting when its time is up and says how to look again', async () => {
+  const { board } = fakeBoard([{ status: 'working' }]);
+  let t = 0;
+  const said = [];
+  const request = await follow(board, 9, { every: 1000, wait: 3000, sleep: async ms => { t += ms; }, clock: () => t, say: line => said.push(line) });
+  assert.equal(request.status, 'working');
+  assert.match(said.at(-1), /^Still working\. .*vm-post\.mjs state 9$/);
+});
+
+test('the board client signs each call with the machine token', async () => {
+  const calls = [];
+  const board = boardClient({ url: 'https://board.example/', token: 'tok' }, async (url, init) => {
+    calls.push([url, init]);
+    return { ok: true, json: async () => ({ ok: true }) };
+  });
+  await board('/v1/requests', { text: 'x' });
+  await board('/v1/requests/state?id=1');
+  assert.equal(calls[0][0], 'https://board.example/v1/requests');
+  assert.equal(calls[0][1].method, 'POST');
+  assert.equal(calls[0][1].headers.authorization, 'Bearer tok');
+  assert.equal(calls[1][1].method, undefined);
+  const failing = boardClient({ url: 'https://b', token: 't' }, async () => ({ ok: false, status: 401, json: async () => ({ error: 'Not signed in.' }) }));
+  await assert.rejects(failing('/v1/requests', {}), /Not signed in/);
 });

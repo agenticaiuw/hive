@@ -87,7 +87,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
     captions.doing("Typing “weather”");
     captions.thinking("Looking for the address bar");
     captions.agent_request("from another program");
-    captions.paused("Paused: press fn to go on");
+    captions.paused("Paused: say continue to go on");
     captions.muted(true);
     captions.activity("Safari");
     captions.active(false);
@@ -106,7 +106,7 @@ fn every_caption_goes_to_the_overlay_as_one_json_line() {
             json!({"doing": "Typing “weather”"}),
             json!({"thinking": "Looking for the address bar"}),
             json!({"agent_request": "from another program"}),
-            json!({"paused": "Paused: press fn to go on"}),
+            json!({"paused": "Paused: say continue to go on"}),
             json!({"muted": true}),
             json!({"activity": "Safari"}),
             json!({"active": false}),

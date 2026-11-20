@@ -359,7 +359,7 @@ fn actions_after_a_takeover_carry_on_without_the_screen() {
     assert!(is_error(&res));
     assert_eq!(
         first_text(&res),
-        "The user took over the mouse and keyboard (trackpad), so screen actions wait until they press fn. Don't \
+        "The user took over the mouse and keyboard (trackpad), so screen actions wait until they say \"continue\". Don't \
          stop working: carry on with everything that doesn't need the screen (the shell, files, APIs, reading what \
          you already have). Call wait_for_control only when the screen is the one way forward, then look at the \
          new screenshot before acting; things may have changed."
@@ -541,7 +541,7 @@ fn wait_for_control_waits_for_the_hand_back() {
     ));
     assert_eq!(
         *s.system.notifications.lock().unwrap(),
-        ["Hive needs the screen. Press fn when it can have the mouse and keyboard."]
+        ["Hive needs the screen. Say “continue” when it can have the mouse and keyboard."]
     );
     assert!(s.tools.holding());
 
@@ -996,7 +996,7 @@ fn on_the_virtual_monitor_a_takeover_doesnt_stop_the_agent() {
     assert_eq!(*s.system.activated.lock().unwrap(), vec![7, 9, 7]);
 }
 
-/// On the virtual monitor, a touch in the middle of a step says so, without waiting for fn.
+/// On the virtual monitor, a touch in the middle of a step says so, without waiting for "continue".
 #[test]
 fn on_the_virtual_monitor_a_touch_mid_step_says_to_look_and_go_on() {
     let s = setup_on_monitor();
@@ -1007,6 +1007,6 @@ fn on_the_virtual_monitor_a_touch_mid_step_says_to_look_and_go_on() {
     assert!(texts(&res).starts_with("You have the mouse and keyboard."));
     assert!(MacTools::not_yours("trackpad")
         .to_string()
-        .contains("press fn"));
-    assert!(!s.tools.not_now("busy").to_string().contains("press fn"));
+        .contains("wait until they say"));
+    assert!(!s.tools.not_now("busy").to_string().contains("wait until they say"));
 }

@@ -13,6 +13,10 @@ libc.workspace = true
 rusqlite = "0.41.1"
 # The owner's cloud copy of the board (cloud/tasks/worker.js).
 ureq = { version = "2.12", features = ["json"] }
+# Mac releases (update.rs): the format cloud/vm-agent/version.mjs makes.
+base64.workspace = true
+flate2 = "1.1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true

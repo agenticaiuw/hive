@@ -18,7 +18,14 @@ use hive_mac::vhid::{temp_file, TextBox, VhidError};
 use hive_mac::{AgentVHID, RealMac, System};
 
 // Picked at run time so the word can't already be on screen somewhere else.
-const HIDDEN_WORDS: [&str; 6] = ["pineapple", "lighthouse", "marmalade", "porcupine", "trombone", "avalanche"];
+const HIDDEN_WORDS: [&str; 6] = [
+    "pineapple",
+    "lighthouse",
+    "marmalade",
+    "porcupine",
+    "trombone",
+    "avalanche",
+];
 const HIDDEN_LINE: usize = 160;
 
 fn io(e: std::io::Error) -> VhidError {
@@ -42,13 +49,19 @@ fn report(ok: bool, what: &str) -> bool {
 fn visible_line_numbers(boxes: &[TextBox]) -> Vec<usize> {
     let mut numbers = BTreeSet::new();
     for b in boxes {
-        let Some(rest) = b.line.strip_prefix("Line ") else { continue };
+        let Some(rest) = b.line.strip_prefix("Line ") else {
+            continue;
+        };
         let digits = rest.get(..3).unwrap_or("");
         let word_after = rest[3.min(rest.len())..]
             .chars()
             .next()
             .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if digits.len() == 3 && digits.bytes().all(|c| c.is_ascii_digit()) && !word_after && b.text == digits {
+        if digits.len() == 3
+            && digits.bytes().all(|c| c.is_ascii_digit())
+            && !word_after
+            && b.text == digits
+        {
             numbers.insert(digits.parse().unwrap());
         }
     }
@@ -72,8 +85,15 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
     mac.key("cmd+c")?;
     pause(0.3);
     let answer = clipboard().replace(',', "").trim().to_string();
-    let shown = if answer.is_empty() { "(nothing copied)" } else { &answer };
-    results.push(report(answer == "7006652", &format!("1234 x 5678 = {shown}")));
+    let shown = if answer.is_empty() {
+        "(nothing copied)"
+    } else {
+        &answer
+    };
+    results.push(report(
+        answer == "7006652",
+        &format!("1234 x 5678 = {shown}"),
+    ));
     mac.key("cmd+q")?;
     pause(0.8);
 
@@ -88,7 +108,11 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
         }
     }
     let path = temp_file("agent-vhid-note-", ".txt", note.as_bytes()).map_err(io)?;
-    let opened = Command::new("open").arg("-e").arg(&path).status().map_err(io)?;
+    let opened = Command::new("open")
+        .arg("-e")
+        .arg(&path)
+        .status()
+        .map_err(io)?;
     if !opened.success() {
         return Err(VhidError::Io(format!("open exited with {opened}")));
     }
@@ -113,7 +137,11 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
         let lines = visible_line_numbers(&boxes);
         let top = lines.first().copied().unwrap_or(previous_top);
         let q = |v: Option<&usize>| v.map_or("?".to_string(), |n| n.to_string());
-        println!("    scrolled 5 notches: lines {}-{} visible", q(lines.first()), q(lines.last()));
+        println!(
+            "    scrolled 5 notches: lines {}-{} visible",
+            q(lines.first()),
+            q(lines.last())
+        );
         if top < previous_top {
             results.push(report(false, "scrolling went the wrong way"));
             break;
@@ -126,7 +154,11 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
     }
     results.push(report(
         target.is_some(),
-        &if target.is_some() { format!("found '{word}' on line {HIDDEN_LINE}") } else { "never saw the word".to_string() },
+        &if target.is_some() {
+            format!("found '{word}' on line {HIDDEN_LINE}")
+        } else {
+            "never saw the word".to_string()
+        },
     ));
 
     if let Some(target) = target {
@@ -137,7 +169,10 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
         mac.key("cmd+c")?;
         pause(0.3);
         let copied = clipboard();
-        results.push(report(copied == word, &format!("clipboard holds {copied:?}")));
+        results.push(report(
+            copied == word,
+            &format!("clipboard holds {copied:?}"),
+        ));
 
         // 4. Right-click and read the menu
         println!("Right-click menu");
@@ -157,7 +192,10 @@ fn steps(mac: &AgentVHID, word: &str, results: &mut Vec<bool>) -> Result<Option<
             .map(String::as_str)
             .filter(|l| matches!(l.trim(), "Copy" | "Cut" | "Paste") || l.contains("Look Up"))
             .collect();
-        results.push(report(has_lookup && has_copy, &format!("menu shows {}", listed.join(", "))));
+        results.push(report(
+            has_lookup && has_copy,
+            &format!("menu shows {}", listed.join(", ")),
+        ));
         mac.key("escape")?;
         pause(0.3);
     }
@@ -187,7 +225,9 @@ fn run() -> Result<u8, VhidError> {
     println!("engaged");
     let outcome = steps(&mac, word, &mut results);
     // Whatever happened, put the clipboard back.
-    RealMac.set_clipboard(&saved_clipboard).map_err(VhidError::Io)?;
+    RealMac
+        .set_clipboard(&saved_clipboard)
+        .map_err(VhidError::Io)?;
     match outcome {
         Ok(Some(code)) => return Ok(code),
         Ok(None) => {}

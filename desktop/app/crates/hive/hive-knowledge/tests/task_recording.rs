@@ -191,6 +191,11 @@ fn the_folder_and_names() {
     env.set("HIVE_RECORDINGS", "/tmp/somewhere");
     assert_eq!(task_recording::folder(), PathBuf::from("/tmp/somewhere"));
     env.remove("HIVE_RECORDINGS");
+    let temp = tempfile::tempdir().unwrap();
+    env.set("HOME", temp.path().to_str().unwrap());
+    env.remove("AGENT_STATE_DIR");
+    assert!(task_recording::folder().ends_with("Library/Application Support/Hive/recordings"));
+    std::fs::create_dir_all(temp.path().join("Movies/Hive")).unwrap();
     assert!(task_recording::folder().ends_with("Movies/Hive"));
     assert_eq!(
         task_recording::slug("Fill the form! (quickly), please"),

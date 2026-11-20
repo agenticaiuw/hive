@@ -46,7 +46,9 @@ class Microphone:
         self.active = active
         self.name = ""             # the microphone's
         self.error: str | None = None
-        self.tap_error: str | None = None
+        self.tap_error: str | None = "system audio tap has not connected" if devices else None
+        self._current_tap = None
+        self._tap_data_at = 0.0
         self.heard_mac_at = 0.0    # when the tap last carried some sound (time.monotonic())
         self._queue: queue.Queue = queue.Queue()  # ("mic" | "mac", samples), in the order they came
         self._canceller = None
@@ -71,7 +73,9 @@ class Microphone:
             return f"off ({self.canceller_error})"
         if self.tap_error:
             return f"off ({self.tap_error})"
-        return "on (it takes what the Mac plays out of what it hears)"
+        if self._current_tap is not None and time.monotonic() - self._tap_data_at >= 2.0:
+            return "unverified (system audio tap has no recent audio frames)"
+        return "available (system audio tap connected; echo cancellation not verified)"
 
     def set_active(self, on: bool):
         """Opens (True) or closes the microphone and the tap. While closed, macOS shows no
@@ -81,7 +85,8 @@ class Microphone:
 
     def hears_the_mac(self) -> bool:
         """The echo canceller is getting what the Mac plays, so the agent's voice won't be heard as you."""
-        return self._canceller is not None and time.monotonic() - self.heard_mac_at < 1.0
+        return (self._canceller is not None and self.active and self.tap_error is None
+                and time.monotonic() - self.heard_mac_at < 1.0)
 
     def from_mic(self, samples: np.ndarray):
         self._queue.put(("mic", samples))
@@ -149,6 +154,7 @@ class Microphone:
                     stream.close()
                     stream = mic_device = None
                 if tap is not None:
+                    self._current_tap = None  # its reader must not report an intentional stop as failure
                     if tap.poll() is None:
                         tap.terminate()
                     tap = out_device = None
@@ -201,6 +207,8 @@ class Microphone:
             self.tap_error = "build/agent-vhid-tap isn't built; run make"
             return None
         tap = subprocess.Popen([TAP], stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        self._current_tap = tap
+        self._tap_data_at = 0.0
         threading.Thread(target=self._read_tap, args=(tap,), daemon=True).start()
         return tap
 
@@ -209,19 +217,27 @@ class Microphone:
         header = tap.stdout.readline().split()
         if len(header) != 2:
             tap.wait()
-            if not self.active:
-                return  # closed on purpose
+            if not self.active or self._current_tap is not tap:
+                return  # closed on purpose or replaced
             self.tap_error = (tap.stderr.read().decode().strip().removeprefix("agent-vhid-tap: ")
                               or f"the tap stopped ({tap.returncode})")
             return
+        if self._current_tap is not tap:
+            return  # a newer tap owns the status
         self.tap_error = None
         rate, channels = int(header[0]), int(header[1])
         resampler = soxr.ResampleStream(rate, RATE, 1, dtype="float32")
         leftover = b""
         while chunk := tap.stdout.read1(8192):
+            if self._current_tap is not tap:
+                return
+            self._tap_data_at = time.monotonic()
             chunk, leftover = leftover + chunk, b""
             usable = len(chunk) - len(chunk) % (4 * channels)
             chunk, leftover = chunk[:usable], chunk[usable:]
             samples = np.frombuffer(chunk, np.float32).reshape(-1, channels).mean(axis=1)
             self.from_mac(resampler.resample_chunk(samples))
         tap.wait()
+        if self.active and self._current_tap is tap:
+            self.tap_error = (tap.stderr.read().decode(errors="replace").strip().removeprefix("agent-vhid-tap: ")
+                              or f"the system audio tap stopped ({tap.returncode})")

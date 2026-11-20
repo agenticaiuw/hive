@@ -279,7 +279,7 @@ Settings live in `.env` (copy `.env.example`; it's gitignored and wins over your
 | `AGENT_FAST` | `1` uses Codex's Fast tier: quicker replies, but it uses up your plan's usage sooner |
 | `AGENT_EFFORT` | Its reasoning effort: `low` (default), `medium`, `high`, ... |
 | `CAPTIONS` | `0` turns the on-screen captions off |
-| `PHONE_RELAY` | The phone relay's folder (see [Your iPhone](#your-iphone)); empty means no phone |
+| `PHONE_RELAY` | A phone relay of your own (see [Your iPhone](#your-iphone)); empty means Hive Phone through the board |
 
 To hear a voice before you pick it, or check what it hears:
 
@@ -528,13 +528,14 @@ the voice agent's output to `~/Library/Logs/Agent.log`, and the helper's to
 
 ### Your iPhone
 
-It uses the relay from the Phone Control Automation project: the iPhone runs
-WebDriverAgent inside its controller app, which keeps a connection open to a
-Cloudflare Worker, so it works over Wi-Fi or cellular with no cable. Set
-`PHONE_RELAY` in `.env` to that project's `work/phone-relay` folder (it reads the
-address from `endpoint.txt` and the token from `private/secrets.json`, and never
-prints the token). To connect the phone, unlock it and open the WebDriverAgent relay app
-(**WebDriverAgentRunner-Runner**), then check:
+The iPhone runs Hive Phone (`mobile/relay`): WebDriverAgent with a relay that keeps
+a connection open to your board, so it works over Wi-Fi or cellular with no cable,
+and every node reaches it through the board. The dashboard's **iPhone** section
+installs it with SideStore and connects it. With `PHONE_RELAY` empty, the Mac
+reaches it through the board with this Mac's cloud key (`~/.config/hive/tasks.json`,
+never printed). A relay of your own still works: set `PHONE_RELAY` to its folder (the
+address in `endpoint.txt`, the token in `private/secrets.json`) and open its relay app
+(**WebDriverAgentRunner-Runner**) on the phone. To check the connection:
 
 ```bash
 build/phone-status
@@ -545,7 +546,7 @@ id and reads the accessibility tree for exact labels. Every task gets the phone'
 tools along with the Mac's, so it uses the phone whenever a request needs it; one
 that says "phone" or "iPhone" starts by looking at the phone and leaves the Mac to
 any other task. If the phone isn't
-connected it says so and tells you to open the relay app.
+connected it says so and tells you to open Hive Phone (or your relay app).
 
 ## One-time setup
 

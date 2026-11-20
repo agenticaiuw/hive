@@ -43,6 +43,11 @@ stdout, one JSON object per line:
   {"event": "reply", "id": 1, ...} or {"event": "reply", "id": 1, "error": "..."}
   {"event": "log", "line": "..."}       a line the model code printed (for Agent.log)
   {"event": "error", "error": "..."}    a command it couldn't carry out
+
+<state>/dictation.sock serves other programs on this Mac: {"wav": path} reads a recording (the
+dashboard's composer), and {"listen": true} listens for them the way the floating window listens
+(Hive's Safari popup, through Hive.app): drafts as you talk, then the final, which never reach the
+agent (Server.listen_for).
 """
 
 from __future__ import annotations
@@ -59,6 +64,8 @@ if HERE not in sys.path:
 
 STATUS_EVERY = 0.25  # seconds between status events
 HEARS_THE_MAC = 1.0  # mic.py: the tap carried sound this recently
+LISTEN_LONGEST = 60.0  # a program listening through the ears (Listener) gets at most this long
+LISTEN_FOR_START = 8.0  # ...and this long to start talking
 
 
 class Talking:
@@ -127,6 +134,43 @@ def reporting_voice(voice_class, server: "Server"):
                                                             "on_done": staticmethod(server.on_done)})
 
 
+class Listener:
+    """A program on this Mac listening through the ears instead of the agent: Hive's Safari popup,
+    through Hive.app (dashboard.swift SafariListen). It gets what the floating window gets: the
+    words as you say them, then all of it once you stop, read by the same models with the same
+    pause and voiceprint. One JSON line each, on its connection to the dictation socket."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.started = time.monotonic()
+        self.spoke = False  # you started talking (on_speech)
+        self.winding = False  # it asked to stop, or ran out of time: what's heard so far is its last
+        self.ended = False  # its final line has gone
+        self._lock = threading.Lock()
+
+    def send(self, **fields) -> bool:
+        with self._lock:
+            if self.ended:
+                return False
+            self._write(fields)
+            return True
+
+    def end(self, **fields) -> bool:
+        """The last line; False if it already had one."""
+        with self._lock:
+            if self.ended:
+                return False
+            self.ended = True
+            self._write(fields)
+            return True
+
+    def _write(self, fields):
+        try:
+            self.conn.sendall((json.dumps(fields, ensure_ascii=False) + "\n").encode())
+        except OSError:
+            pass  # it hung up; what it would have heard still never goes to the agent
+
+
 class LogLines:
     """sys.stdout while serving: each line printed becomes a log event."""
 
@@ -162,6 +206,11 @@ class Server:
         self.ears = None
         self.voice = None
         self.quitting = threading.Event()
+        # While a Listener has the ears, what they hear goes to it and not to the agent, and
+        # the agent's listen commands wait in _agent_listening until it lets go.
+        self._listener: Listener | None = None
+        self._agent_listening = False
+        self._ears_lock = threading.Lock()
 
     def emit(self, event: str, **fields):
         line = json.dumps({"event": event, **fields}, ensure_ascii=False)
@@ -185,6 +234,13 @@ class Server:
     # -- Ears' and Voice's callbacks --
 
     def on_text(self, text: str, final: bool):
+        listener = self._listener
+        if listener is not None:
+            if not final:
+                listener.send(draft=text)
+            else:
+                self._done_listening(listener, text)
+            return
         if not final:
             self.emit("text", text=text, final=False)
             return
@@ -193,15 +249,93 @@ class Server:
         self.emit("text", text=text, final=True, heard_times={k: now - v for k, v in times.items()})
 
     def on_speech(self):
+        listener = self._listener
+        if listener is not None:  # (to the agent, talking is a cut-in)
+            listener.spoke = True
+            return
         self.emit("speech")
 
     def on_ignored(self, seconds: float, similarity: float):
+        if self._listener is not None:
+            return
         voiceprint = getattr(self.ears, "voiceprint", None)
         self.emit("ignored", seconds=float(seconds), similarity=float(similarity),
                   heard_machine=bool(getattr(voiceprint, "heard_machine", False)))
 
     def on_talking(self, on: bool):
+        if self._listener is not None:
+            return  # the agent hears where talking stands when the listener lets go
         self.emit("talking", on=on)
+
+    # -- another program listening (Listener) --
+
+    def start_listening(self, listener: Listener):
+        """The ears are listener's until it has your words, hangs up or runs out of time. The
+        agent's own listening resumes after; anyone listening before is told it's over."""
+        with self._ears_lock:
+            before = self._listener
+            if before is None:
+                self._agent_listening = bool(self.ears.listening)
+            self._listener = listener
+            self.ears.listen(True)
+        if before is not None:
+            before.end(text="", done=True)
+
+    def wind_up(self, listener: Listener):
+        """Stop listening for listener: what it has said so far is its last, and nothing heard
+        before the cut goes to the agent."""
+        if listener.winding:
+            return
+        listener.winding = True
+        self.ears.cut(lambda: self._done_listening(listener, ""))
+
+    def _done_listening(self, listener: Listener, text: str):
+        listener.end(text=text.strip(), done=True)
+        with self._ears_lock:
+            if self._listener is not listener:
+                return
+            self._listener = None
+            self.ears.listen(self._agent_listening)
+        self.emit("talking", on=bool(getattr(self.ears, "talking", False)))
+
+    def listen_for(self, conn, rest: bytes = b""):
+        """{"listen": true} on the dictation socket: listen for that connection. It gets
+        {"state": "listening"}, then {"draft": "..."} as you talk, then {"text": "...", "done": true}
+        (or {"error": "..."}); {"stop": true} from it ends what you're saying now, and hanging up
+        cancels."""
+        import socket
+        ears = self.ears
+        if ears is None or (getattr(ears, "model", True) is None and getattr(ears, "error", None)):
+            why = getattr(ears, "error", None) or "Hive's ears aren't running"
+            conn.sendall((json.dumps({"error": f"Hive can't hear right now: {why}"}) + "\n").encode())
+            return
+        listener = Listener(conn)
+        self.start_listening(listener)
+        listener.send(state="listening")
+        conn.settimeout(0.1)
+        buffer = rest
+        while not listener.ended:
+            waited = time.monotonic() - listener.started
+            if waited > LISTEN_LONGEST or (not listener.spoke and waited > LISTEN_FOR_START):
+                self.wind_up(listener)
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    asked = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(asked, dict) and asked.get("stop"):
+                    self.wind_up(listener)
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                chunk = b""
+            if not chunk:  # hung up: cancelled
+                self.wind_up(listener)
+                return
+            buffer += chunk
 
     def on_play(self, words: str):
         self.emit("play", words=words)
@@ -301,7 +435,8 @@ class Server:
 
     def serve_dictation(self, path: str):
         """Takes dictation for other programs on this Mac (Hive's dashboard window) on a socket
-        only you can open: one JSON line in, {"wav": path}; one back, {"text"} or {"error"}."""
+        only you can open: one JSON line in, {"wav": path}; one back, {"text"} or {"error"}. Or
+        {"listen": true}: it listens for them like the floating window (listen_for)."""
         import socket
         try:
             os.unlink(path)
@@ -325,7 +460,12 @@ class Server:
                         if not chunk:
                             break
                         data += chunk
-                    reply = {"text": self.dictate(json.loads(data.split(b"\n", 1)[0]).get("wav"))}
+                    first, _, rest = data.partition(b"\n")
+                    asked = json.loads(first)
+                    if isinstance(asked, dict) and asked.get("listen"):
+                        self.listen_for(conn, rest)
+                        return
+                    reply = {"text": self.dictate(asked.get("wav"))}
                 except Exception as e:
                     reply = {"error": str(e) or type(e).__name__}
                 try:
@@ -355,7 +495,11 @@ class Server:
         """One command; False to stop serving."""
         cmd = message.get("cmd")
         if cmd == "listen":
-            self.ears.listen(bool(message.get("on")))
+            with self._ears_lock:
+                if self._listener is not None:  # it's someone else's turn: after it
+                    self._agent_listening = bool(message.get("on"))
+                else:
+                    self.ears.listen(bool(message.get("on")))
         elif cmd == "cut":
             then = message.get("then")
             self.ears.cut(None if then is None else (lambda: self.emit("then", id=then)))

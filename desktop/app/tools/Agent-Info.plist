@@ -41,7 +41,5 @@
 			</array>
 		</dict>
 	</array>
-	<key>AgentRepository</key>
-	<string>@REPO@</string>
 </dict>
 </plist>

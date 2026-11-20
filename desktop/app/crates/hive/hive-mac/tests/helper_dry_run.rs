@@ -82,10 +82,7 @@ impl Helper {
             if Instant::now() > deadline || matches!(child.try_wait(), Ok(Some(_))) {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!(
-                    "helper did not start:\n{}",
-                    lock(&lines).join("\n")
-                );
+                panic!("helper did not start:\n{}", lock(&lines).join("\n"));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -364,7 +361,10 @@ fn human_input_disengages_and_releases_everything() {
     assert_eq!(helper.raw("human trackpad"), "ok");
     assert_eq!(
         helper.reports(n),
-        [keyboard(0, &[]), "pointing buttons=0 x=0 y=0 wheel=0,0".into()]
+        [
+            keyboard(0, &[]),
+            "pointing buttons=0 x=0 y=0 wheel=0,0".into()
+        ]
     );
     assert!(matches!(mac.key("a"), Err(VhidError::Disengaged(_))));
     assert!(matches!(
@@ -403,10 +403,7 @@ fn touch_while_arming_cancels() {
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(
         state(&mac),
-        (
-            "disengaged".into(),
-            "engage_cancelled_by_trackpad".into()
-        )
+        ("disengaged".into(), "engage_cancelled_by_trackpad".into())
     );
 }
 
@@ -498,7 +495,10 @@ fn keys_are_released_when_a_client_disconnects() {
     assert!(reports.len() >= 2, "{reports:?}");
     assert_eq!(
         reports[reports.len() - 2..],
-        [keyboard(0, &[]), "pointing buttons=0 x=0 y=0 wheel=0,0".into()]
+        [
+            keyboard(0, &[]),
+            "pointing buttons=0 x=0 y=0 wheel=0,0".into()
+        ]
     );
 }
 
@@ -572,7 +572,8 @@ fn hives_sound_switch_silences_the_chimes() {
         let since = helper.mark();
         mac.engage().unwrap();
         assert!(
-            mac.wait_engaged(Some(Duration::from_secs(3)), false).unwrap(),
+            mac.wait_engaged(Some(Duration::from_secs(3)), false)
+                .unwrap(),
             "{what}: engaged"
         );
         helper.lines_since(since)
@@ -585,10 +586,16 @@ fn hives_sound_switch_silences_the_chimes() {
     let since = helper.mark();
     mac.disengage().unwrap();
     let lines = helper.lines_since(since);
-    assert!(lines.iter().any(|l| l == "[sound] muted: Funk"), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l == "[sound] muted: Funk"),
+        "{lines:?}"
+    );
     assert!(!lines.iter().any(|l| l == "[sound] Funk"), "{lines:?}");
     let lines = engage("off");
-    assert!(lines.iter().any(|l| l == "[sound] muted: Glass"), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l == "[sound] muted: Glass"),
+        "{lines:?}"
+    );
     assert!(!lines.iter().any(|l| l == "[sound] Glass"), "{lines:?}");
 
     std::fs::write(&setting, "on\n").unwrap();

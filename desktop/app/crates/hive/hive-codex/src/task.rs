@@ -1955,11 +1955,16 @@ impl CodexTask {
         s.between_goal_turns && s.turn.as_deref() == turn
     }
 
-    /// Waits through the configured proxy without resetting a stop or replaying a request.
+    /// Waits for ChatGPT to be reachable (as Codex reaches it) without resetting a stop or
+    /// replaying a request.
     pub(crate) fn wait_for_provider(&self, arm: bool, expected_turn: Option<&str>) -> bool {
         self.event(
             "doing",
-            "Waiting for provider access through the configured network",
+            &format!(
+                "Can't reach ChatGPT from this Mac ({}); trying again every {} seconds",
+                crate::provider_wait::route(&self.agent.env),
+                INTERVAL_SECONDS as u64
+            ),
         );
         self.st().provider_waiting = true;
         let result = self.wait_for_provider_steps(arm, expected_turn);
@@ -2091,6 +2096,12 @@ impl CodexTask {
 
     /// Answers Codex's call to one of our tools.
     pub(crate) fn call_tool(&self, params: &Value) -> Value {
+        fn with_note(mut reply: Value, note: &str) -> Value {
+            if let Some(items) = reply.get_mut("contentItems").and_then(Value::as_array_mut) {
+                items.push(json!({"type": "inputText", "text": note}));
+            }
+            reply
+        }
         let namespace = py::text(params.get("namespace"))
             .unwrap_or(&self.device)
             .to_owned();
@@ -2134,7 +2145,15 @@ impl CodexTask {
                 };
                 let ok = reply.get("success") == Some(&Value::Bool(true));
                 self.record_action(&namespace, tool.unwrap_or(""), &arguments, ok);
-                reply
+                if crate::describe::acts(tool)
+                    && py::text(arguments.get("step")).is_none_or(|s| py::strip(s).is_empty())
+                {
+                    // The card and the activity view show `step` as you act; without it the user
+                    // can't tell what's happening (it went missing after a compaction).
+                    with_note(reply, prompts::STEP_MISSING)
+                } else {
+                    reply
+                }
             }
             _ => {
                 let text = if stopped {
