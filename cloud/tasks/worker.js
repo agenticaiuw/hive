@@ -89,6 +89,7 @@ async function route(request, env, url) {
       if (url.pathname === "/v1/requests/take" && request.method === "POST") return await takeRequest(request, env);
       if (url.pathname === "/v1/requests/update" && request.method === "POST") return await updateRequest(request, env);
       if (url.pathname === "/v1/requests/state") return await requestState(url, request, env);
+      if (url.pathname === "/v1/requests/context" && request.method === "GET") return await requestContext(url, request, env);
       if (url.pathname === "/v1/requests/stop" && request.method === "POST") return await stopRequest(request, env);
       if (url.pathname === "/v1/runs" && request.method === "POST") return await saveRun(request, env);
       if (url.pathname === "/v1/runs/message" && request.method === "POST") return await messageRun(request, env);
@@ -528,6 +529,48 @@ async function takeRequest(request, env) {
       said_at: message?.said_at, from: message?.session || "web",
       page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },
+  });
+}
+
+// Earlier requests are source material for later work. Read the saved words and page, not the
+// dashboard's summary. Runs include every node; their steps and messages have pages so old material
+// is reachable even in a long conversation. follows points to the request before this one.
+async function requestContext(url, request, env) {
+  if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
+  const raw = url.searchParams.get("id") || "";
+  const id = Number(raw.replace(/^R/i, ""));
+  const offset = Number(url.searchParams.get("offset") || "0");
+  if (!/^[Rr]?[1-9]\d*$/.test(raw) || !Number.isSafeInteger(id)) return json({ error: "Say which request (id, such as R7)." }, 400);
+  if (!Number.isSafeInteger(offset) || offset < 0) return json({ error: "offset must be a nonnegative whole number." }, 400);
+  const row = await env.DB.prepare(
+    `SELECT r.id, r.agent, r.folder, r.status, r.outcome, r.follows, r.retry_note,
+       r.created_at, r.updated_at, r.finished_at, r.stop_at, m.text, m.project, m.session AS "from", m.said_at
+     FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id WHERE r.id = ?1`,
+  ).bind(id).first();
+  if (!row) return json({ error: "No such request." }, 404);
+  const size = 50;
+  const [page, tasks, runs, steps, messages] = await env.DB.batch([
+    env.DB.prepare("SELECT url, title, outline FROM board_page_asks WHERE request = ?1").bind(id),
+    env.DB.prepare(
+      `SELECT id - ?1 * 100 AS key, quote, title, status, outcome, evidence FROM board_tasks
+       WHERE machine = 'cloud' AND message = ?1 ORDER BY id`,
+    ).bind(id),
+    env.DB.prepare("SELECT machine, run, agent, title, status, task, project, started_at, updated_at FROM board_runs WHERE request = ?1 ORDER BY machine, run").bind(id),
+    env.DB.prepare(
+      `SELECT s.machine, s.run, s.n, s.at, s.kind, s.text FROM board_run_steps s
+       JOIN board_runs r ON r.machine = s.machine AND r.run = s.run
+       WHERE r.request = ?1 ORDER BY s.machine, s.run, s.n LIMIT ?2 OFFSET ?3`,
+    ).bind(id, size + 1, offset),
+    env.DB.prepare(
+      `SELECT m.id, m.machine, m.run, m.text, m.sender, m.status, m.detail, m.request, m.task, m.created_at, m.updated_at
+       FROM board_run_messages m JOIN board_runs r ON r.machine = m.machine AND r.run = m.run
+       WHERE r.request = ?1 ORDER BY m.id LIMIT ?2 OFFSET ?3`,
+    ).bind(id, size + 1, offset),
+  ]);
+  return json({
+    request: row, page: page.results[0] ?? null, tasks: tasks.results, runs: runs.results,
+    steps: steps.results.slice(0, size), messages: messages.results.slice(0, size),
+    next_offset: steps.results.length > size || messages.results.length > size ? offset + size : null,
   });
 }
 

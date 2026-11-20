@@ -27,10 +27,10 @@ function fakeD1() {
 
 function setup() {
   const env = { DB: fakeD1(), TASKS_TOKEN: 'machine-token' };
-  const call = async (method, path, body) => {
+  const call = async (method, path, body, token = 'machine-token') => {
     const response = await worker.fetch(new Request(`https://board.test${path}`, {
       method,
-      headers: { authorization: 'Bearer machine-token', 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     }), env);
     return { status: response.status, body: await response.json() };
@@ -92,4 +92,73 @@ test("a request that failed on its own is still stuck, so Hive continues it; a s
   await call('POST', '/v1/requests/update', { id: failed, status: 'failed', outcome: "Couldn't plan it: no answer" });
   const lone = (await call('GET', '/v1/board')).body.tasks.find((t) => t.machine === 'cloud' && t.id === failed * 100 + 1);
   assert.equal(lone?.status, 'blocked');
+});
+
+
+test('request context retrieves original material and follows links without changing the request', async () => {
+  const { call, env } = setup();
+  const words = 'Transcribe these words:\nTHE FIRST line.\nThe second LINE.\nSource: /tmp/sample.txt';
+  const page = { url: 'https://example.test/source', title: 'Source', outline: 'Exact PAGE material.\n' + 'More text. '.repeat(800).trimEnd() };
+  const id = (await call('POST', '/v1/requests', { text: words, from: 'mac', page })).body.id;
+  await call('POST', '/v1/requests/update', { id, status: 'done', outcome: 'A saved result', tasks: [
+    { key: 1, title: 'Transcribe', quote: words, status: 'done', outcome: 'Exact transcription' },
+  ] });
+  const follow = (await call('POST', '/v1/runs/message', { request: id, text: 'Keep the words.', from: 'mac' })).body.request;
+  const latest = await call('GET', `/v1/requests/context?id=R${follow}`);
+  assert.equal(latest.status, 200);
+  assert.equal(latest.body.request.text, 'Keep the words.');
+  assert.equal(latest.body.request.follows, id);
+  assert.equal(latest.body.page, null);
+  assert.deepEqual(latest.body.steps, []);
+  assert.equal(latest.body.next_offset, null);
+  const before = env.DB.db.prepare('SELECT * FROM board_requests ORDER BY id').all();
+  const got = await call('GET', `/v1/requests/context?id=${latest.body.request.follows}`);
+  assert.equal(got.status, 200);
+  assert.equal(got.body.request.text, words);
+  assert.equal(got.body.request.from, 'mac');
+  assert.equal(got.body.request.outcome, 'A saved result');
+  assert.deepEqual(got.body.page, page);
+  assert.equal(got.body.tasks[0].outcome, 'Exact transcription');
+  assert.deepEqual(env.DB.db.prepare('SELECT * FROM board_requests ORDER BY id').all(), before);
+});
+
+test('request history pages include every saved step and message from every node, only for this request', async () => {
+  const { call } = setup();
+  const id = (await call('POST', '/v1/requests', { text: 'Read the source' })).body.id;
+  const other = (await call('POST', '/v1/requests', { text: 'Unrelated work' })).body.id;
+  for (const [machine, request, count] of [['cloud', id, 65], ['mac-test', id, 2], ['unrelated', other, 1]]) {
+    await call('POST', '/v1/runs', { machine, run: 'source', agent: 'mac', request,
+      steps: Array.from({ length: count }, (_, i) => ({ n: i + 1, at: 100 + i, kind: 'say', text: `${machine} source ${i + 1}` })) });
+  }
+  for (let i = 0; i < 52; i++) {
+    await call('POST', '/v1/runs/message', { machine: 'mac-test', run: 'source', text: `Saved message ${i}` });
+  }
+  await call('POST', '/v1/runs/message', { machine: 'unrelated', run: 'source', text: 'Unrelated message' });
+  const first = (await call('GET', `/v1/requests/context?id=${id}`)).body;
+  assert.deepEqual(first.runs.map(r => r.machine), ['cloud', 'mac-test']);
+  assert.equal(first.steps.length, 50);
+  assert.equal(first.messages.length, 50);
+  assert.equal(first.next_offset, 50);
+  const second = (await call('GET', `/v1/requests/context?id=${id}&offset=${first.next_offset}`)).body;
+  assert.equal(second.next_offset, null);
+  assert.deepEqual([...first.steps, ...second.steps].map(s => s.text), [
+    ...Array.from({ length: 65 }, (_, i) => `cloud source ${i + 1}`), 'mac-test source 1', 'mac-test source 2',
+  ]);
+  assert.deepEqual([...first.messages, ...second.messages].map(m => m.text),
+    Array.from({ length: 52 }, (_, i) => `Saved message ${i}`));
+});
+
+test('request context requires machine authentication and valid IDs and offsets', async () => {
+  const { call } = setup();
+  assert.equal((await call('GET', '/v1/requests/context?id=1', undefined, '')).status, 401);
+  assert.equal((await call('GET', '/v1/requests/context?id=1', undefined, 'wrong')).status, 401);
+  for (const id of ['', '0', '-1', 'R0', '1.5', '9007199254740992', 'wat']) {
+    assert.equal((await call('GET', `/v1/requests/context?id=${id}`)).status, 400, id);
+  }
+  for (const offset of ['-1', '0.5', 'wat']) {
+    assert.equal((await call('GET', `/v1/requests/context?id=1&offset=${offset}`)).status, 400, offset);
+  }
+  const missing = await call('GET', '/v1/requests/context?id=R999');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error, 'No such request.');
 });
