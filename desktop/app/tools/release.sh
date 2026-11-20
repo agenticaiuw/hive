@@ -57,7 +57,7 @@ for code in "$app/Contents/Helpers/workspace-engine" "$app/Contents/PlugIns/Hive
 done
 # Every program the app carries for a teammate's setup (Hive's agent and tools, uv, Codex and what
 # it brings): Apple notarizes no app with an unsigned program inside, or one without the hardened runtime.
-find "$app/Contents/Resources/hive" "$app/Contents/Helpers/uv" "$app/Contents/Helpers/codex" -type f 2>/dev/null |
+find "$app/Contents/Resources/hive" "$app/Contents/Helpers/uv" "$app/Contents/Resources/codex" -type f 2>/dev/null |
   while IFS= read -r file; do
     if file -b "$file" | grep -q '^Mach-O'; then
       codesign --remove-signature "$file" 2>/dev/null || true

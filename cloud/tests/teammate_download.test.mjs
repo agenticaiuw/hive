@@ -84,7 +84,7 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     assert.ok(!existsSync(join(carried, 'desktop/app/python/__pycache__')), 'no Python caches');
     assert.match(readFileSync(join(carried, 'VERSION'), 'utf8'), /^abc123def456 [0-9a-f]{12}\n$/);
     assert.ok(existsSync(join(app, 'Contents/Helpers/uv')));
-    assert.ok(existsSync(join(app, 'Contents/Helpers/codex/codex-path/rg')));
+    assert.ok(existsSync(join(app, 'Contents/Resources/codex/codex-path/rg')));
 
     // First open: the Kokoro files are there already, so nothing is fetched.
     const root = join(dir, 'Application Support/Hive/install');
@@ -102,7 +102,7 @@ test('carry.mjs puts a release, the voice files, uv and Codex in the app, and fi
     assert.ok(existsSync(join(root, 'desktop/app/build/hive-agent')));
     assert.equal(execFileSync(join(root, 'desktop/app/build/hive-agent'), { encoding: 'utf8' }), 'agent\n');
     assert.ok(existsSync(join(root, 'cloud/knowledge/migrations/0001_init.sql')));
-    assert.equal(readlinkSync(join(root, 'bin/codex')), join(app, 'Contents/Helpers/codex/bin/codex'));
+    assert.equal(readlinkSync(join(root, 'bin/codex')), join(app, 'Contents/Resources/codex/bin/codex'));
     const calls = readFileSync(log, 'utf8');
     assert.match(calls, /python install --quiet --no-bin 3\.14\.7/);
     assert.match(calls, /pip sync --quiet --python .*\.venv\/bin\/python .*requirements\.lock/);
