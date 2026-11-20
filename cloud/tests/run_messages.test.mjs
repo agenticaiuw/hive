@@ -113,6 +113,23 @@ test('a reply to Hive in the cloud becomes a follow-up request that knows what i
   const next = (await call('POST', '/v1/requests/take', { by: 'vm' })).body.request;
   assert.equal(next.id, more.body.request);
   assert.match(next.text, /which ended: Drafted\.\nNow: For hive › mail: \[Hive on the Mac, not the owner\] Send the draft$/);
+  // Two back and more: the whole conversation, oldest first, so "the same, but fix the caps" has its subject.
+  assert.match(next.text, /^Earlier in this conversation, oldest first:\n- R1 \("Summarize my inbox"\), which ended: Three new emails, none urgent\.\nThis follows the owner's earlier request R2 \("Draft a reply to the second one"\)/);
+});
+
+test('a follow-up hears at most the six requests before it', async () => {
+  const { call } = setup();
+  let last = (await call('POST', '/v1/requests', { text: 'step 1', from: 'web' })).body.id;
+  for (let n = 2; n <= 9; n++) {
+    await call('POST', '/v1/requests/take', { by: 'vm' });
+    await call('POST', '/v1/requests/update', { id: last, status: 'done', outcome: `did ${n - 1}` });
+    last = (await call('POST', '/v1/runs/message', { request: last, text: `step ${n}`, from: 'web' })).body.request;
+  }
+  const taken = (await call('POST', '/v1/requests/take', { by: 'vm' })).body.request;
+  assert.match(taken.text, /The owner now says: step 9$/);
+  assert.match(taken.text, /- R3 \("step 3"\), which ended: did 3\n/);
+  assert.doesNotMatch(taken.text, /step 2"/);
+  assert.equal(taken.text.match(/^- R/gm).length, 5);
 });
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -223,4 +240,29 @@ test('a message to a VM job becomes a new request to Hive on the VM, and reads a
   assert.equal(board.run_messages[0].status, 'delivered');
   // Nothing waits for a VM that would never take it.
   assert.deepEqual((await call('POST', '/v1/runs/messages/take', { machine: 'cloud' })).body.messages, []);
+});
+
+test('a request Hive on the VM was on when it restarted runs again, twice at most, with a note of what happened', async () => {
+  const { call } = setup();
+  const id = (await call('POST', '/v1/requests', { text: 'Post the video', from: 'web' })).body.id;
+  assert.equal((await call('POST', '/v1/requests/take', { by: 'vm', fresh: true })).body.request.id, id);
+  await call('POST', '/v1/requests/update', { id, status: 'working' });
+  const other = (await call('POST', '/v1/requests', { text: 'Something later', from: 'web' })).body.id;
+
+  for (let restart = 1; restart <= 2; restart++) {
+    const again = (await call('POST', '/v1/requests/take', { by: 'vm', fresh: true })).body.request;
+    assert.equal(again.id, id, `restart ${restart}: the same request, ahead of later ones`);
+    assert.equal(again.retry, true);
+    assert.match(again.text, /^Hive on the VM restarted while it was working on this request[\s\S]*The request, as it was:\nPost the video$/);
+    await call('POST', '/v1/requests/update', { id, status: 'working' });
+  }
+  const third = (await call('POST', '/v1/requests/take', { by: 'vm', fresh: true })).body.request;
+  assert.equal(third.id, other, 'the third restart ends it');
+  const ended = (await call('GET', '/v1/board')).body.requests.find((r) => r.id === id);
+  assert.equal(ended.status, 'failed');
+  assert.match(ended.outcome, /restarted while it worked on this, 2 times/);
+  // A take that isn't a fresh start leaves what's in progress alone.
+  await call('POST', '/v1/requests/update', { id: other, status: 'working' });
+  assert.equal((await call('POST', '/v1/requests/take', { by: 'vm' })).body.request, null);
+  assert.equal((await call('GET', '/v1/board')).body.requests.find((r) => r.id === other).status, 'working');
 });

@@ -194,7 +194,19 @@ export function readEvents(lines) {
 
 /** A short outcome for the board: the report's first sentence or line. */
 export function outcomeOf(report, fallback) {
-  const first = String(report || '').trim().split(/\n|(?<=[.!?])\s/)[0]?.trim() ?? '';
+  const text = String(report || '').trim();
+  const first = text.split(/\n|(?<=[.!?])\s/)[0]?.trim() ?? '';
+  // A first line ending in a colon introduces the outcome itself ("Updated the bio:" and the bio): the lines
+  // after it too, as many whole ones as fit.
+  if (first.endsWith(':')) {
+    let out = '';
+    for (const line of text.split('\n').map(l => l.trim()).filter(Boolean)) {
+      const more = out ? `${out}\n${line}` : line;
+      if (more.length > 500) break;
+      out = more;
+    }
+    if (out.length > first.length) return out;
+  }
   return (first || fallback).slice(0, 240);
 }
 
