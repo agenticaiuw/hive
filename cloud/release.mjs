@@ -7,6 +7,7 @@
 //   node cloud/release.mjs board [--from DIR] [--dry-run]
 //   node cloud/release.mjs phone [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]
 //   node cloud/release.mjs site [--from DIR] [--dry-run]
+//   node cloud/release.mjs download [--dmg FILE] [--dry-run]
 //
 // The code is the repository's last commit (git archive HEAD), so uncommitted work never goes out;
 // --from DIR takes a tree laid out like the repository instead (a checked export). `board` applies
@@ -20,6 +21,10 @@
 // Its sources unchanged since the newest phone release, nothing is built or published.
 // `site` builds the dashboard website (the hive-dashboard Worker, dashboard/) and deploys it, as
 // `npm run deploy:cloudflare` does; its secrets stay in Cloudflare, never here.
+// `download` makes the notarized Hive.dmg tools/release.sh built (its newest, or --dmg FILE) the one club
+// members download from the club page (cloud/tasks/club.js /v1/club/download/mac), with the version its
+// app carries; it goes into the board's RELEASES bucket with wrangler, since the board takes no upload
+// that large.
 // Every release and the board's deploy say the commit on main they were built from (HEAD, or --from's
 // when it's a checkout of one), so all of Hive's nodes read as one version (cloud/tasks/nodes.js).
 // The board's address and key are this machine's hive-tasks config (~/.config/hive/tasks.json),
@@ -32,6 +37,11 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundleVersion, pack, PROTOCOL } from './vm-agent/version.mjs';
 import { ownerDetails } from './shared/ownerDetails.mjs';
+
+// Where the club's Hive for Mac and what it is go in the board's RELEASES: club.js's MAC_DOWNLOAD and
+// MAC_DOWNLOAD_ABOUT (cloud/tests/club.test.mjs checks they agree).
+export const MAC_DOWNLOAD = 'download/mac/Hive.dmg';
+export const MAC_DOWNLOAD_ABOUT = 'download/mac/Hive.json';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 
@@ -302,13 +312,61 @@ function releaseSite({ from, dryRun }) {
   }
 }
 
+/** The version a Hive.dmg's app carries (tools/carry.mjs writes Resources/hive/VERSION). */
+function dmgVersion(dmg) {
+  const mount = mkdtempSync(join(tmpdir(), 'hive-dmg-'));
+  execFileSync('hdiutil', ['attach', '-quiet', '-nobrowse', '-readonly', '-mountpoint', mount, dmg]);
+  try {
+    return readFileSync(join(mount, 'Hive.app', 'Contents', 'Resources', 'hive', 'VERSION'), 'utf8').trim().split(/\s+/)[0];
+  } finally {
+    execFileSync('hdiutil', ['detach', '-quiet', mount]);
+    rmSync(mount, { recursive: true, force: true });
+  }
+}
+
+/** Hive for Mac as club members download it: the newest notarized Hive-*.dmg tools/release.sh made, or `dmg`. */
+function releaseDownload({ dmg, dryRun }) {
+  const built = join(REPO, 'desktop', 'app', 'build', 'release');
+  const newest = () => readdirSync(built).filter(f => /^Hive-.*\.dmg$/.test(f)).map(f => join(built, f))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+  const file = dmg ? resolve(dmg) : existsSync(built) ? newest() : undefined;
+  if (!file || !existsSync(file)) throw new Error('no Hive.dmg: tools/release.sh makes one (or pass --dmg FILE)');
+  if (spawnSync('xcrun', ['stapler', 'validate', file], { encoding: 'utf8' }).status !== 0) throw new Error(`${file} isn't notarized and stapled`);
+  const version = dmgVersion(file);
+  const size = statSync(file).size;
+  console.log(`download mac ${version}: ${Math.round(size / 1048576)} MB, notarized`);
+  if (dryRun) return;
+  const tasks = join(REPO, 'cloud', 'tasks');
+  const bucket = /"bucket_name":\s*"([^"]+)"/.exec(readFileSync(join(tasks, 'wrangler.jsonc'), 'utf8'))?.[1];
+  if (!bucket) throw new Error('the board has no RELEASES bucket (cloud/tasks/wrangler.jsonc)');
+  const wrangler = (process.env.WRANGLER ?? 'npx wrangler').split(' ');
+  const put = (key, path, type) => {
+    const r = spawnSync(wrangler[0], [...wrangler.slice(1), 'r2', 'object', 'put', `${bucket}/${key}`, '--file', path, '--content-type', type, '--remote'],
+      { cwd: tasks, encoding: 'utf8', maxBuffer: 16 << 20 });
+    if (r.status !== 0) {
+      const said = `${r.stdout}\n${r.stderr}`.replace(/https:\/\/\S+/g, '<board>').replace(/[0-9a-f]{32}/g, '<id>').split('\n').filter(l => l.trim()).slice(-3).join('\n');
+      throw new Error(`wrangler r2 object put ${key} failed:\n${said}`);
+    }
+  };
+  put(MAC_DOWNLOAD, file, 'application/x-apple-diskimage');
+  // What it is goes in after it, so the club page never names one that isn't there.
+  const about = join(mkdtempSync(join(tmpdir(), 'hive-download-')), 'Hive.json');
+  writeFileSync(about, JSON.stringify({ version, size, published_at: Math.floor(Date.now() / 1000) }));
+  try {
+    put(MAC_DOWNLOAD_ABOUT, about, 'application/json');
+  } finally {
+    rmSync(join(about, '..'), { recursive: true, force: true });
+  }
+  console.log(`published Hive for Mac ${version} for the club to download`);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [kind, ...rest] = process.argv.slice(2);
   const option = name => { const i = rest.indexOf(name); return i < 0 ? undefined : rest[i + 1]; };
-  const opts = { from: option('--from'), notes: option('--notes') ?? '', dryRun: rest.includes('--dry-run'), out: option('--out') };
-  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone, site: releaseSite };
+  const opts = { from: option('--from'), notes: option('--notes') ?? '', dryRun: rest.includes('--dry-run'), out: option('--out'), dmg: option('--dmg') };
+  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone, site: releaseSite, download: releaseDownload };
   if (!known[kind]) {
-    console.error('usage: node cloud/release.mjs vm|mac|board|phone|site [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]');
+    console.error('usage: node cloud/release.mjs vm|mac|board|phone|site [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]\n       node cloud/release.mjs download [--dmg FILE] [--dry-run]');
     process.exit(64);
   }
   try {

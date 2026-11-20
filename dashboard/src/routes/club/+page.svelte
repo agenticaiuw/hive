@@ -7,7 +7,8 @@
    * nothing of the owner's own board. Their own devices that take the club's releases show with the
    * commit each runs (cloud/tasks/nodes.js), and Hive Phone's updates come from the board's SideStore source.
    * Connect this Mac opens Hive on the member's Mac with a one-use code, which Hive trades for the Mac's own
-   * key (club.js /v1/club/devices/code and /connect), so that Mac takes the club's releases too.
+   * key (club.js /v1/club/devices/code and /connect), so that Mac takes the club's releases too. Get Hive
+   * for Mac downloads the notarized app (club.js /v1/club/download/mac), which sets itself up when opened.
    */
   /* eslint-disable @typescript-eslint/no-explicit-any -- The board answers schemaless JSON here. */
   import { onMount } from "svelte";
@@ -320,6 +321,9 @@
                 </li>
               {/each}
             </ul>
+            {#if onMac && devices.mac_download}
+              <a class="phone" href="/club/api/download/mac" download="Hive.dmg">Get Hive for Mac{devices.mac_download.size ? ` (${Math.round(devices.mac_download.size / 1048576)} MB)` : ""}</a>
+            {/if}
             {#if onMac}
               <button type="button" class="link" onclick={connectMac} disabled={connecting}>{connecting ? "Connecting…" : "Connect this Mac"}</button>
             {/if}

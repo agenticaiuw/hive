@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../tasks/worker.js';
-import { memberName } from '../tasks/club.js';
+import { memberName, MAC_DOWNLOAD, MAC_DOWNLOAD_ABOUT } from '../tasks/club.js';
+import * as release from '../release.mjs';
 
 const dir = new URL('../knowledge/migrations/', import.meta.url);
 const migrations = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort().map((f) => readFileSync(new URL(f, dir), 'utf8'));
@@ -209,4 +210,34 @@ test("over the dashboard's service binding, the club's links carry the board's p
   const made = await viaBinding('/v1/club/devices/code');
   assert.equal(made.status, 200);
   assert.ok(made.body.link.startsWith(`hive://club/connect?board=${encodeURIComponent('https://board.example.com')}&code=`));
+});
+
+test("a member downloads Hive for Mac from the club page once there's one, and nobody else can", async () => {
+  const { env, call, join } = setup();
+  const objects = new Map();
+  env.RELEASES = {
+    async get(key) {
+      const bytes = objects.get(key);
+      return bytes ? { body: new Blob([bytes]).stream(), size: bytes.length } : null;
+    },
+  };
+  // `node cloud/release.mjs download` puts them where the board looks.
+  assert.deepEqual([release.MAC_DOWNLOAD, release.MAC_DOWNLOAD_ABOUT], [MAC_DOWNLOAD, MAC_DOWNLOAD_ABOUT]);
+  const key = await join('alice');
+  const download = (token) => worker.fetch(new Request('https://board.test/v1/club/download/mac', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.equal((await call('GET', '/v1/club/devices', undefined, key)).body.mac_download, null);
+  assert.equal((await download(key)).status, 404);
+  // release.mjs download puts the disk image and what it is there.
+  const dmg = Buffer.from('a notarized disk image');
+  objects.set('download/mac/Hive.dmg', dmg);
+  objects.set('download/mac/Hive.json', Buffer.from(JSON.stringify({ version: 'b40fdeb43958', size: dmg.length, published_at: 1 })));
+  assert.deepEqual((await call('GET', '/v1/club/devices', undefined, key)).body.mac_download, { version: 'b40fdeb43958', size: dmg.length, published_at: 1 });
+  const got = await download(key);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('content-type'), 'application/x-apple-diskimage');
+  assert.equal(got.headers.get('content-disposition'), 'attachment; filename="Hive.dmg"');
+  assert.equal(got.headers.get('content-length'), String(dmg.length));
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), dmg);
+  assert.equal((await download('club.mallory.' + 'a'.repeat(64))).status, 401);
+  assert.equal((await download('nobody')).status, 401);
 });

@@ -1,7 +1,7 @@
 import { json } from "@sveltejs/kit";
 import type { RequestHandler } from "./$types";
 import { NO_STORE_HEADERS } from "$lib/server/http";
-import { askBoard } from "$lib/server/tasks";
+import { askBoard, boardFile } from "$lib/server/tasks";
 
 export const prerender = false;
 
@@ -10,6 +10,7 @@ export const prerender = false;
  * (POST join {invite}) becomes their own key, kept in an HttpOnly cookie and sent to the board on each
  * call, so the page never holds it and the machines' token never leaves this server for a member.
  * Only the club's own routes go through; everything else of the owner's stays behind the owner's sign-in.
+ * GET download/mac is Hive for Mac itself (Hive.dmg), passed through as the board sends it.
  */
 const COOKIE = "__Host-hive_club";
 const YEAR = 365 * 86400;
@@ -30,9 +31,17 @@ function keyOf(request: Request): string {
 }
 
 export const GET: RequestHandler = async ({ locals, params, request, url }) => {
-  if (!GETS.has(params.path)) return answer({ error: "Not found" }, 404);
+  if (!GETS.has(params.path) && params.path !== "download/mac") return answer({ error: "Not found" }, 404);
   const key = keyOf(request);
   if (!key) return answer({ error: "Sign in with the invite link the club's owner sent you." }, 401);
+  if (params.path === "download/mac") {
+    const file = await boardFile(locals.runtimeEnv, "/v1/club/download/mac", key);
+    if (!file.ok) return file;
+    const headers: Record<string, string> = { ...NO_STORE_HEADERS, "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="Hive.dmg"' };
+    const length = file.headers.get("content-length");
+    if (length) headers["content-length"] = length;
+    return new Response(file.body, { headers });
+  }
   const asked = await askBoard(locals.runtimeEnv, `/v1/club/${params.path}${url.search}`, { token: key, statuses: true });
   return asked.ok ? answer(asked.value) : asked.response;
 };
