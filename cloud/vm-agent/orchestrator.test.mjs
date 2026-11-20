@@ -218,6 +218,41 @@ test('a code task in a repository the VM can push to runs there and waits for re
   assert.match(waiting.outcome, /code change in buckymatch: Hive's cloud agent changes code only in hive/);
 });
 
+test("a code task in Hive's own repository has Hive change itself: tested, landed and live, no review branch", async () => {
+  const { board, calls } = fakeBoard();
+  const asked = [];
+  await handle({ id: 13, text: 'make the dashboard show stuck requests' }, {
+    board, now: () => 1000, stepEvery: 1,
+    plan: async () => JSON.stringify({ project: 'hive', tasks: [{ title: 'Show stuck requests on the dashboard', quote: 'make the dashboard show stuck requests', kind: 'code', difficulty: 'hard' }] }),
+    run: async () => assert.fail('not a screen task'),
+    code: async () => assert.fail('not a review branch: Hive changes itself'),
+    improve: async (need, where, step) => {
+      asked.push({ need, where });
+      step('$ Testing Hive\'s change (2 files)');
+      return { ok: true, commit: 'feedface00112233', files: ['dashboard/src/a.svelte', 'cloud/tasks/worker.js'], live: ['the board', 'the dashboard website', 'the Mac'],
+        report: 'Stuck requests show as stuck.', seconds: 300, tokensIn: 1000, tokensOut: 100 };
+    },
+  });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(asked[0].need, { what: 'Show stuck requests on the dashboard', why: 'make the dashboard show stuck requests' });
+  assert.equal(asked[0].where.asked, true);
+  assert.equal(asked[0].where.request, 13);
+  const task = calls.filter(c => c.path === '/v1/requests/update' && c.body.tasks).at(-1).body.tasks[0];
+  assert.equal(task.status, 'done');
+  assert.match(task.report, /^Stuck requests show as stuck\.\n\nLanded: feedface00 on main \(2 files: .*\); live on the board, the dashboard website, the Mac\.$/);
+  assert.equal(calls.filter(c => c.path === '/v1/requests/update').at(-1).body.status, 'done');
+
+  const failed = fakeBoard();
+  await handle({ id: 14, text: 'change hive' }, {
+    board: failed.board, now: () => 1000, stepEvery: 1,
+    plan: async () => JSON.stringify({ project: 'hive', tasks: [{ title: 'Change Hive', quote: 'change hive', kind: 'code' }] }),
+    improve: async () => ({ ok: false, report: "Hive's tests still failed after 3 tries" }),
+  });
+  const blocked = failed.calls.filter(c => c.path === '/v1/requests/update' && c.body.tasks).at(-1).body.tasks[0];
+  assert.equal(blocked.status, 'blocked');
+  assert.match(blocked.report, /tests still failed/);
+});
+
 test('a request asked on a web page becomes that page\'s rule', async () => {
   const { handle, parsePageRule } = await import('./orchestrator.mjs');
   assert.deepEqual(parsePageRule('{"off": true}'), { off: true });
