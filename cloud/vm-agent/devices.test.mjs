@@ -165,3 +165,25 @@ test('a tool server ends with its task: stdin closing or SIGTERM gives the turn 
     assert.deepEqual([lease.closed, exits], [1, [0]], how);
   }
 });
+
+test("a tool server's socket that breaks doesn't take the orchestrator down (request 100's EPIPE)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-devices-'));
+  const path = join(dir, 'devices.sock');
+  const served = serveDevices(path, { tickMs: 60_000 });
+  const sockets = [];
+  served.server.on('connection', socket => sockets.push(socket));
+  try {
+    const lease = new Lease(path, 'mac', 'R100-1');
+    await lease.use(async () => {});
+    assert.equal(sockets.length, 1);
+    // What node does when a write to a peer that's gone fails: the socket errors (and readline with it).
+    sockets[0].emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(served.release('R100-1'), [], 'its turn was given back when its socket broke');
+    assert.deepEqual(served.devices.state().mac, { holder: null, waiting: [] });
+    lease.close();
+  } finally {
+    await served.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
