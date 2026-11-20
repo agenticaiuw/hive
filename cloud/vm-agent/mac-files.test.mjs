@@ -47,13 +47,48 @@ test('paths and shell metacharacters remain single quoted words', async () => {
 test('failures stop the transfer, keep the cloud key for recovery, and never retry the Mac command', async () => {
   let ran = 0;
   const args = { direction: 'to_vm', mac_path: '/Desktop/recording.mov', step: 'Copying.' };
-  assert.equal(await transferFile(args, async () => { ran++; return failed; },
-    { uuid, fetch: () => assert.fail('must not fetch') }), failed);
+  const result = await transferFile(args, async () => { ran++; return failed; },
+    { uuid, fetch: () => assert.fail('must not fetch') });
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.content[0], failed.content[0], 'keep the Mac failure details');
+  assert.match(result.content[1].text, /may have uploaded.*transfers\/test-id\/recording.mov/);
+  assert.match(result.content[1].text, /before retrying/);
   assert.equal(ran, 1);
   await assert.rejects(transferFile(args, async () => ok,
     { uuid, fetch: async () => { throw new Error('offline'); } }), /Copied to cloud key transfers\/test-id\/recording.mov.*offline/);
   await assert.rejects(transferFile({ ...args, direction: 'to_mac', vm_path: '/files/a' },
     () => assert.fail('must not download'), { uuid, put: async () => { throw new Error('upload failed'); } }), /upload failed/);
+});
+
+test('lost Mac replies report the cloud key without claiming the transfer finished or running it again', async () => {
+  for (const direction of ['to_vm', 'to_mac']) {
+    let ran = 0;
+    let uploaded = false;
+    const args = { direction, mac_path: '/Desktop/copy.mov', vm_path: '/files/recording.mov', step: 'Copying.' };
+    const deps = { uuid, fetch: () => assert.fail('must not fetch'), put: async () => { uploaded = true; } };
+    await assert.rejects(transferFile(args, async () => { ran++; throw new Error('board offline'); }, deps), error => {
+      assert.match(error.message, /board offline/);
+      assert.ok(error.message.includes(`transfers/test-id/${direction === 'to_vm' ? 'copy.mov' : 'recording.mov'}`));
+      assert.match(error.message, direction === 'to_vm' ? /may have uploaded/ : /was uploaded/);
+      assert.match(error.message, /before retrying/);
+      if (direction === 'to_mac') assert.ok(error.message.includes(args.mac_path));
+      return true;
+    });
+    assert.equal(ran, 1);
+    assert.equal(uploaded, direction === 'to_mac');
+  }
+});
+
+test('a failed Mac download keeps the uploaded key and the original error for recovery', async () => {
+  let uploaded;
+  const result = await transferFile({ direction: 'to_mac', mac_path: '/Desktop/copy.mov',
+    vm_path: '/files/recording.mov', step: 'Copying.' }, async () => failed,
+  { uuid, put: async (...args) => { uploaded = args; } });
+  assert.deepEqual(uploaded, ['/files/recording.mov', key]);
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.content[0], failed.content[0]);
+  assert.match(result.content[1].text, /was uploaded.*transfers\/test-id\/recording.mov/);
+  assert.match(result.content[1].text, /\/Desktop\/copy.mov.*before retrying/);
 });
 
 test('the command workflow copies a 109 MB recording both ways without clobbering or keeping partial downloads', async () => {
