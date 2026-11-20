@@ -73,6 +73,9 @@ test("Codex's events give its report and the tokens it used", () => {
   assert.deepEqual(readEvents(lines), { report: 'It answered in 0.4 s. Nothing else to do.', tokensIn: 2000, tokensOut: 120 });
   assert.equal(outcomeOf('It answered in 0.4 s. Nothing else to do.', 'x'), 'It answered in 0.4 s.');
   assert.equal(outcomeOf('', 'Done.'), 'Done.');
+  assert.equal(outcomeOf('Updated the bio on the [profile](https://x.com/a):\n> Agentic AI Club\n> Build it.\n\nVerified on the page.', 'x'),
+    'Updated the bio on the [profile](https://x.com/a):\n> Agentic AI Club\n> Build it.\nVerified on the page.', 'what a colon introduces is the outcome');
+  assert.equal(outcomeOf(`Wrote:\n${'a'.repeat(600)}`, 'x'), 'Wrote:', 'a line too long to fit is left out');
   assert.deepEqual(scopeOf('For hive › Voice: x'), { project: 'hive', folder: 'Voice' });
   assert.deepEqual(scopeOf('For buckymatch: x'), { project: 'buckymatch', folder: '' });
   assert.deepEqual(scopeOf('just do it'), { project: '', folder: '' });

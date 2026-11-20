@@ -481,6 +481,11 @@ async function newRequest(env, { words, agent, from, at }) {
   return made.results[0].id;
 }
 
+// A request Hive on the VM was on when it restarted runs again, at most this many times, with this note.
+const MOST_RESTARTS = 2;
+const RESTARTED = "Hive on the VM restarted while it was working on this request, so it runs again. What it did "
+  + "before is on the board (the request's steps, which knowledge get_request reads): check what's already done there first.";
+
 async function takeRequest(request, env) {
   if (!(await machineAllowed(request, env))) return json({ error: "Not signed in." }, 401);
   const body = await request.json();
@@ -488,13 +493,18 @@ async function takeRequest(request, env) {
   if (!by) return json({ error: "Say who is taking it (by)." }, 400);
   const agent = text(body.agent, 40) || "hive-cloud";
   const at = now();
-  const [, taken] = await env.DB.batch([
-    // What this orchestrator held when it last stopped won't be finished by it now.
+  const [, , taken] = await env.DB.batch([
+    // What this orchestrator held when it last stopped goes on: back in the queue, first in line, with a
+    // note of what happened, MOST_RESTARTS times at most a request; after that it ends there.
     env.DB.prepare(
       `UPDATE board_requests SET status = 'failed', finished_at = ?2, updated_at = ?2,
-         outcome = COALESCE(outcome, 'The orchestrator restarted before it finished this.')
+         outcome = COALESCE(outcome, 'Hive on the VM restarted while it worked on this, ' || restarts || ' times; it stopped here.')
+       WHERE taken_by = ?1 AND status IN ('planning', 'working') AND ?3 = 1 AND restarts >= ?4`,
+    ).bind(by, at, body.fresh ? 1 : 0, MOST_RESTARTS),
+    env.DB.prepare(
+      `UPDATE board_requests SET status = 'queued', taken_by = NULL, restarts = restarts + 1, updated_at = ?2, retry_note = ?4
        WHERE taken_by = ?1 AND status IN ('planning', 'working') AND ?3 = 1`,
-    ).bind(by, at, body.fresh ? 1 : 0),
+    ).bind(by, at, body.fresh ? 1 : 0, RESTARTED),
     env.DB.prepare(
       `UPDATE board_requests SET status = 'planning', taken_by = ?1, taken_at = ?2, updated_at = ?2
        WHERE id = (SELECT id FROM board_requests WHERE status = 'queued' AND agent = ?3 ORDER BY id LIMIT 1)
@@ -503,23 +513,24 @@ async function takeRequest(request, env) {
   ]);
   const row = taken.results[0];
   if (!row) return json({ request: null });
-  const [message, asked, earlier] = await Promise.all([
+  const [message, asked, chain] = await Promise.all([
     env.DB.prepare("SELECT project, text, said_at, session FROM board_messages WHERE machine = 'cloud' AND id = ?1").bind(row.id).first(),
     env.DB.prepare("SELECT url, title, outline FROM board_page_asks WHERE request = ?1").bind(row.id).first(),
-    row.follows
-      ? env.DB.prepare(
-        `SELECT m.text, r.outcome FROM board_requests r LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = r.id
-         WHERE r.id = ?1`,
-      ).bind(row.follows).first()
-      : null,
+    row.follows ? conversationBefore(env, row.follows) : [],
   ]);
-  // The owner replied in an earlier request's conversation: the agent hears what that one was.
+  // The owner replied in an earlier request's conversation: the agent hears what that one was, and what
+  // came before it in the same conversation ("nah, verbatim actually but fix the caps" means nothing
+  // without the bio it's about, two requests back).
   // Run again by Hive because its tasks got stuck (continueStuck): its note comes first.
   const retry = row.retry_note ? `${row.retry_note}\nDon't redo what's already done. The request, as it was:\n` : "";
   // Hive on the Mac handing over more of the same work (vm-post.mjs task --follows) says so in its
   // words ("[Hive on the Mac, not the owner]"): they aren't introduced as the owner's.
   const handed = /^(?:For [^\n:]{1,250}: )?\[Hive on the Mac\b/.test(message?.text || "");
-  const before = retry + (earlier
+  const earlier = chain.at(-1);
+  const older = chain.slice(0, -1);
+  const before = retry + (older.length
+    ? `Earlier in this conversation, oldest first:\n${older.map((r) => `- R${r.id} ("${clip(r.text || "", WORDS_BEFORE)}"), which ended: ${r.outcome || "no outcome recorded"}`).join("\n")}\n`
+    : "") + (earlier
     ? `This follows the owner's earlier request R${row.follows} ("${earlier.text || ""}"), which ended: ${earlier.outcome || "no outcome recorded"}.\n${handed ? "Now" : "The owner now says"}: `
     : "");
   return json({
@@ -530,6 +541,28 @@ async function takeRequest(request, env) {
       page: asked ? { url: asked.url, title: asked.title || "", outline: asked.outline || "" } : null,
     },
   });
+}
+
+// How far back a follow-up hears its conversation, and how much of each earlier request's words.
+const MOST_BEFORE = 6;
+const WORDS_BEFORE = 600;
+const clip = (text, most) => (text.length > most ? `${text.slice(0, most)}…` : text);
+
+/** The requests a follow-up continues, oldest first and the one it follows last: each one's words and how it
+ *  ended, along `follows`, MOST_BEFORE at most. */
+async function conversationBefore(env, id) {
+  const { results } = await env.DB.prepare(
+    `WITH RECURSIVE chain (id, follows, depth) AS (
+       SELECT id, follows, 1 FROM board_requests WHERE id = ?1
+       UNION ALL
+       SELECT r.id, r.follows, chain.depth + 1 FROM board_requests r JOIN chain ON r.id = chain.follows WHERE chain.depth < ?2
+     )
+     SELECT chain.id, chain.depth, m.text, r.outcome FROM chain
+       JOIN board_requests r ON r.id = chain.id
+       LEFT JOIN board_messages m ON m.machine = 'cloud' AND m.id = chain.id
+     ORDER BY chain.depth DESC`,
+  ).bind(id, MOST_BEFORE).all();
+  return results ?? [];
 }
 
 // Earlier requests are source material for later work. Read the saved words and page, not the
