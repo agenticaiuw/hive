@@ -285,6 +285,9 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         if let root = installRoot {
             // A downloaded app's Codex (first-open.sh links it in bin/) and Hive's own tools come first.
             environment["PATH"] = "\(root)/bin:\(repository)/build:" + environment["PATH"]!
+            // Where this app is, so the agent can put the club's newer download in its place
+            // (hive-tasks app_update.rs) and say "@@ relaunch".
+            environment["HIVE_APP"] = Bundle.main.bundlePath
         }
 #if canImport(WorkspaceViewer)
         if monitorViewer != nil {
@@ -385,6 +388,8 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
                 speakItem.state = line.hasSuffix("1") ? .on : .off
             } else if line.hasPrefix("@@ window ") {
                 windowItem.state = line.hasSuffix("1") ? .on : .off
+            } else if line.hasPrefix("@@ relaunch") {
+                relaunch(String(line.dropFirst("@@ relaunch".count)).trimmingCharacters(in: .whitespaces))
             } else if line.hasPrefix("@@ workspace-resume ") {
 #if canImport(WorkspaceViewer)
                 monitorViewer?.resumeAfterTakeover()
@@ -660,6 +665,29 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         } else {
             stop(note: "restart")  // it starts again once it has stopped
         }
+    }
+
+    /// The agent put the club's newer Hive.app in this one's place (hive-tasks app_update.rs) while Hive
+    /// was idle: this one quits and the new one opens in the menu bar, as at login.
+    func relaunch(_ why: String) {
+        guard installRoot != nil, !quitting else { return }
+        write("--- reopening: \(why) \(Date())\n")
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open -g --env HIVE_STAY_IN_MENU_BAR=1 \"$2\" || /usr/bin/open -g \"$2\"",
+                            "reopen", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+        helper.standardInput = FileHandle.nullDevice
+        helper.standardOutput = FileHandle.nullDevice
+        helper.standardError = FileHandle.nullDevice
+        do {
+            try helper.run()
+        } catch {
+            write("--- couldn't reopen: \(error.localizedDescription)\n")
+            return
+        }
+        quitting = true
+        stop(note: "quit")
+        NSApp.terminate(nil)
     }
 
     @objc func quit() {

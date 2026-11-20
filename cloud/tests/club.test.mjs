@@ -227,11 +227,15 @@ test("a member downloads Hive for Mac from the club page once there's one, and n
   const download = (token) => worker.fetch(new Request('https://board.test/v1/club/download/mac', { headers: { authorization: `Bearer ${token}` } }), env);
   assert.equal((await call('GET', '/v1/club/devices', undefined, key)).body.mac_download, null);
   assert.equal((await download(key)).status, 404);
+  // A member's Hive.app asks what the newest download is (hive-tasks app_update.rs).
+  assert.deepEqual((await call('GET', '/v1/club/download/mac/about', undefined, key)).body, { download: null });
   // release.mjs download puts the disk image and what it is there.
   const dmg = Buffer.from('a notarized disk image');
   objects.set('download/mac/Hive.dmg', dmg);
   objects.set('download/mac/Hive.json', Buffer.from(JSON.stringify({ version: 'b40fdeb43958', size: dmg.length, published_at: 1 })));
   assert.deepEqual((await call('GET', '/v1/club/devices', undefined, key)).body.mac_download, { version: 'b40fdeb43958', size: dmg.length, published_at: 1 });
+  assert.deepEqual((await call('GET', '/v1/club/download/mac/about', undefined, key)).body, { download: { version: 'b40fdeb43958', size: dmg.length, published_at: 1 } });
+  assert.equal((await call('GET', '/v1/club/download/mac/about', undefined, 'club.mallory.' + 'a'.repeat(64))).status, 401);
   const got = await download(key);
   assert.equal(got.status, 200);
   assert.equal(got.headers.get('content-type'), 'application/x-apple-diskimage');

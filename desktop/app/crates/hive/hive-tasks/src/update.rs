@@ -6,8 +6,9 @@
 //! overwrite anyone's work: the agent and its tools (desktop/app/build/hive-agent and the rest), the
 //! dashboard Hive's window shows (desktop/app/build/dashboard) and the browser extension Chrome runs
 //! (browser/chrome/build/chrome, which reloads itself when its files change: browser/chrome/src/
-//! version.js), in the format cloud/vm-agent/version.mjs makes. The app itself (Hive.app), the voice
-//! models' Python and the privileged helper come with the install, not a release.
+//! version.js), in the format cloud/vm-agent/version.mjs makes. The app itself (Hive.app, with the
+//! Safari extension), the voice models' Python and the privileged helper come with the install, not a
+//! release; a club member's downloaded Hive.app takes the club's newer download itself (app_update.rs).
 //!
 //! 1. Now and then the agent asks the board for the newest Mac release (GET /v1/releases/latest).
 //!    A build made by hand ("dev") is never replaced (node::wants_update), nor is a release put in
@@ -238,7 +239,7 @@ fn units(release: &Release) -> Vec<String> {
     out
 }
 
-fn remove(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
         Ok(_) => std::fs::remove_file(path),
@@ -431,21 +432,8 @@ fn look(hive: &Path, cloud: &Cloud, idle: Option<(&dyn Fn() -> bool, Duration)>,
         let _ = std::fs::write(&checked, b"");
     }
     if let Some((idle, wait)) = idle {
-        let until = std::time::Instant::now() + wait;
-        let mut quiet_twice = false;
-        loop {
-            if idle() {
-                if quiet_twice {
-                    break;
-                }
-                quiet_twice = true;
-            } else {
-                quiet_twice = false;
-            }
-            if std::time::Instant::now() >= until {
-                return Ok(Outcome::Waiting(version));
-            }
-            std::thread::sleep(Duration::from_secs(30).min(wait));
+        if !wait_for_idle(idle, wait) {
+            return Ok(Outcome::Waiting(version));
         }
     }
     let _ = std::fs::remove_file(&checked);
@@ -455,10 +443,37 @@ fn look(hive: &Path, cloud: &Cloud, idle: Option<(&dyn Fn() -> bool, Duration)>,
     Ok(Outcome::PutIn { from: node::VERSION.to_string(), to: version })
 }
 
+/// Whether Hive was idle two half-minute looks in a row within `wait`.
+pub fn wait_for_idle(idle: &dyn Fn() -> bool, wait: Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    let mut quiet_twice = false;
+    loop {
+        if idle() {
+            if quiet_twice {
+                return true;
+            }
+            quiet_twice = true;
+        } else {
+            quiet_twice = false;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(30).min(wait));
+    }
+}
+
 /// Starts the updater for an agent Hive.app runs: confirms the release it runs once it has run long
 /// enough, then looks for a new one a minute in and every ten minutes after. `idle` says whether Hive
-/// is idle; `restart` stops the agent so the app starts the new one (it's told what to say).
-pub fn watch(hive: PathBuf, confirm_release: Option<String>, idle: Box<dyn Fn() -> bool + Send>, restart: Box<dyn Fn(&str) + Send>) {
+/// is idle; `restart` stops the agent so the app starts the new one (it's told what to say). `app` is a
+/// downloaded Hive.app's path and what reopens it, for its own updates (app_update.rs).
+pub fn watch(
+    hive: PathBuf,
+    confirm_release: Option<String>,
+    idle: Box<dyn Fn() -> bool + Send>,
+    restart: Box<dyn Fn(&str) + Send>,
+    app: Option<(PathBuf, Box<dyn Fn(&str) + Send>)>,
+) {
     let _ = std::thread::Builder::new().name("hive-update".into()).spawn(move || {
         if let Some(version) = confirm_release {
             std::thread::sleep(CONFIRM_AFTER);
@@ -476,6 +491,17 @@ pub fn watch(hive: PathBuf, confirm_release: Option<String>, idle: Box<dyn Fn() 
                     }
                     Ok(_) => {}
                     Err(why) => hive_common::say(format!("   ✗ update: {why}")),
+                }
+                // The app around the agent, once the agent is current.
+                if let Some((app, reopen)) = &app {
+                    match crate::app_update::once(&hive, app, &cloud, &*idle, Duration::from_secs(3600)) {
+                        Ok(crate::app_update::Outcome::PutIn { to, .. }) => {
+                            reopen(&format!("reopen as Hive.app {to}"));
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(why) => hive_common::say(format!("   ✗ app update: {why}")),
+                    }
                 }
             }
             std::thread::sleep(Duration::from_secs(600));
