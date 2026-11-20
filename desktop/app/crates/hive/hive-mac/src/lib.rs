@@ -7,10 +7,12 @@
 //! - [`virtual_monitor`]: Hive's second, hidden display (python/virtual_monitor.py).
 //! - [`tools`]: [`MacTools`], the "mac" tool namespace (python/mac_mcp.py) and the Mac's
 //!   authentication tools (python/authentication_mcp.py).
+//! - [`command`]: commands without the screen, with bounded output and a deadline.
 //! - [`credentials`]: typing the saved Mac password, and the phone passcode (python/credentials.py).
 //! - [`system`]: what the tools read from the Mac outside the helper, behind a trait tests fake.
 
 pub mod activity;
+pub mod command;
 pub mod credentials;
 pub mod desktop;
 mod ffi;

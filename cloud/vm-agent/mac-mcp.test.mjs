@@ -76,3 +76,37 @@ test('a call the Mac never answers is given up on and cancelled, with the reason
   assert.match(out.content[0].text, /didn't answer within 6 minutes/);
   assert.deepEqual(calls.at(-1), { path: '/v1/mac/cancel', body: { id: 5 } });
 });
+
+test('commands and transfers use the same Mac lease and board-supplied request words', async () => {
+  const tools = [...TOOLS, { name: 'run_command', inputSchema: { type: 'object' } }];
+  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools }], answer: { result: { content: [] } } });
+  const turns = [];
+  const answer = server({ board, label: 'R42-1', turn: { use: async fn => { turns.push('take'); return fn(); } },
+    files: { uuid: () => 'copy-id', fetch: async key => `/files/${key}` } });
+  const list = (await answer({ id: 1, method: 'tools/list' })).result.tools;
+  assert.deepEqual(list.map(t => t.name), ['screenshot', 'run_command', 'transfer_file']);
+  const args = { command: 'echo hello', step: 'Checking.', irreversible: false };
+  await answer({ id: 2, method: 'tools/call', params: { name: 'run_command', arguments: args } });
+  assert.deepEqual(calls.find(c => c.path === '/v1/mac/calls').body.arguments, args);
+  const copied = await answer({ id: 3, method: 'tools/call', params: {
+    name: 'transfer_file', arguments: { direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.' },
+  } });
+  assert.equal(JSON.parse(copied.result.content[0].text).vm_path, '/files/transfers/copy-id/clip.mov');
+  assert.deepEqual(turns, ['take', 'take']);
+  assert.ok(calls.filter(c => c.path === '/v1/mac/calls').every(c => c.body.name === 'run_command' && c.body.request === 42));
+});
+
+
+test('a Mac without command support cannot offer or attempt a transfer', async () => {
+  const { board, calls } = fakeBoard();
+  const answer = server({ board, label: 'R42-1',
+    turn: { use: () => assert.fail('must not take the Mac') },
+    files: { put: () => assert.fail('must not upload'), fetch: () => assert.fail('must not fetch') } });
+  assert.ok(!(await answer({ id: 1, method: 'tools/list' })).result.tools.some(t => t.name === 'transfer_file'));
+  const out = await answer({ id: 2, method: 'tools/call', params: { name: 'transfer_file', arguments: {
+    direction: 'to_mac', vm_path: '/files/clip.mov', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.',
+  } } });
+  assert.equal(out.result.isError, true);
+  assert.match(out.result.content[0].text, /the Mac has no tool transfer_file/);
+  assert.ok(!calls.some(c => c.path === '/v1/mac/calls'));
+});

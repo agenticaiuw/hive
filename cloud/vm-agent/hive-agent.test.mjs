@@ -224,6 +224,10 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.match(GUIDE, /request.follows/);
   assert.match(GUIDE, /next_offset until it is null/);
   assert.match(GUIDE, /mac tools are the owner's own Mac/);
+  assert.match(GUIDE, /mac.run_command/);
+  assert.match(GUIDE, /mac.transfer_file/);
+  assert.match(GUIDE, /irreversible=true/);
+  assert.match(GUIDE, /never overwrite a Mac file/);
   assert.match(GUIDE, /"One-way:" and quotes the\s+owner's exact words/);
   // The owner (2026-11-19): "before, hive did the bulk write when i asked it to create songs on ableton. why is it
   // this time it did each note one by one". The Mac's own agent batched; the cloud agent, told to look after
