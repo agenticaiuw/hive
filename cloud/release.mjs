@@ -8,6 +8,7 @@
 //   node cloud/release.mjs phone [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]
 //   node cloud/release.mjs site [--from DIR] [--dry-run]
 //   node cloud/release.mjs download [--dmg FILE] [--dry-run]
+//   node cloud/release.mjs windows [--notes TEXT] [--dry-run] [--out FILE]
 //
 // The code is the repository's last commit (git archive HEAD), so uncommitted work never goes out;
 // --from DIR takes a tree laid out like the repository instead (a checked export). `board` applies
@@ -25,6 +26,11 @@
 // members download from the club page (cloud/tasks/club.js /v1/club/download/mac), with the version its
 // app carries; it goes into the board's RELEASES bucket with wrangler, since the board takes no upload
 // that large.
+// `windows` publishes Hive for Windows (desktop/app/crates/hive/hive-windows): GitHub's Windows machines
+// build it from HEAD, which must be on GitHub's main, with its version built in and check it there
+// (.github/workflows/windows.yml, run with gh); its Hive.exe is published as the windows release, which
+// members' PCs put in by themselves and the club page offers (club.js /v1/club/download/windows). Its
+// sources unchanged since the newest windows release, nothing is built or published.
 // Every release and the board's deploy say the commit on main they were built from (HEAD, or --from's
 // when it's a checkout of one), so all of Hive's nodes read as one version (cloud/tasks/nodes.js).
 // The board's address and key are this machine's hive-tasks config (~/.config/hive/tasks.json),
@@ -360,13 +366,79 @@ function releaseDownload({ dmg, dryRun }) {
   console.log(`published Hive for Mac ${version} for the club to download`);
 }
 
+// What Hive for Windows is built from; its version is their hash.
+export const WINDOWS_SOURCES = ['desktop/app/crates/hive/hive-windows', 'desktop/app/crates/hive/Cargo.lock', '.github/workflows/windows.yml'];
+
+/** The gh command, in the repository, its output as text. */
+function gh(args) {
+  return execFileSync('gh', args, { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 << 20 }).trim();
+}
+
+async function releaseWindows({ notes, dryRun, out }) {
+  const root = committed(WINDOWS_SOURCES);
+  let version;
+  try {
+    version = bundleVersion(sourceFiles(root, WINDOWS_SOURCES));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  const newest = await newestRelease('windows').catch(error => { if (dryRun) return null; throw error; });
+  if (newest?.version === version) {
+    console.log(`windows: ${version} is already these sources; nothing to publish`);
+    return null;
+  }
+  const commit = commitOf();
+  execFileSync('git', ['-C', REPO, 'fetch', '--quiet', 'origin', 'main']);
+  if (spawnSync('git', ['-C', REPO, 'merge-base', '--is-ancestor', commit, 'origin/main']).status !== 0) {
+    throw new Error(`HEAD (${commit.slice(0, 7)}) isn't on GitHub's main yet, so GitHub's Windows machines can't build it: push it first`);
+  }
+  console.log(`windows ${version}: building on GitHub's Windows machines from ${commit.slice(0, 7)}`);
+  if (dryRun) return { version };
+  const asked = Date.now();
+  gh(['workflow', 'run', 'windows.yml', '--ref', 'main', '-f', `version=${version}`, '-f', `commit=${commit}`]);
+  let run;
+  for (let tries = 0; !run && tries < 40; tries++) {
+    await new Promise(done => setTimeout(done, 3000));
+    const runs = JSON.parse(gh(['run', 'list', '--workflow', 'windows.yml', '--event', 'workflow_dispatch', '--limit', '10', '--json', 'databaseId,displayTitle,createdAt']));
+    run = runs.find(r => r.displayTitle === `Hive for Windows ${version}` && Date.parse(r.createdAt) >= asked - 60_000);
+  }
+  if (!run) throw new Error("GitHub didn't start the Windows build");
+  console.log(`windows: GitHub run ${run.databaseId} building and checking it`);
+  for (;;) {
+    await new Promise(done => setTimeout(done, 20_000));
+    const { status, conclusion } = JSON.parse(gh(['run', 'view', String(run.databaseId), '--json', 'status,conclusion']));
+    if (status !== 'completed') continue;
+    if (conclusion !== 'success') {
+      const log = spawnSync('gh', ['run', 'view', String(run.databaseId), '--log-failed'], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 << 20 }).stdout || '';
+      throw new Error(`the Windows build ${conclusion}:\n${log.trim().split('\n').slice(-25).join('\n')}`);
+    }
+    break;
+  }
+  const work = mkdtempSync(join(tmpdir(), 'hive-windows-'));
+  try {
+    gh(['run', 'download', String(run.databaseId), '-n', `hive-windows-${version}`, '-D', work]);
+    const bytes = readFileSync(join(work, 'Hive.exe'));
+    if (bytes.subarray(0, 2).toString('latin1') !== 'MZ') throw new Error("what GitHub's Windows build uploaded isn't a Windows program");
+    const found = ownerDetails([join(work, 'Hive.exe')]);
+    if (found.length) throw new Error(`Hive.exe holds ${found.map(f => f.what).join(', ')}; nothing was published`);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    console.log(`windows ${version}: ${(bytes.length / 1024 / 1024).toFixed(1)} MB Hive.exe, checked on Windows, none of the owner's details`);
+    if (out) writeFileSync(out, bytes);
+    const release = await publish('windows', { bytes, version, sha256 }, notes);
+    console.log(`published windows ${release.version}; members' PCs put it in by themselves and the club page offers it`);
+    return { bytes, version, sha256 };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [kind, ...rest] = process.argv.slice(2);
   const option = name => { const i = rest.indexOf(name); return i < 0 ? undefined : rest[i + 1]; };
   const opts = { from: option('--from'), notes: option('--notes') ?? '', dryRun: rest.includes('--dry-run'), out: option('--out'), dmg: option('--dmg') };
-  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone, site: releaseSite, download: releaseDownload };
+  const known = { vm: releaseVm, mac: releaseMac, board: releaseBoard, phone: releasePhone, site: releaseSite, download: releaseDownload, windows: releaseWindows };
   if (!known[kind]) {
-    console.error('usage: node cloud/release.mjs vm|mac|board|phone|site [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]\n       node cloud/release.mjs download [--dmg FILE] [--dry-run]');
+    console.error('usage: node cloud/release.mjs vm|mac|board|phone|site|windows [--from DIR] [--notes TEXT] [--dry-run] [--out FILE]\n       node cloud/release.mjs download [--dmg FILE] [--dry-run]');
     process.exit(64);
   }
   try {

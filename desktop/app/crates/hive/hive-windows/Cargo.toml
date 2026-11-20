@@ -1,0 +1,19 @@
+[package]
+name = "hive-windows"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Hive for Windows: a club member's PC connects to the club and takes Hive's releases, updating itself"
+
+[dependencies]
+serde_json.workspace = true
+# The club's board (cloud/tasks/club.js, nodes.js), as hive-tasks calls it.
+ureq = { version = "2.12", features = ["json"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "Hive"
+path = "src/main.rs"

@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../tasks/worker.js';
 import { memberName, MAC_DOWNLOAD, MAC_DOWNLOAD_ABOUT } from '../tasks/club.js';
@@ -244,4 +245,46 @@ test("a member downloads Hive for Mac from the club page once there's one, and n
   assert.deepEqual(Buffer.from(await got.arrayBuffer()), dmg);
   assert.equal((await download('club.mallory.' + 'a'.repeat(64))).status, 401);
   assert.equal((await download('nobody')).status, 401);
+});
+
+test("a member downloads Hive for Windows, the newest windows release, and nobody else can", async () => {
+  const { env, call, join } = setup();
+  const objects = new Map();
+  env.RELEASES = {
+    async put(key, body) { objects.set(key, Buffer.from(await new Response(body).arrayBuffer())); },
+    async get(key) {
+      const bytes = objects.get(key);
+      return bytes ? { body: new Blob([bytes]).stream(), size: bytes.length } : null;
+    },
+  };
+  const key = await join('alice');
+  const download = (token) => worker.fetch(new Request('https://board.test/v1/club/download/windows', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.equal((await download(key)).status, 404, 'none published yet');
+  const publish = async (version, bytes) => {
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    const sent = await worker.fetch(new Request(`https://board.test/v1/releases?kind=windows&version=${version}&protocol=1&sha256=${sha}`, {
+      method: 'POST', headers: { authorization: 'Bearer machine-token', 'content-length': String(bytes.length) }, body: bytes,
+    }), env);
+    assert.equal(sent.status, 200, await sent.text());
+    return sha;
+  };
+  await publish('aaaaaaaaaaaa', Buffer.from('MZ the first Hive.exe'));
+  const newer = Buffer.from('MZ the second Hive.exe');
+  const sha = await publish('bbbbbbbbbbbb', newer);
+  // The club page offers it once there's one (the devices answer lists the newest of each kind).
+  assert.ok((await call('GET', '/v1/club/devices', undefined, key)).body.releases.some((r) => r.kind === 'windows' && r.version === 'bbbbbbbbbbbb'));
+  const got = await download(key);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('content-disposition'), 'attachment; filename="Hive.exe"');
+  assert.equal(got.headers.get('content-length'), String(newer.length));
+  assert.equal(got.headers.get('x-hive-sha256'), sha);
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), newer);
+  assert.equal((await download('club.mallory.' + 'a'.repeat(64))).status, 401);
+  // A member's Windows PC says what it runs under the member's name, like their Mac.
+  const seen = await worker.fetch(new Request('https://board.test/v1/releases/latest?kind=windows', {
+    headers: { authorization: `Bearer ${key}`, 'x-hive-node': 'windows:Alices-PC', 'x-hive-version': 'aaaaaaaaaaaa', 'x-hive-protocol': '1' },
+  }), env);
+  assert.equal((await seen.json()).release.version, 'bbbbbbbbbbbb');
+  const mine = (await call('GET', '/v1/club/devices', undefined, key)).body.nodes;
+  assert.deepEqual(mine.map((n) => [n.kind, n.name, n.current]), [['windows', 'alices-pc', false]]);
 });

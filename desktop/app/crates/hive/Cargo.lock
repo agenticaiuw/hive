@@ -477,6 +477,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hive-windows"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "hive-workspace"
 version = "0.1.0"
 dependencies = [

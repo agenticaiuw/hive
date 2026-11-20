@@ -17,6 +17,7 @@ members = [
     "hive-dream",
     "hive-cloud",
     "hive-tasks",
+    "hive-windows",
 ]
 
 [workspace.package]
