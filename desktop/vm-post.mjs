@@ -13,10 +13,14 @@
 //   vm-post.mjs where discord [server-id]    list your servers, or one server's channels
 //   vm-post.mjs send --to <name|channel-link|x> [--file path]... [--text "..."]   (or text on stdin)
 //   vm-post.mjs run '<shell command>'        run a command on the VM (as ubuntu); its output and exit code
-//   vm-post.mjs task [--wait minutes]        hand Hive's agent on the VM the task given on stdin, through the
+//   vm-post.mjs task [--follows <id>] [--wait minutes]
+//                                            hand Hive's agent on the VM the task given on stdin, through the
 //                                            cloud: it shows on every dashboard as an agent the owner can open
 //                                            and talk to; waits (20 min) and prints how it ended. Files go
-//                                            first with hive-files.mjs send <file> --to vm (~/hive-files there)
+//                                            first with hive-files.mjs send <file> --to vm (~/hive-files there).
+//                                            More about the same work (a correction, a retry after a stop, the
+//                                            next step) follows that work's newest request (--follows), so the
+//                                            owner reads every turn in one conversation, not one per hand-off
 //   vm-post.mjs state <id>                   how a task handed to the VM stands
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -88,18 +92,37 @@ export const handedWords = words => {
   const scope = /^For [^\n:]{1,250}: /.exec(words);
   return scope ? `${scope[0]}${FROM_THE_MAC}${words.slice(scope[0].length)}` : `${FROM_THE_MAC}${words}`;
 };
-export async function handOff(board, words, { wait = 20 * 60_000, every = 5000, say = console.log, sleep = ms => new Promise(done => setTimeout(done, ms)), clock = Date.now } = {}) {
+// A hand-off about work already handed over follows it: the board makes it a follow-up request
+// (/v1/runs/message {request}), which the dashboard shows in the same conversation, and the VM agent
+// hears what that request was and how it ended. Each hand-off as a request of its own split one job
+// into a conversation per hand-off, so the owner couldn't read all of its turns (2026-11-20: "why
+// can't i view all of the turns as you do that is clearly a bug").
+export async function handOff(board, words, { follows = 0, wait = 20 * 60_000, every = 5000, say = console.log, sleep = ms => new Promise(done => setTimeout(done, ms)), clock = Date.now } = {}) {
   const text = words.trim();
   if (!text) throw new Error('say what the VM agent should do, on stdin');
-  const { id } = await board('/v1/requests', { text: handedWords(text), from: 'mac' });
-  say(`Hive's agent on the VM has it (request ${id}); every dashboard shows it as Hive in the cloud.`);
+  const id = follows
+    ? (await board('/v1/runs/message', { request: follows, text: handedWords(text), from: 'mac' })).request
+    : (await board('/v1/requests', { text: handedWords(text), from: 'mac' })).id;
+  say(follows
+    ? `Hive's agent on the VM has it (request ${id}, following ${follows}); every dashboard shows it in that conversation.`
+    : `Hive's agent on the VM has it (request ${id}); every dashboard shows it as Hive in the cloud.`);
   return follow(board, id, { wait, every, say, sleep, clock });
 }
 export async function follow(board, id, { wait = 0, every = 5000, say = console.log, sleep = ms => new Promise(done => setTimeout(done, ms)), clock = Date.now } = {}) {
   const until = clock() + wait;
   let last = '';
+  let misses = 0;
   for (;;) {
-    const { request } = await board(`/v1/requests/state?id=${id}`);
+    let request;
+    try {
+      ({ request } = await board(`/v1/requests/state?id=${id}`));
+      misses = 0;
+    } catch (error) {
+      // The Mac's link to the board drops now and then ("fetch failed"); the request goes on on the VM.
+      if (++misses >= 12 || clock() >= until) throw error;
+      await sleep(every);
+      continue;
+    }
     if (request.status === 'done' || request.status === 'failed') {
       say(`${request.status === 'done' ? 'Done' : "Didn't finish"}: ${request.outcome ?? ''}`.trim());
       return request;
@@ -253,7 +276,10 @@ async function main(argv) {
     if (!(wait >= 0)) throw new Error('--wait is a number of minutes');
     const id = Number(rest[0]);
     if (command === 'state' && !(Number.isInteger(id) && id > 0)) throw new Error('usage: vm-post.mjs state <id>');
-    const request = command === 'task' ? await handOff(board, readFileSync(0, 'utf8'), { wait }) : await follow(board, id, { wait: at < 0 ? 0 : wait });
+    const after = rest.indexOf('--follows');
+    const follows = after < 0 ? 0 : Number(String(rest[after + 1] ?? '').replace(/^R/i, ''));
+    if (command === 'task' && after >= 0 && !(Number.isInteger(follows) && follows > 0)) throw new Error('--follows is the id of the request this one follows');
+    const request = command === 'task' ? await handOff(board, readFileSync(0, 'utf8'), { follows, wait }) : await follow(board, id, { wait: at < 0 ? 0 : wait });
     process.exitCode = { done: 0, failed: 1 }[request.status] ?? 3;
     return;
   }
