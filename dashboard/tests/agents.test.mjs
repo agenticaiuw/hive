@@ -74,6 +74,80 @@ test('a task that has not started or is stuck says why', () => {
   assert.match(reasonFor({ ...task('148'), session: '' }, undefined), /^No agent has it yet/);
 });
 
+function requestBoard({ status = 'working', age = 1200, tasks = [], runs = [], steps = [], requests = [] } = {}) {
+  return normalizeBoard({ source: 'cloud', board: {
+    now: NOW,
+    requests: [{ id: 21, text: 'Move the recording', status, created_at: NOW - 3600, updated_at: NOW - age }, ...requests],
+    tasks: tasks.map((t) => ({ machine: 'cloud', id: 2101, updated_at: NOW - age, ...t })),
+    runs: runs.map((r) => ({ machine: 'cloud', run: '2101', request: 21, task: 1, started_at: NOW - 3600, updated_at: NOW, ...r })),
+    run_steps: steps.map((s, i) => ({ machine: 'cloud', run: '2101', n: i + 1, kind: 'action', text: 'Read the file', ...s })),
+  } });
+}
+
+test('unfinished requests become stuck at twenty minutes without progress, and recover on refresh', () => {
+  for (const status of ['queued', 'planning', 'working']) {
+    const b = requestBoard({ status, age: 1199 });
+    assert.equal(agents(b)[0].status, 'working', status);
+    b.now += 1;
+    assert.equal(agents(b)[0].status, 'stuck', status);
+    b.requests[0].updated = b.now;
+    assert.equal(agents(b)[0].status, 'working', `${status} resumes`);
+  }
+});
+
+test('blocked requests and blocked tasks stay visible as stuck while Hive retries', () => {
+  for (const b of [
+    requestBoard({ status: 'blocked', age: 0 }),
+    requestBoard({ age: 0, tasks: [{ status: 'blocked', retrying: 1 }] }),
+    requestBoard({ status: 'failed', tasks: [{ status: 'blocked' }] }),
+  ]) {
+    const a = agents(b)[0];
+    assert.equal(a.status, 'stuck');
+    assert.equal(a.pinned, true);
+  }
+  const b = requestBoard({ age: 0, tasks: [{ status: 'blocked' }] });
+  b.tasks[0].status = 'active';
+  assert.equal(agents(b)[0].status, 'working', 'a resolved blocker clears the warning');
+});
+
+test('recent steps and completed tasks count as progress, but a run heartbeat does not', () => {
+  const quiet = requestBoard({ runs: [{ status: 'working' }], steps: [{ at: NOW - 1800 }] });
+  assert.equal(agents(quiet)[0].status, 'stuck', 'updated_at alone cannot hide a stalled run');
+  for (const b of [
+    requestBoard({ runs: [{ status: 'working' }], steps: [{ at: NOW - 10 }] }),
+    requestBoard({ tasks: [{ status: 'done', updated_at: NOW - 10 }] }),
+    requestBoard({ runs: [{ status: 'working', started_at: NOW - 10 }] }),
+  ]) assert.equal(agents(b)[0].status, 'working');
+});
+
+test('finished and owner-stopped requests do not become stuck with age', () => {
+  for (const status of ['done', 'failed', 'dropped', 'cancelled']) {
+    assert.equal(agents(requestBoard({ status, age: 86400, tasks: [{ status: 'dropped' }] }))[0].status, 'idle', status);
+  }
+  assert.equal(agents(requestBoard({ age: 0, tasks: [{ status: 'waiting' }] }))[0].status, 'needs-you');
+});
+
+test('a follow-up cannot hide or refresh an earlier stuck request in its thread', () => {
+  const b = requestBoard({ requests: [
+    { id: 22, follows: 21, text: 'Check the folder too', status: 'working', created_at: NOW - 20, updated_at: NOW },
+  ], runs: [{ request: 22, run: '2201', started_at: NOW - 10 }] });
+  assert.equal(agents(b)[0].status, 'stuck');
+  b.requests[0].status = 'done';
+  assert.equal(agents(b)[0].status, 'working', 'the follow-up is still running');
+  b.requests[1].status = 'done';
+  assert.equal(agents(b)[0].status, 'idle');
+});
+
+test('old stuck requests stay on the main list ahead of newer working and finished requests', () => {
+  const b = requestBoard({ age: 3 * 86400, status: 'blocked', requests: [
+    { id: 22, text: 'New work', status: 'working', created_at: NOW - 20, updated_at: NOW },
+    { id: 23, text: 'Finished work', status: 'done', created_at: NOW - 10, updated_at: NOW },
+  ] });
+  assert.deepEqual(agents(b).map((a) => [a.key, a.status, !!a.pinned]), [
+    ['cloud|R21', 'stuck', true], ['cloud|R22', 'working', false], ['cloud|R23', 'idle', false],
+  ]);
+});
+
 test('a conversation is what the owner said, what the agent said, and its work folded into a line', () => {
   const steps = [
     { n: 1, at: 10, kind: 'asked', text: 'fix the stuck label' },

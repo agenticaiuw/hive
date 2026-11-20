@@ -76,7 +76,7 @@
     "not-started": "Not started",
     done: "Done",
   };
-  const STATUS_LABEL = { "needs-you": "Needs you", working: "Working", idle: "Idle" } as const;
+  const STATUS_LABEL = { "needs-you": "Needs you", stuck: "Stuck", working: "Working", idle: "Idle" } as const;
 
   let board = $state<Board | null>(null);
   let loadError = $state("");
@@ -642,6 +642,7 @@
         <span class="agent-title">{a.title}</span>
         <span class="agent-meta">{a.place ? `${a.label} · ${a.place}` : a.label}</span>
       </span>
+      {#if a.status === "stuck"}<span class="tag status st-stuck">{STATUS_LABEL[a.status]}</span>{/if}
       {#if a.tasks.length}<span class="count" title="Tasks it holds">{a.tasks.length}</span>{/if}
     </button>
   </li>
@@ -1484,7 +1485,8 @@
     box-shadow: 0 0 0 0 rgba(122, 216, 160, 0.5);
     animation: pulse 2s ease-out infinite;
   }
-  .dot.st-needs-you {
+  .dot.st-needs-you,
+  .dot.st-stuck {
     background: var(--amber);
   }
   @keyframes pulse {
@@ -2203,7 +2205,8 @@
     background: rgba(122, 216, 160, 0.12);
     color: var(--green);
   }
-  .tag.status.st-needs-you {
+  .tag.status.st-needs-you,
+  .tag.status.st-stuck {
     background: rgba(255, 173, 92, 0.14);
     color: var(--amber);
   }
