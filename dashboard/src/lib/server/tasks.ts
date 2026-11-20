@@ -44,3 +44,21 @@ export async function askBoard(
   }
   return { ok: true, value };
 }
+
+/**
+ * A file from the board as it comes (the club's Hive for Mac download), signed in with `token`: its
+ * body passes straight through, never read into memory here. The board's own error otherwise.
+ */
+export async function boardFile(env: RuntimeEnv, path: string, token: string): Promise<Response> {
+  if (!env.TASKS && !env.TASKS_URL) {
+    return json({ error: "The task board isn't connected (the TASKS binding)." }, { status: 503, headers: NO_STORE_HEADERS });
+  }
+  const request: RequestInit = { headers: { authorization: `Bearer ${token}`, "user-agent": "hive-dashboard" } };
+  try {
+    return env.TASKS
+      ? await env.TASKS.fetch(`https://hive-tasks${path}`, request)
+      : await fetch(`${String(env.TASKS_URL).replace(/\/+$/, "")}${path}`, request);
+  } catch {
+    return json({ error: "Couldn't reach the task board." }, { status: 502, headers: NO_STORE_HEADERS });
+  }
+}

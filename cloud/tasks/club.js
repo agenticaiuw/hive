@@ -28,6 +28,10 @@
 //                                                 key, which works as the member's until they're let go;
 //                                                 Hive keeps it as where its releases come from
 //                                                 (hive-tasks club.rs, tasks.json's `releases`)
+//   GET  /v1/club/download/mac                    member: Hive for Mac (Hive.dmg), notarized: open it and it
+//                                                 sets itself up (tools/release.sh builds it, `node
+//                                                 cloud/release.mjs download` puts it in RELEASES); the
+//                                                 devices answer says which (mac_download)
 //   /v1/club/team/...                             member: messages and file leases (team.js), as themselves
 //
 // How many at once (the knowledge base's "Club collaboration" decision): a member runs at most
@@ -42,6 +46,9 @@ export const DEFAULT_AGENTS = 3;
 export const MOST_AGENTS = 8;
 export const INVITE_S = 7 * 86400;
 export const DEVICE_CODE_S = 600;
+// Hive for Mac as members download it, and what it is ({version, size, published_at}), in RELEASES.
+export const MAC_DOWNLOAD = "download/mac/Hive.dmg";
+export const MAC_DOWNLOAD_ABOUT = "download/mac/Hive.json";
 const DAY = 86400;
 const SEEN_EVERY_S = 60;
 const GOING = "('queued', 'planning', 'working')";
@@ -92,6 +99,14 @@ async function going(env, name) {
  * `deps`: allowed(request, env) for the owner; newRequest(env, {words, agent, from, at, member, follows})
  * → id (worker.js); teamRoute (team.js).
  */
+/** What Hive for Mac members download is ({version, size, published_at}), or null before there's one. */
+async function macDownload(env) {
+  const object = env.RELEASES ? await env.RELEASES.get(MAC_DOWNLOAD_ABOUT) : null;
+  const about = object ? await new Response(object.body).json().catch(() => null) : null;
+  if (!about || typeof about.version !== "string") return null;
+  return { version: about.version, size: Number(about.size) || null, published_at: about.published_at ?? null };
+}
+
 export async function clubRoute(request, env, url, { allowed, newRequest, teamRoute }, { clock = () => Date.now() } = {}) {
   const now = Math.floor(clock() / 1000);
   const path = url.pathname;
@@ -250,6 +265,20 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
       releases: list.releases.filter((r) => r.kind !== "board").map(({ kind, version, commit, published_at }) => ({ kind, version, commit, published_at })),
       board: list.board,
       phone_source: phone && origin ? `${origin}/v1/phone/source.json` : null,
+      mac_download: await macDownload(env),
+    });
+  }
+
+  if (path === "/v1/club/download/mac" && request.method === "GET") {
+    const object = env.RELEASES ? await env.RELEASES.get(MAC_DOWNLOAD) : null;
+    if (!object) return json({ error: "There's no Hive for Mac to download yet." }, 404);
+    return new Response(object.body, {
+      headers: {
+        "content-type": "application/x-apple-diskimage",
+        ...(object.size ? { "content-length": String(object.size) } : {}),
+        "content-disposition": 'attachment; filename="Hive.dmg"',
+        "cache-control": "no-store",
+      },
     });
   }
 

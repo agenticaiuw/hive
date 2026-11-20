@@ -27,6 +27,9 @@ const env = {
       }
       if (path === "/v1/club/requests") return Response.json({ error: "You have 3 changes going, the most you can at once: one has to finish first." }, { status: 429 });
       if (path === "/v1/club/members") return Response.json({ name: "bob", max_agents: 3, invite: "d".repeat(48), expires_in: 604800 });
+      if (path === "/v1/club/download/mac") {
+        return new Response("a notarized disk image", { headers: { "content-type": "application/x-apple-diskimage", "content-length": "22" } });
+      }
       return Response.json({ me: "alice", requests: [] });
     },
   },
@@ -72,6 +75,13 @@ test("a member signs in on the club page with their invite and reaches only the 
   assert.equal(asked.at(-1).path, "/v1/club/devices", "their own devices on the club's releases");
   await call(w, "/club/api/devices/code", { method: "POST", body: {}, cookie });
   assert.equal(asked.at(-1).path, "/v1/club/devices/code", "a one-use code that connects their Mac");
+  const dmg = await call(w, "/club/api/download/mac", { cookie });
+  assert.equal(asked.at(-1).path, "/v1/club/download/mac", "Hive for Mac, as the member");
+  assert.equal(dmg.status, 200);
+  assert.equal(dmg.headers.get("content-disposition"), 'attachment; filename="Hive.dmg"');
+  assert.equal(dmg.headers.get("content-length"), "22");
+  assert.equal(await dmg.text(), "a notarized disk image", "the file itself, passed through");
+  assert.equal((await call(w, "/club/api/download/mac")).status, 401, "not for someone not signed in");
   const busy = await call(w, "/club/api/requests", { method: "POST", body: { text: "a dark theme" }, cookie });
   assert.equal(busy.status, 429, "the board's own answer");
   assert.match((await busy.json()).error, /3 changes going/);
