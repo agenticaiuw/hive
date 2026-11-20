@@ -21,18 +21,27 @@
 //   GET  /v1/club/devices                         member: their own devices on Hive's releases (nodes.js),
 //                                                 each against the newest release of its kind, and where
 //                                                 Hive Phone's updates come from (SideStore)
+//   POST /v1/club/devices/code                    member: a one-use code, for 10 minutes, that connects one
+//                                                 of their Macs: {code, link, expires_in}; the link
+//                                                 (hive://club/connect?board=…&code=…) opens Hive there
+//   POST /v1/club/devices/connect {code, device}  with that code: {name, key, board}, once: the Mac's own
+//                                                 key, which works as the member's until they're let go;
+//                                                 Hive keeps it as where its releases come from
+//                                                 (hive-tasks club.rs, tasks.json's `releases`)
 //   /v1/club/team/...                             member: messages and file leases (team.js), as themselves
 //
 // How many at once (the knowledge base's "Club collaboration" decision): a member runs at most
 // max_agents requests at a time (DEFAULT_AGENTS unless the owner says otherwise); the planner splits each
 // into tasks, one agent each; the VM's slots (orchestrator.mjs MOST_REQUESTS, MOST_RUNNING) cap them all.
-// Tables: cloud/knowledge/migrations/0025_club.sql.
+// Tables: cloud/knowledge/migrations/0025_club.sql, 0027_club_devices.sql.
 
 import { nodeList } from "./nodes.js";
+import { boardOrigin } from "./phone.js";
 
 export const DEFAULT_AGENTS = 3;
 export const MOST_AGENTS = 8;
 export const INVITE_S = 7 * 86400;
+export const DEVICE_CODE_S = 600;
 const DAY = 86400;
 const SEEN_EVERY_S = 60;
 const GOING = "('queued', 'planning', 'working')";
@@ -61,9 +70,13 @@ export async function memberOf(request, env, now) {
   const header = request.headers.get("authorization") || "";
   const match = /^Bearer club\.([a-z0-9_-]{1,40})\.([0-9a-f]{64})$/.exec(header);
   if (!match) return null;
-  const row = await env.DB.prepare("SELECT name, max_agents, key_hash, seen_at FROM club_members WHERE name = ?1").bind(match[1]).first();
-  // Only the key's hash is kept, so comparing hashes says nothing about the key.
-  if (!row?.key_hash || row.key_hash !== (await sha256(match[2]))) return null;
+  // Only keys' hashes are kept, so comparing hashes says nothing about the key. A member's key is the one
+  // their invite gave them, or one of their Macs' (/v1/club/devices/connect).
+  const row = await env.DB.prepare(
+    `SELECT c.name, c.max_agents, c.seen_at FROM club_members c
+     WHERE c.name = ?1 AND (c.key_hash = ?2 OR EXISTS (SELECT 1 FROM club_device_keys d WHERE d.member = c.name AND d.key_hash = ?2))`,
+  ).bind(match[1], await sha256(match[2])).first();
+  if (!row) return null;
   if (!(row.seen_at > now - SEEN_EVERY_S)) {
     await env.DB.prepare("UPDATE club_members SET seen_at = ?2 WHERE name = ?1").bind(row.name, now).run();
   }
@@ -104,6 +117,10 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
     if (!name) return json({ error: "Say who (name: lowercase letters, digits, _ or -)." }, 400);
     if (path === "/v1/club/members/remove") {
       const gone = await env.DB.prepare("DELETE FROM club_members WHERE name = ?1").bind(name).run();
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM club_device_keys WHERE member = ?1").bind(name),
+        env.DB.prepare("DELETE FROM club_device_codes WHERE member = ?1").bind(name),
+      ]);
       return json({ name, removed: gone.meta.changes });
     }
     const max = Math.min(Math.max(Math.round(Number(body.max_agents)) || DEFAULT_AGENTS, 1), MOST_AGENTS);
@@ -127,6 +144,19 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
     ).bind(await sha256(invite), now, await sha256(key)).first();
     if (!row) return json({ error: "That invite was used or has expired: ask for a new one." }, 403);
     return json({ name: row.name, max_agents: row.max_agents, key: `club.${row.name}.${key}` });
+  }
+
+  // ---- a member's Mac, with the code the club page gave them ----
+  if (path === "/v1/club/devices/connect" && request.method === "POST") {
+    const code = text(body.code, 100);
+    if (!/^[0-9a-f]{32}$/.test(code)) return json({ error: "That code isn't one (code)." }, 400);
+    const row = await env.DB.prepare("DELETE FROM club_device_codes WHERE code_hash = ?1 AND expires_at > ?2 RETURNING member")
+      .bind(await sha256(code), now).first();
+    if (!row) return json({ error: "That link was used or has expired: open Connect this Mac on the club page again." }, 403);
+    const key = secret(32);
+    await env.DB.prepare("INSERT INTO club_device_keys (member, key_hash, device, created_at) VALUES (?1, ?2, ?3, ?4)")
+      .bind(row.member, await sha256(key), text(body.device, 60) || null, now).run();
+    return json({ name: row.member, key: `club.${row.member}.${key}`, board: await boardOrigin(env, url) });
   }
 
   // ---- a member ----
@@ -211,13 +241,29 @@ export async function clubRoute(request, env, url, { allowed, newRequest, teamRo
     // updater.mjs: tasks.json's `releases`), and say here what they run, under the member's name.
     const list = await nodeList(env, { member: member.name });
     const phone = list.releases.some((r) => r.kind === "phone");
+    // Over the dashboard's service binding the board's own address is https://hive-tasks, which nobody
+    // else can open; boardOrigin knows its public one.
+    const origin = await boardOrigin(env, url);
     return json({
       me: member.name,
       nodes: list.nodes.map((n) => ({ ...n, name: n.name.slice(member.name.length + 1) })),
       releases: list.releases.filter((r) => r.kind !== "board").map(({ kind, version, commit, published_at }) => ({ kind, version, commit, published_at })),
       board: list.board,
-      phone_source: phone ? `${url.origin}/v1/phone/source.json` : null,
+      phone_source: phone && origin ? `${origin}/v1/phone/source.json` : null,
     });
+  }
+
+  if (path === "/v1/club/devices/code" && request.method === "POST") {
+    const origin = await boardOrigin(env, url);
+    if (!origin) return json({ error: "The board doesn't know its own address yet; it learns it from the next call a Mac or the VM makes to it." }, 503);
+    const code = secret(16);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM club_device_codes WHERE expires_at <= ?1").bind(now),
+      env.DB.prepare("INSERT INTO club_device_codes (code_hash, member, expires_at) VALUES (?1, ?2, ?3)")
+        .bind(await sha256(code), member.name, now + DEVICE_CODE_S),
+    ]);
+    const link = `hive://club/connect?board=${encodeURIComponent(origin)}&code=${code}`;
+    return json({ code, link, expires_in: DEVICE_CODE_S });
   }
 
   if (path.startsWith("/v1/club/team/")) {

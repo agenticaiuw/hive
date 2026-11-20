@@ -534,9 +534,60 @@ let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathCompon
         }
     }
 
-    /// hive:// links (`open hive://tasks`) open the dashboard there.
+    /// hive:// links (`open hive://tasks`) open the dashboard there; the club page's Connect this Mac
+    /// (hive://club/connect?board=…&code=…) connects this Mac to the club's releases.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "hive" { dashboard.show(path: DashboardWindow.path(for: url)) }
+        for url in urls where url.scheme == "hive" {
+            if url.host == "club" && url.path == "/connect" { connectToClub(url) } else { dashboard.show(path: DashboardWindow.path(for: url)) }
+        }
+    }
+
+    /// Any web page can open a hive:// link, so the member says yes to the club's board by name first:
+    /// this Mac takes Hive's updates from it from then on (`hive-agent --join-club`, which trades the
+    /// link's one-use code for this Mac's own key: crates/hive/hive-tasks/src/club.rs).
+    func connectToClub(_ url: URL) {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        guard let board = items.first(where: { $0.name == "board" })?.value,
+              let code = items.first(where: { $0.name == "code" })?.value,
+              let host = URL(string: board)?.host, !host.isEmpty else { return }
+        func tell(_ title: String, _ detail: String) {
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = detail
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        let ask = NSAlert()
+        ask.messageText = "Connect this Mac to the club at \(host)?"
+        ask.informativeText = "Hive on this Mac will take its updates from there, so it runs the same Hive as the rest of the club."
+        ask.addButton(withTitle: "Connect")
+        ask.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard ask.runModal() == .alertFirstButtonReturn else { return }
+        let agentPath = repository + "/build/hive-agent"
+        guard !repository.isEmpty, FileManager.default.isExecutableFile(atPath: agentPath) else {
+            tell("Hive is still setting up on this Mac.", "Choose Connect this Mac on the club page again once Hive's menu says it's ready.")
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: agentPath)
+        process.arguments = ["--join-club", board, code]
+        process.currentDirectoryURL = URL(fileURLWithPath: repository)
+        process.standardInput = FileHandle.nullDevice
+        let said = Pipe()
+        process.standardOutput = said
+        process.standardError = said
+        process.terminationHandler = { [weak self] process in
+            let line = String(decoding: said.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let joined = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self?.write("--- club connect at \(host): \(joined ? "connected" : "didn't connect") \(Date())\n")
+                tell(joined ? "This Mac is connected to the club." : "This Mac didn't connect to the club.",
+                     line.isEmpty ? "hive-agent stopped (exit \(process.terminationStatus))." : line)
+            }
+        }
+        do { try process.run() } catch { tell("This Mac didn't connect to the club.", error.localizedDescription) }
     }
 
     @objc func showLog() {

@@ -55,7 +55,7 @@ if [ ! -x "$python" ] || [ "$("$python" -c 'import platform; print(platform.pyth
   step "Getting Python $version"
   "$uv" python install --quiet --no-bin "$version"
   rm -rf "$app/.venv"
-  "$uv" venv --quiet --managed-python --python "$version" "$app/.venv"
+  "$uv" venv --quiet --python "$version" "$app/.venv"  # only-managed: UV_PYTHON_PREFERENCE above
 fi
 if [ ! -f "$app/.venv/.installed" ] || [ "$lock" -nt "$app/.venv/.installed" ]; then
   step "Installing the voice packages ($(grep -vc '^#' "$lock") of them, about 1 GB)"

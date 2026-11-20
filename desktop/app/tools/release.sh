@@ -33,6 +33,12 @@ out=build/release
 rm -rf "$out" && mkdir -p "$out/image"
 app="$out/image/Hive.app"
 ditto "$source_app" "$app"
+# Hive's own Swift programs, built for release: the development build is a debug build, whose
+# debugging symbols name the build folder in the home folder.
+bash tools/build-workspace.sh --release "$out/swift"
+cp "$out/swift/agent-unified-host" "$app/Contents/MacOS/Agent"
+cp "$out/swift/workspace-engine" "$app/Contents/Helpers/workspace-engine"
+rm -rf "$out/swift"
 
 # A teammate's whole setup goes inside, so the download alone sets up the same Hive the owner runs
 # (tools/carry.mjs, then tools/first-open.sh on their Mac): a Mac release of the commit, the voice
@@ -49,7 +55,16 @@ rm -rf "$out/mac.release" "$out/source"
 
 # Inside out, each with a secure timestamp and the hardened runtime: the helper, the Safari
 # extension (with its sandbox entitlements: Safari loads no other kind), then the app itself.
-sign() { codesign --force --timestamp --options runtime --sign "$identity" "$@"; }
+# Apple's timestamp server now and then doesn't answer ("A timestamp was expected but was not
+# found"), and the app carries over a hundred programs, so each signing gets a few tries.
+sign() {
+  local try
+  for try in 1 2 3 4; do
+    codesign --force --timestamp --options runtime --sign "$identity" "$@" && return 0
+    sleep $((try * 5))
+  done
+  return 1
+}
 # The development signatures come off first: re-signing reuses the space a signature had without
 # clearing it, so the old certificate, which names the owner's Apple ID, would stay underneath.
 for code in "$app/Contents/Helpers/workspace-engine" "$app/Contents/PlugIns/Hive.appex" "$app"; do
