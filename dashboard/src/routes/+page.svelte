@@ -18,6 +18,7 @@
    */
   import { onMount } from "svelte";
   import { base } from "$app/paths";
+  import StuckRequests from "$lib/StuckRequests.svelte";
   import {
     actOnTask,
     turnRuleOff,
@@ -1302,6 +1303,8 @@
           <p class="board-note">Loading the tasks…</p>
         {:else}
           {#if loadError}<p class="board-note bad">Couldn't refresh: {loadError}</p>{/if}
+
+          <StuckRequests agents={agentList} />
 
           {#each shown as section (section.id)}
             {#if section.id === "done"}
