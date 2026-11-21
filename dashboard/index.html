@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hive</title>
+<link rel="manifest" href="/manifest.json"><link rel="apple-touch-icon" href="/icon.png"><meta name="apple-mobile-web-app-capable" content="yes">
 <style>
 :root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #b45309; --ok: #15803d; --warn: #b91c1c; }
 @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f5f5f4; --muted: #a8a29e; --line: #2c2926; --card: #1f1c1a; --accent: #f59e0b; --ok: #4ade80; --warn: #f87171; } }
@@ -43,7 +44,7 @@ img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
 <body>
 <div id="login" class="card" hidden>
   <b>Hive</b>
-  <p class="muted">Sign in with your Hive key or a pairing code from a signed-in device.</p>
+  <p class="muted">Sign in with your Hive key, or open a pairing link from a signed-in device (Pair a device).</p>
   <input id="secret" type="password" placeholder="Key or pairing code">
   <p class="row"><button onclick="login()">Sign in</button> <span id="loginerr" class="muted"></span></p>
 </div>
@@ -80,7 +81,12 @@ async function forget(id, name) {
   await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
   await refresh();
 }
-async function pairCode() { const r = await api('/api/pair/code', { method: 'POST' }); $('#code').textContent = `Address ${location.host} · code ${r.code} (10 min)`; }
+// One link pairs anything: opened on a phone or computer it signs in here; pasted into the Hive app or extension it connects that.
+async function pairCode() {
+  const link = `${location.origin}/#pair=${(await api('/api/pair/code', { method: 'POST' })).code}`;
+  navigator.clipboard?.writeText(link).catch(() => {});
+  $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · open it on the device, or paste it into the Hive app or extension (10 min)`;
+}
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
   $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
@@ -178,6 +184,11 @@ async function refresh() {
   else loadChat();
 }
 async function start() {
+  const link = location.hash.match(/^#(?:key|pair)=(.+)$/);
+  if (link) {
+    history.replaceState(null, '', '/'); tab = 'Agents';
+    await fetch('/api/login', { method: 'POST', body: JSON.stringify({ secret: decodeURIComponent(link[1]) }) });
+  }
   try { await api('/api/me'); } catch { return; }
   $('#app').hidden = false; tabs(); await refresh(); render();
   clearInterval(timer);

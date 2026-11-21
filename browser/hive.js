@@ -15,16 +15,17 @@ export async function api(c, path, body, method) {
   return j;
 }
 
-/** Connect this browser with a code from the dashboard's "Pair a device". */
-export async function pair(server, code) {
-  server = server.trim().replace(/\/+$/, '');
-  if (!/^https?:\/\//.test(server)) server = `https://${server}`;
+/** Connect this browser with the link the dashboard's "Pair a device" copies: https://<server>/#pair=<code>. */
+export async function pair(link) {
+  const [server, code] = link.trim().split('/#pair=');
+  if (!code) throw new Error("That isn't a pairing link. On your Hive dashboard, choose Pair a device and paste the link it copies.");
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
-  const name = brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
+  const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
+  const name = safari ? 'Safari' : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
   const r = await fetch(`${server}/api/pair`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ code: code.trim(), kind: 'browser', name }),
+    body: JSON.stringify({ code, kind: 'browser', name }),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `Hive answered ${r.status}`);

@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 const DASHBOARD: &str = include_str!("../../dashboard/index.html");
+const ICON: &[u8] = include_bytes!("../../dashboard/icon.png");
+/// Lets a phone keep the dashboard on its home screen as the Hive app.
+const MANIFEST: &str = r##"{"name":"Hive","short_name":"Hive","start_url":"/","display":"standalone","background_color":"#161412","theme_color":"#161412","icons":[{"src":"/icon.png","sizes":"180x180","type":"image/png"}]}"##;
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_default() }
 pub fn hash(t: &str) -> String { Sha256::digest(t.as_bytes()).iter().map(|b| format!("{b:02x}")).collect() }
@@ -23,10 +26,10 @@ fn token(req: &Req) -> String {
         .or_else(|| req.cookie("hive")).unwrap_or_else(|| req.q("key").to_string())
 }
 
-fn authed(hive: &Hive, req: &Req) -> bool {
-    let t = token(req);
-    !t.is_empty() && (t == hive.owner_key || hive.db.get("select 1 from tokens where hash=? and node!='code'", args!(hash(&t))).is_some())
+fn valid(hive: &Hive, t: &str) -> bool {
+    !t.is_empty() && (t == hive.owner_key || hive.db.get("select 1 from tokens where hash=? and node!='code'", args!(hash(t))).is_some())
 }
+fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
 
 /// A new device token for a pairing code or the owner key; None if neither matches.
 fn pair(hive: &Hive, secret: &str, node: &str) -> Option<String> {
@@ -51,9 +54,14 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
     let m = req.method.as_str();
     match (m, parts.as_slice()) {
         ("GET", [""]) => return Res::new(200, "text/html; charset=utf-8", DASHBOARD),
+        ("GET", ["icon.png"]) => return Res::new(200, "image/png", ICON),
+        ("GET", ["manifest.json"]) => return Res::new(200, "application/manifest+json", MANIFEST),
         ("GET", ["health"]) => return Res::json(&json!({ "ok": true, "version": hive.version })),
         ("POST", ["api", "login"]) => {
-            return match pair(hive, &s(&req.json()["secret"]), "dashboard") {
+            // A device's own token (the desktop app opening the dashboard), the owner key, or a pairing code.
+            let secret = s(&req.json()["secret"]);
+            let t = if secret != hive.owner_key && valid(hive, &secret) { Some(secret) } else { pair(hive, &secret, "dashboard") };
+            return match t {
                 Some(t) => Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000")),
                 None => Res::err(401, "That key or code isn't right (codes last 10 minutes)."),
             };

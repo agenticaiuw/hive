@@ -40,7 +40,7 @@ $('pair').onsubmit = async (e) => {
   e.preventDefault();
   $('pairNote').textContent = 'Connecting…';
   try {
-    await pair($('server').value, $('code').value);
+    await pair($('link').value);
     show();
   } catch (err) {
     $('pairNote').textContent = err.message;

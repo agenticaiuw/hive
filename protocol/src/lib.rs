@@ -144,11 +144,21 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
     #[cfg(windows)]
     { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).ok(); }
     run(&["cargo", "build", "--release", "-p", package])?;
-    restart(exe)
+    match app() {
+        Some(app) => { run(&["sh", "desktop/mac/bundle.sh", &app.to_string_lossy()])?; restart(app.join("Contents/MacOS").join(package)) }
+        None => restart(exe),
+    }
+}
+
+/// The Mac app this program runs inside (Hive.app), if it does: updates replace the whole app so its signature stays whole.
+fn app() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") { return None; }
+    std::env::current_exe().ok()?.ancestors().find(|d| d.extension().is_some_and(|x| x == "app")).map(PathBuf::from)
 }
 
 /// A downloaded node: fetch GitHub's build of the server's version and swap it in for this program.
 fn download(package: &str, want: &str) -> Result<(), String> {
+    if let Some(app) = app() { return download_app(&app, package, want); }
     let name = match std::env::consts::OS { "macos" => format!("{package}-macos"), "windows" => format!("{package}-windows.exe"), os => return Err(format!("no downloads for {os}")) };
     let r = ureq::get(&format!("{RELEASES}/{name}")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
@@ -167,6 +177,31 @@ fn download(package: &str, want: &str) -> Result<(), String> {
     { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).map_err(|e| e.to_string())?; }
     std::fs::rename(&new, &exe).map_err(|e| e.to_string())?;
     restart(exe)
+}
+
+/// A downloaded Mac app: unpack GitHub's Hive-Mac.zip next to this one and swap the whole app.
+fn download_app(app: &std::path::Path, package: &str, want: &str) -> Result<(), String> {
+    let r = ureq::get(&format!("{RELEASES}/Hive-Mac.zip")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let dir = app.with_extension("update");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("Hive-Mac.zip"), bytes).map_err(|e| e.to_string())?;
+    let new = dir.join("Hive.app");
+    let exe = |a: &std::path::Path| a.join("Contents/MacOS").join(package);
+    let unzipped = std::process::Command::new("ditto").args(["-x", "-k"]).arg(dir.join("Hive-Mac.zip")).arg(&dir).status().map_err(|e| e.to_string())?;
+    let got = std::process::Command::new(exe(&new)).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if !unzipped.success() || got.is_empty() || !(got.starts_with(want) || want.starts_with(got.as_str())) {
+        std::fs::remove_dir_all(&dir).ok();
+        return Err(format!("GitHub's build is {got:?}, not {want} yet; trying again in 10 minutes"));
+    }
+    let old = app.with_extension("old");
+    std::fs::remove_dir_all(&old).ok();
+    std::fs::rename(app, &old).and_then(|_| std::fs::rename(&new, app)).map_err(|e| e.to_string())?;
+    std::fs::remove_dir_all(&old).ok();
+    std::fs::remove_dir_all(&dir).ok();
+    restart(exe(app))
 }
 
 fn restart(exe: PathBuf) -> Result<(), String> {
