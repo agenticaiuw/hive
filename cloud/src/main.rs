@@ -38,6 +38,8 @@ fn main() {
     let login_from = PathBuf::from(env("HIVE_CODEX_LOGIN", "/root/.codex-hive"));
     #[cfg(unix)]
     if !codex_home.join("auth.json").exists() { std::os::unix::fs::symlink(login_from.join("auth.json"), codex_home.join("auth.json")).ok(); }
+    // No login shells: the VM's login profile belongs to other work and moves every shell out of the agent's folder.
+    if !codex_home.join("config.toml").exists() { std::fs::write(codex_home.join("config.toml"), "allow_login_shell = false\n").ok(); }
     if !codex_home.join("models_cache.json").exists() { std::fs::copy(login_from.join("models_cache.json"), codex_home.join("models_cache.json")).ok(); }
     let codex_env = vec![("CODEX_HOME".to_string(), codex_home.to_string_lossy().into_owned())];
 
