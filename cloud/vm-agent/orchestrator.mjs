@@ -61,6 +61,9 @@ const POLL_MS = 5000;
 // Requests taken at once, and tasks working at once across all of them (each is a Codex run).
 const MOST_REQUESTS = Number(process.env.HIVE_MOST_REQUESTS) || 3;
 const MOST_RUNNING = Number(process.env.HIVE_MOST_TASKS) || 4;
+// The earlier requests the planner sees when it decides what a new message is about: this many, this recent.
+const MOST_LATELY = 6;
+const RECENT_MS = 6 * 3600_000;
 
 /** The model and effort for a planned task: its rating's, and never less than `hard` for code. */
 export function pick(task) {
@@ -101,7 +104,27 @@ export const FROM_HIVE = '[Hive, not the owner]';
  * it: the plan has no tasks"). It's planned as the tasks it lists, one each. A cloud request run again
  * (retry) is planned from the owner's words that come with the note, as before.
  */
-export function planWords(request) {
+export function planWords(request, underway = []) {
+  const words = ownWords(request);
+  if (!underway.length || request.follows || request.member || request.retry) return words;
+  return `${words}\n\n${aboutGuide(underway)}`;
+}
+
+/**
+ * The owner's earlier requests that are still underway or ended lately, for the planner to say whether a
+ * new message is about one of them. Hive on the Mac sends a new request for anything said there unless
+ * it interrupted the last one (2026-11-21, R121: "have you posted it yet…" about the X post became a second
+ * Hive agent on the VM), so the orchestrator, which every request goes to first (R56), decides.
+ */
+export function aboutGuide(underway) {
+  const line = u => `R${u.id} (${u.working ? 'still working' : 'ended'}): "${String(u.text).replace(/\s+/g, ' ').trim().slice(0, 300)}"`;
+  return ['The owner\'s earlier requests, newest first:', ...underway.map(line),
+    'If the instruction above is about one of these (a reply to it, a correction or more for its work, asking how it ' +
+    'went or to keep going), add "about": <its number> to your JSON and plan tasks that carry that request on. ' +
+    'A new, separate instruction is "about": null, even when it is on a similar subject.'].join('\n');
+}
+
+function ownWords(request) {
   // A club member's request (cloud/tasks/club.js) is a change to Hive's own code, and nothing else.
   if (request.member) {
     return `(Club member ${request.member} asked this, not the owner: it is a change to Hive's own code. Plan only code tasks ` +
@@ -158,7 +181,8 @@ export function parsePlan(answer) {
     t.needs = [...new Set(t.needs.map(n => kept.get(n)).filter(Boolean))].sort((a, b) => a - b);
     delete t.at;
   }
-  return { project: line(plan.project, 60).toLowerCase(), tasks };
+  const about = Number(plan.about);
+  return { project: line(plan.project, 60).toLowerCase(), tasks, about: Number.isSafeInteger(about) && about > 0 ? about : null };
 }
 
 /** "For hive › Voice: x" → {project: "hive", folder: "Voice"} (as the board reads it). */
@@ -634,9 +658,10 @@ async function handleWork(request, deps, signal) {
   const { board, plan, run, code, now = () => Math.floor(Date.now() / 1000), log = () => {} } = deps;
   const scope = scopeOf(request.text);
   log(`R${request.id}: ${request.text}`);
+  const underway = deps.underway?.(request) ?? [];
   let planned;
   try {
-    planned = parsePlan(await plan(planWords(request)));
+    planned = parsePlan(await plan(planWords(request, underway)));
   } catch (error) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't plan it: ${error.message}` });
     return;
@@ -644,6 +669,15 @@ async function handleWork(request, deps, signal) {
   if (signal.aborted) {
     await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: STOPPED });
     return;
+  }
+  // About an earlier request: it's part of that request's chat (follows), and the agent still working on
+  // it hears it at its next step instead of a second agent starting (deps.passOn → tellRunning).
+  const about = request.follows || request.member || request.retry ? null : underway.find(u => u.id === planned.about);
+  if (about) {
+    log(`R${request.id} is about R${about.id}`);
+    await board('/v1/requests/update', { id: request.id, follows: about.id })
+      .catch(error => log(`couldn't put R${request.id} under R${about.id}: ${error.message}`));
+    if (about.working && await deps.passOn?.({ ...request, follows: about.id }, about.id)) return;
   }
   // A club member's request is only ever a change to Hive's code (cloud/tasks/club.js): whatever the
   // planner said, every task is a code task in Hive, which Hive makes, tests and lands itself
@@ -1413,6 +1447,18 @@ async function main(argv) {
   };
   const running = new Map();
   const passedOn = new Map(); // a follow-up being passed on → the request whose agents hear it
+  // The requests taken lately, newest first, for the planner to tell what a new message is about.
+  const lately = [];
+  deps.underway = request => lately
+    .filter(t => t.id !== request.id && !passedOn.has(t.id) && Date.now() - t.at < RECENT_MS)
+    .map(t => ({ id: t.id, text: t.text, working: running.has(t.id) }));
+  deps.passOn = (request, to) => {
+    while (passedOn.has(to)) to = passedOn.get(to);
+    const earlier = running.get(to);
+    if (!earlier || to === request.id) return false;
+    passedOn.set(request.id, to);
+    return tellRunning(request, earlier, { board, stateDir, log, to }).finally(() => passedOn.delete(request.id));
+  };
   // The requests in flight, for the updater (updater.mjs inFlight): it never restarts this mid-request.
   let notedAt = 0;
   const noteRunning = () => {
@@ -1445,6 +1491,8 @@ async function main(argv) {
     }
     if (request) {
       const taken = request;
+      lately.unshift({ id: taken.id, text: taken.text.replace(/^[\s\S]*\bnow says: /, ''), at: Date.now() });
+      lately.splice(MOST_LATELY);
       // A reply to a request still working here goes to its agents now (tellRunning); only one none of
       // them heard runs by itself, after that request, since it builds on how that one ends.
       // A reply to a reply that is itself being passed on goes where that one went.

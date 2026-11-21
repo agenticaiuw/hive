@@ -266,3 +266,18 @@ test('a request Hive on the VM was on when it restarted runs again, twice at mos
   assert.equal((await call('POST', '/v1/requests/take', { by: 'vm' })).body.request, null);
   assert.equal((await call('GET', '/v1/board')).body.requests.find((r) => r.id === other).status, 'working');
 });
+
+test("a request the orchestrator finds is about an earlier one joins that one's conversation, once", async () => {
+  const { call, env } = setup();
+  const first = (await call('POST', '/v1/requests', { text: 'post the recording to X', from: 'mac' })).body.id;
+  const second = (await call('POST', '/v1/requests', { text: 'have you posted it yet', from: 'mac' })).body.id;
+  const follows = (id) => env.DB.db.prepare('SELECT follows FROM board_requests WHERE id = ?').get(id).follows;
+  assert.equal((await call('POST', '/v1/requests/update', { id: second, follows: first })).status, 200);
+  assert.equal(follows(second), first);
+  // Never a later request, one that doesn't exist, or a change to what it already follows.
+  const third = (await call('POST', '/v1/requests', { text: 'open Canvas', from: 'web' })).body.id;
+  await call('POST', '/v1/requests/update', { id: second, follows: third });
+  await call('POST', '/v1/requests/update', { id: third, follows: 999 });
+  assert.equal(follows(second), first);
+  assert.equal(follows(third), null);
+});
