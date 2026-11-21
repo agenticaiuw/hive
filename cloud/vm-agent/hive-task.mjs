@@ -192,6 +192,7 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     // Keep transfers in code mode and out of deferred search, including after a repair.
     // Strict third-party deferral would ignore these servers' exposure settings.
     '-c', 'features.code_mode_only_strict_3p_tools=false',
+    ...['desktop', 'mac', 'hivefiles'].flatMap(name => ['-c', `mcp_servers.${name}.enabled=true`]),
     ...['desktop', 'mac', 'hivefiles'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["deferred"]`]),
     '-c', 'mcp_servers.hivefiles.command="sudo"', '-c', `mcp_servers.hivefiles.args=${toml(transfers)}`,
     '-c', 'mcp_servers.hivefiles.required=true', '-c', 'mcp_servers.hivefiles.startup_readiness="catalog"',
@@ -325,13 +326,19 @@ async function main(argv) {
   // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
   const traceDir = join(workDir, 'runtime-trace');
   const catalogFile = join(workDir, 'runtime-catalog.json');
-  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs', 'transfer-mcp.mjs']
+  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-runtime.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs', 'transfer-mcp.mjs']
     .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
   if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
+  // A transfer repair opens and probes its actual thread before submitting the owner's
+  // prompt. Keep the same server settings and retain the per-request model catalog audit.
+  const launch = probeRequired
+    ? [process.execPath, join(here, 'task-runtime.mjs'), workDir, options.model, options.effort,
+      ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])]
+    : ['/root/.local/bin/codex', ...args];
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,
-    ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), '/root/.local/bin/codex', ...args],
+    ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), ...launch],
     { stdio: ['pipe', 'pipe', 'pipe'] });
-  let threadId = '', catalog = null, auditing = null;
+  let threadId = '', catalog = null, auditing = null, runtimeFailure = null;
   let announced = false;
   const audit = () => {
     if (options.code || catalog?.ok === false || !threadId) return;
@@ -351,6 +358,13 @@ async function main(argv) {
         rmSync(output, { force: true });
         // An unfinished or unreadable request cannot reuse an earlier success.
         catalog = verdict?.thread_id === threadId ? { ...verdict, probe_required: probeRequired } : null;
+        if (catalog?.ok && probeRequired) {
+          const exposed = catalog.tools?.includes('functions.exec') || catalog.tools?.includes('exec')
+            ? catalog.code_tools : catalog.tools;
+          if (!['mcp__mac.transfer_file', 'mcp__mac.run_command'].every(name => exposed?.includes(name))) {
+            catalog = { ...catalog, ok: false, why: 'The repaired task model did not receive mac.transfer_file and mac.run_command in its callable catalog; the task cannot continue.' };
+          }
+        }
         if (catalog) {
           writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
           if (!announced || !catalog.ok) {
@@ -381,6 +395,7 @@ async function main(argv) {
     appendFileSync(events, `${line}\n`);
     let event; try { event = JSON.parse(line); } catch { return; }
     if (event.type === 'thread.started') threadId = event.thread_id;
+    if (event.type === 'error') runtimeFailure = event.message;
     // Direct MCP calls provide the same live evidence as the dedicated server's
     // receipt. Share it with the call gate so a fallback probe can unblock work.
     if (!options.code && threadId && transferProbeSucceeded(event)) {
@@ -411,7 +426,7 @@ async function main(argv) {
     writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,
       probe_required: probeRequired, probed, ok: Boolean(catalog?.ok) })}\n`, { mode: 0o600 });
     if (!catalog?.ok) {
-      const why = catalog?.why ?? 'No model-visible transfer catalog was recorded for this owner task.';
+      const why = catalog?.why ?? runtimeFailure ?? 'No model-visible transfer catalog was recorded for this owner task.';
       writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,
         probe_required: probeRequired, probed, ok: false, why })}\n`, { mode: 0o600 });
       // runAgent reads the last agent_message, so the board must not retain a success claim

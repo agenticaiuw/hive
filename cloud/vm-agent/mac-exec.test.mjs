@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexArgs, GUIDE } from './hive-task.mjs';
 import { requestCatalog } from './task-catalog.mjs';
+import { runRuntime } from './task-runtime.mjs';
 
 const codex = process.env.HIVE_TEST_CODEX ?? '/root/.local/bin/codex';
 const releaseCheck = process.env.HIVE_UPDATE_CHECK === '1';
@@ -153,14 +154,25 @@ globalThis.fetch = async (url, options) => {
     if (repaired) args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
     if (!macEnabled) args.push('-c', 'mcp_servers.mac.enabled=false');
     args.push('-');
-    const child = spawn(codex, args, { cwd: dir, detached: true,
-      env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir, CODEX_HOME: dir },
-      stdio: ['pipe', 'pipe', 'pipe'] });
     let errors = '', events = '';
+    const env = { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir, CODEX_HOME: dir };
+    const prompt = `${GUIDE}\n\n${repaired ? 'Continue after the repair.' : 'New task.'} Probe the fixture transfer before proceeding.`;
+    let child, runtime;
+    if (repaired) {
+      // Exercise the production repair path: the Mac probe and the model turn share
+      // the app-server thread. Do not replace this with a separate preflight process.
+      runtime = runRuntime({ command: codex,
+        args: ['app-server', ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])],
+        env, model: 'fixture', effort: 'low', workDir: dir, prompt,
+        emit: event => { events += `${JSON.stringify(event)}\n`; },
+        spawnProcess: (command, argv, options) => (child = spawn(command, argv, { ...options, cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] })),
+      });
+    } else child = spawn(codex, args, { cwd: dir, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stderr.on('data', b => { errors = (errors + b).slice(-8000); });
-    child.stdout.on('data', b => { events += b; });
+    if (!repaired) child.stdout.on('data', b => { events += b; });
     let ended = false, timedOut = false;
-    const closed = new Promise((resolve, reject) => {
+    const closed = repaired ? runtime.then(code => { ended = true; return { code, signal: null }; },
+      error => { ended = true; return { code: 1, signal: null, error }; }) : new Promise((resolve, reject) => {
       child.on('error', reject);
       child.on('close', (code, signal) => { ended = true; resolve({ code, signal }); });
     });
@@ -173,11 +185,18 @@ globalThis.fetch = async (url, options) => {
     };
     t.after(async () => { stop(); await closed; });
     const timer = setTimeout(() => { timedOut = true; stop(); }, execTimeout);
-    child.stdin.end(`${GUIDE}\n\n${repaired ? 'Continue after the repair.' : 'New task.'} Probe the fixture transfer before proceeding.`);
+    if (!repaired) child.stdin.end(prompt);
     let status;
     try { status = await closed; }
     finally { clearTimeout(timer); server.off('request', handle); }
+    if (!macEnabled) {
+      assert.equal(status.code, 1);
+      assert.match(status.error?.message ?? '', /no connected mac\.run_command/);
+      assert.equal(requests, 0, 'a repair without Mac tools must not start a model turn');
+      continue;
+    }
     if (failure) throw failure;
+    if (status.error) throw status.error;
     assert.equal(status.code, 0, `${repaired ? 'repair retry' : 'new task'} (${namespace}): `
       + `${timedOut ? `timed out after ${execTimeout}ms` : `exited with ${status.code}`}; `
       + `signal=${status.signal}; model requests=${requests}; probe received=${probed}\n`
