@@ -7,6 +7,14 @@ import { join } from 'node:path';
 
 const toolName = name => name.replace(/^(mcp__[^_]+|hivefiles)__(.+)$/, '$1.$2');
 
+/** A request chained onto an earlier response (previous_response_id) that declares no tools of its
+ * own: it carries only the new input, such as a tool's output, and the model keeps the tools that
+ * response was given. Codex sends one after every tool call, so it says nothing about the catalog. */
+export function continuesEarlier(request) {
+  return Boolean(request.previous_response_id) && !(request.tools ?? []).length
+    && !(request.input ?? []).some(item => item.type === 'additional_tools');
+}
+
 export function requestCatalog(request, threadId) {
   const tools = new Map();
   for (const tool of [...(request.tools ?? []),
@@ -98,9 +106,11 @@ export function readTaskCatalog(root, threadId, seen = new Map()) {
         const key = `${threadId}/${dir.name}/${path}`;
         let next = seen.get(key);
         if (!next) {
-          next = requestCatalog(JSON.parse(readFileSync(join(root, dir.name, path), 'utf8')), threadId);
+          const request = JSON.parse(readFileSync(join(root, dir.name, path), 'utf8'));
+          next = continuesEarlier(request) ? 'continues' : requestCatalog(request, threadId);
           seen.set(key, next);
         }
+        if (next === 'continues') continue; // same tools as the request it chains onto
         catalog = { ...next, requests: ++requests };
         // A later healthy catalog cannot erase a request that ran without the tool.
         if (!catalog.ok) return catalog;
