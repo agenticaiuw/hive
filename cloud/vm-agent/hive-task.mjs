@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
 import { Lease } from './devices.mjs';
 import { boardClient, boardConfig, runSender } from './orchestrator.mjs';
+import { transferProbeRequired, transferProbeSucceeded } from './task-catalog.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAFE = /^[\w@%+=:,./~-]+$/;
@@ -307,9 +308,11 @@ async function main(argv) {
   // Hive's own Codex home on the VM, signed in to the owner's account (Devhub's, /root/.codex, is another).
   const codexHome = process.env.HIVE_CODEX_HOME ?? '/root/.codex-hive';
   if (!SAFE.test(codexHome)) throw new Error('unsupported HIVE_CODEX_HOME');
+  const probeRequired = !options.code && transferProbeRequired(text);
   const args = options.code
     ? codeArgs({ ...options, codeDir: options.code })
-    : codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile, label: taskLabel(id),
+    : codexArgs({ ...options, keepOpen: options.keepOpen || probeRequired,
+      workDir, appDir: here, stateDir, filesDir, stepsFile, label: taskLabel(id),
       improveFile: process.env.HIVE_IMPROVE_FILE ?? '' });
   // A fresh task (including a repair retry) must supply its own evidence. A fixture app-server
   // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
@@ -322,8 +325,9 @@ async function main(argv) {
     ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), '/root/.local/bin/codex', ...args],
     { stdio: ['pipe', 'pipe', 'pipe'] });
   let threadId = '', catalog = null, auditing = null;
+  let probed = false, announced = false;
   const audit = () => {
-    if (options.code || catalog || !threadId) return;
+    if (options.code || catalog?.ok === false || !threadId) return;
     if (auditing) return auditing;
     auditing = new Promise(resolve => {
       // The trace is root's. Read it there instead of treating a permission error as
@@ -338,12 +342,16 @@ async function main(argv) {
         let verdict;
         try { if (code === 0) verdict = JSON.parse(readFileSync(output, 'utf8')); } catch {}
         rmSync(output, { force: true });
-        if (verdict?.thread_id === threadId) {
-          catalog = verdict;
-          clearInterval(catalogTimer);
+        // An unfinished or unreadable request cannot reuse an earlier success.
+        catalog = verdict?.thread_id === threadId ? verdict : null;
+        if (catalog) {
           writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
-          say(catalog.ok ? `Callable transfer catalog verified for thread ${threadId}.` : `❌ ${catalog.why}`);
-          if (!catalog.ok) codex.kill('SIGTERM');
+          if (!announced || !catalog.ok) {
+            say(catalog.ok ? `Callable transfer catalog verified for thread ${threadId}.` : `❌ ${catalog.why}`);
+            announced = true;
+          }
+          // Keep watching after startup: a resumed turn can receive a different tool catalog.
+          if (!catalog.ok) { clearInterval(catalogTimer); codex.kill('SIGTERM'); }
         }
         resolve();
       });
@@ -366,6 +374,7 @@ async function main(argv) {
     appendFileSync(events, `${line}\n`);
     let event; try { event = JSON.parse(line); } catch { return; }
     if (event.type === 'thread.started') threadId = event.thread_id;
+    if (transferProbeSucceeded(event)) probed = true;
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') last = event.item.text;
     const line2 = describe(event); if (line2) say(line2);
   });
@@ -374,11 +383,18 @@ async function main(argv) {
   const codexStatus = await new Promise(resolve => codex.on('close', resolve));
   let status = codexStatus;
   clearInterval(catalogTimer);
+  // Finish any in-flight read, then inspect requests written just before Codex exited.
+  await auditing;
   await audit();
   if (!options.code) {
+    if (catalog?.ok && probeRequired && !probed) catalog = { ...catalog, ok: false,
+      why: 'The resumed Mac transfer task did not complete a successful to_vm check_only call in this execution.' };
+    writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,
+      probe_required: probeRequired, probed, ok: Boolean(catalog?.ok) })}\n`, { mode: 0o600 });
     if (!catalog?.ok) {
       const why = catalog?.why ?? 'No model-visible transfer catalog was recorded for this owner task.';
-      writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources, ok: false, why })}\n`, { mode: 0o600 });
+      writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,
+        probe_required: probeRequired, probed, ok: false, why })}\n`, { mode: 0o600 });
       // runAgent reads the last agent_message, so the board must not retain a success claim
       // from a process whose actual callable catalog failed verification.
       appendFileSync(events, `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: why } })}\n`);
@@ -392,7 +408,8 @@ async function main(argv) {
       clean.on('error', resolve); clean.on('close', resolve);
     });
   }
-  if (!options.keepOpen && !options.code) await closeAfter(workDir, stateDir, taskLabel(id));
+  // A failed runtime check must leave the unfinished browser work for the next continuation.
+  if (!options.keepOpen && !options.code && catalog?.ok) await closeAfter(workDir, stateDir, taskLabel(id));
   if (codexStatus !== 0) say(`❌ Codex exited with ${codexStatus}${errors.trim() ? `: ${errors.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
   else if (status === 0) say(`✅ Done. ${last ? '' : '(no report)'}`.trim());
   await run?.done(status === 0 ? 'done' : 'failed');
