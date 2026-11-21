@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexArgs, GUIDE } from './hive-task.mjs';
@@ -69,6 +69,8 @@ globalThis.fetch = async (url, options) => {
 `);
   for (const [repaired, macEnabled] of [[false, true], [true, true], [true, false]]) {
     rmSync(join(dir, 'runtime-catalog.json'), { force: true });
+    rmSync(join(dir, 'runtime-catalog.json.probe'), { force: true });
+    rmSync(join(dir, 'transfer-probe.json'), { force: true });
     const namespace = 'hivefiles';
     let requests = 0, failure, probed = false, codeMode = false;
     const respond = (res, item) => {
@@ -183,6 +185,8 @@ globalThis.fetch = async (url, options) => {
     assert.ok(probed, 'exec must discover and invoke the transfer before continuing');
     const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
     if (!codeMode) assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
+    else assert.deepEqual(JSON.parse(readFileSync(join(dir, 'runtime-catalog.json.probe'), 'utf8')),
+      { thread_id: 'fixture-model-request', ready: true }, 'code mode must leave server evidence for task completion');
     t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${codeMode ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
   }
 });
