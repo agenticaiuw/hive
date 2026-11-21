@@ -1,7 +1,0 @@
-{
-  "name": "hive-board",
-  "version": "0.1.0",
-  "description": "Hive's task board in a pane beside the chat: what needs you, what agents are on, what finished",
-  "types": "./types/index.d.ts",
-  "license": "MIT"
-}
