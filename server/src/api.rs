@@ -129,6 +129,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             hive.bump();
             Res::json(&json!({ "id": rid }))
         }
+        ("DELETE", ["api", "nodes", node]) => {
+            hive.db.run("delete from tokens where node=?", args!(node));
+            hive.db.run("delete from nodes where id=?", args!(node));
+            hive.bump();
+            Res::json(&json!({ "ok": true }))
+        }
         ("DELETE", ["api", "rules", _]) => { hive.db.run("update rules set active=0 where id=?", args!(id(2))); hive.bump(); Res::json(&json!({ "ok": true })) }
         ("GET", ["api", "info"]) => Res::json(&json!(hive.db.all("select * from info order by key", &[]))),
         ("POST", ["api", "info"]) => {

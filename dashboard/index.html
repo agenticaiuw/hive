@@ -75,6 +75,11 @@ async function login() {
   const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ secret: $('#secret').value }) });
   if (r.ok) { $('#login').hidden = true; start(); } else $('#loginerr').textContent = (await r.json()).error;
 }
+async function forget(id, name) {
+  if (!confirm(`Forget ${name}? It stops working with Hive until it's paired again.`)) return;
+  await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  await refresh();
+}
 async function pairCode() { const r = await api('/api/pair/code', { method: 'POST' }); $('#code').textContent = `Address ${location.host} · code ${r.code} (10 min)`; }
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
@@ -144,7 +149,8 @@ async function render() {
     v.innerHTML = `<div class="card row"><input type="file" id="up" multiple style="flex:1"><button onclick="upload()">Upload to Hive</button></div>
       ${files.map(f => `<div class="card row"><a href="/api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
   } else if (tab === 'Nodes') {
-    v.innerHTML = table(state.nodes.map(n => ({ node: n.kind, name: n.name, seen: ago(n.seen), version: n.version }))) + '<p class="muted">Locks</p>' + table(state.locks);
+    v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
+    v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
     v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="/api/vm/screen?t=${Date.now()}">`;
   } else if (tab === 'Database') {
