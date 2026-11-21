@@ -193,7 +193,8 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
   const config = args.filter((_, i) => args[i - 1] === '-c');
-  assert.ok(config.includes('features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]'));
+  assert.ok(!config.some(c => c.includes('direct_only_tool_namespaces')));
+  assert.ok(config.includes('mcp_servers.desktop.omit_tools_from=["deferred"]'));
   const desktop = JSON.parse(config.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);

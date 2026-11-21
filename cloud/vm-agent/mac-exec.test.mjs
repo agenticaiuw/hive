@@ -32,6 +32,18 @@ test('exec exposes and invokes transfer before continuing a repaired task', {
   t.after(() => { server.closeAllConnections(); server.close(); });
   const dir = mkdtempSync(join(tmpdir(), 'hive-mac-exec-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Tool mode comes from model metadata, not the legacy feature flags. Provision
+  // the repaired task explicitly so an empty fixture home still exercises exec.
+  const models = join(dir, 'models.json');
+  writeFileSync(models, JSON.stringify({ models: [{ slug: 'fixture', display_name: 'Fixture', description: 'Offline test',
+    base_instructions: 'Use the tools to carry out the task.',
+    default_reasoning_level: 'low', supported_reasoning_levels: [{ effort: 'low', description: 'Low' }],
+    shell_type: 'unified_exec', visibility: 'list', supported_in_api: true, priority: 0,
+    tool_mode: 'code_mode_only', use_responses_lite: true, supports_search_tool: true,
+    default_reasoning_summary: 'none', support_verbosity: true, default_verbosity: 'low',
+    truncation_policy: { mode: 'tokens', limit: 10000 }, context_window: 32000,
+    effective_context_window_percent: 95, experimental_supported_tools: [], input_modalities: ['text'],
+  }] }));
   mkdirSync(join(dir, 'bin'));
   writeFileSync(join(dir, 'board.json'), JSON.stringify({ url: 'https://board.invalid', token: 'fixture' }));
   writeFileSync(join(dir, 'bin', 'sudo'), '#!/bin/sh\n[ "$1" = "-n" ] && [ "$2" = "-u" ] || exit 1\nshift 3\nexec "$@"\n', { mode: 0o755 });
@@ -69,8 +81,24 @@ globalThis.fetch = async (url, options) => {
         if (requests === 1) {
           // Support both flat function names and namespaced tool definitions. Only accept
           // tools actually present without discovery; the MCP status endpoint isn't evidence.
-          const functions = body.tools.flatMap(tool => tool.type === 'namespace'
+          const functions = [...(body.tools ?? []),
+            ...(body.input ?? []).filter(item => item.type === 'additional_tools').flatMap(item => item.tools ?? [])]
+            .flatMap(tool => tool.type === 'namespace'
             ? tool.tools.map(fn => ({ ...fn, namespace: tool.name })) : [tool]);
+          const exec = functions.find(tool => tool.namespace === 'functions' && tool.name === 'exec');
+          if (repaired) {
+            assert.ok(exec, 'the repaired task must exercise code mode');
+            const name = `mcp__${namespace}__transfer_file`;
+            assert.ok(exec.description.includes(`declare const tools: { ${name}(`));
+            respond(res, { id: 'call-fixture', type: 'custom_tool_call', call_id: 'transfer-probe',
+              name: exec.name, namespace: exec.namespace,
+              input: `const name = ${JSON.stringify(name)};
+                if (!ALL_TOOLS.some(t => t.name === name) || typeof tools[name] !== 'function')
+                  throw new Error('Transfer is missing from this execution');
+                text(await tools[name]({ direction: 'to_vm', mac_path: '/Desktop/clip.mov',
+                  check_only: true, step: 'Checking transfer before continuing the fixture task.' }));` });
+            return;
+          }
           const transfer = functions.find(tool => tool.name === `mcp__${namespace}__transfer_file`
             || (['mcp__' + namespace, namespace].includes(tool.namespace) && tool.name === 'transfer_file'));
           assert.ok(transfer, `${namespace}.transfer_file must be in the agent's initial catalog`);
@@ -83,7 +111,7 @@ globalThis.fetch = async (url, options) => {
           return;
         }
         assert.equal(requests, 2);
-        const output = body.input.find(item => item.type === 'function_call_output' && item.call_id === 'transfer-probe');
+        const output = body.input.find(item => ['function_call_output', 'custom_tool_call_output'].includes(item.type) && item.call_id === 'transfer-probe');
         assert.ok(output, 'the same agent turn must receive the probe result');
         assert.match(JSON.stringify(output.output), /ready[^a-z]+true/);
         assert.match(JSON.stringify(output.output), /copied[^a-z]+false/);
@@ -92,7 +120,7 @@ globalThis.fetch = async (url, options) => {
       respond(res, done);
     };
     server.on('request', handle);
-    const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: dir, appDir: import.meta.dirname,
+    const args = codexArgs({ model: 'fixture', effort: 'low', workDir: dir, appDir: import.meta.dirname,
       stateDir: dir, filesDir: join(dir, 'files'), stepsFile: join(dir, 'steps'), user: 'test', label: 'R42-1',
       tasksConfig: join(dir, 'board.json'), improveFile: repaired ? join(dir, 'repair.json') : '' });
     args.pop();
@@ -104,9 +132,7 @@ globalThis.fetch = async (url, options) => {
       '-c', `model_providers.fixture.base_url="http://127.0.0.1:${server.address().port}"`,
       '-c', 'model_providers.fixture.wire_api="responses"', '-c', 'model_providers.fixture.request_max_retries=0',
       '-c', 'model_providers.fixture.stream_max_retries=0');
-    // The reported continuations used ALL_TOOLS. Exercise that mode explicitly instead
-    // of depending on the fixture home's model cache to select it.
-    if (repaired) args.push('-c', 'features.code_mode=true', '-c', 'features.code_mode_only=true');
+    if (repaired) args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
     if (!macEnabled) args.push('-c', 'mcp_servers.mac.enabled=false');
     args.push('-');
     const child = spawn(codex, args, { cwd: dir,
@@ -127,6 +153,6 @@ globalThis.fetch = async (url, options) => {
     assert.ok(probed, 'exec must discover and invoke the transfer before continuing');
     const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
     assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
-    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} visible to the agent and probe invoked`);
+    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${repaired ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
   }
 });

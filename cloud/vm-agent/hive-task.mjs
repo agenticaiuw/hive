@@ -93,11 +93,10 @@ exit code and bounded stdout/stderr; check them. Give irreversible=true for any 
 or otherwise cannot be undone, and use the same One-way: step quoting the owner's exact words. A timeout can leave
 partial effects: inspect before retrying, especially a send. Use mac.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
-Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
-Check the directly exposed mac and desktop tool namespaces before searching ALL_TOOLS.
-Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
+Tool discovery is local to this execution. In functions.exec, find mcp__mac__transfer_file or
+mcp__desktop__transfer_file in ALL_TOOLS and check that the matching tools property is a function.
 If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
-Hive exposes both namespaces as direct tools, outside functions.exec; call those direct tools when available.
+When functions.exec is unavailable, use the directly exposed mac or desktop tool namespace.
 After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
 with check_only=true and the intended direction and paths. Require ready=true in its result, then call again without
 check_only to copy. This checks the current tool route and Mac command support, not file existence or a completed copy.
@@ -179,14 +178,11 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), node, join(appDir, 'mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
-    // The owner's models use code_mode_only. MCP registration alone did not prove that
-    // code mode exposed these tools. Like Hive on the Mac, give them a direct callable surface.
-    '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]',
-    // A registered MCP catalog does not mean the model can discover its tools. Keep the
-    // transfer servers directly callable, including in the first turn after a repair.
-    // Strict third-party deferral would ignore these servers' exposure settings.
+    // Owner tasks discover and call tools through functions.exec. Direct-only exposure
+    // removes them from both ALL_TOOLS and the tools object, even when MCP startup succeeds.
+    // Keep transfers in code mode and out of deferred search, including after a repair.
     '-c', 'features.code_mode_only_strict_3p_tools=false',
-    ...['desktop', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`]),
+    ...['desktop', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["deferred"]`]),
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     // The desktop catalog includes the Mac file fallback. Load it before the first turn,
     // and fail startup instead of letting a task run with missing file tools.
@@ -314,7 +310,7 @@ async function main(argv) {
   // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
   const traceDir = join(workDir, 'runtime-trace');
   const catalogFile = join(workDir, 'runtime-catalog.json');
-  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
+  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
     .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
   if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,

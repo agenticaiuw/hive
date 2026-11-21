@@ -23,12 +23,11 @@ test('new and repaired tasks require both transfer catalogs and a probe in the c
     for (const name of ['mac', 'desktop']) {
       assert.ok(args.includes(`mcp_servers.${name}.required=true`));
       assert.ok(args.includes(`mcp_servers.${name}.startup_readiness="catalog"`));
-      assert.ok(args.includes(`mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`));
+      assert.ok(args.includes(`mcp_servers.${name}.omit_tools_from=["deferred"]`));
     }
   }
-  assert.match(GUIDE, /missing name in ALL_TOOLS alone does not prove the tool is absent/);
-  assert.match(GUIDE, /directly exposed mac and desktop tool namespaces/);
-  assert.match(GUIDE, /search deferred tools with tool_search/);
+  assert.match(GUIDE, /in ALL_TOOLS and check that the matching tools property is a function/);
+  assert.match(GUIDE, /When functions.exec is unavailable, use the directly exposed/);
   assert.match(GUIDE, /check_only=true[\s\S]*Require ready=true/);
 });
 
@@ -189,7 +188,7 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
   assert.deepEqual(readFileSync(source), bytes);
 });
 
-for (const direct of [false, true]) test(`owner exec with code mode: ${direct ? 'repair exposes direct transfers' : 'registration alone is not direct exposure'}`, {
+for (const exposure of ['deferred', 'direct-only', 'code-mode']) test(`owner exec with code mode: ${exposure}`, {
   skip: !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the owner exec runtime', timeout: 30000,
 }, async t => {
   const { dir, preload } = fixture(t);
@@ -206,17 +205,24 @@ for (const direct of [false, true]) test(`owner exec with code mode: ${direct ? 
     effective_context_window_percent: 95, experimental_supported_tools: [], input_modalities: ['text'],
   }] }));
   const args = codexArgs({ ...options(dir), improveFile: join(dir, 'repair.json') });
-  if (!direct) {
+  if (exposure === 'deferred') {
     // Registration alone must exclude every exposure override, including the server
-    // settings that keep transfers out of code mode and deferred discovery.
+    // settings that keep transfers available without deferred discovery.
     for (const setting of [
-      'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]',
       'features.code_mode_only_strict_3p_tools=false',
-      ...['desktop', 'mac'].map(name => `mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`),
+      ...['desktop', 'mac'].map(name => `mcp_servers.${name}.omit_tools_from=["deferred"]`),
     ]) {
       const at = args.indexOf(setting);
       assert.ok(at > 0 && args[at - 1] === '-c', `Missing exposure setting: ${setting}`);
       args.splice(at - 1, 2);
+    }
+  }
+  if (exposure === 'direct-only') {
+    // Earlier repairs passed the direct catalog check while removing these methods
+    // from ALL_TOOLS and the tools object. That must fail this task's runtime audit.
+    args.splice(-1, 0, '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]');
+    for (let i = 0; i < args.length; i++) {
+      args[i] = args[i].replace('omit_tools_from=["deferred"]', 'omit_tools_from=["code_mode","deferred"]');
     }
   }
   const config = [`model_catalog_json=${JSON.stringify(models)}`, 'model_provider="fixture"',
@@ -251,9 +257,11 @@ for (const direct of [false, true]) test(`owner exec with code mode: ${direct ? 
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.ok(catalog, `exec did not record its model request: ${errors}`);
-  assert.equal(catalog.ok, direct, JSON.stringify(catalog));
-  assert.equal(catalog.tools.includes('mcp__mac.transfer_file'), direct);
-  assert.equal(catalog.tools.includes('mcp__mac.run_command'), direct);
+  const callable = exposure === 'code-mode';
+  assert.equal(catalog.ok, callable, JSON.stringify(catalog));
+  assert.equal(catalog.code_tools.includes('mcp__mac.transfer_file'), callable);
+  assert.equal(catalog.code_tools.includes('mcp__mac.run_command'), callable);
+  assert.equal(catalog.tools.includes('mcp__desktop.transfer_file'), exposure === 'direct-only');
   assert.ok(catalog.tools.includes('functions.exec'), 'the model really uses code mode');
-  t.diagnostic(`Owner exec thread ${thread}: direct transfer catalog ${catalog.ok ? 'verified' : 'absent without the repair'}.`);
+  t.diagnostic(`Owner exec thread ${thread}: code-mode transfer catalog ${catalog.ok ? 'verified' : 'absent without the repair'}.`);
 });
