@@ -49,6 +49,8 @@ Only do what the task asks. Anything sent, posted or published as the owner uses
 never reword, shorten or "fix" them, and never send something twice. If you can't tell whether something
 went out, look (for example at their profile) instead of sending it again. If you can't do the task exactly
 as asked, stop and say why. End with a short report of what you did, including any link to what you posted.
+While you work, the owner may say more: a tool's answer then ends with what they "just said about the request you're
+working on". Those are the owner's own words, passed on by Hive: follow them as part of the task.
 
 Signing in: the VM keeps the owner's saved passwords, like their Mac. On a sign-in page, click the field and use
 authenticate (never ask for or type a password yourself). If the site then asks for Duo, use the phone tools: they
@@ -175,9 +177,10 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []),
     ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), ...launch('desktop-mcp.mjs')];
   const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, ...launch('phone-mcp.mjs')];
-  const browser = ['-n', '-u', user, ...launch('browser-mcp.mjs')];
+  // Every tool server knows its task and the state folder: what's said to the request meanwhile comes with its answers (meanwhile.mjs).
+  const browser = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, ...launch('browser-mcp.mjs')];
   // HIVE_IMPROVE_FILE (set by the orchestrator) gives the agent improve_hive: what it writes there has Hive change itself.
-  const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, `HIVE_TASK_LABEL=${label}`,
+  const knowledge = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, `HIVE_TASK_LABEL=${label}`,
     ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), ...launch('knowledge-mcp.mjs')];
   // Mac transfers must land in the same folder the desktop tools list and attach files from.
   // sudo drops the task's environment. Carry the board config path explicitly, or a task

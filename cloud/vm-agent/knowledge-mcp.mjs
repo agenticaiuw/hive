@@ -20,6 +20,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { boardClient, boardConfig } from './orchestrator.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 export const OFFLINE = "The owner's knowledge and request history aren't reachable: this VM doesn't have the board's key "
   + '(/root/.config/hive/tasks.json), so the knowledge and request tools are unavailable.';
@@ -337,7 +338,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     improveFile: process.env.HIVE_IMPROVE_FILE || '', agent: /^[\w.@:-]{1,80}$/.test(process.env.HIVE_TASK_LABEL ?? '') ? process.env.HIVE_TASK_LABEL : '' };
   createInterface({ input: process.stdin }).on('line', async line => {
     let message; try { message = JSON.parse(line); } catch { return; }
-    const out = await answer(board, message, context);
+    const out = withHeard(await answer(board, message, context));
     if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
   });
 }

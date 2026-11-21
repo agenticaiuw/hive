@@ -27,6 +27,7 @@ import { comboKeysyms, encodePng, untypable, Vnc } from './vnc.mjs';
 import { fetchFile, filesDir, listRemote } from './files.mjs';
 import { Lease } from './devices.mjs';
 import { TRANSFER_TOOL } from './mac-files.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const stateDir = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
@@ -414,7 +415,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     // One at a time: the screen has one mouse.
-    queue = queue.then(async () => { const out = await answer(message); if (out) process.stdout.write(`${JSON.stringify(out)}\n`); });
+    queue = queue.then(async () => { const out = withHeard(await answer(message)); if (out) process.stdout.write(`${JSON.stringify(out)}\n`); });
   });
   lines.on('close', () => queue.then(shutdown));
   process.on('SIGTERM', shutdown);

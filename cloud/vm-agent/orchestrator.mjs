@@ -39,6 +39,7 @@ import {
   secretValues, SELF_GUIDE, missingDeployments,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
+import { forget, hear, heardBy, leave, told } from './meanwhile.mjs';
 import { nodeHeaders } from './version.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -484,6 +485,43 @@ export class Slots {
   }
 }
 
+/**
+ * A follow-up to a request still working here (the owner typing into a working Hive's message box) goes
+ * to that request's agents at once instead of waiting for it to end (meanwhile.mjs): each of its tasks
+ * hears it with its next tool answer, or when it starts again after Hive changed itself. Once one has,
+ * the follow-up is done; if none did by the time the request it follows ends, it runs as a request of
+ * its own after all (false). `earlier` is that request's handling here; `to` the request whose agents
+ * hear it (the one followed, or what that one was itself passed on to).
+ */
+export async function tellRunning(request, earlier, { board, stateDir, log = () => {}, everyMs = 2000, stepEvery, to = request.follows }) {
+  const follows = to;
+  leave(stateDir, follows, { id: request.id, text: request.text, from: request.member ? `Club member ${request.member}` : 'The owner' });
+  log(`R${request.id} follows R${follows}, still working: told its agents`);
+  const steps = runSender(board, { request: request.id, task: 0, title: 'Your message' }, { log, every: stepEvery });
+  steps.step(`💬 Passed on to the agent working on this: it reads it at its next step.`);
+  let ended = false;
+  const ending = earlier.then(() => { ended = true; }, () => { ended = true; });
+  let heard = false;
+  for (;;) {
+    const by = heard ? [] : heardBy(stateDir, follows, request.id);
+    if (by.length) {
+      heard = true;
+      log(`R${request.id}: heard by ${by.join(', ')}`);
+      await steps.done('done');
+      await board('/v1/requests/update', { id: request.id, status: 'done', outcome: 'The agent working on this heard you and carries on with it.' })
+        .catch(error => log(`couldn't close R${request.id}: ${error.message}`));
+    }
+    if (ended) break;
+    await Promise.race([new Promise(resolve => setTimeout(resolve, everyMs)), ending]);
+  }
+  forget(stateDir, follows, request.id);
+  if (!heard) {
+    steps.step(`It finished before it read your message, so Hive takes it up now.`);
+    await steps.done('done');
+  }
+  return heard;
+}
+
 export async function handle(request, deps) {
   if (request.page?.url && deps.ask) return handlePage(request, deps);
   const stopping = watchStop(request, deps);
@@ -546,7 +584,7 @@ export async function runImproving(brief, { task, request, label, signal, step }
     }
     const landed = landedLine(change);
     step(`✅ Hive changed itself: ${landed}`);
-    brief = againBrief(brief, need, landed);
+    brief = [againBrief(brief, need, landed), told(deps.hear?.(label))].filter(Boolean).join('\n\n');
   }
 }
 
@@ -650,7 +688,8 @@ async function handleWork(request, deps, signal) {
     const label = labelOf(request.id, task.key);
     deps.labels?.set(label, { title: task.title, step: steps.step });
     try {
-      const brief = taskBrief(task, request, folder, rules);
+      // What was said to the request after it was planned, before this task started (meanwhile.mjs).
+      const brief = [taskBrief(task, request, folder, rules), told(deps.hear?.(label))].filter(Boolean).join('\n\n');
       result = selfChange
         ? await changeHive(brief, { task, request, label, signal, step: steps.step }, deps)
         : coding
@@ -1336,9 +1375,10 @@ async function main(argv) {
   mkdirSync(improveDir, { recursive: true, mode: 0o700 });
   const deps = {
     board, plan: planWithCodex, ask: askCodex, run: runOnVm, code: codeOnVm, log, slots, labels, release: devices.release,
-    improve: improveOnVm, improveDir,
+    improve: improveOnVm, improveDir, hear: label => hear(stateDir, label),
   };
   const running = new Map();
+  const passedOn = new Map(); // a follow-up being passed on → the request whose agents hear it
   // The requests in flight, for the updater (updater.mjs inFlight): it never restarts this mid-request.
   let notedAt = 0;
   const noteRunning = () => {
@@ -1371,12 +1411,17 @@ async function main(argv) {
     }
     if (request) {
       const taken = request;
-      // A reply to a request still working here waits for it: it builds on how that one ends.
-      const earlier = taken.follows ? running.get(taken.follows) : null;
+      // A reply to a request still working here goes to its agents now (tellRunning); only one none of
+      // them heard runs by itself, after that request, since it builds on how that one ends.
+      // A reply to a reply that is itself being passed on goes where that one went.
+      let to = taken.follows;
+      while (passedOn.has(to)) to = passedOn.get(to);
+      const earlier = to ? running.get(to) : null;
       const going = (async () => {
         if (earlier) {
-          log(`R${taken.id} follows R${taken.follows}, still working: it starts after it`);
-          await earlier;
+          passedOn.set(taken.id, to);
+          const heard = await tellRunning(taken, earlier, { board, stateDir, log, to }).finally(() => passedOn.delete(taken.id));
+          if (heard) return;
         }
         await handle(taken, deps);
       })().catch(async error => {
