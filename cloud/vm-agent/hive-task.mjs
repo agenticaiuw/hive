@@ -93,6 +93,7 @@ partial effects: inspect before retrying, especially a send. Use mac.transfer_fi
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
 Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
 Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
+If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
 After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
 with check_only=true and the intended direction and paths. Require ready=true in its result, then call again without
 check_only to copy. This checks the current tool route and Mac command support, not file existence or a completed copy.
@@ -160,7 +161,8 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   }
   const toml = value => JSON.stringify(value); // TOML basic strings and arrays of them read like JSON
   const server = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`, `HIVE_TASK_STEPS=${stepsFile}`,
-    `HIVE_TASK_LABEL=${label}`, ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), node, join(appDir, 'desktop-mcp.mjs')];
+    `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []),
+    ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), node, join(appDir, 'desktop-mcp.mjs')];
   const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'phone-mcp.mjs')];
   const browser = ['-n', '-u', user, node, join(appDir, 'browser-mcp.mjs')];
   // HIVE_IMPROVE_FILE (set by the orchestrator) gives the agent improve_hive: what it writes there has Hive change itself.
