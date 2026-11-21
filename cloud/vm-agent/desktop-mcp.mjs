@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
-import { encodePng, untypable, Vnc } from './vnc.mjs';
+import { comboKeysyms, encodePng, untypable, Vnc } from './vnc.mjs';
 import { fetchFile, filesDir, listRemote } from './files.mjs';
 import { Lease } from './devices.mjs';
 import { TRANSFER_TOOL } from './mac-files.mjs';
@@ -90,7 +90,9 @@ async function screen() {
     // -rfbport 0: no TCP port at all. The socket sits in the worker's private (0700) state folder, so
     // only this user can connect; -localhost would refuse socket clients, so it is left out.
     stopStrayVnc();
-    vncServer = spawn('x11vnc', ['-display', display, ...(auth ? ['-auth', auth] : []), '-rfbport', '0', '-unixsock', vncSocket,
+    // This private server must accept input even if the user's viewer config is view-only.
+    // Release keys left down by an earlier disconnected client before this task starts typing.
+    vncServer = spawn('x11vnc', ['-norc', '-clear_keys', '-display', display, ...(auth ? ['-auth', auth] : []), '-rfbport', '0', '-unixsock', vncSocket,
       '-forever', '-shared', '-noxdamage', '-nopw', '-quiet'], { stdio: 'ignore' });
     for (let waited = 0; !existsSync(vncSocket); waited += 100) {
       if (vncServer.exitCode !== null) throw new Error('x11vnc stopped before it started sharing the screen');
@@ -151,7 +153,8 @@ export async function runBatch(steps, run) {
   if (steps.length > MOST_STEPS) throw new Error(`at most ${MOST_STEPS} steps in one batch, not ${steps.length}; nothing was done`);
   steps.forEach((s, i) => {
     if (!s || !BATCHABLE.includes(s.tool)) throw new Error(`step ${i + 1}'s tool is one of ${BATCHABLE.join(', ')}; nothing was done`);
-    if (s.tool === 'type_text' && untypable(String(s.text ?? '')).length) {
+    validateAction(s.tool, s, `step ${i + 1}`);
+    if (s.tool === 'type_text' && untypable(s.text).length) {
       throw new Error(`step ${i + 1} has characters the VM keyboard can't type (${untypable(String(s.text)).join(' ')}); nothing was done`);
     }
   });
@@ -201,15 +204,39 @@ export const TOOLS = [
   // Static, even when Mac discovery is unavailable at startup. The task already uses this
   // server to find and attach files; it must also be able to bring a file here from the Mac.
   TRANSFER_TOOL,
-  tool('batch', 'Do several actions in a row and get one screenshot at the end. Use it whenever you already know the next steps '
+];
+
+// Describe the arguments inside each batch step too: code-mode callers build their calls
+// from this schema. A list of tool names alone hides text, keys and coordinates from them.
+const actionProperties = Object.fromEntries(TOOLS.filter(t => BATCHABLE.includes(t.name))
+  .flatMap(t => Object.entries(t.inputSchema.properties)).filter(([key]) => key !== 'step'));
+TOOLS.push(tool('batch', 'Do several actions in a row and get one screenshot at the end. Use it whenever you already know the next steps '
     + '(a form\'s fields, a run of clicks and keys you can see the places for): each separate call costs the owner seconds. Each step is '
     + `{"tool": name, ...that tool's arguments}, the tool being one of ${BATCHABLE.join(', ')}. For example: `
     + '[{"tool": "click", "x": 640, "y": 60}, {"tool": "type_text", "text": "weather\\n"}]. Stops at the first step that fails. '
     + 'Its step says what the whole batch does.', {
     steps: { type: 'array', minItems: 1, maxItems: MOST_STEPS, items: {
-      type: 'object', properties: { tool: { type: 'string', enum: BATCHABLE } }, required: ['tool'] } },
-  }, ['steps']),
-];
+      type: 'object', properties: { tool: { type: 'string', enum: BATCHABLE }, ...actionProperties },
+      required: ['tool'], additionalProperties: false } },
+  }, ['steps']));
+
+// Check all steps before the first action, including the arguments a tool needs. Missing
+// text used to type "undefined", and missing coordinates could silently act at (0, 0).
+function validateAction(name, args, label = name) {
+  const schema = TOOLS.find(t => t.name === name).inputSchema;
+  for (const [key, property] of Object.entries(schema.properties)) {
+    if (key === 'step') continue;
+    if (args[key] === undefined && !schema.required.includes(key)) continue;
+    if (typeof args[key] !== property.type || (property.type === 'number' && !Number.isFinite(args[key]))
+      || (property.enum && !property.enum.includes(args[key]))) {
+      throw new Error(`${label}'s ${key} must be ${property.enum ? property.enum.join(' or ') : `a ${property.type}`}; nothing was done`);
+    }
+  }
+  if (name === 'press_key') {
+    try { comboKeysyms(args.keys); }
+    catch (error) { throw new Error(`${label}: ${error.message}; nothing was done`); }
+  }
+}
 
 function record(name, args) {
   const line = `→ ${name}: ${String(args.step ?? '').trim() || '(no step given)'}`;
@@ -256,6 +283,7 @@ async function act(name, args) {
         { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }];
     }
     case 'click': case 'drag': case 'scroll': case 'type_text': case 'press_key': case 'wait': {
+      validateAction(name, args);
       const s = await screen(); return look(s, await ACTIONS[name](s, args));
     }
     case 'batch': {
