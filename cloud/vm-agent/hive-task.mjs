@@ -399,7 +399,13 @@ async function main(argv) {
   await audit();
   if (!options.code) {
     // Receipts come from successful direct MCP events or the dedicated server.
-    const probed = transferProbed(catalogFile, threadId);
+    let probed = transferProbed(catalogFile, threadId);
+    // Code mode may omit individual MCP events. Its wrapper records the same successful
+    // reply before returning it, bound to this thread rather than an earlier task's probe.
+    try {
+      const receipt = JSON.parse(readFileSync(join(workDir, 'transfer-probe.json'), 'utf8'));
+      if (threadId && receipt.thread_id === threadId && receipt.probed === true) probed = true;
+    } catch {} // missing or partial evidence is not a successful probe
     if (catalog?.ok && probeRequired && !probed) catalog = { ...catalog, ok: false,
       why: 'The repaired task did not complete a live transfer_file probe in its own execution; the task cannot continue.' };
     writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,

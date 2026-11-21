@@ -66,7 +66,7 @@ test('every model request is audited and a later good catalog cannot erase a mis
   assert.equal(readTaskCatalog(root, 'current', seen).ok, false);
 });
 
-for (const scenario of ['no-probe', 'good-probe', 'failed-probe', 'lost-catalog', 'unfinished-catalog']) {
+for (const scenario of ['no-probe', 'good-probe', 'server-probe', 'stale-server-probe', 'failed-probe', 'lost-catalog', 'unfinished-catalog']) {
   test(`resumed task completion verifies this execution: ${scenario}`, { timeout: 10000 }, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hive-live-task-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -99,7 +99,12 @@ until [ -s "\${trace%/*}/runtime-catalog.json" ]; do
   [ "$fixture_tries" -lt 200 ] || exit 2
   sleep 0.02
 done
-if [ '${scenario}' != no-probe ]; then cat '${dir}/probe.json'; fi
+case '${scenario}' in
+server-probe|stale-server-probe)
+  printf '%s\\n' '{"thread_id":"${scenario === 'server-probe' ? 'current' : 'earlier'}","probed":true}' > "\${trace%/*}/transfer-probe.json" ;;
+no-probe) ;;
+*) cat '${dir}/probe.json' ;;
+esac
 if [ '${scenario}' = lost-catalog ]; then
   printf '%s\\n' '{"tools":[]}' > "$trace/trace/payloads/2.json"
   cat '${dir}/trace-2.json' >> "$trace/trace/trace.jsonl"
@@ -119,7 +124,7 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     for (const fd of fds) closeSync(fd);
     const output = readFileSync(join(dir, 'output'), 'utf8');
     const errors = readFileSync(join(dir, 'errors'), 'utf8');
-    const good = scenario === 'good-probe';
+    const good = ['good-probe', 'server-probe'].includes(scenario);
     assert.equal(status, good ? 0 : 1, `${output}\n${errors}`);
     assert.match(output, /Callable transfer catalog verified/, 'exercise a passing first audit');
     const work = join(state, 'tasks', readdirSync(join(state, 'tasks'))[0]);

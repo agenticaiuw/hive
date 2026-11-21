@@ -2,9 +2,10 @@
 // request act until Hive has checked its transfer schema. A transfer repair also
 // needs a live probe in this thread, not a release test or another task's evidence.
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { transferProbed } from './task-catalog.mjs';
+import { transferProbed, transferProbeSucceeded } from './task-catalog.mjs';
 
 export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now } = {}) {
   const until = now() + timeoutMs;
@@ -19,9 +20,10 @@ export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => ne
 }
 
 export async function forward(message, catalog, send, reply) {
+  let verdict;
   if (message.method === 'tools/call') {
     try {
-      const verdict = await waitForCatalog(catalog);
+      verdict = await waitForCatalog(catalog);
       if (verdict.probe_required && !transferProbed(catalog, verdict.thread_id)
         && !(message.params?.name === 'transfer_file' && message.params?.arguments?.check_only === true)) {
         throw new Error('Before continuing this repaired task, discover hivefiles.transfer_file in ALL_TOOLS, check that tools[name] is a function, and call it with check_only=true and the intended paths. Require ready=true.');
@@ -34,13 +36,46 @@ export async function forward(message, catalog, send, reply) {
       return;
     }
   }
-  send(message);
+  send(message, verdict);
+}
+
+// Code-mode calls need not appear as individual MCP events in Codex's JSON stream.
+// Observe the real server reply instead; keep only a receipt for this task's thread,
+// never file paths or tool output. A model's text cannot create this evidence.
+export function transferProbeObserver(catalog, server) {
+  const probes = new Map();
+  return {
+    sent(message, verdict) {
+      if (!['desktop', 'mac'].includes(server) || message.method !== 'tools/call'
+        || message.params?.name !== 'transfer_file' || message.params?.arguments?.check_only !== true) return;
+      if (verdict?.ok && verdict.thread_id) probes.set(message.id, { thread: verdict.thread_id, args: message.params.arguments });
+    },
+    received(message) {
+      const probe = probes.get(message.id);
+      if (!probe) return;
+      probes.delete(message.id);
+      if (!transferProbeSucceeded({ type: 'item.completed', item: {
+        type: 'mcp_tool_call', status: 'completed', server, tool: 'transfer_file',
+        arguments: probe.args, result: message.result, error: message.error,
+      } })) return;
+      writeFileSync(join(dirname(catalog), 'transfer-probe.json'),
+        `${JSON.stringify({ thread_id: probe.thread, probed: true })}\n`, { mode: 0o600 });
+      // Fallback probes must also unlock the shared call gate before work resumes.
+      writeFileSync(`${catalog}.probe`, JSON.stringify({ thread_id: probe.thread, ready: true }), { mode: 0o600 });
+    },
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [catalog, script] = process.argv.slice(2);
   const server = spawn(process.execPath, [script], { stdio: ['pipe', 'pipe', 'inherit'] });
-  server.stdout.pipe(process.stdout);
+  const probe = transferProbeObserver(catalog, basename(script).replace(/-mcp\.mjs$/, ''));
+  createInterface({ input: server.stdout }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch {} // preserve the server's protocol output
+    if (message) probe.received(message);
+    process.stdout.write(`${line}\n`);
+  });
   const pending = new Set();
   let calls = Promise.resolve();
   const lines = createInterface({ input: process.stdin });
@@ -53,7 +88,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     const dispatch = () => forward(message, catalog,
-      value => server.stdin.write(`${JSON.stringify(value)}\n`),
+      (value, verdict) => { probe.sent(value, verdict); server.stdin.write(`${JSON.stringify(value)}\n`); },
       value => process.stdout.write(`${JSON.stringify(value)}\n`));
     // Calls retain arrival order while the verdict is pending. Discovery and protocol
     // notifications still pass immediately, so startup cannot wait on its own audit.
