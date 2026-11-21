@@ -10,7 +10,7 @@ pub struct Phone {
     scale: Mutex<Option<f64>>,
 }
 
-const DOWN: &str = "The iPhone isn't connected to its relay: Hive Phone has to be open on it. Report done=false: the owner needs to open Hive Phone on the iPhone.";
+const DOWN: &str = "The iPhone isn't connected to its relay: Hive Phone has to be open on it. The owner needs to open Hive Phone on the iPhone.";
 
 impl Phone {
     pub fn new(state: PathBuf) -> Phone {
@@ -120,7 +120,7 @@ impl Phone {
                 let (st, v) = self.raw("/agent/unlock-now", "POST", Some(json!({})), 150)?;
                 *self.sid.lock().unwrap() = None;
                 if v["unlocked"].as_bool() == Some(true) { return Ok(json!("The iPhone is unlocked.")); }
-                Err(format!("The phone didn't unlock ({}). Don't retry; report why.", v["error"].as_str().map(String::from).unwrap_or(format!("relay said {st}"))))
+                Err(format!("The phone didn't unlock ({}). Don't retry; stop using the phone and say why.", v["error"].as_str().map(String::from).unwrap_or(format!("relay said {st}"))))
             }
             "phone_screenshot" => Ok(json!({ "text": "The iPhone's screen.", "images": [self.screenshot()?] })),
             "phone_tap" => {

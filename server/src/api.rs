@@ -110,18 +110,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Err(e) => Res::err(409, &e),
         },
         ("POST", ["api", "tasks", _, "drop"]) => { hive.drop_task(id(2)); Res::json(&json!({ "ok": true })) }
-        ("POST", ["api", "tasks", _, "report"]) => {
-            let done = b["done"].as_bool().unwrap_or(false);
-            if done {
-                hive.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&b["outcome"]), now(), id(2)));
-            } else {
-                if s(&b["why"]).trim().is_empty() || s(&b["need"]).trim().is_empty() { return Res::err(400, "Give the exact why and need."); }
-                hive.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&b["why"]), s(&b["need"]), now(), id(2)));
-            }
-            let agent = hive.db.get("select agent_id from tasks where id=?", args!(id(2))).and_then(|r| r["agent_id"].as_i64()).unwrap_or(0);
-            hive.log(agent, id(2), 0, "report", &if done { format!("Done: {}", s(&b["outcome"])) } else { format!("Needs the owner. Why: {} Need: {}", s(&b["why"]), s(&b["need"])) });
-            Res::json(&json!({ "ok": true }))
-        }
         ("GET", ["api", "log"]) => Res::json(&json!(hive.db.all(
             "select * from log where id > ? and (?=0 or request_id=?) order by id desc limit ?",
             args!(req.q("after").parse::<i64>().unwrap_or(0), id_q(&req, "request"), id_q(&req, "request"), req.q("limit").parse::<i64>().unwrap_or(300))))),

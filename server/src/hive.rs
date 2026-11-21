@@ -24,6 +24,7 @@ pub struct Hive {
     turns: Mutex<HashMap<String, String>>,
     watchers: Mutex<HashMap<String, mpsc::Sender<(String, Value)>>>,
     nudges: Mutex<HashMap<i64, u32>>,
+    last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
     changed: (Mutex<u64>, Condvar),
     pub phone: phone::Phone,
@@ -48,7 +49,7 @@ impl Hive {
         Arc::new(Hive {
             db, state, repo, codex_cmd, codex_env, owner_key, version, phone,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
-            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
         })
     }
@@ -138,7 +139,7 @@ impl Hive {
     fn resume_working(self: &Arc<Self>) {
         for a in self.db.all("select id from agents where kind='codex' and status='working' and thread is not null", &[]) {
             let id = a["id"].as_i64().unwrap_or(0);
-            if let Err(e) = self.start_turn(id, "Hive restarted while you were working. Carry on with your task; call report when it's done.") {
+            if let Err(e) = self.start_turn(id, "Hive restarted while you were working. Carry on with your task.") {
                 eprintln!("couldn't resume agent {id}: {e}");
             }
         }
@@ -222,7 +223,7 @@ impl Hive {
             let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, at, updated) values(?,?,?,?,?,?,?,?)",
                 args!(id, s(&t["project"]), s(&t["title"]), s(&t["quote"]), t["nodes"].clone(), level, now(), now()));
             if let Some(session) = requester.strip_prefix("claude:") {
-                // A Claude Code session's tasks are its own: it works on them and reports with `hive report`.
+                // A Claude Code session's tasks are its own: it works on them itself.
                 let agent = self.agent_for_session(session, tid);
                 self.db.run("update tasks set agent_id=?, status='working' where id=?", args!(agent, tid));
             }
@@ -270,7 +271,7 @@ impl Hive {
         for n in &nodes {
             match n.as_str() {
                 "mac" => t += "\n- The owner's Mac: mac_* tools (screenshot, click, type, keys, shell). One agent at a time drives its keyboard and mouse; the shell runs alongside.",
-                "browser" => t += "\n- The owner's own Chrome, signed in to their accounts: browser_* tools. Use browser_js for anything a page script can do (read Gmail, click, fill). If one way fails, write different code; never give up on the first error. save_page_rule changes how a site looks for good.",
+                "browser" => t += "\n- The owner's own Chrome, signed in to their accounts: browser_* tools. Use browser_js for anything a page script can do. If one way fails, write different code; never give up on the first error. save_page_rule changes how a site looks for good.",
                 "phone" => t += "\n- The owner's iPhone: phone_* tools. One agent at a time touches it.",
                 "hive" => t += &format!("\n- Hive's own code: the git checkout at {} (Rust server in server/, Mac node and CLI in node/, Chrome extension in extension/, dashboard in server/dashboard.html). Keep it lean. Commit with a clear message, push to origin main, then call reinstall.", self.repo.display()),
                 _ => {}
@@ -324,7 +325,8 @@ impl Hive {
             codex.request("thread/resume", json!({ "threadId": thread }), 60)?;
             self.loaded.lock().unwrap().insert(thread.clone());
         }
-        let r = codex.request("turn/start", json!({ "threadId": thread, "effort": effort, "input": [{ "type": "text", "text": text }] }), 60)?;
+        let r = codex.request("turn/start", json!({ "threadId": thread, "effort": effort, "input": [{ "type": "text", "text": text }],
+            "outputSchema": end_schema() }), 60)?;
         let turn = s(&r["turn"]["id"]);
         if !turn.is_empty() { self.turns.lock().unwrap().insert(thread, turn); }
         self.db.run("update agents set status='working', updated=? where id=?", args!(now(), agent));
@@ -379,7 +381,10 @@ impl Hive {
             "item/completed" => {
                 let item = &params["item"];
                 let line = match s(&item["type"]).as_str() {
-                    "agentMessage" => Some(("agent", s(&item["text"]))),
+                    "agentMessage" => {
+                        let text = s(&item["text"]);
+                        if ended(&text).is_some() { self.last.lock().unwrap().insert(agent, text); None } else { Some(("agent", text)) }
+                    }
                     "commandExecution" => Some(("command", format!("$ {}\n{}", s(&item["command"]), short(&s(&item["aggregatedOutput"]), 3000)))),
                     "fileChange" => Some(("files", item["changes"].as_array().map(|c| c.iter().map(|x| s(&x["path"])).collect::<Vec<_>>().join(", ")).unwrap_or_default())),
                     "webSearch" => Some(("search", s(&item["query"]))),
@@ -397,28 +402,45 @@ impl Hive {
         }
     }
 
+    /// A turn's end says how the task stands: done (outcome), or needs the owner (exact why and need). Anything else: keep going.
     fn after_turn(self: &Arc<Self>, agent: i64, task: i64, status: String) {
         let t = self.db.get("select status from tasks where id=?", args!(task)).map(|r| s(&r["status"])).unwrap_or_default();
+        let end = self.last.lock().unwrap().remove(&agent).and_then(|m| ended(&m));
         if t != "working" || status == "interrupted" {
             self.db.run("update agents set status=?, updated=? where id=?", args!(if t == "done" || t == "dropped" { "done" } else { "idle" }, now(), agent));
-            self.nudges.lock().unwrap().remove(&agent);
             self.bump();
             return;
         }
-        let n = { let mut m = self.nudges.lock().unwrap(); let e = m.entry(agent).or_insert(0); *e += 1; *e };
-        if n <= 2 {
-            let me = self.clone();
-            std::thread::spawn(move || {
-                me.start_turn(agent, "You ended your turn without calling report, so the task isn't finished. Keep working on it. \
-                    If it truly needs the owner, call report with done=false, the exact reason and exactly what you need.").ok();
-            });
-        } else {
-            let last = self.db.get("select text from log where agent_id=? and who='agent' order by id desc limit 1", args!(agent)).map(|r| s(&r["text"])).unwrap_or_default();
-            self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
-                args!(format!("The agent stopped three times without finishing. Its last words: {}", short(&last, 1500)), "Read its last words and reply to the task.", now(), task));
-            self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
-            self.bump();
+        match end {
+            Some(e) if e["done"] == true => {
+                self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&e["outcome"]), now(), task));
+                self.db.run("update agents set status='done', updated=? where id=?", args!(now(), agent));
+                self.log(agent, task, 0, "done", &s(&e["outcome"]));
+                self.nudges.lock().unwrap().remove(&agent);
+            }
+            Some(e) if !s(&e["why"]).trim().is_empty() && !s(&e["need"]).trim().is_empty() => {
+                self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&e["why"]), s(&e["need"]), now(), task));
+                self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
+                self.log(agent, task, 0, "needs you", &format!("{} Needs: {}", s(&e["why"]), s(&e["need"])));
+                self.nudges.lock().unwrap().remove(&agent);
+            }
+            _ => {
+                let n = { let mut m = self.nudges.lock().unwrap(); let e = m.entry(agent).or_insert(0); *e += 1; *e };
+                if n <= 2 {
+                    let me = self.clone();
+                    std::thread::spawn(move || {
+                        me.start_turn(agent, "The task isn't finished and you didn't say exactly why you stopped and what you need from \
+                            the owner. Keep going.").ok();
+                    });
+                } else {
+                    let words = self.db.get("select text from log where agent_id=? and who='agent' order by id desc limit 1", args!(agent)).map(|r| s(&r["text"])).unwrap_or_default();
+                    self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
+                        args!(format!("The agent stopped three times without finishing or saying why. Its last words: {}", short(&words, 1500)), "Reply to the task with what to do.", now(), task));
+                    self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
+                }
+            }
         }
+        self.bump();
     }
 
     // ---- locks: one agent at a time on the Mac's input and the phone's screen ----
@@ -454,7 +476,7 @@ impl Hive {
         let node = self.db.get("select id from nodes where kind=? and seen > ? order by seen desc limit 1", args!(kind, now() - 90_000))
             .map(|r| s(&r["id"]))
             .ok_or_else(|| format!("The owner's {kind} isn't connected to Hive right now, so this tool can't run. Do the task another way, \
-                or report done=false saying the {kind} needs to be online (for the Mac: Hive running; for Chrome: the Hive extension)."))?;
+                or end saying the {kind} needs to be online (for the Mac: Hive running; for Chrome: the Hive extension)."))?;
         let id = self.db.run("insert into calls(node, tool, args, agent_id, at) values(?,?,?,?,?)", args!(node, tool, args.clone(), agent, now()));
         self.bump();
         let done = self.wait_until(secs * 1000, || {
@@ -476,7 +498,7 @@ impl Hive {
         let a = &params["arguments"];
         let agent_row = self.db.get("select * from agents where thread=?", args!(s(&params["threadId"]))).unwrap_or(json!({}));
         let (agent, task) = (agent_row["id"].as_i64().unwrap_or(0), agent_row["task_id"].as_i64().unwrap_or(0));
-        if name != "report" { self.log(agent, task, 0, "tool", &format!("{name} {}", short(&a.to_string(), 300))); }
+        self.log(agent, task, 0, "tool", &format!("{name} {}", short(&a.to_string(), 300)));
         let r = self.tool_inner(&name, a, agent, task);
         match r {
             Ok(v) => {
@@ -491,19 +513,6 @@ impl Hive {
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
         if let Some(lock) = tools::lock_for(name) { self.take_lock(lock, agent)?; }
         match name {
-            "report" => {
-                if a["done"].as_bool().unwrap_or(false) {
-                    self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&a["outcome"]), now(), task));
-                    self.log(agent, task, 0, "report", &format!("Done: {}", s(&a["outcome"])));
-                } else {
-                    if s(&a["why"]).trim().is_empty() || s(&a["need"]).trim().is_empty() {
-                        return Err("Say exactly why you stopped and exactly what you need from the owner, or keep going.".into());
-                    }
-                    self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&a["why"]), s(&a["need"]), now(), task));
-                    self.log(agent, task, 0, "report", &format!("Needs the owner. Why: {} Need: {}", s(&a["why"]), s(&a["need"])));
-                }
-                Ok(json!("Recorded. End your turn now."))
-            }
             "message_agent" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;
                 self.message_task(to, &s(&a["text"]), &format!("task #{task}'s agent"))?;
@@ -565,6 +574,17 @@ impl Hive {
     }
 }
 
+/// The final message of every agent turn.
+fn end_schema() -> Value {
+    let st = json!({ "type": "string" });
+    json!({ "type": "object", "additionalProperties": false, "required": ["done", "outcome", "why", "need"],
+        "properties": { "done": { "type": "boolean" }, "outcome": st, "why": st, "need": st } })
+}
+
+fn ended(text: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(text).ok().filter(|v| v["done"].is_boolean())
+}
+
 fn plan_schema() -> Value {
     let st = json!({ "type": "string" });
     json!({
@@ -602,8 +622,9 @@ session become tasks that session does itself.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
 server runs on this VM (where you run, as root) and reaches the owner's Mac, their Chrome and their iPhone. Work until the task is \
-done, then call report with done=true and the outcome. There is no \"stuck\": when something fails, try another way. Only when the \
-task truly needs the owner, call report with done=false, the exact reason and exactly what you need from them. Never send a message \
+done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
+what you need from the owner. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
+keep going. Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
 sends it on their behalf. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
