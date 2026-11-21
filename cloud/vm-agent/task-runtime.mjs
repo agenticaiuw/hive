@@ -1,6 +1,6 @@
-// A repaired Mac transfer task must not spend another model turn discovering a broken
-// runtime. Keep one app-server thread from discovery and the live probe through the
-// owner's turn. A second process or a fixture catalog cannot verify that thread.
+// Every owner task gets a transfer tool bound to its app-server thread, even when a
+// board continuation no longer contains the repair note. Transfer repairs also keep
+// discovery, the live probe and the owner's turn in that same thread.
 import { spawn } from 'node:child_process';
 import { chownSync, existsSync, copyFileSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -28,12 +28,15 @@ function receipt(workDir, path, value) {
   chownSync(path, uid, gid);
 }
 
-export async function startTask(request, { model, effort, workDir, emit }) {
+export async function startTask(request, { model, effort, workDir, emit, probeRequired = false }) {
   await request('initialize', { clientInfo: { name: 'hive-task', version: '1' }, capabilities: { experimentalApi: true } });
   const { thread } = await request('thread/start', { model, cwd: workDir, ephemeral: true,
     approvalPolicy: 'never', sandbox: 'read-only', dynamicTools: TRANSFER_TOOLS });
   if (!thread?.id) throw new Error('The task runtime did not return a thread ID.');
   emit({ type: 'thread.started', thread_id: thread.id });
+  // Ordinary VM work can run while the Mac is asleep. Its transfer remains callable
+  // and reports Mac availability when used, just like the other Mac tools.
+  if (!probeRequired) return thread.id;
   const { data } = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'mac' });
   const mac = data?.find(server => server.name === 'mac');
   const schema = mac?.tools?.transfer_file?.inputSchema;
@@ -76,9 +79,9 @@ export function taskEvent(method, params) {
   return null;
 }
 
-export async function runRuntime({ command, args, env, model, effort, workDir, prompt, emit, spawnProcess = spawn }) {
+export async function runRuntime({ command, args, env, model, effort, workDir, prompt, emit, probeRequired = false, spawnProcess = spawn }) {
   const child = spawnProcess(command, args, { env, stdio: ['pipe', 'pipe', 'inherit'], detached: true });
-  let serial = 0, threadId = '', usage, finish, callable = false, resumed = false;
+  let serial = 0, threadId = '', usage, finish, callable = false, resumed = !probeRequired;
   const pending = new Map();
   const closed = new Promise(resolve => child.on('close', resolve));
   let done = new Promise(resolve => { finish = resolve; });
@@ -156,18 +159,20 @@ export async function runRuntime({ command, args, env, model, effort, workDir, p
   const interrupted = () => { failed(new Error('The task runtime was stopped.')); stop(); };
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, interrupted);
   try {
-    await startTask(request, { model, effort, workDir, emit: event => {
+    await startTask(request, { model, effort, workDir, probeRequired, emit: event => {
       if (event.type === 'thread.started') threadId = event.thread_id;
       // A dispatcher call must not create the model-call receipt in hive-task.
       if (event.type === 'thread.started') emit(event);
     } });
-    const checked = await done;
-    if (checked.error) throw checked.error;
-    if (checked.status !== 'completed' || !callable) {
-      throw new Error('The active task catalog did not complete its callable transfer_file probe; the owner task was not resumed.');
+    if (probeRequired) {
+      const checked = await done;
+      if (checked.error) throw checked.error;
+      if (checked.status !== 'completed' || !callable) {
+        throw new Error('The active task catalog did not complete its callable transfer_file probe; the owner task was not resumed.');
+      }
+      receipt(workDir, `${join(workDir, 'runtime-catalog.json')}.probe`, { thread_id: threadId, ready: true });
+      done = new Promise(resolve => { finish = resolve; });
     }
-    receipt(workDir, `${join(workDir, 'runtime-catalog.json')}.probe`, { thread_id: threadId, ready: true });
-    done = new Promise(resolve => { finish = resolve; });
     resumed = true;
     await request('turn/start', { threadId, effort, input: [{ type: 'text', text: prompt }] });
     const outcome = await done;
@@ -188,6 +193,8 @@ export async function runRuntime({ command, args, env, model, effort, workDir, p
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [workDir, model, effort, ...config] = process.argv.slice(2);
+  const probeRequired = config[0] === '--probe-transfer';
+  if (probeRequired) config.shift();
   const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk);
   const home = join(workDir, 'runtime-home');
   const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -199,7 +206,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (existsSync(join(source, 'auth.json'))) symlinkSync(join(source, 'auth.json'), join(home, 'auth.json'));
     if (existsSync(join(source, 'models_cache.json'))) copyFileSync(join(source, 'models_cache.json'), join(home, 'models_cache.json'));
     process.exitCode = await runRuntime({ command: '/root/.local/bin/codex', args: ['app-server', ...config],
-      env: { ...process.env, CODEX_HOME: home }, model, effort, workDir, prompt: Buffer.concat(chunks).toString('utf8'), emit });
+      env: { ...process.env, CODEX_HOME: home }, model, effort, workDir, probeRequired,
+      prompt: Buffer.concat(chunks).toString('utf8'), emit });
   } catch (error) {
     emit({ type: 'error', message: error.message });
     process.exitCode = 1;
