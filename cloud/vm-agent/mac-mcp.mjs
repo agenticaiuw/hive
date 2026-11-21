@@ -136,7 +136,9 @@ export function server({ board, label = '', turn = null, files = undefined, disc
           ? (await import('./mac-files.mjs')).transferFile(message.params?.arguments ?? {}, args => call('run_command', args), files)
           : call(message.params?.name, message.params?.arguments ?? {});
         try {
-          return reply(await (turn ? turn.use(run) : run()));
+          // The live probe checks dispatch and Mac support without holding the owner's Mac.
+          const probe = transfer && message.params?.arguments?.check_only === true;
+          return reply(await (turn && !probe ? turn.use(run) : run()));
         } catch (error) {
           return reply({ content: [{ type: 'text', text: `Failed: ${error.message}` }], isError: true });
         }

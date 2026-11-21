@@ -91,6 +91,13 @@ exit code and bounded stdout/stderr; check them. Give irreversible=true for any 
 or otherwise cannot be undone, and use the same One-way: step quoting the owner's exact words. A timeout can leave
 partial effects: inspect before retrying, especially a send. Use mac.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
+Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
+Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
+After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
+with check_only=true and the intended direction and paths. Require ready=true in its result, then call again without
+check_only to copy. This checks the current tool route and Mac command support, not file existence or a completed copy.
+If discovery fails, report that exact failure to improve_hive and stop. If the probe says the Mac is offline, report
+that reason instead of asking Hive to repair code. Earlier tests or replies are not proof that this execution has the tool. Never post until the real copy returns a verified VM path.
 Transfers keep the source and a cloud copy, return the destination path, and never overwrite a Mac file. Use a new
 path if one exists. The tools stream even large recordings through cloud storage; never print file bytes or base64
 into command output. Sending or posting that file to others still needs the owner's exact words.
@@ -180,6 +187,9 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     // A broken server must fail startup with its reason, not let the task repeatedly ask
     // Hive to repair tools that Codex never registered. An offline Mac still starts normally.
     '-c', 'mcp_servers.mac.required=true',
+    // A connection alone is not a tool catalog. Wait for tools/list before the first turn,
+    // including a fresh process continuing a task after a repair.
+    '-c', 'mcp_servers.mac.startup_readiness="catalog"',
     // A first Mac call may wait for its turn at the Mac, then up to 6 minutes for the Mac (mac-mcp.mjs).
     '-c', 'mcp_servers.mac.startup_timeout_sec=30', '-c', 'mcp_servers.mac.tool_timeout_sec=3700',
     // Codex asks before running an MCP tool, and with no one to ask (exec) that ask is a refusal, so
