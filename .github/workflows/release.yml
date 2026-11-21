@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo build --release -p hive
       - shell: bash
-        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe && cp target/release/hive.exe out/Hive-Windows.exe
+        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: out }
   publish:
