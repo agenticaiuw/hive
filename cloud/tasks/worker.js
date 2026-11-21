@@ -1112,6 +1112,17 @@ async function updateRequest(request, env) {
       ).bind(id, status, body.outcome === undefined ? null : text(body.outcome, 4000), at),
     );
   }
+  // The orchestrator found that this request is about an earlier one (said on the Mac without
+  // interrupting it, say): it joins that request's conversation, so it shows in that agent's chat.
+  const follows = Number(body.follows);
+  if (Number.isInteger(follows) && follows > 0 && follows < id) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE board_requests SET follows = ?2, updated_at = ?3
+         WHERE id = ?1 AND follows IS NULL AND EXISTS (SELECT 1 FROM board_requests WHERE id = ?2)`,
+      ).bind(id, follows, at),
+    );
+  }
   const project = text(body.project, 120).toLowerCase();
   if (project) {
     statements.push(

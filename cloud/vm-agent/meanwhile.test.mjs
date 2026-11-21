@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { forget, hear, heardBy, inboxOf, leave, told, withHeard } from './meanwhile.mjs';
-import { handle, tellRunning } from './orchestrator.mjs';
+import { handle, planWords, tellRunning } from './orchestrator.mjs';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'hive-meanwhile-'));
 const said = 'post: Turn YouTube to black and white to avoid doom scrolling!';
@@ -56,7 +56,11 @@ test("each of a request's tasks hears what's said to it once, oldest first, thro
 /** A board that keeps every call. */
 const fakeBoard = () => {
   const calls = [];
-  return { calls, board: async (path, body) => { calls.push({ path, body }); return path.startsWith('/v1/runs?') ? { steps: [] } : {}; } };
+  return { calls, board: async (path, body) => {
+    calls.push({ path, body });
+    if (path.startsWith('/v1/rules?')) return { rules: [] };
+    return path.startsWith('/v1/runs?') ? { steps: [] } : {};
+  } };
 };
 
 test('a message to a working request reaches its agent at its next step, and is done once heard', async () => {
@@ -118,4 +122,46 @@ test("a message no agent heard before its request ended runs by itself; one sent
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
+});
+
+test("a new message about a request still working goes to that request's agent and its chat, not to a second agent", async () => {
+  const { board, calls } = fakeBoard();
+  const words = [];
+  const passed = [];
+  const underway = [{ id: 119, text: 'post the recording to X', working: true }, { id: 117, text: 'make YouTube black and white', working: false }];
+  const deps = {
+    board, now: () => 1000, stepEvery: 1, underway: () => underway,
+    plan: async w => { words.push(w); return JSON.stringify({ about: 119, tasks: [{ title: 'Check the post', quote: 'have you posted it yet', kind: 'screen' }] }); },
+    run: async () => { throw new Error('no second agent runs'); },
+    passOn: async (request, to) => { passed.push([request.id, request.follows, to]); return true; },
+  };
+  await handle({ id: 121, text: 'have you posted it yet', from: 'mac' }, deps);
+  assert.match(words[0], /^\(Said to Hive on the owner's Mac\.\) have you posted it yet\n\nThe owner's earlier requests, newest first:\nR119 \(still working\): "post the recording to X"\nR117 \(ended\): "make YouTube black and white"\nIf the instruction above is about one of these/);
+  assert.deepEqual(calls.filter(c => c.path === '/v1/requests/update').map(c => c.body), [{ id: 121, follows: 119 }]);
+  assert.deepEqual(passed, [[121, 119, 119]]);
+
+  // About one that ended: it joins that chat, and its own tasks run.
+  const ran = [];
+  const again = fakeBoard();
+  await handle({ id: 122, text: 'keep going on that', from: 'phone' }, {
+    ...deps, board: again.board, passOn: async () => { throw new Error('nothing to pass on to'); },
+    plan: async () => JSON.stringify({ about: 117, tasks: [{ title: 'Carry on', quote: 'keep going on that', kind: 'answer' }] }),
+    run: async brief => { ran.push(brief); return { ok: true, report: 'Done.', seconds: 1 }; },
+  });
+  assert.deepEqual(again.calls.find(c => c.path === '/v1/requests/update').body, { id: 122, follows: 117 });
+  assert.equal(ran.length, 1);
+
+  // A separate instruction, or a number that isn't one of them: on its own, as before.
+  for (const about of [null, 5]) {
+    const alone = fakeBoard();
+    await handle({ id: 123, text: 'open Canvas' }, {
+      ...deps, board: alone.board, passOn: async () => { throw new Error('not about anything'); },
+      plan: async () => JSON.stringify({ about, tasks: [{ title: 'Open Canvas', quote: 'open Canvas', kind: 'answer' }] }),
+      run: async () => ({ ok: true, report: 'Open.', seconds: 1 }),
+    });
+    assert.equal(alone.calls.some(c => c.body?.follows), false);
+  }
+  // A follow-up already knows what it follows; nothing is listed for the planner.
+  assert.equal(planWords({ text: 'more', follows: 3 }, underway), 'more');
+  assert.equal(planWords({ text: 'more' }, []), 'more');
 });
