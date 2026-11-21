@@ -1,0 +1,12 @@
+[Unit]
+Description=Hive's iPhone device
+After=hive-server.service
+
+[Service]
+Environment=HOME=/root
+ExecStart=/opt/hive/target/release/hive-phone
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
